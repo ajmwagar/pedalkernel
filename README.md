@@ -5,6 +5,7 @@
   <p>Write <code>.pedal</code> files with real component values. Get WDF audio engines and KiCad netlists.</p>
 
   [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+  [![JACK](https://img.shields.io/badge/JACK-Audio-ff6b6b?style=for-the-badge&logo=audio-technica&logoColor=white)](https://jackaudio.org/)
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 </div>
 
@@ -295,6 +296,10 @@ let output = od.process(input_sample);
 
 // Render to WAV
 pedalkernel::wav::render_to_wav(&mut od, &input, Path::new("out.wav"), 48000).unwrap();
+
+// Run through JACK for real-time audio (cargo build --features jack-rt)
+// let od = pedalkernel::pedals::Overdrive::new(48000.0);
+// let _client = pedalkernel::AudioEngine::run("PedalKernel", od).unwrap();
 ```
 
 ---

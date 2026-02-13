@@ -10,11 +10,16 @@ keywords = ["audio", "dsp", "wdf", "guitar", "effects"]
 categories = ["multimedia::audio"]
 rust-version = "1.75"
 
+[features]
+default = []
+jack-rt = ["jack"]
+
 [dependencies]
 # DSL parser
 nom = "7"
 
-# Audio output (WAV)
+# Audio I/O
+jack = { version = "0.11", optional = true }
 hound = "3.5"
 
 # Math

@@ -30,6 +30,66 @@ pub trait PedalProcessor {
 }
 
 // ---------------------------------------------------------------------------
+// JACK real-time audio engine (requires `jack-rt` feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "jack-rt")]
+mod jack_engine {
+    use jack::{AudioIn, AudioOut, Client, ClientOptions, Control, ProcessHandler, ProcessScope};
+    use crate::PedalProcessor;
+
+    struct JackProcessor<P: PedalProcessor> {
+        processor: P,
+        in_port: jack::Port<AudioIn>,
+        out_port: jack::Port<AudioOut>,
+    }
+
+    impl<P: PedalProcessor> ProcessHandler for JackProcessor<P> {
+        fn process(&mut self, _client: &Client, ps: &ProcessScope) -> Control {
+            let input = self.in_port.as_slice(ps);
+            let output = self.out_port.as_mut_slice(ps);
+
+            for (out, &inp) in output.iter_mut().zip(input.iter()) {
+                *out = self.processor.process(inp as f64) as f32;
+            }
+
+            Control::Continue
+        }
+    }
+
+    /// JACK-based real-time audio engine.
+    ///
+    /// Connects a `PedalProcessor` to the system audio graph via JACK.
+    /// Target: sub-5 ms total latency through a Scarlett 2i2 on Linux
+    /// (48 kHz, 64-sample buffer).
+    ///
+    /// Enable with: `cargo build --features jack-rt`
+    pub struct AudioEngine;
+
+    impl AudioEngine {
+        /// Create a JACK client, register ports, and start processing.
+        ///
+        /// Blocks until the returned `AsyncClient` is dropped.
+        pub fn run<P: PedalProcessor + Send + 'static>(
+            name: &str,
+            mut processor: P,
+        ) -> Result<jack::AsyncClient<(), JackProcessor<P>>, jack::Error> {
+            let (client, _status) = Client::new(name, ClientOptions::NO_START_SERVER)?;
+            processor.set_sample_rate(client.sample_rate() as f64);
+
+            let in_port = client.register_port("in", AudioIn)?;
+            let out_port = client.register_port("out", AudioOut)?;
+
+            let handler = JackProcessor { processor, in_port, out_port };
+            client.activate_async((), handler)
+        }
+    }
+}
+
+#[cfg(feature = "jack-rt")]
+pub use jack_engine::AudioEngine;
+
+// ---------------------------------------------------------------------------
 // Integration tests
 // ---------------------------------------------------------------------------
 
