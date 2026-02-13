@@ -645,8 +645,7 @@ fn run_board_control_wav(
     connect_to: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let controls = Arc::new(SharedControls::new());
-    let (async_client, _our_in, our_out) =
-        AudioEngine::start(client, processor, controls.clone())?;
+    let (async_client, _our_in, our_out) = AudioEngine::start(client, processor, controls.clone())?;
 
     // Only connect output port
     async_client
@@ -696,8 +695,7 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
 
     // Load WAV input if provided
     let wav_data = if let Some(path) = wav_input {
-        let (samples, wav_sr) =
-            pedalkernel::wav::read_wav_mono(std::path::Path::new(path))?;
+        let (samples, wav_sr) = pedalkernel::wav::read_wav_mono(std::path::Path::new(path))?;
         if samples.is_empty() {
             return Err("WAV file contains no samples".into());
         }
@@ -793,15 +791,14 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
 
     let result = if let Some((samples, _, ref wav_path)) = wav_data {
         // WAV input mode: output-only port selection
-        let selected_out =
-            match run_output_select(&mut terminal, &board.name, output_ports)? {
-                OutputSelectResult::Selected(output) => output,
-                OutputSelectResult::Quit => {
-                    disable_raw_mode()?;
-                    stdout().execute(LeaveAlternateScreen)?;
-                    return Ok(());
-                }
-            };
+        let selected_out = match run_output_select(&mut terminal, &board.name, output_ports)? {
+            OutputSelectResult::Selected(output) => output,
+            OutputSelectResult::Quit => {
+                disable_raw_mode()?;
+                stdout().execute(LeaveAlternateScreen)?;
+                return Ok(());
+            }
+        };
 
         let wav_filename = std::path::Path::new(wav_path)
             .file_name()
@@ -834,24 +831,18 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
         if input_ports.is_empty() {
             disable_raw_mode()?;
             stdout().execute(LeaveAlternateScreen)?;
-            return Err(
-                "No JACK input sources found. Is JACK running with audio hardware?".into(),
-            );
+            return Err("No JACK input sources found. Is JACK running with audio hardware?".into());
         }
 
-        let (selected_in, selected_out) = match run_port_select(
-            &mut terminal,
-            &board.name,
-            input_ports,
-            output_ports,
-        )? {
-            PortSelectResult::Selected { input, output } => (input, output),
-            PortSelectResult::Quit => {
-                disable_raw_mode()?;
-                stdout().execute(LeaveAlternateScreen)?;
-                return Ok(());
-            }
-        };
+        let (selected_in, selected_out) =
+            match run_port_select(&mut terminal, &board.name, input_ports, output_ports)? {
+                PortSelectResult::Selected { input, output } => (input, output),
+                PortSelectResult::Quit => {
+                    disable_raw_mode()?;
+                    stdout().execute(LeaveAlternateScreen)?;
+                    return Ok(());
+                }
+            };
 
         let processor =
             PedalboardProcessor::from_board(&board, board_dir, client.sample_rate() as f64)

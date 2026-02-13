@@ -626,8 +626,7 @@ fn run_folder_control_wav(
     connect_to: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let controls = Arc::new(SharedControls::new());
-    let (async_client, _our_in, our_out) =
-        AudioEngine::start(client, switcher, controls.clone())?;
+    let (async_client, _our_in, our_out) = AudioEngine::start(client, switcher, controls.clone())?;
 
     // Only connect output port
     async_client
@@ -667,8 +666,7 @@ fn run_folder_control_wav(
 pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // Load WAV input if provided
     let wav_data = if let Some(path) = wav_input {
-        let (samples, wav_sr) =
-            pedalkernel::wav::read_wav_mono(std::path::Path::new(path))?;
+        let (samples, wav_sr) = pedalkernel::wav::read_wav_mono(std::path::Path::new(path))?;
         if samples.is_empty() {
             return Err("WAV file contains no samples".into());
         }
@@ -752,23 +750,18 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let title = format!(
-        "Folder: {} ({} boards)",
-        dir_path,
-        board_states.len()
-    );
+    let title = format!("Folder: {} ({} boards)", dir_path, board_states.len());
 
     let result = if let Some((samples, _, ref wav_path)) = wav_data {
         // WAV input mode: output-only port selection
-        let selected_out =
-            match run_output_select(&mut terminal, &title, output_ports)? {
-                OutputSelectResult::Selected(output) => output,
-                OutputSelectResult::Quit => {
-                    disable_raw_mode()?;
-                    stdout().execute(LeaveAlternateScreen)?;
-                    return Ok(());
-                }
-            };
+        let selected_out = match run_output_select(&mut terminal, &title, output_ports)? {
+            OutputSelectResult::Selected(output) => output,
+            OutputSelectResult::Quit => {
+                disable_raw_mode()?;
+                stdout().execute(LeaveAlternateScreen)?;
+                return Ok(());
+            }
+        };
 
         let wav_filename = std::path::Path::new(wav_path)
             .file_name()
@@ -797,9 +790,7 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
         if input_ports.is_empty() {
             disable_raw_mode()?;
             stdout().execute(LeaveAlternateScreen)?;
-            return Err(
-                "No JACK input sources found. Is JACK running with audio hardware?".into(),
-            );
+            return Err("No JACK input sources found. Is JACK running with audio hardware?".into());
         }
 
         let (selected_in, selected_out) =

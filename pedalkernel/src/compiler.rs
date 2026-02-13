@@ -555,7 +555,12 @@ impl CircuitGraph {
 
     /// Collect edge indices of passive elements directly connected to a junction node,
     /// excluding diode edges and edges on the direct output path.
-    fn elements_at_junction(&self, junction: NodeId, diode_edge_indices: &[usize], active_edge_indices: &[usize]) -> Vec<usize> {
+    fn elements_at_junction(
+        &self,
+        junction: NodeId,
+        diode_edge_indices: &[usize],
+        active_edge_indices: &[usize],
+    ) -> Vec<usize> {
         self.edges
             .iter()
             .enumerate()
@@ -989,7 +994,8 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
 
     for (_edge_idx, diode_info) in &diodes {
         let junction = diode_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(junction, &diode_edge_indices, &graph.active_edge_indices);
+        let passive_idxs =
+            graph.elements_at_junction(junction, &diode_edge_indices, &graph.active_edge_indices);
 
         if passive_idxs.is_empty() {
             continue;

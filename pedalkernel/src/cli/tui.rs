@@ -387,32 +387,20 @@ pub fn run(pedal_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
         if input_ports.is_empty() {
             disable_raw_mode()?;
             stdout().execute(LeaveAlternateScreen)?;
-            return Err(
-                "No JACK input sources found. Is JACK running with audio hardware?".into(),
-            );
+            return Err("No JACK input sources found. Is JACK running with audio hardware?".into());
         }
 
-        let (selected_in, selected_out) = match run_port_select(
-            &mut terminal,
-            &pedal.name,
-            input_ports,
-            output_ports,
-        )? {
-            PortSelectResult::Selected { input, output } => (input, output),
-            PortSelectResult::Quit => {
-                disable_raw_mode()?;
-                stdout().execute(LeaveAlternateScreen)?;
-                return Ok(());
-            }
-        };
+        let (selected_in, selected_out) =
+            match run_port_select(&mut terminal, &pedal.name, input_ports, output_ports)? {
+                PortSelectResult::Selected { input, output } => (input, output),
+                PortSelectResult::Quit => {
+                    disable_raw_mode()?;
+                    stdout().execute(LeaveAlternateScreen)?;
+                    return Ok(());
+                }
+            };
 
-        run_pedal_control(
-            &mut terminal,
-            client,
-            &pedal,
-            &selected_in,
-            &selected_out,
-        )
+        run_pedal_control(&mut terminal, client, &pedal, &selected_in, &selected_out)
     };
 
     // Teardown (always runs)

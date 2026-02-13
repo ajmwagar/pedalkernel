@@ -34,8 +34,8 @@ fn run_pedal(pedal_path: &str, input_path: &str, output_path: &str, knob_args: &
     });
 
     // Read input WAV
-    let (input_samples, sample_rate) =
-        pedalkernel::wav::read_wav_mono(Path::new(input_path)).unwrap_or_else(|e| {
+    let (input_samples, sample_rate) = pedalkernel::wav::read_wav_mono(Path::new(input_path))
+        .unwrap_or_else(|e| {
             eprintln!("Error reading {input_path}: {e}");
             process::exit(1);
         });
@@ -125,8 +125,8 @@ fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &
         .unwrap_or_else(|| Path::new("."));
 
     // Read input WAV
-    let (input_samples, sample_rate) =
-        pedalkernel::wav::read_wav_mono(Path::new(input_path)).unwrap_or_else(|e| {
+    let (input_samples, sample_rate) = pedalkernel::wav::read_wav_mono(Path::new(input_path))
+        .unwrap_or_else(|e| {
             eprintln!("Error reading {input_path}: {e}");
             process::exit(1);
         });
@@ -188,4 +188,3 @@ fn write_wav(output_path: &str, sample_rate: u32, samples: &[f64]) {
     }
     writer.finalize().unwrap();
 }
-

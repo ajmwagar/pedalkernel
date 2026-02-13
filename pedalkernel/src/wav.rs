@@ -59,10 +59,7 @@ pub fn read_wav_mono(path: &Path) -> Result<(Vec<f64>, u32), Box<dyn std::error:
     let samples = match spec.sample_format {
         SampleFormat::Float => {
             let all: Vec<f32> = reader.samples::<f32>().map(|s| s.unwrap()).collect();
-            mix_to_mono(
-                &all.iter().map(|&s| s as f64).collect::<Vec<_>>(),
-                channels,
-            )
+            mix_to_mono(&all.iter().map(|&s| s as f64).collect::<Vec<_>>(), channels)
         }
         SampleFormat::Int => {
             let max_val = (1_i64 << (spec.bits_per_sample - 1)) as f64;
