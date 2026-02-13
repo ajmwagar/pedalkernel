@@ -383,8 +383,8 @@ impl CircuitGraph {
             let d = dist[&n];
             if let Some(neighbors) = adj.get(&n) {
                 for &nb in neighbors {
-                    if !dist.contains_key(&nb) {
-                        dist.insert(nb, d + 1);
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
                         queue.push_back(nb);
                     }
                 }
