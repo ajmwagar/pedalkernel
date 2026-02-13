@@ -215,12 +215,14 @@ cargo run --example tui --features tui -- examples/tube_screamer.pedal
 
 ## Features
 
-- **DSL Parser** — `nom`-based parser for `.pedal` files
+- **DSL Parser** — `nom`-based parser for `.pedal` files with engineering notation
+- **Netlist Compiler** — automatically compiles `.pedal` netlists into WDF trees via series-parallel decomposition with impedance balancing
 - **WDF Engine** — series/parallel adaptors with verified scattering matrices, diode pair and single-diode nonlinear roots via Newton-Raphson
 - **Zero-Allocation Hot Path** — per-sample processing with no heap allocation
 - **KiCad Export** — generate netlists from the same `.pedal` file for PCB prototyping
 - **WAV Output** — offline rendering via `hound` for tone prototyping without a running audio server
 - **Pedal Library** — ready-to-use Overdrive, Fuzz Face, and Delay implementations
+- **JACK Real-Time Audio** — sub-5ms latency via JACK audio server (optional `jack-rt` feature)
 - **TUI Control Surface** — interactive ASCII pedal with rotary knobs via `ratatui` (optional `tui` feature)
 
 ### Built-in Pedals
@@ -281,19 +283,55 @@ Works with any pedal file — try `big_muff.pedal` for a 3-knob layout.
       |
       v
  +----------------------------------+
- |          WDF Engine              |
+ |     Netlist Compiler             |
  |                                  |
- |  Leaves: R, C, L, VoltageSource  |
- |  Adaptors: Series, Parallel      |
- |  Roots: DiodePair, Diode (NR<=8) |
+ |  1. Build circuit graph          |
+ |  2. Find diode clipping stages   |
+ |  3. SP decompose -> WDF tree     |
+ |  4. Balance Vs impedance         |
  +------------+---------------------+
               |
               v
  +----------------------------------+
- |        Pedal Library             |
- |  Overdrive | FuzzFace | Delay    |---> WAV output (hound)
+ |          WDF Engine              |
+ |                                  |
+ |  Leaves: R, C, L, Vs, Pot       |
+ |  Adaptors: Series, Parallel      |
+ |  Roots: DiodePair, Diode (NR)   |
+ +------------+---------------------+
+              |
+              v
+ +----------------------------------+
+ |     CompiledPedal                |
+ |  Per-stage WDF trees + roots     |---> WAV / JACK real-time
+ |  Auto-bound knob controls        |
  +----------------------------------+
 ```
+
+### Netlist Compilation Algorithm
+
+The compiler transforms a `.pedal` netlist into a real-time WDF processor:
+
+**1. Circuit graph construction** — Union-Find merges connected pins into circuit nodes, creating an undirected graph where components are edges.
+
+**2. Diode stage identification** — BFS from the input locates diode elements (the nonlinear clipping stages). Each diode becomes a WDF root; its neighboring passive components form the WDF tree.
+
+**3. Series-parallel (SP) decomposition** — The passive subgraph around each diode is reduced into a binary tree:
+
+```
+Given edges: {Vs-A, C-AB, R-AB, R2-BN}   (A,B = nodes, N = terminal)
+
+Dead-end reduction:  R2-BN → R2-BSource  (redirect degree-1 non-terminals)
+Parallel reduction:  C-AB ∥ R-AB → Par(C,R)-AB
+Series reduction:    Vs + Par → Ser(Vs, Par(C,R))
+Parallel reduction:  Ser ∥ R2 → Par(Ser(Vs, Par(C,R)), R2)     ← final tree
+```
+
+At each step, edges with the same endpoints merge into Parallel adaptors; degree-2 internal nodes collapse into Series adaptors. The algorithm terminates when one edge remains.
+
+**4. Voltage source impedance balancing** — A raw Vs (Rp=1) in parallel with kOhm-range components creates extreme impedance mismatch (gamma->1), attenuating the signal. The compiler walks the tree and adjusts the Vs port resistance to match its sibling branches, ensuring balanced signal transfer and numerical stability.
+
+**5. Active element modeling** — Transistors and opamps contribute pre-gain (cascaded amplitude boost) and soft limiting (tanh), since their nonlinear behavior is approximated rather than WDF-modeled.
 
 ### WDF Processing Pipeline
 
@@ -301,35 +339,43 @@ Each sample is processed in four phases with zero heap allocation:
 
 ```
 1. scatter_up    Leaves -> Root    Reflected waves propagate bottom-up
-2. root_solve    Nonlinear root   Newton-Raphson on Shockley equation
+2. root_solve    Nonlinear root   Newton-Raphson on Shockley equation (<=16 iter)
 3. scatter_down  Root -> Leaves    Incident waves propagate top-down
 4. state_update  Reactive elems   Capacitors/inductors latch new state
 ```
 
-### Clipper Tree Topology
+### Example: Compiled Big Muff Tree
+
+The Big Muff has two cascaded clipping stages. The compiler produces:
 
 ```
-       [DiodePair root]        <- Newton-Raphson solver
-             |
-        SeriesAdaptor          <- Rp = R1 + R2
-         /         \
-  VoltageSource   ParallelAdaptor  <- Rp = R1*R2/(R1+R2)
-   (input)         /          \
-               Resistor    Capacitor
+Stage 1:                          Stage 2:
+   [DiodePair D1]                    [DiodePair D2]
+         |                                 |
+   ParallelAdaptor                   ParallelAdaptor
+    /          \                      /          \
+  Series      R1(10k)              Series       R2(47k)
+  /     \                          /     \
+Vs    C1(100n)                   Vs    C2(100n)
 ```
+
+Each stage's Vs is impedance-balanced to match its parallel sibling (R1/R2), giving gamma ~0.5 for efficient signal transfer through the tree.
 
 ---
 
 ## Rust API
 
 ```rust
-// Parse a .pedal file
+// Parse and compile a .pedal file into a real-time processor
 let pedal = pedalkernel::dsl::parse_pedal_file(&src).unwrap();
+let mut proc = pedalkernel::compiler::compile_pedal(&pedal, 48000.0).unwrap();
+proc.set_control("Drive", 0.7);
+let output = proc.process(input_sample);
 
-// Export KiCad netlist
+// Export KiCad netlist from the same .pedal file
 let netlist = pedalkernel::kicad::export_kicad_netlist(&pedal);
 
-// Use the WDF overdrive
+// Or use the hardcoded WDF overdrive directly
 let mut od = pedalkernel::pedals::Overdrive::new(48000.0);
 od.set_gain(0.7);
 let output = od.process(input_sample);
@@ -338,8 +384,7 @@ let output = od.process(input_sample);
 pedalkernel::wav::render_to_wav(&mut od, &input, Path::new("out.wav"), 48000).unwrap();
 
 // Run through JACK for real-time audio (cargo build --features jack-rt)
-// let od = pedalkernel::pedals::Overdrive::new(48000.0);
-// let _client = pedalkernel::AudioEngine::run("PedalKernel", od).unwrap();
+// let _client = pedalkernel::AudioEngine::run("PedalKernel", proc).unwrap();
 ```
 
 ---

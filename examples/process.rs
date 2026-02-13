@@ -9,8 +9,8 @@
 //!   cargo run --example process -- examples/big_muff.pedal in.wav out.wav Sustain=1.0
 
 use hound::{WavReader, WavWriter, SampleFormat};
+use pedalkernel::compiler::compile_pedal;
 use pedalkernel::dsl::parse_pedal_file;
-use pedalkernel::pedals::{FuzzFace, Overdrive};
 use pedalkernel::PedalProcessor;
 use std::path::Path;
 use std::process;
@@ -84,44 +84,15 @@ fn main() {
         }
     }
 
-    // Instantiate processor based on pedal name
-    let output_samples = match pedal.name.as_str() {
-        "Fuzz Face" => {
-            let mut proc = FuzzFace::new(sample_rate as f64);
-            for (label, val) in &knob_values {
-                match label.as_str() {
-                    "Fuzz" => proc.set_fuzz(*val),
-                    "Volume" => proc.set_volume(*val),
-                    other => eprintln!("Warning: unmapped knob '{other}' for Fuzz Face"),
-                }
-            }
-            process_audio(&mut proc, &input_samples)
-        }
-        "Big Muff" => {
-            // Big Muff maps: Sustain→gain, Tone→level, Volume→level
-            let mut proc = Overdrive::new(sample_rate as f64);
-            for (label, val) in &knob_values {
-                match label.as_str() {
-                    "Sustain" | "Gain" => proc.set_gain(*val),
-                    "Tone" | "Volume" | "Level" => proc.set_level(*val),
-                    other => eprintln!("Warning: unmapped knob '{other}' for Big Muff"),
-                }
-            }
-            process_audio(&mut proc, &input_samples)
-        }
-        // Default: Tube Screamer / Overdrive
-        _ => {
-            let mut proc = Overdrive::new(sample_rate as f64);
-            for (label, val) in &knob_values {
-                match label.as_str() {
-                    "Drive" | "Gain" | "Sustain" | "Fuzz" => proc.set_gain(*val),
-                    "Level" | "Volume" | "Tone" => proc.set_level(*val),
-                    other => eprintln!("Warning: unmapped knob '{other}' for Overdrive"),
-                }
-            }
-            process_audio(&mut proc, &input_samples)
-        }
-    };
+    // Compile the pedal's netlist into a WDF processor
+    let mut proc = compile_pedal(&pedal, sample_rate as f64).unwrap_or_else(|e| {
+        eprintln!("Compilation error: {e}");
+        process::exit(1);
+    });
+    for (label, val) in &knob_values {
+        proc.set_control(label, *val);
+    }
+    let output_samples = process_audio(&mut proc, &input_samples);
 
     // Write output WAV (same sample rate, mono, 32-bit float)
     let out_spec = hound::WavSpec {

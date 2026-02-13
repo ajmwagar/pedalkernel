@@ -10,6 +10,7 @@
 //! - [`kicad`] — KiCad netlist export from the parsed AST
 //! - [`wav`] — WAV file I/O for offline rendering and testing
 
+pub mod compiler;
 pub mod dsl;
 pub mod elements;
 pub mod kicad;
@@ -38,13 +39,14 @@ mod jack_engine {
     use jack::{AudioIn, AudioOut, Client, ClientOptions, Control, ProcessHandler, ProcessScope};
     use crate::PedalProcessor;
 
-    struct JackProcessor<P: PedalProcessor> {
+    /// JACK process handler wrapping a PedalProcessor.
+    pub struct JackProcessor<P: PedalProcessor> {
         processor: P,
         in_port: jack::Port<AudioIn>,
         out_port: jack::Port<AudioOut>,
     }
 
-    impl<P: PedalProcessor> ProcessHandler for JackProcessor<P> {
+    impl<P: PedalProcessor + Send> ProcessHandler for JackProcessor<P> {
         fn process(&mut self, _client: &Client, ps: &ProcessScope) -> Control {
             let input = self.in_port.as_slice(ps);
             let output = self.out_port.as_mut_slice(ps);
@@ -181,8 +183,8 @@ pedal "Test Pedal" {
         let p = parse_example("tube_screamer.pedal");
         assert_eq!(p.name, "Tube Screamer");
         assert_eq!(p.components.len(), 4);
-        assert_eq!(p.nets.len(), 5);
-        assert_eq!(p.controls.len(), 1);
+        assert_eq!(p.nets.len(), 4);
+        assert_eq!(p.controls.len(), 2);
         assert_eq!(p.controls[0].label, "Drive");
     }
 
