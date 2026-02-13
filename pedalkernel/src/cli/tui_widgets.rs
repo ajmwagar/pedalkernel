@@ -174,14 +174,10 @@ impl PortSelectState {
     pub fn cursor_up(&mut self) {
         match self.active_panel {
             PortPanel::Input => {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                }
+                self.input_cursor = self.input_cursor.saturating_sub(1);
             }
             PortPanel::Output => {
-                if self.output_cursor > 0 {
-                    self.output_cursor -= 1;
-                }
+                self.output_cursor = self.output_cursor.saturating_sub(1);
             }
         }
     }
@@ -365,9 +361,7 @@ pub fn run_output_select(
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(OutputSelectResult::Quit),
                     KeyCode::Up => {
-                        if cursor > 0 {
-                            cursor -= 1;
-                        }
+                        cursor = cursor.saturating_sub(1);
                     }
                     KeyCode::Down => {
                         if cursor + 1 < output_ports.len() {
