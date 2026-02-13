@@ -1,0 +1,40 @@
+# Big Muff Pi style distortion
+# Four-stage clipping with tone stack
+
+pedal "Big Muff" {
+  components {
+    C1: cap(100n)
+    R1: resistor(10k)
+    D1: diode_pair(silicon)
+    R2: resistor(47k)
+    C2: cap(100n)
+    D2: diode_pair(silicon)
+    R3: resistor(100k)
+    C3: cap(4n)
+    R4: resistor(22k)
+    C4: cap(10n)
+    Tone: pot(100k)
+    Sustain: pot(100k)
+    Volume: pot(100k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, D1.a
+    D1.b -> gnd
+    R1.b -> C2.a
+    C2.b -> R2.a, D2.a
+    D2.b -> gnd
+    R2.b -> R3.a
+    R3.b -> Tone.a
+    Tone.b -> C3.a, C4.a
+    C3.b -> R4.a
+    C4.b -> R4.a
+    R4.b -> Volume.a
+    Volume.b -> out
+  }
+  controls {
+    Sustain.position -> "Sustain" [0.0, 1.0] = 0.7
+    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+  }
+}

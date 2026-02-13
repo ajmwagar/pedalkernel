@@ -3,16 +3,24 @@ name = "pedalkernel"
 version = "0.1.0"
 edition = "2021"
 authors = ["Avery Wagar <ajmwagar@gmail.com>"]
-description = "Rust WDF kernel for FX pedals"
+description = "Rust WDF kernel for FX pedals — DSL → WDF → audio"
 license = "MIT"
 repository = "https://github.com/ajmwagar/pedalkernel"
 keywords = ["audio", "dsp", "wdf", "guitar", "effects"]
 categories = ["multimedia::audio"]
 rust-version = "1.75"
 
+[features]
+default = []
+jack-rt = ["jack"]
+
 [dependencies]
+# DSL parser
+nom = "7"
+
 # Audio I/O
-jack = "0.11"
+jack = { version = "0.11", optional = true }
+hound = "3.5"
 
 # Math
 num-complex = "0.4"

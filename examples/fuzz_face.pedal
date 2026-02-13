@@ -1,0 +1,35 @@
+# Fuzz Face style germanium fuzz
+# Two-transistor topology with input cap and biasing
+
+pedal "Fuzz Face" {
+  components {
+    C1: cap(2.2u)
+    R1: resistor(33k)
+    R2: resistor(8.2k)
+    Q1: pnp()
+    Q2: pnp()
+    C2: cap(10u)
+    R3: resistor(100k)
+    Fuzz: pot(1k)
+    Volume: pot(500k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> Q1.base
+    vcc -> R1.a
+    R1.b -> Q1.collector, R2.a
+    R2.b -> Q2.base
+    Q1.emitter -> Fuzz.a
+    Fuzz.b -> gnd
+    Q2.collector -> R3.a
+    R3.b -> gnd
+    Q2.emitter -> vcc
+    Q2.collector -> C2.a
+    C2.b -> Volume.a
+    Volume.b -> out
+  }
+  controls {
+    Fuzz.position -> "Fuzz" [0.0, 1.0] = 0.7
+    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+  }
+}

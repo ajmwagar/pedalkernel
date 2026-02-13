@@ -1,0 +1,21 @@
+# Tube Screamer TS-808 style overdrive
+# Simplified clipping stage: input cap -> feedback network with diode pair
+
+pedal "Tube Screamer" {
+  components {
+    R1: resistor(4.7k)
+    C1: cap(220n)
+    D1: diode_pair(silicon)
+    Gain: pot(500k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, D1.a
+    D1.b -> gnd
+    R1.b -> Gain.a
+    Gain.b -> out
+  }
+  controls {
+    Gain.position -> "Drive" [0.0, 1.0] = 0.5
+  }
+}
