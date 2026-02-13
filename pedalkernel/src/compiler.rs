@@ -442,7 +442,14 @@ impl CircuitGraph {
         let mut active_edge_indices = Vec::new();
         for comp in &pedal.components {
             let pin_order: &[&str] = match &comp.kind {
-                ComponentKind::OpAmp => &["pos", "neg", "out"],
+                ComponentKind::OpAmp => {
+                    // OpAmps use either 3-pin (pos/neg/out) or 2-pin (in/out) form.
+                    if pin_ids.contains_key(&format!("{}.pos", comp.id)) {
+                        &["pos", "neg", "out"]
+                    } else {
+                        &["in", "out"]
+                    }
+                }
                 ComponentKind::Npn | ComponentKind::Pnp => &["base", "collector", "emitter"],
                 _ => continue,
             };
