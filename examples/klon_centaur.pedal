@@ -1,0 +1,50 @@
+# Klon Centaur overdrive
+# Buffer + gain stage topology with germanium diodes in feedback
+# The most hyped pedal ever, mythical status
+# Dual op-amp: first as buffer, second as clipping gain stage
+
+pedal "Klon Centaur" {
+  components {
+    C1: cap(100n)             # Input coupling
+    R1: resistor(1M)          # Input impedance
+    U1: opamp()               # Input buffer (unity gain)
+    R2: resistor(10k)         # Buffer output resistor
+    C2: cap(68n)              # Gain stage coupling
+    R3: resistor(1.5k)        # Gain stage input resistor
+    U2: opamp()               # Gain / clipping stage
+    R4: resistor(422k)        # Feedback resistor (the famous value)
+    D1: diode_pair(germanium) # Germanium diodes in feedback loop
+    Gain: pot(100k)           # Drive control (parallel feedback path)
+    C3: cap(390p)             # Treble voicing cap
+    R5: resistor(15k)         # Treble network resistor
+    Treble: pot(25k)          # Treble control
+    C4: cap(1u)               # Output coupling
+    Output: pot(100k)         # Output level
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, U1.pos
+    R1.b -> gnd
+    U1.neg -> U1.out
+    U1.out -> R2.a
+    R2.b -> C2.a
+    C2.b -> R3.a
+    R3.b -> U2.neg
+    U2.pos -> gnd
+    U2.neg -> R4.a, D1.a, Gain.a
+    R4.b -> U2.out
+    D1.b -> U2.out
+    Gain.b -> U2.out
+    U2.out -> C3.a, R5.a
+    C3.b -> Treble.a
+    R5.b -> Treble.a
+    Treble.b -> C4.a
+    C4.b -> Output.a
+    Output.b -> out
+  }
+  controls {
+    Gain.position -> "Gain" [0.0, 1.0] = 0.3
+    Treble.position -> "Treble" [0.0, 1.0] = 0.5
+    Output.position -> "Output" [0.0, 1.0] = 0.5
+  }
+}

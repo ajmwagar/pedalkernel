@@ -162,4 +162,136 @@ pedal "Test Pedal" {
         let max_out = output.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
         assert!(max_out > 0.0001, "fuzz should produce output");
     }
+
+    // -----------------------------------------------------------------------
+    // Per-pedal .pedal file parse tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: read and parse a .pedal example file, panicking with context on failure.
+    fn parse_example(filename: &str) -> dsl::PedalDef {
+        let path = format!("examples/{filename}");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        dsl::parse_pedal_file(&src)
+            .unwrap_or_else(|e| panic!("failed to parse {path}: {e}"))
+    }
+
+    #[test]
+    fn pedal_tube_screamer() {
+        let p = parse_example("tube_screamer.pedal");
+        assert_eq!(p.name, "Tube Screamer");
+        assert_eq!(p.components.len(), 4);
+        assert_eq!(p.nets.len(), 5);
+        assert_eq!(p.controls.len(), 1);
+        assert_eq!(p.controls[0].label, "Drive");
+    }
+
+    #[test]
+    fn pedal_fuzz_face() {
+        let p = parse_example("fuzz_face.pedal");
+        assert_eq!(p.name, "Fuzz Face");
+        assert_eq!(p.components.len(), 9);
+        assert_eq!(p.nets.len(), 13);
+        assert_eq!(p.controls.len(), 2);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Fuzz"));
+        assert!(labels.contains(&"Volume"));
+    }
+
+    #[test]
+    fn pedal_big_muff() {
+        let p = parse_example("big_muff.pedal");
+        assert_eq!(p.name, "Big Muff");
+        assert_eq!(p.components.len(), 13);
+        assert_eq!(p.nets.len(), 13);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Sustain"));
+        assert!(labels.contains(&"Tone"));
+        assert!(labels.contains(&"Volume"));
+    }
+
+    #[test]
+    fn pedal_dyna_comp() {
+        let p = parse_example("dyna_comp.pedal");
+        assert_eq!(p.name, "MXR Dyna Comp");
+        assert_eq!(p.components.len(), 9);
+        assert_eq!(p.nets.len(), 11);
+        assert_eq!(p.controls.len(), 2);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Sensitivity"));
+        assert!(labels.contains(&"Output"));
+        // Verify opamp is present (OTA topology)
+        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::OpAmp));
+    }
+
+    #[test]
+    fn pedal_proco_rat() {
+        let p = parse_example("proco_rat.pedal");
+        assert_eq!(p.name, "ProCo RAT");
+        assert_eq!(p.components.len(), 12);
+        assert_eq!(p.nets.len(), 15);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Distortion"));
+        assert!(labels.contains(&"Filter"));
+        assert!(labels.contains(&"Volume"));
+        // Verify opamp + hard clipping diode pair
+        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::OpAmp));
+        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::DiodePair(dsl::DiodeType::Silicon)));
+    }
+
+    #[test]
+    fn pedal_blues_driver() {
+        let p = parse_example("blues_driver.pedal");
+        assert_eq!(p.name, "Boss Blues Driver");
+        assert_eq!(p.components.len(), 15);
+        assert_eq!(p.nets.len(), 18);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Gain"));
+        assert!(labels.contains(&"Tone"));
+        assert!(labels.contains(&"Level"));
+        // Verify NPN transistor + asymmetric single diode
+        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::Npn));
+        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)));
+    }
+
+    #[test]
+    fn pedal_klon_centaur() {
+        let p = parse_example("klon_centaur.pedal");
+        assert_eq!(p.name, "Klon Centaur");
+        assert_eq!(p.components.len(), 15);
+        assert_eq!(p.nets.len(), 19);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Gain"));
+        assert!(labels.contains(&"Treble"));
+        assert!(labels.contains(&"Output"));
+        // Verify dual opamps + germanium diode pair in feedback
+        let opamp_count = p.components.iter()
+            .filter(|c| c.kind == dsl::ComponentKind::OpAmp)
+            .count();
+        assert_eq!(opamp_count, 2, "Klon uses dual opamps");
+        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::DiodePair(dsl::DiodeType::Germanium)));
+    }
+
+    #[test]
+    fn all_pedal_files_export_kicad() {
+        let files = [
+            "tube_screamer.pedal",
+            "fuzz_face.pedal",
+            "big_muff.pedal",
+            "dyna_comp.pedal",
+            "proco_rat.pedal",
+            "blues_driver.pedal",
+            "klon_centaur.pedal",
+        ];
+        for f in files {
+            let p = parse_example(f);
+            let netlist = kicad::export_kicad_netlist(&p);
+            assert!(netlist.contains("(export (version D)"), "{f} KiCad export missing header");
+            assert!(netlist.contains(&p.name), "{f} KiCad export missing pedal name");
+        }
+    }
 }

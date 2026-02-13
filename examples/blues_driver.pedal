@@ -1,0 +1,49 @@
+# Boss Blues Driver BD-2
+# Discrete transistor gain stage with asymmetric clipping
+# "Transparent" overdrive, stack-friendly
+# Single diode for characteristic asymmetric clip
+
+pedal "Boss Blues Driver" {
+  components {
+    C1: cap(47n)            # Input coupling
+    R1: resistor(470k)      # Input impedance / bias
+    Q1: npn()               # Discrete gain stage transistor
+    R2: resistor(10k)       # Collector load
+    R3: resistor(4.7k)      # Emitter resistor
+    Gain: pot(250k)         # Drive control (emitter bypass)
+    C2: cap(100n)           # Interstage coupling
+    D1: diode(silicon)      # Asymmetric clipping (single diode)
+    R4: resistor(22k)       # Clipping load resistor
+    C3: cap(10n)            # Tone cap (treble)
+    C4: cap(47n)            # Tone cap (bass)
+    R5: resistor(10k)       # Tone mixing resistor
+    Tone: pot(50k)          # Tone control
+    C5: cap(10u)            # Output coupling
+    Level: pot(100k)        # Output level
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, Q1.base
+    R1.b -> gnd
+    vcc -> R2.a
+    R2.b -> Q1.collector
+    Q1.emitter -> R3.a, Gain.a
+    R3.b -> gnd
+    Gain.b -> gnd
+    Q1.collector -> C2.a
+    C2.b -> D1.a, R4.a
+    D1.b -> gnd
+    R4.b -> Tone.a
+    Tone.b -> C3.a, C4.a
+    C3.b -> R5.a
+    C4.b -> R5.a
+    R5.b -> C5.a
+    C5.b -> Level.a
+    Level.b -> out
+  }
+  controls {
+    Gain.position -> "Gain" [0.0, 1.0] = 0.5
+    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+    Level.position -> "Level" [0.0, 1.0] = 0.5
+  }
+}

@@ -1,0 +1,43 @@
+# ProCo RAT distortion
+# LM308 op-amp gain stage into hard clipping diodes
+# Bridges the overdrive-to-distortion gap
+# Passive low-pass Filter control for tone shaping
+
+pedal "ProCo RAT" {
+  components {
+    C1: cap(22n)            # Input coupling
+    R1: resistor(1M)        # Input impedance / bias
+    R2: resistor(1k)        # Gain stage input resistor
+    U1: opamp()             # LM308 op-amp
+    C2: cap(100p)           # Feedback compensation cap (LM308 quirk)
+    Distortion: pot(100k)   # Gain control in feedback loop
+    D1: diode_pair(silicon) # Hard clipping diodes to ground
+    R3: resistor(10k)       # Post-clip isolation resistor
+    C3: cap(3.3n)           # Filter cap (low-pass)
+    Filter: pot(100k)       # Tone control (low-pass cutoff)
+    C4: cap(1u)             # Output coupling
+    Volume: pot(100k)       # Output level
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, R2.a
+    R1.b -> gnd
+    R2.b -> U1.neg
+    U1.pos -> gnd
+    U1.neg -> Distortion.a, C2.a
+    Distortion.b -> U1.out
+    C2.b -> U1.out
+    U1.out -> D1.a, R3.a
+    D1.b -> gnd
+    R3.b -> Filter.a, C3.a
+    C3.b -> gnd
+    Filter.b -> C4.a
+    C4.b -> Volume.a
+    Volume.b -> out
+  }
+  controls {
+    Distortion.position -> "Distortion" [0.0, 1.0] = 0.5
+    Filter.position -> "Filter" [0.0, 1.0] = 0.7
+    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+  }
+}
