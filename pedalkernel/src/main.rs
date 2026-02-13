@@ -26,7 +26,7 @@ enum Command {
     /// Interactive TUI with live JACK audio — select I/O ports and tweak knobs.
     #[cfg(all(feature = "jack-rt", feature = "tui"))]
     Tui {
-        /// Path to the .pedal or .board file.
+        /// Path to a .pedal file, .board file, or directory of .board files.
         file: String,
     },
 }
@@ -43,7 +43,10 @@ fn main() {
         } => cli::process::run(&file, &input, &output, &knobs),
         #[cfg(all(feature = "jack-rt", feature = "tui"))]
         Command::Tui { file } => {
-            let result = if file.ends_with(".board") {
+            let path = std::path::Path::new(&file);
+            let result = if path.is_dir() {
+                cli::folder_tui::run(&file)
+            } else if file.ends_with(".board") {
                 cli::board_tui::run(&file)
             } else {
                 cli::tui::run(&file)

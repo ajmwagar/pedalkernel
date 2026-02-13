@@ -1,4 +1,4 @@
-//! Pedalboard TUI — chain view with per-pedal knob editing and bypass.
+//! Pedalboard TUI — overview + detail views with per-pedal knob editing and bypass.
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -6,7 +6,6 @@ use crossterm::{
     ExecutableCommand,
 };
 use pedalkernel::board::parse_board_file;
-use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::pedalboard::PedalboardProcessor;
 use pedalkernel::{AudioEngine, SharedControls};
 use ratatui::{
@@ -21,34 +20,43 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::tui_widgets::{
-    render_footswitch, render_knob_row, run_port_select, KnobState, PortSelectResult, Term,
+    knob_frame_index, render_footswitch, render_knob_row, run_port_select, KnobState,
+    PortSelectResult, Term, KNOB_FRAMES,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
 // State
 // ═════════════════════════════════════════════════════════════════════════════
 
-struct PedalPanel {
-    name: String,
-    knobs: Vec<KnobState>,
-    bypassed: bool,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewMode {
+    Overview,
+    Detail,
 }
 
-struct BoardControlState {
-    board_name: String,
-    pedals: Vec<PedalPanel>,
-    focused_pedal: usize,
-    focused_knob: usize,
-    controls: Arc<SharedControls>,
-    input_port: String,
-    output_port: String,
+pub(crate) struct PedalPanel {
+    pub name: String,
+    pub knobs: Vec<KnobState>,
+    pub bypassed: bool,
+}
+
+pub(crate) struct BoardControlState {
+    pub board_name: String,
+    pub pedals: Vec<PedalPanel>,
+    pub focused_pedal: usize,
+    pub focused_knob: usize,
+    pub board_bypassed: bool,
+    pub view_mode: ViewMode,
+    pub controls: Arc<SharedControls>,
+    pub input_port: String,
+    pub output_port: String,
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Actions
 // ═════════════════════════════════════════════════════════════════════════════
 
-enum BoardAction {
+pub(crate) enum BoardAction {
     Quit,
     NextPedal,
     PrevPedal,
@@ -57,10 +65,13 @@ enum BoardAction {
     Adjust(f64),
     ResetKnob,
     ToggleBypass,
+    ToggleBoardBypass,
+    ToggleView,
+    EnterDetail,
     None,
 }
 
-fn handle_board_key(code: KeyCode, modifiers: KeyModifiers) -> BoardAction {
+pub(crate) fn handle_board_key(code: KeyCode, modifiers: KeyModifiers) -> BoardAction {
     match code {
         KeyCode::Char('q') | KeyCode::Esc => BoardAction::Quit,
         KeyCode::Char(']') => BoardAction::NextPedal,
@@ -73,14 +84,17 @@ fn handle_board_key(code: KeyCode, modifiers: KeyModifiers) -> BoardAction {
         KeyCode::Down => BoardAction::Adjust(-0.01),
         KeyCode::Up => BoardAction::Adjust(0.01),
         KeyCode::Char(' ') => BoardAction::ToggleBypass,
+        KeyCode::Char('b') | KeyCode::Char('B') => BoardAction::ToggleBoardBypass,
         KeyCode::Char('r') | KeyCode::Char('R') => BoardAction::ResetKnob,
+        KeyCode::Char('v') | KeyCode::Char('V') => BoardAction::ToggleView,
+        KeyCode::Enter => BoardAction::EnterDetail,
         _ => BoardAction::None,
     }
 }
 
 impl BoardControlState {
     /// Returns false when the user wants to quit.
-    fn update(&mut self, action: BoardAction) -> bool {
+    pub(crate) fn update(&mut self, action: BoardAction) -> bool {
         match action {
             BoardAction::Quit => return false,
             BoardAction::NextPedal => {
@@ -97,38 +111,59 @@ impl BoardControlState {
                 }
             }
             BoardAction::NextKnob => {
-                if let Some(panel) = self.pedals.get(self.focused_pedal) {
-                    if !panel.knobs.is_empty() {
-                        self.focused_knob = (self.focused_knob + 1) % panel.knobs.len();
+                if self.view_mode == ViewMode::Detail {
+                    if let Some(panel) = self.pedals.get(self.focused_pedal) {
+                        if !panel.knobs.is_empty() {
+                            self.focused_knob = (self.focused_knob + 1) % panel.knobs.len();
+                        }
                     }
                 }
             }
             BoardAction::PrevKnob => {
-                if let Some(panel) = self.pedals.get(self.focused_pedal) {
-                    if !panel.knobs.is_empty() {
-                        self.focused_knob =
-                            (self.focused_knob + panel.knobs.len() - 1) % panel.knobs.len();
+                if self.view_mode == ViewMode::Detail {
+                    if let Some(panel) = self.pedals.get(self.focused_pedal) {
+                        if !panel.knobs.is_empty() {
+                            self.focused_knob = (self.focused_knob + panel.knobs.len() - 1)
+                                % panel.knobs.len();
+                        }
                     }
                 }
             }
             BoardAction::Adjust(delta) => {
-                let pidx = self.focused_pedal;
-                if let Some(panel) = self.pedals.get_mut(pidx) {
-                    if let Some(k) = panel.knobs.get_mut(self.focused_knob) {
-                        let span = k.range.1 - k.range.0;
-                        k.value = (k.value + delta * span).clamp(k.range.0, k.range.1);
-                        self.controls
-                            .set_control(&format!("{pidx}:{}", k.label), k.value);
+                if self.view_mode == ViewMode::Overview {
+                    // In overview, left/right navigate pedals
+                    if !self.pedals.is_empty() {
+                        if delta < 0.0 {
+                            self.focused_pedal = (self.focused_pedal + self.pedals.len() - 1)
+                                % self.pedals.len();
+                        } else {
+                            self.focused_pedal =
+                                (self.focused_pedal + 1) % self.pedals.len();
+                        }
+                        self.focused_knob = 0;
+                    }
+                } else {
+                    let pidx = self.focused_pedal;
+                    if let Some(panel) = self.pedals.get_mut(pidx) {
+                        if let Some(k) = panel.knobs.get_mut(self.focused_knob) {
+                            let span = k.range.1 - k.range.0;
+                            k.value =
+                                (k.value + delta * span).clamp(k.range.0, k.range.1);
+                            self.controls
+                                .set_control(&format!("{pidx}:{}", k.label), k.value);
+                        }
                     }
                 }
             }
             BoardAction::ResetKnob => {
-                let pidx = self.focused_pedal;
-                if let Some(panel) = self.pedals.get_mut(pidx) {
-                    if let Some(k) = panel.knobs.get_mut(self.focused_knob) {
-                        k.value = k.default;
-                        self.controls
-                            .set_control(&format!("{pidx}:{}", k.label), k.value);
+                if self.view_mode == ViewMode::Detail {
+                    let pidx = self.focused_pedal;
+                    if let Some(panel) = self.pedals.get_mut(pidx) {
+                        if let Some(k) = panel.knobs.get_mut(self.focused_knob) {
+                            k.value = k.default;
+                            self.controls
+                                .set_control(&format!("{pidx}:{}", k.label), k.value);
+                        }
                     }
                 }
             }
@@ -141,6 +176,21 @@ impl BoardControlState {
                         .set_control(&format!("{pidx}:__bypass__"), val);
                 }
             }
+            BoardAction::ToggleBoardBypass => {
+                self.board_bypassed = !self.board_bypassed;
+                self.controls.set_bypassed(self.board_bypassed);
+            }
+            BoardAction::ToggleView => {
+                self.view_mode = match self.view_mode {
+                    ViewMode::Overview => ViewMode::Detail,
+                    ViewMode::Detail => ViewMode::Overview,
+                };
+            }
+            BoardAction::EnterDetail => {
+                if self.view_mode == ViewMode::Overview {
+                    self.view_mode = ViewMode::Detail;
+                }
+            }
             BoardAction::None => {}
         }
         true
@@ -148,35 +198,223 @@ impl BoardControlState {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Drawing
+// Drawing — dispatcher
 // ═════════════════════════════════════════════════════════════════════════════
 
-fn draw_board_control(frame: &mut Frame, state: &BoardControlState) {
+pub(crate) fn draw_board_control(frame: &mut Frame, state: &BoardControlState) {
     let area = frame.area();
 
-    if area.width < 40 || area.height < 18 {
-        let msg = Paragraph::new("Terminal too small!\nResize to at least 40x18.")
+    if area.width < 40 || area.height < 14 {
+        let msg = Paragraph::new("Terminal too small!\nResize to at least 40x14.")
             .alignment(Alignment::Center);
         frame.render_widget(msg, area);
         return;
     }
 
+    let title = if state.board_bypassed {
+        format!("  {} [BYPASSED]  ", state.board_name.to_uppercase())
+    } else {
+        format!("  {}  ", state.board_name.to_uppercase())
+    };
+    let border_color = if state.board_bypassed {
+        Color::DarkGray
+    } else {
+        Color::White
+    };
     let outer = Block::default()
-        .title(format!("  {}  ", state.board_name.to_uppercase()))
+        .title(title)
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
-        .style(Style::default().fg(Color::White));
+        .style(Style::default().fg(border_color));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
     if state.pedals.is_empty() {
-        let msg = Paragraph::new("No pedals in this board.")
-            .alignment(Alignment::Center);
+        let msg =
+            Paragraph::new("No pedals in this board.").alignment(Alignment::Center);
         frame.render_widget(msg, inner);
         return;
     }
 
+    match state.view_mode {
+        ViewMode::Overview => draw_board_overview(frame, state, inner),
+        ViewMode::Detail => draw_board_detail(frame, state, inner),
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Drawing — Overview mode (mini pedal cards side-by-side)
+// ═════════════════════════════════════════════════════════════════════════════
+
+pub(crate) fn draw_board_overview(frame: &mut Frame, state: &BoardControlState, inner: Rect) {
+    let v_chunks = Layout::vertical([
+        Constraint::Length(1), // I/O info
+        Constraint::Length(1), // padding
+        Constraint::Min(12),   // pedal cards
+        Constraint::Length(1), // help
+    ])
+    .split(inner);
+
+    // I/O info bar
+    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port);
+
+    // Pedal cards — split horizontally
+    let n = state.pedals.len();
+    let h_constraints: Vec<Constraint> =
+        (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+    let card_cols = Layout::horizontal(&h_constraints).split(v_chunks[2]);
+
+    for (i, panel) in state.pedals.iter().enumerate() {
+        let is_focused = i == state.focused_pedal;
+        render_mini_pedal(frame, card_cols[i], panel, is_focused);
+    }
+
+    // Help bar
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("[ ] ←→", Style::default().fg(Color::Cyan)),
+        Span::raw(" pedal  "),
+        Span::styled("V", Style::default().fg(Color::Cyan)),
+        Span::raw("/"),
+        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::raw(" detail  "),
+        Span::styled("Space", Style::default().fg(Color::Cyan)),
+        Span::raw(" bypass  "),
+        Span::styled("B", Style::default().fg(Color::Cyan)),
+        Span::raw(" bypass all  "),
+        Span::styled("Q", Style::default().fg(Color::Cyan)),
+        Span::raw(" quit"),
+    ]))
+    .alignment(Alignment::Center);
+    frame.render_widget(help, v_chunks[3]);
+}
+
+/// Render a single mini pedal card within its allocated rect.
+pub(crate) fn render_mini_pedal(frame: &mut Frame, area: Rect, panel: &PedalPanel, is_focused: bool) {
+    let (border_style, title_style) = if is_focused {
+        (
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if panel.bypassed {
+        (
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )
+    } else {
+        (
+            Style::default().fg(Color::White),
+            Style::default().fg(Color::White),
+        )
+    };
+
+    let block = Block::default()
+        .title(Span::styled(
+            format!(" {} ", panel.name.to_uppercase()),
+            title_style,
+        ))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(if is_focused {
+            BorderType::Double
+        } else {
+            BorderType::Rounded
+        })
+        .style(border_style);
+    let card_inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if card_inner.height < 3 || card_inner.width < 4 {
+        return;
+    }
+
+    // Layout inside card: knobs + footswitch
+    let card_chunks = Layout::vertical([
+        Constraint::Length(5), // knob art
+        Constraint::Length(1), // labels
+        Constraint::Length(1), // values
+        Constraint::Min(0),    // spacer
+        Constraint::Length(3), // footswitch
+    ])
+    .split(card_inner);
+
+    // Render mini knobs (no selection highlight in overview)
+    if !panel.knobs.is_empty() {
+        render_mini_knobs(frame, &panel.knobs, card_chunks[0], card_chunks[1], card_chunks[2], panel.bypassed);
+    }
+
+    // Footswitch
+    if card_chunks[4].height >= 3 {
+        render_footswitch(frame, card_chunks[4], panel.bypassed);
+    }
+}
+
+/// Render knobs compactly inside a mini pedal card (no selection highlight).
+fn render_mini_knobs(
+    frame: &mut Frame,
+    knobs: &[KnobState],
+    knob_area: Rect,
+    label_area: Rect,
+    value_area: Rect,
+    dimmed: bool,
+) {
+    let n = knobs.len();
+    if n == 0 {
+        return;
+    }
+    let h_constraints: Vec<Constraint> =
+        (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+    let knob_cols = Layout::horizontal(&h_constraints).split(knob_area);
+    let label_cols = Layout::horizontal(&h_constraints).split(label_area);
+    let value_cols = Layout::horizontal(&h_constraints).split(value_area);
+
+    let style = if dimmed {
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    for (i, knob) in knobs.iter().enumerate() {
+        let fi = knob_frame_index(knob.value, knob.range);
+        let art = KNOB_FRAMES[fi];
+
+        let lines: Vec<Line> = art
+            .iter()
+            .map(|l| Line::from(Span::styled(*l, style)))
+            .collect();
+        frame.render_widget(
+            Paragraph::new(lines).alignment(Alignment::Center),
+            knob_cols[i],
+        );
+
+        frame.render_widget(
+            Paragraph::new(Span::styled(&knob.label, style)).alignment(Alignment::Center),
+            label_cols[i],
+        );
+
+        frame.render_widget(
+            Paragraph::new(Span::styled(format!("{:.2}", knob.value), style))
+                .alignment(Alignment::Center),
+            value_cols[i],
+        );
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Drawing — Detail mode (focused pedal with full knob controls)
+// ═════════════════════════════════════════════════════════════════════════════
+
+pub(crate) fn draw_board_detail(frame: &mut Frame, state: &BoardControlState, inner: Rect) {
     let v_chunks = Layout::vertical([
         Constraint::Length(1), // I/O info
         Constraint::Length(1), // padding
@@ -195,21 +433,13 @@ fn draw_board_control(frame: &mut Frame, state: &BoardControlState) {
     .split(inner);
 
     // I/O info bar
-    let io_info = Paragraph::new(Line::from(vec![
-        Span::styled(" IN: ", Style::default().fg(Color::Green)),
-        Span::raw(&state.input_port),
-        Span::raw("  "),
-        Span::styled("OUT: ", Style::default().fg(Color::Green)),
-        Span::raw(&state.output_port),
-    ]))
-    .alignment(Alignment::Center);
-    frame.render_widget(io_info, v_chunks[0]);
+    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port);
 
-    // Chain bar: [PEDAL1] → [PEDAL2] → [PEDAL3]
+    // Chain bar
     render_chain_bar(frame, v_chunks[2], &state.pedals, state.focused_pedal);
 
-    // Status row: ACTIVE / BYPASSED under each pedal
-    render_status_row(frame, v_chunks[3], &state.pedals, state.focused_pedal);
+    // Status row
+    render_status_row(frame, v_chunks[3], &state.pedals);
 
     // Focused pedal header
     if let Some(panel) = state.pedals.get(state.focused_pedal) {
@@ -246,7 +476,7 @@ fn draw_board_control(frame: &mut Frame, state: &BoardControlState) {
 
     // Help bar
     let help = Paragraph::new(Line::from(vec![
-        Span::styled("[/]", Style::default().fg(Color::Cyan)),
+        Span::styled("[ ]", Style::default().fg(Color::Cyan)),
         Span::raw(" pedal  "),
         Span::styled("Tab", Style::default().fg(Color::Cyan)),
         Span::raw(" knob  "),
@@ -256,8 +486,12 @@ fn draw_board_control(frame: &mut Frame, state: &BoardControlState) {
         Span::raw(" fine  "),
         Span::styled("Space", Style::default().fg(Color::Cyan)),
         Span::raw(" bypass  "),
+        Span::styled("B", Style::default().fg(Color::Cyan)),
+        Span::raw(" bypass all  "),
         Span::styled("R", Style::default().fg(Color::Cyan)),
         Span::raw(" reset  "),
+        Span::styled("V", Style::default().fg(Color::Cyan)),
+        Span::raw(" overview  "),
         Span::styled("Q", Style::default().fg(Color::Cyan)),
         Span::raw(" quit"),
     ]))
@@ -265,8 +499,24 @@ fn draw_board_control(frame: &mut Frame, state: &BoardControlState) {
     frame.render_widget(help, v_chunks[12]);
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Shared drawing helpers
+// ═════════════════════════════════════════════════════════════════════════════
+
+pub(crate) fn render_io_bar(frame: &mut Frame, area: Rect, input_port: &str, output_port: &str) {
+    let io_info = Paragraph::new(Line::from(vec![
+        Span::styled(" IN: ", Style::default().fg(Color::Green)),
+        Span::raw(input_port),
+        Span::raw("  "),
+        Span::styled("OUT: ", Style::default().fg(Color::Green)),
+        Span::raw(output_port),
+    ]))
+    .alignment(Alignment::Center);
+    frame.render_widget(io_info, area);
+}
+
 /// Render the chain bar: [TUBE SCREAMER] → [BLUES DRIVER] → ...
-fn render_chain_bar(frame: &mut Frame, area: Rect, pedals: &[PedalPanel], focused: usize) {
+pub(crate) fn render_chain_bar(frame: &mut Frame, area: Rect, pedals: &[PedalPanel], focused: usize) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, panel) in pedals.iter().enumerate() {
         if i > 0 {
@@ -294,7 +544,7 @@ fn render_chain_bar(frame: &mut Frame, area: Rect, pedals: &[PedalPanel], focuse
 }
 
 /// Render status indicators under each pedal name in the chain.
-fn render_status_row(frame: &mut Frame, area: Rect, pedals: &[PedalPanel], _focused: usize) {
+pub(crate) fn render_status_row(frame: &mut Frame, area: Rect, pedals: &[PedalPanel]) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, panel) in pedals.iter().enumerate() {
         if i > 0 {
@@ -311,11 +561,9 @@ fn render_status_row(frame: &mut Frame, area: Rect, pedals: &[PedalPanel], _focu
         } else {
             ("ACTIVE", Style::default().fg(Color::Green))
         };
-        // Center the status text under the pedal name box
         let padding = name_len.saturating_sub(label.len()) / 2;
         let padded = format!("{:>width$}", label, width = padding + label.len());
         spans.push(Span::styled(padded, style));
-        // Fill remaining space
         let remaining = name_len.saturating_sub(padding + label.len());
         if remaining > 0 {
             spans.push(Span::raw(" ".repeat(remaining)));
@@ -355,6 +603,8 @@ fn run_board_control(
         pedals: panels,
         focused_pedal: 0,
         focused_knob: 0,
+        board_bypassed: false,
+        view_mode: ViewMode::Overview,
         controls,
         input_port: connect_from.to_string(),
         output_port: connect_to.to_string(),
@@ -389,45 +639,57 @@ pub fn run(board_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .unwrap_or_else(|| Path::new("."));
 
-    // Build pedal panels (need control info from .pedal files for the TUI)
+    // Build pedal panels (need control info from .pedal files for the TUI).
+    // If a pedal file can't be read/parsed, create a failed panel (no knobs)
+    // — the processor will use dry passthrough for that slot.
     let mut panels = Vec::new();
     for entry in &board.pedals {
         let pedal_path = board_dir.join(&entry.path);
-        let pedal_source = std::fs::read_to_string(&pedal_path).map_err(|e| {
-            format!(
-                "Error reading pedal '{}' at {}: {e}",
-                entry.id,
-                pedal_path.display()
-            )
-        })?;
-        let pedal_def = parse_pedal_file(&pedal_source)
-            .map_err(|e| format!("Parse error in '{}': {e}", entry.id))?;
 
-        let knobs: Vec<KnobState> = pedal_def
-            .controls
-            .iter()
-            .map(|c| {
-                // Check for board-level override for the default value
-                let default_val = entry
-                    .overrides
+        let panel = match std::fs::read_to_string(&pedal_path)
+            .map_err(|e| e.to_string())
+            .and_then(|src| {
+                pedalkernel::dsl::parse_pedal_file(&src).map_err(|e| e.to_string())
+            }) {
+            Ok(pedal_def) => {
+                let knobs: Vec<KnobState> = pedal_def
+                    .controls
                     .iter()
-                    .find(|(label, _)| label.eq_ignore_ascii_case(&c.label))
-                    .map(|(_, v)| *v)
-                    .unwrap_or(c.default);
-                KnobState {
-                    label: c.label.clone(),
-                    value: default_val,
-                    range: c.range,
-                    default: default_val,
+                    .map(|c| {
+                        let default_val = entry
+                            .overrides
+                            .iter()
+                            .find(|(label, _)| label.eq_ignore_ascii_case(&c.label))
+                            .map(|(_, v)| *v)
+                            .unwrap_or(c.default);
+                        KnobState {
+                            label: c.label.clone(),
+                            value: default_val,
+                            range: c.range,
+                            default: default_val,
+                        }
+                    })
+                    .collect();
+                PedalPanel {
+                    name: pedal_def.name.clone(),
+                    knobs,
+                    bypassed: false,
                 }
-            })
-            .collect();
+            }
+            Err(e) => {
+                eprintln!(
+                    "WARNING: Pedal '{}' failed to load — dry passthrough: {e}",
+                    entry.id
+                );
+                PedalPanel {
+                    name: format!("{} [FAILED]", entry.id),
+                    knobs: Vec::new(),
+                    bypassed: false,
+                }
+            }
+        };
 
-        panels.push(PedalPanel {
-            name: pedal_def.name.clone(),
-            knobs,
-            bypassed: false,
-        });
+        panels.push(panel);
     }
 
     // Create JACK client and enumerate available ports
