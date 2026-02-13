@@ -21,7 +21,9 @@ pub struct Resistor {
 
 impl Resistor {
     pub fn new(resistance: f64) -> Self {
-        Self { port_resistance: resistance }
+        Self {
+            port_resistance: resistance,
+        }
     }
 
     #[inline]
@@ -126,7 +128,10 @@ pub struct VoltageSource {
 
 impl VoltageSource {
     pub fn new(port_resistance: f64) -> Self {
-        Self { voltage: 0.0, port_resistance }
+        Self {
+            voltage: 0.0,
+            port_resistance,
+        }
     }
 
     pub fn set_voltage(&mut self, v: f64) {
@@ -157,15 +162,24 @@ pub struct DiodeModel {
 
 impl DiodeModel {
     pub fn silicon() -> Self {
-        Self { is: 2.52e-9, n_vt: 1.752 * 25.85e-3 }
+        Self {
+            is: 2.52e-9,
+            n_vt: 1.752 * 25.85e-3,
+        }
     }
 
     pub fn germanium() -> Self {
-        Self { is: 1e-6, n_vt: 1.3 * 25.85e-3 }
+        Self {
+            is: 1e-6,
+            n_vt: 1.3 * 25.85e-3,
+        }
     }
 
     pub fn led() -> Self {
-        Self { is: 2.96e-12, n_vt: 1.9 * 25.85e-3 }
+        Self {
+            is: 2.96e-12,
+            n_vt: 1.9 * 25.85e-3,
+        }
     }
 }
 
@@ -184,7 +198,10 @@ pub struct DiodePairRoot {
 
 impl DiodePairRoot {
     pub fn new(model: DiodeModel) -> Self {
-        Self { model, max_iter: 16 }
+        Self {
+            model,
+            max_iter: 16,
+        }
     }
 
     /// Compute reflected wave from incident wave `a` and port resistance `rp`.
@@ -245,7 +262,10 @@ pub struct DiodeRoot {
 
 impl DiodeRoot {
     pub fn new(model: DiodeModel) -> Self {
-        Self { model, max_iter: 16 }
+        Self {
+            model,
+            max_iter: 16,
+        }
     }
 
     /// `f(v) = a - 2v - 2*Rp*Is*(exp(v/nVt) - 1)`
@@ -337,7 +357,10 @@ mod tests {
     fn diode_pair_zero_input() {
         let dp = DiodePairRoot::new(DiodeModel::silicon());
         let b = dp.process(0.0, 1000.0);
-        assert!(b.abs() < 1e-6, "symmetric diode pair should reflect ~0 for zero input");
+        assert!(
+            b.abs() < 1e-6,
+            "symmetric diode pair should reflect ~0 for zero input"
+        );
     }
 
     #[test]
@@ -369,6 +392,9 @@ mod tests {
         let b_pos = d.process(1.0, 1000.0);
         let b_neg = d.process(-1.0, 1000.0);
         // Single diode should produce different reflections for + vs -
-        assert!((b_pos - b_neg).abs() > 1e-10, "should be asymmetric: b+={b_pos}, b-={b_neg}");
+        assert!(
+            (b_pos - b_neg).abs() > 1e-10,
+            "should be asymmetric: b+={b_pos}, b-={b_neg}"
+        );
     }
 }

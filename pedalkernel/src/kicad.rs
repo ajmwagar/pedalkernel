@@ -13,7 +13,7 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::Resistor(_) => ("Device:R", "R"),
         ComponentKind::Capacitor(_) => ("Device:C", "C"),
         ComponentKind::Inductor(_) => ("Device:L", "L"),
-        ComponentKind::DiodePair(_) => ("Device:D", "D"),   // pair shown as single symbol + note
+        ComponentKind::DiodePair(_) => ("Device:D", "D"), // pair shown as single symbol + note
         ComponentKind::Diode(_) => ("Device:D", "D"),
         ComponentKind::Potentiometer(_) => ("Device:R_Potentiometer", "RV"),
         ComponentKind::Npn => ("Device:Q_NPN_BCE", "Q"),
@@ -100,9 +100,16 @@ fn build_net_map(nets: &[NetDef]) -> Vec<(usize, String, Vec<Pin>)> {
         .map(|(i, pins)| {
             let net_num = i + 1;
             // Name the net after the first reserved node or first pin
-            let name = pins.iter().find_map(|p| {
-                if let Pin::Reserved(n) = p { Some(n.clone()) } else { None }
-            }).unwrap_or_else(|| format!("Net{net_num}"));
+            let name = pins
+                .iter()
+                .find_map(|p| {
+                    if let Pin::Reserved(n) = p {
+                        Some(n.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| format!("Net{net_num}"));
             (net_num, name, pins)
         })
         .collect()
@@ -129,7 +136,12 @@ pub fn export_kicad_netlist(pedal: &PedalDef) -> String {
     for (i, comp) in pedal.components.iter().enumerate() {
         let (lib_ref, prefix) = footprint_ref(&comp.kind);
         let val = value_str(&comp.kind);
-        writeln!(out, "    (comp (ref {prefix}{}) (value \"{val}\") (libsource (lib \"{lib_ref}\")))", i + 1).unwrap();
+        writeln!(
+            out,
+            "    (comp (ref {prefix}{}) (value \"{val}\") (libsource (lib \"{lib_ref}\")))",
+            i + 1
+        )
+        .unwrap();
     }
     writeln!(out, "  )").unwrap();
 
@@ -170,20 +182,41 @@ mod tests {
         let pedal = PedalDef {
             name: "Tube Screamer".into(),
             components: vec![
-                ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(4700.0) },
-                ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(220e-9) },
-                ComponentDef { id: "D1".into(), kind: ComponentKind::DiodePair(DiodeType::Silicon) },
+                ComponentDef {
+                    id: "R1".into(),
+                    kind: ComponentKind::Resistor(4700.0),
+                },
+                ComponentDef {
+                    id: "C1".into(),
+                    kind: ComponentKind::Capacitor(220e-9),
+                },
+                ComponentDef {
+                    id: "D1".into(),
+                    kind: ComponentKind::DiodePair(DiodeType::Silicon),
+                },
             ],
             nets: vec![
                 NetDef {
                     from: Pin::Reserved("in".into()),
-                    to: vec![Pin::ComponentPin { component: "C1".into(), pin: "a".into() }],
+                    to: vec![Pin::ComponentPin {
+                        component: "C1".into(),
+                        pin: "a".into(),
+                    }],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "C1".into(), pin: "b".into() },
+                    from: Pin::ComponentPin {
+                        component: "C1".into(),
+                        pin: "b".into(),
+                    },
                     to: vec![
-                        Pin::ComponentPin { component: "R1".into(), pin: "a".into() },
-                        Pin::ComponentPin { component: "D1".into(), pin: "a".into() },
+                        Pin::ComponentPin {
+                            component: "R1".into(),
+                            pin: "a".into(),
+                        },
+                        Pin::ComponentPin {
+                            component: "D1".into(),
+                            pin: "a".into(),
+                        },
                     ],
                 },
             ],
@@ -203,11 +236,20 @@ mod tests {
         let nets = vec![
             NetDef {
                 from: Pin::Reserved("in".into()),
-                to: vec![Pin::ComponentPin { component: "C1".into(), pin: "a".into() }],
+                to: vec![Pin::ComponentPin {
+                    component: "C1".into(),
+                    pin: "a".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "C1".into(), pin: "a".into() },
-                to: vec![Pin::ComponentPin { component: "R1".into(), pin: "a".into() }],
+                from: Pin::ComponentPin {
+                    component: "C1".into(),
+                    pin: "a".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "R1".into(),
+                    pin: "a".into(),
+                }],
             },
         ];
         let map = build_net_map(&nets);

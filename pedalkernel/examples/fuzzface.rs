@@ -48,7 +48,10 @@ fn main() {
     let output: Vec<f64> = input.iter().map(|&s| ff.process(s)).collect();
     let path = Path::new("fuzz_ab.wav");
     write_stereo_wav(&input, &output, path, sample_rate).unwrap();
-    println!("Wrote A/B stereo (L=clean, R=fuzz 0.8) → {}", path.display());
+    println!(
+        "Wrote A/B stereo (L=clean, R=fuzz 0.8) → {}",
+        path.display()
+    );
 
     println!();
     println!("Done!");

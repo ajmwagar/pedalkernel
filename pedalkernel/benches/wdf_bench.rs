@@ -1,6 +1,4 @@
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pedalkernel::compiler::compile_pedal;
 use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::elements::*;
@@ -118,17 +116,13 @@ fn bench_compiled_pedals_block(c: &mut Criterion) {
             let block = test_block(block_size);
 
             group.throughput(Throughput::Elements(block_size as u64));
-            group.bench_with_input(
-                BenchmarkId::new(label, block_size),
-                &block,
-                |b, block| {
-                    b.iter(|| {
-                        for &s in block {
-                            black_box(proc.process(black_box(s)));
-                        }
-                    })
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(label, block_size), &block, |b, block| {
+                b.iter(|| {
+                    for &s in block {
+                        black_box(proc.process(black_box(s)));
+                    }
+                })
+            });
         }
     }
 
@@ -277,10 +271,6 @@ criterion_group!(
     bench_compiled_pedals_block
 );
 
-criterion_group!(
-    realtime,
-    bench_realtime_budget,
-    bench_compiled_vs_hardcoded
-);
+criterion_group!(realtime, bench_realtime_budget, bench_compiled_vs_hardcoded);
 
 criterion_main!(existing, compiled, realtime);

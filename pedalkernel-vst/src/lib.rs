@@ -330,16 +330,13 @@ impl Plugin for PedalKernelPlugin {
 
 impl Vst3Plugin for PedalKernelPlugin {
     const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlWdfV0_02\0";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
-        Vst3SubCategory::Fx,
-        Vst3SubCategory::Distortion,
-    ];
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Fx, Vst3SubCategory::Distortion];
 }
 
 impl ClapPlugin for PedalKernelPlugin {
     const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel";
-    const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("WDF-based guitar pedal emulations");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based guitar pedal emulations");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[

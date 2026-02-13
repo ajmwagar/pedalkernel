@@ -32,11 +32,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let source = if args.len() > 1 {
-        std::fs::read_to_string(&args[1])
-            .unwrap_or_else(|e| {
-                eprintln!("Error reading {}: {}", args[1], e);
-                std::process::exit(1);
-            })
+        std::fs::read_to_string(&args[1]).unwrap_or_else(|e| {
+            eprintln!("Error reading {}: {}", args[1], e);
+            std::process::exit(1);
+        })
     } else {
         println!("No .pedal file specified, using built-in Tube Screamer example.");
         println!("Usage: cargo run --example parse_pedal -- <file.pedal>\n");
@@ -72,9 +71,10 @@ fn main() {
     if !pedal.controls.is_empty() {
         println!("Controls ({}):", pedal.controls.len());
         for c in &pedal.controls {
-            println!("  {}.{} -> \"{}\" [{}, {}] = {}",
-                c.component, c.property, c.label,
-                c.range.0, c.range.1, c.default);
+            println!(
+                "  {}.{} -> \"{}\" [{}, {}] = {}",
+                c.component, c.property, c.label, c.range.0, c.range.1, c.default
+            );
         }
         println!();
     }

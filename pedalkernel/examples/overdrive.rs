@@ -13,7 +13,7 @@ use std::path::Path;
 fn main() {
     let sample_rate = 48_000;
     let duration = 2.0; // seconds
-    let freq = 82.41;   // low E string
+    let freq = 82.41; // low E string
 
     println!("PedalKernel — Tube Screamer Overdrive Example");
     println!("==============================================");
@@ -61,7 +61,10 @@ fn main() {
     let output: Vec<f64> = input.iter().map(|&s| od.process(s)).collect();
     let path = Path::new("overdrive_ab.wav");
     write_stereo_wav(&input, &output, path, sample_rate).unwrap();
-    println!("Wrote A/B stereo (L=clean, R=high gain) → {}", path.display());
+    println!(
+        "Wrote A/B stereo (L=clean, R=high gain) → {}",
+        path.display()
+    );
 
     println!();
     println!("Done! Open the .wav files in your DAW or audio player to compare.");

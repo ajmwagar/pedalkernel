@@ -22,12 +22,30 @@ use crate::PedalProcessor;
 /// Leaves are one-port elements; internal nodes are series/parallel adaptors.
 /// All state is inline — zero heap allocation on the processing hot path.
 pub enum DynNode {
-    Resistor { rp: f64 },
-    Capacitor { capacitance: f64, rp: f64, state: f64 },
-    Inductor { inductance: f64, rp: f64, state: f64 },
-    VoltageSource { voltage: f64, rp: f64 },
+    Resistor {
+        rp: f64,
+    },
+    Capacitor {
+        capacitance: f64,
+        rp: f64,
+        state: f64,
+    },
+    Inductor {
+        inductance: f64,
+        rp: f64,
+        state: f64,
+    },
+    VoltageSource {
+        voltage: f64,
+        rp: f64,
+    },
     /// Variable resistor (potentiometer) — tagged with component ID for control binding.
-    Pot { comp_id: String, max_resistance: f64, position: f64, rp: f64 },
+    Pot {
+        comp_id: String,
+        max_resistance: f64,
+        position: f64,
+        rp: f64,
+    },
     Series {
         left: Box<DynNode>,
         right: Box<DynNode>,
@@ -66,12 +84,25 @@ impl DynNode {
             Self::Capacitor { state, .. } => *state,
             Self::Inductor { state, .. } => -*state,
             Self::VoltageSource { voltage, .. } => 2.0 * *voltage,
-            Self::Series { left, right, b1, b2, .. } => {
+            Self::Series {
+                left,
+                right,
+                b1,
+                b2,
+                ..
+            } => {
                 *b1 = left.reflected();
                 *b2 = right.reflected();
                 -(*b1 + *b2)
             }
-            Self::Parallel { left, right, gamma, b1, b2, .. } => {
+            Self::Parallel {
+                left,
+                right,
+                gamma,
+                b1,
+                b2,
+                ..
+            } => {
                 *b1 = left.reflected();
                 *b2 = right.reflected();
                 *b1 + *gamma * (*b2 - *b1)
@@ -85,14 +116,28 @@ impl DynNode {
             Self::Resistor { .. } | Self::Pot { .. } | Self::VoltageSource { .. } => {}
             Self::Capacitor { state, .. } => *state = a,
             Self::Inductor { state, .. } => *state = a,
-            Self::Series { left, right, gamma, b1, b2, .. } => {
+            Self::Series {
+                left,
+                right,
+                gamma,
+                b1,
+                b2,
+                ..
+            } => {
                 let sum = *b1 + *b2 + a;
                 let a1 = *b1 - *gamma * sum;
                 let a2 = *b2 - (1.0 - *gamma) * sum;
                 left.set_incident(a1);
                 right.set_incident(a2);
             }
-            Self::Parallel { left, right, gamma, b1, b2, .. } => {
+            Self::Parallel {
+                left,
+                right,
+                gamma,
+                b1,
+                b2,
+                ..
+            } => {
                 let diff = *b2 - *b1;
                 let a1 = a + (1.0 - *gamma) * diff;
                 let a2 = a - *gamma * diff;
@@ -117,7 +162,12 @@ impl DynNode {
     /// Update a pot's position and resistance.  Returns true if found.
     pub fn set_pot(&mut self, target_id: &str, pos: f64) -> bool {
         match self {
-            Self::Pot { comp_id, max_resistance, position, rp } if comp_id == target_id => {
+            Self::Pot {
+                comp_id,
+                max_resistance,
+                position,
+                rp,
+            } if comp_id == target_id => {
                 *position = pos;
                 *rp = (pos * *max_resistance).max(1.0);
                 true
@@ -132,7 +182,13 @@ impl DynNode {
     /// Recompute all adaptor coefficients bottom-up (call after pot changes).
     pub fn recompute(&mut self) {
         match self {
-            Self::Series { left, right, rp, gamma, .. } => {
+            Self::Series {
+                left,
+                right,
+                rp,
+                gamma,
+                ..
+            } => {
                 left.recompute();
                 right.recompute();
                 let r1 = left.port_resistance();
@@ -140,7 +196,13 @@ impl DynNode {
                 *rp = r1 + r2;
                 *gamma = r1 / *rp;
             }
-            Self::Parallel { left, right, rp, gamma, .. } => {
+            Self::Parallel {
+                left,
+                right,
+                rp,
+                gamma,
+                ..
+            } => {
                 left.recompute();
                 right.recompute();
                 let r1 = left.port_resistance();
@@ -156,8 +218,20 @@ impl DynNode {
     pub fn reset(&mut self) {
         match self {
             Self::Capacitor { state, .. } | Self::Inductor { state, .. } => *state = 0.0,
-            Self::Series { left, right, b1, b2, .. }
-            | Self::Parallel { left, right, b1, b2, .. } => {
+            Self::Series {
+                left,
+                right,
+                b1,
+                b2,
+                ..
+            }
+            | Self::Parallel {
+                left,
+                right,
+                b1,
+                b2,
+                ..
+            } => {
                 *b1 = 0.0;
                 *b2 = 0.0;
                 left.reset();
@@ -170,7 +244,9 @@ impl DynNode {
     /// Update capacitor/inductor port resistances for a new sample rate.
     pub fn update_sample_rate(&mut self, fs: f64) {
         match self {
-            Self::Capacitor { capacitance, rp, .. } => {
+            Self::Capacitor {
+                capacitance, rp, ..
+            } => {
                 *rp = 1.0 / (2.0 * fs * *capacitance);
             }
             Self::Inductor { inductance, rp, .. } => {
@@ -345,7 +421,11 @@ impl CircuitGraph {
                     let id_b = get_id(&key_b, &mut uf);
                     let node_a = uf.find(id_a);
                     let node_b = uf.find(id_b);
-                    edges.push(GraphEdge { comp_idx: idx, node_a, node_b });
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
+                    });
                 }
                 ComponentKind::Npn | ComponentKind::Pnp | ComponentKind::OpAmp => {
                     num_active += 1;
@@ -398,14 +478,30 @@ impl CircuitGraph {
                 ComponentKind::DiodePair(dt) => Some(DiodeInfo {
                     diode_type: *dt,
                     is_pair: true,
-                    junction_node: if e.node_b == self.gnd_node { e.node_a } else { e.node_b },
-                    ground_node: if e.node_b == self.gnd_node { e.node_b } else { e.node_a },
+                    junction_node: if e.node_b == self.gnd_node {
+                        e.node_a
+                    } else {
+                        e.node_b
+                    },
+                    ground_node: if e.node_b == self.gnd_node {
+                        e.node_b
+                    } else {
+                        e.node_a
+                    },
                 }),
                 ComponentKind::Diode(dt) => Some(DiodeInfo {
                     diode_type: *dt,
                     is_pair: false,
-                    junction_node: if e.node_b == self.gnd_node { e.node_a } else { e.node_b },
-                    ground_node: if e.node_b == self.gnd_node { e.node_b } else { e.node_a },
+                    junction_node: if e.node_b == self.gnd_node {
+                        e.node_a
+                    } else {
+                        e.node_b
+                    },
+                    ground_node: if e.node_b == self.gnd_node {
+                        e.node_b
+                    } else {
+                        e.node_a
+                    },
                 }),
                 _ => None,
             };
@@ -415,7 +511,8 @@ impl CircuitGraph {
         }
 
         // Sort by distance of junction node from input.
-        diodes.sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
+        diodes
+            .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
         diodes
     }
 
@@ -434,7 +531,11 @@ impl CircuitGraph {
                     return false;
                 }
                 // Skip elements going directly to output (those become output attenuation).
-                let other = if e.node_a == junction { e.node_b } else { e.node_a };
+                let other = if e.node_a == junction {
+                    e.node_b
+                } else {
+                    e.node_a
+                };
                 if other == self.out_node {
                     return false;
                 }
@@ -543,12 +644,24 @@ fn sp_reduce(
             }
             let i1 = idxs[0];
             let i2 = idxs[1];
-            let other1 = if edges[i1].0 == *node { edges[i1].1 } else { edges[i1].0 };
-            let other2 = if edges[i2].0 == *node { edges[i2].1 } else { edges[i2].0 };
+            let other1 = if edges[i1].0 == *node {
+                edges[i1].1
+            } else {
+                edges[i1].0
+            };
+            let other2 = if edges[i2].0 == *node {
+                edges[i2].1
+            } else {
+                edges[i2].0
+            };
             let (lo, hi) = if i1 < i2 { (i1, i2) } else { (i2, i1) };
             let (_, _, tree_hi) = edges.remove(hi);
             let (_, _, tree_lo) = edges.remove(lo);
-            edges.push((other1, other2, SpTree::Series(Box::new(tree_lo), Box::new(tree_hi))));
+            edges.push((
+                other1,
+                other2,
+                SpTree::Series(Box::new(tree_lo), Box::new(tree_hi)),
+            ));
             changed = true;
             break;
         }
@@ -765,7 +878,9 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
     let diode_edge_indices: Vec<usize> = diodes.iter().map(|(idx, _)| *idx).collect();
 
     // Determine gain range based on circuit characteristics.
-    let has_germanium = diodes.iter().any(|(_, d)| d.diode_type == DiodeType::Germanium);
+    let has_germanium = diodes
+        .iter()
+        .any(|(_, d)| d.diode_type == DiodeType::Germanium);
     let has_single_diode = diodes.iter().any(|(_, d)| !d.is_pair);
     let gain_range = if has_germanium && has_single_diode {
         (5.0, 250.0) // Fuzz-like
@@ -828,7 +943,11 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         let mut best_dist = usize::MAX;
         for &eidx in &passive_idxs {
             let e = &graph.edges[eidx];
-            let other = if e.node_a == junction { e.node_b } else { e.node_a };
+            let other = if e.node_a == junction {
+                e.node_b
+            } else {
+                e.node_a
+            };
             if let Some(&d) = dist_from_in.get(&other) {
                 if d < best_dist {
                     best_dist = d;
@@ -875,7 +994,11 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
             RootKind::SingleDiode(DiodeRoot::new(model))
         };
 
-        stages.push(WdfStage { tree, root, compensation: 1.0 });
+        stages.push(WdfStage {
+            tree,
+            root,
+            compensation: 1.0,
+        });
     }
 
     // Balance voltage source impedance in each stage.
@@ -1142,14 +1265,8 @@ mod tests {
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
 
         let corr = correlation(&input, &output).abs();
-        assert!(
-            corr < 0.98,
-            "Compiled TS should distort: |corr|={corr:.4}"
-        );
-        assert!(
-            output.iter().all(|x| x.is_finite()),
-            "No NaN/inf in output"
-        );
+        assert!(corr < 0.98, "Compiled TS should distort: |corr|={corr:.4}");
+        assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf in output");
     }
 
     #[test]
@@ -1186,10 +1303,7 @@ mod tests {
             .collect();
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
 
-        assert!(
-            output.iter().all(|x| x.is_finite()),
-            "No NaN/inf in output"
-        );
+        assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf in output");
         let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
         assert!(peak > 0.01, "Should produce output: peak={peak}");
     }
@@ -1229,7 +1343,11 @@ mod tests {
     #[test]
     fn compiled_pedals_differ() {
         // Each pedal should produce a distinct output (different topologies/values).
-        let files = ["tube_screamer.pedal", "big_muff.pedal", "blues_driver.pedal"];
+        let files = [
+            "tube_screamer.pedal",
+            "big_muff.pedal",
+            "blues_driver.pedal",
+        ];
         let mut outputs = Vec::new();
 
         for f in files {
@@ -1434,7 +1552,8 @@ mod tests {
                 assert!(
                     corr < 0.9999,
                     "{} vs {} too similar: |corr|={corr:.6}",
-                    files[i], files[j]
+                    files[i],
+                    files[j]
                 );
             }
         }
@@ -1455,7 +1574,10 @@ mod tests {
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
         assert_finite(&output, "TS max drive");
         let corr = correlation(&input, &output).abs();
-        assert!(corr < 0.95, "Max drive should heavily distort: |corr|={corr:.4}");
+        assert!(
+            corr < 0.95,
+            "Max drive should heavily distort: |corr|={corr:.4}"
+        );
     }
 
     #[test]
@@ -1469,7 +1591,10 @@ mod tests {
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
         assert_finite(&output, "TS min drive");
         let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        assert!(peak > 0.001, "Min drive should still produce output: peak={peak}");
+        assert!(
+            peak > 0.001,
+            "Min drive should still produce output: peak={peak}"
+        );
     }
 
     #[test]
@@ -1483,7 +1608,10 @@ mod tests {
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
         assert_finite(&output, "BM max sustain");
         let corr = correlation(&input, &output).abs();
-        assert!(corr < 0.95, "Max sustain should heavily distort: |corr|={corr:.4}");
+        assert!(
+            corr < 0.95,
+            "Max sustain should heavily distort: |corr|={corr:.4}"
+        );
     }
 
     #[test]
@@ -1497,7 +1625,10 @@ mod tests {
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
         assert_finite(&output, "RAT max distortion");
         let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        assert!(peak > 0.01, "Max distortion should produce output: peak={peak}");
+        assert!(
+            peak > 0.01,
+            "Max distortion should produce output: peak={peak}"
+        );
     }
 
     #[test]
@@ -1541,7 +1672,11 @@ mod tests {
                 proc.set_control(label, val);
             }
             let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
-            let settings: String = knobs.iter().map(|(l, v)| format!("{l}={v}")).collect::<Vec<_>>().join(",");
+            let settings: String = knobs
+                .iter()
+                .map(|(l, v)| format!("{l}={v}"))
+                .collect::<Vec<_>>()
+                .join(",");
             assert!(
                 output.iter().all(|x| x.is_finite()),
                 "{f} [{settings}]: NaN/inf"

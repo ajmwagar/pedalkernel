@@ -8,7 +8,7 @@
 //!   cargo run --example process -- examples/fuzz_face.pedal in.wav out.wav Fuzz=0.9 Volume=0.3
 //!   cargo run --example process -- examples/big_muff.pedal in.wav out.wav Sustain=1.0
 
-use hound::{WavReader, WavWriter, SampleFormat};
+use hound::{SampleFormat, WavReader, WavWriter};
 use pedalkernel::compiler::compile_pedal;
 use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::PedalProcessor;
@@ -18,11 +18,20 @@ use std::process;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("Usage: {} <file.pedal> <input.wav> <output.wav> [knob=value ...]", args[0]);
+        eprintln!(
+            "Usage: {} <file.pedal> <input.wav> <output.wav> [knob=value ...]",
+            args[0]
+        );
         eprintln!();
         eprintln!("Examples:");
-        eprintln!("  {} examples/tube_screamer.pedal input.wav output.wav", args[0]);
-        eprintln!("  {} examples/fuzz_face.pedal input.wav output.wav Fuzz=0.9", args[0]);
+        eprintln!(
+            "  {} examples/tube_screamer.pedal input.wav output.wav",
+            args[0]
+        );
+        eprintln!(
+            "  {} examples/fuzz_face.pedal input.wav output.wav Fuzz=0.9",
+            args[0]
+        );
         process::exit(1);
     }
 
@@ -76,11 +85,19 @@ fn main() {
         .map(|c| (c.label.clone(), c.default))
         .collect();
     for (name, val) in &overrides {
-        if let Some(kv) = knob_values.iter_mut().find(|(l, _)| l.eq_ignore_ascii_case(name)) {
+        if let Some(kv) = knob_values
+            .iter_mut()
+            .find(|(l, _)| l.eq_ignore_ascii_case(name))
+        {
             kv.1 = *val;
         } else {
-            eprintln!("Warning: unknown knob '{name}', available: {:?}",
-                knob_values.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>());
+            eprintln!(
+                "Warning: unknown knob '{name}', available: {:?}",
+                knob_values
+                    .iter()
+                    .map(|(l, _)| l.as_str())
+                    .collect::<Vec<_>>()
+            );
         }
     }
 
