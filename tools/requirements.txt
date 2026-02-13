@@ -1,0 +1,4 @@
+# Optional — only needed for tools/, not for the Rust core
+schemdraw>=0.18        # EE schematic drawing
+matplotlib>=3.7        # PNG/PDF raster backend for schemdraw
+requests>=2.28         # Mouser API (mouser_bom.py, optional)

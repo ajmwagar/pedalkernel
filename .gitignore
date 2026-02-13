@@ -11,3 +11,4 @@ Cargo.lock
 *.mp3
 *.ogg
 /output/
+tools/.venv/

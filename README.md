@@ -389,6 +389,49 @@ pedalkernel::wav::render_to_wav(&mut od, &input, Path::new("out.wav"), 48000).un
 
 ---
 
+## Python Tools
+
+Optional Python utilities in `tools/` — these are standalone scripts, not needed by the Rust core.
+
+### Setup
+
+```bash
+python3 -m venv tools/.venv
+tools/.venv/bin/pip install -r tools/requirements.txt
+```
+
+### Schematic Renderer
+
+Generate EE-style circuit schematics (PNG/PDF/SVG) from `.pedal` files:
+
+```bash
+# Single pedal
+tools/.venv/bin/python tools/schematic.py examples/tube_screamer.pedal -o tube_screamer.png
+tools/.venv/bin/python tools/schematic.py examples/klon_centaur.pedal -o klon.pdf
+tools/.venv/bin/python tools/schematic.py examples/big_muff.pedal -o muff.svg
+
+# High-res PNG
+tools/.venv/bin/python tools/schematic.py examples/klon_centaur.pedal -o klon_hires.png --dpi 300
+
+# All pedals at once
+for f in examples/*.pedal; do
+  tools/.venv/bin/python tools/schematic.py "$f" -o "output/schematics/$(basename ${f%.pedal}).png"
+done
+```
+
+Schematics include proper EE symbols (resistor zigzags, cap plates, opamp triangles, BJTs), auto-layout with signal flow left-to-right, ground/Vcc branches, and an EE-style title block.
+
+### Mouser BOM Generator
+
+Generate a Mouser Electronics bill of materials from `.pedal` files:
+
+```bash
+tools/.venv/bin/python tools/mouser_bom.py examples/tube_screamer.pedal
+tools/.venv/bin/python tools/mouser_bom.py examples/big_muff.pedal --qty 5 --csv bom.csv
+```
+
+---
+
 ## Benchmarks
 
 ```bash
