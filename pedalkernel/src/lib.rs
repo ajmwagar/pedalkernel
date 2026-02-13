@@ -133,6 +133,50 @@ mod jack_engine {
         }
     }
 
+    /// A `PedalProcessor` wrapper that ignores JACK input and feeds samples
+    /// from a pre-loaded circular buffer (looping WAV file) into the inner processor.
+    pub struct WavLoopProcessor<P: PedalProcessor> {
+        samples: Vec<f64>,
+        position: usize,
+        inner: P,
+    }
+
+    impl<P: PedalProcessor> WavLoopProcessor<P> {
+        pub fn new(samples: Vec<f64>, inner: P) -> Self {
+            Self {
+                samples,
+                position: 0,
+                inner,
+            }
+        }
+    }
+
+    impl<P: PedalProcessor + Send> PedalProcessor for WavLoopProcessor<P> {
+        fn process(&mut self, _input: f64) -> f64 {
+            let sample = if self.samples.is_empty() {
+                0.0
+            } else {
+                let s = self.samples[self.position];
+                self.position = (self.position + 1) % self.samples.len();
+                s
+            };
+            self.inner.process(sample)
+        }
+
+        fn set_sample_rate(&mut self, rate: f64) {
+            self.inner.set_sample_rate(rate);
+        }
+
+        fn reset(&mut self) {
+            self.position = 0;
+            self.inner.reset();
+        }
+
+        fn set_control(&mut self, label: &str, value: f64) {
+            self.inner.set_control(label, value);
+        }
+    }
+
     /// JACK-based real-time audio engine.
     ///
     /// Connects a `PedalProcessor` to the system audio graph via JACK.
@@ -234,7 +278,7 @@ mod jack_engine {
 }
 
 #[cfg(feature = "jack-rt")]
-pub use jack_engine::{AudioEngine, SharedControls};
+pub use jack_engine::{AudioEngine, SharedControls, WavLoopProcessor};
 
 // ---------------------------------------------------------------------------
 // Integration tests

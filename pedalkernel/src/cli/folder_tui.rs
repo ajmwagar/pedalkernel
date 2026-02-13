@@ -9,7 +9,7 @@ use crossterm::{
 use pedalkernel::board::parse_board_file;
 use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::pedalboard::{BoardSwitcherProcessor, PedalboardProcessor};
-use pedalkernel::{AudioEngine, SharedControls};
+use pedalkernel::{AudioEngine, SharedControls, WavLoopProcessor};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -24,7 +24,9 @@ use std::sync::Arc;
 use super::board_tui::{
     handle_board_key, render_io_bar, BoardAction, PedalPanel, ViewMode,
 };
-use super::tui_widgets::{run_port_select, KnobState, PortSelectResult, Term};
+use super::tui_widgets::{
+    run_output_select, run_port_select, KnobState, OutputSelectResult, PortSelectResult, Term,
+};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // State
@@ -625,14 +627,80 @@ fn run_folder_control(
     Ok(())
 }
 
+fn run_folder_control_wav(
+    terminal: &mut Term,
+    client: jack::Client,
+    switcher: WavLoopProcessor<BoardSwitcherProcessor>,
+    boards: Vec<BoardState>,
+    input_label: &str,
+    connect_to: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let controls = Arc::new(SharedControls::new());
+    let (async_client, _our_in, our_out) =
+        AudioEngine::start(client, switcher, controls.clone())?;
+
+    // Only connect output port
+    async_client
+        .as_client()
+        .connect_ports_by_name(&our_out, connect_to)?;
+
+    let mut state = FolderControlState {
+        boards,
+        active_board: 0,
+        board_bypassed: false,
+        view_mode: ViewMode::Overview,
+        controls,
+        input_port: input_label.to_string(),
+        output_port: connect_to.to_string(),
+    };
+
+    loop {
+        terminal.draw(|f| draw_folder_control(f, &state))?;
+
+        if event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                if !handle_folder_input(&mut state, key.code, key.modifiers) {
+                    break;
+                }
+            }
+        }
+    }
+
+    drop(async_client);
+    Ok(())
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Main entry point
 // ═════════════════════════════════════════════════════════════════════════════
 
-pub fn run(dir_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    // Load WAV input if provided
+    let wav_data = if let Some(path) = wav_input {
+        let (samples, wav_sr) =
+            pedalkernel::wav::read_wav_mono(std::path::Path::new(path))?;
+        if samples.is_empty() {
+            return Err("WAV file contains no samples".into());
+        }
+        Some((samples, wav_sr, path.to_string()))
+    } else {
+        None
+    };
+
     // Create JACK client first to get sample rate for compilation
     let client = AudioEngine::create_client("pedalkernel")?;
     let sample_rate = client.sample_rate() as f64;
+
+    // Warn if WAV sample rate differs from JACK
+    if let Some((_, wav_sr, ref path)) = wav_data {
+        let jack_sr = client.sample_rate() as u32;
+        if wav_sr != jack_sr {
+            eprintln!(
+                "WARNING: WAV file '{}' sample rate ({} Hz) differs from JACK ({} Hz)",
+                path, wav_sr, jack_sr
+            );
+        }
+    }
 
     // Discover and pre-compile all boards
     let discovered = discover_boards(dir_path, sample_rate)?;
@@ -675,24 +743,13 @@ pub fn run(dir_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let switcher = BoardSwitcherProcessor::new(processors);
 
     // Enumerate JACK ports
-    let input_ports = AudioEngine::list_input_sources(&client);
     let output_ports = AudioEngine::list_output_destinations(&client);
-
     let client_name = client.name().to_string();
-    let input_ports: Vec<String> = input_ports
-        .into_iter()
-        .filter(|p| !p.starts_with(&format!("{client_name}:")))
-        .collect();
     let output_ports: Vec<String> = output_ports
         .into_iter()
         .filter(|p| !p.starts_with(&format!("{client_name}:")))
         .collect();
 
-    if input_ports.is_empty() {
-        return Err(
-            "No JACK input sources found. Is JACK running with audio hardware?".into(),
-        );
-    }
     if output_ports.is_empty() {
         return Err(
             "No JACK output destinations found. Is JACK running with audio hardware?".into(),
@@ -705,31 +762,75 @@ pub fn run(dir_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    // Phase 1: port selection
     let title = format!(
         "Folder: {} ({} boards)",
         dir_path,
         board_states.len()
     );
-    let (selected_in, selected_out) =
-        match run_port_select(&mut terminal, &title, input_ports, output_ports)? {
-            PortSelectResult::Selected { input, output } => (input, output),
-            PortSelectResult::Quit => {
-                disable_raw_mode()?;
-                stdout().execute(LeaveAlternateScreen)?;
-                return Ok(());
-            }
-        };
 
-    // Phase 2: folder control with live JACK audio
-    let result = run_folder_control(
-        &mut terminal,
-        client,
-        switcher,
-        board_states,
-        &selected_in,
-        &selected_out,
-    );
+    let result = if let Some((samples, _, ref wav_path)) = wav_data {
+        // WAV input mode: output-only port selection
+        let selected_out =
+            match run_output_select(&mut terminal, &title, output_ports)? {
+                OutputSelectResult::Selected(output) => output,
+                OutputSelectResult::Quit => {
+                    disable_raw_mode()?;
+                    stdout().execute(LeaveAlternateScreen)?;
+                    return Ok(());
+                }
+            };
+
+        let wav_filename = std::path::Path::new(wav_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(wav_path);
+        let input_label = format!("WAV: {} (looping)", wav_filename);
+
+        let wav_switcher = WavLoopProcessor::new(samples, switcher);
+
+        run_folder_control_wav(
+            &mut terminal,
+            client,
+            wav_switcher,
+            board_states,
+            &input_label,
+            &selected_out,
+        )
+    } else {
+        // Normal mode: input + output port selection
+        let input_ports = AudioEngine::list_input_sources(&client);
+        let input_ports: Vec<String> = input_ports
+            .into_iter()
+            .filter(|p| !p.starts_with(&format!("{client_name}:")))
+            .collect();
+
+        if input_ports.is_empty() {
+            disable_raw_mode()?;
+            stdout().execute(LeaveAlternateScreen)?;
+            return Err(
+                "No JACK input sources found. Is JACK running with audio hardware?".into(),
+            );
+        }
+
+        let (selected_in, selected_out) =
+            match run_port_select(&mut terminal, &title, input_ports, output_ports)? {
+                PortSelectResult::Selected { input, output } => (input, output),
+                PortSelectResult::Quit => {
+                    disable_raw_mode()?;
+                    stdout().execute(LeaveAlternateScreen)?;
+                    return Ok(());
+                }
+            };
+
+        run_folder_control(
+            &mut terminal,
+            client,
+            switcher,
+            board_states,
+            &selected_in,
+            &selected_out,
+        )
+    };
 
     // Teardown
     disable_raw_mode()?;

@@ -1,4 +1,4 @@
-use hound::{SampleFormat, WavReader, WavWriter};
+use hound::{SampleFormat, WavWriter};
 use pedalkernel::compiler::compile_pedal;
 use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::PedalProcessor;
@@ -34,22 +34,16 @@ fn run_pedal(pedal_path: &str, input_path: &str, output_path: &str, knob_args: &
     });
 
     // Read input WAV
-    let mut reader = WavReader::open(input_path).unwrap_or_else(|e| {
-        eprintln!("Error opening {input_path}: {e}");
-        process::exit(1);
-    });
-    let spec = reader.spec();
-    let sample_rate = spec.sample_rate;
-
-    let input_samples = read_samples_mono(&mut reader);
+    let (input_samples, sample_rate) =
+        pedalkernel::wav::read_wav_mono(Path::new(input_path)).unwrap_or_else(|e| {
+            eprintln!("Error reading {input_path}: {e}");
+            process::exit(1);
+        });
     eprintln!(
-        "Input: {} ({} samples, {} Hz, {} ch, {}-bit {:?})",
+        "Input: {} ({} samples, {} Hz)",
         input_path,
         input_samples.len(),
         sample_rate,
-        spec.channels,
-        spec.bits_per_sample,
-        spec.sample_format,
     );
 
     // Resolve control values: start from defaults, apply overrides
@@ -133,22 +127,16 @@ fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &
         .unwrap_or_else(|| Path::new("."));
 
     // Read input WAV
-    let mut reader = WavReader::open(input_path).unwrap_or_else(|e| {
-        eprintln!("Error opening {input_path}: {e}");
-        process::exit(1);
-    });
-    let spec = reader.spec();
-    let sample_rate = spec.sample_rate;
-
-    let input_samples = read_samples_mono(&mut reader);
+    let (input_samples, sample_rate) =
+        pedalkernel::wav::read_wav_mono(Path::new(input_path)).unwrap_or_else(|e| {
+            eprintln!("Error reading {input_path}: {e}");
+            process::exit(1);
+        });
     eprintln!(
-        "Input: {} ({} samples, {} Hz, {} ch, {}-bit {:?})",
+        "Input: {} ({} samples, {} Hz)",
         input_path,
         input_samples.len(),
         sample_rate,
-        spec.channels,
-        spec.bits_per_sample,
-        spec.sample_format,
     );
 
     // Build pedalboard processor
@@ -205,35 +193,3 @@ fn write_wav(output_path: &str, sample_rate: u32, samples: &[f64]) {
     writer.finalize().unwrap();
 }
 
-/// Read all samples from a WAV file into a mono f64 buffer, normalizing to [-1, 1].
-fn read_samples_mono(reader: &mut WavReader<std::io::BufReader<std::fs::File>>) -> Vec<f64> {
-    let spec = reader.spec();
-    let channels = spec.channels as usize;
-
-    match spec.sample_format {
-        SampleFormat::Float => {
-            let all: Vec<f32> = reader.samples::<f32>().map(|s| s.unwrap()).collect();
-            mix_to_mono(
-                &all.iter().map(|&s| s as f64).collect::<Vec<_>>(),
-                channels,
-            )
-        }
-        SampleFormat::Int => {
-            let max_val = (1_i64 << (spec.bits_per_sample - 1)) as f64;
-            let all: Vec<i32> = reader.samples::<i32>().map(|s| s.unwrap()).collect();
-            let normalized: Vec<f64> = all.iter().map(|&s| s as f64 / max_val).collect();
-            mix_to_mono(&normalized, channels)
-        }
-    }
-}
-
-/// Mix interleaved multi-channel samples down to mono by averaging channels.
-fn mix_to_mono(interleaved: &[f64], channels: usize) -> Vec<f64> {
-    if channels == 1 {
-        return interleaved.to_vec();
-    }
-    interleaved
-        .chunks(channels)
-        .map(|frame| frame.iter().sum::<f64>() / channels as f64)
-        .collect()
-}

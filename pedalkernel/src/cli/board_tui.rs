@@ -7,7 +7,7 @@ use crossterm::{
 };
 use pedalkernel::board::parse_board_file;
 use pedalkernel::pedalboard::PedalboardProcessor;
-use pedalkernel::{AudioEngine, SharedControls};
+use pedalkernel::{AudioEngine, SharedControls, WavLoopProcessor};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -20,8 +20,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::tui_widgets::{
-    knob_frame_index, render_footswitch, render_knob_row, run_port_select, KnobState,
-    PortSelectResult, Term, KNOB_FRAMES,
+    knob_frame_index, render_footswitch, render_knob_row, run_output_select, run_port_select,
+    KnobState, OutputSelectResult, PortSelectResult, Term, KNOB_FRAMES,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -627,17 +627,76 @@ fn run_board_control(
     Ok(())
 }
 
+fn run_board_control_wav(
+    terminal: &mut Term,
+    client: jack::Client,
+    processor: WavLoopProcessor<PedalboardProcessor>,
+    panels: Vec<PedalPanel>,
+    board_name: &str,
+    input_label: &str,
+    connect_to: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let controls = Arc::new(SharedControls::new());
+    let (async_client, _our_in, our_out) =
+        AudioEngine::start(client, processor, controls.clone())?;
+
+    // Only connect output port
+    async_client
+        .as_client()
+        .connect_ports_by_name(&our_out, connect_to)?;
+
+    let mut state = BoardControlState {
+        board_name: board_name.to_string(),
+        pedals: panels,
+        focused_pedal: 0,
+        focused_knob: 0,
+        board_bypassed: false,
+        view_mode: ViewMode::Overview,
+        controls,
+        input_port: input_label.to_string(),
+        output_port: connect_to.to_string(),
+    };
+
+    loop {
+        terminal.draw(|f| draw_board_control(f, &state))?;
+
+        if event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                let action = handle_board_key(key.code, key.modifiers);
+                if !state.update(action) {
+                    break;
+                }
+            }
+        }
+    }
+
+    drop(async_client);
+    Ok(())
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Main entry point
 // ═════════════════════════════════════════════════════════════════════════════
 
-pub fn run(board_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let source = std::fs::read_to_string(board_path)?;
     let board = parse_board_file(&source).map_err(|e| format!("Parse error: {e}"))?;
 
     let board_dir = Path::new(board_path)
         .parent()
         .unwrap_or_else(|| Path::new("."));
+
+    // Load WAV input if provided
+    let wav_data = if let Some(path) = wav_input {
+        let (samples, wav_sr) =
+            pedalkernel::wav::read_wav_mono(std::path::Path::new(path))?;
+        if samples.is_empty() {
+            return Err("WAV file contains no samples".into());
+        }
+        Some((samples, wav_sr, path.to_string()))
+    } else {
+        None
+    };
 
     // Build pedal panels (need control info from .pedal files for the TUI).
     // If a pedal file can't be read/parsed, create a failed panel (no knobs)
@@ -694,25 +753,25 @@ pub fn run(board_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     // Create JACK client and enumerate available ports
     let client = AudioEngine::create_client("pedalkernel")?;
-    let input_ports = AudioEngine::list_input_sources(&client);
-    let output_ports = AudioEngine::list_output_destinations(&client);
 
-    // Filter out our own ports
+    // Warn if WAV sample rate differs from JACK
+    if let Some((_, wav_sr, ref path)) = wav_data {
+        let jack_sr = client.sample_rate() as u32;
+        if wav_sr != jack_sr {
+            eprintln!(
+                "WARNING: WAV file '{}' sample rate ({} Hz) differs from JACK ({} Hz)",
+                path, wav_sr, jack_sr
+            );
+        }
+    }
+
+    let output_ports = AudioEngine::list_output_destinations(&client);
     let client_name = client.name().to_string();
-    let input_ports: Vec<String> = input_ports
-        .into_iter()
-        .filter(|p| !p.starts_with(&format!("{client_name}:")))
-        .collect();
     let output_ports: Vec<String> = output_ports
         .into_iter()
         .filter(|p| !p.starts_with(&format!("{client_name}:")))
         .collect();
 
-    if input_ports.is_empty() {
-        return Err(
-            "No JACK input sources found. Is JACK running with audio hardware?".into(),
-        );
-    }
     if output_ports.is_empty() {
         return Err(
             "No JACK output destinations found. Is JACK running with audio hardware?"
@@ -726,36 +785,82 @@ pub fn run(board_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    // Phase 1: port selection
-    let (selected_in, selected_out) = match run_port_select(
-        &mut terminal,
-        &board.name,
-        input_ports,
-        output_ports,
-    )? {
-        PortSelectResult::Selected { input, output } => (input, output),
-        PortSelectResult::Quit => {
+    let result = if let Some((samples, _, ref wav_path)) = wav_data {
+        // WAV input mode: output-only port selection
+        let selected_out =
+            match run_output_select(&mut terminal, &board.name, output_ports)? {
+                OutputSelectResult::Selected(output) => output,
+                OutputSelectResult::Quit => {
+                    disable_raw_mode()?;
+                    stdout().execute(LeaveAlternateScreen)?;
+                    return Ok(());
+                }
+            };
+
+        let wav_filename = std::path::Path::new(wav_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(wav_path);
+        let input_label = format!("WAV: {} (looping)", wav_filename);
+
+        let processor =
+            PedalboardProcessor::from_board(&board, board_dir, client.sample_rate() as f64)
+                .map_err(|e| format!("Board compilation error: {e}"))?;
+        let wav_proc = WavLoopProcessor::new(samples, processor);
+
+        run_board_control_wav(
+            &mut terminal,
+            client,
+            wav_proc,
+            panels,
+            &board.name,
+            &input_label,
+            &selected_out,
+        )
+    } else {
+        // Normal mode: input + output port selection
+        let input_ports = AudioEngine::list_input_sources(&client);
+        let input_ports: Vec<String> = input_ports
+            .into_iter()
+            .filter(|p| !p.starts_with(&format!("{client_name}:")))
+            .collect();
+
+        if input_ports.is_empty() {
             disable_raw_mode()?;
             stdout().execute(LeaveAlternateScreen)?;
-            return Ok(());
+            return Err(
+                "No JACK input sources found. Is JACK running with audio hardware?".into(),
+            );
         }
+
+        let (selected_in, selected_out) = match run_port_select(
+            &mut terminal,
+            &board.name,
+            input_ports,
+            output_ports,
+        )? {
+            PortSelectResult::Selected { input, output } => (input, output),
+            PortSelectResult::Quit => {
+                disable_raw_mode()?;
+                stdout().execute(LeaveAlternateScreen)?;
+                return Ok(());
+            }
+        };
+
+        let processor =
+            PedalboardProcessor::from_board(&board, board_dir, client.sample_rate() as f64)
+                .map_err(|e| format!("Board compilation error: {e}"))?;
+
+        run_board_control(
+            &mut terminal,
+            client,
+            processor,
+            panels,
+            &board.name,
+            &selected_in,
+            &selected_out,
+        )
     };
-
-    // Build the pedalboard processor
-    let processor =
-        PedalboardProcessor::from_board(&board, board_dir, client.sample_rate() as f64)
-            .map_err(|e| format!("Board compilation error: {e}"))?;
-
-    // Phase 2: board control with live JACK audio
-    let result = run_board_control(
-        &mut terminal,
-        client,
-        processor,
-        panels,
-        &board.name,
-        &selected_in,
-        &selected_out,
-    );
 
     // Teardown (always runs)
     disable_raw_mode()?;

@@ -28,6 +28,9 @@ enum Command {
     Tui {
         /// Path to a .pedal file, .board file, or directory of .board files.
         file: String,
+        /// Optional WAV file to loop as audio input instead of a JACK input port.
+        #[arg(long)]
+        input: Option<String>,
     },
 }
 
@@ -42,14 +45,15 @@ fn main() {
             knobs,
         } => cli::process::run(&file, &input, &output, &knobs),
         #[cfg(all(feature = "jack-rt", feature = "tui"))]
-        Command::Tui { file } => {
+        Command::Tui { file, input } => {
+            let wav_input = input.as_deref();
             let path = std::path::Path::new(&file);
             let result = if path.is_dir() {
-                cli::folder_tui::run(&file)
+                cli::folder_tui::run(&file, wav_input)
             } else if file.ends_with(".board") {
-                cli::board_tui::run(&file)
+                cli::board_tui::run(&file, wav_input)
             } else {
-                cli::tui::run(&file)
+                cli::tui::run(&file, wav_input)
             };
             if let Err(e) = result {
                 eprintln!("Error: {e}");

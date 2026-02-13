@@ -400,6 +400,104 @@ pub fn draw_port_select(frame: &mut Frame, state: &PortSelectState, title: &str)
     frame.render_widget(help, v_chunks[4]);
 }
 
+/// Result of the output-only selection screen.
+pub enum OutputSelectResult {
+    Selected(String),
+    Quit,
+}
+
+/// Run an output-only port selection screen (for WAV input mode).
+pub fn run_output_select(
+    terminal: &mut Term,
+    title: &str,
+    output_ports: Vec<String>,
+) -> Result<OutputSelectResult, Box<dyn std::error::Error>> {
+    let mut cursor = 0_usize;
+
+    loop {
+        terminal.draw(|f| {
+            draw_output_select(f, title, &output_ports, cursor);
+        })?;
+
+        if event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(OutputSelectResult::Quit),
+                    KeyCode::Up => {
+                        if cursor > 0 {
+                            cursor -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if cursor + 1 < output_ports.len() {
+                            cursor += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(port) = output_ports.get(cursor) {
+                            return Ok(OutputSelectResult::Selected(port.clone()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn draw_output_select(frame: &mut Frame, title: &str, ports: &[String], cursor: usize) {
+    let area = frame.area();
+
+    if area.width < 40 || area.height < 10 {
+        let msg = Paragraph::new("Terminal too small!\nResize to at least 40x10.")
+            .alignment(Alignment::Center);
+        frame.render_widget(msg, area);
+        return;
+    }
+
+    let outer = Block::default()
+        .title(format!(
+            "  {} — Output Port Selection  ",
+            title.to_uppercase()
+        ))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .style(Style::default().fg(Color::White));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    let v_chunks = Layout::vertical([
+        Constraint::Length(1), // top padding
+        Constraint::Length(1), // column header
+        Constraint::Min(3),    // port list
+        Constraint::Length(1), // gap
+        Constraint::Length(1), // help bar
+    ])
+    .split(inner);
+
+    let header_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    frame.render_widget(
+        Paragraph::new(Span::styled(" Output (Destination)", header_style)),
+        v_chunks[1],
+    );
+
+    draw_port_list(frame, v_chunks[2], ports, cursor, true);
+
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+        Span::raw(" navigate  "),
+        Span::styled("Enter", Style::default().fg(Color::Cyan)),
+        Span::raw(" confirm  "),
+        Span::styled("Q", Style::default().fg(Color::Cyan)),
+        Span::raw(" quit"),
+    ]))
+    .alignment(Alignment::Center);
+    frame.render_widget(help, v_chunks[4]);
+}
+
 pub fn draw_port_list(
     frame: &mut Frame,
     area: Rect,

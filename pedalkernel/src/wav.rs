@@ -3,7 +3,7 @@
 //! Uses `hound` to write processed audio to WAV files so circuits
 //! can be auditioned without a running JACK server.
 
-use hound::{SampleFormat, WavSpec, WavWriter};
+use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::path::Path;
 
 use crate::PedalProcessor;
@@ -45,6 +45,45 @@ pub fn guitar_pluck(freq_hz: f64, duration_secs: f64, sample_rate: u32) -> Vec<f
         buf.push(0.4 * envelope * (fundamental + h2 + h3 + h4));
     }
     buf
+}
+
+/// Read a WAV file and return mono f64 samples normalized to [-1, 1] plus the sample rate.
+///
+/// Handles float and integer sample formats and mixes stereo (or multi-channel) down to mono.
+pub fn read_wav_mono(path: &Path) -> Result<(Vec<f64>, u32), Box<dyn std::error::Error>> {
+    let mut reader = WavReader::open(path)?;
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate;
+    let channels = spec.channels as usize;
+
+    let samples = match spec.sample_format {
+        SampleFormat::Float => {
+            let all: Vec<f32> = reader.samples::<f32>().map(|s| s.unwrap()).collect();
+            mix_to_mono(
+                &all.iter().map(|&s| s as f64).collect::<Vec<_>>(),
+                channels,
+            )
+        }
+        SampleFormat::Int => {
+            let max_val = (1_i64 << (spec.bits_per_sample - 1)) as f64;
+            let all: Vec<i32> = reader.samples::<i32>().map(|s| s.unwrap()).collect();
+            let normalized: Vec<f64> = all.iter().map(|&s| s as f64 / max_val).collect();
+            mix_to_mono(&normalized, channels)
+        }
+    };
+
+    Ok((samples, sample_rate))
+}
+
+/// Mix interleaved multi-channel samples down to mono by averaging channels.
+fn mix_to_mono(interleaved: &[f64], channels: usize) -> Vec<f64> {
+    if channels == 1 {
+        return interleaved.to_vec();
+    }
+    interleaved
+        .chunks(channels)
+        .map(|frame| frame.iter().sum::<f64>() / channels as f64)
+        .collect()
 }
 
 /// Process a buffer of samples through a pedal and write the result to a WAV file.
