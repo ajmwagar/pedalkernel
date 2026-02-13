@@ -1,0 +1,14 @@
+[package]
+name = "pedalkernel-vst"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar <ajmwagar@gmail.com>"]
+description = "VST3/CLAP plugin wrapper for the PedalKernel WDF engine"
+license = "GPL-3.0-only"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+pedalkernel = { path = "../pedalkernel", default-features = false }
