@@ -1,0 +1,10 @@
+# Blues Rig — classic three-pedal chain
+# Compressor → Overdrive → Drive
+#
+# Signal chain order: top = first in chain
+
+board "Blues Rig" {
+  ts: "tube_screamer.pedal" { Drive = 0.6, Level = 0.7 }
+  bd: "blues_driver.pedal" { Gain = 0.5, Level = 0.6 }
+  comp: "dyna_comp.pedal" { Sensitivity = 0.4, Output = 0.8 }
+}

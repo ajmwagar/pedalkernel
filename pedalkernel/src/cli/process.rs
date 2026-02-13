@@ -5,7 +5,15 @@ use pedalkernel::PedalProcessor;
 use std::path::Path;
 use std::process;
 
-pub fn run(pedal_path: &str, input_path: &str, output_path: &str, knob_args: &[String]) {
+pub fn run(file_path: &str, input_path: &str, output_path: &str, knob_args: &[String]) {
+    if file_path.ends_with(".board") {
+        run_board(file_path, input_path, output_path, knob_args);
+    } else {
+        run_pedal(file_path, input_path, output_path, knob_args);
+    }
+}
+
+fn run_pedal(pedal_path: &str, input_path: &str, output_path: &str, knob_args: &[String]) {
     // Parse knob overrides (e.g. "Drive=0.8")
     let overrides: Vec<(&str, f64)> = knob_args
         .iter()
@@ -78,20 +86,7 @@ pub fn run(pedal_path: &str, input_path: &str, output_path: &str, knob_args: &[S
     let output_samples: Vec<f64> = input_samples.iter().map(|&s| proc.process(s)).collect();
 
     // Write output WAV (same sample rate, mono, 32-bit float)
-    let out_spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 32,
-        sample_format: SampleFormat::Float,
-    };
-    let mut writer = WavWriter::create(Path::new(output_path), out_spec).unwrap_or_else(|e| {
-        eprintln!("Error creating {output_path}: {e}");
-        process::exit(1);
-    });
-    for &s in &output_samples {
-        writer.write_sample(s as f32).unwrap();
-    }
-    writer.finalize().unwrap();
+    write_wav(output_path, sample_rate, &output_samples);
 
     eprintln!("Pedal:  \"{}\"", pedal.name);
     for (label, val) in &knob_values {
@@ -102,6 +97,112 @@ pub fn run(pedal_path: &str, input_path: &str, output_path: &str, knob_args: &[S
         output_path,
         output_samples.len()
     );
+}
+
+fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &[String]) {
+    use pedalkernel::board::parse_board_file;
+    use pedalkernel::pedalboard::PedalboardProcessor;
+
+    // Parse knob overrides for boards: "pedal_id.Knob=value"
+    let overrides: Vec<(&str, &str, f64)> = knob_args
+        .iter()
+        .filter_map(|a| {
+            let (lhs, v) = a.split_once('=')?;
+            let val = v.parse::<f64>().ok()?;
+            if let Some((pedal_id, knob)) = lhs.split_once('.') {
+                Some((pedal_id, knob, val))
+            } else {
+                eprintln!("Warning: board knob override must use 'pedal_id.Knob=value' format, got: {a}");
+                None
+            }
+        })
+        .collect();
+
+    // Parse the .board file
+    let source = std::fs::read_to_string(board_path).unwrap_or_else(|e| {
+        eprintln!("Error reading {board_path}: {e}");
+        process::exit(1);
+    });
+    let board = parse_board_file(&source).unwrap_or_else(|e| {
+        eprintln!("Parse error: {e}");
+        process::exit(1);
+    });
+
+    let board_dir = Path::new(board_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+
+    // Read input WAV
+    let mut reader = WavReader::open(input_path).unwrap_or_else(|e| {
+        eprintln!("Error opening {input_path}: {e}");
+        process::exit(1);
+    });
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate;
+
+    let input_samples = read_samples_mono(&mut reader);
+    eprintln!(
+        "Input: {} ({} samples, {} Hz, {} ch, {}-bit {:?})",
+        input_path,
+        input_samples.len(),
+        sample_rate,
+        spec.channels,
+        spec.bits_per_sample,
+        spec.sample_format,
+    );
+
+    // Build pedalboard processor
+    let mut proc =
+        PedalboardProcessor::from_board(&board, board_dir, sample_rate as f64).unwrap_or_else(
+            |e| {
+                eprintln!("Board compilation error: {e}");
+                process::exit(1);
+            },
+        );
+
+    // Apply CLI knob overrides using the "idx:label" control routing
+    for (pedal_id, knob, val) in &overrides {
+        if let Some(idx) = board.pedals.iter().position(|p| p.id == *pedal_id) {
+            proc.set_control(&format!("{idx}:{knob}"), *val);
+        } else {
+            eprintln!(
+                "Warning: unknown pedal id '{pedal_id}', available: {:?}",
+                board.pedals.iter().map(|p| p.id.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    let output_samples: Vec<f64> = input_samples.iter().map(|&s| proc.process(s)).collect();
+
+    // Write output WAV
+    write_wav(output_path, sample_rate, &output_samples);
+
+    eprintln!("Board:  \"{}\"", board.name);
+    for entry in &board.pedals {
+        eprintln!("  [{}] {}", entry.id, entry.path);
+    }
+    eprintln!(
+        "Output: {} ({} samples)",
+        output_path,
+        output_samples.len()
+    );
+}
+
+fn write_wav(output_path: &str, sample_rate: u32, samples: &[f64]) {
+    let out_spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: SampleFormat::Float,
+    };
+    let mut writer = WavWriter::create(Path::new(output_path), out_spec).unwrap_or_else(|e| {
+        eprintln!("Error creating {output_path}: {e}");
+        process::exit(1);
+    });
+    for &s in samples {
+        writer.write_sample(s as f32).unwrap();
+    }
+    writer.finalize().unwrap();
 }
 
 /// Read all samples from a WAV file into a mono f64 buffer, normalizing to [-1, 1].

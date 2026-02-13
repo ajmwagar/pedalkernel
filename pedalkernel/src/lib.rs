@@ -10,10 +10,12 @@
 //! - [`kicad`] — KiCad netlist export from the parsed AST
 //! - [`wav`] — WAV file I/O for offline rendering and testing
 
+pub mod board;
 pub mod compiler;
 pub mod dsl;
 pub mod elements;
 pub mod kicad;
+pub mod pedalboard;
 pub mod pedals;
 pub mod tree;
 pub mod wav;
