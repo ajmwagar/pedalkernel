@@ -158,10 +158,7 @@ fn parse_board(input: &str) -> IResult<&str, BoardDef> {
 pub fn parse_board_file(src: &str) -> Result<BoardDef, String> {
     match parse_board(src) {
         Ok(("", def)) => Ok(def),
-        Ok((rest, _)) => Err(format!(
-            "Trailing input: {:?}",
-            &rest[..rest.len().min(60)]
-        )),
+        Ok((rest, _)) => Err(format!("Trailing input: {:?}", &rest[..rest.len().min(60)])),
         Err(e) => Err(format!("Parse error: {e}")),
     }
 }

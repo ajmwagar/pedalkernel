@@ -21,9 +21,7 @@ use std::io::stdout;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::board_tui::{
-    handle_board_key, render_io_bar, BoardAction, PedalPanel, ViewMode,
-};
+use super::board_tui::{handle_board_key, render_io_bar, BoardAction, PedalPanel, ViewMode};
 use super::tui_widgets::{
     run_output_select, run_port_select, KnobState, OutputSelectResult, PortSelectResult, Term,
 };
@@ -276,19 +274,11 @@ fn draw_folder_detail(
 }
 
 /// Render the board selector bar: `{ BLUES RIG } → [ GRUNGE BOARD ]`
-fn render_board_selector(
-    frame: &mut Frame,
-    area: Rect,
-    boards: &[BoardState],
-    active: usize,
-) {
+fn render_board_selector(frame: &mut Frame, area: Rect, boards: &[BoardState], active: usize) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, board) in boards.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(
-                " → ",
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
         }
         let name = board.name.to_uppercase();
         if i == active {
@@ -316,13 +306,16 @@ fn render_board_selector(
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Handle input for the folder TUI. Returns false when the user wants to quit.
-fn handle_folder_input(state: &mut FolderControlState, code: KeyCode, modifiers: KeyModifiers) -> bool {
+fn handle_folder_input(
+    state: &mut FolderControlState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
     // Board switching: { and } (Shift+[ and Shift+])
     match code {
         KeyCode::Char('{') => {
             if state.boards.len() > 1 {
-                let new_idx =
-                    (state.active_board + state.boards.len() - 1) % state.boards.len();
+                let new_idx = (state.active_board + state.boards.len() - 1) % state.boards.len();
                 state.switch_board(new_idx);
             }
             return true;
@@ -371,8 +364,8 @@ fn handle_folder_input(state: &mut FolderControlState, code: KeyCode, modifiers:
             if state.view_mode == ViewMode::Detail {
                 if let Some(panel) = board.pedals.get(board.focused_pedal) {
                     if !panel.knobs.is_empty() {
-                        board.focused_knob = (board.focused_knob + panel.knobs.len() - 1)
-                            % panel.knobs.len();
+                        board.focused_knob =
+                            (board.focused_knob + panel.knobs.len() - 1) % panel.knobs.len();
                     }
                 }
             }
@@ -381,8 +374,8 @@ fn handle_folder_input(state: &mut FolderControlState, code: KeyCode, modifiers:
             if state.view_mode == ViewMode::Overview {
                 if !board.pedals.is_empty() {
                     if delta < 0.0 {
-                        board.focused_pedal = (board.focused_pedal + board.pedals.len() - 1)
-                            % board.pedals.len();
+                        board.focused_pedal =
+                            (board.focused_pedal + board.pedals.len() - 1) % board.pedals.len();
                     } else {
                         board.focused_pedal = (board.focused_pedal + 1) % board.pedals.len();
                     }
@@ -509,9 +502,7 @@ fn discover_boards(
             }
         };
 
-        let board_dir = board_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."));
+        let board_dir = board_path.parent().unwrap_or_else(|| Path::new("."));
 
         // Build the processor — individual pedal failures produce warnings
         // and dry passthrough slots (never returns Err)
@@ -591,8 +582,7 @@ fn run_folder_control(
     connect_to: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let controls = Arc::new(SharedControls::new());
-    let (async_client, our_in, our_out) =
-        AudioEngine::start(client, switcher, controls.clone())?;
+    let (async_client, our_in, our_out) = AudioEngine::start(client, switcher, controls.clone())?;
 
     async_client
         .as_client()
@@ -636,8 +626,7 @@ fn run_folder_control_wav(
     connect_to: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let controls = Arc::new(SharedControls::new());
-    let (async_client, _our_in, our_out) =
-        AudioEngine::start(client, switcher, controls.clone())?;
+    let (async_client, _our_in, our_out) = AudioEngine::start(client, switcher, controls.clone())?;
 
     // Only connect output port
     async_client
@@ -677,8 +666,7 @@ fn run_folder_control_wav(
 pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     // Load WAV input if provided
     let wav_data = if let Some(path) = wav_input {
-        let (samples, wav_sr) =
-            pedalkernel::wav::read_wav_mono(std::path::Path::new(path))?;
+        let (samples, wav_sr) = pedalkernel::wav::read_wav_mono(std::path::Path::new(path))?;
         if samples.is_empty() {
             return Err("WAV file contains no samples".into());
         }
@@ -762,23 +750,18 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let title = format!(
-        "Folder: {} ({} boards)",
-        dir_path,
-        board_states.len()
-    );
+    let title = format!("Folder: {} ({} boards)", dir_path, board_states.len());
 
     let result = if let Some((samples, _, ref wav_path)) = wav_data {
         // WAV input mode: output-only port selection
-        let selected_out =
-            match run_output_select(&mut terminal, &title, output_ports)? {
-                OutputSelectResult::Selected(output) => output,
-                OutputSelectResult::Quit => {
-                    disable_raw_mode()?;
-                    stdout().execute(LeaveAlternateScreen)?;
-                    return Ok(());
-                }
-            };
+        let selected_out = match run_output_select(&mut terminal, &title, output_ports)? {
+            OutputSelectResult::Selected(output) => output,
+            OutputSelectResult::Quit => {
+                disable_raw_mode()?;
+                stdout().execute(LeaveAlternateScreen)?;
+                return Ok(());
+            }
+        };
 
         let wav_filename = std::path::Path::new(wav_path)
             .file_name()
@@ -807,9 +790,7 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
         if input_ports.is_empty() {
             disable_raw_mode()?;
             stdout().execute(LeaveAlternateScreen)?;
-            return Err(
-                "No JACK input sources found. Is JACK running with audio hardware?".into(),
-            );
+            return Err("No JACK input sources found. Is JACK running with audio hardware?".into());
         }
 
         let (selected_in, selected_out) =

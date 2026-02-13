@@ -562,7 +562,12 @@ impl CircuitGraph {
 
     /// Collect edge indices of passive elements directly connected to a junction node,
     /// excluding diode edges and edges on the direct output path.
-    fn elements_at_junction(&self, junction: NodeId, diode_edge_indices: &[usize], active_edge_indices: &[usize]) -> Vec<usize> {
+    fn elements_at_junction(
+        &self,
+        junction: NodeId,
+        diode_edge_indices: &[usize],
+        active_edge_indices: &[usize],
+    ) -> Vec<usize> {
         self.edges
             .iter()
             .enumerate()
@@ -823,6 +828,8 @@ pub struct CompiledPedal {
     sample_rate: f64,
     controls: Vec<ControlBinding>,
     gain_range: (f64, f64),
+    /// Supply voltage in volts (default 9.0).
+    supply_voltage: f64,
 }
 
 /// Gain-like control labels.
@@ -842,6 +849,10 @@ fn is_level_label(label: &str) -> bool {
 }
 
 impl CompiledPedal {
+    pub fn set_supply_voltage(&mut self, voltage: f64) {
+        self.supply_voltage = voltage.clamp(5.0, 24.0);
+    }
+
     /// Set a control by its label (e.g., "Drive", "Level").
     pub fn set_control(&mut self, label: &str, value: f64) {
         let value = value.clamp(0.0, 1.0);
@@ -871,25 +882,30 @@ impl CompiledPedal {
 
 impl PedalProcessor for CompiledPedal {
     fn process(&mut self, input: f64) -> f64 {
+        let headroom = self.supply_voltage / 9.0;
         let mut signal = input;
 
         // Apply pre-gain before EACH stage.  In real circuits, each clipping
         // stage has its own active gain element (transistor/opamp).  The diode
         // voltage output (~0.7V) must be re-amplified before the next stage.
+        // The headroom factor models the active element's supply rail: at 12V
+        // it can swing ~33% further before rail clipping.
         for stage in &mut self.stages {
-            signal = stage.process(signal * self.pre_gain);
+            signal = stage.process(signal * self.pre_gain * headroom);
         }
 
         // No WDF stages → just apply gain + soft clip.
         if self.stages.is_empty() {
-            signal = input * self.pre_gain;
+            signal = input * self.pre_gain * headroom;
         }
 
         if self.use_soft_limit {
-            signal = (signal * self.soft_limit_scale).tanh();
+            // Scale the tanh ceiling with headroom: at 12V the soft-limiter
+            // (modeling transistor/opamp saturation) kicks in later.
+            signal = headroom * (signal * self.soft_limit_scale / headroom).tanh();
         }
 
-        signal * self.output_gain
+        signal * self.output_gain * headroom
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
@@ -908,6 +924,10 @@ impl PedalProcessor for CompiledPedal {
 
     fn set_control(&mut self, label: &str, value: f64) {
         self.set_control(label, value);
+    }
+
+    fn set_supply_voltage(&mut self, voltage: f64) {
+        self.set_supply_voltage(voltage);
     }
 }
 
@@ -981,7 +1001,8 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
 
     for (_edge_idx, diode_info) in &diodes {
         let junction = diode_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(junction, &diode_edge_indices, &graph.active_edge_indices);
+        let passive_idxs =
+            graph.elements_at_junction(junction, &diode_edge_indices, &graph.active_edge_indices);
 
         if passive_idxs.is_empty() {
             continue;
@@ -1131,7 +1152,172 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         sample_rate,
         controls,
         gain_range: (glo * active_bonus, ghi * active_bonus),
+        supply_voltage: 9.0,
     })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Voltage compatibility check
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Severity of a voltage compatibility warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningSeverity {
+    /// Informational — the component should be fine, but behavior may differ
+    /// from the canonical 9V version (e.g. slightly different bias point).
+    Info,
+    /// The component is likely operating outside its typical ratings and may
+    /// clip, distort differently, or wear out faster in a real build.
+    Caution,
+    /// The component would almost certainly fail or be damaged at this voltage
+    /// in a physical build.
+    Danger,
+}
+
+/// A single voltage compatibility warning for a component.
+#[derive(Debug, Clone)]
+pub struct VoltageWarning {
+    pub component_id: String,
+    pub severity: WarningSeverity,
+    pub message: String,
+}
+
+/// Check a pedal definition for voltage compatibility at a given supply voltage.
+///
+/// Returns a list of warnings for components that may not tolerate the target
+/// voltage.  These are heuristic — the DSL doesn't carry voltage ratings, so
+/// we infer from component types and typical part specs:
+///
+/// - **Germanium transistors**: Vce(max) typically 15–32V.  Caution above 15V.
+/// - **Electrolytic capacitors** (≥ 1 µF): often rated 10–16V.  Caution above 12V.
+/// - **Op-amps**: common audio opamps (TL072, NE5532) rated to ±18V (36V total).
+///   Caution above 18V.
+/// - **Silicon transistors**: usually Vce(max) ≥ 40V.  Caution above 24V.
+/// - **Germanium diodes**: forward behaviour is voltage-independent, but reverse
+///   breakdown is lower (~50V Ge vs ~100V+ Si).  Only flagged above 24V.
+///
+/// Note: passive elements (R, L) and silicon diodes are unaffected in the WDF
+/// model and are not flagged.
+pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<VoltageWarning> {
+    let mut warnings = Vec::new();
+
+    let has_germanium_transistor = pedal
+        .components
+        .iter()
+        .any(|c| c.kind == ComponentKind::Pnp);
+    // Heuristic: PNP transistors in a circuit with "fuzz" controls are likely
+    // germanium (AC128, OC44, etc.) with lower voltage tolerance.
+    let likely_germanium_fuzz = has_germanium_transistor
+        && pedal
+            .controls
+            .iter()
+            .any(|c| c.label.eq_ignore_ascii_case("fuzz"));
+
+    for comp in &pedal.components {
+        match &comp.kind {
+            ComponentKind::Pnp | ComponentKind::Npn => {
+                let is_ge = comp.kind == ComponentKind::Pnp && likely_germanium_fuzz;
+                if is_ge {
+                    // Germanium PNPs: typical Vce(max) = 15–32V
+                    if voltage > 18.0 {
+                        warnings.push(VoltageWarning {
+                            component_id: comp.id.clone(),
+                            severity: WarningSeverity::Danger,
+                            message: format!(
+                                "Germanium transistor {} likely exceeds Vce(max) at {:.0}V \
+                                 (typical Ge PNP rated 15–32V)",
+                                comp.id, voltage
+                            ),
+                        });
+                    } else if voltage > 12.0 {
+                        warnings.push(VoltageWarning {
+                            component_id: comp.id.clone(),
+                            severity: WarningSeverity::Caution,
+                            message: format!(
+                                "Germanium transistor {} may run hot at {:.0}V \
+                                 — bias point shifts, tone will differ from 9V",
+                                comp.id, voltage
+                            ),
+                        });
+                    }
+                } else if voltage > 24.0 {
+                    // Silicon transistors: typically Vce(max) >= 40V
+                    warnings.push(VoltageWarning {
+                        component_id: comp.id.clone(),
+                        severity: WarningSeverity::Caution,
+                        message: format!(
+                            "Transistor {} at {:.0}V — verify Vce(max) rating of actual part",
+                            comp.id, voltage
+                        ),
+                    });
+                }
+            }
+            ComponentKind::OpAmp => {
+                // Common audio opamps: TL072 (±18V = 36V), NE5532 (±22V = 44V)
+                if voltage > 18.0 {
+                    warnings.push(VoltageWarning {
+                        component_id: comp.id.clone(),
+                        severity: WarningSeverity::Caution,
+                        message: format!(
+                            "Op-amp {} at {:.0}V — verify supply range \
+                             (TL072 max ±18V, NE5532 max ±22V)",
+                            comp.id, voltage
+                        ),
+                    });
+                }
+            }
+            ComponentKind::Capacitor(farads) => {
+                // Electrolytics (≥ 1µF) often have low voltage ratings.
+                // 10µF caps commonly rated 10V or 16V.
+                if *farads >= 1e-6 {
+                    if voltage > 16.0 {
+                        warnings.push(VoltageWarning {
+                            component_id: comp.id.clone(),
+                            severity: WarningSeverity::Danger,
+                            message: format!(
+                                "Electrolytic cap {} ({:.0}µF) may exceed voltage rating at {:.0}V \
+                                 — common ratings are 10V, 16V, 25V",
+                                comp.id, farads * 1e6, voltage
+                            ),
+                        });
+                    } else if voltage > 12.0 {
+                        warnings.push(VoltageWarning {
+                            component_id: comp.id.clone(),
+                            severity: WarningSeverity::Caution,
+                            message: format!(
+                                "Electrolytic cap {} ({:.0}µF) — ensure voltage rating ≥ {:.0}V",
+                                comp.id,
+                                farads * 1e6,
+                                voltage
+                            ),
+                        });
+                    }
+                }
+            }
+            ComponentKind::DiodePair(DiodeType::Germanium)
+            | ComponentKind::Diode(DiodeType::Germanium) => {
+                // Ge diode forward behaviour is voltage-independent in the WDF,
+                // but reverse breakdown is lower (~50V vs 100V+ Si).
+                // Also: more temperature-sensitive at higher power dissipation.
+                if voltage > 18.0 {
+                    warnings.push(VoltageWarning {
+                        component_id: comp.id.clone(),
+                        severity: WarningSeverity::Info,
+                        message: format!(
+                            "Germanium diode {} — higher power dissipation at {:.0}V \
+                             may shift forward voltage (temperature dependent)",
+                            comp.id, voltage
+                        ),
+                    });
+                }
+            }
+            // Resistors, inductors, Si/LED diodes, pots: no voltage concerns
+            // within the 5–24V range we support.
+            _ => {}
+        }
+    }
+
+    warnings
 }
 
 /// Convert SP tree to DynNode, inserting a VoltageSource for the virtual leaf.
@@ -1769,5 +1955,249 @@ mod tests {
             return 0.0;
         }
         cov / (va.sqrt() * vb.sqrt())
+    }
+
+    fn rms(buf: &[f64]) -> f64 {
+        (buf.iter().map(|x| x * x).sum::<f64>() / buf.len() as f64).sqrt()
+    }
+
+    // -----------------------------------------------------------------------
+    // 12V supply voltage tests (compiled pedals)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compiled_12v_more_headroom() {
+        let pedal = parse("tube_screamer.pedal");
+        let input = sine(48000);
+
+        let mut proc_9v = compile_pedal(&pedal, 48000.0).unwrap();
+        proc_9v.set_control("Drive", 0.5);
+        proc_9v.set_control("Level", 1.0);
+        let out_9v: Vec<f64> = input.iter().map(|&s| proc_9v.process(s)).collect();
+
+        let mut proc_12v = compile_pedal(&pedal, 48000.0).unwrap();
+        proc_12v.set_supply_voltage(12.0);
+        proc_12v.set_control("Drive", 0.5);
+        proc_12v.set_control("Level", 1.0);
+        let out_12v: Vec<f64> = input.iter().map(|&s| proc_12v.process(s)).collect();
+
+        assert!(
+            rms(&out_12v) > rms(&out_9v),
+            "Compiled pedal at 12V should have more output"
+        );
+    }
+
+    #[test]
+    fn compiled_12v_all_pedals_stable() {
+        let files = [
+            "tube_screamer.pedal",
+            "fuzz_face.pedal",
+            "big_muff.pedal",
+            "blues_driver.pedal",
+            "dyna_comp.pedal",
+            "klon_centaur.pedal",
+            "proco_rat.pedal",
+        ];
+        let input = sine(4800);
+        for f in files {
+            let pedal = parse(f);
+            let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+            proc.set_supply_voltage(12.0);
+            let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+            assert!(output.iter().all(|x| x.is_finite()), "{f} at 12V: NaN/inf");
+            let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+            assert!(peak < 7.0, "{f} at 12V: output too loud, peak={peak}");
+            assert!(peak > 0.001, "{f} at 12V: silent, peak={peak}");
+        }
+    }
+
+    #[test]
+    fn compiled_9v_unchanged() {
+        // Explicitly setting 9V should match default behavior.
+        let pedal = parse("tube_screamer.pedal");
+        let input = sine(48000);
+
+        let mut proc_default = compile_pedal(&pedal, 48000.0).unwrap();
+        let out_default: Vec<f64> = input.iter().map(|&s| proc_default.process(s)).collect();
+
+        let mut proc_9v = compile_pedal(&pedal, 48000.0).unwrap();
+        proc_9v.set_supply_voltage(9.0);
+        let out_9v: Vec<f64> = input.iter().map(|&s| proc_9v.process(s)).collect();
+
+        let diff_rms = rms(&out_default
+            .iter()
+            .zip(&out_9v)
+            .map(|(a, b)| a - b)
+            .collect::<Vec<_>>());
+        assert!(
+            diff_rms < 1e-10,
+            "Compiled 9V should match default: diff_rms={diff_rms}"
+        );
+    }
+
+    #[test]
+    fn compiled_12v_extreme_settings_stable() {
+        let configs: &[(&str, &[(&str, f64)])] = &[
+            ("tube_screamer.pedal", &[("Drive", 1.0), ("Level", 1.0)]),
+            ("fuzz_face.pedal", &[("Fuzz", 1.0), ("Volume", 1.0)]),
+            ("big_muff.pedal", &[("Sustain", 1.0), ("Volume", 1.0)]),
+            ("proco_rat.pedal", &[("Distortion", 1.0), ("Volume", 1.0)]),
+        ];
+
+        let input = sine(4800);
+        for (f, knobs) in configs {
+            let pedal = parse(f);
+            let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+            proc.set_supply_voltage(12.0);
+            for &(label, val) in *knobs {
+                proc.set_control(label, val);
+            }
+            let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+            let settings: String = knobs
+                .iter()
+                .map(|(l, v)| format!("{l}={v}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            assert!(
+                output.iter().all(|x| x.is_finite()),
+                "{f} 12V [{settings}]: NaN/inf"
+            );
+            let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+            assert!(
+                peak < 10.0,
+                "{f} 12V [{settings}]: output too loud, peak={peak}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Voltage compatibility check tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn voltage_check_tube_screamer_9v_clean() {
+        // Tube Screamer at 9V should have no warnings.
+        let pedal = parse("tube_screamer.pedal");
+        let warnings = check_voltage_compatibility(&pedal, 9.0);
+        assert!(
+            warnings.is_empty(),
+            "TS at 9V should have no warnings: got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn voltage_check_tube_screamer_12v_clean() {
+        // Tube Screamer has only passives + silicon diodes — fine at 12V.
+        let pedal = parse("tube_screamer.pedal");
+        let warnings = check_voltage_compatibility(&pedal, 12.0);
+        assert!(
+            warnings.is_empty(),
+            "TS at 12V should have no warnings: got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn voltage_check_fuzz_face_18v_warns() {
+        // Fuzz Face has PNP transistors (likely germanium) and electrolytic
+        // caps — should warn at 18V.
+        let pedal = parse("fuzz_face.pedal");
+        let warnings = check_voltage_compatibility(&pedal, 18.0);
+        assert!(
+            !warnings.is_empty(),
+            "Fuzz Face at 18V should have warnings"
+        );
+        // Should flag the electrolytic caps (2.2µF, 10µF).
+        let cap_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.component_id.starts_with('C'))
+            .collect();
+        assert!(
+            !cap_warnings.is_empty(),
+            "Should warn about electrolytic caps at 18V"
+        );
+    }
+
+    #[test]
+    fn voltage_check_fuzz_face_ge_transistors() {
+        // The Fuzz Face PNP transistors should trigger caution above 12V.
+        let pedal = parse("fuzz_face.pedal");
+        let warnings = check_voltage_compatibility(&pedal, 15.0);
+        let transistor_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.component_id.starts_with('Q'))
+            .collect();
+        assert!(
+            !transistor_warnings.is_empty(),
+            "Should warn about Ge PNP transistors above 12V"
+        );
+        assert!(transistor_warnings
+            .iter()
+            .all(|w| w.severity == WarningSeverity::Caution));
+    }
+
+    #[test]
+    fn voltage_check_fuzz_face_ge_transistors_danger() {
+        // At 20V, germanium transistors should be Danger severity.
+        let pedal = parse("fuzz_face.pedal");
+        let warnings = check_voltage_compatibility(&pedal, 20.0);
+        let danger: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.severity == WarningSeverity::Danger)
+            .collect();
+        assert!(!danger.is_empty(), "Ge transistors at 20V should be Danger");
+    }
+
+    #[test]
+    fn voltage_check_klon_opamp_18v() {
+        // Klon has opamps — should warn above 18V.
+        let pedal = parse("klon_centaur.pedal");
+        let warnings = check_voltage_compatibility(&pedal, 20.0);
+        let opamp_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.component_id.starts_with('U'))
+            .collect();
+        assert!(
+            !opamp_warnings.is_empty(),
+            "Should warn about opamps above 18V"
+        );
+    }
+
+    #[test]
+    fn voltage_check_klon_12v_clean() {
+        // Klon at 12V should be fine (no electrolytics in the signal path
+        // that would fail, opamps are within range).
+        let pedal = parse("klon_centaur.pedal");
+        let warnings = check_voltage_compatibility(&pedal, 12.0);
+        // The 1µF output coupling cap may trigger a caution.
+        let danger: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.severity == WarningSeverity::Danger)
+            .collect();
+        assert!(
+            danger.is_empty(),
+            "Klon at 12V should have no Danger warnings: got {danger:?}"
+        );
+    }
+
+    #[test]
+    fn voltage_check_all_pedals_9v_no_danger() {
+        // At 9V, no pedal should have Danger or Caution warnings.
+        let files = [
+            "tube_screamer.pedal",
+            "fuzz_face.pedal",
+            "big_muff.pedal",
+            "blues_driver.pedal",
+            "dyna_comp.pedal",
+            "klon_centaur.pedal",
+            "proco_rat.pedal",
+        ];
+        for f in files {
+            let pedal = parse(f);
+            let warnings = check_voltage_compatibility(&pedal, 9.0);
+            assert!(
+                warnings.is_empty(),
+                "{f} at 9V should have no warnings: got {warnings:?}"
+            );
+        }
     }
 }

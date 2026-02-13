@@ -38,7 +38,7 @@ fn value_str(kind: &ComponentKind) -> String {
 }
 
 /// Format a value with engineering suffix for display.
-fn format_eng(val: f64, unit: &str) -> String {
+pub fn format_eng(val: f64, unit: &str) -> String {
     if val >= 1e6 {
         format!("{:.1}M{unit}", val / 1e6)
     } else if val >= 1e3 {

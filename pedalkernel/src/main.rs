@@ -3,7 +3,10 @@ mod cli;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "pedalkernel", about = "Guitar pedal DSP engine — DSL → WDF → audio")]
+#[command(
+    name = "pedalkernel",
+    about = "Guitar pedal DSP engine — DSL → WDF → audio"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

@@ -14,6 +14,8 @@ pub mod board;
 pub mod compiler;
 pub mod dsl;
 pub mod elements;
+#[cfg(feature = "hardware")]
+pub mod hw;
 pub mod kicad;
 pub mod pedalboard;
 pub mod pedals;
@@ -33,6 +35,15 @@ pub trait PedalProcessor {
 
     /// Set a named control parameter (0.0–1.0). Default: no-op.
     fn set_control(&mut self, _label: &str, _value: f64) {}
+
+    /// Set supply voltage in volts (default 9.0).
+    ///
+    /// Real pedals run at 9V (standard battery), but many players and boutique
+    /// builders run them at 12V or 18V for more headroom.  Higher voltage means
+    /// the active gain stages (opamps / transistors) can swing further before
+    /// hitting their supply rails, preserving more dynamics before the diode
+    /// clipping stage.  The diode clipping threshold itself is unchanged.
+    fn set_supply_voltage(&mut self, _voltage: f64) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +56,10 @@ mod jack_engine {
     use jack::{AudioIn, AudioOut, Client, ClientOptions, Control, ProcessHandler, ProcessScope};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+
+    /// Result of activating a JACK client: the async handle plus registered
+    /// input/output port names.
+    pub type ActiveJackClient<P> = (jack::AsyncClient<(), JackProcessorLive<P>>, String, String);
 
     /// JACK process handler wrapping a PedalProcessor.
     pub struct JackProcessor<P: PedalProcessor> {
@@ -70,6 +85,7 @@ mod jack_engine {
 
     /// Shared control state for real-time parameter updates between a UI
     /// thread and the JACK process callback.
+    #[derive(Default)]
     pub struct SharedControls {
         pending: Mutex<Vec<(String, f64)>>,
         bypassed: AtomicBool,
@@ -250,10 +266,7 @@ mod jack_engine {
             client: Client,
             mut processor: P,
             controls: Arc<SharedControls>,
-        ) -> Result<
-            (jack::AsyncClient<(), JackProcessorLive<P>>, String, String),
-            jack::Error,
-        > {
+        ) -> Result<ActiveJackClient<P>, jack::Error> {
             processor.set_sample_rate(client.sample_rate() as f64);
 
             let in_port = client.register_port("in", AudioIn)?;

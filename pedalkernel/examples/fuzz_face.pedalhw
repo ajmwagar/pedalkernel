@@ -1,0 +1,15 @@
+# Fuzz Face — hardware component specs for physical build validation
+#
+# Classic germanium Fuzz Face uses AC128 PNP transistors and cheap
+# electrolytic caps.  This file lets `check_voltage_with_specs()` flag
+# real problems when you crank the supply past 9V.
+#
+# Enable with: cargo build --features hardware
+
+Q1: vce_max(32) part("AC128")
+Q2: vce_max(32) part("AC128")
+C1: voltage_rating(25) part("2.2uF electrolytic")
+C2: voltage_rating(16) part("10uF electrolytic")
+R1: power_rating(0.25)
+R2: power_rating(0.25)
+R3: power_rating(0.25)

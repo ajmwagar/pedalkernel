@@ -157,6 +157,44 @@ def parse_pedal(path):
 
 
 # ---------------------------------------------------------------------------
+# .pedalhw parser
+# ---------------------------------------------------------------------------
+
+HWPROP_RE = re.compile(
+    r'(?:part\("([^"]+)"\)|vce_max\([\d.]+\)|voltage_rating\([\d.]+\)'
+    r"|supply_max\([\d.]+\)|breakdown\([\d.]+\)|power_rating\([\d.]+\))"
+)
+HWLINE_RE = re.compile(r"^\s*(\w+)\s*:\s*(.+)$", re.MULTILINE)
+
+
+def parse_pedalhw(path):
+    """Parse a .pedalhw file, returning {comp_id: part_name} for labeling.
+
+    Only extracts part("...") values — the voltage/power specs are handled
+    by the Rust `hw` module.
+    """
+    parts = {}
+    if not os.path.exists(path):
+        return parts
+    with open(path) as f:
+        text = f.read()
+    for match in HWLINE_RE.finditer(text):
+        comp_id = match.group(1)
+        props = match.group(2)
+        m = re.search(r'part\("([^"]+)"\)', props)
+        if m:
+            parts[comp_id] = m.group(1)
+    return parts
+
+
+def find_pedalhw(pedal_path):
+    """Auto-discover the companion .pedalhw file for a .pedal file."""
+    base = os.path.splitext(pedal_path)[0]
+    hw_path = base + ".pedalhw"
+    return hw_path
+
+
+# ---------------------------------------------------------------------------
 # Union-Find for junction merging
 # ---------------------------------------------------------------------------
 
@@ -460,11 +498,27 @@ SCHEMDRAW_MAP = {
 }
 
 
-def make_label(comp_id, kind, arg):
-    """Create a two-line label: ID on top, value below."""
+def make_label(comp_id, kind, arg, part_name=None):
+    """Create a label: ID on top, part name and/or value below.
+
+    If a .pedalhw file provides a part name (e.g. "AC128"), it's shown
+    instead of the generic value for active components, or alongside the
+    value for passives.
+    """
     val = format_value(kind, arg)
     if kind == "diode_pair":
         val = f"{val} \u00d72"
+    if part_name:
+        if kind in ("npn", "pnp", "opamp"):
+            # Active: show part name instead of dash
+            return f"{comp_id}\n{part_name}"
+        elif kind in ("diode", "diode_pair"):
+            return f"{comp_id}\n{part_name}" + (f" \u00d72" if kind == "diode_pair" else "")
+        elif val:
+            # Passive: show both
+            return f"{comp_id}\n{part_name}\n{val}"
+        else:
+            return f"{comp_id}\n{part_name}"
     if val:
         return f"{comp_id}\n{val}"
     return comp_id
@@ -661,8 +715,14 @@ def _draw_bypass_switching(d, origin, unit):
     d.add(elm.Ground().at(led.end))
 
 
-def render_schematic(name, components, edges, multi_edges, comp_map, adj, output_path, dpi=150):
-    """Render the circuit schematic using schemdraw."""
+def render_schematic(name, components, edges, multi_edges, comp_map, adj, output_path, dpi=150, hw_parts=None):
+    """Render the circuit schematic using schemdraw.
+
+    Args:
+        hw_parts: optional dict {comp_id: part_name} from .pedalhw file.
+            When present, part names are shown on the schematic labels.
+    """
+    hw_parts = hw_parts or {}
     spine_comps, branches, parallel_comps, feedback_comps = classify_components(
         edges, multi_edges, comp_map, adj
     )
@@ -709,7 +769,7 @@ def render_schematic(name, components, edges, multi_edges, comp_map, adj, output
         for comp_id, ja, jb in spine_comps:
             comp = comp_map[comp_id]
             kind = comp["kind"]
-            label = make_label(comp_id, kind, comp["arg"])
+            label = make_label(comp_id, kind, comp["arg"], hw_parts.get(comp_id))
 
             if kind in ("npn", "pnp"):
                 # Draw a short wire, then place BJT with base at current pos
@@ -783,7 +843,7 @@ def render_schematic(name, components, edges, multi_edges, comp_map, adj, output
             for comp_id, target_j, direction in branch_list:
                 comp = comp_map[comp_id]
                 kind = comp["kind"]
-                label = make_label(comp_id, kind, comp["arg"])
+                label = make_label(comp_id, kind, comp["arg"], hw_parts.get(comp_id))
 
                 if direction == "gnd":
                     # Center the gnd branches around the junction x-position
@@ -834,7 +894,7 @@ def render_schematic(name, components, edges, multi_edges, comp_map, adj, output
         for i, (comp_id, ja, jb) in enumerate(parallel_comps):
             comp = comp_map[comp_id]
             kind = comp["kind"]
-            label = make_label(comp_id, kind, comp["arg"])
+            label = make_label(comp_id, kind, comp["arg"], hw_parts.get(comp_id))
             elem_cls = SCHEMDRAW_MAP.get(kind, elm.Resistor)
 
             pos_a = junction_pos.get(ja)
@@ -857,7 +917,7 @@ def render_schematic(name, components, edges, multi_edges, comp_map, adj, output
         for i, (comp_id, ja, jb) in enumerate(feedback_comps):
             comp = comp_map[comp_id]
             kind = comp["kind"]
-            label = make_label(comp_id, kind, comp["arg"])
+            label = make_label(comp_id, kind, comp["arg"], hw_parts.get(comp_id))
             elem_cls = SCHEMDRAW_MAP.get(kind, elm.Resistor)
 
             pos_a = junction_pos.get(ja)
@@ -952,6 +1012,12 @@ def main():
 
     name, components, nets = parse_pedal(args.pedal_file)
 
+    # Auto-discover companion .pedalhw file for part name annotations
+    hw_path = find_pedalhw(args.pedal_file)
+    hw_parts = parse_pedalhw(hw_path)
+    if hw_parts:
+        print(f"  Using hardware specs from: {hw_path}")
+
     output_path = args.output
     if output_path is None:
         base = os.path.splitext(os.path.basename(args.pedal_file))[0]
@@ -960,7 +1026,7 @@ def main():
     uf, comp_map, edges, multi_edges = build_graph(components, nets)
     adj = build_adjacency(edges, multi_edges, comp_map)
 
-    render_schematic(name, components, edges, multi_edges, comp_map, adj, output_path, args.dpi)
+    render_schematic(name, components, edges, multi_edges, comp_map, adj, output_path, args.dpi, hw_parts)
 
     print(f"Schematic saved to: {output_path}")
 

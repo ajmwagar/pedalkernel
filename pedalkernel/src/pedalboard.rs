@@ -74,9 +74,8 @@ impl PedalboardProcessor {
                         pedal_path.display()
                     )
                 })?;
-                let pedal_def = parse_pedal_file(&source).map_err(|e| {
-                    format!("Parse error in '{}' ({}): {e}", entry.id, entry.path)
-                })?;
+                let pedal_def = parse_pedal_file(&source)
+                    .map_err(|e| format!("Parse error in '{}' ({}): {e}", entry.id, entry.path))?;
                 let mut proc = compile_pedal(&pedal_def, sample_rate).map_err(|e| {
                     format!("Compilation error in '{}' ({}): {e}", entry.id, entry.path)
                 })?;
@@ -138,12 +137,12 @@ impl PedalboardProcessor {
 
     /// Check if a pedal is bypassed.
     pub fn is_pedal_bypassed(&self, index: usize) -> bool {
-        self.pedals.get(index).map_or(false, |s| s.bypassed)
+        self.pedals.get(index).is_some_and(|s| s.bypassed)
     }
 
     /// Check if a pedal slot failed to compile (dry passthrough).
     pub fn is_pedal_failed(&self, index: usize) -> bool {
-        self.pedals.get(index).map_or(false, |s| s.failed)
+        self.pedals.get(index).is_some_and(|s| s.failed)
     }
 }
 
