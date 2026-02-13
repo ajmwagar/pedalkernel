@@ -86,11 +86,7 @@ fn run_pedal(pedal_path: &str, input_path: &str, output_path: &str, knob_args: &
     for (label, val) in &knob_values {
         eprintln!("  {label}: {val:.2}");
     }
-    eprintln!(
-        "Output: {} ({} samples)",
-        output_path,
-        output_samples.len()
-    );
+    eprintln!("Output: {} ({} samples)", output_path, output_samples.len());
 }
 
 fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &[String]) {
@@ -106,7 +102,9 @@ fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &
             if let Some((pedal_id, knob)) = lhs.split_once('.') {
                 Some((pedal_id, knob, val))
             } else {
-                eprintln!("Warning: board knob override must use 'pedal_id.Knob=value' format, got: {a}");
+                eprintln!(
+                    "Warning: board knob override must use 'pedal_id.Knob=value' format, got: {a}"
+                );
                 None
             }
         })
@@ -140,13 +138,11 @@ fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &
     );
 
     // Build pedalboard processor
-    let mut proc =
-        PedalboardProcessor::from_board(&board, board_dir, sample_rate as f64).unwrap_or_else(
-            |e| {
-                eprintln!("Board compilation error: {e}");
-                process::exit(1);
-            },
-        );
+    let mut proc = PedalboardProcessor::from_board(&board, board_dir, sample_rate as f64)
+        .unwrap_or_else(|e| {
+            eprintln!("Board compilation error: {e}");
+            process::exit(1);
+        });
 
     // Apply CLI knob overrides using the "idx:label" control routing
     for (pedal_id, knob, val) in &overrides {
@@ -155,7 +151,11 @@ fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &
         } else {
             eprintln!(
                 "Warning: unknown pedal id '{pedal_id}', available: {:?}",
-                board.pedals.iter().map(|p| p.id.as_str()).collect::<Vec<_>>()
+                board
+                    .pedals
+                    .iter()
+                    .map(|p| p.id.as_str())
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -169,11 +169,7 @@ fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &
     for entry in &board.pedals {
         eprintln!("  [{}] {}", entry.id, entry.path);
     }
-    eprintln!(
-        "Output: {} ({} samples)",
-        output_path,
-        output_samples.len()
-    );
+    eprintln!("Output: {} ({} samples)", output_path, output_samples.len());
 }
 
 fn write_wav(output_path: &str, sample_rate: u32, samples: &[f64]) {

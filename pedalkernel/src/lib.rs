@@ -261,10 +261,8 @@ mod jack_engine {
             client: Client,
             mut processor: P,
             controls: Arc<SharedControls>,
-        ) -> Result<
-            (jack::AsyncClient<(), JackProcessorLive<P>>, String, String),
-            jack::Error,
-        > {
+        ) -> Result<(jack::AsyncClient<(), JackProcessorLive<P>>, String, String), jack::Error>
+        {
             processor.set_sample_rate(client.sample_rate() as f64);
 
             let in_port = client.register_port("in", AudioIn)?;

@@ -1188,7 +1188,10 @@ pub struct VoltageWarning {
 pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<VoltageWarning> {
     let mut warnings = Vec::new();
 
-    let has_germanium_transistor = pedal.components.iter().any(|c| c.kind == ComponentKind::Pnp);
+    let has_germanium_transistor = pedal
+        .components
+        .iter()
+        .any(|c| c.kind == ComponentKind::Pnp);
     // Heuristic: PNP transistors in a circuit with "fuzz" controls are likely
     // germanium (AC128, OC44, etc.) with lower voltage tolerance.
     let likely_germanium_fuzz = has_germanium_transistor
@@ -1270,7 +1273,9 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                             severity: WarningSeverity::Caution,
                             message: format!(
                                 "Electrolytic cap {} ({:.0}µF) — ensure voltage rating ≥ {:.0}V",
-                                comp.id, farads * 1e6, voltage
+                                comp.id,
+                                farads * 1e6,
+                                voltage
                             ),
                         });
                     }
@@ -1986,10 +1991,7 @@ mod tests {
             let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
             proc.set_supply_voltage(12.0);
             let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
-            assert!(
-                output.iter().all(|x| x.is_finite()),
-                "{f} at 12V: NaN/inf"
-            );
+            assert!(output.iter().all(|x| x.is_finite()), "{f} at 12V: NaN/inf");
             let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
             assert!(peak < 7.0, "{f} at 12V: output too loud, peak={peak}");
             assert!(peak > 0.001, "{f} at 12V: silent, peak={peak}");
@@ -2009,13 +2011,11 @@ mod tests {
         proc_9v.set_supply_voltage(9.0);
         let out_9v: Vec<f64> = input.iter().map(|&s| proc_9v.process(s)).collect();
 
-        let diff_rms = rms(
-            &out_default
-                .iter()
-                .zip(&out_9v)
-                .map(|(a, b)| a - b)
-                .collect::<Vec<_>>(),
-        );
+        let diff_rms = rms(&out_default
+            .iter()
+            .zip(&out_9v)
+            .map(|(a, b)| a - b)
+            .collect::<Vec<_>>());
         assert!(
             diff_rms < 1e-10,
             "Compiled 9V should match default: diff_rms={diff_rms}"
@@ -2131,10 +2131,7 @@ mod tests {
             .iter()
             .filter(|w| w.severity == WarningSeverity::Danger)
             .collect();
-        assert!(
-            !danger.is_empty(),
-            "Ge transistors at 20V should be Danger"
-        );
+        assert!(!danger.is_empty(), "Ge transistors at 20V should be Danger");
     }
 
     #[test]

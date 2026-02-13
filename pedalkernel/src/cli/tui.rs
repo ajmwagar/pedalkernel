@@ -73,8 +73,7 @@ impl PedalControlState {
             }
             PedalAction::PrevKnob => {
                 if !self.knobs.is_empty() {
-                    self.selected =
-                        (self.selected + self.knobs.len() - 1) % self.knobs.len();
+                    self.selected = (self.selected + self.knobs.len() - 1) % self.knobs.len();
                 }
             }
             PedalAction::Adjust(delta) => {
@@ -109,9 +108,8 @@ fn run_pedal_control(
     connect_from: &str,
     connect_to: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut proc =
-        compile_pedal(pedal, client.sample_rate() as f64)
-            .map_err(|e| format!("Compilation error: {e}"))?;
+    let mut proc = compile_pedal(pedal, client.sample_rate() as f64)
+        .map_err(|e| format!("Compilation error: {e}"))?;
 
     // Apply default control values
     for c in &pedal.controls {
@@ -119,8 +117,7 @@ fn run_pedal_control(
     }
 
     let controls = Arc::new(SharedControls::new());
-    let (async_client, our_in, our_out) =
-        AudioEngine::start(client, proc, controls.clone())?;
+    let (async_client, our_in, our_out) = AudioEngine::start(client, proc, controls.clone())?;
 
     // Connect selected ports
     async_client
@@ -189,8 +186,8 @@ fn draw_pedal_control(frame: &mut Frame, state: &PedalControlState) {
     frame.render_widget(outer, area);
 
     if state.knobs.is_empty() {
-        let msg = Paragraph::new("No controls defined for this pedal.")
-            .alignment(Alignment::Center);
+        let msg =
+            Paragraph::new("No controls defined for this pedal.").alignment(Alignment::Center);
         frame.render_widget(msg, inner);
         return;
     }
@@ -299,8 +296,7 @@ pub fn run(pedal_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
 
     if output_ports.is_empty() {
         return Err(
-            "No JACK output destinations found. Is JACK running with audio hardware?"
-                .into(),
+            "No JACK output destinations found. Is JACK running with audio hardware?".into(),
         );
     }
 
@@ -327,9 +323,8 @@ pub fn run(pedal_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
             .unwrap_or(wav_path);
         let input_label = format!("WAV: {} (looping)", wav_filename);
 
-        let mut proc =
-            compile_pedal(&pedal, client.sample_rate() as f64)
-                .map_err(|e| format!("Compilation error: {e}"))?;
+        let mut proc = compile_pedal(&pedal, client.sample_rate() as f64)
+            .map_err(|e| format!("Compilation error: {e}"))?;
         for c in &pedal.controls {
             proc.set_control(&c.label, c.default);
         }

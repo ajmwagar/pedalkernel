@@ -910,10 +910,7 @@ mod tests {
         let p = peak(&output);
         assert!(p < 3.0, "12V output should be bounded: peak={p:.4}");
         assert!(p > 0.1, "12V output should not be silent: peak={p:.4}");
-        assert!(
-            output.iter().all(|x| x.is_finite()),
-            "no NaN/inf at 12V"
-        );
+        assert!(output.iter().all(|x| x.is_finite()), "no NaN/inf at 12V");
     }
 
     #[test]
@@ -1041,10 +1038,7 @@ mod tests {
             od.set_gain(g);
             od.set_level(1.0);
             let output = process_buf(&mut od, &input);
-            assert!(
-                output.iter().all(|x| x.is_finite()),
-                "NaN at 12V gain={g}"
-            );
+            assert!(output.iter().all(|x| x.is_finite()), "NaN at 12V gain={g}");
         }
     }
 }

@@ -167,12 +167,8 @@ pub fn parse_pedalhw(input: &str) -> Result<HardwareLimits, String> {
     let mut remaining = input;
     let mut specs: HashMap<String, HardwareSpec> = HashMap::new();
 
-    loop {
-        // Skip whitespace and comments.
-        match ws_comments(remaining) {
-            Ok((r, _)) => remaining = r,
-            Err(_) => break,
-        }
+    while let Ok((r, _)) = ws_comments(remaining) {
+        remaining = r;
         if remaining.is_empty() {
             break;
         }
@@ -494,12 +490,36 @@ const RESISTORS: &[(f64, &str, &str)] = &[
     (22e3, "603-MFR-25FRF52-22K", "22k\u{2126} 1/4W Metal Film"),
     (33e3, "603-MFR-25FRF52-33K", "33k\u{2126} 1/4W Metal Film"),
     (47e3, "603-MFR-25FRF52-47K", "47k\u{2126} 1/4W Metal Film"),
-    (100e3, "603-MFR-25FRF52-100K", "100k\u{2126} 1/4W Metal Film"),
-    (150e3, "603-MFR-25FRF52-150K", "150k\u{2126} 1/4W Metal Film"),
-    (422e3, "603-MFR-25FRF52-422K", "422k\u{2126} 1/4W Metal Film"),
-    (470e3, "603-MFR-25FRF52-470K", "470k\u{2126} 1/4W Metal Film"),
-    (500e3, "603-MFR-25FRF52-500K", "500k\u{2126} 1/4W Metal Film"),
-    (560e3, "603-MFR-25FRF52-560K", "560k\u{2126} 1/4W Metal Film"),
+    (
+        100e3,
+        "603-MFR-25FRF52-100K",
+        "100k\u{2126} 1/4W Metal Film",
+    ),
+    (
+        150e3,
+        "603-MFR-25FRF52-150K",
+        "150k\u{2126} 1/4W Metal Film",
+    ),
+    (
+        422e3,
+        "603-MFR-25FRF52-422K",
+        "422k\u{2126} 1/4W Metal Film",
+    ),
+    (
+        470e3,
+        "603-MFR-25FRF52-470K",
+        "470k\u{2126} 1/4W Metal Film",
+    ),
+    (
+        500e3,
+        "603-MFR-25FRF52-500K",
+        "500k\u{2126} 1/4W Metal Film",
+    ),
+    (
+        560e3,
+        "603-MFR-25FRF52-560K",
+        "560k\u{2126} 1/4W Metal Film",
+    ),
     (1e6, "603-MFR-25FRF52-1M", "1M\u{2126} 1/4W Metal Film"),
 ];
 
@@ -518,9 +538,24 @@ const CAPACITORS: &[(f64, &str, &str, f64)] = &[
     (100e-9, "5-MKS2D041001A00JSSD", "100nF WIMA Film", 100.0),
     (220e-9, "5-MKS2D042201A00JSSD", "220nF WIMA Film", 100.0),
     (1e-6, "647-UPW1H010MDD6", "1\u{b5}F 50V Electrolytic", 50.0),
-    (2.2e-6, "647-UPW1H2R2MDD6", "2.2\u{b5}F 50V Electrolytic", 50.0),
-    (10e-6, "647-UPW1H100MDD6", "10\u{b5}F 50V Electrolytic", 50.0),
-    (100e-6, "647-UPW1H101MED6", "100\u{b5}F 50V Electrolytic", 50.0),
+    (
+        2.2e-6,
+        "647-UPW1H2R2MDD6",
+        "2.2\u{b5}F 50V Electrolytic",
+        50.0,
+    ),
+    (
+        10e-6,
+        "647-UPW1H100MDD6",
+        "10\u{b5}F 50V Electrolytic",
+        50.0,
+    ),
+    (
+        100e-6,
+        "647-UPW1H101MED6",
+        "100\u{b5}F 50V Electrolytic",
+        50.0,
+    ),
 ];
 
 /// Potentiometers — Alpha 16mm single-gang.
@@ -711,7 +746,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     } else if let Some((pn, desc)) = find_closest(RESISTORS, *val) {
                         (Some(pn.to_string()), desc.to_string())
                     } else {
-                        (None, format!("{} Resistor", crate::kicad::format_eng(*val, "\u{2126}")))
+                        (
+                            None,
+                            format!("{} Resistor", crate::kicad::format_eng(*val, "\u{2126}")),
+                        )
                     };
                     BomEntry {
                         reference: comp.id.clone(),
@@ -728,7 +766,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     } else if let Some((cpn, cdesc, _)) = find_closest_cap(*val) {
                         (Some(cpn.to_string()), cdesc.to_string())
                     } else {
-                        (None, format!("{} Capacitor", crate::kicad::format_eng(*val, "F")))
+                        (
+                            None,
+                            format!("{} Capacitor", crate::kicad::format_eng(*val, "F")),
+                        )
                     };
                     BomEntry {
                         reference: comp.id.clone(),
@@ -753,7 +794,13 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     } else if let Some((ppn, pdesc)) = find_closest(POTS, *val) {
                         (Some(ppn.to_string()), pdesc.to_string())
                     } else {
-                        (None, format!("{} Potentiometer", crate::kicad::format_eng(*val, "\u{2126}")))
+                        (
+                            None,
+                            format!(
+                                "{} Potentiometer",
+                                crate::kicad::format_eng(*val, "\u{2126}")
+                            ),
+                        )
                     };
                     BomEntry {
                         reference: comp.id.clone(),
@@ -1063,10 +1110,7 @@ R1: power_rating(0.25)
         let pedal = fuzz_face_pedal();
         let limits = parse_pedalhw("C2: voltage_rating(25)").unwrap();
         let warnings = check_voltage_with_specs(&pedal, 12.0, &limits);
-        let c2_warns: Vec<_> = warnings
-            .iter()
-            .filter(|w| w.component_id == "C2")
-            .collect();
+        let c2_warns: Vec<_> = warnings.iter().filter(|w| w.component_id == "C2").collect();
         assert!(c2_warns.is_empty(), "25V cap at 12V should be fine");
     }
 
@@ -1093,22 +1137,13 @@ R1: power_rating(0.25)
         let pedal = fuzz_face_pedal();
         let limits = parse_pedalhw("Q1: vce_max(32)").unwrap();
         let warnings = check_voltage_with_specs(&pedal, 15.0, &limits);
-        let q2_warns: Vec<_> = warnings
-            .iter()
-            .filter(|w| w.component_id == "Q2")
-            .collect();
+        let q2_warns: Vec<_> = warnings.iter().filter(|w| w.component_id == "Q2").collect();
         assert!(
             !q2_warns.is_empty(),
             "Unspec'd Q2 should get heuristic warning at 15V"
         );
-        let q1_warns: Vec<_> = warnings
-            .iter()
-            .filter(|w| w.component_id == "Q1")
-            .collect();
-        assert!(
-            q1_warns.is_empty(),
-            "Spec'd Q1 (32V) should be fine at 15V"
-        );
+        let q1_warns: Vec<_> = warnings.iter().filter(|w| w.component_id == "Q1").collect();
+        assert!(q1_warns.is_empty(), "Spec'd Q1 (32V) should be fine at 15V");
     }
 
     #[test]
@@ -1156,10 +1191,7 @@ pedal "Test" {
         let pedal = crate::dsl::parse_pedal_file(src).unwrap();
         let limits = parse_pedalhw("R1: power_rating(0.01)").unwrap();
         let warnings = check_voltage_with_specs(&pedal, 18.0, &limits);
-        let r1_warns: Vec<_> = warnings
-            .iter()
-            .filter(|w| w.component_id == "R1")
-            .collect();
+        let r1_warns: Vec<_> = warnings.iter().filter(|w| w.component_id == "R1").collect();
         // P = 18²/100 = 3.24W >> 0.01W
         assert!(!r1_warns.is_empty(), "Should warn about power dissipation");
     }
@@ -1188,7 +1220,7 @@ pedal "Test" {
         let pedal = tube_screamer_pedal();
         let bom = build_bom(&pedal, None);
         assert_eq!(bom.len(), 4); // Drive pot, C1, D1, Level pot
-        // All should have a Mouser P/N from the curated DB.
+                                  // All should have a Mouser P/N from the curated DB.
         for entry in &bom {
             assert!(
                 entry.mouser_pn.is_some(),
@@ -1283,10 +1315,7 @@ pedal "Test" {
             let src = std::fs::read_to_string(format!("examples/{f}")).unwrap();
             let pedal = crate::dsl::parse_pedal_file(&src).unwrap();
             let bom = build_bom(&pedal, None);
-            assert!(
-                !bom.is_empty(),
-                "{f} should produce a non-empty BOM"
-            );
+            assert!(!bom.is_empty(), "{f} should produce a non-empty BOM");
             // Every entry should have a non-empty description.
             for entry in &bom {
                 assert!(

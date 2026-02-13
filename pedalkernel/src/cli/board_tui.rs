@@ -123,8 +123,8 @@ impl BoardControlState {
                 if self.view_mode == ViewMode::Detail {
                     if let Some(panel) = self.pedals.get(self.focused_pedal) {
                         if !panel.knobs.is_empty() {
-                            self.focused_knob = (self.focused_knob + panel.knobs.len() - 1)
-                                % panel.knobs.len();
+                            self.focused_knob =
+                                (self.focused_knob + panel.knobs.len() - 1) % panel.knobs.len();
                         }
                     }
                 }
@@ -134,11 +134,10 @@ impl BoardControlState {
                     // In overview, left/right navigate pedals
                     if !self.pedals.is_empty() {
                         if delta < 0.0 {
-                            self.focused_pedal = (self.focused_pedal + self.pedals.len() - 1)
-                                % self.pedals.len();
-                        } else {
                             self.focused_pedal =
-                                (self.focused_pedal + 1) % self.pedals.len();
+                                (self.focused_pedal + self.pedals.len() - 1) % self.pedals.len();
+                        } else {
+                            self.focused_pedal = (self.focused_pedal + 1) % self.pedals.len();
                         }
                         self.focused_knob = 0;
                     }
@@ -147,8 +146,7 @@ impl BoardControlState {
                     if let Some(panel) = self.pedals.get_mut(pidx) {
                         if let Some(k) = panel.knobs.get_mut(self.focused_knob) {
                             let span = k.range.1 - k.range.0;
-                            k.value =
-                                (k.value + delta * span).clamp(k.range.0, k.range.1);
+                            k.value = (k.value + delta * span).clamp(k.range.0, k.range.1);
                             self.controls
                                 .set_control(&format!("{pidx}:{}", k.label), k.value);
                         }
@@ -231,8 +229,7 @@ pub(crate) fn draw_board_control(frame: &mut Frame, state: &BoardControlState) {
     frame.render_widget(outer, area);
 
     if state.pedals.is_empty() {
-        let msg =
-            Paragraph::new("No pedals in this board.").alignment(Alignment::Center);
+        let msg = Paragraph::new("No pedals in this board.").alignment(Alignment::Center);
         frame.render_widget(msg, inner);
         return;
     }
@@ -261,8 +258,7 @@ pub(crate) fn draw_board_overview(frame: &mut Frame, state: &BoardControlState, 
 
     // Pedal cards — split horizontally
     let n = state.pedals.len();
-    let h_constraints: Vec<Constraint> =
-        (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+    let h_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
     let card_cols = Layout::horizontal(&h_constraints).split(v_chunks[2]);
 
     for (i, panel) in state.pedals.iter().enumerate() {
@@ -290,7 +286,12 @@ pub(crate) fn draw_board_overview(frame: &mut Frame, state: &BoardControlState, 
 }
 
 /// Render a single mini pedal card within its allocated rect.
-pub(crate) fn render_mini_pedal(frame: &mut Frame, area: Rect, panel: &PedalPanel, is_focused: bool) {
+pub(crate) fn render_mini_pedal(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &PedalPanel,
+    is_focused: bool,
+) {
     let (border_style, title_style) = if is_focused {
         (
             Style::default()
@@ -348,7 +349,14 @@ pub(crate) fn render_mini_pedal(frame: &mut Frame, area: Rect, panel: &PedalPane
 
     // Render mini knobs (no selection highlight in overview)
     if !panel.knobs.is_empty() {
-        render_mini_knobs(frame, &panel.knobs, card_chunks[0], card_chunks[1], card_chunks[2], panel.bypassed);
+        render_mini_knobs(
+            frame,
+            &panel.knobs,
+            card_chunks[0],
+            card_chunks[1],
+            card_chunks[2],
+            panel.bypassed,
+        );
     }
 
     // Footswitch
@@ -370,8 +378,7 @@ fn render_mini_knobs(
     if n == 0 {
         return;
     }
-    let h_constraints: Vec<Constraint> =
-        (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+    let h_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
     let knob_cols = Layout::horizontal(&h_constraints).split(knob_area);
     let label_cols = Layout::horizontal(&h_constraints).split(label_area);
     let value_cols = Layout::horizontal(&h_constraints).split(value_area);
@@ -516,14 +523,16 @@ pub(crate) fn render_io_bar(frame: &mut Frame, area: Rect, input_port: &str, out
 }
 
 /// Render the chain bar: [TUBE SCREAMER] → [BLUES DRIVER] → ...
-pub(crate) fn render_chain_bar(frame: &mut Frame, area: Rect, pedals: &[PedalPanel], focused: usize) {
+pub(crate) fn render_chain_bar(
+    frame: &mut Frame,
+    area: Rect,
+    pedals: &[PedalPanel],
+    focused: usize,
+) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, panel) in pedals.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(
-                " → ",
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
         }
         let name = panel.name.to_uppercase();
         let style = if i == focused {
@@ -587,8 +596,7 @@ fn run_board_control(
     connect_to: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let controls = Arc::new(SharedControls::new());
-    let (async_client, our_in, our_out) =
-        AudioEngine::start(client, processor, controls.clone())?;
+    let (async_client, our_in, our_out) = AudioEngine::start(client, processor, controls.clone())?;
 
     // Connect selected ports
     async_client
@@ -707,9 +715,8 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
 
         let panel = match std::fs::read_to_string(&pedal_path)
             .map_err(|e| e.to_string())
-            .and_then(|src| {
-                pedalkernel::dsl::parse_pedal_file(&src).map_err(|e| e.to_string())
-            }) {
+            .and_then(|src| pedalkernel::dsl::parse_pedal_file(&src).map_err(|e| e.to_string()))
+        {
             Ok(pedal_def) => {
                 let knobs: Vec<KnobState> = pedal_def
                     .controls
@@ -774,8 +781,7 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
 
     if output_ports.is_empty() {
         return Err(
-            "No JACK output destinations found. Is JACK running with audio hardware?"
-                .into(),
+            "No JACK output destinations found. Is JACK running with audio hardware?".into(),
         );
     }
 

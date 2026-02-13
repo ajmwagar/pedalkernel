@@ -27,62 +27,14 @@ pub struct KnobState {
 }
 
 pub const KNOB_FRAMES: [&[&str; 5]; 8] = [
-    &[
-        " ╭───╮ ",
-        "╱     ╲",
-        "│      │",
-        "╲/    ╱",
-        " ╰───╯ ",
-    ],
-    &[
-        " ╭───╮ ",
-        "╱     ╲",
-        "│-     │",
-        "╲     ╱",
-        " ╰───╯ ",
-    ],
-    &[
-        " ╭───╮ ",
-        "╱     ╲",
-        "│─     │",
-        "╲     ╱",
-        " ╰───╯ ",
-    ],
-    &[
-        " ╭───╮ ",
-        "╱/    ╲",
-        "│      │",
-        "╲     ╱",
-        " ╰───╯ ",
-    ],
-    &[
-        " ╭───╮ ",
-        "╱  |  ╲",
-        "│  |   │",
-        "╲     ╱",
-        " ╰───╯ ",
-    ],
-    &[
-        " ╭───╮ ",
-        "╱    ╲╲",
-        "│      │",
-        "╲     ╱",
-        " ╰───╯ ",
-    ],
-    &[
-        " ╭───╮ ",
-        "╱     ╲",
-        "│     ─│",
-        "╲     ╱",
-        " ╰───╯ ",
-    ],
-    &[
-        " ╭───╮ ",
-        "╱     ╲",
-        "│      │",
-        "╲    \\╱",
-        " ╰───╯ ",
-    ],
+    &[" ╭───╮ ", "╱     ╲", "│      │", "╲/    ╱", " ╰───╯ "],
+    &[" ╭───╮ ", "╱     ╲", "│-     │", "╲     ╱", " ╰───╯ "],
+    &[" ╭───╮ ", "╱     ╲", "│─     │", "╲     ╱", " ╰───╯ "],
+    &[" ╭───╮ ", "╱/    ╲", "│      │", "╲     ╱", " ╰───╯ "],
+    &[" ╭───╮ ", "╱  |  ╲", "│  |   │", "╲     ╱", " ╰───╯ "],
+    &[" ╭───╮ ", "╱    ╲╲", "│      │", "╲     ╱", " ╰───╯ "],
+    &[" ╭───╮ ", "╱     ╲", "│     ─│", "╲     ╱", " ╰───╯ "],
+    &[" ╭───╮ ", "╱     ╲", "│      │", "╲    \\╱", " ╰───╯ "],
 ];
 
 pub fn knob_frame_index(value: f64, range: (f64, f64)) -> usize {
@@ -108,8 +60,7 @@ pub fn render_knob_row(
     if n == 0 {
         return;
     }
-    let h_constraints: Vec<Constraint> =
-        (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+    let h_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
     let knob_cols = Layout::horizontal(&h_constraints).split(knob_area);
     let label_cols = Layout::horizontal(&h_constraints).split(label_area);
     let value_cols = Layout::horizontal(&h_constraints).split(value_area);
@@ -139,13 +90,11 @@ pub fn render_knob_row(
         } else {
             knob.label.clone()
         };
-        let label =
-            Paragraph::new(Span::styled(label_text, style)).alignment(Alignment::Center);
+        let label = Paragraph::new(Span::styled(label_text, style)).alignment(Alignment::Center);
         frame.render_widget(label, label_cols[i]);
 
         let val_text = format!("{:.2}", knob.value);
-        let val =
-            Paragraph::new(Span::styled(val_text, style)).alignment(Alignment::Center);
+        let val = Paragraph::new(Span::styled(val_text, style)).alignment(Alignment::Center);
         frame.render_widget(val, value_cols[i]);
     }
 }
@@ -286,14 +235,8 @@ pub fn run_port_select(
                     KeyCode::Down => state.cursor_down(),
                     KeyCode::Tab | KeyCode::BackTab => state.toggle_panel(),
                     KeyCode::Enter => {
-                        let input = state
-                            .selected_input()
-                            .unwrap_or_default()
-                            .to_string();
-                        let output = state
-                            .selected_output()
-                            .unwrap_or_default()
-                            .to_string();
+                        let input = state.selected_input().unwrap_or_default().to_string();
+                        let output = state.selected_output().unwrap_or_default().to_string();
                         if !input.is_empty() && !output.is_empty() {
                             return Ok(PortSelectResult::Selected { input, output });
                         }
@@ -337,9 +280,8 @@ pub fn draw_port_select(frame: &mut Frame, state: &PortSelectState, title: &str)
     .split(inner);
 
     // Column headers
-    let h_cols =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(v_chunks[1]);
+    let h_cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(v_chunks[1]);
 
     let input_style = if state.active_panel == PortPanel::Input {
         Style::default()
@@ -366,9 +308,8 @@ pub fn draw_port_select(frame: &mut Frame, state: &PortSelectState, title: &str)
     );
 
     // Port lists
-    let list_cols =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(v_chunks[2]);
+    let list_cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(v_chunks[2]);
 
     draw_port_list(
         frame,
