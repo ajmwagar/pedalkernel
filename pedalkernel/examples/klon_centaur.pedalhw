@@ -1,0 +1,12 @@
+# Klon Centaur — hardware component specs for physical build validation
+#
+# The Klon uses dual TL072 opamps (±18V max = 36V total) and
+# germanium diodes (1N34A) in the feedback loop.  The 1µF output
+# coupling cap is often a film cap rated 50V, but cheap builds
+# sometimes use a 16V electrolytic.
+
+U1: supply_max(36) part("TL072")
+U2: supply_max(36) part("TL072")
+D1: breakdown(50) part("1N34A")
+C1: voltage_rating(50) part("100nF film")
+C4: voltage_rating(50) part("1uF film")

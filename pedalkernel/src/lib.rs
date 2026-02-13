@@ -14,6 +14,8 @@ pub mod board;
 pub mod compiler;
 pub mod dsl;
 pub mod elements;
+#[cfg(feature = "hardware")]
+pub mod hw;
 pub mod kicad;
 pub mod pedalboard;
 pub mod pedals;

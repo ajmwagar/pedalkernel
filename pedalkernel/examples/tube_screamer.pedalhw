@@ -1,0 +1,9 @@
+# Tube Screamer TS-808 — hardware component specs
+#
+# The TS circuit is simple and voltage-tolerant.  The clipping diodes
+# are 1N4148 (100V breakdown), the cap is a 47nF film cap, and the
+# pot/resistor are standard.  This file mostly serves as documentation
+# — nothing here should warn below 24V.
+
+D1: breakdown(100) part("1N4148")
+C1: voltage_rating(50) part("47nF film")

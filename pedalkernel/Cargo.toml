@@ -15,6 +15,7 @@ default = ["jack-rt", "tui", "cli"]
 jack-rt = ["jack"]
 tui = ["dep:ratatui", "dep:crossterm"]
 cli = ["dep:clap"]
+hardware = []
 
 [dependencies]
 # DSL parser
