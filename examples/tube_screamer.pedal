@@ -1,21 +1,24 @@
-# Tube Screamer TS-808 style overdrive
-# Simplified clipping stage: input cap -> feedback network with diode pair
+# Tube Screamer TS-808 clipping stage
+# WDF topology: series(Vs, parallel(R_drive, C)) → diode_pair_root
+#
+# Drive knob varies the feedback resistance (lower R = more clipping).
+# Level knob attenuates the output.
 
 pedal "Tube Screamer" {
   components {
-    R1: resistor(4.7k)
-    C1: cap(220n)
-    D1: diode_pair(silicon)
-    Gain: pot(500k)
+    Drive: pot(4.7k)         # variable feedback resistor (base 4.7 kΩ)
+    C1: cap(47n)             # feedback capacitor (47 nF)
+    D1: diode_pair(silicon)  # symmetric silicon clipping diodes
+    Level: pot(100k)         # output volume
   }
   nets {
-    in -> C1.a
-    C1.b -> R1.a, D1.a
-    D1.b -> gnd
-    R1.b -> Gain.a
-    Gain.b -> out
+    in -> Drive.a, C1.a                # input feeds parallel R||C
+    Drive.b -> C1.b, D1.a, Level.a     # junction: diode clip + output tap
+    D1.b -> gnd                        # diodes to ground
+    Level.b -> out                     # output
   }
   controls {
-    Gain.position -> "Drive" [0.0, 1.0] = 0.5
+    Drive.position -> "Drive" [0.0, 1.0] = 0.5
+    Level.position -> "Level" [0.0, 1.0] = 0.8
   }
 }

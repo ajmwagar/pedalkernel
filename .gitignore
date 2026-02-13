@@ -7,5 +7,7 @@ Cargo.lock
 .vscode/
 .idea/
 *.wav
+!examples/wav/**/*.wav
 *.mp3
 *.ogg
+/output/

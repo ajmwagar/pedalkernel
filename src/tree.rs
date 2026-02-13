@@ -237,10 +237,10 @@ impl WdfClipper {
         self.resistor.set_incident(a_r);
         self.capacitor.set_incident(a_c);
 
-        // Output = voltage across the diode pair = (a_root + b_ser) / 2
-        // But we can also read the voltage at the parallel junction:
-        //   v_out = (a_par + b_par) / 2
-        (a_par + b_par) / 2.0
+        // Output = voltage across the diode pair (the clipped signal).
+        // This is naturally bounded by the diode forward voltage (~±0.7V
+        // for silicon), producing the characteristic soft-clipping curve.
+        (a_root + b_ser) / 2.0
     }
 
     /// Update port resistances after sample rate change.
@@ -312,7 +312,8 @@ impl WdfSingleDiodeClipper {
         self.resistor.set_incident(a_r);
         self.capacitor.set_incident(a_c);
 
-        (a_par + b_par) / 2.0
+        // Output = voltage across the single diode (asymmetric clipping).
+        (a_root + b_ser) / 2.0
     }
 
     pub fn set_sample_rate(&mut self, fs: f64) {

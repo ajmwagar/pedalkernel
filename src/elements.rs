@@ -184,7 +184,7 @@ pub struct DiodePairRoot {
 
 impl DiodePairRoot {
     pub fn new(model: DiodeModel) -> Self {
-        Self { model, max_iter: 8 }
+        Self { model, max_iter: 16 }
     }
 
     /// Compute reflected wave from incident wave `a` and port resistance `rp`.
@@ -200,11 +200,22 @@ impl DiodePairRoot {
     pub fn process(&self, a: f64, rp: f64) -> f64 {
         let is = self.model.is;
         let nvt = self.model.n_vt;
-        let mut v = 0.0_f64;
+
+        // Initial guess: for large |a| the diode is saturated and we can
+        // estimate v from the Shockley equation in the forward-bias regime
+        // (2*Rp*Is*exp(|v|/nVt) ≈ |a|).  For small |a| the linear
+        // approximation v ≈ a/2 is accurate.
+        let mut v = if a.abs() > 10.0 * nvt {
+            let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
+            nvt * log_arg.ln() * a.signum()
+        } else {
+            a * 0.5
+        };
 
         for _ in 0..self.max_iter {
-            let ev_pos = (v / nvt).exp();
-            let ev_neg = (-v / nvt).exp();
+            let x = (v / nvt).clamp(-500.0, 500.0);
+            let ev_pos = x.exp();
+            let ev_neg = (-x).exp();
             let sinh_term = is * (ev_pos - ev_neg);
             let cosh_term = is * (ev_pos + ev_neg) / nvt;
 
@@ -234,7 +245,7 @@ pub struct DiodeRoot {
 
 impl DiodeRoot {
     pub fn new(model: DiodeModel) -> Self {
-        Self { model, max_iter: 8 }
+        Self { model, max_iter: 16 }
     }
 
     /// `f(v) = a - 2v - 2*Rp*Is*(exp(v/nVt) - 1)`
@@ -242,10 +253,18 @@ impl DiodeRoot {
     pub fn process(&self, a: f64, rp: f64) -> f64 {
         let is = self.model.is;
         let nvt = self.model.n_vt;
-        let mut v = 0.0_f64;
+
+        // Same analytical initial guess as DiodePairRoot.
+        let mut v = if a.abs() > 10.0 * nvt {
+            let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
+            nvt * log_arg.ln() * a.signum()
+        } else {
+            a * 0.5
+        };
 
         for _ in 0..self.max_iter {
-            let ev = (v / nvt).exp();
+            let x = (v / nvt).clamp(-500.0, 500.0);
+            let ev = x.exp();
             let i_d = is * (ev - 1.0);
             let di_d = is * ev / nvt;
 
@@ -326,8 +345,22 @@ mod tests {
         let dp = DiodePairRoot::new(DiodeModel::silicon());
         let b_small = dp.process(0.01, 1000.0);
         let b_large = dp.process(10.0, 1000.0);
-        // Large input should be clipped relative to small
-        assert!(b_large.abs() / 10.0 < b_small.abs() / 0.01 + 0.1);
+        // The diode voltage v = (a + b) / 2 is what gets clipped.
+        let v_small = (0.01 + b_small) / 2.0;
+        let v_large = (10.0 + b_large) / 2.0;
+        // Diode voltage should be bounded (silicon: < 2V regardless of input).
+        assert!(
+            v_large.abs() < 2.0,
+            "diode voltage should be bounded: {v_large}"
+        );
+        // Relative clipping: v/a ratio should shrink for larger inputs.
+        assert!(
+            v_large.abs() / 10.0 < v_small.abs() / 0.01,
+            "large input should be clipped harder: \
+             v_small/a_small={:.4}, v_large/a_large={:.4}",
+            v_small.abs() / 0.01,
+            v_large.abs() / 10.0,
+        );
     }
 
     #[test]

@@ -206,6 +206,9 @@ cargo run --example parse_pedal -- examples/big_muff.pedal
 
 # Compare silicon/germanium/LED diode models
 cargo run --example direct_wdf
+
+# Interactive TUI pedal control surface
+cargo run --example tui --features tui -- examples/tube_screamer.pedal
 ```
 
 ---
@@ -218,6 +221,7 @@ cargo run --example direct_wdf
 - **KiCad Export** — generate netlists from the same `.pedal` file for PCB prototyping
 - **WAV Output** — offline rendering via `hound` for tone prototyping without a running audio server
 - **Pedal Library** — ready-to-use Overdrive, Fuzz Face, and Delay implementations
+- **TUI Control Surface** — interactive ASCII pedal with rotary knobs via `ratatui` (optional `tui` feature)
 
 ### Built-in Pedals
 
@@ -226,6 +230,42 @@ cargo run --example direct_wdf
 | **Overdrive** | Tube Screamer-style WDF diode-pair clipping | Working |
 | **FuzzFace** | Germanium single-diode asymmetric clipping | Working |
 | **Delay** | Digital delay line with feedback | Working |
+
+---
+
+## TUI Control Surface
+
+Visualize and tweak any `.pedal` file as an interactive ASCII pedal — like staring down at a real pedalboard in your terminal.
+
+```bash
+cargo run --example tui --features tui -- examples/tube_screamer.pedal
+```
+
+```
+╔══════════════════════════════════════╗
+║          TUBE SCREAMER               ║
+║                                      ║
+║      ╭───╮          ╭───╮           ║
+║     ╱  |  ╲        ╱     ╲          ║
+║    │   |   │      │     \ │          ║
+║     ╲     ╱        ╲     ╱          ║
+║      ╰───╯          ╰───╯           ║
+║    >>Drive<<         Level           ║
+║       0.50           0.80            ║
+║                                      ║
+║            ╭──────────╮              ║
+║            │  ACTIVE  │              ║
+║            ╰──────────╯              ║
+║                                      ║
+║  ←→ adjust  ↑↓ fine  Tab next  Q quit║
+╚══════════════════════════════════════╝
+```
+
+**Controls:** `←→` coarse adjust, `↑↓` fine adjust, `Tab`/`Shift+Tab` cycle knobs, `R` reset to default, `Space` toggle bypass, `Q` quit.
+
+Works with any pedal file — try `big_muff.pedal` for a 3-knob layout.
+
+<!-- TODO: Add asciinema recording or VHS gif (https://github.com/charmbracelet/vhs) -->
 
 ---
 

@@ -13,6 +13,7 @@ rust-version = "1.75"
 [features]
 default = []
 jack-rt = ["jack"]
+tui = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
 # DSL parser
@@ -21,6 +22,8 @@ nom = "7"
 # Audio I/O
 jack = { version = "0.11", optional = true }
 hound = "3.5"
+ratatui = { version = "0.29", optional = true, default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.28", optional = true }
 
 # Math
 num-complex = "0.4"
@@ -34,3 +37,10 @@ criterion = "0.5"
 [[bench]]
 name = "wdf_bench"
 harness = false
+
+[[example]]
+name = "tui"
+required-features = ["tui"]
+
+[[example]]
+name = "process"
