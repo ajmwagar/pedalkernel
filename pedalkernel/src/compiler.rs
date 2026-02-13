@@ -331,6 +331,9 @@ struct CircuitGraph {
     gnd_node: NodeId,
     /// Number of active elements found (opamps + transistors).
     num_active: usize,
+    /// Edge indices for virtual bridge edges through active elements.
+    /// These exist for BFS traversal but are not passive WDF tree elements.
+    active_edge_indices: Vec<usize>,
 }
 
 /// Simple union-find for grouping connected pins into circuit nodes.
@@ -433,6 +436,39 @@ impl CircuitGraph {
             }
         }
 
+        // Create virtual bridge edges for active elements (OpAmp, Npn, Pnp).
+        // This ensures BFS can traverse through them for distance computation
+        // and voltage source injection picks a proper connected node.
+        let mut active_edge_indices = Vec::new();
+        for comp in &pedal.components {
+            let pin_order: &[&str] = match &comp.kind {
+                ComponentKind::OpAmp => &["pos", "neg", "out"],
+                ComponentKind::Npn | ComponentKind::Pnp => &["base", "collector", "emitter"],
+                _ => continue,
+            };
+
+            // Collect resolved node IDs for each pin that exists in the netlist.
+            let mut pin_nodes: Vec<NodeId> = Vec::new();
+            for pin_name in pin_order {
+                let key = format!("{}.{}", comp.id, pin_name);
+                if let Some(&raw_id) = pin_ids.get(&key) {
+                    pin_nodes.push(uf.find(raw_id));
+                }
+            }
+
+            // Chain consecutive pin pairs as virtual bridge edges.
+            for pair in pin_nodes.windows(2) {
+                if pair[0] != pair[1] {
+                    active_edge_indices.push(edges.len());
+                    edges.push(GraphEdge {
+                        comp_idx: 0, // placeholder — active edges are excluded from WDF
+                        node_a: pair[0],
+                        node_b: pair[1],
+                    });
+                }
+            }
+        }
+
         let in_node = uf.find(*pin_ids.get("in").unwrap());
         let out_node = uf.find(*pin_ids.get("out").unwrap());
         let gnd_node = uf.find(*pin_ids.get("gnd").unwrap());
@@ -444,6 +480,7 @@ impl CircuitGraph {
             out_node,
             gnd_node,
             num_active,
+            active_edge_indices,
         }
     }
 
@@ -518,12 +555,15 @@ impl CircuitGraph {
 
     /// Collect edge indices of passive elements directly connected to a junction node,
     /// excluding diode edges and edges on the direct output path.
-    fn elements_at_junction(&self, junction: NodeId, diode_edge_indices: &[usize]) -> Vec<usize> {
+    fn elements_at_junction(&self, junction: NodeId, diode_edge_indices: &[usize], active_edge_indices: &[usize]) -> Vec<usize> {
         self.edges
             .iter()
             .enumerate()
             .filter(|(idx, e)| {
                 if diode_edge_indices.contains(idx) {
+                    return false;
+                }
+                if active_edge_indices.contains(idx) {
                     return false;
                 }
                 // Must touch the junction.
@@ -934,7 +974,7 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
 
     for (_edge_idx, diode_info) in &diodes {
         let junction = diode_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(junction, &diode_edge_indices);
+        let passive_idxs = graph.elements_at_junction(junction, &diode_edge_indices, &graph.active_edge_indices);
 
         if passive_idxs.is_empty() {
             continue;
@@ -975,7 +1015,7 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         let terminals = vec![source_node, junction];
         let sp_tree = match sp_reduce(sp_edges, &terminals) {
             Ok(t) => t,
-            Err(_) => continue, // Skip stages that can't be decomposed.
+            Err(_) => continue,
         };
 
         // Convert SP tree to dynamic WDF nodes.
