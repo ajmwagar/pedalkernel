@@ -57,6 +57,10 @@ mod jack_engine {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    /// Result of activating a JACK client: the async handle plus registered
+    /// input/output port names.
+    pub type ActiveJackClient<P> = (jack::AsyncClient<(), JackProcessorLive<P>>, String, String);
+
     /// JACK process handler wrapping a PedalProcessor.
     pub struct JackProcessor<P: PedalProcessor> {
         processor: P,
@@ -261,8 +265,7 @@ mod jack_engine {
             client: Client,
             mut processor: P,
             controls: Arc<SharedControls>,
-        ) -> Result<(jack::AsyncClient<(), JackProcessorLive<P>>, String, String), jack::Error>
-        {
+        ) -> Result<ActiveJackClient<P>, jack::Error> {
             processor.set_sample_rate(client.sample_rate() as f64);
 
             let in_port = client.register_port("in", AudioIn)?;
