@@ -22,6 +22,9 @@ pub struct Overdrive {
     pre_gain: f64,
     base_resistance: f64,
     sample_rate: f64,
+    /// Supply voltage in volts. Standard pedals use 9V; 12V or 18V gives more
+    /// headroom from the op-amp stage before diode clipping.
+    supply_voltage: f64,
 }
 
 impl Overdrive {
@@ -39,9 +42,14 @@ impl Overdrive {
             pre_gain: 1.0,
             base_resistance: base_r,
             sample_rate,
+            supply_voltage: 9.0,
         };
         od.set_gain(0.5);
         od
+    }
+
+    pub fn set_supply_voltage(&mut self, voltage: f64) {
+        self.supply_voltage = voltage.clamp(5.0, 24.0);
     }
 
     pub fn set_gain(&mut self, gain: f64) {
@@ -62,9 +70,12 @@ impl Overdrive {
 
 impl crate::PedalProcessor for Overdrive {
     fn process(&mut self, input: f64) -> f64 {
-        // The diode voltage output is naturally bounded by silicon
-        // forward voltage (~±0.7–1.0V), so no post-normalization needed.
-        self.clipper.process(input * self.pre_gain) * self.level
+        // Headroom factor models the op-amp supply rail.  At 9V the factor is
+        // 1.0 (baseline); at 12V it's ~1.33 — the op-amp can swing further
+        // before rail clipping, so more of the signal's dynamics reach the
+        // diode clipper and the output stage can swing higher.
+        let headroom = self.supply_voltage / 9.0;
+        self.clipper.process(input * self.pre_gain * headroom) * self.level * headroom
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
@@ -74,6 +85,10 @@ impl crate::PedalProcessor for Overdrive {
 
     fn reset(&mut self) {
         self.clipper.reset();
+    }
+
+    fn set_supply_voltage(&mut self, voltage: f64) {
+        self.set_supply_voltage(voltage);
     }
 }
 
@@ -91,6 +106,9 @@ pub struct FuzzFace {
     volume: f64,
     pre_gain: f64,
     sample_rate: f64,
+    /// Supply voltage in volts. Fuzz Face transistors have more headroom at
+    /// higher voltage, producing a tighter, punchier response.
+    supply_voltage: f64,
 }
 
 impl FuzzFace {
@@ -106,9 +124,14 @@ impl FuzzFace {
             volume: 0.8,
             pre_gain: 1.0,
             sample_rate,
+            supply_voltage: 9.0,
         };
         ff.set_fuzz(0.5);
         ff
+    }
+
+    pub fn set_supply_voltage(&mut self, voltage: f64) {
+        self.supply_voltage = voltage.clamp(5.0, 24.0);
     }
 
     pub fn set_fuzz(&mut self, fuzz: f64) {
@@ -133,12 +156,17 @@ const GERMANIUM_SCALE: f64 = 3.0;
 
 impl crate::PedalProcessor for FuzzFace {
     fn process(&mut self, input: f64) -> f64 {
-        let raw = self.clipper.process(input * self.pre_gain);
+        let headroom = self.supply_voltage / 9.0;
+        let raw = self.clipper.process(input * self.pre_gain * headroom);
         // The single-diode clipper only clips one polarity; the reverse-bias
         // half passes through linearly and can be very large.  tanh() provides
         // a musically useful soft limit on both halves while preserving the
         // asymmetric germanium character on the clipped side.
-        (raw * GERMANIUM_SCALE).tanh() * self.volume
+        //
+        // At higher voltages the soft-limit ceiling scales up, giving the
+        // transistor stages more room to breathe before saturation.
+        let ceiling = headroom;
+        (raw * GERMANIUM_SCALE / ceiling).tanh() * ceiling * self.volume
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
@@ -148,6 +176,10 @@ impl crate::PedalProcessor for FuzzFace {
 
     fn reset(&mut self) {
         self.clipper.reset();
+    }
+
+    fn set_supply_voltage(&mut self, voltage: f64) {
+        self.set_supply_voltage(voltage);
     }
 }
 
@@ -833,6 +865,186 @@ mod tests {
             let out = od.process(s);
             assert!(out.is_finite(), "NaN during knob sweep at sample {i}");
             assert!(out.abs() < 5.0, "output spike at sample {i}: {out}");
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    //  12V supply voltage (overdrive mode) tests
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn overdrive_12v_more_headroom() {
+        // At 12V the op-amp can swing further, so at moderate gain the
+        // output should be louder than at 9V (more headroom = less
+        // compression before the diode stage).
+        let input = sine(440.0, 0.5, N);
+
+        let mut od_9v = Overdrive::new(SR);
+        od_9v.set_gain(0.5);
+        od_9v.set_level(1.0);
+        let out_9v = process_buf(&mut od_9v, &input);
+
+        let mut od_12v = Overdrive::new(SR);
+        od_12v.set_supply_voltage(12.0);
+        od_12v.set_gain(0.5);
+        od_12v.set_level(1.0);
+        let out_12v = process_buf(&mut od_12v, &input);
+
+        let rms_9v = rms(&out_9v);
+        let rms_12v = rms(&out_12v);
+        assert!(
+            rms_12v > rms_9v,
+            "12V should have more output than 9V: 9V_rms={rms_9v:.4}, 12V_rms={rms_12v:.4}"
+        );
+    }
+
+    #[test]
+    fn overdrive_12v_output_bounded() {
+        // Even at 12V + max gain, output must remain bounded.
+        let input = sine(440.0, 1.0, N);
+        let mut od = Overdrive::new(SR);
+        od.set_supply_voltage(12.0);
+        od.set_gain(1.0);
+        od.set_level(1.0);
+        let output = process_buf(&mut od, &input);
+        let p = peak(&output);
+        assert!(p < 3.0, "12V output should be bounded: peak={p:.4}");
+        assert!(p > 0.1, "12V output should not be silent: peak={p:.4}");
+        assert!(
+            output.iter().all(|x| x.is_finite()),
+            "no NaN/inf at 12V"
+        );
+    }
+
+    #[test]
+    fn overdrive_9v_unchanged() {
+        // Explicitly setting 9V should produce identical output to the default.
+        let input = sine(440.0, 0.5, N);
+
+        let mut od_default = Overdrive::new(SR);
+        od_default.set_gain(0.7);
+        od_default.set_level(1.0);
+        let out_default = process_buf(&mut od_default, &input);
+
+        let mut od_9v = Overdrive::new(SR);
+        od_9v.set_supply_voltage(9.0);
+        od_9v.set_gain(0.7);
+        od_9v.set_level(1.0);
+        let out_9v = process_buf(&mut od_9v, &input);
+
+        let diff_rms = rms(&out_default
+            .iter()
+            .zip(&out_9v)
+            .map(|(a, b)| a - b)
+            .collect::<Vec<_>>());
+        assert!(
+            diff_rms < 1e-10,
+            "9V explicit should match default: diff_rms={diff_rms}"
+        );
+    }
+
+    #[test]
+    fn overdrive_18v_more_than_12v() {
+        // 18V (boutique mod) should have even more headroom than 12V.
+        let input = sine(440.0, 0.5, N);
+
+        let mut od_12v = Overdrive::new(SR);
+        od_12v.set_supply_voltage(12.0);
+        od_12v.set_gain(0.5);
+        od_12v.set_level(1.0);
+        let out_12v = process_buf(&mut od_12v, &input);
+
+        let mut od_18v = Overdrive::new(SR);
+        od_18v.set_supply_voltage(18.0);
+        od_18v.set_gain(0.5);
+        od_18v.set_level(1.0);
+        let out_18v = process_buf(&mut od_18v, &input);
+
+        assert!(
+            rms(&out_18v) > rms(&out_12v),
+            "18V should be louder than 12V"
+        );
+    }
+
+    #[test]
+    fn fuzzface_12v_more_headroom() {
+        let input = sine(440.0, 0.5, N);
+
+        let mut ff_9v = FuzzFace::new(SR);
+        ff_9v.set_fuzz(0.5);
+        ff_9v.set_volume(1.0);
+        let out_9v = process_buf(&mut ff_9v, &input);
+
+        let mut ff_12v = FuzzFace::new(SR);
+        ff_12v.set_supply_voltage(12.0);
+        ff_12v.set_fuzz(0.5);
+        ff_12v.set_volume(1.0);
+        let out_12v = process_buf(&mut ff_12v, &input);
+
+        let rms_9v = rms(&out_9v);
+        let rms_12v = rms(&out_12v);
+        assert!(
+            rms_12v > rms_9v,
+            "12V fuzz should have more output: 9V_rms={rms_9v:.4}, 12V_rms={rms_12v:.4}"
+        );
+    }
+
+    #[test]
+    fn fuzzface_12v_output_bounded() {
+        let input = sine(440.0, 1.0, N);
+        let mut ff = FuzzFace::new(SR);
+        ff.set_supply_voltage(12.0);
+        ff.set_fuzz(1.0);
+        ff.set_volume(1.0);
+        let output = process_buf(&mut ff, &input);
+        let p = peak(&output);
+        assert!(p < 4.0, "12V fuzz output should be bounded: peak={p:.4}");
+        assert!(
+            output.iter().all(|x| x.is_finite()),
+            "no NaN/inf at 12V fuzz"
+        );
+    }
+
+    #[test]
+    fn fuzzface_9v_unchanged() {
+        let input = sine(440.0, 0.5, N);
+
+        let mut ff_default = FuzzFace::new(SR);
+        ff_default.set_fuzz(0.7);
+        ff_default.set_volume(1.0);
+        let out_default = process_buf(&mut ff_default, &input);
+
+        let mut ff_9v = FuzzFace::new(SR);
+        ff_9v.set_supply_voltage(9.0);
+        ff_9v.set_fuzz(0.7);
+        ff_9v.set_volume(1.0);
+        let out_9v = process_buf(&mut ff_9v, &input);
+
+        let diff_rms = rms(&out_default
+            .iter()
+            .zip(&out_9v)
+            .map(|(a, b)| a - b)
+            .collect::<Vec<_>>());
+        assert!(
+            diff_rms < 1e-10,
+            "9V explicit should match default: diff_rms={diff_rms}"
+        );
+    }
+
+    #[test]
+    fn overdrive_12v_stable_at_all_gains() {
+        // Sweep through gain settings at 12V — no NaN or explosions.
+        let input = sine(440.0, 0.5, 4800);
+        for &g in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+            let mut od = Overdrive::new(SR);
+            od.set_supply_voltage(12.0);
+            od.set_gain(g);
+            od.set_level(1.0);
+            let output = process_buf(&mut od, &input);
+            assert!(
+                output.iter().all(|x| x.is_finite()),
+                "NaN at 12V gain={g}"
+            );
         }
     }
 }

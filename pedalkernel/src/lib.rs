@@ -33,6 +33,15 @@ pub trait PedalProcessor {
 
     /// Set a named control parameter (0.0–1.0). Default: no-op.
     fn set_control(&mut self, _label: &str, _value: f64) {}
+
+    /// Set supply voltage in volts (default 9.0).
+    ///
+    /// Real pedals run at 9V (standard battery), but many players and boutique
+    /// builders run them at 12V or 18V for more headroom.  Higher voltage means
+    /// the active gain stages (opamps / transistors) can swing further before
+    /// hitting their supply rails, preserving more dynamics before the diode
+    /// clipping stage.  The diode clipping threshold itself is unchanged.
+    fn set_supply_voltage(&mut self, _voltage: f64) {}
 }
 
 // ---------------------------------------------------------------------------

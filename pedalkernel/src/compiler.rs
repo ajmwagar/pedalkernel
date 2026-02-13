@@ -816,6 +816,8 @@ pub struct CompiledPedal {
     sample_rate: f64,
     controls: Vec<ControlBinding>,
     gain_range: (f64, f64),
+    /// Supply voltage in volts (default 9.0).
+    supply_voltage: f64,
 }
 
 /// Gain-like control labels.
@@ -835,6 +837,10 @@ fn is_level_label(label: &str) -> bool {
 }
 
 impl CompiledPedal {
+    pub fn set_supply_voltage(&mut self, voltage: f64) {
+        self.supply_voltage = voltage.clamp(5.0, 24.0);
+    }
+
     /// Set a control by its label (e.g., "Drive", "Level").
     pub fn set_control(&mut self, label: &str, value: f64) {
         let value = value.clamp(0.0, 1.0);
@@ -864,25 +870,30 @@ impl CompiledPedal {
 
 impl PedalProcessor for CompiledPedal {
     fn process(&mut self, input: f64) -> f64 {
+        let headroom = self.supply_voltage / 9.0;
         let mut signal = input;
 
         // Apply pre-gain before EACH stage.  In real circuits, each clipping
         // stage has its own active gain element (transistor/opamp).  The diode
         // voltage output (~0.7V) must be re-amplified before the next stage.
+        // The headroom factor models the active element's supply rail: at 12V
+        // it can swing ~33% further before rail clipping.
         for stage in &mut self.stages {
-            signal = stage.process(signal * self.pre_gain);
+            signal = stage.process(signal * self.pre_gain * headroom);
         }
 
         // No WDF stages → just apply gain + soft clip.
         if self.stages.is_empty() {
-            signal = input * self.pre_gain;
+            signal = input * self.pre_gain * headroom;
         }
 
         if self.use_soft_limit {
-            signal = (signal * self.soft_limit_scale).tanh();
+            // Scale the tanh ceiling with headroom: at 12V the soft-limiter
+            // (modeling transistor/opamp saturation) kicks in later.
+            signal = headroom * (signal * self.soft_limit_scale / headroom).tanh();
         }
 
-        signal * self.output_gain
+        signal * self.output_gain * headroom
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
@@ -901,6 +912,10 @@ impl PedalProcessor for CompiledPedal {
 
     fn set_control(&mut self, label: &str, value: f64) {
         self.set_control(label, value);
+    }
+
+    fn set_supply_voltage(&mut self, voltage: f64) {
+        self.set_supply_voltage(voltage);
     }
 }
 
@@ -1124,6 +1139,7 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         sample_rate,
         controls,
         gain_range: (glo * active_bonus, ghi * active_bonus),
+        supply_voltage: 9.0,
     })
 }
 
@@ -1762,5 +1778,123 @@ mod tests {
             return 0.0;
         }
         cov / (va.sqrt() * vb.sqrt())
+    }
+
+    fn rms(buf: &[f64]) -> f64 {
+        (buf.iter().map(|x| x * x).sum::<f64>() / buf.len() as f64).sqrt()
+    }
+
+    // -----------------------------------------------------------------------
+    // 12V supply voltage tests (compiled pedals)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compiled_12v_more_headroom() {
+        let pedal = parse("tube_screamer.pedal");
+        let input = sine(48000);
+
+        let mut proc_9v = compile_pedal(&pedal, 48000.0).unwrap();
+        proc_9v.set_control("Drive", 0.5);
+        proc_9v.set_control("Level", 1.0);
+        let out_9v: Vec<f64> = input.iter().map(|&s| proc_9v.process(s)).collect();
+
+        let mut proc_12v = compile_pedal(&pedal, 48000.0).unwrap();
+        proc_12v.set_supply_voltage(12.0);
+        proc_12v.set_control("Drive", 0.5);
+        proc_12v.set_control("Level", 1.0);
+        let out_12v: Vec<f64> = input.iter().map(|&s| proc_12v.process(s)).collect();
+
+        assert!(
+            rms(&out_12v) > rms(&out_9v),
+            "Compiled pedal at 12V should have more output"
+        );
+    }
+
+    #[test]
+    fn compiled_12v_all_pedals_stable() {
+        let files = [
+            "tube_screamer.pedal",
+            "fuzz_face.pedal",
+            "big_muff.pedal",
+            "blues_driver.pedal",
+            "dyna_comp.pedal",
+            "klon_centaur.pedal",
+            "proco_rat.pedal",
+        ];
+        let input = sine(4800);
+        for f in files {
+            let pedal = parse(f);
+            let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+            proc.set_supply_voltage(12.0);
+            let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+            assert!(
+                output.iter().all(|x| x.is_finite()),
+                "{f} at 12V: NaN/inf"
+            );
+            let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+            assert!(peak < 7.0, "{f} at 12V: output too loud, peak={peak}");
+            assert!(peak > 0.001, "{f} at 12V: silent, peak={peak}");
+        }
+    }
+
+    #[test]
+    fn compiled_9v_unchanged() {
+        // Explicitly setting 9V should match default behavior.
+        let pedal = parse("tube_screamer.pedal");
+        let input = sine(48000);
+
+        let mut proc_default = compile_pedal(&pedal, 48000.0).unwrap();
+        let out_default: Vec<f64> = input.iter().map(|&s| proc_default.process(s)).collect();
+
+        let mut proc_9v = compile_pedal(&pedal, 48000.0).unwrap();
+        proc_9v.set_supply_voltage(9.0);
+        let out_9v: Vec<f64> = input.iter().map(|&s| proc_9v.process(s)).collect();
+
+        let diff_rms = rms(
+            &out_default
+                .iter()
+                .zip(&out_9v)
+                .map(|(a, b)| a - b)
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            diff_rms < 1e-10,
+            "Compiled 9V should match default: diff_rms={diff_rms}"
+        );
+    }
+
+    #[test]
+    fn compiled_12v_extreme_settings_stable() {
+        let configs: &[(&str, &[(&str, f64)])] = &[
+            ("tube_screamer.pedal", &[("Drive", 1.0), ("Level", 1.0)]),
+            ("fuzz_face.pedal", &[("Fuzz", 1.0), ("Volume", 1.0)]),
+            ("big_muff.pedal", &[("Sustain", 1.0), ("Volume", 1.0)]),
+            ("proco_rat.pedal", &[("Distortion", 1.0), ("Volume", 1.0)]),
+        ];
+
+        let input = sine(4800);
+        for (f, knobs) in configs {
+            let pedal = parse(f);
+            let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+            proc.set_supply_voltage(12.0);
+            for &(label, val) in *knobs {
+                proc.set_control(label, val);
+            }
+            let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+            let settings: String = knobs
+                .iter()
+                .map(|(l, v)| format!("{l}={v}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            assert!(
+                output.iter().all(|x| x.is_finite()),
+                "{f} 12V [{settings}]: NaN/inf"
+            );
+            let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+            assert!(
+                peak < 10.0,
+                "{f} 12V [{settings}]: output too loud, peak={peak}"
+            );
+        }
     }
 }
