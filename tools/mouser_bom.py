@@ -211,12 +211,45 @@ def mouser_search_url(kind, arg):
 
 
 # ---------------------------------------------------------------------------
+# .pedalhw reader — for part name overrides
+# ---------------------------------------------------------------------------
+
+
+def parse_pedalhw(pedal_path):
+    """Read companion .pedalhw file, returning {comp_id: part_name}.
+
+    Auto-discovers the .pedalhw file next to the .pedal file.
+    Returns empty dict if no companion file exists.
+    """
+    hw_path = os.path.splitext(pedal_path)[0] + ".pedalhw"
+    parts = {}
+    if not os.path.exists(hw_path):
+        return parts
+    with open(hw_path) as f:
+        for line in f:
+            line = line.split("#")[0].strip()
+            if not line:
+                continue
+            m = re.match(r"(\w+)\s*:", line)
+            if not m:
+                continue
+            comp_id = m.group(1)
+            pm = re.search(r'part\("([^"]+)"\)', line)
+            if pm:
+                parts[comp_id] = pm.group(1)
+    return parts
+
+
+# ---------------------------------------------------------------------------
 # BOM generation
 # ---------------------------------------------------------------------------
 
 
-def _component_display(kind, arg):
-    """Human-friendly component type label."""
+def _component_display(kind, arg, hw_part=None):
+    """Human-friendly component type label.
+
+    If a .pedalhw part name is provided, it's included in the display.
+    """
     labels = {
         "resistor": "Resistor",
         "cap": "Capacitor",
@@ -228,7 +261,10 @@ def _component_display(kind, arg):
         "opamp": "Op-Amp",
         "led": "LED",
     }
-    return labels.get(kind, kind)
+    base = labels.get(kind, kind)
+    if hw_part:
+        return f"{base} [{hw_part}]"
+    return base
 
 
 def _format_value(kind, arg):
@@ -254,7 +290,8 @@ def build_bom(components, qty):
     for comp in components:
         kind, arg = comp["kind"], comp["arg"]
         result = lookup_part(kind, arg)
-        display = _component_display(kind, arg)
+        hw_part = comp.get("hw_part")
+        display = _component_display(kind, arg, hw_part)
         value = _format_value(kind, arg)
 
         if result:
@@ -414,6 +451,15 @@ def main():
         sys.exit(1)
 
     name, components = parse_pedal(args.pedal_file)
+
+    # Read companion .pedalhw for part name overrides
+    hw_parts = parse_pedalhw(args.pedal_file)
+    if hw_parts:
+        print(f"  Using part names from: {os.path.splitext(args.pedal_file)[0]}.pedalhw")
+        for comp in components:
+            if comp["id"] in hw_parts:
+                comp["hw_part"] = hw_parts[comp["id"]]
+
     bom = build_bom(components, args.qty)
 
     print_bom_table(name, bom, args.qty)
