@@ -659,7 +659,14 @@ pub fn run(pedal_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let pedal = parse_pedal_file(&source).map_err(|e| format!("Parse error: {e}"))?;
 
     // Create JACK client and enumerate available ports
-    let client = AudioEngine::create_client("pedalkernel")?;
+    let client = AudioEngine::create_client("pedalkernel").map_err(|e| {
+        format!(
+            "Failed to connect to JACK server: {e}\n\n\
+             Make sure JACK is running. You can start it with:\n  \
+             jackd -d alsa -r 48000 -p 256\n\
+             or use a JACK control app like QjackCtl / Cadence."
+        )
+    })?;
     let input_ports = AudioEngine::list_input_sources(&client);
     let output_ports = AudioEngine::list_output_destinations(&client);
 

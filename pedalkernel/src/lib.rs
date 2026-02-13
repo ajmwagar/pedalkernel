@@ -163,9 +163,17 @@ mod jack_engine {
         }
 
         /// Create a JACK client (for port enumeration before activation).
+        ///
+        /// Tries to connect to an existing JACK server first; falls back to
+        /// allowing the server to auto-start if `NO_START_SERVER` fails.
         pub fn create_client(name: &str) -> Result<Client, jack::Error> {
-            let (client, _status) = Client::new(name, ClientOptions::NO_START_SERVER)?;
-            Ok(client)
+            match Client::new(name, ClientOptions::NO_START_SERVER) {
+                Ok((client, _status)) => Ok(client),
+                Err(_) => {
+                    let (client, _status) = Client::new(name, ClientOptions::empty())?;
+                    Ok(client)
+                }
+            }
         }
 
         /// List available audio input sources (JACK ports that produce audio).
