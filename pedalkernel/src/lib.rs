@@ -85,6 +85,7 @@ mod jack_engine {
 
     /// Shared control state for real-time parameter updates between a UI
     /// thread and the JACK process callback.
+    #[derive(Default)]
     pub struct SharedControls {
         pending: Mutex<Vec<(String, f64)>>,
         bypassed: AtomicBool,
