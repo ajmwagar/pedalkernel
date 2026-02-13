@@ -215,15 +215,98 @@ cargo run --example tui --features tui -- examples/tube_screamer.pedal
 
 ## Features
 
+### Core (always available)
+
 - **DSL Parser** — `nom`-based parser for `.pedal` files with engineering notation
 - **Netlist Compiler** — automatically compiles `.pedal` netlists into WDF trees via series-parallel decomposition with impedance balancing
 - **WDF Engine** — series/parallel adaptors with verified scattering matrices, diode pair and single-diode nonlinear roots via Newton-Raphson
 - **Zero-Allocation Hot Path** — per-sample processing with no heap allocation
+- **Supply Voltage Modeling** — run pedals at 9V (stock), 12V, or 18V with accurate headroom scaling for active gain stages
 - **KiCad Export** — generate netlists from the same `.pedal` file for PCB prototyping
 - **WAV Output** — offline rendering via `hound` for tone prototyping without a running audio server
 - **Pedal Library** — ready-to-use Overdrive, Fuzz Face, and Delay implementations
-- **JACK Real-Time Audio** — sub-5ms latency via JACK audio server (optional `jack-rt` feature)
-- **TUI Control Surface** — interactive ASCII pedal with rotary knobs via `ratatui` (optional `tui` feature)
+
+### Optional Features
+
+PedalKernel uses Cargo feature flags to keep the core lean. Enable what you need:
+
+```toml
+# In your Cargo.toml
+pedalkernel = { version = "0.1", features = ["hardware"] }
+```
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `jack-rt` | Yes | JACK real-time audio engine — sub-5ms latency through a Scarlett 2i2 on Linux |
+| `tui` | Yes | Interactive ASCII pedal control surface via `ratatui` |
+| `cli` | Yes | Command-line interface via `clap` |
+| `hardware` | No | Hardware design tools — BOM generation, voltage compatibility checking, physical component specs |
+
+Build with no optional features for a minimal DSP-only library:
+
+```bash
+cargo build --no-default-features
+```
+
+### Hardware Design Tools (`--features hardware`)
+
+For builders who prototype tone digitally and then build it in real life. This feature adds physical-world awareness without touching the `.pedal` DSL — tone-focused users never see it.
+
+**Companion `.pedalhw` files** declare real component specs alongside your `.pedal` file:
+
+```
+# fuzz_face.pedalhw — physical component specs
+
+Q1: vce_max(32) part("AC128")
+Q2: vce_max(32) part("AC128")
+C1: voltage_rating(25) part("2.2uF electrolytic")
+C2: voltage_rating(16) part("10uF electrolytic")
+U1: supply_max(36) part("TL072")
+D1: breakdown(50) part("1N34A")
+R1: power_rating(0.25)
+```
+
+| Property | Applies to | What it checks |
+|---|---|---|
+| `vce_max(V)` | Transistors | Collector-emitter breakdown voltage |
+| `voltage_rating(V)` | Capacitors | Max DC voltage before failure |
+| `supply_max(V)` | Op-amps | Total supply voltage limit |
+| `breakdown(V)` | Diodes | Reverse breakdown voltage |
+| `power_rating(W)` | Resistors | Max power dissipation |
+| `part("...")` | Any | Part name for BOM and schematic labels |
+
+**Voltage compatibility check** — flags components that would fail or behave differently at your target supply voltage:
+
+```rust
+use pedalkernel::hw::*;
+
+let pedal = pedalkernel::dsl::parse_pedal_file(&src).unwrap();
+let mut limits = parse_pedalhw_file("fuzz_face.pedalhw").unwrap();
+
+// Auto-fill specs from the curated parts DB (TL072 → 36V, 1N4148 → 100V, etc.)
+auto_populate_specs(&pedal, &mut limits);
+
+// Check at 18V — will flag the AC128 transistors and electrolytic caps
+let warnings = check_voltage_with_specs(&pedal, 18.0, &limits);
+for w in &warnings {
+    println!("[{:?}] {}: {}", w.severity, w.component_id, w.message);
+}
+```
+
+Without a `.pedalhw` file, heuristic checks still catch obvious problems (germanium transistors in fuzz circuits at >12V, electrolytic caps at >16V, etc.).
+
+**BOM generation** — produces a Mouser-compatible bill of materials from a curated parts database:
+
+```rust
+let bom = build_bom(&pedal, Some(&limits));
+let csv = export_bom_csv(&bom, 5);  // 5 units
+std::fs::write("bom.csv", csv).unwrap();
+
+// Or print a formatted table
+print!("{}", format_bom_table(&pedal.name, &bom, 1));
+```
+
+The parts DB includes Mouser P/Ns for common pedal components (Yageo resistors, WIMA film caps, Nichicon electrolytics, Alpha pots, 1N4148/1N34A diodes, 2N3904/2N3906 transistors, TL072 opamps). When a `.pedalhw` file specifies `part("AC128")`, the BOM marks that line for manual sourcing.
 
 ### Built-in Pedals
 
