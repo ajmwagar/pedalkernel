@@ -1,0 +1,35 @@
+# MXR Dyna Comp compressor
+# OTA-based (CA3080) compression with envelope follower
+# Single-knob simplicity: Output level + Sensitivity control
+# Essential for country, funk, and chicken pickin'
+
+pedal "MXR Dyna Comp" {
+  components {
+    C1: cap(1u)             # Input coupling
+    R1: resistor(10k)       # Input impedance
+    U1: opamp()             # OTA (CA3080) modeled as opamp
+    R2: resistor(150k)      # Feedback resistor (sets compression ratio)
+    C2: cap(1u)             # Envelope smoothing
+    R3: resistor(560k)      # Bias network
+    C3: cap(100n)           # Output coupling
+    Sensitivity: pot(50k)   # Compression amount
+    Output: pot(500k)       # Output level
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> U1.pos, R3.a
+    R3.b -> vcc
+    U1.neg -> R2.a, C2.a
+    R2.b -> U1.out
+    C2.b -> Sensitivity.a
+    Sensitivity.b -> gnd
+    U1.out -> C3.a
+    C3.b -> Output.a
+    Output.b -> out
+  }
+  controls {
+    Sensitivity.position -> "Sensitivity" [0.0, 1.0] = 0.5
+    Output.position -> "Output" [0.0, 1.0] = 0.5
+  }
+}
