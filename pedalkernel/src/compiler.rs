@@ -858,6 +858,10 @@ impl PedalProcessor for CompiledPedal {
             stage.reset();
         }
     }
+
+    fn set_control(&mut self, label: &str, value: f64) {
+        self.set_control(label, value);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
