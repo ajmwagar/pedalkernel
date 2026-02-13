@@ -36,8 +36,8 @@ pub trait PedalProcessor {
 
 #[cfg(feature = "jack-rt")]
 mod jack_engine {
-    use jack::{AudioIn, AudioOut, Client, ClientOptions, Control, ProcessHandler, ProcessScope};
     use crate::PedalProcessor;
+    use jack::{AudioIn, AudioOut, Client, ClientOptions, Control, ProcessHandler, ProcessScope};
 
     /// JACK process handler wrapping a PedalProcessor.
     pub struct JackProcessor<P: PedalProcessor> {
@@ -82,7 +82,11 @@ mod jack_engine {
             let in_port = client.register_port("in", AudioIn)?;
             let out_port = client.register_port("out", AudioOut)?;
 
-            let handler = JackProcessor { processor, in_port, out_port };
+            let handler = JackProcessor {
+                processor,
+                in_port,
+                out_port,
+            };
             client.activate_async((), handler)
         }
     }
@@ -172,10 +176,9 @@ pedal "Test Pedal" {
     /// Helper: read and parse a .pedal example file, panicking with context on failure.
     fn parse_example(filename: &str) -> dsl::PedalDef {
         let path = format!("examples/{filename}");
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-        dsl::parse_pedal_file(&src)
-            .unwrap_or_else(|e| panic!("failed to parse {path}: {e}"))
+        let src =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        dsl::parse_pedal_file(&src).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"))
     }
 
     #[test]
@@ -224,7 +227,10 @@ pedal "Test Pedal" {
         assert!(labels.contains(&"Sensitivity"));
         assert!(labels.contains(&"Output"));
         // Verify opamp is present (OTA topology)
-        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::OpAmp));
+        assert!(p
+            .components
+            .iter()
+            .any(|c| c.kind == dsl::ComponentKind::OpAmp));
     }
 
     #[test]
@@ -239,8 +245,14 @@ pedal "Test Pedal" {
         assert!(labels.contains(&"Filter"));
         assert!(labels.contains(&"Volume"));
         // Verify opamp + hard clipping diode pair
-        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::OpAmp));
-        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::DiodePair(dsl::DiodeType::Silicon)));
+        assert!(p
+            .components
+            .iter()
+            .any(|c| c.kind == dsl::ComponentKind::OpAmp));
+        assert!(p
+            .components
+            .iter()
+            .any(|c| c.kind == dsl::ComponentKind::DiodePair(dsl::DiodeType::Silicon)));
     }
 
     #[test]
@@ -255,8 +267,14 @@ pedal "Test Pedal" {
         assert!(labels.contains(&"Tone"));
         assert!(labels.contains(&"Level"));
         // Verify NPN transistor + asymmetric single diode
-        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::Npn));
-        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)));
+        assert!(p
+            .components
+            .iter()
+            .any(|c| c.kind == dsl::ComponentKind::Npn));
+        assert!(p
+            .components
+            .iter()
+            .any(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)));
     }
 
     #[test]
@@ -271,11 +289,16 @@ pedal "Test Pedal" {
         assert!(labels.contains(&"Treble"));
         assert!(labels.contains(&"Output"));
         // Verify dual opamps + germanium diode pair in feedback
-        let opamp_count = p.components.iter()
+        let opamp_count = p
+            .components
+            .iter()
             .filter(|c| c.kind == dsl::ComponentKind::OpAmp)
             .count();
         assert_eq!(opamp_count, 2, "Klon uses dual opamps");
-        assert!(p.components.iter().any(|c| c.kind == dsl::ComponentKind::DiodePair(dsl::DiodeType::Germanium)));
+        assert!(p
+            .components
+            .iter()
+            .any(|c| c.kind == dsl::ComponentKind::DiodePair(dsl::DiodeType::Germanium)));
     }
 
     #[test]
@@ -292,8 +315,14 @@ pedal "Test Pedal" {
         for f in files {
             let p = parse_example(f);
             let netlist = kicad::export_kicad_netlist(&p);
-            assert!(netlist.contains("(export (version D)"), "{f} KiCad export missing header");
-            assert!(netlist.contains(&p.name), "{f} KiCad export missing pedal name");
+            assert!(
+                netlist.contains("(export (version D)"),
+                "{f} KiCad export missing header"
+            );
+            assert!(
+                netlist.contains(&p.name),
+                "{f} KiCad export missing pedal name"
+            );
         }
     }
 }

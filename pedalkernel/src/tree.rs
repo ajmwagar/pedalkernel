@@ -208,7 +208,15 @@ impl WdfClipper {
         let ser = SeriesAdaptor::new(vs.port_resistance, par.port_resistance);
         let diode = DiodePairRoot::new(diode_model);
 
-        Self { vs, resistor, capacitor, par, ser, diode, sample_rate }
+        Self {
+            vs,
+            resistor,
+            capacitor,
+            par,
+            ser,
+            diode,
+            sample_rate,
+        }
     }
 
     /// Process one sample through the WDF tree.  Zero allocations.
@@ -247,8 +255,12 @@ impl WdfClipper {
     pub fn set_sample_rate(&mut self, fs: f64) {
         self.sample_rate = fs;
         self.capacitor.update_sample_rate(fs);
-        self.par.update_ports(self.resistor.port_resistance, self.capacitor.port_resistance);
-        self.ser.update_ports(self.vs.port_resistance, self.par.port_resistance);
+        self.par.update_ports(
+            self.resistor.port_resistance,
+            self.capacitor.port_resistance,
+        );
+        self.ser
+            .update_ports(self.vs.port_resistance, self.par.port_resistance);
     }
 
     /// Reset all state (capacitor memory).
@@ -289,7 +301,15 @@ impl WdfSingleDiodeClipper {
         let ser = SeriesAdaptor::new(vs.port_resistance, par.port_resistance);
         let diode = DiodeRoot::new(diode_model);
 
-        Self { vs, resistor, capacitor, par, ser, diode, sample_rate }
+        Self {
+            vs,
+            resistor,
+            capacitor,
+            par,
+            ser,
+            diode,
+            sample_rate,
+        }
     }
 
     #[inline]
@@ -319,8 +339,12 @@ impl WdfSingleDiodeClipper {
     pub fn set_sample_rate(&mut self, fs: f64) {
         self.sample_rate = fs;
         self.capacitor.update_sample_rate(fs);
-        self.par.update_ports(self.resistor.port_resistance, self.capacitor.port_resistance);
-        self.ser.update_ports(self.vs.port_resistance, self.par.port_resistance);
+        self.par.update_ports(
+            self.resistor.port_resistance,
+            self.capacitor.port_resistance,
+        );
+        self.ser
+            .update_ports(self.vs.port_resistance, self.par.port_resistance);
     }
 
     pub fn reset(&mut self) {
@@ -390,7 +414,10 @@ mod tests {
             max_out = max_out.max(out.abs());
         }
         // Output should be bounded — diode clipping keeps it from blowing up
-        assert!(max_out < 50.0, "output should be bounded: peak was {max_out}");
+        assert!(
+            max_out < 50.0,
+            "output should be bounded: peak was {max_out}"
+        );
         assert!(max_out > 0.01, "should produce nonzero output");
     }
 
@@ -405,7 +432,10 @@ mod tests {
             let out = c.process(input);
             max_out = max_out.max(out.abs());
         }
-        assert!(max_out > 0.001, "should produce nonzero output, got {max_out}");
+        assert!(
+            max_out > 0.001,
+            "should produce nonzero output, got {max_out}"
+        );
     }
 
     #[test]
@@ -428,6 +458,9 @@ mod tests {
         let v1 = (a1 + b1) / 2.0;
         let v2 = (a2 + b2) / 2.0;
         let v3 = (a3 + b3) / 2.0;
-        assert!((v1 + v2 - v3).abs() < 1e-10, "KVL: {v1} + {v2} should ≈ {v3}");
+        assert!(
+            (v1 + v2 - v3).abs() < 1e-10,
+            "KVL: {v1} + {v2} should ≈ {v3}"
+        );
     }
 }

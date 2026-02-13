@@ -7,7 +7,7 @@
 
 use pedalkernel::elements::*;
 use pedalkernel::tree::*;
-use pedalkernel::wav::{sine_wave, write_wav, write_stereo_wav};
+use pedalkernel::wav::{sine_wave, write_stereo_wav, write_wav};
 use std::path::Path;
 
 fn main() {
@@ -40,7 +40,8 @@ fn main() {
     println!("LED diode pair       → wdf_led.wav");
 
     // Single diode (asymmetric) — germanium
-    let mut asym = WdfSingleDiodeClipper::new(4700.0, 47e-9, DiodeModel::germanium(), sample_rate as f64);
+    let mut asym =
+        WdfSingleDiodeClipper::new(4700.0, 47e-9, DiodeModel::germanium(), sample_rate as f64);
     let asym_out: Vec<f64> = input.iter().map(|&s| asym.process(s)).collect();
     write_wav(&asym_out, Path::new("wdf_asymmetric.wav"), sample_rate).unwrap();
     println!("Single diode (asym)  → wdf_asymmetric.wav");

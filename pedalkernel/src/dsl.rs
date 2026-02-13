@@ -4,7 +4,6 @@
 //! into an AST that can drive WDF tree construction or KiCad export.
 
 use nom::{
-    IResult,
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
     character::complete::{char, multispace1, not_line_ending},
@@ -12,6 +11,7 @@ use nom::{
     multi::{many0, separated_list1},
     number::complete::double,
     sequence::{delimited, pair, preceded, tuple},
+    IResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ fn eng_suffix(input: &str) -> IResult<&str, f64> {
         value(1e-6, tag("u")),
         value(1e3, tag("k")),
         value(1e6, tag("M")),
-        value(1e-3, tag("m")),  // milli – after 'M' to disambiguate
+        value(1e-3, tag("m")), // milli – after 'M' to disambiguate
     ))(input)
 }
 
@@ -224,7 +224,13 @@ fn component_def(input: &str) -> IResult<&str, ComponentDef> {
     let (input, _) = char(':')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, kind) = component_kind(input)?;
-    Ok((input, ComponentDef { id: id.to_string(), kind }))
+    Ok((
+        input,
+        ComponentDef {
+            id: id.to_string(),
+            kind,
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -237,10 +243,13 @@ fn pin(input: &str) -> IResult<&str, Pin> {
     let (input, first) = identifier(input)?;
     let (input, dot_pin) = opt(preceded(char('.'), identifier))(input)?;
     match dot_pin {
-        Some(p) => Ok((input, Pin::ComponentPin {
-            component: first.to_string(),
-            pin: p.to_string(),
-        })),
+        Some(p) => Ok((
+            input,
+            Pin::ComponentPin {
+                component: first.to_string(),
+                pin: p.to_string(),
+            },
+        )),
         None => {
             if RESERVED_NODES.contains(&first) {
                 Ok((input, Pin::Reserved(first.to_string())))
@@ -259,10 +268,7 @@ fn net_def(input: &str) -> IResult<&str, NetDef> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("->")(input)?;
     let (input, _) = ws_comments(input)?;
-    let (input, to) = separated_list1(
-        tuple((ws_comments, char(','), ws_comments)),
-        pin,
-    )(input)?;
+    let (input, to) = separated_list1(tuple((ws_comments, char(','), ws_comments)), pin)(input)?;
     Ok((input, NetDef { from, to }))
 }
 
@@ -295,13 +301,16 @@ fn control_def(input: &str) -> IResult<&str, ControlDef> {
     let (input, _) = char('=')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, def) = double(input)?;
-    Ok((input, ControlDef {
-        component: comp.to_string(),
-        property: prop.to_string(),
-        label: label.to_string(),
-        range: (lo, hi),
-        default: def,
-    }))
+    Ok((
+        input,
+        ControlDef {
+            component: comp.to_string(),
+            property: prop.to_string(),
+            label: label.to_string(),
+            range: (lo, hi),
+            default: def,
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -362,12 +371,15 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, _) = char('}')(input)?;
     let (input, _) = ws_comments(input)?;
 
-    Ok((input, PedalDef {
-        name: name.to_string(),
-        components,
-        nets,
-        controls: controls.unwrap_or_default(),
-    }))
+    Ok((
+        input,
+        PedalDef {
+            name: name.to_string(),
+            components,
+            nets,
+            controls: controls.unwrap_or_default(),
+        },
+    ))
 }
 
 /// Convenience wrapper that returns `Result`.
@@ -446,9 +458,13 @@ mod tests {
     fn parse_net_simple() {
         let (_, n) = net_def("in -> C1.a").unwrap();
         assert_eq!(n.from, Pin::Reserved("in".to_string()));
-        assert_eq!(n.to, vec![Pin::ComponentPin {
-            component: "C1".to_string(), pin: "a".to_string()
-        }]);
+        assert_eq!(
+            n.to,
+            vec![Pin::ComponentPin {
+                component: "C1".to_string(),
+                pin: "a".to_string()
+            }]
+        );
     }
 
     #[test]

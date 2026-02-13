@@ -30,7 +30,7 @@ impl Overdrive {
         let mut od = Self {
             clipper: WdfClipper::new(
                 base_r,
-                47e-9,  // 47 nF
+                47e-9, // 47 nF
                 DiodeModel::silicon(),
                 sample_rate,
             ),
@@ -117,7 +117,8 @@ impl FuzzFace {
         // fuzz=0 → 5× (mild grit), fuzz=1 → 250× (full splat).
         self.pre_gain = 5.0 * 50.0_f64.powf(self.fuzz);
         let r = 10000.0 * (1.0 - 0.95 * self.fuzz) + 100.0;
-        self.clipper = WdfSingleDiodeClipper::new(r, 100e-9, DiodeModel::germanium(), self.sample_rate);
+        self.clipper =
+            WdfSingleDiodeClipper::new(r, 100e-9, DiodeModel::germanium(), self.sample_rate);
     }
 
     pub fn set_volume(&mut self, volume: f64) {
@@ -245,7 +246,9 @@ mod tests {
             va += da * da;
             vb += db * db;
         }
-        if va == 0.0 || vb == 0.0 { return 0.0; }
+        if va == 0.0 || vb == 0.0 {
+            return 0.0;
+        }
         cov / (va.sqrt() * vb.sqrt())
     }
 
@@ -289,7 +292,9 @@ mod tests {
         }
         let fundamental_power = (re * re + im * im) / (n as f64 * n as f64);
         let total_power: f64 = buf.iter().map(|x| x * x).sum::<f64>() / n as f64;
-        if total_power < 1e-20 { return 0.0; }
+        if total_power < 1e-20 {
+            return 0.0;
+        }
         let harmonic_power = (total_power - fundamental_power).max(0.0);
         (harmonic_power / total_power).sqrt()
     }
@@ -466,7 +471,11 @@ mod tests {
         let out2 = process_buf(&mut od, &input);
 
         // After reset, processing the same input should give the same result.
-        let diff_rms = rms(&out1.iter().zip(&out2).map(|(a, b)| a - b).collect::<Vec<_>>());
+        let diff_rms = rms(&out1
+            .iter()
+            .zip(&out2)
+            .map(|(a, b)| a - b)
+            .collect::<Vec<_>>());
         assert!(
             diff_rms < 1e-10,
             "reset should restore identical behavior: diff_rms={diff_rms}"
@@ -592,10 +601,7 @@ mod tests {
         ff.set_volume(1.0);
         let output = process_buf(&mut ff, &input);
         let thd = estimate_thd(&output, 440.0, SR);
-        assert!(
-            thd > 0.3,
-            "Max fuzz THD should be > 30%: got {thd:.4}"
-        );
+        assert!(thd > 0.3, "Max fuzz THD should be > 30%: got {thd:.4}");
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -654,10 +660,7 @@ mod tests {
             od.set_level(1.0);
             let output = process_buf(&mut od, &input);
             let thd = estimate_thd(&output, freq, SR);
-            assert!(
-                thd > 0.2,
-                "Overdrive should clip at {freq}Hz: THD={thd:.4}"
-            );
+            assert!(thd > 0.2, "Overdrive should clip at {freq}Hz: THD={thd:.4}");
         }
     }
 

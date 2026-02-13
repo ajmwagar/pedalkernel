@@ -69,8 +69,7 @@ mod tui_app {
                 }
                 AppAction::PrevKnob => {
                     if !self.knobs.is_empty() {
-                        self.selected =
-                            (self.selected + self.knobs.len() - 1) % self.knobs.len();
+                        self.selected = (self.selected + self.knobs.len() - 1) % self.knobs.len();
                     }
                 }
                 AppAction::Adjust(delta) => {
@@ -126,69 +125,21 @@ mod tui_app {
     /// The indicator mark varies per position.
     const KNOB_FRAMES: [&[&str; 5]; 8] = [
         // 0: 7-o'clock  (value ≈ 0.00)
-        &[
-            " ╭───╮ ",
-            "╱     ╲",
-            "│      │",
-            "╲/    ╱",
-            " ╰───╯ ",
-        ],
+        &[" ╭───╮ ", "╱     ╲", "│      │", "╲/    ╱", " ╰───╯ "],
         // 1: 8-o'clock  (value ≈ 0.14)
-        &[
-            " ╭───╮ ",
-            "╱     ╲",
-            "│-     │",
-            "╲     ╱",
-            " ╰───╯ ",
-        ],
+        &[" ╭───╮ ", "╱     ╲", "│-     │", "╲     ╱", " ╰───╯ "],
         // 2: 9-o'clock  (value ≈ 0.29)
-        &[
-            " ╭───╮ ",
-            "╱     ╲",
-            "│─     │",
-            "╲     ╱",
-            " ╰───╯ ",
-        ],
+        &[" ╭───╮ ", "╱     ╲", "│─     │", "╲     ╱", " ╰───╯ "],
         // 3: 10-o'clock (value ≈ 0.43)
-        &[
-            " ╭───╮ ",
-            "╱/    ╲",
-            "│      │",
-            "╲     ╱",
-            " ╰───╯ ",
-        ],
+        &[" ╭───╮ ", "╱/    ╲", "│      │", "╲     ╱", " ╰───╯ "],
         // 4: 12-o'clock (value ≈ 0.57)
-        &[
-            " ╭───╮ ",
-            "╱  |  ╲",
-            "│  |   │",
-            "╲     ╱",
-            " ╰───╯ ",
-        ],
+        &[" ╭───╮ ", "╱  |  ╲", "│  |   │", "╲     ╱", " ╰───╯ "],
         // 5: 2-o'clock  (value ≈ 0.71)
-        &[
-            " ╭───╮ ",
-            "╱    ╲╲",
-            "│      │",
-            "╲     ╱",
-            " ╰───╯ ",
-        ],
+        &[" ╭───╮ ", "╱    ╲╲", "│      │", "╲     ╱", " ╰───╯ "],
         // 6: 3-o'clock  (value ≈ 0.86)
-        &[
-            " ╭───╮ ",
-            "╱     ╲",
-            "│     ─│",
-            "╲     ╱",
-            " ╰───╯ ",
-        ],
+        &[" ╭───╮ ", "╱     ╲", "│     ─│", "╲     ╱", " ╰───╯ "],
         // 7: 5-o'clock  (value ≈ 1.00)
-        &[
-            " ╭───╮ ",
-            "╱     ╲",
-            "│      │",
-            "╲    \\╱",
-            " ╰───╯ ",
-        ],
+        &[" ╭───╮ ", "╱     ╲", "│      │", "╲    \\╱", " ╰───╯ "],
     ];
 
     fn knob_frame_index(value: f64, range: (f64, f64)) -> usize {
@@ -225,8 +176,8 @@ mod tui_app {
         frame.render_widget(outer, area);
 
         if app.knobs.is_empty() {
-            let msg = Paragraph::new("No controls defined for this pedal.")
-                .alignment(Alignment::Center);
+            let msg =
+                Paragraph::new("No controls defined for this pedal.").alignment(Alignment::Center);
             frame.render_widget(msg, inner);
             return;
         }
@@ -265,7 +216,10 @@ mod tui_app {
             };
 
             // Knob art
-            let lines: Vec<Line> = art.iter().map(|l| Line::from(Span::styled(*l, style))).collect();
+            let lines: Vec<Line> = art
+                .iter()
+                .map(|l| Line::from(Span::styled(*l, style)))
+                .collect();
             let knob_widget = Paragraph::new(lines).alignment(Alignment::Center);
             frame.render_widget(knob_widget, knob_cols[i]);
 
@@ -275,14 +229,13 @@ mod tui_app {
             } else {
                 knob.label.clone()
             };
-            let label = Paragraph::new(Span::styled(label_text, style))
-                .alignment(Alignment::Center);
+            let label =
+                Paragraph::new(Span::styled(label_text, style)).alignment(Alignment::Center);
             frame.render_widget(label, label_cols[i]);
 
             // Value
             let val_text = format!("{:.2}", knob.value);
-            let val = Paragraph::new(Span::styled(val_text, style))
-                .alignment(Alignment::Center);
+            let val = Paragraph::new(Span::styled(val_text, style)).alignment(Alignment::Center);
             frame.render_widget(val, value_cols[i]);
         }
 
@@ -312,7 +265,9 @@ mod tui_app {
         let (label, style) = if bypassed {
             (
                 " BYPASSED ",
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
             )
         } else {
             (

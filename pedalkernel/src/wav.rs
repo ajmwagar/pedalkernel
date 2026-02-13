@@ -3,7 +3,7 @@
 //! Uses `hound` to write processed audio to WAV files so circuits
 //! can be auditioned without a running JACK server.
 
-use hound::{WavSpec, WavWriter, SampleFormat};
+use hound::{SampleFormat, WavSpec, WavWriter};
 use std::path::Path;
 
 use crate::PedalProcessor;
@@ -129,7 +129,7 @@ mod tests {
         let buf = guitar_pluck(82.41, 2.0, 48000);
         // First 1000 samples should be louder than last 1000
         let rms_start: f64 = buf[..1000].iter().map(|x| x * x).sum::<f64>() / 1000.0;
-        let rms_end: f64 = buf[buf.len()-1000..].iter().map(|x| x * x).sum::<f64>() / 1000.0;
+        let rms_end: f64 = buf[buf.len() - 1000..].iter().map(|x| x * x).sum::<f64>() / 1000.0;
         assert!(rms_start > rms_end * 10.0, "signal should decay");
     }
 
