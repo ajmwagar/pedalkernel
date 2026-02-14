@@ -534,9 +534,9 @@ impl CircuitGraph {
                 ComponentKind::Npn | ComponentKind::Pnp | ComponentKind::OpAmp => {
                     num_active += 1;
                 }
-                ComponentKind::Lfo(..) => {
-                    // LFO is a virtual modulation source, not a physical circuit element.
-                    // It connects via .out pin to modulation targets (J.vgs, OC.led).
+                ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..) => {
+                    // LFO and EnvelopeFollower are virtual modulation sources, not physical
+                    // circuit elements. They connect via .out pin to modulation targets.
                 }
             }
         }
@@ -770,6 +770,60 @@ impl CircuitGraph {
             .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
         jfets
     }
+
+    /// Find triode edges, ordered by topological distance from `in`.
+    fn find_triodes(&self) -> Vec<(usize, TriodeInfo)> {
+        // BFS from in_node to compute distances.
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &self.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(self.in_node, 0);
+        queue.push_back(self.in_node);
+        while let Some(n) = queue.pop_front() {
+            let d = dist[&n];
+            if let Some(neighbors) = adj.get(&n) {
+                for &nb in neighbors {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
+                        queue.push_back(nb);
+                    }
+                }
+            }
+        }
+
+        let mut triodes: Vec<(usize, TriodeInfo)> = Vec::new();
+        for (edge_idx, e) in self.edges.iter().enumerate() {
+            let comp = &self.components[e.comp_idx];
+            if let ComponentKind::Triode(tt) = &comp.kind {
+                triodes.push((
+                    edge_idx,
+                    TriodeInfo {
+                        triode_type: *tt,
+                        junction_node: if e.node_b == self.gnd_node {
+                            e.node_a
+                        } else {
+                            e.node_b
+                        },
+                        ground_node: if e.node_b == self.gnd_node {
+                            e.node_b
+                        } else {
+                            e.node_a
+                        },
+                    },
+                ));
+            }
+        }
+
+        // Sort by distance of junction node from input.
+        triodes.sort_by_key(|(_, info)| {
+            dist.get(&info.junction_node).copied().unwrap_or(usize::MAX)
+        });
+        triodes
+    }
 }
 
 struct DiodeInfo {
@@ -783,6 +837,13 @@ struct DiodeInfo {
 struct JfetInfo {
     jfet_type: JfetType,
     is_n_channel: bool,
+    junction_node: NodeId,
+    #[allow(dead_code)]
+    ground_node: NodeId,
+}
+
+struct TriodeInfo {
+    triode_type: TriodeType,
     junction_node: NodeId,
     #[allow(dead_code)]
     ground_node: NodeId,
@@ -1010,19 +1071,21 @@ enum ControlTarget {
     LfoRate(usize),
 }
 
-/// LFO modulation target.
+/// Modulation target for LFOs and envelope followers.
 #[derive(Debug, Clone)]
-enum LfoTarget {
+enum ModulationTarget {
     /// Modulate a JFET's Vgs.
     JfetVgs { stage_idx: usize },
     /// Modulate a Photocoupler's LED drive.
     PhotocouplerLed { stage_idx: usize, comp_id: String },
+    /// Modulate a Triode's Vgk (grid-cathode bias).
+    TriodeVgk { stage_idx: usize },
 }
 
 /// LFO binding in a compiled pedal.
 struct LfoBinding {
     lfo: crate::elements::Lfo,
-    target: LfoTarget,
+    target: ModulationTarget,
     /// Bias offset for the modulation (e.g., Vgs center point).
     bias: f64,
     /// Modulation range (amplitude).
@@ -1032,6 +1095,19 @@ struct LfoBinding {
     /// LFO component ID (for debugging and future control binding).
     #[allow(dead_code)]
     lfo_id: String,
+}
+
+/// Envelope follower binding in a compiled pedal.
+struct EnvelopeBinding {
+    envelope: crate::elements::EnvelopeFollower,
+    target: ModulationTarget,
+    /// Bias offset for the modulation.
+    bias: f64,
+    /// Modulation range (amplitude).
+    range: f64,
+    /// Envelope follower component ID.
+    #[allow(dead_code)]
+    env_id: String,
 }
 
 /// A pedal processor compiled from a `.pedal` file's netlist.
@@ -1051,6 +1127,8 @@ pub struct CompiledPedal {
     supply_voltage: f64,
     /// LFO modulators.
     lfos: Vec<LfoBinding>,
+    /// Envelope follower modulators.
+    envelopes: Vec<EnvelopeBinding>,
 }
 
 /// Gain-like control labels.
@@ -1129,17 +1207,45 @@ impl PedalProcessor for CompiledPedal {
             let modulation = binding.bias + lfo_out * binding.range;
 
             match &binding.target {
-                LfoTarget::JfetVgs { stage_idx } => {
+                ModulationTarget::JfetVgs { stage_idx } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         stage.set_jfet_vgs(modulation);
                     }
                 }
-                LfoTarget::PhotocouplerLed { stage_idx, comp_id } => {
+                ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        // LED drive is 0-1, LFO outputs -1 to 1
-                        // Convert: bias=0.5, range=0.5 gives full 0-1 sweep
                         stage.tree.set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
                         stage.tree.recompute();
+                    }
+                }
+                ModulationTarget::TriodeVgk { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_triode_vgk(modulation);
+                    }
+                }
+            }
+        }
+
+        // Tick all envelope followers and route their outputs to targets.
+        for binding in &mut self.envelopes {
+            let env_out = binding.envelope.process(input);
+            let modulation = binding.bias + env_out * binding.range;
+
+            match &binding.target {
+                ModulationTarget::JfetVgs { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_jfet_vgs(modulation);
+                    }
+                }
+                ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.tree.set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
+                        stage.tree.recompute();
+                    }
+                }
+                ModulationTarget::TriodeVgk { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_triode_vgk(modulation);
                     }
                 }
             }
@@ -1180,6 +1286,9 @@ impl PedalProcessor for CompiledPedal {
         for binding in &mut self.lfos {
             binding.lfo.set_sample_rate(rate);
         }
+        for binding in &mut self.envelopes {
+            binding.envelope.set_sample_rate(rate);
+        }
     }
 
     fn reset(&mut self) {
@@ -1188,6 +1297,9 @@ impl PedalProcessor for CompiledPedal {
         }
         for binding in &mut self.lfos {
             binding.lfo.reset();
+        }
+        for binding in &mut self.envelopes {
+            binding.envelope.reset();
         }
     }
 
@@ -1415,6 +1527,81 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         });
     }
 
+    // Build WDF stages for triodes.
+    let triodes = graph.find_triodes();
+    let triode_edge_indices: Vec<usize> = triodes.iter().map(|(idx, _)| *idx).collect();
+    let all_nonlinear_with_triodes: Vec<usize> = all_nonlinear_indices
+        .iter()
+        .chain(triode_edge_indices.iter())
+        .copied()
+        .collect();
+
+    for (_edge_idx, triode_info) in &triodes {
+        let junction = triode_info.junction_node;
+        let passive_idxs = graph.elements_at_junction(
+            junction,
+            &all_nonlinear_with_triodes,
+            &graph.active_edge_indices,
+        );
+
+        if passive_idxs.is_empty() {
+            continue;
+        }
+
+        // Find the best injection node for the voltage source.
+        let mut injection_node = graph.in_node;
+        let mut best_dist = usize::MAX;
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            let other = if e.node_a == junction {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            if let Some(&d) = dist_from_in.get(&other) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = other;
+                }
+            }
+        }
+
+        // Build SP edges.
+        let source_node = graph.edges.len() + 3000; // virtual source node (unique offset)
+        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+        }
+
+        let terminals = vec![source_node, junction];
+        let sp_tree = match sp_reduce(sp_edges, &terminals) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let mut triode_components = graph.components.clone();
+        while triode_components.len() <= vs_comp_idx {
+            triode_components.push(ComponentDef {
+                id: "__vs__".to_string(),
+                kind: ComponentKind::Resistor(1.0),
+            });
+        }
+
+        let tree = sp_to_dyn_with_vs(&sp_tree, &triode_components, sample_rate, vs_comp_idx);
+
+        let model = triode_model(triode_info.triode_type);
+        let root = RootKind::Triode(TriodeRoot::new(model));
+
+        stages.push(WdfStage {
+            tree,
+            root,
+            compensation: 1.0,
+        });
+    }
+
     // Balance voltage source impedance in each stage.
     // This fixes topologies where the Vs branch sits in a Parallel adaptor
     // opposite a high-impedance element (e.g. Big Muff: Parallel(Series(Vs,C), R)
@@ -1569,19 +1756,29 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                             .iter()
                                             .position(|s| matches!(&s.root, RootKind::Jfet(_)))
                                             .unwrap_or(0);
-                                        LfoTarget::JfetVgs { stage_idx }
+                                        ModulationTarget::JfetVgs { stage_idx }
                                     }
-                                    "led" => LfoTarget::PhotocouplerLed {
+                                    "led" => ModulationTarget::PhotocouplerLed {
                                         stage_idx: 0,
                                         comp_id: target_comp.clone(),
                                     },
+                                    "vgk" => {
+                                        // Find which stage contains this triode
+                                        let stage_idx = stages
+                                            .iter()
+                                            .position(|s| matches!(&s.root, RootKind::Triode(_)))
+                                            .unwrap_or(0);
+                                        ModulationTarget::TriodeVgk { stage_idx }
+                                    }
                                     _ => continue,
                                 };
 
                                 // Bias and range based on target type
                                 let (bias, range) = match &target {
-                                    LfoTarget::JfetVgs { .. } => (-1.25, 1.25),
-                                    LfoTarget::PhotocouplerLed { .. } => (0.5, 0.5),
+                                    ModulationTarget::JfetVgs { .. } => (-1.25, 1.25),
+                                    ModulationTarget::PhotocouplerLed { .. } => (0.5, 0.5),
+                                    // Triode grid bias: -2V center with ±2V swing
+                                    ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
                                 };
 
                                 lfos.push(LfoBinding {
@@ -1591,6 +1788,67 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                     range,
                                     base_freq,
                                     lfo_id: comp.id.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build EnvelopeFollower bindings from EnvelopeFollower components and their net connections.
+    let mut envelopes = Vec::new();
+    for comp in &pedal.components {
+        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sensitivity_r) = &comp.kind {
+            let envelope = crate::elements::EnvelopeFollower::from_rc(
+                *attack_r, *attack_c, *release_r, *release_c, *sensitivity_r, sample_rate,
+            );
+
+            // Find what this envelope follower connects to via nets (EF.out -> target.property)
+            for net in &pedal.nets {
+                if let Pin::ComponentPin { component, pin } = &net.from {
+                    if component == &comp.id && pin == "out" {
+                        for target_pin in &net.to {
+                            if let Pin::ComponentPin {
+                                component: target_comp,
+                                pin: target_prop,
+                            } = target_pin
+                            {
+                                let target = match target_prop.as_str() {
+                                    "vgs" => {
+                                        let stage_idx = stages
+                                            .iter()
+                                            .position(|s| matches!(&s.root, RootKind::Jfet(_)))
+                                            .unwrap_or(0);
+                                        ModulationTarget::JfetVgs { stage_idx }
+                                    }
+                                    "led" => ModulationTarget::PhotocouplerLed {
+                                        stage_idx: 0,
+                                        comp_id: target_comp.clone(),
+                                    },
+                                    "vgk" => {
+                                        let stage_idx = stages
+                                            .iter()
+                                            .position(|s| matches!(&s.root, RootKind::Triode(_)))
+                                            .unwrap_or(0);
+                                        ModulationTarget::TriodeVgk { stage_idx }
+                                    }
+                                    _ => continue,
+                                };
+
+                                let (bias, range) = match &target {
+                                    ModulationTarget::JfetVgs { .. } => (-1.25, 1.25),
+                                    ModulationTarget::PhotocouplerLed { .. } => (0.0, 1.0),
+                                    ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
+                                };
+
+                                envelopes.push(EnvelopeBinding {
+                                    envelope: envelope.clone(),
+                                    target,
+                                    bias,
+                                    range,
+                                    env_id: comp.id.clone(),
                                 });
                             }
                         }
@@ -1611,6 +1869,7 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         gain_range: (glo * active_bonus, ghi * active_bonus),
         supply_voltage: 9.0,
         lfos,
+        envelopes,
     })
 }
 
@@ -1845,6 +2104,14 @@ fn jfet_model(jt: JfetType, is_n_channel: bool) -> JfetModel {
                 JfetModel::p_2n5460()
             }
         }
+    }
+}
+
+fn triode_model(tt: TriodeType) -> TriodeModel {
+    match tt {
+        TriodeType::T12ax7 => TriodeModel::t_12ax7(),
+        TriodeType::T12at7 => TriodeModel::t_12at7(),
+        TriodeType::T12au7 => TriodeModel::t_12au7(),
     }
 }
 

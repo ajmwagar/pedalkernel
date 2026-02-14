@@ -1,8 +1,8 @@
 <div align="center">
   <img src="logo/pedalkernel-logo.png" alt="PedalKernel Logo" width="200">
   <h1>PedalKernel</h1>
-  <p><strong>Compile guitar pedal circuits into real-time DSP kernels</strong></p>
-  <p>Write <code>.pedal</code> files with real component values. Get WDF audio engines and KiCad netlists.</p>
+  <p><strong>Real components. Real circuits. Real tone.</strong></p>
+  <p>Write a schematic in <code>.pedal</code> files. Hear it. Build it.</p>
 
   [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
   [![JACK](https://img.shields.io/badge/JACK-Audio-ff6b6b?style=for-the-badge&logo=audio-technica&logoColor=white)](https://jackaudio.org/)
@@ -11,21 +11,20 @@
 
 ---
 
-## The `.pedal` DSL
+PedalKernel is a circuit-to-audio compiler. You describe a pedal the way you'd draw it on a napkin -- resistors, caps, diodes, tubes, pots, with real values and real wiring -- and PedalKernel compiles it into a real-time audio engine using Wave Digital Filters.
 
-Define circuits the way you'd read a schematic. Components use real values with engineering notation, nets describe signal flow, and controls map knobs to parameters.
+The same `.pedal` file exports to KiCad for PCB layout and generates a Mouser bill of materials. Design the tone first, then solder it.
 
-### Tube Screamer
+## What it sounds like
+
+Every component shapes the sound the way the physical part would. A 220nF cap in the feedback loop rolls off differently than a 100nF. Germanium diodes clip softer than silicon. A 12AX7 saturates differently than a 12AU7. There are no "models" or "algorithms" to choose from -- just the circuit.
 
 ```
-# Tube Screamer TS-808 style overdrive
-# Simplified clipping stage: input cap -> feedback network with diode pair
-
 pedal "Tube Screamer" {
   components {
-    R1: resistor(4.7k)
-    C1: cap(220n)
-    D1: diode_pair(silicon)
+    R1: resistor(4.7k)       # These values are the tone
+    C1: cap(220n)             # Change them and the sound changes
+    D1: diode_pair(silicon)   # Si clips harder than Ge
     Gain: pot(500k)
   }
   nets {
@@ -41,18 +40,13 @@ pedal "Tube Screamer" {
 }
 ```
 
-### Fuzz Face
-
 ```
-# Fuzz Face style germanium fuzz
-# Two-transistor topology with input cap and biasing
-
 pedal "Fuzz Face" {
   components {
-    C1: cap(2.2u)
+    C1: cap(2.2u)             # Big input cap = full bass into the fuzz
     R1: resistor(33k)
     R2: resistor(8.2k)
-    Q1: pnp()
+    Q1: pnp()                 # Germanium PNP pair
     Q2: pnp()
     C2: cap(10u)
     R3: resistor(100k)
@@ -81,355 +75,194 @@ pedal "Fuzz Face" {
 }
 ```
 
-### Big Muff Pi
+## Components
+
+Everything you'd find on a pedal builder's bench:
+
+| Component | Syntax | What it does to the sound |
+|-----------|--------|--------------------------|
+| Resistor | `resistor(4.7k)` | Sets impedance, biasing, gain structure |
+| Capacitor | `cap(220n)` | Frequency-dependent -- shapes the EQ curve |
+| Inductor | `inductor(100m)` | Wah-style resonant peaks |
+| Diode pair | `diode_pair(silicon\|germanium\|led)` | Symmetric clipping -- the core of overdrive |
+| Single diode | `diode(silicon\|germanium\|led)` | Asymmetric clipping -- fuzz character |
+| Potentiometer | `pot(500k)` | Variable resistance, bound to knobs |
+| BJT | `npn()` / `pnp()` | Gain stages, biasing networks |
+| Op-amp | `opamp()` | Clean gain, buffering |
+| N-JFET | `njfet(j201\|2n5457)` | Voltage-controlled resistance (tremolo, compression) |
+| P-JFET | `pjfet(2n5460)` | Complementary modulation |
+| Vactrol | `photocoupler(vtl5c3\|vtl5c1\|nsl32)` | Optical compression, smooth envelope following |
+| Triode | `triode(12ax7\|12at7\|12au7)` | Tube saturation -- plate starve to full breakup |
+| LFO | `lfo(sine, 10k, 100n)` | Modulation source from physical RC timing |
+| Envelope follower | `envelope_follower(10k, 100n, 100k, 1u, 47k)` | Dynamics-reactive modulation from RC networks |
+
+### Engineering notation
+
+`100p` = 100 pF, `220n` = 220 nF, `2.2u` = 2.2 uF, `100m` = 100 mH, `4.7k` = 4.7 kOhm, `1M` = 1 MOhm
+
+### Wiring
+
+Signal flow uses `->`. Comma-separated pins at a junction are electrically connected:
 
 ```
-# Big Muff Pi style distortion
-# Four-stage clipping with tone stack
-
-pedal "Big Muff" {
-  components {
-    C1: cap(100n)
-    R1: resistor(10k)
-    D1: diode_pair(silicon)
-    R2: resistor(47k)
-    C2: cap(100n)
-    D2: diode_pair(silicon)
-    R3: resistor(100k)
-    C3: cap(4n)
-    R4: resistor(22k)
-    C4: cap(10n)
-    Tone: pot(100k)
-    Sustain: pot(100k)
-    Volume: pot(100k)
-  }
-  nets {
-    in -> C1.a
-    C1.b -> R1.a, D1.a
-    D1.b -> gnd
-    R1.b -> C2.a
-    C2.b -> R2.a, D2.a
-    D2.b -> gnd
-    R2.b -> R3.a
-    R3.b -> Tone.a
-    Tone.b -> C3.a, C4.a
-    C3.b -> R4.a
-    C4.b -> R4.a
-    R4.b -> Volume.a
-    Volume.b -> out
-  }
-  controls {
-    Sustain.position -> "Sustain" [0.0, 1.0] = 0.7
-    Tone.position -> "Tone" [0.0, 1.0] = 0.5
-    Volume.position -> "Volume" [0.0, 1.0] = 0.5
-  }
-}
+in -> C1.a              # Signal enters the coupling cap
+C1.b -> R1.a, D1.a      # Cap output goes to both the resistor and diode
+D1.b -> gnd              # Diode clips to ground
 ```
 
----
-
-## DSL Reference
-
-### Components
-
-| Syntax | Description |
-|--------|-------------|
-| `resistor(4.7k)` | Resistor |
-| `cap(220n)` | Capacitor |
-| `inductor(100m)` | Inductor |
-| `diode_pair(silicon\|germanium\|led)` | Anti-parallel diode pair |
-| `diode(silicon\|germanium\|led)` | Single diode |
-| `pot(500k)` | Potentiometer |
-| `npn()` / `pnp()` | BJT transistors |
-| `opamp()` | Operational amplifier |
-
-### Engineering Notation
-
-| Suffix | Multiplier | Example |
-|--------|-----------|---------|
-| `p` | 10^-12 (pico) | `100p` = 100 pF |
-| `n` | 10^-9 (nano) | `220n` = 220 nF |
-| `u` | 10^-6 (micro) | `2.2u` = 2.2 uF |
-| `m` | 10^-3 (milli) | `100m` = 100 mH |
-| `k` | 10^3 (kilo) | `4.7k` = 4.7 kOhm |
-| `M` | 10^6 (mega) | `1M` = 1 MOhm |
-
-### Nets
-
-Signal flow uses `->` with comma-separated nodes at the same junction:
-
-```
-in -> C1.a              # reserved node to component pin
-C1.b -> R1.a, D1.a      # one-to-many junction
-D1.b -> gnd              # component pin to ground
-```
-
-### Reserved Nodes
-
-| Node | Purpose |
-|------|---------|
-| `in` | Signal input |
-| `out` | Signal output |
-| `gnd` | Ground reference |
-| `vcc` | Power supply |
+Reserved nodes: `in`, `out`, `gnd`, `vcc`
 
 ### Controls
 
-Map component properties to named knobs with range and default:
+Map physical pot positions to named knobs:
 
 ```
 Gain.position -> "Drive" [0.0, 1.0] = 0.5
 ```
 
-### Comments
-
-Lines starting with `#` are comments.
-
 ---
 
-## Quick Start
+## Quick start
 
 ```bash
 git clone https://github.com/ajmwagar/pedalkernel
 cd pedalkernel
-
 cargo build --release
 cargo test
 
-# Render overdrive/fuzz to WAV files
+# Render to WAV -- listen to the circuit
 cargo run --example overdrive
 cargo run --example fuzzface
 
-# Parse a .pedal file and export KiCad netlist
-cargo run --example parse_pedal
+# Parse any .pedal file
 cargo run --example parse_pedal -- examples/big_muff.pedal
 
-# Compare silicon/germanium/LED diode models
+# Export KiCad netlist for PCB layout
+cargo run --example parse_pedal -- examples/klon_centaur.pedal
+
+# Compare diode clipping: silicon vs germanium vs LED
 cargo run --example direct_wdf
 
-# Interactive TUI pedal control surface
+# Interactive TUI -- tweak knobs in real time
 cargo run --example tui --features tui -- examples/tube_screamer.pedal
 ```
 
 ---
 
-## Features
+## From tone to PCB
 
-### Core (always available)
-
-- **DSL Parser** — `nom`-based parser for `.pedal` files with engineering notation
-- **Netlist Compiler** — automatically compiles `.pedal` netlists into WDF trees via series-parallel decomposition with impedance balancing
-- **WDF Engine** — series/parallel adaptors with verified scattering matrices, diode pair and single-diode nonlinear roots via Newton-Raphson
-- **Zero-Allocation Hot Path** — per-sample processing with no heap allocation
-- **Supply Voltage Modeling** — run pedals at 9V (stock), 12V, or 18V with accurate headroom scaling for active gain stages
-- **KiCad Export** — generate netlists from the same `.pedal` file for PCB prototyping
-- **WAV Output** — offline rendering via `hound` for tone prototyping without a running audio server
-- **Pedal Library** — ready-to-use Overdrive, Fuzz Face, and Delay implementations
-
-### Optional Features
-
-PedalKernel uses Cargo feature flags to keep the core lean. Enable what you need:
-
-```toml
-# In your Cargo.toml
-pedalkernel = { version = "0.1", features = ["hardware"] }
-```
-
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `jack-rt` | Yes | JACK real-time audio engine — sub-5ms latency through a Scarlett 2i2 on Linux |
-| `tui` | Yes | Interactive ASCII pedal control surface via `ratatui` |
-| `cli` | Yes | Command-line interface via `clap` |
-| `hardware` | No | Hardware design tools — BOM generation, voltage compatibility checking, physical component specs |
-
-Build with no optional features for a minimal DSP-only library:
-
-```bash
-cargo build --no-default-features
-```
-
-### Hardware Design Tools (`--features hardware`)
-
-For builders who prototype tone digitally and then build it in real life. This feature adds physical-world awareness without touching the `.pedal` DSL — tone-focused users never see it.
-
-**Companion `.pedalhw` files** declare real component specs alongside your `.pedal` file:
+The same `.pedal` file drives three outputs:
 
 ```
-# fuzz_face.pedalhw — physical component specs
+                          +---> WDF audio engine ---> WAV / JACK real-time
+                          |
+  .pedal file ---> parse -+---> KiCad netlist ---> PCB layout
+                          |
+                          +---> Bill of Materials ---> Mouser order
+```
 
+### KiCad export
+
+Every component maps to a real KiCad symbol. Triodes get `Valve:ECC83`/`ECC81`/`ECC82`. JFETs get `Device:Q_NJFET_DGS`. Nets are preserved exactly. Open the `.net` file in KiCad and start laying out copper.
+
+### Bill of materials
+
+The BOM engine maps your circuit to real parts from a curated database -- Yageo metal film resistors, WIMA film caps, Nichicon electrolytics, Alpha pots, JJ Electronic tubes. Upload the CSV directly to Mouser:
+
+```rust
+let bom = pedalkernel::hw::build_bom(&pedal, None);
+print!("{}", pedalkernel::hw::format_bom_table(&pedal.name, &bom, 1));
+// -> Mouser P/Ns, quantities, descriptions, ready to order
+```
+
+### Hardware specs (`.pedalhw` files)
+
+For builders who need to know if a part will survive the voltage. Declare real specs alongside your circuit:
+
+```
+# fuzz_face.pedalhw
 Q1: vce_max(32) part("AC128")
 Q2: vce_max(32) part("AC128")
-C1: voltage_rating(25) part("2.2uF electrolytic")
-C2: voltage_rating(16) part("10uF electrolytic")
-U1: supply_max(36) part("TL072")
-D1: breakdown(50) part("1N34A")
-R1: power_rating(0.25)
+C2: voltage_rating(16)
 ```
 
-| Property | Applies to | What it checks |
-|---|---|---|
-| `vce_max(V)` | Transistors | Collector-emitter breakdown voltage |
-| `voltage_rating(V)` | Capacitors | Max DC voltage before failure |
-| `supply_max(V)` | Op-amps | Total supply voltage limit |
-| `breakdown(V)` | Diodes | Reverse breakdown voltage |
-| `power_rating(W)` | Resistors | Max power dissipation |
-| `part("...")` | Any | Part name for BOM and schematic labels |
-
-**Voltage compatibility check** — flags components that would fail or behave differently at your target supply voltage:
+Run voltage compatibility checks before you power anything up:
 
 ```rust
-use pedalkernel::hw::*;
-
-let pedal = pedalkernel::dsl::parse_pedal_file(&src).unwrap();
-let mut limits = parse_pedalhw_file("fuzz_face.pedalhw").unwrap();
-
-// Auto-fill specs from the curated parts DB (TL072 → 36V, 1N4148 → 100V, etc.)
-auto_populate_specs(&pedal, &mut limits);
-
-// Check at 18V — will flag the AC128 transistors and electrolytic caps
-let warnings = check_voltage_with_specs(&pedal, 18.0, &limits);
-for w in &warnings {
-    println!("[{:?}] {}: {}", w.severity, w.component_id, w.message);
-}
+let warnings = pedalkernel::hw::check_voltage_with_specs(&pedal, 18.0, &limits);
+// [Danger] Q1: Germanium transistor exceeds Vce(max) 32V at 18V
+// [Info]   V1: Tube needs 150-400V plate supply; at 18V the WDF model
+//              runs fine but a physical build needs a B+ supply
 ```
 
-Without a `.pedalhw` file, heuristic checks still catch obvious problems (germanium transistors in fuzz circuits at >12V, electrolytic caps at >16V, etc.).
-
-**BOM generation** — produces a Mouser-compatible bill of materials from a curated parts database:
-
-```rust
-let bom = build_bom(&pedal, Some(&limits));
-let csv = export_bom_csv(&bom, 5);  // 5 units
-std::fs::write("bom.csv", csv).unwrap();
-
-// Or print a formatted table
-print!("{}", format_bom_table(&pedal.name, &bom, 1));
-```
-
-The parts DB includes Mouser P/Ns for common pedal components (Yageo resistors, WIMA film caps, Nichicon electrolytics, Alpha pots, 1N4148/1N34A diodes, 2N3904/2N3906 transistors, TL072 opamps). When a `.pedalhw` file specifies `part("AC128")`, the BOM marks that line for manual sourcing.
-
-### Built-in Pedals
-
-| Pedal | Description | Status |
-|-------|-------------|--------|
-| **Overdrive** | Tube Screamer-style WDF diode-pair clipping | Working |
-| **FuzzFace** | Germanium single-diode asymmetric clipping | Working |
-| **Delay** | Digital delay line with feedback | Working |
+Without a `.pedalhw` file, heuristic checks still catch obvious problems -- germanium transistors in fuzz circuits above 12V, undersized electrolytic caps, tubes at pedal voltages.
 
 ---
 
-## TUI Control Surface
+## TUI control surface
 
-Visualize and tweak any `.pedal` file as an interactive ASCII pedal — like staring down at a real pedalboard in your terminal.
+Tweak any `.pedal` file as an interactive ASCII pedalboard:
 
 ```bash
 cargo run --example tui --features tui -- examples/tube_screamer.pedal
 ```
 
 ```
-╔══════════════════════════════════════╗
-║          TUBE SCREAMER               ║
-║                                      ║
-║      ╭───╮          ╭───╮           ║
-║     ╱  |  ╲        ╱     ╲          ║
-║    │   |   │      │     \ │          ║
-║     ╲     ╱        ╲     ╱          ║
-║      ╰───╯          ╰───╯           ║
-║    >>Drive<<         Level           ║
-║       0.50           0.80            ║
-║                                      ║
-║            ╭──────────╮              ║
-║            │  ACTIVE  │              ║
-║            ╰──────────╯              ║
-║                                      ║
-║  ←→ adjust  ↑↓ fine  Tab next  Q quit║
-╚══════════════════════════════════════╝
++--------------------------------------+
+|          TUBE SCREAMER               |
+|                                      |
+|      .---.          .---.           |
+|     /  |  \        /     \          |
+|    |   |   |      |     \ |          |
+|     \     /        \     /          |
+|      '---'          '---'           |
+|    >>Drive<<         Level           |
+|       0.50           0.80            |
+|                                      |
+|            .----------.              |
+|            |  ACTIVE  |              |
+|            '----------'              |
+|                                      |
+|  <-> adjust  ^v fine  Tab next  Q quit|
++--------------------------------------+
 ```
 
-**Controls:** `←→` coarse adjust, `↑↓` fine adjust, `Tab`/`Shift+Tab` cycle knobs, `R` reset to default, `Space` toggle bypass, `Q` quit.
-
-Works with any pedal file — try `big_muff.pedal` for a 3-knob layout.
-
-<!-- TODO: Add asciinema recording or VHS gif (https://github.com/charmbracelet/vhs) -->
+Works with any pedal file. `big_muff.pedal` gives you three knobs. The control surface shapes to whatever you wire up.
 
 ---
 
-## Architecture
+## Supply voltage
 
-```
- .pedal file
-     |
-     v
- +----------+     +--------------+
- |DSL Parser|---->| KiCad Export  |---> .net file (PCB layout)
- +----+-----+     +--------------+
-      |
-      v
- +----------------------------------+
- |     Netlist Compiler             |
- |                                  |
- |  1. Build circuit graph          |
- |  2. Find diode clipping stages   |
- |  3. SP decompose -> WDF tree     |
- |  4. Balance Vs impedance         |
- +------------+---------------------+
-              |
-              v
- +----------------------------------+
- |          WDF Engine              |
- |                                  |
- |  Leaves: R, C, L, Vs, Pot       |
- |  Adaptors: Series, Parallel      |
- |  Roots: DiodePair, Diode (NR)   |
- +------------+---------------------+
-              |
-              v
- +----------------------------------+
- |     CompiledPedal                |
- |  Per-stage WDF trees + roots     |---> WAV / JACK real-time
- |  Auto-bound knob controls        |
- +----------------------------------+
+Pedals run at 9V by default. Crank it to 12V or 18V for more headroom -- the WDF engine models how the active elements respond to higher rail voltage. The clipping threshold shifts, the gain stages swing further before saturating, the whole feel opens up. Just like plugging a real Tube Screamer into an 18V adapter.
+
+```rust
+proc.set_supply_voltage(12.0);  // More headroom, cleaner clipping
+proc.set_supply_voltage(18.0);  // Even more -- like a Voodoo Lab Pedal Power
 ```
 
-### Netlist Compilation Algorithm
+---
 
-The compiler transforms a `.pedal` netlist into a real-time WDF processor:
+## How it works
 
-**1. Circuit graph construction** — Union-Find merges connected pins into circuit nodes, creating an undirected graph where components are edges.
+The compiler transforms your circuit into a Wave Digital Filter tree:
 
-**2. Diode stage identification** — BFS from the input locates diode elements (the nonlinear clipping stages). Each diode becomes a WDF root; its neighboring passive components form the WDF tree.
+1. **Circuit graph** -- Union-Find merges connected pins into nodes. Components become edges.
 
-**3. Series-parallel (SP) decomposition** — The passive subgraph around each diode is reduced into a binary tree:
+2. **Nonlinear root identification** -- BFS from the input finds diodes, JFETs, and triodes. Each becomes a WDF root. Its neighboring passives form the WDF tree.
 
-```
-Given edges: {Vs-A, C-AB, R-AB, R2-BN}   (A,B = nodes, N = terminal)
+3. **Series-parallel decomposition** -- The passive subgraph around each nonlinear element reduces into a binary tree of Series and Parallel adaptors.
 
-Dead-end reduction:  R2-BN → R2-BSource  (redirect degree-1 non-terminals)
-Parallel reduction:  C-AB ∥ R-AB → Par(C,R)-AB
-Series reduction:    Vs + Par → Ser(Vs, Par(C,R))
-Parallel reduction:  Ser ∥ R2 → Par(Ser(Vs, Par(C,R)), R2)     ← final tree
-```
+4. **Impedance balancing** -- A raw voltage source (Rp=1) in parallel with a 100k resistor would attenuate the signal to nothing. The compiler adjusts Vs port resistance to match its sibling, giving balanced gamma for efficient signal transfer.
 
-At each step, edges with the same endpoints merge into Parallel adaptors; degree-2 internal nodes collapse into Series adaptors. The algorithm terminates when one edge remains.
+5. **Per-sample processing** -- Four phases, zero allocation:
+   - Scatter up: leaves to root (reflected waves propagate)
+   - Root solve: Newton-Raphson on the nonlinear element (Shockley equation for diodes, Koren equation for triodes)
+   - Scatter down: root to leaves (incident waves propagate)
+   - State update: capacitors and inductors latch
 
-**4. Voltage source impedance balancing** — A raw Vs (Rp=1) in parallel with kOhm-range components creates extreme impedance mismatch (gamma->1), attenuating the signal. The compiler walks the tree and adjusts the Vs port resistance to match its sibling branches, ensuring balanced signal transfer and numerical stability.
+### Compiled Big Muff topology
 
-**5. Active element modeling** — Transistors and opamps contribute pre-gain (cascaded amplitude boost) and soft limiting (tanh), since their nonlinear behavior is approximated rather than WDF-modeled.
-
-### WDF Processing Pipeline
-
-Each sample is processed in four phases with zero heap allocation:
-
-```
-1. scatter_up    Leaves -> Root    Reflected waves propagate bottom-up
-2. root_solve    Nonlinear root   Newton-Raphson on Shockley equation (<=16 iter)
-3. scatter_down  Root -> Leaves    Incident waves propagate top-down
-4. state_update  Reactive elems   Capacitors/inductors latch new state
-```
-
-### Example: Compiled Big Muff Tree
-
-The Big Muff has two cascaded clipping stages. The compiler produces:
+Two cascaded clipping stages. Each diode pair gets its own WDF tree:
 
 ```
 Stage 1:                          Stage 2:
@@ -442,87 +275,82 @@ Stage 1:                          Stage 2:
 Vs    C1(100n)                   Vs    C2(100n)
 ```
 
-Each stage's Vs is impedance-balanced to match its parallel sibling (R1/R2), giving gamma ~0.5 for efficient signal transfer through the tree.
-
 ---
 
-## Rust API
+## API
 
 ```rust
-// Parse and compile a .pedal file into a real-time processor
-let pedal = pedalkernel::dsl::parse_pedal_file(&src).unwrap();
-let mut proc = pedalkernel::compiler::compile_pedal(&pedal, 48000.0).unwrap();
+use pedalkernel::{dsl, compiler, kicad};
+
+// Parse and compile
+let pedal = dsl::parse_pedal_file(&src).unwrap();
+let mut proc = compiler::compile_pedal(&pedal, 48000.0).unwrap();
+
+// Play
 proc.set_control("Drive", 0.7);
 let output = proc.process(input_sample);
 
-// Export KiCad netlist from the same .pedal file
-let netlist = pedalkernel::kicad::export_kicad_netlist(&pedal);
+// Export for PCB
+let netlist = kicad::export_kicad_netlist(&pedal);
 
-// Or use the hardcoded WDF overdrive directly
+// Or use the built-in overdrive directly
 let mut od = pedalkernel::pedals::Overdrive::new(48000.0);
 od.set_gain(0.7);
 let output = od.process(input_sample);
-
-// Render to WAV
-pedalkernel::wav::render_to_wav(&mut od, &input, Path::new("out.wav"), 48000).unwrap();
-
-// Run through JACK for real-time audio (cargo build --features jack-rt)
-// let _client = pedalkernel::AudioEngine::run("PedalKernel", proc).unwrap();
 ```
 
 ---
 
-## Python Tools
+## Feature flags
 
-Optional Python utilities in `tools/` — these are standalone scripts, not needed by the Rust core.
+| Feature | Default | What it adds |
+|---------|---------|-------------|
+| `jack-rt` | Yes | JACK real-time audio -- sub-5ms latency through a Scarlett 2i2 |
+| `tui` | Yes | Interactive ASCII control surface via `ratatui` |
+| `cli` | Yes | Command-line interface via `clap` |
+| `hardware` | No | BOM generation, voltage checks, `.pedalhw` specs |
 
-### Setup
+Minimal DSP-only build:
+
+```bash
+cargo build --no-default-features
+```
+
+---
+
+## Included pedals
+
+Seven `.pedal` files ship in `examples/`:
+
+| Circuit | Topology | Character |
+|---------|----------|-----------|
+| Tube Screamer | Feedback clipping, silicon diode pair | Mid-hump overdrive, the sound of blues rock |
+| Fuzz Face | Two-transistor, single Ge diode | Velcro-rip fuzz, NPN/PNP polarity flip |
+| Big Muff | Four-stage cascaded clipping | Sustained wall of fuzz, Smashing Pumpkins territory |
+| Klon Centaur | Dual opamp, Ge diode blend | Transparent overdrive, clean/dirty mix |
+| ProCo RAT | Opamp gain + diode pair to ground | Tight distortion, filter sweep |
+| Blues Driver | Multi-stage with tone stack | Dynamic, touch-sensitive overdrive |
+| Dyna Comp | Envelope-controlled JFET + vactrol | Optical compression, country squish |
+
+---
+
+## Python tools
+
+Optional standalone scripts in `tools/`:
 
 ```bash
 python3 -m venv tools/.venv
 tools/.venv/bin/pip install -r tools/requirements.txt
-```
 
-### Schematic Renderer
+# Render EE-style schematics from .pedal files
+tools/.venv/bin/python tools/schematic.py examples/tube_screamer.pedal -o ts.png
 
-Generate EE-style circuit schematics (PNG/PDF/SVG) from `.pedal` files:
-
-```bash
-# Single pedal
-tools/.venv/bin/python tools/schematic.py examples/tube_screamer.pedal -o tube_screamer.png
-tools/.venv/bin/python tools/schematic.py examples/klon_centaur.pedal -o klon.pdf
-tools/.venv/bin/python tools/schematic.py examples/big_muff.pedal -o muff.svg
-
-# High-res PNG
-tools/.venv/bin/python tools/schematic.py examples/klon_centaur.pedal -o klon_hires.png --dpi 300
-
-# All pedals at once
-for f in examples/*.pedal; do
-  tools/.venv/bin/python tools/schematic.py "$f" -o "output/schematics/$(basename ${f%.pedal}).png"
-done
-```
-
-Schematics include proper EE symbols (resistor zigzags, cap plates, opamp triangles, BJTs), auto-layout with signal flow left-to-right, ground/Vcc branches, and an EE-style title block.
-
-### Mouser BOM Generator
-
-Generate a Mouser Electronics bill of materials from `.pedal` files:
-
-```bash
-tools/.venv/bin/python tools/mouser_bom.py examples/tube_screamer.pedal
+# Generate Mouser BOM
 tools/.venv/bin/python tools/mouser_bom.py examples/big_muff.pedal --qty 5 --csv bom.csv
-```
-
----
-
-## Benchmarks
-
-```bash
-cargo bench
 ```
 
 ---
 
 ## License
 
-MIT © [Avery Wagar](https://github.com/ajmwagar)
+MIT (c) [Avery Wagar](https://github.com/ajmwagar)

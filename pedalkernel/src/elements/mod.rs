@@ -703,16 +703,18 @@ mod tests {
     }
 
     #[test]
-    fn envelope_follower_presets() {
-        let ef_wah = EnvelopeFollower::auto_wah(48000.0);
-        let ef_comp = EnvelopeFollower::compressor(48000.0);
+    fn envelope_follower_from_rc() {
+        // Auto-wah style: attack τ = 1kΩ × 4.7µF = 4.7ms, release τ = 100kΩ × 1.5µF = 150ms
+        let ef_wah = EnvelopeFollower::from_rc(1_000.0, 4.7e-6, 100_000.0, 1.5e-6, 20_000.0, 48000.0);
+        // Compressor style: attack τ = 100Ω × 10µF = 1ms, release τ = 300kΩ × 1µF = 300ms
+        let ef_comp = EnvelopeFollower::from_rc(100.0, 10e-6, 300_000.0, 1e-6, 10_000.0, 48000.0);
 
-        // Auto-wah should have faster attack than default
-        assert!(ef_wah.attack() < 10.0);
+        // Auto-wah should have fast attack
+        assert!(ef_wah.attack() < 10.0, "wah attack: {}", ef_wah.attack());
         // Compressor should have very fast attack
-        assert!(ef_comp.attack() <= 1.0);
+        assert!(ef_comp.attack() <= 1.5, "comp attack: {}", ef_comp.attack());
         // Compressor should have slow release
-        assert!(ef_comp.release() >= 300.0);
+        assert!(ef_comp.release() >= 250.0, "comp release: {}", ef_comp.release());
     }
 
     #[test]

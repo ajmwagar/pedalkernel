@@ -245,27 +245,44 @@ impl EnvelopeFollower {
         ef
     }
 
-    /// Create an envelope follower optimized for auto-wah.
+    /// Create an envelope follower from physical RC timing components.
     ///
-    /// Fast attack (5ms) for quick response to pick attacks,
-    /// medium release (150ms) for smooth filter sweep.
-    pub fn auto_wah(sample_rate: f64) -> Self {
-        let mut ef = Self::new(sample_rate);
-        ef.set_attack(5.0);
-        ef.set_release(150.0);
-        ef.set_sensitivity(2.0); // Boost for typical guitar levels
-        ef
-    }
+    /// This mirrors real envelope detector circuits where attack and release
+    /// time constants are set by RC networks, and sensitivity is set by
+    /// an input gain resistor.
+    ///
+    /// - `attack_r`: Attack timing resistor (Ω)
+    /// - `attack_c`: Attack timing capacitor (F)
+    /// - `release_r`: Release timing resistor (Ω)
+    /// - `release_c`: Release timing capacitor (F)
+    /// - `sensitivity_r`: Sensitivity resistor (Ω) — gain = sensitivity_r / 10kΩ
+    ///
+    /// Time constants: τ_attack = R_attack × C_attack (in seconds),
+    /// τ_release = R_release × C_release (in seconds).
+    pub fn from_rc(
+        attack_r: f64,
+        attack_c: f64,
+        release_r: f64,
+        release_c: f64,
+        sensitivity_r: f64,
+        sample_rate: f64,
+    ) -> Self {
+        // τ = R × C gives seconds, convert to ms
+        let attack_ms = attack_r * attack_c * 1000.0;
+        let release_ms = release_r * release_c * 1000.0;
+        // Sensitivity as a ratio against 10kΩ reference (like an OTA gain resistor)
+        let sensitivity = sensitivity_r / 10_000.0;
 
-    /// Create an envelope follower optimized for compression.
-    ///
-    /// Very fast attack (1ms) to catch transients,
-    /// slow release (300ms) for smooth gain reduction.
-    pub fn compressor(sample_rate: f64) -> Self {
-        let mut ef = Self::new(sample_rate);
-        ef.set_attack(1.0);
-        ef.set_release(300.0);
-        ef.set_sensitivity(1.0);
+        let mut ef = Self {
+            envelope: 0.0,
+            attack_coef: 0.0,
+            release_coef: 0.0,
+            sample_rate,
+            attack_ms,
+            release_ms,
+            sensitivity,
+        };
+        ef.update_coefficients();
         ef
     }
 

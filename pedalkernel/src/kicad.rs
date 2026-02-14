@@ -22,15 +22,13 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::NJfet(_) => ("Device:Q_NJFET_DGS", "J"),
         ComponentKind::PJfet(_) => ("Device:Q_PJFET_DGS", "J"),
         ComponentKind::Photocoupler(_) => ("Isolator:PC817", "OC"),
-        ComponentKind::Lfo(..) => ("", "LFO"), // Virtual component, not in physical netlist
-        ComponentKind::Triode(tt) => {
-            // Triode tubes use vacuum tube symbols
-            match tt {
-                TriodeType::T12ax7 | TriodeType::T12at7 | TriodeType::T12au7 => {
-                    ("Valve:ECC83", "V")
-                }
-            }
-        }
+        ComponentKind::Lfo(..) => ("", "LFO"), // Expands to timing R + C
+        ComponentKind::Triode(tt) => match tt {
+            TriodeType::T12ax7 => ("Valve:ECC83", "V"),
+            TriodeType::T12at7 => ("Valve:ECC81", "V"),
+            TriodeType::T12au7 => ("Valve:ECC82", "V"),
+        },
+        ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
     }
 }
 
@@ -58,6 +56,16 @@ fn value_str(kind: &ComponentKind) -> String {
             )
         }
         ComponentKind::Triode(tt) => format!("Triode_{tt:?}"),
+        ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) => {
+            format!(
+                "ENV_atk{}/{}_rel{}/{}_sens{}",
+                format_eng(*attack_r, ""),
+                format_eng(*attack_c, ""),
+                format_eng(*release_r, ""),
+                format_eng(*release_c, ""),
+                format_eng(*sens_r, ""),
+            )
+        }
     }
 }
 
@@ -157,37 +165,80 @@ pub fn export_kicad_netlist(pedal: &PedalDef) -> String {
 
     // Components section
     writeln!(out, "  (components").unwrap();
-    let mut comp_num = 1;
-    let mut lfo_timing_count = 0;
     for comp in &pedal.components {
-        // LFO components expand into timing R and C for the physical circuit
-        if let ComponentKind::Lfo(waveform, timing_r, timing_c) = &comp.kind {
-            lfo_timing_count += 1;
-            // Timing resistor
-            writeln!(
-                out,
-                "    (comp (ref R_LFO{lfo_timing_count}) (value \"{}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"LFO {:?} timing\"))",
-                format_eng(*timing_r, "Ω"),
-                waveform
-            )
-            .unwrap();
-            // Timing capacitor
-            writeln!(
-                out,
-                "    (comp (ref C_LFO{lfo_timing_count}) (value \"{}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"LFO {:?} timing\"))",
-                format_eng(*timing_c, "F"),
-                waveform
-            )
-            .unwrap();
-        } else {
-            let (lib_ref, prefix) = footprint_ref(&comp.kind);
-            let val = value_str(&comp.kind);
-            writeln!(
-                out,
-                "    (comp (ref {prefix}{comp_num}) (value \"{val}\") (libsource (lib \"{lib_ref}\")))"
-            )
-            .unwrap();
-            comp_num += 1;
+        match &comp.kind {
+            // LFO components expand into timing R and C for the physical circuit
+            ComponentKind::Lfo(waveform, timing_r, timing_c) => {
+                // Timing resistor
+                writeln!(
+                    out,
+                    "    (comp (ref R_{id}) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"LFO {wf:?} timing\"))",
+                    id = comp.id, val = format_eng(*timing_r, "Ω"), wf = waveform
+                )
+                .unwrap();
+                // Timing capacitor
+                writeln!(
+                    out,
+                    "    (comp (ref C_{id}) (value \"{val}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"LFO {wf:?} timing\"))",
+                    id = comp.id, val = format_eng(*timing_c, "F"), wf = waveform
+                )
+                .unwrap();
+            }
+            // Envelope follower expands into 5 physical components
+            ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) => {
+                // Attack timing resistor
+                writeln!(
+                    out,
+                    "    (comp (ref R_{id}_ATK) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope attack timing\"))",
+                    id = comp.id, val = format_eng(*attack_r, "Ω")
+                )
+                .unwrap();
+                // Attack timing capacitor
+                writeln!(
+                    out,
+                    "    (comp (ref C_{id}_ATK) (value \"{val}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"Envelope attack timing\"))",
+                    id = comp.id, val = format_eng(*attack_c, "F")
+                )
+                .unwrap();
+                // Release timing resistor
+                writeln!(
+                    out,
+                    "    (comp (ref R_{id}_REL) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope release timing\"))",
+                    id = comp.id, val = format_eng(*release_r, "Ω")
+                )
+                .unwrap();
+                // Release timing capacitor
+                writeln!(
+                    out,
+                    "    (comp (ref C_{id}_REL) (value \"{val}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"Envelope release timing\"))",
+                    id = comp.id, val = format_eng(*release_c, "F")
+                )
+                .unwrap();
+                // Sensitivity resistor
+                writeln!(
+                    out,
+                    "    (comp (ref R_{id}_SENS) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope sensitivity\"))",
+                    id = comp.id, val = format_eng(*sens_r, "Ω")
+                )
+                .unwrap();
+                // Rectifier diode (part of the physical envelope detector)
+                writeln!(
+                    out,
+                    "    (comp (ref D_{id}) (value \"1N4148\") (libsource (lib \"Device:D\")) (field (name \"Note\") \"Envelope rectifier\"))",
+                    id = comp.id
+                )
+                .unwrap();
+            }
+            _ => {
+                let (lib_ref, _prefix) = footprint_ref(&comp.kind);
+                let val = value_str(&comp.kind);
+                writeln!(
+                    out,
+                    "    (comp (ref {id}) (value \"{val}\") (libsource (lib \"{lib_ref}\")))",
+                    id = comp.id
+                )
+                .unwrap();
+            }
         }
     }
     writeln!(out, "  )").unwrap();
