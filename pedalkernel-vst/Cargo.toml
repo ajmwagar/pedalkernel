@@ -9,6 +9,12 @@ license = "GPL-3.0-only"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = []
+# Embed pro pedals from the private pedalkernel-pro repo (sibling directory).
+# Build will fail if ~/src/pedalkernel-pro is not checked out.
+pro-pedals = []
+
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 pedalkernel = { path = "../pedalkernel", default-features = false }

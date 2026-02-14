@@ -1,12 +1,16 @@
 //! PedalKernel VST3/CLAP plugin.
 //!
-//! Single-plugin architecture with a pedal selector and three generic
+//! Single-plugin architecture with a pedal selector and six generic
 //! knob parameters.  Built-in pedals are always available; user-supplied
 //! `.pedal` files are loaded from `~/.pedalkernel/pedals/` at plugin init.
 //!
 //! The pedal selector is an `IntParam` whose range adapts to the number of
 //! loaded pedals.  Built-in pedals occupy indices 0–7 (seven WDF-based
 //! models plus a digital delay); user pedals follow at index 8+.
+//!
+//! Controls are mapped sequentially: the first control declared in the
+//! `.pedal` file maps to knob 1, the second to knob 2, etc. (up to 6).
+//! Unused knobs display "—".
 
 use nih_plug::prelude::*;
 use pedalkernel::compiler::{compile_pedal, CompiledPedal};
@@ -31,15 +35,43 @@ const EMBEDDED_SOURCES: &[&str] = &[
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Pro pedals (private repo, only available with `pro-pedals` feature)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "pro-pedals")]
+const PRO_SOURCES: &[&str] = &[
+    include_str!("../../../pedalkernel-pro/pedals/boss_dm2_delay.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/ce2_chorus.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/crybaby_wah.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/eqd_plumes.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/fender_tremolo.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/fulltone_ocd.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/harmonic_tremolo.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/keeley_compressor_plus.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/klon_centaur.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/morning_glory.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/optical_tremolo.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/phase90.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/ts808_tubescreamer.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/tumnus.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/univibe.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/walrus_slo_reverb.pedal"),
+];
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Pedal metadata & loading
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Number of generic knob parameters exposed by the plugin.
+const NUM_KNOBS: usize = 6;
 
 /// Immutable metadata for a loaded pedal slot, shared with parameter formatters.
 #[derive(Clone)]
 struct PedalMeta {
     name: String,
-    /// [primary, secondary, output] — `None` means the knob is inactive.
-    labels: [Option<String>; 3],
+    /// Up to 6 control labels, assigned in declaration order from the `.pedal` file.
+    /// `None` means the knob is inactive for this pedal.
+    labels: [Option<String>; NUM_KNOBS],
 }
 
 /// The actual processor for a pedal slot.
@@ -71,30 +103,15 @@ impl PedalEngine {
     }
 }
 
-/// Classify a control label into one of the three knob slots:
-///   0 = primary (drive/gain/fuzz/etc.)
-///   1 = secondary (tone/filter/treble/etc.)
-///   2 = output (level/volume/output/mix)
-fn knob_slot(label: &str) -> usize {
-    match label.to_ascii_lowercase().as_str() {
-        "drive" | "gain" | "fuzz" | "sustain" | "distortion" | "sensitivity" | "time" => 0,
-        "level" | "volume" | "output" | "mix" => 2,
-        _ => 1,
-    }
-}
-
 /// Parse and compile a `.pedal` source string into metadata + engine.
 fn load_pedal_source(src: &str, sample_rate: f64) -> Option<(PedalMeta, PedalEngine)> {
     let def = dsl::parse_pedal_file(src).ok()?;
     let compiled = compile_pedal(&def, sample_rate).ok()?;
 
-    let mut labels: [Option<String>; 3] = [None, None, None];
-    for ctrl in &def.controls {
-        let slot = knob_slot(&ctrl.label);
-        // First control that maps to a slot wins.
-        if labels[slot].is_none() {
-            labels[slot] = Some(ctrl.label.clone());
-        }
+    // Map controls sequentially to knob slots (up to NUM_KNOBS).
+    let mut labels: [Option<String>; NUM_KNOBS] = Default::default();
+    for (i, ctrl) in def.controls.iter().take(NUM_KNOBS).enumerate() {
+        labels[i] = Some(ctrl.label.clone());
     }
 
     let meta = PedalMeta {
@@ -160,18 +177,42 @@ struct PedalKernelParams {
     #[id = "type"]
     pedal_type: IntParam,
 
-    /// Primary control (Drive / Fuzz / Sustain / Sensitivity / Gain / Time).
     #[id = "k1"]
     knob1: FloatParam,
-
-    /// Secondary control (Tone / Filter / Treble / Feedback).
-    /// Inactive for two-knob pedals.
     #[id = "k2"]
     knob2: FloatParam,
-
-    /// Output control (Level / Volume / Output / Mix).
     #[id = "k3"]
     knob3: FloatParam,
+    #[id = "k4"]
+    knob4: FloatParam,
+    #[id = "k5"]
+    knob5: FloatParam,
+    #[id = "k6"]
+    knob6: FloatParam,
+}
+
+/// Default display names for each knob slot (used as the parameter name in the DAW).
+const KNOB_NAMES: [&str; NUM_KNOBS] = ["Knob 1", "Knob 2", "Knob 3", "Knob 4", "Knob 5", "Knob 6"];
+
+/// Build a single knob `FloatParam` with a formatter that shows the active pedal's label.
+fn make_knob(
+    name: &str,
+    default: f32,
+    slot: usize,
+    indicator: &PedalIndicator,
+    meta: &Arc<Vec<PedalMeta>>,
+) -> FloatParam {
+    let pi = indicator.clone();
+    let m = meta.clone();
+    FloatParam::new(name, default, FloatRange::Linear { min: 0.0, max: 1.0 })
+        .with_smoother(SmoothingStyle::Linear(20.0))
+        .with_value_to_string(Arc::new(move |v: f32| {
+            let idx = pi.load(Ordering::Relaxed) as usize;
+            match m.get(idx).and_then(|meta| meta.labels[slot].as_deref()) {
+                Some(label) => format!("{label}: {v:.2}"),
+                None => "\u{2014}".to_string(),
+            }
+        }))
 }
 
 impl PedalKernelParams {
@@ -179,12 +220,6 @@ impl PedalKernelParams {
         let max_idx = (meta.len() as i32 - 1).max(0);
 
         let meta_sel = meta.clone();
-        let meta_k1 = meta.clone();
-        let meta_k2 = meta.clone();
-        let meta_k3 = meta;
-        let pi1 = indicator.clone();
-        let pi2 = indicator.clone();
-        let pi3 = indicator;
 
         Self {
             pedal_type: IntParam::new("Pedal", 0, IntRange::Linear { min: 0, max: max_idx })
@@ -195,40 +230,12 @@ impl PedalKernelParams {
                         .unwrap_or_else(|| format!("#{v}"))
                 })),
 
-            knob1: FloatParam::new("Drive", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_smoother(SmoothingStyle::Linear(20.0))
-                .with_value_to_string(Arc::new(move |v: f32| {
-                    let idx = pi1.load(Ordering::Relaxed) as usize;
-                    let label = meta_k1
-                        .get(idx)
-                        .and_then(|m| m.labels[0].as_deref())
-                        .unwrap_or("—");
-                    format!("{label}: {v:.2}")
-                })),
-
-            knob2: FloatParam::new("Tone", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_smoother(SmoothingStyle::Linear(20.0))
-                .with_value_to_string(Arc::new(move |v: f32| {
-                    let idx = pi2.load(Ordering::Relaxed) as usize;
-                    match meta_k2
-                        .get(idx)
-                        .and_then(|m| m.labels[1].as_deref())
-                    {
-                        Some(label) => format!("{label}: {v:.2}"),
-                        None => "—".to_string(),
-                    }
-                })),
-
-            knob3: FloatParam::new("Level", 0.8, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_smoother(SmoothingStyle::Linear(20.0))
-                .with_value_to_string(Arc::new(move |v: f32| {
-                    let idx = pi3.load(Ordering::Relaxed) as usize;
-                    let label = meta_k3
-                        .get(idx)
-                        .and_then(|m| m.labels[2].as_deref())
-                        .unwrap_or("—");
-                    format!("{label}: {v:.2}")
-                })),
+            knob1: make_knob(KNOB_NAMES[0], 0.5, 0, &indicator, &meta),
+            knob2: make_knob(KNOB_NAMES[1], 0.5, 1, &indicator, &meta),
+            knob3: make_knob(KNOB_NAMES[2], 0.5, 2, &indicator, &meta),
+            knob4: make_knob(KNOB_NAMES[3], 0.5, 3, &indicator, &meta),
+            knob5: make_knob(KNOB_NAMES[4], 0.5, 4, &indicator, &meta),
+            knob6: make_knob(KNOB_NAMES[5], 0.5, 5, &indicator, &meta),
         }
     }
 }
@@ -262,13 +269,25 @@ impl Default for PedalKernelPlugin {
             }
         }
 
-        // 2. Built-in digital delay (index 7).
+        // 1b. Pro pedals (feature-gated, from private repo).
+        #[cfg(feature = "pro-pedals")]
+        for src in PRO_SOURCES {
+            if let Some((m, e)) = load_pedal_source(src, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 2. Built-in digital delay.
         meta_list.push(PedalMeta {
             name: "Delay".to_string(),
             labels: [
                 Some("Time".to_string()),
                 Some("Feedback".to_string()),
                 Some("Mix".to_string()),
+                None,
+                None,
+                None,
             ],
         });
         engines.push(PedalEngine::Delay(Delay::new(sr)));
@@ -300,7 +319,11 @@ impl Default for PedalKernelPlugin {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl Plugin for PedalKernelPlugin {
+    #[cfg(not(feature = "pro-pedals"))]
     const NAME: &'static str = "PedalKernel";
+    #[cfg(feature = "pro-pedals")]
+    const NAME: &'static str = "PedalKernel Pro";
+
     const VENDOR: &'static str = "Avery Wagar";
     const URL: &'static str = "https://github.com/ajmwagar/pedalkernel";
     const EMAIL: &'static str = "ajmwagar@gmail.com";
@@ -360,31 +383,32 @@ impl Plugin for PedalKernelPlugin {
 
         for channel_samples in buffer.iter_samples() {
             // Read smoothed knob values (per-sample for zipper-free automation)
-            let k1 = self.params.knob1.smoothed.next() as f64;
-            let k2 = self.params.knob2.smoothed.next() as f64;
-            let k3 = self.params.knob3.smoothed.next() as f64;
+            let knobs: [f64; NUM_KNOBS] = [
+                self.params.knob1.smoothed.next() as f64,
+                self.params.knob2.smoothed.next() as f64,
+                self.params.knob3.smoothed.next() as f64,
+                self.params.knob4.smoothed.next() as f64,
+                self.params.knob5.smoothed.next() as f64,
+                self.params.knob6.smoothed.next() as f64,
+            ];
 
             if let Some(engine) = self.engines.get_mut(idx) {
                 // Route knobs to the active pedal's controls
                 match engine {
                     PedalEngine::Compiled(pedal) => {
                         if let Some(labels) = labels {
-                            if let Some(ref label) = labels[0] {
-                                pedal.set_control(label, k1);
-                            }
-                            if let Some(ref label) = labels[1] {
-                                pedal.set_control(label, k2);
-                            }
-                            if let Some(ref label) = labels[2] {
-                                pedal.set_control(label, k3);
+                            for (slot, value) in knobs.iter().enumerate() {
+                                if let Some(ref label) = labels[slot] {
+                                    pedal.set_control(label, *value);
+                                }
                             }
                         }
                     }
                     PedalEngine::Delay(delay) => {
                         // Quadratic curve for natural-feeling time control
-                        delay.set_delay_time(10.0 + k1 * k1 * 1990.0);
-                        delay.set_feedback(k2 * 0.95);
-                        delay.set_mix(k3);
+                        delay.set_delay_time(10.0 + knobs[0] * knobs[0] * 1990.0);
+                        delay.set_feedback(knobs[1] * 0.95);
+                        delay.set_mix(knobs[2]);
                     }
                 }
 
@@ -406,14 +430,25 @@ impl Plugin for PedalKernelPlugin {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl Vst3Plugin for PedalKernelPlugin {
-    const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlWdfV0_02\0";
+    #[cfg(not(feature = "pro-pedals"))]
+    const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlWdfV0_03\0";
+    #[cfg(feature = "pro-pedals")]
+    const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlProV0_03\0";
+
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
         &[Vst3SubCategory::Fx, Vst3SubCategory::Distortion];
 }
 
 impl ClapPlugin for PedalKernelPlugin {
+    #[cfg(not(feature = "pro-pedals"))]
     const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel";
+    #[cfg(feature = "pro-pedals")]
+    const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-pro";
+
+    #[cfg(not(feature = "pro-pedals"))]
     const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based guitar pedal emulations");
+    #[cfg(feature = "pro-pedals")]
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based guitar pedal emulations — Pro edition");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[
