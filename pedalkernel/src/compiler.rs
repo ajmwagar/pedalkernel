@@ -79,7 +79,7 @@ impl DynNode {
             | Self::Pot { rp, .. }
             | Self::Series { rp, .. }
             | Self::Parallel { rp, .. } => *rp,
-            Self::Photocoupler { inner, .. } => inner.port_resistance,
+            Self::Photocoupler { inner, .. } => inner.port_resistance(),
         }
     }
 
@@ -263,7 +263,7 @@ impl DynNode {
                 *rp = 2.0 * fs * *inductance;
             }
             Self::Photocoupler { inner, .. } => {
-                inner.update_sample_rate(fs);
+                inner.set_sample_rate(fs);
             }
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.update_sample_rate(fs);
@@ -314,7 +314,7 @@ impl WdfStage {
         self.tree.set_voltage(input * self.compensation);
         let b_tree = self.tree.reflected();
         let rp = self.tree.port_resistance();
-        let a_root = match &self.root {
+        let a_root = match &mut self.root {
             RootKind::DiodePair(dp) => dp.process(b_tree, rp),
             RootKind::SingleDiode(d) => d.process(b_tree, rp),
             RootKind::Jfet(j) => j.process(b_tree, rp),
@@ -1142,7 +1142,7 @@ impl PedalProcessor for CompiledPedal {
             stage.tree.recompute();
         }
         for binding in &mut self.lfos {
-            binding.lfo.update_sample_rate(rate);
+            binding.lfo.set_sample_rate(rate);
         }
     }
 

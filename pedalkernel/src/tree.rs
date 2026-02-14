@@ -204,8 +204,8 @@ impl WdfClipper {
         let resistor = Resistor::new(resistance);
         let capacitor = Capacitor::new(capacitance, sample_rate);
 
-        let par = ParallelAdaptor::new(resistor.port_resistance, capacitor.port_resistance);
-        let ser = SeriesAdaptor::new(vs.port_resistance, par.port_resistance);
+        let par = ParallelAdaptor::new(resistor.port_resistance(), capacitor.port_resistance());
+        let ser = SeriesAdaptor::new(vs.port_resistance(), par.port_resistance);
         let diode = DiodePairRoot::new(diode_model);
 
         Self {
@@ -254,13 +254,13 @@ impl WdfClipper {
     /// Update port resistances after sample rate change.
     pub fn set_sample_rate(&mut self, fs: f64) {
         self.sample_rate = fs;
-        self.capacitor.update_sample_rate(fs);
+        self.capacitor.set_sample_rate(fs);
         self.par.update_ports(
-            self.resistor.port_resistance,
-            self.capacitor.port_resistance,
+            self.resistor.port_resistance(),
+            self.capacitor.port_resistance(),
         );
         self.ser
-            .update_ports(self.vs.port_resistance, self.par.port_resistance);
+            .update_ports(self.vs.port_resistance(), self.par.port_resistance);
     }
 
     /// Reset all state (capacitor memory).
@@ -297,8 +297,8 @@ impl WdfSingleDiodeClipper {
         let resistor = Resistor::new(resistance);
         let capacitor = Capacitor::new(capacitance, sample_rate);
 
-        let par = ParallelAdaptor::new(resistor.port_resistance, capacitor.port_resistance);
-        let ser = SeriesAdaptor::new(vs.port_resistance, par.port_resistance);
+        let par = ParallelAdaptor::new(resistor.port_resistance(), capacitor.port_resistance());
+        let ser = SeriesAdaptor::new(vs.port_resistance(), par.port_resistance);
         let diode = DiodeRoot::new(diode_model);
 
         Self {
@@ -338,13 +338,13 @@ impl WdfSingleDiodeClipper {
 
     pub fn set_sample_rate(&mut self, fs: f64) {
         self.sample_rate = fs;
-        self.capacitor.update_sample_rate(fs);
+        self.capacitor.set_sample_rate(fs);
         self.par.update_ports(
-            self.resistor.port_resistance,
-            self.capacitor.port_resistance,
+            self.resistor.port_resistance(),
+            self.capacitor.port_resistance(),
         );
         self.ser
-            .update_ports(self.vs.port_resistance, self.par.port_resistance);
+            .update_ports(self.vs.port_resistance(), self.par.port_resistance);
     }
 
     pub fn reset(&mut self) {
