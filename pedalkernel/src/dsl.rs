@@ -45,6 +45,11 @@ pub enum ComponentKind {
     Npn,
     Pnp,
     OpAmp,
+    NJfet(JfetType),
+    PJfet(JfetType),
+    Photocoupler(PhotocouplerType),
+    /// LFO: waveform, timing_r (Ω), timing_c (F) -> f = 1/(2πRC)
+    Lfo(LfoWaveformDsl, f64, f64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +57,31 @@ pub enum DiodeType {
     Silicon,
     Germanium,
     Led,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JfetType {
+    J201,
+    N2n5457,
+    P2n5460,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhotocouplerType {
+    Vtl5c3,
+    Vtl5c1,
+    Nsl32,
+}
+
+/// LFO waveform shapes for DSL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LfoWaveformDsl {
+    Sine,
+    Triangle,
+    Square,
+    SawUp,
+    SawDown,
+    SampleAndHold,
 }
 
 /// A net connection: `in -> C1.a` or `C1.b -> R1.a, D1.a`
@@ -202,6 +232,46 @@ fn parse_opamp(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::OpAmp))
 }
 
+fn jfet_type(input: &str) -> IResult<&str, JfetType> {
+    alt((
+        value(JfetType::J201, tag("j201")),
+        value(JfetType::N2n5457, tag("2n5457")),
+        value(JfetType::P2n5460, tag("2n5460")),
+    ))(input)
+}
+
+fn parse_njfet(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("njfet")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, jt) = jfet_type(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::NJfet(jt)))
+}
+
+fn parse_pjfet(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("pjfet")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, jt) = jfet_type(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::PJfet(jt)))
+}
+
+fn photocoupler_type(input: &str) -> IResult<&str, PhotocouplerType> {
+    alt((
+        value(PhotocouplerType::Vtl5c3, tag("vtl5c3")),
+        value(PhotocouplerType::Vtl5c1, tag("vtl5c1")),
+        value(PhotocouplerType::Nsl32, tag("nsl32")),
+    ))(input)
+}
+
+fn parse_photocoupler(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("photocoupler")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, pt) = photocoupler_type(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Photocoupler(pt)))
+}
+
 fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
     alt((
         parse_resistor,
@@ -213,6 +283,10 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
         parse_npn,
         parse_pnp,
         parse_opamp,
+        parse_njfet,
+        parse_pjfet,
+        parse_photocoupler,
+        parse_lfo,
     ))(input)
 }
 
@@ -311,6 +385,37 @@ fn control_def(input: &str) -> IResult<&str, ControlDef> {
             default: def,
         },
     ))
+}
+
+fn lfo_waveform(input: &str) -> IResult<&str, LfoWaveformDsl> {
+    alt((
+        value(LfoWaveformDsl::Sine, tag("sine")),
+        value(LfoWaveformDsl::Triangle, tag("triangle")),
+        value(LfoWaveformDsl::Square, tag("square")),
+        value(LfoWaveformDsl::SawUp, tag("saw_up")),
+        value(LfoWaveformDsl::SawDown, tag("saw_down")),
+        value(LfoWaveformDsl::SampleAndHold, tag("sample_hold")),
+    ))(input)
+}
+
+/// `lfo(triangle, 100k, 220n)` - waveform, timing_r, timing_c
+/// Frequency is computed as f = 1/(2πRC)
+fn parse_lfo(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("lfo")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, waveform) = lfo_waveform(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, timing_r) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, timing_c) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Lfo(waveform, timing_r, timing_c)))
 }
 
 // ---------------------------------------------------------------------------
@@ -551,5 +656,153 @@ pedal "All" {
 "#;
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.components.len(), 9);
+    }
+
+    #[test]
+    fn parse_njfet_j201() {
+        let (_, c) = component_def("J1: njfet(j201)").unwrap();
+        assert_eq!(c.id, "J1");
+        assert_eq!(c.kind, ComponentKind::NJfet(JfetType::J201));
+    }
+
+    #[test]
+    fn parse_njfet_2n5457() {
+        let (_, c) = component_def("J2: njfet(2n5457)").unwrap();
+        assert_eq!(c.kind, ComponentKind::NJfet(JfetType::N2n5457));
+    }
+
+    #[test]
+    fn parse_pjfet_2n5460() {
+        let (_, c) = component_def("J3: pjfet(2n5460)").unwrap();
+        assert_eq!(c.kind, ComponentKind::PJfet(JfetType::P2n5460));
+    }
+
+    #[test]
+    fn parse_pedal_with_jfet() {
+        let src = r#"
+pedal "Tremolo" {
+  components {
+    C1: cap(100n)
+    J1: njfet(j201)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> J1.gate
+    J1.drain -> R1.a
+    J1.source -> gnd
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Tremolo");
+        assert_eq!(def.components.len(), 3);
+        assert_eq!(def.components[1].kind, ComponentKind::NJfet(JfetType::J201));
+    }
+
+    #[test]
+    fn parse_photocoupler_vtl5c3() {
+        let (_, c) = component_def("OC1: photocoupler(vtl5c3)").unwrap();
+        assert_eq!(c.id, "OC1");
+        assert_eq!(c.kind, ComponentKind::Photocoupler(PhotocouplerType::Vtl5c3));
+    }
+
+    #[test]
+    fn parse_photocoupler_vtl5c1() {
+        let (_, c) = component_def("OC2: photocoupler(vtl5c1)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Photocoupler(PhotocouplerType::Vtl5c1));
+    }
+
+    #[test]
+    fn parse_photocoupler_nsl32() {
+        let (_, c) = component_def("OC3: photocoupler(nsl32)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Photocoupler(PhotocouplerType::Nsl32));
+    }
+
+    #[test]
+    fn parse_pedal_with_photocoupler() {
+        let src = r#"
+pedal "Optical Tremolo" {
+  components {
+    C1: cap(100n)
+    OC1: photocoupler(vtl5c3)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> OC1.a
+    OC1.b -> R1.a
+    R1.b -> out
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Optical Tremolo");
+        assert_eq!(def.components.len(), 3);
+        assert_eq!(
+            def.components[1].kind,
+            ComponentKind::Photocoupler(PhotocouplerType::Vtl5c3)
+        );
+    }
+
+    #[test]
+    fn parse_lfo_component() {
+        // lfo(triangle, 100k, 220n) -> f = 1/(2π*100000*220e-9) ≈ 7.2 Hz
+        let (_, c) = component_def("LFO1: lfo(triangle, 100k, 220n)").unwrap();
+        assert_eq!(c.id, "LFO1");
+        if let ComponentKind::Lfo(waveform, timing_r, timing_c) = c.kind {
+            assert_eq!(waveform, LfoWaveformDsl::Triangle);
+            assert!((timing_r - 100_000.0).abs() < 1.0);
+            assert!((timing_c - 220e-9).abs() < 1e-12);
+        } else {
+            panic!("expected Lfo");
+        }
+    }
+
+    #[test]
+    fn parse_lfo_waveforms() {
+        assert_eq!(lfo_waveform("sine").unwrap().1, LfoWaveformDsl::Sine);
+        assert_eq!(lfo_waveform("triangle").unwrap().1, LfoWaveformDsl::Triangle);
+        assert_eq!(lfo_waveform("square").unwrap().1, LfoWaveformDsl::Square);
+        assert_eq!(lfo_waveform("saw_up").unwrap().1, LfoWaveformDsl::SawUp);
+        assert_eq!(lfo_waveform("saw_down").unwrap().1, LfoWaveformDsl::SawDown);
+        assert_eq!(lfo_waveform("sample_hold").unwrap().1, LfoWaveformDsl::SampleAndHold);
+    }
+
+    #[test]
+    fn parse_pedal_with_lfo_component() {
+        let src = r#"
+pedal "Harmonic Tremolo" {
+  components {
+    LFO1: lfo(triangle, 100k, 220n)
+    C1: cap(100n)
+    J1: njfet(j201)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> J1.drain
+    J1.source -> gnd
+    LFO1.out -> J1.vgs
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Harmonic Tremolo");
+        assert_eq!(def.components.len(), 4);
+        // Check LFO component: 100k timing resistor, 220n timing cap
+        if let ComponentKind::Lfo(waveform, timing_r, timing_c) = &def.components[0].kind {
+            assert_eq!(*waveform, LfoWaveformDsl::Triangle);
+            assert!((*timing_r - 100_000.0).abs() < 1.0);
+            assert!((*timing_c - 220e-9).abs() < 1e-12);
+        } else {
+            panic!("expected Lfo component");
+        }
+        // Check LFO.out net connection
+        let lfo_net = def.nets.iter().find(|n| {
+            matches!(&n.from, Pin::ComponentPin { component, pin }
+                     if component == "LFO1" && pin == "out")
+        });
+        assert!(lfo_net.is_some(), "should have LFO1.out net");
     }
 }

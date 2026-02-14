@@ -19,6 +19,10 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::Npn => ("Device:Q_NPN_BCE", "Q"),
         ComponentKind::Pnp => ("Device:Q_PNP_BCE", "Q"),
         ComponentKind::OpAmp => ("Amplifier_Operational:LM741", "U"),
+        ComponentKind::NJfet(_) => ("Device:Q_NJFET_DGS", "J"),
+        ComponentKind::PJfet(_) => ("Device:Q_PJFET_DGS", "J"),
+        ComponentKind::Photocoupler(_) => ("Isolator:PC817", "OC"),
+        ComponentKind::Lfo(..) => ("", "LFO"), // Virtual component, not in physical netlist
     }
 }
 
@@ -34,6 +38,17 @@ fn value_str(kind: &ComponentKind) -> String {
         ComponentKind::Npn => "NPN".into(),
         ComponentKind::Pnp => "PNP".into(),
         ComponentKind::OpAmp => "OpAmp".into(),
+        ComponentKind::NJfet(jt) => format!("N-JFET_{jt:?}"),
+        ComponentKind::PJfet(jt) => format!("P-JFET_{jt:?}"),
+        ComponentKind::Photocoupler(pt) => format!("Vactrol_{pt:?}"),
+        ComponentKind::Lfo(wf, timing_r, timing_c) => {
+            // Show waveform and timing components for BOM reference
+            format!(
+                "LFO_{wf:?}_R{}_C{}",
+                format_eng(*timing_r, ""),
+                format_eng(*timing_c, "")
+            )
+        }
     }
 }
 
@@ -133,15 +148,38 @@ pub fn export_kicad_netlist(pedal: &PedalDef) -> String {
 
     // Components section
     writeln!(out, "  (components").unwrap();
-    for (i, comp) in pedal.components.iter().enumerate() {
-        let (lib_ref, prefix) = footprint_ref(&comp.kind);
-        let val = value_str(&comp.kind);
-        writeln!(
-            out,
-            "    (comp (ref {prefix}{}) (value \"{val}\") (libsource (lib \"{lib_ref}\")))",
-            i + 1
-        )
-        .unwrap();
+    let mut comp_num = 1;
+    let mut lfo_timing_count = 0;
+    for comp in &pedal.components {
+        // LFO components expand into timing R and C for the physical circuit
+        if let ComponentKind::Lfo(waveform, timing_r, timing_c) = &comp.kind {
+            lfo_timing_count += 1;
+            // Timing resistor
+            writeln!(
+                out,
+                "    (comp (ref R_LFO{lfo_timing_count}) (value \"{}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"LFO {:?} timing\"))",
+                format_eng(*timing_r, "Ω"),
+                waveform
+            )
+            .unwrap();
+            // Timing capacitor
+            writeln!(
+                out,
+                "    (comp (ref C_LFO{lfo_timing_count}) (value \"{}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"LFO {:?} timing\"))",
+                format_eng(*timing_c, "F"),
+                waveform
+            )
+            .unwrap();
+        } else {
+            let (lib_ref, prefix) = footprint_ref(&comp.kind);
+            let val = value_str(&comp.kind);
+            writeln!(
+                out,
+                "    (comp (ref {prefix}{comp_num}) (value \"{val}\") (libsource (lib \"{lib_ref}\")))"
+            )
+            .unwrap();
+            comp_num += 1;
+        }
     }
     writeln!(out, "  )").unwrap();
 

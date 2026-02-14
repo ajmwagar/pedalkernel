@@ -46,6 +46,11 @@ pub enum DynNode {
         position: f64,
         rp: f64,
     },
+    /// Photocoupler (Vactrol) — LDR with CdS carrier dynamics.
+    Photocoupler {
+        comp_id: String,
+        inner: crate::elements::Photocoupler,
+    },
     Series {
         left: Box<DynNode>,
         right: Box<DynNode>,
@@ -74,13 +79,14 @@ impl DynNode {
             | Self::Pot { rp, .. }
             | Self::Series { rp, .. }
             | Self::Parallel { rp, .. } => *rp,
+            Self::Photocoupler { inner, .. } => inner.port_resistance,
         }
     }
 
     /// Scatter-up: compute reflected wave (bottom → root), caching child waves.
     pub fn reflected(&mut self) -> f64 {
         match self {
-            Self::Resistor { .. } | Self::Pot { .. } => 0.0,
+            Self::Resistor { .. } | Self::Pot { .. } | Self::Photocoupler { .. } => 0.0,
             Self::Capacitor { state, .. } => *state,
             Self::Inductor { state, .. } => -*state,
             Self::VoltageSource { voltage, .. } => 2.0 * *voltage,
@@ -113,7 +119,10 @@ impl DynNode {
     /// Scatter-down + state update: propagate incident wave (root → leaves).
     pub fn set_incident(&mut self, a: f64) {
         match self {
-            Self::Resistor { .. } | Self::Pot { .. } | Self::VoltageSource { .. } => {}
+            Self::Resistor { .. }
+            | Self::Pot { .. }
+            | Self::VoltageSource { .. }
+            | Self::Photocoupler { .. } => {}
             Self::Capacitor { state, .. } => *state = a,
             Self::Inductor { state, .. } => *state = a,
             Self::Series {
@@ -218,6 +227,7 @@ impl DynNode {
     pub fn reset(&mut self) {
         match self {
             Self::Capacitor { state, .. } | Self::Inductor { state, .. } => *state = 0.0,
+            Self::Photocoupler { inner, .. } => inner.reset(),
             Self::Series {
                 left,
                 right,
@@ -252,11 +262,29 @@ impl DynNode {
             Self::Inductor { inductance, rp, .. } => {
                 *rp = 2.0 * fs * *inductance;
             }
+            Self::Photocoupler { inner, .. } => {
+                inner.update_sample_rate(fs);
+            }
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.update_sample_rate(fs);
                 right.update_sample_rate(fs);
             }
             _ => {}
+        }
+    }
+
+    /// Set LED drive level for a photocoupler. Returns true if found.
+    pub fn set_photocoupler_led(&mut self, target_id: &str, led_drive: f64) -> bool {
+        match self {
+            Self::Photocoupler { comp_id, inner } if comp_id == target_id => {
+                inner.set_led_drive(led_drive);
+                true
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                left.set_photocoupler_led(target_id, led_drive)
+                    || right.set_photocoupler_led(target_id, led_drive)
+            }
+            _ => false,
         }
     }
 }
@@ -268,6 +296,7 @@ impl DynNode {
 pub enum RootKind {
     DiodePair(DiodePairRoot),
     SingleDiode(DiodeRoot),
+    Jfet(JfetRoot),
 }
 
 pub struct WdfStage {
@@ -288,6 +317,7 @@ impl WdfStage {
         let a_root = match &self.root {
             RootKind::DiodePair(dp) => dp.process(b_tree, rp),
             RootKind::SingleDiode(d) => d.process(b_tree, rp),
+            RootKind::Jfet(j) => j.process(b_tree, rp),
         };
         self.tree.set_incident(a_root);
         (a_root + b_tree) / 2.0
@@ -305,6 +335,25 @@ impl WdfStage {
     fn balance_vs_impedance(&mut self) {
         balance_parallel_vs(&mut self.tree);
         self.tree.recompute();
+    }
+
+    /// Set the gate-source voltage for JFET root elements.
+    ///
+    /// This is used for external modulation (LFO, envelope, etc.).
+    /// Has no effect if the root is not a JFET.
+    #[inline]
+    pub fn set_jfet_vgs(&mut self, vgs: f64) {
+        if let RootKind::Jfet(j) = &mut self.root {
+            j.set_vgs(vgs);
+        }
+    }
+
+    /// Get the current gate-source voltage if this is a JFET stage.
+    pub fn jfet_vgs(&self) -> Option<f64> {
+        match &self.root {
+            RootKind::Jfet(j) => Some(j.vgs()),
+            _ => None,
+        }
     }
 }
 
@@ -417,7 +466,8 @@ impl CircuitGraph {
                 | ComponentKind::Inductor(_)
                 | ComponentKind::Potentiometer(_)
                 | ComponentKind::DiodePair(_)
-                | ComponentKind::Diode(_) => {
+                | ComponentKind::Diode(_)
+                | ComponentKind::Photocoupler(_) => {
                     let key_a = format!("{}.a", comp.id);
                     let key_b = format!("{}.b", comp.id);
                     let id_a = get_id(&key_a, &mut uf);
@@ -430,8 +480,27 @@ impl CircuitGraph {
                         node_b,
                     });
                 }
+                ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => {
+                    // JFET: drain-source path is the WDF edge (like a diode).
+                    // Gate is external control, not part of WDF tree.
+                    let key_d = format!("{}.drain", comp.id);
+                    let key_s = format!("{}.source", comp.id);
+                    let id_d = get_id(&key_d, &mut uf);
+                    let id_s = get_id(&key_s, &mut uf);
+                    let node_d = uf.find(id_d);
+                    let node_s = uf.find(id_s);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a: node_d,
+                        node_b: node_s,
+                    });
+                }
                 ComponentKind::Npn | ComponentKind::Pnp | ComponentKind::OpAmp => {
                     num_active += 1;
+                }
+                ComponentKind::Lfo(..) => {
+                    // LFO is a virtual modulation source, not a physical circuit element.
+                    // It connects via .out pin to modulation targets (J.vgs, OC.led).
                 }
             }
         }
@@ -596,11 +665,88 @@ impl CircuitGraph {
             .map(|(idx, _)| idx)
             .collect()
     }
+
+    /// Find JFET edges, ordered by topological distance from `in`.
+    fn find_jfets(&self) -> Vec<(usize, JfetInfo)> {
+        // BFS from in_node to compute distances.
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &self.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(self.in_node, 0);
+        queue.push_back(self.in_node);
+        while let Some(n) = queue.pop_front() {
+            let d = dist[&n];
+            if let Some(neighbors) = adj.get(&n) {
+                for &nb in neighbors {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
+                        queue.push_back(nb);
+                    }
+                }
+            }
+        }
+
+        let mut jfets: Vec<(usize, JfetInfo)> = Vec::new();
+        for (edge_idx, e) in self.edges.iter().enumerate() {
+            let comp = &self.components[e.comp_idx];
+            let info = match &comp.kind {
+                ComponentKind::NJfet(jt) => Some(JfetInfo {
+                    jfet_type: *jt,
+                    is_n_channel: true,
+                    junction_node: if e.node_b == self.gnd_node {
+                        e.node_a
+                    } else {
+                        e.node_b
+                    },
+                    ground_node: if e.node_b == self.gnd_node {
+                        e.node_b
+                    } else {
+                        e.node_a
+                    },
+                }),
+                ComponentKind::PJfet(jt) => Some(JfetInfo {
+                    jfet_type: *jt,
+                    is_n_channel: false,
+                    junction_node: if e.node_b == self.gnd_node {
+                        e.node_a
+                    } else {
+                        e.node_b
+                    },
+                    ground_node: if e.node_b == self.gnd_node {
+                        e.node_b
+                    } else {
+                        e.node_a
+                    },
+                }),
+                _ => None,
+            };
+            if let Some(info) = info {
+                jfets.push((edge_idx, info));
+            }
+        }
+
+        // Sort by distance of junction node from input.
+        jfets
+            .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
+        jfets
+    }
 }
 
 struct DiodeInfo {
     diode_type: DiodeType,
     is_pair: bool,
+    junction_node: NodeId,
+    #[allow(dead_code)]
+    ground_node: NodeId,
+}
+
+struct JfetInfo {
+    jfet_type: JfetType,
+    is_n_channel: bool,
     junction_node: NodeId,
     #[allow(dead_code)]
     ground_node: NodeId,
@@ -788,6 +934,17 @@ fn make_leaf(comp: &ComponentDef, sample_rate: f64) -> DynNode {
             position: 0.5,
             rp: 0.5 * *max_r,
         },
+        ComponentKind::Photocoupler(pt) => {
+            let model = match pt {
+                PhotocouplerType::Vtl5c3 => crate::elements::PhotocouplerModel::vtl5c3(),
+                PhotocouplerType::Vtl5c1 => crate::elements::PhotocouplerModel::vtl5c1(),
+                PhotocouplerType::Nsl32 => crate::elements::PhotocouplerModel::nsl32(),
+            };
+            DynNode::Photocoupler {
+                comp_id: comp.id.clone(),
+                inner: crate::elements::Photocoupler::new(model, sample_rate),
+            }
+        }
         // Diodes shouldn't appear as leaves (they're roots), but handle gracefully.
         _ => DynNode::Resistor { rp: 1000.0 },
     }
@@ -813,6 +970,32 @@ enum ControlTarget {
     OutputGain,
     /// Modify a pot in a specific WDF stage.
     PotInStage(usize),
+    /// Modify an LFO's rate (index into lfos vector).
+    LfoRate(usize),
+}
+
+/// LFO modulation target.
+#[derive(Debug, Clone)]
+enum LfoTarget {
+    /// Modulate a JFET's Vgs.
+    JfetVgs { stage_idx: usize },
+    /// Modulate a Photocoupler's LED drive.
+    PhotocouplerLed { stage_idx: usize, comp_id: String },
+}
+
+/// LFO binding in a compiled pedal.
+struct LfoBinding {
+    lfo: crate::elements::Lfo,
+    target: LfoTarget,
+    /// Bias offset for the modulation (e.g., Vgs center point).
+    bias: f64,
+    /// Modulation range (amplitude).
+    range: f64,
+    /// Base frequency from RC timing: f = 1/(2πRC).
+    base_freq: f64,
+    /// LFO component ID (for debugging and future control binding).
+    #[allow(dead_code)]
+    lfo_id: String,
 }
 
 /// A pedal processor compiled from a `.pedal` file's netlist.
@@ -830,6 +1013,8 @@ pub struct CompiledPedal {
     gain_range: (f64, f64),
     /// Supply voltage in volts (default 9.0).
     supply_voltage: f64,
+    /// LFO modulators.
+    lfos: Vec<LfoBinding>,
 }
 
 /// Gain-like control labels.
@@ -848,19 +1033,27 @@ fn is_level_label(label: &str) -> bool {
     )
 }
 
+/// Rate-like control labels (for LFO).
+fn is_rate_label(label: &str) -> bool {
+    matches!(
+        label.to_ascii_lowercase().as_str(),
+        "rate" | "speed" | "tempo"
+    )
+}
+
 impl CompiledPedal {
     pub fn set_supply_voltage(&mut self, voltage: f64) {
         self.supply_voltage = voltage.clamp(5.0, 24.0);
     }
 
-    /// Set a control by its label (e.g., "Drive", "Level").
+    /// Set a control by its label (e.g., "Drive", "Level", "Rate").
     pub fn set_control(&mut self, label: &str, value: f64) {
         let value = value.clamp(0.0, 1.0);
-        for binding in &self.controls {
-            if !binding.label.eq_ignore_ascii_case(label) {
+        for i in 0..self.controls.len() {
+            if !self.controls[i].label.eq_ignore_ascii_case(label) {
                 continue;
             }
-            match &binding.target {
+            match &self.controls[i].target {
                 ControlTarget::PreGain => {
                     let (lo, hi) = self.gain_range;
                     self.pre_gain = lo * (hi / lo).powf(value);
@@ -869,9 +1062,21 @@ impl CompiledPedal {
                     self.output_gain = value;
                 }
                 ControlTarget::PotInStage(stage_idx) => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.tree.set_pot(&binding.component_id, value);
+                    let stage_idx = *stage_idx;
+                    let comp_id = self.controls[i].component_id.clone();
+                    if let Some(stage) = self.stages.get_mut(stage_idx) {
+                        stage.tree.set_pot(&comp_id, value);
                         stage.tree.recompute();
+                    }
+                }
+                ControlTarget::LfoRate(lfo_idx) => {
+                    let lfo_idx = *lfo_idx;
+                    if let Some(binding) = self.lfos.get_mut(lfo_idx) {
+                        // Scale rate around base_freq: 0.1x to 10x (100x range)
+                        // pot=0 -> 0.1x, pot=0.5 -> 1x, pot=1 -> 10x
+                        let scale = 0.1_f64 * 100.0_f64.powf(value);
+                        let rate = binding.base_freq * scale;
+                        binding.lfo.set_rate(rate);
                     }
                 }
             }
@@ -882,6 +1087,28 @@ impl CompiledPedal {
 
 impl PedalProcessor for CompiledPedal {
     fn process(&mut self, input: f64) -> f64 {
+        // Tick all LFOs and route their outputs to targets.
+        for binding in &mut self.lfos {
+            let lfo_out = binding.lfo.tick();
+            let modulation = binding.bias + lfo_out * binding.range;
+
+            match &binding.target {
+                LfoTarget::JfetVgs { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_jfet_vgs(modulation);
+                    }
+                }
+                LfoTarget::PhotocouplerLed { stage_idx, comp_id } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        // LED drive is 0-1, LFO outputs -1 to 1
+                        // Convert: bias=0.5, range=0.5 gives full 0-1 sweep
+                        stage.tree.set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
+                        stage.tree.recompute();
+                    }
+                }
+            }
+        }
+
         let headroom = self.supply_voltage / 9.0;
         let mut signal = input;
 
@@ -914,11 +1141,17 @@ impl PedalProcessor for CompiledPedal {
             stage.tree.update_sample_rate(rate);
             stage.tree.recompute();
         }
+        for binding in &mut self.lfos {
+            binding.lfo.update_sample_rate(rate);
+        }
     }
 
     fn reset(&mut self) {
         for stage in &mut self.stages {
             stage.reset();
+        }
+        for binding in &mut self.lfos {
+            binding.lfo.reset();
         }
     }
 
@@ -1073,6 +1306,79 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         });
     }
 
+    // Build WDF stages for JFETs.
+    let jfets = graph.find_jfets();
+    let jfet_edge_indices: Vec<usize> = jfets.iter().map(|(idx, _)| *idx).collect();
+    let all_nonlinear_indices: Vec<usize> = diode_edge_indices
+        .iter()
+        .chain(jfet_edge_indices.iter())
+        .copied()
+        .collect();
+
+    for (_edge_idx, jfet_info) in &jfets {
+        let junction = jfet_info.junction_node;
+        let passive_idxs =
+            graph.elements_at_junction(junction, &all_nonlinear_indices, &graph.active_edge_indices);
+
+        if passive_idxs.is_empty() {
+            continue;
+        }
+
+        // Find the best injection node for the voltage source.
+        let mut injection_node = graph.in_node;
+        let mut best_dist = usize::MAX;
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            let other = if e.node_a == junction {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            if let Some(&d) = dist_from_in.get(&other) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = other;
+                }
+            }
+        }
+
+        // Build SP edges.
+        let source_node = graph.edges.len() + 2000; // virtual source node (different from diodes)
+        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+        }
+
+        let terminals = vec![source_node, junction];
+        let sp_tree = match sp_reduce(sp_edges, &terminals) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        // Create components list with virtual voltage source for JFET stages.
+        let mut jfet_components = graph.components.clone();
+        while jfet_components.len() <= vs_comp_idx {
+            jfet_components.push(ComponentDef {
+                id: "__vs__".to_string(),
+                kind: ComponentKind::Resistor(1.0),
+            });
+        }
+
+        let tree = sp_to_dyn_with_vs(&sp_tree, &jfet_components, sample_rate, vs_comp_idx);
+
+        let model = jfet_model(jfet_info.jfet_type, jfet_info.is_n_channel);
+        let root = RootKind::Jfet(JfetRoot::new(model));
+
+        stages.push(WdfStage {
+            tree,
+            root,
+            compensation: 1.0,
+        });
+    }
+
     // Balance voltage source impedance in each stage.
     // This fixes topologies where the Vs branch sits in a Parallel adaptor
     // opposite a high-impedance element (e.g. Big Muff: Parallel(Series(Vs,C), R)
@@ -1085,6 +1391,19 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
     let use_soft_limit = has_single_diode || stages.is_empty();
     let soft_limit_scale = if has_germanium { 3.0 } else { 2.0 };
 
+    // Collect LFO component IDs for control binding.
+    let lfo_ids: Vec<String> = pedal
+        .components
+        .iter()
+        .filter_map(|c| {
+            if matches!(c.kind, ComponentKind::Lfo(..)) {
+                Some(c.id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
     // Build control bindings.
     let mut controls = Vec::new();
     for ctrl in &pedal.controls {
@@ -1092,18 +1411,50 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
             ControlTarget::PreGain
         } else if is_level_label(&ctrl.label) {
             ControlTarget::OutputGain
+        } else if is_rate_label(&ctrl.label) {
+            // Check if there's an LFO to control
+            if !lfo_ids.is_empty() {
+                ControlTarget::LfoRate(0) // Control first LFO by default
+            } else {
+                ControlTarget::PreGain // fallback
+            }
         } else {
-            // Try to find this pot in a WDF stage.
-            let mut found_stage = None;
-            for (si, stage) in stages.iter().enumerate() {
-                if has_pot(&stage.tree, &ctrl.component) {
-                    found_stage = Some(si);
-                    break;
+            // Check if this pot connects to an LFO.rate via nets
+            let mut lfo_target = None;
+            for net in &pedal.nets {
+                if let Pin::ComponentPin { component, pin } = &net.from {
+                    if component == &ctrl.component && pin == "wiper" {
+                        // This pot's wiper connects somewhere
+                        for to_pin in &net.to {
+                            if let Pin::ComponentPin { component: target_comp, pin: target_pin } = to_pin {
+                                if target_pin == "rate" {
+                                    // Find the LFO index
+                                    if let Some(idx) = lfo_ids.iter().position(|id| id == target_comp) {
+                                        lfo_target = Some(ControlTarget::LfoRate(idx));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            match found_stage {
-                Some(si) => ControlTarget::PotInStage(si),
-                None => ControlTarget::PreGain, // fallback: map unknown controls to gain
+
+            if let Some(target) = lfo_target {
+                target
+            } else {
+                // Try to find this pot in a WDF stage.
+                let mut found_stage = None;
+                for (si, stage) in stages.iter().enumerate() {
+                    if has_pot(&stage.tree, &ctrl.component) {
+                        found_stage = Some(si);
+                        break;
+                    }
+                }
+                match found_stage {
+                    Some(si) => ControlTarget::PotInStage(si),
+                    None => ControlTarget::PreGain, // fallback: map unknown controls to gain
+                }
             }
         };
 
@@ -1143,6 +1494,76 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
     let ratio: f64 = ghi / glo;
     let pre_gain = glo * ratio.powf(gain_default) * active_bonus;
 
+    // Build LFO bindings from LFO components and their net connections.
+    let mut lfos = Vec::new();
+    for comp in &pedal.components {
+        if let ComponentKind::Lfo(waveform_dsl, timing_r, timing_c) = &comp.kind {
+            // Convert DSL waveform to elements waveform
+            let waveform = match waveform_dsl {
+                LfoWaveformDsl::Sine => crate::elements::LfoWaveform::Sine,
+                LfoWaveformDsl::Triangle => crate::elements::LfoWaveform::Triangle,
+                LfoWaveformDsl::Square => crate::elements::LfoWaveform::Square,
+                LfoWaveformDsl::SawUp => crate::elements::LfoWaveform::SawUp,
+                LfoWaveformDsl::SawDown => crate::elements::LfoWaveform::SawDown,
+                LfoWaveformDsl::SampleAndHold => crate::elements::LfoWaveform::SampleAndHold,
+            };
+
+            // Compute base frequency from RC timing: f = 1/(2πRC)
+            let base_freq = 1.0 / (2.0 * std::f64::consts::PI * timing_r * timing_c);
+
+            // Create LFO with base frequency
+            let mut lfo = crate::elements::Lfo::new(waveform, sample_rate);
+            lfo.set_rate(base_freq);
+
+            // Find what this LFO connects to via nets (LFO.out -> target.property)
+            for net in &pedal.nets {
+                if let Pin::ComponentPin { component, pin } = &net.from {
+                    if component == &comp.id && pin == "out" {
+                        // This LFO's output connects to targets in net.to
+                        for target_pin in &net.to {
+                            if let Pin::ComponentPin {
+                                component: target_comp,
+                                pin: target_prop,
+                            } = target_pin
+                            {
+                                let target = match target_prop.as_str() {
+                                    "vgs" => {
+                                        // Find which stage contains this JFET
+                                        let stage_idx = stages
+                                            .iter()
+                                            .position(|s| matches!(&s.root, RootKind::Jfet(_)))
+                                            .unwrap_or(0);
+                                        LfoTarget::JfetVgs { stage_idx }
+                                    }
+                                    "led" => LfoTarget::PhotocouplerLed {
+                                        stage_idx: 0,
+                                        comp_id: target_comp.clone(),
+                                    },
+                                    _ => continue,
+                                };
+
+                                // Bias and range based on target type
+                                let (bias, range) = match &target {
+                                    LfoTarget::JfetVgs { .. } => (-1.25, 1.25),
+                                    LfoTarget::PhotocouplerLed { .. } => (0.5, 0.5),
+                                };
+
+                                lfos.push(LfoBinding {
+                                    lfo: lfo.clone(),
+                                    target,
+                                    bias,
+                                    range,
+                                    base_freq,
+                                    lfo_id: comp.id.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(CompiledPedal {
         stages,
         pre_gain,
@@ -1153,6 +1574,7 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         controls,
         gain_range: (glo * active_bonus, ghi * active_bonus),
         supply_voltage: 9.0,
+        lfos,
     })
 }
 
@@ -1371,6 +1793,22 @@ fn diode_model(dt: DiodeType) -> DiodeModel {
         DiodeType::Silicon => DiodeModel::silicon(),
         DiodeType::Germanium => DiodeModel::germanium(),
         DiodeType::Led => DiodeModel::led(),
+    }
+}
+
+fn jfet_model(jt: JfetType, is_n_channel: bool) -> JfetModel {
+    match jt {
+        JfetType::J201 => JfetModel::n_j201(),
+        JfetType::N2n5457 => JfetModel::n_2n5457(),
+        JfetType::P2n5460 => {
+            if is_n_channel {
+                // Mismatch: N-channel requested with P-channel type
+                // Fall back to a reasonable N-channel model
+                JfetModel::n_2n5457()
+            } else {
+                JfetModel::p_2n5460()
+            }
+        }
     }
 }
 

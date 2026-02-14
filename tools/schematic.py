@@ -102,6 +102,21 @@ def format_value(kind, arg):
         return arg.title()
     elif kind in ("npn", "pnp", "opamp", "led"):
         return ""
+    elif kind in ("njfet", "pjfet"):
+        # JFET type: j201, 2n5457, 2n5460
+        return arg.upper() if arg else ""
+    elif kind == "photocoupler":
+        # Photocoupler type: nsl32, vtl5c1, vtl5c3
+        return arg.upper() if arg else "VTL"
+    elif kind == "lfo":
+        # LFO args: waveform, timing_r, timing_c
+        parts = [p.strip() for p in arg.split(",")]
+        if len(parts) >= 3:
+            waveform = parts[0].title()
+            timing_r = format_eng(parse_eng(parts[1]), "\u03a9")
+            timing_c = format_eng(parse_eng(parts[2]), "F")
+            return f"{waveform}\nR={timing_r}, C={timing_c}"
+        return arg
     return arg
 
 
@@ -251,6 +266,10 @@ PINS = {
     "npn": ["base", "collector", "emitter"],
     "pnp": ["base", "collector", "emitter"],
     "opamp": ["pos", "neg", "out"],
+    "njfet": ["gate", "drain", "source"],
+    "pjfet": ["gate", "drain", "source"],
+    "photocoupler": ["led", "ldr_a", "ldr_b"],
+    "lfo": ["out", "rate"],
 }
 
 TWO_TERMINAL = {"resistor", "cap", "pot", "diode", "diode_pair", "led"}
@@ -495,6 +514,9 @@ SCHEMDRAW_MAP = {
     "npn": elm.BjtNpn,
     "pnp": elm.BjtPnp,
     "opamp": elm.Opamp,
+    "njfet": elm.JFetN,
+    "pjfet": elm.JFetP,
+    # LFO and photocoupler use Box elements with custom labels
 }
 
 
@@ -538,7 +560,7 @@ def _draw_element(d, kind, label, direction="right", pos=None, label_loc=None):
     """Draw a schemdraw element with correct handling for all component types.
 
     For two-terminal components, returns (element, start_point, end_point).
-    For BJT/opamp, returns (element, pin_dict) where pin_dict maps pin names to points.
+    For BJT/opamp/JFET, returns (element, pin_dict) where pin_dict maps pin names to points.
     """
     elem_cls = SCHEMDRAW_MAP.get(kind, elm.Resistor)
 
@@ -554,6 +576,18 @@ def _draw_element(d, kind, label, direction="right", pos=None, label_loc=None):
             "emitter": el.absanchors["emitter"],
         }
         return el, pins
+    elif kind in ("njfet", "pjfet"):
+        e = elem_cls()
+        if pos is not None:
+            e = e.at(pos)
+        e = e.label(label, loc=label_loc or "right")
+        el = d.add(e)
+        pins = {
+            "gate": el.absanchors["gate"],
+            "drain": el.absanchors["drain"],
+            "source": el.absanchors["source"],
+        }
+        return el, pins
     elif kind == "opamp":
         e = elem_cls()
         if pos is not None:
@@ -564,6 +598,36 @@ def _draw_element(d, kind, label, direction="right", pos=None, label_loc=None):
             "in1": el.absanchors["in1"],
             "in2": el.absanchors["in2"],
             "out": el.absanchors["out"],
+        }
+        return el, pins
+    elif kind == "lfo":
+        # Draw LFO as a labeled box with timing component info
+        e = elm.Ic(pins=[elm.IcPin("out", side="right"),
+                        elm.IcPin("rate", side="left")],
+                   size=(2, 1.5))
+        if pos is not None:
+            e = e.at(pos)
+        e = e.label(label, loc="center", fontsize=8)
+        el = d.add(e)
+        pins = {
+            "out": el.absanchors["out"],
+            "rate": el.absanchors["rate"],
+        }
+        return el, pins
+    elif kind == "photocoupler":
+        # Draw photocoupler as a box with LED and LDR pins
+        e = elm.Ic(pins=[elm.IcPin("led", side="left"),
+                        elm.IcPin("ldr_a", side="right", anchorname="ldr_a"),
+                        elm.IcPin("ldr_b", side="right", anchorname="ldr_b")],
+                   size=(2, 1.5))
+        if pos is not None:
+            e = e.at(pos)
+        e = e.label(label, loc="center", fontsize=8)
+        el = d.add(e)
+        pins = {
+            "led": el.absanchors["led"],
+            "ldr_a": el.absanchors["ldr_a"],
+            "ldr_b": el.absanchors["ldr_b"],
         }
         return el, pins
     else:
