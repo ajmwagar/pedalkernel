@@ -23,14 +23,11 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::PJfet(_) => ("Device:Q_PJFET_DGS", "J"),
         ComponentKind::Photocoupler(_) => ("Isolator:PC817", "OC"),
         ComponentKind::Lfo(..) => ("", "LFO"), // Expands to timing R + C
-        ComponentKind::Triode(tt) => {
-            // Triode tubes use vacuum tube symbols
-            match tt {
-                TriodeType::T12ax7 | TriodeType::T12at7 | TriodeType::T12au7 => {
-                    ("Valve:ECC83", "V")
-                }
-            }
-        }
+        ComponentKind::Triode(tt) => match tt {
+            TriodeType::T12ax7 => ("Valve:ECC83", "V"),
+            TriodeType::T12at7 => ("Valve:ECC81", "V"),
+            TriodeType::T12au7 => ("Valve:ECC82", "V"),
+        },
         ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
     }
 }

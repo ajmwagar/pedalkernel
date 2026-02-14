@@ -360,6 +360,23 @@ fn check_spec_voltage(
             }
         }
     }
+
+    // Triode plate voltage — tubes expect much higher voltages than transistors.
+    // The WDF model simulates tube behavior at any voltage, but a real build
+    // needs a plate supply of 150-400V (via a step-up transformer or charge pump).
+    if let ComponentKind::Triode(_) = kind {
+        if voltage < 100.0 {
+            warnings.push(VoltageWarning {
+                component_id: id.to_string(),
+                severity: WarningSeverity::Info,
+                message: format!(
+                    "Tube {id}{part_label} needs 150-400V plate supply; \
+                     at {voltage:.0}V the WDF model runs fine but a physical build \
+                     needs a B+ supply (charge pump or transformer)",
+                ),
+            });
+        }
+    }
 }
 
 /// Heuristic voltage check for a single component (no spec available).
@@ -454,6 +471,19 @@ fn check_heuristic_voltage(
                     message: format!(
                         "Germanium diode {id} — higher power dissipation at {voltage:.0}V \
                          may shift forward voltage",
+                    ),
+                });
+            }
+        }
+        ComponentKind::Triode(_) => {
+            if voltage < 100.0 {
+                warnings.push(VoltageWarning {
+                    component_id: id.to_string(),
+                    severity: WarningSeverity::Info,
+                    message: format!(
+                        "Tube {id} needs 150-400V plate supply; at {voltage:.0}V the WDF \
+                         model runs fine but a physical build needs a B+ supply \
+                         — add a .pedalhw file to specify plate voltage",
                     ),
                 });
             }
@@ -993,6 +1023,34 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     });
 
                     entries
+                }
+                ComponentKind::Triode(tt) => {
+                    let (pn, desc) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string())
+                    } else {
+                        match tt {
+                            crate::dsl::TriodeType::T12ax7 => (
+                                Some("JJ-12AX7".to_string()),
+                                "12AX7 / ECC83 Preamp Tube (JJ Electronic)".to_string(),
+                            ),
+                            crate::dsl::TriodeType::T12at7 => (
+                                Some("JJ-12AT7".to_string()),
+                                "12AT7 / ECC81 Preamp Tube (JJ Electronic)".to_string(),
+                            ),
+                            crate::dsl::TriodeType::T12au7 => (
+                                Some("JJ-12AU7".to_string()),
+                                "12AU7 / ECC82 Preamp Tube (JJ Electronic)".to_string(),
+                            ),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: format!("Vacuum Tube ({tt:?})"),
+                        value: format!("{tt:?}"),
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
                 }
                 ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) => {
                     let mut entries = Vec::new();
