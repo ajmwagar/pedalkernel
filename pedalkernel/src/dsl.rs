@@ -50,6 +50,8 @@ pub enum ComponentKind {
     Photocoupler(PhotocouplerType),
     /// LFO: waveform, timing_r (Ω), timing_c (F) -> f = 1/(2πRC)
     Lfo(LfoWaveformDsl, f64, f64),
+    /// Triode vacuum tube
+    Triode(TriodeType),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,17 @@ pub enum LfoWaveformDsl {
     SawUp,
     SawDown,
     SampleAndHold,
+}
+
+/// Triode vacuum tube types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriodeType {
+    /// 12AX7 / ECC83 - High gain preamp tube
+    T12ax7,
+    /// 12AT7 / ECC81 - Medium gain
+    T12at7,
+    /// 12AU7 / ECC82 - Low gain
+    T12au7,
 }
 
 /// A net connection: `in -> C1.a` or `C1.b -> R1.a, D1.a`
@@ -272,6 +285,26 @@ fn parse_photocoupler(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Photocoupler(pt)))
 }
 
+fn triode_type(input: &str) -> IResult<&str, TriodeType> {
+    alt((
+        value(TriodeType::T12ax7, tag("12ax7")),
+        value(TriodeType::T12at7, tag("12at7")),
+        value(TriodeType::T12au7, tag("12au7")),
+        // European designations
+        value(TriodeType::T12ax7, tag("ecc83")),
+        value(TriodeType::T12at7, tag("ecc81")),
+        value(TriodeType::T12au7, tag("ecc82")),
+    ))(input)
+}
+
+fn parse_triode(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("triode")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, tt) = triode_type(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Triode(tt)))
+}
+
 fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
     alt((
         parse_resistor,
@@ -287,6 +320,7 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
         parse_pjfet,
         parse_photocoupler,
         parse_lfo,
+        parse_triode,
     ))(input)
 }
 
@@ -743,6 +777,32 @@ pedal "Optical Tremolo" {
             def.components[1].kind,
             ComponentKind::Photocoupler(PhotocouplerType::Vtl5c3)
         );
+    }
+
+    #[test]
+    fn parse_triode_12ax7() {
+        let (_, c) = component_def("V1: triode(12ax7)").unwrap();
+        assert_eq!(c.id, "V1");
+        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12ax7));
+    }
+
+    #[test]
+    fn parse_triode_12at7() {
+        let (_, c) = component_def("V2: triode(12at7)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12at7));
+    }
+
+    #[test]
+    fn parse_triode_12au7() {
+        let (_, c) = component_def("V3: triode(12au7)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12au7));
+    }
+
+    #[test]
+    fn parse_triode_ecc83() {
+        // ECC83 = European 12AX7
+        let (_, c) = component_def("V4: triode(ecc83)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12ax7));
     }
 
     #[test]

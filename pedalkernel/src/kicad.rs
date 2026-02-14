@@ -23,6 +23,14 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::PJfet(_) => ("Device:Q_PJFET_DGS", "J"),
         ComponentKind::Photocoupler(_) => ("Isolator:PC817", "OC"),
         ComponentKind::Lfo(..) => ("", "LFO"), // Virtual component, not in physical netlist
+        ComponentKind::Triode(tt) => {
+            // Triode tubes use vacuum tube symbols
+            match tt {
+                TriodeType::T12ax7 | TriodeType::T12at7 | TriodeType::T12au7 => {
+                    ("Valve:ECC83", "V")
+                }
+            }
+        }
     }
 }
 
@@ -49,6 +57,7 @@ fn value_str(kind: &ComponentKind) -> String {
                 format_eng(*timing_c, "")
             )
         }
+        ComponentKind::Triode(tt) => format!("Triode_{tt:?}"),
     }
 }
 

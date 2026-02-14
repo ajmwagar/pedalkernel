@@ -297,6 +297,7 @@ pub enum RootKind {
     DiodePair(DiodePairRoot),
     SingleDiode(DiodeRoot),
     Jfet(JfetRoot),
+    Triode(TriodeRoot),
 }
 
 pub struct WdfStage {
@@ -318,6 +319,7 @@ impl WdfStage {
             RootKind::DiodePair(dp) => dp.process(b_tree, rp),
             RootKind::SingleDiode(d) => d.process(b_tree, rp),
             RootKind::Jfet(j) => j.process(b_tree, rp),
+            RootKind::Triode(t) => t.process(b_tree, rp),
         };
         self.tree.set_incident(a_root);
         (a_root + b_tree) / 2.0
@@ -352,6 +354,25 @@ impl WdfStage {
     pub fn jfet_vgs(&self) -> Option<f64> {
         match &self.root {
             RootKind::Jfet(j) => Some(j.vgs()),
+            _ => None,
+        }
+    }
+
+    /// Set the grid-cathode voltage for triode root elements.
+    ///
+    /// This is used for external modulation (bias, LFO, signal input).
+    /// Has no effect if the root is not a triode.
+    #[inline]
+    pub fn set_triode_vgk(&mut self, vgk: f64) {
+        if let RootKind::Triode(t) = &mut self.root {
+            t.set_vgk(vgk);
+        }
+    }
+
+    /// Get the current grid-cathode voltage if this is a triode stage.
+    pub fn triode_vgk(&self) -> Option<f64> {
+        match &self.root {
+            RootKind::Triode(t) => Some(t.vgk()),
             _ => None,
         }
     }
@@ -493,6 +514,21 @@ impl CircuitGraph {
                         comp_idx: idx,
                         node_a: node_d,
                         node_b: node_s,
+                    });
+                }
+                ComponentKind::Triode(_) => {
+                    // Triode: plate-cathode path is the WDF edge (like JFET drain-source).
+                    // Grid is external control, not part of WDF tree.
+                    let key_p = format!("{}.plate", comp.id);
+                    let key_k = format!("{}.cathode", comp.id);
+                    let id_p = get_id(&key_p, &mut uf);
+                    let id_k = get_id(&key_k, &mut uf);
+                    let node_p = uf.find(id_p);
+                    let node_k = uf.find(id_k);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a: node_p,
+                        node_b: node_k,
                     });
                 }
                 ComponentKind::Npn | ComponentKind::Pnp | ComponentKind::OpAmp => {

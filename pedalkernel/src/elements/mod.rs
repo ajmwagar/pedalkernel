@@ -385,6 +385,117 @@ mod tests {
         assert!(b.is_finite(), "P-channel should handle negative input");
     }
 
+    // Triode tests
+    #[test]
+    fn triode_cutoff_at_negative_grid() {
+        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        // Very negative grid voltage should cut off the tube
+        triode.set_vgk(-50.0);
+        let ip = triode.plate_current(200.0);
+        assert!(ip < 1e-9, "should be cutoff at Vgk=-50V: ip={ip}");
+    }
+
+    #[test]
+    fn triode_active_region() {
+        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        // Typical operating point: Vgk around -1 to -2V
+        triode.set_vgk(-1.5);
+        let ip = triode.plate_current(200.0);
+        // Should have measurable plate current (Koren model scale)
+        assert!(
+            ip > 0.0 && ip < 10.0,
+            "should be in active region with reasonable current: ip={ip}"
+        );
+    }
+
+    #[test]
+    fn triode_plate_current_increases_with_vpk() {
+        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        triode.set_vgk(-1.0);
+        let ip_100 = triode.plate_current(100.0);
+        let ip_200 = triode.plate_current(200.0);
+        let ip_300 = triode.plate_current(300.0);
+        assert!(
+            ip_100 < ip_200 && ip_200 < ip_300,
+            "Ip should increase with Vpk: {ip_100} < {ip_200} < {ip_300}"
+        );
+    }
+
+    #[test]
+    fn triode_vgk_modulates_current() {
+        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        // More negative Vgk = less plate current
+        triode.set_vgk(0.0);
+        let ip_0 = triode.plate_current(200.0);
+        triode.set_vgk(-1.0);
+        let ip_1 = triode.plate_current(200.0);
+        triode.set_vgk(-2.0);
+        let ip_2 = triode.plate_current(200.0);
+        assert!(
+            ip_0 > ip_1 && ip_1 > ip_2,
+            "Ip should decrease as Vgk becomes more negative: ip_0={ip_0}, ip_1={ip_1}, ip_2={ip_2}"
+        );
+    }
+
+    #[test]
+    fn triode_newton_converges() {
+        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        triode.set_vgk(-1.5);
+
+        // Test convergence for various input levels
+        for a in [-10.0, 0.0, 10.0, 100.0, 500.0] {
+            let b = triode.process(a, 100_000.0);
+            assert!(b.is_finite(), "Newton should converge for a={a}, got b={b}");
+        }
+    }
+
+    #[test]
+    fn triode_12ax7_high_gain() {
+        let model = TriodeModel::t_12ax7();
+        assert_eq!(model.mu, 100.0, "12AX7 should have mu=100");
+    }
+
+    #[test]
+    fn triode_12au7_low_gain() {
+        let model = TriodeModel::t_12au7();
+        assert_eq!(model.mu, 20.0, "12AU7 should have mu=20");
+    }
+
+    #[test]
+    fn triode_different_tubes_different_current() {
+        let mut ax7 = TriodeRoot::new(TriodeModel::t_12ax7());
+        let mut au7 = TriodeRoot::new(TriodeModel::t_12au7());
+        ax7.set_vgk(-1.0);
+        au7.set_vgk(-1.0);
+
+        let ip_ax7 = ax7.plate_current(200.0);
+        let ip_au7 = au7.plate_current(200.0);
+
+        // Different tubes should have different characteristics
+        assert!(
+            (ip_ax7 - ip_au7).abs() > 1e-6,
+            "Different tubes should have different Ip: ax7={ip_ax7}, au7={ip_au7}"
+        );
+    }
+
+    #[test]
+    fn triode_wdf_constraint_satisfied() {
+        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        triode.set_vgk(-1.5);
+
+        let a = 100.0;
+        let rp = 100_000.0;
+        let b = triode.process(a, rp);
+
+        // WDF constraint: v = (a + b) / 2
+        let v = (a + b) / 2.0;
+        // Current: i = (a - b) / (2 * Rp)
+        let i = (a - b) / (2.0 * rp);
+
+        assert!(v.is_finite() && v.abs() < 1000.0, "v should be reasonable: {v}");
+        assert!(i.is_finite() && i.abs() < 0.01, "i should be reasonable: {i}");
+    }
+
     // Photocoupler tests
     #[test]
     fn photocoupler_dark_state() {
