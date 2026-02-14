@@ -1,11 +1,12 @@
 //! PedalKernel VST3/CLAP plugin.
 //!
-//! Single-plugin architecture with a pedal selector dropdown and three generic
-//! knob parameters.  Each pedal type remaps the knobs to its own controls
-//! (Drive, Tone, Sustain, etc.) via the compiled `.pedal` DSL pipeline.
+//! Single-plugin architecture with a pedal selector and three generic
+//! knob parameters.  Built-in pedals are always available; user-supplied
+//! `.pedal` files are loaded from `~/.pedalkernel/pedals/` at plugin init.
 //!
-//! Seven WDF-based pedal models are compiled from embedded `.pedal` source
-//! files at plugin init; one digital delay is provided as a built-in.
+//! The pedal selector is an `IntParam` whose range adapts to the number of
+//! loaded pedals.  Built-in pedals occupy indices 0–7 (seven WDF-based
+//! models plus a digital delay); user pedals follow at index 8+.
 
 use nih_plug::prelude::*;
 use pedalkernel::compiler::{compile_pedal, CompiledPedal};
@@ -16,10 +17,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Embedded .pedal sources (compiled at init)
+// Embedded .pedal sources (always available)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const PEDAL_SOURCES: &[&str] = &[
+const EMBEDDED_SOURCES: &[&str] = &[
     include_str!("../../pedalkernel/examples/tube_screamer.pedal"),
     include_str!("../../pedalkernel/examples/fuzz_face.pedal"),
     include_str!("../../pedalkernel/examples/big_muff.pedal"),
@@ -30,85 +31,119 @@ const PEDAL_SOURCES: &[&str] = &[
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Pedal type selector
+// Pedal metadata & loading
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
-enum PedalType {
-    #[name = "Tube Screamer"]
-    TubeScreamer,
-    #[name = "Fuzz Face"]
-    FuzzFace,
-    #[name = "Big Muff"]
-    BigMuff,
-    #[name = "MXR Dyna Comp"]
-    DynaComp,
-    #[name = "ProCo RAT"]
-    ProCoRat,
-    #[name = "Blues Driver"]
-    BluesDriver,
-    #[name = "Klon Centaur"]
-    KlonCentaur,
-    Delay,
+/// Immutable metadata for a loaded pedal slot, shared with parameter formatters.
+#[derive(Clone)]
+struct PedalMeta {
+    name: String,
+    /// [primary, secondary, output] — `None` means the knob is inactive.
+    labels: [Option<String>; 3],
 }
 
-impl PedalType {
-    /// Per-pedal control labels for each knob slot: [drive, tone, level].
-    /// `None` means the knob is inactive for this pedal.
-    fn control_labels(self) -> [Option<&'static str>; 3] {
+/// The actual processor for a pedal slot.
+enum PedalEngine {
+    Compiled(CompiledPedal),
+    Delay(Delay),
+}
+
+impl PedalEngine {
+    fn process(&mut self, input: f64) -> f64 {
         match self {
-            Self::TubeScreamer => [Some("Drive"), None, Some("Level")],
-            Self::FuzzFace => [Some("Fuzz"), None, Some("Volume")],
-            Self::BigMuff => [Some("Sustain"), Some("Tone"), Some("Volume")],
-            Self::DynaComp => [Some("Sensitivity"), None, Some("Output")],
-            Self::ProCoRat => [Some("Distortion"), Some("Filter"), Some("Volume")],
-            Self::BluesDriver => [Some("Gain"), Some("Tone"), Some("Level")],
-            Self::KlonCentaur => [Some("Gain"), Some("Treble"), Some("Output")],
-            Self::Delay => [Some("Time"), Some("Feedback"), Some("Mix")],
+            Self::Compiled(p) => p.process(input),
+            Self::Delay(d) => d.process(input),
         }
     }
 
-    /// Index into the compiled pedals vec, or `None` for the built-in Delay.
-    fn compiled_index(self) -> Option<usize> {
+    fn set_sample_rate(&mut self, rate: f64) {
         match self {
-            Self::TubeScreamer => Some(0),
-            Self::FuzzFace => Some(1),
-            Self::BigMuff => Some(2),
-            Self::DynaComp => Some(3),
-            Self::ProCoRat => Some(4),
-            Self::BluesDriver => Some(5),
-            Self::KlonCentaur => Some(6),
-            Self::Delay => None,
+            Self::Compiled(p) => p.set_sample_rate(rate),
+            Self::Delay(d) => d.set_sample_rate(rate),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Compiled(p) => p.reset(),
+            Self::Delay(d) => d.reset(),
         }
     }
 }
 
-/// Recover `PedalType` from the atomic indicator byte.
-fn pedal_from_indicator(val: u8) -> PedalType {
-    match val {
-        0 => PedalType::TubeScreamer,
-        1 => PedalType::FuzzFace,
-        2 => PedalType::BigMuff,
-        3 => PedalType::DynaComp,
-        4 => PedalType::ProCoRat,
-        5 => PedalType::BluesDriver,
-        6 => PedalType::KlonCentaur,
-        _ => PedalType::Delay,
+/// Classify a control label into one of the three knob slots:
+///   0 = primary (drive/gain/fuzz/etc.)
+///   1 = secondary (tone/filter/treble/etc.)
+///   2 = output (level/volume/output/mix)
+fn knob_slot(label: &str) -> usize {
+    match label.to_ascii_lowercase().as_str() {
+        "drive" | "gain" | "fuzz" | "sustain" | "distortion" | "sensitivity" | "time" => 0,
+        "level" | "volume" | "output" | "mix" => 2,
+        _ => 1,
     }
 }
 
-/// Indicator byte for a `PedalType` (matches enum declaration order).
-fn pedal_to_indicator(pt: PedalType) -> u8 {
-    match pt {
-        PedalType::TubeScreamer => 0,
-        PedalType::FuzzFace => 1,
-        PedalType::BigMuff => 2,
-        PedalType::DynaComp => 3,
-        PedalType::ProCoRat => 4,
-        PedalType::BluesDriver => 5,
-        PedalType::KlonCentaur => 6,
-        PedalType::Delay => 7,
+/// Parse and compile a `.pedal` source string into metadata + engine.
+fn load_pedal_source(src: &str, sample_rate: f64) -> Option<(PedalMeta, PedalEngine)> {
+    let def = dsl::parse_pedal_file(src).ok()?;
+    let compiled = compile_pedal(&def, sample_rate).ok()?;
+
+    let mut labels: [Option<String>; 3] = [None, None, None];
+    for ctrl in &def.controls {
+        let slot = knob_slot(&ctrl.label);
+        // First control that maps to a slot wins.
+        if labels[slot].is_none() {
+            labels[slot] = Some(ctrl.label.clone());
+        }
     }
+
+    let meta = PedalMeta {
+        name: def.name.clone(),
+        labels,
+    };
+    Some((meta, PedalEngine::Compiled(compiled)))
+}
+
+/// Resolve the directory to scan for user `.pedal` files.
+///
+/// Checks `PEDALKERNEL_PEDALS_DIR` first, then falls back to
+/// `~/.pedalkernel/pedals/`.
+fn user_pedals_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("PEDALKERNEL_PEDALS_DIR") {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".pedalkernel").join("pedals"))
+}
+
+/// Scan the user pedals directory for `.pedal` files and compile them.
+fn scan_user_pedals(sample_rate: f64) -> Vec<(PedalMeta, PedalEngine)> {
+    let dir = match user_pedals_dir() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "pedal"))
+        .map(|e| e.path())
+        .collect();
+    paths.sort(); // deterministic ordering
+
+    let mut pedals = Vec::new();
+    for path in paths {
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            if let Some(loaded) = load_pedal_source(&src, sample_rate) {
+                pedals.push(loaded);
+            }
+        }
+    }
+    pedals
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -116,14 +151,14 @@ fn pedal_to_indicator(pt: PedalType) -> u8 {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Shared atomic byte used by value-to-string formatters to read the current
-/// pedal type without requiring mutable access to the plugin struct.
+/// pedal index without requiring mutable access to the plugin struct.
 type PedalIndicator = Arc<AtomicU8>;
 
 #[derive(Params)]
 struct PedalKernelParams {
-    /// Which pedal model to use.
+    /// Which pedal model to use (index into the loaded pedals list).
     #[id = "type"]
-    pedal_type: EnumParam<PedalType>,
+    pedal_type: IntParam,
 
     /// Primary control (Drive / Fuzz / Sustain / Sensitivity / Gain / Time).
     #[id = "k1"]
@@ -140,27 +175,45 @@ struct PedalKernelParams {
 }
 
 impl PedalKernelParams {
-    fn new(indicator: PedalIndicator) -> Self {
+    fn new(indicator: PedalIndicator, meta: Arc<Vec<PedalMeta>>) -> Self {
+        let max_idx = (meta.len() as i32 - 1).max(0);
+
+        let meta_sel = meta.clone();
+        let meta_k1 = meta.clone();
+        let meta_k2 = meta.clone();
+        let meta_k3 = meta;
         let pi1 = indicator.clone();
         let pi2 = indicator.clone();
-        let pi3 = indicator.clone();
+        let pi3 = indicator;
 
         Self {
-            pedal_type: EnumParam::new("Pedal", PedalType::TubeScreamer),
+            pedal_type: IntParam::new("Pedal", 0, IntRange::Linear { min: 0, max: max_idx })
+                .with_value_to_string(Arc::new(move |v| {
+                    meta_sel
+                        .get(v as usize)
+                        .map(|m| m.name.clone())
+                        .unwrap_or_else(|| format!("#{v}"))
+                })),
 
             knob1: FloatParam::new("Drive", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(20.0))
                 .with_value_to_string(Arc::new(move |v: f32| {
-                    let pt = pedal_from_indicator(pi1.load(Ordering::Relaxed));
-                    let label = pt.control_labels()[0].unwrap_or("—");
+                    let idx = pi1.load(Ordering::Relaxed) as usize;
+                    let label = meta_k1
+                        .get(idx)
+                        .and_then(|m| m.labels[0].as_deref())
+                        .unwrap_or("—");
                     format!("{label}: {v:.2}")
                 })),
 
             knob2: FloatParam::new("Tone", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(20.0))
                 .with_value_to_string(Arc::new(move |v: f32| {
-                    let pt = pedal_from_indicator(pi2.load(Ordering::Relaxed));
-                    match pt.control_labels()[1] {
+                    let idx = pi2.load(Ordering::Relaxed) as usize;
+                    match meta_k2
+                        .get(idx)
+                        .and_then(|m| m.labels[1].as_deref())
+                    {
                         Some(label) => format!("{label}: {v:.2}"),
                         None => "—".to_string(),
                     }
@@ -169,8 +222,11 @@ impl PedalKernelParams {
             knob3: FloatParam::new("Level", 0.8, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(20.0))
                 .with_value_to_string(Arc::new(move |v: f32| {
-                    let pt = pedal_from_indicator(pi3.load(Ordering::Relaxed));
-                    let label = pt.control_labels()[2].unwrap_or("—");
+                    let idx = pi3.load(Ordering::Relaxed) as usize;
+                    let label = meta_k3
+                        .get(idx)
+                        .and_then(|m| m.labels[2].as_deref())
+                        .unwrap_or("—");
                     format!("{label}: {v:.2}")
                 })),
         }
@@ -183,33 +239,57 @@ impl PedalKernelParams {
 
 struct PedalKernelPlugin {
     params: Arc<PedalKernelParams>,
-    /// Seven compiled WDF pedal processors, indexed by `PedalType::compiled_index()`.
-    pedals: Vec<CompiledPedal>,
-    /// Built-in digital delay (non-WDF).
-    delay: Delay,
-    /// Shared indicator so value formatters know the active pedal.
+    /// Metadata for every loaded pedal (shared with parameter formatters).
+    meta: Arc<Vec<PedalMeta>>,
+    /// One engine per loaded pedal, indexed in lockstep with `meta`.
+    engines: Vec<PedalEngine>,
+    /// Shared indicator so value formatters know the active pedal index.
     pedal_indicator: PedalIndicator,
-}
-
-fn compile_embedded(src: &str, sample_rate: f64) -> CompiledPedal {
-    let def = dsl::parse_pedal_file(src).expect("embedded .pedal file should parse");
-    compile_pedal(&def, sample_rate).expect("embedded .pedal file should compile")
 }
 
 impl Default for PedalKernelPlugin {
     fn default() -> Self {
         let sr = 48000.0;
+
+        let mut meta_list = Vec::new();
+        let mut engines = Vec::new();
+
+        // 1. Embedded WDF pedals (indices 0–6).
+        for src in EMBEDDED_SOURCES {
+            if let Some((m, e)) = load_pedal_source(src, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 2. Built-in digital delay (index 7).
+        meta_list.push(PedalMeta {
+            name: "Delay".to_string(),
+            labels: [
+                Some("Time".to_string()),
+                Some("Feedback".to_string()),
+                Some("Mix".to_string()),
+            ],
+        });
+        engines.push(PedalEngine::Delay(Delay::new(sr)));
+
+        // 3. User-supplied .pedal files (indices 8+).
+        for (m, e) in scan_user_pedals(sr) {
+            meta_list.push(m);
+            engines.push(e);
+        }
+
+        let meta = Arc::new(meta_list);
         let pedal_indicator: PedalIndicator = Arc::new(AtomicU8::new(0));
-        let params = Arc::new(PedalKernelParams::new(pedal_indicator.clone()));
-        let pedals: Vec<CompiledPedal> = PEDAL_SOURCES
-            .iter()
-            .map(|src| compile_embedded(src, sr))
-            .collect();
+        let params = Arc::new(PedalKernelParams::new(
+            pedal_indicator.clone(),
+            meta.clone(),
+        ));
 
         Self {
             params,
-            pedals,
-            delay: Delay::new(sr),
+            meta,
+            engines,
             pedal_indicator,
         }
     }
@@ -255,18 +335,16 @@ impl Plugin for PedalKernelPlugin {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         let sr = buffer_config.sample_rate as f64;
-        for pedal in &mut self.pedals {
-            pedal.set_sample_rate(sr);
+        for engine in &mut self.engines {
+            engine.set_sample_rate(sr);
         }
-        self.delay.set_sample_rate(sr);
         true
     }
 
     fn reset(&mut self) {
-        for pedal in &mut self.pedals {
-            pedal.reset();
+        for engine in &mut self.engines {
+            engine.reset();
         }
-        self.delay.reset();
     }
 
     fn process(
@@ -275,10 +353,10 @@ impl Plugin for PedalKernelPlugin {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        let pedal_type = self.params.pedal_type.value();
-        self.pedal_indicator
-            .store(pedal_to_indicator(pedal_type), Ordering::Relaxed);
-        let labels = pedal_type.control_labels();
+        let idx = self.params.pedal_type.value() as usize;
+        self.pedal_indicator.store(idx as u8, Ordering::Relaxed);
+
+        let labels = self.meta.get(idx).map(|m| &m.labels);
 
         for channel_samples in buffer.iter_samples() {
             // Read smoothed knob values (per-sample for zipper-free automation)
@@ -286,37 +364,36 @@ impl Plugin for PedalKernelPlugin {
             let k2 = self.params.knob2.smoothed.next() as f64;
             let k3 = self.params.knob3.smoothed.next() as f64;
 
-            // Route knobs to the active pedal's controls
-            match pedal_type.compiled_index() {
-                Some(idx) => {
-                    let pedal = &mut self.pedals[idx];
-                    if let Some(label) = labels[0] {
-                        pedal.set_control(label, k1);
+            if let Some(engine) = self.engines.get_mut(idx) {
+                // Route knobs to the active pedal's controls
+                match engine {
+                    PedalEngine::Compiled(pedal) => {
+                        if let Some(labels) = labels {
+                            if let Some(ref label) = labels[0] {
+                                pedal.set_control(label, k1);
+                            }
+                            if let Some(ref label) = labels[1] {
+                                pedal.set_control(label, k2);
+                            }
+                            if let Some(ref label) = labels[2] {
+                                pedal.set_control(label, k3);
+                            }
+                        }
                     }
-                    if let Some(label) = labels[1] {
-                        pedal.set_control(label, k2);
-                    }
-                    if let Some(label) = labels[2] {
-                        pedal.set_control(label, k3);
+                    PedalEngine::Delay(delay) => {
+                        // Quadratic curve for natural-feeling time control
+                        delay.set_delay_time(10.0 + k1 * k1 * 1990.0);
+                        delay.set_feedback(k2 * 0.95);
+                        delay.set_mix(k3);
                     }
                 }
-                None => {
-                    // Delay: map 0–1 knobs to delay-specific ranges
-                    // Quadratic curve for natural-feeling time control
-                    self.delay.set_delay_time(10.0 + k1 * k1 * 1990.0);
-                    self.delay.set_feedback(k2 * 0.95);
-                    self.delay.set_mix(k3);
-                }
-            }
 
-            // Process each channel through the active pedal
-            for sample in channel_samples {
-                let input = *sample as f64;
-                let output = match pedal_type.compiled_index() {
-                    Some(idx) => self.pedals[idx].process(input),
-                    None => self.delay.process(input),
-                };
-                *sample = output as f32;
+                // Process each channel through the active pedal
+                for sample in channel_samples {
+                    let input = *sample as f64;
+                    let output = engine.process(input);
+                    *sample = output as f32;
+                }
             }
         }
 
