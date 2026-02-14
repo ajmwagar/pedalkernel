@@ -35,27 +35,50 @@ const EMBEDDED_SOURCES: &[&str] = &[
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Pro pedals (private repo, only available with `pro-pedals` feature)
+// Pro pedals (private repo, feature-gated by variant)
+//
+// Guitar: overdrives, fuzz, wah — voiced for guitar frequencies.
+// Shared: compressors, delays, modulation, reverb — instrument-agnostic.
+// Bass:   bass-specific circuits (populated in pedalkernel-pro/pedals/bass/).
+//
+// `pro-pedals` = guitar + bass + shared (the complete Pro bundle).
+// `pro-guitar` = guitar + shared.
+// `pro-bass`   = bass + shared.
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg(feature = "pro-pedals")]
-const PRO_SOURCES: &[&str] = &[
-    include_str!("../../../pedalkernel-pro/pedals/boss_dm2_delay.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/ce2_chorus.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/crybaby_wah.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/eqd_plumes.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/fender_tremolo.pedal"),
+/// Guitar-voiced pedals (overdrives, fuzz, wah).
+#[cfg(feature = "pro-guitar")]
+const PRO_GUITAR_SOURCES: &[&str] = &[
     include_str!("../../../pedalkernel-pro/pedals/fulltone_ocd.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/harmonic_tremolo.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/keeley_compressor_plus.pedal"),
     include_str!("../../../pedalkernel-pro/pedals/klon_centaur.pedal"),
     include_str!("../../../pedalkernel-pro/pedals/morning_glory.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/optical_tremolo.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/phase90.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/ts808_tubescreamer.pedal"),
     include_str!("../../../pedalkernel-pro/pedals/tumnus.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/ts808_tubescreamer.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/eqd_plumes.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/crybaby_wah.pedal"),
+];
+
+/// Instrument-agnostic pedals (compression, delay, modulation, reverb).
+/// Included in both guitar and bass variants.
+#[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
+const PRO_SHARED_SOURCES: &[&str] = &[
+    include_str!("../../../pedalkernel-pro/pedals/keeley_compressor_plus.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/ce2_chorus.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/phase90.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/fender_tremolo.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/optical_tremolo.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/harmonic_tremolo.pedal"),
     include_str!("../../../pedalkernel-pro/pedals/univibe.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/boss_dm2_delay.pedal"),
     include_str!("../../../pedalkernel-pro/pedals/walrus_slo_reverb.pedal"),
+];
+
+/// Bass-specific pedals (bass overdrive, bass compressor, etc.).
+/// Add new bass .pedal files to pedalkernel-pro/pedals/bass/ and list them here.
+#[cfg(feature = "pro-bass")]
+const PRO_BASS_SOURCES: &[&str] = &[
+    // TODO: Add bass-specific pedals as they're created, e.g.:
+    // include_str!("../../../pedalkernel-pro/pedals/bass/darkglass_b7k.pedal"),
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -269,9 +292,27 @@ impl Default for PedalKernelPlugin {
             }
         }
 
-        // 1b. Pro pedals (feature-gated, from private repo).
-        #[cfg(feature = "pro-pedals")]
-        for src in PRO_SOURCES {
+        // 1b. Pro guitar pedals.
+        #[cfg(feature = "pro-guitar")]
+        for src in PRO_GUITAR_SOURCES {
+            if let Some((m, e)) = load_pedal_source(src, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 1c. Pro bass pedals.
+        #[cfg(feature = "pro-bass")]
+        for src in PRO_BASS_SOURCES {
+            if let Some((m, e)) = load_pedal_source(src, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 1d. Pro shared pedals (included in both guitar and bass variants).
+        #[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
+        for src in PRO_SHARED_SOURCES {
             if let Some((m, e)) = load_pedal_source(src, sr) {
                 meta_list.push(m);
                 engines.push(e);
@@ -319,10 +360,14 @@ impl Default for PedalKernelPlugin {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl Plugin for PedalKernelPlugin {
-    #[cfg(not(feature = "pro-pedals"))]
+    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
     const NAME: &'static str = "PedalKernel";
-    #[cfg(feature = "pro-pedals")]
+    #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
     const NAME: &'static str = "PedalKernel Pro";
+    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+    const NAME: &'static str = "PedalKernel Pro Guitar";
+    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+    const NAME: &'static str = "PedalKernel Pro Bass";
 
     const VENDOR: &'static str = "Avery Wagar";
     const URL: &'static str = "https://github.com/ajmwagar/pedalkernel";
@@ -430,25 +475,37 @@ impl Plugin for PedalKernelPlugin {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl Vst3Plugin for PedalKernelPlugin {
-    #[cfg(not(feature = "pro-pedals"))]
+    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
     const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlWdfV0_03\0";
-    #[cfg(feature = "pro-pedals")]
+    #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
     const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlProV0_03\0";
+    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+    const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlGtrV0_03\0";
+    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+    const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlBssV0_03\0";
 
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
         &[Vst3SubCategory::Fx, Vst3SubCategory::Distortion];
 }
 
 impl ClapPlugin for PedalKernelPlugin {
-    #[cfg(not(feature = "pro-pedals"))]
+    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
     const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel";
-    #[cfg(feature = "pro-pedals")]
+    #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
     const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-pro";
+    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+    const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-pro-guitar";
+    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+    const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-pro-bass";
 
-    #[cfg(not(feature = "pro-pedals"))]
+    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
     const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based guitar pedal emulations");
-    #[cfg(feature = "pro-pedals")]
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based guitar pedal emulations — Pro edition");
+    #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based pedal emulations — Pro edition");
+    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based guitar pedal emulations — Pro Guitar edition");
+    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based bass pedal emulations — Pro Bass edition");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[

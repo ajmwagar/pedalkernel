@@ -11,9 +11,13 @@ crate-type = ["cdylib"]
 
 [features]
 default = []
-# Embed pro pedals from the private pedalkernel-pro repo (sibling directory).
+# Embed ALL pro pedals from the private pedalkernel-pro repo (sibling directory).
 # Build will fail if ~/src/pedalkernel-pro is not checked out.
-pro-pedals = []
+pro-pedals = ["pro-guitar", "pro-bass"]
+# Guitar-only variant: guitar overdrives/fuzz/wah + shared (delay, mod, comp).
+pro-guitar = []
+# Bass-only variant: bass-specific pedals + shared (delay, mod, comp).
+pro-bass = []
 
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
