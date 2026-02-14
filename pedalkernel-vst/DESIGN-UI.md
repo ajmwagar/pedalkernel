@@ -512,6 +512,214 @@ This is trivially within budget. Professional plugins with far more complex UIs
 
 ---
 
+## Unified Asset Pipeline: Plugin UI to Physical Pedal
+
+A major advantage of investing in a proper 3D asset pipeline is that the **same
+Blender models, textures, and layouts produce both the plugin UI and the
+manufacturing files for real hardware.** Design once, output everywhere.
+
+### The Master File: One Blender Project Per Pedal
+
+```
+assets/blender/pedals/tube_screamer/
+  tube_screamer.blend          # Complete 3D scene
+  ├── Enclosure (1590B mesh)   # Exact Hammond dimensions: 112 x 60 x 31 mm
+  ├── Knobs (linked from knob library)
+  ├── Footswitch, jacks, LED
+  ├── Materials (PBR: powder coat, chrome, rubber)
+  ├── Lighting rig (3-point + HDRI)
+  ├── Camera: "GUI Render"     # Top-down for plugin filmstrips
+  ├── Camera: "UV Print"       # Orthographic, face-only, for manufacturing
+  └── Camera: "Product Shot"   # 3/4 angle for marketing/website
+```
+
+From this single scene you export:
+
+| Output | Purpose | Format | How |
+|--------|---------|--------|-----|
+| Plugin background | VST GUI enclosure | PNG @2x (800x1400) | Render "GUI Render" camera, no knobs visible |
+| Knob filmstrips | VST GUI knob rotation | PNG filmstrip (128 frames) | Animate knob rotation, render sequence |
+| UV print artwork | Physical enclosure printing | PDF (CMYK + spot layers) | Bake texture → export → finalize in Inkscape/Illustrator |
+| Laser engrave file | Physical enclosure engraving | SVG / DXF (vector) | Export face art via Freestyle SVG or Flatterer add-on |
+| Product renders | Website, marketing | PNG/JPEG @high-res | Render "Product Shot" camera |
+| PCB silkscreen | Circuit board labeling | KiCad footprint (.kicad_mod) | Export label layer SVG → svg2shenzhen → KiCad |
+
+### Physical Manufacturing Formats
+
+#### UV Printing (Full-Color on Aluminum)
+
+This is how EarthQuaker Devices, JHS, and most modern builders do it. A Roland
+VersaUV flatbed printer sprays CMYK + white + gloss directly onto powder-coated
+or bare aluminum.
+
+**From Blender to UV print:**
+
+1. Model enclosure at **exact real-world dimensions** (1590B = 112 x 60 x 31 mm)
+2. UV unwrap the top face
+3. Texture paint the design (or apply materials and bake)
+4. **Bake texture** to image: minimum **4096 x 4096 px** (covers 600+ DPI on a
+   1590B face which is 56 x 108.5 mm)
+5. Export baked texture as PNG/TIFF
+6. Import into **Inkscape or Illustrator** at exact physical dimensions
+7. Convert to **CMYK** color space
+8. Add required spot-color layers:
+   - **WHITE layer**: RDG_WHITE spot color (where white ink prints; required for
+     any white or light areas on a dark enclosure)
+   - **GLOSS layer**: RDG_GLOSS spot color (varnish for shine/matte contrast)
+   - **COLOR layer**: The CMYK artwork itself
+9. Convert all text to outlines/paths
+10. Export as **PDF** for the print service (Tayda, AmplifyFun, etc.)
+
+**Resolution requirements:**
+| Target DPI | Pixel dimensions for 1590B face (56 x 108.5 mm) |
+|------------|--------------------------------------------------|
+| 300 DPI | 661 x 1281 px |
+| 400 DPI (minimum) | 882 x 1709 px |
+| 600 DPI (recommended) | 1323 x 2563 px |
+| 1440 DPI (printer native) | 3175 x 6152 px |
+
+Since we're already rendering enclosure backgrounds at 800x1400 for the plugin
+GUI (@2x), bumping to **1600x2800** or higher for the master bake gives us
+print-ready resolution with zero extra modeling work.
+
+#### Laser Engraving (Powder Coat Removal)
+
+For a more industrial/boutique look: laser away the powder coat to expose bare
+aluminum. Creates a permanent, unfadeable two-tone design.
+
+**From Blender to laser file:**
+
+1. Use Blender's **Freestyle SVG Exporter** (built-in) or the **Flatterer**
+   add-on to export the enclosure face artwork as vector SVG
+2. Open in Inkscape, set document dimensions to physical enclosure size
+3. Color-code paths: black = engrave, red = score/cut
+4. Set stroke width to **0.1 mm (hairline)** for cut/score operations
+5. Convert all text to paths
+6. Export as **SVG or DXF** for the laser cutter (LightBurn, etc.)
+
+**What works well with engraving:**
+- Control labels (text)
+- Logos and line art
+- Simple geometric patterns
+- Knob position markers (the "0-10" scale arc)
+
+**What needs UV printing instead:**
+- Multi-color artwork
+- Photographic images
+- Gradients and complex shading
+
+#### Screen Printing (Legacy, Large Runs)
+
+Traditional method, still used for 1-3 color designs at scale (25+ units):
+- Export vector artwork (SVG/AI/EPS), one color per layer
+- Each color = one screen (mesh setup ~$100-150 per screen)
+- Use **Nazdar epoxy ink** for durability on metal
+- Economics favor UV printing for runs under ~50 units
+
+#### PCB Silkscreen Art
+
+The same design elements (logo, knob labels, component references) can target
+PCB fabrication:
+
+1. Design labels and logos as SVG in Inkscape
+2. Use **svg2shenzhen** extension to assign Inkscape layers to KiCad PCB layers:
+   - `F.SilkS` = front silkscreen (white text/logos)
+   - `F.Mask` = front solder mask openings
+   - `Edge.Cuts` = board outline
+3. Export to `.kicad_mod` footprint files
+4. Import into KiCad alongside the PedalKernel-generated netlist
+
+Alternatively, KiCad's **bitmap2component** tool converts PNG → footprint at
+300 PPI (a 300x300 px image = 1" on the board).
+
+### Unified Inkscape Master
+
+For maximum reuse, maintain a single **Inkscape SVG per pedal** with named
+layers that export to every target:
+
+```
+tube_screamer_master.svg
+  Layer: "COLOR"        → UV print color artwork
+  Layer: "WHITE"        → UV print white ink areas
+  Layer: "GLOSS"        → UV print varnish areas
+  Layer: "ENGRAVE"      → Laser engraving paths
+  Layer: "F.SilkS"      → PCB front silkscreen
+  Layer: "Edge.Cuts"    → PCB board outline
+  Layer: "DRILL"        → Enclosure drill template + PCB drills
+  Layer: "GUI_OVERLAY"  → Plugin-only overlay elements
+```
+
+**Export targets from one file:**
+- Toggle COLOR + WHITE + GLOSS visible → Export PDF → Tayda UV printing
+- Toggle ENGRAVE visible → Export SVG → LightBurn laser engraving
+- Toggle F.SilkS + Edge.Cuts + DRILL visible → svg2shenzhen → KiCad
+- Toggle COLOR + GUI_OVERLAY visible → Export PNG @2x → Plugin background asset
+
+### What This Means in Practice
+
+When you design a new pedal:
+
+1. **Model it once** in Blender (or draw it in Inkscape for 2D-only)
+2. **Render it** for the plugin UI (filmstrips + background)
+3. **Export it** for UV printing when you're ready to manufacture
+4. **Export it** for laser engraving if you prefer that finish
+5. **Export it** for PCB silkscreen labeling
+6. **Render product shots** for the website / marketing
+
+The 3D model IS the single source of truth. Change the color of the enclosure in
+Blender, re-render, and both the plugin skin and the manufacturing file update.
+
+### Asset Directory Structure (Extended for Manufacturing)
+
+```
+assets/
+  blender/
+    pedals/
+      tube_screamer/
+        tube_screamer.blend
+        tube_screamer_master.svg    # Inkscape unified export file
+      fuzz_face/
+        ...
+    knobs/
+      chicken_head.blend
+      davies_1900h.blend
+      ...
+    shared/
+      lighting_rig.blend            # Linked into all pedal scenes
+      hdri/studio_neutral.exr
+  gui/                              # Plugin UI assets (generated from blender/)
+    enclosures/
+      tube_screamer_bg.png
+      tube_screamer_bg@2x.png
+      ...
+    filmstrips/
+      pointer_cream_128f.png
+      ...
+    leds/
+      led_red_on.png
+      ...
+  manufacturing/                    # Physical production files (generated)
+    uv_print/
+      tube_screamer_tayda.pdf       # Ready for Tayda UV print service
+      fuzz_face_tayda.pdf
+      ...
+    laser/
+      tube_screamer_engrave.svg
+      ...
+    drill_templates/
+      1590b_ts808_drill.dxf        # CNC drill template
+      ...
+    pcb/
+      tube_screamer_silkscreen.kicad_mod
+      ...
+  render/                           # Marketing / product shots
+    tube_screamer_hero.png
+    tube_screamer_angle.png
+    ...
+```
+
+---
+
 ## Open Questions
 
 1. **Window size**: Fixed per pedal (like real hardware) or fixed viewport with
@@ -536,3 +744,12 @@ This is trivially within budget. Professional plugins with far more complex UIs
    (static silkscreen look), or render dynamically with a font (flexible but
    less realistic)? Recommendation: static in the background for built-in
    pedals, dynamic for user pedals.
+
+6. **Enclosure finish for physical builds**: UV printing (full-color, Tayda
+   service, ~$3-5/unit) or laser engraving (two-tone, more "boutique" feel,
+   requires a fiber/CO2 laser)? Could offer both -- the same Blender model
+   exports to either format.
+
+7. **Texture resolution master**: Render Blender bakes at 4096x4096+ so the
+   same texture is print-ready (600 DPI on a 1590B) without re-rendering. The
+   plugin GUI just downsamples from the master.
