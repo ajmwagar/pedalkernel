@@ -39,6 +39,11 @@ Each component is declared as `<id>: <type>(<params>)`.
 | NPN transistor | `npn()` | NPN BJT (modeled as gain stage) |
 | PNP transistor | `pnp()` | PNP BJT (modeled as gain stage) |
 | Op-amp | `opamp()` | Operational amplifier |
+| N-channel JFET | `njfet(<model>)` | N-channel JFET (nonlinear WDF root) |
+| P-channel JFET | `pjfet(<model>)` | P-channel JFET (nonlinear WDF root) |
+| Photocoupler | `photocoupler(<model>)` | Vactrol / optocoupler (controlled resistance) |
+| LFO | `lfo(<waveform>, <R>, <C>)` | LFO with RC timing (f = 1/2piRC) |
+| Envelope Follower | `envelope_follower(<atk_R>, <atk_C>, <rel_R>, <rel_C>, <sens_R>)` | Envelope detector with RC timing |
 
 **Engineering notation** is supported for component values:
 
@@ -53,6 +58,12 @@ Each component is declared as `<id>: <type>(<params>)`.
 
 **Diode types**: `silicon`, `germanium`, `led`
 
+**JFET models**: `j201`, `2n5457`, `2n5460`
+
+**Photocoupler models**: `vtl5c3`, `vtl5c1`, `nsl32`
+
+**LFO waveforms**: `sine`, `triangle`, `square`, `saw_up`, `saw_down`, `sample_and_hold`
+
 ### Nets
 
 Nets describe how component pins connect. Each net is `<from> -> <to1>, <to2>, ...`.
@@ -65,7 +76,7 @@ Nets describe how component pins connect. Each net is `<from> -> <to1>, <to2>, .
 
 **Component pins** use dot notation: `C1.a`, `R1.b`, `D1.a`, `Q1.base`.
 
-Two-terminal components (resistors, capacitors, inductors, diodes, potentiometers) have pins `a` and `b`. Transistors have `base`, `collector`, `emitter`.
+Two-terminal components (resistors, capacitors, inductors, diodes, potentiometers) have pins `a` and `b`. Transistors have `base`, `collector`, `emitter`. JFETs have `gate`, `drain`, `source`. Op-amps have `pos`, `neg`, `out`. LFOs and envelope followers have `out` (modulation output) which connects to modulation inputs like `<jfet>.vgs` or `<photocoupler>.led`.
 
 ```
 in -> C1.a                       # input to capacitor pin a
@@ -87,6 +98,26 @@ The `position` property is used for potentiometers (0.0 = fully CCW, 1.0 = fully
 ```
 Drive.position -> "Drive" [0.0, 1.0] = 0.5
 Level.position -> "Level" [0.0, 1.0] = 0.8
+```
+
+### Modulation Components
+
+**LFO** — Specify waveform and physical RC timing components. Frequency is derived from the RC constant: `f = 1/(2*pi*R*C)`. The R and C values appear in the KiCad netlist and Mouser BOM as real components.
+
+```
+LFO1: lfo(triangle, 100k, 220n)  # f ≈ 7.2 Hz triangle
+LFO1.out -> OC1.led              # drive photocoupler LED
+```
+
+**Envelope Follower** — Specify attack/release RC timing and sensitivity resistor. All 5 component values are physical parts that appear in KiCad export and BOM.
+
+```
+# envelope_follower(attack_R, attack_C, release_R, release_C, sensitivity_R)
+EF1: envelope_follower(1k, 4.7u, 100k, 1u, 20k)
+# Attack τ = 1kΩ × 4.7µF = 4.7ms (fast attack)
+# Release τ = 100kΩ × 1µF = 100ms (smooth release)
+# Sensitivity = 20kΩ / 10kΩ = 2.0x gain
+EF1.out -> J1.vgs                # modulate JFET gate voltage
 ```
 
 ### Complete Example

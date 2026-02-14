@@ -52,6 +52,10 @@ pub enum ComponentKind {
     Lfo(LfoWaveformDsl, f64, f64),
     /// Triode vacuum tube
     Triode(TriodeType),
+    /// Envelope follower: attack_r (Ω), attack_c (F), release_r (Ω), release_c (F), sensitivity_r (Ω)
+    /// Attack τ = attack_r × attack_c, Release τ = release_r × release_c
+    /// Sensitivity = sensitivity_r / 10kΩ
+    EnvelopeFollower(f64, f64, f64, f64, f64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,6 +323,7 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
         parse_njfet,
         parse_pjfet,
         parse_photocoupler,
+        parse_envelope_follower, // must come before parse_lfo (both are long keywords)
         parse_lfo,
         parse_triode,
     ))(input)
@@ -430,6 +435,35 @@ fn lfo_waveform(input: &str) -> IResult<&str, LfoWaveformDsl> {
         value(LfoWaveformDsl::SawDown, tag("saw_down")),
         value(LfoWaveformDsl::SampleAndHold, tag("sample_hold")),
     ))(input)
+}
+
+/// `envelope_follower(1k, 4.7u, 100k, 1u, 20k)` - attack_r, attack_c, release_r, release_c, sensitivity_r
+/// Attack τ = R_attack × C_attack, Release τ = R_release × C_release
+/// Sensitivity gain = R_sensitivity / 10kΩ
+fn parse_envelope_follower(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("envelope_follower")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, attack_r) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, attack_c) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, release_r) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, release_c) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, sensitivity_r) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sensitivity_r)))
 }
 
 /// `lfo(triangle, 100k, 220n)` - waveform, timing_r, timing_c
@@ -864,5 +898,62 @@ pedal "Harmonic Tremolo" {
                      if component == "LFO1" && pin == "out")
         });
         assert!(lfo_net.is_some(), "should have LFO1.out net");
+    }
+
+    #[test]
+    fn parse_envelope_follower_component() {
+        // envelope_follower(1k, 4.7u, 100k, 1u, 20k)
+        let (_, c) = component_def("EF1: envelope_follower(1k, 4.7u, 100k, 1u, 20k)").unwrap();
+        assert_eq!(c.id, "EF1");
+        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) = c.kind {
+            assert!((attack_r - 1_000.0).abs() < 1.0);
+            assert!((attack_c - 4.7e-6).abs() < 1e-9);
+            assert!((release_r - 100_000.0).abs() < 1.0);
+            assert!((release_c - 1e-6).abs() < 1e-9);
+            assert!((sens_r - 20_000.0).abs() < 1.0);
+        } else {
+            panic!("expected EnvelopeFollower");
+        }
+    }
+
+    #[test]
+    fn parse_pedal_with_envelope_follower() {
+        let src = r#"
+pedal "Auto Wah" {
+  components {
+    EF1: envelope_follower(1k, 4.7u, 100k, 1.5u, 20k)
+    C1: cap(100n)
+    J1: njfet(j201)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> J1.drain
+    J1.source -> gnd
+    EF1.out -> J1.vgs
+    R1.a -> J1.drain
+    R1.b -> out
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Auto Wah");
+        assert_eq!(def.components.len(), 4);
+        // Check EnvelopeFollower component
+        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) = &def.components[0].kind {
+            assert!((*attack_r - 1_000.0).abs() < 1.0);
+            assert!((*attack_c - 4.7e-6).abs() < 1e-9);
+            assert!((*release_r - 100_000.0).abs() < 1.0);
+            assert!((*release_c - 1.5e-6).abs() < 1e-9);
+            assert!((*sens_r - 20_000.0).abs() < 1.0);
+        } else {
+            panic!("expected EnvelopeFollower component");
+        }
+        // Check EF1.out net connection
+        let ef_net = def.nets.iter().find(|n| {
+            matches!(&n.from, Pin::ComponentPin { component, pin }
+                     if component == "EF1" && pin == "out")
+        });
+        assert!(ef_net.is_some(), "should have EF1.out net");
     }
 }

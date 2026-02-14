@@ -534,9 +534,9 @@ impl CircuitGraph {
                 ComponentKind::Npn | ComponentKind::Pnp | ComponentKind::OpAmp => {
                     num_active += 1;
                 }
-                ComponentKind::Lfo(..) => {
-                    // LFO is a virtual modulation source, not a physical circuit element.
-                    // It connects via .out pin to modulation targets (J.vgs, OC.led).
+                ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..) => {
+                    // LFO and EnvelopeFollower are virtual modulation sources, not physical
+                    // circuit elements. They connect via .out pin to modulation targets.
                 }
             }
         }
@@ -1010,9 +1010,9 @@ enum ControlTarget {
     LfoRate(usize),
 }
 
-/// LFO modulation target.
+/// Modulation target for LFOs and envelope followers.
 #[derive(Debug, Clone)]
-enum LfoTarget {
+enum ModulationTarget {
     /// Modulate a JFET's Vgs.
     JfetVgs { stage_idx: usize },
     /// Modulate a Photocoupler's LED drive.
@@ -1022,7 +1022,7 @@ enum LfoTarget {
 /// LFO binding in a compiled pedal.
 struct LfoBinding {
     lfo: crate::elements::Lfo,
-    target: LfoTarget,
+    target: ModulationTarget,
     /// Bias offset for the modulation (e.g., Vgs center point).
     bias: f64,
     /// Modulation range (amplitude).
@@ -1032,6 +1032,19 @@ struct LfoBinding {
     /// LFO component ID (for debugging and future control binding).
     #[allow(dead_code)]
     lfo_id: String,
+}
+
+/// Envelope follower binding in a compiled pedal.
+struct EnvelopeBinding {
+    envelope: crate::elements::EnvelopeFollower,
+    target: ModulationTarget,
+    /// Bias offset for the modulation.
+    bias: f64,
+    /// Modulation range (amplitude).
+    range: f64,
+    /// Envelope follower component ID.
+    #[allow(dead_code)]
+    env_id: String,
 }
 
 /// A pedal processor compiled from a `.pedal` file's netlist.
@@ -1051,6 +1064,8 @@ pub struct CompiledPedal {
     supply_voltage: f64,
     /// LFO modulators.
     lfos: Vec<LfoBinding>,
+    /// Envelope follower modulators.
+    envelopes: Vec<EnvelopeBinding>,
 }
 
 /// Gain-like control labels.
@@ -1129,15 +1144,35 @@ impl PedalProcessor for CompiledPedal {
             let modulation = binding.bias + lfo_out * binding.range;
 
             match &binding.target {
-                LfoTarget::JfetVgs { stage_idx } => {
+                ModulationTarget::JfetVgs { stage_idx } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         stage.set_jfet_vgs(modulation);
                     }
                 }
-                LfoTarget::PhotocouplerLed { stage_idx, comp_id } => {
+                ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         // LED drive is 0-1, LFO outputs -1 to 1
                         // Convert: bias=0.5, range=0.5 gives full 0-1 sweep
+                        stage.tree.set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
+                        stage.tree.recompute();
+                    }
+                }
+            }
+        }
+
+        // Tick all envelope followers and route their outputs to targets.
+        for binding in &mut self.envelopes {
+            let env_out = binding.envelope.process(input);
+            let modulation = binding.bias + env_out * binding.range;
+
+            match &binding.target {
+                ModulationTarget::JfetVgs { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_jfet_vgs(modulation);
+                    }
+                }
+                ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         stage.tree.set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
                         stage.tree.recompute();
                     }
@@ -1180,6 +1215,9 @@ impl PedalProcessor for CompiledPedal {
         for binding in &mut self.lfos {
             binding.lfo.set_sample_rate(rate);
         }
+        for binding in &mut self.envelopes {
+            binding.envelope.set_sample_rate(rate);
+        }
     }
 
     fn reset(&mut self) {
@@ -1188,6 +1226,9 @@ impl PedalProcessor for CompiledPedal {
         }
         for binding in &mut self.lfos {
             binding.lfo.reset();
+        }
+        for binding in &mut self.envelopes {
+            binding.envelope.reset();
         }
     }
 
@@ -1569,9 +1610,9 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                             .iter()
                                             .position(|s| matches!(&s.root, RootKind::Jfet(_)))
                                             .unwrap_or(0);
-                                        LfoTarget::JfetVgs { stage_idx }
+                                        ModulationTarget::JfetVgs { stage_idx }
                                     }
-                                    "led" => LfoTarget::PhotocouplerLed {
+                                    "led" => ModulationTarget::PhotocouplerLed {
                                         stage_idx: 0,
                                         comp_id: target_comp.clone(),
                                     },
@@ -1580,8 +1621,8 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
 
                                 // Bias and range based on target type
                                 let (bias, range) = match &target {
-                                    LfoTarget::JfetVgs { .. } => (-1.25, 1.25),
-                                    LfoTarget::PhotocouplerLed { .. } => (0.5, 0.5),
+                                    ModulationTarget::JfetVgs { .. } => (-1.25, 1.25),
+                                    ModulationTarget::PhotocouplerLed { .. } => (0.5, 0.5),
                                 };
 
                                 lfos.push(LfoBinding {
@@ -1591,6 +1632,59 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                     range,
                                     base_freq,
                                     lfo_id: comp.id.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build EnvelopeFollower bindings from EnvelopeFollower components and their net connections.
+    let mut envelopes = Vec::new();
+    for comp in &pedal.components {
+        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sensitivity_r) = &comp.kind {
+            let envelope = crate::elements::EnvelopeFollower::from_rc(
+                *attack_r, *attack_c, *release_r, *release_c, *sensitivity_r, sample_rate,
+            );
+
+            // Find what this envelope follower connects to via nets (EF.out -> target.property)
+            for net in &pedal.nets {
+                if let Pin::ComponentPin { component, pin } = &net.from {
+                    if component == &comp.id && pin == "out" {
+                        for target_pin in &net.to {
+                            if let Pin::ComponentPin {
+                                component: target_comp,
+                                pin: target_prop,
+                            } = target_pin
+                            {
+                                let target = match target_prop.as_str() {
+                                    "vgs" => {
+                                        let stage_idx = stages
+                                            .iter()
+                                            .position(|s| matches!(&s.root, RootKind::Jfet(_)))
+                                            .unwrap_or(0);
+                                        ModulationTarget::JfetVgs { stage_idx }
+                                    }
+                                    "led" => ModulationTarget::PhotocouplerLed {
+                                        stage_idx: 0,
+                                        comp_id: target_comp.clone(),
+                                    },
+                                    _ => continue,
+                                };
+
+                                let (bias, range) = match &target {
+                                    ModulationTarget::JfetVgs { .. } => (-1.25, 1.25),
+                                    ModulationTarget::PhotocouplerLed { .. } => (0.0, 1.0),
+                                };
+
+                                envelopes.push(EnvelopeBinding {
+                                    envelope: envelope.clone(),
+                                    target,
+                                    bias,
+                                    range,
+                                    env_id: comp.id.clone(),
                                 });
                             }
                         }
@@ -1611,6 +1705,7 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         gain_range: (glo * active_bonus, ghi * active_bonus),
         supply_voltage: 9.0,
         lfos,
+        envelopes,
     })
 }
 
