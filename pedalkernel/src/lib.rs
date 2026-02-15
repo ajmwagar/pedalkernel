@@ -428,7 +428,7 @@ pedal "Test Pedal" {
         assert!(p
             .components
             .iter()
-            .any(|c| c.kind == dsl::ComponentKind::OpAmp));
+            .any(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_))));
     }
 
     #[test]
@@ -446,7 +446,7 @@ pedal "Test Pedal" {
         assert!(p
             .components
             .iter()
-            .any(|c| c.kind == dsl::ComponentKind::OpAmp));
+            .any(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_))));
         assert!(p
             .components
             .iter()
@@ -490,9 +490,9 @@ pedal "Test Pedal" {
         let opamp_count = p
             .components
             .iter()
-            .filter(|c| c.kind == dsl::ComponentKind::OpAmp)
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_)))
             .count();
-        assert_eq!(opamp_count, 2, "Klon uses dual opamps");
+        assert_eq!(opamp_count, 3, "Klon uses 3 opamps (2 gain + 1 output buffer)");
         assert!(p
             .components
             .iter()

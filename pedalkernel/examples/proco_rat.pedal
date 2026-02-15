@@ -1,39 +1,91 @@
-# ProCo RAT distortion
-# LM308 op-amp gain stage into hard clipping diodes
-# Bridges the overdrive-to-distortion gap
-# Passive low-pass Filter control for tone shaping
+# ProCo RAT Distortion (1988 "Whiteface" reissue reference)
+# LM308 op-amp gain stage with hard clipping diodes to ground
+# Famous for the frequency compensation cap that shapes the LM308's slew
+#
+# Real circuit: ~10 caps, ~13 resistors, 2 diodes, LM308, 3 pots
 
 pedal "ProCo RAT" {
   components {
-    C1: cap(22n)            # Input coupling
-    R1: resistor(1M)        # Input impedance / bias
-    R2: resistor(1k)        # Gain stage input resistor
-    U1: opamp()             # LM308 op-amp
-    C2: cap(100p)           # Feedback compensation cap (LM308 quirk)
-    Distortion: pot(100k)   # Gain control in feedback loop
-    D1: diode_pair(silicon) # Hard clipping diodes to ground
-    R3: resistor(10k)       # Post-clip isolation resistor
-    C3: cap(3.3n)           # Filter cap (low-pass)
-    Filter: pot(100k)       # Tone control (low-pass cutoff)
-    C4: cap(1u)             # Output coupling
-    Volume: pot(100k)       # Output level
+    # Power supply filtering
+    C_pwr1: cap(100u)         # Main power filter
+    C_pwr2: cap(100n)         # High-freq bypass
+    R_pwr: resistor(100)      # Power supply decoupling
+
+    # Input stage
+    C1: cap(22n)              # Input coupling (blocks DC)
+    R1: resistor(1M)          # Input impedance to ground (bias path)
+
+    # Op-amp gain stage (LM308)
+    R2: resistor(1k)          # Input resistor to inverting input
+    U1: opamp(lm308)          # LM308 - slow slew rate (0.3V/µs) shapes the RAT's tone
+    R3: resistor(47)          # Op-amp output current limit
+    C2: cap(100p)             # Frequency compensation (pins 1-8)
+    C3: cap(33p)              # Additional HF rolloff (some versions)
+
+    # Feedback / Gain control
+    Distortion: pot(100k)     # Gain control (log taper)
+    R4: resistor(560)         # Minimum gain resistor (series with pot)
+
+    # Clipping stage
+    D1: diode(silicon)        # 1N914 clipping diode (positive)
+    D2: diode(silicon)        # 1N914 clipping diode (negative)
+    R5: resistor(1k)          # Clipping isolation resistor
+
+    # Tone control (passive low-pass)
+    C4: cap(3.3n)             # Filter cap
+    Filter: pot(100k)         # Filter control (audio taper)
+    R6: resistor(1.5k)        # Filter minimum resistance
+
+    # Output stage
+    C5: cap(4.7u)             # Output coupling
+    R7: resistor(100k)        # Output load resistor
+    Volume: pot(100k)         # Volume control (audio taper)
+    R8: resistor(1k)          # Output buffer resistor
   }
   nets {
+    # Power supply rail filtering
+    vcc -> R_pwr.a
+    R_pwr.b -> C_pwr1.a, C_pwr2.a
+    C_pwr1.b -> gnd
+    C_pwr2.b -> gnd
+
+    # Input coupling and bias
     in -> C1.a
     C1.b -> R1.a, R2.a
     R1.b -> gnd
+
+    # Op-amp configuration (inverting)
     R2.b -> U1.neg
     U1.pos -> gnd
-    U1.neg -> Distortion.a, C2.a
-    Distortion.b -> U1.out
-    C2.b -> U1.out
-    U1.out -> D1.a, R3.a
+    U1.out -> R3.a
+
+    # Frequency compensation (the famous LM308 caps)
+    U1.neg -> C2.a
+    C2.b -> R3.b
+    R3.b -> C3.a
+    C3.b -> U1.out
+
+    # Feedback loop with gain control
+    U1.neg -> R4.a
+    R4.b -> Distortion.a
+    Distortion.b -> R3.b
+
+    # Hard clipping to ground (the RAT's signature)
+    R3.b -> D1.a, D2.b, R5.a
     D1.b -> gnd
-    R3.b -> Filter.a, C3.a
-    C3.b -> gnd
-    Filter.b -> C4.a
-    C4.b -> Volume.a
-    Volume.b -> out
+    D2.a -> gnd
+
+    # Passive tone control (low-pass)
+    R5.b -> C4.a, Filter.a
+    C4.b -> gnd
+    Filter.b -> R6.a
+    R6.b -> C5.a
+
+    # Output stage
+    C5.b -> R7.a, Volume.a
+    R7.b -> gnd
+    Volume.b -> R8.a
+    R8.b -> out
   }
   controls {
     Distortion.position -> "Distortion" [0.0, 1.0] = 0.5

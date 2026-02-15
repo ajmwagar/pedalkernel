@@ -1,0 +1,29 @@
+# ProCo RAT Hardware Specs
+# Reference: 1988 "Whiteface" reissue schematic
+
+# Power supply
+C_pwr1: voltage_rating(25)
+C_pwr2: voltage_rating(50)
+
+# Input stage
+C1: voltage_rating(50)
+
+# LM308 op-amp - the heart of the RAT
+# Note: LM308 has slow slew rate (0.3V/µs) which contributes to the tone
+U1: part("LM308N") supply_max(36)
+
+# Frequency compensation caps (critical for LM308 stability)
+C2: voltage_rating(50) part("100pF Ceramic")
+C3: voltage_rating(50) part("33pF Ceramic")
+
+# Clipping diodes - 1N914 or 1N4148
+D1: part("1N914") breakdown(100)
+D2: part("1N914") breakdown(100)
+
+# Electrolytics
+C5: voltage_rating(25) part("4.7uF Electrolytic")
+
+# Pots - Alpha or similar
+Distortion: part("100k Log")
+Filter: part("100k Linear")
+Volume: part("100k Log")

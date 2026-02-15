@@ -301,7 +301,7 @@ fn check_spec_voltage(
 
     // Op-amp supply max
     if let Some(supply_max) = spec.supply_max {
-        if let ComponentKind::OpAmp = kind {
+        if let ComponentKind::OpAmp(_) = kind {
             if voltage > supply_max {
                 warnings.push(VoltageWarning {
                     component_id: id.to_string(),
@@ -426,13 +426,15 @@ fn check_heuristic_voltage(
                 });
             }
         }
-        ComponentKind::OpAmp => {
-            if voltage > 18.0 {
+        ComponentKind::OpAmp(ot) => {
+            // Use the op-amp type's supply_max for accurate warning threshold
+            let max_supply = ot.supply_max();
+            if voltage > max_supply * 0.5 {
                 warnings.push(VoltageWarning {
                     component_id: id.to_string(),
                     severity: WarningSeverity::Caution,
                     message: format!(
-                        "Op-amp {id} at {voltage:.0}V — add a .pedalhw file to specify supply_max",
+                        "Op-amp {id} ({ot:?}) at {voltage:.0}V — max supply {max_supply:.0}V",
                     ),
                 });
             }
@@ -713,9 +715,9 @@ pub fn auto_populate_specs(pedal: &PedalDef, limits: &mut HardwareLimits) {
                     spec.vce_max = Some(PNP_DEFAULT.vce_max);
                 }
             }
-            ComponentKind::OpAmp => {
+            ComponentKind::OpAmp(ot) => {
                 if spec.supply_max.is_none() {
-                    spec.supply_max = Some(OPAMP_DEFAULT.2);
+                    spec.supply_max = Some(ot.supply_max());
                 }
             }
             ComponentKind::Diode(dt) | ComponentKind::DiodePair(dt) => {
@@ -917,19 +919,45 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         qty_per_unit: 1,
                     }]
                 }
-                ComponentKind::OpAmp => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
+                ComponentKind::OpAmp(ot) => {
+                    let (pn, desc, label) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string(), format!("{ot:?}"))
                     } else {
-                        (
-                            Some(OPAMP_DEFAULT.0.to_string()),
-                            OPAMP_DEFAULT.1.to_string(),
-                        )
+                        // Use type-specific Mouser part numbers
+                        match ot {
+                            crate::dsl::OpAmpType::Generic | crate::dsl::OpAmpType::Tl072 => {
+                                (Some("595-TL072CP".to_string()), "TL072 Dual Op-Amp".to_string(), "TL072".to_string())
+                            }
+                            crate::dsl::OpAmpType::Tl082 => {
+                                (Some("595-TL082CP".to_string()), "TL082 Dual Op-Amp".to_string(), "TL082".to_string())
+                            }
+                            crate::dsl::OpAmpType::Jrc4558 => {
+                                (Some("513-NJM4558DD".to_string()), "JRC4558D Dual Op-Amp".to_string(), "JRC4558D".to_string())
+                            }
+                            crate::dsl::OpAmpType::Rc4558 => {
+                                (Some("595-RC4558P".to_string()), "RC4558 Dual Op-Amp".to_string(), "RC4558".to_string())
+                            }
+                            crate::dsl::OpAmpType::Lm308 => {
+                                (Some("926-LM308N/NOPB".to_string()), "LM308N Op-Amp".to_string(), "LM308N".to_string())
+                            }
+                            crate::dsl::OpAmpType::Lm741 => {
+                                (Some("595-LM741CN/NOPB".to_string()), "LM741 Op-Amp".to_string(), "LM741".to_string())
+                            }
+                            crate::dsl::OpAmpType::Ne5532 => {
+                                (Some("595-NE5532P".to_string()), "NE5532 Dual Op-Amp".to_string(), "NE5532".to_string())
+                            }
+                            crate::dsl::OpAmpType::Ca3080 => {
+                                (Some("595-CA3080EZ".to_string()), "CA3080 OTA".to_string(), "CA3080".to_string())
+                            }
+                            crate::dsl::OpAmpType::Op07 => {
+                                (Some("595-OP07CP".to_string()), "OP07 Precision Op-Amp".to_string(), "OP07".to_string())
+                            }
+                        }
                     };
                     vec![BomEntry {
                         reference: comp.id.clone(),
                         display: "Op-Amp".into(),
-                        value: "\u{2014}".into(),
+                        value: label,
                         mouser_pn: pn,
                         description: desc,
                         qty_per_unit: 1,

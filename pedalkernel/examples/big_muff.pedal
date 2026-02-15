@@ -1,35 +1,129 @@
-# Big Muff Pi style distortion
-# Four-stage clipping with tone stack
+# Electro-Harmonix Big Muff Pi ("Ram's Head" ~1973)
+# Four transistor gain stages with diode clipping
+# Each clipping stage: transistor gain -> diode pair -> coupling cap
+# Famous "wall of fuzz" tone with scooped mids
+#
+# Q1-Q4: 2N5088 or similar high-gain NPN transistors
 
 pedal "Big Muff" {
   components {
-    C1: cap(100n)
-    R1: resistor(10k)
-    D1: diode_pair(silicon)
-    R2: resistor(47k)
-    C2: cap(100n)
-    D2: diode_pair(silicon)
-    R3: resistor(100k)
-    C3: cap(4n)
-    R4: resistor(22k)
-    C4: cap(10n)
-    Tone: pot(100k)
-    Sustain: pot(100k)
-    Volume: pot(100k)
+    # Power supply
+    R_bias: resistor(10k)   # Bias voltage divider
+    C_pwr: cap(100u)        # Power filtering
+
+    # Input stage
+    C1: cap(100n)           # Input coupling
+    R1: resistor(39k)       # Input impedance
+
+    # Stage 1: Input buffer / first gain
+    Q1: npn()               # 2N5088 input stage
+    R2: resistor(470k)      # Q1 base bias
+    R3: resistor(8.2k)      # Q1 collector load
+    R4: resistor(100)       # Q1 emitter resistor
+    C2: cap(100n)           # Stage 1 coupling
+
+    # Stage 2: First clipping stage
+    Q2: npn()               # 2N5088 gain stage
+    R5: resistor(470k)      # Q2 base bias
+    R6: resistor(10k)       # Q2 collector load
+    R7: resistor(100)       # Q2 emitter resistor
+    C3: cap(100n)           # Q2 emitter bypass
+    D1: diode_pair(silicon) # First clipping pair (1N914)
+    C4: cap(100n)           # Stage 2 coupling
+
+    # Stage 3: Second clipping stage (Sustain control here)
+    Q3: npn()               # 2N5088 gain stage
+    R8: resistor(470k)      # Q3 base bias
+    Sustain: pot(100k)      # Sustain (feedback/gain control)
+    R9: resistor(1k)        # Sustain minimum resistance
+    R10: resistor(100)      # Q3 emitter resistor
+    C5: cap(100n)           # Q3 emitter bypass
+    D2: diode_pair(silicon) # Second clipping pair (1N914)
+    C6: cap(100n)           # Stage 3 coupling
+
+    # Stage 4: Output driver
+    Q4: npn()               # 2N5088 output stage
+    R11: resistor(470k)     # Q4 base bias
+    R12: resistor(12k)      # Q4 collector load
+    R13: resistor(100)      # Q4 emitter resistor
+    C7: cap(100n)           # Stage 4 output coupling
+
+    # Tone stack (the famous Big Muff scoop)
+    R14: resistor(22k)      # Tone input resistor
+    C8: cap(4n)             # Treble cap (high-pass path)
+    C9: cap(100n)           # Bass cap (low-pass path)
+    Tone: pot(100k)         # Tone control
+    R15: resistor(22k)      # Tone mixing resistor
+
+    # Output stage
+    C10: cap(100n)          # Final output coupling
+    Volume: pot(100k)       # Volume control (log taper)
+    R16: resistor(100k)     # Output load
   }
   nets {
+    # Power supply bias
+    vcc -> R_bias.a
+    R_bias.b -> C_pwr.a
+    C_pwr.b -> gnd
+
+    # Input
     in -> C1.a
-    C1.b -> R1.a, D1.a
+    C1.b -> R1.a
+    R1.b -> gnd
+
+    # Stage 1: Input buffer
+    C1.b -> R2.a, Q1.base
+    R2.b -> gnd
+    vcc -> R3.a
+    R3.b -> Q1.collector
+    Q1.emitter -> R4.a
+    R4.b -> gnd
+    Q1.collector -> C2.a
+
+    # Stage 2: First clipping
+    C2.b -> R5.a, Q2.base
+    R5.b -> gnd
+    vcc -> R6.a
+    R6.b -> Q2.collector, D1.a
     D1.b -> gnd
-    R1.b -> C2.a
-    C2.b -> R2.a, D2.a
+    Q2.emitter -> R7.a, C3.a
+    R7.b -> gnd
+    C3.b -> gnd
+    Q2.collector -> C4.a
+
+    # Stage 3: Second clipping + Sustain
+    C4.b -> R8.a, Q3.base
+    R8.b -> gnd
+    vcc -> Sustain.a
+    Sustain.b -> R9.a
+    R9.b -> Q3.collector, D2.a
     D2.b -> gnd
-    R2.b -> R3.a
-    R3.b -> Tone.a
-    Tone.b -> C3.a, C4.a
-    C3.b -> R4.a
-    C4.b -> R4.a
-    R4.b -> Volume.a
+    Q3.emitter -> R10.a, C5.a
+    R10.b -> gnd
+    C5.b -> gnd
+    Q3.collector -> C6.a
+
+    # Stage 4: Output driver
+    C6.b -> R11.a, Q4.base
+    R11.b -> gnd
+    vcc -> R12.a
+    R12.b -> Q4.collector
+    Q4.emitter -> R13.a
+    R13.b -> gnd
+    Q4.collector -> C7.a
+
+    # Tone stack (parallel treble/bass paths)
+    C7.b -> R14.a
+    R14.b -> C8.a, C9.a
+    C8.b -> Tone.a             # Treble path
+    C9.b -> Tone.b             # Bass path (opposite end)
+    Tone.a -> R15.a
+    Tone.b -> R15.a            # Both paths mix at R15
+    R15.b -> C10.a
+
+    # Output
+    C10.b -> Volume.a, R16.a
+    R16.b -> gnd
     Volume.b -> out
   }
   controls {

@@ -7,7 +7,7 @@ pedal "MXR Dyna Comp" {
   components {
     C1: cap(1u)             # Input coupling
     R1: resistor(10k)       # Input impedance
-    U1: opamp()             # OTA (CA3080) modeled as opamp
+    U1: opamp(ca3080)       # CA3080 OTA - current-controlled gain for compression
     R2: resistor(150k)      # Feedback resistor (sets compression ratio)
     C2: cap(1u)             # Envelope smoothing
     R3: resistor(560k)      # Bias network

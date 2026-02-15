@@ -1,9 +1,28 @@
-# Tube Screamer TS-808 — hardware component specs
+# Ibanez TS-808 Tube Screamer Hardware Specs
+# Reference: Original 1979 TS-808 with JRC4558D
 #
-# The TS circuit is simple and voltage-tolerant.  The clipping diodes
-# are 1N4148 (100V breakdown), the cap is a 47nF film cap, and the
-# pot/resistor are standard.  This file mostly serves as documentation
-# — nothing here should warn below 24V.
+# The TS circuit is voltage-tolerant. The clipping diodes are in the
+# feedback loop (soft clipping), not to ground like the RAT.
 
-D1: breakdown(100) part("1N4148")
-C1: voltage_rating(50) part("47nF film")
+# Op-amps - JRC4558D is the classic, but TL072 works
+# The JRC4558D has a warmer, more compressed sound
+U1: supply_max(36) part("JRC4558D")
+U2: supply_max(36) part("JRC4558D")
+
+# Clipping diodes - 1N914 or MA150 (original)
+# Symmetric soft clipping in feedback loop
+D1: breakdown(100) part("1N914")
+D2: breakdown(100) part("1N914")
+
+# Film capacitors
+C1: voltage_rating(50) part("100nF Film")
+C2: voltage_rating(50) part("47nF Film")
+C3: voltage_rating(50) part("47nF Film")
+C4: voltage_rating(50) part("220nF Film")
+C5: voltage_rating(50) part("100nF Film")
+C6: voltage_rating(50) part("100nF Film")
+
+# Pots - original uses 500k for Drive
+Drive: part("500k Log")
+Tone: part("20k Linear")
+Level: part("100k Log")

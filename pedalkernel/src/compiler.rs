@@ -531,7 +531,7 @@ impl CircuitGraph {
                         node_b: node_k,
                     });
                 }
-                ComponentKind::Npn | ComponentKind::Pnp | ComponentKind::OpAmp => {
+                ComponentKind::Npn | ComponentKind::Pnp | ComponentKind::OpAmp(_) => {
                     num_active += 1;
                 }
                 ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..) => {
@@ -547,7 +547,7 @@ impl CircuitGraph {
         let mut active_edge_indices = Vec::new();
         for comp in &pedal.components {
             let pin_order: &[&str] = match &comp.kind {
-                ComponentKind::OpAmp => {
+                ComponentKind::OpAmp(_) => {
                     // OpAmps use either 3-pin (pos/neg/out) or 2-pin (in/out) form.
                     if pin_ids.contains_key(&format!("{}.pos", comp.id)) {
                         &["pos", "neg", "out"]
@@ -1969,16 +1969,22 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                     });
                 }
             }
-            ComponentKind::OpAmp => {
-                // Common audio opamps: TL072 (±18V = 36V), NE5532 (±22V = 44V)
-                if voltage > 18.0 {
+            ComponentKind::OpAmp(ot) => {
+                // Use the op-amp type's known supply_max for accurate warnings
+                let max_supply = ot.supply_max();
+                if voltage > max_supply * 0.5 {
+                    // Operating above half the max total supply (typical single-supply limit)
+                    let severity = if voltage > max_supply {
+                        WarningSeverity::Danger
+                    } else {
+                        WarningSeverity::Caution
+                    };
                     warnings.push(VoltageWarning {
                         component_id: comp.id.clone(),
-                        severity: WarningSeverity::Caution,
+                        severity,
                         message: format!(
-                            "Op-amp {} at {:.0}V — verify supply range \
-                             (TL072 max ±18V, NE5532 max ±22V)",
-                            comp.id, voltage
+                            "Op-amp {} ({:?}) at {:.0}V — max total supply {:.0}V (±{:.0}V split)",
+                            comp.id, ot, voltage, max_supply, max_supply / 2.0
                         ),
                     });
                 }

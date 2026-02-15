@@ -100,7 +100,24 @@ def format_value(kind, arg):
         return format_eng(parse_eng(arg), "F")
     elif kind in ("diode", "diode_pair"):
         return arg.title()
-    elif kind in ("npn", "pnp", "opamp", "led"):
+    elif kind in ("npn", "pnp", "led"):
+        return ""
+    elif kind == "opamp":
+        # Op-amp type: tl072, jrc4558, lm308, ca3080, etc.
+        if arg:
+            type_map = {
+                "tl072": "TL072",
+                "tl082": "TL082",
+                "jrc4558": "JRC4558D",
+                "4558": "JRC4558D",
+                "rc4558": "RC4558",
+                "lm308": "LM308N",
+                "lm741": "LM741",
+                "ne5532": "NE5532",
+                "ca3080": "CA3080",
+                "op07": "OP07",
+            }
+            return type_map.get(arg.lower(), arg.upper())
         return ""
     elif kind in ("njfet", "pjfet"):
         # JFET type: j201, 2n5457, 2n5460

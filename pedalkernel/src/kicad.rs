@@ -18,7 +18,21 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::Potentiometer(_) => ("Device:R_Potentiometer", "RV"),
         ComponentKind::Npn => ("Device:Q_NPN_BCE", "Q"),
         ComponentKind::Pnp => ("Device:Q_PNP_BCE", "Q"),
-        ComponentKind::OpAmp => ("Amplifier_Operational:LM741", "U"),
+        ComponentKind::OpAmp(ot) => {
+            let lib = match ot {
+                OpAmpType::Generic => "Amplifier_Operational:TL072",
+                OpAmpType::Tl072 => "Amplifier_Operational:TL072",
+                OpAmpType::Tl082 => "Amplifier_Operational:TL082",
+                OpAmpType::Jrc4558 => "Amplifier_Operational:JRC4558",
+                OpAmpType::Rc4558 => "Amplifier_Operational:RC4558",
+                OpAmpType::Lm308 => "Amplifier_Operational:LM308",
+                OpAmpType::Lm741 => "Amplifier_Operational:LM741",
+                OpAmpType::Ne5532 => "Amplifier_Operational:NE5532",
+                OpAmpType::Ca3080 => "Amplifier_Operational:CA3080",
+                OpAmpType::Op07 => "Amplifier_Operational:OP07",
+            };
+            (lib, "U")
+        }
         ComponentKind::NJfet(_) => ("Device:Q_NJFET_DGS", "J"),
         ComponentKind::PJfet(_) => ("Device:Q_PJFET_DGS", "J"),
         ComponentKind::Photocoupler(_) => ("Isolator:PC817", "OC"),
@@ -43,7 +57,18 @@ fn value_str(kind: &ComponentKind) -> String {
         ComponentKind::Potentiometer(v) => format_eng(*v, "Ω"),
         ComponentKind::Npn => "NPN".into(),
         ComponentKind::Pnp => "PNP".into(),
-        ComponentKind::OpAmp => "OpAmp".into(),
+        ComponentKind::OpAmp(ot) => match ot {
+            OpAmpType::Generic => "OpAmp".into(),
+            OpAmpType::Tl072 => "TL072".into(),
+            OpAmpType::Tl082 => "TL082".into(),
+            OpAmpType::Jrc4558 => "JRC4558D".into(),
+            OpAmpType::Rc4558 => "RC4558".into(),
+            OpAmpType::Lm308 => "LM308N".into(),
+            OpAmpType::Lm741 => "LM741".into(),
+            OpAmpType::Ne5532 => "NE5532".into(),
+            OpAmpType::Ca3080 => "CA3080".into(),
+            OpAmpType::Op07 => "OP07".into(),
+        },
         ComponentKind::NJfet(jt) => format!("N-JFET_{jt:?}"),
         ComponentKind::PJfet(jt) => format!("P-JFET_{jt:?}"),
         ComponentKind::Photocoupler(pt) => format!("Vactrol_{pt:?}"),

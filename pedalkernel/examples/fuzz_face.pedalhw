@@ -1,15 +1,40 @@
-# Fuzz Face — hardware component specs for physical build validation
+# Dallas Arbiter Fuzz Face Hardware Specs
+# Reference: 1966 Germanium PNP original circuit
 #
-# Classic germanium Fuzz Face uses AC128 PNP transistors and cheap
-# electrolytic caps.  This file lets `check_voltage_with_specs()` flag
-# real problems when you crank the supply past 9V.
+# Classic germanium Fuzz Face uses AC128 or NKT275 PNP transistors.
+# This file lets `check_voltage_with_specs()` flag real problems
+# when you crank the supply past 9V.
 #
 # Enable with: cargo build --features hardware
 
+# Germanium PNP transistors - matched pair recommended
+# AC128, NKT275, or OC44 are period-correct
+# Note: Ge transistors are temperature sensitive
 Q1: vce_max(32) part("AC128")
 Q2: vce_max(32) part("AC128")
-C1: voltage_rating(25) part("2.2uF electrolytic")
-C2: voltage_rating(16) part("10uF electrolytic")
+
+# Input coupling - non-polarized or bipolar electrolytic
+C1: voltage_rating(25) part("2.2uF Film")
+
+# Emitter bypass - enhances gain
+C2: voltage_rating(25) part("22uF Electrolytic")
+
+# Power bypass
+C3: voltage_rating(25) part("100nF Ceramic")
+
+# Output coupling
+C4: voltage_rating(25) part("10uF Electrolytic")
+
+# Standard 1/4W resistors
 R1: power_rating(0.25)
 R2: power_rating(0.25)
 R3: power_rating(0.25)
+R4: power_rating(0.25)
+R5: power_rating(0.25)
+R6: power_rating(0.25)
+R7: power_rating(0.25)
+R8: power_rating(0.25)
+
+# Pots
+Fuzz: part("1k Linear")
+Volume: part("500k Log")

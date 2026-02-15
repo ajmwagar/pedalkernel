@@ -1,24 +1,80 @@
-# Tube Screamer TS-808 clipping stage
-# WDF topology: series(Vs, parallel(R_drive, C)) → diode_pair_root
+# Ibanez Tube Screamer TS-808 (Original 1979)
+# JRC4558D dual op-amp with symmetric soft clipping in feedback loop
+# Famous for the "mid-hump" EQ and smooth, compressed overdrive
 #
-# Drive knob varies the feedback resistance (lower R = more clipping).
-# Level knob attenuates the output.
+# Key: Diodes are in the FEEDBACK loop (soft clipping), not to ground
 
 pedal "Tube Screamer" {
   components {
-    Drive: pot(4.7k)         # variable feedback resistor (base 4.7 kΩ)
-    C1: cap(47n)             # feedback capacitor (47 nF)
-    D1: diode_pair(silicon)  # symmetric silicon clipping diodes
-    Level: pot(100k)         # output volume
+    # Input buffer stage (first half of JRC4558)
+    C1: cap(100n)           # Input DC blocking
+    R1: resistor(510k)      # Input impedance (also bias)
+    U1: opamp(jrc4558)      # JRC4558D input buffer (unity gain)
+    R2: resistor(10k)       # Buffer output resistor
+
+    # Clipping stage (second half of JRC4558)
+    C2: cap(47n)            # Coupling to clipping stage
+    R3: resistor(4.7k)      # Input resistor to inverting input
+    U2: opamp(jrc4558)      # JRC4558D clipping amplifier (warm, compressed)
+    R4: resistor(51k)       # Feedback resistor (sets minimum gain)
+    Drive: pot(500k)        # Drive control (increases feedback R)
+    C3: cap(47n)            # Feedback cap (HF rolloff in feedback)
+    D1: diode(silicon)      # 1N914 clipping diode (positive half)
+    D2: diode(silicon)      # 1N914 clipping diode (negative half)
+
+    # Tone control (gyrator-based mid-hump)
+    R5: resistor(1k)        # Tone input resistor
+    Tone: pot(20k)          # Tone control
+    C4: cap(220n)           # Tone bass cap
+    C5: cap(100n)           # Tone treble cap
+    R6: resistor(220)       # Tone mixing resistor
+
+    # Output stage
+    C6: cap(100n)           # Output coupling
+    Level: pot(100k)        # Output level (log taper)
+    R7: resistor(10k)       # Output load
   }
   nets {
-    in -> Drive.a, C1.a                # input feeds parallel R||C
-    Drive.b -> C1.b, D1.a, Level.a     # junction: diode clip + output tap
-    D1.b -> gnd                        # diodes to ground
-    Level.b -> out                     # output
+    # Input buffer (voltage follower)
+    in -> C1.a
+    C1.b -> R1.a, U1.pos
+    R1.b -> gnd
+    U1.neg -> U1.out        # Unity gain feedback
+    U1.out -> R2.a
+
+    # Coupling to clipping stage
+    R2.b -> C2.a
+    C2.b -> R3.a
+    R3.b -> U2.neg
+    U2.pos -> gnd           # Reference to virtual ground
+
+    # Feedback network with soft clipping diodes
+    U2.neg -> R4.a, Drive.a, C3.a
+    R4.b -> U2.out
+    Drive.b -> U2.out
+    C3.b -> U2.out
+    # Diodes in anti-parallel across feedback (SOFT clipping)
+    U2.neg -> D1.a
+    D1.b -> U2.out
+    U2.neg -> D2.b
+    D2.a -> U2.out
+
+    # Tone control
+    U2.out -> R5.a
+    R5.b -> Tone.a
+    Tone.b -> C4.a, C5.a
+    C4.b -> R6.a
+    C5.b -> R6.a
+    R6.b -> C6.a
+
+    # Output
+    C6.b -> Level.a, R7.a
+    R7.b -> gnd
+    Level.b -> out
   }
   controls {
     Drive.position -> "Drive" [0.0, 1.0] = 0.5
-    Level.position -> "Level" [0.0, 1.0] = 0.8
+    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+    Level.position -> "Level" [0.0, 1.0] = 0.7
   }
 }

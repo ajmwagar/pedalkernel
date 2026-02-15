@@ -1,0 +1,16 @@
+# MXR Dyna Comp Hardware Specs
+# Reference: Original 1972 design with CA3080
+
+# OTA - CA3080 Operational Transconductance Amplifier
+# Note: CA3080 is NOT a regular op-amp - it's current-controlled
+# The DSL uses opamp() but the real circuit uses an OTA
+U1: part("CA3080") supply_max(36)
+
+# Electrolytics
+C1: voltage_rating(25) part("1uF Electrolytic")
+C2: voltage_rating(25) part("1uF Electrolytic")
+C3: voltage_rating(50) part("100nF Film")
+
+# Pots
+Sensitivity: part("50k Linear")
+Output: part("500k Log")

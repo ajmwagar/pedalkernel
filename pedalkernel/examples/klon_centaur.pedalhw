@@ -1,12 +1,32 @@
-# Klon Centaur — hardware component specs for physical build validation
+# Klon Centaur Professional Overdrive Hardware Specs
+# Reference: 1994 original Bill Finnegan design
 #
-# The Klon uses dual TL072 opamps (±18V max = 36V total) and
-# germanium diodes (1N34A) in the feedback loop.  The 1µF output
-# coupling cap is often a film cap rated 50V, but cheap builds
-# sometimes use a 16V electrolytic.
+# The Klon uses TL072 dual op-amps (±18V max = 36V total) and
+# germanium diodes (1N34A or MA856) in the feedback loop.
+# The charge pump provides +/-9V headroom for extra dynamics.
 
-U1: supply_max(36) part("TL072")
-U2: supply_max(36) part("TL072")
-D1: breakdown(50) part("1N34A")
-C1: voltage_rating(50) part("100nF film")
-C4: voltage_rating(50) part("1uF film")
+# Op-amps - TL072 dual op-amp
+U1: supply_max(36) part("TL072CP")
+U2: supply_max(36) part("TL072CP")
+U3: supply_max(36) part("TL072CP")
+
+# Germanium clipping diodes - the Klon's secret sauce
+# MA856 or 1N34A - soft clipping in feedback loop
+D1: breakdown(60) part("1N34A")
+D2: breakdown(60) part("1N34A")
+
+# Film capacitors
+C1: voltage_rating(50) part("100nF Film")
+C2: voltage_rating(50) part("82nF Film")
+C3: voltage_rating(50) part("68nF Film")
+C4: voltage_rating(50) part("390pF Ceramic")
+C5: voltage_rating(50) part("68nF Film")
+
+# Power supply / charge pump caps
+C_pwr1: voltage_rating(25) part("100uF Electrolytic")
+C_pwr2: voltage_rating(25) part("100uF Electrolytic")
+
+# Pots - dual-gang for Gain (simplified to single here)
+Gain: part("100k Log")
+Treble: part("10k Linear")
+Output: part("100k Log")

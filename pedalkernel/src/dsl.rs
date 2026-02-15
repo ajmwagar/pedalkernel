@@ -44,7 +44,7 @@ pub enum ComponentKind {
     Potentiometer(f64),
     Npn,
     Pnp,
-    OpAmp,
+    OpAmp(OpAmpType),
     NJfet(JfetType),
     PJfet(JfetType),
     Photocoupler(PhotocouplerType),
@@ -56,6 +56,87 @@ pub enum ComponentKind {
     /// Attack τ = attack_r × attack_c, Release τ = release_r × release_c
     /// Sensitivity = sensitivity_r / 10kΩ
     EnvelopeFollower(f64, f64, f64, f64, f64),
+}
+
+/// Op-amp types with different characteristics.
+/// Each type has distinct slew rate, gain-bandwidth product, and input impedance
+/// that affect the tone and response of the circuit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpAmpType {
+    /// Generic op-amp (defaults to TL072 characteristics)
+    #[default]
+    Generic,
+    /// TL072 - JFET input, fast, clean (slew: 13V/µs, GBW: 3MHz)
+    /// Common in: Tube Screamer mods, Klon, modern pedals
+    Tl072,
+    /// JRC4558D - BJT input, warmer, compressed (slew: 1.7V/µs, GBW: 3MHz)
+    /// The classic Tube Screamer op-amp
+    Jrc4558,
+    /// LM308 - Slow slew rate gives distinctive compression (slew: 0.3V/µs, GBW: 1MHz)
+    /// The heart of the Pro-Co RAT
+    Lm308,
+    /// LM741 - Classic slow op-amp (slew: 0.5V/µs, GBW: 1MHz)
+    /// Vintage circuits
+    Lm741,
+    /// NE5532 - Low noise, high drive (slew: 9V/µs, GBW: 10MHz)
+    /// Studio-grade circuits
+    Ne5532,
+    /// CA3080 - Operational Transconductance Amplifier (OTA)
+    /// Current-controlled gain, used in compressors like Dyna Comp
+    Ca3080,
+    /// RC4558 - Texas Instruments version of 4558 (slew: 1.7V/µs)
+    Rc4558,
+    /// TL082 - Similar to TL072 but different bias (slew: 13V/µs)
+    Tl082,
+    /// OP07 - Precision low-offset op-amp (slew: 0.3V/µs, GBW: 0.6MHz)
+    Op07,
+}
+
+impl OpAmpType {
+    /// Slew rate in V/µs - affects high frequency response and distortion character
+    pub fn slew_rate(&self) -> f64 {
+        match self {
+            OpAmpType::Generic | OpAmpType::Tl072 | OpAmpType::Tl082 => 13.0,
+            OpAmpType::Jrc4558 | OpAmpType::Rc4558 => 1.7,
+            OpAmpType::Lm308 => 0.3,
+            OpAmpType::Lm741 => 0.5,
+            OpAmpType::Ne5532 => 9.0,
+            OpAmpType::Ca3080 => 50.0, // OTA - very fast
+            OpAmpType::Op07 => 0.3,
+        }
+    }
+
+    /// Gain-bandwidth product in Hz - affects frequency response
+    pub fn gain_bandwidth(&self) -> f64 {
+        match self {
+            OpAmpType::Generic | OpAmpType::Tl072 | OpAmpType::Tl082 => 3e6,
+            OpAmpType::Jrc4558 | OpAmpType::Rc4558 => 3e6,
+            OpAmpType::Lm308 => 1e6,
+            OpAmpType::Lm741 => 1e6,
+            OpAmpType::Ne5532 => 10e6,
+            OpAmpType::Ca3080 => 2e6, // Transconductance-dependent
+            OpAmpType::Op07 => 0.6e6,
+        }
+    }
+
+    /// Maximum supply voltage (total V+ to V-)
+    pub fn supply_max(&self) -> f64 {
+        match self {
+            OpAmpType::Generic | OpAmpType::Tl072 | OpAmpType::Tl082 => 36.0,
+            OpAmpType::Jrc4558 | OpAmpType::Rc4558 => 36.0,
+            OpAmpType::Lm308 => 36.0,
+            OpAmpType::Lm741 => 36.0,
+            OpAmpType::Ne5532 => 44.0,
+            OpAmpType::Ca3080 => 36.0,
+            OpAmpType::Op07 => 44.0,
+        }
+    }
+
+    /// Whether this is an OTA (Operational Transconductance Amplifier)
+    /// OTAs have current output and behave differently
+    pub fn is_ota(&self) -> bool {
+        matches!(self, OpAmpType::Ca3080)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,10 +324,28 @@ fn parse_pnp(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Pnp))
 }
 
+fn opamp_type(input: &str) -> IResult<&str, OpAmpType> {
+    alt((
+        value(OpAmpType::Tl072, tag("tl072")),
+        value(OpAmpType::Tl082, tag("tl082")),
+        value(OpAmpType::Jrc4558, alt((tag("jrc4558"), tag("4558")))),
+        value(OpAmpType::Rc4558, tag("rc4558")),
+        value(OpAmpType::Lm308, tag("lm308")),
+        value(OpAmpType::Lm741, tag("lm741")),
+        value(OpAmpType::Ne5532, tag("ne5532")),
+        value(OpAmpType::Ca3080, tag("ca3080")),
+        value(OpAmpType::Op07, tag("op07")),
+    ))(input)
+}
+
 fn parse_opamp(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("opamp")(input)?;
-    let (input, _) = tag("()")(input)?;
-    Ok((input, ComponentKind::OpAmp))
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, ot) = opt(opamp_type)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::OpAmp(ot.unwrap_or(OpAmpType::Generic))))
 }
 
 fn jfet_type(input: &str) -> IResult<&str, JfetType> {
@@ -955,5 +1054,60 @@ pedal "Auto Wah" {
                      if component == "EF1" && pin == "out")
         });
         assert!(ef_net.is_some(), "should have EF1.out net");
+    }
+
+    #[test]
+    fn parse_opamp_generic() {
+        let (_, c) = component_def("U1: opamp()").unwrap();
+        assert_eq!(c.id, "U1");
+        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Generic));
+    }
+
+    #[test]
+    fn parse_opamp_tl072() {
+        let (_, c) = component_def("U1: opamp(tl072)").unwrap();
+        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Tl072));
+    }
+
+    #[test]
+    fn parse_opamp_jrc4558() {
+        let (_, c) = component_def("U1: opamp(jrc4558)").unwrap();
+        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Jrc4558));
+    }
+
+    #[test]
+    fn parse_opamp_4558_alias() {
+        // "4558" should also work as an alias for JRC4558
+        let (_, c) = component_def("U1: opamp(4558)").unwrap();
+        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Jrc4558));
+    }
+
+    #[test]
+    fn parse_opamp_lm308() {
+        let (_, c) = component_def("U1: opamp(lm308)").unwrap();
+        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Lm308));
+    }
+
+    #[test]
+    fn parse_opamp_ca3080() {
+        let (_, c) = component_def("U1: opamp(ca3080)").unwrap();
+        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Ca3080));
+        // CA3080 is an OTA
+        assert!(OpAmpType::Ca3080.is_ota());
+    }
+
+    #[test]
+    fn opamp_slew_rates() {
+        // Verify slew rates are as specified
+        assert!((OpAmpType::Lm308.slew_rate() - 0.3).abs() < 0.01);
+        assert!((OpAmpType::Tl072.slew_rate() - 13.0).abs() < 0.1);
+        assert!((OpAmpType::Jrc4558.slew_rate() - 1.7).abs() < 0.1);
+    }
+
+    #[test]
+    fn opamp_gain_bandwidth() {
+        // Verify GBW products
+        assert!((OpAmpType::Lm308.gain_bandwidth() - 1e6).abs() < 1e3);
+        assert!((OpAmpType::Ne5532.gain_bandwidth() - 10e6).abs() < 1e3);
     }
 }
