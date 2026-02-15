@@ -12,3 +12,4 @@ Cargo.lock
 *.ogg
 /output/
 tools/.venv/
+*.net
