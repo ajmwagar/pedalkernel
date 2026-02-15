@@ -298,6 +298,8 @@ pub enum RootKind {
     SingleDiode(DiodeRoot),
     Jfet(JfetRoot),
     Triode(TriodeRoot),
+    Mosfet(MosfetRoot),
+    Zener(ZenerRoot),
 }
 
 pub struct WdfStage {
@@ -320,6 +322,8 @@ impl WdfStage {
             RootKind::SingleDiode(d) => d.process(b_tree, rp),
             RootKind::Jfet(j) => j.process(b_tree, rp),
             RootKind::Triode(t) => t.process(b_tree, rp),
+            RootKind::Mosfet(m) => m.process(b_tree, rp),
+            RootKind::Zener(z) => z.process(b_tree, rp),
         };
         self.tree.set_incident(a_root);
         (a_root + b_tree) / 2.0
@@ -373,6 +377,22 @@ impl WdfStage {
     pub fn triode_vgk(&self) -> Option<f64> {
         match &self.root {
             RootKind::Triode(t) => Some(t.vgk()),
+            _ => None,
+        }
+    }
+
+    /// Set the gate-source voltage for MOSFET root elements.
+    #[inline]
+    pub fn set_mosfet_vgs(&mut self, vgs: f64) {
+        if let RootKind::Mosfet(m) = &mut self.root {
+            m.set_vgs(vgs);
+        }
+    }
+
+    /// Get the current gate-source voltage if this is a MOSFET stage.
+    pub fn mosfet_vgs(&self) -> Option<f64> {
+        match &self.root {
+            RootKind::Mosfet(m) => Some(m.vgs()),
             _ => None,
         }
     }
@@ -529,6 +549,35 @@ impl CircuitGraph {
                         comp_idx: idx,
                         node_a: node_p,
                         node_b: node_k,
+                    });
+                }
+                ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => {
+                    // MOSFET: drain-source path is the WDF edge (like a JFET).
+                    // Gate is external control, not part of WDF tree.
+                    let key_d = format!("{}.drain", comp.id);
+                    let key_s = format!("{}.source", comp.id);
+                    let id_d = get_id(&key_d, &mut uf);
+                    let id_s = get_id(&key_s, &mut uf);
+                    let node_d = uf.find(id_d);
+                    let node_s = uf.find(id_s);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a: node_d,
+                        node_b: node_s,
+                    });
+                }
+                ComponentKind::Zener(_) => {
+                    // Zener diode: treated like a regular diode (two-terminal, a/b pins).
+                    let key_a = format!("{}.a", comp.id);
+                    let key_b = format!("{}.b", comp.id);
+                    let id_a = get_id(&key_a, &mut uf);
+                    let id_b = get_id(&key_b, &mut uf);
+                    let node_a = uf.find(id_a);
+                    let node_b = uf.find(id_b);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
                     });
                 }
                 ComponentKind::Npn | ComponentKind::Pnp | ComponentKind::OpAmp(_) => {
@@ -822,6 +871,124 @@ impl CircuitGraph {
             .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
         triodes
     }
+
+    /// Find MOSFET edges, ordered by topological distance from `in`.
+    fn find_mosfets(&self) -> Vec<(usize, MosfetInfo)> {
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &self.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(self.in_node, 0);
+        queue.push_back(self.in_node);
+        while let Some(n) = queue.pop_front() {
+            let d = dist[&n];
+            if let Some(neighbors) = adj.get(&n) {
+                for &nb in neighbors {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
+                        queue.push_back(nb);
+                    }
+                }
+            }
+        }
+
+        let mut mosfets: Vec<(usize, MosfetInfo)> = Vec::new();
+        for (edge_idx, e) in self.edges.iter().enumerate() {
+            let comp = &self.components[e.comp_idx];
+            let info = match &comp.kind {
+                ComponentKind::Nmos(mt) => Some(MosfetInfo {
+                    mosfet_type: *mt,
+                    is_n_channel: true,
+                    junction_node: if e.node_b == self.gnd_node {
+                        e.node_a
+                    } else {
+                        e.node_b
+                    },
+                    ground_node: if e.node_b == self.gnd_node {
+                        e.node_b
+                    } else {
+                        e.node_a
+                    },
+                }),
+                ComponentKind::Pmos(mt) => Some(MosfetInfo {
+                    mosfet_type: *mt,
+                    is_n_channel: false,
+                    junction_node: if e.node_b == self.gnd_node {
+                        e.node_a
+                    } else {
+                        e.node_b
+                    },
+                    ground_node: if e.node_b == self.gnd_node {
+                        e.node_b
+                    } else {
+                        e.node_a
+                    },
+                }),
+                _ => None,
+            };
+            if let Some(info) = info {
+                mosfets.push((edge_idx, info));
+            }
+        }
+
+        mosfets
+            .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
+        mosfets
+    }
+
+    /// Find Zener diode edges, ordered by topological distance from `in`.
+    fn find_zeners(&self) -> Vec<(usize, ZenerInfo)> {
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &self.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(self.in_node, 0);
+        queue.push_back(self.in_node);
+        while let Some(n) = queue.pop_front() {
+            let d = dist[&n];
+            if let Some(neighbors) = adj.get(&n) {
+                for &nb in neighbors {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
+                        queue.push_back(nb);
+                    }
+                }
+            }
+        }
+
+        let mut zeners: Vec<(usize, ZenerInfo)> = Vec::new();
+        for (edge_idx, e) in self.edges.iter().enumerate() {
+            let comp = &self.components[e.comp_idx];
+            if let ComponentKind::Zener(vz) = &comp.kind {
+                zeners.push((
+                    edge_idx,
+                    ZenerInfo {
+                        voltage: *vz,
+                        junction_node: if e.node_b == self.gnd_node {
+                            e.node_a
+                        } else {
+                            e.node_b
+                        },
+                        ground_node: if e.node_b == self.gnd_node {
+                            e.node_b
+                        } else {
+                            e.node_a
+                        },
+                    },
+                ));
+            }
+        }
+
+        zeners
+            .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
+        zeners
+    }
 }
 
 struct DiodeInfo {
@@ -842,6 +1009,21 @@ struct JfetInfo {
 
 struct TriodeInfo {
     triode_type: TriodeType,
+    junction_node: NodeId,
+    #[allow(dead_code)]
+    ground_node: NodeId,
+}
+
+struct MosfetInfo {
+    mosfet_type: MosfetType,
+    is_n_channel: bool,
+    junction_node: NodeId,
+    #[allow(dead_code)]
+    ground_node: NodeId,
+}
+
+struct ZenerInfo {
+    voltage: f64,
     junction_node: NodeId,
     #[allow(dead_code)]
     ground_node: NodeId,
@@ -1078,6 +1260,8 @@ enum ModulationTarget {
     PhotocouplerLed { stage_idx: usize, comp_id: String },
     /// Modulate a Triode's Vgk (grid-cathode bias).
     TriodeVgk { stage_idx: usize },
+    /// Modulate a MOSFET's Vgs.
+    MosfetVgs { stage_idx: usize },
 }
 
 /// LFO binding in a compiled pedal.
@@ -1223,6 +1407,11 @@ impl PedalProcessor for CompiledPedal {
                         stage.set_triode_vgk(modulation);
                     }
                 }
+                ModulationTarget::MosfetVgs { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_mosfet_vgs(modulation);
+                    }
+                }
             }
         }
 
@@ -1248,6 +1437,11 @@ impl PedalProcessor for CompiledPedal {
                 ModulationTarget::TriodeVgk { stage_idx } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         stage.set_triode_vgk(modulation);
+                    }
+                }
+                ModulationTarget::MosfetVgs { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_mosfet_vgs(modulation);
                     }
                 }
             }
@@ -1607,6 +1801,152 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         });
     }
 
+    // Build WDF stages for MOSFETs.
+    let mosfets = graph.find_mosfets();
+    let mosfet_edge_indices: Vec<usize> = mosfets.iter().map(|(idx, _)| *idx).collect();
+    let all_nonlinear_with_mosfets: Vec<usize> = all_nonlinear_with_triodes
+        .iter()
+        .chain(mosfet_edge_indices.iter())
+        .copied()
+        .collect();
+
+    for (_edge_idx, mosfet_info) in &mosfets {
+        let junction = mosfet_info.junction_node;
+        let passive_idxs = graph.elements_at_junction(
+            junction,
+            &all_nonlinear_with_mosfets,
+            &graph.active_edge_indices,
+        );
+
+        if passive_idxs.is_empty() {
+            continue;
+        }
+
+        let mut injection_node = graph.in_node;
+        let mut best_dist = usize::MAX;
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            let other = if e.node_a == junction {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            if let Some(&d) = dist_from_in.get(&other) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = other;
+                }
+            }
+        }
+
+        let source_node = graph.edges.len() + 4000;
+        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+        }
+
+        let terminals = vec![source_node, junction];
+        let sp_tree = match sp_reduce(sp_edges, &terminals) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let mut mosfet_components = graph.components.clone();
+        while mosfet_components.len() <= vs_comp_idx {
+            mosfet_components.push(ComponentDef {
+                id: "__vs__".to_string(),
+                kind: ComponentKind::Resistor(1.0),
+            });
+        }
+
+        let tree = sp_to_dyn_with_vs(&sp_tree, &mosfet_components, sample_rate, vs_comp_idx);
+
+        let model = mosfet_model(mosfet_info.mosfet_type, mosfet_info.is_n_channel);
+        let root = RootKind::Mosfet(MosfetRoot::new(model));
+
+        stages.push(WdfStage {
+            tree,
+            root,
+            compensation: 1.0,
+        });
+    }
+
+    // Build WDF stages for Zener diodes.
+    let zeners = graph.find_zeners();
+    let zener_edge_indices: Vec<usize> = zeners.iter().map(|(idx, _)| *idx).collect();
+    let all_nonlinear_final: Vec<usize> = all_nonlinear_with_mosfets
+        .iter()
+        .chain(zener_edge_indices.iter())
+        .copied()
+        .collect();
+
+    for (_edge_idx, zener_info) in &zeners {
+        let junction = zener_info.junction_node;
+        let passive_idxs = graph.elements_at_junction(
+            junction,
+            &all_nonlinear_final,
+            &graph.active_edge_indices,
+        );
+
+        if passive_idxs.is_empty() {
+            continue;
+        }
+
+        let mut injection_node = graph.in_node;
+        let mut best_dist = usize::MAX;
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            let other = if e.node_a == junction {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            if let Some(&d) = dist_from_in.get(&other) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = other;
+                }
+            }
+        }
+
+        let source_node = graph.edges.len() + 5000;
+        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+        }
+
+        let terminals = vec![source_node, junction];
+        let sp_tree = match sp_reduce(sp_edges, &terminals) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let mut zener_components = graph.components.clone();
+        while zener_components.len() <= vs_comp_idx {
+            zener_components.push(ComponentDef {
+                id: "__vs__".to_string(),
+                kind: ComponentKind::Resistor(1.0),
+            });
+        }
+
+        let tree = sp_to_dyn_with_vs(&sp_tree, &zener_components, sample_rate, vs_comp_idx);
+
+        let model = ZenerModel::new(zener_info.voltage);
+        let root = RootKind::Zener(ZenerRoot::new(model));
+
+        stages.push(WdfStage {
+            tree,
+            root,
+            compensation: 1.0,
+        });
+    }
+
     // Balance voltage source impedance in each stage.
     // This fixes topologies where the Vs branch sits in a Parallel adaptor
     // opposite a high-impedance element (e.g. Big Muff: Parallel(Series(Vs,C), R)
@@ -1762,12 +2102,20 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                             {
                                 let target = match target_prop.as_str() {
                                     "vgs" => {
-                                        // Find which stage contains this JFET
-                                        let stage_idx = stages
+                                        // Find which stage contains this JFET or MOSFET
+                                        if let Some(stage_idx) = stages
                                             .iter()
                                             .position(|s| matches!(&s.root, RootKind::Jfet(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::JfetVgs { stage_idx }
+                                        {
+                                            ModulationTarget::JfetVgs { stage_idx }
+                                        } else if let Some(stage_idx) = stages
+                                            .iter()
+                                            .position(|s| matches!(&s.root, RootKind::Mosfet(_)))
+                                        {
+                                            ModulationTarget::MosfetVgs { stage_idx }
+                                        } else {
+                                            ModulationTarget::JfetVgs { stage_idx: 0 }
+                                        }
                                     }
                                     "led" => ModulationTarget::PhotocouplerLed {
                                         stage_idx: 0,
@@ -1790,6 +2138,8 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                     ModulationTarget::PhotocouplerLed { .. } => (0.5, 0.5),
                                     // Triode grid bias: -2V center with ±2V swing
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
+                                    // MOSFET: bias above threshold with swing
+                                    ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
                                 };
 
                                 lfos.push(LfoBinding {
@@ -1864,6 +2214,7 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                     ModulationTarget::JfetVgs { .. } => (-1.25, 1.25),
                                     ModulationTarget::PhotocouplerLed { .. } => (0.0, 1.0),
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
+                                    ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
                                 };
 
                                 envelopes.push(EnvelopeBinding {
@@ -2141,6 +2492,28 @@ fn triode_model(tt: TriodeType) -> TriodeModel {
         TriodeType::T12ax7 => TriodeModel::t_12ax7(),
         TriodeType::T12at7 => TriodeModel::t_12at7(),
         TriodeType::T12au7 => TriodeModel::t_12au7(),
+    }
+}
+
+fn mosfet_model(mt: MosfetType, is_n_channel: bool) -> MosfetModel {
+    match mt {
+        MosfetType::N2n7000 => MosfetModel::n_2n7000(),
+        MosfetType::Irf520 => MosfetModel::n_irf520(),
+        MosfetType::Bs250 => {
+            if is_n_channel {
+                // Mismatch: N-channel requested with P-channel type
+                MosfetModel::n_2n7000()
+            } else {
+                MosfetModel::p_bs250()
+            }
+        }
+        MosfetType::Irf9520 => {
+            if is_n_channel {
+                MosfetModel::n_2n7000()
+            } else {
+                MosfetModel::p_irf9520()
+            }
+        }
     }
 }
 

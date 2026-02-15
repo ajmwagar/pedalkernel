@@ -770,4 +770,126 @@ mod tests {
             ef.envelope()
         );
     }
+
+    // ── MOSFET model tests ──────────────────────────────────────────────
+
+    #[test]
+    fn mosfet_n2n7000_cutoff() {
+        // Below threshold, drain current should be zero
+        let model = MosfetModel::n_2n7000();
+        let mut root = MosfetRoot::new(model);
+        root.set_vgs(0.0); // well below Vth=2.1V
+        let ids = root.drain_current(5.0);
+        assert!(ids.abs() < 1e-12, "MOSFET should be off below Vth: ids={ids}");
+    }
+
+    #[test]
+    fn mosfet_n2n7000_saturation() {
+        // Above threshold with enough Vds for saturation
+        let model = MosfetModel::n_2n7000();
+        let mut root = MosfetRoot::new(model);
+        root.set_vgs(4.0); // well above Vth=2.1V
+        let ids = root.drain_current(5.0);
+        assert!(ids > 0.0, "MOSFET should conduct above Vth: ids={ids}");
+        // Expected: Kp * (Vgs-Vth)^2 * (1 + lambda*Vds) = 0.1 * 3.61 * 1.2 = 0.433 A
+        assert!((ids - 0.433).abs() < 0.05, "saturation current ~0.43A: ids={ids}");
+    }
+
+    #[test]
+    fn mosfet_pmos_bs250_conduction() {
+        let model = MosfetModel::p_bs250();
+        let mut root = MosfetRoot::new(model);
+        // P-channel: conducts when Vgs < Vth (Vth is -1.5V)
+        root.set_vgs(-3.0); // Vgs below Vth
+        let ids = root.drain_current(-5.0);
+        assert!(ids < 0.0, "P-MOS should conduct: ids={ids}");
+    }
+
+    #[test]
+    fn mosfet_wdf_root_convergence() {
+        let model = MosfetModel::n_2n7000();
+        let mut root = MosfetRoot::new(model);
+        root.set_vgs(3.5); // Above threshold
+
+        // Process through WDF - should converge without NaN
+        let rp = 1000.0;
+        let a = 1.0;
+        let b = root.process(a, rp);
+        assert!(b.is_finite(), "MOSFET WDF root should converge: b={b}");
+    }
+
+    #[test]
+    fn mosfet_wdf_root_cutoff_passthrough() {
+        let model = MosfetModel::n_2n7000();
+        let mut root = MosfetRoot::new(model);
+        root.set_vgs(0.0); // Below threshold = off
+
+        // When MOSFET is off, it should act like an open circuit
+        // reflected wave ≈ incident wave
+        let rp = 1000.0;
+        let a = 1.0;
+        let b = root.process(a, rp);
+        assert!(b.is_finite(), "should converge: b={b}");
+    }
+
+    // ── Zener diode model tests ─────────────────────────────────────────
+
+    #[test]
+    fn zener_forward_conduction() {
+        let model = ZenerModel::new(5.1);
+        let root = ZenerRoot::new(model);
+        // Forward bias: should conduct like a regular diode
+        let i = root.current(0.7);
+        assert!(i > 0.0, "Zener should conduct in forward bias: i={i}");
+    }
+
+    #[test]
+    fn zener_reverse_below_breakdown() {
+        let model = ZenerModel::new(5.1);
+        let root = ZenerRoot::new(model);
+        // Reverse bias below Vz: very little current
+        let i = root.current(-3.0);
+        assert!(i.abs() < 1e-6, "Zener should block below Vz: i={i}");
+    }
+
+    #[test]
+    fn zener_reverse_breakdown() {
+        let model = ZenerModel::new(5.1);
+        let root = ZenerRoot::new(model);
+        // Reverse bias well past Vz: should conduct heavily
+        // At -5.5V (0.4V past breakdown), the exponential model gives large current
+        let i = root.current(-5.5);
+        assert!(i < -1.0, "Zener should conduct heavily past breakdown: i={i}");
+    }
+
+    #[test]
+    fn zener_wdf_root_convergence() {
+        let model = ZenerModel::new(5.1);
+        let mut root = ZenerRoot::new(model);
+
+        // Process through WDF - should converge
+        let rp = 1000.0;
+        for &a in &[0.0, 0.5, 1.0, -1.0, 5.0, -5.0, 10.0, -10.0] {
+            let b = root.process(a, rp);
+            assert!(b.is_finite(), "Zener WDF should converge for a={a}: b={b}");
+        }
+    }
+
+    #[test]
+    fn zener_clipping_behavior() {
+        let model = ZenerModel::new(5.1);
+        let mut root = ZenerRoot::new(model);
+        let rp = 1000.0;
+
+        // Small signal should pass mostly unchanged
+        let b_small = root.process(0.1, rp);
+        let v_small = (0.1 + b_small) / 2.0;
+
+        // Large signal should be clipped
+        let b_large = root.process(20.0, rp);
+        let v_large = (20.0 + b_large) / 2.0;
+
+        assert!(v_large < 20.0, "large signal should be clipped: v={v_large}");
+        assert!(v_small.abs() < v_large.abs(), "small signal < large signal");
+    }
 }

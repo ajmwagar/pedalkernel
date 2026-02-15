@@ -1,4 +1,4 @@
-//! Nonlinear WDF root elements: Diodes, JFETs.
+//! Nonlinear WDF root elements: Diodes, JFETs, MOSFETs, Zener diodes.
 //!
 //! These elements sit at the tree root and use Newton-Raphson iteration
 //! to solve the implicit WDF constraint equation for the reflected wave.
@@ -625,6 +625,385 @@ impl WdfRoot for TriodeRoot {
 
             // Clamp to reasonable range to prevent runaway
             v = v.clamp(-1000.0, 1000.0);
+
+            if dv.abs() < 1e-6 {
+                break;
+            }
+        }
+
+        2.0 * v - a
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MOSFET Models (Enhancement-mode)
+// ---------------------------------------------------------------------------
+
+/// Enhancement-mode MOSFET model parameters.
+///
+/// Uses the standard square-law model for drain current:
+/// - Cutoff: `Ids = 0` when `|Vgs| < |Vth|`
+/// - Triode: `Ids = Kp * [2*(Vgs-Vth)*Vds - Vds^2]`
+/// - Saturation: `Ids = Kp * (Vgs-Vth)^2 * (1 + lambda*|Vds|)`
+#[derive(Debug, Clone, Copy)]
+pub struct MosfetModel {
+    /// Threshold voltage (V). N-channel: positive, P-channel: negative.
+    pub vth: f64,
+    /// Transconductance parameter (A/V²). Kp = µn·Cox·W/(2L).
+    pub kp: f64,
+    /// Channel-length modulation parameter (1/V). Typical: 0.01-0.1.
+    pub lambda: f64,
+    /// True for N-channel, false for P-channel.
+    pub is_n_channel: bool,
+}
+
+impl MosfetModel {
+    /// 2N7000 N-channel enhancement MOSFET.
+    ///
+    /// Very common in guitar pedal clipping (Fulltone OCD, modern drives).
+    /// Low threshold voltage, small package, fast switching.
+    pub fn n_2n7000() -> Self {
+        Self {
+            vth: 2.1,
+            kp: 0.1,
+            lambda: 0.04,
+            is_n_channel: true,
+        }
+    }
+
+    /// IRF520 N-channel power MOSFET.
+    ///
+    /// Higher current capability, used in some high-headroom drive circuits.
+    pub fn n_irf520() -> Self {
+        Self {
+            vth: 4.0,
+            kp: 1.0,
+            lambda: 0.02,
+            is_n_channel: true,
+        }
+    }
+
+    /// BS250 P-channel enhancement MOSFET.
+    ///
+    /// Used in some boost circuits and complementary configurations.
+    pub fn p_bs250() -> Self {
+        Self {
+            vth: -1.5,
+            kp: 0.07,
+            lambda: 0.04,
+            is_n_channel: false,
+        }
+    }
+
+    /// IRF9520 P-channel power MOSFET.
+    pub fn p_irf9520() -> Self {
+        Self {
+            vth: -4.0,
+            kp: 0.5,
+            lambda: 0.02,
+            is_n_channel: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MOSFET Root
+// ---------------------------------------------------------------------------
+
+/// Enhancement-mode MOSFET nonlinear root for WDF trees.
+///
+/// Models the drain-source path as a nonlinear element controlled by
+/// an external gate-source voltage Vgs. Uses Newton-Raphson to solve
+/// the implicit WDF constraint equation.
+///
+/// Unlike JFETs (depletion-mode, normally on), enhancement MOSFETs are
+/// normally off and require Vgs > Vth to conduct.
+#[derive(Debug, Clone, Copy)]
+pub struct MosfetRoot {
+    pub model: MosfetModel,
+    /// Current gate-source voltage (external control parameter).
+    vgs: f64,
+    /// Maximum Newton-Raphson iterations (bounded for RT safety).
+    max_iter: usize,
+}
+
+impl MosfetRoot {
+    pub fn new(model: MosfetModel) -> Self {
+        Self {
+            model,
+            vgs: 0.0,
+            max_iter: 16,
+        }
+    }
+
+    /// Set the gate-source voltage (external control from bias, signal, etc.)
+    #[inline]
+    pub fn set_vgs(&mut self, vgs: f64) {
+        self.vgs = vgs;
+    }
+
+    /// Get current gate-source voltage.
+    #[inline]
+    pub fn vgs(&self) -> f64 {
+        self.vgs
+    }
+
+    /// Compute drain current for given Vds at current Vgs.
+    ///
+    /// Enhancement-mode square-law model:
+    /// - Cutoff: Ids = 0 when |Vgs| < |Vth|
+    /// - Triode: Ids = Kp * [2*(Vgs-Vth)*Vds - Vds²]
+    /// - Saturation: Ids = Kp * (Vgs-Vth)² * (1 + lambda*|Vds|)
+    #[inline]
+    pub fn drain_current(&self, vds: f64) -> f64 {
+        let vth = self.model.vth;
+        let kp = self.model.kp;
+        let lambda = self.model.lambda;
+        let vgs = self.vgs;
+
+        // Cutoff check
+        if self.model.is_n_channel {
+            if vgs <= vth {
+                return 0.0;
+            }
+        } else {
+            // P-channel: conducts when Vgs < Vth (Vth is negative)
+            if vgs >= vth {
+                return 0.0;
+            }
+        }
+
+        // Overdrive voltage
+        let vov = if self.model.is_n_channel {
+            vgs - vth
+        } else {
+            vth - vgs // positive magnitude for P-channel
+        };
+
+        let vds_abs = vds.abs();
+        let vds_sign = vds.signum();
+
+        let ids_magnitude = if vds_abs < vov {
+            // Triode (linear) region
+            kp * (2.0 * vov * vds_abs - vds_abs * vds_abs)
+        } else {
+            // Saturation region with channel-length modulation
+            kp * vov * vov * (1.0 + lambda * vds_abs)
+        };
+
+        ids_magnitude * vds_sign
+    }
+
+    /// Compute derivative of drain current w.r.t. Vds.
+    #[inline]
+    fn drain_current_derivative(&self, vds: f64) -> f64 {
+        let vth = self.model.vth;
+        let kp = self.model.kp;
+        let lambda = self.model.lambda;
+        let vgs = self.vgs;
+
+        // Cutoff: small conductance
+        if self.model.is_n_channel {
+            if vgs <= vth {
+                return 1e-12;
+            }
+        } else if vgs >= vth {
+            return 1e-12;
+        }
+
+        let vov = if self.model.is_n_channel {
+            vgs - vth
+        } else {
+            vth - vgs
+        };
+
+        let vds_abs = vds.abs();
+
+        if vds_abs < vov {
+            // Triode: dIds/dVds = Kp * 2*(Vov - Vds)
+            kp * 2.0 * (vov - vds_abs)
+        } else {
+            // Saturation: dIds/dVds = Kp * Vov^2 * lambda
+            kp * vov * vov * lambda
+        }
+    }
+}
+
+impl WdfRoot for MosfetRoot {
+    /// Compute reflected wave from incident wave `a` and port resistance `rp`.
+    ///
+    /// WDF constraint: `v = (a + b) / 2`, `i = (a - b) / (2 * Rp)`
+    /// MOSFET: `i = Ids(v, Vgs)`
+    ///
+    /// Solve: `f(v) = a - 2*v - 2*Rp*Ids(v, Vgs) = 0`
+    #[inline]
+    fn process(&mut self, a: f64, rp: f64) -> f64 {
+        // Initial guess: linear approximation
+        let vov = if self.model.is_n_channel {
+            (self.vgs - self.model.vth).max(0.0)
+        } else {
+            (self.model.vth - self.vgs).max(0.0)
+        };
+        let gds_approx = 2.0 * self.model.kp * vov;
+        let mut v = if gds_approx > 1e-12 {
+            a / (2.0 + 2.0 * rp * gds_approx)
+        } else {
+            a * 0.5
+        };
+
+        for _ in 0..self.max_iter {
+            let ids = self.drain_current(v);
+            let dids = self.drain_current_derivative(v);
+
+            let f = a - 2.0 * v - 2.0 * rp * ids;
+            let fp = -2.0 - 2.0 * rp * dids;
+
+            if fp.abs() < 1e-15 {
+                break;
+            }
+
+            let dv = f / fp;
+            v -= dv;
+
+            if dv.abs() < 1e-6 {
+                break;
+            }
+        }
+
+        2.0 * v - a
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Zener Diode Model
+// ---------------------------------------------------------------------------
+
+/// Zener diode model with forward and reverse breakdown behavior.
+///
+/// Forward bias: standard Shockley equation (same as regular diode).
+/// Reverse bias: sharp exponential breakdown at the Zener voltage Vz.
+///
+/// Used in voltage regulation circuits and some clipping configurations
+/// in guitar pedals.
+#[derive(Debug, Clone, Copy)]
+pub struct ZenerModel {
+    /// Zener breakdown voltage (V). Always positive.
+    pub vz: f64,
+    /// Forward saturation current (A).
+    pub is_fwd: f64,
+    /// Forward thermal voltage * ideality factor (V).
+    pub n_vt_fwd: f64,
+    /// Reverse breakdown sharpness (A). Controls how sharp the knee is.
+    pub is_rev: f64,
+    /// Reverse thermal voltage * ideality factor (V). Smaller = sharper knee.
+    pub n_vt_rev: f64,
+}
+
+impl ZenerModel {
+    /// Create a Zener diode model for a given breakdown voltage.
+    ///
+    /// The forward characteristics are similar to a standard silicon diode.
+    /// The reverse characteristics model the Zener/avalanche breakdown.
+    pub fn new(vz: f64) -> Self {
+        Self {
+            vz,
+            is_fwd: 2.52e-9,           // Same as standard silicon
+            n_vt_fwd: 1.752 * 25.85e-3, // ~45mV
+            is_rev: 1e-12,              // Very small reverse leakage
+            n_vt_rev: 0.5 * 25.85e-3,   // Sharp knee (~13mV)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Zener Diode Root
+// ---------------------------------------------------------------------------
+
+/// Zener diode at the WDF tree root.
+///
+/// Models both forward conduction (standard diode behavior) and
+/// reverse breakdown at the Zener voltage Vz.
+///
+/// Current model:
+/// - Forward: `i = Is_fwd * (exp(v / nVt_fwd) - 1)`
+/// - Reverse: `i = -Is_rev * (exp((-v - Vz) / nVt_rev) - 1)`
+///
+/// Total: `i(v) = i_fwd(v) + i_rev(v)`
+#[derive(Debug, Clone, Copy)]
+pub struct ZenerRoot {
+    pub model: ZenerModel,
+    max_iter: usize,
+}
+
+impl ZenerRoot {
+    pub fn new(model: ZenerModel) -> Self {
+        Self {
+            model,
+            max_iter: 16,
+        }
+    }
+
+    /// Total current through the Zener diode.
+    #[inline]
+    pub fn current(&self, v: f64) -> f64 {
+        let m = &self.model;
+
+        // Forward bias current (standard Shockley)
+        let x_fwd = (v / m.n_vt_fwd).clamp(-500.0, 500.0);
+        let i_fwd = m.is_fwd * (x_fwd.exp() - 1.0);
+
+        // Reverse breakdown current
+        let x_rev = ((-v - m.vz) / m.n_vt_rev).clamp(-500.0, 500.0);
+        let i_rev = -m.is_rev * (x_rev.exp() - 1.0);
+
+        i_fwd + i_rev
+    }
+
+    /// Derivative of total current w.r.t. voltage.
+    #[inline]
+    fn current_derivative(&self, v: f64) -> f64 {
+        let m = &self.model;
+
+        // Forward: di_fwd/dv = Is_fwd / nVt_fwd * exp(v / nVt_fwd)
+        let x_fwd = (v / m.n_vt_fwd).clamp(-500.0, 500.0);
+        let di_fwd = m.is_fwd * x_fwd.exp() / m.n_vt_fwd;
+
+        // Reverse: di_rev/dv = Is_rev / nVt_rev * exp((-v - Vz) / nVt_rev)
+        let x_rev = ((-v - m.vz) / m.n_vt_rev).clamp(-500.0, 500.0);
+        let di_rev = m.is_rev * x_rev.exp() / m.n_vt_rev;
+
+        di_fwd + di_rev
+    }
+}
+
+impl WdfRoot for ZenerRoot {
+    /// Solve the WDF constraint for a Zener diode.
+    ///
+    /// `f(v) = a - 2v - 2*Rp*i(v) = 0`
+    #[inline]
+    fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let nvt = self.model.n_vt_fwd;
+
+        let mut v = if a.abs() > 10.0 * nvt {
+            let log_arg = (a.abs() / (2.0 * rp * self.model.is_fwd)).max(1.0);
+            nvt * log_arg.ln() * a.signum()
+        } else {
+            a * 0.5
+        };
+
+        for _ in 0..self.max_iter {
+            let i = self.current(v);
+            let di = self.current_derivative(v);
+
+            let f = a - 2.0 * v - 2.0 * rp * i;
+            let fp = -2.0 - 2.0 * rp * di;
+
+            if fp.abs() < 1e-15 {
+                break;
+            }
+
+            let dv = f / fp;
+            v -= dv;
 
             if dv.abs() < 1e-6 {
                 break;

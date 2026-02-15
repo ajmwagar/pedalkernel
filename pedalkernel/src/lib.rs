@@ -596,9 +596,13 @@ pedal "Test Pedal" {
         let opamp_count = p
             .components
             .iter()
-            .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_)))
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Jrc4558)))
             .count();
-        assert_eq!(opamp_count, 2, "Tube Screamer uses dual JRC4558");
+        assert_eq!(opamp_count, 2, "TS808 uses dual JRC4558D");
+        assert!(p
+            .components
+            .iter()
+            .any(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)));
     }
 
     #[test]
@@ -611,7 +615,7 @@ pedal "Test Pedal" {
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Fuzz"));
         assert!(labels.contains(&"Volume"));
-        // Verify dual PNP transistors
+        // Verify PNP transistors (germanium)
         let pnp_count = p
             .components
             .iter()
@@ -726,7 +730,7 @@ pedal "Test Pedal" {
         let opamp_count = p
             .components
             .iter()
-            .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_)))
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072)))
             .count();
         assert_eq!(opamp_count, 3, "Klon uses 3 opamps (2 gain + 1 output buffer)");
         let ge_diode_count = p
@@ -735,6 +739,26 @@ pedal "Test Pedal" {
             .filter(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Germanium))
             .count();
         assert_eq!(ge_diode_count, 2, "Klon uses 2 germanium clipping diodes in feedback");
+    }
+
+    #[test]
+    fn pedal_fulltone_ocd() {
+        let p = parse_example("fulltone_ocd.pedal");
+        assert_eq!(p.name, "Fulltone OCD");
+        assert_eq!(p.components.len(), 18);
+        assert_eq!(p.nets.len(), 23);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Drive"));
+        assert!(labels.contains(&"Tone"));
+        assert!(labels.contains(&"Volume"));
+        // Verify MOSFET clipping (the OCD's signature)
+        let mosfet_count = p
+            .components
+            .iter()
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::Nmos(_)))
+            .count();
+        assert_eq!(mosfet_count, 2, "OCD uses 2 NMOS MOSFETs for clipping");
     }
 
     #[test]
@@ -747,6 +771,7 @@ pedal "Test Pedal" {
             "proco_rat.pedal",
             "blues_driver.pedal",
             "klon_centaur.pedal",
+            "fulltone_ocd.pedal",
         ];
         for f in files {
             let p = parse_example(f);

@@ -43,6 +43,9 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
             TriodeType::T12au7 => ("Valve:ECC82", "V"),
         },
         ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
+        ComponentKind::Nmos(_) => ("Device:Q_NMOS_DGS", "Q"),
+        ComponentKind::Pmos(_) => ("Device:Q_PMOS_DGS", "Q"),
+        ComponentKind::Zener(_) => ("Device:D_Zener", "D"),
     }
 }
 
@@ -91,6 +94,9 @@ fn value_str(kind: &ComponentKind) -> String {
                 format_eng(*sens_r, ""),
             )
         }
+        ComponentKind::Nmos(mt) => format!("N-MOS_{mt:?}"),
+        ComponentKind::Pmos(mt) => format!("P-MOS_{mt:?}"),
+        ComponentKind::Zener(vz) => format!("Zener_{:.1}V", vz),
     }
 }
 
