@@ -59,8 +59,9 @@ impl Overdrive {
         self.pre_gain = 2.0 * 50.0_f64.powf(self.gain);
         // Resistance varies with gain (affects clipping tone character).
         // Higher gain → lower R → sharper knee.
+        // Update in-place to preserve capacitor state and avoid clicks.
         let r = self.base_resistance * (1.0 - 0.9 * self.gain) + 51.0;
-        self.clipper = WdfClipper::new(r, 47e-9, DiodeModel::silicon(), self.sample_rate);
+        self.clipper.set_resistance(r);
     }
 
     pub fn set_level(&mut self, level: f64) {
@@ -139,9 +140,9 @@ impl FuzzFace {
         // Pre-gain models two cascaded transistor gain stages.
         // fuzz=0 → 5× (mild grit), fuzz=1 → 250× (full splat).
         self.pre_gain = 5.0 * 50.0_f64.powf(self.fuzz);
+        // Update resistance in-place to preserve capacitor state and avoid clicks.
         let r = 10000.0 * (1.0 - 0.95 * self.fuzz) + 100.0;
-        self.clipper =
-            WdfSingleDiodeClipper::new(r, 100e-9, DiodeModel::germanium(), self.sample_rate);
+        self.clipper.set_resistance(r);
     }
 
     pub fn set_volume(&mut self, volume: f64) {

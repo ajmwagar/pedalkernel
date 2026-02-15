@@ -116,7 +116,14 @@ fn run_pedal_control(
         proc.set_control(&c.label, c.default);
     }
 
-    let controls = Arc::new(SharedControls::new());
+    // Pre-register controls as lock-free atomic slots — eliminates
+    // Mutex contention from the RT audio callback.
+    let control_labels: Vec<(String, f64)> = pedal
+        .controls
+        .iter()
+        .map(|c| (c.label.clone(), c.default))
+        .collect();
+    let controls = Arc::new(SharedControls::with_controls(&control_labels));
     let (async_client, our_in, our_out) = AudioEngine::start(client, proc, controls.clone())?;
 
     // Connect selected ports
@@ -330,7 +337,13 @@ pub fn run(pedal_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
         }
         let wav_proc = WavLoopProcessor::new(samples, proc);
 
-        let controls = Arc::new(SharedControls::new());
+        // Pre-register controls as lock-free atomic slots.
+        let control_labels: Vec<(String, f64)> = pedal
+            .controls
+            .iter()
+            .map(|c| (c.label.clone(), c.default))
+            .collect();
+        let controls = Arc::new(SharedControls::with_controls(&control_labels));
         let (async_client, _our_in, our_out) =
             AudioEngine::start(client, wav_proc, controls.clone())?;
 

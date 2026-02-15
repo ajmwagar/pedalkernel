@@ -251,6 +251,19 @@ impl WdfClipper {
         (a_root + b_ser) / 2.0
     }
 
+    /// Update the clipping resistance in-place without resetting capacitor
+    /// state.  This avoids the discontinuity (click/pop) that occurs when
+    /// the entire WDF tree is reconstructed on a knob change.
+    pub fn set_resistance(&mut self, resistance: f64) {
+        self.resistor.set_resistance(resistance);
+        self.par.update_ports(
+            self.resistor.port_resistance(),
+            self.capacitor.port_resistance(),
+        );
+        self.ser
+            .update_ports(self.vs.port_resistance(), self.par.port_resistance);
+    }
+
     /// Update port resistances after sample rate change.
     pub fn set_sample_rate(&mut self, fs: f64) {
         self.sample_rate = fs;
@@ -334,6 +347,18 @@ impl WdfSingleDiodeClipper {
 
         // Output = voltage across the single diode (asymmetric clipping).
         (a_root + b_ser) / 2.0
+    }
+
+    /// Update the clipping resistance in-place without resetting capacitor
+    /// state (avoids clicks on knob changes).
+    pub fn set_resistance(&mut self, resistance: f64) {
+        self.resistor.set_resistance(resistance);
+        self.par.update_ports(
+            self.resistor.port_resistance(),
+            self.capacitor.port_resistance(),
+        );
+        self.ser
+            .update_ports(self.vs.port_resistance(), self.par.port_resistance);
     }
 
     pub fn set_sample_rate(&mut self, fs: f64) {
