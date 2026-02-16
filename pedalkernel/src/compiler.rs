@@ -766,8 +766,7 @@ impl CircuitGraph {
         }
 
         // Sort by distance of junction node from input.
-        jfets
-            .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
+        jfets.sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
         jfets
     }
 
@@ -819,9 +818,8 @@ impl CircuitGraph {
         }
 
         // Sort by distance of junction node from input.
-        triodes.sort_by_key(|(_, info)| {
-            dist.get(&info.junction_node).copied().unwrap_or(usize::MAX)
-        });
+        triodes
+            .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
         triodes
     }
 }
@@ -1214,7 +1212,9 @@ impl PedalProcessor for CompiledPedal {
                 }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.tree.set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
+                        stage
+                            .tree
+                            .set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
                         stage.tree.recompute();
                     }
                 }
@@ -1239,7 +1239,9 @@ impl PedalProcessor for CompiledPedal {
                 }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.tree.set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
+                        stage
+                            .tree
+                            .set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
                         stage.tree.recompute();
                     }
                 }
@@ -1465,8 +1467,11 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
 
     for (_edge_idx, jfet_info) in &jfets {
         let junction = jfet_info.junction_node;
-        let passive_idxs =
-            graph.elements_at_junction(junction, &all_nonlinear_indices, &graph.active_edge_indices);
+        let passive_idxs = graph.elements_at_junction(
+            junction,
+            &all_nonlinear_indices,
+            &graph.active_edge_indices,
+        );
 
         if passive_idxs.is_empty() {
             continue;
@@ -1649,10 +1654,16 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                     if component == &ctrl.component && pin == "wiper" {
                         // This pot's wiper connects somewhere
                         for to_pin in &net.to {
-                            if let Pin::ComponentPin { component: target_comp, pin: target_pin } = to_pin {
+                            if let Pin::ComponentPin {
+                                component: target_comp,
+                                pin: target_pin,
+                            } = to_pin
+                            {
                                 if target_pin == "rate" {
                                     // Find the LFO index
-                                    if let Some(idx) = lfo_ids.iter().position(|id| id == target_comp) {
+                                    if let Some(idx) =
+                                        lfo_ids.iter().position(|id| id == target_comp)
+                                    {
                                         lfo_target = Some(ControlTarget::LfoRate(idx));
                                         break;
                                     }
@@ -1800,9 +1811,21 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
     // Build EnvelopeFollower bindings from EnvelopeFollower components and their net connections.
     let mut envelopes = Vec::new();
     for comp in &pedal.components {
-        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sensitivity_r) = &comp.kind {
+        if let ComponentKind::EnvelopeFollower(
+            attack_r,
+            attack_c,
+            release_r,
+            release_c,
+            sensitivity_r,
+        ) = &comp.kind
+        {
             let envelope = crate::elements::EnvelopeFollower::from_rc(
-                *attack_r, *attack_c, *release_r, *release_c, *sensitivity_r, sample_rate,
+                *attack_r,
+                *attack_c,
+                *release_r,
+                *release_c,
+                *sensitivity_r,
+                sample_rate,
             );
 
             // Find what this envelope follower connects to via nets (EF.out -> target.property)
