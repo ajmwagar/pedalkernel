@@ -96,10 +96,18 @@ mod jack_engine {
     // DAC hard clipping (output > 1.0) sounds like harsh static/buzz
     // that's unrelated to the musical soft-clipping the WDF diodes produce.
 
-    /// Output stage: DC blocker + soft limiter to prevent DAC hard clipping.
+    /// Output stage: DC blocker + soft-knee limiter to prevent DAC hard clipping.
     struct OutputStage {
         dc_blocker: DcBlocker,
     }
+
+    /// Soft-knee limiter threshold.  Signals below this amplitude pass
+    /// through *unchanged* — no coloration, no dynamics loss.  Only
+    /// signals between the threshold and the DAC ceiling are compressed.
+    const LIMITER_THRESHOLD: f64 = 0.9;
+
+    /// Reciprocal of `(1.0 - THRESHOLD)`, precomputed.
+    const LIMITER_INV_KNEE: f64 = 1.0 / (1.0 - LIMITER_THRESHOLD);
 
     impl OutputStage {
         fn new(sample_rate: f64) -> Self {
@@ -110,17 +118,32 @@ mod jack_engine {
 
         /// Process a sample: remove DC offset, then soft-limit to [-1.0, 1.0].
         ///
-        /// Uses tanh soft clipping — the same curve as analog tape saturation.
-        /// Signals below ~0.8 pass through nearly unchanged; signals above
-        /// are gently compressed toward ±1.0 instead of hard-clipping at the DAC.
+        /// Uses a soft-knee limiter modeled after analog brickwall limiters:
+        /// - Below ±0.9: **passthrough** — no coloration whatsoever.
+        /// - 0.9 to 1.0: smooth cubic compression toward ±1.0.
+        /// - Above 1.0: hard ceiling at ±1.0 (should rarely reach here).
+        ///
+        /// This preserves 100% of the WDF circuit's tonal character for
+        /// signals in the normal range, and only intervenes for peaks that
+        /// would otherwise hit the DAC hard clipper.
         #[inline]
         fn process(&mut self, sample: f64) -> f64 {
-            let dc_blocked = self.dc_blocker.process(sample);
-            // tanh naturally maps to (-1, 1) with a smooth knee.
-            // Below ~0.5 the distortion is < 0.1%.  At 1.0 the output is ~0.76.
-            // This preserves the WDF circuit's clipping character while
-            // preventing the harsh static from DAC hard clipping.
-            dc_blocked.tanh()
+            let x = self.dc_blocker.process(sample);
+            let abs_x = x.abs();
+            if abs_x <= LIMITER_THRESHOLD {
+                // Below threshold: clean passthrough, zero coloration.
+                x
+            } else if abs_x >= 1.0 {
+                // Above ceiling: hard limit (safety net).
+                x.signum()
+            } else {
+                // Knee region: cubic ease-out from threshold to 1.0.
+                // Maps [threshold, 1.0] input → [threshold, 1.0] output
+                // with zero derivative at the ceiling (smooth tangent).
+                let t = (abs_x - LIMITER_THRESHOLD) * LIMITER_INV_KNEE; // 0..1
+                let compressed = LIMITER_THRESHOLD + (1.0 - LIMITER_THRESHOLD) * (2.0 * t - t * t);
+                compressed.copysign(x)
+            }
         }
     }
 
