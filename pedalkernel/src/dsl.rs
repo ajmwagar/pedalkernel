@@ -62,6 +62,8 @@ pub enum ComponentKind {
     Pmos(MosfetType),
     /// Zener diode with breakdown voltage (V)
     Zener(f64),
+    /// BBD (Bucket-Brigade Device) delay line
+    Bbd(BbdType),
 }
 
 /// Op-amp types with different characteristics.
@@ -199,6 +201,17 @@ pub enum MosfetType {
     Bs250,
     /// IRF9520 P-channel power MOSFET
     Irf9520,
+}
+
+/// BBD (Bucket-Brigade Device) types for analog delay lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BbdType {
+    /// MN3207 — 1024-stage, Boss CE-2 chorus
+    Mn3207,
+    /// MN3007 — 1024-stage low-noise, Boss DM-2 delay
+    Mn3007,
+    /// MN3005 — 4096-stage long delay, Memory Man
+    Mn3005,
 }
 
 /// A net connection: `in -> C1.a` or `C1.b -> R1.a, D1.a`
@@ -463,6 +476,23 @@ fn parse_zener(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Zener(voltage)))
 }
 
+fn bbd_type(input: &str) -> IResult<&str, BbdType> {
+    alt((
+        value(BbdType::Mn3207, tag("mn3207")),
+        value(BbdType::Mn3007, tag("mn3007")),
+        value(BbdType::Mn3005, tag("mn3005")),
+    ))(input)
+}
+
+/// `bbd(mn3207)` — Bucket-brigade device delay line.
+fn parse_bbd(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("bbd")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, bt) = bbd_type(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Bbd(bt)))
+}
+
 fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
     alt((
         alt((
@@ -486,6 +516,7 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_nmos, // must come before parse_npn — but npn is already above
             parse_pmos,
             parse_zener,
+            parse_bbd,
         )),
     ))(input)
 }
@@ -1290,5 +1321,54 @@ pedal "Zener Clipper" {
         assert_eq!(def.name, "Zener Clipper");
         assert_eq!(def.components.len(), 3);
         assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::Zener(v) if (v - 5.1).abs() < 1e-6)));
+    }
+
+    // ── BBD parser tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_bbd_mn3207() {
+        let (_, c) = component_def("BBD1: bbd(mn3207)").unwrap();
+        assert_eq!(c.id, "BBD1");
+        assert_eq!(c.kind, ComponentKind::Bbd(BbdType::Mn3207));
+    }
+
+    #[test]
+    fn parse_bbd_mn3007() {
+        let (_, c) = component_def("BBD1: bbd(mn3007)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Bbd(BbdType::Mn3007));
+    }
+
+    #[test]
+    fn parse_bbd_mn3005() {
+        let (_, c) = component_def("BBD1: bbd(mn3005)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Bbd(BbdType::Mn3005));
+    }
+
+    #[test]
+    fn parse_pedal_with_bbd() {
+        let src = r#"
+pedal "Chorus" {
+  components {
+    C1: cap(100n)
+    R1: resistor(10k)
+    BBD1: bbd(mn3207)
+    LFO1: lfo(triangle, 100k, 47n)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, BBD1.in
+    R1.b -> gnd
+    BBD1.out -> out
+    LFO1.out -> BBD1.clock
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Chorus");
+        assert_eq!(def.components.len(), 4);
+        assert!(def
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::Bbd(BbdType::Mn3207))));
     }
 }

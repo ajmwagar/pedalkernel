@@ -1,0 +1,43 @@
+# Boss CE-2 Chorus
+# Classic analog chorus using MN3207 BBD delay line
+# LFO modulates the BBD clock for time-varying delay (chorus effect)
+# The original uses a TL022 op-amp for input buffering
+
+pedal "Boss CE-2" {
+  components {
+    C1: cap(47n)            # Input coupling capacitor
+    R1: resistor(10k)       # Input impedance
+    U1: opamp(tl072)        # Input buffer / gain stage
+    R2: resistor(47k)       # Feedback resistor
+    C2: cap(100n)           # Anti-alias filter cap
+    R3: resistor(10k)       # Anti-alias filter resistor
+    BBD1: bbd(mn3207)       # MN3207 bucket-brigade delay (1024 stages)
+    C3: cap(100n)           # Output coupling
+    R4: resistor(47k)       # Output load
+    LFO1: lfo(triangle, 150k, 33n)  # Triangle LFO for smooth chorus sweep
+    Rate: pot(500k)         # Rate control
+    C4: cap(1u)             # Output smoothing
+    R5: resistor(100k)      # Mix resistor (dry)
+    R6: resistor(100k)      # Mix resistor (wet)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, U1.pos
+    R1.b -> gnd
+    U1.neg -> R2.a
+    R2.b -> U1.out
+    U1.out -> C2.a, R5.a
+    C2.b -> R3.a
+    R3.b -> BBD1.in
+    LFO1.out -> BBD1.clock
+    BBD1.out -> C3.a
+    C3.b -> R4.a, R6.a
+    R4.b -> gnd
+    R5.b -> C4.a
+    R6.b -> C4.a
+    C4.b -> out
+  }
+  controls {
+    Rate.position -> "Rate" [0.0, 1.0] = 0.5
+  }
+}

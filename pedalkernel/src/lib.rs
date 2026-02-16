@@ -762,6 +762,31 @@ pedal "Test Pedal" {
     }
 
     #[test]
+    fn pedal_boss_ce2() {
+        let p = parse_example("boss_ce2.pedal");
+        assert_eq!(p.name, "Boss CE-2");
+        assert_eq!(p.components.len(), 14);
+        assert_eq!(p.controls.len(), 1);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Rate"));
+        // Verify BBD delay line component
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::Bbd(dsl::BbdType::Mn3207))));
+        // Verify LFO for chorus modulation
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::Lfo(..))));
+        // Verify TL072 op-amp (input buffer)
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072))));
+    }
+
+    #[test]
     fn all_pedal_files_export_kicad() {
         let files = [
             "tube_screamer.pedal",
@@ -772,6 +797,7 @@ pedal "Test Pedal" {
             "blues_driver.pedal",
             "klon_centaur.pedal",
             "fulltone_ocd.pedal",
+            "boss_ce2.pedal",
         ];
         for f in files {
             let p = parse_example(f);

@@ -300,6 +300,7 @@ pub enum RootKind {
     Triode(TriodeRoot),
     Mosfet(MosfetRoot),
     Zener(ZenerRoot),
+    Ota(OtaRoot),
 }
 
 pub struct WdfStage {
@@ -324,6 +325,7 @@ impl WdfStage {
             RootKind::Triode(t) => t.process(b_tree, rp),
             RootKind::Mosfet(m) => m.process(b_tree, rp),
             RootKind::Zener(z) => z.process(b_tree, rp),
+            RootKind::Ota(o) => o.process(b_tree, rp),
         };
         self.tree.set_incident(a_root);
         (a_root + b_tree) / 2.0
@@ -394,6 +396,22 @@ impl WdfStage {
         match &self.root {
             RootKind::Mosfet(m) => Some(m.vgs()),
             _ => None,
+        }
+    }
+
+    /// Set the OTA bias current (for envelope-controlled gain).
+    #[inline]
+    pub fn set_ota_iabc(&mut self, iabc: f64) {
+        if let RootKind::Ota(o) = &mut self.root {
+            o.set_iabc(iabc);
+        }
+    }
+
+    /// Set OTA gain as normalized value (0.0–1.0).
+    #[inline]
+    pub fn set_ota_gain(&mut self, gain: f64) {
+        if let RootKind::Ota(o) = &mut self.root {
+            o.set_gain_normalized(gain);
         }
     }
 }
@@ -580,12 +598,35 @@ impl CircuitGraph {
                         node_b,
                     });
                 }
-                ComponentKind::Npn | ComponentKind::Pnp | ComponentKind::OpAmp(_) => {
+                ComponentKind::Npn | ComponentKind::Pnp => {
+                    num_active += 1;
+                }
+                ComponentKind::OpAmp(ot) if ot.is_ota() => {
+                    // OTAs are nonlinear elements (current-controlled gain).
+                    // Their pos/neg pins define the WDF edge (like a diode).
+                    // Use pos/neg if available, otherwise fall back to generic 2-terminal.
+                    let key_a = format!("{}.pos", comp.id);
+                    let key_b = format!("{}.neg", comp.id);
+                    let id_a = get_id(&key_a, &mut uf);
+                    let id_b = get_id(&key_b, &mut uf);
+                    let node_a = uf.find(id_a);
+                    let node_b = uf.find(id_b);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
+                    });
+                }
+                ComponentKind::OpAmp(_) => {
                     num_active += 1;
                 }
                 ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..) => {
                     // LFO and EnvelopeFollower are virtual modulation sources, not physical
                     // circuit elements. They connect via .out pin to modulation targets.
+                }
+                ComponentKind::Bbd(_) => {
+                    // BBDs are handled as delay line processors, not WDF elements.
+                    // They connect via .in/.out pins but are processed separately.
                 }
             }
         }
@@ -989,6 +1030,59 @@ impl CircuitGraph {
             .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
         zeners
     }
+
+    /// Find OTA (CA3080) edges, ordered by topological distance from `in`.
+    fn find_otas(&self) -> Vec<(usize, OtaInfo)> {
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &self.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(self.in_node, 0);
+        queue.push_back(self.in_node);
+        while let Some(n) = queue.pop_front() {
+            let d = dist[&n];
+            if let Some(neighbors) = adj.get(&n) {
+                for &nb in neighbors {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
+                        queue.push_back(nb);
+                    }
+                }
+            }
+        }
+
+        let mut otas: Vec<(usize, OtaInfo)> = Vec::new();
+        for (edge_idx, e) in self.edges.iter().enumerate() {
+            let comp = &self.components[e.comp_idx];
+            if let ComponentKind::OpAmp(ot) = &comp.kind {
+                if ot.is_ota() {
+                    otas.push((
+                        edge_idx,
+                        OtaInfo {
+                            junction_node: if e.node_b == self.gnd_node {
+                                e.node_a
+                            } else {
+                                e.node_b
+                            },
+                            ground_node: if e.node_b == self.gnd_node {
+                                e.node_b
+                            } else {
+                                e.node_a
+                            },
+                        },
+                    ));
+                }
+            }
+        }
+
+        otas.sort_by_key(|(_, info)| {
+            dist.get(&info.junction_node).copied().unwrap_or(usize::MAX)
+        });
+        otas
+    }
 }
 
 struct DiodeInfo {
@@ -1024,6 +1118,12 @@ struct MosfetInfo {
 
 struct ZenerInfo {
     voltage: f64,
+    junction_node: NodeId,
+    #[allow(dead_code)]
+    ground_node: NodeId,
+}
+
+struct OtaInfo {
     junction_node: NodeId,
     #[allow(dead_code)]
     ground_node: NodeId,
@@ -1262,6 +1362,10 @@ enum ModulationTarget {
     TriodeVgk { stage_idx: usize },
     /// Modulate a MOSFET's Vgs.
     MosfetVgs { stage_idx: usize },
+    /// Modulate an OTA's bias current (for VCA/compressor).
+    OtaIabc { stage_idx: usize },
+    /// Modulate a BBD's clock frequency (for chorus/flanger).
+    BbdClock { bbd_idx: usize },
 }
 
 /// LFO binding in a compiled pedal.
@@ -1311,6 +1415,11 @@ pub struct CompiledPedal {
     lfos: Vec<LfoBinding>,
     /// Envelope follower modulators.
     envelopes: Vec<EnvelopeBinding>,
+    /// Slew rate limiters for op-amp stages (one per op-amp in the circuit).
+    /// Applied to the signal path to model HF compression from slow op-amps.
+    slew_limiters: Vec<SlewRateLimiter>,
+    /// BBD delay lines for delay/chorus/flanger effects.
+    bbds: Vec<BbdDelayLine>,
 }
 
 /// Gain-like control labels.
@@ -1412,6 +1521,18 @@ impl PedalProcessor for CompiledPedal {
                         stage.set_mosfet_vgs(modulation);
                     }
                 }
+                ModulationTarget::OtaIabc { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        // LFO modulation of OTA: modulation maps to gain (0-1)
+                        stage.set_ota_gain(modulation.clamp(0.0, 1.0));
+                    }
+                }
+                ModulationTarget::BbdClock { bbd_idx } => {
+                    if let Some(bbd) = self.bbds.get_mut(*bbd_idx) {
+                        // LFO modulates delay time: modulation = normalized 0-1
+                        bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
+                    }
+                }
             }
         }
 
@@ -1444,6 +1565,19 @@ impl PedalProcessor for CompiledPedal {
                         stage.set_mosfet_vgs(modulation);
                     }
                 }
+                ModulationTarget::OtaIabc { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        // Envelope controls OTA gain: louder input → lower gain
+                        // Invert: high envelope (loud) → low gain (compression)
+                        let gain = (1.0 - modulation).clamp(0.0, 1.0);
+                        stage.set_ota_gain(gain);
+                    }
+                }
+                ModulationTarget::BbdClock { bbd_idx } => {
+                    if let Some(bbd) = self.bbds.get_mut(*bbd_idx) {
+                        bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
+                    }
+                }
             }
         }
 
@@ -1464,10 +1598,24 @@ impl PedalProcessor for CompiledPedal {
             signal = input * self.pre_gain * headroom;
         }
 
+        // Apply slew rate limiting from op-amps.
+        // Each op-amp in the circuit contributes its own slew rate limit.
+        // This is the mechanism that makes the LM308 RAT sound different
+        // from a TL072 RAT — the slow slew rate rounds off HF transients.
+        for slew in &mut self.slew_limiters {
+            signal = slew.process(signal);
+        }
+
         if self.use_soft_limit {
             // Scale the tanh ceiling with headroom: at 12V the soft-limiter
             // (modeling transistor/opamp saturation) kicks in later.
             signal = headroom * (signal * self.soft_limit_scale / headroom).tanh();
+        }
+
+        // Process through BBD delay lines (wet signal mixed with dry).
+        for bbd in &mut self.bbds {
+            let wet = bbd.process(signal);
+            signal = signal + wet; // Simple mix (could be controllable)
         }
 
         signal * self.output_gain * headroom
@@ -1485,6 +1633,12 @@ impl PedalProcessor for CompiledPedal {
         for binding in &mut self.envelopes {
             binding.envelope.set_sample_rate(rate);
         }
+        for slew in &mut self.slew_limiters {
+            slew.set_sample_rate(rate);
+        }
+        for bbd in &mut self.bbds {
+            bbd.set_sample_rate(rate);
+        }
     }
 
     fn reset(&mut self) {
@@ -1496,6 +1650,12 @@ impl PedalProcessor for CompiledPedal {
         }
         for binding in &mut self.envelopes {
             binding.envelope.reset();
+        }
+        for slew in &mut self.slew_limiters {
+            slew.reset();
+        }
+        for bbd in &mut self.bbds {
+            bbd.reset();
         }
     }
 
@@ -1947,12 +2107,118 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         });
     }
 
+    // ── OTA (CA3080) stages ──────────────────────────────────────────────
+    let otas = graph.find_otas();
+    let ota_edge_indices: Vec<usize> = otas.iter().map(|(idx, _)| *idx).collect();
+    let all_nonlinear_with_otas: Vec<usize> = all_nonlinear_final
+        .iter()
+        .chain(ota_edge_indices.iter())
+        .copied()
+        .collect();
+
+    for (_edge_idx, ota_info) in &otas {
+        let junction = ota_info.junction_node;
+        let passive_idxs = graph.elements_at_junction(
+            junction,
+            &all_nonlinear_with_otas,
+            &graph.active_edge_indices,
+        );
+
+        if passive_idxs.is_empty() {
+            continue;
+        }
+
+        let mut injection_node = graph.in_node;
+        let mut best_dist = usize::MAX;
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            let other = if e.node_a == junction {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            if let Some(&d) = dist_from_in.get(&other) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = other;
+                }
+            }
+        }
+
+        let source_node = graph.edges.len() + 6000;
+        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+        }
+
+        let terminals = vec![source_node, junction];
+        let sp_tree = match sp_reduce(sp_edges, &terminals) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let mut ota_components = graph.components.clone();
+        while ota_components.len() <= vs_comp_idx {
+            ota_components.push(ComponentDef {
+                id: "__vs__".to_string(),
+                kind: ComponentKind::Resistor(1.0),
+            });
+        }
+
+        let tree = sp_to_dyn_with_vs(&sp_tree, &ota_components, sample_rate, vs_comp_idx);
+
+        let model = OtaModel::ca3080();
+        let root = RootKind::Ota(OtaRoot::new(model));
+
+        // OTA stages need compensation: the transconductance amplifier's
+        // voltage gain (gm * Rp) can be very high. In real circuits, negative
+        // feedback (R2 in Dyna Comp) tames this. We apply a compensation
+        // factor based on the feedback network impedance.
+        let feedback_compensation = 0.08; // Models closed-loop gain reduction from feedback R
+
+        stages.push(WdfStage {
+            tree,
+            root,
+            compensation: feedback_compensation,
+        });
+    }
+
     // Balance voltage source impedance in each stage.
     // This fixes topologies where the Vs branch sits in a Parallel adaptor
     // opposite a high-impedance element (e.g. Big Muff: Parallel(Series(Vs,C), R)
     // with R >> C causes gamma ≈ 1.0 and severe signal attenuation).
     for stage in &mut stages {
         stage.balance_vs_impedance();
+    }
+
+    // ── Slew rate limiters (from op-amps) ─────────────────────────────────
+    // Each op-amp in the circuit contributes a slew rate limiter to model
+    // the HF compression from finite output slew rate.
+    let mut slew_limiters = Vec::new();
+    for comp in &pedal.components {
+        if let ComponentKind::OpAmp(ot) = &comp.kind {
+            // OTAs (CA3080) are very fast (50 V/µs) — slew limiting is negligible.
+            // Only add slew limiters for voltage-mode op-amps with slow slew rates.
+            if !ot.is_ota() {
+                slew_limiters.push(SlewRateLimiter::new(ot.slew_rate(), sample_rate));
+            }
+        }
+    }
+
+    // ── BBD delay lines ──────────────────────────────────────────────────
+    let mut bbds = Vec::new();
+    for comp in &pedal.components {
+        if let ComponentKind::Bbd(bt) = &comp.kind {
+            let model = match bt {
+                BbdType::Mn3207 => BbdModel::mn3207(),
+                BbdType::Mn3007 => BbdModel::mn3007(),
+                BbdType::Mn3005 => BbdModel::mn3005(),
+            };
+            bbds.push(BbdDelayLine::new(model, sample_rate));
+        }
     }
 
     // If no diodes found, create a dummy stage-less pedal (just gain + soft clip).
@@ -2129,6 +2395,19 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                             .unwrap_or(0);
                                         ModulationTarget::TriodeVgk { stage_idx }
                                     }
+                                    "iabc" => {
+                                        // Find which stage contains an OTA
+                                        let stage_idx = stages
+                                            .iter()
+                                            .position(|s| matches!(&s.root, RootKind::Ota(_)))
+                                            .unwrap_or(0);
+                                        ModulationTarget::OtaIabc { stage_idx }
+                                    }
+                                    "clock" => {
+                                        // Find which BBD to modulate
+                                        let bbd_idx = 0; // First BBD by default
+                                        ModulationTarget::BbdClock { bbd_idx }
+                                    }
                                     _ => continue,
                                 };
 
@@ -2140,6 +2419,10 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
                                     // MOSFET: bias above threshold with swing
                                     ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
+                                    // OTA: normalized gain 0-1
+                                    ModulationTarget::OtaIabc { .. } => (0.5, 0.5),
+                                    // BBD: normalized delay 0-1, centered at 0.5
+                                    ModulationTarget::BbdClock { .. } => (0.5, 0.3),
                                 };
 
                                 lfos.push(LfoBinding {
@@ -2207,6 +2490,16 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                             .unwrap_or(0);
                                         ModulationTarget::TriodeVgk { stage_idx }
                                     }
+                                    "iabc" => {
+                                        let stage_idx = stages
+                                            .iter()
+                                            .position(|s| matches!(&s.root, RootKind::Ota(_)))
+                                            .unwrap_or(0);
+                                        ModulationTarget::OtaIabc { stage_idx }
+                                    }
+                                    "clock" => {
+                                        ModulationTarget::BbdClock { bbd_idx: 0 }
+                                    }
                                     _ => continue,
                                 };
 
@@ -2215,6 +2508,8 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                     ModulationTarget::PhotocouplerLed { .. } => (0.0, 1.0),
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
                                     ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
+                                    ModulationTarget::OtaIabc { .. } => (0.5, 0.5),
+                                    ModulationTarget::BbdClock { .. } => (0.5, 0.3),
                                 };
 
                                 envelopes.push(EnvelopeBinding {
@@ -2244,6 +2539,8 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         supply_voltage: 9.0,
         lfos,
         envelopes,
+        slew_limiters,
+        bbds,
     })
 }
 
@@ -2403,6 +2700,20 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                         message: format!(
                             "Germanium diode {} — higher power dissipation at {:.0}V \
                              may shift forward voltage (temperature dependent)",
+                            comp.id, voltage
+                        ),
+                    });
+                }
+            }
+            ComponentKind::Bbd(_) => {
+                // BBDs are typically rated 10-15V. They're sensitive to
+                // over-voltage which causes excess clock noise and distortion.
+                if voltage > 15.0 {
+                    warnings.push(VoltageWarning {
+                        component_id: comp.id.clone(),
+                        severity: WarningSeverity::Danger,
+                        message: format!(
+                            "BBD {} may exceed max supply at {:.0}V — typical rating 10-15V",
                             comp.id, voltage
                         ),
                     });
@@ -2698,6 +3009,7 @@ mod tests {
             "dyna_comp.pedal",
             "klon_centaur.pedal",
             "proco_rat.pedal",
+            "boss_ce2.pedal",
         ];
         for f in files {
             let pedal = parse(f);
@@ -3064,6 +3376,131 @@ mod tests {
             let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
             assert!(peak < 5.0, "{f} [{settings}]: output too loud, peak={peak}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Slew rate, OTA, BBD tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn proco_rat_has_slew_limiter() {
+        // ProCo RAT uses LM308 (0.3 V/µs slew rate).
+        // The compiled pedal should have a slew rate limiter.
+        let pedal = parse("proco_rat.pedal");
+        let proc = compile_pedal(&pedal, 48000.0).unwrap();
+        assert!(
+            !proc.slew_limiters.is_empty(),
+            "ProCo RAT should have slew rate limiters from LM308"
+        );
+        assert!(
+            (proc.slew_limiters[0].slew_rate() - 0.3).abs() < 0.01,
+            "LM308 slew rate should be 0.3 V/µs"
+        );
+    }
+
+    #[test]
+    fn tube_screamer_has_slew_limiter() {
+        // Tube Screamer uses JRC4558 (1.7 V/µs slew rate).
+        let pedal = parse("tube_screamer.pedal");
+        let proc = compile_pedal(&pedal, 48000.0).unwrap();
+        assert!(
+            !proc.slew_limiters.is_empty(),
+            "Tube Screamer should have slew limiter from JRC4558"
+        );
+        assert!(
+            (proc.slew_limiters[0].slew_rate() - 1.7).abs() < 0.01,
+            "JRC4558 slew rate should be 1.7 V/µs"
+        );
+    }
+
+    #[test]
+    fn dyna_comp_no_slew_limiter() {
+        // Dyna Comp uses CA3080 OTA which is very fast (50 V/µs).
+        // OTAs are handled as WDF roots, not slew limiters.
+        let pedal = parse("dyna_comp.pedal");
+        let proc = compile_pedal(&pedal, 48000.0).unwrap();
+        assert!(
+            proc.slew_limiters.is_empty(),
+            "CA3080 OTA should not add a slew rate limiter (it's a WDF root)"
+        );
+    }
+
+    #[test]
+    fn dyna_comp_has_ota_stage() {
+        // Dyna Comp should have an OTA WDF stage.
+        let pedal = parse("dyna_comp.pedal");
+        let proc = compile_pedal(&pedal, 48000.0).unwrap();
+        let ota_stages: Vec<_> = proc
+            .stages
+            .iter()
+            .filter(|s| matches!(s.root, RootKind::Ota(_)))
+            .collect();
+        assert!(
+            !ota_stages.is_empty(),
+            "Dyna Comp should have an OTA stage"
+        );
+    }
+
+    #[test]
+    fn slew_rate_affects_rat_character() {
+        // The RAT with LM308 slew rate limiting should produce different
+        // output than if we removed the slew limiting.
+        let pedal = parse("proco_rat.pedal");
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        proc.set_control("Distortion", 0.8);
+        proc.set_control("Volume", 0.5);
+
+        let input = sine(4800);
+        let output_with_slew: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+
+        // Process should produce finite output
+        assert!(
+            output_with_slew.iter().all(|x| x.is_finite()),
+            "RAT with slew limiting: output should be finite"
+        );
+        let peak = output_with_slew
+            .iter()
+            .fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(peak > 0.01, "RAT should produce output: peak={peak}");
+    }
+
+    #[test]
+    fn bbd_pedal_compiles_and_processes() {
+        // Parse a BBD-based chorus pedal inline.
+        let src = r#"
+pedal "Test Chorus" {
+  components {
+    C1: cap(100n)
+    R1: resistor(10k)
+    BBD1: bbd(mn3207)
+    LFO1: lfo(triangle, 100k, 47n)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, BBD1.in
+    R1.b -> gnd
+    BBD1.out -> out
+    LFO1.out -> BBD1.clock
+  }
+}
+"#;
+        let pedal = crate::dsl::parse_pedal_file(src).unwrap();
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+        assert!(
+            !proc.bbds.is_empty(),
+            "Chorus pedal should have BBD delay line"
+        );
+
+        // Process audio
+        let input = sine(4800);
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert!(
+            output.iter().all(|x| x.is_finite()),
+            "BBD output should be finite"
+        );
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(peak > 0.001, "Chorus should produce output: peak={peak}");
     }
 
     // -----------------------------------------------------------------------

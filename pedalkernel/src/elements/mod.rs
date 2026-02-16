@@ -892,4 +892,453 @@ mod tests {
         assert!(v_large < 20.0, "large signal should be clipped: v={v_large}");
         assert!(v_small.abs() < v_large.abs(), "small signal < large signal");
     }
+
+    // ── Phase 3: Slew Rate Limiter tests ────────────────────────────────
+
+    #[test]
+    fn slew_limiter_slow_signal_passes_through() {
+        // At 48kHz with LM308 (0.3 V/µs), max_dv = 0.3e6/48000 ≈ 6.25 V/sample.
+        // A 440Hz sine at amplitude 1.0 has max dV/dt ≈ 2π*440 ≈ 2764 V/s
+        // = 0.002764 V/µs, well below 0.3 V/µs. Should pass through clean.
+        let mut slew = SlewRateLimiter::new(0.3, 48000.0);
+        let n = 4800;
+        let input: Vec<f64> = (0..n)
+            .map(|i| (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+            .collect();
+        let output: Vec<f64> = input.iter().map(|&x| slew.process(x)).collect();
+
+        // Should be nearly identical (correlation > 0.999)
+        let corr = correlation_f64(&input[100..], &output[100..]);
+        assert!(
+            corr > 0.999,
+            "Slow signal should pass through LM308 slew limiter: corr={corr:.6}"
+        );
+    }
+
+    #[test]
+    fn slew_limiter_fast_signal_is_limited() {
+        // Test that the slew rate limiter actually limits the output derivative.
+        // At 48kHz, 0.3 V/µs → max_dv = 6.25 V/sample.
+        // If we feed a step function of +100V, the first output should be
+        // limited to max_dv, not jump instantly to 100V.
+        let mut slew = SlewRateLimiter::new(0.3, 48000.0);
+        let max_dv = 0.3e6 / 48000.0; // 6.25 V/sample
+
+        // Feed a large step from 0 to 100
+        let out1 = slew.process(100.0);
+        // First output should be clamped at max_dv
+        assert!(
+            (out1 - max_dv).abs() < 0.01,
+            "First sample should be slew-limited: out={out1}, max_dv={max_dv}"
+        );
+
+        // Second sample should advance by another max_dv
+        let out2 = slew.process(100.0);
+        assert!(
+            (out2 - 2.0 * max_dv).abs() < 0.01,
+            "Second sample should ramp: out={out2}, expected={}", 2.0 * max_dv
+        );
+
+        // After many samples, should converge to the target
+        for _ in 0..100 {
+            slew.process(100.0);
+        }
+        let final_out = slew.process(100.0);
+        assert!(
+            (final_out - 100.0).abs() < 0.01,
+            "Should converge to target: out={final_out}"
+        );
+    }
+
+    #[test]
+    fn slew_limiter_tl072_transparent() {
+        // TL072 at 13 V/µs should be transparent for all audio signals.
+        // max_dv = 13e6/48000 ≈ 270 V/sample — way above any audio signal.
+        let mut slew = SlewRateLimiter::new(13.0, 48000.0);
+        let n = 4800;
+        let input: Vec<f64> = (0..n)
+            .map(|i| 5.0 * (2.0 * std::f64::consts::PI * 10_000.0 * i as f64 / 48000.0).sin())
+            .collect();
+        let output: Vec<f64> = input.iter().map(|&x| slew.process(x)).collect();
+
+        let corr = correlation_f64(&input[10..], &output[10..]);
+        assert!(
+            corr > 0.9999,
+            "TL072 should be transparent: corr={corr:.6}"
+        );
+    }
+
+    #[test]
+    fn slew_limiter_lm308_vs_tl072_character() {
+        // LM308 (0.3 V/µs) takes longer to reach a step target than TL072 (13 V/µs).
+        // After a step of 100V, the LM308 should be further from the target
+        // than the TL072 after the same number of samples.
+        let mut lm308 = SlewRateLimiter::new(0.3, 48000.0);
+        let mut tl072 = SlewRateLimiter::new(13.0, 48000.0);
+
+        // Apply a step and check after 5 samples
+        let mut out_lm308 = 0.0;
+        let mut out_tl072 = 0.0;
+        for _ in 0..5 {
+            out_lm308 = lm308.process(100.0);
+            out_tl072 = tl072.process(100.0);
+        }
+
+        // TL072 should be much closer to 100V than LM308
+        assert!(
+            out_tl072 > out_lm308,
+            "TL072 should slew faster than LM308: tl072={out_tl072:.2} lm308={out_lm308:.2}"
+        );
+        // LM308: 5 * 6.25 = 31.25V
+        // TL072: 5 * 270.8 = min(1354, 100) = 100V
+        assert!(
+            out_lm308 < 50.0,
+            "LM308 should be slow: {out_lm308:.2}"
+        );
+        assert!(
+            out_tl072 > 99.0,
+            "TL072 should reach target quickly: {out_tl072:.2}"
+        );
+    }
+
+    #[test]
+    fn slew_limiter_reset() {
+        let mut slew = SlewRateLimiter::new(0.3, 48000.0);
+        slew.process(5.0);
+        slew.reset();
+        // After reset, first output should be slew-limited from 0
+        let out = slew.process(100.0);
+        let max_dv = 0.3e6 / 48000.0;
+        assert!(
+            (out - max_dv).abs() < 0.01,
+            "After reset, should slew from 0: out={out}, max_dv={max_dv}"
+        );
+    }
+
+    #[test]
+    fn slew_limiter_sample_rate_update() {
+        let mut slew = SlewRateLimiter::new(0.3, 48000.0);
+        let max_dv_48k = 0.3e6 / 48000.0;
+
+        slew.set_sample_rate(96000.0);
+        let max_dv_96k = 0.3e6 / 96000.0;
+
+        // At double sample rate, max_dv should be half
+        let out = slew.process(100.0);
+        assert!(
+            (out - max_dv_96k).abs() < 0.01,
+            "96kHz should have half the dV of 48kHz: out={out}, expected={max_dv_96k}, 48k={max_dv_48k}"
+        );
+    }
+
+    // ── Phase 3: OTA (CA3080) model tests ───────────────────────────────
+
+    #[test]
+    fn ota_tanh_transfer() {
+        let model = OtaModel::ca3080();
+        let root = OtaRoot::new(model);
+
+        // Small signal: should be approximately linear
+        let i_small = root.output_current(0.001);
+        let gm = root.transconductance();
+        let expected = gm * 0.001;
+        assert!(
+            (i_small - expected).abs() / expected.abs() < 0.01,
+            "Small signal should be linear: i={i_small}, expected={expected}"
+        );
+
+        // Large signal: should saturate at ±Iabc
+        let i_large = root.output_current(1.0);
+        assert!(
+            (i_large - root.iabc()).abs() < root.iabc() * 0.01,
+            "Large signal should saturate at Iabc: i={i_large}, iabc={}", root.iabc()
+        );
+
+        // Negative large signal: should saturate at -Iabc
+        let i_neg = root.output_current(-1.0);
+        assert!(
+            (i_neg + root.iabc()).abs() < root.iabc() * 0.01,
+            "Negative should saturate at -Iabc: i={i_neg}"
+        );
+    }
+
+    #[test]
+    fn ota_gain_control() {
+        let model = OtaModel::ca3080();
+        let mut root = OtaRoot::new(model);
+
+        // Full gain
+        root.set_gain_normalized(1.0);
+        let i_full = root.output_current(0.01);
+
+        // Half gain
+        root.set_gain_normalized(0.5);
+        let i_half = root.output_current(0.01);
+
+        // Zero gain
+        root.set_gain_normalized(0.0);
+        let i_zero = root.output_current(0.01);
+
+        assert!(
+            i_full > i_half,
+            "Full gain > half gain: full={i_full}, half={i_half}"
+        );
+        assert!(
+            (i_zero).abs() < 1e-15,
+            "Zero gain should give zero current: i={i_zero}"
+        );
+        // Half gain should give approximately half the current for small signals
+        assert!(
+            (i_half / i_full - 0.5).abs() < 0.05,
+            "Half gain ≈ half current: ratio={}", i_half / i_full
+        );
+    }
+
+    #[test]
+    fn ota_transconductance() {
+        let model = OtaModel::ca3080();
+        let root = OtaRoot::new(model);
+
+        // gm = Iabc / (2*Vt)
+        let gm = root.transconductance();
+        let expected = root.iabc() / (2.0 * 25.85e-3);
+        assert!(
+            (gm - expected).abs() < 1e-6,
+            "Transconductance: gm={gm}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn ota_wdf_root_convergence() {
+        let model = OtaModel::ca3080();
+        let mut root = OtaRoot::new(model);
+
+        // Process through WDF - should converge for all inputs
+        let rp = 10_000.0;
+        for &a in &[0.0, 0.1, 0.5, 1.0, -1.0, 5.0, -5.0, 10.0, -10.0] {
+            let b = root.process(a, rp);
+            assert!(b.is_finite(), "OTA WDF should converge for a={a}: b={b}");
+        }
+    }
+
+    #[test]
+    fn ota_soft_clipping_character() {
+        // The OTA's tanh characteristic compresses large signals.
+        // For the WDF root, we need signals large enough relative to 2*Vt (~52mV)
+        // to reach the tanh saturation region.
+        let model = OtaModel::ca3080();
+        let root = OtaRoot::new(model);
+
+        // Small signal (well within linear region: 1mV << 52mV)
+        let i_small = root.output_current(0.001);
+
+        // Large signal (well into saturation: 200mV >> 52mV)
+        let i_large = root.output_current(0.2);
+
+        // Ratio of output currents should be much less than ratio of inputs
+        // (200x input increase → should NOT give 200x current increase due to tanh)
+        let input_ratio = 0.2 / 0.001;
+        let output_ratio = i_large.abs() / i_small.abs();
+        assert!(
+            output_ratio < input_ratio * 0.5,
+            "OTA should compress: input_ratio={input_ratio}, output_ratio={output_ratio:.2}"
+        );
+
+        // At 200mV the output should be close to Iabc (saturated)
+        let iabc = root.iabc();
+        assert!(
+            i_large > 0.9 * iabc,
+            "OTA should be near saturation at 200mV: i={i_large}, iabc={iabc}"
+        );
+    }
+
+    // ── Phase 3: BBD Delay Line tests ───────────────────────────────────
+
+    #[test]
+    fn bbd_mn3207_delay_range() {
+        let model = BbdModel::mn3207();
+        // MN3207: 1024 stages, 10kHz-200kHz clock
+        // Min delay: 1024/(2*200000) = 2.56ms
+        // Max delay: 1024/(2*10000) = 51.2ms
+        let min_delay = model.min_delay();
+        let max_delay = model.max_delay();
+
+        assert!(
+            (min_delay - 0.00256).abs() < 1e-6,
+            "MN3207 min delay: {min_delay}"
+        );
+        assert!(
+            (max_delay - 0.0512).abs() < 1e-6,
+            "MN3207 max delay: {max_delay}"
+        );
+    }
+
+    #[test]
+    fn bbd_mn3005_long_delay() {
+        let model = BbdModel::mn3005();
+        // MN3005: 4096 stages, max delay ≈ 204.8ms
+        let max_delay = model.max_delay();
+        assert!(
+            (max_delay - 0.2048).abs() < 1e-6,
+            "MN3005 max delay: {max_delay}"
+        );
+    }
+
+    #[test]
+    fn bbd_produces_delayed_output() {
+        let model = BbdModel::mn3207();
+        let mut bbd = BbdDelayLine::new(model, 48000.0);
+        bbd.set_feedback(0.0); // No feedback for clean test
+
+        // Send an impulse and wait for it to come back
+        let _ = bbd.process(1.0);
+        let delay_samples = (bbd.delay_time() * 48000.0) as usize;
+
+        let mut found_peak = false;
+        let mut peak_idx = 0;
+        let mut peak_val = 0.0f64;
+        for i in 1..delay_samples + 100 {
+            let out = bbd.process(0.0);
+            if out.abs() > peak_val {
+                peak_val = out.abs();
+                peak_idx = i;
+                found_peak = true;
+            }
+        }
+
+        assert!(found_peak, "BBD should produce delayed output");
+        // Peak should be near the expected delay time
+        let expected_delay = delay_samples;
+        let tolerance = expected_delay / 4; // 25% tolerance for filter effects
+        assert!(
+            (peak_idx as i64 - expected_delay as i64).unsigned_abs() < tolerance as u64,
+            "Peak at sample {peak_idx}, expected near {expected_delay} (±{tolerance})"
+        );
+    }
+
+    #[test]
+    fn bbd_feedback_creates_repeats() {
+        let model = BbdModel::mn3207();
+        let mut bbd_no_fb = BbdDelayLine::new(model, 48000.0);
+        let mut bbd_with_fb = BbdDelayLine::new(model, 48000.0);
+        bbd_no_fb.set_feedback(0.0);
+        bbd_with_fb.set_feedback(0.7); // Higher feedback for clearer effect
+
+        // Process impulse
+        bbd_no_fb.process(1.0);
+        bbd_with_fb.process(1.0);
+
+        // Collect energy over several delay periods
+        let n = 48000; // 1 second
+        let mut energy_no_fb = 0.0;
+        let mut energy_with_fb = 0.0;
+        for _ in 0..n {
+            let out_no_fb = bbd_no_fb.process(0.0);
+            let out_with_fb = bbd_with_fb.process(0.0);
+            energy_no_fb += out_no_fb * out_no_fb;
+            energy_with_fb += out_with_fb * out_with_fb;
+        }
+
+        assert!(
+            energy_with_fb > energy_no_fb * 1.1,
+            "Feedback should create more energy: with={energy_with_fb:.6}, without={energy_no_fb:.6}"
+        );
+    }
+
+    #[test]
+    fn bbd_clock_modulation() {
+        let model = BbdModel::mn3207();
+        let mut bbd = BbdDelayLine::new(model, 48000.0);
+
+        // Set to minimum delay
+        bbd.set_delay_normalized(0.0);
+        let delay_min = bbd.delay_time();
+
+        // Set to maximum delay
+        bbd.set_delay_normalized(1.0);
+        let delay_max = bbd.delay_time();
+
+        assert!(
+            delay_max > delay_min * 3.0,
+            "Max delay should be much longer than min: max={delay_max:.6}s, min={delay_min:.6}s"
+        );
+    }
+
+    #[test]
+    fn bbd_soft_clip_characteristic() {
+        // BBD soft clip should limit amplitude
+        let clipped = bbd_soft_clip(0.5);
+        assert!(
+            (clipped - (0.5 - 0.5_f64.powi(3) / 3.0)).abs() < 1e-10,
+            "Below threshold: cubic soft clip"
+        );
+
+        let saturated = bbd_soft_clip(2.0);
+        assert!(
+            (saturated - 2.0 / 3.0).abs() < 1e-10,
+            "Above threshold: saturated at 2/3"
+        );
+    }
+
+    #[test]
+    fn bbd_reset() {
+        let model = BbdModel::mn3207();
+        let mut bbd = BbdDelayLine::new(model, 48000.0);
+
+        // Fill buffer with signal
+        for _ in 0..4800 {
+            bbd.process(0.5);
+        }
+
+        bbd.reset();
+
+        // After reset, output should be near zero (just noise)
+        let out = bbd.process(0.0);
+        assert!(
+            out.abs() < 0.01,
+            "After reset, output should be near zero: {out}"
+        );
+    }
+
+    #[test]
+    fn bbd_output_bounded() {
+        let model = BbdModel::mn3207();
+        let mut bbd = BbdDelayLine::new(model, 48000.0);
+        bbd.set_feedback(0.9);
+
+        // Process loud input for a long time
+        for _ in 0..48000 {
+            let out = bbd.process(1.0);
+            assert!(
+                out.abs() < 10.0,
+                "BBD output should be bounded: {out}"
+            );
+            assert!(out.is_finite(), "BBD output should be finite");
+        }
+    }
+
+    // ── Phase 3 helper ──────────────────────────────────────────────────
+
+    fn correlation_f64(a: &[f64], b: &[f64]) -> f64 {
+        let n = a.len().min(b.len());
+        if n == 0 {
+            return 0.0;
+        }
+        let mean_a: f64 = a[..n].iter().sum::<f64>() / n as f64;
+        let mean_b: f64 = b[..n].iter().sum::<f64>() / n as f64;
+        let mut cov = 0.0;
+        let mut var_a = 0.0;
+        let mut var_b = 0.0;
+        for i in 0..n {
+            let da = a[i] - mean_a;
+            let db = b[i] - mean_b;
+            cov += da * db;
+            var_a += da * da;
+            var_b += db * db;
+        }
+        if var_a < 1e-15 || var_b < 1e-15 {
+            return 0.0;
+        }
+        cov / (var_a.sqrt() * var_b.sqrt())
+    }
 }
