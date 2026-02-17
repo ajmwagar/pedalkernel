@@ -122,6 +122,17 @@ Gain.position -> "Drive" [0.0, 1.0] = 0.5
 
 ---
 
+## UI manifests
+
+Pedal UI manifests (JSON) live under `pedalkernel-vst/ui/`.
+
+- Schema: `pedalkernel-vst/ui/ui_manifest.schema.json`
+- Free pedal manifests: `pedalkernel-vst/ui/manifests/free/`
+
+These are non-secret control-surface descriptions (controls list, enclosure preset, optional style hints) used by UI/skin generation in downstream tooling.
+
+See: `docs/UI_MANIFESTS.md`
+
 ## Quick start
 
 ```bash
@@ -160,6 +171,12 @@ The same `.pedal` file drives three outputs:
                           |
                           +---> Bill of Materials ---> Mouser order
 ```
+
+> Note on UI/skins:
+> - `.pedal` is **circuit-only** (signal path + parameter mapping).
+> - `.pedalhw` is **hardware/skin metadata** (e.g., parts specs, faceplate/finish in the pro toolchain).
+> - This repo also contains **UI manifests** (JSON) under `pedalkernel-vst/ui/` for non-secret control-surface metadata (labels, knob/switch list, enclosure preset).
+> - The pro pipeline may merge `.pedalhw` + UI manifest + internal assets when generating final branded skins.
 
 ### KiCad export
 

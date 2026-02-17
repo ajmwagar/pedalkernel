@@ -1,0 +1,16 @@
+{
+  "$schema": "../../ui_manifest.schema.json",
+  "schema_version": 1,
+  "pedal_id": "klon_centaur",
+  "display_name": "Klon Centaur",
+  "enclosure": "125B_PORTRAIT",
+  "label_style": "printed",
+  "knob_style": { "family": "classic", "color": "gold" },
+  "led": { "color": "red" },
+  "controls": [
+    { "id": "gain", "label": "GAIN", "kind": "knob", "range": { "min": 0.0, "max": 1.0 }, "default": 0.4 },
+    { "id": "treble", "label": "TREBLE", "kind": "knob", "range": { "min": 0.0, "max": 1.0 }, "default": 0.5 },
+    { "id": "output", "label": "OUTPUT", "kind": "knob", "range": { "min": 0.0, "max": 1.0 }, "default": 0.6 },
+    { "id": "bypass", "label": "BYPASS", "kind": "switch", "default": false }
+  ]
+}

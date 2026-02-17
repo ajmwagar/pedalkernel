@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ajmwagar/pedalkernel/blob/main/pedalkernel-vst/ui/ui_manifest.schema.json",
+  "title": "Pedal UI Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "pedal_id", "display_name", "controls"],
+  "properties": {
+    "schema_version": {
+      "description": "Manifest schema version for forwards/backwards compatibility.",
+      "type": "integer",
+      "minimum": 1,
+      "default": 1
+    },
+    "pedal_id": {
+      "description": "Stable identifier / slug for the pedal (e.g. 'tube_screamer').",
+      "type": "string",
+      "minLength": 1
+    },
+    "display_name": {
+      "description": "Human-friendly display name (e.g. 'Tube Screamer').",
+      "type": "string",
+      "minLength": 1
+    },
+    "enclosure": {
+      "description": "Enclosure preset name. Defaults to 125B portrait.",
+      "type": "string",
+      "default": "125B_PORTRAIT"
+    },
+    "label_style": {
+      "description": "How text is rendered on the faceplate.",
+      "type": "string",
+      "enum": ["engraved_1c", "printed"]
+    },
+    "knob_style": {
+      "description": "Optional knob styling hints.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "family": { "type": "string" },
+        "color": { "type": "string" }
+      }
+    },
+    "led": {
+      "description": "Optional LED styling hints.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "color": { "type": "string" },
+        "style": { "type": "string" }
+      }
+    },
+    "controls": {
+      "description": "Ordered list of control surface elements.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/control" }
+    }
+  },
+  "$defs": {
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "kind"],
+      "properties": {
+        "id": {
+          "description": "Stable control identifier used for mapping automation/params.",
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "description": "Text shown near the control.",
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "description": "Control type.",
+          "type": "string",
+          "enum": ["knob", "switch"]
+        },
+        "range": {
+          "description": "Optional numeric range for continuous controls.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["min", "max"],
+          "properties": {
+            "min": { "type": "number" },
+            "max": { "type": "number" },
+            "step": { "type": "number" }
+          }
+        },
+        "default": {
+          "description": "Optional default value for the control.",
+          "type": ["number", "boolean", "string", "null"]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "switch" } }, "required": ["kind"] },
+          "then": {
+            "properties": {
+              "default": { "type": ["boolean", "null"] }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

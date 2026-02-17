@@ -1,0 +1,16 @@
+{
+  "$schema": "../../ui_manifest.schema.json",
+  "schema_version": 1,
+  "pedal_id": "big_muff",
+  "display_name": "Big Muff",
+  "enclosure": "125B_PORTRAIT",
+  "label_style": "printed",
+  "knob_style": { "family": "classic", "color": "white" },
+  "led": { "color": "red" },
+  "controls": [
+    { "id": "volume", "label": "VOLUME", "kind": "knob", "range": { "min": 0.0, "max": 1.0 }, "default": 0.5 },
+    { "id": "tone", "label": "TONE", "kind": "knob", "range": { "min": 0.0, "max": 1.0 }, "default": 0.5 },
+    { "id": "sustain", "label": "SUSTAIN", "kind": "knob", "range": { "min": 0.0, "max": 1.0 }, "default": 0.6 },
+    { "id": "bypass", "label": "BYPASS", "kind": "switch", "default": false }
+  ]
+}
