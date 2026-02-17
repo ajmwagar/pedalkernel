@@ -8,15 +8,15 @@
 //!
 //! Adaptors (Series, Parallel) remain in the `tree` module as they're structural.
 
-mod linear;
-mod nonlinear;
 mod controlled;
+mod linear;
 mod modulation;
+mod nonlinear;
 
-pub use linear::*;
-pub use nonlinear::*;
 pub use controlled::*;
+pub use linear::*;
 pub use modulation::*;
+pub use nonlinear::*;
 
 // ---------------------------------------------------------------------------
 // Traits
@@ -225,7 +225,10 @@ mod tests {
 
         // Down saw should start near +1 and fall to -1
         assert!(down_samples[0] > 0.9, "saw down should start near +1");
-        assert!(down_samples[24000] < 0.0, "saw down should be negative at mid");
+        assert!(
+            down_samples[24000] < 0.0,
+            "saw down should be negative at mid"
+        );
     }
 
     #[test]
@@ -307,7 +310,7 @@ mod tests {
         let model = JfetModel::n_2n5457();
         let mut jfet = JfetRoot::new(model);
         jfet.set_vgs(0.0); // Fully on
-        // Small Vds (triode region)
+                           // Small Vds (triode region)
         let b = jfet.process(0.1, 100.0);
         assert!(b.abs() < 0.1, "JFET triode should pass small signal");
     }
@@ -317,7 +320,7 @@ mod tests {
         let model = JfetModel::n_2n5457();
         let mut jfet = JfetRoot::new(model);
         jfet.set_vgs(0.0); // Fully on
-        // Large Vds should saturate
+                           // Large Vds should saturate
         let b = jfet.process(10.0, 1000.0);
         assert!(
             b.abs() < 10.0,
@@ -492,8 +495,14 @@ mod tests {
         // Current: i = (a - b) / (2 * Rp)
         let i = (a - b) / (2.0 * rp);
 
-        assert!(v.is_finite() && v.abs() < 1000.0, "v should be reasonable: {v}");
-        assert!(i.is_finite() && i.abs() < 0.01, "i should be reasonable: {i}");
+        assert!(
+            v.is_finite() && v.abs() < 1000.0,
+            "v should be reasonable: {v}"
+        );
+        assert!(
+            i.is_finite() && i.abs() < 0.01,
+            "i should be reasonable: {i}"
+        );
     }
 
     // Photocoupler tests
@@ -544,7 +553,10 @@ mod tests {
             r_after_fall < pc.model.r_dark * 0.9,
             "fall should be slower than rise"
         );
-        assert!(r_after_rise < r_after_fall, "resistance should increase when LED off");
+        assert!(
+            r_after_rise < r_after_fall,
+            "resistance should increase when LED off"
+        );
     }
 
     #[test]
@@ -705,7 +717,8 @@ mod tests {
     #[test]
     fn envelope_follower_from_rc() {
         // Auto-wah style: attack τ = 1kΩ × 4.7µF = 4.7ms, release τ = 100kΩ × 1.5µF = 150ms
-        let ef_wah = EnvelopeFollower::from_rc(1_000.0, 4.7e-6, 100_000.0, 1.5e-6, 20_000.0, 48000.0);
+        let ef_wah =
+            EnvelopeFollower::from_rc(1_000.0, 4.7e-6, 100_000.0, 1.5e-6, 20_000.0, 48000.0);
         // Compressor style: attack τ = 100Ω × 10µF = 1ms, release τ = 300kΩ × 1µF = 300ms
         let ef_comp = EnvelopeFollower::from_rc(100.0, 10e-6, 300_000.0, 1e-6, 10_000.0, 48000.0);
 
@@ -714,7 +727,11 @@ mod tests {
         // Compressor should have very fast attack
         assert!(ef_comp.attack() <= 1.5, "comp attack: {}", ef_comp.attack());
         // Compressor should have slow release
-        assert!(ef_comp.release() >= 250.0, "comp release: {}", ef_comp.release());
+        assert!(
+            ef_comp.release() >= 250.0,
+            "comp release: {}",
+            ef_comp.release()
+        );
     }
 
     #[test]

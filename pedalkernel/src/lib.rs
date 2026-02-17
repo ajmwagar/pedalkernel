@@ -54,8 +54,154 @@ pub trait PedalProcessor {
 mod jack_engine {
     use crate::PedalProcessor;
     use jack::{AudioIn, AudioOut, Client, ClientOptions, Control, ProcessHandler, ProcessScope};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
+
+    // ── DC blocking filter ─────────────────────────────────────────────
+    //
+    // First-order high-pass at ~10 Hz removes DC offset that accumulates
+    // from WDF numerical drift, reclaiming headroom that would otherwise
+    // push one side of the waveform into DAC hard clipping.
+
+    /// First-order DC blocking filter (high-pass, ~10 Hz cutoff).
+    struct DcBlocker {
+        x_prev: f64,
+        y_prev: f64,
+        coeff: f64, // R / (R + 1) where R = 1 / (2π * fc / fs)
+    }
+
+    impl DcBlocker {
+        fn new(sample_rate: f64) -> Self {
+            let fc = 10.0; // 10 Hz cutoff — well below guitar range
+            let r = 1.0 / (2.0 * std::f64::consts::PI * fc / sample_rate);
+            Self {
+                x_prev: 0.0,
+                y_prev: 0.0,
+                coeff: r / (r + 1.0),
+            }
+        }
+
+        #[inline]
+        fn process(&mut self, x: f64) -> f64 {
+            // y[n] = R * (y[n-1] + x[n] - x[n-1])
+            self.y_prev = self.coeff * (self.y_prev + x - self.x_prev);
+            self.x_prev = x;
+            self.y_prev
+        }
+    }
+
+    // ── Output stage ──────────────────────────────────────────────────
+    //
+    // Applies DC blocking + soft limiting to prevent DAC hard clipping.
+    // DAC hard clipping (output > 1.0) sounds like harsh static/buzz
+    // that's unrelated to the musical soft-clipping the WDF diodes produce.
+
+    /// Output stage: DC blocker + soft-knee limiter to prevent DAC hard clipping.
+    struct OutputStage {
+        dc_blocker: DcBlocker,
+    }
+
+    /// Soft-knee limiter threshold.  Signals below this amplitude pass
+    /// through *unchanged* — no coloration, no dynamics loss.  Only
+    /// signals between the threshold and the DAC ceiling are compressed.
+    const LIMITER_THRESHOLD: f64 = 0.9;
+
+    /// Reciprocal of `(1.0 - THRESHOLD)`, precomputed.
+    const LIMITER_INV_KNEE: f64 = 1.0 / (1.0 - LIMITER_THRESHOLD);
+
+    impl OutputStage {
+        fn new(sample_rate: f64) -> Self {
+            Self {
+                dc_blocker: DcBlocker::new(sample_rate),
+            }
+        }
+
+        /// Process a sample: remove DC offset, then soft-limit to [-1.0, 1.0].
+        ///
+        /// Uses a soft-knee limiter modeled after analog brickwall limiters:
+        /// - Below ±0.9: **passthrough** — no coloration whatsoever.
+        /// - 0.9 to 1.0: smooth cubic compression toward ±1.0.
+        /// - Above 1.0: hard ceiling at ±1.0 (should rarely reach here).
+        ///
+        /// This preserves 100% of the WDF circuit's tonal character for
+        /// signals in the normal range, and only intervenes for peaks that
+        /// would otherwise hit the DAC hard clipper.
+        #[inline]
+        fn process(&mut self, sample: f64) -> f64 {
+            let x = self.dc_blocker.process(sample);
+            let abs_x = x.abs();
+            if abs_x <= LIMITER_THRESHOLD {
+                // Below threshold: clean passthrough, zero coloration.
+                x
+            } else if abs_x >= 1.0 {
+                // Above ceiling: hard limit (safety net).
+                x.signum()
+            } else {
+                // Knee region: cubic ease-out from threshold to 1.0.
+                // Maps [threshold, 1.0] input → [threshold, 1.0] output
+                // with zero derivative at the ceiling (smooth tangent).
+                let t = (abs_x - LIMITER_THRESHOLD) * LIMITER_INV_KNEE; // 0..1
+                let compressed = LIMITER_THRESHOLD + (1.0 - LIMITER_THRESHOLD) * (2.0 * t - t * t);
+                compressed.copysign(x)
+            }
+        }
+    }
+
+    // ── Lock-free control slot ────────────────────────────────────────
+    //
+    // Replaces the `Mutex<Vec<(String, f64)>>` on the hot path.  The UI
+    // thread writes control updates into fixed slots keyed by label.
+    // The RT callback reads them without locking — no priority inversion,
+    // no heap allocation, no xruns.
+
+    /// A single lock-free control value slot using atomic f64.
+    struct ControlSlot {
+        label: String,
+        /// Atomic storage for the f64 value (bit-cast via u64).
+        value: AtomicU64,
+        /// Generation counter: bumped on each write so the reader knows
+        /// whether a new value is available without a separate dirty flag.
+        generation: AtomicU64,
+        /// Last generation the reader saw.
+        last_read_gen: std::cell::UnsafeCell<u64>,
+    }
+
+    // SAFETY: The AtomicU64 fields are inherently thread-safe.
+    // `last_read_gen` is only accessed from the RT thread (reader side).
+    unsafe impl Send for ControlSlot {}
+    unsafe impl Sync for ControlSlot {}
+
+    impl ControlSlot {
+        fn new(label: String, initial: f64) -> Self {
+            Self {
+                label,
+                value: AtomicU64::new(initial.to_bits()),
+                generation: AtomicU64::new(0),
+                last_read_gen: std::cell::UnsafeCell::new(0),
+            }
+        }
+
+        /// Write a new value (UI thread).
+        fn store(&self, value: f64) {
+            self.value.store(value.to_bits(), Ordering::Release);
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+
+        /// Check if a new value is available and read it (RT thread).
+        /// Returns `Some(value)` if updated since last read.
+        #[inline]
+        fn load_if_changed(&self) -> Option<f64> {
+            let gen = self.generation.load(Ordering::Acquire);
+            // SAFETY: only called from the single RT thread
+            let last = unsafe { &mut *self.last_read_gen.get() };
+            if gen != *last {
+                *last = gen;
+                Some(f64::from_bits(self.value.load(Ordering::Acquire)))
+            } else {
+                None
+            }
+        }
+    }
 
     /// Result of activating a JACK client: the async handle plus registered
     /// input/output port names.
@@ -85,24 +231,79 @@ mod jack_engine {
 
     /// Shared control state for real-time parameter updates between a UI
     /// thread and the JACK process callback.
-    #[derive(Default)]
+    ///
+    /// Uses lock-free atomic slots instead of a `Mutex<Vec<>>` to avoid
+    /// priority inversion and heap allocation in the RT callback — the
+    /// most common cause of xruns (crackle/static) in JACK applications.
     pub struct SharedControls {
+        slots: Vec<ControlSlot>,
+        /// Fallback for controls not pre-registered as slots.
         pending: Mutex<Vec<(String, f64)>>,
         bypassed: AtomicBool,
+    }
+
+    impl Default for SharedControls {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl SharedControls {
         pub fn new() -> Self {
             Self {
+                slots: Vec::new(),
                 pending: Mutex::new(Vec::new()),
                 bypassed: AtomicBool::new(false),
             }
         }
 
-        /// Queue a control update (called from the UI thread).
+        /// Create SharedControls with pre-registered lock-free slots for
+        /// known control labels.  This is the preferred constructor — it
+        /// eliminates all locking from the RT callback for these controls.
+        pub fn with_controls(labels: &[(String, f64)]) -> Self {
+            let slots = labels
+                .iter()
+                .map(|(label, default)| ControlSlot::new(label.clone(), *default))
+                .collect();
+            Self {
+                slots,
+                pending: Mutex::new(Vec::new()),
+                bypassed: AtomicBool::new(false),
+            }
+        }
+
+        /// Set a control value (called from the UI thread).
+        ///
+        /// If the label matches a pre-registered slot, uses lock-free
+        /// atomic write.  Otherwise falls back to the Mutex path.
         pub fn set_control(&self, label: &str, value: f64) {
+            for slot in &self.slots {
+                if slot.label == label {
+                    slot.store(value);
+                    return;
+                }
+            }
+            // Fallback for unknown labels
             if let Ok(mut pending) = self.pending.lock() {
                 pending.push((label.to_string(), value));
+            }
+        }
+
+        /// Drain changed controls into the processor (called from RT thread).
+        /// Lock-free for pre-registered slots; `try_lock` for the fallback.
+        #[inline]
+        fn drain_into(&self, processor: &mut dyn PedalProcessor) {
+            // Lock-free path: check each atomic slot
+            for slot in &self.slots {
+                if let Some(value) = slot.load_if_changed() {
+                    processor.set_control(&slot.label, value);
+                }
+            }
+            // Fallback path (rare): drain any Mutex-queued controls
+            if let Ok(mut pending) = self.pending.try_lock() {
+                for (label, value) in pending.drain(..) {
+                    processor.set_control(&label, value);
+                }
             }
         }
 
@@ -121,16 +322,13 @@ mod jack_engine {
         in_port: jack::Port<AudioIn>,
         out_port: jack::Port<AudioOut>,
         controls: Arc<SharedControls>,
+        output_stage: OutputStage,
     }
 
     impl<P: PedalProcessor + Send> ProcessHandler for JackProcessorLive<P> {
         fn process(&mut self, _client: &Client, ps: &ProcessScope) -> Control {
-            // Drain pending control updates (non-blocking).
-            if let Ok(mut pending) = self.controls.pending.try_lock() {
-                for (label, value) in pending.drain(..) {
-                    self.processor.set_control(&label, value);
-                }
-            }
+            // Drain pending control updates (lock-free for registered slots).
+            self.controls.drain_into(&mut self.processor);
 
             let input = self.in_port.as_slice(ps);
             let output = self.out_port.as_mut_slice(ps);
@@ -141,7 +339,9 @@ mod jack_engine {
                 }
             } else {
                 for (out, &inp) in output.iter_mut().zip(input.iter()) {
-                    *out = self.processor.process(inp as f64) as f32;
+                    let processed = self.processor.process(inp as f64);
+                    // DC-block + soft-limit to prevent DAC hard clipping.
+                    *out = self.output_stage.process(processed) as f32;
                 }
             }
 
@@ -267,7 +467,8 @@ mod jack_engine {
             mut processor: P,
             controls: Arc<SharedControls>,
         ) -> Result<ActiveJackClient<P>, jack::Error> {
-            processor.set_sample_rate(client.sample_rate() as f64);
+            let sample_rate = client.sample_rate() as f64;
+            processor.set_sample_rate(sample_rate);
 
             let in_port = client.register_port("in", AudioIn)?;
             let out_port = client.register_port("out", AudioOut)?;
@@ -282,6 +483,7 @@ mod jack_engine {
                 in_port,
                 out_port,
                 controls,
+                output_stage: OutputStage::new(sample_rate),
             };
             let async_client = client.activate_async((), handler)?;
 

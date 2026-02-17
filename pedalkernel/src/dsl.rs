@@ -562,7 +562,10 @@ fn parse_envelope_follower(input: &str) -> IResult<&str, ComponentKind> {
     let (input, sensitivity_r) = eng_value(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sensitivity_r)))
+    Ok((
+        input,
+        ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sensitivity_r),
+    ))
 }
 
 /// `lfo(triangle, 100k, 220n)` - waveform, timing_r, timing_c
@@ -871,13 +874,19 @@ pedal "Tremolo" {
     fn parse_photocoupler_vtl5c3() {
         let (_, c) = component_def("OC1: photocoupler(vtl5c3)").unwrap();
         assert_eq!(c.id, "OC1");
-        assert_eq!(c.kind, ComponentKind::Photocoupler(PhotocouplerType::Vtl5c3));
+        assert_eq!(
+            c.kind,
+            ComponentKind::Photocoupler(PhotocouplerType::Vtl5c3)
+        );
     }
 
     #[test]
     fn parse_photocoupler_vtl5c1() {
         let (_, c) = component_def("OC2: photocoupler(vtl5c1)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Photocoupler(PhotocouplerType::Vtl5c1));
+        assert_eq!(
+            c.kind,
+            ComponentKind::Photocoupler(PhotocouplerType::Vtl5c1)
+        );
     }
 
     #[test]
@@ -955,11 +964,17 @@ pedal "Optical Tremolo" {
     #[test]
     fn parse_lfo_waveforms() {
         assert_eq!(lfo_waveform("sine").unwrap().1, LfoWaveformDsl::Sine);
-        assert_eq!(lfo_waveform("triangle").unwrap().1, LfoWaveformDsl::Triangle);
+        assert_eq!(
+            lfo_waveform("triangle").unwrap().1,
+            LfoWaveformDsl::Triangle
+        );
         assert_eq!(lfo_waveform("square").unwrap().1, LfoWaveformDsl::Square);
         assert_eq!(lfo_waveform("saw_up").unwrap().1, LfoWaveformDsl::SawUp);
         assert_eq!(lfo_waveform("saw_down").unwrap().1, LfoWaveformDsl::SawDown);
-        assert_eq!(lfo_waveform("sample_hold").unwrap().1, LfoWaveformDsl::SampleAndHold);
+        assert_eq!(
+            lfo_waveform("sample_hold").unwrap().1,
+            LfoWaveformDsl::SampleAndHold
+        );
     }
 
     #[test]
@@ -1004,7 +1019,9 @@ pedal "Harmonic Tremolo" {
         // envelope_follower(1k, 4.7u, 100k, 1u, 20k)
         let (_, c) = component_def("EF1: envelope_follower(1k, 4.7u, 100k, 1u, 20k)").unwrap();
         assert_eq!(c.id, "EF1");
-        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) = c.kind {
+        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) =
+            c.kind
+        {
             assert!((attack_r - 1_000.0).abs() < 1.0);
             assert!((attack_c - 4.7e-6).abs() < 1e-9);
             assert!((release_r - 100_000.0).abs() < 1.0);
@@ -1039,7 +1056,9 @@ pedal "Auto Wah" {
         assert_eq!(def.name, "Auto Wah");
         assert_eq!(def.components.len(), 4);
         // Check EnvelopeFollower component
-        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) = &def.components[0].kind {
+        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) =
+            &def.components[0].kind
+        {
             assert!((*attack_r - 1_000.0).abs() < 1.0);
             assert!((*attack_c - 4.7e-6).abs() < 1e-9);
             assert!((*release_r - 100_000.0).abs() < 1.0);

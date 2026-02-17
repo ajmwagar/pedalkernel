@@ -968,9 +968,15 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         (None, part_name.to_string())
                     } else {
                         match jt {
-                            crate::dsl::JfetType::J201 => (Some("512-J201".to_string()), "J201 N-JFET".to_string()),
-                            crate::dsl::JfetType::N2n5457 => (Some("512-2N5457".to_string()), "2N5457 N-JFET".to_string()),
-                            crate::dsl::JfetType::P2n5460 => (None, "N-JFET (unknown model)".to_string()),
+                            crate::dsl::JfetType::J201 => {
+                                (Some("512-J201".to_string()), "J201 N-JFET".to_string())
+                            }
+                            crate::dsl::JfetType::N2n5457 => {
+                                (Some("512-2N5457".to_string()), "2N5457 N-JFET".to_string())
+                            }
+                            crate::dsl::JfetType::P2n5460 => {
+                                (None, "N-JFET (unknown model)".to_string())
+                            }
                         }
                     };
                     vec![BomEntry {
@@ -987,7 +993,9 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         (None, part_name.to_string())
                     } else {
                         match jt {
-                            crate::dsl::JfetType::P2n5460 => (Some("512-2N5460".to_string()), "2N5460 P-JFET".to_string()),
+                            crate::dsl::JfetType::P2n5460 => {
+                                (Some("512-2N5460".to_string()), "2N5460 P-JFET".to_string())
+                            }
                             _ => (None, "P-JFET".to_string()),
                         }
                     };
@@ -1005,9 +1013,15 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         (None, part_name.to_string())
                     } else {
                         match pt {
-                            crate::dsl::PhotocouplerType::Vtl5c3 => (Some("VTL5C3".to_string()), "VTL5C3 Vactrol".to_string()),
-                            crate::dsl::PhotocouplerType::Vtl5c1 => (Some("VTL5C1".to_string()), "VTL5C1 Vactrol".to_string()),
-                            crate::dsl::PhotocouplerType::Nsl32 => (Some("NSL-32".to_string()), "NSL-32 Optocoupler".to_string()),
+                            crate::dsl::PhotocouplerType::Vtl5c3 => {
+                                (Some("VTL5C3".to_string()), "VTL5C3 Vactrol".to_string())
+                            }
+                            crate::dsl::PhotocouplerType::Vtl5c1 => {
+                                (Some("VTL5C1".to_string()), "VTL5C1 Vactrol".to_string())
+                            }
+                            crate::dsl::PhotocouplerType::Nsl32 => {
+                                (Some("NSL-32".to_string()), "NSL-32 Optocoupler".to_string())
+                            }
                         }
                     };
                     vec![BomEntry {
@@ -1080,7 +1094,13 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         qty_per_unit: 1,
                     }]
                 }
-                ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) => {
+                ComponentKind::EnvelopeFollower(
+                    attack_r,
+                    attack_c,
+                    release_r,
+                    release_c,
+                    sens_r,
+                ) => {
                     let mut entries = Vec::new();
 
                     // Attack timing resistor
@@ -1091,7 +1111,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     entries.push(BomEntry {
                         reference: format!("R_{}_ATK", comp.id),
                         display: "Envelope Attack R".into(),
-                        value: val, mouser_pn: pn, description: desc, qty_per_unit: 1,
+                        value: val,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
                     });
 
                     // Attack timing capacitor
@@ -1102,7 +1125,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     entries.push(BomEntry {
                         reference: format!("C_{}_ATK", comp.id),
                         display: "Envelope Attack C".into(),
-                        value: val, mouser_pn: pn, description: desc, qty_per_unit: 1,
+                        value: val,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
                     });
 
                     // Release timing resistor
@@ -1113,7 +1139,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     entries.push(BomEntry {
                         reference: format!("R_{}_REL", comp.id),
                         display: "Envelope Release R".into(),
-                        value: val, mouser_pn: pn, description: desc, qty_per_unit: 1,
+                        value: val,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
                     });
 
                     // Release timing capacitor
@@ -1124,7 +1153,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     entries.push(BomEntry {
                         reference: format!("C_{}_REL", comp.id),
                         display: "Envelope Release C".into(),
-                        value: val, mouser_pn: pn, description: desc, qty_per_unit: 1,
+                        value: val,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
                     });
 
                     // Sensitivity resistor
@@ -1135,7 +1167,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     entries.push(BomEntry {
                         reference: format!("R_{}_SENS", comp.id),
                         display: "Envelope Sens R".into(),
-                        value: val, mouser_pn: pn, description: desc, qty_per_unit: 1,
+                        value: val,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
                     });
 
                     // Rectifier diode (1N4148)

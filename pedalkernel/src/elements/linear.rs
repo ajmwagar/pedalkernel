@@ -18,6 +18,11 @@ impl Resistor {
     pub fn new(resistance: f64) -> Self {
         Self { resistance }
     }
+
+    /// Change the resistance value in-place (no state reset).
+    pub fn set_resistance(&mut self, resistance: f64) {
+        self.resistance = resistance;
+    }
 }
 
 impl WdfLeaf for Resistor {

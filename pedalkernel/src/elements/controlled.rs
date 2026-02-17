@@ -38,13 +38,13 @@ impl PhotocouplerModel {
     /// VTL5C3 - Classic Vactrol used in Uni-Vibe and optical tremolos.
     pub fn vtl5c3() -> Self {
         Self {
-            r_dark: 1_000_000.0,  // 1MΩ
-            r_light: 1_500.0,      // 1.5kΩ
+            r_dark: 1_000_000.0, // 1MΩ
+            r_light: 1_500.0,    // 1.5kΩ
             gamma: 0.75,
-            tau_fast_rise: 0.002,  // 2ms
-            tau_fast_fall: 0.008,  // 8ms
-            tau_slow_rise: 0.020,  // 20ms
-            tau_slow_fall: 0.080,  // 80ms
+            tau_fast_rise: 0.002, // 2ms
+            tau_fast_fall: 0.008, // 8ms
+            tau_slow_rise: 0.020, // 20ms
+            tau_slow_fall: 0.080, // 80ms
             slow_weight: 0.3,
         }
     }
@@ -52,13 +52,13 @@ impl PhotocouplerModel {
     /// VTL5C1 - Faster response, used in some compressors.
     pub fn vtl5c1() -> Self {
         Self {
-            r_dark: 600_000.0,     // 600kΩ
-            r_light: 600.0,        // 600Ω
+            r_dark: 600_000.0, // 600kΩ
+            r_light: 600.0,    // 600Ω
             gamma: 0.8,
-            tau_fast_rise: 0.001,  // 1ms
-            tau_fast_fall: 0.005,  // 5ms
-            tau_slow_rise: 0.010,  // 10ms
-            tau_slow_fall: 0.050,  // 50ms
+            tau_fast_rise: 0.001, // 1ms
+            tau_fast_fall: 0.005, // 5ms
+            tau_slow_rise: 0.010, // 10ms
+            tau_slow_fall: 0.050, // 50ms
             slow_weight: 0.25,
         }
     }
@@ -66,13 +66,13 @@ impl PhotocouplerModel {
     /// NSL-32 - Common optocoupler, moderate response.
     pub fn nsl32() -> Self {
         Self {
-            r_dark: 2_000_000.0,   // 2MΩ
-            r_light: 2_000.0,      // 2kΩ
+            r_dark: 2_000_000.0, // 2MΩ
+            r_light: 2_000.0,    // 2kΩ
             gamma: 0.7,
-            tau_fast_rise: 0.003,  // 3ms
-            tau_fast_fall: 0.010,  // 10ms
-            tau_slow_rise: 0.025,  // 25ms
-            tau_slow_fall: 0.100,  // 100ms
+            tau_fast_rise: 0.003, // 3ms
+            tau_fast_fall: 0.010, // 10ms
+            tau_slow_rise: 0.025, // 25ms
+            tau_slow_fall: 0.100, // 100ms
             slow_weight: 0.35,
         }
     }
