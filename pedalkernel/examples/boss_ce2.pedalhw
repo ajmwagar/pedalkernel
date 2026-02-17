@@ -1,0 +1,5 @@
+# Boss CE-2 hardware specs
+power: 9v
+current_draw: 10mA
+bypass: buffered
+enclosure: boss_compact

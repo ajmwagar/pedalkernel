@@ -1,0 +1,21 @@
+# Fulltone OCD V1.7 Hardware Specs
+# Reference: Fulltone OCD V1.7 (MOSFET clipping)
+
+# Op-amp - TL072 (gain stage)
+U1: part("TL072CP") supply_max(36)
+
+# MOSFET clipping pair - 2N7000 N-channel enhancement
+M1: part("2N7000") vds_max(60)
+M2: part("2N7000") vds_max(60)
+
+# Coupling capacitors
+C1: voltage_rating(50) part("100nF Film")
+C2: voltage_rating(50) part("100pF Ceramic")
+C3: voltage_rating(50) part("47nF Film")
+C4: voltage_rating(50) part("22nF Film")
+C5: voltage_rating(25) part("10uF Electrolytic")
+
+# Pots
+Drive: part("500k Log")
+Tone: part("100k Linear")
+Volume: part("100k Audio")
