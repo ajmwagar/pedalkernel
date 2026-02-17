@@ -1,0 +1,41 @@
+# Boss NS-2 style noise suppressor
+# JFET voltage-controlled gate driven by envelope follower
+#
+# When input signal is above threshold, EF drives JFET into
+# conduction — signal passes through. When signal drops below
+# threshold, JFET pinches off and attenuates the noise floor.
+#
+# Threshold: sensitivity of the envelope detector (higher = more gating)
+# Decay: controls the release time of the gate via output RC network
+
+pedal "Noise Suppressor" {
+  components {
+    C1:        cap(100n)        # Input coupling capacitor
+    R1:        resistor(10k)    # JFET drain load — required for WDF stage
+    J1:        njfet(j201)      # N-channel JFET as voltage-controlled switch
+    EF1:       envelope_follower(470, 10u, 47k, 10u, 10k)
+    # Attack  τ = 470Ω × 10µF  = 4.7 ms  (fast open)
+    # Release τ = 47kΩ × 10µF  = 470 ms   (smooth close)
+    # Sensitivity = 10kΩ / 10kΩ = 1.0x
+    R2:        resistor(100k)   # Output impedance
+    Threshold: pot(50k)         # Threshold (attenuates signal in JFET network)
+    Decay:     pot(100k)        # Decay (output attenuation / bleed)
+    C2:        cap(100n)        # Output coupling capacitor
+  }
+  nets {
+    in -> C1.a
+    C1.b -> J1.drain, R1.a
+    R1.b -> gnd
+    J1.source -> gnd
+    EF1.out -> J1.vgs
+    J1.drain -> Threshold.a
+    Threshold.b -> R2.a
+    R2.b -> Decay.a
+    Decay.b -> C2.a
+    C2.b -> out
+  }
+  controls {
+    Threshold.position -> "Threshold" [0.0, 1.0] = 0.5
+    Decay.position -> "Decay" [0.0, 1.0] = 0.5
+  }
+}

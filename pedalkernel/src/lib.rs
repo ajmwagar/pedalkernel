@@ -687,6 +687,35 @@ pedal "Test Pedal" {
     }
 
     #[test]
+    fn pedal_noise_suppressor() {
+        let p = parse_example("noise_suppressor.pedal");
+        assert_eq!(p.name, "Noise Suppressor");
+        assert_eq!(p.controls.len(), 2);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Threshold"));
+        assert!(labels.contains(&"Decay"));
+        // Verify JFET + envelope follower
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::NJfet(_))));
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::EnvelopeFollower(..))));
+
+        // Compile and verify it produces output with a real signal
+        let mut proc = compiler::compile_pedal(&p, 48000.0).unwrap();
+        let input: Vec<f64> = (0..4800)
+            .map(|i| 0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+            .collect();
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf");
+        let peak = output.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        assert!(peak > 0.001, "Should produce output: peak={peak}");
+    }
+
+    #[test]
     fn all_pedal_files_export_kicad() {
         let files = [
             "tube_screamer.pedal",

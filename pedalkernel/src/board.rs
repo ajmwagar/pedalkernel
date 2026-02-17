@@ -1,12 +1,17 @@
 //! Parser for `.board` pedalboard definition files.
 //!
 //! A `.board` file defines a signal chain of `.pedal` files with optional
-//! per-pedal knob overrides.
+//! per-pedal knob overrides. Utility pedals can be placed at the start
+//! and/or end of the chain using the `utilities` block:
 //!
 //! ```text
 //! board "Blues Rig" {
 //!   ts: "tube_screamer.pedal" { Drive = 0.6, Level = 0.7 }
 //!   bd: "blues_driver.pedal"
+//! }
+//!
+//! utilities {
+//!   start { ns: "noise_suppressor.pedal" { Threshold = 0.5 } }
 //! }
 //! ```
 
@@ -30,6 +35,10 @@ use nom::{
 pub struct BoardDef {
     pub name: String,
     pub pedals: Vec<BoardPedalEntry>,
+    /// Utility pedals inserted at the start of the chain (e.g. noise gate).
+    pub utility_start: Vec<BoardPedalEntry>,
+    /// Utility pedals inserted at the end of the chain (e.g. limiter, tuner buffer).
+    pub utility_end: Vec<BoardPedalEntry>,
 }
 
 /// A single pedal entry in the board.
@@ -130,6 +139,56 @@ fn pedal_entry(input: &str) -> IResult<&str, BoardPedalEntry> {
 }
 
 // ---------------------------------------------------------------------------
+// Utilities block
+// ---------------------------------------------------------------------------
+
+/// Parse a `start { ... }` or `end { ... }` sub-block inside `utilities`.
+fn utility_position_block<'a>(
+    keyword: &'static str,
+    input: &'a str,
+) -> IResult<&'a str, Vec<BoardPedalEntry>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag(keyword)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+    let (input, entries) = many0(pedal_entry)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+    Ok((input, entries))
+}
+
+/// Parse the optional `utilities { start { ... } end { ... } }` block.
+fn utilities_block(input: &str) -> IResult<&str, (Vec<BoardPedalEntry>, Vec<BoardPedalEntry>)> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("utilities")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+
+    // Parse start/end in any order, both optional
+    let mut start = Vec::new();
+    let mut end = Vec::new();
+    let mut remaining = input;
+    loop {
+        let (input, _) = ws_comments(remaining)?;
+        if let Ok((input, entries)) = utility_position_block("start", input) {
+            start = entries;
+            remaining = input;
+            continue;
+        }
+        if let Ok((input, entries)) = utility_position_block("end", input) {
+            end = entries;
+            remaining = input;
+            continue;
+        }
+        break;
+    }
+
+    let (input, _) = ws_comments(remaining)?;
+    let (input, _) = char('}')(input)?;
+    Ok((input, (start, end)))
+}
+
+// ---------------------------------------------------------------------------
 // Top-level
 // ---------------------------------------------------------------------------
 
@@ -144,12 +203,21 @@ fn parse_board(input: &str) -> IResult<&str, BoardDef> {
     let (input, pedals) = many0(pedal_entry)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
+
+    // Optional utilities block after the board block
+    let (input, (utility_start, utility_end)) = match utilities_block(input) {
+        Ok((input, utils)) => (input, utils),
+        Err(_) => (input, (Vec::new(), Vec::new())),
+    };
     let (input, _) = ws_comments(input)?;
+
     Ok((
         input,
         BoardDef {
             name: name.to_string(),
             pedals,
+            utility_start,
+            utility_end,
         },
     ))
 }
@@ -250,5 +318,64 @@ board "Solo" {
         assert_eq!(board.pedals.len(), 1);
         assert_eq!(board.pedals[0].id, "od");
         assert_eq!(board.pedals[0].overrides.len(), 2);
+    }
+
+    #[test]
+    fn parse_board_with_utilities() {
+        let src = r#"
+board "Gated Rig" {
+  ts: "tube_screamer.pedal" { Drive = 0.7 }
+  bd: "blues_driver.pedal"
+}
+
+utilities {
+  start { ns: "noise_suppressor.pedal" { Threshold = 0.5 } }
+  end   { buf: "noise_suppressor.pedal" }
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        assert_eq!(board.name, "Gated Rig");
+        assert_eq!(board.pedals.len(), 2);
+
+        assert_eq!(board.utility_start.len(), 1);
+        assert_eq!(board.utility_start[0].id, "ns");
+        assert_eq!(board.utility_start[0].path, "noise_suppressor.pedal");
+        assert_eq!(board.utility_start[0].overrides.len(), 1);
+        assert_eq!(
+            board.utility_start[0].overrides[0],
+            ("Threshold".to_string(), 0.5)
+        );
+
+        assert_eq!(board.utility_end.len(), 1);
+        assert_eq!(board.utility_end[0].id, "buf");
+        assert!(board.utility_end[0].overrides.is_empty());
+    }
+
+    #[test]
+    fn parse_board_utilities_start_only() {
+        let src = r#"
+board "Start Only" {
+  ts: "tube_screamer.pedal"
+}
+
+utilities {
+  start { ns: "noise_suppressor.pedal" }
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        assert_eq!(board.utility_start.len(), 1);
+        assert!(board.utility_end.is_empty());
+    }
+
+    #[test]
+    fn parse_board_no_utilities() {
+        let src = r#"
+board "Plain" {
+  ts: "tube_screamer.pedal"
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        assert!(board.utility_start.is_empty());
+        assert!(board.utility_end.is_empty());
     }
 }

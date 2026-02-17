@@ -7,7 +7,7 @@
 //! - `"0:Drive"` → pedal index 0, knob "Drive"
 //! - `"2:__bypass__"` → toggle bypass on pedal index 2
 
-use crate::board::BoardDef;
+use crate::board::{BoardDef, BoardPedalEntry};
 use crate::compiler::{compile_pedal, CompiledPedal};
 use crate::dsl::parse_pedal_file;
 use crate::PedalProcessor;
@@ -23,11 +23,27 @@ struct PedalSlot {
     processor: Option<CompiledPedal>,
     bypassed: bool,
     failed: bool,
+    /// Whether this is a utility pedal (noise gate, buffer, etc.).
+    /// Utility pedals are auto-inserted at the start/end of the chain
+    /// and are not user-addressable by index in the main chain.
+    #[allow(dead_code)]
+    utility: bool,
 }
 
 /// Chains N `CompiledPedal` instances in series.
+///
+/// The internal chain is: `[utility_start...] [user pedals...] [utility_end...]`
+///
+/// User-facing indices (in `set_control("idx:Label", ...)`) address only the
+/// user pedals, not the utility slots. Utility pedals can be controlled via
+/// `"start:idx:Label"` or `"end:idx:Label"`.
 pub struct PedalboardProcessor {
+    /// Utility pedals at the start of the chain.
+    utility_start: Vec<PedalSlot>,
+    /// User-defined pedals in the chain.
     pedals: Vec<PedalSlot>,
+    /// Utility pedals at the end of the chain.
+    utility_end: Vec<PedalSlot>,
 }
 
 impl PedalboardProcessor {
@@ -60,10 +76,46 @@ impl PedalboardProcessor {
         board_dir: &Path,
         sample_rate: f64,
     ) -> (Self, Vec<String>) {
-        let mut pedals = Vec::with_capacity(board.pedals.len());
         let mut warnings = Vec::new();
 
-        for entry in &board.pedals {
+        let utility_start = Self::compile_entries(
+            &board.utility_start,
+            board_dir,
+            sample_rate,
+            true,
+            &mut warnings,
+        );
+        let pedals =
+            Self::compile_entries(&board.pedals, board_dir, sample_rate, false, &mut warnings);
+        let utility_end = Self::compile_entries(
+            &board.utility_end,
+            board_dir,
+            sample_rate,
+            true,
+            &mut warnings,
+        );
+
+        (
+            Self {
+                utility_start,
+                pedals,
+                utility_end,
+            },
+            warnings,
+        )
+    }
+
+    /// Compile a list of board pedal entries into slots.
+    fn compile_entries(
+        entries: &[BoardPedalEntry],
+        board_dir: &Path,
+        sample_rate: f64,
+        utility: bool,
+        warnings: &mut Vec<String>,
+    ) -> Vec<PedalSlot> {
+        let mut slots = Vec::with_capacity(entries.len());
+
+        for entry in entries {
             let pedal_path = board_dir.join(&entry.path);
 
             let result: Result<(String, CompiledPedal), String> = (|| {
@@ -95,11 +147,12 @@ impl PedalboardProcessor {
 
             match result {
                 Ok((name, proc)) => {
-                    pedals.push(PedalSlot {
+                    slots.push(PedalSlot {
                         name,
                         processor: Some(proc),
                         bypassed: false,
                         failed: false,
+                        utility,
                     });
                 }
                 Err(msg) => {
@@ -107,35 +160,36 @@ impl PedalboardProcessor {
                         "Pedal '{}' failed — using dry passthrough: {msg}",
                         entry.id
                     ));
-                    pedals.push(PedalSlot {
+                    slots.push(PedalSlot {
                         name: format!("{} [FAILED]", entry.id),
                         processor: None,
                         bypassed: false,
                         failed: true,
+                        utility,
                     });
                 }
             }
         }
 
-        (Self { pedals }, warnings)
+        slots
     }
 
-    /// Number of pedals in the chain.
+    /// Number of user pedals in the chain (excludes utilities).
     pub fn len(&self) -> usize {
         self.pedals.len()
     }
 
-    /// Whether the pedalboard is empty.
+    /// Whether the pedalboard has no user pedals.
     pub fn is_empty(&self) -> bool {
         self.pedals.is_empty()
     }
 
-    /// Get the name of pedal at the given index.
+    /// Get the name of a user pedal at the given index.
     pub fn pedal_name(&self, index: usize) -> Option<&str> {
         self.pedals.get(index).map(|s| s.name.as_str())
     }
 
-    /// Check if a pedal is bypassed.
+    /// Check if a user pedal is bypassed.
     pub fn is_pedal_bypassed(&self, index: usize) -> bool {
         self.pedals.get(index).is_some_and(|s| s.bypassed)
     }
@@ -144,49 +198,117 @@ impl PedalboardProcessor {
     pub fn is_pedal_failed(&self, index: usize) -> bool {
         self.pedals.get(index).is_some_and(|s| s.failed)
     }
+
+    /// Number of utility pedals at the start of the chain.
+    pub fn utility_start_len(&self) -> usize {
+        self.utility_start.len()
+    }
+
+    /// Number of utility pedals at the end of the chain.
+    pub fn utility_end_len(&self) -> usize {
+        self.utility_end.len()
+    }
+
+    /// Get the name of a start-of-chain utility pedal.
+    pub fn utility_start_name(&self, index: usize) -> Option<&str> {
+        self.utility_start.get(index).map(|s| s.name.as_str())
+    }
+
+    /// Get the name of an end-of-chain utility pedal.
+    pub fn utility_end_name(&self, index: usize) -> Option<&str> {
+        self.utility_end.get(index).map(|s| s.name.as_str())
+    }
+}
+
+/// Process signal through a slice of pedal slots.
+fn process_slots(slots: &mut [PedalSlot], signal: &mut f64) {
+    for slot in slots {
+        if !slot.bypassed {
+            if let Some(ref mut proc) = slot.processor {
+                *signal = proc.process(*signal);
+            }
+        }
+    }
+}
+
+/// Set sample rate on all slots.
+fn set_sample_rate_slots(slots: &mut [PedalSlot], rate: f64) {
+    for slot in slots {
+        if let Some(ref mut proc) = slot.processor {
+            proc.set_sample_rate(rate);
+        }
+    }
+}
+
+/// Reset all slots.
+fn reset_slots(slots: &mut [PedalSlot]) {
+    for slot in slots {
+        if let Some(ref mut proc) = slot.processor {
+            proc.reset();
+        }
+    }
+}
+
+/// Dispatch a control to a slot by index within a slice.
+fn set_control_slot(slots: &mut [PedalSlot], idx: usize, label: &str, value: f64) {
+    if let Some(slot) = slots.get_mut(idx) {
+        if label == "__bypass__" {
+            slot.bypassed = value > 0.5;
+        } else if let Some(ref mut proc) = slot.processor {
+            proc.set_control(label, value);
+        }
+    }
 }
 
 impl PedalProcessor for PedalboardProcessor {
     fn process(&mut self, input: f64) -> f64 {
         let mut signal = input;
-        for slot in &mut self.pedals {
-            if !slot.bypassed {
-                if let Some(ref mut proc) = slot.processor {
-                    signal = proc.process(signal);
-                }
-                // None → dry passthrough (failed pedal)
-            }
-        }
+        // Utility pedals at chain start (e.g. noise gate)
+        process_slots(&mut self.utility_start, &mut signal);
+        // User pedals
+        process_slots(&mut self.pedals, &mut signal);
+        // Utility pedals at chain end (e.g. limiter, buffer)
+        process_slots(&mut self.utility_end, &mut signal);
         signal
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
-        for slot in &mut self.pedals {
-            if let Some(ref mut proc) = slot.processor {
-                proc.set_sample_rate(rate);
-            }
-        }
+        set_sample_rate_slots(&mut self.utility_start, rate);
+        set_sample_rate_slots(&mut self.pedals, rate);
+        set_sample_rate_slots(&mut self.utility_end, rate);
     }
 
     fn reset(&mut self) {
-        for slot in &mut self.pedals {
-            if let Some(ref mut proc) = slot.processor {
-                proc.reset();
-            }
-        }
+        reset_slots(&mut self.utility_start);
+        reset_slots(&mut self.pedals);
+        reset_slots(&mut self.utility_end);
     }
 
-    /// Control routing: `"idx:label"` dispatches to the appropriate pedal.
-    ///
-    /// Special control `"idx:__bypass__"` toggles bypass (value > 0.5 = bypassed).
+    /// Control routing:
+    /// - `"idx:label"` → user pedal at index `idx`
+    /// - `"start:idx:label"` → utility pedal at chain start
+    /// - `"end:idx:label"` → utility pedal at chain end
+    /// - `"idx:__bypass__"` → toggle bypass (value > 0.5 = bypassed)
     fn set_control(&mut self, label: &str, value: f64) {
         if let Some((prefix, remainder)) = label.split_once(':') {
-            if let Ok(idx) = prefix.parse::<usize>() {
-                if let Some(slot) = self.pedals.get_mut(idx) {
-                    if remainder == "__bypass__" {
-                        slot.bypassed = value > 0.5;
-                    } else if let Some(ref mut proc) = slot.processor {
-                        proc.set_control(remainder, value);
+            match prefix {
+                "start" => {
+                    if let Some((idx_str, ctrl)) = remainder.split_once(':') {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            set_control_slot(&mut self.utility_start, idx, ctrl, value);
+                        }
+                    }
+                }
+                "end" => {
+                    if let Some((idx_str, ctrl)) = remainder.split_once(':') {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            set_control_slot(&mut self.utility_end, idx, ctrl, value);
+                        }
+                    }
+                }
+                _ => {
+                    if let Ok(idx) = prefix.parse::<usize>() {
+                        set_control_slot(&mut self.pedals, idx, remainder, value);
                     }
                 }
             }
@@ -445,5 +567,128 @@ board "Bad" {
         // Should not panic — sets rate on all boards
         switcher.set_sample_rate(44100.0);
         switcher.reset();
+    }
+
+    // ── Utility pedal tests ─────────────────────────────────────────────
+
+    #[test]
+    fn board_with_utility_start() {
+        let src = r#"
+board "Gated Rig" {
+  ts: "tube_screamer.pedal" { Drive = 0.7 }
+}
+
+utilities {
+  start { ns: "noise_suppressor.pedal" { Threshold = 0.5 } }
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        assert_eq!(board.pedals.len(), 1);
+        assert_eq!(board.utility_start.len(), 1);
+        assert_eq!(board.utility_start[0].id, "ns");
+        assert!(board.utility_end.is_empty());
+
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let pb = PedalboardProcessor::from_board(&board, &board_dir, 48000.0).unwrap();
+        assert_eq!(pb.len(), 1); // user pedals only
+        assert_eq!(pb.utility_start_len(), 1);
+        assert_eq!(pb.utility_start_name(0), Some("Noise Suppressor"));
+    }
+
+    #[test]
+    fn board_with_utility_start_and_end() {
+        let src = r#"
+board "Full Rig" {
+  ts: "tube_screamer.pedal"
+}
+
+utilities {
+  start { ns: "noise_suppressor.pedal" }
+  end   { buf: "noise_suppressor.pedal" }
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        assert_eq!(board.utility_start.len(), 1);
+        assert_eq!(board.utility_end.len(), 1);
+
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let pb = PedalboardProcessor::from_board(&board, &board_dir, 48000.0).unwrap();
+        assert_eq!(pb.utility_start_len(), 1);
+        assert_eq!(pb.utility_end_len(), 1);
+    }
+
+    #[test]
+    fn utility_pedal_processes_audio() {
+        let src = r#"
+board "Gated" {
+  ts: "tube_screamer.pedal"
+}
+
+utilities {
+  start { ns: "noise_suppressor.pedal" { Threshold = 0.3 } }
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let mut pb = PedalboardProcessor::from_board(&board, &board_dir, 48000.0).unwrap();
+
+        // Process a real signal — should produce output through the whole chain
+        let mut max_out = 0.0_f64;
+        for i in 0..4800 {
+            let input = (i as f64 * 440.0 * 2.0 * std::f64::consts::PI / 48000.0).sin() * 0.3;
+            let output = pb.process(input);
+            max_out = max_out.max(output.abs());
+        }
+        assert!(
+            max_out > 0.001,
+            "signal should pass through gated chain: {max_out}"
+        );
+    }
+
+    #[test]
+    fn utility_pedal_control_routing() {
+        let src = r#"
+board "Control Test" {
+  ts: "tube_screamer.pedal"
+}
+
+utilities {
+  start { ns: "noise_suppressor.pedal" }
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let mut pb = PedalboardProcessor::from_board(&board, &board_dir, 48000.0).unwrap();
+
+        // Control utility pedal via "start:idx:label" routing
+        pb.set_control("start:0:Threshold", 0.8);
+        pb.set_control("start:0:Decay", 0.3);
+
+        // Control user pedal via normal routing
+        pb.set_control("0:Drive", 0.9);
+
+        // Neither should panic
+    }
+
+    #[test]
+    fn board_without_utilities_still_works() {
+        // Existing boards without utilities block should work unchanged
+        let src = r#"
+board "Simple" {
+  ts: "tube_screamer.pedal"
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        assert!(board.utility_start.is_empty());
+        assert!(board.utility_end.is_empty());
+
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let mut pb = PedalboardProcessor::from_board(&board, &board_dir, 48000.0).unwrap();
+        assert_eq!(pb.utility_start_len(), 0);
+        assert_eq!(pb.utility_end_len(), 0);
+
+        // Process should still work
+        let output = pb.process(0.1);
+        assert!(output.is_finite());
     }
 }
