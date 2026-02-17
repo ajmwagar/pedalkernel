@@ -1,11 +1,12 @@
 //! Tube Screamer-style overdrive → WAV output.
 //!
-//! Renders a 440 Hz guitar-like pluck through the WDF overdrive at
-//! three gain settings and writes each to a separate WAV file.
+//! Renders a 440 Hz guitar-like pluck through the compiled Tube Screamer
+//! at three gain settings and writes each to a separate WAV file.
 //!
 //! Run: `cargo run --example overdrive`
 
-use pedalkernel::pedals::Overdrive;
+use pedalkernel::compiler::compile_pedal;
+use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::wav::{guitar_pluck, render_to_wav, write_stereo_wav};
 use pedalkernel::PedalProcessor;
 use std::path::Path;
@@ -22,6 +23,9 @@ fn main() {
     println!("Input:       guitar pluck at {:.1} Hz (low E)", freq);
     println!();
 
+    let src = std::fs::read_to_string("examples/tube_screamer.pedal")
+        .expect("failed to read tube_screamer.pedal");
+    let pedal_def = parse_pedal_file(&src).expect("failed to parse tube_screamer.pedal");
     let input = guitar_pluck(freq, duration, sample_rate);
 
     // Clean signal
@@ -30,35 +34,30 @@ fn main() {
     println!("Wrote clean signal → {}", clean_path.display());
 
     // Low gain
-    let mut od_low = Overdrive::new(sample_rate as f64);
-    od_low.set_gain(0.2);
-    od_low.set_level(0.8);
+    let mut proc = compile_pedal(&pedal_def, sample_rate as f64).unwrap();
+    proc.set_control("Drive", 0.2);
     let path = Path::new("overdrive_low.wav");
-    render_to_wav(&mut od_low, &input, path, sample_rate).unwrap();
+    render_to_wav(&mut proc, &input, path, sample_rate).unwrap();
     println!("Wrote low gain (0.2) → {}", path.display());
 
     // Medium gain
-    let mut od_mid = Overdrive::new(sample_rate as f64);
-    od_mid.set_gain(0.5);
-    od_mid.set_level(0.8);
+    let mut proc = compile_pedal(&pedal_def, sample_rate as f64).unwrap();
+    proc.set_control("Drive", 0.5);
     let path = Path::new("overdrive_mid.wav");
-    render_to_wav(&mut od_mid, &input, path, sample_rate).unwrap();
+    render_to_wav(&mut proc, &input, path, sample_rate).unwrap();
     println!("Wrote mid gain (0.5) → {}", path.display());
 
     // High gain
-    let mut od_high = Overdrive::new(sample_rate as f64);
-    od_high.set_gain(0.9);
-    od_high.set_level(0.8);
+    let mut proc = compile_pedal(&pedal_def, sample_rate as f64).unwrap();
+    proc.set_control("Drive", 0.9);
     let path = Path::new("overdrive_high.wav");
-    render_to_wav(&mut od_high, &input, path, sample_rate).unwrap();
+    render_to_wav(&mut proc, &input, path, sample_rate).unwrap();
     println!("Wrote high gain (0.9) → {}", path.display());
 
     // A/B comparison — clean vs high gain in stereo
-    let mut od = Overdrive::new(sample_rate as f64);
-    od.set_gain(0.9);
-    od.set_level(0.8);
-    od.reset();
-    let output: Vec<f64> = input.iter().map(|&s| od.process(s)).collect();
+    let mut proc = compile_pedal(&pedal_def, sample_rate as f64).unwrap();
+    proc.set_control("Drive", 0.9);
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     let path = Path::new("overdrive_ab.wav");
     write_stereo_wav(&input, &output, path, sample_rate).unwrap();
     println!(

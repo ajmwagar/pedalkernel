@@ -171,11 +171,14 @@ mod tests {
 
     #[test]
     fn render_wav_roundtrip() {
-        use crate::pedals::Overdrive;
+        let src = std::fs::read_to_string("examples/tube_screamer.pedal")
+            .expect("tube_screamer.pedal example file");
+        let pedal_def = crate::dsl::parse_pedal_file(&src).unwrap();
+        let mut proc = crate::compiler::compile_pedal(&pedal_def, 48000.0).unwrap();
+
         let tmp = std::env::temp_dir().join("pedalkernel_test_render.wav");
         let input = sine_wave(440.0, 0.1, 48000);
-        let mut od = Overdrive::new(48000.0);
-        render_to_wav(&mut od, &input, &tmp, 48000).unwrap();
+        render_to_wav(&mut proc, &input, &tmp, 48000).unwrap();
 
         // Verify the file was created and has correct length
         let reader = hound::WavReader::open(&tmp).unwrap();

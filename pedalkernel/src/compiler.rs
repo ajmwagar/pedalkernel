@@ -1127,6 +1127,8 @@ pub struct CompiledPedal {
     lfos: Vec<LfoBinding>,
     /// Envelope follower modulators.
     envelopes: Vec<EnvelopeBinding>,
+    /// Noise gate applied before the gain stage.
+    gate: NoiseGate,
 }
 
 /// Gain-like control labels.
@@ -1199,6 +1201,11 @@ impl CompiledPedal {
 
 impl PedalProcessor for CompiledPedal {
     fn process(&mut self, input: f64) -> f64 {
+        // Gate the raw input before any gain — silences ADC noise / cable hum
+        // when no note is being played, just like a real noise gate pedal
+        // placed first in the signal chain.
+        let gated = self.gate.process(input);
+
         // Tick all LFOs and route their outputs to targets.
         for binding in &mut self.lfos {
             let lfo_out = binding.lfo.tick();
@@ -1226,9 +1233,10 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
-        // Tick all envelope followers and route their outputs to targets.
+        // Tick envelope followers on gated signal — prevents noise floor
+        // from keeping modulations active during silence.
         for binding in &mut self.envelopes {
-            let env_out = binding.envelope.process(input);
+            let env_out = binding.envelope.process(gated);
             let modulation = binding.bias + env_out * binding.range;
 
             match &binding.target {
@@ -1254,7 +1262,7 @@ impl PedalProcessor for CompiledPedal {
         }
 
         let headroom = self.supply_voltage / 9.0;
-        let mut signal = input;
+        let mut signal = gated;
 
         // Apply pre-gain before EACH stage.  In real circuits, each clipping
         // stage has its own active gain element (transistor/opamp).  The diode
@@ -1267,7 +1275,7 @@ impl PedalProcessor for CompiledPedal {
 
         // No WDF stages → just apply gain + soft clip.
         if self.stages.is_empty() {
-            signal = input * self.pre_gain * headroom;
+            signal = gated * self.pre_gain * headroom;
         }
 
         if self.use_soft_limit {
@@ -1291,6 +1299,7 @@ impl PedalProcessor for CompiledPedal {
         for binding in &mut self.envelopes {
             binding.envelope.set_sample_rate(rate);
         }
+        self.gate.set_sample_rate(rate);
     }
 
     fn reset(&mut self) {
@@ -1303,6 +1312,7 @@ impl PedalProcessor for CompiledPedal {
         for binding in &mut self.envelopes {
             binding.envelope.reset();
         }
+        self.gate.reset();
     }
 
     fn set_control(&mut self, label: &str, value: f64) {
@@ -1893,6 +1903,7 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         supply_voltage: 9.0,
         lfos,
         envelopes,
+        gate: NoiseGate::new(sample_rate),
     })
 }
 
@@ -2963,5 +2974,53 @@ mod tests {
                 "{f} at 9V should have no warnings: got {warnings:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Noise gate integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compiled_pedal_gates_noise() {
+        // All pedals should produce near-silence when fed noise-floor input.
+        let files = [
+            "tube_screamer.pedal",
+            "fuzz_face.pedal",
+            "big_muff.pedal",
+            "blues_driver.pedal",
+            "klon_centaur.pedal",
+            "proco_rat.pedal",
+        ];
+        for f in files {
+            let pedal = parse(f);
+            let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+            // Feed 4800 samples of ADC-level noise (~−80 dBFS)
+            let mut peak = 0.0_f64;
+            for i in 0..4800 {
+                let noise = 0.0001 * (i as f64 * 0.1).sin();
+                let out = proc.process(noise);
+                peak = peak.max(out.abs());
+            }
+            assert!(
+                peak < 0.01,
+                "{f}: noise gate should suppress ADC noise, peak={peak}"
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_pedal_passes_signal_through_gate() {
+        // Signal well above threshold should pass through with real output.
+        let pedal = parse("tube_screamer.pedal");
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+        let input = sine(48000);
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        let peak = output.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+        assert!(
+            peak > 0.01,
+            "Signal should pass through noise gate: peak={peak}"
+        );
     }
 }

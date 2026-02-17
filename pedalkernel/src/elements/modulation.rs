@@ -377,3 +377,136 @@ impl EnvelopeFollower {
         self.update_coefficients();
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Noise gate
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Noise gate that attenuates signal below a threshold.
+///
+/// Uses an RMS envelope to detect signal level and applies smooth
+/// gain reduction (not hard mute) to avoid clicks. Hysteresis
+/// prevents chattering at the threshold boundary.
+///
+/// Place this **before** the gain stage so it operates on the raw
+/// guitar signal, where the noise floor is well-separated from
+/// played notes.
+#[derive(Debug, Clone)]
+pub struct NoiseGate {
+    /// RMS envelope of the input signal.
+    envelope: f64,
+    /// Smoothing coefficient for the envelope follower.
+    env_coef: f64,
+    /// Current gate gain (0.0 = fully closed, 1.0 = fully open).
+    gain: f64,
+    /// Open threshold (RMS level above which the gate opens).
+    open_threshold: f64,
+    /// Close threshold (RMS level below which the gate closes).
+    /// Lower than `open_threshold` to provide hysteresis.
+    close_threshold: f64,
+    /// Attack coefficient — how fast the gate opens.
+    attack_coef: f64,
+    /// Release coefficient — how fast the gate closes.
+    release_coef: f64,
+    /// Sample rate.
+    sample_rate: f64,
+}
+
+impl NoiseGate {
+    /// Create a noise gate with sensible defaults for guitar.
+    ///
+    /// - Threshold: −60 dBFS (≈ 0.001 RMS) — below typical pickup noise
+    /// - Hysteresis: 6 dB below open threshold
+    /// - Attack: 0.5 ms (fast open to avoid clipping transients)
+    /// - Release: 20 ms (smooth fade to avoid abrupt cuts)
+    /// - Envelope: 5 ms RMS window
+    pub fn new(sample_rate: f64) -> Self {
+        let mut gate = Self {
+            envelope: 0.0,
+            env_coef: 0.0,
+            gain: 0.0,
+            open_threshold: 0.001,   // ≈ −60 dBFS
+            close_threshold: 0.0005, // ≈ −66 dBFS (6 dB hysteresis)
+            attack_coef: 0.0,
+            release_coef: 0.0,
+            sample_rate,
+        };
+        gate.update_coefficients();
+        gate
+    }
+
+    fn update_coefficients(&mut self) {
+        // Envelope: 5 ms time constant
+        let env_samples = (5.0 * self.sample_rate / 1000.0).max(1.0);
+        self.env_coef = (-1.0 / env_samples).exp();
+
+        // Attack: 0.5 ms (gate opens quickly)
+        let attack_samples = (0.5 * self.sample_rate / 1000.0).max(1.0);
+        self.attack_coef = (-1.0 / attack_samples).exp();
+
+        // Release: 20 ms (gate closes smoothly)
+        let release_samples = (20.0 * self.sample_rate / 1000.0).max(1.0);
+        self.release_coef = (-1.0 / release_samples).exp();
+    }
+
+    /// Set the open threshold in linear amplitude (RMS).
+    ///
+    /// Typical guitar values: 0.0005–0.005 depending on pickups and gain.
+    pub fn set_threshold(&mut self, threshold: f64) {
+        self.open_threshold = threshold.max(1e-6);
+        // Hysteresis: close at half the open threshold (−6 dB)
+        self.close_threshold = self.open_threshold * 0.5;
+    }
+
+    /// Process one sample through the noise gate.
+    ///
+    /// Returns the gated sample (input × gate gain).
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        // Track RMS envelope (squared → smoothed → sqrt approximation).
+        // We smooth the squared magnitude and compare thresholds in the
+        // squared domain to avoid a per-sample sqrt.
+        let sq = input * input;
+        self.envelope = self.env_coef * self.envelope + (1.0 - self.env_coef) * sq;
+        let rms = self.envelope.sqrt();
+
+        // Determine target gate state with hysteresis
+        let target = if self.gain > 0.5 {
+            // Gate is currently open — use close threshold
+            if rms > self.close_threshold {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            // Gate is currently closed — use open threshold
+            if rms > self.open_threshold {
+                1.0
+            } else {
+                0.0
+            }
+        };
+
+        // Smooth the gate gain (attack/release)
+        let coef = if target > self.gain {
+            self.attack_coef
+        } else {
+            self.release_coef
+        };
+        self.gain = coef * self.gain + (1.0 - coef) * target;
+
+        input * self.gain
+    }
+
+    /// Reset gate state.
+    pub fn reset(&mut self) {
+        self.envelope = 0.0;
+        self.gain = 0.0;
+    }
+
+    /// Update sample rate.
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        self.update_coefficients();
+    }
+}

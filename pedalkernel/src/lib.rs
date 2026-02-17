@@ -6,7 +6,7 @@
 //! - [`dsl`] — nom-based parser for `.pedal` circuit definition files
 //! - [`elements`] — WDF one-port elements (R, C, L) and nonlinear roots (diodes)
 //! - [`tree`] — WDF adaptors (series, parallel) and processing engine
-//! - [`pedals`] — ready-to-use pedal implementations (Overdrive, Fuzz, Delay)
+//! - [`pedals`] — utility pedal implementations (Delay)
 //! - [`kicad`] — KiCad netlist export from the parsed AST
 //! - [`wav`] — WAV file I/O for offline rendering and testing
 
@@ -535,38 +535,23 @@ pedal "Test Pedal" {
     }
 
     #[test]
-    fn wdf_overdrive_pipeline() {
-        use pedals::Overdrive;
-
-        let mut od = Overdrive::new(48000.0);
-        od.set_gain(0.7);
+    fn compiled_pedal_pipeline() {
+        let src = std::fs::read_to_string("examples/tube_screamer.pedal")
+            .expect("tube_screamer.pedal example file");
+        let pedal_def = dsl::parse_pedal_file(&src).unwrap();
+        let mut proc = compiler::compile_pedal(&pedal_def, 48000.0).unwrap();
 
         // Process a short burst
         let input = wav::sine_wave(440.0, 0.1, 48000);
-        let output: Vec<f64> = input.iter().map(|&s| od.process(s)).collect();
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
 
         // Should have nonzero output
         let max_out = output.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
         assert!(max_out > 0.001);
 
-        // Should be clipped relative to input
+        // Should be bounded
         let max_in = input.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
-        // At high gain the output peak may be less than input peak (clipping)
-        // or at least the waveform is modified
         assert!(max_out < max_in * 5.0, "output shouldn't blow up");
-    }
-
-    #[test]
-    fn wdf_fuzz_pipeline() {
-        use pedals::FuzzFace;
-
-        let mut ff = FuzzFace::new(48000.0);
-        ff.set_fuzz(0.8);
-
-        let input = wav::sine_wave(196.0, 0.1, 48000);
-        let output: Vec<f64> = input.iter().map(|&s| ff.process(s)).collect();
-        let max_out = output.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
-        assert!(max_out > 0.0001, "fuzz should produce output");
     }
 
     // -----------------------------------------------------------------------

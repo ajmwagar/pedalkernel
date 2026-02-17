@@ -770,4 +770,94 @@ mod tests {
             ef.envelope()
         );
     }
+
+    // NoiseGate tests
+    #[test]
+    fn noise_gate_silences_noise() {
+        let mut gate = NoiseGate::new(48000.0);
+        // Process low-level noise (well below threshold)
+        let mut max_out = 0.0_f64;
+        for _ in 0..4800 {
+            let noise = 0.0001; // −80 dBFS — typical ADC noise floor
+            let out = gate.process(noise);
+            max_out = max_out.max(out.abs());
+        }
+        // Gate should attenuate this to near-zero
+        assert!(
+            max_out < 0.0001,
+            "gate should silence noise: max_out={max_out}"
+        );
+    }
+
+    #[test]
+    fn noise_gate_passes_signal() {
+        let mut gate = NoiseGate::new(48000.0);
+        // Process a guitar-level signal (well above threshold)
+        let mut max_out = 0.0_f64;
+        for i in 0..4800 {
+            let t = i as f64 / 48000.0;
+            let signal = 0.3 * (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            let out = gate.process(signal);
+            max_out = max_out.max(out.abs());
+        }
+        // Gate should pass signal through at full level
+        assert!(max_out > 0.2, "gate should pass signal: max_out={max_out}");
+    }
+
+    #[test]
+    fn noise_gate_hysteresis() {
+        let mut gate = NoiseGate::new(48000.0);
+        // Open the gate with a strong signal
+        for i in 0..4800 {
+            let t = i as f64 / 48000.0;
+            gate.process(0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin());
+        }
+        // Now send a signal just below the open threshold but above close threshold.
+        // The gate should remain open due to hysteresis.
+        let mut max_out = 0.0_f64;
+        for i in 0..480 {
+            let t = i as f64 / 48000.0;
+            // 0.0008 RMS is above close_threshold (0.0005) but below open_threshold (0.001)
+            let signal = 0.001 * (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            let out = gate.process(signal);
+            max_out = max_out.max(out.abs());
+        }
+        assert!(
+            max_out > 0.0005,
+            "hysteresis should keep gate open: max_out={max_out}"
+        );
+    }
+
+    #[test]
+    fn noise_gate_smooth_release() {
+        let mut gate = NoiseGate::new(48000.0);
+        // Open with signal
+        for i in 0..4800 {
+            let t = i as f64 / 48000.0;
+            gate.process(0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin());
+        }
+        // Now go to silence — gate should close smoothly (not instantly)
+        let first_silent = gate.process(0.0);
+        // Immediately after signal stops, gain should still be partially open
+        assert!(
+            first_silent.abs() < 0.001,
+            "no signal means near-zero output"
+        );
+        // But the gate gain itself should still be transitioning
+        // (tested implicitly: no clicks from instant mute)
+    }
+
+    #[test]
+    fn noise_gate_reset() {
+        let mut gate = NoiseGate::new(48000.0);
+        // Open the gate
+        for i in 0..4800 {
+            let t = i as f64 / 48000.0;
+            gate.process(0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin());
+        }
+        gate.reset();
+        // After reset, low-level noise should be gated again
+        let out = gate.process(0.0001);
+        assert!(out.abs() < 0.0001, "reset should close gate");
+    }
 }

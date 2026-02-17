@@ -2,7 +2,6 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use pedalkernel::compiler::compile_pedal;
 use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::elements::*;
-use pedalkernel::pedals::{FuzzFace, Overdrive};
 use pedalkernel::tree::*;
 use pedalkernel::PedalProcessor;
 use std::time::Duration;
@@ -165,29 +164,6 @@ fn bench_realtime_budget(c: &mut Criterion) {
         });
     }
 
-    // Hardcoded processors for comparison.
-    let mut od = Overdrive::new(SAMPLE_RATE);
-    od.set_gain(0.7);
-    group.throughput(Throughput::Elements(64));
-    group.bench_function("hardcoded_overdrive", |b| {
-        b.iter(|| {
-            for &s in &block {
-                black_box(od.process(black_box(s)));
-            }
-        })
-    });
-
-    let mut ff = FuzzFace::new(SAMPLE_RATE);
-    ff.set_fuzz(0.8);
-    group.throughput(Throughput::Elements(64));
-    group.bench_function("hardcoded_fuzzface", |b| {
-        b.iter(|| {
-            for &s in &block {
-                black_box(ff.process(black_box(s)));
-            }
-        })
-    });
-
     group.finish();
 
     eprintln!();
@@ -196,64 +172,6 @@ fn bench_realtime_budget(c: &mut Criterion) {
     eprintln!("  All pedals must complete a 64-sample block within");
     eprintln!("  this budget for glitch-free real-time audio.");
     eprintln!("══════════════════════════════════════════════════════");
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Group 5: Compiled vs hardcoded comparison
-// ═══════════════════════════════════════════════════════════════════
-
-fn bench_compiled_vs_hardcoded(c: &mut Criterion) {
-    let mut group = c.benchmark_group("compiled_vs_hardcoded");
-    group.measurement_time(Duration::from_secs(5));
-
-    let block = test_block(256);
-    group.throughput(Throughput::Elements(256));
-
-    // Tube Screamer: compiled vs hardcoded Overdrive
-    {
-        let mut compiled = compile_example("tube_screamer.pedal");
-        group.bench_function("tube_screamer/compiled", |b| {
-            b.iter(|| {
-                for &s in &block {
-                    black_box(compiled.process(black_box(s)));
-                }
-            })
-        });
-
-        let mut hardcoded = Overdrive::new(SAMPLE_RATE);
-        hardcoded.set_gain(0.5);
-        group.bench_function("tube_screamer/hardcoded", |b| {
-            b.iter(|| {
-                for &s in &block {
-                    black_box(hardcoded.process(black_box(s)));
-                }
-            })
-        });
-    }
-
-    // Fuzz Face: compiled vs hardcoded FuzzFace
-    {
-        let mut compiled = compile_example("fuzz_face.pedal");
-        group.bench_function("fuzz_face/compiled", |b| {
-            b.iter(|| {
-                for &s in &block {
-                    black_box(compiled.process(black_box(s)));
-                }
-            })
-        });
-
-        let mut hardcoded = FuzzFace::new(SAMPLE_RATE);
-        hardcoded.set_fuzz(0.7);
-        group.bench_function("fuzz_face/hardcoded", |b| {
-            b.iter(|| {
-                for &s in &block {
-                    black_box(hardcoded.process(black_box(s)));
-                }
-            })
-        });
-    }
-
-    group.finish();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -271,6 +189,6 @@ criterion_group!(
     bench_compiled_pedals_block
 );
 
-criterion_group!(realtime, bench_realtime_budget, bench_compiled_vs_hardcoded);
+criterion_group!(realtime, bench_realtime_budget);
 
 criterion_main!(existing, compiled, realtime);
