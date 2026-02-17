@@ -693,6 +693,15 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
         .parent()
         .unwrap_or_else(|| Path::new("."));
 
+    // Load global utilities from ~/.config/pedalkernel/utilities
+    let global_utilities = match pedalkernel::config::load_global_utilities() {
+        Ok(gu) => gu,
+        Err(e) => {
+            eprintln!("WARNING: {e}");
+            None
+        }
+    };
+
     // Load WAV input if provided
     let wav_data = if let Some(path) = wav_input {
         let (samples, wav_sr) = pedalkernel::wav::read_wav_mono(std::path::Path::new(path))?;
@@ -806,9 +815,15 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
             .unwrap_or(wav_path);
         let input_label = format!("WAV: {} (looping)", wav_filename);
 
-        let processor =
-            PedalboardProcessor::from_board(&board, board_dir, client.sample_rate() as f64)
-                .map_err(|e| format!("Board compilation error: {e}"))?;
+        let (processor, build_warnings) = PedalboardProcessor::from_board_with_options(
+            &board,
+            board_dir,
+            client.sample_rate() as f64,
+            global_utilities.as_ref(),
+        );
+        for w in &build_warnings {
+            eprintln!("WARNING: {w}");
+        }
         let wav_proc = WavLoopProcessor::new(samples, processor);
 
         run_board_control_wav(
@@ -844,9 +859,15 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
                 }
             };
 
-        let processor =
-            PedalboardProcessor::from_board(&board, board_dir, client.sample_rate() as f64)
-                .map_err(|e| format!("Board compilation error: {e}"))?;
+        let (processor, build_warnings) = PedalboardProcessor::from_board_with_options(
+            &board,
+            board_dir,
+            client.sample_rate() as f64,
+            global_utilities.as_ref(),
+        );
+        for w in &build_warnings {
+            eprintln!("WARNING: {w}");
+        }
 
         run_board_control(
             &mut terminal,

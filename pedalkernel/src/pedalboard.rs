@@ -9,6 +9,7 @@
 
 use crate::board::{BoardDef, BoardPedalEntry};
 use crate::compiler::{compile_pedal, CompiledPedal};
+use crate::config::GlobalUtilities;
 use crate::dsl::parse_pedal_file;
 use crate::PedalProcessor;
 use std::path::Path;
@@ -76,24 +77,52 @@ impl PedalboardProcessor {
         board_dir: &Path,
         sample_rate: f64,
     ) -> (Self, Vec<String>) {
+        Self::from_board_with_options(board, board_dir, sample_rate, None)
+    }
+
+    /// Build a pedalboard with optional global utility pedals.
+    ///
+    /// If the board defines its own `utilities { ... }` block, those are used.
+    /// Otherwise, `global_utilities` (loaded from `~/.config/pedalkernel/utilities`)
+    /// provides the default utility chain. Pedal paths for global utilities are
+    /// resolved relative to the config directory, not the board directory.
+    pub fn from_board_with_options(
+        board: &BoardDef,
+        board_dir: &Path,
+        sample_rate: f64,
+        global_utilities: Option<&GlobalUtilities>,
+    ) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
 
+        // Decide utility source: per-board overrides global.
+        let board_has_utilities = !board.utility_start.is_empty() || !board.utility_end.is_empty();
+
+        let (util_start_entries, util_end_entries, util_dir);
+        if board_has_utilities {
+            util_start_entries = &board.utility_start[..];
+            util_end_entries = &board.utility_end[..];
+            util_dir = board_dir;
+        } else if let Some(global) = global_utilities {
+            util_start_entries = &global.start[..];
+            util_end_entries = &global.end[..];
+            util_dir = global.dir.as_path();
+        } else {
+            util_start_entries = &[];
+            util_end_entries = &[];
+            util_dir = board_dir;
+        };
+
         let utility_start = Self::compile_entries(
-            &board.utility_start,
-            board_dir,
+            util_start_entries,
+            util_dir,
             sample_rate,
             true,
             &mut warnings,
         );
         let pedals =
             Self::compile_entries(&board.pedals, board_dir, sample_rate, false, &mut warnings);
-        let utility_end = Self::compile_entries(
-            &board.utility_end,
-            board_dir,
-            sample_rate,
-            true,
-            &mut warnings,
-        );
+        let utility_end =
+            Self::compile_entries(util_end_entries, util_dir, sample_rate, true, &mut warnings);
 
         (
             Self {
@@ -690,5 +719,139 @@ board "Simple" {
         // Process should still work
         let output = pb.process(0.1);
         assert!(output.is_finite());
+    }
+
+    // ── Global utilities tests ──────────────────────────────────────────
+
+    #[test]
+    fn global_utilities_applied_when_board_has_none() {
+        let src = r#"
+board "Plain" {
+  ts: "tube_screamer.pedal"
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        assert!(board.utility_start.is_empty());
+
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let global = GlobalUtilities {
+            start: vec![crate::board::BoardPedalEntry {
+                id: "ns".to_string(),
+                path: "noise_suppressor.pedal".to_string(),
+                overrides: vec![("Threshold".to_string(), 0.4)],
+            }],
+            end: vec![],
+            dir: board_dir.clone(),
+        };
+
+        let (pb, warnings) = PedalboardProcessor::from_board_with_options(
+            &board,
+            &board_dir,
+            48000.0,
+            Some(&global),
+        );
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(pb.utility_start_len(), 1);
+        assert_eq!(pb.utility_start_name(0), Some("Noise Suppressor"));
+        assert_eq!(pb.len(), 1);
+    }
+
+    #[test]
+    fn per_board_utilities_override_global() {
+        // Board defines its own utilities — global should be ignored
+        let src = r#"
+board "Custom Utils" {
+  ts: "tube_screamer.pedal"
+}
+
+utilities {
+  start { ns: "noise_suppressor.pedal" { Threshold = 0.7 } }
+  end   { buf: "noise_suppressor.pedal" }
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        assert_eq!(board.utility_start.len(), 1);
+        assert_eq!(board.utility_end.len(), 1);
+
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+
+        // Provide different global utilities that should NOT be used
+        let global = GlobalUtilities {
+            start: vec![
+                crate::board::BoardPedalEntry {
+                    id: "g1".to_string(),
+                    path: "noise_suppressor.pedal".to_string(),
+                    overrides: vec![],
+                },
+                crate::board::BoardPedalEntry {
+                    id: "g2".to_string(),
+                    path: "noise_suppressor.pedal".to_string(),
+                    overrides: vec![],
+                },
+            ],
+            end: vec![],
+            dir: board_dir.clone(),
+        };
+
+        let (pb, _) = PedalboardProcessor::from_board_with_options(
+            &board,
+            &board_dir,
+            48000.0,
+            Some(&global),
+        );
+        // Should have board's utilities (1 start, 1 end), NOT global's (2 start, 0 end)
+        assert_eq!(pb.utility_start_len(), 1);
+        assert_eq!(pb.utility_end_len(), 1);
+    }
+
+    #[test]
+    fn global_utilities_with_separate_dir() {
+        // Global utilities resolve pedal paths relative to their own dir
+        let src = r#"
+board "Remote Utils" {
+  ts: "tube_screamer.pedal"
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+
+        // Global utilities dir is the same examples dir (for test purposes)
+        let global = GlobalUtilities {
+            start: vec![crate::board::BoardPedalEntry {
+                id: "ns".to_string(),
+                path: "noise_suppressor.pedal".to_string(),
+                overrides: vec![],
+            }],
+            end: vec![],
+            dir: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .to_path_buf(),
+        };
+
+        let (pb, warnings) = PedalboardProcessor::from_board_with_options(
+            &board,
+            &board_dir,
+            48000.0,
+            Some(&global),
+        );
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(pb.utility_start_len(), 1);
+        assert_eq!(pb.utility_start_name(0), Some("Noise Suppressor"));
+    }
+
+    #[test]
+    fn global_utilities_none_means_no_utilities() {
+        let src = r#"
+board "No Utils" {
+  ts: "tube_screamer.pedal"
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+
+        let (pb, _) =
+            PedalboardProcessor::from_board_with_options(&board, &board_dir, 48000.0, None);
+        assert_eq!(pb.utility_start_len(), 0);
+        assert_eq!(pb.utility_end_len(), 0);
     }
 }

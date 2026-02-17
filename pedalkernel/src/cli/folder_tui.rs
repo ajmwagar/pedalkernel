@@ -451,6 +451,7 @@ struct DiscoveredBoard {
 fn discover_boards(
     dir_path: &str,
     sample_rate: f64,
+    global_utilities: Option<&pedalkernel::config::GlobalUtilities>,
 ) -> Result<Vec<DiscoveredBoard>, Box<dyn std::error::Error>> {
     let dir = Path::new(dir_path);
     if !dir.is_dir() {
@@ -506,8 +507,12 @@ fn discover_boards(
 
         // Build the processor — individual pedal failures produce warnings
         // and dry passthrough slots (never returns Err)
-        let (processor, warnings) =
-            PedalboardProcessor::from_board_with_warnings(&board_def, board_dir, sample_rate);
+        let (processor, warnings) = PedalboardProcessor::from_board_with_options(
+            &board_def,
+            board_dir,
+            sample_rate,
+            global_utilities,
+        );
 
         // Build pedal panels for the TUI, matching processor slots.
         // If a pedal source can't be read/parsed, create a failed panel
@@ -690,8 +695,17 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
         }
     }
 
+    // Load global utilities from ~/.config/pedalkernel/utilities
+    let global_utilities = match pedalkernel::config::load_global_utilities() {
+        Ok(gu) => gu,
+        Err(e) => {
+            eprintln!("WARNING: {e}");
+            None
+        }
+    };
+
     // Discover and pre-compile all boards
-    let discovered = discover_boards(dir_path, sample_rate)?;
+    let discovered = discover_boards(dir_path, sample_rate, global_utilities.as_ref())?;
 
     if discovered.is_empty() {
         return Err(format!(

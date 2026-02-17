@@ -231,6 +231,26 @@ pub fn parse_board_file(src: &str) -> Result<BoardDef, String> {
     }
 }
 
+/// Parse a standalone utilities file (same syntax as the `utilities { ... }` block
+/// in a `.board` file).
+///
+/// Returns `(start_entries, end_entries)`.
+pub fn parse_utilities_file(
+    src: &str,
+) -> Result<(Vec<BoardPedalEntry>, Vec<BoardPedalEntry>), String> {
+    let (remaining, (start, end)) =
+        utilities_block(src).map_err(|e| format!("Parse error: {e}"))?;
+    let (remaining, _) = ws_comments(remaining).map_err(|e| format!("Parse error: {e}"))?;
+    if remaining.is_empty() {
+        Ok((start, end))
+    } else {
+        Err(format!(
+            "Trailing input: {:?}",
+            &remaining[..remaining.len().min(60)]
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -377,5 +397,43 @@ board "Plain" {
         let board = parse_board_file(src).unwrap();
         assert!(board.utility_start.is_empty());
         assert!(board.utility_end.is_empty());
+    }
+
+    // ── Standalone utilities file parsing ────────────────────────────────
+
+    #[test]
+    fn parse_utilities_file_start_only() {
+        let src = r#"
+utilities {
+  start { ns: "noise_suppressor.pedal" { Threshold = 0.5 } }
+}
+"#;
+        let (start, end) = parse_utilities_file(src).unwrap();
+        assert_eq!(start.len(), 1);
+        assert_eq!(start[0].id, "ns");
+        assert_eq!(start[0].path, "noise_suppressor.pedal");
+        assert_eq!(start[0].overrides.len(), 1);
+        assert!(end.is_empty());
+    }
+
+    #[test]
+    fn parse_utilities_file_start_and_end() {
+        let src = r#"
+# Global utilities
+utilities {
+  start { ns: "noise_suppressor.pedal" { Threshold = 0.3 } }
+  end   { buf: "buffer.pedal" }
+}
+"#;
+        let (start, end) = parse_utilities_file(src).unwrap();
+        assert_eq!(start.len(), 1);
+        assert_eq!(end.len(), 1);
+        assert_eq!(end[0].id, "buf");
+    }
+
+    #[test]
+    fn parse_utilities_file_trailing_input_error() {
+        let src = r#"utilities { start { ns: "x.pedal" } } garbage"#;
+        assert!(parse_utilities_file(src).is_err());
     }
 }

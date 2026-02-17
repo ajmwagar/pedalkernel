@@ -12,6 +12,7 @@
 
 pub mod board;
 pub mod compiler;
+pub mod config;
 pub mod dsl;
 pub mod elements;
 #[cfg(feature = "hardware")]
