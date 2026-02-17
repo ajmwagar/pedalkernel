@@ -383,35 +383,59 @@ pedal "Test Pedal" {
     fn pedal_tube_screamer() {
         let p = parse_example("tube_screamer.pedal");
         assert_eq!(p.name, "Tube Screamer");
-        assert_eq!(p.components.len(), 4);
-        assert_eq!(p.nets.len(), 4);
-        assert_eq!(p.controls.len(), 2);
-        assert_eq!(p.controls[0].label, "Drive");
+        assert_eq!(p.components.len(), 20);
+        assert_eq!(p.nets.len(), 26);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Drive"));
+        assert!(labels.contains(&"Tone"));
+        assert!(labels.contains(&"Level"));
+        // Verify dual JRC4558 opamps + feedback clipping diodes
+        let opamp_count = p
+            .components
+            .iter()
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_)))
+            .count();
+        assert_eq!(opamp_count, 2, "Tube Screamer uses dual JRC4558");
     }
 
     #[test]
     fn pedal_fuzz_face() {
         let p = parse_example("fuzz_face.pedal");
         assert_eq!(p.name, "Fuzz Face");
-        assert_eq!(p.components.len(), 9);
-        assert_eq!(p.nets.len(), 13);
+        assert_eq!(p.components.len(), 16);
+        assert_eq!(p.nets.len(), 22);
         assert_eq!(p.controls.len(), 2);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Fuzz"));
         assert!(labels.contains(&"Volume"));
+        // Verify dual PNP transistors
+        let pnp_count = p
+            .components
+            .iter()
+            .filter(|c| c.kind == dsl::ComponentKind::Pnp)
+            .count();
+        assert_eq!(pnp_count, 2, "Fuzz Face uses 2 PNP transistors");
     }
 
     #[test]
     fn pedal_big_muff() {
         let p = parse_example("big_muff.pedal");
         assert_eq!(p.name, "Big Muff");
-        assert_eq!(p.components.len(), 13);
-        assert_eq!(p.nets.len(), 13);
+        assert_eq!(p.components.len(), 37);
+        assert_eq!(p.nets.len(), 49);
         assert_eq!(p.controls.len(), 3);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Sustain"));
         assert!(labels.contains(&"Tone"));
         assert!(labels.contains(&"Volume"));
+        // Verify 4 NPN gain stages + 2 clipping diode pairs
+        let npn_count = p
+            .components
+            .iter()
+            .filter(|c| c.kind == dsl::ComponentKind::Npn)
+            .count();
+        assert_eq!(npn_count, 4, "Big Muff uses 4 NPN transistor stages");
     }
 
     #[test]
@@ -435,68 +459,80 @@ pedal "Test Pedal" {
     fn pedal_proco_rat() {
         let p = parse_example("proco_rat.pedal");
         assert_eq!(p.name, "ProCo RAT");
-        assert_eq!(p.components.len(), 12);
-        assert_eq!(p.nets.len(), 15);
+        assert_eq!(p.components.len(), 22);
+        assert_eq!(p.nets.len(), 28);
         assert_eq!(p.controls.len(), 3);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Distortion"));
         assert!(labels.contains(&"Filter"));
         assert!(labels.contains(&"Volume"));
-        // Verify opamp + hard clipping diode pair
+        // Verify LM308 opamp + hard clipping diodes
         assert!(p
             .components
             .iter()
-            .any(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_))));
-        assert!(p
+            .any(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Lm308))));
+        let diode_count = p
             .components
             .iter()
-            .any(|c| c.kind == dsl::ComponentKind::DiodePair(dsl::DiodeType::Silicon)));
+            .filter(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon))
+            .count();
+        assert_eq!(diode_count, 2, "RAT uses 2 silicon clipping diodes");
     }
 
     #[test]
     fn pedal_blues_driver() {
         let p = parse_example("blues_driver.pedal");
         assert_eq!(p.name, "Boss Blues Driver");
-        assert_eq!(p.components.len(), 15);
-        assert_eq!(p.nets.len(), 18);
+        assert_eq!(p.components.len(), 32);
+        assert_eq!(p.nets.len(), 39);
         assert_eq!(p.controls.len(), 3);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Gain"));
         assert!(labels.contains(&"Tone"));
         assert!(labels.contains(&"Level"));
-        // Verify NPN transistor + asymmetric single diode
+        // Verify JFET input buffer + dual TL072 + asymmetric diodes
         assert!(p
             .components
             .iter()
-            .any(|c| c.kind == dsl::ComponentKind::Npn));
-        assert!(p
+            .any(|c| matches!(c.kind, dsl::ComponentKind::NJfet(_))));
+        let opamp_count = p
             .components
             .iter()
-            .any(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)));
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_)))
+            .count();
+        assert_eq!(opamp_count, 2, "Blues Driver uses dual TL072");
+        let diode_count = p
+            .components
+            .iter()
+            .filter(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon))
+            .count();
+        assert_eq!(diode_count, 3, "Blues Driver uses 3 asymmetric clipping diodes");
     }
 
     #[test]
     fn pedal_klon_centaur() {
         let p = parse_example("klon_centaur.pedal");
         assert_eq!(p.name, "Klon Centaur");
-        assert_eq!(p.components.len(), 15);
-        assert_eq!(p.nets.len(), 19);
+        assert_eq!(p.components.len(), 29);
+        assert_eq!(p.nets.len(), 37);
         assert_eq!(p.controls.len(), 3);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Gain"));
         assert!(labels.contains(&"Treble"));
         assert!(labels.contains(&"Output"));
-        // Verify dual opamps + germanium diode pair in feedback
+        // Verify 3 TL072 opamps + germanium feedback clipping diodes
         let opamp_count = p
             .components
             .iter()
             .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_)))
             .count();
         assert_eq!(opamp_count, 3, "Klon uses 3 opamps (2 gain + 1 output buffer)");
-        assert!(p
+        let ge_diode_count = p
             .components
             .iter()
-            .any(|c| c.kind == dsl::ComponentKind::DiodePair(dsl::DiodeType::Germanium)));
+            .filter(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Germanium))
+            .count();
+        assert_eq!(ge_diode_count, 2, "Klon uses 2 germanium clipping diodes in feedback");
     }
 
     #[test]
