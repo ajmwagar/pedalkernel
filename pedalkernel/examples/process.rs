@@ -4,9 +4,10 @@
 //!   cargo run --example process -- <file.pedal> <input.wav> <output.wav> [knob=value ...]
 //!
 //! Examples:
-//!   cargo run --example process -- examples/tube_screamer.pedal in.wav out.wav
-//!   cargo run --example process -- examples/fuzz_face.pedal in.wav out.wav Fuzz=0.9 Volume=0.3
-//!   cargo run --example process -- examples/big_muff.pedal in.wav out.wav Sustain=1.0
+//!   cargo run --example process -- examples/pedals/overdrive/tube_screamer.pedal in.wav out.wav
+//!   cargo run --example process -- examples/pedals/fuzz/fuzz_face.pedal in.wav out.wav Fuzz=0.9 Volume=0.3
+//!   cargo run --example process -- examples/pedals/fuzz/big_muff.pedal in.wav out.wav Sustain=1.0
+//!   cargo run --example process -- examples/amps/tweed_deluxe_5e3.pedal in.wav out.wav Volume=0.7
 
 use hound::{SampleFormat, WavReader, WavWriter};
 use pedalkernel::compiler::compile_pedal;
@@ -25,11 +26,11 @@ fn main() {
         eprintln!();
         eprintln!("Examples:");
         eprintln!(
-            "  {} examples/tube_screamer.pedal input.wav output.wav",
+            "  {} examples/pedals/overdrive/tube_screamer.pedal input.wav output.wav",
             args[0]
         );
         eprintln!(
-            "  {} examples/fuzz_face.pedal input.wav output.wav Fuzz=0.9",
+            "  {} examples/pedals/fuzz/fuzz_face.pedal input.wav output.wav Fuzz=0.9",
             args[0]
         );
         process::exit(1);

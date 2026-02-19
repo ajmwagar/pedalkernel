@@ -25,13 +25,13 @@ use std::sync::Arc;
 // ═══════════════════════════════════════════════════════════════════════════
 
 const EMBEDDED_SOURCES: &[&str] = &[
-    include_str!("../../pedalkernel/examples/tube_screamer.pedal"),
-    include_str!("../../pedalkernel/examples/fuzz_face.pedal"),
-    include_str!("../../pedalkernel/examples/big_muff.pedal"),
-    include_str!("../../pedalkernel/examples/dyna_comp.pedal"),
-    include_str!("../../pedalkernel/examples/proco_rat.pedal"),
-    include_str!("../../pedalkernel/examples/blues_driver.pedal"),
-    include_str!("../../pedalkernel/examples/klon_centaur.pedal"),
+    include_str!("../../pedalkernel/examples/pedals/overdrive/tube_screamer.pedal"),
+    include_str!("../../pedalkernel/examples/pedals/fuzz/fuzz_face.pedal"),
+    include_str!("../../pedalkernel/examples/pedals/fuzz/big_muff.pedal"),
+    include_str!("../../pedalkernel/examples/pedals/compressor/dyna_comp.pedal"),
+    include_str!("../../pedalkernel/examples/pedals/distortion/proco_rat.pedal"),
+    include_str!("../../pedalkernel/examples/pedals/overdrive/blues_driver.pedal"),
+    include_str!("../../pedalkernel/examples/pedals/overdrive/klon_centaur.pedal"),
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════

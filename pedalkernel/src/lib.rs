@@ -575,10 +575,29 @@ pedal "Test Pedal" {
 
     /// Helper: read and parse a .pedal example file, panicking with context on failure.
     fn parse_example(filename: &str) -> dsl::PedalDef {
-        let path = format!("examples/{filename}");
+        let path = find_example_file(filename);
         let src =
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
         dsl::parse_pedal_file(&src).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"))
+    }
+
+    /// Search examples/ subdirectories for a file by name.
+    fn find_example_file(filename: &str) -> String {
+        fn walk(dir: &str, target: &str) -> Option<String> {
+            for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(found) = walk(path.to_str()?, target) {
+                        return Some(found);
+                    }
+                } else if path.file_name().and_then(|n| n.to_str()) == Some(target) {
+                    return Some(path.to_string_lossy().to_string());
+                }
+            }
+            None
+        }
+        walk("examples", filename)
+            .unwrap_or_else(|| panic!("example file not found: {filename}"))
     }
 
     #[test]

@@ -2937,9 +2937,35 @@ mod tests {
     use crate::dsl::parse_pedal_file;
 
     fn parse(filename: &str) -> PedalDef {
-        let path = format!("examples/{filename}");
+        let path = find_example(filename);
         let src = std::fs::read_to_string(&path).unwrap();
         parse_pedal_file(&src).unwrap()
+    }
+
+    /// Search examples/ subdirectories for a file by name.
+    fn find_example(filename: &str) -> String {
+        for entry in walkdir("examples") {
+            if entry.ends_with(filename) {
+                return entry;
+            }
+        }
+        panic!("example file not found: {filename}");
+    }
+
+    /// Simple recursive directory walk.
+    fn walkdir(dir: &str) -> Vec<String> {
+        let mut results = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    results.extend(walkdir(path.to_str().unwrap()));
+                } else {
+                    results.push(path.to_string_lossy().to_string());
+                }
+            }
+        }
+        results
     }
 
     #[test]
