@@ -3013,6 +3013,7 @@ mod tests {
             "boss_ce2.pedal",
             "tweed_deluxe_5e3.pedal",
             "bassman_5f6a.pedal",
+            "marshall_jtm45.pedal",
         ];
         for f in files {
             let pedal = parse(f);
@@ -3163,6 +3164,26 @@ mod tests {
         assert!(
             peak > 0.01,
             "Bassman should produce output: peak={peak}"
+        );
+    }
+
+    #[test]
+    fn compile_marshall_jtm45() {
+        let pedal = parse("marshall_jtm45.pedal");
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        proc.set_control("Volume", 0.6);
+        proc.set_control("Treble", 0.6);
+        proc.set_control("Mid", 0.5);
+        proc.set_control("Bass", 0.5);
+        proc.set_control("Presence", 0.5);
+
+        let input = sine(48000);
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert_finite(&output, "Marshall JTM45");
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(
+            peak > 0.01,
+            "JTM45 should produce output: peak={peak}"
         );
     }
 
