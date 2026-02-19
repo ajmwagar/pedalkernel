@@ -41,6 +41,7 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
             TriodeType::T12ax7 => ("Valve:ECC83", "V"),
             TriodeType::T12at7 => ("Valve:ECC81", "V"),
             TriodeType::T12au7 => ("Valve:ECC82", "V"),
+            TriodeType::T12ay7 => ("Valve:12AY7", "V"),
         },
         ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
         ComponentKind::Nmos(_) => ("Device:Q_NMOS_DGS", "Q"),

@@ -467,6 +467,27 @@ impl TriodeModel {
     pub fn t_ecc82() -> Self {
         Self::t_12au7()
     }
+
+    /// 12AY7 / 6072 - Low-medium gain preamp tube.
+    ///
+    /// The original Fender tweed tube. Lower mu (44) than 12AX7 gives a
+    /// cleaner, more dynamic response — the amp cleans up beautifully with
+    /// guitar volume. Used in the Fender 5E3 Tweed Deluxe V1 position.
+    /// Produces warm, touch-sensitive breakup that's highly responsive to
+    /// picking dynamics.
+    pub fn t_12ay7() -> Self {
+        Self {
+            mu: 44.0,
+            kp: 420.0,
+            kvb: 300.0,
+            ex: 1.4,
+        }
+    }
+
+    /// 6072 - Military/industrial designation for 12AY7.
+    pub fn t_6072() -> Self {
+        Self::t_12ay7()
+    }
 }
 
 // ---------------------------------------------------------------------------
