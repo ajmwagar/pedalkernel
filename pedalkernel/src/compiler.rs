@@ -1669,6 +1669,237 @@ impl PedalProcessor for CompiledPedal {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// FX loop split — partition a PedalDef at fx_send/fx_return
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Split a pedal definition at its `fx_send`/`fx_return` boundary into
+/// pre-section and post-section `PedalDef`s.
+///
+/// Returns `None` if the pedal has no FX loop (no `fx_send`/`fx_return`).
+pub fn split_pedal_def(pedal: &PedalDef) -> Option<(PedalDef, PedalDef)> {
+    if !pedal.has_fx_loop() {
+        return None;
+    }
+
+    // Collect all node names that each component touches.
+    let mut component_nodes: HashMap<String, Vec<String>> = HashMap::new();
+    for net in &pedal.nets {
+        let node_name = match &net.from {
+            Pin::Reserved(n) => n.clone(),
+            Pin::ComponentPin { component, .. } => component.clone(),
+        };
+        for pin in &net.to {
+            let to_name = match pin {
+                Pin::Reserved(n) => n.clone(),
+                Pin::ComponentPin { component, .. } => component.clone(),
+            };
+            component_nodes
+                .entry(node_name.clone())
+                .or_default()
+                .push(to_name.clone());
+            component_nodes
+                .entry(to_name)
+                .or_default()
+                .push(node_name.clone());
+        }
+    }
+
+    // BFS from "in" — collect all component IDs reachable WITHOUT crossing fx_send→fx_return.
+    // Stop at fx_send (include it as a boundary but don't cross to fx_return).
+    let pre_components = bfs_collect_components(&component_nodes, "in", "fx_send");
+    let post_components = bfs_collect_components(&component_nodes, "fx_return", "out");
+
+    // Build pre PedalDef: filter to pre components, replace fx_send→out
+    let pre_def = build_half(pedal, &pre_components, "fx_send", "out", "pre");
+    // Build post PedalDef: filter to post components, replace fx_return→in
+    let post_def = build_half(pedal, &post_components, "fx_return", "in", "post");
+
+    Some((pre_def, post_def))
+}
+
+/// BFS from `start_node` through component adjacency, collecting component IDs.
+/// Stops at `stop_node` (does not cross it to reach further components).
+fn bfs_collect_components(
+    adj: &HashMap<String, Vec<String>>,
+    start_node: &str,
+    stop_node: &str,
+) -> std::collections::HashSet<String> {
+    use std::collections::{HashSet, VecDeque};
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(start_node.to_string());
+    visited.insert(start_node.to_string());
+    // Always include gnd and vcc — they're shared by all stages
+    visited.insert("gnd".to_string());
+    visited.insert("vcc".to_string());
+
+    while let Some(node) = queue.pop_front() {
+        if node == stop_node {
+            // Include the stop node itself but don't traverse its neighbors
+            continue;
+        }
+        if let Some(neighbors) = adj.get(&node) {
+            for nb in neighbors {
+                if !visited.contains(nb) {
+                    visited.insert(nb.clone());
+                    queue.push_back(nb.clone());
+                }
+            }
+        }
+    }
+    visited
+}
+
+/// Build one half of a split pedal definition.
+fn build_half(
+    pedal: &PedalDef,
+    component_ids: &std::collections::HashSet<String>,
+    old_node: &str,
+    new_node: &str,
+    suffix: &str,
+) -> PedalDef {
+    // Filter components to those in this half
+    let components: Vec<ComponentDef> = pedal
+        .components
+        .iter()
+        .filter(|c| component_ids.contains(&c.id))
+        .cloned()
+        .collect();
+
+    // Rename the boundary node and filter nets
+    let rename = |pin: &Pin| -> Pin {
+        match pin {
+            Pin::Reserved(n) if n == old_node => Pin::Reserved(new_node.to_string()),
+            // Drop the other fx node — it doesn't exist in this half
+            Pin::Reserved(n) if (n == "fx_send" || n == "fx_return") && n != old_node => {
+                return pin.clone(); // will be filtered out
+            }
+            _ => pin.clone(),
+        }
+    };
+
+    let nets: Vec<NetDef> = pedal
+        .nets
+        .iter()
+        .filter_map(|net| {
+            let from = rename(&net.from);
+            let to: Vec<Pin> = net.to.iter().map(&rename).collect();
+
+            // A pin is "relevant" if it references a component in this half
+            // or is a standard reserved node (in, out, gnd, vcc).
+            let relevant = |p: &Pin| match p {
+                Pin::Reserved(n) => {
+                    n == "in" || n == "out" || n == "gnd" || n == "vcc" || n == new_node
+                }
+                Pin::ComponentPin { component, .. } => component_ids.contains(component),
+            };
+
+            // A pin "belongs" to this half — only component pins in our set.
+            let belongs = |p: &Pin| match p {
+                Pin::Reserved(_) => true,
+                Pin::ComponentPin { component, .. } => component_ids.contains(component),
+            };
+
+            // Keep this net only if at least one component pin belongs to this half.
+            // This avoids orphan nets like `C6.b -> out` when C6 is in the other half.
+            let all_pins = std::iter::once(&from).chain(to.iter());
+            let has_local_component = all_pins.clone().any(|p| {
+                matches!(p, Pin::ComponentPin { component, .. } if component_ids.contains(component))
+            });
+
+            if has_local_component {
+                let filtered_to: Vec<Pin> = to.into_iter().filter(|p| belongs(p)).collect();
+                if !filtered_to.is_empty() && relevant(&from) {
+                    Some(NetDef {
+                        from,
+                        to: filtered_to,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Filter controls to those referencing components in this half
+    let controls: Vec<ControlDef> = pedal
+        .controls
+        .iter()
+        .filter(|c| component_ids.contains(&c.component))
+        .cloned()
+        .collect();
+
+    PedalDef {
+        name: format!("{} ({})", pedal.name, suffix),
+        components,
+        nets,
+        controls,
+    }
+}
+
+/// A split compiled pedal — pre-section and post-section with an FX loop between them.
+pub struct SplitCompiledPedal {
+    pub pre: CompiledPedal,
+    pub post: CompiledPedal,
+}
+
+impl SplitCompiledPedal {
+    /// Process with no FX loop — direct connection from pre to post.
+    pub fn process(&mut self, input: f64) -> f64 {
+        let send = self.pre.process(input);
+        self.post.process(send)
+    }
+
+    /// Process the pre-section only, returning the FX send signal.
+    pub fn process_pre(&mut self, input: f64) -> f64 {
+        self.pre.process(input)
+    }
+
+    /// Process the post-section only, taking the FX return signal.
+    pub fn process_post(&mut self, fx_return: f64) -> f64 {
+        self.post.process(fx_return)
+    }
+
+    pub fn set_sample_rate(&mut self, rate: f64) {
+        self.pre.set_sample_rate(rate);
+        self.post.set_sample_rate(rate);
+    }
+
+    pub fn reset(&mut self) {
+        self.pre.reset();
+        self.post.reset();
+    }
+
+    pub fn set_control(&mut self, label: &str, value: f64) {
+        // Try both halves — controls are partitioned but the user shouldn't
+        // need to know which half a control belongs to.
+        self.pre.set_control(label, value);
+        self.post.set_control(label, value);
+    }
+}
+
+/// Compile a pedal with an FX loop, splitting at `fx_send`/`fx_return`.
+///
+/// Returns `Ok(SplitCompiledPedal)` if the pedal has send/return nodes.
+/// Returns `Err` if the pedal has no FX loop or compilation fails.
+pub fn compile_split_pedal(
+    pedal: &PedalDef,
+    sample_rate: f64,
+) -> Result<SplitCompiledPedal, String> {
+    let (pre_def, post_def) =
+        split_pedal_def(pedal).ok_or_else(|| "Pedal has no fx_send/fx_return nodes".to_string())?;
+
+    let pre = compile_pedal(&pre_def, sample_rate)
+        .map_err(|e| format!("Failed to compile pre-section: {e}"))?;
+    let post = compile_pedal(&post_def, sample_rate)
+        .map_err(|e| format!("Failed to compile post-section: {e}"))?;
+
+    Ok(SplitCompiledPedal { pre, post })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Main compiler entry point
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1764,6 +1995,11 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                 }
             }
         }
+        // Fallback: if in_node is disconnected (e.g. split pedal post-half
+        // where in maps to a triode grid), use gnd as the injection point.
+        if best_dist == usize::MAX {
+            injection_node = graph.gnd_node;
+        }
 
         // Build SP edges: one edge per passive element, plus a virtual VoltageSource.
         let source_node = graph.edges.len() + 1000; // virtual source node
@@ -1848,6 +2084,11 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                 }
             }
         }
+        // Fallback: if in_node is disconnected (e.g. split pedal post-half
+        // where in maps to a triode grid), use gnd as the injection point.
+        if best_dist == usize::MAX {
+            injection_node = graph.gnd_node;
+        }
 
         // Build SP edges.
         let source_node = graph.edges.len() + 2000; // virtual source node (different from diodes)
@@ -1924,6 +2165,11 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                 }
             }
         }
+        // Fallback: if in_node is disconnected (e.g. split pedal post-half
+        // where in maps to a triode grid), use gnd as the injection point.
+        if best_dist == usize::MAX {
+            injection_node = graph.gnd_node;
+        }
 
         // Build SP edges.
         let source_node = graph.edges.len() + 3000; // virtual source node (unique offset)
@@ -1998,6 +2244,9 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                 }
             }
         }
+        if best_dist == usize::MAX {
+            injection_node = graph.gnd_node;
+        }
 
         let source_node = graph.edges.len() + 4000;
         let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
@@ -2071,6 +2320,9 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                 }
             }
         }
+        if best_dist == usize::MAX {
+            injection_node = graph.gnd_node;
+        }
 
         let source_node = graph.edges.len() + 5000;
         let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
@@ -2143,6 +2395,9 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                     injection_node = other;
                 }
             }
+        }
+        if best_dist == usize::MAX {
+            injection_node = graph.gnd_node;
         }
 
         let source_node = graph.edges.len() + 6000;
@@ -3865,5 +4120,80 @@ pedal "Test Chorus" {
                 "{f} at 9V should have no warnings: got {warnings:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // FX loop split tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tweed_deluxe_has_fx_loop() {
+        let pedal = parse("tweed_deluxe_5e3.pedal");
+        assert!(pedal.has_fx_loop(), "Tweed Deluxe should have fx_send/fx_return");
+    }
+
+    #[test]
+    fn split_tweed_deluxe_produces_two_halves() {
+        let pedal = parse("tweed_deluxe_5e3.pedal");
+        let (pre, post) = split_pedal_def(&pedal).expect("should split");
+        assert!(
+            pre.name.contains("pre"),
+            "Pre half should have 'pre' in name: {}",
+            pre.name
+        );
+        assert!(
+            post.name.contains("post"),
+            "Post half should have 'post' in name: {}",
+            post.name
+        );
+        // Both halves should have some components
+        assert!(!pre.components.is_empty(), "Pre half should have components");
+        assert!(!post.components.is_empty(), "Post half should have components");
+        // Neither half should still have fx_send/fx_return
+        assert!(!pre.has_fx_loop(), "Pre half should not have fx loop nodes");
+        assert!(!post.has_fx_loop(), "Post half should not have fx loop nodes");
+    }
+
+    #[test]
+    fn compile_split_tweed_deluxe() {
+        let pedal = parse("tweed_deluxe_5e3.pedal");
+        let mut split = compile_split_pedal(&pedal, 48000.0).unwrap();
+        split.set_control("Volume", 0.7);
+        split.set_control("Tone", 0.5);
+
+        // Process through split (direct, no FX loop effects)
+        let input = sine(48000);
+        let output: Vec<f64> = input.iter().map(|&s| split.process(s)).collect();
+        assert_finite(&output, "Split Tweed (direct)");
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(peak > 0.001, "Split Tweed should produce output: peak={peak}");
+    }
+
+    #[test]
+    fn split_pre_post_individually() {
+        let pedal = parse("tweed_deluxe_5e3.pedal");
+        let mut split = compile_split_pedal(&pedal, 48000.0).unwrap();
+        split.set_control("Volume", 0.7);
+        split.set_control("Tone", 0.5);
+
+        let input = sine(48000);
+        // Process through pre → post separately
+        let mut output = Vec::with_capacity(input.len());
+        for &s in &input {
+            let send = split.process_pre(s);
+            let ret = split.process_post(send);
+            output.push(ret);
+        }
+        assert_finite(&output, "Split Tweed (pre→post)");
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(peak > 0.001, "Pre→post should produce output: peak={peak}");
+    }
+
+    #[test]
+    fn non_fx_loop_pedal_does_not_split() {
+        let pedal = parse("tube_screamer.pedal");
+        assert!(!pedal.has_fx_loop());
+        assert!(split_pedal_def(&pedal).is_none());
+        assert!(compile_split_pedal(&pedal, 48000.0).is_err());
     }
 }
