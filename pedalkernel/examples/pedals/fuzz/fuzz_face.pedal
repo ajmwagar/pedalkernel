@@ -76,6 +76,6 @@ pedal "Fuzz Face" {
   }
   controls {
     Fuzz.position -> "Fuzz" [0.0, 1.0] = 0.7
-    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+    Volume.position -> "Volume" [0.0, 1.0] = 0.6
   }
 }

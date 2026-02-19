@@ -7,9 +7,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, Paragraph},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
+use std::path::{Path, PathBuf};
 
 /// Terminal type alias used across TUI modules.
 pub type Term = Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>;
@@ -27,14 +28,14 @@ pub struct KnobState {
 }
 
 pub const KNOB_FRAMES: [&[&str; 5]; 8] = [
-    &[" ╭───╮ ", "╱     ╲", "│      │", "╲/    ╱", " ╰───╯ "],
-    &[" ╭───╮ ", "╱     ╲", "│-     │", "╲     ╱", " ╰───╯ "],
-    &[" ╭───╮ ", "╱     ╲", "│─     │", "╲     ╱", " ╰───╯ "],
-    &[" ╭───╮ ", "╱/    ╲", "│      │", "╲     ╱", " ╰───╯ "],
-    &[" ╭───╮ ", "╱  |  ╲", "│  |   │", "╲     ╱", " ╰───╯ "],
-    &[" ╭───╮ ", "╱    ╲╲", "│      │", "╲     ╱", " ╰───╯ "],
-    &[" ╭───╮ ", "╱     ╲", "│     ─│", "╲     ╱", " ╰───╯ "],
-    &[" ╭───╮ ", "╱     ╲", "│      │", "╲    \\╱", " ╰───╯ "],
+    &[" ╭───╮ ", "╱     ╲", "│      │", "╲*    ╱", " ╰───╯ "], // 0: 7 o'clock
+    &[" ╭───╮ ", "╱     ╲", "│*     │", "╲     ╱", " ╰───╯ "], // 1: 8 o'clock
+    &[" ╭───╮ ", "╱*    ╲", "│      │", "╲     ╱", " ╰───╯ "], // 2: 10 o'clock
+    &[" ╭───╮ ", "╱ *   ╲", "│      │", "╲     ╱", " ╰───╯ "], // 3: 11 o'clock
+    &[" ╭───╮ ", "╱  *  ╲", "│      │", "╲     ╱", " ╰───╯ "], // 4: 12 o'clock
+    &[" ╭───╮ ", "╱   * ╲", "│      │", "╲     ╱", " ╰───╯ "], // 5: 1 o'clock
+    &[" ╭───╮ ", "╱    *╲", "│      │", "╲     ╱", " ╰───╯ "], // 6: 2 o'clock
+    &[" ╭───╮ ", "╱     ╲", "│     *│", "╲     ╱", " ╰───╯ "], // 7: 4 o'clock
 ];
 
 pub fn knob_frame_index(value: f64, range: (f64, f64)) -> usize {
@@ -85,12 +86,13 @@ pub fn render_knob_row(
         let knob_widget = Paragraph::new(lines).alignment(Alignment::Center);
         frame.render_widget(knob_widget, knob_cols[i]);
 
-        let label_text = if is_selected {
-            format!(">>{label}<<", label = knob.label)
+        let label_style = if is_selected {
+            style.add_modifier(Modifier::UNDERLINED)
         } else {
-            knob.label.clone()
+            style
         };
-        let label = Paragraph::new(Span::styled(label_text, style)).alignment(Alignment::Center);
+        let label = Paragraph::new(Span::styled(knob.label.clone(), label_style))
+            .alignment(Alignment::Center);
         frame.render_widget(label, label_cols[i]);
 
         let val_text = format!("{:.2}", knob.value);
@@ -106,14 +108,14 @@ pub fn render_knob_row(
 pub fn render_footswitch(frame: &mut Frame, area: Rect, bypassed: bool) {
     let (label, style) = if bypassed {
         (
-            " BYPASSED ",
+            "○ OFF",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
         )
     } else {
         (
-            "  ACTIVE  ",
+            "● ON",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -477,4 +479,282 @@ pub fn draw_port_list(
 
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Shared I/O bar
+// ═════════════════════════════════════════════════════════════════════════════
+
+pub fn render_io_bar(
+    frame: &mut Frame,
+    area: Rect,
+    input_port: &str,
+    output_port: &str,
+    voltage: f64,
+) {
+    let voltage_str = format!("{}V", voltage as u32);
+    let dim = Style::default().fg(Color::DarkGray);
+    let bright = Style::default().fg(Color::White);
+    let io_info = Paragraph::new(Line::from(vec![
+        Span::styled("IN: ", dim),
+        Span::styled(input_port, bright),
+        Span::styled(" │ ", dim),
+        Span::styled("OUT: ", dim),
+        Span::styled(output_port, bright),
+        Span::styled(" │ ", dim),
+        Span::styled(voltage_str, Style::default().fg(Color::Yellow)),
+    ]))
+    .alignment(Alignment::Center);
+    frame.render_widget(io_info, area);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Shared help bar builder
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Build a help bar line from (key, description) pairs.
+/// Keys are Cyan, descriptions are DarkGray.
+pub fn help_spans(pairs: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, (key, desc)) in pairs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            key.to_string(),
+            Style::default().fg(Color::Cyan),
+        ));
+        spans.push(Span::styled(
+            format!(" {desc}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// File picker
+// ═════════════════════════════════════════════════════════════════════════════
+
+pub enum FilePickerResult {
+    Selected(PathBuf),
+    Quit,
+}
+
+struct FilePickerState {
+    all_files: Vec<PathBuf>,
+    filtered: Vec<usize>,
+    cursor: usize,
+    filter: String,
+    base_dir: PathBuf,
+}
+
+impl FilePickerState {
+    fn new(base_dir: PathBuf, files: Vec<PathBuf>) -> Self {
+        let filtered: Vec<usize> = (0..files.len()).collect();
+        Self {
+            all_files: files,
+            filtered,
+            cursor: 0,
+            filter: String::new(),
+            base_dir,
+        }
+    }
+
+    fn refilter(&mut self) {
+        let query = self.filter.to_lowercase();
+        self.filtered = self
+            .all_files
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                let display = p
+                    .strip_prefix(&self.base_dir)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .to_lowercase();
+                query.is_empty() || display.contains(&query)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.cursor >= self.filtered.len() {
+            self.cursor = self.filtered.len().saturating_sub(1);
+        }
+    }
+
+    fn display_path(&self, idx: usize) -> String {
+        self.all_files[idx]
+            .strip_prefix(&self.base_dir)
+            .unwrap_or(&self.all_files[idx])
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn discover_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_files_recursive(dir, &mut files);
+    files.sort();
+    files
+}
+
+fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_recursive(&path, out);
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if ext == "pedal" || ext == "board" {
+                out.push(path);
+            }
+        }
+    }
+}
+
+pub fn run_file_picker(
+    terminal: &mut Term,
+    base_dir: &Path,
+) -> Result<FilePickerResult, Box<dyn std::error::Error>> {
+    let files = discover_files(base_dir);
+    if files.is_empty() {
+        return Err(format!(
+            "No .pedal or .board files found in '{}'",
+            base_dir.display()
+        )
+        .into());
+    }
+
+    let mut state = FilePickerState::new(base_dir.to_path_buf(), files);
+
+    loop {
+        terminal.draw(|f| draw_file_picker(f, &state))?;
+
+        if event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') if state.filter.is_empty() => {
+                        return Ok(FilePickerResult::Quit);
+                    }
+                    KeyCode::Esc => {
+                        state.filter.clear();
+                        state.refilter();
+                    }
+                    KeyCode::Up => {
+                        state.cursor = state.cursor.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        if state.cursor + 1 < state.filtered.len() {
+                            state.cursor += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(&idx) = state.filtered.get(state.cursor) {
+                            return Ok(FilePickerResult::Selected(
+                                state.all_files[idx].clone(),
+                            ));
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        state.filter.pop();
+                        state.refilter();
+                    }
+                    KeyCode::Char(c) => {
+                        state.filter.push(c);
+                        state.refilter();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn draw_file_picker(frame: &mut Frame, state: &FilePickerState) {
+    let area = frame.area();
+
+    let title_text = if state.filter.is_empty() {
+        format!(
+            "  Select File ({} found)  ",
+            state.all_files.len()
+        )
+    } else {
+        format!(
+            "  Select File — filter: \"{}\" ({}/{})  ",
+            state.filter,
+            state.filtered.len(),
+            state.all_files.len()
+        )
+    };
+
+    let outer = Block::default()
+        .title(Span::styled(
+            title_text,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .style(Style::default().fg(Color::White));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    let v_chunks = Layout::vertical([
+        Constraint::Min(3),    // file list
+        Constraint::Length(1), // help bar
+    ])
+    .split(inner);
+
+    // File list
+    if state.filtered.is_empty() {
+        let msg = Paragraph::new(Span::styled(
+            "  (no matching files)",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .alignment(Alignment::Center);
+        frame.render_widget(msg, v_chunks[0]);
+    } else {
+        let items: Vec<ListItem> = state
+            .filtered
+            .iter()
+            .enumerate()
+            .map(|(i, &file_idx)| {
+                let display = state.display_path(file_idx);
+                let is_selected = i == state.cursor;
+                let style = if is_selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                let prefix = if is_selected { "▸ " } else { "  " };
+                ListItem::new(Span::styled(format!("{prefix}{display}"), style))
+            })
+            .collect();
+
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded),
+        );
+        let mut list_state = ListState::default();
+        list_state.select(Some(state.cursor));
+        frame.render_stateful_widget(list, v_chunks[0], &mut list_state);
+    }
+
+    // Help bar
+    let help = Paragraph::new(help_spans(&[
+        ("↑↓", "navigate"),
+        ("Enter", "select"),
+        ("Type", "filter"),
+        ("Esc", "clear/quit"),
+    ]))
+    .alignment(Alignment::Center);
+    frame.render_widget(help, v_chunks[1]);
 }

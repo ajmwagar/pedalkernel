@@ -1349,6 +1349,8 @@ enum ControlTarget {
     PotInStage(usize),
     /// Modify an LFO's rate (index into lfos vector).
     LfoRate(usize),
+    /// Modify an LFO's depth/amplitude (index into lfos vector).
+    LfoDepth(usize),
 }
 
 /// Modulation target for LFOs and envelope followers.
@@ -1446,6 +1448,14 @@ fn is_rate_label(label: &str) -> bool {
     )
 }
 
+/// Depth-like control labels (for LFO modulation amount).
+fn is_depth_label(label: &str) -> bool {
+    matches!(
+        label.to_ascii_lowercase().as_str(),
+        "depth" | "intensity" | "width"
+    )
+}
+
 impl CompiledPedal {
     pub fn set_supply_voltage(&mut self, voltage: f64) {
         self.supply_voltage = voltage.clamp(5.0, 24.0);
@@ -1482,6 +1492,12 @@ impl CompiledPedal {
                         let scale = 0.1_f64 * 100.0_f64.powf(value);
                         let rate = binding.base_freq * scale;
                         binding.lfo.set_rate(rate);
+                    }
+                }
+                ControlTarget::LfoDepth(lfo_idx) => {
+                    let lfo_idx = *lfo_idx;
+                    if let Some(binding) = self.lfos.get_mut(lfo_idx) {
+                        binding.lfo.set_depth(value);
                     }
                 }
             }
@@ -1581,21 +1597,25 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
+        // Headroom models the supply rail ceiling.  In real circuits, gain
+        // is set by resistor ratios (feedback/input) and is independent of
+        // supply voltage.  What changes with voltage is how far the active
+        // element can swing before hitting the rail — i.e. the clipping
+        // ceiling.  So headroom only scales the soft limiter, not pre_gain
+        // or output_gain.
         let headroom = self.supply_voltage / 9.0;
         let mut signal = input;
 
         // Apply pre-gain before EACH stage.  In real circuits, each clipping
         // stage has its own active gain element (transistor/opamp).  The diode
         // voltage output (~0.7V) must be re-amplified before the next stage.
-        // The headroom factor models the active element's supply rail: at 12V
-        // it can swing ~33% further before rail clipping.
         for stage in &mut self.stages {
-            signal = stage.process(signal * self.pre_gain * headroom);
+            signal = stage.process(signal * self.pre_gain);
         }
 
         // No WDF stages → just apply gain + soft clip.
         if self.stages.is_empty() {
-            signal = input * self.pre_gain * headroom;
+            signal = input * self.pre_gain;
         }
 
         // Apply slew rate limiting from op-amps.
@@ -1607,18 +1627,19 @@ impl PedalProcessor for CompiledPedal {
         }
 
         if self.use_soft_limit {
-            // Scale the tanh ceiling with headroom: at 12V the soft-limiter
-            // (modeling transistor/opamp saturation) kicks in later.
+            // Scale the tanh ceiling with headroom: at higher voltage the
+            // soft-limiter (modeling transistor/opamp rail saturation) kicks
+            // in later, allowing more clean swing.
             signal = headroom * (signal * self.soft_limit_scale / headroom).tanh();
         }
 
         // Process through BBD delay lines (wet signal mixed with dry).
         for bbd in &mut self.bbds {
             let wet = bbd.process(signal);
-            signal = signal + wet; // Simple mix (could be controllable)
+            signal = signal * 0.5 + wet * 0.5;
         }
 
-        signal * self.output_gain * headroom
+        signal * self.output_gain
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
@@ -2476,8 +2497,10 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
         }
     }
 
-    // If no diodes found, create a dummy stage-less pedal (just gain + soft clip).
-    let use_soft_limit = has_single_diode || stages.is_empty();
+    // Always apply output soft-limiting.  The WDF stages provide their own
+    // diode clipping, but the output limiter prevents runaway gain when pedals
+    // are chained in a pedalboard (series gains multiply without a ceiling).
+    let use_soft_limit = true;
     let soft_limit_scale = if has_germanium { 3.0 } else { 2.0 };
 
     // Collect LFO component IDs for control binding.
@@ -2504,6 +2527,12 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
             // Check if there's an LFO to control
             if !lfo_ids.is_empty() {
                 ControlTarget::LfoRate(0) // Control first LFO by default
+            } else {
+                ControlTarget::PreGain // fallback
+            }
+        } else if is_depth_label(&ctrl.label) {
+            if !lfo_ids.is_empty() {
+                ControlTarget::LfoDepth(0)
             } else {
                 ControlTarget::PreGain // fallback
             }
@@ -2676,8 +2705,8 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                     ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
                                     // OTA: normalized gain 0-1
                                     ModulationTarget::OtaIabc { .. } => (0.5, 0.5),
-                                    // BBD: normalized delay 0-1, centered at 0.5
-                                    ModulationTarget::BbdClock { .. } => (0.5, 0.3),
+                                    // BBD: short-delay chorus range (center ~3.3 ms, sweep ~3–5 ms)
+                                    ModulationTarget::BbdClock { .. } => (0.15, 0.10),
                                 };
 
                                 lfos.push(LfoBinding {
@@ -2764,7 +2793,7 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
                                     ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
                                     ModulationTarget::OtaIabc { .. } => (0.5, 0.5),
-                                    ModulationTarget::BbdClock { .. } => (0.5, 0.3),
+                                    ModulationTarget::BbdClock { .. } => (0.15, 0.10),
                                 };
 
                                 envelopes.push(EnvelopeBinding {
@@ -3295,6 +3324,8 @@ mod tests {
             "tweed_deluxe_5e3.pedal",
             "bassman_5f6a.pedal",
             "marshall_jtm45.pedal",
+            "phase90.pedal",
+            "memory_man.pedal",
         ];
         for f in files {
             let pedal = parse(f);
@@ -3888,23 +3919,30 @@ pedal "Test Chorus" {
 
     #[test]
     fn compiled_12v_more_headroom() {
+        // At 12V the soft-limiter ceiling is higher, so the signal clips
+        // less — giving a cleaner waveform with higher peak amplitude.
+        // The gain and output level stay the same (resistor ratios don't
+        // change with supply voltage), but the clipping ceiling rises.
         let pedal = parse("tube_screamer.pedal");
         let input = sine(48000);
 
         let mut proc_9v = compile_pedal(&pedal, 48000.0).unwrap();
-        proc_9v.set_control("Drive", 0.5);
+        proc_9v.set_control("Drive", 0.8);
         proc_9v.set_control("Level", 1.0);
         let out_9v: Vec<f64> = input.iter().map(|&s| proc_9v.process(s)).collect();
 
         let mut proc_12v = compile_pedal(&pedal, 48000.0).unwrap();
         proc_12v.set_supply_voltage(12.0);
-        proc_12v.set_control("Drive", 0.5);
+        proc_12v.set_control("Drive", 0.8);
         proc_12v.set_control("Level", 1.0);
         let out_12v: Vec<f64> = input.iter().map(|&s| proc_12v.process(s)).collect();
 
+        let peak_9v = out_9v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let peak_12v = out_12v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+
         assert!(
-            rms(&out_12v) > rms(&out_9v),
-            "Compiled pedal at 12V should have more output"
+            peak_12v > peak_9v,
+            "12V should allow higher peaks (more headroom): 9V peak={peak_9v}, 12V peak={peak_12v}"
         );
     }
 

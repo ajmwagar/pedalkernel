@@ -38,6 +38,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 criterion = "0.5"
+tempfile = "3"
 
 [[bench]]
 name = "wdf_bench"

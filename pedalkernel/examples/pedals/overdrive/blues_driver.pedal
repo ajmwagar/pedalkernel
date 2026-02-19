@@ -112,6 +112,6 @@ pedal "Boss Blues Driver" {
   controls {
     Gain.position -> "Gain" [0.0, 1.0] = 0.5
     Tone.position -> "Tone" [0.0, 1.0] = 0.5
-    Level.position -> "Level" [0.0, 1.0] = 0.5
+    Level.position -> "Level" [0.0, 1.0] = 0.7
   }
 }

@@ -109,6 +109,6 @@ pedal "Klon Centaur" {
   controls {
     Gain.position -> "Gain" [0.0, 1.0] = 0.5
     Treble.position -> "Treble" [0.0, 1.0] = 0.5
-    Output.position -> "Output" [0.0, 1.0] = 0.5
+    Output.position -> "Output" [0.0, 1.0] = 0.7
   }
 }

@@ -20,6 +20,7 @@ use nom::{
     sequence::pair,
     IResult,
 };
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // AST
@@ -85,6 +86,13 @@ pub struct BoardPedalEntry {
     pub path: String,
     /// Optional knob overrides (e.g. `[("Drive", 0.7)]`).
     pub overrides: Vec<(String, f64)>,
+}
+
+/// Global board definition — pedals auto-injected at the start/end of every board.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobalBoardDef {
+    pub start: Vec<BoardPedalEntry>,
+    pub end: Vec<BoardPedalEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +264,86 @@ pub fn parse_board_file(src: &str) -> Result<BoardDef, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Global board parser
+// ---------------------------------------------------------------------------
+
+/// Parse a `start { ... }` or `end { ... }` section inside a global block.
+fn global_section<'a>(keyword: &'static str) -> impl FnMut(&'a str) -> IResult<&'a str, Vec<BoardPedalEntry>> {
+    move |input: &'a str| {
+        let (input, _) = ws_comments(input)?;
+        let (input, _) = tag(keyword)(input)?;
+        let (input, _) = ws_comments(input)?;
+        let (input, _) = char('{')(input)?;
+        let (input, entries) = many0(pedal_entry)(input)?;
+        let (input, _) = ws_comments(input)?;
+        let (input, _) = char('}')(input)?;
+        Ok((input, entries))
+    }
+}
+
+/// Parse a complete `.global.board` file.
+fn parse_global_board(input: &str) -> IResult<&str, GlobalBoardDef> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("global")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+
+    // Both sections are optional and can appear in any order
+    let mut start = Vec::new();
+    let mut end = Vec::new();
+    let mut input = input;
+
+    loop {
+        let (rest, _) = ws_comments(input)?;
+        input = rest;
+
+        if let Ok((rest, entries)) = global_section("start")(input) {
+            start = entries;
+            input = rest;
+        } else if let Ok((rest, entries)) = global_section("end")(input) {
+            end = entries;
+            input = rest;
+        } else {
+            break;
+        }
+    }
+
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    Ok((input, GlobalBoardDef { start, end }))
+}
+
+/// Parse a `.global.board` file, returning a `Result`.
+pub fn parse_global_board_file(src: &str) -> Result<GlobalBoardDef, String> {
+    match parse_global_board(src) {
+        Ok(("", def)) => Ok(def),
+        Ok((rest, _)) => Err(format!("Trailing input: {:?}", &rest[..rest.len().min(60)])),
+        Err(e) => Err(format!("Parse error: {e}")),
+    }
+}
+
+/// Search for a `.global.board` file by walking up from `start_dir`.
+///
+/// Returns the parsed definition and the directory it was found in
+/// (for resolving relative pedal paths).
+pub fn find_global_board(start_dir: &Path) -> Option<(GlobalBoardDef, PathBuf)> {
+    let mut dir = start_dir.canonicalize().ok()?;
+    loop {
+        let candidate = dir.join(".global.board");
+        if candidate.is_file() {
+            let source = std::fs::read_to_string(&candidate).ok()?;
+            let def = parse_global_board_file(&source).ok()?;
+            return Some((def, dir));
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -393,5 +481,130 @@ board "Mix Test" {
         } else {
             panic!("Expected FxLoop entry");
         }
+    }
+
+    // ── Global board tests ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_global_board_both_sections() {
+        let src = r#"
+# Global board
+global {
+  start {
+    gate: "noise_gate.pedal" { Threshold = 0.3 }
+  }
+  end {
+    amp: "clean_fender.pedal" { Volume = 0.7 }
+    cab: "cabinet.pedal"
+  }
+}
+"#;
+        let def = parse_global_board_file(src).unwrap();
+        assert_eq!(def.start.len(), 1);
+        assert_eq!(def.start[0].id, "gate");
+        assert_eq!(def.start[0].path, "noise_gate.pedal");
+        assert_eq!(def.start[0].overrides, vec![("Threshold".to_string(), 0.3)]);
+        assert_eq!(def.end.len(), 2);
+        assert_eq!(def.end[0].id, "amp");
+        assert_eq!(def.end[1].id, "cab");
+        assert!(def.end[1].overrides.is_empty());
+    }
+
+    #[test]
+    fn parse_global_board_start_only() {
+        let src = r#"
+global {
+  start {
+    comp: "dyna_comp.pedal"
+  }
+}
+"#;
+        let def = parse_global_board_file(src).unwrap();
+        assert_eq!(def.start.len(), 1);
+        assert!(def.end.is_empty());
+    }
+
+    #[test]
+    fn parse_global_board_end_only() {
+        let src = r#"
+global {
+  end {
+    amp: "clean_fender.pedal" { Volume = 0.5 }
+  }
+}
+"#;
+        let def = parse_global_board_file(src).unwrap();
+        assert!(def.start.is_empty());
+        assert_eq!(def.end.len(), 1);
+    }
+
+    #[test]
+    fn parse_global_board_empty() {
+        let src = "global {}";
+        let def = parse_global_board_file(src).unwrap();
+        assert!(def.start.is_empty());
+        assert!(def.end.is_empty());
+    }
+
+    #[test]
+    fn parse_global_board_reversed_order() {
+        let src = r#"
+global {
+  end {
+    amp: "clean_fender.pedal"
+  }
+  start {
+    gate: "noise_gate.pedal"
+  }
+}
+"#;
+        let def = parse_global_board_file(src).unwrap();
+        assert_eq!(def.start.len(), 1);
+        assert_eq!(def.start[0].id, "gate");
+        assert_eq!(def.end.len(), 1);
+        assert_eq!(def.end[0].id, "amp");
+    }
+
+    #[test]
+    fn find_global_board_in_same_dir() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let global_path = tmp.path().join(".global.board");
+        let mut f = std::fs::File::create(&global_path).unwrap();
+        writeln!(f, "global {{ start {{ g: \"gate.pedal\" }} }}").unwrap();
+
+        let result = find_global_board(tmp.path());
+        assert!(result.is_some());
+        let (def, dir) = result.unwrap();
+        assert_eq!(def.start.len(), 1);
+        assert_eq!(def.start[0].id, "g");
+        assert_eq!(dir, tmp.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn find_global_board_walks_up() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        // Put .global.board in root
+        let global_path = tmp.path().join(".global.board");
+        let mut f = std::fs::File::create(&global_path).unwrap();
+        writeln!(f, "global {{ end {{ a: \"amp.pedal\" }} }}").unwrap();
+
+        // Create a subdirectory
+        let sub = tmp.path().join("boards");
+        std::fs::create_dir(&sub).unwrap();
+
+        let result = find_global_board(&sub);
+        assert!(result.is_some());
+        let (def, dir) = result.unwrap();
+        assert_eq!(def.end.len(), 1);
+        assert_eq!(dir, tmp.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn find_global_board_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = find_global_board(tmp.path());
+        assert!(result.is_none());
     }
 }

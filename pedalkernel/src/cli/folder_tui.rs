@@ -21,9 +21,10 @@ use std::io::stdout;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::board_tui::{handle_board_key, render_io_bar, BoardAction, PedalPanel, ViewMode};
+use super::board_tui::{handle_board_key, BoardAction, PedalPanel, ViewMode};
 use super::tui_widgets::{
-    run_output_select, run_port_select, KnobState, OutputSelectResult, PortSelectResult, Term,
+    help_spans, render_io_bar, run_file_picker, run_output_select, run_port_select,
+    FilePickerResult, KnobState, OutputSelectResult, PortSelectResult, Term,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -45,6 +46,7 @@ struct FolderControlState {
     controls: Arc<SharedControls>,
     input_port: String,
     output_port: String,
+    voltage: f64,
 }
 
 impl FolderControlState {
@@ -97,7 +99,7 @@ fn draw_folder_control(frame: &mut Frame, state: &FolderControlState) {
     // ── Board content — reuse board_tui drawing ──
     let board = &state.boards[state.active_board];
 
-    let title = if state.board_bypassed {
+    let title_text = if state.board_bypassed {
         format!("  {} [BYPASSED]  ", board.name.to_uppercase())
     } else {
         format!("  {}  ", board.name.to_uppercase())
@@ -107,8 +109,18 @@ fn draw_folder_control(frame: &mut Frame, state: &FolderControlState) {
     } else {
         Color::White
     };
+    let title_color = if state.board_bypassed {
+        Color::DarkGray
+    } else {
+        Color::Yellow
+    };
     let outer = Block::default()
-        .title(title)
+        .title(Span::styled(
+            title_text,
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
+        ))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
@@ -151,7 +163,7 @@ fn draw_folder_overview(
     ])
     .split(inner);
 
-    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port);
+    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
 
     let n = board.pedals.len();
     if n > 0 {
@@ -166,21 +178,15 @@ fn draw_folder_overview(
     }
 
     // Help bar with { } hint
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled("{ }", Style::default().fg(Color::Cyan)),
-        Span::raw(" board  "),
-        Span::styled("[ ] ←→", Style::default().fg(Color::Cyan)),
-        Span::raw(" pedal  "),
-        Span::styled("V", Style::default().fg(Color::Cyan)),
-        Span::raw("/"),
-        Span::styled("Enter", Style::default().fg(Color::Cyan)),
-        Span::raw(" detail  "),
-        Span::styled("Space", Style::default().fg(Color::Cyan)),
-        Span::raw(" bypass  "),
-        Span::styled("B", Style::default().fg(Color::Cyan)),
-        Span::raw(" bypass all  "),
-        Span::styled("Q", Style::default().fg(Color::Cyan)),
-        Span::raw(" quit"),
+    let help = Paragraph::new(help_spans(&[
+        ("{ }", "board"),
+        ("[ ] ←→", "pedal"),
+        ("V/Enter", "detail"),
+        ("Space", "bypass"),
+        ("B", "bypass all"),
+        ("+/-", "voltage"),
+        ("P", "picker"),
+        ("Q", "quit"),
     ]))
     .alignment(Alignment::Center);
     frame.render_widget(help, v_chunks[3]);
@@ -212,7 +218,7 @@ fn draw_folder_detail(
     ])
     .split(inner);
 
-    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port);
+    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
     render_chain_bar(frame, v_chunks[2], &board.pedals, board.focused_pedal);
     render_status_row(frame, v_chunks[3], &board.pedals);
 
@@ -247,27 +253,19 @@ fn draw_folder_detail(
     }
 
     // Help bar with { } hint
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled("{ }", Style::default().fg(Color::Cyan)),
-        Span::raw(" board  "),
-        Span::styled("[ ]", Style::default().fg(Color::Cyan)),
-        Span::raw(" pedal  "),
-        Span::styled("Tab", Style::default().fg(Color::Cyan)),
-        Span::raw(" knob  "),
-        Span::styled("←→", Style::default().fg(Color::Cyan)),
-        Span::raw(" adjust  "),
-        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
-        Span::raw(" fine  "),
-        Span::styled("Space", Style::default().fg(Color::Cyan)),
-        Span::raw(" bypass  "),
-        Span::styled("B", Style::default().fg(Color::Cyan)),
-        Span::raw(" bypass all  "),
-        Span::styled("R", Style::default().fg(Color::Cyan)),
-        Span::raw(" reset  "),
-        Span::styled("V", Style::default().fg(Color::Cyan)),
-        Span::raw(" overview  "),
-        Span::styled("Q", Style::default().fg(Color::Cyan)),
-        Span::raw(" quit"),
+    let help = Paragraph::new(help_spans(&[
+        ("{ }", "board"),
+        ("[ ]", "pedal"),
+        ("Tab", "knob"),
+        ("←→", "adjust"),
+        ("↑↓", "fine"),
+        ("Space", "bypass"),
+        ("B", "bypass all"),
+        ("R", "reset"),
+        ("+/-", "voltage"),
+        ("V", "overview"),
+        ("P", "picker"),
+        ("Q", "quit"),
     ]))
     .alignment(Alignment::Center);
     frame.render_widget(help, v_chunks[12]);
@@ -432,7 +430,15 @@ fn handle_folder_input(
                 state.view_mode = ViewMode::Detail;
             }
         }
-        BoardAction::None => {}
+        BoardAction::VoltageUp => {
+            state.voltage = (state.voltage + 1.0).min(18.0);
+            state.controls.set_supply_voltage(state.voltage);
+        }
+        BoardAction::VoltageDown => {
+            state.voltage = (state.voltage - 1.0).max(5.0);
+            state.controls.set_supply_voltage(state.voltage);
+        }
+        BoardAction::OpenPicker | BoardAction::None => {}
     }
     true
 }
@@ -580,7 +586,8 @@ fn run_folder_control(
     boards: Vec<BoardState>,
     connect_from: &str,
     connect_to: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+    base_dir: &Path,
+) -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
     let controls = Arc::new(SharedControls::new());
     let (async_client, our_in, our_out) = AudioEngine::start(client, switcher, controls.clone())?;
 
@@ -590,6 +597,9 @@ fn run_folder_control(
     async_client
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
+    if let Some(pair) = super::stereo_pair(connect_to) {
+        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+    }
 
     let mut state = FolderControlState {
         boards,
@@ -598,23 +608,30 @@ fn run_folder_control(
         view_mode: ViewMode::Overview,
         controls,
         input_port: connect_from.to_string(),
-        output_port: connect_to.to_string(),
+        output_port: super::stereo_display(connect_to),
+        voltage: 9.0,
     };
 
-    loop {
+    let result = loop {
         terminal.draw(|f| draw_folder_control(f, &state))?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('p') || key.code == KeyCode::Char('P') {
+                    drop(async_client);
+                    break match run_file_picker(terminal, base_dir)? {
+                        FilePickerResult::Selected(path) => Some(path),
+                        FilePickerResult::Quit => None,
+                    };
+                }
                 if !handle_folder_input(&mut state, key.code, key.modifiers) {
-                    break;
+                    break None;
                 }
             }
         }
-    }
+    };
 
-    drop(async_client);
-    Ok(())
+    Ok(result)
 }
 
 fn run_folder_control_wav(
@@ -624,7 +641,8 @@ fn run_folder_control_wav(
     boards: Vec<BoardState>,
     input_label: &str,
     connect_to: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+    base_dir: &Path,
+) -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
     let controls = Arc::new(SharedControls::new());
     let (async_client, _our_in, our_out) = AudioEngine::start(client, switcher, controls.clone())?;
 
@@ -632,6 +650,9 @@ fn run_folder_control_wav(
     async_client
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
+    if let Some(pair) = super::stereo_pair(connect_to) {
+        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+    }
 
     let mut state = FolderControlState {
         boards,
@@ -640,30 +661,41 @@ fn run_folder_control_wav(
         view_mode: ViewMode::Overview,
         controls,
         input_port: input_label.to_string(),
-        output_port: connect_to.to_string(),
+        output_port: super::stereo_display(connect_to),
+        voltage: 9.0,
     };
 
-    loop {
+    let result = loop {
         terminal.draw(|f| draw_folder_control(f, &state))?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('p') || key.code == KeyCode::Char('P') {
+                    drop(async_client);
+                    break match run_file_picker(terminal, base_dir)? {
+                        FilePickerResult::Selected(path) => Some(path),
+                        FilePickerResult::Quit => None,
+                    };
+                }
                 if !handle_folder_input(&mut state, key.code, key.modifiers) {
-                    break;
+                    break None;
                 }
             }
         }
-    }
+    };
 
-    drop(async_client);
-    Ok(())
+    Ok(result)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Main entry point
 // ═════════════════════════════════════════════════════════════════════════════
 
-pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+/// Run the folder TUI. Returns `Some(path)` to switch files, `None` on quit.
+pub fn run(
+    dir_path: &str,
+    wav_input: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     // Load WAV input if provided
     let wav_data = if let Some(path) = wav_input {
         let (samples, wav_sr) = pedalkernel::wav::read_wav_mono(std::path::Path::new(path))?;
@@ -689,6 +721,8 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
             );
         }
     }
+
+    let base_dir = Path::new(dir_path);
 
     // Discover and pre-compile all boards
     let discovered = discover_boards(dir_path, sample_rate)?;
@@ -759,7 +793,7 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
             OutputSelectResult::Quit => {
                 disable_raw_mode()?;
                 stdout().execute(LeaveAlternateScreen)?;
-                return Ok(());
+                return Ok(None);
             }
         };
 
@@ -778,6 +812,7 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
             board_states,
             &input_label,
             &selected_out,
+            base_dir,
         )
     } else {
         // Normal mode: input + output port selection
@@ -799,7 +834,7 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
                 PortSelectResult::Quit => {
                     disable_raw_mode()?;
                     stdout().execute(LeaveAlternateScreen)?;
-                    return Ok(());
+                    return Ok(None);
                 }
             };
 
@@ -810,6 +845,7 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
             board_states,
             &selected_in,
             &selected_out,
+            base_dir,
         )
     };
 
@@ -817,5 +853,5 @@ pub fn run(dir_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::e
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
-    result
+    result.map(|opt| opt.map(|p| p.to_string_lossy().into_owned()))
 }
