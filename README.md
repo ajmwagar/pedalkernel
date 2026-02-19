@@ -146,16 +146,16 @@ cargo run --example overdrive
 cargo run --example fuzzface
 
 # Parse any .pedal file
-cargo run --example parse_pedal -- examples/big_muff.pedal
+cargo run --example parse_pedal -- examples/pedals/fuzz/big_muff.pedal
 
 # Export KiCad netlist for PCB layout
-cargo run --example parse_pedal -- examples/klon_centaur.pedal
+cargo run --example parse_pedal -- examples/pedals/overdrive/klon_centaur.pedal
 
 # Compare diode clipping: silicon vs germanium vs LED
 cargo run --example direct_wdf
 
 # Interactive TUI -- tweak knobs in real time
-cargo run --example tui --features tui -- examples/tube_screamer.pedal
+cargo run --example tui --features tui -- examples/pedals/overdrive/tube_screamer.pedal
 ```
 
 ---
@@ -221,7 +221,7 @@ Without a `.pedalhw` file, heuristic checks still catch obvious problems -- germ
 Tweak any `.pedal` file as an interactive ASCII pedalboard:
 
 ```bash
-cargo run --example tui --features tui -- examples/tube_screamer.pedal
+cargo run --example tui --features tui -- examples/pedals/overdrive/tube_screamer.pedal
 ```
 
 ```
@@ -335,19 +335,31 @@ cargo build --no-default-features
 
 ---
 
-## Included pedals
+## Included pedals & amps
 
-Seven `.pedal` files ship in `examples/`:
+`.pedal` files are organized under `examples/`:
 
-| Circuit | Topology | Character |
+**Pedals** (`examples/pedals/`)
+
+| Circuit | Category | Character |
 |---------|----------|-----------|
-| Tube Screamer | Feedback clipping, silicon diode pair | Mid-hump overdrive, the sound of blues rock |
-| Fuzz Face | Two-transistor, single Ge diode | Velcro-rip fuzz, NPN/PNP polarity flip |
-| Big Muff | Four-stage cascaded clipping | Sustained wall of fuzz, Smashing Pumpkins territory |
-| Klon Centaur | Dual opamp, Ge diode blend | Transparent overdrive, clean/dirty mix |
-| ProCo RAT | Opamp gain + diode pair to ground | Tight distortion, filter sweep |
-| Blues Driver | Multi-stage with tone stack | Dynamic, touch-sensitive overdrive |
-| Dyna Comp | Envelope-controlled JFET + vactrol | Optical compression, country squish |
+| Tube Screamer | overdrive | Mid-hump overdrive, the sound of blues rock |
+| Blues Driver | overdrive | Dynamic, touch-sensitive overdrive |
+| Klon Centaur | overdrive | Transparent overdrive, clean/dirty mix |
+| Fulltone OCD | overdrive | MOSFET clipping, amp-like breakup |
+| Fuzz Face | fuzz | Velcro-rip fuzz, NPN/PNP polarity flip |
+| Big Muff | fuzz | Sustained wall of fuzz, Smashing Pumpkins territory |
+| ProCo RAT | distortion | Tight distortion, filter sweep |
+| Dyna Comp | compressor | Optical compression, country squish |
+| Boss CE-2 | modulation | BBD analog chorus |
+
+**Amps** (`examples/amps/`)
+
+| Circuit | Tubes | Character |
+|---------|-------|-----------|
+| Tweed Deluxe 5E3 | 12AY7 + 12AX7 | Touch-sensitive breakup, Neil Young |
+| Bassman 5F6-A | 12AY7 + 12AX7 | TMB tone stack, the grandfather of Marshall |
+| Marshall JTM45 | ECC83 x3 | British crunch, Clapton "Beano" tone |
 
 ---
 
@@ -360,10 +372,10 @@ python3 -m venv tools/.venv
 tools/.venv/bin/pip install -r tools/requirements.txt
 
 # Render EE-style schematics from .pedal files
-tools/.venv/bin/python tools/schematic.py examples/tube_screamer.pedal -o ts.png
+tools/.venv/bin/python tools/schematic.py examples/pedals/overdrive/tube_screamer.pedal -o ts.png
 
 # Generate Mouser BOM
-tools/.venv/bin/python tools/mouser_bom.py examples/big_muff.pedal --qty 5 --csv bom.csv
+tools/.venv/bin/python tools/mouser_bom.py examples/pedals/fuzz/big_muff.pedal --qty 5 --csv bom.csv
 ```
 
 ---

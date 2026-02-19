@@ -188,6 +188,8 @@ pub enum TriodeType {
     T12at7,
     /// 12AU7 / ECC82 - Low gain
     T12au7,
+    /// 12AY7 / 6072 - Low-medium gain, original Fender tweed tube
+    T12ay7,
 }
 
 /// MOSFET types for enhancement-mode devices used in guitar pedals.
@@ -424,11 +426,13 @@ fn triode_type(input: &str) -> IResult<&str, TriodeType> {
     alt((
         value(TriodeType::T12ax7, tag("12ax7")),
         value(TriodeType::T12at7, tag("12at7")),
+        value(TriodeType::T12ay7, tag("12ay7")),
         value(TriodeType::T12au7, tag("12au7")),
-        // European designations
+        // European/military designations
         value(TriodeType::T12ax7, tag("ecc83")),
         value(TriodeType::T12at7, tag("ecc81")),
         value(TriodeType::T12au7, tag("ecc82")),
+        value(TriodeType::T12ay7, tag("6072")),
     ))(input)
 }
 
@@ -1038,6 +1042,20 @@ pedal "Optical Tremolo" {
         // ECC83 = European 12AX7
         let (_, c) = component_def("V4: triode(ecc83)").unwrap();
         assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12ax7));
+    }
+
+    #[test]
+    fn parse_triode_12ay7() {
+        let (_, c) = component_def("V1: triode(12ay7)").unwrap();
+        assert_eq!(c.id, "V1");
+        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12ay7));
+    }
+
+    #[test]
+    fn parse_triode_6072() {
+        // 6072 = military designation for 12AY7
+        let (_, c) = component_def("V1: triode(6072)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12ay7));
     }
 
     #[test]

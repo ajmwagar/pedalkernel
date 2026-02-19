@@ -64,7 +64,17 @@ impl PedalboardProcessor {
         let mut warnings = Vec::new();
 
         for entry in &board.pedals {
-            let pedal_path = board_dir.join(&entry.path);
+            // Try direct path first, then search subdirectories by filename.
+            let pedal_path = {
+                let direct = board_dir.join(&entry.path);
+                if direct.exists() {
+                    direct
+                } else if let Some(found) = Self::find_in_subdirs(board_dir, &entry.path) {
+                    found
+                } else {
+                    direct // fall through to produce the original error message
+                }
+            };
 
             let result: Result<(String, CompiledPedal), String> = (|| {
                 let source = std::fs::read_to_string(&pedal_path).map_err(|e| {
@@ -118,6 +128,28 @@ impl PedalboardProcessor {
         }
 
         (Self { pedals }, warnings)
+    }
+
+    /// Search subdirectories of `base` for a file matching `filename`.
+    fn find_in_subdirs(base: &Path, filename: &str) -> Option<std::path::PathBuf> {
+        let target = Path::new(filename)
+            .file_name()?
+            .to_str()?;
+        Self::walk_for_file(base, target)
+    }
+
+    fn walk_for_file(dir: &Path, target: &str) -> Option<std::path::PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = Self::walk_for_file(&path, target) {
+                    return Some(found);
+                }
+            } else if path.file_name().and_then(|n| n.to_str()) == Some(target) {
+                return Some(path);
+            }
+        }
+        None
     }
 
     /// Number of pedals in the chain.

@@ -17,10 +17,27 @@ fn test_block(size: usize) -> Vec<f64> {
 }
 
 fn compile_example(name: &str) -> Box<dyn PedalProcessor> {
-    let path = format!("examples/{name}");
+    let path = find_example(name);
     let src = std::fs::read_to_string(&path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
     Box::new(compile_pedal(&pedal, SAMPLE_RATE).unwrap())
+}
+
+fn find_example(filename: &str) -> String {
+    fn walk(dir: &str, target: &str) -> Option<String> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = walk(path.to_str()?, target) {
+                    return Some(found);
+                }
+            } else if path.file_name().and_then(|n| n.to_str()) == Some(target) {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+        None
+    }
+    walk("examples", filename).unwrap_or_else(|| panic!("example file not found: {filename}"))
 }
 
 // ═══════════════════════════════════════════════════════════════════

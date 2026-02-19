@@ -1331,13 +1331,30 @@ R1: power_rating(0.25)
 
     // ── Voltage checks with specs ────────────────────────────────────────
 
+    fn find_example(filename: &str) -> String {
+        fn walk(dir: &str, target: &str) -> Option<String> {
+            for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(found) = walk(path.to_str()?, target) {
+                        return Some(found);
+                    }
+                } else if path.file_name().and_then(|n| n.to_str()) == Some(target) {
+                    return Some(path.to_string_lossy().to_string());
+                }
+            }
+            None
+        }
+        walk("examples", filename).unwrap_or_else(|| panic!("example file not found: {filename}"))
+    }
+
     fn fuzz_face_pedal() -> PedalDef {
-        let src = std::fs::read_to_string("examples/fuzz_face.pedal").unwrap();
+        let src = std::fs::read_to_string(find_example("fuzz_face.pedal")).unwrap();
         crate::dsl::parse_pedal_file(&src).unwrap()
     }
 
     fn tube_screamer_pedal() -> PedalDef {
-        let src = std::fs::read_to_string("examples/tube_screamer.pedal").unwrap();
+        let src = std::fs::read_to_string(find_example("tube_screamer.pedal")).unwrap();
         crate::dsl::parse_pedal_file(&src).unwrap()
     }
 
@@ -1441,7 +1458,7 @@ R1: power_rating(0.25)
     #[test]
     fn opamp_supply_max_exceeded() {
         let pedal = {
-            let src = std::fs::read_to_string("examples/klon_centaur.pedal").unwrap();
+            let src = std::fs::read_to_string(find_example("klon_centaur.pedal")).unwrap();
             crate::dsl::parse_pedal_file(&src).unwrap()
         };
         let limits = parse_pedalhw("U1: supply_max(36)\nU2: supply_max(36)").unwrap();
@@ -1480,7 +1497,7 @@ pedal "Test" {
 
     #[test]
     fn parse_fuzz_face_pedalhw() {
-        let src = std::fs::read_to_string("examples/fuzz_face.pedalhw");
+        let src = std::fs::read_to_string(find_example("fuzz_face.pedalhw"));
         if let Ok(src) = src {
             let limits = parse_pedalhw(&src).unwrap();
             assert!(!limits.specs.is_empty());
@@ -1491,7 +1508,7 @@ pedal "Test" {
     // ── BOM generation tests ─────────────────────────────────────────────
 
     fn klon_pedal() -> PedalDef {
-        let src = std::fs::read_to_string("examples/klon_centaur.pedal").unwrap();
+        let src = std::fs::read_to_string(find_example("klon_centaur.pedal")).unwrap();
         crate::dsl::parse_pedal_file(&src).unwrap()
     }
 
@@ -1592,7 +1609,7 @@ pedal "Test" {
             "proco_rat.pedal",
         ];
         for f in files {
-            let src = std::fs::read_to_string(format!("examples/{f}")).unwrap();
+            let src = std::fs::read_to_string(find_example(f)).unwrap();
             let pedal = crate::dsl::parse_pedal_file(&src).unwrap();
             let bom = build_bom(&pedal, None);
             assert!(!bom.is_empty(), "{f} should produce a non-empty BOM");

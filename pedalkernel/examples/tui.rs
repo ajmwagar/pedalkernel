@@ -1,6 +1,6 @@
 //! Interactive ASCII pedal control surface.
 //!
-//! Run: `cargo run --example tui --features tui -- examples/tube_screamer.pedal`
+//! Run: `cargo run --example tui --features tui -- examples/pedals/overdrive/tube_screamer.pedal`
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tui_app::run()

@@ -1,0 +1,94 @@
+# Fender 5E3 Tweed Deluxe (1955-1960)
+# The amp that defined rock and roll — Neil Young, Billy Gibbons, countless others.
+#
+# Circuit topology (preamp only):
+#   V1a: 12AY7 first gain stage (lower mu = more dynamic, cleans up with volume)
+#   V1b: 12AX7 second gain stage (higher gain, where the breakup lives)
+#   Tone stack between stages (simple single-knob Fender style)
+#
+# The 5E3's magic is in the interaction between its two volume controls
+# and the cathode follower mixing. We model the "Normal" channel path
+# which is the most commonly used for guitar.
+#
+# Key characteristics:
+#   - Touch-sensitive: the 12AY7 front end cleans up beautifully with picking dynamics
+#   - Saggy, compressed breakup from the cathode-biased output stage interaction
+#   - The tone control is a simple treble rolloff between stages
+#   - Volume interaction: both channels share a cathode follower (modeled as gain)
+
+pedal "Tweed Deluxe 5E3" {
+  components {
+    # Input stage
+    C1: cap(20n)            # Input coupling cap (0.02uF in original)
+    R1: resistor(1M)        # Grid leak resistor
+    R2: resistor(68k)       # Plate load resistor
+
+    # V1a: 12AY7 first triode gain stage
+    V1: triode(12ay7)       # 12AY7 — lower gain, more dynamic
+    R3: resistor(820)       # Cathode resistor (self-bias)
+    C2: cap(25u)            # Cathode bypass cap (full bypass for gain)
+
+    # Volume control (Normal channel)
+    Volume: pot(1M)         # 1M audio taper volume pot
+
+    # Interstage coupling and tone control
+    C3: cap(20n)            # Coupling cap to second stage (0.02uF)
+    R4: resistor(100k)      # Tone circuit series resistor
+    Tone: pot(250k)         # Tone control (treble rolloff)
+    C4: cap(250p)           # Tone cap — rolls off treble to ground
+
+    # V1b: 12AX7 second triode gain stage
+    R5: resistor(100k)      # Plate load resistor
+    V2: triode(12ax7)       # 12AX7 — higher gain stage
+    R6: resistor(1.5k)      # Cathode resistor (self-bias)
+    C5: cap(22u)            # Cathode bypass cap
+
+    # Output coupling
+    C6: cap(22n)            # Output coupling cap
+    R7: resistor(1M)        # Grid leak / output load
+  }
+  nets {
+    # Input coupling and grid leak
+    in -> C1.a
+    C1.b -> R1.a, V1.grid
+    R1.b -> gnd
+
+    # V1a: 12AY7 plate circuit
+    vcc -> R2.a
+    R2.b -> V1.plate
+
+    # V1a: cathode bias
+    V1.cathode -> R3.a, C2.a
+    R3.b -> gnd
+    C2.b -> gnd
+
+    # Volume control
+    V1.plate -> Volume.a
+    Volume.b -> C3.a
+
+    # Tone control between stages
+    C3.b -> R4.a
+    R4.b -> Tone.a, V2.grid
+    Tone.b -> C4.a
+    C4.b -> gnd
+
+    # V2: 12AX7 plate circuit
+    vcc -> R5.a
+    R5.b -> V2.plate
+
+    # V2: cathode bias
+    V2.cathode -> R6.a, C5.a
+    R6.b -> gnd
+    C5.b -> gnd
+
+    # Output coupling
+    V2.plate -> C6.a
+    C6.b -> R7.a
+    R7.b -> gnd
+    C6.b -> out
+  }
+  controls {
+    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+  }
+}

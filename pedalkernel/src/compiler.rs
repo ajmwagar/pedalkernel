@@ -2803,6 +2803,7 @@ fn triode_model(tt: TriodeType) -> TriodeModel {
         TriodeType::T12ax7 => TriodeModel::t_12ax7(),
         TriodeType::T12at7 => TriodeModel::t_12at7(),
         TriodeType::T12au7 => TriodeModel::t_12au7(),
+        TriodeType::T12ay7 => TriodeModel::t_12ay7(),
     }
 }
 
@@ -2936,9 +2937,35 @@ mod tests {
     use crate::dsl::parse_pedal_file;
 
     fn parse(filename: &str) -> PedalDef {
-        let path = format!("examples/{filename}");
+        let path = find_example(filename);
         let src = std::fs::read_to_string(&path).unwrap();
         parse_pedal_file(&src).unwrap()
+    }
+
+    /// Search examples/ subdirectories for a file by name.
+    fn find_example(filename: &str) -> String {
+        for entry in walkdir("examples") {
+            if entry.ends_with(filename) {
+                return entry;
+            }
+        }
+        panic!("example file not found: {filename}");
+    }
+
+    /// Simple recursive directory walk.
+    fn walkdir(dir: &str) -> Vec<String> {
+        let mut results = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    results.extend(walkdir(path.to_str().unwrap()));
+                } else {
+                    results.push(path.to_string_lossy().to_string());
+                }
+            }
+        }
+        results
     }
 
     #[test]
@@ -3010,6 +3037,9 @@ mod tests {
             "klon_centaur.pedal",
             "proco_rat.pedal",
             "boss_ce2.pedal",
+            "tweed_deluxe_5e3.pedal",
+            "bassman_5f6a.pedal",
+            "marshall_jtm45.pedal",
         ];
         for f in files {
             let pedal = parse(f);
@@ -3125,6 +3155,62 @@ mod tests {
         assert_finite(&output, "Dyna Comp");
         let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
         assert!(peak > 0.01, "Dyna Comp should produce output: peak={peak}");
+    }
+
+    #[test]
+    fn compile_tweed_deluxe_5e3() {
+        let pedal = parse("tweed_deluxe_5e3.pedal");
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        proc.set_control("Volume", 0.7);
+        proc.set_control("Tone", 0.5);
+
+        let input = sine(48000);
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert_finite(&output, "Tweed Deluxe 5E3");
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(
+            peak > 0.01,
+            "Tweed Deluxe should produce output: peak={peak}"
+        );
+    }
+
+    #[test]
+    fn compile_bassman_5f6a() {
+        let pedal = parse("bassman_5f6a.pedal");
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        proc.set_control("Volume", 0.6);
+        proc.set_control("Treble", 0.6);
+        proc.set_control("Mid", 0.5);
+        proc.set_control("Bass", 0.5);
+
+        let input = sine(48000);
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert_finite(&output, "Bassman 5F6-A");
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(
+            peak > 0.01,
+            "Bassman should produce output: peak={peak}"
+        );
+    }
+
+    #[test]
+    fn compile_marshall_jtm45() {
+        let pedal = parse("marshall_jtm45.pedal");
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        proc.set_control("Volume", 0.6);
+        proc.set_control("Treble", 0.6);
+        proc.set_control("Mid", 0.5);
+        proc.set_control("Bass", 0.5);
+        proc.set_control("Presence", 0.5);
+
+        let input = sine(48000);
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert_finite(&output, "Marshall JTM45");
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(
+            peak > 0.01,
+            "JTM45 should produce output: peak={peak}"
+        );
     }
 
     // -----------------------------------------------------------------------

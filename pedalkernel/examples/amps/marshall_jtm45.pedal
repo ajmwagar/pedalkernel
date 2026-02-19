@@ -1,0 +1,153 @@
+# Marshall JTM45 / Bluesbreaker (1962-1966)
+# Jim Marshall's first amp — a modified Fender Bassman 5F6-A with British parts.
+# Eric Clapton "Beano" tone, early Hendrix, Jimmy Page, Keith Richards.
+#
+# Circuit topology (preamp only):
+#   V1a: ECC83 (12AX7) first gain stage — "High Treble" channel input
+#   V1b: ECC83 (12AX7) second gain stage — cascaded for more crunch
+#   TMB tone stack: Fender-derived but retuned for brighter British voicing
+#   V2a: ECC83 (12AX7) third gain stage — drives the phase inverter
+#
+# Key differences from the Bassman 5F6-A:
+#   - All ECC83 (12AX7) tubes instead of 12AY7 first stage = more gain
+#   - Higher-value plate load resistors = more voltage gain per stage
+#   - Different tone stack component values = brighter, more aggressive mids
+#   - Three gain stages before the power amp vs Bassman's two
+#   - Mustard caps and carbon comp resistors give a grittier character
+#
+# The "High Treble" (Channel II, input 1) is the iconic Marshall channel.
+# Running both channels jumpered is a later trick not modeled here.
+
+pedal "Marshall JTM45" {
+  components {
+    # Input stage — High Treble channel
+    C1: cap(50n)            # Input coupling cap (larger than Bassman = more bass)
+    R1: resistor(1M)        # Grid leak resistor
+    R2: resistor(220k)      # Plate load resistor (higher than Bassman for more gain)
+
+    # V1a: ECC83 first gain stage
+    V1: triode(ecc83)       # ECC83 (12AX7) — high gain, unlike Bassman's 12AY7
+    R3: resistor(820)       # Cathode resistor (self-bias)
+    C2: cap(25u)            # Cathode bypass cap
+
+    # Volume control
+    Volume: pot(1M)         # 1M audio taper volume pot
+    C3: cap(100p)           # Bright cap (smaller than Bassman = tighter treble)
+
+    # Coupling to second gain stage
+    C4: cap(22n)            # Interstage coupling cap
+
+    # V1b: ECC83 second gain stage (the extra stage vs Bassman)
+    R4: resistor(220k)      # Plate load resistor
+    V2: triode(ecc83)       # ECC83 — cascaded gain stage
+    R5: resistor(820)       # Cathode resistor
+    C5: cap(25u)            # Cathode bypass cap
+
+    # Coupling to tone stack
+    C6: cap(22n)            # Coupling cap to tone stack
+
+    # TMB Tone Stack — British-voiced Fender derivative
+    # Same topology as Bassman but different values:
+    # brighter treble cap, more mid presence
+    R6: resistor(33k)       # Slope resistor (lower than Bassman = less insertion loss)
+    Treble: pot(250k)       # Treble pot
+    C7: cap(500p)           # Treble cap (larger than Bassman = lower treble freq)
+    Bass: pot(1M)           # Bass pot
+    C8: cap(22n)            # Bass cap
+    R7: resistor(25k)       # Mid resistor
+    C9: cap(22n)            # Mid cap
+    Mid: pot(25k)           # Mid pot (lower value than Bassman = different interaction)
+
+    # V2a: ECC83 third gain stage (drives phase inverter in real amp)
+    C10: cap(22n)           # Coupling cap to third stage
+    R8: resistor(100k)      # Plate load resistor
+    V3: triode(ecc83)       # ECC83 — third gain stage for extra push
+    R9: resistor(1.5k)      # Cathode resistor
+    C11: cap(22u)           # Cathode bypass cap
+
+    # Presence control (negative feedback from output stage, modeled as HF shelf)
+    R10: resistor(5k)       # Presence network resistor
+    Presence: pot(25k)      # Presence control
+    C12: cap(4.7n)          # Presence cap (sets shelf frequency)
+
+    # Output coupling
+    C13: cap(22n)           # Output coupling cap
+    R11: resistor(1M)       # Grid leak / output load
+  }
+  nets {
+    # Input coupling and grid leak
+    in -> C1.a
+    C1.b -> R1.a, V1.grid
+    R1.b -> gnd
+
+    # V1a: ECC83 first stage plate circuit
+    vcc -> R2.a
+    R2.b -> V1.plate
+
+    # V1a: cathode bias
+    V1.cathode -> R3.a, C2.a
+    R3.b -> gnd
+    C2.b -> gnd
+
+    # Volume control with bright cap
+    V1.plate -> Volume.a, C3.a
+    C3.b -> Volume.b
+    Volume.b -> C4.a
+
+    # V1b: ECC83 second gain stage
+    C4.b -> V2.grid
+    vcc -> R4.a
+    R4.b -> V2.plate
+
+    # V1b: cathode bias
+    V2.cathode -> R5.a, C5.a
+    R5.b -> gnd
+    C5.b -> gnd
+
+    # Coupling to TMB tone stack
+    V2.plate -> C6.a
+
+    # TMB Tone Stack (same topology as Bassman, different values)
+    C6.b -> R6.a
+    R6.b -> Treble.a
+    Treble.b -> C7.a, Bass.a, R7.a
+    C7.b -> gnd
+    Bass.b -> C8.a
+    C8.b -> gnd
+    R7.b -> C9.a
+    C9.b -> Mid.a
+    Mid.b -> gnd
+
+    # Coupling to third stage
+    Treble.b -> C10.a
+
+    # V2a: ECC83 third gain stage
+    C10.b -> V3.grid
+    vcc -> R8.a
+    R8.b -> V3.plate
+
+    # V2a: cathode bias
+    V3.cathode -> R9.a, C11.a
+    R9.b -> gnd
+    C11.b -> gnd
+
+    # Presence control (HF shelf from output coupling)
+    V3.plate -> R10.a
+    R10.b -> Presence.a, C12.a
+    Presence.b -> gnd
+    C12.b -> gnd
+
+    # Output coupling
+    V3.plate -> C13.a
+    C13.b -> R11.a
+    R11.b -> gnd
+    C13.b -> out
+  }
+  controls {
+    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+    Treble.position -> "Treble" [0.0, 1.0] = 0.6
+    Mid.position -> "Mid" [0.0, 1.0] = 0.5
+    Bass.position -> "Bass" [0.0, 1.0] = 0.5
+    Presence.position -> "Presence" [0.0, 1.0] = 0.5
+  }
+}
