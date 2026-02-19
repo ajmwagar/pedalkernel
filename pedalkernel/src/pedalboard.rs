@@ -115,6 +115,9 @@ impl PedalboardProcessor {
                     chain.push(ChainSlot::Pedal(slot));
                 }
                 BoardEntry::FxLoop(group) => {
+                    // Find the referenced amp pedal — it must have been declared
+                    // earlier in the board as a regular Pedal entry.
+                    // We need to load, parse, and compile it as a split pedal.
                     let amp_entry = board.entries.iter().find_map(|e| {
                         if let BoardEntry::Pedal(p) = e {
                             if p.id == group.target_id {
@@ -167,6 +170,7 @@ impl PedalboardProcessor {
                                         format!("Failed to split-compile '{}': {e}", entry.id)
                                     })?;
 
+                                // Apply overrides from the board
                                 for ctrl in &pedal_def.controls {
                                     split.set_control(&ctrl.label, ctrl.default);
                                 }
@@ -181,6 +185,8 @@ impl PedalboardProcessor {
 
                     match amp_result {
                         Ok((name, split)) => {
+                            // Remove the regular pedal entry for this amp from the chain
+                            // (it's now handled by the FX loop)
                             chain.retain(|slot| {
                                 if let ChainSlot::Pedal(p) = slot {
                                     p.name != name || p.failed
@@ -210,6 +216,7 @@ impl PedalboardProcessor {
                                 "FX loop for '{}' failed: {msg}",
                                 group.target_id
                             ));
+                            // Fall back: just add the FX loop effects as regular pedals
                             for pedal_entry in &group.pedals {
                                 let slot = Self::compile_pedal_entry(
                                     pedal_entry,
@@ -1022,6 +1029,7 @@ board "FX Loop" {
             "FX loop board should load without warnings: {warnings:?}"
         );
 
+        // Process some samples — should produce non-zero output
         let mut max_out = 0.0_f64;
         for i in 0..1000 {
             let input = (i as f64 * 440.0 * 2.0 * std::f64::consts::PI / 48000.0).sin() * 0.1;
@@ -1046,9 +1054,13 @@ board "Mix" {
         let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
         let mut pb = PedalboardProcessor::from_board(&board, &board_dir, 48000.0).unwrap();
 
+        // Set FX loop mix — should not panic
         pb.set_control("fx_loop:mix", 0.5);
+
+        // Route a control to the amp inside the FX loop
         pb.set_control("fx_loop:Volume", 0.8);
 
+        // Process should still work
         let output = pb.process(0.1);
         assert!(output.is_finite());
     }
@@ -1068,10 +1080,12 @@ board "Bad FX Loop" {
         let (pb, warnings) =
             PedalboardProcessor::from_board_with_warnings(&board, &board_dir, 48000.0);
 
+        // Should have a warning about the missing amp
         assert!(
             warnings.iter().any(|w| w.contains("nonexistent")),
             "Should warn about missing amp: {warnings:?}"
         );
+        // The blues_driver should still be in the chain as a fallback pedal
         assert!(pb.len() >= 2, "Fallback should still have pedals");
     }
 }
