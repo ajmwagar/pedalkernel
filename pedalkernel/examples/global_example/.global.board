@@ -1,0 +1,8 @@
+# Example global board — wraps every board in this directory
+# Compressor at the start of the chain
+
+global {
+  start {
+    comp: "../dyna_comp.pedal" { Sensitivity = 0.3, Output = 0.8 }
+  }
+}

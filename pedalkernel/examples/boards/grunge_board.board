@@ -1,0 +1,11 @@
+# Grunge Board — high-gain wall of fuzz
+# Compressor → Klon (light boost) → RAT (main distortion) → Big Muff (sustain/fuzz)
+#
+# Signal chain order: top = first in chain
+
+board "Grunge Board" {
+  comp: "dyna_comp.pedal" { Sensitivity = 0.6, Output = 0.7 }
+  klon: "klon_centaur.pedal" { Gain = 0.3, Treble = 0.5, Output = 0.7 }
+  rat: "proco_rat.pedal" { Distortion = 0.8, Filter = 0.4, Volume = 0.6 }
+  muff: "big_muff.pedal" { Sustain = 0.9, Tone = 0.5, Volume = 0.5 }
+}

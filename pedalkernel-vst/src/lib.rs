@@ -49,28 +49,28 @@ const EMBEDDED_SOURCES: &[&str] = &[
 /// Guitar-voiced pedals (overdrives, fuzz, wah).
 #[cfg(feature = "pro-guitar")]
 const PRO_GUITAR_SOURCES: &[&str] = &[
-    include_str!("../../../pedalkernel-pro/pedals/fulltone_ocd.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/klon_centaur.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/morning_glory.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/tumnus.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/ts808_tubescreamer.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/eqd_plumes.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/crybaby_wah.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/overdrive/fulltone_ocd.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/overdrive/klon_centaur.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/overdrive/morning_glory.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/overdrive/tumnus.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/overdrive/ts808_tubescreamer.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/overdrive/eqd_plumes.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/wah/crybaby_wah.pedal"),
 ];
 
 /// Instrument-agnostic pedals (compression, delay, modulation, reverb).
 /// Included in both guitar and bass variants.
 #[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
 const PRO_SHARED_SOURCES: &[&str] = &[
-    include_str!("../../../pedalkernel-pro/pedals/keeley_compressor_plus.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/ce2_chorus.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/phase90.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/fender_tremolo.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/optical_tremolo.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/harmonic_tremolo.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/univibe.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/boss_dm2_delay.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/walrus_slo_reverb.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/compressor/keeley_compressor_plus.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/chorus/ce2_chorus.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/phaser/phase90.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/tremolo/fender_tremolo.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/tremolo/optical_tremolo.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/tremolo/harmonic_tremolo.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/phaser/univibe.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/delay/boss_dm2_delay.pedal"),
+    include_str!("../../../pedalkernel-pro/pedals/reverb/walrus_slo_reverb.pedal"),
 ];
 
 /// Bass-specific pedals (bass overdrive, bass compressor, etc.).

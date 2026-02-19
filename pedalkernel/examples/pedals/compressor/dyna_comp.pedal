@@ -30,6 +30,6 @@ pedal "MXR Dyna Comp" {
   }
   controls {
     Sensitivity.position -> "Sensitivity" [0.0, 1.0] = 0.5
-    Output.position -> "Output" [0.0, 1.0] = 0.5
+    Output.position -> "Output" [0.0, 1.0] = 0.7
   }
 }

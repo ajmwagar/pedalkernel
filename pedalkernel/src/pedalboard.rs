@@ -7,7 +7,7 @@
 //! - `"0:Drive"` → pedal index 0, knob "Drive"
 //! - `"2:__bypass__"` → toggle bypass on pedal index 2
 
-use crate::board::BoardDef;
+use crate::board::{find_global_board, BoardDef, BoardPedalEntry};
 use crate::compiler::{compile_pedal, CompiledPedal};
 use crate::dsl::parse_pedal_file;
 use crate::PedalProcessor;
@@ -28,6 +28,100 @@ struct PedalSlot {
 /// Chains N `CompiledPedal` instances in series.
 pub struct PedalboardProcessor {
     pedals: Vec<PedalSlot>,
+}
+
+/// Search subdirectories of `base` for a file matching `filename`.
+fn find_in_subdirs(base: &Path, filename: &str) -> Option<std::path::PathBuf> {
+    let target = Path::new(filename).file_name()?.to_str()?;
+    walk_for_file(base, target)
+}
+
+fn walk_for_file(dir: &Path, target: &str) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = walk_for_file(&path, target) {
+                return Some(found);
+            }
+        } else if path.file_name().and_then(|n| n.to_str()) == Some(target) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Build `PedalSlot`s from a list of `BoardPedalEntry`, appending to `out`.
+/// Failed pedals become dry passthrough slots with a warning.
+fn build_slots(
+    entries: &[BoardPedalEntry],
+    base_dir: &Path,
+    sample_rate: f64,
+    out: &mut Vec<PedalSlot>,
+    warnings: &mut Vec<String>,
+) {
+    for entry in entries {
+        // Try direct path first, then search subdirectories by filename.
+        let pedal_path = {
+            let direct = base_dir.join(&entry.path);
+            if direct.exists() {
+                direct
+            } else if let Some(found) = find_in_subdirs(base_dir, &entry.path) {
+                found
+            } else {
+                direct // fall through to produce the original error message
+            }
+        };
+
+        let result: Result<(String, CompiledPedal), String> = (|| {
+            let source = std::fs::read_to_string(&pedal_path).map_err(|e| {
+                format!(
+                    "Error reading pedal '{}' at {}: {e}",
+                    entry.id,
+                    pedal_path.display()
+                )
+            })?;
+            let pedal_def = parse_pedal_file(&source)
+                .map_err(|e| format!("Parse error in '{}' ({}): {e}", entry.id, entry.path))?;
+            let mut proc = compile_pedal(&pedal_def, sample_rate).map_err(|e| {
+                format!("Compilation error in '{}' ({}): {e}", entry.id, entry.path)
+            })?;
+
+            // Apply default control values from the .pedal file
+            for ctrl in &pedal_def.controls {
+                proc.set_control(&ctrl.label, ctrl.default);
+            }
+
+            // Apply overrides from the .board file
+            for (label, val) in &entry.overrides {
+                proc.set_control(label, *val);
+            }
+
+            Ok((pedal_def.name.clone(), proc))
+        })();
+
+        match result {
+            Ok((name, proc)) => {
+                out.push(PedalSlot {
+                    name,
+                    processor: Some(proc),
+                    bypassed: false,
+                    failed: false,
+                });
+            }
+            Err(msg) => {
+                warnings.push(format!(
+                    "Pedal '{}' failed — using dry passthrough: {msg}",
+                    entry.id
+                ));
+                out.push(PedalSlot {
+                    name: format!("{} [FAILED]", entry.id),
+                    processor: None,
+                    bypassed: false,
+                    failed: true,
+                });
+            }
+        }
+    }
 }
 
 impl PedalboardProcessor {
@@ -55,101 +149,44 @@ impl PedalboardProcessor {
     ///
     /// Pedals that fail to read, parse, or compile are replaced with dry
     /// passthrough slots. The returned warnings describe each failure.
+    ///
+    /// If a `.global.board` file is found (by walking up from `board_dir`),
+    /// its `start` pedals are prepended and `end` pedals are appended to
+    /// the signal chain.
     pub fn from_board_with_warnings(
         board: &BoardDef,
         board_dir: &Path,
         sample_rate: f64,
     ) -> (Self, Vec<String>) {
-        let mut pedals = Vec::with_capacity(board.pedals.len());
         let mut warnings = Vec::new();
 
-        for entry in &board.pedals {
-            // Try direct path first, then search subdirectories by filename.
-            let pedal_path = {
-                let direct = board_dir.join(&entry.path);
-                if direct.exists() {
-                    direct
-                } else if let Some(found) = Self::find_in_subdirs(board_dir, &entry.path) {
-                    found
-                } else {
-                    direct // fall through to produce the original error message
-                }
-            };
+        // Detect global board
+        let global = find_global_board(board_dir);
+        if let Some((ref def, ref dir)) = global {
+            let n_start = def.start.len();
+            let n_end = def.end.len();
+            eprintln!(
+                "Global: {} ({} start, {} end)",
+                dir.join(".global.board").display(),
+                n_start,
+                n_end,
+            );
+        }
 
-            let result: Result<(String, CompiledPedal), String> = (|| {
-                let source = std::fs::read_to_string(&pedal_path).map_err(|e| {
-                    format!(
-                        "Error reading pedal '{}' at {}: {e}",
-                        entry.id,
-                        pedal_path.display()
-                    )
-                })?;
-                let pedal_def = parse_pedal_file(&source)
-                    .map_err(|e| format!("Parse error in '{}' ({}): {e}", entry.id, entry.path))?;
-                let mut proc = compile_pedal(&pedal_def, sample_rate).map_err(|e| {
-                    format!("Compilation error in '{}' ({}): {e}", entry.id, entry.path)
-                })?;
+        // Build slots: [global start] + [board] + [global end]
+        let mut pedals = Vec::new();
 
-                // Apply default control values from the .pedal file
-                for ctrl in &pedal_def.controls {
-                    proc.set_control(&ctrl.label, ctrl.default);
-                }
+        if let Some((ref def, ref global_dir)) = global {
+            build_slots(&def.start, global_dir, sample_rate, &mut pedals, &mut warnings);
+        }
 
-                // Apply overrides from the .board file
-                for (label, val) in &entry.overrides {
-                    proc.set_control(label, *val);
-                }
+        build_slots(&board.pedals, board_dir, sample_rate, &mut pedals, &mut warnings);
 
-                Ok((pedal_def.name.clone(), proc))
-            })();
-
-            match result {
-                Ok((name, proc)) => {
-                    pedals.push(PedalSlot {
-                        name,
-                        processor: Some(proc),
-                        bypassed: false,
-                        failed: false,
-                    });
-                }
-                Err(msg) => {
-                    warnings.push(format!(
-                        "Pedal '{}' failed — using dry passthrough: {msg}",
-                        entry.id
-                    ));
-                    pedals.push(PedalSlot {
-                        name: format!("{} [FAILED]", entry.id),
-                        processor: None,
-                        bypassed: false,
-                        failed: true,
-                    });
-                }
-            }
+        if let Some((ref def, ref global_dir)) = global {
+            build_slots(&def.end, global_dir, sample_rate, &mut pedals, &mut warnings);
         }
 
         (Self { pedals }, warnings)
-    }
-
-    /// Search subdirectories of `base` for a file matching `filename`.
-    fn find_in_subdirs(base: &Path, filename: &str) -> Option<std::path::PathBuf> {
-        let target = Path::new(filename)
-            .file_name()?
-            .to_str()?;
-        Self::walk_for_file(base, target)
-    }
-
-    fn walk_for_file(dir: &Path, target: &str) -> Option<std::path::PathBuf> {
-        for entry in std::fs::read_dir(dir).ok()?.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(found) = Self::walk_for_file(&path, target) {
-                    return Some(found);
-                }
-            } else if path.file_name().and_then(|n| n.to_str()) == Some(target) {
-                return Some(path);
-            }
-        }
-        None
     }
 
     /// Number of pedals in the chain.
@@ -290,6 +327,75 @@ impl PedalProcessor for BoardSwitcherProcessor {
             }
         } else if let Some(board) = self.boards.get_mut(self.active) {
             board.set_control(label, value);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PedalSwitcherProcessor — switches between individual compiled pedals
+// ---------------------------------------------------------------------------
+
+/// Meta-processor wrapping multiple pre-compiled individual pedals.
+///
+/// Delegates `process()` to the active pedal. Switching is instant —
+/// just an index change, no allocation, no audio gap.
+/// Unlike `BoardSwitcherProcessor`, forwards bare control labels (no prefix).
+pub struct PedalSwitcherProcessor {
+    pedals: Vec<CompiledPedal>,
+    active: usize,
+}
+
+impl PedalSwitcherProcessor {
+    /// Create a new pedal switcher from a vec of pre-compiled pedals.
+    pub fn new(pedals: Vec<CompiledPedal>) -> Self {
+        Self { pedals, active: 0 }
+    }
+
+    /// Number of pedals.
+    pub fn len(&self) -> usize {
+        self.pedals.len()
+    }
+
+    /// Whether there are no pedals.
+    pub fn is_empty(&self) -> bool {
+        self.pedals.is_empty()
+    }
+
+    /// Current active pedal index.
+    pub fn active(&self) -> usize {
+        self.active
+    }
+}
+
+impl PedalProcessor for PedalSwitcherProcessor {
+    fn process(&mut self, input: f64) -> f64 {
+        if let Some(pedal) = self.pedals.get_mut(self.active) {
+            pedal.process(input)
+        } else {
+            input
+        }
+    }
+
+    fn set_sample_rate(&mut self, rate: f64) {
+        for pedal in &mut self.pedals {
+            pedal.set_sample_rate(rate);
+        }
+    }
+
+    fn reset(&mut self) {
+        for pedal in &mut self.pedals {
+            pedal.reset();
+        }
+    }
+
+    fn set_control(&mut self, label: &str, value: f64) {
+        if label == "__switch_pedal__" {
+            let idx = value as usize;
+            if idx < self.pedals.len() {
+                self.active = idx;
+            }
+        } else if let Some(pedal) = self.pedals.get_mut(self.active) {
+            pedal.set_control(label, value);
         }
     }
 }
@@ -477,5 +583,166 @@ board "Bad" {
         // Should not panic — sets rate on all boards
         switcher.set_sample_rate(44100.0);
         switcher.reset();
+    }
+
+    // ── Global board tests ──────────────────────────────────────────────
+
+    #[test]
+    fn global_board_prepends_and_appends() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
+        let comp_path = examples.join("pedals/compressor/dyna_comp.pedal").canonicalize().unwrap();
+        let bd_path = examples.join("pedals/overdrive/blues_driver.pedal").canonicalize().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create .global.board with absolute paths
+        let global_content = format!(
+            "global {{\n  start {{\n    comp: \"{}\" {{ Sensitivity = 0.3 }}\n  }}\n  end {{\n    bd: \"{}\"\n  }}\n}}",
+            comp_path.display(),
+            bd_path.display(),
+        );
+        std::fs::write(tmp.path().join(".global.board"), &global_content).unwrap();
+
+        // Create board file in subdirectory
+        let sub = tmp.path().join("boards");
+        std::fs::create_dir(&sub).unwrap();
+        let board_content = format!(
+            "board \"Test\" {{\n  ts: \"{}\" {{ Drive = 0.6 }}\n}}",
+            ts_path.display(),
+        );
+        std::fs::write(sub.join("test.board"), &board_content).unwrap();
+
+        let board = parse_board_file(&board_content).unwrap();
+        let (pb, warnings) =
+            PedalboardProcessor::from_board_with_warnings(&board, &sub, 48000.0);
+
+        // Should have 3 pedals: comp (start) + ts (board) + bd (end)
+        assert_eq!(pb.len(), 3, "warnings: {warnings:?}");
+        assert_eq!(pb.pedal_name(0), Some("MXR Dyna Comp"));
+        assert_eq!(pb.pedal_name(1), Some("Tube Screamer"));
+        assert_eq!(pb.pedal_name(2), Some("Boss Blues Driver"));
+    }
+
+    #[test]
+    fn global_board_start_only() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
+        let comp_path = examples.join("pedals/compressor/dyna_comp.pedal").canonicalize().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        let global_content = format!(
+            "global {{\n  start {{\n    comp: \"{}\"\n  }}\n}}",
+            comp_path.display(),
+        );
+        std::fs::write(tmp.path().join(".global.board"), &global_content).unwrap();
+
+        let board_content = format!(
+            "board \"Test\" {{\n  ts: \"{}\"\n}}",
+            ts_path.display(),
+        );
+
+        let board = parse_board_file(&board_content).unwrap();
+        let (pb, _) =
+            PedalboardProcessor::from_board_with_warnings(&board, tmp.path(), 48000.0);
+
+        assert_eq!(pb.len(), 2);
+        assert_eq!(pb.pedal_name(0), Some("MXR Dyna Comp"));
+        assert_eq!(pb.pedal_name(1), Some("Tube Screamer"));
+    }
+
+    #[test]
+    fn global_board_signal_chain_order() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
+        let comp_path = examples.join("pedals/compressor/dyna_comp.pedal").canonicalize().unwrap();
+        let bd_path = examples.join("pedals/overdrive/blues_driver.pedal").canonicalize().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        let global_content = format!(
+            "global {{\n  start {{\n    comp: \"{}\"\n  }}\n  end {{\n    bd: \"{}\"\n  }}\n}}",
+            comp_path.display(),
+            bd_path.display(),
+        );
+        std::fs::write(tmp.path().join(".global.board"), &global_content).unwrap();
+
+        let board_content = format!(
+            "board \"Chain\" {{\n  ts: \"{}\" {{ Drive = 0.8 }}\n}}",
+            ts_path.display(),
+        );
+
+        let board = parse_board_file(&board_content).unwrap();
+        let (pb, _) =
+            PedalboardProcessor::from_board_with_warnings(&board, tmp.path(), 48000.0);
+
+        // Signal chain: comp → ts → bd
+        assert_eq!(pb.len(), 3);
+
+        // Process audio — should produce non-zero, finite output
+        let mut pb = pb;
+        let mut max_out = 0.0_f64;
+        for i in 0..1000 {
+            let input = (i as f64 * 440.0 * 2.0 * std::f64::consts::PI / 48000.0).sin() * 0.1;
+            let output = pb.process(input);
+            assert!(output.is_finite());
+            max_out = max_out.max(output.abs());
+        }
+        assert!(max_out > 0.0001, "pedalboard with global should produce output");
+    }
+
+    #[test]
+    fn no_global_board_unchanged() {
+        // Board in a dir with no .global.board — should work as before
+        let tmp = tempfile::tempdir().unwrap();
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
+
+        let board_content = format!(
+            "board \"Solo\" {{\n  ts: \"{}\"\n}}",
+            ts_path.display(),
+        );
+
+        let board = parse_board_file(&board_content).unwrap();
+        let (pb, warnings) =
+            PedalboardProcessor::from_board_with_warnings(&board, tmp.path(), 48000.0);
+
+        assert_eq!(pb.len(), 1);
+        assert!(warnings.is_empty());
+        assert_eq!(pb.pedal_name(0), Some("Tube Screamer"));
+    }
+
+    #[test]
+    fn global_board_control_routing_flat_index() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
+        let comp_path = examples.join("pedals/compressor/dyna_comp.pedal").canonicalize().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        let global_content = format!(
+            "global {{\n  start {{\n    comp: \"{}\"\n  }}\n}}",
+            comp_path.display(),
+        );
+        std::fs::write(tmp.path().join(".global.board"), &global_content).unwrap();
+
+        let board_content = format!(
+            "board \"Test\" {{\n  ts: \"{}\"\n}}",
+            ts_path.display(),
+        );
+
+        let board = parse_board_file(&board_content).unwrap();
+        let (mut pb, _) =
+            PedalboardProcessor::from_board_with_warnings(&board, tmp.path(), 48000.0);
+
+        // Index 0 = global comp, index 1 = board ts
+        // Bypass the global comp via flat index
+        pb.set_control("0:__bypass__", 1.0);
+        assert!(pb.is_pedal_bypassed(0));
+        assert!(!pb.is_pedal_bypassed(1));
+
+        // Route a knob control to the board pedal
+        pb.set_control("1:Drive", 0.9);
     }
 }

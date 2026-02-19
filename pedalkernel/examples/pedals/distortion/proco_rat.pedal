@@ -90,6 +90,6 @@ pedal "ProCo RAT" {
   controls {
     Distortion.position -> "Distortion" [0.0, 1.0] = 0.5
     Filter.position -> "Filter" [0.0, 1.0] = 0.7
-    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+    Volume.position -> "Volume" [0.0, 1.0] = 0.6
   }
 }

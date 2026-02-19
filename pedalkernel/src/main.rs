@@ -29,8 +29,8 @@ enum Command {
     /// Interactive TUI with live JACK audio — select I/O ports and tweak knobs.
     #[cfg(all(feature = "jack-rt", feature = "tui"))]
     Tui {
-        /// Path to a .pedal file, .board file, or directory of .board files.
-        file: String,
+        /// Path to a .pedal file, .board file, or directory (default: current dir).
+        file: Option<String>,
         /// Optional WAV file to loop as audio input instead of a JACK input port.
         #[arg(long)]
         input: Option<String>,
@@ -50,17 +50,45 @@ fn main() {
         #[cfg(all(feature = "jack-rt", feature = "tui"))]
         Command::Tui { file, input } => {
             let wav_input = input.as_deref();
-            let path = std::path::Path::new(&file);
-            let result = if path.is_dir() {
-                cli::folder_tui::run(&file, wav_input)
-            } else if file.ends_with(".board") {
-                cli::board_tui::run(&file, wav_input)
-            } else {
-                cli::tui::run(&file, wav_input)
-            };
-            if let Err(e) = result {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
+            let mut current_file = file.unwrap_or_else(|| ".".to_string());
+
+            loop {
+                let path = std::path::Path::new(&current_file);
+                let result = if path.is_dir() {
+                    // Check for .board files first (existing behavior)
+                    let has_boards = std::fs::read_dir(&current_file)
+                        .ok()
+                        .map(|rd| {
+                            rd.flatten().any(|e| {
+                                e.path()
+                                    .extension()
+                                    .and_then(|x| x.to_str())
+                                    .map(|x| x == "board")
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false);
+                    if has_boards {
+                        cli::folder_tui::run(&current_file, wav_input)
+                    } else {
+                        cli::pedal_folder_tui::run(&current_file, wav_input)
+                    }
+                } else if current_file.ends_with(".board") {
+                    cli::board_tui::run(&current_file, wav_input)
+                } else {
+                    cli::tui::run(&current_file, wav_input)
+                };
+
+                match result {
+                    Ok(Some(new_file)) => {
+                        current_file = new_file;
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                }
             }
         }
     }

@@ -14,8 +14,10 @@ pedal "Boss CE-2" {
     BBD1: bbd(mn3207)       # MN3207 bucket-brigade delay (1024 stages)
     C3: cap(100n)           # Output coupling
     R4: resistor(47k)       # Output load
-    LFO1: lfo(triangle, 150k, 33n)  # Triangle LFO for smooth chorus sweep
+    LFO1: lfo(triangle, 150k, 1u)   # Triangle LFO for smooth chorus sweep
     Rate: pot(500k)         # Rate control
+    Depth: pot(50k)         # Depth control — scales LFO modulation amount
+    R7: resistor(22k)       # Depth scaling resistor
     C4: cap(1u)             # Output smoothing
     R5: resistor(100k)      # Mix resistor (dry)
     R6: resistor(100k)      # Mix resistor (wet)
@@ -29,7 +31,10 @@ pedal "Boss CE-2" {
     U1.out -> C2.a, R5.a
     C2.b -> R3.a
     R3.b -> BBD1.in
-    LFO1.out -> BBD1.clock
+    Rate.b -> LFO1.rate
+    LFO1.out -> Depth.a
+    Depth.b -> R7.a
+    R7.b -> BBD1.clock
     BBD1.out -> C3.a
     C3.b -> R4.a, R6.a
     R4.b -> gnd
@@ -38,6 +43,7 @@ pedal "Boss CE-2" {
     C4.b -> out
   }
   controls {
-    Rate.position -> "Rate" [0.0, 1.0] = 0.5
+    Rate.position -> "Rate" [0.0, 1.0] = 0.4
+    Depth.position -> "Depth" [0.0, 1.0] = 0.5
   }
 }

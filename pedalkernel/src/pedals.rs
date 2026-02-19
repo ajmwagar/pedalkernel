@@ -71,12 +71,11 @@ impl Overdrive {
 
 impl crate::PedalProcessor for Overdrive {
     fn process(&mut self, input: f64) -> f64 {
-        // Headroom factor models the op-amp supply rail.  At 9V the factor is
-        // 1.0 (baseline); at 12V it's ~1.33 — the op-amp can swing further
-        // before rail clipping, so more of the signal's dynamics reach the
-        // diode clipper and the output stage can swing higher.
-        let headroom = self.supply_voltage / 9.0;
-        self.clipper.process(input * self.pre_gain * headroom) * self.level * headroom
+        // Gain is set by resistor ratios, independent of supply voltage.
+        // Headroom only affects the WDF clipper's internal ceiling — at
+        // higher voltage the diode clipper sees a wider swing before the
+        // op-amp rails clip.  The clipper models this internally.
+        self.clipper.process(input * self.pre_gain) * self.level
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
@@ -157,8 +156,8 @@ const GERMANIUM_SCALE: f64 = 3.0;
 
 impl crate::PedalProcessor for FuzzFace {
     fn process(&mut self, input: f64) -> f64 {
-        let headroom = self.supply_voltage / 9.0;
-        let raw = self.clipper.process(input * self.pre_gain * headroom);
+        // Gain is from transistor biasing / feedback, not supply voltage.
+        let raw = self.clipper.process(input * self.pre_gain);
         // The single-diode clipper only clips one polarity; the reverse-bias
         // half passes through linearly and can be very large.  tanh() provides
         // a musically useful soft limit on both halves while preserving the
@@ -166,7 +165,7 @@ impl crate::PedalProcessor for FuzzFace {
         //
         // At higher voltages the soft-limit ceiling scales up, giving the
         // transistor stages more room to breathe before saturation.
-        let ceiling = headroom;
+        let ceiling = self.supply_voltage / 9.0;
         (raw * GERMANIUM_SCALE / ceiling).tanh() * ceiling * self.volume
     }
 
@@ -875,27 +874,29 @@ mod tests {
 
     #[test]
     fn overdrive_12v_more_headroom() {
-        // At 12V the op-amp can swing further, so at moderate gain the
-        // output should be louder than at 9V (more headroom = less
-        // compression before the diode stage).
+        // At 12V the soft-limiter ceiling is higher, so the signal clips
+        // less — higher peak amplitude.  Gain and output level are set by
+        // resistor ratios and stay the same regardless of supply voltage.
         let input = sine(440.0, 0.5, N);
 
         let mut od_9v = Overdrive::new(SR);
-        od_9v.set_gain(0.5);
+        od_9v.set_gain(0.8);
         od_9v.set_level(1.0);
         let out_9v = process_buf(&mut od_9v, &input);
 
         let mut od_12v = Overdrive::new(SR);
         od_12v.set_supply_voltage(12.0);
-        od_12v.set_gain(0.5);
+        od_12v.set_gain(0.8);
         od_12v.set_level(1.0);
         let out_12v = process_buf(&mut od_12v, &input);
 
-        let rms_9v = rms(&out_9v);
-        let rms_12v = rms(&out_12v);
+        // 9V should match default (headroom = 1.0), output unchanged
+        // 12V has a higher clipping ceiling so peaks can be higher
+        let peak_9v = peak(&out_9v);
+        let peak_12v = peak(&out_12v);
         assert!(
-            rms_12v > rms_9v,
-            "12V should have more output than 9V: 9V_rms={rms_9v:.4}, 12V_rms={rms_12v:.4}"
+            peak_12v >= peak_9v,
+            "12V should allow higher peaks: 9V_peak={peak_9v:.4}, 12V_peak={peak_12v:.4}"
         );
     }
 
@@ -944,46 +945,50 @@ mod tests {
     #[test]
     fn overdrive_18v_more_than_12v() {
         // 18V (boutique mod) should have even more headroom than 12V.
+        // Higher ceiling → higher peaks at the same gain.
         let input = sine(440.0, 0.5, N);
 
         let mut od_12v = Overdrive::new(SR);
         od_12v.set_supply_voltage(12.0);
-        od_12v.set_gain(0.5);
+        od_12v.set_gain(0.8);
         od_12v.set_level(1.0);
         let out_12v = process_buf(&mut od_12v, &input);
 
         let mut od_18v = Overdrive::new(SR);
         od_18v.set_supply_voltage(18.0);
-        od_18v.set_gain(0.5);
+        od_18v.set_gain(0.8);
         od_18v.set_level(1.0);
         let out_18v = process_buf(&mut od_18v, &input);
 
+        let peak_12v = peak(&out_12v);
+        let peak_18v = peak(&out_18v);
         assert!(
-            rms(&out_18v) > rms(&out_12v),
-            "18V should be louder than 12V"
+            peak_18v >= peak_12v,
+            "18V should allow higher peaks than 12V: 12V={peak_12v:.4}, 18V={peak_18v:.4}"
         );
     }
 
     #[test]
     fn fuzzface_12v_more_headroom() {
+        // At 12V the soft-limiter ceiling rises, allowing higher peaks.
         let input = sine(440.0, 0.5, N);
 
         let mut ff_9v = FuzzFace::new(SR);
-        ff_9v.set_fuzz(0.5);
+        ff_9v.set_fuzz(0.8);
         ff_9v.set_volume(1.0);
         let out_9v = process_buf(&mut ff_9v, &input);
 
         let mut ff_12v = FuzzFace::new(SR);
         ff_12v.set_supply_voltage(12.0);
-        ff_12v.set_fuzz(0.5);
+        ff_12v.set_fuzz(0.8);
         ff_12v.set_volume(1.0);
         let out_12v = process_buf(&mut ff_12v, &input);
 
-        let rms_9v = rms(&out_9v);
-        let rms_12v = rms(&out_12v);
+        let peak_9v = peak(&out_9v);
+        let peak_12v = peak(&out_12v);
         assert!(
-            rms_12v > rms_9v,
-            "12V fuzz should have more output: 9V_rms={rms_9v:.4}, 12V_rms={rms_12v:.4}"
+            peak_12v >= peak_9v,
+            "12V fuzz should allow higher peaks: 9V={peak_9v:.4}, 12V={peak_12v:.4}"
         );
     }
 

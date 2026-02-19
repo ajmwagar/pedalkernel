@@ -77,6 +77,6 @@ pedal "Fulltone OCD" {
   controls {
     Drive.position -> "Drive" [0.0, 1.0] = 0.5
     Tone.position -> "Tone" [0.0, 1.0] = 0.5
-    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+    Volume.position -> "Volume" [0.0, 1.0] = 0.7
   }
 }

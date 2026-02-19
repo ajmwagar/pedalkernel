@@ -20,8 +20,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::tui_widgets::{
-    knob_frame_index, render_footswitch, render_knob_row, run_output_select, run_port_select,
-    KnobState, OutputSelectResult, PortSelectResult, Term, KNOB_FRAMES,
+    help_spans, knob_frame_index, render_footswitch, render_io_bar, render_knob_row,
+    run_file_picker, run_output_select, run_port_select, FilePickerResult, KnobState,
+    OutputSelectResult, PortSelectResult, Term, KNOB_FRAMES,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -50,6 +51,7 @@ pub(crate) struct BoardControlState {
     pub controls: Arc<SharedControls>,
     pub input_port: String,
     pub output_port: String,
+    pub voltage: f64,
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -68,6 +70,9 @@ pub(crate) enum BoardAction {
     ToggleBoardBypass,
     ToggleView,
     EnterDetail,
+    VoltageUp,
+    VoltageDown,
+    OpenPicker,
     None,
 }
 
@@ -88,6 +93,9 @@ pub(crate) fn handle_board_key(code: KeyCode, modifiers: KeyModifiers) -> BoardA
         KeyCode::Char('r') | KeyCode::Char('R') => BoardAction::ResetKnob,
         KeyCode::Char('v') | KeyCode::Char('V') => BoardAction::ToggleView,
         KeyCode::Enter => BoardAction::EnterDetail,
+        KeyCode::Char('+') | KeyCode::Char('=') => BoardAction::VoltageUp,
+        KeyCode::Char('-') | KeyCode::Char('_') => BoardAction::VoltageDown,
+        KeyCode::Char('p') | KeyCode::Char('P') => BoardAction::OpenPicker,
         _ => BoardAction::None,
     }
 }
@@ -189,7 +197,15 @@ impl BoardControlState {
                     self.view_mode = ViewMode::Detail;
                 }
             }
-            BoardAction::None => {}
+            BoardAction::VoltageUp => {
+                self.voltage = (self.voltage + 1.0).min(18.0);
+                self.controls.set_supply_voltage(self.voltage);
+            }
+            BoardAction::VoltageDown => {
+                self.voltage = (self.voltage - 1.0).max(5.0);
+                self.controls.set_supply_voltage(self.voltage);
+            }
+            BoardAction::OpenPicker | BoardAction::None => {}
         }
         true
     }
@@ -209,7 +225,7 @@ pub(crate) fn draw_board_control(frame: &mut Frame, state: &BoardControlState) {
         return;
     }
 
-    let title = if state.board_bypassed {
+    let title_text = if state.board_bypassed {
         format!("  {} [BYPASSED]  ", state.board_name.to_uppercase())
     } else {
         format!("  {}  ", state.board_name.to_uppercase())
@@ -219,8 +235,18 @@ pub(crate) fn draw_board_control(frame: &mut Frame, state: &BoardControlState) {
     } else {
         Color::White
     };
+    let title_color = if state.board_bypassed {
+        Color::DarkGray
+    } else {
+        Color::Yellow
+    };
     let outer = Block::default()
-        .title(title)
+        .title(Span::styled(
+            title_text,
+            Style::default()
+                .fg(title_color)
+                .add_modifier(Modifier::BOLD),
+        ))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
@@ -254,7 +280,7 @@ pub(crate) fn draw_board_overview(frame: &mut Frame, state: &BoardControlState, 
     .split(inner);
 
     // I/O info bar
-    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port);
+    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
 
     // Pedal cards — split horizontally
     let n = state.pedals.len();
@@ -267,19 +293,14 @@ pub(crate) fn draw_board_overview(frame: &mut Frame, state: &BoardControlState, 
     }
 
     // Help bar
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled("[ ] ←→", Style::default().fg(Color::Cyan)),
-        Span::raw(" pedal  "),
-        Span::styled("V", Style::default().fg(Color::Cyan)),
-        Span::raw("/"),
-        Span::styled("Enter", Style::default().fg(Color::Cyan)),
-        Span::raw(" detail  "),
-        Span::styled("Space", Style::default().fg(Color::Cyan)),
-        Span::raw(" bypass  "),
-        Span::styled("B", Style::default().fg(Color::Cyan)),
-        Span::raw(" bypass all  "),
-        Span::styled("Q", Style::default().fg(Color::Cyan)),
-        Span::raw(" quit"),
+    let help = Paragraph::new(help_spans(&[
+        ("[ ] ←→", "pedal"),
+        ("V/Enter", "detail"),
+        ("Space", "bypass"),
+        ("B", "bypass all"),
+        ("+/-", "voltage"),
+        ("P", "picker"),
+        ("Q", "quit"),
     ]))
     .alignment(Alignment::Center);
     frame.render_widget(help, v_chunks[3]);
@@ -433,14 +454,14 @@ pub(crate) fn draw_board_detail(frame: &mut Frame, state: &BoardControlState, in
         Constraint::Length(5), // knob art
         Constraint::Length(1), // labels
         Constraint::Length(1), // values
-        Constraint::Length(1), // gap
+        Constraint::Length(1), // separator
         Constraint::Length(3), // footswitch
         Constraint::Length(1), // help
     ])
     .split(inner);
 
     // I/O info bar
-    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port);
+    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
 
     // Chain bar
     render_chain_bar(frame, v_chunks[2], &state.pedals, state.focused_pedal);
@@ -477,30 +498,27 @@ pub(crate) fn draw_board_detail(frame: &mut Frame, state: &BoardControlState, in
             frame.render_widget(msg, v_chunks[7]);
         }
 
+        // Separator
+        let sep = Block::default().borders(Borders::TOP);
+        frame.render_widget(sep, v_chunks[10]);
+
         // Footswitch for focused pedal
         render_footswitch(frame, v_chunks[11], panel.bypassed);
     }
 
     // Help bar
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled("[ ]", Style::default().fg(Color::Cyan)),
-        Span::raw(" pedal  "),
-        Span::styled("Tab", Style::default().fg(Color::Cyan)),
-        Span::raw(" knob  "),
-        Span::styled("←→", Style::default().fg(Color::Cyan)),
-        Span::raw(" adjust  "),
-        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
-        Span::raw(" fine  "),
-        Span::styled("Space", Style::default().fg(Color::Cyan)),
-        Span::raw(" bypass  "),
-        Span::styled("B", Style::default().fg(Color::Cyan)),
-        Span::raw(" bypass all  "),
-        Span::styled("R", Style::default().fg(Color::Cyan)),
-        Span::raw(" reset  "),
-        Span::styled("V", Style::default().fg(Color::Cyan)),
-        Span::raw(" overview  "),
-        Span::styled("Q", Style::default().fg(Color::Cyan)),
-        Span::raw(" quit"),
+    let help = Paragraph::new(help_spans(&[
+        ("[ ]", "pedal"),
+        ("Tab", "knob"),
+        ("←→", "adjust"),
+        ("↑↓", "fine"),
+        ("Space", "bypass"),
+        ("B", "bypass all"),
+        ("R", "reset"),
+        ("+/-", "voltage"),
+        ("V", "overview"),
+        ("P", "picker"),
+        ("Q", "quit"),
     ]))
     .alignment(Alignment::Center);
     frame.render_widget(help, v_chunks[12]);
@@ -509,18 +527,6 @@ pub(crate) fn draw_board_detail(frame: &mut Frame, state: &BoardControlState, in
 // ═════════════════════════════════════════════════════════════════════════════
 // Shared drawing helpers
 // ═════════════════════════════════════════════════════════════════════════════
-
-pub(crate) fn render_io_bar(frame: &mut Frame, area: Rect, input_port: &str, output_port: &str) {
-    let io_info = Paragraph::new(Line::from(vec![
-        Span::styled(" IN: ", Style::default().fg(Color::Green)),
-        Span::raw(input_port),
-        Span::raw("  "),
-        Span::styled("OUT: ", Style::default().fg(Color::Green)),
-        Span::raw(output_port),
-    ]))
-    .alignment(Alignment::Center);
-    frame.render_widget(io_info, area);
-}
 
 /// Render the chain bar: [TUBE SCREAMER] → [BLUES DRIVER] → ...
 pub(crate) fn render_chain_bar(
@@ -594,7 +600,8 @@ fn run_board_control(
     board_name: &str,
     connect_from: &str,
     connect_to: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+    base_dir: &Path,
+) -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
     let controls = Arc::new(SharedControls::new());
     let (async_client, our_in, our_out) = AudioEngine::start(client, processor, controls.clone())?;
 
@@ -605,6 +612,9 @@ fn run_board_control(
     async_client
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
+    if let Some(pair) = super::stereo_pair(connect_to) {
+        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+    }
 
     let mut state = BoardControlState {
         board_name: board_name.to_string(),
@@ -615,24 +625,35 @@ fn run_board_control(
         view_mode: ViewMode::Overview,
         controls,
         input_port: connect_from.to_string(),
-        output_port: connect_to.to_string(),
+        output_port: super::stereo_display(connect_to),
+        voltage: 9.0,
     };
 
-    loop {
+    let result = loop {
         terminal.draw(|f| draw_board_control(f, &state))?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 let action = handle_board_key(key.code, key.modifiers);
-                if !state.update(action) {
-                    break;
+                match action {
+                    BoardAction::OpenPicker => {
+                        drop(async_client);
+                        break match run_file_picker(terminal, base_dir)? {
+                            FilePickerResult::Selected(path) => Some(path),
+                            FilePickerResult::Quit => None,
+                        };
+                    }
+                    _ => {
+                        if !state.update(action) {
+                            break None;
+                        }
+                    }
                 }
             }
         }
-    }
+    };
 
-    drop(async_client);
-    Ok(())
+    Ok(result)
 }
 
 fn run_board_control_wav(
@@ -643,7 +664,8 @@ fn run_board_control_wav(
     board_name: &str,
     input_label: &str,
     connect_to: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+    base_dir: &Path,
+) -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
     let controls = Arc::new(SharedControls::new());
     let (async_client, _our_in, our_out) = AudioEngine::start(client, processor, controls.clone())?;
 
@@ -651,6 +673,9 @@ fn run_board_control_wav(
     async_client
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
+    if let Some(pair) = super::stereo_pair(connect_to) {
+        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+    }
 
     let mut state = BoardControlState {
         board_name: board_name.to_string(),
@@ -661,31 +686,46 @@ fn run_board_control_wav(
         view_mode: ViewMode::Overview,
         controls,
         input_port: input_label.to_string(),
-        output_port: connect_to.to_string(),
+        output_port: super::stereo_display(connect_to),
+        voltage: 9.0,
     };
 
-    loop {
+    let result = loop {
         terminal.draw(|f| draw_board_control(f, &state))?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 let action = handle_board_key(key.code, key.modifiers);
-                if !state.update(action) {
-                    break;
+                match action {
+                    BoardAction::OpenPicker => {
+                        drop(async_client);
+                        break match run_file_picker(terminal, base_dir)? {
+                            FilePickerResult::Selected(path) => Some(path),
+                            FilePickerResult::Quit => None,
+                        };
+                    }
+                    _ => {
+                        if !state.update(action) {
+                            break None;
+                        }
+                    }
                 }
             }
         }
-    }
+    };
 
-    drop(async_client);
-    Ok(())
+    Ok(result)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Main entry point
 // ═════════════════════════════════════════════════════════════════════════════
 
-pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+/// Run the board TUI. Returns `Some(path)` to switch files, `None` on quit.
+pub fn run(
+    board_path: &str,
+    wav_input: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let source = std::fs::read_to_string(board_path)?;
     let board = parse_board_file(&source).map_err(|e| format!("Parse error: {e}"))?;
 
@@ -796,7 +836,7 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
             OutputSelectResult::Quit => {
                 disable_raw_mode()?;
                 stdout().execute(LeaveAlternateScreen)?;
-                return Ok(());
+                return Ok(None);
             }
         };
 
@@ -819,6 +859,7 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
             &board.name,
             &input_label,
             &selected_out,
+            board_dir,
         )
     } else {
         // Normal mode: input + output port selection
@@ -840,7 +881,7 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
                 PortSelectResult::Quit => {
                     disable_raw_mode()?;
                     stdout().execute(LeaveAlternateScreen)?;
-                    return Ok(());
+                    return Ok(None);
                 }
             };
 
@@ -856,6 +897,7 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
             &board.name,
             &selected_in,
             &selected_out,
+            board_dir,
         )
     };
 
@@ -863,5 +905,5 @@ pub fn run(board_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
-    result
+    result.map(|opt| opt.map(|p| p.to_string_lossy().into_owned()))
 }

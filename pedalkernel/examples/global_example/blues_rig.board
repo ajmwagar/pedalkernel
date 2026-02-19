@@ -1,0 +1,7 @@
+# Blues Rig with global board
+# The .global.board in this directory prepends a compressor
+
+board "Blues Rig (Global)" {
+  ts: "../tube_screamer.pedal" { Drive = 0.6, Level = 0.7 }
+  bd: "../blues_driver.pedal" { Gain = 0.5, Level = 0.6 }
+}

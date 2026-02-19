@@ -129,6 +129,6 @@ pedal "Big Muff" {
   controls {
     Sustain.position -> "Sustain" [0.0, 1.0] = 0.7
     Tone.position -> "Tone" [0.0, 1.0] = 0.5
-    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+    Volume.position -> "Volume" [0.0, 1.0] = 0.6
   }
 }

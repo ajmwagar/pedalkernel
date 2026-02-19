@@ -8,8 +8,8 @@ use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::{AudioEngine, SharedControls, WavLoopProcessor};
 use ratatui::{
     layout::{Alignment, Constraint, Layout},
-    style::{Color, Style},
-    text::{Line, Span},
+    style::{Color, Modifier, Style},
+    text::Span,
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame, Terminal,
 };
@@ -17,8 +17,9 @@ use std::io::stdout;
 use std::sync::Arc;
 
 use super::tui_widgets::{
-    render_footswitch, render_knob_row, run_output_select, run_port_select, KnobState,
-    OutputSelectResult, PortSelectResult, Term,
+    help_spans, render_footswitch, render_io_bar, render_knob_row, run_file_picker,
+    run_output_select, run_port_select, FilePickerResult, KnobState, OutputSelectResult,
+    PortSelectResult, Term,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -33,6 +34,7 @@ struct PedalControlState {
     controls: Arc<SharedControls>,
     input_port: String,
     output_port: String,
+    voltage: f64,
 }
 
 enum PedalAction {
@@ -42,6 +44,9 @@ enum PedalAction {
     Adjust(f64),
     ResetKnob,
     ToggleBypass,
+    VoltageUp,
+    VoltageDown,
+    OpenPicker,
     None,
 }
 
@@ -57,6 +62,9 @@ fn handle_pedal_key(code: KeyCode, modifiers: KeyModifiers) -> PedalAction {
         KeyCode::Up => PedalAction::Adjust(0.01),
         KeyCode::Char(' ') => PedalAction::ToggleBypass,
         KeyCode::Char('r') | KeyCode::Char('R') => PedalAction::ResetKnob,
+        KeyCode::Char(']') => PedalAction::VoltageUp,
+        KeyCode::Char('[') => PedalAction::VoltageDown,
+        KeyCode::Char('p') | KeyCode::Char('P') => PedalAction::OpenPicker,
         _ => PedalAction::None,
     }
 }
@@ -93,21 +101,30 @@ impl PedalControlState {
                 self.bypassed = !self.bypassed;
                 self.controls.set_bypassed(self.bypassed);
             }
-            PedalAction::None => {}
+            PedalAction::VoltageUp => {
+                self.voltage = (self.voltage + 1.0).min(18.0);
+                self.controls.set_supply_voltage(self.voltage);
+            }
+            PedalAction::VoltageDown => {
+                self.voltage = (self.voltage - 1.0).max(5.0);
+                self.controls.set_supply_voltage(self.voltage);
+            }
+            PedalAction::OpenPicker | PedalAction::None => {}
         }
         true
     }
 }
 
 /// Run the pedal control screen with live JACK audio.
-/// The JACK async client is kept alive on the stack for the duration.
+/// Returns `Some(path)` if the user picked a new file, `None` on quit.
 fn run_pedal_control(
     terminal: &mut Term,
     client: jack::Client,
     pedal: &pedalkernel::dsl::PedalDef,
     connect_from: &str,
     connect_to: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+    base_dir: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
     let mut proc = compile_pedal(pedal, client.sample_rate() as f64)
         .map_err(|e| format!("Compilation error: {e}"))?;
 
@@ -133,6 +150,9 @@ fn run_pedal_control(
     async_client
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
+    if let Some(pair) = super::stereo_pair(connect_to) {
+        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+    }
 
     let knobs = pedal
         .controls
@@ -152,25 +172,35 @@ fn run_pedal_control(
         bypassed: false,
         controls,
         input_port: connect_from.to_string(),
-        output_port: connect_to.to_string(),
+        output_port: super::stereo_display(connect_to),
+        voltage: 9.0,
     };
 
-    loop {
+    let result = loop {
         terminal.draw(|f| draw_pedal_control(f, &state))?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 let action = handle_pedal_key(key.code, key.modifiers);
-                if !state.update(action) {
-                    break;
+                match action {
+                    PedalAction::OpenPicker => {
+                        drop(async_client);
+                        match run_file_picker(terminal, base_dir)? {
+                            FilePickerResult::Selected(path) => break Some(path),
+                            FilePickerResult::Quit => break None,
+                        }
+                    }
+                    _ => {
+                        if !state.update(action) {
+                            break None;
+                        }
+                    }
                 }
             }
         }
-    }
+    };
 
-    // async_client drops here, stopping JACK processing.
-    drop(async_client);
-    Ok(())
+    Ok(result)
 }
 
 fn draw_pedal_control(frame: &mut Frame, state: &PedalControlState) {
@@ -184,7 +214,12 @@ fn draw_pedal_control(frame: &mut Frame, state: &PedalControlState) {
     }
 
     let outer = Block::default()
-        .title(format!("  {}  ", state.name.to_uppercase()))
+        .title(Span::styled(
+            format!("  {}  ", state.name.to_uppercase()),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
@@ -205,22 +240,14 @@ fn draw_pedal_control(frame: &mut Frame, state: &PedalControlState) {
         Constraint::Length(5), // knob art
         Constraint::Length(1), // labels
         Constraint::Length(1), // values
-        Constraint::Length(1), // gap
+        Constraint::Length(1), // separator
         Constraint::Length(3), // footswitch
         Constraint::Length(1), // help
     ])
     .split(inner);
 
     // I/O info bar
-    let io_info = Paragraph::new(Line::from(vec![
-        Span::styled(" IN: ", Style::default().fg(Color::Green)),
-        Span::raw(&state.input_port),
-        Span::raw("  "),
-        Span::styled("OUT: ", Style::default().fg(Color::Green)),
-        Span::raw(&state.output_port),
-    ]))
-    .alignment(Alignment::Center);
-    frame.render_widget(io_info, v_chunks[0]);
+    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
 
     // Knob row (delegated to shared widget)
     render_knob_row(
@@ -232,23 +259,23 @@ fn draw_pedal_control(frame: &mut Frame, state: &PedalControlState) {
         v_chunks[4],
     );
 
+    // Separator
+    let sep = Block::default().borders(Borders::TOP);
+    frame.render_widget(sep, v_chunks[5]);
+
     // Footswitch
     render_footswitch(frame, v_chunks[6], state.bypassed);
 
     // Help bar
-    let help = Paragraph::new(Line::from(vec![
-        Span::styled("←→", Style::default().fg(Color::Cyan)),
-        Span::raw(" adjust  "),
-        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
-        Span::raw(" fine  "),
-        Span::styled("Tab", Style::default().fg(Color::Cyan)),
-        Span::raw(" next  "),
-        Span::styled("R", Style::default().fg(Color::Cyan)),
-        Span::raw(" reset  "),
-        Span::styled("Space", Style::default().fg(Color::Cyan)),
-        Span::raw(" bypass  "),
-        Span::styled("Q", Style::default().fg(Color::Cyan)),
-        Span::raw(" quit"),
+    let help = Paragraph::new(help_spans(&[
+        ("←→", "adjust"),
+        ("↑↓", "fine"),
+        ("Tab", "next"),
+        ("R", "reset"),
+        ("[/]", "voltage"),
+        ("Space", "bypass"),
+        ("P", "picker"),
+        ("Q", "quit"),
     ]))
     .alignment(Alignment::Center);
     frame.render_widget(help, v_chunks[7]);
@@ -258,9 +285,17 @@ fn draw_pedal_control(frame: &mut Frame, state: &PedalControlState) {
 // Main entry point
 // ═════════════════════════════════════════════════════════════════════════════
 
-pub fn run(pedal_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+/// Run the single-pedal TUI. Returns `Some(path)` to switch files, `None` on quit.
+pub fn run(
+    pedal_path: &str,
+    wav_input: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let source = std::fs::read_to_string(pedal_path)?;
     let pedal = parse_pedal_file(&source).map_err(|e| format!("Parse error: {e}"))?;
+
+    let base_dir = std::path::Path::new(pedal_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
 
     // Load WAV input if provided
     let wav_data = if let Some(path) = wav_input {
@@ -320,7 +355,7 @@ pub fn run(pedal_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
             OutputSelectResult::Quit => {
                 disable_raw_mode()?;
                 stdout().execute(LeaveAlternateScreen)?;
-                return Ok(());
+                return Ok(None);
             }
         };
 
@@ -351,6 +386,9 @@ pub fn run(pedal_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
         async_client
             .as_client()
             .connect_ports_by_name(&our_out, &selected_out)?;
+        if let Some(pair) = super::stereo_pair(&selected_out) {
+            let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+        }
 
         let knobs = pedal
             .controls
@@ -370,24 +408,37 @@ pub fn run(pedal_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
             bypassed: false,
             controls,
             input_port: input_label,
-            output_port: selected_out,
+            output_port: super::stereo_display(&selected_out),
+            voltage: 9.0,
         };
 
-        let r = (|| -> Result<(), Box<dyn std::error::Error>> {
-            loop {
-                terminal.draw(|f| draw_pedal_control(f, &state))?;
-                if event::poll(std::time::Duration::from_millis(50))? {
-                    if let Event::Key(key) = event::read()? {
-                        let action = handle_pedal_key(key.code, key.modifiers);
-                        if !state.update(action) {
-                            break;
+        let r: Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> =
+            (|| -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
+                loop {
+                    terminal.draw(|f| draw_pedal_control(f, &state))?;
+                    if event::poll(std::time::Duration::from_millis(50))? {
+                        if let Event::Key(key) = event::read()? {
+                            let action = handle_pedal_key(key.code, key.modifiers);
+                            match action {
+                                PedalAction::OpenPicker => {
+                                    drop(async_client);
+                                    return match run_file_picker(&mut terminal, base_dir)? {
+                                        FilePickerResult::Selected(path) => Ok(Some(path)),
+                                        FilePickerResult::Quit => Ok(None),
+                                    };
+                                }
+                                _ => {
+                                    if !state.update(action) {
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-            }
-            drop(async_client);
-            Ok(())
-        })();
+                drop(async_client);
+                Ok(None)
+            })();
         r
     } else {
         // Normal mode: input + output port selection
@@ -409,16 +460,23 @@ pub fn run(pedal_path: &str, wav_input: Option<&str>) -> Result<(), Box<dyn std:
                 PortSelectResult::Quit => {
                     disable_raw_mode()?;
                     stdout().execute(LeaveAlternateScreen)?;
-                    return Ok(());
+                    return Ok(None);
                 }
             };
 
-        run_pedal_control(&mut terminal, client, &pedal, &selected_in, &selected_out)
+        run_pedal_control(
+            &mut terminal,
+            client,
+            &pedal,
+            &selected_in,
+            &selected_out,
+            base_dir,
+        )
     };
 
     // Teardown (always runs)
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
-    result
+    result.map(|opt| opt.map(|p| p.to_string_lossy().into_owned()))
 }
