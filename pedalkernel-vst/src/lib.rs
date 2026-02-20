@@ -2,19 +2,23 @@
 //!
 //! Single-plugin architecture with a pedal selector and six generic
 //! knob parameters.  Built-in pedals are always available; user-supplied
-//! `.pedal` files are loaded from `~/.pedalkernel/pedals/` at plugin init.
+//! `.pedal` and `.board` files are loaded from `~/.pedalkernel/pedals/`
+//! at plugin init.
 //!
 //! The pedal selector is an `IntParam` whose range adapts to the number of
-//! loaded pedals.  Built-in pedals occupy indices 0–7 (seven WDF-based
-//! models plus a digital delay); user pedals follow at index 8+.
+//! loaded entries.  Built-in pedals occupy indices 0–7 (seven WDF-based
+//! models plus a digital delay); user pedals follow, then user boards.
 //!
 //! Controls are mapped sequentially: the first control declared in the
 //! `.pedal` file maps to knob 1, the second to knob 2, etc. (up to 6).
-//! Unused knobs display "—".
+//! Unused knobs display "—".  Board entries use their baked-in overrides
+//! and show no active knobs.
 
 use nih_plug::prelude::*;
+use pedalkernel::board::parse_board_file;
 use pedalkernel::compiler::{compile_pedal, CompiledPedal};
 use pedalkernel::dsl;
+use pedalkernel::pedalboard::PedalboardProcessor;
 use pedalkernel::pedals::Delay;
 use pedalkernel::PedalProcessor;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -101,6 +105,8 @@ struct PedalMeta {
 enum PedalEngine {
     Compiled(CompiledPedal),
     Delay(Delay),
+    /// A pedalboard (signal chain of multiple pedals from a `.board` file).
+    Board(PedalboardProcessor),
 }
 
 impl PedalEngine {
@@ -108,6 +114,7 @@ impl PedalEngine {
         match self {
             Self::Compiled(p) => p.process(input),
             Self::Delay(d) => d.process(input),
+            Self::Board(b) => b.process(input),
         }
     }
 
@@ -115,6 +122,7 @@ impl PedalEngine {
         match self {
             Self::Compiled(p) => p.set_sample_rate(rate),
             Self::Delay(d) => d.set_sample_rate(rate),
+            Self::Board(b) => b.set_sample_rate(rate),
         }
     }
 
@@ -122,6 +130,7 @@ impl PedalEngine {
         match self {
             Self::Compiled(p) => p.reset(),
             Self::Delay(d) => d.reset(),
+            Self::Board(b) => b.reset(),
         }
     }
 }
@@ -184,6 +193,48 @@ fn scan_user_pedals(sample_rate: f64) -> Vec<(PedalMeta, PedalEngine)> {
         }
     }
     pedals
+}
+
+/// Scan the user pedals directory for `.board` files and compile them.
+///
+/// Board files define a signal chain of multiple pedals with optional knob
+/// overrides.  Each board appears as a single selectable entry in the plugin.
+/// The six DAW knobs are inactive for boards — the overrides in the `.board`
+/// file set the knob positions.
+fn scan_user_boards(sample_rate: f64) -> Vec<(PedalMeta, PedalEngine)> {
+    let dir = match user_pedals_dir() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "board"))
+        .map(|e| e.path())
+        .collect();
+    paths.sort(); // deterministic ordering
+
+    let mut boards = Vec::new();
+    for path in paths {
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            if let Ok(board_def) = parse_board_file(&src) {
+                let board_dir = path.parent().unwrap_or(&dir);
+                let (processor, _warnings) =
+                    PedalboardProcessor::from_board_with_warnings(&board_def, board_dir, sample_rate);
+
+                let meta = PedalMeta {
+                    name: format!("{} [Board]", board_def.name),
+                    labels: Default::default(), // no knobs — overrides baked in
+                };
+                boards.push((meta, PedalEngine::Board(processor)));
+            }
+        }
+    }
+    boards
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -339,6 +390,12 @@ impl Default for PedalKernelPlugin {
             engines.push(e);
         }
 
+        // 4. User-supplied .board files (pedalboard signal chains).
+        for (m, e) in scan_user_boards(sr) {
+            meta_list.push(m);
+            engines.push(e);
+        }
+
         let meta = Arc::new(meta_list);
         let pedal_indicator: PedalIndicator = Arc::new(AtomicU8::new(0));
         let params = Arc::new(PedalKernelParams::new(
@@ -454,6 +511,10 @@ impl Plugin for PedalKernelPlugin {
                         delay.set_delay_time(10.0 + knobs[0] * knobs[0] * 1990.0);
                         delay.set_feedback(knobs[1] * 0.95);
                         delay.set_mix(knobs[2]);
+                    }
+                    PedalEngine::Board(_) => {
+                        // Board knob overrides are baked in at load time;
+                        // DAW knobs are inactive for board entries.
                     }
                 }
 
