@@ -519,7 +519,7 @@ fn discover_boards(
         // If a pedal source can't be read/parsed, create a failed panel
         // (no knobs) to match the dry passthrough slot in the processor.
         let mut panels = Vec::new();
-        for entry in &board_def.pedals {
+        for entry in &board_def.pedals() {
             let pedal_path = board_dir.join(&entry.path);
 
             let panel = match std::fs::read_to_string(&pedal_path)

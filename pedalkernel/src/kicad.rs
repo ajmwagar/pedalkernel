@@ -43,6 +43,10 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
             TriodeType::T12au7 => ("Valve:ECC82", "V"),
             TriodeType::T12ay7 => ("Valve:12AY7", "V"),
         },
+        ComponentKind::Pentode(pt) => match pt {
+            PentodeType::Ef86 => ("Valve:EF86", "V"),
+            PentodeType::El84 => ("Valve:EL84", "V"),
+        },
         ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
         ComponentKind::Nmos(_) => ("Device:Q_NMOS_DGS", "Q"),
         ComponentKind::Pmos(_) => ("Device:Q_PMOS_DGS", "Q"),
@@ -90,6 +94,7 @@ fn value_str(kind: &ComponentKind) -> String {
             )
         }
         ComponentKind::Triode(tt) => format!("Triode_{tt:?}"),
+        ComponentKind::Pentode(pt) => format!("Pentode_{pt:?}"),
         ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) => {
             format!(
                 "ENV_atk{}/{}_rel{}/{}_sens{}",

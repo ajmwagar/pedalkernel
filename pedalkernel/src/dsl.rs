@@ -67,6 +67,8 @@ pub enum ComponentKind {
     Lfo(LfoWaveformDsl, f64, f64),
     /// Triode vacuum tube
     Triode(TriodeType),
+    /// Pentode vacuum tube
+    Pentode(PentodeType),
     /// Envelope follower: attack_r (Ω), attack_c (F), release_r (Ω), release_c (F), sensitivity_r (Ω)
     /// Attack τ = attack_r × attack_c, Release τ = release_r × release_c
     /// Sensitivity = sensitivity_r / 10kΩ
@@ -205,6 +207,15 @@ pub enum TriodeType {
     T12au7,
     /// 12AY7 / 6072 - Low-medium gain, original Fender tweed tube
     T12ay7,
+}
+
+/// Pentode vacuum tube types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PentodeType {
+    /// EF86 / 6267 - Small-signal pentode, Vox AC15/AC30 preamp
+    Ef86,
+    /// EL84 / 6BQ5 - Power pentode, Vox AC15/AC30 output stage
+    El84,
 }
 
 /// MOSFET types for enhancement-mode devices used in guitar pedals.
@@ -459,6 +470,24 @@ fn parse_triode(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Triode(tt)))
 }
 
+fn pentode_type(input: &str) -> IResult<&str, PentodeType> {
+    alt((
+        value(PentodeType::Ef86, tag("ef86")),
+        value(PentodeType::El84, tag("el84")),
+        // Alternative designations
+        value(PentodeType::Ef86, tag("6267")),
+        value(PentodeType::El84, tag("6bq5")),
+    ))(input)
+}
+
+fn parse_pentode(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("pentode")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, pt) = pentode_type(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Pentode(pt)))
+}
+
 fn mosfet_type(input: &str) -> IResult<&str, MosfetType> {
     alt((
         value(MosfetType::N2n7000, tag("2n7000")),
@@ -532,6 +561,7 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_envelope_follower, // must come before parse_lfo (both are long keywords)
             parse_lfo,
             parse_triode,
+            parse_pentode,
             parse_nmos, // must come before parse_npn — but npn is already above
             parse_pmos,
             parse_zener,
@@ -1403,5 +1433,67 @@ pedal "Chorus" {
             .components
             .iter()
             .any(|c| matches!(c.kind, ComponentKind::Bbd(BbdType::Mn3207))));
+    }
+
+    // ── Pentode parser tests ────────────────────────────────────────────
+
+    #[test]
+    fn parse_pentode_ef86() {
+        let (_, c) = component_def("V1: pentode(ef86)").unwrap();
+        assert_eq!(c.id, "V1");
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::Ef86));
+    }
+
+    #[test]
+    fn parse_pentode_el84() {
+        let (_, c) = component_def("V1: pentode(el84)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::El84));
+    }
+
+    #[test]
+    fn parse_pentode_6267() {
+        // 6267 = US designation for EF86
+        let (_, c) = component_def("V1: pentode(6267)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::Ef86));
+    }
+
+    #[test]
+    fn parse_pentode_6bq5() {
+        // 6BQ5 = US designation for EL84
+        let (_, c) = component_def("V1: pentode(6bq5)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::El84));
+    }
+
+    #[test]
+    fn parse_pedal_with_pentode() {
+        let src = r#"
+pedal "Vox Preamp" {
+  components {
+    C1: cap(20n)
+    R1: resistor(1M)
+    V1: pentode(ef86)
+    R2: resistor(220k)
+    R3: resistor(2.2k)
+    C2: cap(25u)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, V1.grid
+    R1.b -> gnd
+    vcc -> R2.a
+    R2.b -> V1.plate
+    V1.cathode -> R3.a, C2.a
+    R3.b -> gnd
+    C2.b -> gnd
+    V1.plate -> out
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Vox Preamp");
+        assert!(def
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::Pentode(PentodeType::Ef86))));
     }
 }

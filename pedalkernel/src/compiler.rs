@@ -301,6 +301,7 @@ pub enum RootKind {
     SingleDiode(DiodeRoot),
     Jfet(JfetRoot),
     Triode(TriodeRoot),
+    Pentode(PentodeRoot),
     Mosfet(MosfetRoot),
     Zener(ZenerRoot),
     Ota(OtaRoot),
@@ -341,6 +342,7 @@ impl WdfStage {
                 RootKind::SingleDiode(d) => d.process(b_tree, rp),
                 RootKind::Jfet(j) => j.process(b_tree, rp),
                 RootKind::Triode(t) => t.process(b_tree, rp),
+                RootKind::Pentode(p) => p.process(b_tree, rp),
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
                 RootKind::Zener(z) => z.process(b_tree, rp),
                 RootKind::Ota(o) => o.process(b_tree, rp),
@@ -420,6 +422,30 @@ impl WdfStage {
     pub fn triode_vgk(&self) -> Option<f64> {
         match &self.root {
             RootKind::Triode(t) => Some(t.vgk()),
+            _ => None,
+        }
+    }
+
+    /// Set the control grid voltage (g1-cathode) for pentode root elements.
+    #[inline]
+    pub fn set_pentode_vg1k(&mut self, vg1k: f64) {
+        if let RootKind::Pentode(p) = &mut self.root {
+            p.set_vg1k(vg1k);
+        }
+    }
+
+    /// Set the screen grid voltage (g2-cathode) for pentode root elements.
+    #[inline]
+    pub fn set_pentode_vg2k(&mut self, vg2k: f64) {
+        if let RootKind::Pentode(p) = &mut self.root {
+            p.set_vg2k(vg2k);
+        }
+    }
+
+    /// Get the current control grid voltage if this is a pentode stage.
+    pub fn pentode_vg1k(&self) -> Option<f64> {
+        match &self.root {
+            RootKind::Pentode(p) => Some(p.vg1k()),
             _ => None,
         }
     }
@@ -598,6 +624,21 @@ impl CircuitGraph {
                 ComponentKind::Triode(_) => {
                     // Triode: plate-cathode path is the WDF edge (like JFET drain-source).
                     // Grid is external control, not part of WDF tree.
+                    let key_p = format!("{}.plate", comp.id);
+                    let key_k = format!("{}.cathode", comp.id);
+                    let id_p = get_id(&key_p, &mut uf);
+                    let id_k = get_id(&key_k, &mut uf);
+                    let node_p = uf.find(id_p);
+                    let node_k = uf.find(id_k);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a: node_p,
+                        node_b: node_k,
+                    });
+                }
+                ComponentKind::Pentode(_) => {
+                    // Pentode: plate-cathode path is the WDF edge.
+                    // Control grid (g1) and screen grid (g2) are external control.
                     let key_p = format!("{}.plate", comp.id);
                     let key_k = format!("{}.cathode", comp.id);
                     let id_p = get_id(&key_p, &mut uf);
@@ -954,6 +995,57 @@ impl CircuitGraph {
         triodes
     }
 
+    /// Find pentode edges, ordered by topological distance from `in`.
+    fn find_pentodes(&self) -> Vec<(usize, PentodeInfo)> {
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &self.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(self.in_node, 0);
+        queue.push_back(self.in_node);
+        while let Some(n) = queue.pop_front() {
+            let d = dist[&n];
+            if let Some(neighbors) = adj.get(&n) {
+                for &nb in neighbors {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
+                        queue.push_back(nb);
+                    }
+                }
+            }
+        }
+
+        let mut pentodes: Vec<(usize, PentodeInfo)> = Vec::new();
+        for (edge_idx, e) in self.edges.iter().enumerate() {
+            let comp = &self.components[e.comp_idx];
+            if let ComponentKind::Pentode(pt) = &comp.kind {
+                pentodes.push((
+                    edge_idx,
+                    PentodeInfo {
+                        pentode_type: *pt,
+                        junction_node: if e.node_b == self.gnd_node {
+                            e.node_a
+                        } else {
+                            e.node_b
+                        },
+                        ground_node: if e.node_b == self.gnd_node {
+                            e.node_b
+                        } else {
+                            e.node_a
+                        },
+                    },
+                ));
+            }
+        }
+
+        pentodes
+            .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
+        pentodes
+    }
+
     /// Find MOSFET edges, ordered by topological distance from `in`.
     fn find_mosfets(&self) -> Vec<(usize, MosfetInfo)> {
         let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -1144,6 +1236,13 @@ struct JfetInfo {
 
 struct TriodeInfo {
     triode_type: TriodeType,
+    junction_node: NodeId,
+    #[allow(dead_code)]
+    ground_node: NodeId,
+}
+
+struct PentodeInfo {
+    pentode_type: PentodeType,
     junction_node: NodeId,
     #[allow(dead_code)]
     ground_node: NodeId,
@@ -1403,6 +1502,8 @@ enum ModulationTarget {
     PhotocouplerLed { stage_idx: usize, comp_id: String },
     /// Modulate a Triode's Vgk (grid-cathode bias).
     TriodeVgk { stage_idx: usize },
+    /// Modulate a Pentode's Vg1k (control grid bias).
+    PentodeVg1k { stage_idx: usize },
     /// Modulate a MOSFET's Vgs.
     MosfetVgs { stage_idx: usize },
     /// Modulate an OTA's bias current (for VCA/compressor).
@@ -1600,6 +1701,11 @@ impl PedalProcessor for CompiledPedal {
                         stage.set_triode_vgk(modulation);
                     }
                 }
+                ModulationTarget::PentodeVg1k { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_pentode_vg1k(modulation);
+                    }
+                }
                 ModulationTarget::MosfetVgs { stage_idx } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         stage.set_mosfet_vgs(modulation);
@@ -1642,6 +1748,11 @@ impl PedalProcessor for CompiledPedal {
                 ModulationTarget::TriodeVgk { stage_idx } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         stage.set_triode_vgk(modulation);
+                    }
+                }
+                ModulationTarget::PentodeVg1k { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_pentode_vg1k(modulation);
                     }
                 }
                 ModulationTarget::MosfetVgs { stage_idx } => {
@@ -2365,10 +2476,90 @@ pub fn compile_pedal_with_options(
         });
     }
 
+    // Build WDF stages for pentodes.
+    let pentodes = graph.find_pentodes();
+    let pentode_edge_indices: Vec<usize> = pentodes.iter().map(|(idx, _)| *idx).collect();
+    let all_nonlinear_with_pentodes: Vec<usize> = all_nonlinear_with_triodes
+        .iter()
+        .chain(pentode_edge_indices.iter())
+        .copied()
+        .collect();
+
+    for (_edge_idx, pentode_info) in &pentodes {
+        let junction = pentode_info.junction_node;
+        let passive_idxs = graph.elements_at_junction(
+            junction,
+            &all_nonlinear_with_pentodes,
+            &graph.active_edge_indices,
+        );
+
+        if passive_idxs.is_empty() {
+            continue;
+        }
+
+        // Find the best injection node for the voltage source.
+        let mut injection_node = graph.in_node;
+        let mut best_dist = usize::MAX;
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            let other = if e.node_a == junction {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            if let Some(&d) = dist_from_in.get(&other) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = other;
+                }
+            }
+        }
+        if best_dist == usize::MAX {
+            injection_node = graph.gnd_node;
+        }
+
+        // Build SP edges.
+        let source_node = graph.edges.len() + 4000; // unique offset for pentodes
+        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+        }
+
+        let terminals = vec![source_node, junction];
+        let sp_tree = match sp_reduce(sp_edges, &terminals) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let mut pentode_components = graph.components.clone();
+        while pentode_components.len() <= vs_comp_idx {
+            pentode_components.push(ComponentDef {
+                id: "__vs__".to_string(),
+                kind: ComponentKind::Resistor(1.0),
+            });
+        }
+
+        let tree = sp_to_dyn_with_vs(&sp_tree, &pentode_components, sample_rate, vs_comp_idx);
+
+        let model = pentode_model(pentode_info.pentode_type);
+        let root = RootKind::Pentode(PentodeRoot::new(model));
+
+        stages.push(WdfStage {
+            tree,
+            root,
+            compensation: 1.0,
+            oversampler: Oversampler::new(oversampling),
+            base_diode_model: None,
+        });
+    }
+
     // Build WDF stages for MOSFETs.
     let mosfets = graph.find_mosfets();
     let mosfet_edge_indices: Vec<usize> = mosfets.iter().map(|(idx, _)| *idx).collect();
-    let all_nonlinear_with_mosfets: Vec<usize> = all_nonlinear_with_triodes
+    let all_nonlinear_with_mosfets: Vec<usize> = all_nonlinear_with_pentodes
         .iter()
         .chain(mosfet_edge_indices.iter())
         .copied()
@@ -2822,6 +3013,14 @@ pub fn compile_pedal_with_options(
                                             .unwrap_or(0);
                                         ModulationTarget::TriodeVgk { stage_idx }
                                     }
+                                    "vg1k" => {
+                                        // Find which stage contains this pentode
+                                        let stage_idx = stages
+                                            .iter()
+                                            .position(|s| matches!(&s.root, RootKind::Pentode(_)))
+                                            .unwrap_or(0);
+                                        ModulationTarget::PentodeVg1k { stage_idx }
+                                    }
                                     "iabc" => {
                                         // Find which stage contains an OTA
                                         let stage_idx = stages
@@ -2844,6 +3043,8 @@ pub fn compile_pedal_with_options(
                                     ModulationTarget::PhotocouplerLed { .. } => (0.5, 0.5),
                                     // Triode grid bias: -2V center with ±2V swing
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
+                                    // Pentode control grid: -2V center with ±2V swing
+                                    ModulationTarget::PentodeVg1k { .. } => (-2.0, 2.0),
                                     // MOSFET: bias above threshold with swing
                                     ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
                                     // OTA: normalized gain 0-1
@@ -2917,6 +3118,13 @@ pub fn compile_pedal_with_options(
                                             .unwrap_or(0);
                                         ModulationTarget::TriodeVgk { stage_idx }
                                     }
+                                    "vg1k" => {
+                                        let stage_idx = stages
+                                            .iter()
+                                            .position(|s| matches!(&s.root, RootKind::Pentode(_)))
+                                            .unwrap_or(0);
+                                        ModulationTarget::PentodeVg1k { stage_idx }
+                                    }
                                     "iabc" => {
                                         let stage_idx = stages
                                             .iter()
@@ -2934,6 +3142,7 @@ pub fn compile_pedal_with_options(
                                     ModulationTarget::JfetVgs { .. } => (-1.25, 1.25),
                                     ModulationTarget::PhotocouplerLed { .. } => (0.0, 1.0),
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
+                                    ModulationTarget::PentodeVg1k { .. } => (-2.0, 2.0),
                                     ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
                                     ModulationTarget::OtaIabc { .. } => (0.5, 0.5),
                                     ModulationTarget::BbdClock { .. } => (0.15, 0.10),
@@ -3243,6 +3452,13 @@ fn triode_model(tt: TriodeType) -> TriodeModel {
         TriodeType::T12at7 => TriodeModel::t_12at7(),
         TriodeType::T12au7 => TriodeModel::t_12au7(),
         TriodeType::T12ay7 => TriodeModel::t_12ay7(),
+    }
+}
+
+fn pentode_model(pt: PentodeType) -> PentodeModel {
+    match pt {
+        PentodeType::Ef86 => PentodeModel::p_ef86(),
+        PentodeType::El84 => PentodeModel::p_el84(),
     }
 }
 

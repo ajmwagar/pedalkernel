@@ -748,7 +748,7 @@ pub fn run(
     // If a pedal file can't be read/parsed, create a failed panel (no knobs)
     // — the processor will use dry passthrough for that slot.
     let mut panels = Vec::new();
-    for entry in &board.pedals {
+    for entry in &board.pedals() {
         let pedal_path = board_dir.join(&entry.path);
 
         let panel = match std::fs::read_to_string(&pedal_path)

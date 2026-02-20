@@ -146,13 +146,13 @@ fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &
 
     // Apply CLI knob overrides using the "idx:label" control routing
     for (pedal_id, knob, val) in &overrides {
-        if let Some(idx) = board.pedals.iter().position(|p| p.id == *pedal_id) {
+        if let Some(idx) = board.pedals().iter().position(|p| p.id == *pedal_id) {
             proc.set_control(&format!("{idx}:{knob}"), *val);
         } else {
             eprintln!(
                 "Warning: unknown pedal id '{pedal_id}', available: {:?}",
                 board
-                    .pedals
+                    .pedals()
                     .iter()
                     .map(|p| p.id.as_str())
                     .collect::<Vec<_>>()
@@ -166,7 +166,7 @@ fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &
     write_wav(output_path, sample_rate, &output_samples);
 
     eprintln!("Board:  \"{}\"", board.name);
-    for entry in &board.pedals {
+    for entry in &board.pedals() {
         eprintln!("  [{}] {}", entry.id, entry.path);
     }
     eprintln!("Output: {} ({} samples)", output_path, output_samples.len());
