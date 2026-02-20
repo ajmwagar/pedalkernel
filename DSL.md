@@ -36,6 +36,7 @@ Each component is declared as `<id>: <type>(<params>)`.
 | Potentiometer | `pot(<value>)` | Variable resistor (controllable knob) |
 | Diode pair | `diode_pair(<type>)` | Symmetric clipping diode pair |
 | Single diode | `diode(<type>)` | Asymmetric single diode |
+| Zener diode | `zener(<voltage>)` | Zener diode with breakdown voltage (e.g., `zener(5.1)`) |
 | NPN transistor | `npn()` | NPN BJT (modeled as gain stage) |
 | PNP transistor | `pnp()` | PNP BJT (modeled as gain stage) |
 | Op-amp | `opamp()` | Operational amplifier |
@@ -58,7 +59,9 @@ Each component is declared as `<id>: <type>(<params>)`.
 
 **Diode types**: `silicon`, `germanium`, `led`
 
-**JFET models**: `j201`, `2n5457`, `2n5460`
+**Zener voltages**: Common values are 3.3, 4.7, 5.1, 5.6, 6.2, 9.1, 12 (in volts)
+
+**JFET models**: `j201`, `2n5457`, `2n5460`, `2sk30` (or `2sk30a`, `2sk30-gr`, `2sk30-y`, `2sk30-bl` for graded variants)
 
 **Photocoupler models**: `vtl5c3`, `vtl5c1`, `nsl32`
 

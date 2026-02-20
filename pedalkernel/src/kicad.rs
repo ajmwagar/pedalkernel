@@ -15,6 +15,7 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::Inductor(_) => ("Device:L", "L"),
         ComponentKind::DiodePair(_) => ("Device:D", "D"), // pair shown as single symbol + note
         ComponentKind::Diode(_) => ("Device:D", "D"),
+        ComponentKind::Zener(_) => ("Device:D_Zener", "D"),
         ComponentKind::Potentiometer(_) => ("Device:R_Potentiometer", "RV"),
         ComponentKind::Npn => ("Device:Q_NPN_BCE", "Q"),
         ComponentKind::Pnp => ("Device:Q_PNP_BCE", "Q"),
@@ -67,6 +68,7 @@ fn value_str(kind: &ComponentKind) -> String {
         ComponentKind::Inductor(v) => format_eng(*v, "H"),
         ComponentKind::DiodePair(dt) => format!("{dt:?}_pair"),
         ComponentKind::Diode(dt) => format!("{dt:?}"),
+        ComponentKind::Zener(v) => format!("{v}V_Zener"),
         ComponentKind::Potentiometer(v) => format_eng(*v, "Ω"),
         ComponentKind::Npn => "NPN".into(),
         ComponentKind::Pnp => "PNP".into(),

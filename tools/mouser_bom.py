@@ -149,14 +149,53 @@ DIODES = {
 }
 LED_PART = ("604-WP7113ID", "3mm Red LED")
 
+# Zener Diodes (1N47xx series)
+ZENERS = {
+    3.3: ("512-1N4728A", "1N4728A 3.3V Zener"),
+    4.7: ("512-1N4732A", "1N4732A 4.7V Zener"),
+    5.1: ("512-1N4733A", "1N4733A 5.1V Zener"),
+    5.6: ("512-1N4734A", "1N4734A 5.6V Zener"),
+    6.2: ("512-1N4735A", "1N4735A 6.2V Zener"),
+    9.1: ("512-1N4739A", "1N4739A 9.1V Zener"),
+    12.0: ("512-1N4742A", "1N4742A 12V Zener"),
+}
+
+# JFETs
+JFETS = {
+    "j201": ("512-J201", "J201 N-JFET"),
+    "2n5457": ("512-2N5457", "2N5457 N-JFET"),
+    "2n5460": ("512-2N5460", "2N5460 P-JFET"),
+    "2sk30": ("757-2SK30ATM-GR", "2SK30A N-JFET"),
+    "2sk30a": ("757-2SK30ATM-GR", "2SK30A N-JFET"),
+    "2sk30-gr": ("757-2SK30ATM-GR", "2SK30A-GR N-JFET (Low Idss)"),
+    "2sk30-y": ("757-2SK30ATM-Y", "2SK30A-Y N-JFET (Mid Idss)"),
+    "2sk30-bl": ("757-2SK30ATM-BL", "2SK30A-BL N-JFET (High Idss)"),
+    "2sk30a_gr": ("757-2SK30ATM-GR", "2SK30A-GR N-JFET (Low Idss)"),
+    "2sk30a_y": ("757-2SK30ATM-Y", "2SK30A-Y N-JFET (Mid Idss)"),
+    "2sk30a_bl": ("757-2SK30ATM-BL", "2SK30A-BL N-JFET (High Idss)"),
+}
+
 # Transistors
 TRANSISTORS = {
     "npn": ("512-2N3904BU", "2N3904 NPN Transistor"),
     "pnp": ("512-2N3906BU", "2N3906 PNP Transistor"),
 }
 
-# Op-amps
-OPAMP_PART = ("595-TL072CP", "TL072 Dual Op-Amp")
+# Op-amps (by type in DSL argument)
+OPAMPS = {
+    "": ("595-TL072CP", "TL072 Dual Op-Amp"),  # Default/generic
+    "tl072": ("595-TL072CP", "TL072 Dual Op-Amp"),
+    "tl082": ("595-TL082CP", "TL082 Dual Op-Amp"),
+    "jrc4558": ("513-NJM4558D", "JRC4558D Dual Op-Amp"),
+    "4558": ("513-NJM4558D", "JRC4558D Dual Op-Amp"),
+    "rc4558": ("595-RC4558P", "RC4558 Dual Op-Amp"),
+    "lm308": ("926-LM308N/NOPB", "LM308N Single Op-Amp"),
+    "lm741": ("595-UA741CP", "UA741/LM741 Single Op-Amp"),
+    "ne5532": ("595-NE5532P", "NE5532 Dual Op-Amp"),
+    "ca3080": ("595-CA3080EZ", "CA3080 OTA"),
+    "op07": ("595-OP07CP", "OP07 Precision Op-Amp"),
+}
+OPAMP_PART = ("595-TL072CP", "TL072 Dual Op-Amp")  # Legacy fallback
 
 
 def _find_closest(table, value, tolerance=0.02):
@@ -193,13 +232,32 @@ def lookup_part(kind, arg):
         entry = DIODES.get(arg)
         if entry:
             return (*entry, 1)
+    elif kind == "zener":
+        # Parse voltage (e.g., "5.1" or "5.1v")
+        voltage_str = arg.lower().replace("v", "").strip()
+        try:
+            voltage = float(voltage_str)
+            entry = _find_closest(ZENERS, voltage, tolerance=0.05)
+            if entry:
+                return (*entry, 1)
+        except ValueError:
+            pass
     elif kind == "led":
         return (*LED_PART, 1)
     elif kind in ("npn", "pnp"):
         entry = TRANSISTORS.get(kind)
         if entry:
             return (*entry, 1)
+    elif kind == "njfet" or kind == "pjfet":
+        entry = JFETS.get(arg.lower())
+        if entry:
+            return (*entry, 1)
     elif kind == "opamp":
+        # Look up by op-amp type (arg is the type, e.g., "lm741", "tl072")
+        entry = OPAMPS.get(arg.lower())
+        if entry:
+            return (*entry, 1)
+        # Fallback to default op-amp
         return (*OPAMP_PART, 1)
     return None
 
@@ -256,9 +314,12 @@ def _component_display(kind, arg, hw_part=None):
         "pot": "Potentiometer",
         "diode_pair": f"Diode ({arg.title()}, x2)",
         "diode": f"Diode ({arg.title()})",
+        "zener": f"Zener ({arg}V)",
         "npn": "NPN Transistor",
         "pnp": "PNP Transistor",
-        "opamp": "Op-Amp",
+        "njfet": f"N-JFET ({arg.upper()})",
+        "pjfet": f"P-JFET ({arg.upper()})",
+        "opamp": f"Op-Amp ({arg.upper()})" if arg else "Op-Amp",
         "led": "LED",
     }
     base = labels.get(kind, kind)
@@ -275,7 +336,13 @@ def _format_value(kind, arg):
         return format_eng(parse_eng(arg), "F")
     elif kind in ("diode", "diode_pair"):
         return arg.title()
-    elif kind in ("npn", "pnp", "opamp", "led"):
+    elif kind == "zener":
+        return f"{arg}V"
+    elif kind in ("njfet", "pjfet"):
+        return arg.upper()
+    elif kind == "opamp":
+        return arg.upper() if arg else "\u2014"
+    elif kind in ("npn", "pnp", "led"):
         return "\u2014"
     return arg
 

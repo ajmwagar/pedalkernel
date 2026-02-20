@@ -100,6 +100,9 @@ def format_value(kind, arg):
         return format_eng(parse_eng(arg), "F")
     elif kind in ("diode", "diode_pair"):
         return arg.title()
+    elif kind == "zener":
+        # Format zener voltage: "5.1" -> "5.1V"
+        return f"{arg}V"
     elif kind in ("npn", "pnp", "led"):
         return ""
     elif kind == "opamp":
@@ -279,6 +282,7 @@ PINS = {
     "pot": ["a", "b"],
     "diode": ["a", "b"],
     "diode_pair": ["a", "b"],
+    "zener": ["a", "b"],
     "led": ["a", "b"],
     "npn": ["base", "collector", "emitter"],
     "pnp": ["base", "collector", "emitter"],
@@ -289,7 +293,7 @@ PINS = {
     "lfo": ["out", "rate"],
 }
 
-TWO_TERMINAL = {"resistor", "cap", "pot", "diode", "diode_pair", "led"}
+TWO_TERMINAL = {"resistor", "cap", "pot", "diode", "diode_pair", "zener", "led"}
 
 
 def build_graph(components, nets):
@@ -527,6 +531,7 @@ SCHEMDRAW_MAP = {
     "pot": elm.Potentiometer,
     "diode": elm.Diode,
     "diode_pair": elm.Diode,
+    "zener": elm.Zener,
     "led": elm.LED,
     "npn": elm.BjtNpn,
     "pnp": elm.BjtPnp,

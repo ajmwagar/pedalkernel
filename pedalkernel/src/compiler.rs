@@ -299,6 +299,7 @@ impl DynNode {
 pub enum RootKind {
     DiodePair(DiodePairRoot),
     SingleDiode(DiodeRoot),
+    Zener(ZenerRoot),
     Jfet(JfetRoot),
     Triode(TriodeRoot),
     Pentode(PentodeRoot),
@@ -340,11 +341,11 @@ impl WdfStage {
             let a_root = match root {
                 RootKind::DiodePair(dp) => dp.process(b_tree, rp),
                 RootKind::SingleDiode(d) => d.process(b_tree, rp),
+                RootKind::Zener(z) => z.process(b_tree, rp),
                 RootKind::Jfet(j) => j.process(b_tree, rp),
                 RootKind::Triode(t) => t.process(b_tree, rp),
                 RootKind::Pentode(p) => p.process(b_tree, rp),
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
-                RootKind::Zener(z) => z.process(b_tree, rp),
                 RootKind::Ota(o) => o.process(b_tree, rp),
             };
             tree.set_incident(a_root);
@@ -593,6 +594,7 @@ impl CircuitGraph {
                 | ComponentKind::Potentiometer(_)
                 | ComponentKind::DiodePair(_)
                 | ComponentKind::Diode(_)
+                | ComponentKind::Zener(_)
                 | ComponentKind::Photocoupler(_) => {
                     let key_a = format!("{}.a", comp.id);
                     let key_b = format!("{}.b", comp.id);
@@ -1215,6 +1217,60 @@ impl CircuitGraph {
             dist.get(&info.junction_node).copied().unwrap_or(usize::MAX)
         });
         otas
+    }
+
+    /// Find zener diode edges, ordered by topological distance from `in`.
+    fn find_zeners(&self) -> Vec<(usize, ZenerInfo)> {
+        // BFS from in_node to compute distances.
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &self.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(self.in_node, 0);
+        queue.push_back(self.in_node);
+        while let Some(n) = queue.pop_front() {
+            let d = dist[&n];
+            if let Some(neighbors) = adj.get(&n) {
+                for &nb in neighbors {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
+                        queue.push_back(nb);
+                    }
+                }
+            }
+        }
+
+        let mut zeners: Vec<(usize, ZenerInfo)> = Vec::new();
+        for (edge_idx, e) in self.edges.iter().enumerate() {
+            let comp = &self.components[e.comp_idx];
+            if let ComponentKind::Zener(voltage) = &comp.kind {
+                zeners.push((
+                    edge_idx,
+                    ZenerInfo {
+                        voltage: *voltage,
+                        junction_node: if e.node_b == self.gnd_node {
+                            e.node_a
+                        } else {
+                            e.node_b
+                        },
+                        ground_node: if e.node_b == self.gnd_node {
+                            e.node_b
+                        } else {
+                            e.node_a
+                        },
+                    },
+                ));
+            }
+        }
+
+        // Sort by distance of junction node from input.
+        zeners.sort_by_key(|(_, info)| {
+            dist.get(&info.junction_node).copied().unwrap_or(usize::MAX)
+        });
+        zeners
     }
 }
 
@@ -2796,6 +2852,81 @@ pub fn compile_pedal_with_options(
         });
     }
 
+    // Build WDF stages for zener diodes.
+    let zeners = graph.find_zeners();
+    let zener_edge_indices: Vec<usize> = zeners.iter().map(|(idx, _)| *idx).collect();
+    let all_nonlinear_with_zeners: Vec<usize> = all_nonlinear_with_triodes
+        .iter()
+        .chain(zener_edge_indices.iter())
+        .copied()
+        .collect();
+
+    for (_edge_idx, zener_info) in &zeners {
+        let junction = zener_info.junction_node;
+        let passive_idxs = graph.elements_at_junction(
+            junction,
+            &all_nonlinear_with_zeners,
+            &graph.active_edge_indices,
+        );
+
+        if passive_idxs.is_empty() {
+            continue;
+        }
+
+        // Find the best injection node for the voltage source.
+        let mut injection_node = graph.in_node;
+        let mut best_dist = usize::MAX;
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            let other = if e.node_a == junction {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            if let Some(&d) = dist_from_in.get(&other) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = other;
+                }
+            }
+        }
+
+        // Build SP edges.
+        let source_node = graph.edges.len() + 4000; // virtual source node (unique offset for zeners)
+        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+        }
+
+        let terminals = vec![source_node, junction];
+        let sp_tree = match sp_reduce(sp_edges, &terminals) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let mut zener_components = graph.components.clone();
+        while zener_components.len() <= vs_comp_idx {
+            zener_components.push(ComponentDef {
+                id: "__vs__".to_string(),
+                kind: ComponentKind::Resistor(1.0),
+            });
+        }
+
+        let tree = sp_to_dyn_with_vs(&sp_tree, &zener_components, sample_rate, vs_comp_idx);
+
+        let model = ZenerModel::with_voltage(zener_info.voltage);
+        let root = RootKind::Zener(ZenerRoot::new(model));
+
+        stages.push(WdfStage {
+            tree,
+            root,
+            compensation: 1.0,
+        });
+    }
+
     // Balance voltage source impedance in each stage.
     // This fixes topologies where the Vs branch sits in a Parallel adaptor
     // opposite a high-impedance element (e.g. Big Muff: Parallel(Series(Vs,C), R)
@@ -3434,6 +3565,11 @@ fn jfet_model(jt: JfetType, is_n_channel: bool) -> JfetModel {
     match jt {
         JfetType::J201 => JfetModel::n_j201(),
         JfetType::N2n5457 => JfetModel::n_2n5457(),
+        // 2SK30A variants - classic phaser JFETs
+        JfetType::N2sk30a => JfetModel::n_2sk30a(),
+        JfetType::N2sk30aGr => JfetModel::n_2sk30a_gr(),
+        JfetType::N2sk30aY => JfetModel::n_2sk30a_y(),
+        JfetType::N2sk30aBl => JfetModel::n_2sk30a_bl(),
         JfetType::P2n5460 => {
             if is_n_channel {
                 // Mismatch: N-channel requested with P-channel type

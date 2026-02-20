@@ -45,6 +45,200 @@ impl DiodeModel {
 }
 
 // ---------------------------------------------------------------------------
+// Zener Diode Model
+// ---------------------------------------------------------------------------
+
+/// Zener diode model parameters.
+///
+/// A zener diode conducts normally in forward bias (like a silicon diode)
+/// and exhibits sharp breakdown at the zener voltage in reverse bias.
+/// This makes it useful for voltage regulation and clipping.
+#[derive(Debug, Clone, Copy)]
+pub struct ZenerModel {
+    /// Zener breakdown voltage (V). Common values: 3.3, 4.7, 5.1, 6.2, 9.1, 12.
+    pub vz: f64,
+    /// Forward saturation current (A). Similar to silicon diode.
+    pub is_fwd: f64,
+    /// Forward thermal voltage * ideality (V).
+    pub n_vt_fwd: f64,
+    /// Reverse saturation current at breakdown (A). Controls sharpness.
+    pub is_rev: f64,
+    /// Reverse thermal voltage * ideality (V). Smaller = sharper knee.
+    pub n_vt_rev: f64,
+    /// Dynamic resistance in breakdown region (Ω). Typical: 1-30Ω.
+    pub rz: f64,
+}
+
+impl ZenerModel {
+    /// Create a zener diode with specified breakdown voltage.
+    ///
+    /// Uses typical 1N47xx series characteristics.
+    pub fn with_voltage(vz: f64) -> Self {
+        // Dynamic resistance scales roughly with voltage
+        // Lower voltage zeners have higher Rz due to avalanche mechanism
+        let rz = if vz < 5.0 {
+            30.0  // Avalanche dominated
+        } else if vz < 8.0 {
+            10.0  // Mixed mechanism
+        } else {
+            5.0   // Zener dominated
+        };
+
+        Self {
+            vz,
+            is_fwd: 2.52e-9,
+            n_vt_fwd: 1.752 * 25.85e-3,
+            is_rev: 1e-12,
+            n_vt_rev: 0.5 * 25.85e-3, // Sharp knee
+            rz,
+        }
+    }
+
+    /// 1N4728A - 3.3V Zener (500mW)
+    pub fn z3v3() -> Self {
+        Self::with_voltage(3.3)
+    }
+
+    /// 1N4732A - 4.7V Zener (500mW)
+    pub fn z4v7() -> Self {
+        Self::with_voltage(4.7)
+    }
+
+    /// 1N4733A - 5.1V Zener (500mW) - Common in pedal circuits
+    pub fn z5v1() -> Self {
+        Self::with_voltage(5.1)
+    }
+
+    /// 1N4734A - 5.6V Zener (500mW)
+    pub fn z5v6() -> Self {
+        Self::with_voltage(5.6)
+    }
+
+    /// 1N4735A - 6.2V Zener (500mW)
+    pub fn z6v2() -> Self {
+        Self::with_voltage(6.2)
+    }
+
+    /// 1N4739A - 9.1V Zener (500mW)
+    pub fn z9v1() -> Self {
+        Self::with_voltage(9.1)
+    }
+
+    /// 1N4742A - 12V Zener (500mW)
+    pub fn z12v() -> Self {
+        Self::with_voltage(12.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Zener Diode Root
+// ---------------------------------------------------------------------------
+
+/// Zener diode at the tree root.
+///
+/// Models both forward conduction (like silicon diode) and reverse
+/// breakdown (zener/avalanche). Uses Newton-Raphson iteration.
+///
+/// Current equation:
+/// - Forward (v > 0): `i = Is_fwd * (exp(v/nVt_fwd) - 1)`
+/// - Reverse (v < -Vz): `i = -Is_rev * (exp(-(v+Vz)/nVt_rev) - 1) - (v+Vz)/Rz`
+#[derive(Debug, Clone, Copy)]
+pub struct ZenerRoot {
+    pub model: ZenerModel,
+    max_iter: usize,
+}
+
+impl ZenerRoot {
+    pub fn new(model: ZenerModel) -> Self {
+        Self {
+            model,
+            max_iter: 16,
+        }
+    }
+
+    /// Compute zener current for given voltage.
+    #[inline]
+    fn current(&self, v: f64) -> f64 {
+        if v >= 0.0 {
+            // Forward bias: standard Shockley diode
+            let x = (v / self.model.n_vt_fwd).clamp(-500.0, 500.0);
+            self.model.is_fwd * (x.exp() - 1.0)
+        } else if v > -self.model.vz {
+            // Reverse bias below breakdown: small leakage
+            -self.model.is_rev
+        } else {
+            // Reverse breakdown: exponential + resistive
+            let v_excess = -v - self.model.vz; // How far past Vz
+            let x = (v_excess / self.model.n_vt_rev).clamp(-500.0, 500.0);
+            let i_breakdown = self.model.is_rev * (x.exp() - 1.0);
+            let i_resistive = v_excess / self.model.rz;
+            -(i_breakdown + i_resistive + self.model.is_rev)
+        }
+    }
+
+    /// Compute derivative of current w.r.t. voltage.
+    #[inline]
+    fn current_derivative(&self, v: f64) -> f64 {
+        if v >= 0.0 {
+            // Forward bias
+            let x = (v / self.model.n_vt_fwd).clamp(-500.0, 500.0);
+            self.model.is_fwd * x.exp() / self.model.n_vt_fwd
+        } else if v > -self.model.vz {
+            // Reverse bias below breakdown: very small conductance
+            1e-12
+        } else {
+            // Reverse breakdown
+            let v_excess = -v - self.model.vz;
+            let x = (v_excess / self.model.n_vt_rev).clamp(-500.0, 500.0);
+            let di_exp = self.model.is_rev * x.exp() / self.model.n_vt_rev;
+            let di_res = 1.0 / self.model.rz;
+            di_exp + di_res // Note: chain rule gives positive derivative
+        }
+    }
+}
+
+impl WdfRoot for ZenerRoot {
+    /// Solve for reflected wave using Newton-Raphson.
+    ///
+    /// `f(v) = a - 2*v - 2*Rp*i(v) = 0`
+    #[inline]
+    fn process(&mut self, a: f64, rp: f64) -> f64 {
+        // Initial guess based on operating region
+        let mut v = if a > 0.0 {
+            // Likely forward bias
+            (a * 0.5).min(0.7)
+        } else if a < -2.0 * self.model.vz {
+            // Likely in breakdown
+            -self.model.vz - 0.1
+        } else {
+            // Reverse bias, not yet breakdown
+            a * 0.5
+        };
+
+        for _ in 0..self.max_iter {
+            let i = self.current(v);
+            let di = self.current_derivative(v);
+
+            let f = a - 2.0 * v - 2.0 * rp * i;
+            let fp = -2.0 - 2.0 * rp * di;
+
+            if fp.abs() < 1e-15 {
+                break;
+            }
+
+            let dv = f / fp;
+            v -= dv;
+
+            if dv.abs() < 1e-6 {
+                break;
+            }
+        }
+
+        2.0 * v - a
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Diode Pair Root
 // ---------------------------------------------------------------------------
 
@@ -213,6 +407,56 @@ impl JfetModel {
             idss: 1e-3,
             vp: -1.0,
             lambda: 0.01,
+            is_n_channel: true,
+        }
+    }
+
+    /// 2SK30A N-channel JFET (Toshiba, classic phaser/modulation JFET).
+    ///
+    /// The 2SK30A is the classic choice for MXR Phase 90, Small Stone,
+    /// and other vintage phasers. It has moderate Idss and a wider
+    /// pinch-off range that makes it ideal for voltage-controlled
+    /// resistance applications.
+    ///
+    /// Datasheet specs:
+    /// - Idss: 0.6 - 6.5 mA (modeled at 2.6 mA typical)
+    /// - Vgs(off): -0.4V to -5V (modeled at -1.8V typical)
+    /// - Available in GR (low), Y (mid), BL (high) Idss grades
+    pub fn n_2sk30a() -> Self {
+        Self {
+            idss: 2.6e-3,  // Typical mid-grade
+            vp: -1.8,      // Typical pinch-off
+            lambda: 0.015, // Moderate channel-length modulation
+            is_n_channel: true,
+        }
+    }
+
+    /// 2SK30A-GR (Green) - Low Idss grade (0.6-1.4 mA).
+    pub fn n_2sk30a_gr() -> Self {
+        Self {
+            idss: 1.0e-3,
+            vp: -1.2,
+            lambda: 0.015,
+            is_n_channel: true,
+        }
+    }
+
+    /// 2SK30A-Y (Yellow) - Medium Idss grade (1.2-3.0 mA).
+    pub fn n_2sk30a_y() -> Self {
+        Self {
+            idss: 2.0e-3,
+            vp: -1.6,
+            lambda: 0.015,
+            is_n_channel: true,
+        }
+    }
+
+    /// 2SK30A-BL (Blue) - High Idss grade (2.6-6.5 mA).
+    pub fn n_2sk30a_bl() -> Self {
+        Self {
+            idss: 4.0e-3,
+            vp: -2.2,
+            lambda: 0.015,
             is_n_channel: true,
         }
     }

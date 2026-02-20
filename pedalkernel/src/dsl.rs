@@ -56,6 +56,8 @@ pub enum ComponentKind {
     Inductor(f64),
     DiodePair(DiodeType),
     Diode(DiodeType),
+    /// Zener diode with breakdown voltage (V). Common: 3.3, 4.7, 5.1, 6.2, 9.1, 12
+    Zener(f64),
     Potentiometer(f64),
     Npn,
     Pnp,
@@ -176,6 +178,14 @@ pub enum JfetType {
     J201,
     N2n5457,
     P2n5460,
+    /// 2SK30A - Classic phaser JFET (Toshiba), generic mid-grade
+    N2sk30a,
+    /// 2SK30A-GR - Low Idss grade (0.6-1.4 mA)
+    N2sk30aGr,
+    /// 2SK30A-Y - Medium Idss grade (1.2-3.0 mA)
+    N2sk30aY,
+    /// 2SK30A-BL - High Idss grade (2.6-6.5 mA)
+    N2sk30aBl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,6 +374,22 @@ fn parse_diode(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Diode(dt)))
 }
 
+/// Parse zener diode: `zener(5.1)` or `zener(5.1v)`
+///
+/// The voltage parameter specifies the breakdown voltage in volts.
+/// Common values: 3.3, 4.7, 5.1, 5.6, 6.2, 9.1, 12
+fn parse_zener(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("zener")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, voltage) = double(input)?;
+    // Optional 'v' suffix for clarity
+    let (input, _) = opt(tag("v"))(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Zener(voltage)))
+}
+
 fn parse_pot(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("pot")(input)?;
     let (input, _) = char('(')(input)?;
@@ -413,6 +439,11 @@ fn jfet_type(input: &str) -> IResult<&str, JfetType> {
         value(JfetType::J201, tag("j201")),
         value(JfetType::N2n5457, tag("2n5457")),
         value(JfetType::P2n5460, tag("2n5460")),
+        // 2SK30A variants - order matters: specific grades before generic
+        value(JfetType::N2sk30aGr, alt((tag("2sk30a_gr"), tag("2sk30-gr")))),
+        value(JfetType::N2sk30aY, alt((tag("2sk30a_y"), tag("2sk30-y")))),
+        value(JfetType::N2sk30aBl, alt((tag("2sk30a_bl"), tag("2sk30-bl")))),
+        value(JfetType::N2sk30a, alt((tag("2sk30a"), tag("2sk30")))),
     ))(input)
 }
 
@@ -549,6 +580,7 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_inductor,
             parse_diode_pair, // must come before parse_diode
             parse_diode,
+            parse_zener, // zener diode with voltage parameter
             parse_pot,
             parse_npn,
             parse_pnp,
@@ -562,9 +594,8 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_lfo,
             parse_triode,
             parse_pentode,
-            parse_nmos, // must come before parse_npn — but npn is already above
+            parse_nmos,
             parse_pmos,
-            parse_zener,
             parse_bbd,
         )),
     ))(input)
