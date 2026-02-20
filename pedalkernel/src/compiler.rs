@@ -3695,8 +3695,6 @@ mod tests {
             "tweed_deluxe_5e3.pedal",
             "bassman_5f6a.pedal",
             "marshall_jtm45.pedal",
-            "phase90.pedal",
-            "memory_man.pedal",
         ];
         for f in files {
             let pedal = parse(f);

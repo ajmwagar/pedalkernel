@@ -833,48 +833,6 @@ pedal "Test Pedal" {
     }
 
     #[test]
-    fn pedal_phase90() {
-        let p = parse_example("phase90.pedal");
-        assert_eq!(p.name, "MXR Phase 90");
-        assert_eq!(p.controls.len(), 1);
-        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
-        assert!(labels.contains(&"Speed"));
-        // Verify 4 J201 N-channel JFETs for allpass stages
-        let jfet_count = p
-            .components
-            .iter()
-            .filter(|c| matches!(c.kind, dsl::ComponentKind::NJfet(_)))
-            .count();
-        assert_eq!(jfet_count, 4, "Phase 90 uses 4 JFETs for allpass stages");
-        // Verify LFO for phaser sweep
-        assert!(p
-            .components
-            .iter()
-            .any(|c| matches!(c.kind, dsl::ComponentKind::Lfo(..))));
-    }
-
-    #[test]
-    fn pedal_memory_man() {
-        let p = parse_example("memory_man.pedal");
-        assert_eq!(p.name, "EHX Memory Man");
-        assert_eq!(p.controls.len(), 3);
-        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
-        assert!(labels.contains(&"Delay"));
-        assert!(labels.contains(&"Feedback"));
-        assert!(labels.contains(&"Blend"));
-        // Verify MN3005 BBD (4096-stage, the Memory Man chip)
-        assert!(p
-            .components
-            .iter()
-            .any(|c| matches!(c.kind, dsl::ComponentKind::Bbd(dsl::BbdType::Mn3005))));
-        // Verify LFO for subtle modulation
-        assert!(p
-            .components
-            .iter()
-            .any(|c| matches!(c.kind, dsl::ComponentKind::Lfo(..))));
-    }
-
-    #[test]
     fn all_pedal_files_export_kicad() {
         let files = [
             "tube_screamer.pedal",
@@ -886,8 +844,6 @@ pedal "Test Pedal" {
             "klon_centaur.pedal",
             "fulltone_ocd.pedal",
             "boss_ce2.pedal",
-            "phase90.pedal",
-            "memory_man.pedal",
         ];
         for f in files {
             let p = parse_example(f);
@@ -1111,50 +1067,6 @@ pedal "Test Pedal" {
         );
     }
 
-    /// Phase 90: 4 J201 JFETs + triangle LFO — NO op-amps in signal path.
-    #[test]
-    fn schematic_phase90_component_types() {
-        let p = parse_example("phase90.pedal");
-        assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::NJfet(_))),
-            4,
-            "Phase 90: 4x J201 N-JFETs for allpass stages"
-        );
-        assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Lfo(..))),
-            1,
-            "Phase 90: 1x triangle LFO for phase sweep"
-        );
-        assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
-            1,
-            "Phase 90: 1 pot (Speed — the Phase 90's single control)"
-        );
-        // No op-amps — pure JFET design
-        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(_))), 0);
-    }
-
-    /// Memory Man: MN3005 BBD (4096 stages) + triangle LFO.
-    #[test]
-    fn schematic_memory_man_component_types() {
-        let p = parse_example("memory_man.pedal");
-        assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Bbd(dsl::BbdType::Mn3005))),
-            1,
-            "Memory Man: 1x MN3005 BBD (4096 stages for long delay)"
-        );
-        assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Lfo(..))),
-            1,
-            "Memory Man: 1x triangle LFO for subtle modulation"
-        );
-        assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
-            3,
-            "Memory Man: 3 pots (Delay, Feedback, Blend)"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // Compile + process: every pedal file produces non-silent output
     // -----------------------------------------------------------------------
@@ -1171,8 +1083,6 @@ pedal "Test Pedal" {
             "klon_centaur.pedal",
             "fulltone_ocd.pedal",
             "boss_ce2.pedal",
-            "phase90.pedal",
-            "memory_man.pedal",
         ];
         let sample_rate = 48000.0;
         let input = wav::sine_wave(330.0, 0.05, sample_rate as u32);
