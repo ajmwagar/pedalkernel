@@ -263,6 +263,115 @@ impl PedalboardProcessor {
         (Self { chain, loading }, warnings)
     }
 
+    /// Build a pedalboard from a parsed `.board` definition, using a resolver
+    /// function instead of filesystem reads.
+    ///
+    /// The `resolver` takes a pedal path string (as written in the `.board` file)
+    /// and returns the `.pedal` source text.  This allows building boards from
+    /// `include_str!`'d sources without any filesystem access — useful for
+    /// embedded/factory boards in the VST plugin.
+    ///
+    /// Global boards and FX loops are not supported in resolver mode (boards
+    /// referencing FX loops should use [`from_board_with_warnings`] instead).
+    pub fn from_board_with_resolver(
+        board: &BoardDef,
+        sample_rate: f64,
+        resolver: impl Fn(&str) -> Option<String>,
+    ) -> (Self, Vec<String>) {
+        let mut chain = Vec::new();
+        let mut warnings = Vec::new();
+
+        for entry in &board.entries {
+            match entry {
+                BoardEntry::Pedal(pedal_entry) => {
+                    let slot = Self::compile_pedal_entry_from_source(
+                        pedal_entry,
+                        &resolver,
+                        sample_rate,
+                        &mut warnings,
+                    );
+                    chain.push(ChainSlot::Pedal(slot));
+                }
+                BoardEntry::FxLoop(group) => {
+                    warnings.push(format!(
+                        "FX loop '{}' skipped — not supported in resolver mode",
+                        group.target_id,
+                    ));
+                    // Add the FX loop effects as regular pedals (best effort).
+                    for pedal_entry in &group.pedals {
+                        let slot = Self::compile_pedal_entry_from_source(
+                            pedal_entry,
+                            &resolver,
+                            sample_rate,
+                            &mut warnings,
+                        );
+                        chain.push(ChainSlot::Pedal(slot));
+                    }
+                }
+            }
+        }
+
+        let n = chain.len();
+        let loading = if n > 1 {
+            (0..n - 1)
+                .map(|_| InterstageLoading::transparent(sample_rate))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        (Self { chain, loading }, warnings)
+    }
+
+    /// Compile a pedal entry using a resolver instead of filesystem reads.
+    fn compile_pedal_entry_from_source(
+        entry: &crate::board::BoardPedalEntry,
+        resolver: &impl Fn(&str) -> Option<String>,
+        sample_rate: f64,
+        warnings: &mut Vec<String>,
+    ) -> PedalSlot {
+        let result: Result<(String, CompiledPedal), String> = (|| {
+            let source = resolver(&entry.path).ok_or_else(|| {
+                format!("Pedal '{}' not found: {}", entry.id, entry.path)
+            })?;
+            let pedal_def = parse_pedal_file(&source)
+                .map_err(|e| format!("Parse error in '{}' ({}): {e}", entry.id, entry.path))?;
+            let mut proc = compile_pedal(&pedal_def, sample_rate).map_err(|e| {
+                format!("Compilation error in '{}' ({}): {e}", entry.id, entry.path)
+            })?;
+
+            for ctrl in &pedal_def.controls {
+                proc.set_control(&ctrl.label, ctrl.default);
+            }
+            for (label, val) in &entry.overrides {
+                proc.set_control(label, *val);
+            }
+
+            Ok((pedal_def.name.clone(), proc))
+        })();
+
+        match result {
+            Ok((name, proc)) => PedalSlot {
+                name,
+                processor: Some(proc),
+                bypassed: false,
+                failed: false,
+            },
+            Err(msg) => {
+                warnings.push(format!(
+                    "Pedal '{}' failed — using dry passthrough: {msg}",
+                    entry.id
+                ));
+                PedalSlot {
+                    name: format!("{} [FAILED]", entry.id),
+                    processor: None,
+                    bypassed: false,
+                    failed: true,
+                }
+            }
+        }
+    }
+
     /// Compile a single pedal entry into a PedalSlot.
     fn compile_pedal_entry(
         entry: &crate::board::BoardPedalEntry,
@@ -1142,5 +1251,71 @@ board "Bad FX Loop" {
         );
         // The blues_driver should still be in the chain as a fallback pedal
         assert!(pb.len() >= 2, "Fallback should still have pedals");
+    }
+
+    #[test]
+    fn from_board_with_resolver_builds_chain() {
+        let board_src = r#"
+board "Resolver Test" {
+  ts: "tube_screamer.pedal" { Drive = 0.7 }
+  bd: "blues_driver.pedal"
+}
+"#;
+        let ts_src = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/pedals/overdrive/tube_screamer.pedal"),
+        )
+        .unwrap();
+        let bd_src = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/pedals/overdrive/blues_driver.pedal"),
+        )
+        .unwrap();
+
+        let sources: Vec<(&str, String)> = vec![
+            ("tube_screamer.pedal", ts_src),
+            ("blues_driver.pedal", bd_src),
+        ];
+
+        let board = parse_board_file(board_src).unwrap();
+        let (pb, warnings) = PedalboardProcessor::from_board_with_resolver(
+            &board,
+            48000.0,
+            |path| sources.iter().find(|(p, _)| *p == path).map(|(_, s)| s.clone()),
+        );
+
+        assert!(warnings.is_empty(), "Unexpected warnings: {warnings:?}");
+        assert_eq!(pb.len(), 2);
+        assert_eq!(pb.pedal_name(0), Some("Tube Screamer"));
+        assert_eq!(pb.pedal_name(1), Some("Boss Blues Driver"));
+
+        // Verify it processes audio
+        let mut pb = pb;
+        let input = crate::wav::sine_wave(330.0, 0.02, 48000);
+        let output: Vec<f64> = input.iter().map(|&s| pb.process(s)).collect();
+        let max_out = output.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
+        assert!(max_out > 1e-6, "Board should produce non-silent output");
+    }
+
+    #[test]
+    fn from_board_with_resolver_missing_pedal_warns() {
+        let board_src = r#"
+board "Missing Test" {
+  ts: "nonexistent.pedal"
+}
+"#;
+        let board = parse_board_file(board_src).unwrap();
+        let (pb, warnings) = PedalboardProcessor::from_board_with_resolver(
+            &board,
+            48000.0,
+            |_| None,
+        );
+
+        assert_eq!(pb.len(), 1);
+        assert!(pb.is_pedal_failed(0));
+        assert!(
+            warnings.iter().any(|w| w.contains("not found")),
+            "Should warn about missing pedal: {warnings:?}"
+        );
     }
 }

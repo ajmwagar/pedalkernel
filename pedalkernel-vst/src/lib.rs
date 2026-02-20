@@ -86,6 +86,42 @@ const PRO_BASS_SOURCES: &[&str] = &[
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Embedded .board sources (factory pedalboard presets, feature-gated)
+//
+// Each entry is a tuple of:
+//   (board_source, &[("pedal_path_as_in_board", pedal_source)])
+//
+// The resolver maps pedal path strings from the board file to their
+// `include_str!`'d sources, so no filesystem access is needed at runtime.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Pro guitar boards — curated signal chains for guitar.
+#[cfg(feature = "pro-guitar")]
+const PRO_GUITAR_BOARD_SOURCES: &[(&str, &[(&str, &str)])] = &[
+    // TODO: Add pro guitar boards as they're created, e.g.:
+    // (
+    //     include_str!("../../../pedalkernel-pro/boards/blues_rig.board"),
+    //     &[
+    //         ("overdrive/tube_screamer.pedal", include_str!("../../../pedalkernel-pro/pedals/overdrive/tube_screamer.pedal")),
+    //         ("overdrive/blues_driver.pedal", include_str!("../../../pedalkernel-pro/pedals/overdrive/blues_driver.pedal")),
+    //     ],
+    // ),
+];
+
+/// Pro bass boards — curated signal chains for bass.
+#[cfg(feature = "pro-bass")]
+const PRO_BASS_BOARD_SOURCES: &[(&str, &[(&str, &str)])] = &[
+    // TODO: Add pro bass boards as they're created.
+];
+
+/// Shared boards — instrument-agnostic signal chains.
+/// Included in both guitar and bass Pro variants.
+#[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
+const PRO_SHARED_BOARD_SOURCES: &[(&str, &[(&str, &str)])] = &[
+    // TODO: Add shared pro boards as they're created.
+];
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Pedal metadata & loading
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -133,6 +169,36 @@ impl PedalEngine {
             Self::Board(b) => b.reset(),
         }
     }
+}
+
+/// Build a board from an embedded source string and a pedal-path → source mapping.
+///
+/// Only called when pro feature flags are active.
+///
+/// Uses `from_board_with_resolver` so no filesystem access is needed — all
+/// pedal sources are resolved from the compile-time `include_str!` table.
+#[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
+fn load_embedded_board(
+    board_src: &str,
+    pedal_sources: &[(&str, &str)],
+    sample_rate: f64,
+) -> Option<(PedalMeta, PedalEngine)> {
+    let board_def = parse_board_file(board_src).ok()?;
+    let (processor, _warnings) = PedalboardProcessor::from_board_with_resolver(
+        &board_def,
+        sample_rate,
+        |path| {
+            pedal_sources
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map(|(_, src)| (*src).to_string())
+        },
+    );
+    let meta = PedalMeta {
+        name: format!("{} [Board]", board_def.name),
+        labels: Default::default(),
+    };
+    Some((meta, PedalEngine::Board(processor)))
 }
 
 /// Parse and compile a `.pedal` source string into metadata + engine.
@@ -384,7 +450,34 @@ impl Default for PedalKernelPlugin {
         });
         engines.push(PedalEngine::Delay(Delay::new(sr)));
 
-        // 3. User-supplied .pedal files (indices 8+).
+        // 2b. Embedded pro boards (guitar).
+        #[cfg(feature = "pro-guitar")]
+        for &(board_src, pedals) in PRO_GUITAR_BOARD_SOURCES {
+            if let Some((m, e)) = load_embedded_board(board_src, pedals, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 2c. Embedded pro boards (bass).
+        #[cfg(feature = "pro-bass")]
+        for &(board_src, pedals) in PRO_BASS_BOARD_SOURCES {
+            if let Some((m, e)) = load_embedded_board(board_src, pedals, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 2d. Embedded pro boards (shared — included in both guitar and bass).
+        #[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
+        for &(board_src, pedals) in PRO_SHARED_BOARD_SOURCES {
+            if let Some((m, e)) = load_embedded_board(board_src, pedals, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 3. User-supplied .pedal files.
         for (m, e) in scan_user_pedals(sr) {
             meta_list.push(m);
             engines.push(e);
