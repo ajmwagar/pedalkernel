@@ -10,6 +10,7 @@
 use crate::board::{find_global_board, BoardDef, BoardEntry};
 use crate::compiler::{compile_pedal, compile_split_pedal, CompiledPedal, SplitCompiledPedal};
 use crate::dsl::parse_pedal_file;
+use crate::loading::InterstageLoading;
 use crate::PedalProcessor;
 use std::path::Path;
 
@@ -44,8 +45,15 @@ enum ChainSlot {
 }
 
 /// Chains N `CompiledPedal` instances in series, with optional FX loop groups.
+///
+/// When impedance loading is enabled, interstage loading models are inserted
+/// between adjacent pedals to simulate the electrical interaction between
+/// source and load impedances.
 pub struct PedalboardProcessor {
     chain: Vec<ChainSlot>,
+    /// Interstage loading between pedals. `loading[i]` sits between
+    /// `chain[i]` and `chain[i+1]`. Length = max(0, chain.len() - 1).
+    loading: Vec<InterstageLoading>,
 }
 
 impl PedalboardProcessor {
@@ -240,7 +248,19 @@ impl PedalboardProcessor {
             }
         }
 
-        (Self { chain }, warnings)
+        // Create interstage loading between adjacent pedals.
+        // Default: transparent (buffered output → high-Z input), which is the
+        // most common modern pedal configuration and has negligible effect.
+        let n = chain.len();
+        let loading = if n > 1 {
+            (0..n - 1)
+                .map(|_| InterstageLoading::transparent(sample_rate))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        (Self { chain, loading }, warnings)
     }
 
     /// Compile a single pedal entry into a PedalSlot.
@@ -394,6 +414,30 @@ impl PedalboardProcessor {
             .get(index)
             .is_some_and(|s| s.failed)
     }
+
+    /// Configure the impedance loading between two adjacent pedals.
+    ///
+    /// `junction_index` is the junction between `chain[junction_index]` and
+    /// `chain[junction_index + 1]`. The `source` describes the output impedance
+    /// of the preceding pedal, and `load` describes the input impedance of
+    /// the following pedal.
+    ///
+    /// This models the electrical interaction that causes real pedals to sound
+    /// different depending on what's connected before/after them. For example,
+    /// a Fuzz Face after a buffered pedal sounds different than directly after
+    /// a guitar, because its low input impedance loads the source differently.
+    pub fn set_interstage_loading(
+        &mut self,
+        junction_index: usize,
+        source: crate::loading::ImpedanceModel,
+        load: crate::loading::ImpedanceModel,
+        sample_rate: f64,
+    ) {
+        if junction_index < self.loading.len() {
+            self.loading[junction_index] =
+                InterstageLoading::new(source, load, sample_rate);
+        }
+    }
 }
 
 /// Process a single pedal slot, respecting bypass.
@@ -410,8 +454,9 @@ fn process_slot(slot: &mut PedalSlot, signal: f64) -> f64 {
 impl PedalProcessor for PedalboardProcessor {
     fn process(&mut self, input: f64) -> f64 {
         let mut signal = input;
-        for chain_slot in &mut self.chain {
-            match chain_slot {
+        let n = self.chain.len();
+        for i in 0..n {
+            match &mut self.chain[i] {
                 ChainSlot::Pedal(slot) => {
                     signal = process_slot(slot, signal);
                 }
@@ -428,6 +473,10 @@ impl PedalProcessor for PedalboardProcessor {
                     // Post-amp section (power amp) ← FX return
                     signal = fx.amp.process_post(fx_return);
                 }
+            }
+            // Apply interstage loading between this slot and the next.
+            if i < self.loading.len() {
+                signal = self.loading[i].process(signal);
             }
         }
         signal
@@ -451,6 +500,9 @@ impl PedalProcessor for PedalboardProcessor {
                 }
             }
         }
+        for loading in &mut self.loading {
+            loading.set_sample_rate(rate);
+        }
     }
 
     fn reset(&mut self) {
@@ -470,6 +522,9 @@ impl PedalProcessor for PedalboardProcessor {
                     }
                 }
             }
+        }
+        for loading in &mut self.loading {
+            loading.reset();
         }
     }
 

@@ -9,6 +9,10 @@
 //! - [`pedals`] — ready-to-use pedal implementations (Overdrive, Fuzz, Delay)
 //! - [`kicad`] — KiCad netlist export from the parsed AST
 //! - [`wav`] — WAV file I/O for offline rendering and testing
+//! - [`oversampling`] — antialiasing via oversampling at nonlinear stages
+//! - [`loading`] — electrical loading and impedance interaction between stages
+//! - [`tolerance`] — component tolerance randomization for realistic variation
+//! - [`thermal`] — thermal drift model for temperature-dependent behavior
 
 pub mod board;
 pub mod compiler;
@@ -17,8 +21,12 @@ pub mod elements;
 #[cfg(feature = "hardware")]
 pub mod hw;
 pub mod kicad;
+pub mod loading;
+pub mod oversampling;
 pub mod pedalboard;
 pub mod pedals;
+pub mod thermal;
+pub mod tolerance;
 pub mod tree;
 pub mod wav;
 
