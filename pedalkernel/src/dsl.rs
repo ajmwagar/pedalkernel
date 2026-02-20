@@ -27,6 +27,21 @@ pub struct PedalDef {
     pub controls: Vec<ControlDef>,
 }
 
+impl PedalDef {
+    /// Returns true if this pedal has an FX send/return loop defined.
+    pub fn has_fx_loop(&self) -> bool {
+        let has_send = self.nets.iter().any(|n| {
+            n.from == Pin::Reserved("fx_send".into())
+                || n.to.contains(&Pin::Reserved("fx_send".into()))
+        });
+        let has_return = self.nets.iter().any(|n| {
+            n.from == Pin::Reserved("fx_return".into())
+                || n.to.contains(&Pin::Reserved("fx_return".into()))
+        });
+        has_send && has_return
+    }
+}
+
 /// A single component declaration, e.g. `R1: resistor(4.7k)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComponentDef {
@@ -546,7 +561,7 @@ fn component_def(input: &str) -> IResult<&str, ComponentDef> {
 // Net parsers
 // ---------------------------------------------------------------------------
 
-const RESERVED_NODES: &[&str] = &["in", "out", "gnd", "vcc"];
+const RESERVED_NODES: &[&str] = &["in", "out", "gnd", "vcc", "fx_send", "fx_return"];
 
 fn pin(input: &str) -> IResult<&str, Pin> {
     let (input, first) = identifier(input)?;

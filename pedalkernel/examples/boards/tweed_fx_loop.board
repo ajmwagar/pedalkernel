@@ -1,0 +1,22 @@
+# Tweed Deluxe with FX loop
+# Pedals in front of the amp → amp preamp → FX loop (delay/chorus) → amp power section
+#
+# Signal chain:
+#   Guitar → Tube Screamer (front) → Tweed Deluxe preamp
+#     → [FX loop: chorus → delay] → Tweed Deluxe power amp → Output
+#
+# The fx_loop(amp) directive splits the amp at its fx_send/fx_return boundary.
+# Effects inside the loop run between the preamp and power amp stages.
+
+board "Tweed FX Loop" {
+  # Front-of-amp pedals (before the amp input)
+  ts: "pedals/overdrive/tube_screamer.pedal" { Drive = 0.4, Level = 0.6 }
+
+  # Amp — declared as a normal pedal so it appears in the chain
+  amp: "amps/tweed_deluxe_5e3.pedal" { Volume = 0.7, Tone = 0.6 }
+
+  # FX loop inserted at the amp's fx_send/fx_return point
+  fx_loop(amp) {
+    chorus: "pedals/modulation/boss_ce2.pedal"
+  }
+}

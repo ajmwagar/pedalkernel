@@ -68,9 +68,12 @@ pedal "Tweed Deluxe 5E3" {
 
     # Tone control between stages
     C3.b -> R4.a
-    R4.b -> Tone.a, V2.grid
+    R4.b -> Tone.a, fx_send
     Tone.b -> C4.a
     C4.b -> gnd
+
+    # FX send/return loop point (between preamp and power amp)
+    fx_return -> V2.grid
 
     # V2: 12AX7 plate circuit
     vcc -> R5.a

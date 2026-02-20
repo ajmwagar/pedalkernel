@@ -7,8 +7,8 @@
 //! - `"0:Drive"` → pedal index 0, knob "Drive"
 //! - `"2:__bypass__"` → toggle bypass on pedal index 2
 
-use crate::board::{find_global_board, BoardDef, BoardPedalEntry};
-use crate::compiler::{compile_pedal, CompiledPedal};
+use crate::board::{find_global_board, BoardDef, BoardEntry};
+use crate::compiler::{compile_pedal, compile_split_pedal, CompiledPedal, SplitCompiledPedal};
 use crate::dsl::parse_pedal_file;
 use crate::PedalProcessor;
 use std::path::Path;
@@ -25,103 +25,27 @@ struct PedalSlot {
     failed: bool,
 }
 
-/// Chains N `CompiledPedal` instances in series.
+/// An FX send/return loop backed by a split amp pedal.
+///
+/// The amp's pre-section runs first, then the FX chain, then the post-section.
+struct FxLoopSlot {
+    /// The split amp pedal (pre → FX chain → post).
+    amp: SplitCompiledPedal,
+    /// Effects inside the FX loop.
+    effects: Vec<PedalSlot>,
+    /// Wet/dry mix for the FX chain (0.0 = bypass loop, 1.0 = full wet).
+    mix: f64,
+}
+
+/// A slot in the signal chain — either a single pedal or an FX loop group.
+enum ChainSlot {
+    Pedal(PedalSlot),
+    FxLoop(FxLoopSlot),
+}
+
+/// Chains N `CompiledPedal` instances in series, with optional FX loop groups.
 pub struct PedalboardProcessor {
-    pedals: Vec<PedalSlot>,
-}
-
-/// Search subdirectories of `base` for a file matching `filename`.
-fn find_in_subdirs(base: &Path, filename: &str) -> Option<std::path::PathBuf> {
-    let target = Path::new(filename).file_name()?.to_str()?;
-    walk_for_file(base, target)
-}
-
-fn walk_for_file(dir: &Path, target: &str) -> Option<std::path::PathBuf> {
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = walk_for_file(&path, target) {
-                return Some(found);
-            }
-        } else if path.file_name().and_then(|n| n.to_str()) == Some(target) {
-            return Some(path);
-        }
-    }
-    None
-}
-
-/// Build `PedalSlot`s from a list of `BoardPedalEntry`, appending to `out`.
-/// Failed pedals become dry passthrough slots with a warning.
-fn build_slots(
-    entries: &[BoardPedalEntry],
-    base_dir: &Path,
-    sample_rate: f64,
-    out: &mut Vec<PedalSlot>,
-    warnings: &mut Vec<String>,
-) {
-    for entry in entries {
-        // Try direct path first, then search subdirectories by filename.
-        let pedal_path = {
-            let direct = base_dir.join(&entry.path);
-            if direct.exists() {
-                direct
-            } else if let Some(found) = find_in_subdirs(base_dir, &entry.path) {
-                found
-            } else {
-                direct // fall through to produce the original error message
-            }
-        };
-
-        let result: Result<(String, CompiledPedal), String> = (|| {
-            let source = std::fs::read_to_string(&pedal_path).map_err(|e| {
-                format!(
-                    "Error reading pedal '{}' at {}: {e}",
-                    entry.id,
-                    pedal_path.display()
-                )
-            })?;
-            let pedal_def = parse_pedal_file(&source)
-                .map_err(|e| format!("Parse error in '{}' ({}): {e}", entry.id, entry.path))?;
-            let mut proc = compile_pedal(&pedal_def, sample_rate).map_err(|e| {
-                format!("Compilation error in '{}' ({}): {e}", entry.id, entry.path)
-            })?;
-
-            // Apply default control values from the .pedal file
-            for ctrl in &pedal_def.controls {
-                proc.set_control(&ctrl.label, ctrl.default);
-            }
-
-            // Apply overrides from the .board file
-            for (label, val) in &entry.overrides {
-                proc.set_control(label, *val);
-            }
-
-            Ok((pedal_def.name.clone(), proc))
-        })();
-
-        match result {
-            Ok((name, proc)) => {
-                out.push(PedalSlot {
-                    name,
-                    processor: Some(proc),
-                    bypassed: false,
-                    failed: false,
-                });
-            }
-            Err(msg) => {
-                warnings.push(format!(
-                    "Pedal '{}' failed — using dry passthrough: {msg}",
-                    entry.id
-                ));
-                out.push(PedalSlot {
-                    name: format!("{} [FAILED]", entry.id),
-                    processor: None,
-                    bypassed: false,
-                    failed: true,
-                });
-            }
-        }
-    }
+    chain: Vec<ChainSlot>,
 }
 
 impl PedalboardProcessor {
@@ -158,6 +82,7 @@ impl PedalboardProcessor {
         board_dir: &Path,
         sample_rate: f64,
     ) -> (Self, Vec<String>) {
+        let mut chain = Vec::new();
         let mut warnings = Vec::new();
 
         // Detect global board
@@ -173,85 +98,431 @@ impl PedalboardProcessor {
             );
         }
 
-        // Build slots: [global start] + [board] + [global end]
-        let mut pedals = Vec::new();
-
+        // Prepend global start pedals
         if let Some((ref def, ref global_dir)) = global {
-            build_slots(&def.start, global_dir, sample_rate, &mut pedals, &mut warnings);
+            for entry in &def.start {
+                let slot = Self::compile_pedal_entry(entry, global_dir, sample_rate, &mut warnings);
+                chain.push(ChainSlot::Pedal(slot));
+            }
         }
 
-        build_slots(&board.pedals, board_dir, sample_rate, &mut pedals, &mut warnings);
+        // Build main board entries
+        for entry in &board.entries {
+            match entry {
+                BoardEntry::Pedal(pedal_entry) => {
+                    let slot =
+                        Self::compile_pedal_entry(pedal_entry, board_dir, sample_rate, &mut warnings);
+                    chain.push(ChainSlot::Pedal(slot));
+                }
+                BoardEntry::FxLoop(group) => {
+                    // Find the referenced amp pedal — it must have been declared
+                    // earlier in the board as a regular Pedal entry.
+                    // We need to load, parse, and compile it as a split pedal.
+                    let amp_entry = board.entries.iter().find_map(|e| {
+                        if let BoardEntry::Pedal(p) = e {
+                            if p.id == group.target_id {
+                                return Some(p);
+                            }
+                        }
+                        None
+                    });
 
-        if let Some((ref def, ref global_dir)) = global {
-            build_slots(&def.end, global_dir, sample_rate, &mut pedals, &mut warnings);
+                    let amp_result: Result<(String, SplitCompiledPedal), String> = match amp_entry {
+                        None => Err(format!(
+                            "fx_loop references '{}' but no pedal with that ID exists",
+                            group.target_id
+                        )),
+                        Some(entry) => {
+                            let pedal_path = {
+                                let direct = board_dir.join(&entry.path);
+                                if direct.exists() {
+                                    direct
+                                } else if let Some(found) =
+                                    Self::find_in_subdirs(board_dir, &entry.path)
+                                {
+                                    found
+                                } else {
+                                    direct
+                                }
+                            };
+                            (|| {
+                                let source =
+                                    std::fs::read_to_string(&pedal_path).map_err(|e| {
+                                        format!(
+                                            "Error reading amp '{}' at {}: {e}",
+                                            entry.id,
+                                            pedal_path.display()
+                                        )
+                                    })?;
+                                let pedal_def = parse_pedal_file(&source).map_err(|e| {
+                                    format!("Parse error in '{}': {e}", entry.id)
+                                })?;
+
+                                if !pedal_def.has_fx_loop() {
+                                    return Err(format!(
+                                        "Pedal '{}' has no fx_send/fx_return nodes",
+                                        entry.id
+                                    ));
+                                }
+
+                                let mut split = compile_split_pedal(&pedal_def, sample_rate)
+                                    .map_err(|e| {
+                                        format!("Failed to split-compile '{}': {e}", entry.id)
+                                    })?;
+
+                                // Apply overrides from the board
+                                for ctrl in &pedal_def.controls {
+                                    split.set_control(&ctrl.label, ctrl.default);
+                                }
+                                for (label, val) in &entry.overrides {
+                                    split.set_control(label, *val);
+                                }
+
+                                Ok((pedal_def.name.clone(), split))
+                            })()
+                        }
+                    };
+
+                    match amp_result {
+                        Ok((name, split)) => {
+                            // Remove the regular pedal entry for this amp from the chain
+                            // (it's now handled by the FX loop)
+                            chain.retain(|slot| {
+                                if let ChainSlot::Pedal(p) = slot {
+                                    p.name != name || p.failed
+                                } else {
+                                    true
+                                }
+                            });
+
+                            let mut effects = Vec::with_capacity(group.pedals.len());
+                            for pedal_entry in &group.pedals {
+                                let slot = Self::compile_pedal_entry(
+                                    pedal_entry,
+                                    board_dir,
+                                    sample_rate,
+                                    &mut warnings,
+                                );
+                                effects.push(slot);
+                            }
+                            chain.push(ChainSlot::FxLoop(FxLoopSlot {
+                                amp: split,
+                                effects,
+                                mix: group.mix,
+                            }));
+                        }
+                        Err(msg) => {
+                            warnings.push(format!(
+                                "FX loop for '{}' failed: {msg}",
+                                group.target_id
+                            ));
+                            // Fall back: just add the FX loop effects as regular pedals
+                            for pedal_entry in &group.pedals {
+                                let slot = Self::compile_pedal_entry(
+                                    pedal_entry,
+                                    board_dir,
+                                    sample_rate,
+                                    &mut warnings,
+                                );
+                                chain.push(ChainSlot::Pedal(slot));
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        (Self { pedals }, warnings)
+        // Append global end pedals
+        if let Some((ref def, ref global_dir)) = global {
+            for entry in &def.end {
+                let slot = Self::compile_pedal_entry(entry, global_dir, sample_rate, &mut warnings);
+                chain.push(ChainSlot::Pedal(slot));
+            }
+        }
+
+        (Self { chain }, warnings)
     }
 
-    /// Number of pedals in the chain.
+    /// Compile a single pedal entry into a PedalSlot.
+    fn compile_pedal_entry(
+        entry: &crate::board::BoardPedalEntry,
+        board_dir: &Path,
+        sample_rate: f64,
+        warnings: &mut Vec<String>,
+    ) -> PedalSlot {
+        // Try direct path first, then search subdirectories by filename.
+        let pedal_path = {
+            let direct = board_dir.join(&entry.path);
+            if direct.exists() {
+                direct
+            } else if let Some(found) = Self::find_in_subdirs(board_dir, &entry.path) {
+                found
+            } else {
+                direct // fall through to produce the original error message
+            }
+        };
+
+        let result: Result<(String, CompiledPedal), String> = (|| {
+            let source = std::fs::read_to_string(&pedal_path).map_err(|e| {
+                format!(
+                    "Error reading pedal '{}' at {}: {e}",
+                    entry.id,
+                    pedal_path.display()
+                )
+            })?;
+            let pedal_def = parse_pedal_file(&source)
+                .map_err(|e| format!("Parse error in '{}' ({}): {e}", entry.id, entry.path))?;
+            let mut proc = compile_pedal(&pedal_def, sample_rate).map_err(|e| {
+                format!("Compilation error in '{}' ({}): {e}", entry.id, entry.path)
+            })?;
+
+            // Apply default control values from the .pedal file
+            for ctrl in &pedal_def.controls {
+                proc.set_control(&ctrl.label, ctrl.default);
+            }
+
+            // Apply overrides from the .board file
+            for (label, val) in &entry.overrides {
+                proc.set_control(label, *val);
+            }
+
+            Ok((pedal_def.name.clone(), proc))
+        })();
+
+        match result {
+            Ok((name, proc)) => PedalSlot {
+                name,
+                processor: Some(proc),
+                bypassed: false,
+                failed: false,
+            },
+            Err(msg) => {
+                warnings.push(format!(
+                    "Pedal '{}' failed — using dry passthrough: {msg}",
+                    entry.id
+                ));
+                PedalSlot {
+                    name: format!("{} [FAILED]", entry.id),
+                    processor: None,
+                    bypassed: false,
+                    failed: true,
+                }
+            }
+        }
+    }
+
+    /// Search subdirectories of `base` for a file matching `filename`.
+    fn find_in_subdirs(base: &Path, filename: &str) -> Option<std::path::PathBuf> {
+        let target = Path::new(filename)
+            .file_name()?
+            .to_str()?;
+        Self::walk_for_file(base, target)
+    }
+
+    fn walk_for_file(dir: &Path, target: &str) -> Option<std::path::PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = Self::walk_for_file(&path, target) {
+                    return Some(found);
+                }
+            } else if path.file_name().and_then(|n| n.to_str()) == Some(target) {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Flat list of all pedal slots (for indexed access).
+    /// FX loop effect slots are flattened — indices are stable across the board.
+    fn flat_pedals(&self) -> Vec<&PedalSlot> {
+        let mut out = Vec::new();
+        for slot in &self.chain {
+            match slot {
+                ChainSlot::Pedal(p) => out.push(p),
+                ChainSlot::FxLoop(lp) => {
+                    for p in &lp.effects {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Mutable flat list of all pedal slots.
+    fn flat_pedals_mut(&mut self) -> Vec<&mut PedalSlot> {
+        let mut out = Vec::new();
+        for slot in &mut self.chain {
+            match slot {
+                ChainSlot::Pedal(p) => out.push(p),
+                ChainSlot::FxLoop(lp) => {
+                    for p in &mut lp.effects {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Number of pedals in the chain (flattened, including FX loop contents).
     pub fn len(&self) -> usize {
-        self.pedals.len()
+        self.flat_pedals().len()
     }
 
     /// Whether the pedalboard is empty.
     pub fn is_empty(&self) -> bool {
-        self.pedals.is_empty()
+        self.chain.is_empty()
     }
 
-    /// Get the name of pedal at the given index.
+    /// Get the name of pedal at the given flat index.
     pub fn pedal_name(&self, index: usize) -> Option<&str> {
-        self.pedals.get(index).map(|s| s.name.as_str())
+        self.flat_pedals().get(index).map(|s| s.name.as_str())
     }
 
     /// Check if a pedal is bypassed.
     pub fn is_pedal_bypassed(&self, index: usize) -> bool {
-        self.pedals.get(index).is_some_and(|s| s.bypassed)
+        self.flat_pedals()
+            .get(index)
+            .is_some_and(|s| s.bypassed)
     }
 
     /// Check if a pedal slot failed to compile (dry passthrough).
     pub fn is_pedal_failed(&self, index: usize) -> bool {
-        self.pedals.get(index).is_some_and(|s| s.failed)
+        self.flat_pedals()
+            .get(index)
+            .is_some_and(|s| s.failed)
+    }
+}
+
+/// Process a single pedal slot, respecting bypass.
+fn process_slot(slot: &mut PedalSlot, signal: f64) -> f64 {
+    if slot.bypassed {
+        signal
+    } else if let Some(ref mut proc) = slot.processor {
+        proc.process(signal)
+    } else {
+        signal // dry passthrough (failed pedal)
     }
 }
 
 impl PedalProcessor for PedalboardProcessor {
     fn process(&mut self, input: f64) -> f64 {
         let mut signal = input;
-        for slot in &mut self.pedals {
-            if !slot.bypassed {
-                if let Some(ref mut proc) = slot.processor {
-                    signal = proc.process(signal);
+        for chain_slot in &mut self.chain {
+            match chain_slot {
+                ChainSlot::Pedal(slot) => {
+                    signal = process_slot(slot, signal);
                 }
-                // None → dry passthrough (failed pedal)
+                ChainSlot::FxLoop(fx) => {
+                    // Pre-amp section → FX send
+                    let send = fx.amp.process_pre(signal);
+                    // FX chain with wet/dry mix
+                    let dry = send;
+                    let mut wet = send;
+                    for slot in &mut fx.effects {
+                        wet = process_slot(slot, wet);
+                    }
+                    let fx_return = dry * (1.0 - fx.mix) + wet * fx.mix;
+                    // Post-amp section (power amp) ← FX return
+                    signal = fx.amp.process_post(fx_return);
+                }
             }
         }
         signal
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
-        for slot in &mut self.pedals {
-            if let Some(ref mut proc) = slot.processor {
-                proc.set_sample_rate(rate);
+        for chain_slot in &mut self.chain {
+            match chain_slot {
+                ChainSlot::Pedal(slot) => {
+                    if let Some(ref mut proc) = slot.processor {
+                        proc.set_sample_rate(rate);
+                    }
+                }
+                ChainSlot::FxLoop(fx) => {
+                    fx.amp.set_sample_rate(rate);
+                    for slot in &mut fx.effects {
+                        if let Some(ref mut proc) = slot.processor {
+                            proc.set_sample_rate(rate);
+                        }
+                    }
+                }
             }
         }
     }
 
     fn reset(&mut self) {
-        for slot in &mut self.pedals {
-            if let Some(ref mut proc) = slot.processor {
-                proc.reset();
+        for chain_slot in &mut self.chain {
+            match chain_slot {
+                ChainSlot::Pedal(slot) => {
+                    if let Some(ref mut proc) = slot.processor {
+                        proc.reset();
+                    }
+                }
+                ChainSlot::FxLoop(fx) => {
+                    fx.amp.reset();
+                    for slot in &mut fx.effects {
+                        if let Some(ref mut proc) = slot.processor {
+                            proc.reset();
+                        }
+                    }
+                }
             }
         }
     }
 
     /// Control routing: `"idx:label"` dispatches to the appropriate pedal.
     ///
-    /// Special control `"idx:__bypass__"` toggles bypass (value > 0.5 = bypassed).
+    /// Indices are flat across the board — FX loop pedals are numbered
+    /// sequentially after pedals before the loop. Special controls:
+    /// - `"idx:__bypass__"` toggles bypass (value > 0.5 = bypassed)
+    /// - `"fx_loop:mix"` controls the FX loop wet/dry blend (first loop)
+    /// - `"fx_loop_N:mix"` controls the Nth FX loop's mix (0-indexed)
     fn set_control(&mut self, label: &str, value: f64) {
+        // FX loop controls: "fx_loop:mix", "fx_loop_N:mix", "fx_loop:Knob", "fx_loop_N:Knob"
+        if let Some(rest) = label.strip_prefix("fx_loop") {
+            // Determine which FX loop index and which knob label
+            let (loop_idx, knob) = if let Some(knob_label) = rest.strip_prefix(':') {
+                (0usize, knob_label)
+            } else if let Some(idx_and_label) = rest.strip_prefix('_') {
+                if let Some((idx_str, knob_label)) = idx_and_label.split_once(':') {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        (idx, knob_label)
+                    } else {
+                        return;
+                    }
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            };
+
+            let mut cur_loop = 0;
+            for slot in &mut self.chain {
+                if let ChainSlot::FxLoop(fx) = slot {
+                    if cur_loop == loop_idx {
+                        if knob == "mix" {
+                            fx.mix = value.clamp(0.0, 1.0);
+                        } else {
+                            // Route to the split amp's controls
+                            fx.amp.set_control(knob, value);
+                        }
+                        return;
+                    }
+                    cur_loop += 1;
+                }
+            }
+            return;
+        }
+
+        // Standard pedal control routing
         if let Some((prefix, remainder)) = label.split_once(':') {
             if let Ok(idx) = prefix.parse::<usize>() {
-                if let Some(slot) = self.pedals.get_mut(idx) {
+                let mut flat = self.flat_pedals_mut();
+                if let Some(slot) = flat.get_mut(idx) {
                     if remainder == "__bypass__" {
                         slot.bypassed = value > 0.5;
                     } else if let Some(ref mut proc) = slot.processor {
@@ -596,7 +867,6 @@ board "Bad" {
 
         let tmp = tempfile::tempdir().unwrap();
 
-        // Create .global.board with absolute paths
         let global_content = format!(
             "global {{\n  start {{\n    comp: \"{}\" {{ Sensitivity = 0.3 }}\n  }}\n  end {{\n    bd: \"{}\"\n  }}\n}}",
             comp_path.display(),
@@ -604,7 +874,6 @@ board "Bad" {
         );
         std::fs::write(tmp.path().join(".global.board"), &global_content).unwrap();
 
-        // Create board file in subdirectory
         let sub = tmp.path().join("boards");
         std::fs::create_dir(&sub).unwrap();
         let board_content = format!(
@@ -617,7 +886,6 @@ board "Bad" {
         let (pb, warnings) =
             PedalboardProcessor::from_board_with_warnings(&board, &sub, 48000.0);
 
-        // Should have 3 pedals: comp (start) + ts (board) + bd (end)
         assert_eq!(pb.len(), 3, "warnings: {warnings:?}");
         assert_eq!(pb.pedal_name(0), Some("MXR Dyna Comp"));
         assert_eq!(pb.pedal_name(1), Some("Tube Screamer"));
@@ -677,10 +945,8 @@ board "Bad" {
         let (pb, _) =
             PedalboardProcessor::from_board_with_warnings(&board, tmp.path(), 48000.0);
 
-        // Signal chain: comp → ts → bd
         assert_eq!(pb.len(), 3);
 
-        // Process audio — should produce non-zero, finite output
         let mut pb = pb;
         let mut max_out = 0.0_f64;
         for i in 0..1000 {
@@ -694,7 +960,6 @@ board "Bad" {
 
     #[test]
     fn no_global_board_unchanged() {
-        // Board in a dir with no .global.board — should work as before
         let tmp = tempfile::tempdir().unwrap();
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
         let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
@@ -736,13 +1001,91 @@ board "Bad" {
         let (mut pb, _) =
             PedalboardProcessor::from_board_with_warnings(&board, tmp.path(), 48000.0);
 
-        // Index 0 = global comp, index 1 = board ts
-        // Bypass the global comp via flat index
         pb.set_control("0:__bypass__", 1.0);
         assert!(pb.is_pedal_bypassed(0));
         assert!(!pb.is_pedal_bypassed(1));
 
-        // Route a knob control to the board pedal
         pb.set_control("1:Drive", 0.9);
+    }
+
+    // ── FX loop tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn pedalboard_fx_loop_processes_audio() {
+        let src = r#"
+board "FX Loop" {
+  amp: "tweed_deluxe_5e3.pedal" { Volume = 0.7, Tone = 0.5 }
+  fx_loop(amp) {
+    ts: "tube_screamer.pedal" { Drive = 0.3, Level = 0.5 }
+  }
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let (mut pb, warnings) =
+            PedalboardProcessor::from_board_with_warnings(&board, &board_dir, 48000.0);
+        assert!(
+            warnings.is_empty(),
+            "FX loop board should load without warnings: {warnings:?}"
+        );
+
+        // Process some samples — should produce non-zero output
+        let mut max_out = 0.0_f64;
+        for i in 0..1000 {
+            let input = (i as f64 * 440.0 * 2.0 * std::f64::consts::PI / 48000.0).sin() * 0.1;
+            let output = pb.process(input);
+            assert!(output.is_finite(), "FX loop output should be finite");
+            max_out = max_out.max(output.abs());
+        }
+        assert!(max_out > 0.0001, "FX loop board should produce output");
+    }
+
+    #[test]
+    fn pedalboard_fx_loop_mix_control() {
+        let src = r#"
+board "Mix" {
+  amp: "tweed_deluxe_5e3.pedal" { Volume = 0.5, Tone = 0.5 }
+  fx_loop(amp) {
+    ts: "tube_screamer.pedal" { Drive = 0.5 }
+  }
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let mut pb = PedalboardProcessor::from_board(&board, &board_dir, 48000.0).unwrap();
+
+        // Set FX loop mix — should not panic
+        pb.set_control("fx_loop:mix", 0.5);
+
+        // Route a control to the amp inside the FX loop
+        pb.set_control("fx_loop:Volume", 0.8);
+
+        // Process should still work
+        let output = pb.process(0.1);
+        assert!(output.is_finite());
+    }
+
+    #[test]
+    fn pedalboard_fx_loop_missing_amp_falls_back() {
+        let src = r#"
+board "Bad FX Loop" {
+  ts: "tube_screamer.pedal"
+  fx_loop(nonexistent) {
+    bd: "blues_driver.pedal"
+  }
+}
+"#;
+        let board = parse_board_file(src).unwrap();
+        let board_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let (pb, warnings) =
+            PedalboardProcessor::from_board_with_warnings(&board, &board_dir, 48000.0);
+
+        // Should have a warning about the missing amp
+        assert!(
+            warnings.iter().any(|w| w.contains("nonexistent")),
+            "Should warn about missing amp: {warnings:?}"
+        );
+        // The blues_driver should still be in the chain as a fallback pedal
+        assert!(pb.len() >= 2, "Fallback should still have pedals");
     }
 }
