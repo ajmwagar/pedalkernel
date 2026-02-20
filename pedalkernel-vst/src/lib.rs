@@ -2,19 +2,23 @@
 //!
 //! Single-plugin architecture with a pedal selector and six generic
 //! knob parameters.  Built-in pedals are always available; user-supplied
-//! `.pedal` files are loaded from `~/.pedalkernel/pedals/` at plugin init.
+//! `.pedal` and `.board` files are loaded from `~/.pedalkernel/pedals/`
+//! at plugin init.
 //!
 //! The pedal selector is an `IntParam` whose range adapts to the number of
-//! loaded pedals.  Built-in pedals occupy indices 0–7 (seven WDF-based
-//! models plus a digital delay); user pedals follow at index 8+.
+//! loaded entries.  Built-in pedals occupy indices 0–7 (seven WDF-based
+//! models plus a digital delay); user pedals follow, then user boards.
 //!
 //! Controls are mapped sequentially: the first control declared in the
 //! `.pedal` file maps to knob 1, the second to knob 2, etc. (up to 6).
-//! Unused knobs display "—".
+//! Unused knobs display "—".  Board entries use their baked-in overrides
+//! and show no active knobs.
 
 use nih_plug::prelude::*;
+use pedalkernel::board::parse_board_file;
 use pedalkernel::compiler::{compile_pedal, CompiledPedal};
 use pedalkernel::dsl;
+use pedalkernel::pedalboard::PedalboardProcessor;
 use pedalkernel::pedals::Delay;
 use pedalkernel::PedalProcessor;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -82,6 +86,42 @@ const PRO_BASS_SOURCES: &[&str] = &[
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Embedded .board sources (factory pedalboard presets, feature-gated)
+//
+// Each entry is a tuple of:
+//   (board_source, &[("pedal_path_as_in_board", pedal_source)])
+//
+// The resolver maps pedal path strings from the board file to their
+// `include_str!`'d sources, so no filesystem access is needed at runtime.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Pro guitar boards — curated signal chains for guitar.
+#[cfg(feature = "pro-guitar")]
+const PRO_GUITAR_BOARD_SOURCES: &[(&str, &[(&str, &str)])] = &[
+    // TODO: Add pro guitar boards as they're created, e.g.:
+    // (
+    //     include_str!("../../../pedalkernel-pro/boards/blues_rig.board"),
+    //     &[
+    //         ("overdrive/tube_screamer.pedal", include_str!("../../../pedalkernel-pro/pedals/overdrive/tube_screamer.pedal")),
+    //         ("overdrive/blues_driver.pedal", include_str!("../../../pedalkernel-pro/pedals/overdrive/blues_driver.pedal")),
+    //     ],
+    // ),
+];
+
+/// Pro bass boards — curated signal chains for bass.
+#[cfg(feature = "pro-bass")]
+const PRO_BASS_BOARD_SOURCES: &[(&str, &[(&str, &str)])] = &[
+    // TODO: Add pro bass boards as they're created.
+];
+
+/// Shared boards — instrument-agnostic signal chains.
+/// Included in both guitar and bass Pro variants.
+#[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
+const PRO_SHARED_BOARD_SOURCES: &[(&str, &[(&str, &str)])] = &[
+    // TODO: Add shared pro boards as they're created.
+];
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Pedal metadata & loading
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -101,6 +141,8 @@ struct PedalMeta {
 enum PedalEngine {
     Compiled(CompiledPedal),
     Delay(Delay),
+    /// A pedalboard (signal chain of multiple pedals from a `.board` file).
+    Board(PedalboardProcessor),
 }
 
 impl PedalEngine {
@@ -108,6 +150,7 @@ impl PedalEngine {
         match self {
             Self::Compiled(p) => p.process(input),
             Self::Delay(d) => d.process(input),
+            Self::Board(b) => b.process(input),
         }
     }
 
@@ -115,6 +158,7 @@ impl PedalEngine {
         match self {
             Self::Compiled(p) => p.set_sample_rate(rate),
             Self::Delay(d) => d.set_sample_rate(rate),
+            Self::Board(b) => b.set_sample_rate(rate),
         }
     }
 
@@ -122,8 +166,39 @@ impl PedalEngine {
         match self {
             Self::Compiled(p) => p.reset(),
             Self::Delay(d) => d.reset(),
+            Self::Board(b) => b.reset(),
         }
     }
+}
+
+/// Build a board from an embedded source string and a pedal-path → source mapping.
+///
+/// Only called when pro feature flags are active.
+///
+/// Uses `from_board_with_resolver` so no filesystem access is needed — all
+/// pedal sources are resolved from the compile-time `include_str!` table.
+#[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
+fn load_embedded_board(
+    board_src: &str,
+    pedal_sources: &[(&str, &str)],
+    sample_rate: f64,
+) -> Option<(PedalMeta, PedalEngine)> {
+    let board_def = parse_board_file(board_src).ok()?;
+    let (processor, _warnings) = PedalboardProcessor::from_board_with_resolver(
+        &board_def,
+        sample_rate,
+        |path| {
+            pedal_sources
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map(|(_, src)| (*src).to_string())
+        },
+    );
+    let meta = PedalMeta {
+        name: format!("{} [Board]", board_def.name),
+        labels: Default::default(),
+    };
+    Some((meta, PedalEngine::Board(processor)))
 }
 
 /// Parse and compile a `.pedal` source string into metadata + engine.
@@ -184,6 +259,48 @@ fn scan_user_pedals(sample_rate: f64) -> Vec<(PedalMeta, PedalEngine)> {
         }
     }
     pedals
+}
+
+/// Scan the user pedals directory for `.board` files and compile them.
+///
+/// Board files define a signal chain of multiple pedals with optional knob
+/// overrides.  Each board appears as a single selectable entry in the plugin.
+/// The six DAW knobs are inactive for boards — the overrides in the `.board`
+/// file set the knob positions.
+fn scan_user_boards(sample_rate: f64) -> Vec<(PedalMeta, PedalEngine)> {
+    let dir = match user_pedals_dir() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "board"))
+        .map(|e| e.path())
+        .collect();
+    paths.sort(); // deterministic ordering
+
+    let mut boards = Vec::new();
+    for path in paths {
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            if let Ok(board_def) = parse_board_file(&src) {
+                let board_dir = path.parent().unwrap_or(&dir);
+                let (processor, _warnings) =
+                    PedalboardProcessor::from_board_with_warnings(&board_def, board_dir, sample_rate);
+
+                let meta = PedalMeta {
+                    name: format!("{} [Board]", board_def.name),
+                    labels: Default::default(), // no knobs — overrides baked in
+                };
+                boards.push((meta, PedalEngine::Board(processor)));
+            }
+        }
+    }
+    boards
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -333,8 +450,41 @@ impl Default for PedalKernelPlugin {
         });
         engines.push(PedalEngine::Delay(Delay::new(sr)));
 
-        // 3. User-supplied .pedal files (indices 8+).
+        // 2b. Embedded pro boards (guitar).
+        #[cfg(feature = "pro-guitar")]
+        for &(board_src, pedals) in PRO_GUITAR_BOARD_SOURCES {
+            if let Some((m, e)) = load_embedded_board(board_src, pedals, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 2c. Embedded pro boards (bass).
+        #[cfg(feature = "pro-bass")]
+        for &(board_src, pedals) in PRO_BASS_BOARD_SOURCES {
+            if let Some((m, e)) = load_embedded_board(board_src, pedals, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 2d. Embedded pro boards (shared — included in both guitar and bass).
+        #[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
+        for &(board_src, pedals) in PRO_SHARED_BOARD_SOURCES {
+            if let Some((m, e)) = load_embedded_board(board_src, pedals, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 3. User-supplied .pedal files.
         for (m, e) in scan_user_pedals(sr) {
+            meta_list.push(m);
+            engines.push(e);
+        }
+
+        // 4. User-supplied .board files (pedalboard signal chains).
+        for (m, e) in scan_user_boards(sr) {
             meta_list.push(m);
             engines.push(e);
         }
@@ -454,6 +604,10 @@ impl Plugin for PedalKernelPlugin {
                         delay.set_delay_time(10.0 + knobs[0] * knobs[0] * 1990.0);
                         delay.set_feedback(knobs[1] * 0.95);
                         delay.set_mix(knobs[2]);
+                    }
+                    PedalEngine::Board(_) => {
+                        // Board knob overrides are baked in at load time;
+                        // DAW knobs are inactive for board entries.
                     }
                 }
 
