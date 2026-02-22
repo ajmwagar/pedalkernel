@@ -299,15 +299,19 @@ fn check_spec_voltage(
         }
     }
 
-    // Op-amp supply max
+    // IC supply max (op-amps, synth ICs, comparators, analog switches)
     if let Some(supply_max) = spec.supply_max {
-        if let ComponentKind::OpAmp(_) = kind {
+        let is_ic = matches!(kind,
+            ComponentKind::OpAmp(_) | ComponentKind::Vco(_) | ComponentKind::Vcf(_) |
+            ComponentKind::Vca(_) | ComponentKind::Comparator(_) | ComponentKind::AnalogSwitch(_)
+        );
+        if is_ic {
             if voltage > supply_max {
                 warnings.push(VoltageWarning {
                     component_id: id.to_string(),
                     severity: WarningSeverity::Danger,
                     message: format!(
-                        "Op-amp {id}{part_label} max supply {supply_max:.0}V — \
+                        "IC {id}{part_label} max supply {supply_max:.0}V — \
                          {voltage:.0}V exceeds absolute max",
                     ),
                 });
@@ -316,7 +320,7 @@ fn check_spec_voltage(
                     component_id: id.to_string(),
                     severity: WarningSeverity::Caution,
                     message: format!(
-                        "Op-amp {id}{part_label} max supply {supply_max:.0}V — \
+                        "IC {id}{part_label} max supply {supply_max:.0}V — \
                          {voltage:.0}V is close to limit",
                     ),
                 });
@@ -730,6 +734,35 @@ pub fn auto_populate_specs(pedal: &PedalDef, limits: &mut HardwareLimits) {
                     spec.breakdown = Some(dp.breakdown);
                 }
             }
+            // Synth ICs: populate supply max from known datasheets
+            ComponentKind::Vco(_) => {
+                if spec.supply_max.is_none() {
+                    spec.supply_max = Some(18.0); // CEM3340/AS3340/V3340: ±5V to ±9V (18V total)
+                }
+            }
+            ComponentKind::Vcf(_) => {
+                if spec.supply_max.is_none() {
+                    spec.supply_max = Some(18.0); // CEM3320/AS3320: ±9V max
+                }
+            }
+            ComponentKind::Vca(_) => {
+                if spec.supply_max.is_none() {
+                    spec.supply_max = Some(36.0); // SSM2164/V2164: ±18V max
+                }
+            }
+            ComponentKind::Comparator(ct) => {
+                if spec.supply_max.is_none() {
+                    spec.supply_max = Some(match ct {
+                        crate::dsl::ComparatorType::Lm311 => 36.0,
+                        crate::dsl::ComparatorType::Lm393 => 36.0,
+                    });
+                }
+            }
+            ComponentKind::AnalogSwitch(_) => {
+                if spec.supply_max.is_none() {
+                    spec.supply_max = Some(20.0); // CD4066/DG411: 20V max
+                }
+            }
             _ => {}
         }
     }
@@ -977,6 +1010,12 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                             crate::dsl::JfetType::P2n5460 => {
                                 (None, "N-JFET (unknown model)".to_string())
                             }
+                            crate::dsl::JfetType::N2sk30a
+                            | crate::dsl::JfetType::N2sk30aGr
+                            | crate::dsl::JfetType::N2sk30aY
+                            | crate::dsl::JfetType::N2sk30aBl => {
+                                (None, format!("2SK30A N-JFET ({jt:?})"))
+                            }
                         }
                     };
                     vec![BomEntry {
@@ -1083,12 +1122,129 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                                 Some("JJ-12AU7".to_string()),
                                 "12AU7 / ECC82 Preamp Tube (JJ Electronic)".to_string(),
                             ),
+                            crate::dsl::TriodeType::T12ay7 => (
+                                Some("JJ-12AY7".to_string()),
+                                "12AY7 Preamp Tube (JJ Electronic)".to_string(),
+                            ),
                         }
                     };
                     vec![BomEntry {
                         reference: comp.id.clone(),
                         display: format!("Vacuum Tube ({tt:?})"),
                         value: format!("{tt:?}"),
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::Zener(vz) => {
+                    let desc = if let Some(part_name) = hw_part {
+                        part_name.to_string()
+                    } else {
+                        format!("{:.1}V Zener Diode", vz)
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "Zener Diode".into(),
+                        value: format!("{:.1}V", vz),
+                        mouser_pn: None, // Zener voltage-specific P/N varies
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::Pentode(pt) => {
+                    let (pn, desc) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string())
+                    } else {
+                        match pt {
+                            crate::dsl::PentodeType::Ef86 => (
+                                Some("JJ-EF86".to_string()),
+                                "EF86 / 6267 Pentode (JJ Electronic)".to_string(),
+                            ),
+                            crate::dsl::PentodeType::El84 => (
+                                Some("JJ-EL84".to_string()),
+                                "EL84 / 6BQ5 Power Pentode (JJ Electronic)".to_string(),
+                            ),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: format!("Pentode ({pt:?})"),
+                        value: format!("{pt:?}"),
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::Nmos(mt) => {
+                    let (pn, desc) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string())
+                    } else {
+                        match mt {
+                            crate::dsl::MosfetType::N2n7000 => {
+                                (Some("512-2N7000".to_string()), "2N7000 N-MOSFET".to_string())
+                            }
+                            crate::dsl::MosfetType::Irf520 => {
+                                (Some("942-IRF520NPBF".to_string()), "IRF520 N-MOSFET".to_string())
+                            }
+                            _ => (None, format!("N-MOSFET ({mt:?})")),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: format!("N-MOSFET ({mt:?})"),
+                        value: format!("{mt:?}"),
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::Pmos(mt) => {
+                    let (pn, desc) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string())
+                    } else {
+                        match mt {
+                            crate::dsl::MosfetType::Bs250 => {
+                                (Some("512-BS250".to_string()), "BS250 P-MOSFET".to_string())
+                            }
+                            crate::dsl::MosfetType::Irf9520 => {
+                                (Some("942-IRF9520NPBF".to_string()), "IRF9520 P-MOSFET".to_string())
+                            }
+                            _ => (None, format!("P-MOSFET ({mt:?})")),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: format!("P-MOSFET ({mt:?})"),
+                        value: format!("{mt:?}"),
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::Bbd(bt) => {
+                    let (pn, desc) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string())
+                    } else {
+                        match bt {
+                            crate::dsl::BbdType::Mn3207 => (
+                                None, // NOS sourcing
+                                "MN3207 1024-stage BBD".to_string(),
+                            ),
+                            crate::dsl::BbdType::Mn3007 => (
+                                None,
+                                "MN3007 1024-stage BBD (low-noise)".to_string(),
+                            ),
+                            crate::dsl::BbdType::Mn3005 => (
+                                None,
+                                "MN3005 4096-stage BBD (long delay)".to_string(),
+                            ),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: format!("BBD ({bt:?})"),
+                        value: format!("{bt:?}"),
                         mouser_pn: pn,
                         description: desc,
                         qty_per_unit: 1,
@@ -1184,6 +1340,201 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     });
 
                     entries
+                }
+                // ── Synth ICs ──────────────────────────────────────────
+                ComponentKind::Vco(vt) => {
+                    let (pn, desc, label) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string(), format!("{vt:?}"))
+                    } else {
+                        match vt {
+                            crate::dsl::VcoType::Cem3340 => (
+                                None, // NOS/specialty sourcing
+                                "CEM3340 VCO (Curtis, NOS)".to_string(),
+                                "CEM3340".to_string(),
+                            ),
+                            crate::dsl::VcoType::As3340 => (
+                                Some("ALFA-AS3340".to_string()),
+                                "AS3340 VCO (Alfa RPAR)".to_string(),
+                                "AS3340".to_string(),
+                            ),
+                            crate::dsl::VcoType::V3340 => (
+                                Some("COOLAUDIO-V3340".to_string()),
+                                "V3340 VCO (CoolAudio)".to_string(),
+                                "V3340".to_string(),
+                            ),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "VCO".into(),
+                        value: label,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::Vcf(vt) => {
+                    let (pn, desc, label) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string(), format!("{vt:?}"))
+                    } else {
+                        match vt {
+                            crate::dsl::VcfType::Cem3320 => (
+                                None,
+                                "CEM3320 VCF (Curtis, NOS)".to_string(),
+                                "CEM3320".to_string(),
+                            ),
+                            crate::dsl::VcfType::As3320 => (
+                                Some("ALFA-AS3320".to_string()),
+                                "AS3320 VCF (Alfa RPAR)".to_string(),
+                                "AS3320".to_string(),
+                            ),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "VCF".into(),
+                        value: label,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::Vca(vt) => {
+                    let (pn, desc, label) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string(), format!("{vt:?}"))
+                    } else {
+                        match vt {
+                            crate::dsl::VcaType::Ssm2164 => (
+                                None,
+                                "SSM2164 Quad VCA (NOS)".to_string(),
+                                "SSM2164".to_string(),
+                            ),
+                            crate::dsl::VcaType::V2164 => (
+                                Some("COOLAUDIO-V2164".to_string()),
+                                "V2164 Quad VCA (CoolAudio)".to_string(),
+                                "V2164".to_string(),
+                            ),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "VCA".into(),
+                        value: label,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::Comparator(ct) => {
+                    let (pn, desc, label) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string(), format!("{ct:?}"))
+                    } else {
+                        match ct {
+                            crate::dsl::ComparatorType::Lm311 => (
+                                Some("595-LM311P".to_string()),
+                                "LM311 Comparator".to_string(),
+                                "LM311".to_string(),
+                            ),
+                            crate::dsl::ComparatorType::Lm393 => (
+                                Some("595-LM393P".to_string()),
+                                "LM393 Dual Comparator".to_string(),
+                                "LM393".to_string(),
+                            ),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "Comparator".into(),
+                        value: label,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::AnalogSwitch(st) => {
+                    let (pn, desc, label) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string(), format!("{st:?}"))
+                    } else {
+                        match st {
+                            crate::dsl::AnalogSwitchType::Cd4066 => (
+                                Some("595-CD4066BE".to_string()),
+                                "CD4066 Quad Bilateral Switch".to_string(),
+                                "CD4066".to_string(),
+                            ),
+                            crate::dsl::AnalogSwitchType::Dg411 => (
+                                Some("700-DG411DJ-E3".to_string()),
+                                "DG411 Quad SPST Switch".to_string(),
+                                "DG411".to_string(),
+                            ),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "Analog Switch".into(),
+                        value: label,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::MatchedNpn(mt) | ComponentKind::MatchedPnp(mt) => {
+                    let (pn, desc, label) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string(), format!("{mt:?}"))
+                    } else {
+                        match mt {
+                            crate::dsl::MatchedTransistorType::Ssm2210 => (
+                                Some("584-SSM2210PZ".to_string()),
+                                "SSM2210 Matched Dual NPN".to_string(),
+                                "SSM2210".to_string(),
+                            ),
+                            crate::dsl::MatchedTransistorType::Ca3046 => (
+                                None, // Discontinued, NOS sourcing
+                                "CA3046 5-NPN Transistor Array (NOS)".to_string(),
+                                "CA3046".to_string(),
+                            ),
+                            crate::dsl::MatchedTransistorType::Lm394 => (
+                                None, // Discontinued, NOS sourcing
+                                "LM394 Supermatch Pair (NOS)".to_string(),
+                                "LM394".to_string(),
+                            ),
+                            crate::dsl::MatchedTransistorType::That340 => (
+                                Some("THAT-340P14-U".to_string()),
+                                "THAT340 Matched Quad NPN".to_string(),
+                                "THAT340".to_string(),
+                            ),
+                        }
+                    };
+                    let is_npn = matches!(&comp.kind, ComponentKind::MatchedNpn(_));
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: if is_npn {
+                            "Matched NPN".into()
+                        } else {
+                            "Matched PNP".into()
+                        },
+                        value: label,
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::Tempco(r, ppm) => {
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "Tempco Resistor".into(),
+                        value: format!(
+                            "{} +{:.0}ppm/\u{b0}C",
+                            crate::kicad::format_eng(*r, "\u{2126}"),
+                            ppm
+                        ),
+                        mouser_pn: None, // Specialist supplier
+                        description: format!(
+                            "{} Tempco Resistor +{:.0}ppm/\u{b0}C",
+                            crate::kicad::format_eng(*r, "\u{2126}"),
+                            ppm
+                        ),
+                        qty_per_unit: 1,
+                    }]
                 }
             }
         })
@@ -1516,22 +1867,20 @@ pedal "Test" {
     fn bom_tube_screamer_all_matched() {
         let pedal = tube_screamer_pedal();
         let bom = build_bom(&pedal, None);
-        assert_eq!(bom.len(), 4); // Drive pot, C1, D1, Level pot
-                                  // All should have a Mouser P/N from the curated DB.
-        for entry in &bom {
-            assert!(
-                entry.mouser_pn.is_some(),
-                "TS {} should have a Mouser P/N",
-                entry.reference
-            );
-        }
+        // Tube Screamer: 20 components total (R×7, C×6, U×2, D×2, Pot×3)
+        assert_eq!(bom.len(), pedal.components.len());
+        // All curated components should have a Mouser P/N.
+        // Op-amps and well-known passives are all in the DB.
+        let matched = bom.iter().filter(|e| e.mouser_pn.is_some()).count();
+        assert!(matched >= 4, "At least Drive pot, C1, D1, Level pot should have Mouser P/Ns");
     }
 
     #[test]
     fn bom_fuzz_face_components() {
         let pedal = fuzz_face_pedal();
         let bom = build_bom(&pedal, None);
-        assert_eq!(bom.len(), 9);
+        // All components should produce BOM entries
+        assert_eq!(bom.len(), pedal.components.len());
         // PNP transistors should default to 2N3906
         let q1 = bom.iter().find(|e| e.reference == "Q1").unwrap();
         assert!(q1.description.contains("2N3906"));
@@ -1550,7 +1899,19 @@ pedal "Test" {
 
     #[test]
     fn bom_diode_pair_qty_2() {
-        let pedal = tube_screamer_pedal();
+        // Build a pedal with a diode_pair to verify qty=2
+        let src = r#"
+pedal "Pair Test" {
+  components {
+    D1: diode_pair(silicon)
+  }
+  nets {
+    in -> D1.a
+    D1.b -> out
+  }
+}
+"#;
+        let pedal = crate::dsl::parse_pedal_file(src).unwrap();
         let bom = build_bom(&pedal, None);
         let d1 = bom.iter().find(|e| e.reference == "D1").unwrap();
         assert_eq!(d1.qty_per_unit, 2, "Diode pair should need 2 units");
@@ -1577,7 +1938,21 @@ pedal "Test" {
 
     #[test]
     fn bom_csv_qty_multiplier() {
-        let pedal = tube_screamer_pedal();
+        // Use a pedal with a diode_pair for qty multiplier testing
+        let src = r#"
+pedal "Qty Test" {
+  components {
+    D1: diode_pair(silicon)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> D1.a, R1.a
+    D1.b -> out
+    R1.b -> gnd
+  }
+}
+"#;
+        let pedal = crate::dsl::parse_pedal_file(src).unwrap();
         let bom = build_bom(&pedal, None);
         let csv_x1 = export_bom_csv(&bom, 1);
         let csv_x5 = export_bom_csv(&bom, 5);

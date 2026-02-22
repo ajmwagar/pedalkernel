@@ -304,7 +304,6 @@ pub enum RootKind {
     Triode(TriodeRoot),
     Pentode(PentodeRoot),
     Mosfet(MosfetRoot),
-    Zener(ZenerRoot),
     Ota(OtaRoot),
 }
 
@@ -668,20 +667,6 @@ impl CircuitGraph {
                         node_b: node_s,
                     });
                 }
-                ComponentKind::Zener(_) => {
-                    // Zener diode: treated like a regular diode (two-terminal, a/b pins).
-                    let key_a = format!("{}.a", comp.id);
-                    let key_b = format!("{}.b", comp.id);
-                    let id_a = get_id(&key_a, &mut uf);
-                    let id_b = get_id(&key_b, &mut uf);
-                    let node_a = uf.find(id_a);
-                    let node_b = uf.find(id_b);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a,
-                        node_b,
-                    });
-                }
                 ComponentKind::Npn | ComponentKind::Pnp => {
                     num_active += 1;
                 }
@@ -711,6 +696,53 @@ impl CircuitGraph {
                 ComponentKind::Bbd(_) => {
                     // BBDs are handled as delay line processors, not WDF elements.
                     // They connect via .in/.out pins but are processed separately.
+                }
+                // ── Synth ICs ──────────────────────────────────────────
+                // These are complex ICs with internal behavior. They are NOT
+                // part of the WDF tree — they generate/process signals
+                // independently and connect via their pin nodes.
+                ComponentKind::Vco(_) => {
+                    // VCO generates audio internally. Not a WDF element.
+                    // Connects via .saw/.tri/.pulse output pins and .cv input.
+                    num_active += 1;
+                }
+                ComponentKind::Vcf(_) => {
+                    // VCF processes audio through internal OTA stages.
+                    // .in/.out are signal path; .cv/.res are control.
+                    num_active += 1;
+                }
+                ComponentKind::Vca(_) => {
+                    // VCA is a gain-control element (exponential CV).
+                    // .in/.out are signal path; .cv is control.
+                    num_active += 1;
+                }
+                ComponentKind::Comparator(_) => {
+                    // Binary output element. Not a WDF nonlinear root.
+                    // .pos/.neg are inputs; .out is open-collector output.
+                    num_active += 1;
+                }
+                ComponentKind::AnalogSwitch(_) => {
+                    // Bilateral switch: low-R path when ctrl is high.
+                    // Each channel: .in1/.out1/.ctrl1 through .in4/.out4/.ctrl4.
+                    num_active += 1;
+                }
+                ComponentKind::MatchedNpn(_) | ComponentKind::MatchedPnp(_) => {
+                    // Matched pairs: same as regular BJTs but with tighter Vbe matching.
+                    num_active += 1;
+                }
+                ComponentKind::Tempco(_, _) => {
+                    // Temperature-compensating resistor (2-terminal, like regular R).
+                    let key_a = format!("{}.a", comp.id);
+                    let key_b = format!("{}.b", comp.id);
+                    let id_a = get_id(&key_a, &mut uf);
+                    let id_b = get_id(&key_b, &mut uf);
+                    let node_a = uf.find(id_a);
+                    let node_b = uf.find(id_b);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
+                    });
                 }
             }
         }
@@ -1219,59 +1251,6 @@ impl CircuitGraph {
         otas
     }
 
-    /// Find zener diode edges, ordered by topological distance from `in`.
-    fn find_zeners(&self) -> Vec<(usize, ZenerInfo)> {
-        // BFS from in_node to compute distances.
-        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        for e in &self.edges {
-            adj.entry(e.node_a).or_default().push(e.node_b);
-            adj.entry(e.node_b).or_default().push(e.node_a);
-        }
-        let mut dist: HashMap<NodeId, usize> = HashMap::new();
-        let mut queue = std::collections::VecDeque::new();
-        dist.insert(self.in_node, 0);
-        queue.push_back(self.in_node);
-        while let Some(n) = queue.pop_front() {
-            let d = dist[&n];
-            if let Some(neighbors) = adj.get(&n) {
-                for &nb in neighbors {
-                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
-                        e.insert(d + 1);
-                        queue.push_back(nb);
-                    }
-                }
-            }
-        }
-
-        let mut zeners: Vec<(usize, ZenerInfo)> = Vec::new();
-        for (edge_idx, e) in self.edges.iter().enumerate() {
-            let comp = &self.components[e.comp_idx];
-            if let ComponentKind::Zener(voltage) = &comp.kind {
-                zeners.push((
-                    edge_idx,
-                    ZenerInfo {
-                        voltage: *voltage,
-                        junction_node: if e.node_b == self.gnd_node {
-                            e.node_a
-                        } else {
-                            e.node_b
-                        },
-                        ground_node: if e.node_b == self.gnd_node {
-                            e.node_b
-                        } else {
-                            e.node_a
-                        },
-                    },
-                ));
-            }
-        }
-
-        // Sort by distance of junction node from input.
-        zeners.sort_by_key(|(_, info)| {
-            dist.get(&info.junction_node).copied().unwrap_or(usize::MAX)
-        });
-        zeners
-    }
 }
 
 struct DiodeInfo {
@@ -1518,6 +1497,9 @@ fn make_leaf(comp: &ComponentDef, sample_rate: f64) -> DynNode {
                 inner: crate::elements::Photocoupler::new(model, sample_rate),
             }
         }
+        // Tempco resistor: modeled as a standard resistor (nominal value).
+        // Temperature compensation handled by the thermal model separately.
+        ComponentKind::Tempco(r, _ppm) => DynNode::Resistor { rp: *r },
         // Diodes shouldn't appear as leaves (they're roots), but handle gracefully.
         _ => DynNode::Resistor { rp: 1000.0 },
     }
@@ -2852,81 +2834,6 @@ pub fn compile_pedal_with_options(
         });
     }
 
-    // Build WDF stages for zener diodes.
-    let zeners = graph.find_zeners();
-    let zener_edge_indices: Vec<usize> = zeners.iter().map(|(idx, _)| *idx).collect();
-    let all_nonlinear_with_zeners: Vec<usize> = all_nonlinear_with_triodes
-        .iter()
-        .chain(zener_edge_indices.iter())
-        .copied()
-        .collect();
-
-    for (_edge_idx, zener_info) in &zeners {
-        let junction = zener_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(
-            junction,
-            &all_nonlinear_with_zeners,
-            &graph.active_edge_indices,
-        );
-
-        if passive_idxs.is_empty() {
-            continue;
-        }
-
-        // Find the best injection node for the voltage source.
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            let other = if e.node_a == junction {
-                e.node_b
-            } else {
-                e.node_a
-            };
-            if let Some(&d) = dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
-                }
-            }
-        }
-
-        // Build SP edges.
-        let source_node = graph.edges.len() + 4000; // virtual source node (unique offset for zeners)
-        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-        }
-
-        let terminals = vec![source_node, junction];
-        let sp_tree = match sp_reduce(sp_edges, &terminals) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        let mut zener_components = graph.components.clone();
-        while zener_components.len() <= vs_comp_idx {
-            zener_components.push(ComponentDef {
-                id: "__vs__".to_string(),
-                kind: ComponentKind::Resistor(1.0),
-            });
-        }
-
-        let tree = sp_to_dyn_with_vs(&sp_tree, &zener_components, sample_rate, vs_comp_idx);
-
-        let model = ZenerModel::with_voltage(zener_info.voltage);
-        let root = RootKind::Zener(ZenerRoot::new(model));
-
-        stages.push(WdfStage {
-            tree,
-            root,
-            compensation: 1.0,
-        });
-    }
-
     // Balance voltage source impedance in each stage.
     // This fixes topologies where the Vs branch sits in a Parallel adaptor
     // opposite a high-impedance element (e.g. Big Muff: Parallel(Series(Vs,C), R)
@@ -3498,8 +3405,34 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                     });
                 }
             }
-            // Resistors, inductors, Si/LED diodes, pots: no voltage concerns
-            // within the 5–24V range we support.
+            // Synth ICs: CEM/AS/V series typically run ±5V to ±9V (10-18V total)
+            ComponentKind::Vco(_) | ComponentKind::Vcf(_) => {
+                if voltage > 18.0 {
+                    warnings.push(VoltageWarning {
+                        component_id: comp.id.clone(),
+                        severity: WarningSeverity::Danger,
+                        message: format!(
+                            "Synth IC {} exceeds max supply at {:.0}V — CEM/AS/V series rated ±9V (18V max)",
+                            comp.id, voltage
+                        ),
+                    });
+                }
+            }
+            ComponentKind::AnalogSwitch(_) => {
+                if voltage > 20.0 {
+                    warnings.push(VoltageWarning {
+                        component_id: comp.id.clone(),
+                        severity: WarningSeverity::Danger,
+                        message: format!(
+                            "Analog switch {} exceeds max supply at {:.0}V — CD4066/DG411 rated 20V max",
+                            comp.id, voltage
+                        ),
+                    });
+                }
+            }
+            // Resistors, inductors, Si/LED diodes, pots, VCA, comparator, matched
+            // transistors, tempco: no voltage concerns within the 5–24V range
+            // (or handled by supply_max spec if provided).
             _ => {}
         }
     }

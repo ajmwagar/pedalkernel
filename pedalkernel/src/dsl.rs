@@ -79,10 +79,31 @@ pub enum ComponentKind {
     Nmos(MosfetType),
     /// P-channel enhancement-mode MOSFET
     Pmos(MosfetType),
-    /// Zener diode with breakdown voltage (V)
-    Zener(f64),
     /// BBD (Bucket-Brigade Device) delay line
     Bbd(BbdType),
+    // ── Synth-specific component types ──────────────────────────────────
+    /// Voltage-Controlled Oscillator IC (CEM3340/AS3340/V3340).
+    /// Generates sawtooth, triangle, and pulse waveforms with 1V/Oct tracking.
+    Vco(VcoType),
+    /// Voltage-Controlled Filter IC (CEM3320/AS3320).
+    /// 4-pole lowpass with voltage-controlled cutoff and resonance.
+    Vcf(VcfType),
+    /// Voltage-Controlled Amplifier IC (SSM2164/V2164).
+    /// Exponential-control quad VCA.
+    Vca(VcaType),
+    /// Comparator IC (LM311, LM393). Open-collector output.
+    /// Used in VCO reset circuits, Schmitt triggers, ADSR level detection.
+    Comparator(ComparatorType),
+    /// Quad bilateral analog switch (CD4066, DG411).
+    /// Used for sample-and-hold, gate routing, ADSR switching.
+    AnalogSwitch(AnalogSwitchType),
+    /// Matched NPN transistor pair/array for exponential converters.
+    MatchedNpn(MatchedTransistorType),
+    /// Matched PNP transistor pair for exponential converters.
+    MatchedPnp(MatchedTransistorType),
+    /// Temperature-compensating resistor for exponential converters.
+    /// Parameters: nominal resistance (Ω), tempco (ppm/°C).
+    Tempco(f64, f64),
 }
 
 /// Op-amp types with different characteristics.
@@ -250,6 +271,68 @@ pub enum BbdType {
     Mn3007,
     /// MN3005 — 4096-stage long delay, Memory Man
     Mn3005,
+}
+
+// ── Synth-specific component type enums ─────────────────────────────────
+
+/// VCO (Voltage-Controlled Oscillator) IC types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VcoType {
+    /// CEM3340 — Curtis original. Prophet 5, MemoryMoog, Jupiter 6.
+    Cem3340,
+    /// AS3340 — Alfa RPAR clone (currently in production, pin-compatible).
+    As3340,
+    /// V3340 — CoolAudio clone (currently in production, pin-compatible).
+    V3340,
+}
+
+/// VCF (Voltage-Controlled Filter) IC types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VcfType {
+    /// CEM3320 — Curtis 4-pole lowpass. Prophet 5, Oberheim OB-Xa.
+    Cem3320,
+    /// AS3320 — Alfa RPAR clone (currently in production).
+    As3320,
+}
+
+/// VCA (Voltage-Controlled Amplifier) IC types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VcaType {
+    /// SSM2164 — Quad exponential VCA. Widely used in Eurorack.
+    Ssm2164,
+    /// V2164 — CoolAudio clone (currently in production, pin-compatible).
+    V2164,
+}
+
+/// Comparator IC types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComparatorType {
+    /// LM311 — Single comparator, open-collector output. VCO reset, Schmitt triggers.
+    Lm311,
+    /// LM393 — Dual comparator. Precision applications, window comparators.
+    Lm393,
+}
+
+/// Analog switch IC types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalogSwitchType {
+    /// CD4066 — Quad bilateral switch (~100Ω on-resistance). S&H, muting, routing.
+    Cd4066,
+    /// DG411 — Quad SPST analog switch (~25Ω on-resistance). Higher precision.
+    Dg411,
+}
+
+/// Matched transistor pair/array types for exponential converters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchedTransistorType {
+    /// SSM2210 — Matched dual NPN. Tight Vbe matching for V/Oct tracking.
+    Ssm2210,
+    /// CA3046 — 5-NPN transistor array (common substrate). Expo converters.
+    Ca3046,
+    /// LM394 — Supermatch pair. Ultralow Vbe offset.
+    Lm394,
+    /// THAT340 — Modern matched quad NPN (THAT Corporation).
+    That340,
 }
 
 /// A net connection: `in -> C1.a` or `C1.b -> R1.a, D1.a`
@@ -544,17 +627,6 @@ fn parse_pmos(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Pmos(mt)))
 }
 
-/// `zener(5.1v)` — Zener diode with breakdown voltage.
-/// The 'v' suffix is optional: `zener(5.1)` and `zener(5.1v)` are both valid.
-fn parse_zener(input: &str) -> IResult<&str, ComponentKind> {
-    let (input, _) = tag("zener")(input)?;
-    let (input, _) = char('(')(input)?;
-    let (input, voltage) = double(input)?;
-    let (input, _) = opt(tag("v"))(input)?;
-    let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Zener(voltage)))
-}
-
 fn bbd_type(input: &str) -> IResult<&str, BbdType> {
     alt((
         value(BbdType::Mn3207, tag("mn3207")),
@@ -570,6 +642,138 @@ fn parse_bbd(input: &str) -> IResult<&str, ComponentKind> {
     let (input, bt) = bbd_type(input)?;
     let (input, _) = char(')')(input)?;
     Ok((input, ComponentKind::Bbd(bt)))
+}
+
+// ── Synth component parsers ─────────────────────────────────────────────
+
+fn vco_type(input: &str) -> IResult<&str, VcoType> {
+    alt((
+        value(VcoType::Cem3340, tag("cem3340")),
+        value(VcoType::As3340, tag("as3340")),
+        value(VcoType::V3340, tag("v3340")),
+    ))(input)
+}
+
+fn parse_vco(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("vco")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, vt) = vco_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Vco(vt)))
+}
+
+fn vcf_type(input: &str) -> IResult<&str, VcfType> {
+    alt((
+        value(VcfType::Cem3320, tag("cem3320")),
+        value(VcfType::As3320, tag("as3320")),
+    ))(input)
+}
+
+fn parse_vcf(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("vcf")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, vt) = vcf_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Vcf(vt)))
+}
+
+fn vca_type(input: &str) -> IResult<&str, VcaType> {
+    alt((
+        value(VcaType::Ssm2164, tag("ssm2164")),
+        value(VcaType::V2164, tag("v2164")),
+    ))(input)
+}
+
+fn parse_vca(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("vca")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, vt) = vca_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Vca(vt)))
+}
+
+fn comparator_type(input: &str) -> IResult<&str, ComparatorType> {
+    alt((
+        value(ComparatorType::Lm311, tag("lm311")),
+        value(ComparatorType::Lm393, tag("lm393")),
+    ))(input)
+}
+
+fn parse_comparator(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("comparator")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, ct) = comparator_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Comparator(ct)))
+}
+
+fn analog_switch_type(input: &str) -> IResult<&str, AnalogSwitchType> {
+    alt((
+        value(AnalogSwitchType::Cd4066, tag("cd4066")),
+        value(AnalogSwitchType::Dg411, tag("dg411")),
+    ))(input)
+}
+
+fn parse_analog_switch(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("switch")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, st) = analog_switch_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::AnalogSwitch(st)))
+}
+
+fn matched_transistor_type(input: &str) -> IResult<&str, MatchedTransistorType> {
+    alt((
+        value(MatchedTransistorType::Ssm2210, tag("ssm2210")),
+        value(MatchedTransistorType::Ca3046, tag("ca3046")),
+        value(MatchedTransistorType::Lm394, tag("lm394")),
+        value(MatchedTransistorType::That340, tag("that340")),
+    ))(input)
+}
+
+fn parse_matched_npn(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("matched_npn")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, mt) = matched_transistor_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::MatchedNpn(mt)))
+}
+
+fn parse_matched_pnp(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("matched_pnp")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, mt) = matched_transistor_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::MatchedPnp(mt)))
+}
+
+/// `tempco(2k, 3500)` — tempco resistor: nominal_r, ppm/°C
+fn parse_tempco(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("tempco")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, resistance) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, ppm) = double(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Tempco(resistance, ppm)))
 }
 
 fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
@@ -598,6 +802,16 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_pmos,
             parse_bbd,
         )),
+        alt((
+            parse_vco,
+            parse_vcf,
+            parse_vca,
+            parse_comparator,
+            parse_analog_switch,
+            parse_matched_npn, // must come before parse_matched_pnp
+            parse_matched_pnp,
+            parse_tempco,
+        )),
     ))(input)
 }
 
@@ -622,7 +836,14 @@ fn component_def(input: &str) -> IResult<&str, ComponentDef> {
 // Net parsers
 // ---------------------------------------------------------------------------
 
-const RESERVED_NODES: &[&str] = &["in", "out", "gnd", "vcc", "fx_send", "fx_return"];
+const RESERVED_NODES: &[&str] = &[
+    "in", "out", "gnd", "vcc", "fx_send", "fx_return",
+    // Synth-specific CV/Gate nodes
+    "gate",       // Note on/off (0V / +5V)
+    "cv_pitch",   // Pitch CV (1V/Oct standard)
+    "cv_mod",     // Modulation CV (mod wheel, aftertouch)
+    "cv_filter",  // Filter cutoff CV
+];
 
 fn pin(input: &str) -> IResult<&str, Pin> {
     let (input, first) = identifier(input)?;
@@ -802,10 +1023,12 @@ fn controls_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
 // Top-level
 // ---------------------------------------------------------------------------
 
-/// Parse a complete `.pedal` file.
+/// Parse a complete `.pedal` or `.synth` file.
+/// Both `pedal "Name" { ... }` and `synth "Name" { ... }` produce the same AST.
 pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, _) = ws_comments(input)?;
-    let (input, _) = tag("pedal")(input)?;
+    // Accept both "pedal" and "synth" keywords — same AST, different semantics
+    let (input, _) = alt((tag("pedal"), tag("synth")))(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, name) = quoted_string(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1526,5 +1749,162 @@ pedal "Vox Preamp" {
             .components
             .iter()
             .any(|c| matches!(c.kind, ComponentKind::Pentode(PentodeType::Ef86))));
+    }
+
+    // ── Synth component parser tests ──────────────────────────────────
+
+    #[test]
+    fn parse_synth_keyword() {
+        let src = r#"
+synth "Test Synth" {
+  components {
+    R1: resistor(10k)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> out
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Test Synth");
+    }
+
+    #[test]
+    fn parse_vco_cem3340() {
+        let (_, c) = component_def("VCO1: vco(cem3340)").unwrap();
+        assert_eq!(c.id, "VCO1");
+        assert_eq!(c.kind, ComponentKind::Vco(VcoType::Cem3340));
+    }
+
+    #[test]
+    fn parse_vco_as3340() {
+        let (_, c) = component_def("VCO1: vco(as3340)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Vco(VcoType::As3340));
+    }
+
+    #[test]
+    fn parse_vco_v3340() {
+        let (_, c) = component_def("VCO1: vco(v3340)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Vco(VcoType::V3340));
+    }
+
+    #[test]
+    fn parse_vcf_cem3320() {
+        let (_, c) = component_def("VCF1: vcf(cem3320)").unwrap();
+        assert_eq!(c.id, "VCF1");
+        assert_eq!(c.kind, ComponentKind::Vcf(VcfType::Cem3320));
+    }
+
+    #[test]
+    fn parse_vcf_as3320() {
+        let (_, c) = component_def("VCF1: vcf(as3320)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Vcf(VcfType::As3320));
+    }
+
+    #[test]
+    fn parse_vca_ssm2164() {
+        let (_, c) = component_def("VCA1: vca(ssm2164)").unwrap();
+        assert_eq!(c.id, "VCA1");
+        assert_eq!(c.kind, ComponentKind::Vca(VcaType::Ssm2164));
+    }
+
+    #[test]
+    fn parse_vca_v2164() {
+        let (_, c) = component_def("VCA1: vca(v2164)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Vca(VcaType::V2164));
+    }
+
+    #[test]
+    fn parse_comparator_lm311() {
+        let (_, c) = component_def("U1: comparator(lm311)").unwrap();
+        assert_eq!(c.id, "U1");
+        assert_eq!(c.kind, ComponentKind::Comparator(ComparatorType::Lm311));
+    }
+
+    #[test]
+    fn parse_comparator_lm393() {
+        let (_, c) = component_def("U1: comparator(lm393)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Comparator(ComparatorType::Lm393));
+    }
+
+    #[test]
+    fn parse_analog_switch_cd4066() {
+        let (_, c) = component_def("SW1: switch(cd4066)").unwrap();
+        assert_eq!(c.id, "SW1");
+        assert_eq!(c.kind, ComponentKind::AnalogSwitch(AnalogSwitchType::Cd4066));
+    }
+
+    #[test]
+    fn parse_analog_switch_dg411() {
+        let (_, c) = component_def("SW1: switch(dg411)").unwrap();
+        assert_eq!(c.kind, ComponentKind::AnalogSwitch(AnalogSwitchType::Dg411));
+    }
+
+    #[test]
+    fn parse_matched_npn_ssm2210() {
+        let (_, c) = component_def("QM1: matched_npn(ssm2210)").unwrap();
+        assert_eq!(c.id, "QM1");
+        assert_eq!(c.kind, ComponentKind::MatchedNpn(MatchedTransistorType::Ssm2210));
+    }
+
+    #[test]
+    fn parse_matched_npn_ca3046() {
+        let (_, c) = component_def("QM1: matched_npn(ca3046)").unwrap();
+        assert_eq!(c.kind, ComponentKind::MatchedNpn(MatchedTransistorType::Ca3046));
+    }
+
+    #[test]
+    fn parse_matched_pnp_lm394() {
+        let (_, c) = component_def("QM1: matched_pnp(lm394)").unwrap();
+        assert_eq!(c.kind, ComponentKind::MatchedPnp(MatchedTransistorType::Lm394));
+    }
+
+    #[test]
+    fn parse_tempco() {
+        let (_, c) = component_def("RT1: tempco(2k, 3500)").unwrap();
+        assert_eq!(c.id, "RT1");
+        if let ComponentKind::Tempco(r, ppm) = c.kind {
+            assert!((r - 2000.0).abs() < 1e-6);
+            assert!((ppm - 3500.0).abs() < 1e-6);
+        } else {
+            panic!("expected Tempco");
+        }
+    }
+
+    #[test]
+    fn parse_synth_with_cv_gate() {
+        let src = r#"
+synth "CV Test" {
+  components {
+    VCO1: vco(as3340)
+    R1: resistor(100k)
+    VCF1: vcf(as3320)
+    R2: resistor(100k)
+  }
+  nets {
+    cv_pitch -> R1.a
+    R1.b -> VCO1.cv
+    VCO1.saw -> VCF1.in
+    cv_filter -> R2.a
+    R2.b -> VCF1.cv
+    VCF1.out -> out
+    gate -> gnd
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "CV Test");
+        assert_eq!(def.components.len(), 4);
+        // Check that cv_pitch, cv_filter, and gate are valid reserved node names
+        let has_reserved = |name: &str| {
+            def.nets.iter().any(|n| {
+                matches!(&n.from, Pin::Reserved(s) if s == name)
+                    || n.to.iter().any(|p| matches!(p, Pin::Reserved(s) if s == name))
+            })
+        };
+        assert!(has_reserved("cv_pitch"));
+        assert!(has_reserved("cv_filter"));
+        assert!(has_reserved("gate"));
     }
 }

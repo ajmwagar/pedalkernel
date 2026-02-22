@@ -51,12 +51,40 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
         ComponentKind::Nmos(_) => ("Device:Q_NMOS_DGS", "Q"),
         ComponentKind::Pmos(_) => ("Device:Q_PMOS_DGS", "Q"),
-        ComponentKind::Zener(_) => ("Device:D_Zener", "D"),
         ComponentKind::Bbd(bt) => match bt {
             BbdType::Mn3207 => ("Analog_Delay:MN3207", "IC"),
             BbdType::Mn3007 => ("Analog_Delay:MN3007", "IC"),
             BbdType::Mn3005 => ("Analog_Delay:MN3005", "IC"),
         },
+        // ── Synth ICs ──────────────────────────────────────────────────
+        ComponentKind::Vco(vt) => match vt {
+            VcoType::Cem3340 => ("Oscillator:CEM3340", "U"),
+            VcoType::As3340 => ("Oscillator:AS3340", "U"),
+            VcoType::V3340 => ("Oscillator:V3340", "U"),
+        },
+        ComponentKind::Vcf(vt) => match vt {
+            VcfType::Cem3320 => ("Analog:CEM3320", "U"),
+            VcfType::As3320 => ("Analog:AS3320", "U"),
+        },
+        ComponentKind::Vca(vt) => match vt {
+            VcaType::Ssm2164 => ("Analog:SSM2164", "U"),
+            VcaType::V2164 => ("Analog:V2164", "U"),
+        },
+        ComponentKind::Comparator(ct) => match ct {
+            ComparatorType::Lm311 => ("Comparator:LM311", "U"),
+            ComparatorType::Lm393 => ("Comparator:LM393", "U"),
+        },
+        ComponentKind::AnalogSwitch(st) => match st {
+            AnalogSwitchType::Cd4066 => ("Analog_Switch:CD4066", "U"),
+            AnalogSwitchType::Dg411 => ("Analog_Switch:DG411", "U"),
+        },
+        ComponentKind::MatchedNpn(mt) | ComponentKind::MatchedPnp(mt) => match mt {
+            MatchedTransistorType::Ssm2210 => ("Transistor_BJT:SSM2210", "Q"),
+            MatchedTransistorType::Ca3046 => ("Transistor_Array:CA3046", "Q"),
+            MatchedTransistorType::Lm394 => ("Transistor_BJT:LM394", "Q"),
+            MatchedTransistorType::That340 => ("Transistor_BJT:THAT340", "Q"),
+        },
+        ComponentKind::Tempco(_, _) => ("Device:R", "RT"),
     }
 }
 
@@ -109,8 +137,20 @@ fn value_str(kind: &ComponentKind) -> String {
         }
         ComponentKind::Nmos(mt) => format!("N-MOS_{mt:?}"),
         ComponentKind::Pmos(mt) => format!("P-MOS_{mt:?}"),
-        ComponentKind::Zener(vz) => format!("Zener_{:.1}V", vz),
         ComponentKind::Bbd(bt) => format!("BBD_{bt:?}"),
+        // ── Synth ICs ──────────────────────────────────────────────────
+        ComponentKind::Vco(vt) => format!("VCO_{vt:?}"),
+        ComponentKind::Vcf(vt) => format!("VCF_{vt:?}"),
+        ComponentKind::Vca(vt) => format!("VCA_{vt:?}"),
+        ComponentKind::Comparator(ct) => format!("Comparator_{ct:?}"),
+        ComponentKind::AnalogSwitch(st) => format!("Switch_{st:?}"),
+        ComponentKind::MatchedNpn(mt) => format!("Matched_NPN_{mt:?}"),
+        ComponentKind::MatchedPnp(mt) => format!("Matched_PNP_{mt:?}"),
+        ComponentKind::Tempco(r, ppm) => format!(
+            "{}_Tempco_{:.0}ppm",
+            format_eng(*r, "\u{2126}"),
+            ppm
+        ),
     }
 }
 
