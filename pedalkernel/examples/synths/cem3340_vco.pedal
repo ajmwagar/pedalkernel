@@ -1,0 +1,98 @@
+# CEM3340 VCO Module
+#
+# Classic analog VCO based on the Curtis CEM3340 (or AS3340/V3340 clone).
+# Used in the Sequential Prophet 5, Moog MemoryMoog, Roland Jupiter 6.
+#
+# External components set the operating parameters:
+# - C_timing (1nF polystyrene): sets the frequency range
+# - R_cv (100k): 1V/Oct scaling resistor
+# - RT1 (2k tempco +3500ppm): temperature compensation
+# - R_tune / R_fine: coarse and fine tuning
+# - R_pw: pulse width control
+
+synth "CEM3340 VCO" {
+  components {
+    # Core VCO IC
+    VCO1: vco(as3340)
+
+    # Timing capacitor (polystyrene, sets frequency range)
+    C_timing: cap(1n)
+
+    # CV input summing resistors (1V/Oct)
+    R_cv: resistor(100k)
+    R_cv2: resistor(100k)
+
+    # Temperature compensation resistor (+3500ppm/°C)
+    RT1: tempco(2k, 3500)
+
+    # Tuning controls
+    Tune: pot(100k)
+    Fine: pot(10k)
+
+    # Output protection resistors
+    R_saw: resistor(1k)
+    R_tri: resistor(1k)
+    R_pulse: resistor(1k)
+
+    # Pulse width control
+    PW: pot(100k)
+    R_pw: resistor(47k)
+
+    # Decoupling
+    C_dec1: cap(100n)
+    C_dec2: cap(100n)
+
+    # Hard sync input resistor
+    R_sync: resistor(10k)
+  }
+  nets {
+    # CV input path
+    cv_pitch -> R_cv.a
+    R_cv.b -> VCO1.cv
+
+    # Tempco in the exponential converter
+    RT1.a -> VCO1.cv
+    RT1.b -> gnd
+
+    # Tuning pots
+    Tune.a -> vcc
+    Tune.b -> R_cv2.a
+    R_cv2.b -> VCO1.cv
+    Fine.a -> R_cv2.b
+    Fine.b -> gnd
+
+    # Timing capacitor
+    C_timing.a -> VCO1.cv
+    C_timing.b -> gnd
+
+    # Outputs
+    VCO1.saw -> R_saw.a
+    R_saw.b -> out
+
+    VCO1.tri -> R_tri.a
+    R_tri.b -> out
+
+    VCO1.pulse -> R_pulse.a
+    R_pulse.b -> out
+
+    # Pulse width
+    PW.a -> vcc
+    PW.b -> R_pw.a
+    R_pw.b -> VCO1.pw
+
+    # Hard sync
+    in -> R_sync.a
+    R_sync.b -> VCO1.sync
+
+    # Power decoupling
+    C_dec1.a -> vcc
+    C_dec1.b -> gnd
+    C_dec2.a -> vcc
+    C_dec2.b -> gnd
+  }
+  controls {
+    Tune.position -> "Coarse Tune" [0.0, 1.0] = 0.5
+    Fine.position -> "Fine Tune" [0.0, 1.0] = 0.5
+    PW.position -> "Pulse Width" [0.0, 1.0] = 0.5
+  }
+}

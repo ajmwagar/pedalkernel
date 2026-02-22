@@ -1,0 +1,160 @@
+# MiniSynth — Complete Monophonic Synthesizer
+#
+# Signal chain: VCO (AS3340) → VCF (AS3320) → VCA (V2164)
+#
+# Uses modern clones of classic ICs (all currently in production):
+# - AS3340 (Alfa RPAR) — VCO, pin-compatible with CEM3340
+# - AS3320 (Alfa RPAR) — VCF, pin-compatible with CEM3320
+# - V2164 (CoolAudio) — Quad VCA, pin-compatible with SSM2164
+#
+# ADSR envelope uses a comparator (LM311) + analog switch (CD4066)
+# to create attack/decay/sustain/release timing from discrete components.
+#
+# CV/Gate interface: Eurorack-compatible (1V/Oct, +5V gate)
+
+synth "MiniSynth" {
+  components {
+    # ── VCO Section ─────────────────────────────────────────────────────
+    VCO1: vco(as3340)
+    C_timing: cap(1n)
+    R_cv_pitch: resistor(100k)
+    RT1: tempco(2k, 3500)
+    Tune: pot(100k)
+    Fine: pot(10k)
+    R_tune: resistor(100k)
+
+    # ── VCF Section ─────────────────────────────────────────────────────
+    VCF1: vcf(as3320)
+    Cutoff: pot(100k)
+    R_cutoff_cv: resistor(100k)
+    Reso: pot(50k)
+
+    # ── VCA Section ─────────────────────────────────────────────────────
+    VCA1: vca(v2164)
+    R_vca_in: resistor(10k)
+    R_vca_out: resistor(10k)
+
+    # ── ADSR Envelope Generator (discrete) ──────────────────────────────
+    # Comparator detects gate transitions
+    U_comp: comparator(lm311)
+    # Analog switch routes charge/discharge paths
+    U_sw: switch(cd4066)
+
+    # Envelope timing components
+    Attack: pot(1e6)
+    R_atk: resistor(1k)
+    Decay: pot(1e6)
+    R_dec: resistor(1k)
+    Sustain: pot(100k)
+    Release: pot(1e6)
+    R_rel: resistor(1k)
+
+    # Envelope storage capacitor
+    C_env: cap(1e-6)
+
+    # Steering diodes (attack charges, decay/release discharges)
+    D_atk: diode(silicon)
+    D_dec: diode(silicon)
+
+    # ── Master Volume ───────────────────────────────────────────────────
+    Volume: pot(10k)
+
+    # ── Power Decoupling ────────────────────────────────────────────────
+    C_dec1: cap(100n)
+    C_dec2: cap(100n)
+    C_dec3: cap(100n)
+  }
+  nets {
+    # ── CV/Gate Input ───────────────────────────────────────────────────
+    cv_pitch -> R_cv_pitch.a
+    R_cv_pitch.b -> VCO1.cv
+
+    # Tempco compensation
+    RT1.a -> VCO1.cv
+    RT1.b -> gnd
+
+    # Tuning
+    Tune.a -> vcc
+    Tune.b -> R_tune.a
+    R_tune.b -> VCO1.cv
+    Fine.a -> R_tune.b
+    Fine.b -> gnd
+
+    # Timing cap
+    C_timing.a -> VCO1.cv
+    C_timing.b -> gnd
+
+    # ── VCO → VCF ──────────────────────────────────────────────────────
+    VCO1.saw -> VCF1.in
+
+    # Filter controls
+    Cutoff.a -> vcc
+    Cutoff.b -> R_cutoff_cv.a
+    R_cutoff_cv.b -> VCF1.cv
+
+    cv_filter -> R_cutoff_cv.b
+
+    Reso.a -> vcc
+    Reso.b -> VCF1.res
+
+    # ── VCF → VCA ──────────────────────────────────────────────────────
+    VCF1.out -> R_vca_in.a
+    R_vca_in.b -> VCA1.in1
+
+    # ── ADSR → VCA CV ──────────────────────────────────────────────────
+    # Gate drives comparator
+    gate -> U_comp.pos
+    U_comp.neg -> gnd
+    U_comp.out -> U_sw.ctrl1
+
+    # Attack: gate on → charge C_env through Attack pot + steering diode
+    U_sw.in1 -> vcc
+    U_sw.out1 -> D_atk.a
+    D_atk.b -> Attack.a
+    Attack.b -> R_atk.a
+    R_atk.b -> C_env.a
+    C_env.b -> gnd
+
+    # Decay/Release: gate off → discharge through Decay/Release + diode
+    C_env.a -> D_dec.a
+    D_dec.b -> Decay.a
+    Decay.b -> R_dec.a
+    R_dec.b -> gnd
+
+    # Sustain level
+    Sustain.a -> vcc
+    Sustain.b -> gnd
+
+    # Release path
+    Release.a -> C_env.a
+    Release.b -> R_rel.a
+    R_rel.b -> gnd
+
+    # Envelope output → VCA control
+    C_env.a -> VCA1.cv1
+
+    # ── VCA → Output ───────────────────────────────────────────────────
+    VCA1.out1 -> R_vca_out.a
+    R_vca_out.b -> Volume.a
+    Volume.b -> out
+
+    # ── Power Decoupling ────────────────────────────────────────────────
+    C_dec1.a -> vcc
+    C_dec1.b -> gnd
+    C_dec2.a -> vcc
+    C_dec2.b -> gnd
+    C_dec3.a -> vcc
+    C_dec3.b -> gnd
+  }
+  controls {
+    Tune.position -> "Tune" [0.0, 1.0] = 0.5
+    Fine.position -> "Fine" [0.0, 1.0] = 0.5
+    Cutoff.position -> "Cutoff" [0.0, 1.0] = 0.7
+    Reso.position -> "Resonance" [0.0, 1.0] = 0.0
+    Attack.position -> "Attack" [0.0, 1.0] = 0.1
+    Decay.position -> "Decay" [0.0, 1.0] = 0.3
+    Sustain.position -> "Sustain" [0.0, 1.0] = 0.7
+    Release.position -> "Release" [0.0, 1.0] = 0.3
+    Volume.position -> "Volume" [0.0, 1.0] = 0.7
+  }
+}
