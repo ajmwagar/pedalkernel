@@ -41,49 +41,21 @@ const EMBEDDED_SOURCES: &[&str] = &[
 // ═══════════════════════════════════════════════════════════════════════════
 // Pro pedals (private repo, feature-gated by variant)
 //
-// Guitar: overdrives, fuzz, wah — voiced for guitar frequencies.
-// Shared: compressors, delays, modulation, reverb — instrument-agnostic.
-// Bass:   bass-specific circuits (populated in pedalkernel-pro/pedals/bass/).
+// Auto-discovered by build.rs from pedalkernel-pro/pedals/:
+// - overdrive/, wah/, fuzz/ → PRO_GUITAR_PEDALS
+// - bass/ → PRO_BASS_PEDALS
+// - amp/ → PRO_AMP_PEDALS
+// - compressor/, chorus/, phaser/, tremolo/, delay/, reverb/ → PRO_SHARED_PEDALS
+// - Root-level .pedal files → PRO_SHARED_PEDALS
 //
-// `pro-pedals` = guitar + bass + shared (the complete Pro bundle).
+// `pro-pedals` = guitar + bass + amps + shared (the complete Pro bundle).
 // `pro-guitar` = guitar + shared.
 // `pro-bass`   = bass + shared.
+// `pro-amps`   = amps + shared.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Guitar-voiced pedals (overdrives, fuzz, wah).
-#[cfg(feature = "pro-guitar")]
-const PRO_GUITAR_SOURCES: &[&str] = &[
-    include_str!("../../../pedalkernel-pro/pedals/overdrive/fulltone_ocd.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/overdrive/klon_centaur.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/overdrive/morning_glory.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/overdrive/tumnus.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/overdrive/ts808_tubescreamer.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/overdrive/eqd_plumes.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/wah/crybaby_wah.pedal"),
-];
-
-/// Instrument-agnostic pedals (compression, delay, modulation, reverb).
-/// Included in both guitar and bass variants.
-#[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
-const PRO_SHARED_SOURCES: &[&str] = &[
-    include_str!("../../../pedalkernel-pro/pedals/compressor/keeley_compressor_plus.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/chorus/ce2_chorus.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/phaser/phase90.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/tremolo/fender_tremolo.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/tremolo/optical_tremolo.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/tremolo/harmonic_tremolo.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/phaser/univibe.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/delay/boss_dm2_delay.pedal"),
-    include_str!("../../../pedalkernel-pro/pedals/reverb/walrus_slo_reverb.pedal"),
-];
-
-/// Bass-specific pedals (bass overdrive, bass compressor, etc.).
-/// Add new bass .pedal files to pedalkernel-pro/pedals/bass/ and list them here.
-#[cfg(feature = "pro-bass")]
-const PRO_BASS_SOURCES: &[&str] = &[
-    // TODO: Add bass-specific pedals as they're created, e.g.:
-    // include_str!("../../../pedalkernel-pro/pedals/bass/darkglass_b7k.pedal"),
-];
+// Include auto-generated pedal lists from build.rs
+include!(concat!(env!("OUT_DIR"), "/pro_pedals.rs"));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Embedded .board sources (factory pedalboard presets, feature-gated)
@@ -411,7 +383,7 @@ impl Default for PedalKernelPlugin {
 
         // 1b. Pro guitar pedals.
         #[cfg(feature = "pro-guitar")]
-        for src in PRO_GUITAR_SOURCES {
+        for src in PRO_GUITAR_PEDALS {
             if let Some((m, e)) = load_pedal_source(src, sr) {
                 meta_list.push(m);
                 engines.push(e);
@@ -420,16 +392,25 @@ impl Default for PedalKernelPlugin {
 
         // 1c. Pro bass pedals.
         #[cfg(feature = "pro-bass")]
-        for src in PRO_BASS_SOURCES {
+        for src in PRO_BASS_PEDALS {
             if let Some((m, e)) = load_pedal_source(src, sr) {
                 meta_list.push(m);
                 engines.push(e);
             }
         }
 
-        // 1d. Pro shared pedals (included in both guitar and bass variants).
-        #[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
-        for src in PRO_SHARED_SOURCES {
+        // 1d. Pro amp models.
+        #[cfg(feature = "pro-amps")]
+        for src in PRO_AMP_PEDALS {
+            if let Some((m, e)) = load_pedal_source(src, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 1e. Pro shared pedals (included in guitar, bass, and amps variants).
+        #[cfg(any(feature = "pro-guitar", feature = "pro-bass", feature = "pro-amps"))]
+        for src in PRO_SHARED_PEDALS {
             if let Some((m, e)) = load_pedal_source(src, sr) {
                 meta_list.push(m);
                 engines.push(e);

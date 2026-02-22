@@ -72,7 +72,7 @@ pub struct ZenerModel {
 impl ZenerModel {
     /// Create a zener diode with specified breakdown voltage.
     ///
-    /// Uses typical 1N47xx series characteristics.
+    /// Alias for `with_voltage` for API compatibility.
     pub fn new(vz: f64) -> Self {
         Self::with_voltage(vz)
     }

@@ -1250,7 +1250,6 @@ impl CircuitGraph {
         });
         otas
     }
-
 }
 
 struct DiodeInfo {
@@ -2829,6 +2828,83 @@ pub fn compile_pedal_with_options(
             tree,
             root,
             compensation: feedback_compensation,
+            oversampler: Oversampler::new(oversampling),
+            base_diode_model: None,
+        });
+    }
+
+    // Build WDF stages for zener diodes.
+    let zeners = graph.find_zeners();
+    let zener_edge_indices: Vec<usize> = zeners.iter().map(|(idx, _)| *idx).collect();
+    let all_nonlinear_with_zeners: Vec<usize> = all_nonlinear_with_triodes
+        .iter()
+        .chain(zener_edge_indices.iter())
+        .copied()
+        .collect();
+
+    for (_edge_idx, zener_info) in &zeners {
+        let junction = zener_info.junction_node;
+        let passive_idxs = graph.elements_at_junction(
+            junction,
+            &all_nonlinear_with_zeners,
+            &graph.active_edge_indices,
+        );
+
+        if passive_idxs.is_empty() {
+            continue;
+        }
+
+        // Find the best injection node for the voltage source.
+        let mut injection_node = graph.in_node;
+        let mut best_dist = usize::MAX;
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            let other = if e.node_a == junction {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            if let Some(&d) = dist_from_in.get(&other) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = other;
+                }
+            }
+        }
+
+        // Build SP edges.
+        let source_node = graph.edges.len() + 4000; // virtual source node (unique offset for zeners)
+        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+        }
+
+        let terminals = vec![source_node, junction];
+        let sp_tree = match sp_reduce(sp_edges, &terminals) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let mut zener_components = graph.components.clone();
+        while zener_components.len() <= vs_comp_idx {
+            zener_components.push(ComponentDef {
+                id: "__vs__".to_string(),
+                kind: ComponentKind::Resistor(1.0),
+            });
+        }
+
+        let tree = sp_to_dyn_with_vs(&sp_tree, &zener_components, sample_rate, vs_comp_idx);
+
+        let model = ZenerModel::with_voltage(zener_info.voltage);
+        let root = RootKind::Zener(ZenerRoot::new(model));
+
+        stages.push(WdfStage {
+            tree,
+            root,
+            compensation: 1.0,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
         });
