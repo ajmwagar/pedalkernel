@@ -14,10 +14,14 @@
 //! Unused knobs display "—".  Board entries use their baked-in overrides
 //! and show no active knobs.
 
+use atomic_float::AtomicF32;
 use nih_plug::prelude::*;
 #[cfg(feature = "pro-ui")]
 use pedalkernel_ui::{PedalKernelEditor, PedalKernelEditorState, PedalKernelUiState};
 use pedalkernel::board::parse_board_file;
+
+#[cfg(feature = "pro-ui")]
+mod pedalboard;
 use pedalkernel::compiler::{compile_pedal, CompiledPedal};
 use pedalkernel::dsl;
 use pedalkernel::elements::SynthProcessor;
@@ -799,5 +803,438 @@ impl ClapPlugin for PedalKernelPlugin {
     ];
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 6-Slot Pedalboard Plugin (Pro UI for Guitar/Bass only)
+// Signal chain: input → [Slot 1-6 pedals] → [Amp] → output
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "pro-ui")]
+mod pedalboard_plugin {
+    use super::*;
+    use crate::pedalboard::{PedalboardParams, PedalboardState, NUM_SLOTS, KNOBS_PER_SLOT};
+    use std::sync::atomic::Ordering;
+
+    /// 6-slot pedalboard plugin with custom WGPU UI
+    pub struct PedalboardPlugin {
+        params: Arc<PedalboardParams>,
+        /// Shared pedalboard state for UI
+        pub state: Arc<PedalboardState>,
+        /// Metadata for every loaded pedal (NOT including amps)
+        meta: Arc<Vec<PedalMeta>>,
+        /// Metadata for amp models
+        amp_meta: Arc<Vec<PedalMeta>>,
+        /// Pedal engines (one per loaded pedal, indexed by pedal selector)
+        engines: Vec<PedalEngine>,
+        /// Amp engines (one per loaded amp model)
+        amp_engines: Vec<PedalEngine>,
+        /// Editor state
+        editor_state: Arc<PedalKernelEditorState>,
+        /// UI state shared with GUI
+        ui_state: Arc<PedalKernelUiState>,
+    }
+
+    impl Default for PedalboardPlugin {
+        fn default() -> Self {
+            let sr = 48000.0;
+
+            let mut meta_list = Vec::new();
+            let mut engines = Vec::new();
+            let mut amp_meta_list = Vec::new();
+            let mut amp_engines = Vec::new();
+
+            // ─────────────────────────────────────────────────────────────────
+            // Load pedals (NOT amps - they go in amp_engines)
+            // ─────────────────────────────────────────────────────────────────
+
+            // Load all embedded pedals
+            for src in EMBEDDED_SOURCES {
+                if let Some((m, e)) = load_pedal_source(src, sr) {
+                    meta_list.push(m);
+                    engines.push(e);
+                }
+            }
+
+            // Pro guitar pedals (overdrives, fuzzes, wahs - NOT amps)
+            #[cfg(feature = "pro-guitar")]
+            for src in PRO_GUITAR_PEDALS {
+                if let Some((m, e)) = load_pedal_source(src, sr) {
+                    meta_list.push(m);
+                    engines.push(e);
+                }
+            }
+
+            // Pro bass pedals
+            #[cfg(feature = "pro-bass")]
+            for src in PRO_BASS_PEDALS {
+                if let Some((m, e)) = load_pedal_source(src, sr) {
+                    meta_list.push(m);
+                    engines.push(e);
+                }
+            }
+
+            // Pro shared pedals (delays, choruses, etc.)
+            #[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
+            for src in PRO_SHARED_PEDALS {
+                if let Some((m, e)) = load_pedal_source(src, sr) {
+                    meta_list.push(m);
+                    engines.push(e);
+                }
+            }
+
+            // Built-in digital delay
+            meta_list.push(PedalMeta {
+                name: "Delay".to_string(),
+                labels: [
+                    Some("Time".to_string()),
+                    Some("Feedback".to_string()),
+                    Some("Mix".to_string()),
+                    None,
+                    None,
+                    None,
+                ],
+            });
+            engines.push(PedalEngine::Delay(Delay::new(sr)));
+
+            // User pedals
+            for (m, e) in scan_user_pedals(sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+
+            // ─────────────────────────────────────────────────────────────────
+            // Load amps (separate from pedals, always at end of signal chain)
+            // ─────────────────────────────────────────────────────────────────
+
+            // Add a "Clean" bypass option first
+            amp_meta_list.push(PedalMeta {
+                name: "Clean (No Amp)".to_string(),
+                labels: Default::default(),
+            });
+            // Placeholder - amp_engines[0] will just pass through
+            // We'll handle this in process() by checking amp_bypass or idx==0
+
+            // Pro amp models
+            #[cfg(feature = "pro-amps")]
+            for src in PRO_AMP_PEDALS {
+                if let Some((m, e)) = load_pedal_source(src, sr) {
+                    amp_meta_list.push(m);
+                    amp_engines.push(e);
+                }
+            }
+
+            // If no amps loaded, we still have the "Clean" option
+            if amp_engines.is_empty() {
+                // Add placeholder amp names for testing
+                amp_meta_list.push(PedalMeta {
+                    name: "Marshall JCM800".to_string(),
+                    labels: [Some("Gain".to_string()), Some("Tone".to_string()), Some("Volume".to_string()), None, None, None],
+                });
+                amp_meta_list.push(PedalMeta {
+                    name: "Fender Twin".to_string(),
+                    labels: [Some("Gain".to_string()), Some("Tone".to_string()), Some("Volume".to_string()), None, None, None],
+                });
+                amp_meta_list.push(PedalMeta {
+                    name: "Vox AC30".to_string(),
+                    labels: [Some("Gain".to_string()), Some("Tone".to_string()), Some("Volume".to_string()), None, None, None],
+                });
+            }
+
+            let meta = Arc::new(meta_list);
+            let amp_meta = Arc::new(amp_meta_list);
+
+            // Build pedal labels for params (3 labels per pedal, for the 3 knobs)
+            let pedal_labels: Vec<[Option<String>; KNOBS_PER_SLOT]> = meta
+                .iter()
+                .map(|m| {
+                    [
+                        m.labels[0].clone(),
+                        m.labels[1].clone(),
+                        m.labels[2].clone(),
+                    ]
+                })
+                .collect();
+
+            let pedal_names: Vec<String> = meta.iter().map(|m| m.name.clone()).collect();
+            let amp_names: Vec<String> = amp_meta.iter().map(|m| m.name.clone()).collect();
+
+            let state = Arc::new(PedalboardState::new(
+                pedal_names.clone(),
+                pedal_labels,
+                amp_names,
+            ));
+            let params = Arc::new(PedalboardParams::new(state.clone()));
+
+            let editor_state = PedalKernelEditorState::new(1200, 600); // Wider for pedalboard
+
+            // Create UI state that shares the same atomics as PedalboardState
+            // This ensures UI changes are reflected in audio processing and vice versa
+            let ui_state = Arc::new(PedalKernelUiState {
+                pedal_index: Arc::clone(&state.slots[0].pedal_index), // Default to slot 0 for single-pedal compat
+                pedal_names: pedal_names.clone(),
+                amp_names: state.amp_names.clone(),
+                knob_values: std::array::from_fn(|i| {
+                    if i < KNOBS_PER_SLOT {
+                        Arc::clone(&state.slots[0].knobs[i])
+                    } else {
+                        Arc::new(AtomicF32::new(0.5))
+                    }
+                }),
+                knob_labels: Arc::new(crossbeam::atomic::AtomicCell::new([None, None, None, None, None, None])),
+                peak_meter: Arc::clone(&state.peak_meter),
+                // Wire up all 6 slots with shared atomics
+                slots: std::array::from_fn(|slot| {
+                    pedalkernel_ui::SlotUiState {
+                        pedal_index: Arc::clone(&state.slots[slot].pedal_index),
+                        bypassed: Arc::clone(&state.slots[slot].bypassed),
+                        knobs: std::array::from_fn(|k| Arc::clone(&state.slots[slot].knobs[k])),
+                    }
+                }),
+                // Wire up amp section with shared atomics
+                amp: pedalkernel_ui::AmpUiState {
+                    amp_index: Arc::clone(&state.amp.amp_index),
+                    bypassed: Arc::clone(&state.amp.bypassed),
+                    knobs: std::array::from_fn(|k| Arc::clone(&state.amp.knobs[k])),
+                },
+            });
+
+            Self {
+                params,
+                state,
+                meta,
+                amp_meta,
+                engines,
+                amp_engines,
+                editor_state,
+                ui_state,
+            }
+        }
+    }
+
+    impl Plugin for PedalboardPlugin {
+        #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
+        const NAME: &'static str = "PedalKernel Pro Pedalboard";
+        #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+        const NAME: &'static str = "PedalKernel Guitar Pedalboard";
+        #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+        const NAME: &'static str = "PedalKernel Bass Pedalboard";
+        #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
+        const NAME: &'static str = "PedalKernel Pedalboard";
+
+        const VENDOR: &'static str = "Avery Wagar";
+        const URL: &'static str = "https://github.com/ajmwagar/pedalkernel";
+        const EMAIL: &'static str = "ajmwagar@gmail.com";
+        const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+        const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
+            AudioIOLayout {
+                main_input_channels: NonZeroU32::new(1),
+                main_output_channels: NonZeroU32::new(1),
+                ..AudioIOLayout::const_default()
+            },
+            AudioIOLayout {
+                main_input_channels: NonZeroU32::new(2),
+                main_output_channels: NonZeroU32::new(2),
+                ..AudioIOLayout::const_default()
+            },
+        ];
+
+        const MIDI_INPUT: MidiConfig = MidiConfig::None;
+        type SysExMessage = ();
+        type BackgroundTask = ();
+
+        fn params(&self) -> Arc<dyn Params> {
+            self.params.clone()
+        }
+
+        fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+            Some(Box::new(PedalKernelEditor::new(
+                self.editor_state.clone(),
+                self.ui_state.clone(),
+            )))
+        }
+
+        fn initialize(
+            &mut self,
+            _audio_io_layout: &AudioIOLayout,
+            buffer_config: &BufferConfig,
+            _context: &mut impl InitContext<Self>,
+        ) -> bool {
+            let sr = buffer_config.sample_rate as f64;
+            for engine in &mut self.engines {
+                engine.set_sample_rate(sr);
+            }
+            for engine in &mut self.amp_engines {
+                engine.set_sample_rate(sr);
+            }
+            true
+        }
+
+        fn reset(&mut self) {
+            for engine in &mut self.engines {
+                engine.reset();
+            }
+            for engine in &mut self.amp_engines {
+                engine.reset();
+            }
+        }
+
+        fn process(
+            &mut self,
+            buffer: &mut Buffer,
+            _aux: &mut AuxiliaryBuffers,
+            _context: &mut impl ProcessContext<Self>,
+        ) -> ProcessStatus {
+            // Read slot configurations directly from shared state (UI can modify these)
+            // This allows immediate response to UI changes
+            let slot_configs: [(usize, bool, [f64; KNOBS_PER_SLOT]); NUM_SLOTS] = std::array::from_fn(|slot| {
+                (
+                    self.state.slots[slot].pedal_index.load(Ordering::Relaxed) as usize,
+                    self.state.slots[slot].bypassed.load(Ordering::Relaxed),
+                    std::array::from_fn(|k| self.state.slots[slot].knobs[k].load(Ordering::Relaxed) as f64),
+                )
+            });
+
+            // Read amp configuration from shared state
+            let amp_idx = self.state.amp.amp_index.load(Ordering::Relaxed) as usize;
+            let amp_bypass = self.state.amp.bypassed.load(Ordering::Relaxed);
+            let amp_gain = self.state.amp.knobs[0].load(Ordering::Relaxed) as f64;
+            let amp_tone = self.state.amp.knobs[1].load(Ordering::Relaxed) as f64;
+            let amp_volume = self.state.amp.knobs[2].load(Ordering::Relaxed) as f64;
+
+            for channel_samples in buffer.iter_samples() {
+                for sample in channel_samples {
+                    let mut signal = *sample as f64;
+
+                    // ─────────────────────────────────────────────────────────
+                    // Stage 1: Chain through all 6 pedal slots
+                    // ─────────────────────────────────────────────────────────
+                    for (_slot_idx, (pedal_idx, bypassed, knobs)) in slot_configs.iter().enumerate() {
+                        if *bypassed {
+                            continue; // Skip bypassed slots
+                        }
+
+                        if let Some(engine) = self.engines.get_mut(*pedal_idx) {
+                            // Apply knob values
+                            let labels = self.meta.get(*pedal_idx).map(|m| &m.labels);
+                            match engine {
+                                PedalEngine::Compiled(pedal) => {
+                                    if let Some(labels) = labels {
+                                        for (k, value) in knobs.iter().enumerate() {
+                                            if let Some(ref label) = labels[k] {
+                                                pedal.set_control(label, *value);
+                                            }
+                                        }
+                                    }
+                                }
+                                PedalEngine::Delay(delay) => {
+                                    delay.set_delay_time(10.0 + knobs[0] * knobs[0] * 1990.0);
+                                    delay.set_feedback(knobs[1] * 0.95);
+                                    delay.set_mix(knobs[2]);
+                                }
+                                PedalEngine::Board(_) => {}
+                                PedalEngine::Synth(synth) => {
+                                    if let Some(labels) = labels {
+                                        for (k, value) in knobs.iter().enumerate() {
+                                            if let Some(ref label) = labels[k] {
+                                                synth.set_control(label, *value);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            signal = engine.process(signal);
+                        }
+                    }
+
+                    // ─────────────────────────────────────────────────────────
+                    // Stage 2: Amp section (after all pedals)
+                    // Index 0 = "Clean (No Amp)" - just pass through
+                    // ─────────────────────────────────────────────────────────
+                    if !amp_bypass && amp_idx > 0 {
+                        // amp_idx - 1 because index 0 is "Clean"
+                        if let Some(amp_engine) = self.amp_engines.get_mut(amp_idx - 1) {
+                            let labels = self.amp_meta.get(amp_idx).map(|m| &m.labels);
+                            match amp_engine {
+                                PedalEngine::Compiled(amp) => {
+                                    if let Some(labels) = labels {
+                                        if let Some(ref label) = labels[0] {
+                                            amp.set_control(label, amp_gain);
+                                        }
+                                        if let Some(ref label) = labels[1] {
+                                            amp.set_control(label, amp_tone);
+                                        }
+                                        if let Some(ref label) = labels[2] {
+                                            amp.set_control(label, amp_volume);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            signal = amp_engine.process(signal);
+                        }
+                    }
+
+                    *sample = signal as f32;
+                }
+            }
+
+            // Update peak meter for UI
+            let peak = buffer
+                .iter_samples()
+                .flat_map(|mut s| s.iter_mut().map(|sample| sample.abs()).collect::<Vec<_>>())
+                .fold(0.0f32, f32::max);
+            self.state.peak_meter.store(peak, Ordering::Relaxed);
+
+            ProcessStatus::Normal
+        }
+    }
+
+    impl Vst3Plugin for PedalboardPlugin {
+        #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
+        const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlBrdV0_01\0";
+        #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+        const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnGtrBdV001\0";
+        #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+        const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnBssBdV001\0";
+        #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
+        const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlBrdV0_01\0";
+
+        const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+            &[Vst3SubCategory::Fx, Vst3SubCategory::Distortion];
+    }
+
+    impl ClapPlugin for PedalboardPlugin {
+        #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
+        const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-pro-pedalboard";
+        #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+        const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-guitar-pedalboard";
+        #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+        const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-bass-pedalboard";
+        #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
+        const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-pedalboard";
+
+        const CLAP_DESCRIPTION: Option<&'static str> = Some("6-slot WDF pedalboard with amp modeling");
+        const CLAP_MANUAL_URL: Option<&'static str> = None;
+        const CLAP_SUPPORT_URL: Option<&'static str> = None;
+        const CLAP_FEATURES: &'static [ClapFeature] = &[
+            ClapFeature::AudioEffect,
+            ClapFeature::Distortion,
+            ClapFeature::Mono,
+            ClapFeature::Stereo,
+        ];
+    }
+}
+
+// Export different plugin based on features:
+// - Pedalboard for Guitar/Bass variants (6 pedals + amp)
+// - Single-pedal selector for Synth, Amps, and base version
+#[cfg(all(feature = "pro-ui", any(feature = "pro-guitar", feature = "pro-bass")))]
+nih_export_clap!(pedalboard_plugin::PedalboardPlugin);
+#[cfg(all(feature = "pro-ui", any(feature = "pro-guitar", feature = "pro-bass")))]
+nih_export_vst3!(pedalboard_plugin::PedalboardPlugin);
+
+// Non-pedalboard exports (synth, amps, base)
+#[cfg(not(all(feature = "pro-ui", any(feature = "pro-guitar", feature = "pro-bass"))))]
 nih_export_clap!(PedalKernelPlugin);
+#[cfg(not(all(feature = "pro-ui", any(feature = "pro-guitar", feature = "pro-bass"))))]
 nih_export_vst3!(PedalKernelPlugin);

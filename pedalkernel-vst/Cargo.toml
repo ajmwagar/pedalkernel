@@ -28,6 +28,8 @@ pro-ui = ["dep:pedalkernel-ui"]
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 pedalkernel = { path = "../pedalkernel", default-features = false }
+atomic_float = "1.0"
+crossbeam = "0.8"
 
 # Pro UI (optional, feature-gated)
 pedalkernel-ui = { path = "../../pedalkernel-pro/pedalkernel-ui", optional = true }
