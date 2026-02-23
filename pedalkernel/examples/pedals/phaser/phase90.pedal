@@ -12,7 +12,7 @@
 # - 4 cascaded all-pass stages create phase shift
 # - Wet/dry mix creates the characteristic sweeping comb filter
 #
-# Original components: 2N5952 JFETs (US), TL072 op-amps
+# Original components: 2N5952 JFETs (US), LM741 op-amps (1974 script logo)
 # Each all-pass stage: signal -> 24k -> JFET (variable R) -> cap -> op-amp
 # The JFET acts as a variable resistor, changing the phase shift frequency.
 
@@ -35,7 +35,7 @@ pedal "MXR Phase 90" {
     R_jb1a: resistor(150k)       # Gate bias to Vref
     R_jb1b: resistor(150k)       # Gate bias to gnd
     R_load1: resistor(10M)       # Op-amp input impedance (high-Z load for WDF)
-    U1: opamp(tl072)
+    U1: opamp(lm741)
 
     # === ALL-PASS STAGE 2 ===
     R_ap2: resistor(24k)
@@ -44,7 +44,7 @@ pedal "MXR Phase 90" {
     R_jb2a: resistor(150k)
     R_jb2b: resistor(150k)
     R_load2: resistor(10M)       # Op-amp input impedance
-    U2: opamp(tl072)
+    U2: opamp(lm741)
 
     # === ALL-PASS STAGE 3 ===
     R_ap3: resistor(24k)
@@ -53,7 +53,7 @@ pedal "MXR Phase 90" {
     R_jb3a: resistor(150k)
     R_jb3b: resistor(150k)
     R_load3: resistor(10M)       # Op-amp input impedance
-    U3: opamp(tl072)
+    U3: opamp(lm741)
 
     # === ALL-PASS STAGE 4 ===
     R_ap4: resistor(24k)
@@ -62,13 +62,13 @@ pedal "MXR Phase 90" {
     R_jb4a: resistor(150k)
     R_jb4b: resistor(150k)
     R_load4: resistor(10M)       # Op-amp input impedance
-    U4: opamp(tl072)
+    U4: opamp(lm741)
 
     # === OUTPUT MIXER ===
     R_dry: resistor(10k)
     R_wet: resistor(10k)
     R_mix_fb: resistor(10k)
-    U_mix: opamp(tl072)
+    U_mix: opamp(lm741)
 
     # === LFO OSCILLATOR (for BOM - physical circuit) ===
     # Triangle wave oscillator: integrator + Schmitt trigger
@@ -82,8 +82,8 @@ pedal "MXR Phase 90" {
     #   - Positive feedback creates hysteresis
     #   - Drives integrator input, swings between rails
     #
-    U_lfo_int: opamp(tl072)      # Integrator - triangle output
-    U_lfo_cmp: opamp(tl072)      # Schmitt trigger / comparator
+    U_lfo_int: opamp(lm741)      # Integrator - triangle output
+    U_lfo_cmp: opamp(lm741)      # Schmitt trigger / comparator
     R_lfo_in: resistor(150k)     # Integrator input from comparator
     C_lfo_int: cap(220n)         # Integrator timing cap (sets base freq)
     R_lfo_hys1: resistor(100k)   # Schmitt trigger positive feedback

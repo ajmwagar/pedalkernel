@@ -13,11 +13,11 @@
 
 synth "Moog Ladder VCF" {
   components {
-    # 4 differential pairs (ladder core) — 8 matched NPN transistors
-    Q1: npn()    Q2: npn()
-    Q3: npn()    Q4: npn()
-    Q5: npn()    Q6: npn()
-    Q7: npn()    Q8: npn()
+    # 4 differential pairs (ladder core) — 8 matched 2N3904 NPN transistors
+    Q1: npn(2n3904)    Q2: npn(2n3904)
+    Q3: npn(2n3904)    Q4: npn(2n3904)
+    Q5: npn(2n3904)    Q6: npn(2n3904)
+    Q7: npn(2n3904)    Q8: npn(2n3904)
 
     # Filter capacitors (matched values set cutoff range)
     # Smaller C = higher cutoff range, larger C = lower/bassier range
