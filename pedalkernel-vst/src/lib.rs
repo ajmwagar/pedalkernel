@@ -15,6 +15,8 @@
 //! and show no active knobs.
 
 use nih_plug::prelude::*;
+#[cfg(feature = "pro-ui")]
+use pedalkernel_ui::{PedalKernelEditor, PedalKernelEditorState, PedalKernelUiState};
 use pedalkernel::board::parse_board_file;
 use pedalkernel::compiler::{compile_pedal, CompiledPedal};
 use pedalkernel::dsl;
@@ -418,6 +420,12 @@ struct PedalKernelPlugin {
     engines: Vec<PedalEngine>,
     /// Shared indicator so value formatters know the active pedal index.
     pedal_indicator: PedalIndicator,
+    /// Editor state (Pro UI only)
+    #[cfg(feature = "pro-ui")]
+    editor_state: Arc<PedalKernelEditorState>,
+    /// UI state shared between audio and GUI threads (Pro UI only)
+    #[cfg(feature = "pro-ui")]
+    ui_state: Arc<PedalKernelUiState>,
 }
 
 impl Default for PedalKernelPlugin {
@@ -541,11 +549,25 @@ impl Default for PedalKernelPlugin {
             meta.clone(),
         ));
 
+        #[cfg(feature = "pro-ui")]
+        let editor_state = PedalKernelEditorState::default_size();
+
+        #[cfg(feature = "pro-ui")]
+        let ui_state = Arc::new(PedalKernelUiState {
+            pedal_index: Arc::new(AtomicU8::new(0)),
+            pedal_names: meta.iter().map(|m| m.name.clone()).collect(),
+            ..Default::default()
+        });
+
         Self {
             params,
             meta,
             engines,
             pedal_indicator,
+            #[cfg(feature = "pro-ui")]
+            editor_state,
+            #[cfg(feature = "pro-ui")]
+            ui_state,
         }
     }
 }
@@ -599,6 +621,14 @@ impl Plugin for PedalKernelPlugin {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    #[cfg(feature = "pro-ui")]
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        Some(Box::new(PedalKernelEditor::new(
+            self.editor_state.clone(),
+            self.ui_state.clone(),
+        )))
     }
 
     fn initialize(
