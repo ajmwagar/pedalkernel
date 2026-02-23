@@ -15,6 +15,63 @@
 //! at ambient temperature and warms toward a steady-state operating temperature
 //! over time, driven by power dissipation.
 
+/// Device-specific thermal coefficients.
+///
+/// Different semiconductor technologies have different temperature sensitivities.
+/// These coefficients parameterize the thermal model for the dominant device type.
+#[derive(Debug, Clone, Copy)]
+pub struct ThermalCoefficients {
+    /// Beta (hFE) temperature coefficient (%/°C from 25°C reference).
+    /// Germanium BJTs: 0.5–2.0%/°C (highly variable, batch-dependent)
+    /// Silicon BJTs: 0.3–0.8%/°C (more predictable)
+    /// FETs: ~0%/°C (no beta concept, but Idss drifts)
+    pub beta_tempco: f64,
+    /// Is doubling temperature (°C).  Is(T) = Is(Tref) * exp(ΔT / t0)
+    /// Germanium: ~8°C (very temperature-sensitive, leaky)
+    /// Silicon: ~10°C (moderate)
+    /// Schottky: ~12°C (less sensitive)
+    pub is_doubling_temp: f64,
+}
+
+impl ThermalCoefficients {
+    /// Germanium transistor (AC128, OC44, etc.) — very temperature-sensitive.
+    pub fn germanium_bjt() -> Self {
+        Self {
+            beta_tempco: 0.015, // 1.5%/°C — germanium is wildly temperature-dependent
+            is_doubling_temp: 8.0,
+        }
+    }
+
+    /// Silicon BJT (2N3904, BC108, etc.) — moderate sensitivity.
+    pub fn silicon_bjt() -> Self {
+        Self {
+            beta_tempco: 0.007, // 0.7%/°C — standard silicon tempco
+            is_doubling_temp: 10.0,
+        }
+    }
+
+    /// JFET (2N5457, J201, etc.) — Idss drifts but no beta concept.
+    pub fn jfet() -> Self {
+        Self {
+            beta_tempco: 0.003, // Used for Idss drift
+            is_doubling_temp: 12.0,
+        }
+    }
+
+    /// Vacuum tube — cathode emission changes with filament temperature.
+    pub fn vacuum_tube() -> Self {
+        Self {
+            beta_tempco: 0.002, // mu is relatively temperature-stable
+            is_doubling_temp: 15.0, // Plate current drift is gradual
+        }
+    }
+
+    /// Default (silicon) for circuits without specific device info.
+    pub fn default() -> Self {
+        Self::silicon_bjt()
+    }
+}
+
 /// Temperature-dependent parameters that change as the circuit warms up.
 #[derive(Debug, Clone, Copy)]
 pub struct ThermalState {
@@ -32,21 +89,20 @@ pub struct ThermalState {
 }
 
 impl ThermalState {
-    /// Compute thermal state for a given temperature.
-    fn at_temperature(temp_c: f64) -> Self {
+    /// Compute thermal state using device-specific coefficients.
+    fn at_temperature_with_coeffs(temp_c: f64, coeffs: &ThermalCoefficients) -> Self {
         let temp_k = temp_c + 273.15;
         let ref_temp_c = 25.0;
 
         // Boltzmann constant * T / electron charge
         let vt = 8.617e-5 * temp_k; // k/q * T in eV, = Vt in volts
 
-        // BJT beta: approximately +0.7%/°C from reference
-        let beta_multiplier = 1.0 + 0.007 * (temp_c - ref_temp_c);
+        // BJT beta: device-specific tempco from reference
+        let beta_multiplier = 1.0 + coeffs.beta_tempco * (temp_c - ref_temp_c);
 
-        // Diode Is: doubles every ~10°C (exponential temperature dependence)
-        // Is(T) = Is(Tref) * exp((T - Tref) / T0) where T0 ≈ 14.5°C
-        // This gives approximately 2x per 10°C
-        let is_multiplier = ((temp_c - ref_temp_c) / 14.5).exp();
+        // Diode Is: exponential temperature dependence with device-specific doubling temp
+        // Is(T) = Is(Tref) * exp((T - Tref) / T0)
+        let is_multiplier = ((temp_c - ref_temp_c) / coeffs.is_doubling_temp).exp();
 
         Self {
             temperature: temp_c,
@@ -74,6 +130,8 @@ pub struct ThermalModel {
     /// Thermal time constant in seconds.
     /// Typical: 300–600s for a small pedal enclosure.
     thermal_tau: f64,
+    /// Device-specific thermal coefficients.
+    coefficients: ThermalCoefficients,
     /// Current thermal state.
     state: ThermalState,
     /// Elapsed time in seconds.
@@ -82,29 +140,36 @@ pub struct ThermalModel {
     sample_rate: f64,
     /// Samples since last thermal update (we don't need to update every sample).
     samples_since_update: usize,
-    /// How often to update thermal state (in samples). Thermal changes are slow
-    /// enough that updating every 1000 samples is more than sufficient.
+    /// How often to update thermal state (in samples).
+    ///
+    /// Thermal time constants are 300–900 seconds; updating every 1000 samples
+    /// (~21ms at 48kHz) gives ~14,000–43,000 updates per time constant.
+    /// This means each thermal "step" changes temperature by < 0.007% of the
+    /// total range — well below audible threshold.
     update_interval: usize,
 }
 
 impl ThermalModel {
-    /// Create a new thermal model.
+    /// Create a new thermal model with device-specific coefficients.
     ///
     /// - `ambient_temp`: Starting temperature in °C (room temp: ~20–25°C)
     /// - `steady_state_temp`: Temperature the circuit stabilizes at (30–50°C typical)
     /// - `thermal_tau`: Time constant in seconds (300 = 5 min warm-up)
+    /// - `coefficients`: Device-specific thermal sensitivity coefficients
     /// - `sample_rate`: Audio sample rate
-    pub fn new(
+    pub fn with_coefficients(
         ambient_temp: f64,
         steady_state_temp: f64,
         thermal_tau: f64,
+        coefficients: ThermalCoefficients,
         sample_rate: f64,
     ) -> Self {
-        let state = ThermalState::at_temperature(ambient_temp);
+        let state = ThermalState::at_temperature_with_coeffs(ambient_temp, &coefficients);
         Self {
             ambient_temp,
             steady_state_temp,
             thermal_tau,
+            coefficients,
             state,
             elapsed: 0.0,
             sample_rate,
@@ -113,17 +178,37 @@ impl ThermalModel {
         }
     }
 
+    /// Create a new thermal model with default (silicon) coefficients.
+    pub fn new(
+        ambient_temp: f64,
+        steady_state_temp: f64,
+        thermal_tau: f64,
+        sample_rate: f64,
+    ) -> Self {
+        Self::with_coefficients(
+            ambient_temp,
+            steady_state_temp,
+            thermal_tau,
+            ThermalCoefficients::default(),
+            sample_rate,
+        )
+    }
+
     /// Germanium Fuzz Face thermal model.
     ///
-    /// Germanium transistors are notoriously temperature-sensitive.
+    /// Uses germanium BJT coefficients — much more temperature-sensitive
+    /// than silicon.  Beta tempco is ~1.5%/°C (vs 0.7%/°C for silicon),
+    /// and Is doubles every ~8°C (vs ~10°C for silicon).
+    ///
     /// A cold germanium Fuzz Face (just powered on in a cold room) sounds
     /// gated and sputtery. After 15–20 minutes it warms up and becomes
     /// smooth and fat.
-    ///
-    /// Starting at 15°C (cold stage/rehearsal room), warming to 40°C
-    /// (enclosure heat from biasing current).
     pub fn germanium_fuzz(sample_rate: f64) -> Self {
-        Self::new(15.0, 40.0, 600.0, sample_rate)
+        Self::with_coefficients(
+            15.0, 40.0, 600.0,
+            ThermalCoefficients::germanium_bjt(),
+            sample_rate,
+        )
     }
 
     /// Silicon circuit thermal model.
@@ -131,15 +216,24 @@ impl ThermalModel {
     /// Silicon devices are less temperature-sensitive but still drift.
     /// Starts at room temp, warms slightly from power dissipation.
     pub fn silicon_standard(sample_rate: f64) -> Self {
-        Self::new(25.0, 35.0, 300.0, sample_rate)
+        Self::with_coefficients(
+            25.0, 35.0, 300.0,
+            ThermalCoefficients::silicon_bjt(),
+            sample_rate,
+        )
     }
 
     /// Tube amp thermal model.
     ///
     /// Tubes run hot and take longer to reach thermal equilibrium.
-    /// The characteristic "tube warm-up" period.
+    /// Uses vacuum tube coefficients — mu is temperature-stable but
+    /// cathode emission shifts gradually.
     pub fn tube_amp(sample_rate: f64) -> Self {
-        Self::new(25.0, 60.0, 900.0, sample_rate)
+        Self::with_coefficients(
+            25.0, 60.0, 900.0,
+            ThermalCoefficients::vacuum_tube(),
+            sample_rate,
+        )
     }
 
     /// Advance the thermal model by one audio sample.
@@ -159,7 +253,7 @@ impl ThermalModel {
             let temp =
                 self.ambient_temp + (self.steady_state_temp - self.ambient_temp) * alpha;
 
-            self.state = ThermalState::at_temperature(temp);
+            self.state = ThermalState::at_temperature_with_coeffs(temp, &self.coefficients);
         }
         &self.state
     }
@@ -178,13 +272,17 @@ impl ThermalModel {
     pub fn reset(&mut self) {
         self.elapsed = 0.0;
         self.samples_since_update = 0;
-        self.state = ThermalState::at_temperature(self.ambient_temp);
+        self.state = ThermalState::at_temperature_with_coeffs(
+            self.ambient_temp, &self.coefficients,
+        );
     }
 
     /// Jump to fully warmed up state.
     pub fn warm_up(&mut self) {
         self.elapsed = self.thermal_tau * 10.0; // Well past steady state
-        self.state = ThermalState::at_temperature(self.steady_state_temp);
+        self.state = ThermalState::at_temperature_with_coeffs(
+            self.steady_state_temp, &self.coefficients,
+        );
     }
 
     /// Set sample rate.
@@ -201,9 +299,14 @@ impl ThermalModel {
 mod tests {
     use super::*;
 
+    /// Test helper: compute thermal state with default (silicon) coefficients.
+    fn state_at(temp_c: f64) -> ThermalState {
+        ThermalState::at_temperature_with_coeffs(temp_c, &ThermalCoefficients::default())
+    }
+
     #[test]
     fn thermal_state_at_reference() {
-        let state = ThermalState::at_temperature(25.0);
+        let state = state_at(25.0);
         // At 25°C (reference), multipliers should be ~1.0
         assert!(
             (state.beta_multiplier - 1.0).abs() < 0.01,
@@ -224,7 +327,7 @@ mod tests {
 
     #[test]
     fn thermal_state_warm() {
-        let state = ThermalState::at_temperature(40.0);
+        let state = state_at(40.0);
         // At 40°C: beta should be higher, Is should be higher
         assert!(
             state.beta_multiplier > 1.05,
@@ -240,7 +343,7 @@ mod tests {
 
     #[test]
     fn thermal_state_cold() {
-        let state = ThermalState::at_temperature(5.0);
+        let state = state_at(5.0);
         // At 5°C: beta should be lower, Is should be lower
         assert!(
             state.beta_multiplier < 0.9,
@@ -336,8 +439,8 @@ mod tests {
 
     #[test]
     fn thermal_model_silicon_less_dramatic() {
-        let ge = ThermalState::at_temperature(40.0);
-        let si = ThermalState::at_temperature(35.0); // Silicon runs cooler
+        let ge = state_at(40.0);
+        let si = state_at(35.0); // Silicon runs cooler
 
         // Both should see elevated Is, but germanium more so (higher temp)
         assert!(ge.is_multiplier > si.is_multiplier);
@@ -345,8 +448,8 @@ mod tests {
 
     #[test]
     fn thermal_model_vt_temperature_dependence() {
-        let cold = ThermalState::at_temperature(0.0);
-        let hot = ThermalState::at_temperature(50.0);
+        let cold = state_at(0.0);
+        let hot = state_at(50.0);
 
         assert!(
             hot.vt > cold.vt,

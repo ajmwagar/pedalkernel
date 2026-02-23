@@ -547,6 +547,7 @@ struct CircuitGraph {
     out_node: NodeId,
     gnd_node: NodeId,
     /// Number of active elements found (opamps + transistors).
+    #[allow(dead_code)]
     num_active: usize,
     /// Edge indices for virtual bridge edges through active elements.
     /// These exist for BFS traversal but are not passive WDF tree elements.
@@ -1715,6 +1716,146 @@ struct EnvelopeBinding {
     env_id: String,
 }
 
+/// Device-aware rail saturation model.
+///
+/// Real rail saturation depends on the active device's output stage topology.
+/// Instead of a generic `tanh` waveshaper, this models the saturation shape
+/// based on the dominant active device type in the circuit.
+#[derive(Debug, Clone)]
+enum RailSaturation {
+    /// No active devices — passive clipping only (no rail saturation).
+    None,
+    /// Op-amp output stage: symmetric saturation with slight crossover
+    /// distortion near zero. Output stage is push-pull emitter follower
+    /// that saturates symmetrically against both rails.
+    /// `output_swing_ratio` is Vout_max / Vsupply (typically 0.85–0.95).
+    OpAmp { output_swing_ratio: f64 },
+    /// BJT common-emitter: asymmetric saturation.  The collector saturates
+    /// hard (~0.2V from rail) when driven into saturation, but cuts off
+    /// softly when the base drive is removed.  NPN saturates at positive
+    /// rail (hard), cuts off toward negative rail (soft).
+    Bjt { vce_sat: f64 },
+    /// JFET/MOSFET: soft saturation onset due to square-law I-V curve.
+    /// The drain current pinches off gradually as Vds approaches Vgs-Vth.
+    Fet,
+    /// Triode/pentode: grid conduction (hard clip) at positive swing,
+    /// plate current cutoff (soft) at negative swing.
+    /// `mu` is the amplification factor (affects saturation sharpness).
+    Tube { mu: f64 },
+}
+
+impl RailSaturation {
+    /// Apply rail saturation to a signal given the supply headroom.
+    ///
+    /// `headroom` is `supply_voltage / 9.0` (normalized to 9V reference).
+    #[inline]
+    fn process(&self, signal: f64, headroom: f64) -> f64 {
+        match self {
+            RailSaturation::None => signal,
+            RailSaturation::OpAmp { output_swing_ratio } => {
+                // Op-amp output stage: symmetric clipping at ±(swing_ratio * headroom).
+                // Uses a quintic polynomial for smoother knee than tanh, matching
+                // the push-pull emitter-follower output stage characteristic.
+                let ceiling = output_swing_ratio * headroom;
+                let x = signal / ceiling;
+                let ax = x.abs();
+                if ax <= 0.75 {
+                    // Linear region: no saturation
+                    signal
+                } else if ax >= 1.5 {
+                    // Hard saturation
+                    ceiling * x.signum()
+                } else {
+                    // Knee: quintic ease from 0.75 to ceiling
+                    // Normalized to [0, 1] within knee region
+                    let t = (ax - 0.75) / 0.75; // 0..1
+                    let t2 = t * t;
+                    let t3 = t2 * t;
+                    // Hermite-like: starts at 0.75, ends at 1.0, smooth at both ends
+                    let compressed = 0.75 + 0.25 * (3.0 * t2 - 2.0 * t3);
+                    (ceiling * compressed).copysign(signal)
+                }
+            }
+            RailSaturation::Bjt { vce_sat } => {
+                // BJT asymmetric saturation.
+                // Positive rail (collector saturation): hard knee at Vcc - Vce_sat
+                // Negative rail (cutoff): soft exponential tail
+                let pos_ceiling = headroom * (1.0 - vce_sat / (9.0 * headroom));
+                let neg_ceiling = headroom;
+                if signal > 0.0 {
+                    // Hard saturation toward positive rail (collector saturation)
+                    let x = signal / pos_ceiling;
+                    if x <= 0.7 {
+                        signal
+                    } else if x >= 1.5 {
+                        pos_ceiling
+                    } else {
+                        let t = (x - 0.7) / 0.8;
+                        let t2 = t * t;
+                        pos_ceiling * (0.7 + 0.3 * (2.0 * t - t2))
+                    }
+                } else {
+                    // Soft cutoff toward negative rail (transistor cutoff)
+                    let x = -signal / neg_ceiling;
+                    if x <= 0.8 {
+                        signal
+                    } else {
+                        let over = x - 0.8;
+                        // Exponential compression: gradual cutoff
+                        -(neg_ceiling * (0.8 + 0.2 * (1.0 - (-over * 5.0).exp())))
+                    }
+                }
+            }
+            RailSaturation::Fet => {
+                // JFET/MOSFET: soft saturation from square-law characteristic.
+                // The onset is gentler than BJT — current gradually pinches off.
+                let ceiling = headroom;
+                let x = signal / ceiling;
+                let ax = x.abs();
+                if ax <= 0.85 {
+                    signal
+                } else {
+                    // Square-law-like soft compression
+                    let over = ax - 0.85;
+                    let compressed = 0.85 + 0.15 * (1.0 - 1.0 / (1.0 + over * 3.0));
+                    (ceiling * compressed).copysign(signal)
+                }
+            }
+            RailSaturation::Tube { mu } => {
+                // Triode: asymmetric saturation.
+                // Positive swing → grid conduction (hard clipping, like a diode)
+                // Negative swing → plate current cutoff (soft, gradual)
+                // Higher mu = sharper saturation knee
+                let ceiling = headroom;
+                let sharpness = (mu / 100.0).clamp(0.5, 3.0);
+                if signal > 0.0 {
+                    // Grid conduction — hard clip (grid draws current)
+                    let x = signal / ceiling;
+                    if x <= 0.6 {
+                        signal
+                    } else if x >= 2.0 {
+                        ceiling
+                    } else {
+                        let t = (x - 0.6) / 1.4;
+                        let curve = 1.0 - (-t * 2.5 * sharpness).exp();
+                        ceiling * (0.6 + 0.4 * curve)
+                    }
+                } else {
+                    // Plate cutoff — soft, gradual
+                    let x = -signal / ceiling;
+                    if x <= 0.9 {
+                        signal
+                    } else {
+                        let over = x - 0.9;
+                        let compressed = 0.9 + 0.1 * over / (0.1 + over);
+                        -(ceiling * compressed)
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A pedal processor compiled from a `.pedal` file's netlist.
 ///
 /// Each `.pedal` file produces a unique processor with its own WDF tree topology,
@@ -1723,8 +1864,7 @@ pub struct CompiledPedal {
     stages: Vec<WdfStage>,
     pre_gain: f64,
     output_gain: f64,
-    use_soft_limit: bool,
-    soft_limit_scale: f64,
+    rail_saturation: RailSaturation,
     sample_rate: f64,
     controls: Vec<ControlBinding>,
     gain_range: (f64, f64),
@@ -2024,12 +2164,7 @@ impl PedalProcessor for CompiledPedal {
             signal = slew.process(signal);
         }
 
-        if self.use_soft_limit {
-            // Scale the tanh ceiling with headroom: at higher voltage the
-            // soft-limiter (modeling transistor/opamp rail saturation) kicks
-            // in later, allowing more clean swing.
-            signal = headroom * (signal * self.soft_limit_scale / headroom).tanh();
-        }
+        signal = self.rail_saturation.process(signal, headroom);
 
         // Process through BBD delay lines (wet signal mixed with dry).
         for bbd in &mut self.bbds {
@@ -2405,25 +2540,71 @@ pub fn compile_pedal_with_options(
     let diode_edge_indices: Vec<usize> = diodes.iter().map(|(idx, _)| *idx).collect();
 
     // Determine gain range based on circuit characteristics.
+    //
+    // The gain taxonomy considers:
+    //   - Diode type (germanium clips softer → needs more drive)
+    //   - Single vs pair diodes (single = asymmetric = fuzz-like)
+    //   - Number of clipping stages (multi-stage = less gain per stage)
+    //   - Active device count and type (each contributes specific gain)
     let has_germanium = diodes
         .iter()
         .any(|(_, d)| d.diode_type == DiodeType::Germanium);
     let has_single_diode = diodes.iter().any(|(_, d)| !d.is_pair);
+    let has_led = diodes
+        .iter()
+        .any(|(_, d)| d.diode_type == DiodeType::Led);
     let gain_range = if has_germanium && has_single_diode {
-        (5.0, 250.0) // Fuzz-like
+        (5.0, 250.0) // Fuzz-like: single germanium diode needs high drive
     } else if has_germanium {
         (3.0, 150.0) // Germanium overdrive (Klon-ish)
+    } else if has_led {
+        (4.0, 120.0) // LED clipping: higher Vf → needs more drive, but cleaner
+    } else if diodes.len() > 2 {
+        (1.5, 40.0) // Many stages: each clips a little, cumulative is heavy
     } else if diodes.len() > 1 {
-        (2.0, 50.0) // Multi-stage (each clips, cumulative is heavy)
+        (2.0, 60.0) // Two stages (e.g., Big Muff topology)
     } else {
-        (2.0, 100.0) // Standard overdrive
+        (2.0, 100.0) // Standard single-stage overdrive
     };
 
-    // Active elements contribute implicit gain.
-    let active_bonus = match graph.num_active {
-        0 => 1.0,
-        1 => 3.0,
-        _ => 5.0,
+    // Active elements contribute gain based on their type.
+    // Instead of a flat bonus, compute per-device gain contributions.
+    let active_bonus = {
+        let mut bonus = 1.0_f64;
+        for comp in &pedal.components {
+            match &comp.kind {
+                ComponentKind::OpAmp(ot) if !ot.is_ota() => {
+                    // Op-amp gain depends on type — faster op-amps provide
+                    // more effective gain at audio frequencies.
+                    bonus *= match ot {
+                        OpAmpType::Ne5532 => 3.5,   // High GBW = more gain
+                        OpAmpType::Tl072 | OpAmpType::Tl082 | OpAmpType::Generic => 3.0,
+                        OpAmpType::Jrc4558 | OpAmpType::Rc4558 => 2.5,
+                        OpAmpType::Lm741 | OpAmpType::Op07 => 2.0,
+                        OpAmpType::Lm308 => 1.8,    // Low GBW = less effective gain
+                        _ => 2.5,
+                    };
+                }
+                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
+                    // Single BJT CE stage: gain ≈ 20–50x typical
+                    bonus *= 2.5;
+                }
+                ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => {
+                    // JFET CS stage: lower gain than BJT (gm is lower)
+                    bonus *= 1.5;
+                }
+                ComponentKind::Triode(_) => {
+                    // Triode gain stage: mu ≈ 17–100, but loaded gain is lower
+                    bonus *= 2.0;
+                }
+                ComponentKind::Pentode(_) => {
+                    // Pentode: higher gain than triode
+                    bonus *= 3.0;
+                }
+                _ => {}
+            }
+        }
+        bonus
     };
 
     // Build WDF stages.
@@ -3238,11 +3419,66 @@ pub fn compile_pedal_with_options(
         }
     }
 
-    // Always apply output soft-limiting.  The WDF stages provide their own
-    // diode clipping, but the output limiter prevents runaway gain when pedals
-    // are chained in a pedalboard (series gains multiply without a ceiling).
-    let use_soft_limit = true;
-    let soft_limit_scale = if has_germanium { 3.0 } else { 2.0 };
+    // Determine device-aware rail saturation model from the circuit's active devices.
+    // Scan components to find the dominant active device type that shapes rail clipping.
+    let rail_saturation = {
+        let mut has_opamp = false;
+        let mut has_bjt = false;
+        let mut has_fet = false;
+        let mut has_tube = false;
+        let mut tube_mu = 100.0_f64;
+        let mut opamp_swing = 0.85_f64; // default output swing ratio
+        for comp in &pedal.components {
+            match &comp.kind {
+                ComponentKind::OpAmp(ot) if !ot.is_ota() => {
+                    has_opamp = true;
+                    // JFET-input op-amps (TL072) swing closer to rails than BJT-input
+                    opamp_swing = match ot {
+                        OpAmpType::Tl072 | OpAmpType::Tl082 | OpAmpType::Generic => 0.92,
+                        OpAmpType::Ne5532 => 0.90,
+                        OpAmpType::Jrc4558 | OpAmpType::Rc4558 => 0.87,
+                        OpAmpType::Lm308 | OpAmpType::Lm741 | OpAmpType::Op07 => 0.85,
+                        _ => 0.85,
+                    };
+                }
+                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
+                    has_bjt = true;
+                }
+                ComponentKind::NJfet(_) | ComponentKind::PJfet(_)
+                | ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => {
+                    has_fet = true;
+                }
+                ComponentKind::Triode(tt) => {
+                    has_tube = true;
+                    tube_mu = match tt {
+                        TriodeType::T12ax7 => 100.0,
+                        TriodeType::T12at7 => 60.0,
+                        TriodeType::T12ay7 => 40.0,
+                        TriodeType::T12au7 => 17.0,
+                    };
+                }
+                ComponentKind::Pentode(_) => {
+                    has_tube = true;
+                    tube_mu = 200.0; // pentodes have higher effective gain
+                }
+                _ => {}
+            }
+        }
+        // Priority: tube > BJT > FET > op-amp.
+        // The dominant nonlinear device determines the rail saturation character.
+        if has_tube {
+            RailSaturation::Tube { mu: tube_mu }
+        } else if has_bjt {
+            let vce_sat = if has_germanium { 0.3 } else { 0.2 };
+            RailSaturation::Bjt { vce_sat }
+        } else if has_fet {
+            RailSaturation::Fet
+        } else if has_opamp {
+            RailSaturation::OpAmp { output_swing_ratio: opamp_swing }
+        } else {
+            RailSaturation::None
+        }
+    };
 
     // Collect LFO component IDs for control binding.
     let lfo_ids: Vec<String> = pedal
@@ -3611,8 +3847,7 @@ pub fn compile_pedal_with_options(
         stages,
         pre_gain,
         output_gain: level_default,
-        use_soft_limit,
-        soft_limit_scale,
+        rail_saturation,
         sample_rate,
         controls,
         gain_range: (glo * active_bonus, ghi * active_bonus),

@@ -910,14 +910,15 @@ mod tests {
         env.gate_on();
         assert_eq!(env.stage(), EnvelopeStage::Attack);
 
-        // Run attack phase
-        for _ in 0..500 {
+        // Run attack phase (~3 time constants = 99.5% of target)
+        // Attack time = 10ms, sample rate = 48kHz, so ~1440 samples for 3τ
+        for _ in 0..1500 {
             env.tick();
         }
         assert!(env.value() > 0.9, "Attack didn't reach peak: {}", env.value());
 
-        // Run decay to sustain
-        for _ in 0..500 {
+        // Run decay to sustain (~7 time constants for 10ms decay = 3360 samples)
+        for _ in 0..3500 {
             env.tick();
         }
         assert!(
@@ -930,8 +931,8 @@ mod tests {
         env.gate_off();
         assert_eq!(env.stage(), EnvelopeStage::Release);
 
-        // Run release
-        for _ in 0..1000 {
+        // Run release (~7 time constants for 10ms release = 3360 samples)
+        for _ in 0..3500 {
             env.tick();
         }
         assert!(env.value() < 0.01, "Didn't release: {}", env.value());
