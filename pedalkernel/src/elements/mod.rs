@@ -8,15 +8,19 @@
 //!
 //! Adaptors (Series, Parallel) remain in the `tree` module as they're structural.
 
+mod allpass;
 mod controlled;
 mod linear;
 mod modulation;
 mod nonlinear;
+mod synth;
 
+pub use allpass::*;
 pub use controlled::*;
 pub use linear::*;
 pub use modulation::*;
 pub use nonlinear::*;
+pub use synth::*;
 
 // ---------------------------------------------------------------------------
 // Traits

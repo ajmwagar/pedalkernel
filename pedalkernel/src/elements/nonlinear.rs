@@ -416,6 +416,23 @@ impl JfetModel {
         }
     }
 
+    /// 2N5952 N-channel JFET (US, original MXR Phase 90).
+    ///
+    /// The 2N5952 is the JFET used in original 1974 MXR Phase 90 pedals.
+    /// Similar characteristics to 2SK30A but slightly different specs.
+    ///
+    /// Datasheet specs:
+    /// - Idss: 1.0 - 5.0 mA (modeled at 2.4 mA typical)
+    /// - Vgs(off): -0.5V to -4.0V (modeled at -2.0V typical)
+    pub fn n_2n5952() -> Self {
+        Self {
+            idss: 2.4e-3,
+            vp: -2.0,
+            lambda: 0.02,
+            is_n_channel: true,
+        }
+    }
+
     /// 2SK30A N-channel JFET (Toshiba, classic phaser/modulation JFET).
     ///
     /// The 2SK30A is the classic choice for MXR Phase 90, Small Stone,

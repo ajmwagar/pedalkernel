@@ -1007,6 +1007,9 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                             crate::dsl::JfetType::N2n5457 => {
                                 (Some("512-2N5457".to_string()), "2N5457 N-JFET".to_string())
                             }
+                            crate::dsl::JfetType::N2n5952 => {
+                                (Some("512-2N5952".to_string()), "2N5952 N-JFET".to_string())
+                            }
                             crate::dsl::JfetType::P2n5460 => {
                                 (None, "N-JFET (unknown model)".to_string())
                             }

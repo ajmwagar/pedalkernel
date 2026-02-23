@@ -199,6 +199,9 @@ pub enum JfetType {
     J201,
     N2n5457,
     P2n5460,
+    /// 2N5952 - US phaser JFET (original MXR Phase 90)
+    /// Idss: 1.0-5.0 mA (typical 2.4 mA), Vgs(off): -0.5V to -4.0V
+    N2n5952,
     /// 2SK30A - Classic phaser JFET (Toshiba), generic mid-grade
     N2sk30a,
     /// 2SK30A-GR - Low Idss grade (0.6-1.4 mA)
@@ -522,6 +525,7 @@ fn jfet_type(input: &str) -> IResult<&str, JfetType> {
         value(JfetType::J201, tag("j201")),
         value(JfetType::N2n5457, tag("2n5457")),
         value(JfetType::P2n5460, tag("2n5460")),
+        value(JfetType::N2n5952, tag("2n5952")),
         // 2SK30A variants - order matters: specific grades before generic
         value(JfetType::N2sk30aGr, alt((tag("2sk30a_gr"), tag("2sk30-gr")))),
         value(JfetType::N2sk30aY, alt((tag("2sk30a_y"), tag("2sk30-y")))),
@@ -1235,6 +1239,12 @@ pedal "All" {
     fn parse_njfet_2n5457() {
         let (_, c) = component_def("J2: njfet(2n5457)").unwrap();
         assert_eq!(c.kind, ComponentKind::NJfet(JfetType::N2n5457));
+    }
+
+    #[test]
+    fn parse_njfet_2n5952() {
+        let (_, c) = component_def("J1: njfet(2n5952)").unwrap();
+        assert_eq!(c.kind, ComponentKind::NJfet(JfetType::N2n5952));
     }
 
     #[test]

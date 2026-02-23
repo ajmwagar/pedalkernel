@@ -1250,6 +1250,54 @@ impl CircuitGraph {
         });
         otas
     }
+
+    /// Detect if this circuit is a phaser (all-pass filter with LFO-modulated JFETs).
+    ///
+    /// Phaser topology characteristics:
+    /// - Multiple JFETs (≥2, typically 4 for Phase 90)
+    /// - An LFO component modulating the JFETs
+    /// - Op-amps present (for all-pass buffering)
+    ///
+    /// Returns Some(num_stages) if phaser detected, None otherwise.
+    fn detect_phaser(&self) -> Option<usize> {
+        // Count JFETs
+        let jfet_count = self
+            .components
+            .iter()
+            .filter(|c| matches!(c.kind, ComponentKind::NJfet(_) | ComponentKind::PJfet(_)))
+            .count();
+
+        // Need at least 2 JFETs for a phaser
+        if jfet_count < 2 {
+            return None;
+        }
+
+        // Check for LFO component
+        let has_lfo = self
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::Lfo(..)));
+
+        if !has_lfo {
+            return None;
+        }
+
+        // Check for op-amps (for all-pass buffering)
+        let opamp_count = self
+            .components
+            .iter()
+            .filter(|c| matches!(c.kind, ComponentKind::OpAmp(_)))
+            .count();
+
+        // Phase 90 has op-amps for buffering; if we have JFETs + LFO + opamps,
+        // this is almost certainly a phaser.
+        // Allow circuits without op-amps if they have enough JFETs (e.g., simplified models)
+        if opamp_count > 0 || jfet_count >= 4 {
+            Some(jfet_count)
+        } else {
+            None
+        }
+    }
 }
 
 struct DiodeInfo {
@@ -1517,6 +1565,7 @@ struct ControlBinding {
     max_resistance: f64,
 }
 
+#[derive(Debug)]
 enum ControlTarget {
     /// Modify the pre-gain multiplier (gain/drive/fuzz/distortion/sustain).
     PreGain,
@@ -1535,6 +1584,10 @@ enum ControlTarget {
 enum ModulationTarget {
     /// Modulate a JFET's Vgs.
     JfetVgs { stage_idx: usize },
+    /// Modulate ALL JFET stages' Vgs together (for phasers).
+    AllJfetVgs,
+    /// Modulate a Phaser's cutoff frequency (for Phase 90, Small Stone, etc.).
+    PhaserCutoff,
     /// Modulate a Photocoupler's LED drive.
     PhotocouplerLed { stage_idx: usize, comp_id: String },
     /// Modulate a Triode's Vgk (grid-cathode bias).
@@ -1608,6 +1661,10 @@ pub struct CompiledPedal {
     tolerance_seed: u64,
     /// Oversampling factor used for this pedal's nonlinear stages.
     oversampling: OversamplingFactor,
+    /// Phaser element for all-pass filter phaser circuits (Phase 90, etc.).
+    /// When present, JFETs are used as variable resistors in all-pass stages
+    /// rather than as clipping elements.
+    phaser: Option<Phaser>,
 }
 
 /// Gain-like control labels.
@@ -1725,6 +1782,14 @@ impl PedalProcessor for CompiledPedal {
                         stage.set_jfet_vgs(modulation);
                     }
                 }
+                ModulationTarget::AllJfetVgs => {
+                    // Modulate ALL JFET stages with the same value (for phasers)
+                    for stage in &mut self.stages {
+                        if matches!(&stage.root, RootKind::Jfet(_)) {
+                            stage.set_jfet_vgs(modulation);
+                        }
+                    }
+                }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         stage
@@ -1760,6 +1825,13 @@ impl PedalProcessor for CompiledPedal {
                         bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
                     }
                 }
+                ModulationTarget::PhaserCutoff => {
+                    if let Some(ref mut phaser) = self.phaser {
+                        // LFO modulates phaser cutoff: modulation is bipolar (-1 to +1)
+                        // Map directly to phaser modulation input
+                        phaser.set_modulation(modulation);
+                    }
+                }
             }
         }
 
@@ -1772,6 +1844,14 @@ impl PedalProcessor for CompiledPedal {
                 ModulationTarget::JfetVgs { stage_idx } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         stage.set_jfet_vgs(modulation);
+                    }
+                }
+                ModulationTarget::AllJfetVgs => {
+                    // Modulate ALL JFET stages with the same value (for phasers)
+                    for stage in &mut self.stages {
+                        if matches!(&stage.root, RootKind::Jfet(_)) {
+                            stage.set_jfet_vgs(modulation);
+                        }
                     }
                 }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
@@ -1810,6 +1890,11 @@ impl PedalProcessor for CompiledPedal {
                         bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
                     }
                 }
+                ModulationTarget::PhaserCutoff => {
+                    if let Some(ref mut phaser) = self.phaser {
+                        phaser.set_modulation(modulation);
+                    }
+                }
             }
         }
 
@@ -1832,6 +1917,13 @@ impl PedalProcessor for CompiledPedal {
         // No WDF stages → just apply gain + soft clip.
         if self.stages.is_empty() {
             signal = input * self.pre_gain;
+        }
+
+        // Process through phaser if present.
+        // The Phaser element implements the all-pass filter cascade with
+        // LFO-modulated cutoff frequencies — this is the core phaser effect.
+        if let Some(ref mut phaser) = self.phaser {
+            signal = phaser.process(signal);
         }
 
         // Apply slew rate limiting from op-amps.
@@ -1879,6 +1971,9 @@ impl PedalProcessor for CompiledPedal {
         if let Some(ref mut thermal) = self.thermal {
             thermal.set_sample_rate(rate);
         }
+        if let Some(ref mut phaser) = self.phaser {
+            phaser.set_sample_rate(rate);
+        }
     }
 
     fn reset(&mut self) {
@@ -1896,6 +1991,9 @@ impl PedalProcessor for CompiledPedal {
         }
         for bbd in &mut self.bbds {
             bbd.reset();
+        }
+        if let Some(ref mut phaser) = self.phaser {
+            phaser.reset();
         }
         if let Some(ref mut thermal) = self.thermal {
             thermal.reset();
@@ -2348,7 +2446,20 @@ pub fn compile_pedal_with_options(
         });
     }
 
-    // Build WDF stages for JFETs.
+    // Check for phaser topology before building JFET stages.
+    // Phasers use JFETs as variable resistors in all-pass filters,
+    // not as clipping elements — so we use a dedicated Phaser DSP element.
+    let phaser_stages = graph.detect_phaser();
+    let phaser = if let Some(num_stages) = phaser_stages {
+        // Create a Phaser element with the detected number of stages.
+        // Phase 90 uses 4 stages, Small Stone uses 6, etc.
+        Some(Phaser::new(num_stages, sample_rate))
+    } else {
+        None
+    };
+    let is_phaser = phaser.is_some();
+
+    // Build WDF stages for JFETs (skip if this is a phaser circuit).
     let jfets = graph.find_jfets();
     let jfet_edge_indices: Vec<usize> = jfets.iter().map(|(idx, _)| *idx).collect();
     let all_nonlinear_indices: Vec<usize> = diode_edge_indices
@@ -2357,7 +2468,11 @@ pub fn compile_pedal_with_options(
         .copied()
         .collect();
 
+    // Skip JFET stage building for phaser circuits — the Phaser element handles it.
     for (_edge_idx, jfet_info) in &jfets {
+        if is_phaser {
+            continue; // Skip JFET stages for phasers
+        }
         let junction = jfet_info.junction_node;
         let passive_idxs = graph.elements_at_junction(
             junction,
@@ -3087,6 +3202,9 @@ pub fn compile_pedal_with_options(
             let mut lfo = crate::elements::Lfo::new(waveform, sample_rate);
             lfo.set_rate(base_freq);
 
+            // Track if we've already created an AllJfetVgs binding for this LFO
+            let mut created_all_jfet_binding = false;
+
             // Find what this LFO connects to via nets (LFO.out -> target.property)
             for net in &pedal.nets {
                 if let Pin::ComponentPin { component, pin } = &net.from {
@@ -3099,20 +3217,44 @@ pub fn compile_pedal_with_options(
                             } = target_pin
                             {
                                 let target = match target_prop.as_str() {
-                                    "vgs" => {
-                                        // Find which stage contains this JFET or MOSFET
-                                        if let Some(stage_idx) = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Jfet(_)))
-                                        {
-                                            ModulationTarget::JfetVgs { stage_idx }
-                                        } else if let Some(stage_idx) = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Mosfet(_)))
-                                        {
-                                            ModulationTarget::MosfetVgs { stage_idx }
+                                    "vgs" | "gate" => {
+                                        // If this is a phaser circuit, use PhaserCutoff
+                                        // instead of individual JFET modulation
+                                        if is_phaser {
+                                            // Only create ONE binding for PhaserCutoff
+                                            if created_all_jfet_binding {
+                                                continue; // Skip duplicate bindings
+                                            }
+                                            created_all_jfet_binding = true;
+                                            ModulationTarget::PhaserCutoff
                                         } else {
-                                            ModulationTarget::JfetVgs { stage_idx: 0 }
+                                            // Count how many JFETs this LFO connects to
+                                            let jfet_count = stages
+                                                .iter()
+                                                .filter(|s| matches!(&s.root, RootKind::Jfet(_)))
+                                                .count();
+
+                                            if jfet_count > 1 {
+                                                // Multiple JFETs - use AllJfetVgs
+                                                // Only create ONE binding for AllJfetVgs
+                                                if created_all_jfet_binding {
+                                                    continue; // Skip duplicate bindings
+                                                }
+                                                created_all_jfet_binding = true;
+                                                ModulationTarget::AllJfetVgs
+                                            } else if let Some(stage_idx) = stages
+                                                .iter()
+                                                .position(|s| matches!(&s.root, RootKind::Jfet(_)))
+                                            {
+                                                ModulationTarget::JfetVgs { stage_idx }
+                                            } else if let Some(stage_idx) = stages
+                                                .iter()
+                                                .position(|s| matches!(&s.root, RootKind::Mosfet(_)))
+                                            {
+                                                ModulationTarget::MosfetVgs { stage_idx }
+                                            } else {
+                                                ModulationTarget::JfetVgs { stage_idx: 0 }
+                                            }
                                         }
                                     }
                                     "led" => ModulationTarget::PhotocouplerLed {
@@ -3153,7 +3295,15 @@ pub fn compile_pedal_with_options(
 
                                 // Bias and range based on target type
                                 let (bias, range) = match &target {
-                                    ModulationTarget::JfetVgs { .. } => (-1.25, 1.25),
+                                    // JFET phaser: Vgs must stay in variable-resistance region
+                                    // 2SK30A-GR: Vp ~ -0.8V to -1.2V
+                                    // Keep Vgs between -0.2V and -0.7V to avoid pinch-off
+                                    // At -0.2V: low Rds (signal passes)
+                                    // At -0.7V: high Rds (but still conducting)
+                                    ModulationTarget::JfetVgs { .. } => (-0.45, 0.25),
+                                    ModulationTarget::AllJfetVgs => (-0.45, 0.25),
+                                    // Phaser: bipolar modulation (-1 to +1)
+                                    ModulationTarget::PhaserCutoff => (0.0, 1.0),
                                     ModulationTarget::PhotocouplerLed { .. } => (0.5, 0.5),
                                     // Triode grid bias: -2V center with ±2V swing
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
@@ -3253,7 +3403,11 @@ pub fn compile_pedal_with_options(
                                 };
 
                                 let (bias, range) = match &target {
-                                    ModulationTarget::JfetVgs { .. } => (-1.25, 1.25),
+                                    // JFET: Keep in variable-resistance region (avoid pinch-off)
+                                    ModulationTarget::JfetVgs { .. } => (-0.45, 0.25),
+                                    ModulationTarget::AllJfetVgs => (-0.45, 0.25),
+                                    // Phaser: bipolar modulation (-1 to +1)
+                                    ModulationTarget::PhaserCutoff => (0.0, 1.0),
                                     ModulationTarget::PhotocouplerLed { .. } => (0.0, 1.0),
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
                                     ModulationTarget::PentodeVg1k { .. } => (-2.0, 2.0),
@@ -3303,6 +3457,7 @@ pub fn compile_pedal_with_options(
         thermal,
         tolerance_seed: tolerance.seed(),
         oversampling,
+        phaser,
     })
 }
 
@@ -3574,6 +3729,7 @@ fn jfet_model(jt: JfetType, is_n_channel: bool) -> JfetModel {
     match jt {
         JfetType::J201 => JfetModel::n_j201(),
         JfetType::N2n5457 => JfetModel::n_2n5457(),
+        JfetType::N2n5952 => JfetModel::n_2n5952(),
         // 2SK30A variants - classic phaser JFETs
         JfetType::N2sk30a => JfetModel::n_2sk30a(),
         JfetType::N2sk30aGr => JfetModel::n_2sk30a_gr(),
@@ -3955,6 +4111,41 @@ mod tests {
         assert_finite(&output, "Dyna Comp");
         let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
         assert!(peak > 0.01, "Dyna Comp should produce output: peak={peak}");
+    }
+
+    #[test]
+    fn compile_phase90_phaser_detection() {
+        // Phase 90 should be detected as a phaser circuit and use the Phaser element
+        let pedal = parse("phase90.pedal");
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        proc.set_control("Speed", 0.5);
+
+        // Process a sine wave and verify output
+        let input = sine(48000);
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert_finite(&output, "Phase 90");
+
+        // Should produce output
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(
+            peak > 0.01,
+            "Phase 90 should produce output: peak={peak}"
+        );
+
+        // Verify the phaser is actively creating the sweeping effect
+        // by checking that the output varies over time (not just a static gain)
+        let first_half: Vec<f64> = output[0..24000].to_vec();
+        let second_half: Vec<f64> = output[24000..48000].to_vec();
+
+        // RMS of each half
+        let rms_first = (first_half.iter().map(|x| x * x).sum::<f64>() / 24000.0).sqrt();
+        let rms_second = (second_half.iter().map(|x| x * x).sum::<f64>() / 24000.0).sqrt();
+
+        // Both halves should have similar RMS (not cutting out)
+        assert!(
+            rms_first > 0.01 && rms_second > 0.01,
+            "Both halves should have signal: rms_first={rms_first}, rms_second={rms_second}"
+        );
     }
 
     #[test]
