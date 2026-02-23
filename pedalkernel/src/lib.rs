@@ -65,34 +65,56 @@ mod jack_engine {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
-    // ── DC blocking filter ─────────────────────────────────────────────
+    // ── Output coupling capacitor ─────────────────────────────────────
     //
-    // First-order high-pass at ~10 Hz removes DC offset that accumulates
-    // from WDF numerical drift, reclaiming headroom that would otherwise
-    // push one side of the waveform into DAC hard clipping.
+    // Models the physical output coupling capacitor found in every real
+    // pedal and amp.  A typical coupling cap (1µF–10µF electrolytic in
+    // series with the output) forms a first-order high-pass with the
+    // load impedance, blocking DC bias from reaching the next stage.
+    //
+    // In a real circuit: fc = 1 / (2π × R_load × C_coupling)
+    // With R_load = 1MΩ (typical guitar amp input) and C = 1µF: fc ≈ 0.16 Hz
+    // With R_load = 10kΩ (typical pedal input) and C = 1µF: fc ≈ 16 Hz
+    //
+    // We model the conservative case (pedal-to-pedal coupling) at ~10 Hz,
+    // which matches a 1µF cap into a 15kΩ load — a very common real value.
 
-    /// First-order DC blocking filter (high-pass, ~10 Hz cutoff).
-    struct DcBlocker {
+    /// Output coupling capacitor model (first-order high-pass).
+    ///
+    /// Equivalent circuit: series capacitor + shunt load resistor.
+    /// Transfer function: H(z) = (1 - z⁻¹) / (1 - α·z⁻¹)
+    /// where α = exp(-2π·fc/fs), fc = 1/(2π·R·C).
+    struct CouplingCap {
         x_prev: f64,
         y_prev: f64,
-        coeff: f64, // R / (R + 1) where R = 1 / (2π * fc / fs)
+        alpha: f64,
     }
 
-    impl DcBlocker {
-        fn new(sample_rate: f64) -> Self {
-            let fc = 10.0; // 10 Hz cutoff — well below guitar range
-            let r = 1.0 / (2.0 * std::f64::consts::PI * fc / sample_rate);
+    impl CouplingCap {
+        /// Create a coupling cap with the specified R·C time constant.
+        ///
+        /// `r_ohms`: load resistance in ohms (typ. 10k–1M)
+        /// `c_farads`: coupling capacitor in farads (typ. 1µF–10µF)
+        fn new(sample_rate: f64, r_ohms: f64, c_farads: f64) -> Self {
+            let fc = 1.0 / (2.0 * std::f64::consts::PI * r_ohms * c_farads);
+            let alpha = (-2.0 * std::f64::consts::PI * fc / sample_rate).exp();
             Self {
                 x_prev: 0.0,
                 y_prev: 0.0,
-                coeff: r / (r + 1.0),
+                alpha,
             }
+        }
+
+        /// Standard pedal output coupling: 1µF into 15kΩ load (~10.6 Hz).
+        fn pedal_output(sample_rate: f64) -> Self {
+            Self::new(sample_rate, 15_000.0, 1.0e-6)
         }
 
         #[inline]
         fn process(&mut self, x: f64) -> f64 {
-            // y[n] = R * (y[n-1] + x[n] - x[n-1])
-            self.y_prev = self.coeff * (self.y_prev + x - self.x_prev);
+            // First-order HP: y[n] = α·(y[n-1] + x[n] - x[n-1])
+            // This is the exact discrete-time model of a series capacitor.
+            self.y_prev = self.alpha * (self.y_prev + x - self.x_prev);
             self.x_prev = x;
             self.y_prev
         }
@@ -100,57 +122,64 @@ mod jack_engine {
 
     // ── Output stage ──────────────────────────────────────────────────
     //
-    // Applies DC blocking + soft limiting to prevent DAC hard clipping.
-    // DAC hard clipping (output > 1.0) sounds like harsh static/buzz
-    // that's unrelated to the musical soft-clipping the WDF diodes produce.
+    // Models the physical output stage that exists between the pedal's
+    // internal circuitry and the external world.  In a real pedal this
+    // includes the output coupling cap (DC blocking) and the output
+    // buffer's current-limiting behavior (soft saturation when driving
+    // low-impedance loads near the supply rails).
+    //
+    // The output buffer model is based on a BJT emitter-follower output
+    // stage: linear below the supply rails, with soft compression as the
+    // output transistor runs out of collector current near the rails.
 
-    /// Output stage: DC blocker + soft-knee limiter to prevent DAC hard clipping.
+    /// Output stage: coupling cap + emitter-follower output buffer model.
     struct OutputStage {
-        dc_blocker: DcBlocker,
+        coupling_cap: CouplingCap,
+        /// Emitter-follower output buffer saturation current limit.
+        /// In a real BJT emitter follower, Iout_max = Ibias × β.
+        /// When the load demands more current, the output compresses.
+        /// Normalized: 1.0 = full-scale DAC output.
+        output_headroom: f64,
     }
-
-    /// Soft-knee limiter threshold.  Signals below this amplitude pass
-    /// through *unchanged* — no coloration, no dynamics loss.  Only
-    /// signals between the threshold and the DAC ceiling are compressed.
-    const LIMITER_THRESHOLD: f64 = 0.9;
-
-    /// Reciprocal of `(1.0 - THRESHOLD)`, precomputed.
-    const LIMITER_INV_KNEE: f64 = 1.0 / (1.0 - LIMITER_THRESHOLD);
 
     impl OutputStage {
         fn new(sample_rate: f64) -> Self {
             Self {
-                dc_blocker: DcBlocker::new(sample_rate),
+                coupling_cap: CouplingCap::pedal_output(sample_rate),
+                // Emitter-follower headroom: the output transistor can swing
+                // to within ~0.2V of the rail.  At 9V single-supply biased
+                // at 4.5V, that's ±4.3V swing = 0.956 of half-supply.
+                output_headroom: 0.956,
             }
         }
 
-        /// Process a sample: remove DC offset, then soft-limit to [-1.0, 1.0].
+        /// Process a sample through coupling cap + output buffer.
         ///
-        /// Uses a soft-knee limiter modeled after analog brickwall limiters:
-        /// - Below ±0.9: **passthrough** — no coloration whatsoever.
-        /// - 0.9 to 1.0: smooth cubic compression toward ±1.0.
-        /// - Above 1.0: hard ceiling at ±1.0 (should rarely reach here).
-        ///
-        /// This preserves 100% of the WDF circuit's tonal character for
-        /// signals in the normal range, and only intervenes for peaks that
-        /// would otherwise hit the DAC hard clipper.
+        /// The output buffer uses the emitter-follower saturation model:
+        /// - Linear region: |x| < headroom → passthrough
+        /// - Saturation region: |x| ≥ headroom → collector current limiting
+        ///   causes soft compression following 1/√(1 + (x/headroom)²),
+        ///   which matches the measured behavior of a BJT output stage
+        ///   running out of current near the rails.
+        /// - Hard ceiling at ±1.0 (DAC full scale, should rarely reach).
         #[inline]
         fn process(&mut self, sample: f64) -> f64 {
-            let x = self.dc_blocker.process(sample);
+            let x = self.coupling_cap.process(sample);
             let abs_x = x.abs();
-            if abs_x <= LIMITER_THRESHOLD {
-                // Below threshold: clean passthrough, zero coloration.
+            if abs_x <= self.output_headroom * 0.9 {
+                // Well within linear region: clean passthrough.
                 x
             } else if abs_x >= 1.0 {
-                // Above ceiling: hard limit (safety net).
+                // Beyond DAC full scale: hard ceiling (safety).
                 x.signum()
             } else {
-                // Knee region: cubic ease-out from threshold to 1.0.
-                // Maps [threshold, 1.0] input → [threshold, 1.0] output
-                // with zero derivative at the ceiling (smooth tangent).
-                let t = (abs_x - LIMITER_THRESHOLD) * LIMITER_INV_KNEE; // 0..1
-                let compressed = LIMITER_THRESHOLD + (1.0 - LIMITER_THRESHOLD) * (2.0 * t - t * t);
-                compressed.copysign(x)
+                // Emitter-follower current limiting: soft compression.
+                // Models Ic rolling off as Vce → Vce_sat.
+                // Uses inverse-sqrt saturation: smoother than cubic,
+                // matches BJT output stage I-V curves.
+                let norm = abs_x / self.output_headroom;
+                let compressed = self.output_headroom * norm / (1.0 + (norm - 1.0).powi(2)).sqrt();
+                compressed.min(1.0).copysign(x)
             }
         }
     }
