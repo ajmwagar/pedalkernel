@@ -308,6 +308,12 @@ pub enum RootKind {
     /// Voltage-mode op-amp (TL072, LM308, JRC4558, etc.).
     /// Modeled as a VCVS: Vout = Aol * (Vp - Vm).
     OpAmp(OpAmpRoot),
+    /// NPN BJT transistor (2N3904, BC109, 2N5089, etc.).
+    /// Modeled with Ebers-Moll equations.
+    BjtNpn(BjtNpnRoot),
+    /// PNP BJT transistor (2N3906, AC128, NKT275, etc.).
+    /// Modeled with Ebers-Moll equations.
+    BjtPnp(BjtPnpRoot),
 }
 
 pub struct WdfStage {
@@ -350,6 +356,8 @@ impl WdfStage {
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
                 RootKind::Ota(o) => o.process(b_tree, rp),
                 RootKind::OpAmp(op) => op.process(b_tree, rp),
+                RootKind::BjtNpn(bjt) => bjt.process(b_tree, rp),
+                RootKind::BjtPnp(bjt) => bjt.process(b_tree, rp),
             };
             tree.set_incident(a_root);
             (a_root + b_tree) / 2.0
@@ -701,7 +709,7 @@ impl CircuitGraph {
                         node_b: node_s,
                     });
                 }
-                ComponentKind::Npn | ComponentKind::Pnp => {
+                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
                     num_active += 1;
                 }
                 ComponentKind::OpAmp(ot) if ot.is_ota() => {
@@ -795,7 +803,7 @@ impl CircuitGraph {
                         &["in", "out"]
                     }
                 }
-                ComponentKind::Npn | ComponentKind::Pnp => &["base", "collector", "emitter"],
+                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => &["base", "collector", "emitter"],
                 _ => continue,
             };
 
@@ -1008,6 +1016,74 @@ impl CircuitGraph {
         // Sort by distance of junction node from input.
         jfets.sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
         jfets
+    }
+
+    /// Find BJT edges, ordered by topological distance from `in`.
+    fn find_bjts(&self) -> Vec<(usize, BjtInfo)> {
+        // BFS from in_node to compute distances.
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &self.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(self.in_node, 0);
+        queue.push_back(self.in_node);
+        while let Some(n) = queue.pop_front() {
+            let d = dist[&n];
+            if let Some(neighbors) = adj.get(&n) {
+                for &nb in neighbors {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
+                        queue.push_back(nb);
+                    }
+                }
+            }
+        }
+
+        let mut bjts: Vec<(usize, BjtInfo)> = Vec::new();
+        for (edge_idx, e) in self.edges.iter().enumerate() {
+            let comp = &self.components[e.comp_idx];
+            let info = match &comp.kind {
+                ComponentKind::Npn(bt) => Some(BjtInfo {
+                    bjt_type: *bt,
+                    is_npn: true,
+                    junction_node: if e.node_b == self.gnd_node {
+                        e.node_a
+                    } else {
+                        e.node_b
+                    },
+                    ground_node: if e.node_b == self.gnd_node {
+                        e.node_b
+                    } else {
+                        e.node_a
+                    },
+                }),
+                ComponentKind::Pnp(bt) => Some(BjtInfo {
+                    bjt_type: *bt,
+                    is_npn: false,
+                    junction_node: if e.node_b == self.gnd_node {
+                        e.node_a
+                    } else {
+                        e.node_b
+                    },
+                    ground_node: if e.node_b == self.gnd_node {
+                        e.node_b
+                    } else {
+                        e.node_a
+                    },
+                }),
+                _ => None,
+            };
+            if let Some(info) = info {
+                bjts.push((edge_idx, info));
+            }
+        }
+
+        // Sort by distance of junction node from input.
+        bjts.sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
+        bjts
     }
 
     /// Find triode edges, ordered by topological distance from `in`.
@@ -1298,6 +1374,15 @@ struct DiodeInfo {
 struct JfetInfo {
     jfet_type: JfetType,
     is_n_channel: bool,
+    junction_node: NodeId,
+    #[allow(dead_code)]
+    ground_node: NodeId,
+}
+
+struct BjtInfo {
+    bjt_type: BjtType,
+    is_npn: bool,
+    /// The collector node (where the WDF tree connects).
     junction_node: NodeId,
     #[allow(dead_code)]
     ground_node: NodeId,
@@ -2554,10 +2639,95 @@ pub fn compile_pedal_with_options(
         });
     }
 
+    // Build WDF stages for BJTs.
+    let bjts = graph.find_bjts();
+    let bjt_edge_indices: Vec<usize> = bjts.iter().map(|(idx, _)| *idx).collect();
+    let all_nonlinear_with_bjts: Vec<usize> = all_nonlinear_indices
+        .iter()
+        .chain(bjt_edge_indices.iter())
+        .copied()
+        .collect();
+
+    for (_edge_idx, bjt_info) in &bjts {
+        let junction = bjt_info.junction_node;
+        let passive_idxs = graph.elements_at_junction(
+            junction,
+            &all_nonlinear_with_bjts,
+            &graph.active_edge_indices,
+        );
+
+        if passive_idxs.is_empty() {
+            continue;
+        }
+
+        // Find the best injection node for the voltage source.
+        let mut injection_node = graph.in_node;
+        let mut best_dist = usize::MAX;
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            let other = if e.node_a == junction {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            if let Some(&d) = dist_from_in.get(&other) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = other;
+                }
+            }
+        }
+        if best_dist == usize::MAX {
+            injection_node = graph.gnd_node;
+        }
+
+        // Build SP edges.
+        let source_node = graph.edges.len() + 3000; // virtual source node for BJTs
+        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+        }
+
+        let terminals = vec![source_node, junction];
+        let sp_tree = match sp_reduce(sp_edges, &terminals) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        // Create components list with virtual voltage source for BJT stages.
+        let mut bjt_components = graph.components.clone();
+        while bjt_components.len() <= vs_comp_idx {
+            bjt_components.push(ComponentDef {
+                id: "__vs__".to_string(),
+                kind: ComponentKind::Resistor(1.0),
+            });
+        }
+
+        let tree = sp_to_dyn_with_vs(&sp_tree, &bjt_components, sample_rate, vs_comp_idx);
+
+        let model = BjtModel::from_bjt_type(&bjt_info.bjt_type);
+        let root = if bjt_info.is_npn {
+            RootKind::BjtNpn(BjtNpnRoot::new(model))
+        } else {
+            RootKind::BjtPnp(BjtPnpRoot::new(model))
+        };
+
+        stages.push(WdfStage {
+            tree,
+            root,
+            compensation: 1.0,
+            oversampler: Oversampler::new(oversampling),
+            base_diode_model: None,
+        });
+    }
+
     // Build WDF stages for triodes.
     let triodes = graph.find_triodes();
     let triode_edge_indices: Vec<usize> = triodes.iter().map(|(idx, _)| *idx).collect();
-    let all_nonlinear_with_triodes: Vec<usize> = all_nonlinear_indices
+    let all_nonlinear_with_triodes: Vec<usize> = all_nonlinear_with_bjts
         .iter()
         .chain(triode_edge_indices.iter())
         .copied()
@@ -3503,22 +3673,10 @@ pub struct VoltageWarning {
 pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<VoltageWarning> {
     let mut warnings = Vec::new();
 
-    let has_germanium_transistor = pedal
-        .components
-        .iter()
-        .any(|c| c.kind == ComponentKind::Pnp);
-    // Heuristic: PNP transistors in a circuit with "fuzz" controls are likely
-    // germanium (AC128, OC44, etc.) with lower voltage tolerance.
-    let likely_germanium_fuzz = has_germanium_transistor
-        && pedal
-            .controls
-            .iter()
-            .any(|c| c.label.eq_ignore_ascii_case("fuzz"));
-
     for comp in &pedal.components {
         match &comp.kind {
-            ComponentKind::Pnp | ComponentKind::Npn => {
-                let is_ge = comp.kind == ComponentKind::Pnp && likely_germanium_fuzz;
+            ComponentKind::Npn(bt) | ComponentKind::Pnp(bt) => {
+                let is_ge = bt.is_germanium();
                 if is_ge {
                     // Germanium PNPs: typical Vce(max) = 15–32V
                     if voltage > 18.0 {

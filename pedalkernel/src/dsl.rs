@@ -59,8 +59,8 @@ pub enum ComponentKind {
     /// Zener diode with breakdown voltage (V). Common: 3.3, 4.7, 5.1, 6.2, 9.1, 12
     Zener(f64),
     Potentiometer(f64),
-    Npn,
-    Pnp,
+    Npn(BjtType),
+    Pnp(BjtType),
     OpAmp(OpAmpType),
     NJfet(JfetType),
     PJfet(JfetType),
@@ -184,6 +184,61 @@ impl OpAmpType {
     /// OTAs have current output and behave differently
     pub fn is_ota(&self) -> bool {
         matches!(self, OpAmpType::Ca3080)
+    }
+}
+
+/// BJT (Bipolar Junction Transistor) types with Ebers-Moll parameters.
+/// Each type has distinct beta (hFE), saturation current, and Early voltage
+/// that affect gain, clipping character, and frequency response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BjtType {
+    /// Generic BJT with typical small-signal values
+    #[default]
+    Generic,
+
+    // ── NPN Silicon ──────────────────────────────────────────────────────
+    /// 2N3904 — Workhorse NPN, ubiquitous in audio circuits
+    N2n3904,
+    /// 2N2222 — Classic NPN switching/amplifier
+    N2n2222,
+    /// BC108 — British/European small-signal NPN (Vox, Marshall)
+    Bc108,
+    /// BC109 — Low-noise variant of BC108 (Tone Bender)
+    Bc109,
+    /// 2N5088 — High-gain NPN for fuzz/distortion (Big Muff)
+    N2n5088,
+    /// 2N5089 — Ultra-high-gain NPN (Big Muff, boosters)
+    N2n5089,
+
+    // ── PNP Silicon ──────────────────────────────────────────────────────
+    /// 2N3906 — Standard PNP complement to 2N3904
+    N2n3906,
+
+    // ── Germanium (Fuzz Face, vintage) ───────────────────────────────────
+    /// AC128 — Classic germanium PNP for Fuzz Face
+    /// Low beta (~70), high leakage, temperature-sensitive
+    Ac128,
+    /// OC44 — Vintage germanium PNP (early Tone Benders)
+    /// Very low beta (~50), vintage character
+    Oc44,
+    /// NKT275 — "Holy grail" germanium PNP for Fuzz Face
+    /// Medium-low beta (~85) with sweet spot character
+    Nkt275,
+}
+
+impl BjtType {
+    /// Whether this is a germanium transistor.
+    /// Germanium transistors have lower voltage tolerance and higher leakage.
+    pub fn is_germanium(&self) -> bool {
+        matches!(self, BjtType::Ac128 | BjtType::Oc44 | BjtType::Nkt275)
+    }
+
+    /// Whether this is a PNP transistor type.
+    pub fn is_pnp(&self) -> bool {
+        matches!(
+            self,
+            BjtType::N2n3906 | BjtType::Ac128 | BjtType::Oc44 | BjtType::Nkt275
+        )
     }
 }
 
@@ -484,16 +539,42 @@ fn parse_pot(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Potentiometer(val)))
 }
 
+fn bjt_type(input: &str) -> IResult<&str, BjtType> {
+    alt((
+        // NPN Silicon
+        value(BjtType::N2n3904, tag("2n3904")),
+        value(BjtType::N2n2222, tag("2n2222")),
+        value(BjtType::Bc108, tag("bc108")),
+        value(BjtType::Bc109, tag("bc109")),
+        value(BjtType::N2n5088, tag("2n5088")),
+        value(BjtType::N2n5089, tag("2n5089")),
+        // PNP Silicon
+        value(BjtType::N2n3906, tag("2n3906")),
+        // Germanium
+        value(BjtType::Ac128, tag("ac128")),
+        value(BjtType::Oc44, tag("oc44")),
+        value(BjtType::Nkt275, tag("nkt275")),
+    ))(input)
+}
+
 fn parse_npn(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("npn")(input)?;
-    let (input, _) = tag("()")(input)?;
-    Ok((input, ComponentKind::Npn))
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, bt) = opt(bjt_type)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Npn(bt.unwrap_or(BjtType::Generic))))
 }
 
 fn parse_pnp(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("pnp")(input)?;
-    let (input, _) = tag("()")(input)?;
-    Ok((input, ComponentKind::Pnp))
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, bt) = opt(bjt_type)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Pnp(bt.unwrap_or(BjtType::Generic))))
 }
 
 fn opamp_type(input: &str) -> IResult<&str, OpAmpType> {

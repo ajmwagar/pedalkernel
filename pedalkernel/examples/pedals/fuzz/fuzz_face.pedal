@@ -12,14 +12,14 @@ pedal "Fuzz Face" {
     R1: resistor(33k)       # Q1 collector load / Q2 bias
 
     # Q1 - Input buffer / driver stage
-    Q1: pnp()               # AC128 / NKT275 germanium PNP
+    Q1: pnp(ac128)          # AC128 germanium PNP
     R2: resistor(330)       # Q1 emitter stabilization (some versions)
 
     # Interstage coupling
     R3: resistor(8.2k)      # Q1 collector to Q2 base bias
 
     # Q2 - Main gain / clipping stage
-    Q2: pnp()               # AC128 / NKT275 germanium PNP
+    Q2: pnp(ac128)          # AC128 germanium PNP
     R4: resistor(470)       # Q2 emitter resistor
     C2: cap(22u)            # Q2 emitter bypass (more gain)
     R5: resistor(100k)      # Q2 collector load

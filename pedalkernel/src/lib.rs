@@ -664,7 +664,7 @@ pedal "Test Pedal" {
         let pnp_count = p
             .components
             .iter()
-            .filter(|c| c.kind == dsl::ComponentKind::Pnp)
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::Pnp(_)))
             .count();
         assert_eq!(pnp_count, 2, "Fuzz Face uses 2 PNP transistors");
     }
@@ -684,7 +684,7 @@ pedal "Test Pedal" {
         let npn_count = p
             .components
             .iter()
-            .filter(|c| c.kind == dsl::ComponentKind::Npn)
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::Npn(_)))
             .count();
         assert_eq!(npn_count, 4, "Big Muff uses 4 NPN transistor stages");
     }
@@ -889,7 +889,7 @@ pedal "Test Pedal" {
             "TS808: 3 pots (Drive, Tone, Level)"
         );
         // Verify NO MOSFETs, NO transistors, NO JFETs — pure op-amp circuit
-        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Npn | dsl::ComponentKind::Pnp)), 0);
+        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Npn(_) | dsl::ComponentKind::Pnp(_))), 0);
         assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::NJfet(_))), 0);
         assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Nmos(_))), 0);
     }
@@ -900,7 +900,7 @@ pedal "Test Pedal" {
     fn schematic_fuzz_face_component_types() {
         let p = parse_example("fuzz_face.pedal");
         assert_eq!(
-            count_kind(&p, |k| *k == dsl::ComponentKind::Pnp),
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Pnp(_))),
             2,
             "Fuzz Face: 2x AC128/NKT275 PNP germanium transistors"
         );
@@ -919,7 +919,7 @@ pedal "Test Pedal" {
     fn schematic_big_muff_component_types() {
         let p = parse_example("big_muff.pedal");
         assert_eq!(
-            count_kind(&p, |k| *k == dsl::ComponentKind::Npn),
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Npn(_))),
             4,
             "Big Muff: 4x 2N5088 NPN transistor stages"
         );
@@ -1000,7 +1000,7 @@ pedal "Test Pedal" {
             "Klon: 3 pots (Gain, Treble, Output)"
         );
         // No transistors — pure op-amp design
-        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Npn | dsl::ComponentKind::Pnp)), 0);
+        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Npn(_) | dsl::ComponentKind::Pnp(_))), 0);
     }
 
     /// OCD: 2 NMOS MOSFETs (2N7000) + 1 TL072 op-amp — NO silicon diodes.

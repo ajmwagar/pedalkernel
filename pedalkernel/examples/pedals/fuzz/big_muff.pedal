@@ -16,14 +16,14 @@ pedal "Big Muff" {
     R1: resistor(39k)       # Input impedance
 
     # Stage 1: Input buffer / first gain
-    Q1: npn()               # 2N5088 input stage
+    Q1: npn(2n5088)         # 2N5088 input stage
     R2: resistor(470k)      # Q1 base bias
     R3: resistor(8.2k)      # Q1 collector load
     R4: resistor(100)       # Q1 emitter resistor
     C2: cap(100n)           # Stage 1 coupling
 
     # Stage 2: First clipping stage
-    Q2: npn()               # 2N5088 gain stage
+    Q2: npn(2n5088)         # 2N5088 gain stage
     R5: resistor(470k)      # Q2 base bias
     R6: resistor(10k)       # Q2 collector load
     R7: resistor(100)       # Q2 emitter resistor
@@ -32,7 +32,7 @@ pedal "Big Muff" {
     C4: cap(100n)           # Stage 2 coupling
 
     # Stage 3: Second clipping stage (Sustain control here)
-    Q3: npn()               # 2N5088 gain stage
+    Q3: npn(2n5088)         # 2N5088 gain stage
     R8: resistor(470k)      # Q3 base bias
     Sustain: pot(100k)      # Sustain (feedback/gain control)
     R9: resistor(1k)        # Sustain minimum resistance
@@ -42,7 +42,7 @@ pedal "Big Muff" {
     C6: cap(100n)           # Stage 3 coupling
 
     # Stage 4: Output driver
-    Q4: npn()               # 2N5088 output stage
+    Q4: npn(2n5088)         # 2N5088 output stage
     R11: resistor(470k)     # Q4 base bias
     R12: resistor(12k)      # Q4 collector load
     R13: resistor(100)      # Q4 emitter resistor

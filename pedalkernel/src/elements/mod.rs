@@ -1515,6 +1515,207 @@ mod tests {
         );
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // BJT (Bipolar Junction Transistor) Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn bjt_npn_forward_active() {
+        // Basic NPN test: collector current should flow when Vbe > 0 and Vce > 0
+        let model = BjtModel::n2n3904();
+        let mut root = BjtNpnRoot::new(model);
+
+        // Set forward bias on base-emitter junction
+        root.set_vbe(0.6);
+
+        // Process with positive input (collector-emitter path)
+        let b = root.process(10.0, 1000.0);
+        let v = (10.0 + b) / 2.0; // Recover voltage
+
+        // Should have some Vce > 0
+        assert!(v > 0.0, "Vce should be positive: v={v}");
+
+        // Collector current should be significant
+        let ic = root.collector_current();
+        assert!(ic > 1e-6, "Collector current should flow: ic={ic}");
+
+        // Base current should be Ic/beta
+        let ib = root.base_current();
+        let expected_ib = ic / model.bf;
+        assert!(
+            (ib - expected_ib).abs() < 1e-12,
+            "Base current should be Ic/Bf: ib={ib}, expected={expected_ib}"
+        );
+    }
+
+    #[test]
+    fn bjt_npn_cutoff() {
+        // When Vbe < 0, BJT is in cutoff - minimal current
+        let model = BjtModel::n2n3904();
+        let mut root = BjtNpnRoot::new(model);
+
+        root.set_vbe(-0.5); // Reverse bias
+
+        let _b = root.process(10.0, 1000.0);
+        let ic = root.collector_current();
+
+        // Collector current should be negligible
+        assert!(
+            ic < 1e-10,
+            "In cutoff, Ic should be very small: ic={ic}"
+        );
+    }
+
+    #[test]
+    fn bjt_npn_vbe_affects_ic() {
+        // Higher Vbe should produce higher Ic (exponential relationship)
+        let model = BjtModel::n2n3904();
+        let mut root = BjtNpnRoot::new(model);
+
+        // Low Vbe
+        root.set_vbe(0.5);
+        root.process(10.0, 1000.0);
+        let ic_low = root.collector_current();
+
+        // Higher Vbe
+        root.set_vbe(0.65);
+        root.process(10.0, 1000.0);
+        let ic_high = root.collector_current();
+
+        // Ic should increase exponentially with Vbe
+        assert!(
+            ic_high > ic_low * 5.0,
+            "Higher Vbe should produce much higher Ic: ic_low={ic_low}, ic_high={ic_high}"
+        );
+    }
+
+    #[test]
+    fn bjt_pnp_forward_active() {
+        // PNP test: collector current should flow when Veb > 0 and Vec > 0
+        let model = BjtModel::ac128(); // Classic germanium PNP
+        let mut root = BjtPnpRoot::new(model);
+
+        // Set forward bias on emitter-base junction
+        root.set_veb(0.3); // Germanium: lower Vbe ~0.2-0.3V
+
+        // Process with positive input (emitter-collector path)
+        let b = root.process(10.0, 1000.0);
+        let v = (10.0 + b) / 2.0;
+
+        assert!(v > 0.0, "Vec should be positive: v={v}");
+
+        let ic = root.collector_current();
+        assert!(ic > 1e-6, "PNP should conduct: ic={ic}");
+    }
+
+    #[test]
+    fn bjt_germanium_higher_leakage() {
+        // Germanium transistors (AC128) have much higher leakage than silicon
+        let ge_model = BjtModel::ac128();
+        let si_model = BjtModel::n2n3904();
+
+        // Germanium Is is ~1e-6, silicon Is is ~1e-14
+        assert!(
+            ge_model.is > si_model.is * 1e6,
+            "Germanium should have much higher Is: ge={}, si={}",
+            ge_model.is,
+            si_model.is
+        );
+    }
+
+    #[test]
+    fn bjt_beta_affects_base_current() {
+        // Higher beta = less base current for same Ic
+        let high_beta = BjtModel::n2n5089(); // beta ~700
+        let low_beta = BjtModel::oc44();      // beta ~50
+
+        let mut root_high = BjtNpnRoot::new(high_beta);
+        let mut root_low = BjtNpnRoot::new(low_beta);
+
+        // Same Vbe
+        root_high.set_vbe(0.6);
+        root_low.set_vbe(0.6);
+
+        root_high.process(10.0, 1000.0);
+        root_low.process(10.0, 1000.0);
+
+        // Ib = Ic / beta, so higher beta means lower Ib for same Ic
+        // But Ic also differs, so check the ratio
+        let ratio_high = root_high.collector_current() / root_high.base_current();
+        let ratio_low = root_low.collector_current() / root_low.base_current();
+
+        assert!(
+            (ratio_high - high_beta.bf).abs() < 1.0,
+            "High beta ratio should match: ratio={ratio_high}, beta={}",
+            high_beta.bf
+        );
+        assert!(
+            (ratio_low - low_beta.bf).abs() < 1.0,
+            "Low beta ratio should match: ratio={ratio_low}, beta={}",
+            low_beta.bf
+        );
+    }
+
+    #[test]
+    fn bjt_wdf_convergence() {
+        // Verify WDF root converges to valid solution
+        let model = BjtModel::n2n3904();
+        let mut root = BjtNpnRoot::new(model);
+
+        root.set_vbe(0.6);
+
+        // Test with various input wave values
+        for a in [-10.0, 0.0, 5.0, 10.0, 20.0] {
+            let b = root.process(a, 1000.0);
+
+            // Result should be finite
+            assert!(b.is_finite(), "WDF output should be finite for a={a}");
+
+            // Voltage should be recoverable
+            let v = (a + b) / 2.0;
+            assert!(v.is_finite(), "Voltage should be finite: v={v}");
+        }
+    }
+
+    #[test]
+    fn bjt_model_presets() {
+        // Verify all model presets have reasonable values
+        let models = vec![
+            ("2N3904", BjtModel::n2n3904()),
+            ("2N2222", BjtModel::n2n2222()),
+            ("BC108", BjtModel::bc108()),
+            ("BC109", BjtModel::bc109()),
+            ("2N5088", BjtModel::n2n5088()),
+            ("2N5089", BjtModel::n2n5089()),
+            ("2N3906", BjtModel::n2n3906()),
+            ("AC128", BjtModel::ac128()),
+            ("OC44", BjtModel::oc44()),
+            ("NKT275", BjtModel::nkt275()),
+        ];
+
+        for (name, model) in models {
+            // Is should be positive
+            assert!(model.is > 0.0, "{name}: Is should be positive");
+
+            // Beta should be in reasonable range (10-1000)
+            assert!(
+                model.bf > 10.0 && model.bf < 1000.0,
+                "{name}: Beta should be reasonable: {}",
+                model.bf
+            );
+
+            // Thermal voltage should be ~26mV
+            assert!(
+                (model.vt - 0.02585).abs() < 0.005,
+                "{name}: Vt should be ~26mV: {}",
+                model.vt
+            );
+
+            // Early voltage should be positive
+            assert!(model.va > 0.0, "{name}: Va should be positive");
+        }
+    }
+
     // ── Phase 3 helper ──────────────────────────────────────────────────
 
     fn correlation_f64(a: &[f64], b: &[f64]) -> f64 {
