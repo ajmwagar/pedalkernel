@@ -1321,6 +1321,200 @@ mod tests {
         }
     }
 
+    // ── Op-Amp (VCVS) model tests ─────────────────────────────────────
+
+    #[test]
+    fn opamp_unity_gain_buffer() {
+        // Unity-gain buffer: output should follow Vp
+        let model = OpAmpModel::tl072();
+        let mut root = OpAmpRoot::unity_gain(model);
+
+        // Set Vp and process
+        root.set_vp(1.0);
+        let rp = 10_000.0;
+        let a = 0.0;
+        let b = root.process(a, rp);
+
+        // For unity-gain buffer, output voltage should be ≈ Vp
+        let v = (a + b) / 2.0;
+        assert!(
+            (v - 1.0).abs() < 0.1,
+            "Unity-gain buffer should output ≈ Vp: v={v}, Vp=1.0"
+        );
+    }
+
+    #[test]
+    fn opamp_follows_input() {
+        // Unity-gain buffer should track Vp as it changes
+        let model = OpAmpModel::tl072();
+        let mut root = OpAmpRoot::unity_gain(model);
+        let rp = 10_000.0;
+
+        for vp in [0.0, 0.5, 1.0, -0.5, -1.0, 2.0, -2.0] {
+            root.set_vp(vp);
+            let b = root.process(0.0, rp);
+            let v = b / 2.0;
+            assert!(
+                (v - vp).abs() < 0.2,
+                "Should track Vp={vp}: got v={v}"
+            );
+        }
+    }
+
+    #[test]
+    fn opamp_output_saturation() {
+        // Output should saturate at ±Vmax
+        let model = OpAmpModel::tl072();
+        let mut root = OpAmpRoot::unity_gain(model);
+
+        // Try to drive output beyond rails
+        root.set_vp(100.0);
+        let b = root.process(0.0, 10_000.0);
+        let v = b / 2.0;
+
+        assert!(
+            v.abs() <= model.v_max * 1.1,
+            "Output should saturate at Vmax={}: got v={v}",
+            model.v_max
+        );
+    }
+
+    #[test]
+    fn opamp_slew_rate_limiting() {
+        // LM308 has very slow slew rate (0.3 V/µs)
+        // At 48kHz, max_dv = 0.3e6 / 48000 = 6.25 V/sample
+        let model = OpAmpModel::lm308();
+        let mut root = OpAmpRoot::new(model);
+        root.set_sample_rate(48000.0);
+        root.reset();
+
+        // Apply step from 0 to 10V
+        root.set_vp(10.0);
+        let b1 = root.process(0.0, 10_000.0);
+        let v1 = b1 / 2.0;
+
+        // First output should be slew-limited
+        let max_dv = 0.3e6 / 48000.0;
+        assert!(
+            v1 < max_dv * 2.0,
+            "LM308 should slew-limit: v1={v1}, max_dv={max_dv}"
+        );
+    }
+
+    #[test]
+    fn opamp_tl072_faster_than_lm308() {
+        // TL072 (13 V/µs) should reach target faster than LM308 (0.3 V/µs)
+        // At 48kHz:
+        // - LM308: max_dv = 0.3e6 / 48000 = 6.25 V/sample
+        // - TL072: max_dv = 13e6 / 48000 = 270 V/sample
+        //
+        // Both op-amps have v_max = 12V, so target will be clamped.
+        // After 1 sample from 0V:
+        // - LM308: 1 * 6.25 = 6.25V (slew limited)
+        // - TL072: immediately reaches 12V (270 V/sample >> 12V target)
+        let mut lm308 = OpAmpRoot::new(OpAmpModel::lm308());
+        let mut tl072 = OpAmpRoot::new(OpAmpModel::tl072());
+        lm308.set_sample_rate(48000.0);
+        tl072.set_sample_rate(48000.0);
+        lm308.reset();
+        tl072.reset();
+
+        // Apply step to max output (12V)
+        lm308.set_vp(12.0);
+        tl072.set_vp(12.0);
+
+        // Check after just 1 sample - this is where slew rate matters
+        let b1 = lm308.process(0.0, 10_000.0);
+        let b2 = tl072.process(0.0, 10_000.0);
+        let v_lm308 = b1 / 2.0;
+        let v_tl072 = b2 / 2.0;
+
+        // TL072 should reach target immediately
+        assert!(
+            (v_tl072 - 12.0).abs() < 0.1,
+            "TL072 should reach target: v_tl072={v_tl072}"
+        );
+
+        // LM308 should be slew-limited to ~6.25V
+        let expected_lm308 = 0.3e6 / 48000.0; // 6.25 V
+        assert!(
+            (v_lm308 - expected_lm308).abs() < 1.0,
+            "LM308 should be slew-limited: v_lm308={v_lm308}, expected≈{expected_lm308}"
+        );
+
+        // TL072 should definitely be faster
+        assert!(
+            v_tl072 > v_lm308,
+            "TL072 should be faster: tl072={v_tl072}, lm308={v_lm308}"
+        );
+    }
+
+    #[test]
+    fn opamp_wdf_convergence() {
+        // Op-amp should converge for all reasonable inputs
+        let model = OpAmpModel::jrc4558();
+        let mut root = OpAmpRoot::unity_gain(model);
+
+        for &vp in &[0.0, 0.1, 0.5, 1.0, -1.0, 5.0, -5.0, 10.0, -10.0] {
+            root.set_vp(vp);
+            for &a in &[0.0, 0.1, 1.0, -1.0, 10.0, -10.0] {
+                let b = root.process(a, 10_000.0);
+                assert!(
+                    b.is_finite(),
+                    "Op-amp should converge for Vp={vp}, a={a}: b={b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opamp_model_presets() {
+        // Verify model parameters are reasonable
+        let tl072 = OpAmpModel::tl072();
+        let lm308 = OpAmpModel::lm308();
+        let jrc4558 = OpAmpModel::jrc4558();
+        let ne5532 = OpAmpModel::ne5532();
+
+        // LM308 should have slowest slew rate
+        assert!(lm308.slew_rate < jrc4558.slew_rate);
+        assert!(lm308.slew_rate < tl072.slew_rate);
+
+        // TL072 should be faster than JRC4558
+        assert!(tl072.slew_rate > jrc4558.slew_rate);
+
+        // NE5532 should have high GBW
+        assert!(ne5532.gbw > jrc4558.gbw);
+
+        // All should have reasonable open-loop gain
+        assert!(tl072.open_loop_gain >= 100_000.0);
+        assert!(lm308.open_loop_gain >= 100_000.0);
+    }
+
+    #[test]
+    fn opamp_reset() {
+        let model = OpAmpModel::tl072();
+        let mut root = OpAmpRoot::new(model);
+
+        // Build up some state
+        root.set_vp(5.0);
+        for _ in 0..100 {
+            root.process(0.0, 10_000.0);
+        }
+
+        // Reset
+        root.reset();
+
+        // After reset, internal state should be zeroed
+        // A step from 0 should be slew-limited properly
+        root.set_vp(0.0);
+        let b = root.process(0.0, 10_000.0);
+        let v = b / 2.0;
+        assert!(
+            v.abs() < 0.01,
+            "After reset with Vp=0, output should be ~0: v={v}"
+        );
+    }
+
     // ── Phase 3 helper ──────────────────────────────────────────────────
 
     fn correlation_f64(a: &[f64], b: &[f64]) -> f64 {

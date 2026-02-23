@@ -3,10 +3,11 @@
 #
 # Variants:
 #   - pedalkernel (free/demo)
-#   - pedalkernel-pro (guitar + bass + amps + shared)
+#   - pedalkernel-pro (guitar + bass + amps + synth + shared)
 #   - pedalkernel-guitar (guitar + shared)
 #   - pedalkernel-bass (bass + shared)
 #   - pedalkernel-amps (amp models + shared)
+#   - pedalkernel-synth (VCO/VCF/VCA synthesizers)
 
 set -e
 
@@ -44,8 +45,11 @@ build_variant() {
 
     log "Building $display_name..."
 
-    # Clean previous build
+    # Clean previous build (thorough clean to avoid feature caching issues)
     cargo clean -p pedalkernel-vst 2>/dev/null || true
+    rm -rf "$ROOT_DIR/target/release/.fingerprint/pedalkernel-vst-"* 2>/dev/null || true
+    rm -rf "$ROOT_DIR/target/release/deps/libpedalkernel_vst"* 2>/dev/null || true
+    rm -rf "$ROOT_DIR/target/release/deps/pedalkernel_vst"* 2>/dev/null || true
 
     # Build
     if [ -n "$features" ]; then
@@ -102,8 +106,12 @@ while [[ $# -gt 0 ]]; do
             VARIANTS+=("amps")
             shift
             ;;
+        --synth)
+            VARIANTS+=("synth")
+            shift
+            ;;
         --all)
-            VARIANTS=("free" "pro" "guitar" "bass" "amps")
+            VARIANTS=("free" "pro" "guitar" "bass" "amps" "synth")
             shift
             ;;
         --link)
@@ -115,10 +123,11 @@ while [[ $# -gt 0 ]]; do
             echo
             echo "Options:"
             echo "  --free      Build free/demo version"
-            echo "  --pro       Build pro version (guitar + bass + amps + shared)"
+            echo "  --pro       Build pro version (guitar + bass + amps + synth + shared)"
             echo "  --guitar    Build guitar-only version"
             echo "  --bass      Build bass-only version"
             echo "  --amps      Build amp models version"
+            echo "  --synth     Build synth version (VCO/VCF/VCA)"
             echo "  --all       Build all variants"
             echo "  --link      Symlink built plugins to system plugin folders"
             echo "  -h, --help  Show this help"
@@ -161,6 +170,9 @@ for variant in "${VARIANTS[@]}"; do
             ;;
         amps)
             build_variant "pedalkernel-amps" "pro-amps" "PedalKernel Amps"
+            ;;
+        synth)
+            build_variant "pedalkernel-synth" "pro-synth" "PedalKernel Synth"
             ;;
     esac
 done

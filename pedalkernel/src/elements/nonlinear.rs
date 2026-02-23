@@ -1705,6 +1705,432 @@ impl WdfRoot for OtaRoot {
 }
 
 // ---------------------------------------------------------------------------
+// Op-Amp (Voltage-Controlled Voltage Source) Models
+// ---------------------------------------------------------------------------
+
+/// Op-amp model parameters for WDF integration.
+///
+/// Models the op-amp as a voltage-controlled voltage source:
+/// `Vout = Aol * (Vp - Vm)`
+///
+/// Where:
+/// - `Aol` is the open-loop DC gain (typically 100k-1M)
+/// - `Vp` is the non-inverting input voltage (set externally)
+/// - `Vm` is the inverting input voltage (often feedback-dependent)
+///
+/// The feedback network stays in the WDF tree as passive components.
+/// The op-amp root enforces the gain relationship between its differential
+/// input and output via Newton-Raphson iteration.
+///
+/// Non-idealities captured:
+/// - Finite open-loop gain
+/// - Output voltage saturation
+/// - Slew rate limiting (optional, applied post-convergence)
+/// - Gain-bandwidth product (for future frequency-dependent modeling)
+#[derive(Debug, Clone, Copy)]
+pub struct OpAmpModel {
+    /// Open-loop DC gain. TL072 ≈ 200k (106dB), LM308 ≈ 300k.
+    pub open_loop_gain: f64,
+    /// Gain-bandwidth product (Hz). TL072 ≈ 3MHz, LM308 ≈ 1MHz.
+    /// Used for frequency-dependent modeling (future).
+    pub gbw: f64,
+    /// Slew rate (V/µs). TL072 ≈ 13, LM308 ≈ 0.3.
+    pub slew_rate: f64,
+    /// Maximum output voltage swing (V, single-sided from Vcc/2).
+    /// Typically Vcc/2 - 1.5V for rail-to-rail, less for others.
+    pub v_max: f64,
+}
+
+impl OpAmpModel {
+    /// TL072 — JFET-input dual op-amp.
+    ///
+    /// The modern standard for guitar pedals. Fast slew rate (13 V/µs),
+    /// low noise, high input impedance. Used in Klon Centaur, Phase 90,
+    /// and countless modern designs.
+    pub fn tl072() -> Self {
+        Self {
+            open_loop_gain: 200_000.0, // 106 dB
+            gbw: 3e6,                   // 3 MHz
+            slew_rate: 13.0,            // 13 V/µs
+            v_max: 12.0,                // ±12V swing at ±15V supply
+        }
+    }
+
+    /// TL082 — JFET-input dual op-amp (TL072 variant).
+    ///
+    /// Similar to TL072 but slightly different specs. Used interchangeably
+    /// in many designs.
+    pub fn tl082() -> Self {
+        Self {
+            open_loop_gain: 200_000.0,
+            gbw: 4e6,                   // 4 MHz (slightly faster)
+            slew_rate: 13.0,
+            v_max: 12.0,
+        }
+    }
+
+    /// LM308 — The RAT's secret weapon.
+    ///
+    /// Very slow slew rate (0.3 V/µs) creates the distinctive compression
+    /// and "sag" character of the ProCo RAT. The slow slew rate rounds off
+    /// transients, creating a smoother, more compressed distortion.
+    pub fn lm308() -> Self {
+        Self {
+            open_loop_gain: 300_000.0, // 110 dB
+            gbw: 1e6,                   // 1 MHz
+            slew_rate: 0.3,             // 0.3 V/µs — THE key to RAT tone
+            v_max: 12.0,
+        }
+    }
+
+    /// LM741 — The classic vintage op-amp.
+    ///
+    /// Slow and noisy by modern standards, but has a characteristic sound.
+    /// Used in early Big Muff Pi and some vintage designs.
+    pub fn lm741() -> Self {
+        Self {
+            open_loop_gain: 200_000.0,
+            gbw: 1e6,
+            slew_rate: 0.5,             // Slow
+            v_max: 12.0,
+        }
+    }
+
+    /// JRC4558 — The Tube Screamer's heart.
+    ///
+    /// Medium slew rate (1.7 V/µs) contributes to the Tube Screamer's
+    /// warm, slightly compressed midrange. The JRC (Japan Radio Company)
+    /// 4558D is the legendary variant.
+    pub fn jrc4558() -> Self {
+        Self {
+            open_loop_gain: 100_000.0, // 100 dB
+            gbw: 3e6,                   // 3 MHz
+            slew_rate: 1.7,             // Moderate
+            v_max: 12.0,
+        }
+    }
+
+    /// RC4558 — Common 4558 variant.
+    ///
+    /// Texas Instruments version of the 4558, used in many TS clones.
+    /// Very similar to JRC4558 but some players hear subtle differences.
+    pub fn rc4558() -> Self {
+        Self {
+            open_loop_gain: 100_000.0,
+            gbw: 3e6,
+            slew_rate: 1.5,
+            v_max: 12.0,
+        }
+    }
+
+    /// NE5532 — Studio-grade low-noise op-amp.
+    ///
+    /// Very fast, very clean. Used in high-end effects and studio gear.
+    /// The "transparent" choice when you don't want op-amp coloration.
+    pub fn ne5532() -> Self {
+        Self {
+            open_loop_gain: 100_000.0,
+            gbw: 10e6,                  // 10 MHz
+            slew_rate: 9.0,             // Fast
+            v_max: 12.0,
+        }
+    }
+
+    /// OP07 — Precision op-amp.
+    ///
+    /// Very low offset voltage and drift. Used in some boutique designs
+    /// where DC accuracy matters.
+    pub fn op07() -> Self {
+        Self {
+            open_loop_gain: 400_000.0, // 112 dB
+            gbw: 0.6e6,                 // 600 kHz
+            slew_rate: 0.3,             // Slow
+            v_max: 12.0,
+        }
+    }
+
+    /// Generic op-amp with typical values.
+    ///
+    /// Use when the specific op-amp type doesn't matter or isn't specified.
+    pub fn generic() -> Self {
+        Self {
+            open_loop_gain: 100_000.0,
+            gbw: 1e6,
+            slew_rate: 1.0,
+            v_max: 12.0,
+        }
+    }
+
+    /// Convert from DSL OpAmpType to runtime OpAmpModel.
+    pub fn from_opamp_type(ot: &crate::dsl::OpAmpType) -> Self {
+        use crate::dsl::OpAmpType;
+        match ot {
+            OpAmpType::Generic => Self::generic(),
+            OpAmpType::Tl072 => Self::tl072(),
+            OpAmpType::Tl082 => Self::tl082(),
+            OpAmpType::Jrc4558 => Self::jrc4558(),
+            OpAmpType::Rc4558 => Self::rc4558(),
+            OpAmpType::Lm308 => Self::lm308(),
+            OpAmpType::Lm741 => Self::lm741(),
+            OpAmpType::Ne5532 => Self::ne5532(),
+            OpAmpType::Op07 => Self::op07(),
+            // OTAs (CA3080) are handled separately as OtaRoot, not OpAmpRoot
+            OpAmpType::Ca3080 => Self::generic(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Op-Amp Root (VCVS WDF Element)
+// ---------------------------------------------------------------------------
+
+/// Op-amp nonlinear root for WDF trees.
+///
+/// Models the op-amp as a voltage-controlled voltage source:
+/// `Vout = Aol * (Vp - Vm)`
+///
+/// For a unity-gain buffer (voltage follower), Vm = Vout (direct feedback),
+/// which creates the familiar virtual short between inputs. The Newton-Raphson
+/// solver finds the output voltage that satisfies both the op-amp equation
+/// and the WDF constraint.
+///
+/// **Usage in Phase 90 all-pass stages:**
+/// Each op-amp is configured as a unity-gain buffer (neg tied to out).
+/// Set `vp` to the signal at the positive input each sample, and the
+/// root will produce the buffered output.
+///
+/// **Feedback configurations:**
+/// - Unity-gain (voltage follower): `feedback_ratio = 1.0`, output follows Vp
+/// - Inverting amp: `feedback_ratio = Rf/(Rf+Rin)`, Vm depends on output
+/// - Non-inverting amp: similar, but Vp receives the signal
+///
+/// The feedback network components (resistors, capacitors) remain in the
+/// WDF tree — this root just enforces the op-amp gain relationship.
+#[derive(Debug, Clone, Copy)]
+pub struct OpAmpRoot {
+    pub model: OpAmpModel,
+    /// Non-inverting input voltage (set externally each sample).
+    vp: f64,
+    /// Feedback ratio: 0.0 = no feedback, 1.0 = unity-gain buffer.
+    /// Vm = vm_external * (1 - fb_ratio) + v_out * fb_ratio
+    feedback_ratio: f64,
+    /// External voltage at inverting input (for non-feedback path).
+    vm_external: f64,
+    /// Previous output voltage (for slew rate limiting).
+    prev_out: f64,
+    /// Sample rate (needed for slew rate limiting).
+    sample_rate: f64,
+    /// Maximum Newton-Raphson iterations (bounded for RT safety).
+    max_iter: usize,
+    /// Convergence tolerance.
+    tolerance: f64,
+}
+
+impl OpAmpRoot {
+    /// Create a new op-amp root with the given model.
+    ///
+    /// Default configuration: unity-gain buffer (feedback_ratio = 1.0).
+    pub fn new(model: OpAmpModel) -> Self {
+        Self {
+            model,
+            vp: 0.0,
+            feedback_ratio: 1.0, // Unity-gain buffer by default
+            vm_external: 0.0,
+            prev_out: 0.0,
+            sample_rate: 48000.0,
+            max_iter: 16,
+            tolerance: 1e-9,
+        }
+    }
+
+    /// Create a unity-gain buffer (voltage follower).
+    ///
+    /// This is the most common op-amp configuration in guitar pedals.
+    /// The output directly follows the non-inverting input.
+    pub fn unity_gain(model: OpAmpModel) -> Self {
+        let mut root = Self::new(model);
+        root.feedback_ratio = 1.0;
+        root
+    }
+
+    /// Set the non-inverting input voltage.
+    ///
+    /// Call this each sample before `process()` to set the signal
+    /// that the op-amp is buffering/amplifying.
+    #[inline]
+    pub fn set_vp(&mut self, vp: f64) {
+        self.vp = vp;
+    }
+
+    /// Get the current non-inverting input voltage.
+    #[inline]
+    pub fn vp(&self) -> f64 {
+        self.vp
+    }
+
+    /// Configure the feedback topology.
+    ///
+    /// - `ratio = 1.0`: Unity-gain buffer (Vm = Vout)
+    /// - `ratio = 0.5`: 2x non-inverting gain
+    /// - `ratio = R2/(R1+R2)`: General non-inverting amp
+    ///
+    /// For inverting configurations, set `vm_external` to the input signal
+    /// and `ratio` to the feedback divider ratio.
+    #[inline]
+    pub fn set_feedback(&mut self, ratio: f64, vm_external: f64) {
+        self.feedback_ratio = ratio.clamp(0.0, 1.0);
+        self.vm_external = vm_external;
+    }
+
+    /// Set the sample rate (for slew rate limiting).
+    #[inline]
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    /// Compute the inverting input voltage as a function of output.
+    ///
+    /// Vm = vm_external * (1 - fb_ratio) + v_out * fb_ratio
+    ///
+    /// For unity-gain buffer: Vm = v_out
+    /// For inverting amp: Vm depends on both external input and output
+    #[inline]
+    fn vm(&self, v_out: f64) -> f64 {
+        self.vm_external * (1.0 - self.feedback_ratio) + v_out * self.feedback_ratio
+    }
+
+    /// Derivative of Vm with respect to Vout.
+    ///
+    /// This is needed for Newton-Raphson: dVm/dVout = feedback_ratio
+    #[inline]
+    fn dvm_dv(&self) -> f64 {
+        self.feedback_ratio
+    }
+
+    /// Apply slew rate limiting to the output.
+    ///
+    /// Real op-amps have a maximum rate of voltage change (dV/dt).
+    /// When the output tries to change faster than this, it "slews"
+    /// at the maximum rate, creating the compression and warmth
+    /// characteristic of slow op-amps like the LM308.
+    #[inline]
+    fn apply_slew_limit(&mut self, v: f64) -> f64 {
+        // Maximum voltage change per sample: slew_rate * (1e6 / sample_rate)
+        let max_dv = self.model.slew_rate * 1e6 / self.sample_rate;
+        let dv = v - self.prev_out;
+        let limited = if dv > max_dv {
+            self.prev_out + max_dv
+        } else if dv < -max_dv {
+            self.prev_out - max_dv
+        } else {
+            v
+        };
+        self.prev_out = limited;
+        limited
+    }
+
+    /// Reset internal state (call on audio restart).
+    pub fn reset(&mut self) {
+        self.prev_out = 0.0;
+        self.vp = 0.0;
+        self.vm_external = 0.0;
+    }
+}
+
+impl WdfRoot for OpAmpRoot {
+    /// Compute the reflected wave from incident wave `a` and port resistance `rp`.
+    ///
+    /// The op-amp is modeled as a voltage-controlled voltage source:
+    /// `Vout = Aol * (Vp - Vm)`
+    ///
+    /// For a unity-gain buffer (Vm = Vout):
+    /// `Vout = Aol * (Vp - Vout)`
+    /// `Vout * (1 + Aol) = Aol * Vp`
+    /// `Vout = Vp * Aol / (1 + Aol) ≈ Vp` for large Aol
+    ///
+    /// The Newton-Raphson solver finds the output voltage `v` that satisfies
+    /// both the op-amp equation and the WDF constraint:
+    /// `f(v) = a - 2*v - 2*Rp*i = 0`
+    ///
+    /// where `i` is the output current, modeled as the error between
+    /// actual and ideal output divided by a small effective output resistance.
+    #[inline]
+    fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let aol = self.model.open_loop_gain;
+        let v_max = self.model.v_max;
+
+        // Initial guess: for unity-gain buffer, output ≈ Vp
+        // For other configurations, start near the linear approximation
+        let mut v = if self.feedback_ratio > 0.5 {
+            self.vp
+        } else {
+            0.5 * a
+        };
+
+        for _ in 0..self.max_iter {
+            let vm = self.vm(v);
+            let delta = self.vp - vm; // Differential input voltage
+            let ddelta_dv = -self.dvm_dv(); // d(delta)/dv = -dVm/dv
+
+            // Ideal op-amp output: Vout = Aol * delta, clamped to supply rails
+            let v_ideal = (aol * delta).clamp(-v_max, v_max);
+
+            // Model the op-amp output as trying to reach v_ideal.
+            // The "current" represents how the op-amp drives toward ideal:
+            // i = (v - v_ideal) / R_out, where R_out is small.
+            //
+            // But for the WDF constraint, we need to express i in terms
+            // of the port variables. For high open-loop gain, the op-amp
+            // acts nearly as a voltage source at v_ideal.
+            //
+            // Effective output conductance: g_out = Aol * |dVm/dv| / R_eff
+            // For unity-gain buffer: g_out = Aol (very high conductance = low impedance)
+
+            // For numerical stability with finite Aol, model output as:
+            // i = g_m * (v_ideal - v) where g_m is a transconductance
+            // This gives the current the op-amp can supply to reach ideal.
+            let r_out_eff = rp / (aol * self.feedback_ratio.max(0.001)); // Effective output R
+            let i_out = (v_ideal - v) / r_out_eff.max(0.001);
+
+            // Derivative: di/dv = -1/R_out_eff + (Aol * ddelta_dv * in_linear) / R_out_eff
+            let in_linear_region = (aol * delta).abs() < v_max;
+            let di_dv = if in_linear_region {
+                (-1.0 + aol * ddelta_dv) / r_out_eff.max(0.001)
+            } else {
+                -1.0 / r_out_eff.max(0.001) // Saturated: di/dv = -1/Rout
+            };
+
+            // WDF constraint: f(v) = a - 2*v - 2*Rp*i = 0
+            let f = a - 2.0 * v - 2.0 * rp * i_out;
+            let fp = -2.0 - 2.0 * rp * di_dv;
+
+            if fp.abs() < 1e-15 {
+                break;
+            }
+
+            let step = f / fp;
+            v -= step;
+
+            // Clamp to reasonable range
+            v = v.clamp(-v_max * 1.1, v_max * 1.1);
+
+            if step.abs() < self.tolerance {
+                break;
+            }
+        }
+
+        // Apply output saturation (hard clip at rails)
+        v = v.clamp(-v_max, v_max);
+
+        // Apply slew rate limiting
+        v = self.apply_slew_limit(v);
+
+        // Return reflected wave: b = 2*v - a
+        2.0 * v - a
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BBD (Bucket-Brigade Device) Delay Line
 // ---------------------------------------------------------------------------
 

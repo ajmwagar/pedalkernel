@@ -18,6 +18,7 @@ use nih_plug::prelude::*;
 use pedalkernel::board::parse_board_file;
 use pedalkernel::compiler::{compile_pedal, CompiledPedal};
 use pedalkernel::dsl;
+use pedalkernel::elements::SynthProcessor;
 use pedalkernel::pedalboard::PedalboardProcessor;
 use pedalkernel::pedals::Delay;
 use pedalkernel::PedalProcessor;
@@ -45,13 +46,15 @@ const EMBEDDED_SOURCES: &[&str] = &[
 // - overdrive/, wah/, fuzz/ → PRO_GUITAR_PEDALS
 // - bass/ → PRO_BASS_PEDALS
 // - amp/ → PRO_AMP_PEDALS
+// - synth/ → PRO_SYNTH_PEDALS
 // - compressor/, chorus/, phaser/, tremolo/, delay/, reverb/ → PRO_SHARED_PEDALS
 // - Root-level .pedal files → PRO_SHARED_PEDALS
 //
-// `pro-pedals` = guitar + bass + amps + shared (the complete Pro bundle).
+// `pro-pedals` = guitar + bass + amps + synth + shared (the complete Pro bundle).
 // `pro-guitar` = guitar + shared.
 // `pro-bass`   = bass + shared.
-// `pro-amps`   = amps + shared.
+// `pro-amps`   = amps only (standalone amp modeler).
+// `pro-synth`  = synth only (VCO/VCF/VCA-based instruments).
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Include auto-generated pedal lists from build.rs
@@ -115,6 +118,8 @@ enum PedalEngine {
     Delay(Delay),
     /// A pedalboard (signal chain of multiple pedals from a `.board` file).
     Board(PedalboardProcessor),
+    /// A synthesizer voice (VCO + VCF + VCA + ADSR).
+    Synth(SynthProcessor),
 }
 
 impl PedalEngine {
@@ -123,6 +128,12 @@ impl PedalEngine {
             Self::Compiled(p) => p.process(input),
             Self::Delay(d) => d.process(input),
             Self::Board(b) => b.process(input),
+            Self::Synth(s) => {
+                // Synth generates its own audio, input is ignored (or can be used for external audio)
+                let synth_out = s.process();
+                // Mix synth output with processed input for hybrid mode
+                synth_out + s.process_audio(input) * 0.0 // Pure synth mode for now
+            }
         }
     }
 
@@ -131,6 +142,7 @@ impl PedalEngine {
             Self::Compiled(p) => p.set_sample_rate(rate),
             Self::Delay(d) => d.set_sample_rate(rate),
             Self::Board(b) => b.set_sample_rate(rate),
+            Self::Synth(s) => s.set_sample_rate(rate),
         }
     }
 
@@ -139,8 +151,25 @@ impl PedalEngine {
             Self::Compiled(p) => p.reset(),
             Self::Delay(d) => d.reset(),
             Self::Board(b) => b.reset(),
+            Self::Synth(s) => s.reset(),
         }
     }
+
+    /// Handle MIDI note on event (only affects Synth engines).
+    fn note_on(&mut self, note: u8, velocity: u8) {
+        if let Self::Synth(s) = self {
+            s.note_on(note, velocity);
+        }
+    }
+
+    /// Handle MIDI note off event (only affects Synth engines).
+    fn note_off(&mut self, note: u8) {
+        let _ = note; // Note number not needed for monophonic
+        if let Self::Synth(s) = self {
+            s.note_off();
+        }
+    }
+
 }
 
 /// Build a board from an embedded source string and a pedal-path → source mapping.
@@ -189,6 +218,31 @@ fn load_pedal_source(src: &str, sample_rate: f64) -> Option<(PedalMeta, PedalEng
         labels,
     };
     Some((meta, PedalEngine::Compiled(compiled)))
+}
+
+/// Load a synth patch as a SynthProcessor.
+///
+/// For synth patches, we use a dedicated SynthProcessor that handles
+/// MIDI input and generates audio via VCO → VCF → VCA → ADSR.
+#[cfg(feature = "pro-synth")]
+fn load_synth_source(src: &str, sample_rate: f64) -> Option<(PedalMeta, PedalEngine)> {
+    let def = dsl::parse_pedal_file(src).ok()?;
+
+    // Create a SynthProcessor for synth patches
+    let synth = SynthProcessor::new(sample_rate);
+
+    // Map controls sequentially to knob slots (up to NUM_KNOBS).
+    // Read labels from the pedal file just like regular pedals.
+    let mut labels: [Option<String>; NUM_KNOBS] = Default::default();
+    for (i, ctrl) in def.controls.iter().take(NUM_KNOBS).enumerate() {
+        labels[i] = Some(ctrl.label.clone());
+    }
+
+    let meta = PedalMeta {
+        name: def.name.clone(),
+        labels,
+    };
+    Some((meta, PedalEngine::Synth(synth)))
 }
 
 /// Resolve the directory to scan for user `.pedal` files.
@@ -408,8 +462,18 @@ impl Default for PedalKernelPlugin {
             }
         }
 
-        // 1e. Pro shared pedals (included in guitar, bass, and amps variants).
-        #[cfg(any(feature = "pro-guitar", feature = "pro-bass", feature = "pro-amps"))]
+        // 1e. Pro synth patches (VCO/VCF/VCA-based instruments).
+        // Uses SynthProcessor which handles MIDI input and generates audio.
+        #[cfg(feature = "pro-synth")]
+        for src in PRO_SYNTH_PEDALS {
+            if let Some((m, e)) = load_synth_source(src, sr) {
+                meta_list.push(m);
+                engines.push(e);
+            }
+        }
+
+        // 1f. Pro shared pedals (included in guitar and bass variants only).
+        #[cfg(any(feature = "pro-guitar", feature = "pro-bass"))]
         for src in PRO_SHARED_PEDALS {
             if let Some((m, e)) = load_pedal_source(src, sr) {
                 meta_list.push(m);
@@ -491,14 +555,18 @@ impl Default for PedalKernelPlugin {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl Plugin for PedalKernelPlugin {
-    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
+    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass", feature = "pro-synth", feature = "pro-amps")))]
     const NAME: &'static str = "PedalKernel";
     #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
     const NAME: &'static str = "PedalKernel Pro";
-    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass"), not(feature = "pro-synth")))]
     const NAME: &'static str = "PedalKernel Pro Guitar";
-    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar"), not(feature = "pro-synth")))]
     const NAME: &'static str = "PedalKernel Pro Bass";
+    #[cfg(all(feature = "pro-amps", not(feature = "pro-guitar"), not(feature = "pro-bass"), not(feature = "pro-synth")))]
+    const NAME: &'static str = "PedalKernel Amps";
+    #[cfg(all(feature = "pro-synth", not(feature = "pro-guitar"), not(feature = "pro-bass"), not(feature = "pro-amps")))]
+    const NAME: &'static str = "PedalKernel Synth";
 
     const VENDOR: &'static str = "Avery Wagar";
     const URL: &'static str = "https://github.com/ajmwagar/pedalkernel";
@@ -519,6 +587,12 @@ impl Plugin for PedalKernelPlugin {
             ..AudioIOLayout::const_default()
         },
     ];
+
+    // Enable MIDI input for synth variant
+    #[cfg(feature = "pro-synth")]
+    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
+    #[cfg(not(feature = "pro-synth"))]
+    const MIDI_INPUT: MidiConfig = MidiConfig::None;
 
     type SysExMessage = ();
     type BackgroundTask = ();
@@ -550,12 +624,34 @@ impl Plugin for PedalKernelPlugin {
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let idx = self.params.pedal_type.value() as usize;
         self.pedal_indicator.store(idx as u8, Ordering::Relaxed);
 
         let labels = self.meta.get(idx).map(|m| &m.labels);
+
+        // Process MIDI events (for synth variant)
+        #[cfg(feature = "pro-synth")]
+        {
+            while let Some(event) = context.next_event() {
+                if let Some(engine) = self.engines.get_mut(idx) {
+                    match event {
+                        NoteEvent::NoteOn { note, velocity, .. } => {
+                            // Convert velocity from 0-1 float to 0-127
+                            let vel_u8 = (velocity * 127.0) as u8;
+                            engine.note_on(note, vel_u8);
+                        }
+                        NoteEvent::NoteOff { note, .. } => {
+                            engine.note_off(note);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "pro-synth"))]
+        let _ = context;
 
         for channel_samples in buffer.iter_samples() {
             // Read smoothed knob values (per-sample for zipper-free automation)
@@ -590,6 +686,16 @@ impl Plugin for PedalKernelPlugin {
                         // Board knob overrides are baked in at load time;
                         // DAW knobs are inactive for board entries.
                     }
+                    PedalEngine::Synth(synth) => {
+                        // Route knobs using labels from the pedal file
+                        if let Some(labels) = labels {
+                            for (slot, value) in knobs.iter().enumerate() {
+                                if let Some(ref label) = labels[slot] {
+                                    synth.set_control(label, *value);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Process each channel through the active pedal
@@ -610,37 +716,49 @@ impl Plugin for PedalKernelPlugin {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl Vst3Plugin for PedalKernelPlugin {
-    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
+    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass", feature = "pro-synth", feature = "pro-amps")))]
     const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlWdfV0_03\0";
     #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
     const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlProV0_03\0";
-    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass"), not(feature = "pro-synth")))]
     const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlGtrV0_03\0";
-    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar"), not(feature = "pro-synth")))]
     const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlBssV0_03\0";
+    #[cfg(all(feature = "pro-amps", not(feature = "pro-guitar"), not(feature = "pro-bass"), not(feature = "pro-synth")))]
+    const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlAmpV0_03\0";
+    #[cfg(all(feature = "pro-synth", not(feature = "pro-guitar"), not(feature = "pro-bass"), not(feature = "pro-amps")))]
+    const VST3_CLASS_ID: [u8; 16] = *b"PdlKrnlSynV0_03\0";
 
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
         &[Vst3SubCategory::Fx, Vst3SubCategory::Distortion];
 }
 
 impl ClapPlugin for PedalKernelPlugin {
-    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
+    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass", feature = "pro-synth", feature = "pro-amps")))]
     const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel";
     #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
     const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-pro";
-    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass"), not(feature = "pro-synth")))]
     const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-pro-guitar";
-    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar"), not(feature = "pro-synth")))]
     const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-pro-bass";
+    #[cfg(all(feature = "pro-amps", not(feature = "pro-guitar"), not(feature = "pro-bass"), not(feature = "pro-synth")))]
+    const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-amps";
+    #[cfg(all(feature = "pro-synth", not(feature = "pro-guitar"), not(feature = "pro-bass"), not(feature = "pro-amps")))]
+    const CLAP_ID: &'static str = "com.ajmwagar.pedalkernel-synth";
 
-    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass")))]
+    #[cfg(not(any(feature = "pro-guitar", feature = "pro-bass", feature = "pro-synth", feature = "pro-amps")))]
     const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based guitar pedal emulations");
     #[cfg(all(feature = "pro-guitar", feature = "pro-bass"))]
     const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based pedal emulations — Pro edition");
-    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass")))]
+    #[cfg(all(feature = "pro-guitar", not(feature = "pro-bass"), not(feature = "pro-synth")))]
     const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based guitar pedal emulations — Pro Guitar edition");
-    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar")))]
+    #[cfg(all(feature = "pro-bass", not(feature = "pro-guitar"), not(feature = "pro-synth")))]
     const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based bass pedal emulations — Pro Bass edition");
+    #[cfg(all(feature = "pro-amps", not(feature = "pro-guitar"), not(feature = "pro-bass"), not(feature = "pro-synth")))]
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("WDF-based tube amp emulations");
+    #[cfg(all(feature = "pro-synth", not(feature = "pro-guitar"), not(feature = "pro-bass"), not(feature = "pro-amps")))]
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("VCO/VCF/VCA-based analog synthesizer emulations");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[
