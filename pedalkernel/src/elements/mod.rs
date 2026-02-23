@@ -1627,7 +1627,7 @@ mod tests {
     fn bjt_beta_affects_base_current() {
         // Higher beta = less base current for same Ic
         let high_beta = BjtModel::n2n5089(); // beta ~700
-        let low_beta = BjtModel::oc44();      // beta ~50
+        let low_beta = BjtModel::n2n3904();  // beta ~150
 
         let mut root_high = BjtNpnRoot::new(high_beta);
         let mut root_low = BjtNpnRoot::new(low_beta);
@@ -1714,6 +1714,88 @@ mod tests {
             // Early voltage should be positive
             assert!(model.va > 0.0, "{name}: Va should be positive");
         }
+    }
+
+    #[test]
+    fn bjt_pnp_cutoff() {
+        // When Veb < 0, PNP is in cutoff - minimal current
+        let model = BjtModel::ac128();
+        let mut root = BjtPnpRoot::new(model);
+
+        root.set_veb(-0.5); // Reverse bias
+
+        let _b = root.process(10.0, 1000.0);
+        let ic = root.collector_current();
+
+        // Collector current should be negligible (but germanium has higher leakage)
+        assert!(
+            ic < 1e-4,
+            "In cutoff, PNP Ic should be small: ic={ic}"
+        );
+    }
+
+    #[test]
+    fn bjt_pnp_veb_affects_ic() {
+        // Higher Veb should produce higher Ic (exponential relationship)
+        let model = BjtModel::ac128();
+        let mut root = BjtPnpRoot::new(model);
+
+        // Low Veb
+        root.set_veb(0.15);
+        root.process(10.0, 1000.0);
+        let ic_low = root.collector_current();
+
+        // Higher Veb (germanium saturates at lower voltage)
+        root.set_veb(0.3);
+        root.process(10.0, 1000.0);
+        let ic_high = root.collector_current();
+
+        // Ic should increase with Veb
+        assert!(
+            ic_high > ic_low * 2.0,
+            "Higher Veb should produce higher Ic: ic_low={ic_low}, ic_high={ic_high}"
+        );
+    }
+
+    #[test]
+    fn bjt_pnp_wdf_convergence() {
+        // Verify PNP WDF root converges to valid solution
+        let model = BjtModel::ac128();
+        let mut root = BjtPnpRoot::new(model);
+
+        root.set_veb(0.25);
+
+        // Test with various input wave values
+        for a in [-10.0, 0.0, 5.0, 10.0, 20.0] {
+            let b = root.process(a, 1000.0);
+
+            // Result should be finite
+            assert!(b.is_finite(), "PNP WDF output should be finite for a={a}");
+
+            // Voltage should be recoverable
+            let v = (a + b) / 2.0;
+            assert!(v.is_finite(), "PNP voltage should be finite: v={v}");
+        }
+    }
+
+    #[test]
+    fn bjt_pnp_base_current() {
+        // Verify PNP base current tracking
+        let model = BjtModel::ac128();
+        let mut root = BjtPnpRoot::new(model);
+
+        root.set_veb(0.25);
+        root.process(10.0, 1000.0);
+
+        let ic = root.collector_current();
+        let ib = root.base_current();
+
+        // Base current should be Ic/beta
+        let expected_ib = ic / model.bf;
+        assert!(
+            (ib - expected_ib).abs() < 1e-9,
+            "PNP base current should be Ic/Bf: ib={ib}, expected={expected_ib}"
+        );
     }
 
     // ── Phase 3 helper ──────────────────────────────────────────────────
