@@ -972,6 +972,7 @@ mod pedalboard_plugin {
                 pedal_index: Arc::clone(&state.slots[0].pedal_index), // Default to slot 0 for single-pedal compat
                 pedal_names: pedal_names.clone(),
                 amp_names: state.amp_names.clone(),
+                preset_index: Arc::new(AtomicU8::new(0)),
                 knob_values: std::array::from_fn(|i| {
                     if i < KNOBS_PER_SLOT {
                         Arc::clone(&state.slots[0].knobs[i])
@@ -1084,8 +1085,24 @@ mod pedalboard_plugin {
             _aux: &mut AuxiliaryBuffers,
             _context: &mut impl ProcessContext<Self>,
         ) -> ProcessStatus {
-            // Read slot configurations directly from shared state (UI can modify these)
-            // This allows immediate response to UI changes
+            // Sync params → shared state (for DAW automation/host changes)
+            for slot in 0..NUM_SLOTS {
+                self.state.slots[slot].pedal_index.store(
+                    self.params.get_pedal_selector(slot).value() as u8, Ordering::Relaxed);
+                self.state.slots[slot].bypassed.store(
+                    self.params.get_bypass(slot).value(), Ordering::Relaxed);
+                let knobs = self.params.get_knobs(slot);
+                for k in 0..KNOBS_PER_SLOT {
+                    self.state.slots[slot].knobs[k].store(knobs[k].value(), Ordering::Relaxed);
+                }
+            }
+            self.state.amp.amp_index.store(self.params.amp_type.value() as u8, Ordering::Relaxed);
+            self.state.amp.bypassed.store(self.params.amp_bypass.value(), Ordering::Relaxed);
+            self.state.amp.knobs[0].store(self.params.amp_gain.value(), Ordering::Relaxed);
+            self.state.amp.knobs[1].store(self.params.amp_tone.value(), Ordering::Relaxed);
+            self.state.amp.knobs[2].store(self.params.amp_volume.value(), Ordering::Relaxed);
+
+            // Read slot configurations from shared state
             let slot_configs: [(usize, bool, [f64; KNOBS_PER_SLOT]); NUM_SLOTS] = std::array::from_fn(|slot| {
                 (
                     self.state.slots[slot].pedal_index.load(Ordering::Relaxed) as usize,

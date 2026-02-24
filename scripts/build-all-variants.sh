@@ -65,14 +65,16 @@ build_variant() {
         cargo xtask bundle pedalkernel-vst --release
     fi
 
-    # Copy to dist with unique name
+    # Copy to dist with unique name (remove existing first to ensure full overwrite)
     if [ -d "$BUNDLE_DIR/pedalkernel-vst.vst3" ]; then
-        cp -r "$BUNDLE_DIR/pedalkernel-vst.vst3" "$DIST_DIR/${name}.vst3"
+        rm -rf "$DIST_DIR/${name}.vst3"
+        cp -R "$BUNDLE_DIR/pedalkernel-vst.vst3" "$DIST_DIR/${name}.vst3"
         log "  -> $DIST_DIR/${name}.vst3"
     fi
 
     if [ -d "$BUNDLE_DIR/pedalkernel-vst.clap" ]; then
-        cp -r "$BUNDLE_DIR/pedalkernel-vst.clap" "$DIST_DIR/${name}.clap"
+        rm -rf "$DIST_DIR/${name}.clap"
+        cp -R "$BUNDLE_DIR/pedalkernel-vst.clap" "$DIST_DIR/${name}.clap"
         log "  -> $DIST_DIR/${name}.clap"
     fi
 
