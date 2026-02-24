@@ -14,10 +14,15 @@
 //! Unused knobs display "—".  Board entries use their baked-in overrides
 //! and show no active knobs.
 
+// Items are conditionally dead depending on which feature flags are active
+// (e.g. single-pedal vs pedalboard mode). Allow dead_code crate-wide.
+#![allow(dead_code)]
+
+#[cfg(feature = "pro-pedalboard")]
 use atomic_float::AtomicF32;
 use nih_plug::prelude::*;
 #[cfg(feature = "pro-ui")]
-use pedalkernel_ui::{PedalKernelEditor, PedalKernelEditorState, PedalKernelUiState, PedalVisuals};
+use pedalkernel_ui::{PedalKernelEditor, PedalKernelEditorState, PedalKernelUiState, ParamPtrs, PedalVisuals};
 use pedalkernel::board::parse_board_file;
 
 #[cfg(feature = "pro-pedalboard")]
@@ -627,12 +632,30 @@ impl Default for PedalKernelPlugin {
             .collect();
 
         #[cfg(feature = "pro-ui")]
+        let param_ptrs = {
+            use nih_plug::params::Param;
+            ParamPtrs {
+                pedal_type: Some(params.pedal_type.as_ptr()),
+                single_knobs: [
+                    Some(params.knob1.as_ptr()),
+                    Some(params.knob2.as_ptr()),
+                    Some(params.knob3.as_ptr()),
+                    Some(params.knob4.as_ptr()),
+                    Some(params.knob5.as_ptr()),
+                    Some(params.knob6.as_ptr()),
+                ],
+                ..Default::default()
+            }
+        };
+
+        #[cfg(feature = "pro-ui")]
         let ui_state = Arc::new(PedalKernelUiState {
             mode: pedalkernel_ui::EditorMode::SinglePedal,
             pedal_index: Arc::new(AtomicU8::new(0)),
             pedal_names: meta.iter().map(|m| m.name.clone()).collect(),
             knob_labels: Arc::new(std::sync::Mutex::new(initial_labels)),
             pedal_visuals,
+            param_ptrs,
             ..Default::default()
         });
 
@@ -784,6 +807,16 @@ impl Plugin for PedalKernelPlugin {
             for (i, v) in kv.iter().enumerate() {
                 self.ui_state.knob_values[i].store(*v, Ordering::Relaxed);
             }
+        }
+
+        // Check single-pedal bypass from UI
+        #[cfg(feature = "pro-ui")]
+        let bypassed = self.ui_state.bypassed.load(Ordering::Relaxed);
+        #[cfg(not(feature = "pro-ui"))]
+        let bypassed = false;
+
+        if bypassed {
+            return ProcessStatus::Normal;
         }
 
         for channel_samples in buffer.iter_samples() {
@@ -1065,6 +1098,27 @@ mod pedalboard_plugin {
 
             let editor_state = PedalKernelEditorState::new(1200, 600); // Wider for pedalboard
 
+            // Extract ParamPtr values for host notification from UI
+            let param_ptrs = {
+                use nih_plug::params::Param;
+                pedalkernel_ui::ParamPtrs {
+                    slot_pedals: std::array::from_fn(|s| Some(params.get_pedal_selector(s).as_ptr())),
+                    slot_bypasses: std::array::from_fn(|s| Some(params.get_bypass(s).as_ptr())),
+                    slot_knobs: std::array::from_fn(|s| {
+                        let knobs = params.get_knobs(s);
+                        std::array::from_fn(|k| Some(knobs[k].as_ptr()))
+                    }),
+                    amp_type: Some(params.amp_type.as_ptr()),
+                    amp_bypass: Some(params.amp_bypass.as_ptr()),
+                    amp_knobs: [
+                        Some(params.amp_gain.as_ptr()),
+                        Some(params.amp_tone.as_ptr()),
+                        Some(params.amp_volume.as_ptr()),
+                    ],
+                    ..Default::default()
+                }
+            };
+
             // Create UI state that shares the same atomics as PedalboardState
             // This ensures UI changes are reflected in audio processing and vice versa
             let pedal_visuals: Vec<pedalkernel_ui::PedalVisuals> = meta.iter()
@@ -1087,6 +1141,8 @@ mod pedalboard_plugin {
                 knob_labels: Arc::new(std::sync::Mutex::new([None, None, None, None, None, None])),
                 peak_meter: Arc::clone(&state.peak_meter),
                 pedal_visuals,
+                param_ptrs,
+                bypassed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 // Wire up all 6 slots with shared atomics
                 slots: std::array::from_fn(|slot| {
                     // Compute initial knob count for slot 0's default pedal
