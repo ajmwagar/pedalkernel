@@ -7,7 +7,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while1},
     character::complete::{char, multispace1, not_line_ending},
-    combinator::{opt, recognize, value},
+    combinator::{map, opt, recognize, value},
     multi::{many0, separated_list1},
     number::complete::double,
     sequence::{delimited, pair, preceded, tuple},
@@ -81,6 +81,10 @@ pub enum ComponentKind {
     Pmos(MosfetType),
     /// BBD (Bucket-Brigade Device) delay line
     Bbd(BbdType),
+    /// Neon bulb (NE-2, etc.) - used in relaxation oscillators and optocouplers.
+    /// Exhibits negative resistance: conducts when striking voltage reached,
+    /// extinguishes when voltage drops below maintaining voltage.
+    Neon(NeonType),
     // ── Synth-specific component types ──────────────────────────────────
     /// Voltage-Controlled Oscillator IC (CEM3340/AS3340/V3340).
     /// Generates sawtooth, triangle, and pulse waveforms with 1V/Oct tracking.
@@ -104,6 +108,20 @@ pub enum ComponentKind {
     /// Temperature-compensating resistor for exponential converters.
     /// Parameters: nominal resistance (Ω), tempco (ppm/°C).
     Tempco(f64, f64),
+    // ── Studio equipment component types ─────────────────────────────────
+    /// Audio transformer with turns ratio and primary inductance.
+    /// Used for impedance matching, isolation, and push-pull drive.
+    /// Terminals: pri_a, pri_b, sec_a, sec_b, (optional: pri_ct, sec_ct)
+    Transformer(TransformerConfig),
+    /// Capacitor with switchable values (for rotary switch frequency selection).
+    /// Values are selected by a linked RotarySwitch component.
+    CapSwitched(Vec<f64>),
+    /// Inductor with switchable values (for multi-tap inductors).
+    /// Values are selected by a linked RotarySwitch component.
+    InductorSwitched(Vec<f64>),
+    /// Rotary switch that controls one or more switched components.
+    /// Links to component IDs that have switchable values.
+    RotarySwitch(Vec<String>),
 }
 
 /// Op-amp types with different characteristics.
@@ -305,6 +323,8 @@ pub enum PentodeType {
     Ef86,
     /// EL84 / 6BQ5 - Power pentode, Vox AC15/AC30 output stage
     El84,
+    /// 6AQ5A - Beam power tube, used in Pultec MEQ-5 output stage
+    A6aq5a,
 }
 
 /// MOSFET types for enhancement-mode devices used in guitar pedals.
@@ -329,6 +349,60 @@ pub enum BbdType {
     Mn3007,
     /// MN3005 — 4096-stage long delay, Memory Man
     Mn3005,
+}
+
+/// Neon bulb types for relaxation oscillators and optocouplers.
+/// Neon bulbs exhibit negative resistance behavior:
+/// - Off until striking voltage is reached (~90V for NE-2)
+/// - Conduct and emit light until voltage drops below maintaining voltage (~60V)
+/// - Used in vintage tremolo/vibrato circuits (Fender, Wurlitzer)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NeonType {
+    /// NE-2 — Standard miniature neon indicator
+    /// Striking: ~90V, Maintaining: ~60V, Current: 0.3-2mA
+    #[default]
+    Ne2,
+    /// NE-51 — Higher current neon lamp
+    /// Striking: ~95V, Maintaining: ~65V, Current: 0.5-3mA
+    Ne51,
+    /// NE-83 — Lower striking voltage variant
+    /// Striking: ~65V, Maintaining: ~50V
+    Ne83,
+}
+
+impl NeonType {
+    /// Striking voltage - voltage at which the bulb ionizes and begins conducting
+    pub fn striking_voltage(&self) -> f64 {
+        match self {
+            NeonType::Ne2 => 90.0,
+            NeonType::Ne51 => 95.0,
+            NeonType::Ne83 => 65.0,
+        }
+    }
+
+    /// Maintaining voltage - voltage below which the bulb extinguishes
+    pub fn maintaining_voltage(&self) -> f64 {
+        match self {
+            NeonType::Ne2 => 60.0,
+            NeonType::Ne51 => 65.0,
+            NeonType::Ne83 => 50.0,
+        }
+    }
+
+    /// Typical operating current in Amps
+    pub fn typical_current(&self) -> f64 {
+        match self {
+            NeonType::Ne2 => 0.5e-3,   // 0.5mA
+            NeonType::Ne51 => 1.0e-3,  // 1mA
+            NeonType::Ne83 => 0.3e-3,  // 0.3mA
+        }
+    }
+
+    /// Whether this neon bulb emits enough light for optocoupler use
+    pub fn suitable_for_opto(&self) -> bool {
+        // All common neon types work with LDRs
+        true
+    }
 }
 
 // ── Synth-specific component type enums ─────────────────────────────────
@@ -393,6 +467,100 @@ pub enum MatchedTransistorType {
     That340,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Studio Equipment Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Transformer winding configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindingType {
+    /// Standard two-terminal winding
+    #[default]
+    Standard,
+    /// Center-tapped winding (adds .ct terminal)
+    CenterTap,
+    /// Push-pull primary (two halves with center tap for B+)
+    PushPull,
+}
+
+/// Audio transformer configuration.
+///
+/// Transformers are modeled with:
+/// - Turns ratio (affects impedance transformation by n²)
+/// - Primary inductance (determines low-frequency response)
+/// - Optional center taps for push-pull configurations
+/// - Parasitic elements (DCR, capacitance) for accurate HF response
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransformerConfig {
+    /// Turns ratio (primary:secondary). 1.0 = 1:1, 10.0 = 10:1 step-down
+    pub turns_ratio: f64,
+    /// Primary winding inductance in Henries
+    pub primary_inductance: f64,
+    /// Primary winding configuration
+    pub primary_type: WindingType,
+    /// Secondary winding configuration
+    pub secondary_type: WindingType,
+    /// DC resistance of primary winding (Ω), default 0
+    pub primary_dcr: f64,
+    /// DC resistance of secondary winding (Ω), default 0
+    pub secondary_dcr: f64,
+    /// Parasitic capacitance (F), default 0
+    pub capacitance: f64,
+    /// Coupling coefficient (0-1), default 0.99 for audio transformers
+    pub coupling: f64,
+}
+
+impl Default for TransformerConfig {
+    fn default() -> Self {
+        Self {
+            turns_ratio: 1.0,
+            primary_inductance: 1.0,
+            primary_type: WindingType::Standard,
+            secondary_type: WindingType::Standard,
+            primary_dcr: 0.0,
+            secondary_dcr: 0.0,
+            capacitance: 0.0,
+            coupling: 0.99,
+        }
+    }
+}
+
+impl TransformerConfig {
+    /// Create a simple transformer with turns ratio and inductance.
+    pub fn new(turns_ratio: f64, primary_inductance: f64) -> Self {
+        Self {
+            turns_ratio,
+            primary_inductance,
+            ..Default::default()
+        }
+    }
+
+    /// Create a center-tapped secondary transformer.
+    pub fn with_center_tap(mut self) -> Self {
+        self.secondary_type = WindingType::CenterTap;
+        self
+    }
+
+    /// Create a push-pull primary transformer.
+    pub fn with_push_pull_primary(mut self) -> Self {
+        self.primary_type = WindingType::PushPull;
+        self
+    }
+
+    /// Add DC resistance to windings.
+    pub fn with_dcr(mut self, primary: f64, secondary: f64) -> Self {
+        self.primary_dcr = primary;
+        self.secondary_dcr = secondary;
+        self
+    }
+
+    /// Add parasitic capacitance.
+    pub fn with_capacitance(mut self, cap: f64) -> Self {
+        self.capacitance = cap;
+        self
+    }
+}
+
 /// A net connection: `in -> C1.a` or `C1.b -> R1.a, D1.a`
 #[derive(Debug, Clone, PartialEq)]
 pub struct NetDef {
@@ -448,6 +616,10 @@ fn eng_suffix(input: &str) -> IResult<&str, f64> {
         value(1e3, tag("k")),
         value(1e6, tag("M")),
         value(1e-3, tag("m")), // milli – after 'M' to disambiguate
+        value(1.0, tag("H")),  // Henries (unit marker, no scaling)
+        value(1.0, tag("F")),  // Farads (unit marker, no scaling)
+        value(1.0, tag("Ω")),  // Ohms (unit marker, no scaling)
+        value(1.0, tag("R")),  // Ohms alternate notation
     ))(input)
 }
 
@@ -470,7 +642,19 @@ fn quoted_string(input: &str) -> IResult<&str, &str> {
 fn parse_resistor(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("resistor")(input)?;
     let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
     let (input, val) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Optional wattage rating (ignored for WDF, but allows parsing)
+    let (input, _wattage) = opt(tuple((
+        char(','),
+        ws_comments,
+        eng_value, // e.g., 2W or 0.5W
+        opt(char('W')),
+    )))(input)?;
+
+    let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
     Ok((input, ComponentKind::Resistor(val)))
 }
@@ -534,7 +718,18 @@ fn parse_zener(input: &str) -> IResult<&str, ComponentKind> {
 fn parse_pot(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("pot")(input)?;
     let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
     let (input, val) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Optional taper type: log, linear, audio (ignored for WDF, but allows parsing)
+    let (input, _taper) = opt(tuple((
+        char(','),
+        ws_comments,
+        alt((tag("log"), tag("linear"), tag("audio"))),
+    )))(input)?;
+
+    let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
     Ok((input, ComponentKind::Potentiometer(val)))
 }
@@ -673,6 +868,8 @@ fn pentode_type(input: &str) -> IResult<&str, PentodeType> {
     alt((
         value(PentodeType::Ef86, tag("ef86")),
         value(PentodeType::El84, tag("el84")),
+        value(PentodeType::A6aq5a, tag("6aq5a")),
+        value(PentodeType::A6aq5a, tag("6aq5")),
         // Alternative designations
         value(PentodeType::Ef86, tag("6267")),
         value(PentodeType::El84, tag("6bq5")),
@@ -727,6 +924,27 @@ fn parse_bbd(input: &str) -> IResult<&str, ComponentKind> {
     let (input, bt) = bbd_type(input)?;
     let (input, _) = char(')')(input)?;
     Ok((input, ComponentKind::Bbd(bt)))
+}
+
+fn neon_type(input: &str) -> IResult<&str, NeonType> {
+    alt((
+        value(NeonType::Ne2, alt((tag("ne2"), tag("ne-2"), tag("NE2"), tag("NE-2")))),
+        value(NeonType::Ne51, alt((tag("ne51"), tag("ne-51"), tag("NE51"), tag("NE-51")))),
+        value(NeonType::Ne83, alt((tag("ne83"), tag("ne-83"), tag("NE83"), tag("NE-83")))),
+    ))(input)
+}
+
+/// `neon()` or `neon(ne2)` — Neon bulb for relaxation oscillators.
+/// Used in vintage tremolo circuits (Fender Vibrato, Wurlitzer) paired with LDRs.
+fn parse_neon(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("neon")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    // Optional type - defaults to NE-2 if empty
+    let (input, nt) = opt(neon_type)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Neon(nt.unwrap_or_default())))
 }
 
 // ── Synth component parsers ─────────────────────────────────────────────
@@ -861,20 +1079,265 @@ fn parse_tempco(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Tempco(resistance, ppm)))
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Studio Equipment Parsers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parse winding type modifier: `ct` for center-tap, `pp` for push-pull
+/// Parse winding modifiers. Returns (winding_type, is_primary).
+/// ct = center-tap secondary, ct_primary = center-tap primary, pp = push-pull
+fn winding_modifier(input: &str) -> IResult<&str, WindingType> {
+    alt((
+        value(WindingType::CenterTap, tag("ct")),
+        value(WindingType::PushPull, tag("pp")),
+    ))(input)
+}
+
+/// Parse ct_primary specifically (center-tapped primary)
+fn winding_modifier_primary(input: &str) -> IResult<&str, WindingType> {
+    value(WindingType::CenterTap, tag("ct_primary"))(input)
+}
+
+/// `transformer(10:1, 2H)` — basic transformer
+/// `transformer(1:4, 2H, 75, 200p)` — with positional DCR and parasitic cap
+/// `transformer(1:1, 4H, ct)` — center-tapped secondary
+/// `transformer(1:1, 4H, pp, ct)` — push-pull primary, center-tapped secondary
+/// `transformer(10:1, 10H, 150, 300p, ct_primary)` — center-tapped primary
+/// `transformer(10:1, 2H, dcr=75, Cp=200p)` — with named parasitics
+///
+/// Positional syntax: transformer(ratio, inductance [, dcr] [, cap] [, winding_mod])
+/// Named syntax: transformer(ratio, inductance [, dcr=val] [, Cp=val] [, k=val])
+fn parse_transformer(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("transformer")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Parse turns ratio: "10:1" or "1:1" or just a number
+    let (input, ratio_num) = double(input)?;
+    let (input, ratio) = if let Ok((input, _)) = char::<&str, nom::error::Error<&str>>(':')(input) {
+        let (input, denom) = double(input)?;
+        (input, ratio_num / denom)
+    } else {
+        (input, ratio_num)
+    };
+
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Parse primary inductance
+    let (input, inductance) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Parse optional modifiers and named parameters
+    let mut config = TransformerConfig::new(ratio, inductance);
+    let mut positional_count = 0; // Track positional numeric args after inductance
+
+    // Try to parse additional comma-separated options
+    let mut remaining = input;
+    loop {
+        // Check for comma
+        if let Ok((input, _)) = tuple((ws_comments, char::<&str, nom::error::Error<&str>>(','), ws_comments))(remaining) {
+            remaining = input;
+
+            // Try ct_primary first (must come before ct to match longer tag)
+            if let Ok((input, wt)) = winding_modifier_primary(remaining) {
+                config.primary_type = wt;
+                remaining = input;
+                continue;
+            }
+
+            // Try other winding modifiers
+            if let Ok((input, wt)) = winding_modifier(remaining) {
+                // Determine if this is for primary or secondary based on context
+                // pp = push-pull primary, ct = center-tap secondary
+                if wt == WindingType::PushPull {
+                    config.primary_type = wt;
+                } else {
+                    // ct defaults to secondary unless already set
+                    if config.secondary_type == WindingType::Standard {
+                        config.secondary_type = wt;
+                    } else {
+                        config.primary_type = wt;
+                    }
+                }
+                remaining = input;
+                continue;
+            }
+
+            // Try named parameters: dcr=value, Cp=value, k=value
+            if let Ok((input, _)) = tag::<&str, &str, nom::error::Error<&str>>("dcr")(remaining) {
+                let (input, _) = ws_comments(input)?;
+                let (input, _) = char('=')(input)?;
+                let (input, _) = ws_comments(input)?;
+                let (input, dcr) = eng_value(input)?;
+                config.primary_dcr = dcr;
+                config.secondary_dcr = dcr; // Apply to both by default
+                remaining = input;
+                continue;
+            }
+
+            if let Ok((input, _)) = alt((
+                tag::<&str, &str, nom::error::Error<&str>>("Cp"),
+                tag("cp"),
+            ))(remaining) {
+                let (input, _) = ws_comments(input)?;
+                let (input, _) = char('=')(input)?;
+                let (input, _) = ws_comments(input)?;
+                let (input, cap) = eng_value(input)?;
+                config.capacitance = cap;
+                remaining = input;
+                continue;
+            }
+
+            if let Ok((input, _)) = tag::<&str, &str, nom::error::Error<&str>>("k")(remaining) {
+                let (input, _) = ws_comments(input)?;
+                let (input, _) = char('=')(input)?;
+                let (input, _) = ws_comments(input)?;
+                let (input, k) = double(input)?;
+                config.coupling = k;
+                remaining = input;
+                continue;
+            }
+
+            // Try positional numeric values (DCR, then cap)
+            if let Ok((input, val)) = eng_value(remaining) {
+                match positional_count {
+                    0 => {
+                        // First positional = DCR
+                        config.primary_dcr = val;
+                        config.secondary_dcr = val;
+                    }
+                    1 => {
+                        // Second positional = parasitic capacitance
+                        config.capacitance = val;
+                    }
+                    _ => {
+                        // Too many positional args, stop
+                        break;
+                    }
+                }
+                positional_count += 1;
+                remaining = input;
+                continue;
+            }
+
+            // Unknown parameter, break
+            break;
+        } else {
+            break;
+        }
+    }
+
+    let (input, _) = ws_comments(remaining)?;
+    let (input, _) = char(')')(input)?;
+
+    Ok((input, ComponentKind::Transformer(config)))
+}
+
+/// `cap_switched([1.5u, 220n, 68n, 27n])` — capacitor with switchable values
+fn parse_cap_switched(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("cap_switched")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Optional opening bracket
+    let (input, has_bracket) = opt(char('['))(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Parse comma-separated values
+    let (input, values) = separated_list1(
+        tuple((ws_comments, char(','), ws_comments)),
+        eng_value,
+    )(input)?;
+
+    let (input, _) = ws_comments(input)?;
+
+    // Closing bracket if we had opening
+    let input = if has_bracket.is_some() {
+        let (input, _) = char(']')(input)?;
+        let (input, _) = ws_comments(input)?;
+        input
+    } else {
+        input
+    };
+
+    let (input, _) = char(')')(input)?;
+
+    Ok((input, ComponentKind::CapSwitched(values)))
+}
+
+/// `inductor_switched(27m, 47m, 82m, 150m)` — inductor with switchable values (multi-tap)
+/// `inductor_switched([27m, 47m, 82m])` — with optional brackets
+fn parse_inductor_switched(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("inductor_switched")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Optional opening bracket
+    let (input, has_bracket) = opt(char('['))(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Parse comma-separated values
+    let (input, values) = separated_list1(
+        tuple((ws_comments, char(','), ws_comments)),
+        eng_value,
+    )(input)?;
+
+    let (input, _) = ws_comments(input)?;
+
+    // Closing bracket if we had opening
+    let input = if has_bracket.is_some() {
+        let (input, _) = char(']')(input)?;
+        let (input, _) = ws_comments(input)?;
+        input
+    } else {
+        input
+    };
+
+    let (input, _) = char(')')(input)?;
+
+    Ok((input, ComponentKind::InductorSwitched(values)))
+}
+
+/// `rotary("20Hz", "30Hz", "60Hz", "100Hz")` — rotary switch with position labels
+/// `rotary(pos1, pos2, pos3)` — rotary switch with identifier position labels
+fn parse_rotary_switch(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("rotary")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Parse comma-separated position labels (quoted strings or identifiers)
+    let (input, labels) = separated_list1(
+        tuple((ws_comments, char(','), ws_comments)),
+        alt((
+            map(quoted_string, String::from),
+            map(identifier, String::from),
+        )),
+    )(input)?;
+
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+
+    Ok((input, ComponentKind::RotarySwitch(labels)))
+}
+
 fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
     alt((
         alt((
             parse_resistor,
+            parse_cap_switched, // must come before parse_cap
             parse_cap,
+            parse_inductor_switched, // must come before parse_inductor
             parse_inductor,
             parse_diode_pair, // must come before parse_diode
             parse_diode,
             parse_zener, // zener diode with voltage parameter
             parse_pot,
-            parse_npn,
-            parse_pnp,
         )),
         alt((
+            parse_npn,
+            parse_pnp,
             parse_opamp,
             parse_njfet,
             parse_pjfet,
@@ -883,19 +1346,24 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_lfo,
             parse_triode,
             parse_pentode,
+        )),
+        alt((
             parse_nmos,
             parse_pmos,
             parse_bbd,
-        )),
-        alt((
+            parse_neon,
             parse_vco,
             parse_vcf,
             parse_vca,
             parse_comparator,
             parse_analog_switch,
             parse_matched_npn, // must come before parse_matched_pnp
+        )),
+        alt((
             parse_matched_pnp,
             parse_tempco,
+            parse_transformer,
+            parse_rotary_switch,
         )),
     ))(input)
 }
@@ -932,23 +1400,29 @@ const RESERVED_NODES: &[&str] = &[
 
 fn pin(input: &str) -> IResult<&str, Pin> {
     let (input, first) = identifier(input)?;
-    let (input, dot_pin) = opt(preceded(char('.'), identifier))(input)?;
-    match dot_pin {
-        Some(p) => Ok((
+
+    // Parse all dot-separated parts: T1.primary.a -> ["primary", "a"]
+    let (input, rest_parts) = many0(preceded(char('.'), identifier))(input)?;
+
+    if rest_parts.is_empty() {
+        // No dots — reserved node or bare component
+        if RESERVED_NODES.contains(&first) {
+            Ok((input, Pin::Reserved(first.to_string())))
+        } else {
+            // Bare component name treated as reserved-style node
+            Ok((input, Pin::Reserved(first.to_string())))
+        }
+    } else {
+        // Has dots — component + pin (pin may include sub-parts)
+        // T1.primary.a -> component="T1", pin="primary.a"
+        let pin_name = rest_parts.join(".");
+        Ok((
             input,
             Pin::ComponentPin {
                 component: first.to_string(),
-                pin: p.to_string(),
+                pin: pin_name,
             },
-        )),
-        None => {
-            if RESERVED_NODES.contains(&first) {
-                Ok((input, Pin::Reserved(first.to_string())))
-            } else {
-                // Bare component name treated as reserved-style node
-                Ok((input, Pin::Reserved(first.to_string())))
-            }
-        }
+        ))
     }
 }
 
@@ -1093,12 +1567,45 @@ fn nets_section(input: &str) -> IResult<&str, Vec<NetDef>> {
     Ok((input, nets))
 }
 
+/// Skip a line we can't parse (for forward compatibility)
+fn skip_line(input: &str) -> IResult<&str, ()> {
+    let (input, _) = ws_comments(input)?;
+    // Skip until newline or closing brace
+    let (input, _) = take_while(|c: char| c != '\n' && c != '}')(input)?;
+    // Consume the newline if present
+    let (input, _) = opt(char('\n'))(input)?;
+    Ok((input, ()))
+}
+
+/// Try to parse a control_def, or skip the line if unparsable
+fn control_or_skip(input: &str) -> IResult<&str, Option<ControlDef>> {
+    let (input, _) = ws_comments(input)?;
+
+    // Check if we're at closing brace
+    if input.starts_with('}') {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)));
+    }
+
+    // Try to parse a control_def
+    if let Ok((remaining, ctrl)) = control_def(input) {
+        return Ok((remaining, Some(ctrl)));
+    }
+
+    // Couldn't parse, skip this line
+    let (remaining, _) = skip_line(input)?;
+    Ok((remaining, None))
+}
+
 fn controls_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("controls")(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('{')(input)?;
-    let (input, ctrls) = many0(control_def)(input)?;
+
+    // Parse controls, skipping lines we can't understand
+    let (input, maybe_ctrls) = many0(control_or_skip)(input)?;
+    let ctrls: Vec<ControlDef> = maybe_ctrls.into_iter().flatten().collect();
+
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
     Ok((input, ctrls))
@@ -1113,7 +1620,7 @@ fn controls_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
 pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, _) = ws_comments(input)?;
     // Accept both "pedal" and "synth" keywords — same AST, different semantics
-    let (input, _) = alt((tag("pedal"), tag("synth")))(input)?;
+    let (input, _) = alt((tag("pedal"), tag("synth"), tag("equipment")))(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, name) = quoted_string(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1780,6 +2287,69 @@ pedal "Chorus" {
             .any(|c| matches!(c.kind, ComponentKind::Bbd(BbdType::Mn3207))));
     }
 
+    // ── Neon bulb parser tests ─────────────────────────────────────────
+
+    #[test]
+    fn parse_neon_default() {
+        let (_, c) = component_def("NE1: neon()").unwrap();
+        assert_eq!(c.id, "NE1");
+        assert_eq!(c.kind, ComponentKind::Neon(NeonType::Ne2));
+    }
+
+    #[test]
+    fn parse_neon_ne2() {
+        let (_, c) = component_def("NE1: neon(ne2)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Neon(NeonType::Ne2));
+    }
+
+    #[test]
+    fn parse_neon_ne2_hyphen() {
+        let (_, c) = component_def("NE1: neon(ne-2)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Neon(NeonType::Ne2));
+    }
+
+    #[test]
+    fn parse_neon_ne51() {
+        let (_, c) = component_def("NE1: neon(ne51)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Neon(NeonType::Ne51));
+    }
+
+    #[test]
+    fn parse_neon_ne83() {
+        let (_, c) = component_def("NE1: neon(ne-83)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Neon(NeonType::Ne83));
+    }
+
+    #[test]
+    fn parse_pedal_with_neon_tremolo() {
+        let src = r#"
+pedal "Fender Vibrato" {
+  components {
+    R1: resistor(1M)
+    NE1: neon()
+    C1: cap(0.1u)
+    LDR1: photocoupler(vtl5c3)
+    R2: resistor(10k)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> LDR1.a
+    LDR1.b -> out
+    NE1.a -> C1.a
+    C1.b -> gnd
+    NE1.b -> R2.a
+    R2.b -> gnd
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Fender Vibrato");
+        assert!(def
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::Neon(NeonType::Ne2))));
+    }
+
     // ── Pentode parser tests ────────────────────────────────────────────
 
     #[test]
@@ -1997,5 +2567,119 @@ synth "CV Test" {
         assert!(has_reserved("cv_pitch"));
         assert!(has_reserved("cv_filter"));
         assert!(has_reserved("gate"));
+    }
+
+    // ── Studio Equipment parser tests ──────────────────────────────────
+
+    #[test]
+    fn parse_transformer_simple() {
+        let (_, c) = component_def("T1: transformer(10:1, 2H)").unwrap();
+        assert_eq!(c.id, "T1");
+        if let ComponentKind::Transformer(cfg) = c.kind {
+            assert!((cfg.turns_ratio - 10.0).abs() < 1e-6);
+            assert!((cfg.primary_inductance - 2.0).abs() < 1e-6);
+            assert_eq!(cfg.primary_type, WindingType::Standard);
+            assert_eq!(cfg.secondary_type, WindingType::Standard);
+        } else {
+            panic!("expected Transformer");
+        }
+    }
+
+    #[test]
+    fn parse_transformer_with_winding_types() {
+        // Parser syntax: pp = push-pull, ct = center-tap
+        let (_, c) = component_def("T2: transformer(1.5:1, 4H, pp, ct)").unwrap();
+        if let ComponentKind::Transformer(cfg) = c.kind {
+            assert!((cfg.turns_ratio - 1.5).abs() < 1e-6);
+            assert!((cfg.primary_inductance - 4.0).abs() < 1e-6);
+            assert_eq!(cfg.primary_type, WindingType::PushPull);
+            assert_eq!(cfg.secondary_type, WindingType::CenterTap);
+        } else {
+            panic!("expected Transformer");
+        }
+    }
+
+    #[test]
+    fn parse_transformer_with_dcr_and_coupling() {
+        // Parser syntax: dcr=value (applies to both), k=coupling
+        let (_, c) = component_def("T3: transformer(5:1, 1H, dcr=50, k=0.98)").unwrap();
+        if let ComponentKind::Transformer(cfg) = c.kind {
+            assert!((cfg.turns_ratio - 5.0).abs() < 1e-6);
+            assert!((cfg.primary_dcr - 50.0).abs() < 1e-6);
+            assert!((cfg.secondary_dcr - 50.0).abs() < 1e-6); // Both set to same value
+            assert!((cfg.coupling - 0.98).abs() < 1e-6);
+        } else {
+            panic!("expected Transformer");
+        }
+    }
+
+    #[test]
+    fn parse_cap_switched() {
+        let (_, c) = component_def("C_lf: cap_switched(27n, 68n, 220n, 1.5u)").unwrap();
+        assert_eq!(c.id, "C_lf");
+        if let ComponentKind::CapSwitched(values) = c.kind {
+            assert_eq!(values.len(), 4);
+            assert!((values[0] - 27e-9).abs() < 1e-12);
+            assert!((values[1] - 68e-9).abs() < 1e-12);
+            assert!((values[2] - 220e-9).abs() < 1e-12);
+            assert!((values[3] - 1.5e-6).abs() < 1e-12);
+        } else {
+            panic!("expected CapSwitched");
+        }
+    }
+
+    #[test]
+    fn parse_inductor_switched() {
+        let (_, c) = component_def("L_hf: inductor_switched(27m, 33m, 47m, 68m, 82m, 150m)").unwrap();
+        assert_eq!(c.id, "L_hf");
+        if let ComponentKind::InductorSwitched(values) = c.kind {
+            assert_eq!(values.len(), 6);
+            assert!((values[0] - 27e-3).abs() < 1e-6);
+            assert!((values[5] - 150e-3).abs() < 1e-6);
+        } else {
+            panic!("expected InductorSwitched");
+        }
+    }
+
+    #[test]
+    fn parse_rotary_switch() {
+        let (_, c) = component_def(r#"SW1: rotary("20Hz", "30Hz", "60Hz", "100Hz")"#).unwrap();
+        assert_eq!(c.id, "SW1");
+        if let ComponentKind::RotarySwitch(positions) = c.kind {
+            assert_eq!(positions.len(), 4);
+            assert_eq!(positions[0], "20Hz");
+            assert_eq!(positions[3], "100Hz");
+        } else {
+            panic!("expected RotarySwitch");
+        }
+    }
+
+    #[test]
+    fn parse_studio_equipment_file() {
+        let src = r#"
+equipment "Test EQ" {
+  components {
+    T1: transformer(10:1, 2H, pp, ct)
+    C_lf: cap_switched(27n, 68n, 220n)
+    L_hf: inductor_switched(27m, 47m, 82m)
+    SW_freq: rotary("100Hz", "200Hz", "400Hz")
+    R1: resistor(10k)
+  }
+  nets {
+    in -> T1.a
+    T1.b -> C_lf.a
+    C_lf.b -> L_hf.a
+    L_hf.b -> R1.a
+    R1.b -> out
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Test EQ");
+        assert_eq!(def.components.len(), 5);
+        assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::Transformer(_))));
+        assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::CapSwitched(_))));
+        assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::InductorSwitched(_))));
+        assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::RotarySwitch(_))));
     }
 }

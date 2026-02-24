@@ -43,6 +43,7 @@ Each component is declared as `<id>: <type>(<params>)`.
 | N-channel JFET | `njfet(<model>)` | N-channel JFET (nonlinear WDF root) |
 | P-channel JFET | `pjfet(<model>)` | P-channel JFET (nonlinear WDF root) |
 | Photocoupler | `photocoupler(<model>)` | Vactrol / optocoupler (controlled resistance) |
+| Neon bulb | `neon()` or `neon(<model>)` | Neon lamp for relaxation oscillators |
 | LFO | `lfo(<waveform>, <R>, <C>)` | LFO with RC timing (f = 1/2piRC) |
 | Envelope Follower | `envelope_follower(<atk_R>, <atk_C>, <rel_R>, <rel_C>, <sens_R>)` | Envelope detector with RC timing |
 
@@ -64,6 +65,13 @@ Each component is declared as `<id>: <type>(<params>)`.
 **JFET models**: `j201`, `2n5457`, `2n5460`, `2sk30` (or `2sk30a`, `2sk30-gr`, `2sk30-y`, `2sk30-bl` for graded variants)
 
 **Photocoupler models**: `vtl5c3`, `vtl5c1`, `nsl32`
+
+**Neon bulb models**: `ne2` (default), `ne51`, `ne83`
+- NE-2: 90V striking, 60V maintaining — standard miniature neon
+- NE-51: 95V striking, 65V maintaining — higher current
+- NE-83: 65V striking, 50V maintaining — lower voltage variant
+
+Neon bulbs are used in vintage tremolo circuits (Fender Vibrato, Wurlitzer) as part of relaxation oscillators. When paired with an LDR (photocoupler), they create smooth optical modulation.
 
 **LFO waveforms**: `sine`, `triangle`, `square`, `saw_up`, `saw_down`, `sample_and_hold`
 

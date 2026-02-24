@@ -677,7 +677,8 @@ impl CircuitGraph {
                 | ComponentKind::DiodePair(_)
                 | ComponentKind::Diode(_)
                 | ComponentKind::Zener(_)
-                | ComponentKind::Photocoupler(_) => {
+                | ComponentKind::Photocoupler(_)
+                | ComponentKind::Neon(_) => {
                     let key_a = format!("{}.a", comp.id);
                     let key_b = format!("{}.b", comp.id);
                     let id_a = get_id(&key_a, &mut uf);
@@ -826,6 +827,61 @@ impl CircuitGraph {
                         node_a,
                         node_b,
                     });
+                }
+                // ── Studio Equipment: Switched Components ────────────────
+                // These represent physically switched component values (rotary selectors).
+                // At compile time, we select a specific value based on control state.
+                // For WDF, they behave as their base type (C or L).
+                ComponentKind::CapSwitched(_values) => {
+                    // Use first value as default; control system will select correct value
+                    // during pre-compilation of WDF trees for each switch combination.
+                    let key_a = format!("{}.a", comp.id);
+                    let key_b = format!("{}.b", comp.id);
+                    let id_a = get_id(&key_a, &mut uf);
+                    let id_b = get_id(&key_b, &mut uf);
+                    let node_a = uf.find(id_a);
+                    let node_b = uf.find(id_b);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
+                    });
+                }
+                ComponentKind::InductorSwitched(_values) => {
+                    // Same as CapSwitched — 2-terminal element with selectable value.
+                    let key_a = format!("{}.a", comp.id);
+                    let key_b = format!("{}.b", comp.id);
+                    let id_a = get_id(&key_a, &mut uf);
+                    let id_b = get_id(&key_b, &mut uf);
+                    let node_a = uf.find(id_a);
+                    let node_b = uf.find(id_b);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
+                    });
+                }
+                ComponentKind::Transformer(_cfg) => {
+                    // Transformer: primary winding is a-b, secondary is c-d.
+                    // For WDF, we model the ideal transformer as a 2-port adaptor
+                    // with the turns ratio. The primary side is the WDF edge.
+                    // NOTE: Full transformer WDF model needs implementation in tree.rs.
+                    let key_a = format!("{}.a", comp.id);
+                    let key_b = format!("{}.b", comp.id);
+                    let id_a = get_id(&key_a, &mut uf);
+                    let id_b = get_id(&key_b, &mut uf);
+                    let node_a = uf.find(id_a);
+                    let node_b = uf.find(id_b);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
+                    });
+                }
+                ComponentKind::RotarySwitch(_) => {
+                    // Rotary switch is a control element, not a circuit element.
+                    // It determines which value to use for switched components.
+                    // No WDF edge — it's handled by the control system.
                 }
             }
         }
@@ -4242,6 +4298,8 @@ fn pentode_model(pt: PentodeType) -> PentodeModel {
     match pt {
         PentodeType::Ef86 => PentodeModel::p_ef86(),
         PentodeType::El84 => PentodeModel::p_el84(),
+        // 6AQ5A is a beam power tube similar to EL84, use that model as approximation
+        PentodeType::A6aq5a => PentodeModel::p_el84(),
     }
 }
 

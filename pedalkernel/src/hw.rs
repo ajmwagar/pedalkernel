@@ -250,7 +250,7 @@ fn check_spec_voltage(
     // Transistor Vce(max)
     if let Some(vce_max) = spec.vce_max {
         match kind {
-            ComponentKind::Npn | ComponentKind::Pnp => {
+            ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
                 if voltage > vce_max {
                     warnings.push(VoltageWarning {
                         component_id: id.to_string(),
@@ -394,8 +394,8 @@ fn check_heuristic_voltage(
     warnings: &mut Vec<VoltageWarning>,
 ) {
     match kind {
-        ComponentKind::Pnp | ComponentKind::Npn => {
-            let likely_ge = *kind == ComponentKind::Pnp
+        ComponentKind::Pnp(_) | ComponentKind::Npn(_) => {
+            let likely_ge = matches!(kind, ComponentKind::Pnp(_))
                 && pedal
                     .controls
                     .iter()
@@ -709,12 +709,12 @@ pub fn auto_populate_specs(pedal: &PedalDef, limits: &mut HardwareLimits) {
                     }
                 }
             }
-            ComponentKind::Npn => {
+            ComponentKind::Npn(_) => {
                 if spec.vce_max.is_none() {
                     spec.vce_max = Some(NPN_DEFAULT.vce_max);
                 }
             }
-            ComponentKind::Pnp => {
+            ComponentKind::Pnp(_) => {
                 if spec.vce_max.is_none() {
                     spec.vce_max = Some(PNP_DEFAULT.vce_max);
                 }
@@ -916,7 +916,7 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         qty_per_unit: 2,
                     }]
                 }
-                ComponentKind::Npn => {
+                ComponentKind::Npn(_) => {
                     let (pn, desc) = if let Some(part_name) = hw_part {
                         (None, part_name.to_string())
                     } else {
@@ -934,7 +934,7 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         qty_per_unit: 1,
                     }]
                 }
-                ComponentKind::Pnp => {
+                ComponentKind::Pnp(_) => {
                     let (pn, desc) = if let Some(part_name) = hw_part {
                         (None, part_name.to_string())
                     } else {
@@ -1168,6 +1168,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                                 Some("JJ-EL84".to_string()),
                                 "EL84 / 6BQ5 Power Pentode (JJ Electronic)".to_string(),
                             ),
+                            crate::dsl::PentodeType::A6aq5a => (
+                                Some("6AQ5A".to_string()),
+                                "6AQ5A Beam Power Tube".to_string(),
+                            ),
                         }
                     };
                     vec![BomEntry {
@@ -1248,6 +1252,34 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         reference: comp.id.clone(),
                         display: format!("BBD ({bt:?})"),
                         value: format!("{bt:?}"),
+                        mouser_pn: pn,
+                        description: desc,
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::Neon(nt) => {
+                    let (pn, desc) = if let Some(part_name) = hw_part {
+                        (None, part_name.to_string())
+                    } else {
+                        match nt {
+                            crate::dsl::NeonType::Ne2 => (
+                                Some("606-A1A-NE2".to_string()),
+                                "NE-2 Neon Lamp (90V strike, 60V maintain)".to_string(),
+                            ),
+                            crate::dsl::NeonType::Ne51 => (
+                                Some("606-A1B-NE51".to_string()),
+                                "NE-51 Neon Lamp (95V strike, 65V maintain)".to_string(),
+                            ),
+                            crate::dsl::NeonType::Ne83 => (
+                                None,
+                                "NE-83 Neon Lamp (65V strike, 50V maintain)".to_string(),
+                            ),
+                        }
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: format!("Neon Lamp ({nt:?})"),
+                        value: format!("{nt:?}"),
                         mouser_pn: pn,
                         description: desc,
                         qty_per_unit: 1,
@@ -1535,6 +1567,97 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                             "{} Tempco Resistor +{:.0}ppm/\u{b0}C",
                             crate::kicad::format_eng(*r, "\u{2126}"),
                             ppm
+                        ),
+                        qty_per_unit: 1,
+                    }]
+                }
+                // ── Studio Equipment Components ──────────────────────────────
+                ComponentKind::Transformer(cfg) => {
+                    let winding_desc = match (cfg.primary_type, cfg.secondary_type) {
+                        (crate::dsl::WindingType::PushPull, crate::dsl::WindingType::CenterTap) => "PP/CT",
+                        (crate::dsl::WindingType::Standard, crate::dsl::WindingType::CenterTap) => "CT Secondary",
+                        (crate::dsl::WindingType::CenterTap, crate::dsl::WindingType::Standard) => "CT Primary",
+                        (crate::dsl::WindingType::PushPull, crate::dsl::WindingType::Standard) => "Push-Pull",
+                        _ => "Standard",
+                    };
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "Audio Transformer".into(),
+                        value: format!(
+                            "{:.1}:1 {}H {}",
+                            cfg.turns_ratio,
+                            crate::kicad::format_eng(cfg.primary_inductance, ""),
+                            winding_desc
+                        ),
+                        mouser_pn: None, // Custom/specialty (Sowter, Carnhill, etc.)
+                        description: format!(
+                            "Audio Transformer {:.1}:1, {} primary inductance, {}",
+                            cfg.turns_ratio,
+                            crate::kicad::format_eng(cfg.primary_inductance, "H"),
+                            winding_desc
+                        ),
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::CapSwitched(values) => {
+                    // Generate BOM entries for all capacitor values in the switch
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, val)| {
+                            let (pn, desc) = find_closest_cap(*val)
+                                .map(|(cpn, cdesc, _)| (Some(cpn.to_string()), cdesc.to_string()))
+                                .unwrap_or((
+                                    None,
+                                    format!(
+                                        "{} Switched Capacitor (pos {})",
+                                        crate::kicad::format_eng(*val, "F"),
+                                        i + 1
+                                    ),
+                                ));
+                            BomEntry {
+                                reference: format!("{}_{}", comp.id, i + 1),
+                                display: "Switched Capacitor".into(),
+                                value: crate::kicad::format_eng(*val, "F"),
+                                mouser_pn: pn,
+                                description: desc,
+                                qty_per_unit: 1,
+                            }
+                        })
+                        .collect()
+                }
+                ComponentKind::InductorSwitched(values) => {
+                    // Multi-tapped inductor - typically a single wound component
+                    let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let max_val = values.iter().cloned().fold(0.0f64, f64::max);
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "Multi-Tap Inductor".into(),
+                        value: format!(
+                            "{}-{} ({} taps)",
+                            crate::kicad::format_eng(min_val, "H"),
+                            crate::kicad::format_eng(max_val, "H"),
+                            values.len()
+                        ),
+                        mouser_pn: None, // Custom wound
+                        description: format!(
+                            "Multi-tapped inductor, {} positions ({}-{})",
+                            values.len(),
+                            crate::kicad::format_eng(min_val, "H"),
+                            crate::kicad::format_eng(max_val, "H")
+                        ),
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::RotarySwitch(positions) => {
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "Rotary Switch".into(),
+                        value: format!("{}-position", positions.len()),
+                        mouser_pn: None, // Depends on deck count, application
+                        description: format!(
+                            "{}-position rotary switch",
+                            positions.len()
                         ),
                         qty_per_unit: 1,
                     }]

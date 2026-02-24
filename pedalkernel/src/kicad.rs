@@ -47,6 +47,7 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::Pentode(pt) => match pt {
             PentodeType::Ef86 => ("Valve:EF86", "V"),
             PentodeType::El84 => ("Valve:EL84", "V"),
+            PentodeType::A6aq5a => ("Valve:6AQ5", "V"),
         },
         ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
         ComponentKind::Nmos(_) => ("Device:Q_NMOS_DGS", "Q"),
@@ -55,6 +56,11 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
             BbdType::Mn3207 => ("Analog_Delay:MN3207", "IC"),
             BbdType::Mn3007 => ("Analog_Delay:MN3007", "IC"),
             BbdType::Mn3005 => ("Analog_Delay:MN3005", "IC"),
+        },
+        ComponentKind::Neon(nt) => match nt {
+            NeonType::Ne2 => ("Device:Lamp_Neon", "NE"),
+            NeonType::Ne51 => ("Device:Lamp_Neon", "NE"),
+            NeonType::Ne83 => ("Device:Lamp_Neon", "NE"),
         },
         // ── Synth ICs ──────────────────────────────────────────────────
         ComponentKind::Vco(vt) => match vt {
@@ -85,6 +91,42 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
             MatchedTransistorType::That340 => ("Transistor_BJT:THAT340", "Q"),
         },
         ComponentKind::Tempco(_, _) => ("Device:R", "RT"),
+        // ── Studio Equipment ─────────────────────────────────────────────
+        ComponentKind::Transformer(cfg) => {
+            // Select transformer symbol based on configuration
+            match (cfg.primary_type, cfg.secondary_type) {
+                (WindingType::PushPull, WindingType::Standard) => ("Transformer:Transformer_1P_1S", "T"),
+                (WindingType::Standard, WindingType::CenterTap) => ("Transformer:Transformer_1P_1S_CT", "T"),
+                (WindingType::PushPull, WindingType::CenterTap) => ("Transformer:Transformer_1P_CT_1S_CT", "T"),
+                _ => ("Transformer:Transformer_1P_1S", "T"),
+            }
+        }
+        ComponentKind::CapSwitched(values) => {
+            // Switched capacitor - show as regular cap with note about switch positions
+            if values.is_empty() {
+                ("Device:C", "C")
+            } else {
+                ("Device:C", "C")
+            }
+        }
+        ComponentKind::InductorSwitched(values) => {
+            // Multi-tap inductor - show as regular inductor with note about taps
+            if values.is_empty() {
+                ("Device:L", "L")
+            } else {
+                ("Device:L", "L")
+            }
+        }
+        ComponentKind::RotarySwitch(ids) => {
+            // Rotary switch - positions determined by linked components
+            let positions = ids.len().max(2); // Minimum 2 positions
+            match positions {
+                2..=4 => ("Switch:SW_Rotary4", "SW"),
+                5..=6 => ("Switch:SW_Rotary6", "SW"),
+                7..=8 => ("Switch:SW_Rotary8", "SW"),
+                _ => ("Switch:SW_Rotary12", "SW"),
+            }
+        }
     }
 }
 
@@ -162,6 +204,11 @@ fn value_str(kind: &ComponentKind) -> String {
         ComponentKind::Nmos(mt) => format!("N-MOS_{mt:?}"),
         ComponentKind::Pmos(mt) => format!("P-MOS_{mt:?}"),
         ComponentKind::Bbd(bt) => format!("BBD_{bt:?}"),
+        ComponentKind::Neon(nt) => match nt {
+            NeonType::Ne2 => "NE-2".into(),
+            NeonType::Ne51 => "NE-51".into(),
+            NeonType::Ne83 => "NE-83".into(),
+        },
         // ── Synth ICs ──────────────────────────────────────────────────
         ComponentKind::Vco(vt) => format!("VCO_{vt:?}"),
         ComponentKind::Vcf(vt) => format!("VCF_{vt:?}"),
@@ -175,6 +222,53 @@ fn value_str(kind: &ComponentKind) -> String {
             format_eng(*r, "\u{2126}"),
             ppm
         ),
+        // ── Studio Equipment Components ──────────────────────────────
+        ComponentKind::Transformer(cfg) => {
+            let pri = match cfg.primary_type {
+                crate::dsl::WindingType::Standard => "",
+                crate::dsl::WindingType::CenterTap => "CT",
+                crate::dsl::WindingType::PushPull => "PP",
+            };
+            let sec = match cfg.secondary_type {
+                crate::dsl::WindingType::Standard => "",
+                crate::dsl::WindingType::CenterTap => "CT",
+                crate::dsl::WindingType::PushPull => "PP",
+            };
+            format!(
+                "XFMR_{:.1}:1_{}{}_{}H",
+                cfg.turns_ratio,
+                pri,
+                sec,
+                format_eng(cfg.primary_inductance, "")
+            )
+        }
+        ComponentKind::CapSwitched(values) => {
+            // Show range for BOM reference
+            if values.is_empty() {
+                "C_switched".into()
+            } else {
+                format!(
+                    "C_switched_{}-{}",
+                    format_eng(*values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "F"),
+                    format_eng(*values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "F")
+                )
+            }
+        }
+        ComponentKind::InductorSwitched(values) => {
+            // Show range for BOM reference
+            if values.is_empty() {
+                "L_switched".into()
+            } else {
+                format!(
+                    "L_switched_{}-{}",
+                    format_eng(*values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "H"),
+                    format_eng(*values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "H")
+                )
+            }
+        }
+        ComponentKind::RotarySwitch(positions) => {
+            format!("Rotary_{}pos", positions.len())
+        }
     }
 }
 
