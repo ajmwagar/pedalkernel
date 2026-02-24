@@ -92,41 +92,77 @@ def parse_pedal(path):
 
 # Resistors — Yageo MFR-25 1/4W metal film
 RESISTORS = {
+    220: ("603-MFR-25FRF52-220R", "220\u2126 1/4W Metal Film"),
+    250: ("603-MFR-25FRF52-250R", "250\u2126 1/4W Metal Film"),
     470: ("603-MFR-25FRF52-470R", "470\u2126 1/4W Metal Film"),
+    820: ("603-MFR-25FRF52-820R", "820\u2126 1/4W Metal Film"),
     1e3: ("603-MFR-25FRF52-1K", "1k\u2126 1/4W Metal Film"),
     1.5e3: ("603-MFR-25FRF52-1K5", "1.5k\u2126 1/4W Metal Film"),
+    2e3: ("603-MFR-25FRF52-2K", "2k\u2126 1/4W Metal Film"),
+    2.2e3: ("603-MFR-25FRF52-2K2", "2.2k\u2126 1/4W Metal Film"),
+    3.3e3: ("603-MFR-25FRF52-3K3", "3.3k\u2126 1/4W Metal Film"),
+    3.9e3: ("603-MFR-25FRF52-3K9", "3.9k\u2126 1/4W Metal Film"),
     4.7e3: ("603-MFR-25FRF52-4K7", "4.7k\u2126 1/4W Metal Film"),
+    5.1e3: ("603-MFR-25FRF52-5K1", "5.1k\u2126 1/4W Metal Film"),
+    5.6e3: ("603-MFR-25FRF52-5K6", "5.6k\u2126 1/4W Metal Film"),
+    6.8e3: ("603-MFR-25FRF52-6K8", "6.8k\u2126 1/4W Metal Film"),
     8.2e3: ("603-MFR-25FRF52-8K2", "8.2k\u2126 1/4W Metal Film"),
     10e3: ("603-MFR-25FRF52-10K", "10k\u2126 1/4W Metal Film"),
     15e3: ("603-MFR-25FRF52-15K", "15k\u2126 1/4W Metal Film"),
     22e3: ("603-MFR-25FRF52-22K", "22k\u2126 1/4W Metal Film"),
     33e3: ("603-MFR-25FRF52-33K", "33k\u2126 1/4W Metal Film"),
     47e3: ("603-MFR-25FRF52-47K", "47k\u2126 1/4W Metal Film"),
+    56e3: ("603-MFR-25FRF52-56K", "56k\u2126 1/4W Metal Film"),
+    68e3: ("603-MFR-25FRF52-68K", "68k\u2126 1/4W Metal Film"),
+    82e3: ("603-MFR-25FRF52-82K", "82k\u2126 1/4W Metal Film"),
     100e3: ("603-MFR-25FRF52-100K", "100k\u2126 1/4W Metal Film"),
     150e3: ("603-MFR-25FRF52-150K", "150k\u2126 1/4W Metal Film"),
+    220e3: ("603-MFR-25FRF52-220K", "220k\u2126 1/4W Metal Film"),
+    270e3: ("603-MFR-25FRF52-270K", "270k\u2126 1/4W Metal Film"),
+    330e3: ("603-MFR-25FRF52-330K", "330k\u2126 1/4W Metal Film"),
     422e3: ("603-MFR-25FRF52-422K", "422k\u2126 1/4W Metal Film"),
     470e3: ("603-MFR-25FRF52-470K", "470k\u2126 1/4W Metal Film"),
     500e3: ("603-MFR-25FRF52-500K", "500k\u2126 1/4W Metal Film"),
     560e3: ("603-MFR-25FRF52-560K", "560k\u2126 1/4W Metal Film"),
     1e6: ("603-MFR-25FRF52-1M", "1M\u2126 1/4W Metal Film"),
+    2.2e6: ("603-MFR-25FRF52-2M2", "2.2M\u2126 1/4W Metal Film"),
+    10e6: ("603-MFR-25FRF52-10M", "10M\u2126 1/4W Metal Film"),
 }
 
 # Capacitors — Kemet ceramic (pF), WIMA MKS2 film (nF), Nichicon electrolytic (µF)
 CAPACITORS = {
+    10e-12: ("80-C320C100J1G5TA", "10pF Ceramic"),
+    22e-12: ("80-C320C220J1G5TA", "22pF Ceramic"),
+    47e-12: ("80-C320C470J1G5TA", "47pF Ceramic"),
     100e-12: ("80-C320C101J1G5TA", "100pF Ceramic"),
+    220e-12: ("80-C320C221J1G5TA", "220pF Ceramic"),
     390e-12: ("80-C320C391J1G5TA", "390pF Ceramic"),
+    470e-12: ("80-C320C471J1G5TA", "470pF Ceramic"),
     1e-9: ("80-C320C102K5R5TA", "1nF Ceramic"),
+    2.2e-9: ("80-C320C222K5R5TA", "2.2nF Ceramic"),
     3.3e-9: ("80-C320C332K5R5TA", "3.3nF Ceramic"),
     4e-9: ("80-C320C402K5R5TA", "4nF Ceramic"),
+    4.7e-9: ("80-C320C472K5R5TA", "4.7nF Ceramic"),
+    5e-9: ("80-C320C502K5R5TA", "5nF Ceramic"),
     10e-9: ("5-MKS2D031001A00JSSD", "10nF WIMA Film"),
+    20e-9: ("5-MKS2D032001A00JSSD", "20nF WIMA Film"),
     22e-9: ("5-MKS2D032201A00JSSD", "22nF WIMA Film"),
+    33e-9: ("5-MKS2D033301A00JSSD", "33nF WIMA Film"),
+    39e-9: ("5-MKS2D033901A00JSSD", "39nF WIMA Film"),
     47e-9: ("5-MKS2D034701A00JSSD", "47nF WIMA Film"),
     68e-9: ("5-MKS2D036801A00JSSD", "68nF WIMA Film"),
     100e-9: ("5-MKS2D041001A00JSSD", "100nF WIMA Film"),
+    150e-9: ("5-MKS2D041501A00JSSD", "150nF WIMA Film"),
     220e-9: ("5-MKS2D042201A00JSSD", "220nF WIMA Film"),
+    330e-9: ("5-MKS2D043301A00JSSD", "330nF WIMA Film"),
+    470e-9: ("5-MKS2D044701A00JSSD", "470nF WIMA Film"),
     1e-6: ("647-UPW1H010MDD6", "1\u00b5F 50V Electrolytic"),
     2.2e-6: ("647-UPW1H2R2MDD6", "2.2\u00b5F 50V Electrolytic"),
+    4.7e-6: ("647-UPW1H4R7MDD6", "4.7\u00b5F 50V Electrolytic"),
     10e-6: ("647-UPW1H100MDD6", "10\u00b5F 50V Electrolytic"),
+    22e-6: ("647-UPW1H220MDD6", "22\u00b5F 50V Electrolytic"),
+    25e-6: ("647-UPW1H250MDD6", "25\u00b5F 50V Electrolytic"),
+    47e-6: ("647-UPW1H470MDD6", "47\u00b5F 50V Electrolytic"),
     100e-6: ("647-UPW1H101MED6", "100\u00b5F 50V Electrolytic"),
 }
 
@@ -175,10 +211,43 @@ JFETS = {
     "2sk30a_bl": ("757-2SK30ATM-BL", "2SK30A-BL N-JFET (High Idss)"),
 }
 
-# Transistors
+# Transistors — generic fallback
 TRANSISTORS = {
     "npn": ("512-2N3904BU", "2N3904 NPN Transistor"),
     "pnp": ("512-2N3906BU", "2N3906 PNP Transistor"),
+}
+
+# Transistors by specific type (arg-based lookup)
+NPN_TYPES = {
+    "2n3904": ("512-2N3904BU", "2N3904 NPN Transistor"),
+    "2n5088": ("583-2N5088BU", "2N5088 NPN High-Gain Transistor"),
+    "2n2222": ("512-2N2222ABU", "2N2222A NPN Transistor"),
+    "bc108": ("512-BC108BTA", "BC108 NPN Transistor"),
+    "bc109": ("512-BC109BTA", "BC109 NPN Transistor"),
+    "mpsa18": ("512-MPSA18", "MPSA18 NPN High-Gain Transistor"),
+    "mpsa13": ("512-MPSA13", "MPSA13 NPN Darlington Transistor"),
+}
+PNP_TYPES = {
+    "2n3906": ("512-2N3906BU", "2N3906 PNP Transistor"),
+    "2n5087": ("583-2N5087BU", "2N5087 PNP High-Gain Transistor"),
+    "bc557": ("512-BC557BTA", "BC557 PNP Transistor"),
+    "bc558": ("512-BC558BTA", "BC558 PNP Transistor"),
+}
+
+# Photocouplers / optocouplers (LDR-based)
+PHOTOCOUPLERS = {
+    "vtl5c1": ("595-VTL5C1", "VTL5C1 Photocoupler (Fast)"),
+    "vtl5c3": ("595-VTL5C3", "VTL5C3 Photocoupler (Slow)"),
+    "vtl5c4": ("595-VTL5C4", "VTL5C4 Photocoupler"),
+    "nsl32": ("512-NSL32", "NSL-32 Photocoupler"),
+}
+
+# Inductors (for wah / filter circuits)
+INDUCTORS = {
+    500e-3: ("434-23-474", "500mH Inductor (Xicon)"),
+    100e-3: ("434-23-104", "100mH Inductor (Xicon)"),
+    1.0: ("434-23-105", "1H Inductor (Xicon)"),
+    4.0: ("434-23-405", "4H Inductor (Xicon)"),
 }
 
 # Op-amps (by type in DSL argument)
@@ -244,7 +313,18 @@ def lookup_part(kind, arg):
             pass
     elif kind == "led":
         return (*LED_PART, 1)
-    elif kind in ("npn", "pnp"):
+    elif kind == "npn":
+        # Try specific type first, then generic fallback
+        entry = NPN_TYPES.get(arg.lower())
+        if entry:
+            return (*entry, 1)
+        entry = TRANSISTORS.get(kind)
+        if entry:
+            return (*entry, 1)
+    elif kind == "pnp":
+        entry = PNP_TYPES.get(arg.lower())
+        if entry:
+            return (*entry, 1)
         entry = TRANSISTORS.get(kind)
         if entry:
             return (*entry, 1)
@@ -259,6 +339,14 @@ def lookup_part(kind, arg):
             return (*entry, 1)
         # Fallback to default op-amp
         return (*OPAMP_PART, 1)
+    elif kind == "photocoupler":
+        entry = PHOTOCOUPLERS.get(arg.lower())
+        if entry:
+            return (*entry, 1)
+    elif kind == "inductor":
+        entry = _find_closest(INDUCTORS, parse_eng(arg), tolerance=0.05)
+        if entry:
+            return (*entry, 1)
     return None
 
 
@@ -315,12 +403,14 @@ def _component_display(kind, arg, hw_part=None):
         "diode_pair": f"Diode ({arg.title()}, x2)",
         "diode": f"Diode ({arg.title()})",
         "zener": f"Zener ({arg}V)",
-        "npn": "NPN Transistor",
-        "pnp": "PNP Transistor",
+        "npn": f"NPN ({arg.upper()})" if arg else "NPN Transistor",
+        "pnp": f"PNP ({arg.upper()})" if arg else "PNP Transistor",
         "njfet": f"N-JFET ({arg.upper()})",
         "pjfet": f"P-JFET ({arg.upper()})",
         "opamp": f"Op-Amp ({arg.upper()})" if arg else "Op-Amp",
         "led": "LED",
+        "photocoupler": f"Photocoupler ({arg.upper()})",
+        "inductor": "Inductor",
     }
     base = labels.get(kind, kind)
     if hw_part:
@@ -334,6 +424,8 @@ def _format_value(kind, arg):
         return format_eng(parse_eng(arg), "\u2126")
     elif kind == "cap":
         return format_eng(parse_eng(arg), "F")
+    elif kind == "inductor":
+        return format_eng(parse_eng(arg), "H")
     elif kind in ("diode", "diode_pair"):
         return arg.title()
     elif kind == "zener":
@@ -342,7 +434,11 @@ def _format_value(kind, arg):
         return arg.upper()
     elif kind == "opamp":
         return arg.upper() if arg else "\u2014"
-    elif kind in ("npn", "pnp", "led"):
+    elif kind in ("npn", "pnp"):
+        return arg.upper() if arg else "\u2014"
+    elif kind == "photocoupler":
+        return arg.upper()
+    elif kind == "led":
         return "\u2014"
     return arg
 
