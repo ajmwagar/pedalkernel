@@ -179,6 +179,233 @@ mod tests {
         );
     }
 
+    // ── Comprehensive Diode Tests ──────────────────────────────────────────
+
+    #[test]
+    fn diode_pair_symmetry() {
+        // Anti-parallel diodes should produce symmetric clipping
+        let mut diode = DiodePairRoot::new(DiodeModel::silicon());
+        let rp = 10_000.0;
+
+        for a in [0.5, 1.0, 2.0, 5.0, 10.0] {
+            let b_pos = diode.process(a, rp);
+            let b_neg = diode.process(-a, rp);
+            let v_pos = (a + b_pos) / 2.0;
+            let v_neg = (-a + b_neg) / 2.0;
+
+            assert!(
+                (v_pos + v_neg).abs() < 0.01,
+                "Diode pair should be symmetric: v+={v_pos:.4}, v-={v_neg:.4}"
+            );
+        }
+    }
+
+    #[test]
+    fn diode_pair_silicon_clipping_threshold() {
+        // Silicon diodes clip at ~0.6-0.7V forward voltage
+        let mut diode = DiodePairRoot::new(DiodeModel::silicon());
+        let rp = 10_000.0;
+
+        // With large input, output voltage should saturate near Vf
+        let a = 20.0; // Large input wave
+        let b = diode.process(a, rp);
+        let v = (a + b) / 2.0;
+
+        // Silicon Vf is ~0.6-0.7V
+        assert!(
+            v > 0.5 && v < 1.0,
+            "Silicon diode pair should clip at ~0.6V: v={v:.4}"
+        );
+    }
+
+    #[test]
+    fn diode_germanium_lower_threshold() {
+        // Germanium diodes clip earlier (~0.3V) than silicon (~0.6V)
+        let mut ge_diode = DiodePairRoot::new(DiodeModel::germanium());
+        let mut si_diode = DiodePairRoot::new(DiodeModel::silicon());
+        let rp = 10_000.0;
+
+        let a = 10.0;
+        let v_ge = (a + ge_diode.process(a, rp)) / 2.0;
+        let v_si = (a + si_diode.process(a, rp)) / 2.0;
+
+        assert!(
+            v_ge < v_si,
+            "Germanium should clip lower than silicon: Ge={v_ge:.4}, Si={v_si:.4}"
+        );
+        assert!(
+            v_ge > 0.2 && v_ge < 0.5,
+            "Germanium should clip at ~0.3V: v={v_ge:.4}"
+        );
+    }
+
+    #[test]
+    fn diode_led_higher_threshold() {
+        // LEDs clip at higher voltage (~1.7V) than silicon
+        let mut led = DiodePairRoot::new(DiodeModel::led());
+        let mut si = DiodePairRoot::new(DiodeModel::silicon());
+        let rp = 10_000.0;
+
+        let a = 20.0;
+        let v_led = (a + led.process(a, rp)) / 2.0;
+        let v_si = (a + si.process(a, rp)) / 2.0;
+
+        assert!(
+            v_led > v_si,
+            "LED should clip higher than silicon: LED={v_led:.4}, Si={v_si:.4}"
+        );
+        assert!(
+            v_led > 1.2 && v_led < 2.5,
+            "LED should clip at ~1.7V: v={v_led:.4}"
+        );
+    }
+
+    #[test]
+    fn single_diode_forward_clips() {
+        // Single diode should clip forward bias (positive input)
+        let mut diode = DiodeRoot::new(DiodeModel::silicon());
+        let rp = 10_000.0;
+
+        let a = 20.0;
+        let b = diode.process(a, rp);
+        let v = (a + b) / 2.0;
+
+        // Forward bias: should clip at Vf
+        assert!(
+            v > 0.4 && v < 1.0,
+            "Single diode forward bias should clip at ~0.6V: v={v:.4}"
+        );
+    }
+
+    #[test]
+    fn single_diode_reverse_blocks() {
+        // Single diode should block reverse bias (negative input)
+        // When blocked, v ≈ a/2 (no current flows)
+        let mut diode = DiodeRoot::new(DiodeModel::silicon());
+        let rp = 10_000.0;
+
+        let a = -5.0;
+        let b = diode.process(a, rp);
+        let v = (a + b) / 2.0;
+
+        // Reverse bias: very little current, v ≈ a/2
+        // Diode acts like open circuit, so b ≈ -a, v ≈ 0
+        // Actually with WDF: i_d ≈ -Is ≈ 0, so b ≈ a, v ≈ a
+        // Wait, let me think again...
+        // f(v) = a - 2v - 2*Rp*Is*(exp(v/nVt) - 1)
+        // For v << 0: exp(v/nVt) ≈ 0, so i_d ≈ -Is
+        // f(v) = a - 2v + 2*Rp*Is ≈ a - 2v (since Is is tiny)
+        // f(v) = 0 → v = a/2
+        let expected = a / 2.0;
+        assert!(
+            (v - expected).abs() < 0.1,
+            "Single diode reverse bias should have v≈a/2: v={v:.4}, expected={expected:.4}"
+        );
+    }
+
+    #[test]
+    fn single_diode_asymmetric_waveform() {
+        // Process a bipolar signal and verify asymmetric clipping
+        let mut diode = DiodeRoot::new(DiodeModel::silicon());
+        let rp = 10_000.0;
+
+        let mut v_max = f64::NEG_INFINITY;
+        let mut v_min = f64::INFINITY;
+
+        // Process sine-like inputs
+        for i in 0..100 {
+            let a = 5.0 * (i as f64 * 0.0628).sin(); // ~1Hz at "100 samples"
+            let b = diode.process(a, rp);
+            let v = (a + b) / 2.0;
+            v_max = v_max.max(v);
+            v_min = v_min.min(v);
+        }
+
+        // Positive side should be clipped at Vf (~0.6V)
+        assert!(
+            v_max < 1.0,
+            "Positive clipping should occur: v_max={v_max:.4}"
+        );
+        // Negative side should pass through (diode blocks)
+        assert!(
+            v_min < -1.0,
+            "Negative should pass through: v_min={v_min:.4}"
+        );
+    }
+
+    #[test]
+    fn diode_convergence_extreme_inputs() {
+        // Verify N-R converges for extreme inputs
+        let mut pair = DiodePairRoot::new(DiodeModel::silicon());
+        let mut single = DiodeRoot::new(DiodeModel::silicon());
+        let rp = 10_000.0;
+
+        for &a in &[0.0, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0] {
+            // Positive inputs
+            let b_pair = pair.process(a, rp);
+            let b_single = single.process(a, rp);
+            assert!(b_pair.is_finite(), "Pair should converge for a={a}");
+            assert!(b_single.is_finite(), "Single should converge for a={a}");
+
+            // Negative inputs
+            let b_pair_neg = pair.process(-a, rp);
+            let b_single_neg = single.process(-a, rp);
+            assert!(b_pair_neg.is_finite(), "Pair should converge for a={}", -a);
+            assert!(b_single_neg.is_finite(), "Single should converge for a={}", -a);
+        }
+    }
+
+    #[test]
+    fn diode_model_parameters_reasonable() {
+        // Verify model parameters match expected ranges
+        let si = DiodeModel::silicon();
+        let ge = DiodeModel::germanium();
+        let led = DiodeModel::led();
+
+        // Saturation current: Ge >> Si >> LED
+        assert!(ge.is > si.is, "Ge Is should be > Si Is");
+        assert!(si.is > led.is, "Si Is should be > LED Is");
+
+        // nVt should be in reasonable range (25-60 mV typical)
+        assert!(si.n_vt > 0.02 && si.n_vt < 0.1, "Si nVt out of range");
+        assert!(ge.n_vt > 0.02 && ge.n_vt < 0.1, "Ge nVt out of range");
+        assert!(led.n_vt > 0.02 && led.n_vt < 0.1, "LED nVt out of range");
+    }
+
+    #[test]
+    fn diode_1n914_vs_1n4148() {
+        // 1N914 and 1N4148 are similar but 1N914 has slightly different Is
+        let d914 = DiodeModel::_1n914();
+        let d4148 = DiodeModel::_1n4148();
+
+        // Both should have similar but not identical parameters
+        assert!(d914.is != d4148.is, "1N914 and 1N4148 should differ");
+        assert!(
+            (d914.is - d4148.is).abs() < 5e-9,
+            "1N914 and 1N4148 should be similar: Is_914={}, Is_4148={}",
+            d914.is, d4148.is
+        );
+    }
+
+    #[test]
+    fn diode_small_rp_stability() {
+        // Test stability with small port resistance (voltage source driving diode)
+        let mut diode = DiodePairRoot::new(DiodeModel::silicon());
+
+        for &rp in &[1.0, 10.0, 100.0] {
+            let b = diode.process(5.0, rp);
+            assert!(
+                b.is_finite(),
+                "Should converge with small Rp={rp}: b={b}"
+            );
+            let v = (5.0 + b) / 2.0;
+            assert!(
+                v > 0.0 && v < 2.0,
+                "Output should be reasonable with Rp={rp}: v={v}"
+            );
+        }
+    }
+
     #[test]
     fn lfo_sine_range() {
         let mut lfo = Lfo::new(LfoWaveform::Sine, 48000.0);

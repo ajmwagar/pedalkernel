@@ -332,6 +332,13 @@ pub enum TriodeType {
     /// 12BH7A - Medium-mu dual triode, high current capability
     /// Used in cathode follower stages like LA-2A totem-pole output
     T12bh7,
+    /// 6386 - Remote-cutoff (variable-mu) dual triode
+    /// THE tube that makes the Fairchild 670 possible.
+    /// Unlike regular triodes, mu varies with grid bias (~50 at low bias
+    /// to ~5 at high negative bias). This is the gain reduction mechanism.
+    /// The smooth, musical compression character comes from this gradual
+    /// gain change rather than hard limiting.
+    T6386,
 }
 
 /// Pentode vacuum tube types.
@@ -343,6 +350,10 @@ pub enum PentodeType {
     El84,
     /// 6AQ5A - Beam power tube, used in Pultec MEQ-5 output stage
     A6aq5a,
+    /// 6973 - Beam power tube, 9W output
+    /// Used in Fairchild 670 sidechain push-pull output stage.
+    /// Similar to EL84 but different pin-out and slightly higher power.
+    A6973,
 }
 
 /// MOSFET types for enhancement-mode devices used in guitar pedals.
@@ -868,6 +879,8 @@ fn triode_type(input: &str) -> IResult<&str, TriodeType> {
         value(TriodeType::T12ay7, tag("12ay7")),
         value(TriodeType::T12au7, tag("12au7")),
         value(TriodeType::T12bh7, tag("12bh7")),
+        // Remote-cutoff (variable-mu) triode for Fairchild 670
+        value(TriodeType::T6386, tag("6386")),
         // European/military designations
         value(TriodeType::T12ax7, tag("ecc83")),
         value(TriodeType::T12at7, tag("ecc81")),
@@ -890,6 +903,7 @@ fn pentode_type(input: &str) -> IResult<&str, PentodeType> {
         value(PentodeType::El84, tag("el84")),
         value(PentodeType::A6aq5a, tag("6aq5a")),
         value(PentodeType::A6aq5a, tag("6aq5")),
+        value(PentodeType::A6973, tag("6973")),
         // Alternative designations
         value(PentodeType::Ef86, tag("6267")),
         value(PentodeType::El84, tag("6bq5")),

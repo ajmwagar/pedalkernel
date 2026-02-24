@@ -190,27 +190,37 @@ impl DiodeModel {
     }
 
     /// Generic LED diode — higher forward voltage (~1.7V) for harder clipping.
+    ///
+    /// LEDs have much lower saturation current than silicon diodes due to their
+    /// wide bandgap (GaAsP for red LEDs). This results in higher forward voltage
+    /// at the same current levels.
     pub fn led() -> Self {
         // Red LED: Vf ≈ 1.7V at 10mA
+        // Derived from: Vf = n*Vt * ln(If/Is)
+        // 1.7 = 2.0 * 0.02585 * ln(0.01/Is)
+        // Is ≈ 4.5e-17 A
         Self {
-            is: 2.96e-12,
-            n_vt: 1.9 * 25.85e-3,
+            is: 4.5e-17,
+            n_vt: 2.0 * 25.85e-3,
         }
     }
 
     /// Red LED — Vf ≈ 1.7V, used in Klon Centaur and high-headroom clippers.
     pub fn led_red() -> Self {
+        // Same as generic LED
         Self {
-            is: 2.96e-12,
-            n_vt: 1.9 * 25.85e-3,
+            is: 4.5e-17,
+            n_vt: 2.0 * 25.85e-3,
         }
     }
 
     /// Green LED — higher Vf ≈ 2.1V for even more headroom.
     pub fn led_green() -> Self {
+        // Green LEDs have even wider bandgap, Vf ≈ 2.1V at 10mA
+        // Is ≈ 1e-19 A
         Self {
-            is: 1.5e-12,
-            n_vt: 2.05 * 25.85e-3,
+            is: 1.0e-19,
+            n_vt: 2.0 * 25.85e-3,
         }
     }
 }
@@ -479,10 +489,18 @@ impl WdfRoot for DiodeRoot {
         let is = self.model.is;
         let nvt = self.model.n_vt;
 
-        let v0 = if a.abs() > 10.0 * nvt {
-            let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
-            nvt * log_arg.ln() * a.signum()
+        // Initial guess depends on bias direction:
+        // - Forward bias (a > 0): Use logarithmic estimate from Shockley equation
+        // - Reverse bias (a < 0): Diode blocks, i_d ≈ -Is ≈ 0, so v ≈ a/2
+        let v0 = if a > 10.0 * nvt {
+            // Forward bias: logarithmic estimate
+            let log_arg = (a / (2.0 * rp * is)).max(1.0);
+            nvt * log_arg.ln()
+        } else if a < -10.0 * nvt {
+            // Reverse bias: diode blocks
+            a * 0.5
         } else {
+            // Small signal: linear approximation
             a * 0.5
         };
 
@@ -1340,6 +1358,31 @@ impl TriodeModel {
             kp: 60.0,       // Lower Kp for higher current handling
             kvb: 400.0,     // Similar to 12AU7
             ex: 1.3,
+        }
+    }
+
+    /// 6386 - Remote-cutoff (variable-mu) dual triode.
+    ///
+    /// THE tube that makes the Fairchild 670 compressor possible.
+    /// Unlike regular triodes, mu varies with grid bias:
+    ///   - At low negative bias (~0V): mu ≈ 50
+    ///   - At high negative bias (-5V): mu ≈ 5
+    ///
+    /// This variable-mu characteristic provides smooth, musical gain reduction.
+    /// The compression ratio is set by how much the side-chain drives the grid.
+    ///
+    /// Note: For full variable-mu modeling, use RemoteCutoffTriodeRoot which
+    /// dynamically calculates mu from Vgk. This basic model uses nominal mu=40
+    /// which represents mid-range operation.
+    ///
+    /// Developed by General Electric for audio AGC applications. The Fairchild
+    /// 670 uses two matched sections per channel in push-pull configuration.
+    pub fn t_6386() -> Self {
+        Self {
+            mu: 40.0,       // Nominal mu (varies 5-50 with bias in real tube)
+            kp: 180.0,      // Medium Kp for variable-mu characteristic
+            kvb: 300.0,     // Standard knee voltage
+            ex: 1.4,        // Standard exponent
         }
     }
 }

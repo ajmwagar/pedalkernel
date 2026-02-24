@@ -2054,6 +2054,10 @@ pub struct CompiledPedal {
     /// Op-amp stages for unity-gain buffers and gain stages.
     /// Each op-amp is modeled as a VCVS with the OpAmpRoot element.
     opamp_stages: Vec<OpAmpStage>,
+    /// Debug statistics for monitoring WDF engine behavior.
+    /// When set, the processor will record per-sample stats for debugging.
+    #[cfg(debug_assertions)]
+    debug_stats: Option<std::sync::Arc<crate::debug::DebugStats>>,
 }
 
 /// Gain-like control labels.
@@ -2128,6 +2132,48 @@ impl CompiledPedal {
     /// Get the oversampling factor used for this pedal.
     pub fn oversampling(&self) -> OversamplingFactor {
         self.oversampling
+    }
+
+    /// Get the number of WDF stages and op-amp stages.
+    /// Returns (stage_count, opamp_count).
+    pub fn wdf_element_counts(&self) -> (u32, u32) {
+        (self.stages.len() as u32, self.opamp_stages.len() as u32)
+    }
+
+    /// Get the supply voltage.
+    pub fn supply_voltage(&self) -> f64 {
+        self.supply_voltage
+    }
+
+    /// Set debug statistics tracking.
+    ///
+    /// When set, the processor will record per-sample statistics for debugging
+    /// issues like clipping, DC offset, NaN/Inf, and automuting.
+    #[cfg(debug_assertions)]
+    pub fn set_debug_stats(&mut self, stats: std::sync::Arc<crate::debug::DebugStats>) {
+        // Configure the stats with engine info
+        stats.set_engine_config(
+            self.sample_rate as u32,
+            self.stages.len() as u32,
+            self.opamp_stages.len() as u32,
+            self.supply_voltage,
+            self.oversampling.ratio() as u32,
+        );
+        self.debug_stats = Some(stats);
+    }
+
+    /// Get a reference to the debug stats (if set).
+    #[cfg(debug_assertions)]
+    pub fn debug_stats(&self) -> Option<&std::sync::Arc<crate::debug::DebugStats>> {
+        self.debug_stats.as_ref()
+    }
+
+    /// Enable or disable debug mode.
+    #[cfg(debug_assertions)]
+    pub fn set_debug_enabled(&self, enabled: bool) {
+        if let Some(stats) = &self.debug_stats {
+            stats.set_enabled(enabled);
+        }
     }
 
     /// Set a control by its label (e.g., "Drive", "Level", "Rate").
@@ -2317,6 +2363,12 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
+        // Record input for debug stats
+        #[cfg(debug_assertions)]
+        if let Some(ref stats) = self.debug_stats {
+            stats.record_input(input);
+        }
+
         // Headroom models the supply rail ceiling.  In real circuits, gain
         // is set by resistor ratios (feedback/input) and is independent of
         // supply voltage.  What changes with voltage is how far the active
@@ -2329,8 +2381,13 @@ impl PedalProcessor for CompiledPedal {
         // Apply pre-gain before EACH stage.  In real circuits, each clipping
         // stage has its own active gain element (transistor/opamp).  The diode
         // voltage output (~0.7V) must be re-amplified before the next stage.
-        for stage in &mut self.stages {
+        for (stage_idx, stage) in self.stages.iter_mut().enumerate() {
             signal = stage.process(signal * self.pre_gain);
+            // Record per-stage level for debug
+            #[cfg(debug_assertions)]
+            if let Some(ref stats) = self.debug_stats {
+                stats.record_stage_level(stage_idx, signal);
+            }
         }
 
         // No WDF stages → just apply gain + soft clip.
@@ -2377,7 +2434,15 @@ impl PedalProcessor for CompiledPedal {
             signal = signal * 0.5 + wet * 0.5;
         }
 
-        signal * self.output_gain
+        let output = signal * self.output_gain;
+
+        // Record output for debug stats
+        #[cfg(debug_assertions)]
+        if let Some(ref stats) = self.debug_stats {
+            stats.record_output(output);
+        }
+
+        output
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
@@ -3671,6 +3736,7 @@ pub fn compile_pedal_with_options(
                         TriodeType::T12ay7 => 40.0,
                         TriodeType::T12au7 => 17.0,
                         TriodeType::T12bh7 => 17.0, // Similar mu to 12AU7, higher current
+                        TriodeType::T6386 => 40.0,  // Variable-mu: 5-50, nominal 40
                     };
                 }
                 ComponentKind::Pentode(_) => {
@@ -4079,6 +4145,8 @@ pub fn compile_pedal_with_options(
         tolerance_seed: tolerance.seed(),
         oversampling,
         opamp_stages,
+        #[cfg(debug_assertions)]
+        debug_stats: None,
     };
 
     // Apply supply voltage - this propagates v_max to all op-amp stages
@@ -4368,6 +4436,7 @@ fn triode_model(tt: TriodeType) -> TriodeModel {
         TriodeType::T12au7 => TriodeModel::t_12au7(),
         TriodeType::T12ay7 => TriodeModel::t_12ay7(),
         TriodeType::T12bh7 => TriodeModel::t_12bh7(),
+        TriodeType::T6386 => TriodeModel::t_6386(),
     }
 }
 
@@ -4377,6 +4446,8 @@ fn pentode_model(pt: PentodeType) -> PentodeModel {
         PentodeType::El84 => PentodeModel::p_el84(),
         // 6AQ5A is a beam power tube similar to EL84, use that model as approximation
         PentodeType::A6aq5a => PentodeModel::p_el84(),
+        // 6973 is a 9W beam power tube similar to EL84, used in Fairchild 670 sidechain
+        PentodeType::A6973 => PentodeModel::p_el84(),
     }
 }
 

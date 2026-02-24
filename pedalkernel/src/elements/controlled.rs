@@ -77,17 +77,19 @@ impl PhotocouplerModel {
         }
     }
 
-    /// T4B - Silonex optocoupler, used in some tremolo circuits.
+    /// T4B - Electroluminescent panel + CdS LDR used in LA-2A.
+    /// Very slow response gives the characteristic "program-dependent"
+    /// compression feel. The EL panel has inherent lag compared to LEDs.
     pub fn t4b() -> Self {
         Self {
-            r_dark: 1_500_000.0, // 1.5MΩ
-            r_light: 1_000.0,    // 1kΩ
-            gamma: 0.75,
-            tau_fast_rise: 0.002,
-            tau_fast_fall: 0.007,
-            tau_slow_rise: 0.018,
-            tau_slow_fall: 0.070,
-            slow_weight: 0.3,
+            r_dark: 3_000_000.0,  // 3MΩ (very high when no signal)
+            r_light: 500.0,       // 500Ω at full drive
+            gamma: 0.65,          // More gradual curve
+            tau_fast_rise: 0.010, // 10ms - much slower than LED vactrols
+            tau_fast_fall: 0.040, // 40ms
+            tau_slow_rise: 0.100, // 100ms
+            tau_slow_fall: 0.500, // 500ms - very slow release
+            slow_weight: 0.50,    // Strong slow component for that LA-2A feel
         }
     }
 }

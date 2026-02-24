@@ -1064,6 +1064,9 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                             crate::dsl::PhotocouplerType::Nsl32 => {
                                 (Some("NSL-32".to_string()), "NSL-32 Optocoupler".to_string())
                             }
+                            crate::dsl::PhotocouplerType::T4b => {
+                                (Some("T4B".to_string()), "T4B EL Panel + LDR (LA-2A style)".to_string())
+                            }
                         }
                     };
                     vec![BomEntry {
@@ -1129,6 +1132,14 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                                 Some("JJ-12AY7".to_string()),
                                 "12AY7 Preamp Tube (JJ Electronic)".to_string(),
                             ),
+                            crate::dsl::TriodeType::T12bh7 => (
+                                Some("JJ-12BH7A".to_string()),
+                                "12BH7A Dual Triode (JJ Electronic)".to_string(),
+                            ),
+                            crate::dsl::TriodeType::T6386 => (
+                                Some("NOS-6386".to_string()),
+                                "6386 Remote-Cutoff Dual Triode (NOS)".to_string(),
+                            ),
                         }
                     };
                     vec![BomEntry {
@@ -1171,6 +1182,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                             crate::dsl::PentodeType::A6aq5a => (
                                 Some("6AQ5A".to_string()),
                                 "6AQ5A Beam Power Tube".to_string(),
+                            ),
+                            crate::dsl::PentodeType::A6973 => (
+                                Some("NOS-6973".to_string()),
+                                "6973 Beam Power Tube (NOS)".to_string(),
                             ),
                         }
                     };
@@ -1658,6 +1673,33 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         description: format!(
                             "{}-position rotary switch",
                             positions.len()
+                        ),
+                        qty_per_unit: 1,
+                    }]
+                }
+                ComponentKind::ResistorSwitched(values) => {
+                    // Generate entries for all resistor values in the switch
+                    values.iter().enumerate().map(|(i, v)| {
+                        let (_, suffix, scaled) = super::kicad::format_eng_components(*v);
+                        BomEntry {
+                            reference: format!("{}_{}", comp.id, i + 1),
+                            display: "Resistor".into(),
+                            value: format!("{}{}", scaled, suffix),
+                            mouser_pn: super::hw::mouser_resistor(*v),
+                            description: format!("Resistor {:.2}{} (switched position {})", scaled, suffix, i + 1),
+                            qty_per_unit: 1,
+                        }
+                    }).collect()
+                }
+                ComponentKind::Switch(positions) => {
+                    vec![BomEntry {
+                        reference: comp.id.clone(),
+                        display: "Switch".into(),
+                        value: format!("{}-position", positions),
+                        mouser_pn: None, // Depends on specific switch type
+                        description: format!(
+                            "{}-position mechanical switch",
+                            positions
                         ),
                         qty_per_unit: 1,
                     }]

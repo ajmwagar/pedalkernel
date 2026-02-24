@@ -16,6 +16,7 @@
 
 pub mod board;
 pub mod compiler;
+pub mod debug;
 pub mod dsl;
 pub mod elements;
 #[cfg(feature = "hardware")]
@@ -29,6 +30,8 @@ pub mod thermal;
 pub mod tolerance;
 pub mod tree;
 pub mod wav;
+
+pub use debug::DebugStats;
 
 /// Audio processor trait for pedals.
 pub trait PedalProcessor {
