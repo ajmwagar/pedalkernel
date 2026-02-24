@@ -125,6 +125,8 @@ struct PedalMeta {
 
 /// The actual processor for a pedal slot.
 enum PedalEngine {
+    /// Empty/bypass slot - passes signal through unchanged.
+    Bypass,
     Compiled(CompiledPedal),
     Delay(Delay),
     /// A pedalboard (signal chain of multiple pedals from a `.board` file).
@@ -136,6 +138,7 @@ enum PedalEngine {
 impl PedalEngine {
     fn process(&mut self, input: f64) -> f64 {
         match self {
+            Self::Bypass => input, // Pass through unchanged
             Self::Compiled(p) => p.process(input),
             Self::Delay(d) => d.process(input),
             Self::Board(b) => b.process(input),
@@ -150,6 +153,7 @@ impl PedalEngine {
 
     fn set_sample_rate(&mut self, rate: f64) {
         match self {
+            Self::Bypass => {} // No state to update
             Self::Compiled(p) => p.set_sample_rate(rate),
             Self::Delay(d) => d.set_sample_rate(rate),
             Self::Board(b) => b.set_sample_rate(rate),
@@ -159,6 +163,7 @@ impl PedalEngine {
 
     fn reset(&mut self) {
         match self {
+            Self::Bypass => {} // No state to reset
             Self::Compiled(p) => p.reset(),
             Self::Delay(d) => d.reset(),
             Self::Board(b) => b.reset(),
@@ -219,9 +224,23 @@ fn load_pedal_source(src: &str, sample_rate: f64) -> Option<(PedalMeta, PedalEng
     let compiled = compile_pedal(&def, sample_rate).ok()?;
 
     // Map controls sequentially to knob slots (up to NUM_KNOBS).
+    // Deduplicate labels: dual-gang pots share the same label but should appear
+    // as a single knob in the UI. The engine's set_control() updates ALL controls
+    // with matching labels, so one UI knob controls both gangs.
     let mut labels: [Option<String>; NUM_KNOBS] = Default::default();
-    for (i, ctrl) in def.controls.iter().take(NUM_KNOBS).enumerate() {
-        labels[i] = Some(ctrl.label.clone());
+    let mut slot = 0;
+    for ctrl in def.controls.iter() {
+        if slot >= NUM_KNOBS {
+            break;
+        }
+        // Skip if this label is already assigned to a previous slot
+        let already_assigned = labels[..slot]
+            .iter()
+            .any(|l| l.as_ref() == Some(&ctrl.label));
+        if !already_assigned {
+            labels[slot] = Some(ctrl.label.clone());
+            slot += 1;
+        }
     }
 
     let meta = PedalMeta {
@@ -243,10 +262,22 @@ fn load_synth_source(src: &str, sample_rate: f64) -> Option<(PedalMeta, PedalEng
     let synth = SynthProcessor::new(sample_rate);
 
     // Map controls sequentially to knob slots (up to NUM_KNOBS).
-    // Read labels from the pedal file just like regular pedals.
+    // Deduplicate labels: dual-gang pots share the same label but should appear
+    // as a single knob in the UI.
     let mut labels: [Option<String>; NUM_KNOBS] = Default::default();
-    for (i, ctrl) in def.controls.iter().take(NUM_KNOBS).enumerate() {
-        labels[i] = Some(ctrl.label.clone());
+    let mut slot = 0;
+    for ctrl in def.controls.iter() {
+        if slot >= NUM_KNOBS {
+            break;
+        }
+        // Skip if this label is already assigned to a previous slot
+        let already_assigned = labels[..slot]
+            .iter()
+            .any(|l| l.as_ref() == Some(&ctrl.label));
+        if !already_assigned {
+            labels[slot] = Some(ctrl.label.clone());
+            slot += 1;
+        }
     }
 
     let meta = PedalMeta {
@@ -505,7 +536,14 @@ impl Default for PedalKernelPlugin {
         let mut meta_list = Vec::new();
         let mut engines = Vec::new();
 
-        // 1. Embedded WDF pedals (indices 0–6).
+        // 0. Empty/bypass slot (always index 0).
+        meta_list.push(PedalMeta {
+            name: "Empty".to_string(),
+            labels: [None, None, None, None, None, None],
+        });
+        engines.push(PedalEngine::Bypass);
+
+        // 1. Embedded WDF pedals.
         for src in EMBEDDED_SOURCES {
             if let Some((m, e)) = load_pedal_source(src, sr) {
                 meta_list.push(m);
@@ -833,6 +871,7 @@ impl Plugin for PedalKernelPlugin {
             if let Some(engine) = self.engines.get_mut(idx) {
                 // Route knobs to the active pedal's controls
                 match engine {
+                    PedalEngine::Bypass => {} // No controls to update
                     PedalEngine::Compiled(pedal) => {
                         if let Some(labels) = labels {
                             for (slot, value) in knobs.iter().enumerate() {
@@ -977,6 +1016,13 @@ mod pedalboard_plugin {
             // ─────────────────────────────────────────────────────────────────
             // Load pedals (NOT amps - they go in amp_engines)
             // ─────────────────────────────────────────────────────────────────
+
+            // Empty/bypass slot (always index 0)
+            meta_list.push(PedalMeta {
+                name: "Empty".to_string(),
+                labels: [None, None, None, None, None, None],
+            });
+            engines.push(PedalEngine::Bypass);
 
             // Load all embedded pedals
             for src in EMBEDDED_SOURCES {
@@ -1309,6 +1355,7 @@ mod pedalboard_plugin {
                             // Apply knob values
                             let labels = self.meta.get(*pedal_idx).map(|m| &m.labels);
                             match engine {
+                                PedalEngine::Bypass => {} // No controls to update
                                 PedalEngine::Compiled(pedal) => {
                                     if let Some(labels) = labels {
                                         for (k, value) in knobs.iter().enumerate() {

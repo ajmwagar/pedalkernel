@@ -80,6 +80,12 @@ build_variant() {
                 mv "$dylib" "$(dirname "$dylib")/${name}"
             fi
         done
+        # Fix Info.plist CFBundleExecutable to match renamed binary (required by JUCE-based hosts like Carla)
+        plist="$DIST_DIR/${name}.vst3/Contents/Info.plist"
+        if [ -f "$plist" ]; then
+            sed -i.bak "s|<string>pedalkernel-vst</string>|<string>${name}</string>|g" "$plist"
+            rm -f "$plist.bak"
+        fi
         # Ensure binary has execute permission (required by some VST3 hosts)
         chmod +x "$DIST_DIR/${name}.vst3/Contents/"*-linux/*.so 2>/dev/null || true
         chmod +x "$DIST_DIR/${name}.vst3/Contents/MacOS/"* 2>/dev/null || true
