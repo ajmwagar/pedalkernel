@@ -7,7 +7,7 @@
 //! 4. Modeling active elements (transistors, opamps) as gain stages
 //! 5. Chaining everything into a cascaded `PedalProcessor`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
 use crate::elements::*;
@@ -594,6 +594,27 @@ fn pin_key(pin: &Pin) -> String {
 
 impl CircuitGraph {
     fn from_pedal(pedal: &PedalDef) -> Self {
+        // Pre-scan: identify pots that use .w (wiper) pin in nets.
+        // A pot with .w is a 3-terminal pot: lug A, wiper, lug B.
+        // Must be done before the get_id closure borrows pin_ids.
+        let pots_with_wiper: HashSet<String> = {
+            let mut set = HashSet::new();
+            for net in &pedal.nets {
+                let check_pin = |p: &Pin, s: &mut HashSet<String>| {
+                    if let Pin::ComponentPin { component, pin } = p {
+                        if pin == "w" {
+                            s.insert(component.clone());
+                        }
+                    }
+                };
+                check_pin(&net.from, &mut set);
+                for p in &net.to {
+                    check_pin(p, &mut set);
+                }
+            }
+            set
+        };
+
         let mut uf = UnionFind::new();
         let mut pin_ids: HashMap<String, usize> = HashMap::new();
         let mut next_id = 0usize;
@@ -627,13 +648,32 @@ impl CircuitGraph {
         // Build edges for two-terminal components.
         let mut edges = Vec::new();
         let mut num_active = 0usize;
+        let mut deferred_3term: Vec<(usize, String)> = Vec::new();
 
         for (idx, comp) in pedal.components.iter().enumerate() {
             match &comp.kind {
+                ComponentKind::Potentiometer(_) => {
+                    if pots_with_wiper.contains(&comp.id) {
+                        // 3-terminal pot — defer to after loop
+                        deferred_3term.push((idx, comp.id.clone()));
+                    } else {
+                        // 2-terminal pot — existing behavior
+                        let key_a = format!("{}.a", comp.id);
+                        let key_b = format!("{}.b", comp.id);
+                        let id_a = get_id(&key_a, &mut uf);
+                        let id_b = get_id(&key_b, &mut uf);
+                        let node_a = uf.find(id_a);
+                        let node_b = uf.find(id_b);
+                        edges.push(GraphEdge {
+                            comp_idx: idx,
+                            node_a,
+                            node_b,
+                        });
+                    }
+                }
                 ComponentKind::Resistor(_)
                 | ComponentKind::Capacitor(_)
                 | ComponentKind::Inductor(_)
-                | ComponentKind::Potentiometer(_)
                 | ComponentKind::DiodePair(_)
                 | ComponentKind::Diode(_)
                 | ComponentKind::Zener(_)
@@ -790,6 +830,50 @@ impl CircuitGraph {
             }
         }
 
+        // Process deferred 3-terminal pots. Each becomes two synthetic
+        // Potentiometer components sharing the wiper node:
+        //   {id}__aw: a → wiper (R = position * max_R)
+        //   {id}__wb: wiper → b (R = (1 - position) * max_R)
+        let mut extra_components: Vec<ComponentDef> = Vec::new();
+        for (_original_idx, pot_id) in &deferred_3term {
+            let max_r = match &pedal.components[*_original_idx].kind {
+                ComponentKind::Potentiometer(r) => *r,
+                _ => unreachable!(),
+            };
+
+            // Synthetic upper-half: a → wiper
+            let aw_idx = pedal.components.len() + extra_components.len();
+            extra_components.push(ComponentDef {
+                id: format!("{pot_id}__aw"),
+                kind: ComponentKind::Potentiometer(max_r),
+            });
+
+            // Synthetic lower-half: wiper → b
+            let wb_idx = pedal.components.len() + extra_components.len();
+            extra_components.push(ComponentDef {
+                id: format!("{pot_id}__wb"),
+                kind: ComponentKind::Potentiometer(max_r),
+            });
+
+            let key_a = format!("{pot_id}.a");
+            let key_w = format!("{pot_id}.w");
+            let key_b = format!("{pot_id}.b");
+            let id_a = get_id(&key_a, &mut uf);
+            let id_w = get_id(&key_w, &mut uf);
+            let id_b = get_id(&key_b, &mut uf);
+
+            edges.push(GraphEdge {
+                comp_idx: aw_idx,
+                node_a: uf.find(id_a),
+                node_b: uf.find(id_w),
+            });
+            edges.push(GraphEdge {
+                comp_idx: wb_idx,
+                node_a: uf.find(id_w),
+                node_b: uf.find(id_b),
+            });
+        }
+
         // Create virtual bridge edges for active elements (OpAmp, Npn, Pnp).
         // This ensures BFS can traverse through them for distance computation
         // and voltage source injection picks a proper connected node.
@@ -834,9 +918,13 @@ impl CircuitGraph {
         let out_node = uf.find(*pin_ids.get("out").unwrap());
         let gnd_node = uf.find(*pin_ids.get("gnd").unwrap());
 
+        // Append synthetic 3-terminal pot halves to the component list.
+        let mut components = pedal.components.clone();
+        components.extend(extra_components);
+
         CircuitGraph {
             edges,
-            components: pedal.components.clone(),
+            components,
             in_node,
             out_node,
             gnd_node,
@@ -1958,6 +2046,10 @@ impl CompiledPedal {
                     let comp_id = self.controls[i].component_id.clone();
                     if let Some(stage) = self.stages.get_mut(stage_idx) {
                         stage.tree.set_pot(&comp_id, value);
+                        // For 3-terminal pots: update synthetic halves with
+                        // inverse coupling. No-ops for 2-terminal pots.
+                        stage.tree.set_pot(&format!("{comp_id}__aw"), value);
+                        stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
                         stage.tree.recompute();
                     }
                 }
@@ -4265,7 +4357,11 @@ fn set_vs_rp(node: &mut DynNode, rp_val: f64) {
 
 fn has_pot(node: &DynNode, comp_id: &str) -> bool {
     match node {
-        DynNode::Pot { comp_id: id, .. } => id == comp_id,
+        DynNode::Pot { comp_id: id, .. } => {
+            // Match the pot itself or the synthetic __aw half of a 3-terminal pot.
+            // (Finding either half means the control is in this stage.)
+            id == comp_id || *id == format!("{comp_id}__aw")
+        }
         DynNode::Series { left, right, .. } | DynNode::Parallel { left, right, .. } => {
             has_pot(left, comp_id) || has_pot(right, comp_id)
         }
@@ -5328,5 +5424,50 @@ pedal "Test Chorus" {
         assert!(!pedal.has_fx_loop());
         assert!(split_pedal_def(&pedal).is_none());
         assert!(compile_split_pedal(&pedal, 48000.0).is_err());
+    }
+
+    #[test]
+    fn three_terminal_pot_compiles_and_passes_signal() {
+        // 3-terminal pot as volume attenuator at the diode junction.
+        // Wiper is the junction node so both pot halves appear in the
+        // WDF stage. __wb goes to gnd (dead-end, redirected by sp_reduce).
+        let src = r#"
+            pedal "3TermTest" {
+                components {
+                    C1: cap(100n)
+                    R1: resistor(10k)
+                    Vol: pot(100k)
+                    D1: diode_pair(silicon)
+                    R2: resistor(10k)
+                }
+                nets {
+                    in -> C1.a
+                    C1.b -> R1.a
+                    R1.b -> Vol.a
+                    Vol.b -> gnd
+                    Vol.w -> D1.a
+                    D1.b -> gnd
+                    Vol.w -> R2.a
+                    R2.b -> out
+                }
+                controls {
+                    Vol.position -> "Vol" [0.0, 1.0] = 0.5
+                }
+            }
+        "#;
+        let pedal = parse_pedal_file(src).unwrap();
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+        // Basic signal pass-through test at default position.
+        let input = sine(48000);
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert_finite(&output, "3-term pot default");
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(peak > 0.001, "3-term pot should pass signal: peak={peak}");
+
+        // Change control and verify it still produces finite output.
+        proc.set_control("Vol", 0.2);
+        let output2: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert_finite(&output2, "3-term pot Vol=0.2");
     }
 }

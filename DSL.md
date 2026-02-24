@@ -79,7 +79,9 @@ Nets describe how component pins connect. Each net is `<from> -> <to1>, <to2>, .
 
 **Component pins** use dot notation: `C1.a`, `R1.b`, `D1.a`, `Q1.base`.
 
-Two-terminal components (resistors, capacitors, inductors, diodes, potentiometers) have pins `a` and `b`. Transistors have `base`, `collector`, `emitter`. JFETs have `gate`, `drain`, `source`. Op-amps have `pos`, `neg`, `out`. LFOs and envelope followers have `out` (modulation output) which connects to modulation inputs like `<jfet>.vgs` or `<photocoupler>.led`.
+Two-terminal components (resistors, capacitors, inductors, diodes) have pins `a` and `b`. Potentiometers have pins `a` and `b` (2-terminal variable resistor), or `a`, `w` (wiper), and `b` (3-terminal pot for crossfade/blend). Transistors have `base`, `collector`, `emitter`. JFETs have `gate`, `drain`, `source`. Op-amps have `pos`, `neg`, `out`. LFOs and envelope followers have `out` (modulation output) which connects to modulation inputs like `<jfet>.vgs` or `<photocoupler>.led`.
+
+**3-terminal pots:** When a pot uses the `.w` (wiper) pin in nets, it is modeled as two linked variable resistors sharing the wiper node. As position increases, R(a→w) increases and R(w→b) decreases, maintaining R(a→w) + R(w→b) = max_R. This enables crossfade/blend topologies where signals connect to both `.a` and `.b` with the output taken from `.w`.
 
 ```
 in -> C1.a                       # input to capacitor pin a
