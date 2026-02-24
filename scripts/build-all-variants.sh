@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Build all PedalKernel VST/CLAP variants and copy to unique bundle names
 #
-# Variants:
-#   - pedalkernel (free/demo)
-#   - pedalkernel-pro (guitar + bass + amps + synth + shared)
-#   - pedalkernel-guitar (guitar + shared)
-#   - pedalkernel-bass (bass + shared)
-#   - pedalkernel-amps (amp models + shared)
-#   - pedalkernel-synth (VCO/VCF/VCA synthesizers)
+# Single-Pedal Selector variants (WGPU single-pedal editor):
+#   - pedalkernel       (free/demo — embedded pedals only, no editor)
+#   - pedalkernel-pro   (guitar + bass + amps + single-pedal editor)
+#   - pedalkernel-synth (VCO/VCF/VCA synthesizers with MIDI + single-pedal editor)
+#
+# Pedalboard variant (6-slot chain with WGPU pedalboard editor):
+#   - pedalkernel-pedalboard (guitar + bass + amps + pedalboard editor)
 
 set -e
 
@@ -69,12 +69,27 @@ build_variant() {
     if [ -d "$BUNDLE_DIR/pedalkernel-vst.vst3" ]; then
         rm -rf "$DIST_DIR/${name}.vst3"
         cp -R "$BUNDLE_DIR/pedalkernel-vst.vst3" "$DIST_DIR/${name}.vst3"
+        # Rename the .so to match the bundle name (required by JUCE-based hosts like Carla)
+        for so in "$DIST_DIR/${name}.vst3/Contents/"*-linux/pedalkernel-vst.so; do
+            if [ -f "$so" ]; then
+                mv "$so" "$(dirname "$so")/${name}.so"
+            fi
+        done
+        for dylib in "$DIST_DIR/${name}.vst3/Contents/MacOS/pedalkernel-vst"; do
+            if [ -f "$dylib" ]; then
+                mv "$dylib" "$(dirname "$dylib")/${name}"
+            fi
+        done
+        # Ensure binary has execute permission (required by some VST3 hosts)
+        chmod +x "$DIST_DIR/${name}.vst3/Contents/"*-linux/*.so 2>/dev/null || true
+        chmod +x "$DIST_DIR/${name}.vst3/Contents/MacOS/"* 2>/dev/null || true
         log "  -> $DIST_DIR/${name}.vst3"
     fi
 
     if [ -d "$BUNDLE_DIR/pedalkernel-vst.clap" ]; then
         rm -rf "$DIST_DIR/${name}.clap"
         cp -R "$BUNDLE_DIR/pedalkernel-vst.clap" "$DIST_DIR/${name}.clap"
+        chmod +x "$DIST_DIR/${name}.clap/"*.so 2>/dev/null || true
         log "  -> $DIST_DIR/${name}.clap"
     fi
 
@@ -96,24 +111,16 @@ while [[ $# -gt 0 ]]; do
             VARIANTS+=("pro")
             shift
             ;;
-        --guitar)
-            VARIANTS+=("guitar")
-            shift
-            ;;
-        --bass)
-            VARIANTS+=("bass")
-            shift
-            ;;
-        --amps)
-            VARIANTS+=("amps")
-            shift
-            ;;
         --synth)
             VARIANTS+=("synth")
             shift
             ;;
+        --pedalboard)
+            VARIANTS+=("pedalboard")
+            shift
+            ;;
         --all)
-            VARIANTS=("free" "pro" "guitar" "bass" "amps" "synth")
+            VARIANTS=("free" "pro" "synth" "pedalboard")
             shift
             ;;
         --link)
@@ -123,16 +130,18 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo
-            echo "Options:"
-            echo "  --free      Build free/demo version"
-            echo "  --pro       Build pro version (guitar + bass + amps + synth + shared)"
-            echo "  --guitar    Build guitar-only version"
-            echo "  --bass      Build bass-only version"
-            echo "  --amps      Build amp models version"
-            echo "  --synth     Build synth version (VCO/VCF/VCA)"
-            echo "  --all       Build all variants"
-            echo "  --link      Symlink built plugins to system plugin folders"
-            echo "  -h, --help  Show this help"
+            echo "Single-Pedal variants:"
+            echo "  --free         Build free/demo version (no editor)"
+            echo "  --pro          Build pro version (guitar + bass + amps + single-pedal editor)"
+            echo "  --synth        Build synth version (VCO/VCF/VCA with MIDI + single-pedal editor)"
+            echo
+            echo "Pedalboard variant:"
+            echo "  --pedalboard   Build 6-slot pedalboard with pedalboard editor"
+            echo
+            echo "Other:"
+            echo "  --all          Build all variants (4 total)"
+            echo "  --link         Symlink built plugins to system plugin folders"
+            echo "  -h, --help     Show this help"
             echo
             echo "If no variant is specified, builds --pro by default."
             echo
@@ -162,29 +171,31 @@ for variant in "${VARIANTS[@]}"; do
             build_variant "pedalkernel" "" "PedalKernel (Free)"
             ;;
         pro)
-            build_variant "pedalkernel-pro" "pro-pedals" "PedalKernel Pro"
-            ;;
-        guitar)
-            build_variant "pedalkernel-guitar" "pro-guitar" "PedalKernel Guitar"
-            ;;
-        bass)
-            build_variant "pedalkernel-bass" "pro-bass" "PedalKernel Bass"
-            ;;
-        amps)
-            build_variant "pedalkernel-amps" "pro-amps" "PedalKernel Amps"
+            build_variant "pedalkernel-pro" "pro-guitar,pro-bass,pro-amps,pro-ui" "PedalKernel Pro"
             ;;
         synth)
-            build_variant "pedalkernel-synth" "pro-synth" "PedalKernel Synth"
+            build_variant "pedalkernel-synth" "pro-synth,pro-ui" "PedalKernel Synth"
+            ;;
+        pedalboard)
+            build_variant "pedalkernel-pedalboard" "pro-guitar,pro-bass,pro-amps,pro-pedalboard" "PedalKernel Pedalboard"
             ;;
     esac
 done
 
-# Optionally link to system plugin folders
+# Optionally install to system plugin folders
 if [ "$LINK_SYSTEM" = true ]; then
-    log "Linking plugins to system folders..."
+    log "Copying plugins to system folders..."
 
-    VST3_DIR="$HOME/Library/Audio/Plug-Ins/VST3"
-    CLAP_DIR="$HOME/Library/Audio/Plug-Ins/CLAP"
+    case "$(uname)" in
+        Darwin)
+            VST3_DIR="$HOME/Library/Audio/Plug-Ins/VST3"
+            CLAP_DIR="$HOME/Library/Audio/Plug-Ins/CLAP"
+            ;;
+        *)
+            VST3_DIR="$HOME/.vst3"
+            CLAP_DIR="$HOME/.clap"
+            ;;
+    esac
 
     mkdir -p "$VST3_DIR" "$CLAP_DIR"
 
@@ -192,7 +203,7 @@ if [ "$LINK_SYSTEM" = true ]; then
         if [ -d "$vst3" ]; then
             name=$(basename "$vst3")
             rm -rf "$VST3_DIR/$name"
-            ln -sf "$vst3" "$VST3_DIR/$name"
+            cp -R "$vst3" "$VST3_DIR/$name"
             log "  VST3: $name"
         fi
     done
@@ -201,7 +212,7 @@ if [ "$LINK_SYSTEM" = true ]; then
         if [ -d "$clap" ]; then
             name=$(basename "$clap")
             rm -rf "$CLAP_DIR/$name"
-            ln -sf "$clap" "$CLAP_DIR/$name"
+            cp -R "$clap" "$CLAP_DIR/$name"
             log "  CLAP: $name"
         fi
     done

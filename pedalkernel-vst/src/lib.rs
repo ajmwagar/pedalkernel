@@ -17,10 +17,10 @@
 use atomic_float::AtomicF32;
 use nih_plug::prelude::*;
 #[cfg(feature = "pro-ui")]
-use pedalkernel_ui::{PedalKernelEditor, PedalKernelEditorState, PedalKernelUiState};
+use pedalkernel_ui::{PedalKernelEditor, PedalKernelEditorState, PedalKernelUiState, PedalVisuals};
 use pedalkernel::board::parse_board_file;
 
-#[cfg(feature = "pro-ui")]
+#[cfg(feature = "pro-pedalboard")]
 mod pedalboard;
 use pedalkernel::compiler::{compile_pedal, CompiledPedal};
 use pedalkernel::dsl;
@@ -336,6 +336,67 @@ fn scan_user_boards(sample_rate: f64) -> Vec<(PedalMeta, PedalEngine)> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Pedal Visual Identity (from embedded UI manifests)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Embedded UI manifests mapping pedal names to visual properties.
+/// Each entry: (pedal_name, knob_color, led_color)
+#[cfg(feature = "pro-ui")]
+const PEDAL_MANIFEST_DATA: &[(&str, &str, &str)] = &[
+    ("Tube Screamer", "cream", "green"),
+    ("Fuzz Face", "white", "red"),
+    ("Big Muff", "white", "red"),
+    ("DynaComp", "red", "red"),
+    ("RAT", "black", "red"),
+    ("Blues Driver", "black", "red"),
+    ("Klon Centaur", "gold", "red"),
+    ("Delay", "chrome", "green"),
+];
+
+/// Build PedalVisuals for a pedal based on its name (matches against manifest data).
+#[cfg(feature = "pro-ui")]
+fn pedal_visuals_for_name(name: &str) -> PedalVisuals {
+    // Find matching manifest entry
+    let entry = PEDAL_MANIFEST_DATA.iter().find(|(n, _, _)| {
+        name.eq_ignore_ascii_case(n)
+            || name.to_lowercase().contains(&n.to_lowercase())
+    });
+
+    let (knob_color, led_color) = match entry {
+        Some((_, kc, lc)) => (*kc, *lc),
+        None => ("chrome", "green"), // default
+    };
+
+    // Map knob color to enclosure hue/sat and knob style
+    let (hue, saturation, brightness, knob_style) = match knob_color {
+        "cream" => (0.12, 0.35, 0.30, 2),  // warm cream → greenish enclosure
+        "green" => (0.33, 0.50, 0.25, 2),
+        "white" => (0.0, 0.0, 0.28, 3),     // neutral gray
+        "black" => (0.0, 0.0, 0.18, 1),     // dark
+        "red" => (0.0, 0.55, 0.25, 4),       // red-tinted
+        "gold" => (0.13, 0.50, 0.32, 5),    // warm gold
+        _ => (0.0, 0.0, 0.25, 0),           // chrome default
+    };
+
+    // Map LED color to RGB
+    let led_rgb = match led_color {
+        "green" => [0.1, 0.9, 0.2],
+        "red" => [0.9, 0.1, 0.05],
+        "blue" => [0.1, 0.3, 0.9],
+        "amber" => [0.9, 0.6, 0.05],
+        _ => [0.1, 0.9, 0.2],
+    };
+
+    PedalVisuals {
+        hue,
+        saturation,
+        brightness,
+        led_color: led_rgb,
+        knob_style,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Parameters
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -557,9 +618,21 @@ impl Default for PedalKernelPlugin {
         let editor_state = PedalKernelEditorState::default_size();
 
         #[cfg(feature = "pro-ui")]
+        let initial_labels = meta.first().map(|m| m.labels.clone())
+            .unwrap_or_default();
+
+        #[cfg(feature = "pro-ui")]
+        let pedal_visuals: Vec<PedalVisuals> = meta.iter()
+            .map(|m| pedal_visuals_for_name(&m.name))
+            .collect();
+
+        #[cfg(feature = "pro-ui")]
         let ui_state = Arc::new(PedalKernelUiState {
+            mode: pedalkernel_ui::EditorMode::SinglePedal,
             pedal_index: Arc::new(AtomicU8::new(0)),
             pedal_names: meta.iter().map(|m| m.name.clone()).collect(),
+            knob_labels: Arc::new(std::sync::Mutex::new(initial_labels)),
+            pedal_visuals,
             ..Default::default()
         });
 
@@ -663,6 +736,16 @@ impl Plugin for PedalKernelPlugin {
         let idx = self.params.pedal_type.value() as usize;
         self.pedal_indicator.store(idx as u8, Ordering::Relaxed);
 
+        // Sync knob labels to UI when pedal index changes
+        #[cfg(feature = "pro-ui")]
+        {
+            let new_labels = self.meta.get(idx).map(|m| m.labels.clone())
+                .unwrap_or_default();
+            *self.ui_state.knob_labels.lock().unwrap() = new_labels;
+            // Keep UI pedal_index in sync with host parameter
+            self.ui_state.pedal_index.store(idx as u8, Ordering::Relaxed);
+        }
+
         let labels = self.meta.get(idx).map(|m| &m.labels);
 
         // Process MIDI events (for synth variant)
@@ -686,6 +769,22 @@ impl Plugin for PedalKernelPlugin {
         }
         #[cfg(not(feature = "pro-synth"))]
         let _ = context;
+
+        // Sync knob values to UI once per buffer (not per-sample)
+        #[cfg(feature = "pro-ui")]
+        {
+            let kv = [
+                self.params.knob1.value(),
+                self.params.knob2.value(),
+                self.params.knob3.value(),
+                self.params.knob4.value(),
+                self.params.knob5.value(),
+                self.params.knob6.value(),
+            ];
+            for (i, v) in kv.iter().enumerate() {
+                self.ui_state.knob_values[i].store(*v, Ordering::Relaxed);
+            }
+        }
 
         for channel_samples in buffer.iter_samples() {
             // Read smoothed knob values (per-sample for zipper-free automation)
@@ -808,7 +907,7 @@ impl ClapPlugin for PedalKernelPlugin {
 // Signal chain: input → [Slot 1-6 pedals] → [Amp] → output
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg(feature = "pro-ui")]
+#[cfg(feature = "pro-pedalboard")]
 mod pedalboard_plugin {
     use super::*;
     use crate::pedalboard::{PedalboardParams, PedalboardState, NUM_SLOTS, KNOBS_PER_SLOT};
@@ -968,8 +1067,13 @@ mod pedalboard_plugin {
 
             // Create UI state that shares the same atomics as PedalboardState
             // This ensures UI changes are reflected in audio processing and vice versa
+            let pedal_visuals: Vec<pedalkernel_ui::PedalVisuals> = meta.iter()
+                .map(|m| pedal_visuals_for_name(&m.name))
+                .collect();
+
             let ui_state = Arc::new(PedalKernelUiState {
-                pedal_index: Arc::clone(&state.slots[0].pedal_index), // Default to slot 0 for single-pedal compat
+                mode: pedalkernel_ui::EditorMode::Pedalboard,
+                pedal_index: Arc::clone(&state.slots[0].pedal_index),
                 pedal_names: pedal_names.clone(),
                 amp_names: state.amp_names.clone(),
                 preset_index: Arc::new(AtomicU8::new(0)),
@@ -980,14 +1084,20 @@ mod pedalboard_plugin {
                         Arc::new(AtomicF32::new(0.5))
                     }
                 }),
-                knob_labels: Arc::new(crossbeam::atomic::AtomicCell::new([None, None, None, None, None, None])),
+                knob_labels: Arc::new(std::sync::Mutex::new([None, None, None, None, None, None])),
                 peak_meter: Arc::clone(&state.peak_meter),
+                pedal_visuals,
                 // Wire up all 6 slots with shared atomics
                 slots: std::array::from_fn(|slot| {
+                    // Compute initial knob count for slot 0's default pedal
+                    let initial_knob_count = meta.first()
+                        .map(|m| m.labels.iter().filter(|l| l.is_some()).count() as u8)
+                        .unwrap_or(3);
                     pedalkernel_ui::SlotUiState {
                         pedal_index: Arc::clone(&state.slots[slot].pedal_index),
                         bypassed: Arc::clone(&state.slots[slot].bypassed),
                         knobs: std::array::from_fn(|k| Arc::clone(&state.slots[slot].knobs[k])),
+                        knob_count: Arc::new(AtomicU8::new(initial_knob_count)),
                     }
                 }),
                 // Wire up amp section with shared atomics
@@ -1101,6 +1211,15 @@ mod pedalboard_plugin {
             self.state.amp.knobs[0].store(self.params.amp_gain.value(), Ordering::Relaxed);
             self.state.amp.knobs[1].store(self.params.amp_tone.value(), Ordering::Relaxed);
             self.state.amp.knobs[2].store(self.params.amp_volume.value(), Ordering::Relaxed);
+
+            // Sync knob counts per slot to UI
+            for slot in 0..NUM_SLOTS {
+                let pedal_idx = self.state.slots[slot].pedal_index.load(Ordering::Relaxed) as usize;
+                let knob_count = self.meta.get(pedal_idx)
+                    .map(|m| m.labels.iter().filter(|l| l.is_some()).count() as u8)
+                    .unwrap_or(3);
+                self.ui_state.slots[slot].knob_count.store(knob_count, Ordering::Relaxed);
+            }
 
             // Read slot configurations from shared state
             let slot_configs: [(usize, bool, [f64; KNOBS_PER_SLOT]); NUM_SLOTS] = std::array::from_fn(|slot| {
@@ -1243,15 +1362,15 @@ mod pedalboard_plugin {
 }
 
 // Export different plugin based on features:
-// - Pedalboard for Guitar/Bass variants (6 pedals + amp)
-// - Single-pedal selector for Synth, Amps, and base version
-#[cfg(all(feature = "pro-ui", any(feature = "pro-guitar", feature = "pro-bass")))]
+// - Pedalboard for pro-pedalboard (6 pedals + amp, WGPU pedalboard editor)
+// - Single-pedal selector for everything else (pro, synth, amps, free)
+#[cfg(feature = "pro-pedalboard")]
 nih_export_clap!(pedalboard_plugin::PedalboardPlugin);
-#[cfg(all(feature = "pro-ui", any(feature = "pro-guitar", feature = "pro-bass")))]
+#[cfg(feature = "pro-pedalboard")]
 nih_export_vst3!(pedalboard_plugin::PedalboardPlugin);
 
-// Non-pedalboard exports (synth, amps, base)
-#[cfg(not(all(feature = "pro-ui", any(feature = "pro-guitar", feature = "pro-bass"))))]
+// Non-pedalboard exports (pro single-pedal, synth, amps, free)
+#[cfg(not(feature = "pro-pedalboard"))]
 nih_export_clap!(PedalKernelPlugin);
-#[cfg(not(all(feature = "pro-ui", any(feature = "pro-guitar", feature = "pro-bass"))))]
+#[cfg(not(feature = "pro-pedalboard"))]
 nih_export_vst3!(PedalKernelPlugin);

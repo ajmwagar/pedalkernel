@@ -24,6 +24,8 @@ pro-amps = []
 pro-synth = []
 # Custom WGPU-based UI (Pro only)
 pro-ui = ["dep:pedalkernel-ui"]
+# 6-slot pedalboard mode (exports PedalboardPlugin instead of PedalKernelPlugin)
+pro-pedalboard = ["pro-ui"]
 
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
