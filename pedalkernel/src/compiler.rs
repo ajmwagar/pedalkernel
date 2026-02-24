@@ -2089,8 +2089,28 @@ fn is_depth_label(label: &str) -> bool {
 }
 
 impl CompiledPedal {
+    /// Set the supply voltage and update all voltage-dependent models.
+    ///
+    /// This affects:
+    /// - Headroom for rail saturation modeling
+    /// - Op-amp output swing (v_max)
+    ///
+    /// For single-supply pedals biased at Vsupply/2, the op-amp can swing
+    /// from about 1.5V to (Vsupply - 1.5V), giving v_max ≈ (Vsupply/2) - 1.5V.
     pub fn set_supply_voltage(&mut self, voltage: f64) {
-        self.supply_voltage = voltage.clamp(5.0, 24.0);
+        self.supply_voltage = voltage.clamp(5.0, 500.0); // Allow up to 500V for tube gear
+
+        // Calculate op-amp v_max from supply voltage.
+        // For single-supply biased at Vsupply/2: v_max = (Vsupply/2) - saturation_margin
+        // Saturation margin is typically 1.0-1.5V for most op-amps.
+        // For high voltages (tube gear), the margin stays ~1.5V.
+        let saturation_margin = 1.5;
+        let v_max = (voltage / 2.0 - saturation_margin).max(1.0);
+
+        // Propagate v_max to all op-amp stages
+        for stage in &mut self.opamp_stages {
+            stage.opamp.set_v_max(v_max);
+        }
     }
 
     /// Get the tolerance seed for this pedal unit (for diagnostics/UI).
@@ -2319,10 +2339,19 @@ impl PedalProcessor for CompiledPedal {
         for opamp_stage in &mut self.opamp_stages {
             // Set the input signal as Vp (non-inverting input)
             opamp_stage.opamp.set_vp(signal);
-            // Process through the op-amp's VCVS model
-            // For unity-gain buffer: output ≈ Vp (with slew rate limiting)
-            let b = opamp_stage.opamp.process(0.0, 10_000.0);
-            signal = b / 2.0; // Convert reflected wave to voltage
+
+            // WDF formulation: incident wave a comes from the network.
+            // For a unity-gain buffer where we want v_out ≈ vp:
+            //   a = 2 * vp (the voltage wave from the input)
+            //   b = 2 * v_out - a (reflected wave)
+            //   v_out = (a + b) / 2
+            //
+            // By passing a = 2*signal, the solver has the correct reference
+            // for the desired output and can properly compute the current
+            // needed to drive any load (represented by Rp).
+            let a = 2.0 * signal;
+            let b = opamp_stage.opamp.process(a, 10_000.0);
+            signal = (a + b) / 2.0; // Convert wave pair to voltage
         }
 
         // Apply slew rate limiting from op-amps.
@@ -4026,7 +4055,7 @@ pub fn compile_pedal_with_options(
     // Use supply voltage from .pedal file, defaulting to 9V for typical pedals
     let supply_voltage = pedal.supply.unwrap_or(9.0);
 
-    Ok(CompiledPedal {
+    let mut compiled = CompiledPedal {
         stages,
         pre_gain,
         output_gain: level_default,
@@ -4034,7 +4063,7 @@ pub fn compile_pedal_with_options(
         sample_rate,
         controls,
         gain_range: (glo * active_bonus, ghi * active_bonus),
-        supply_voltage,
+        supply_voltage: 9.0, // Will be updated by set_supply_voltage
         lfos,
         envelopes,
         slew_limiters,
@@ -4043,7 +4072,12 @@ pub fn compile_pedal_with_options(
         tolerance_seed: tolerance.seed(),
         oversampling,
         opamp_stages,
-    })
+    };
+
+    // Apply supply voltage - this propagates v_max to all op-amp stages
+    compiled.set_supply_voltage(supply_voltage);
+
+    Ok(compiled)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -1372,6 +1372,19 @@ impl TriodeModel {
     pub fn t_6072() -> Self {
         Self::t_12ay7()
     }
+
+    /// 12BH7A - Medium-mu dual triode with high current capability.
+    /// Used in cathode follower stages requiring higher current than 12AU7.
+    /// Popular in LA-2A totem-pole output stage, hi-fi amplifiers.
+    /// Mu ≈ 17 (similar to 12AU7), max Ip = 15mA per section.
+    pub fn t_12bh7() -> Self {
+        Self {
+            mu: 17.0,       // Same as 12AU7
+            kp: 60.0,       // Lower Kp for higher current handling
+            kvb: 400.0,     // Similar to 12AU7
+            ex: 1.3,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2641,6 +2654,24 @@ impl OpAmpRoot {
         self.vp = 0.0;
         self.vm_external = 0.0;
     }
+
+    /// Set the maximum output voltage (determined by supply rails).
+    ///
+    /// For single-supply pedals at Vsupply biased at Vsupply/2:
+    /// v_max ≈ (Vsupply/2) - saturation_margin
+    ///
+    /// For ±15V supplies (lab standard): v_max ≈ ±12V
+    /// For 9V single-supply biased at 4.5V: v_max ≈ ±3.5V
+    #[inline]
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.model.v_max = v_max.max(0.5); // Minimum 0.5V to avoid degeneracy
+    }
+
+    /// Get the current v_max setting.
+    #[inline]
+    pub fn v_max(&self) -> f64 {
+        self.model.v_max
+    }
 }
 
 impl WdfRoot for OpAmpRoot {
@@ -2666,45 +2697,53 @@ impl WdfRoot for OpAmpRoot {
         let v_max = self.model.v_max;
 
         // Initial guess: for unity-gain buffer, output ≈ Vp
-        // For other configurations, start near the linear approximation
+        // For other configurations, start from the WDF linear approximation
         let mut v = if self.feedback_ratio > 0.5 {
-            self.vp
+            // Unity-gain or high-feedback: output tracks Vp
+            self.vp.clamp(-v_max, v_max)
         } else {
-            0.5 * a
+            // Low feedback: start from linear WDF approximation
+            (0.5 * a).clamp(-v_max, v_max)
         };
+
+        // Soft saturation function: tanh-based limiting that preserves gradient
+        // v_sat(x) = v_max * tanh(x / v_max)
+        // d(v_sat)/dx = sech²(x / v_max) = 1 - tanh²(x / v_max)
+        //
+        // This avoids the Newton oscillation from hard clamping by ensuring
+        // the gradient is always non-zero, even deep in saturation.
+        #[inline]
+        fn soft_sat(x: f64, v_max: f64) -> f64 {
+            v_max * (x / v_max).tanh()
+        }
+        #[inline]
+        fn soft_sat_deriv(x: f64, v_max: f64) -> f64 {
+            let t = (x / v_max).tanh();
+            1.0 - t * t // sech²
+        }
 
         for _ in 0..self.max_iter {
             let vm = self.vm(v);
             let delta = self.vp - vm; // Differential input voltage
             let ddelta_dv = -self.dvm_dv(); // d(delta)/dv = -dVm/dv
 
-            // Ideal op-amp output: Vout = Aol * delta, clamped to supply rails
-            let v_ideal = (aol * delta).clamp(-v_max, v_max);
+            // Ideal op-amp output with soft saturation (preserves gradient)
+            let raw_ideal = aol * delta;
+            let v_ideal = soft_sat(raw_ideal, v_max);
+            let dv_ideal_ddelta = aol * soft_sat_deriv(raw_ideal, v_max);
 
-            // Model the op-amp output as trying to reach v_ideal.
-            // The "current" represents how the op-amp drives toward ideal:
-            // i = (v - v_ideal) / R_out, where R_out is small.
-            //
-            // But for the WDF constraint, we need to express i in terms
-            // of the port variables. For high open-loop gain, the op-amp
-            // acts nearly as a voltage source at v_ideal.
-            //
-            // Effective output conductance: g_out = Aol * |dVm/dv| / R_eff
-            // For unity-gain buffer: g_out = Aol (very high conductance = low impedance)
+            // Effective output resistance: models how the op-amp drives the load
+            // For high Aol with feedback, this is very low (strong voltage source)
+            let r_out_eff = rp / (aol * self.feedback_ratio.max(0.001));
+            let r_out_eff = r_out_eff.max(0.01); // Minimum 10mΩ for stability
 
-            // For numerical stability with finite Aol, model output as:
-            // i = g_m * (v_ideal - v) where g_m is a transconductance
-            // This gives the current the op-amp can supply to reach ideal.
-            let r_out_eff = rp / (aol * self.feedback_ratio.max(0.001)); // Effective output R
-            let i_out = (v_ideal - v) / r_out_eff.max(0.001);
+            // Current the op-amp supplies: i = (v_ideal - v) / R_out
+            let i_out = (v_ideal - v) / r_out_eff;
 
-            // Derivative: di/dv = -1/R_out_eff + (Aol * ddelta_dv * in_linear) / R_out_eff
-            let in_linear_region = (aol * delta).abs() < v_max;
-            let di_dv = if in_linear_region {
-                (-1.0 + aol * ddelta_dv) / r_out_eff.max(0.001)
-            } else {
-                -1.0 / r_out_eff.max(0.001) // Saturated: di/dv = -1/Rout
-            };
+            // Derivative with soft saturation (always well-conditioned):
+            // di/dv = (dv_ideal/dv - 1) / R_out
+            //       = (dv_ideal/ddelta * ddelta/dv - 1) / R_out
+            let di_dv = (dv_ideal_ddelta * ddelta_dv - 1.0) / r_out_eff;
 
             // WDF constraint: f(v) = a - 2*v - 2*Rp*i = 0
             let f = a - 2.0 * v - 2.0 * rp * i_out;
@@ -2715,17 +2754,20 @@ impl WdfRoot for OpAmpRoot {
             }
 
             let step = f / fp;
-            v -= step;
 
-            // Clamp to reasonable range
-            v = v.clamp(-v_max * 1.1, v_max * 1.1);
+            // Damped Newton step to prevent overshoot
+            let damping = if step.abs() > v_max { 0.5 } else { 1.0 };
+            v -= damping * step;
+
+            // Soft clamp to slightly beyond rails (allow overshoot during iteration)
+            v = v.clamp(-v_max * 1.5, v_max * 1.5);
 
             if step.abs() < self.tolerance {
                 break;
             }
         }
 
-        // Apply output saturation (hard clip at rails)
+        // Final hard clip at rails (after convergence)
         v = v.clamp(-v_max, v_max);
 
         // Apply slew rate limiting
