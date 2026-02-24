@@ -39,6 +39,81 @@ fn softplus(x: f64) -> f64 {
 const LEAKAGE_CONDUCTANCE: f64 = 1e-12;
 
 // ---------------------------------------------------------------------------
+// Unified Newton-Raphson WDF Solver
+// ---------------------------------------------------------------------------
+
+/// Unified Newton-Raphson solver for all WDF nonlinear root elements.
+///
+/// Every nonlinear element in the WDF tree solves the same constraint equation:
+///
+///   `f(v) = a - 2v - 2·Rp·i(v) = 0`
+///
+/// where `a` is the incident wave, `Rp` is the port resistance, `v` is the
+/// voltage across the element, and `i(v)` is the device-specific current.
+///
+/// The device I-V characteristic is provided as a closure returning
+/// `(current, d_current/d_voltage)` at a given voltage.
+///
+/// Returns the reflected wave `b = 2v - a`.
+///
+/// # Parameters
+/// - `a`: Incident wave from the WDF tree
+/// - `rp`: Port resistance (Ω)
+/// - `v`: Initial guess for the voltage (mutable, used as starting point)
+/// - `max_iter`: Maximum iterations (bounded for real-time safety)
+/// - `tolerance`: Convergence threshold for |dv|
+/// - `v_clamp`: Optional (min, max) voltage clamping bounds
+/// - `step_limit`: If the raw Newton step exceeds this, the step is halved
+///   to prevent overshoot. Pass `None` for standard (undamped) Newton.
+/// - `device_iv`: Closure returning `(i, di_dv)` for a given voltage
+#[inline]
+fn newton_raphson_solve<F>(
+    a: f64,
+    rp: f64,
+    mut v: f64,
+    max_iter: usize,
+    tolerance: f64,
+    v_clamp: Option<(f64, f64)>,
+    step_limit: Option<f64>,
+    mut device_iv: F,
+) -> f64
+where
+    F: FnMut(f64) -> (f64, f64),
+{
+    for _ in 0..max_iter {
+        let (i, di_dv) = device_iv(v);
+
+        let f = a - 2.0 * v - 2.0 * rp * i;
+        let fp = -2.0 - 2.0 * rp * di_dv;
+
+        if fp.abs() < 1e-15 {
+            break;
+        }
+
+        let mut dv = f / fp;
+
+        // Adaptive damping: halve step when it exceeds the threshold
+        if let Some(limit) = step_limit {
+            if dv.abs() > limit {
+                dv *= 0.5;
+            }
+        }
+
+        v -= dv;
+
+        if let Some((lo, hi)) = v_clamp {
+            v = v.clamp(lo, hi);
+        }
+
+        if dv.abs() < tolerance {
+            break;
+        }
+    }
+
+    2.0 * v - a
+}
+
+// ---------------------------------------------------------------------------
 // Diode Models
 // ---------------------------------------------------------------------------
 
@@ -307,38 +382,18 @@ impl WdfRoot for ZenerRoot {
     /// `f(v) = a - 2*v - 2*Rp*i(v) = 0`
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let root = *self;
         // Initial guess based on operating region
-        let mut v = if a > 0.0 {
-            // Likely forward bias
+        let v0 = if a > 0.0 {
             (a * 0.5).min(0.7)
         } else if a < -2.0 * self.model.vz {
-            // Likely in breakdown
             -self.model.vz - 0.1
         } else {
-            // Reverse bias, not yet breakdown
             a * 0.5
         };
-
-        for _ in 0..self.max_iter {
-            let i = self.current(v);
-            let di = self.current_derivative(v);
-
-            let f = a - 2.0 * v - 2.0 * rp * i;
-            let fp = -2.0 - 2.0 * rp * di;
-
-            if fp.abs() < 1e-15 {
-                break;
-            }
-
-            let dv = f / fp;
-            v -= dv;
-
-            if dv.abs() < 1e-6 {
-                break;
-            }
-        }
-
-        2.0 * v - a
+        newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+            (root.current(v), root.current_derivative(v))
+        })
     }
 }
 
@@ -371,48 +426,27 @@ impl DiodePairRoot {
 impl WdfRoot for DiodePairRoot {
     /// Compute reflected wave from incident wave `a` and port resistance `rp`.
     ///
-    /// The voltage across the diode pair is `v = (a + b) / 2`.
-    /// Current through the pair: `i_d(v) = Is*(exp(v/nVt) - exp(-v/nVt))`.
-    /// The WDF constraint: `b = a - 2*Rp*i_d(v)`.
-    ///
-    /// We solve for `v` using Newton-Raphson on:
-    ///   `f(v) = a - 2*v - 2*Rp * Is * (exp(v/nVt) - exp(-v/nVt))`
-    ///   `f'(v) = -2 - 2*Rp * Is / nVt * (exp(v/nVt) + exp(-v/nVt))`
+    /// Anti-parallel diode pair: `i(v) = Is*(exp(v/nVt) - exp(-v/nVt))`
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let is = self.model.is;
         let nvt = self.model.n_vt;
 
-        // Initial guess: for large |a| the diode is saturated and we can
-        // estimate v from the Shockley equation in the forward-bias regime
-        // (2*Rp*Is*exp(|v|/nVt) ≈ |a|). For small |a| the linear
-        // approximation v ≈ a/2 is accurate.
-        let mut v = if a.abs() > 10.0 * nvt {
+        let v0 = if a.abs() > 10.0 * nvt {
             let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
             nvt * log_arg.ln() * a.signum()
         } else {
             a * 0.5
         };
 
-        for _ in 0..self.max_iter {
+        newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
             let x = (v / nvt).clamp(-500.0, 500.0);
             let ev_pos = x.exp();
             let ev_neg = (-x).exp();
-            let sinh_term = is * (ev_pos - ev_neg);
-            let cosh_term = is * (ev_pos + ev_neg) / nvt;
-
-            let f = a - 2.0 * v - 2.0 * rp * sinh_term;
-            let fp = -2.0 - 2.0 * rp * cosh_term;
-
-            let dv = f / fp;
-            v -= dv;
-
-            if dv.abs() < 1e-6 {
-                break;
-            }
-        }
-
-        2.0 * v - a
+            let i = is * (ev_pos - ev_neg);
+            let di = is * (ev_pos + ev_neg) / nvt;
+            (i, di)
+        })
     }
 }
 
@@ -439,38 +473,26 @@ impl DiodeRoot {
 }
 
 impl WdfRoot for DiodeRoot {
-    /// `f(v) = a - 2v - 2*Rp*Is*(exp(v/nVt) - 1)`
+    /// Single diode: `i(v) = Is*(exp(v/nVt) - 1)`
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let is = self.model.is;
         let nvt = self.model.n_vt;
 
-        // Same analytical initial guess as DiodePairRoot.
-        let mut v = if a.abs() > 10.0 * nvt {
+        let v0 = if a.abs() > 10.0 * nvt {
             let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
             nvt * log_arg.ln() * a.signum()
         } else {
             a * 0.5
         };
 
-        for _ in 0..self.max_iter {
+        newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
             let x = (v / nvt).clamp(-500.0, 500.0);
             let ev = x.exp();
-            let i_d = is * (ev - 1.0);
-            let di_d = is * ev / nvt;
-
-            let f = a - 2.0 * v - 2.0 * rp * i_d;
-            let fp = -2.0 - 2.0 * rp * di_d;
-
-            let dv = f / fp;
-            v -= dv;
-
-            if dv.abs() < 1e-6 {
-                break;
-            }
-        }
-
-        2.0 * v - a
+            let i = is * (ev - 1.0);
+            let di = is * ev / nvt;
+            (i, di)
+        })
     }
 }
 
@@ -714,44 +736,20 @@ impl JfetRoot {
 }
 
 impl WdfRoot for JfetRoot {
-    /// Compute reflected wave from incident wave `a` and port resistance `rp`.
-    ///
-    /// WDF constraint: `v = (a + b) / 2`, `i = (a - b) / (2 * Rp)`
-    /// JFET: `i = Ids(v, Vgs)`
-    ///
-    /// Solve: `f(v) = a - 2*v - 2*Rp*Ids(v, Vgs) = 0`
+    /// JFET drain-source path: `i = Ids(v, Vgs)`
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
-        // Initial guess: linear approximation using small-signal conductance
+        let root = *self;
         let vgs_factor = (1.0 - self.vgs / self.model.vp).clamp(0.0, 1.0);
         let gds_approx = (2.0 * self.model.idss / self.model.vp.abs()) * vgs_factor;
-        let mut v = if gds_approx > LEAKAGE_CONDUCTANCE {
+        let v0 = if gds_approx > LEAKAGE_CONDUCTANCE {
             a / (2.0 + 2.0 * rp * gds_approx)
         } else {
             a * 0.5
         };
-
-        for _ in 0..self.max_iter {
-            let ids = self.drain_current(v);
-            let dids = self.drain_current_derivative(v);
-
-            let f = a - 2.0 * v - 2.0 * rp * ids;
-            let fp = -2.0 - 2.0 * rp * dids;
-
-            // Avoid division by zero
-            if fp.abs() < 1e-15 {
-                break;
-            }
-
-            let dv = f / fp;
-            v -= dv;
-
-            if dv.abs() < 1e-6 {
-                break;
-            }
-        }
-
-        2.0 * v - a
+        newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+            (root.drain_current(v), root.drain_current_derivative(v))
+        })
     }
 }
 
@@ -1094,49 +1092,24 @@ impl BjtNpnRoot {
 }
 
 impl WdfRoot for BjtNpnRoot {
-    /// Compute reflected wave from incident wave `a` and port resistance `rp`.
-    ///
-    /// WDF constraint: `v = (a + b) / 2`, `i = (a - b) / (2 * Rp)`
-    /// BJT (NPN): `i = Ic(Vce, Vbe)` where Vce = v
-    ///
-    /// Solve: `f(v) = a - 2*v - 2*Rp*Ic(v, Vbe) = 0`
+    /// NPN BJT collector-emitter path: `i = Ic(Vce, Vbe)`
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
-        // Initial guess based on operating region
-        let mut v = if self.vbe > 0.3 {
-            // Active region - assume some voltage drop
+        let root = *self;
+        let v0 = if self.vbe > 0.3 {
             (a * 0.5).max(0.1)
         } else {
-            // Cutoff - high impedance
             a * 0.5
         };
-
-        for _ in 0..self.max_iter {
-            let ic = self.collector_current_at(v);
-            let dic = self.collector_current_derivative(v);
-
-            let f = a - 2.0 * v - 2.0 * rp * ic;
-            let fp = -2.0 - 2.0 * rp * dic;
-
-            if fp.abs() < 1e-15 {
-                break;
-            }
-
-            let dv = f / fp;
-            v -= dv;
-
-            // Clamp to reasonable range
-            v = v.clamp(-1.0, 100.0);
-
-            if dv.abs() < self.tolerance {
-                break;
-            }
-        }
-
+        let b = newton_raphson_solve(
+            a, rp, v0, self.max_iter, self.tolerance,
+            Some((-1.0, 100.0)), None,
+            |v| (root.collector_current_at(v), root.collector_current_derivative(v)),
+        );
         // Store collector current for external use
+        let v = (a + b) / 2.0;
         self.ic = self.collector_current_at(v);
-
-        2.0 * v - a
+        b
     }
 }
 
@@ -1239,38 +1212,22 @@ impl BjtPnpRoot {
 }
 
 impl WdfRoot for BjtPnpRoot {
+    /// PNP BJT emitter-collector path: `i = Ic(Vec, Veb)`
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
-        let mut v = if self.veb > 0.2 {
+        let root = *self;
+        let v0 = if self.veb > 0.2 {
             (a * 0.5).max(0.1)
         } else {
             a * 0.5
         };
-
-        for _ in 0..self.max_iter {
-            let ic = self.collector_current_at(v);
-            let dic = self.collector_current_derivative(v);
-
-            let f = a - 2.0 * v - 2.0 * rp * ic;
-            let fp = -2.0 - 2.0 * rp * dic;
-
-            if fp.abs() < 1e-15 {
-                break;
-            }
-
-            let dv = f / fp;
-            v -= dv;
-
-            v = v.clamp(-1.0, 100.0);
-
-            if dv.abs() < self.tolerance {
-                break;
-            }
-        }
-
-        self.ic = self.collector_current_at(v);
-
-        2.0 * v - a
+        let b = newton_raphson_solve(
+            a, rp, v0, self.max_iter, self.tolerance,
+            Some((-1.0, 100.0)), None,
+            |v| (root.collector_current_at(v), root.collector_current_derivative(v)),
+        );
+        self.ic = self.collector_current_at((a + b) / 2.0);
+        b
     }
 }
 
@@ -1518,45 +1475,14 @@ impl TriodeRoot {
 }
 
 impl WdfRoot for TriodeRoot {
-    /// Compute reflected wave from incident wave `a` and port resistance `rp`.
-    ///
-    /// WDF constraint: `v = (a + b) / 2`, `i = (a - b) / (2 * Rp)`
-    /// Triode: `i = Ip(v, Vgk)`
-    ///
-    /// Solve: `f(v) = a - 2*v - 2*Rp*Ip(v, Vgk) = 0`
+    /// Triode plate-cathode path: `i = Ip(Vpk, Vgk)`
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
-        // Initial guess: assume small signal, linear approximation
-        // For a tube, typical plate resistance is on order of model.kp * 1000
-        let mut v = a * 0.5;
-
-        for _ in 0..self.max_iter {
-            let ip = self.plate_current(v);
-            let dip = self.plate_current_derivative(v);
-
-            let f = a - 2.0 * v - 2.0 * rp * ip;
-            let fp = -2.0 - 2.0 * rp * dip;
-
-            // Avoid division by zero
-            if fp.abs() < 1e-15 {
-                break;
-            }
-
-            let dv = f / fp;
-            v -= dv;
-
-            // Clamp to physically motivated plate voltage range.
-            // Real plate voltages: 0V (cutoff) to ~400V (maximum rated).
-            // In guitar amps: typically 150–350V plate supply.
-            // Negative values occur during grid conduction (clamped to -50V).
-            v = v.clamp(-50.0, 500.0);
-
-            if dv.abs() < 1e-6 {
-                break;
-            }
-        }
-
-        2.0 * v - a
+        let root = *self;
+        newton_raphson_solve(a, rp, a * 0.5, self.max_iter, 1e-6,
+            Some((-50.0, 500.0)), None,
+            |v| (root.plate_current(v), root.plate_current_derivative(v)),
+        )
     }
 }
 
@@ -1774,40 +1700,14 @@ impl PentodeRoot {
 }
 
 impl WdfRoot for PentodeRoot {
-    /// Compute reflected wave from incident wave `a` and port resistance `rp`.
-    ///
-    /// WDF constraint: `v = (a + b) / 2`, `i = (a - b) / (2 * Rp)`
-    /// Pentode: `i = Ip(v, Vg1k, Vg2k)`
-    ///
-    /// Solve: `f(v) = a - 2*v - 2*Rp*Ip(v, Vg1k, Vg2k) = 0`
+    /// Pentode plate-cathode path: `i = Ip(Vpk, Vg1k, Vg2k)`
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
-        let mut v = a * 0.5;
-
-        for _ in 0..self.max_iter {
-            let ip = self.plate_current(v);
-            let dip = self.plate_current_derivative(v);
-
-            let f = a - 2.0 * v - 2.0 * rp * ip;
-            let fp = -2.0 - 2.0 * rp * dip;
-
-            if fp.abs() < 1e-15 {
-                break;
-            }
-
-            let dv = f / fp;
-            v -= dv;
-
-            // Pentode plate voltage range: similar to triode but screen
-            // grid collects current at lower voltages.  Typical 0–400V.
-            v = v.clamp(-50.0, 500.0);
-
-            if dv.abs() < 1e-6 {
-                break;
-            }
-        }
-
-        2.0 * v - a
+        let root = *self;
+        newton_raphson_solve(a, rp, a * 0.5, self.max_iter, 1e-6,
+            Some((-50.0, 500.0)), None,
+            |v| (root.plate_current(v), root.plate_current_derivative(v)),
+        )
     }
 }
 
@@ -2006,47 +1906,24 @@ impl MosfetRoot {
 }
 
 impl WdfRoot for MosfetRoot {
-    /// Compute reflected wave from incident wave `a` and port resistance `rp`.
-    ///
-    /// WDF constraint: `v = (a + b) / 2`, `i = (a - b) / (2 * Rp)`
-    /// MOSFET: `i = Ids(v, Vgs)`
-    ///
-    /// Solve: `f(v) = a - 2*v - 2*Rp*Ids(v, Vgs) = 0`
+    /// MOSFET drain-source path: `i = Ids(Vds, Vgs)`
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
-        // Initial guess: linear approximation
+        let root = *self;
         let vov = if self.model.is_n_channel {
             (self.vgs - self.model.vth).max(0.0)
         } else {
             (self.model.vth - self.vgs).max(0.0)
         };
         let gds_approx = 2.0 * self.model.kp * vov;
-        let mut v = if gds_approx > LEAKAGE_CONDUCTANCE {
+        let v0 = if gds_approx > LEAKAGE_CONDUCTANCE {
             a / (2.0 + 2.0 * rp * gds_approx)
         } else {
             a * 0.5
         };
-
-        for _ in 0..self.max_iter {
-            let ids = self.drain_current(v);
-            let dids = self.drain_current_derivative(v);
-
-            let f = a - 2.0 * v - 2.0 * rp * ids;
-            let fp = -2.0 - 2.0 * rp * dids;
-
-            if fp.abs() < 1e-15 {
-                break;
-            }
-
-            let dv = f / fp;
-            v -= dv;
-
-            if dv.abs() < 1e-6 {
-                break;
-            }
-        }
-
-        2.0 * v - a
+        newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+            (root.drain_current(v), root.drain_current_derivative(v))
+        })
     }
 }
 
@@ -2280,46 +2157,19 @@ impl OtaRoot {
 }
 
 impl WdfRoot for OtaRoot {
-    /// Compute reflected wave from incident wave `a` and port resistance `rp`.
-    ///
-    /// The OTA output current flows through the load resistance to produce
-    /// a voltage. The WDF constraint relates this to the wave variables:
-    ///
-    /// `v = (a + b) / 2` (voltage across the port)
-    /// `i = (a - b) / (2 * Rp)` (current into the port)
-    ///
-    /// The OTA current: `i = Iabc * tanh(v / (2*Vt))`
-    /// Solve: `f(v) = a - 2*v - 2*Rp * Iabc * tanh(v / (2*Vt)) = 0`
+    /// OTA transconductance: `i = Iabc * tanh(v / (2·Vt))`
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
-        // Small-signal conductance for initial guess
+        let root = *self;
         let gm = self.transconductance();
-        let mut v = if gm > LEAKAGE_CONDUCTANCE {
+        let v0 = if gm > LEAKAGE_CONDUCTANCE {
             a / (2.0 + 2.0 * rp * gm)
         } else {
             a * 0.5
         };
-
-        for _ in 0..self.max_iter {
-            let i_ota = self.output_current(v);
-            let di_ota = self.output_current_derivative(v);
-
-            let f = a - 2.0 * v - 2.0 * rp * i_ota;
-            let fp = -2.0 - 2.0 * rp * di_ota;
-
-            if fp.abs() < 1e-15 {
-                break;
-            }
-
-            let dv = f / fp;
-            v -= dv;
-
-            if dv.abs() < 1e-6 {
-                break;
-            }
-        }
-
-        2.0 * v - a
+        newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+            (root.output_current(v), root.output_current_derivative(v))
+        })
     }
 }
 
@@ -2607,25 +2457,6 @@ impl OpAmpRoot {
         self.sample_rate = sample_rate;
     }
 
-    /// Compute the inverting input voltage as a function of output.
-    ///
-    /// Vm = vm_external * (1 - fb_ratio) + v_out * fb_ratio
-    ///
-    /// For unity-gain buffer: Vm = v_out
-    /// For inverting amp: Vm depends on both external input and output
-    #[inline]
-    fn vm(&self, v_out: f64) -> f64 {
-        self.vm_external * (1.0 - self.feedback_ratio) + v_out * self.feedback_ratio
-    }
-
-    /// Derivative of Vm with respect to Vout.
-    ///
-    /// This is needed for Newton-Raphson: dVm/dVout = feedback_ratio
-    #[inline]
-    fn dvm_dv(&self) -> f64 {
-        self.feedback_ratio
-    }
-
     /// Apply slew rate limiting to the output.
     ///
     /// Real op-amps have a maximum rate of voltage change (dV/dt).
@@ -2675,97 +2506,47 @@ impl OpAmpRoot {
 }
 
 impl WdfRoot for OpAmpRoot {
-    /// Compute the reflected wave from incident wave `a` and port resistance `rp`.
-    ///
-    /// The op-amp is modeled as a voltage-controlled voltage source:
-    /// `Vout = Aol * (Vp - Vm)`
-    ///
-    /// For a unity-gain buffer (Vm = Vout):
-    /// `Vout = Aol * (Vp - Vout)`
-    /// `Vout * (1 + Aol) = Aol * Vp`
-    /// `Vout = Vp * Aol / (1 + Aol) ≈ Vp` for large Aol
-    ///
-    /// The Newton-Raphson solver finds the output voltage `v` that satisfies
-    /// both the op-amp equation and the WDF constraint:
-    /// `f(v) = a - 2*v - 2*Rp*i = 0`
-    ///
-    /// where `i` is the output current, modeled as the error between
-    /// actual and ideal output divided by a small effective output resistance.
+    /// Op-amp VCVS: `Vout = Aol * (Vp - Vm)`, with soft saturation and slew limiting.
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let aol = self.model.open_loop_gain;
         let v_max = self.model.v_max;
+        let vp = self.vp;
+        let feedback_ratio = self.feedback_ratio;
+        let vm_external = self.vm_external;
 
-        // Initial guess: for unity-gain buffer, output ≈ Vp
-        // For other configurations, start from the WDF linear approximation
-        let mut v = if self.feedback_ratio > 0.5 {
-            // Unity-gain or high-feedback: output tracks Vp
-            self.vp.clamp(-v_max, v_max)
+        let v0 = if feedback_ratio > 0.5 {
+            vp.clamp(-v_max, v_max)
         } else {
-            // Low feedback: start from linear WDF approximation
             (0.5 * a).clamp(-v_max, v_max)
         };
 
-        // Soft saturation function: tanh-based limiting that preserves gradient
-        // v_sat(x) = v_max * tanh(x / v_max)
-        // d(v_sat)/dx = sech²(x / v_max) = 1 - tanh²(x / v_max)
-        //
-        // This avoids the Newton oscillation from hard clamping by ensuring
-        // the gradient is always non-zero, even deep in saturation.
-        #[inline]
-        fn soft_sat(x: f64, v_max: f64) -> f64 {
-            v_max * (x / v_max).tanh()
-        }
-        #[inline]
-        fn soft_sat_deriv(x: f64, v_max: f64) -> f64 {
-            let t = (x / v_max).tanh();
-            1.0 - t * t // sech²
-        }
+        let b = newton_raphson_solve(
+            a, rp, v0, self.max_iter, self.tolerance,
+            Some((-v_max * 1.5, v_max * 1.5)), Some(v_max),
+            |v| {
+                // Compute Vm as a function of output voltage
+                let vm = vm_external * (1.0 - feedback_ratio) + v * feedback_ratio;
+                let delta = vp - vm;
+                let ddelta_dv = -feedback_ratio;
 
-        for _ in 0..self.max_iter {
-            let vm = self.vm(v);
-            let delta = self.vp - vm; // Differential input voltage
-            let ddelta_dv = -self.dvm_dv(); // d(delta)/dv = -dVm/dv
+                // Soft saturation: tanh-based limiting preserves gradient
+                let raw_ideal = aol * delta;
+                let v_ideal = v_max * (raw_ideal / v_max).tanh();
+                let t = (raw_ideal / v_max).tanh();
+                let dv_ideal_ddelta = aol * (1.0 - t * t);
 
-            // Ideal op-amp output with soft saturation (preserves gradient)
-            let raw_ideal = aol * delta;
-            let v_ideal = soft_sat(raw_ideal, v_max);
-            let dv_ideal_ddelta = aol * soft_sat_deriv(raw_ideal, v_max);
+                // Effective output resistance
+                let r_out_eff = (rp / (aol * feedback_ratio.max(0.001))).max(0.01);
 
-            // Effective output resistance: models how the op-amp drives the load
-            // For high Aol with feedback, this is very low (strong voltage source)
-            let r_out_eff = rp / (aol * self.feedback_ratio.max(0.001));
-            let r_out_eff = r_out_eff.max(0.01); // Minimum 10mΩ for stability
+                let i_out = (v_ideal - v) / r_out_eff;
+                let di_dv = (dv_ideal_ddelta * ddelta_dv - 1.0) / r_out_eff;
+                (i_out, di_dv)
+            },
+        );
 
-            // Current the op-amp supplies: i = (v_ideal - v) / R_out
-            let i_out = (v_ideal - v) / r_out_eff;
-
-            // Derivative with soft saturation (always well-conditioned):
-            // di/dv = (dv_ideal/dv - 1) / R_out
-            //       = (dv_ideal/ddelta * ddelta/dv - 1) / R_out
-            let di_dv = (dv_ideal_ddelta * ddelta_dv - 1.0) / r_out_eff;
-
-            // WDF constraint: f(v) = a - 2*v - 2*Rp*i = 0
-            let f = a - 2.0 * v - 2.0 * rp * i_out;
-            let fp = -2.0 - 2.0 * rp * di_dv;
-
-            if fp.abs() < 1e-15 {
-                break;
-            }
-
-            let step = f / fp;
-
-            // Damped Newton step to prevent overshoot
-            let damping = if step.abs() > v_max { 0.5 } else { 1.0 };
-            v -= damping * step;
-
-            // Soft clamp to slightly beyond rails (allow overshoot during iteration)
-            v = v.clamp(-v_max * 1.5, v_max * 1.5);
-
-            if step.abs() < self.tolerance {
-                break;
-            }
-        }
+        // Recover voltage from reflected wave, apply post-NR processing
+        let mut v = (a + b) / 2.0;
 
         // Final hard clip at rails (after convergence)
         v = v.clamp(-v_max, v_max);
@@ -2773,7 +2554,6 @@ impl WdfRoot for OpAmpRoot {
         // Apply slew rate limiting
         v = self.apply_slew_limit(v);
 
-        // Return reflected wave: b = 2*v - a
         2.0 * v - a
     }
 }

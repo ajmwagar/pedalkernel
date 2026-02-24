@@ -76,6 +76,20 @@ impl PhotocouplerModel {
             slow_weight: 0.35,
         }
     }
+
+    /// T4B - Silonex optocoupler, used in some tremolo circuits.
+    pub fn t4b() -> Self {
+        Self {
+            r_dark: 1_500_000.0, // 1.5MΩ
+            r_light: 1_000.0,    // 1kΩ
+            gamma: 0.75,
+            tau_fast_rise: 0.002,
+            tau_fast_fall: 0.007,
+            tau_slow_rise: 0.018,
+            tau_slow_fall: 0.070,
+            slow_weight: 0.3,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
