@@ -2107,9 +2107,16 @@ impl CompiledPedal {
         let saturation_margin = 1.5;
         let v_max = (voltage / 2.0 - saturation_margin).max(1.0);
 
-        // Propagate v_max to all op-amp stages
+        // Propagate v_max to standalone op-amp stages
         for stage in &mut self.opamp_stages {
             stage.opamp.set_v_max(v_max);
+        }
+
+        // Propagate v_max to op-amp roots in WDF stages
+        for stage in &mut self.stages {
+            if let RootKind::OpAmp(op) = &mut stage.root {
+                op.set_v_max(v_max);
+            }
         }
     }
 
