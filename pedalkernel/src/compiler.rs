@@ -2833,7 +2833,28 @@ pub fn compile_pedal_with_options(
     let has_led = diodes
         .iter()
         .any(|(_, d)| d.diode_type == DiodeType::Led);
-    let gain_range = if has_germanium && has_single_diode {
+    // Check what types of active elements the circuit has.
+    let has_bjts = pedal
+        .components
+        .iter()
+        .any(|c| matches!(&c.kind, ComponentKind::Npn(_) | ComponentKind::Pnp(_)));
+    let has_tubes = pedal
+        .components
+        .iter()
+        .any(|c| matches!(&c.kind, ComponentKind::Triode(_) | ComponentKind::Pentode(_)));
+
+    let gain_range = if diodes.is_empty() && !has_bjts && !has_tubes {
+        // Effects circuits (phasers, chorus, compressors) using only JFETs
+        // and/or op-amps — no clipping or gain stages. JFETs act as variable
+        // resistors, op-amps as buffers. Signal should pass at approximately
+        // unity; WDF attenuation is compensated by a small range.
+        (1.0, 3.0)
+    } else if diodes.is_empty() {
+        // Active gain stages (BJTs, triodes, pentodes) without diode clipping.
+        // The active elements clip through device saturation. They need drive,
+        // but less than diode circuits since the active element IS the clipper.
+        (2.0, 30.0)
+    } else if has_germanium && has_single_diode {
         (5.0, 250.0) // Fuzz-like: single germanium diode needs high drive
     } else if has_germanium {
         (3.0, 150.0) // Germanium overdrive (Klon-ish)
@@ -2848,43 +2869,52 @@ pub fn compile_pedal_with_options(
     };
 
     // Active elements contribute gain based on their type.
-    // Instead of a flat bonus, compute per-device gain contributions.
-    let active_bonus = {
-        let mut bonus = 1.0_f64;
+    //
+    // IMPORTANT: Use the maximum single-element bonus, NOT the product.
+    // Each active element already has its own processing stage:
+    //   - Op-amps → OpAmpStage (separate processing loop)
+    //   - JFETs → WDF stages with JfetRoot
+    //   - BJTs → WDF stages with BjtRoot
+    //   - Triodes → WDF stages with TriodeRoot
+    //   - Pentodes → WDF stages with PentodeRoot
+    //
+    // The active_bonus only models the gain that drives signal INTO diode
+    // clipping stages. Using a product (bonus *= N per element) causes
+    // exponential gain growth: 4 op-amps → 2^4 = 16x, 4 JFETs → 1.5^4 ≈ 5x,
+    // combined = 81x — catastrophically wrong for unity-gain circuits like
+    // phasers, buffers, and all-pass filters.
+    //
+    // When there are no diode stages, active_bonus = 1.0 because the active
+    // elements' own WDF/opamp stages handle gain correctly.
+    let active_bonus = if diodes.is_empty() {
+        // No diode clipping: all active elements have their own stages.
+        1.0
+    } else {
+        // Find the strongest active gain element that drives a clipping stage.
+        // Use max (not product) since pre_gain is applied per-stage, and only
+        // ONE active element typically drives each clipping stage.
+        let mut max_bonus = 1.0_f64;
         for comp in &pedal.components {
-            match &comp.kind {
+            let bonus = match &comp.kind {
                 ComponentKind::OpAmp(ot) if !ot.is_ota() => {
-                    // Op-amp gain depends on type — faster op-amps provide
-                    // more effective gain at audio frequencies.
-                    bonus *= match ot {
-                        OpAmpType::Ne5532 => 3.5,   // High GBW = more gain
+                    match ot {
+                        OpAmpType::Ne5532 => 3.5,
                         OpAmpType::Tl072 | OpAmpType::Tl082 | OpAmpType::Generic => 3.0,
                         OpAmpType::Jrc4558 | OpAmpType::Rc4558 => 2.5,
                         OpAmpType::Lm741 | OpAmpType::Op07 => 2.0,
-                        OpAmpType::Lm308 => 1.8,    // Low GBW = less effective gain
+                        OpAmpType::Lm308 => 1.8,
                         _ => 2.5,
-                    };
+                    }
                 }
-                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
-                    // Single BJT CE stage: gain ≈ 20–50x typical
-                    bonus *= 2.5;
-                }
-                ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => {
-                    // JFET CS stage: lower gain than BJT (gm is lower)
-                    bonus *= 1.5;
-                }
-                ComponentKind::Triode(_) => {
-                    // Triode gain stage: mu ≈ 17–100, but loaded gain is lower
-                    bonus *= 2.0;
-                }
-                ComponentKind::Pentode(_) => {
-                    // Pentode: higher gain than triode
-                    bonus *= 3.0;
-                }
-                _ => {}
-            }
+                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => 2.5,
+                ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => 1.5,
+                ComponentKind::Triode(_) => 2.0,
+                ComponentKind::Pentode(_) => 3.0,
+                _ => 1.0,
+            };
+            max_bonus = max_bonus.max(bonus);
         }
-        bonus
+        max_bonus
     };
 
     // Build WDF stages.
