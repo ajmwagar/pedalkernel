@@ -10,6 +10,7 @@ A `.pedal` file describes a guitar pedal's circuit topology as a netlist. The co
 
 ```
 pedal "<Name>" {
+  supply <voltage>V        # optional — defaults to 9V if omitted
   components {
     <component declarations>
   }
@@ -23,6 +24,33 @@ pedal "<Name>" {
 ```
 
 All three sections are required (though `controls` may be omitted if the pedal has no knobs). Comments use `#` and extend to end of line.
+
+### Supply Voltage
+
+The `supply` keyword specifies the circuit's DC supply voltage. This affects the headroom for clipping/saturation modeling and should match the actual power supply of the equipment being modeled:
+
+| Equipment Type | Typical Supply | Example |
+|----------------|----------------|---------|
+| Guitar pedals | 9V | `supply 9V` |
+| 12V modded pedals | 12V | `supply 12V` |
+| Transistor preamps | 24-30V | `supply 24V` |
+| Tube preamps | 250-400V | `supply 285V` |
+
+If omitted, the supply defaults to **9V** (standard guitar pedal voltage).
+
+```
+# Tube amplifier preamp
+pedal "Tweed Deluxe" {
+  supply 350V    # B+ for tube stages
+  ...
+}
+
+# Standard guitar pedal (9V is default, but explicit is clearer)
+pedal "Tube Screamer" {
+  supply 9V
+  ...
+}
+```
 
 ### Components
 

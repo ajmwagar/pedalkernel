@@ -43,6 +43,7 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
             TriodeType::T12at7 => ("Valve:ECC81", "V"),
             TriodeType::T12au7 => ("Valve:ECC82", "V"),
             TriodeType::T12ay7 => ("Valve:12AY7", "V"),
+            TriodeType::T12bh7 => ("Valve:12BH7", "V"),
         },
         ComponentKind::Pentode(pt) => match pt {
             PentodeType::Ef86 => ("Valve:EF86", "V"),
@@ -125,6 +126,22 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
                 5..=6 => ("Switch:SW_Rotary6", "SW"),
                 7..=8 => ("Switch:SW_Rotary8", "SW"),
                 _ => ("Switch:SW_Rotary12", "SW"),
+            }
+        }
+        ComponentKind::ResistorSwitched(values) => {
+            // Switched resistor - show as regular resistor with note about switch positions
+            if values.is_empty() {
+                ("Device:R", "R")
+            } else {
+                ("Device:R", "R")
+            }
+        }
+        ComponentKind::Switch(positions) => {
+            // Simple mechanical switch
+            match positions {
+                2 => ("Switch:SW_SPDT", "SW"),
+                3 => ("Switch:SW_Rotary4", "SW"),
+                _ => ("Switch:SW_Rotary4", "SW"),
             }
         }
     }
@@ -268,6 +285,21 @@ fn value_str(kind: &ComponentKind) -> String {
         }
         ComponentKind::RotarySwitch(positions) => {
             format!("Rotary_{}pos", positions.len())
+        }
+        ComponentKind::ResistorSwitched(values) => {
+            // Show range for BOM reference
+            if values.is_empty() {
+                "R_switched".into()
+            } else {
+                format!(
+                    "R_switched_{}-{}",
+                    format_eng(*values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "Ω"),
+                    format_eng(*values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "Ω")
+                )
+            }
+        }
+        ComponentKind::Switch(positions) => {
+            format!("Switch_{}pos", positions)
         }
     }
 }
@@ -522,6 +554,8 @@ mod tests {
                 },
             ],
             controls: vec![],
+            supply: None,
+            trims: vec![],
         };
 
         let netlist = export_kicad_netlist(&pedal);

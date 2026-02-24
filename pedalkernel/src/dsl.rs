@@ -22,9 +22,14 @@ use nom::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct PedalDef {
     pub name: String,
+    /// Supply voltage in volts (e.g., 9.0 for pedals, 250.0 for tube amps).
+    /// If None, defaults to 9V in the compiler.
+    pub supply: Option<f64>,
     pub components: Vec<ComponentDef>,
     pub nets: Vec<NetDef>,
     pub controls: Vec<ControlDef>,
+    /// Internal trim pots (not user-facing, factory adjustments)
+    pub trims: Vec<ControlDef>,
 }
 
 impl PedalDef {
@@ -119,9 +124,16 @@ pub enum ComponentKind {
     /// Inductor with switchable values (for multi-tap inductors).
     /// Values are selected by a linked RotarySwitch component.
     InductorSwitched(Vec<f64>),
+    /// Resistor with switchable values (for ratio selection networks).
+    /// Values are selected by a linked RotarySwitch component.
+    ResistorSwitched(Vec<f64>),
     /// Rotary switch that controls one or more switched components.
     /// Links to component IDs that have switchable values.
     RotarySwitch(Vec<String>),
+    /// Simple mechanical switch (SPST, SPDT, or n-position rotary).
+    /// Unlike AnalogSwitch (CD4066, etc.), this is a passive mechanical element.
+    /// Parameter is number of positions (2 = SPDT, 3+ = rotary).
+    Switch(usize),
 }
 
 /// Op-amp types with different characteristics.
@@ -290,6 +302,9 @@ pub enum PhotocouplerType {
     Vtl5c3,
     Vtl5c1,
     Nsl32,
+    /// T4B - Electroluminescent panel + CdS LDR used in LA-2A
+    /// EL panel driven by sidechain, LDR in audio path as variable attenuator
+    T4b,
 }
 
 /// LFO waveform shapes for DSL.
@@ -314,6 +329,9 @@ pub enum TriodeType {
     T12au7,
     /// 12AY7 / 6072 - Low-medium gain, original Fender tweed tube
     T12ay7,
+    /// 12BH7A - Medium-mu dual triode, high current capability
+    /// Used in cathode follower stages like LA-2A totem-pole output
+    T12bh7,
 }
 
 /// Pentode vacuum tube types.
@@ -831,6 +849,7 @@ fn photocoupler_type(input: &str) -> IResult<&str, PhotocouplerType> {
         value(PhotocouplerType::Vtl5c3, tag("vtl5c3")),
         value(PhotocouplerType::Vtl5c1, tag("vtl5c1")),
         value(PhotocouplerType::Nsl32, tag("nsl32")),
+        value(PhotocouplerType::T4b, tag("t4b")),
     ))(input)
 }
 
@@ -848,6 +867,7 @@ fn triode_type(input: &str) -> IResult<&str, TriodeType> {
         value(TriodeType::T12at7, tag("12at7")),
         value(TriodeType::T12ay7, tag("12ay7")),
         value(TriodeType::T12au7, tag("12au7")),
+        value(TriodeType::T12bh7, tag("12bh7")),
         // European/military designations
         value(TriodeType::T12ax7, tag("ecc83")),
         value(TriodeType::T12at7, tag("ecc81")),
@@ -1300,6 +1320,53 @@ fn parse_inductor_switched(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::InductorSwitched(values)))
 }
 
+/// `resistor_switched([12k, 6.8k, 3.9k, 1.5k])` — resistor with switchable values
+/// Used for ratio selection networks (1176), feedback networks, etc.
+fn parse_resistor_switched(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("resistor_switched")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Optional opening bracket
+    let (input, has_bracket) = opt(char('['))(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Parse comma-separated values
+    let (input, values) = separated_list1(
+        tuple((ws_comments, char(','), ws_comments)),
+        eng_value,
+    )(input)?;
+
+    let (input, _) = ws_comments(input)?;
+
+    // Closing bracket if we had opening
+    let input = if has_bracket.is_some() {
+        let (input, _) = char(']')(input)?;
+        let (input, _) = ws_comments(input)?;
+        input
+    } else {
+        input
+    };
+
+    let (input, _) = char(')')(input)?;
+
+    Ok((input, ComponentKind::ResistorSwitched(values)))
+}
+
+/// `switch(2)` — simple n-position mechanical switch
+/// Unlike AnalogSwitch (CD4066), this is a passive mechanical element.
+/// Used for mode selection, bypass, etc.
+fn parse_switch(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("switch")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, positions) = double(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+
+    Ok((input, ComponentKind::Switch(positions as usize)))
+}
+
 /// `rotary("20Hz", "30Hz", "60Hz", "100Hz")` — rotary switch with position labels
 /// `rotary(pos1, pos2, pos3)` — rotary switch with identifier position labels
 fn parse_rotary_switch(input: &str) -> IResult<&str, ComponentKind> {
@@ -1325,6 +1392,7 @@ fn parse_rotary_switch(input: &str) -> IResult<&str, ComponentKind> {
 fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
     alt((
         alt((
+            parse_resistor_switched, // must come before parse_resistor
             parse_resistor,
             parse_cap_switched, // must come before parse_cap
             parse_cap,
@@ -1364,6 +1432,7 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_tempco,
             parse_transformer,
             parse_rotary_switch,
+            parse_switch, // simple n-position switch
         )),
     ))(input)
 }
@@ -1611,9 +1680,44 @@ fn controls_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
     Ok((input, ctrls))
 }
 
+/// Internal trim pots (factory adjustments, not user-facing).
+/// Same syntax as controls section, parsed identically.
+fn trims_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("trims")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+
+    // Parse trims, skipping lines we can't understand
+    let (input, maybe_trims) = many0(control_or_skip)(input)?;
+    let trims: Vec<ControlDef> = maybe_trims.into_iter().flatten().collect();
+
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+    Ok((input, trims))
+}
+
 // ---------------------------------------------------------------------------
 // Top-level
 // ---------------------------------------------------------------------------
+
+/// Parse an optional supply voltage declaration: `supply 9V` or `supply 250V`
+/// Returns voltage in volts (e.g., 9.0, 250.0).
+fn supply_section(input: &str) -> IResult<&str, f64> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("supply")(input)?;
+    let (input, _) = ws_comments(input)?;
+    // Parse the voltage value - can be like "9V", "9.0V", "250V", etc.
+    // Also support "9v" lowercase
+    let (input, voltage) = recognize(pair(
+        double,
+        opt(alt((char('V'), char('v')))),
+    ))(input)?;
+    // Extract just the numeric part
+    let num_str = voltage.trim_end_matches(|c| c == 'V' || c == 'v');
+    let volts = num_str.parse::<f64>().unwrap_or(9.0);
+    Ok((input, volts))
+}
 
 /// Parse a complete `.pedal` or `.synth` file.
 /// Both `pedal "Name" { ... }` and `synth "Name" { ... }` produce the same AST.
@@ -1626,9 +1730,13 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('{')(input)?;
 
+    // Optional supply voltage declaration (before components)
+    let (input, supply) = opt(supply_section)(input)?;
+
     let (input, components) = components_section(input)?;
     let (input, nets) = nets_section(input)?;
     let (input, controls) = opt(controls_section)(input)?;
+    let (input, trims) = opt(trims_section)(input)?;
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
@@ -1638,9 +1746,11 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
         input,
         PedalDef {
             name: name.to_string(),
+            supply,
             components,
             nets,
             controls: controls.unwrap_or_default(),
+            trims: trims.unwrap_or_default(),
         },
     ))
 }
@@ -2681,5 +2791,97 @@ equipment "Test EQ" {
         assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::CapSwitched(_))));
         assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::InductorSwitched(_))));
         assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::RotarySwitch(_))));
+    }
+
+    // ── Supply voltage parser tests ───────────────────────────────────────
+
+    #[test]
+    fn parse_supply_9v() {
+        let src = r#"
+pedal "9V Pedal" {
+    supply 9V
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> R1.a
+        R1.b -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "9V Pedal");
+        assert_eq!(def.supply, Some(9.0));
+    }
+
+    #[test]
+    fn parse_supply_250v_tube_amp() {
+        let src = r#"
+pedal "Tube Amp" {
+    supply 250V
+    components {
+        V1: triode(12ax7)
+        R1: resistor(100k)
+    }
+    nets {
+        in -> V1.grid
+        V1.plate -> R1.a
+        R1.b -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Tube Amp");
+        assert_eq!(def.supply, Some(250.0));
+    }
+
+    #[test]
+    fn parse_supply_lowercase_v() {
+        let src = r#"
+pedal "Test" {
+    supply 12v
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.supply, Some(12.0));
+    }
+
+    #[test]
+    fn parse_supply_decimal() {
+        let src = r#"
+pedal "Test" {
+    supply 9.6V
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert!((def.supply.unwrap() - 9.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_no_supply_defaults_none() {
+        let src = r#"
+pedal "Default" {
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.supply, None);
     }
 }

@@ -19,6 +19,8 @@
 #   - Bright cap on the volume pot adds sparkle at low volume settings
 
 pedal "Bassman 5F6-A" {
+  supply 380V    # B+ for 12AY7/12AX7 preamp
+
   components {
     # Input stage
     C1: cap(22n)            # Input coupling cap (typical Fender value)

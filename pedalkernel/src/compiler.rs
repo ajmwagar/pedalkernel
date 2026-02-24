@@ -883,6 +883,26 @@ impl CircuitGraph {
                     // It determines which value to use for switched components.
                     // No WDF edge — it's handled by the control system.
                 }
+                ComponentKind::ResistorSwitched(_values) => {
+                    // Same as CapSwitched — 2-terminal element with selectable value.
+                    // Used for ratio selection networks (1176), feedback networks, etc.
+                    let key_a = format!("{}.a", comp.id);
+                    let key_b = format!("{}.b", comp.id);
+                    let id_a = get_id(&key_a, &mut uf);
+                    let id_b = get_id(&key_b, &mut uf);
+                    let node_a = uf.find(id_a);
+                    let node_b = uf.find(id_b);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
+                    });
+                }
+                ComponentKind::Switch(_) => {
+                    // Simple mechanical switch is a control element.
+                    // It's used to select circuit topology (e.g., limit/compress mode).
+                    // No WDF edge — handled by the control system.
+                }
             }
         }
 
@@ -1755,6 +1775,7 @@ fn make_leaf(comp: &ComponentDef, sample_rate: f64) -> DynNode {
                 PhotocouplerType::Vtl5c3 => crate::elements::PhotocouplerModel::vtl5c3(),
                 PhotocouplerType::Vtl5c1 => crate::elements::PhotocouplerModel::vtl5c1(),
                 PhotocouplerType::Nsl32 => crate::elements::PhotocouplerModel::nsl32(),
+                PhotocouplerType::T4b => crate::elements::PhotocouplerModel::t4b(),
             };
             DynNode::Photocoupler {
                 comp_id: comp.id.clone(),
@@ -2545,11 +2566,21 @@ fn build_half(
         .cloned()
         .collect();
 
+    // Filter trims to those referencing components in this half
+    let trims: Vec<ControlDef> = pedal
+        .trims
+        .iter()
+        .filter(|c| component_ids.contains(&c.component))
+        .cloned()
+        .collect();
+
     PedalDef {
         name: format!("{} ({})", pedal.name, suffix),
+        supply: pedal.supply,
         components,
         nets,
         controls,
+        trims,
     }
 }
 
@@ -3603,6 +3634,7 @@ pub fn compile_pedal_with_options(
                         TriodeType::T12at7 => 60.0,
                         TriodeType::T12ay7 => 40.0,
                         TriodeType::T12au7 => 17.0,
+                        TriodeType::T12bh7 => 17.0, // Similar mu to 12AU7, higher current
                     };
                 }
                 ComponentKind::Pentode(_) => {
@@ -3991,6 +4023,9 @@ pub fn compile_pedal_with_options(
         None
     };
 
+    // Use supply voltage from .pedal file, defaulting to 9V for typical pedals
+    let supply_voltage = pedal.supply.unwrap_or(9.0);
+
     Ok(CompiledPedal {
         stages,
         pre_gain,
@@ -3999,7 +4034,7 @@ pub fn compile_pedal_with_options(
         sample_rate,
         controls,
         gain_range: (glo * active_bonus, ghi * active_bonus),
-        supply_voltage: 9.0,
+        supply_voltage,
         lfos,
         envelopes,
         slew_limiters,
@@ -4291,6 +4326,7 @@ fn triode_model(tt: TriodeType) -> TriodeModel {
         TriodeType::T12at7 => TriodeModel::t_12at7(),
         TriodeType::T12au7 => TriodeModel::t_12au7(),
         TriodeType::T12ay7 => TriodeModel::t_12ay7(),
+        TriodeType::T12bh7 => TriodeModel::t_12bh7(),
     }
 }
 

@@ -17,6 +17,8 @@
 #   - Volume interaction: both channels share a cathode follower (modeled as gain)
 
 pedal "Tweed Deluxe 5E3" {
+  supply 350V    # B+ for 12AY7/12AX7 preamp (actual amp is ~360V)
+
   components {
     # Input stage
     C1: cap(20n)            # Input coupling cap (0.02uF in original)

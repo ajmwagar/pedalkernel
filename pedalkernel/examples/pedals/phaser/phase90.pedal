@@ -17,6 +17,8 @@
 # The JFET acts as a variable resistor, changing the phase shift frequency.
 
 pedal "MXR Phase 90" {
+  supply 9V
+
   components {
     # Input/output coupling
     C_in: cap(100n)

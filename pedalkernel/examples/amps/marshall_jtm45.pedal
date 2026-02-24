@@ -19,6 +19,8 @@
 # Running both channels jumpered is a later trick not modeled here.
 
 pedal "Marshall JTM45" {
+  supply 400V    # B+ for ECC83/12AX7 preamp (actual amp ~420V)
+
   components {
     # Input stage — High Treble channel
     C1: cap(50n)            # Input coupling cap (larger than Bassman = more bass)
