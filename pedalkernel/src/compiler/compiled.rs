@@ -298,6 +298,10 @@ pub struct CompiledPedal {
     /// Op-amp stages for unity-gain buffers and gain stages.
     /// Each op-amp is modeled as a VCVS with the OpAmpRoot element.
     pub(super) opamp_stages: Vec<OpAmpStage>,
+    /// Power supply sag model.
+    /// When present, computes instantaneous B+ droop based on signal current draw
+    /// and feeds the sagged voltage into `set_supply_voltage()` each sample.
+    pub(super) power_supply: Option<PowerSupply>,
     /// Debug statistics for monitoring WDF engine behavior.
     /// When set, the processor will record per-sample stats for debugging.
     #[cfg(debug_assertions)]
@@ -681,6 +685,40 @@ impl PedalProcessor for CompiledPedal {
             stats.record_input(input);
         }
 
+        // Power supply sag: compute instantaneous current draw from signal
+        // level and update the supply voltage.  The power supply model tracks
+        // the filter cap charge/discharge dynamics, producing B+ droop under
+        // load that recovers at a rate set by the filter capacitance.
+        if let Some(ref mut psu) = self.power_supply {
+            // Estimate current draw from the signal amplitude.
+            // In a tube amp, plate current ≈ signal voltage / plate load resistance.
+            // We use a nominal 100kΩ load impedance for the normalized estimate.
+            let current_draw = input.abs() * self.pre_gain / 100_000.0;
+            let sagged_voltage = psu.tick(current_draw);
+            // Propagate the sagged voltage to all voltage-dependent elements.
+            // This is the same mechanism as set_supply_voltage() but avoids
+            // the clamp so we can track the dynamic sag precisely.
+            self.supply_voltage = sagged_voltage;
+            // Update v_max for all root elements
+            let saturation_margin = 1.5;
+            let opamp_v_max = (sagged_voltage / 2.0 - saturation_margin).max(1.0);
+            let tube_v_max = sagged_voltage;
+            let bjt_v_max = sagged_voltage;
+            for stage in &mut self.opamp_stages {
+                stage.opamp.set_v_max(opamp_v_max);
+            }
+            for stage in &mut self.stages {
+                match &mut stage.root {
+                    RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
+                    RootKind::Triode(t) => t.set_v_max(tube_v_max),
+                    RootKind::Pentode(p) => p.set_v_max(tube_v_max),
+                    RootKind::BjtNpn(bjt) => bjt.set_v_max(bjt_v_max),
+                    RootKind::BjtPnp(bjt) => bjt.set_v_max(bjt_v_max),
+                    _ => {}
+                }
+            }
+        }
+
         // Headroom models the supply rail ceiling.  In real circuits, gain
         // is set by resistor ratios (feedback/input) and is independent of
         // supply voltage.  What changes with voltage is how far the active
@@ -821,6 +859,9 @@ impl PedalProcessor for CompiledPedal {
         for opamp_stage in &mut self.opamp_stages {
             opamp_stage.opamp.set_sample_rate(rate);
         }
+        if let Some(ref mut psu) = self.power_supply {
+            psu.set_sample_rate(rate);
+        }
     }
 
     fn reset(&mut self) {
@@ -847,6 +888,9 @@ impl PedalProcessor for CompiledPedal {
         }
         if let Some(ref mut thermal) = self.thermal {
             thermal.reset();
+        }
+        if let Some(ref mut psu) = self.power_supply {
+            psu.reset();
         }
     }
 

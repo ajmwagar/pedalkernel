@@ -19,7 +19,11 @@
 # Running both channels jumpered is a later trick not modeled here.
 
 pedal "Marshall JTM45" {
-  supply 400V    # B+ for ECC83/12AX7 preamp (actual amp ~420V)
+  supply 400V {
+    impedance: 100      # GZ34 tube rectifier (~60Ω) + transformer (~40Ω)
+    filter_cap: 50u     # larger filter cap — slightly tighter than Fender
+    rectifier: tube     # GZ34 — the Plexi sag character
+  }
 
   components {
     # Input stage — High Treble channel

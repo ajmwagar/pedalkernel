@@ -19,7 +19,11 @@
 #   - Bright cap on the volume pot adds sparkle at low volume settings
 
 pedal "Bassman 5F6-A" {
-  supply 380V    # B+ for 12AY7/12AX7 preamp
+  supply 380V {
+    impedance: 120      # GZ34 tube rectifier (~60Ω) + transformer winding (~60Ω)
+    filter_cap: 40u     # larger filter cap than 5E3 — slightly stiffer
+    rectifier: tube     # GZ34 — moderate sag, classic blues compression
+  }
 
   components {
     # Input stage

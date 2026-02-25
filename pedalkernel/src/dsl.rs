@@ -18,13 +18,69 @@ use nom::{
 // AST
 // ---------------------------------------------------------------------------
 
+/// Rectifier type — determines supply output impedance character.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RectifierType {
+    /// Tube rectifier (GZ34, 5U4, 5Y3) — high impedance, significant sag.
+    /// Adds ~40–80V drop under load depending on tube type.
+    Tube,
+    /// Solid-state rectifier (silicon diodes) — very low impedance, stiff supply.
+    /// Adds ~1–2V drop under load.
+    SolidState,
+}
+
+impl Default for RectifierType {
+    fn default() -> Self {
+        RectifierType::SolidState
+    }
+}
+
+/// Power supply configuration — models B+ rail behavior under load.
+///
+/// In real amps, the power supply has finite output impedance from the
+/// rectifier forward drop, transformer winding resistance, and filter cap ESR.
+/// When the output stage draws current, the B+ voltage sags proportionally.
+///
+/// Simple form: `supply 9V` — just sets nominal voltage, no sag.
+/// Block form: `supply 480V { impedance: 150, filter_cap: 40u, rectifier: tube }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct SupplyConfig {
+    /// Nominal (no-load) supply voltage in volts.
+    pub voltage: f64,
+    /// Supply output impedance in ohms (rectifier + transformer + ESR).
+    /// Higher = more sag. Tube rectifier: 50–200Ω, solid-state: 1–10Ω.
+    pub impedance: Option<f64>,
+    /// Main filter capacitance in farads — sets sag recovery time.
+    /// Larger cap = faster recovery. Typical: 40µF (vintage) to 220µF (modern).
+    pub filter_cap: Option<f64>,
+    /// Rectifier type — tube (saggy) or solid-state (stiff).
+    pub rectifier: RectifierType,
+}
+
+impl SupplyConfig {
+    /// Create a simple supply config with just a voltage (no sag modeling).
+    pub fn voltage_only(voltage: f64) -> Self {
+        Self {
+            voltage,
+            impedance: None,
+            filter_cap: None,
+            rectifier: RectifierType::default(),
+        }
+    }
+
+    /// Returns true if this supply has sag parameters configured.
+    pub fn has_sag(&self) -> bool {
+        self.impedance.is_some()
+    }
+}
+
 /// Top-level pedal definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PedalDef {
     pub name: String,
-    /// Supply voltage in volts (e.g., 9.0 for pedals, 250.0 for tube amps).
-    /// If None, defaults to 9V in the compiler.
-    pub supply: Option<f64>,
+    /// Power supply configuration.
+    /// If None, defaults to 9V with no sag in the compiler.
+    pub supply: Option<SupplyConfig>,
     pub components: Vec<ComponentDef>,
     pub nets: Vec<NetDef>,
     pub controls: Vec<ControlDef>,
@@ -1826,9 +1882,18 @@ fn trims_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
 // Top-level
 // ---------------------------------------------------------------------------
 
-/// Parse an optional supply voltage declaration: `supply 9V` or `supply 250V`
-/// Returns voltage in volts (e.g., 9.0, 250.0).
-fn supply_section(input: &str) -> IResult<&str, f64> {
+/// Parse an optional supply voltage declaration.
+///
+/// Simple form: `supply 9V` or `supply 250V`
+/// Block form:
+/// ```text
+/// supply 480V {
+///     impedance: 150        # ohms
+///     filter_cap: 40u       # farads
+///     rectifier: tube       # or solid_state
+/// }
+/// ```
+fn supply_section(input: &str) -> IResult<&str, SupplyConfig> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("supply")(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1841,7 +1906,100 @@ fn supply_section(input: &str) -> IResult<&str, f64> {
     // Extract just the numeric part
     let num_str = voltage.trim_end_matches(|c| c == 'V' || c == 'v');
     let volts = num_str.parse::<f64>().unwrap_or(9.0);
-    Ok((input, volts))
+
+    // Try to parse an optional block with sag parameters
+    let (input, block) = opt(supply_block)(input)?;
+
+    let config = if let Some((impedance, filter_cap, rectifier)) = block {
+        SupplyConfig {
+            voltage: volts,
+            impedance,
+            filter_cap,
+            rectifier: rectifier.unwrap_or_default(),
+        }
+    } else {
+        SupplyConfig::voltage_only(volts)
+    };
+
+    Ok((input, config))
+}
+
+/// Parse the body of a supply block: `{ impedance: 150, filter_cap: 40u, rectifier: tube }`
+fn supply_block(
+    input: &str,
+) -> IResult<&str, (Option<f64>, Option<f64>, Option<RectifierType>)> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+
+    let mut impedance = None;
+    let mut filter_cap = None;
+    let mut rectifier = None;
+
+    let mut input = input;
+    loop {
+        let (rest, _) = ws_comments(input)?;
+        // Check for closing brace
+        if let Ok((rest2, _)) = char::<&str, nom::error::Error<&str>>('}')(rest) {
+            input = rest2;
+            break;
+        }
+        // Try parsing each field
+        if let Ok((rest2, val)) = supply_field_impedance(rest) {
+            impedance = Some(val);
+            input = rest2;
+        } else if let Ok((rest2, val)) = supply_field_filter_cap(rest) {
+            filter_cap = Some(val);
+            input = rest2;
+        } else if let Ok((rest2, val)) = supply_field_rectifier(rest) {
+            rectifier = Some(val);
+            input = rest2;
+        } else {
+            // Unknown field — skip to next line or closing brace
+            let (rest2, _) = not_line_ending(rest)?;
+            input = rest2;
+        }
+    }
+
+    Ok((input, (impedance, filter_cap, rectifier)))
+}
+
+/// Parse `impedance: 150` (value in ohms).
+fn supply_field_impedance(input: &str) -> IResult<&str, f64> {
+    let (input, _) = tag("impedance")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, val) = eng_value(input)?;
+    // Skip optional inline comment
+    let (input, _) = opt(preceded(ws_comments, preceded(char('#'), not_line_ending)))(input)?;
+    Ok((input, val))
+}
+
+/// Parse `filter_cap: 40u` (value in farads).
+fn supply_field_filter_cap(input: &str) -> IResult<&str, f64> {
+    let (input, _) = tag("filter_cap")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, val) = eng_value(input)?;
+    // Skip optional inline comment
+    let (input, _) = opt(preceded(ws_comments, preceded(char('#'), not_line_ending)))(input)?;
+    Ok((input, val))
+}
+
+/// Parse `rectifier: tube` or `rectifier: solid_state`.
+fn supply_field_rectifier(input: &str) -> IResult<&str, RectifierType> {
+    let (input, _) = tag("rectifier")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, rtype) = alt((
+        value(RectifierType::Tube, tag("tube")),
+        value(RectifierType::SolidState, tag("solid_state")),
+    ))(input)?;
+    // Skip optional inline comment
+    let (input, _) = opt(preceded(ws_comments, preceded(char('#'), not_line_ending)))(input)?;
+    Ok((input, rtype))
 }
 
 /// Parse a complete `.pedal` or `.synth` file.
@@ -3003,7 +3161,9 @@ pedal "9V Pedal" {
 "#;
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "9V Pedal");
-        assert_eq!(def.supply, Some(9.0));
+        let supply = def.supply.unwrap();
+        assert_eq!(supply.voltage, 9.0);
+        assert!(!supply.has_sag());
     }
 
     #[test]
@@ -3024,7 +3184,7 @@ pedal "Tube Amp" {
 "#;
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "Tube Amp");
-        assert_eq!(def.supply, Some(250.0));
+        assert_eq!(def.supply.unwrap().voltage, 250.0);
     }
 
     #[test]
@@ -3041,7 +3201,7 @@ pedal "Test" {
 }
 "#;
         let def = parse_pedal_file(src).unwrap();
-        assert_eq!(def.supply, Some(12.0));
+        assert_eq!(def.supply.unwrap().voltage, 12.0);
     }
 
     #[test]
@@ -3058,7 +3218,7 @@ pedal "Test" {
 }
 "#;
         let def = parse_pedal_file(src).unwrap();
-        assert!((def.supply.unwrap() - 9.6).abs() < 0.01);
+        assert!((def.supply.unwrap().voltage - 9.6).abs() < 0.01);
     }
 
     #[test]
@@ -3075,5 +3235,86 @@ pedal "Default" {
 "#;
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.supply, None);
+    }
+
+    #[test]
+    fn parse_supply_block_tube_rectifier() {
+        let src = r#"
+pedal "Tube Amp Sag" {
+    supply 480V {
+        impedance: 150
+        filter_cap: 40u
+        rectifier: tube
+    }
+    components {
+        V1: triode(12ax7)
+        R1: resistor(100k)
+    }
+    nets {
+        in -> V1.grid
+        V1.plate -> R1.a
+        R1.b -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        let supply = def.supply.unwrap();
+        assert_eq!(supply.voltage, 480.0);
+        assert!((supply.impedance.unwrap() - 150.0).abs() < 1e-6);
+        assert!((supply.filter_cap.unwrap() - 40e-6).abs() < 1e-12);
+        assert_eq!(supply.rectifier, RectifierType::Tube);
+        assert!(supply.has_sag());
+    }
+
+    #[test]
+    fn parse_supply_block_solid_state() {
+        let src = r#"
+pedal "Modern Amp" {
+    supply 480V {
+        impedance: 5
+        filter_cap: 220u
+        rectifier: solid_state
+    }
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> R1.a
+        R1.b -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        let supply = def.supply.unwrap();
+        assert_eq!(supply.voltage, 480.0);
+        assert!((supply.impedance.unwrap() - 5.0).abs() < 1e-6);
+        assert!((supply.filter_cap.unwrap() - 220e-6).abs() < 1e-12);
+        assert_eq!(supply.rectifier, RectifierType::SolidState);
+    }
+
+    #[test]
+    fn parse_supply_block_with_comments() {
+        let src = r#"
+pedal "Commented Supply" {
+    supply 400V {
+        impedance: 100    # tube rectifier + transformer resistance
+        filter_cap: 47u   # main filter cap
+        rectifier: tube    # GZ34
+    }
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> R1.a
+        R1.b -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        let supply = def.supply.unwrap();
+        assert_eq!(supply.voltage, 400.0);
+        assert!((supply.impedance.unwrap() - 100.0).abs() < 1e-6);
+        assert!((supply.filter_cap.unwrap() - 47e-6).abs() < 1e-12);
+        assert_eq!(supply.rectifier, RectifierType::Tube);
     }
 }
