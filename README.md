@@ -466,4 +466,4 @@ tools/.venv/bin/python tools/mouser_bom.py examples/pedals/fuzz/big_muff.pedal -
 
 ## License
 
-MIT (c) [Avery Wagar](https://github.com/ajmwagar)
+AGPLv3 (c) [Avery Wagar](https://github.com/ajmwagar)
