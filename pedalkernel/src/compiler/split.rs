@@ -181,7 +181,7 @@ fn build_half(
 
     PedalDef {
         name: format!("{} ({})", pedal.name, suffix),
-        supply: pedal.supply,
+        supply: pedal.supply.clone(),
         components,
         nets,
         controls,

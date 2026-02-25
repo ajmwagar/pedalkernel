@@ -17,7 +17,11 @@
 #   - Volume interaction: both channels share a cathode follower (modeled as gain)
 
 pedal "Tweed Deluxe 5E3" {
-  supply 350V    # B+ for 12AY7/12AX7 preamp (actual amp is ~360V)
+  supply 350V {
+    impedance: 180      # 5Y3 tube rectifier (~120Ω) + transformer winding (~60Ω)
+    filter_cap: 16u     # vintage small filter cap — slow recovery, saggy feel
+    rectifier: tube     # 5Y3 — the sag king, large voltage drop under load
+  }
 
   components {
     # Input stage

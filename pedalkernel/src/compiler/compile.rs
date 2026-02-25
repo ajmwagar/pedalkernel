@@ -1522,7 +1522,22 @@ pub fn compile_pedal_with_options(
     };
 
     // Use supply voltage from .pedal file, defaulting to 9V for typical pedals
-    let supply_voltage = pedal.supply.unwrap_or(9.0);
+    let supply_config = pedal.supply.clone();
+    let supply_voltage = supply_config.as_ref().map_or(9.0, |s| s.voltage);
+
+    // Build power supply sag model if impedance parameters are specified
+    let power_supply = supply_config
+        .as_ref()
+        .filter(|s| s.has_sag())
+        .map(|s| {
+            crate::elements::PowerSupply::new(
+                s.voltage,
+                s.impedance.unwrap_or(0.0),
+                s.filter_cap.unwrap_or(100e-6),
+                s.rectifier,
+                sample_rate,
+            )
+        });
 
     let mut compiled = CompiledPedal {
         stages,
@@ -1542,6 +1557,7 @@ pub fn compile_pedal_with_options(
         tolerance_seed: tolerance.seed(),
         oversampling,
         opamp_stages,
+        power_supply,
         #[cfg(debug_assertions)]
         debug_stats: None,
     };
