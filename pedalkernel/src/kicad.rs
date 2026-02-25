@@ -51,6 +51,9 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
             PentodeType::El84 => ("Valve:EL84", "V"),
             PentodeType::A6aq5a => ("Valve:6AQ5", "V"),
             PentodeType::A6973 => ("Valve:6973", "V"),
+            PentodeType::A6l6gc => ("Valve:6L6GC", "V"),
+            PentodeType::El34 => ("Valve:EL34", "V"),
+            PentodeType::A6550 => ("Valve:6550", "V"),
         },
         ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
         ComponentKind::Nmos(_) => ("Device:Q_NMOS_DGS", "Q"),

@@ -362,6 +362,21 @@ pub enum PentodeType {
     /// Used in Fairchild 670 sidechain push-pull output stage.
     /// Similar to EL84 but different pin-out and slightly higher power.
     A6973,
+    /// 6L6GC - Beam power tetrode, the American power tube standard.
+    /// Used in Fender Twin Reverb, Dumble ODS, and virtually every Fender >40W.
+    /// Higher plate dissipation (30W), gradual compression when overdriven.
+    /// Aliases: 6L6, 5881 (military), KT66 (British equivalent).
+    A6l6gc,
+    /// EL34 / 6CA7 - True pentode, the European power tube standard.
+    /// Used in Marshall JCM800 and most Marshall amps.
+    /// Dominant midrange, earlier breakup, sharper clipping knee than 6L6GC.
+    /// Aliases: 6CA7 (American designation), KT77 (drop-in alternative).
+    El34,
+    /// 6550 - High-power beam tetrode.
+    /// Used in Ampeg SVT, some Mesa Boogies, some Dumble builds.
+    /// More headroom than 6L6GC, tighter bass.
+    /// Aliases: KT88 (British), KT90 (higher dissipation variant).
+    A6550,
 }
 
 /// MOSFET types for enhancement-mode devices used in guitar pedals.
@@ -907,14 +922,29 @@ fn parse_triode(input: &str) -> IResult<&str, ComponentKind> {
 
 fn pentode_type(input: &str) -> IResult<&str, PentodeType> {
     alt((
-        value(PentodeType::Ef86, tag("ef86")),
-        value(PentodeType::El84, tag("el84")),
-        value(PentodeType::A6aq5a, tag("6aq5a")),
-        value(PentodeType::A6aq5a, tag("6aq5")),
-        value(PentodeType::A6973, tag("6973")),
-        // Alternative designations
-        value(PentodeType::Ef86, tag("6267")),
-        value(PentodeType::El84, tag("6bq5")),
+        alt((
+            value(PentodeType::Ef86, tag("ef86")),
+            value(PentodeType::El84, tag("el84")),
+            value(PentodeType::El34, tag("el34")),
+            value(PentodeType::A6aq5a, tag("6aq5a")),
+            value(PentodeType::A6aq5a, tag("6aq5")),
+            value(PentodeType::A6973, tag("6973")),
+            // 6L6GC and aliases — order matters: longer tags first
+            value(PentodeType::A6l6gc, tag("6l6gc")),
+            value(PentodeType::A6l6gc, tag("6l6")),
+            value(PentodeType::A6l6gc, tag("5881")),
+        )),
+        alt((
+            value(PentodeType::A6550, tag("6550")),
+            // Alternative / equivalent designations
+            value(PentodeType::Ef86, tag("6267")),
+            value(PentodeType::El84, tag("6bq5")),
+            value(PentodeType::El34, tag("6ca7")),
+            value(PentodeType::El34, tag("kt77")),
+            value(PentodeType::A6l6gc, tag("kt66")),
+            value(PentodeType::A6550, tag("kt88")),
+            value(PentodeType::A6550, tag("kt90")),
+        )),
     ))(input)
 }
 
@@ -2615,6 +2645,73 @@ pedal "Vox Preamp" {
             .components
             .iter()
             .any(|c| matches!(c.kind, ComponentKind::Pentode(PentodeType::Ef86))));
+    }
+
+    #[test]
+    fn parse_pentode_6l6gc() {
+        let (_, c) = component_def("V1: pentode(6l6gc)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6l6gc));
+    }
+
+    #[test]
+    fn parse_pentode_6l6_alias() {
+        // 6L6 = original lower-dissipation variant, treated as 6L6GC
+        let (_, c) = component_def("V1: pentode(6l6)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6l6gc));
+    }
+
+    #[test]
+    fn parse_pentode_5881_alias() {
+        // 5881 = military equivalent of 6L6GC
+        let (_, c) = component_def("V1: pentode(5881)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6l6gc));
+    }
+
+    #[test]
+    fn parse_pentode_kt66_alias() {
+        // KT66 = British equivalent of 6L6GC
+        let (_, c) = component_def("V1: pentode(kt66)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6l6gc));
+    }
+
+    #[test]
+    fn parse_pentode_el34() {
+        let (_, c) = component_def("V1: pentode(el34)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::El34));
+    }
+
+    #[test]
+    fn parse_pentode_6ca7_alias() {
+        // 6CA7 = American designation for EL34
+        let (_, c) = component_def("V1: pentode(6ca7)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::El34));
+    }
+
+    #[test]
+    fn parse_pentode_kt77_alias() {
+        // KT77 = drop-in alternative for EL34
+        let (_, c) = component_def("V1: pentode(kt77)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::El34));
+    }
+
+    #[test]
+    fn parse_pentode_6550() {
+        let (_, c) = component_def("V1: pentode(6550)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6550));
+    }
+
+    #[test]
+    fn parse_pentode_kt88_alias() {
+        // KT88 = British equivalent of 6550
+        let (_, c) = component_def("V1: pentode(kt88)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6550));
+    }
+
+    #[test]
+    fn parse_pentode_kt90_alias() {
+        // KT90 = higher dissipation variant of 6550
+        let (_, c) = component_def("V1: pentode(kt90)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6550));
     }
 
     // ── Synth component parser tests ──────────────────────────────────

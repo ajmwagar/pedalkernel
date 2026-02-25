@@ -101,6 +101,9 @@ pub(super) fn pentode_model(pt: PentodeType) -> PentodeModel {
         PentodeType::A6aq5a => PentodeModel::p_el84(),
         // 6973 is a 9W beam power tube similar to EL84, used in Fairchild 670 sidechain
         PentodeType::A6973 => PentodeModel::p_el84(),
+        PentodeType::A6l6gc => PentodeModel::p_6l6gc(),
+        PentodeType::El34 => PentodeModel::p_el34(),
+        PentodeType::A6550 => PentodeModel::p_6550(),
     }
 }
 
