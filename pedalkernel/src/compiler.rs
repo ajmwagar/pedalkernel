@@ -798,6 +798,10 @@ impl CircuitGraph {
                     // BBDs are handled as delay line processors, not WDF elements.
                     // They connect via .in/.out pins but are processed separately.
                 }
+                ComponentKind::TapeLoop(_) => {
+                    // TapeLoops are handled as multi-tap delay line processors, not WDF elements.
+                    // They connect via .in/.out/.head1/.head2/.head3 pins but are processed separately.
+                }
                 // ── Synth ICs ──────────────────────────────────────────
                 // These are complex ICs with internal behavior. They are NOT
                 // part of the WDF tree — they generate/process signals
@@ -2115,9 +2119,14 @@ impl CompiledPedal {
     /// This affects:
     /// - Headroom for rail saturation modeling
     /// - Op-amp output swing (v_max)
+    /// - Triode/pentode plate voltage limits (v_max = B+)
+    /// - BJT collector-emitter voltage limits (v_max = Vcc)
     ///
     /// For single-supply pedals biased at Vsupply/2, the op-amp can swing
     /// from about 1.5V to (Vsupply - 1.5V), giving v_max ≈ (Vsupply/2) - 1.5V.
+    ///
+    /// For tube circuits, the plate voltage can swing from 0V to B+ (supply).
+    /// For BJT circuits, Vce can swing from ~0V to Vcc (supply).
     pub fn set_supply_voltage(&mut self, voltage: f64) {
         self.supply_voltage = voltage.clamp(5.0, 500.0); // Allow up to 500V for tube gear
 
@@ -2126,17 +2135,29 @@ impl CompiledPedal {
         // Saturation margin is typically 1.0-1.5V for most op-amps.
         // For high voltages (tube gear), the margin stays ~1.5V.
         let saturation_margin = 1.5;
-        let v_max = (voltage / 2.0 - saturation_margin).max(1.0);
+        let opamp_v_max = (voltage / 2.0 - saturation_margin).max(1.0);
+
+        // For tubes and transistors, v_max is the full supply voltage
+        // (plate/collector can swing from 0V to B+/Vcc)
+        let tube_v_max = voltage;
+        let bjt_v_max = voltage;
 
         // Propagate v_max to standalone op-amp stages
         for stage in &mut self.opamp_stages {
-            stage.opamp.set_v_max(v_max);
+            stage.opamp.set_v_max(opamp_v_max);
         }
 
-        // Propagate v_max to op-amp roots in WDF stages
+        // Propagate v_max to all nonlinear roots in WDF stages
         for stage in &mut self.stages {
-            if let RootKind::OpAmp(op) = &mut stage.root {
-                op.set_v_max(v_max);
+            match &mut stage.root {
+                RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
+                RootKind::Triode(t) => t.set_v_max(tube_v_max),
+                RootKind::Pentode(p) => p.set_v_max(tube_v_max),
+                RootKind::BjtNpn(bjt) => bjt.set_v_max(bjt_v_max),
+                RootKind::BjtPnp(bjt) => bjt.set_v_max(bjt_v_max),
+                // Diodes, JFETs, MOSFETs, OTAs, Zeners don't need supply voltage
+                // (their behavior is determined by their intrinsic parameters)
+                _ => {}
             }
         }
     }
@@ -3755,6 +3776,19 @@ pub fn compile_pedal_with_options(
                 BbdType::Mn3005 => BbdModel::mn3005(),
             };
             bbds.push(BbdDelayLine::new(model, sample_rate));
+        }
+    }
+
+    // ── Tape loop delay lines ────────────────────────────────────────────
+    let mut tape_loops = Vec::new();
+    for comp in &pedal.components {
+        if let ComponentKind::TapeLoop(tl) = &comp.kind {
+            let model = match tl {
+                TapeLoopType::Re201 => TapeLoopModel::re201(),
+                TapeLoopType::Echoplex => TapeLoopModel::echoplex(),
+                TapeLoopType::Echorec => TapeLoopModel::echorec(),
+            };
+            tape_loops.push(TapeLoop::new(model, sample_rate));
         }
     }
 

@@ -1002,6 +1002,9 @@ pub struct BjtNpnRoot {
     vbe: f64,
     /// Last computed collector current (for base current tracking).
     ic: f64,
+    /// Maximum collector-emitter voltage (determined by supply rail Vcc).
+    /// Vce can swing from ~0V (saturated) to Vcc (cutoff).
+    v_max: f64,
     /// Maximum Newton-Raphson iterations.
     max_iter: usize,
     /// Convergence tolerance.
@@ -1014,9 +1017,44 @@ impl BjtNpnRoot {
             model,
             vbe: 0.0,
             ic: 0.0,
+            v_max: 100.0, // Default for typical transistor circuits (will be set by supply)
             max_iter: 16,
             tolerance: 1e-6,
         }
+    }
+
+    /// Create a BJT NPN root with a specific supply voltage (Vcc).
+    ///
+    /// Use this when the supply voltage is known at construction time.
+    pub fn new_with_v_max(model: BjtModel, v_max: f64) -> Self {
+        Self {
+            model,
+            vbe: 0.0,
+            ic: 0.0,
+            v_max: v_max.max(1.0),
+            max_iter: 16,
+            tolerance: 1e-6,
+        }
+    }
+
+    /// Set the maximum collector-emitter voltage (Vcc supply rail).
+    ///
+    /// For BJT circuits, Vce can swing from ~0V (transistor saturated)
+    /// to Vcc (transistor in cutoff). This sets the upper bound for Newton-Raphson.
+    ///
+    /// Examples:
+    /// - 9V guitar pedal: 9V
+    /// - 12V effects: 12V
+    /// - High-voltage preamp: 24-48V
+    #[inline]
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0); // Minimum 1V to avoid degeneracy
+    }
+
+    /// Get the current v_max setting.
+    #[inline]
+    pub fn v_max(&self) -> f64 {
+        self.v_max
     }
 
     /// Set the base-emitter voltage (external control from bias, signal, etc.)
@@ -1114,6 +1152,7 @@ impl WdfRoot for BjtNpnRoot {
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
+        let v_max = self.v_max;
         let v0 = if self.vbe > 0.3 {
             (a * 0.5).max(0.1)
         } else {
@@ -1121,7 +1160,7 @@ impl WdfRoot for BjtNpnRoot {
         };
         let b = newton_raphson_solve(
             a, rp, v0, self.max_iter, self.tolerance,
-            Some((-1.0, 100.0)), None,
+            Some((-1.0, v_max)), None,
             |v| (root.collector_current_at(v), root.collector_current_derivative(v)),
         );
         // Store collector current for external use
@@ -1147,6 +1186,9 @@ pub struct BjtPnpRoot {
     veb: f64,
     /// Last computed collector current magnitude.
     ic: f64,
+    /// Maximum emitter-collector voltage (determined by supply rail).
+    /// Vec can swing from ~0V (saturated) to supply voltage (cutoff).
+    v_max: f64,
     max_iter: usize,
     tolerance: f64,
 }
@@ -1157,9 +1199,39 @@ impl BjtPnpRoot {
             model,
             veb: 0.0,
             ic: 0.0,
+            v_max: 100.0, // Default for typical transistor circuits (will be set by supply)
             max_iter: 16,
             tolerance: 1e-6,
         }
+    }
+
+    /// Create a BJT PNP root with a specific supply voltage.
+    ///
+    /// Use this when the supply voltage is known at construction time.
+    pub fn new_with_v_max(model: BjtModel, v_max: f64) -> Self {
+        Self {
+            model,
+            veb: 0.0,
+            ic: 0.0,
+            v_max: v_max.max(1.0),
+            max_iter: 16,
+            tolerance: 1e-6,
+        }
+    }
+
+    /// Set the maximum emitter-collector voltage (supply rail).
+    ///
+    /// For PNP circuits (like germanium Fuzz Face), Vec can swing from ~0V
+    /// (transistor saturated) to supply voltage (transistor in cutoff).
+    #[inline]
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0); // Minimum 1V to avoid degeneracy
+    }
+
+    /// Get the current v_max setting.
+    #[inline]
+    pub fn v_max(&self) -> f64 {
+        self.v_max
     }
 
     /// Set the emitter-base voltage (Veb = Ve - Vb).
@@ -1234,6 +1306,7 @@ impl WdfRoot for BjtPnpRoot {
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
+        let v_max = self.v_max;
         let v0 = if self.veb > 0.2 {
             (a * 0.5).max(0.1)
         } else {
@@ -1241,7 +1314,7 @@ impl WdfRoot for BjtPnpRoot {
         };
         let b = newton_raphson_solve(
             a, rp, v0, self.max_iter, self.tolerance,
-            Some((-1.0, 100.0)), None,
+            Some((-1.0, v_max)), None,
             |v| (root.collector_current_at(v), root.collector_current_derivative(v)),
         );
         self.ic = self.collector_current_at((a + b) / 2.0);
@@ -1404,6 +1477,9 @@ pub struct TriodeRoot {
     pub model: TriodeModel,
     /// Current grid-cathode voltage (external control parameter).
     vgk: f64,
+    /// Maximum plate voltage (determined by supply rail B+).
+    /// Triode plate can swing from 0V (saturated) to B+ (cutoff).
+    v_max: f64,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
 }
@@ -1413,8 +1489,41 @@ impl TriodeRoot {
         Self {
             model,
             vgk: 0.0,
+            v_max: 500.0, // Default to high-voltage tube amp (will be set by supply)
             max_iter: 16,
         }
+    }
+
+    /// Create a triode root with a specific supply voltage (B+).
+    ///
+    /// Use this when the supply voltage is known at construction time.
+    pub fn new_with_v_max(model: TriodeModel, v_max: f64) -> Self {
+        Self {
+            model,
+            vgk: 0.0,
+            v_max: v_max.max(1.0),
+            max_iter: 16,
+        }
+    }
+
+    /// Set the maximum plate voltage (B+ supply rail).
+    ///
+    /// For tube circuits, the plate voltage can swing from 0V (tube saturated)
+    /// to B+ (tube in cutoff). This sets the upper bound for Newton-Raphson.
+    ///
+    /// Examples:
+    /// - Pultec EQP-1A: 250V
+    /// - Fender Deluxe: 350V
+    /// - Starved plate design: 9-48V
+    #[inline]
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0); // Minimum 1V to avoid degeneracy
+    }
+
+    /// Get the current v_max setting.
+    #[inline]
+    pub fn v_max(&self) -> f64 {
+        self.v_max
     }
 
     /// Set the grid-cathode voltage (external control from bias, signal, LFO).
@@ -1522,8 +1631,9 @@ impl WdfRoot for TriodeRoot {
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
+        let v_max = self.v_max;
         newton_raphson_solve(a, rp, a * 0.5, self.max_iter, 1e-6,
-            Some((-50.0, 500.0)), None,
+            Some((-50.0, v_max)), None,
             |v| (root.plate_current(v), root.plate_current_derivative(v)),
         )
     }
@@ -1624,6 +1734,9 @@ pub struct PentodeRoot {
     vg1k: f64,
     /// Current screen grid voltage (g2-cathode). Typically fixed at operating point.
     vg2k: f64,
+    /// Maximum plate voltage (determined by supply rail B+).
+    /// Pentode plate can swing from 0V (saturated) to B+ (cutoff).
+    v_max: f64,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
 }
@@ -1635,8 +1748,38 @@ impl PentodeRoot {
             model,
             vg1k: 0.0,
             vg2k,
+            v_max: 500.0, // Default to high-voltage tube amp (will be set by supply)
             max_iter: 16,
         }
+    }
+
+    /// Create a pentode root with a specific supply voltage (B+).
+    ///
+    /// Use this when the supply voltage is known at construction time.
+    pub fn new_with_v_max(model: PentodeModel, v_max: f64) -> Self {
+        let vg2k = model.vg2_default;
+        Self {
+            model,
+            vg1k: 0.0,
+            vg2k,
+            v_max: v_max.max(1.0),
+            max_iter: 16,
+        }
+    }
+
+    /// Set the maximum plate voltage (B+ supply rail).
+    ///
+    /// For tube circuits, the plate voltage can swing from 0V (tube saturated)
+    /// to B+ (tube in cutoff). This sets the upper bound for Newton-Raphson.
+    #[inline]
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0); // Minimum 1V to avoid degeneracy
+    }
+
+    /// Get the current v_max setting.
+    #[inline]
+    pub fn v_max(&self) -> f64 {
+        self.v_max
     }
 
     /// Set the control grid voltage (g1-cathode). External modulation.
@@ -1747,8 +1890,9 @@ impl WdfRoot for PentodeRoot {
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
+        let v_max = self.v_max;
         newton_raphson_solve(a, rp, a * 0.5, self.max_iter, 1e-6,
-            Some((-50.0, 500.0)), None,
+            Some((-50.0, v_max)), None,
             |v| (root.plate_current(v), root.plate_current_derivative(v)),
         )
     }
@@ -3067,4 +3211,510 @@ pub fn bbd_soft_clip(x: f64) -> f64 {
     } else {
         x.signum() * 2.0 / 3.0 // Saturated at 2/3 (cubic limit)
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tape Loop Delay — Multi-tap tape delay with magnetic hysteresis
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Models the tape transport section of tape echo units like the Roland RE-201
+// Space Echo, Echoplex, and Binson Echorec.
+//
+// Key characteristics that distinguish tape from BBD:
+//
+// 1. **Multiple fixed taps** — Physical playback heads at fixed distances from
+//    the record head. The RE-201 has 3 heads; Echorec has 4. Unlike BBD,
+//    you can't change the tap positions, only the tape speed.
+//
+// 2. **Longer delays** — Tape loops can achieve 1+ second delays. The RE-201
+//    at slowest speed reaches ~1.2s for head 3.
+//
+// 3. **Magnetic hysteresis saturation** — Tape saturates with a different
+//    curve than BBD. It's a soft, asymptotic saturation described by
+//    the Jiles-Atherton model, simplified here to a modified tanh.
+//    This is the "tape warmth" — not clipping, but saturation.
+//
+// 4. **HF loss accumulates with distance** — Each cm of tape travel loses
+//    some high frequencies. Distant heads (long delays) are darker than
+//    close heads (short delays). This compounds with feedback.
+//
+// 5. **Speed = pitch** — Changing tape speed while echoes are playing creates
+//    pitch shift. This is the "spaceship landing" sound when you turn the
+//    Repeat Rate knob while feedback is high.
+//
+// Buyable components:
+// - Record heads: Tandberg RPH-1, TEAC RP-22
+// - Playback heads: TEAC PB-22, Nortronics style
+// - Tape stock: ATR Magnetics 1/4" tape
+//
+// For BOM/KiCad: Maps to inductor symbol (tape heads ARE inductors electrically)
+// with part numbers like "Tape Head, Record, 1/4 inch, Full Track"
+
+/// Tape loop model configuration.
+///
+/// Different tape echo units have different head configurations and tape
+/// characteristics. This struct captures those differences.
+#[derive(Debug, Clone)]
+pub struct TapeLoopModel {
+    /// Name for BOM generation (e.g., "Roland RE-201 Tape Loop")
+    pub name: &'static str,
+    /// Playback head distances from record head, in centimeters.
+    /// The RE-201 has heads at approximately [3, 6, 12] cm.
+    pub head_distances_cm: Vec<f64>,
+    /// Minimum tape speed in cm/s (slowest, longest delay).
+    pub speed_min_cm_s: f64,
+    /// Maximum tape speed in cm/s (fastest, shortest delay).
+    pub speed_max_cm_s: f64,
+    /// Nominal tape speed in cm/s (default setting).
+    pub speed_nominal_cm_s: f64,
+    /// Magnetic saturation level (0-1 normalized input at which tape
+    /// reaches ~90% of its maximum remanence).
+    pub saturation_level: f64,
+    /// HF loss coefficient per cm of tape travel.
+    /// Higher = faster HF rolloff. Typical: 0.003-0.01.
+    pub hf_loss_per_cm: f64,
+    /// Gap loss frequency (Hz) at nominal speed.
+    /// The playback head gap creates a notch at wavelength = gap width.
+    /// Typical: 12-15 kHz for narrow gaps, 8-10 kHz for wide gaps.
+    pub gap_loss_freq: f64,
+    /// Wow depth (slow speed variation) as fraction of nominal speed.
+    /// RE-201: ~0.003 (0.3%)
+    pub wow_depth: f64,
+    /// Flutter depth (fast speed variation) as fraction of nominal speed.
+    /// RE-201: ~0.001 (0.1%)
+    pub flutter_depth: f64,
+    /// Bias oscillator bleed level (normalized).
+    /// Real tape machines have ~100kHz bias that bleeds through slightly.
+    pub bias_bleed: f64,
+    /// Tape hiss level (normalized amplitude of white noise).
+    pub tape_hiss: f64,
+    /// Print-through level — faint pre-echo from magnetic bleeding
+    /// between adjacent tape layers. Usually very low: 0.001-0.01.
+    pub print_through: f64,
+}
+
+impl TapeLoopModel {
+    /// Roland RE-201 Space Echo tape loop.
+    ///
+    /// The classic tape echo. 3 playback heads at fixed distances.
+    /// Tape speed variable via motor voltage.
+    pub fn re201() -> Self {
+        Self {
+            name: "Roland RE-201 Space Echo",
+            head_distances_cm: vec![3.0, 6.0, 12.0], // Head 1, 2, 3
+            speed_min_cm_s: 9.5,                     // ~1.26s delay at head 3
+            speed_max_cm_s: 38.0,                    // ~316ms delay at head 3
+            speed_nominal_cm_s: 19.0,                // ~632ms at head 3
+            saturation_level: 0.7,
+            hf_loss_per_cm: 0.005,
+            gap_loss_freq: 12000.0,
+            wow_depth: 0.003,
+            flutter_depth: 0.001,
+            bias_bleed: 0.0005,
+            tape_hiss: 0.002,
+            print_through: 0.005,
+        }
+    }
+
+    /// Maestro Echoplex EP-3 tape loop.
+    ///
+    /// Single movable playback head (not fixed like RE-201).
+    /// We model it as a single head at variable distance.
+    pub fn echoplex() -> Self {
+        Self {
+            name: "Maestro Echoplex EP-3",
+            head_distances_cm: vec![10.0], // Single head, movable
+            speed_min_cm_s: 7.5,
+            speed_max_cm_s: 30.0,
+            speed_nominal_cm_s: 15.0,
+            saturation_level: 0.65,
+            hf_loss_per_cm: 0.006,
+            gap_loss_freq: 10000.0,
+            wow_depth: 0.004,
+            flutter_depth: 0.0015,
+            bias_bleed: 0.0008,
+            tape_hiss: 0.003,
+            print_through: 0.008,
+        }
+    }
+
+    /// Binson Echorec tape loop.
+    ///
+    /// Uses a rotating magnetic drum, not tape. But the signal
+    /// characteristics are similar. 4 playback heads at fixed positions.
+    pub fn echorec() -> Self {
+        Self {
+            name: "Binson Echorec",
+            head_distances_cm: vec![4.0, 8.0, 12.0, 16.0], // 4 heads
+            speed_min_cm_s: 15.0,
+            speed_max_cm_s: 45.0,
+            speed_nominal_cm_s: 30.0,
+            saturation_level: 0.75, // Drum saturates harder
+            hf_loss_per_cm: 0.004,
+            gap_loss_freq: 14000.0,
+            wow_depth: 0.002, // Drum is more stable
+            flutter_depth: 0.0008,
+            bias_bleed: 0.0003,
+            tape_hiss: 0.0015,
+            print_through: 0.003,
+        }
+    }
+
+    /// Minimum delay time in seconds (fastest speed, closest head).
+    pub fn min_delay(&self) -> f64 {
+        let min_distance = self
+            .head_distances_cm
+            .iter()
+            .copied()
+            .fold(f64::MAX, f64::min);
+        min_distance / self.speed_max_cm_s
+    }
+
+    /// Maximum delay time in seconds (slowest speed, farthest head).
+    pub fn max_delay(&self) -> f64 {
+        let max_distance = self
+            .head_distances_cm
+            .iter()
+            .copied()
+            .fold(0.0, f64::max);
+        max_distance / self.speed_min_cm_s
+    }
+
+    /// Delay time for a specific head at a given tape speed.
+    pub fn delay_at_head(&self, head_idx: usize, speed_cm_s: f64) -> f64 {
+        let distance = self.head_distances_cm.get(head_idx).copied().unwrap_or(0.0);
+        distance / speed_cm_s
+    }
+}
+
+/// Tape loop delay processor.
+///
+/// Models a complete tape transport with:
+/// - One record head (writes to the "tape")
+/// - Multiple playback heads at fixed positions (reads from the "tape")
+/// - Variable tape speed (affects all delays proportionally)
+/// - Magnetic hysteresis saturation
+/// - HF loss accumulating with distance
+/// - Wow/flutter modulation
+/// - Tape hiss
+///
+/// Unlike BBD which has one tap, tape loops have multiple fixed taps
+/// that all scale together when you change the tape speed.
+#[derive(Debug, Clone)]
+pub struct TapeLoop {
+    pub model: TapeLoopModel,
+    /// Circular delay buffer (shared for all heads).
+    buffer: Vec<f64>,
+    /// Write position in the buffer.
+    write_pos: usize,
+    /// Current tape speed in cm/s.
+    tape_speed: f64,
+    /// Sample rate.
+    sample_rate: f64,
+    /// Per-head read positions (fractional samples for interpolation).
+    head_delay_samples: Vec<f64>,
+    /// Per-head HF loss filter state (one-pole LPF).
+    head_lpf_state: Vec<f64>,
+    /// Per-head HF loss coefficient.
+    head_lpf_coef: Vec<f64>,
+    /// Feedback amount (0.0–0.95).
+    feedback: f64,
+    /// Feedback sample (from mixed output).
+    feedback_sample: f64,
+    /// Per-head enable flags (for mode selector).
+    head_enabled: Vec<bool>,
+    /// Wow LFO phase.
+    wow_phase: f64,
+    /// Flutter LFO phase.
+    flutter_phase: f64,
+    /// Simple RNG state for noise.
+    rng_state: u32,
+}
+
+impl TapeLoop {
+    /// Create a new tape loop processor.
+    pub fn new(model: TapeLoopModel, sample_rate: f64) -> Self {
+        let max_delay = model.max_delay();
+        let buffer_size = (max_delay * sample_rate * 1.1) as usize + 4; // +10% headroom
+        let buffer = vec![0.0; buffer_size];
+
+        let num_heads = model.head_distances_cm.len();
+        let tape_speed = model.speed_nominal_cm_s;
+
+        // Calculate initial delay samples and LPF coefficients for each head
+        let mut head_delay_samples = Vec::with_capacity(num_heads);
+        let mut head_lpf_state = Vec::with_capacity(num_heads);
+        let mut head_lpf_coef = Vec::with_capacity(num_heads);
+
+        for &distance in &model.head_distances_cm {
+            let delay_sec = distance / tape_speed;
+            head_delay_samples.push(delay_sec * sample_rate);
+            head_lpf_state.push(0.0);
+
+            // HF loss increases with distance
+            let cutoff = Self::compute_hf_cutoff(&model, distance, sample_rate);
+            let coef = (-2.0 * std::f64::consts::PI * cutoff / sample_rate).exp();
+            head_lpf_coef.push(coef);
+        }
+
+        let head_enabled = vec![true; num_heads];
+
+        Self {
+            model,
+            buffer,
+            write_pos: 0,
+            tape_speed,
+            sample_rate,
+            head_delay_samples,
+            head_lpf_state,
+            head_lpf_coef,
+            feedback: 0.0,
+            feedback_sample: 0.0,
+            head_enabled,
+            wow_phase: 0.0,
+            flutter_phase: 0.0,
+            rng_state: 42,
+        }
+    }
+
+    /// Compute HF cutoff frequency based on distance and tape characteristics.
+    fn compute_hf_cutoff(model: &TapeLoopModel, distance_cm: f64, sample_rate: f64) -> f64 {
+        // HF loss accumulates: cutoff = base_cutoff * exp(-loss_per_cm * distance)
+        let base_cutoff = model.gap_loss_freq;
+        let loss_factor = (-model.hf_loss_per_cm * distance_cm).exp();
+        (base_cutoff * loss_factor).min(sample_rate * 0.45)
+    }
+
+    /// Set tape speed in cm/s.
+    ///
+    /// This changes ALL head delay times proportionally.
+    /// Changing speed while playing creates pitch shift.
+    pub fn set_speed(&mut self, speed_cm_s: f64) {
+        self.tape_speed = speed_cm_s.clamp(self.model.speed_min_cm_s, self.model.speed_max_cm_s);
+
+        // Recalculate delay samples for each head
+        for (i, &distance) in self.model.head_distances_cm.iter().enumerate() {
+            let delay_sec = distance / self.tape_speed;
+            self.head_delay_samples[i] = delay_sec * self.sample_rate;
+
+            // Recalculate HF cutoff (depends on effective path length, influenced by speed)
+            let cutoff = Self::compute_hf_cutoff(&self.model, distance, self.sample_rate);
+            self.head_lpf_coef[i] = (-2.0 * std::f64::consts::PI * cutoff / self.sample_rate).exp();
+        }
+    }
+
+    /// Set tape speed as normalized value (0.0 = slowest, 1.0 = fastest).
+    pub fn set_speed_normalized(&mut self, norm: f64) {
+        let norm = norm.clamp(0.0, 1.0);
+        // Logarithmic interpolation for more natural feel
+        let log_min = self.model.speed_min_cm_s.ln();
+        let log_max = self.model.speed_max_cm_s.ln();
+        let speed = (log_min + norm * (log_max - log_min)).exp();
+        self.set_speed(speed);
+    }
+
+    /// Set feedback amount (0.0 = single echo, 0.95 = near self-oscillation).
+    pub fn set_feedback(&mut self, feedback: f64) {
+        self.feedback = feedback.clamp(0.0, 0.95);
+    }
+
+    /// Enable/disable a specific playback head.
+    ///
+    /// This models the RE-201 mode selector which routes different
+    /// combinations of heads to the output.
+    pub fn set_head_enabled(&mut self, head_idx: usize, enabled: bool) {
+        if let Some(flag) = self.head_enabled.get_mut(head_idx) {
+            *flag = enabled;
+        }
+    }
+
+    /// Enable heads by RE-201 mode number (1-12).
+    pub fn set_mode(&mut self, mode: u8) {
+        // RE-201 mode mapping (assuming 3 heads):
+        // Mode 1: head 1 only
+        // Mode 2: head 2 only
+        // Mode 3: heads 1+2
+        // Mode 4: head 3 only
+        // Mode 5: heads 1+3
+        // Mode 6: heads 2+3
+        // Mode 7: heads 1+2+3
+        // Modes 8-12: same with reverb (reverb handled separately)
+        let pattern: [bool; 3] = match mode {
+            1 | 9 => [true, false, false],
+            2 => [false, true, false],
+            3 | 10 => [true, true, false],
+            4 => [false, false, true],
+            5 => [true, false, true],
+            6 | 11 => [false, true, true],
+            7 | 12 => [true, true, true],
+            8 => [false, false, false], // Reverb only
+            _ => [true, true, true],
+        };
+
+        for (i, &enabled) in pattern.iter().enumerate() {
+            if let Some(flag) = self.head_enabled.get_mut(i) {
+                *flag = enabled;
+            }
+        }
+    }
+
+    /// Process one sample through the tape loop.
+    ///
+    /// Returns a tuple: (mixed output from all enabled heads, per-head outputs)
+    /// The per-head outputs allow external routing (e.g., mode selector, mixer).
+    #[inline]
+    pub fn process(&mut self, input: f64) -> (f64, Vec<f64>) {
+        let num_heads = self.model.head_distances_cm.len();
+
+        // ── Wow/flutter modulation ───────────────────────────────────────
+        // Wow: slow (~1 Hz) speed variation from belt/motor irregularity
+        // Flutter: fast (~8 Hz) speed variation from capstan eccentricity
+        self.wow_phase += 2.0 * std::f64::consts::PI * 1.2 / self.sample_rate;
+        if self.wow_phase > 2.0 * std::f64::consts::PI {
+            self.wow_phase -= 2.0 * std::f64::consts::PI;
+        }
+        self.flutter_phase += 2.0 * std::f64::consts::PI * 8.5 / self.sample_rate;
+        if self.flutter_phase > 2.0 * std::f64::consts::PI {
+            self.flutter_phase -= 2.0 * std::f64::consts::PI;
+        }
+
+        let wow_mod = self.wow_phase.sin() * self.model.wow_depth;
+        let flutter_mod = self.flutter_phase.sin() * self.model.flutter_depth;
+        let speed_mod = 1.0 + wow_mod + flutter_mod;
+
+        // ── Magnetic hysteresis saturation ───────────────────────────────
+        // Tape saturates with a tanh-like curve (Jiles-Atherton simplified).
+        // This is different from BBD soft clipping — it's asymptotic.
+        let record_signal = input + self.feedback * self.feedback_sample;
+        let saturated = tape_saturation(record_signal, self.model.saturation_level);
+
+        // Add tape hiss
+        let hiss = self.next_noise() * self.model.tape_hiss;
+        let write_sample = saturated + hiss;
+
+        // ── Write to buffer ──────────────────────────────────────────────
+        self.buffer[self.write_pos] = write_sample;
+
+        // ── Read from each playback head ─────────────────────────────────
+        let mut head_outputs = Vec::with_capacity(num_heads);
+        let buf_len = self.buffer.len();
+
+        for i in 0..num_heads {
+            // Apply speed modulation to delay
+            let modulated_delay = self.head_delay_samples[i] * speed_mod;
+            let delay_int = modulated_delay as usize;
+            let delay_frac = modulated_delay - delay_int as f64;
+
+            // Linear interpolation read
+            let idx0 = (self.write_pos + buf_len - delay_int.min(buf_len - 1)) % buf_len;
+            let idx1 = (idx0 + buf_len - 1) % buf_len;
+            let raw = self.buffer[idx0] * (1.0 - delay_frac) + self.buffer[idx1] * delay_frac;
+
+            // HF loss filter (accumulates with distance from record head)
+            let coef = self.head_lpf_coef[i];
+            self.head_lpf_state[i] = coef * self.head_lpf_state[i] + (1.0 - coef) * raw;
+
+            head_outputs.push(self.head_lpf_state[i]);
+        }
+
+        // ── Mix enabled heads ────────────────────────────────────────────
+        let mut mix = 0.0;
+        let mut enabled_count = 0;
+        for (i, &output) in head_outputs.iter().enumerate() {
+            if self.head_enabled.get(i).copied().unwrap_or(false) {
+                mix += output;
+                enabled_count += 1;
+            }
+        }
+
+        // Normalize by enabled head count to prevent level boost
+        if enabled_count > 0 {
+            mix /= enabled_count as f64;
+        }
+
+        // Store for feedback (from mixed output, as in real tape echoes)
+        self.feedback_sample = mix;
+
+        // Advance write position
+        self.write_pos = (self.write_pos + 1) % buf_len;
+
+        (mix, head_outputs)
+    }
+
+    /// Process and return only the mixed output (simpler API).
+    #[inline]
+    pub fn process_mono(&mut self, input: f64) -> f64 {
+        self.process(input).0
+    }
+
+    /// Update sample rate.
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+        let max_delay = self.model.max_delay();
+        let buffer_size = (max_delay * sample_rate * 1.1) as usize + 4;
+        self.buffer = vec![0.0; buffer_size];
+        self.write_pos = 0;
+
+        // Recalculate delays
+        for (i, &distance) in self.model.head_distances_cm.iter().enumerate() {
+            let delay_sec = distance / self.tape_speed;
+            self.head_delay_samples[i] = delay_sec * sample_rate;
+            let cutoff = Self::compute_hf_cutoff(&self.model, distance, sample_rate);
+            self.head_lpf_coef[i] = (-2.0 * std::f64::consts::PI * cutoff / sample_rate).exp();
+        }
+    }
+
+    /// Reset all state.
+    pub fn reset(&mut self) {
+        for s in &mut self.buffer {
+            *s = 0.0;
+        }
+        self.write_pos = 0;
+        for state in &mut self.head_lpf_state {
+            *state = 0.0;
+        }
+        self.feedback_sample = 0.0;
+        self.wow_phase = 0.0;
+        self.flutter_phase = 0.0;
+    }
+
+    /// Get delay time for a specific head in seconds.
+    pub fn delay_at_head(&self, head_idx: usize) -> f64 {
+        self.head_delay_samples
+            .get(head_idx)
+            .map(|&s| s / self.sample_rate)
+            .unwrap_or(0.0)
+    }
+
+    /// Get number of playback heads.
+    pub fn num_heads(&self) -> usize {
+        self.model.head_distances_cm.len()
+    }
+
+    /// Simple fast PRNG for noise (xorshift).
+    #[inline]
+    fn next_noise(&mut self) -> f64 {
+        let mut x = self.rng_state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng_state = x;
+        (x as f64 / u32::MAX as f64) * 2.0 - 1.0
+    }
+}
+
+/// Tape magnetic hysteresis saturation.
+///
+/// Models the Jiles-Atherton hysteresis curve simplified to a modified tanh.
+/// Tape doesn't clip sharply — it saturates asymptotically. The saturation
+/// "knee" is softer than transistor or op-amp clipping.
+///
+/// `level` is the input amplitude at which the tape reaches ~90% saturation.
+/// Typical values: 0.6-0.8 for different tape formulations.
+#[inline]
+pub fn tape_saturation(x: f64, level: f64) -> f64 {
+    // Scale input so that level corresponds to ~90% saturation
+    // tanh(1.47) ≈ 0.9, so we scale accordingly
+    let scaled = x * 1.47 / level;
+    level * scaled.tanh() / 1.47
 }

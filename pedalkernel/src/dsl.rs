@@ -86,6 +86,8 @@ pub enum ComponentKind {
     Pmos(MosfetType),
     /// BBD (Bucket-Brigade Device) delay line
     Bbd(BbdType),
+    /// Tape loop delay (Roland RE-201, Echoplex, Binson Echorec)
+    TapeLoop(TapeLoopType),
     /// Neon bulb (NE-2, etc.) - used in relaxation oscillators and optocouplers.
     /// Exhibits negative resistance: conducts when striking voltage reached,
     /// extinguishes when voltage drops below maintaining voltage.
@@ -378,6 +380,22 @@ pub enum BbdType {
     Mn3007,
     /// MN3005 — 4096-stage long delay, Memory Man
     Mn3005,
+}
+
+/// Tape loop delay types for tape echo units.
+///
+/// Unlike BBD which has a single tap, tape loops have multiple fixed
+/// playback heads at different distances from the record head. The
+/// tape speed controls all delays proportionally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapeLoopType {
+    /// Roland RE-201 Space Echo — 3 playback heads at 3/6/12 cm
+    /// Delay range: ~80ms to ~1.2s per head depending on motor speed
+    Re201,
+    /// Maestro Echoplex EP-3 — Single movable playback head
+    Echoplex,
+    /// Binson Echorec — 4 playback heads, uses magnetic drum not tape
+    Echorec,
 }
 
 /// Neon bulb types for relaxation oscillators and optocouplers.
@@ -960,6 +978,23 @@ fn parse_bbd(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Bbd(bt)))
 }
 
+fn tape_loop_type(input: &str) -> IResult<&str, TapeLoopType> {
+    alt((
+        value(TapeLoopType::Re201, alt((tag("re201"), tag("re-201"), tag("RE201"), tag("RE-201")))),
+        value(TapeLoopType::Echoplex, alt((tag("echoplex"), tag("ep3"), tag("ep-3")))),
+        value(TapeLoopType::Echorec, alt((tag("echorec"), tag("binson")))),
+    ))(input)
+}
+
+/// `tape_loop(re201)` — Tape loop delay (multi-tap tape echo).
+fn parse_tape_loop(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("tape_loop")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, tl) = tape_loop_type(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::TapeLoop(tl)))
+}
+
 fn neon_type(input: &str) -> IResult<&str, NeonType> {
     alt((
         value(NeonType::Ne2, alt((tag("ne2"), tag("ne-2"), tag("NE2"), tag("NE-2")))),
@@ -1433,6 +1468,7 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_nmos,
             parse_pmos,
             parse_bbd,
+            parse_tape_loop,
             parse_neon,
             parse_vco,
             parse_vcf,
@@ -2409,6 +2445,61 @@ pedal "Chorus" {
             .components
             .iter()
             .any(|c| matches!(c.kind, ComponentKind::Bbd(BbdType::Mn3207))));
+    }
+
+    // ── Tape loop parser tests ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_tape_loop_re201() {
+        let (_, c) = component_def("TAPE1: tape_loop(re201)").unwrap();
+        assert_eq!(c.id, "TAPE1");
+        assert_eq!(c.kind, ComponentKind::TapeLoop(TapeLoopType::Re201));
+    }
+
+    #[test]
+    fn parse_tape_loop_re201_hyphen() {
+        let (_, c) = component_def("TAPE1: tape_loop(re-201)").unwrap();
+        assert_eq!(c.kind, ComponentKind::TapeLoop(TapeLoopType::Re201));
+    }
+
+    #[test]
+    fn parse_tape_loop_echoplex() {
+        let (_, c) = component_def("TAPE1: tape_loop(echoplex)").unwrap();
+        assert_eq!(c.kind, ComponentKind::TapeLoop(TapeLoopType::Echoplex));
+    }
+
+    #[test]
+    fn parse_tape_loop_echorec() {
+        let (_, c) = component_def("TAPE1: tape_loop(echorec)").unwrap();
+        assert_eq!(c.kind, ComponentKind::TapeLoop(TapeLoopType::Echorec));
+    }
+
+    #[test]
+    fn parse_pedal_with_tape_loop() {
+        let src = r#"
+pedal "Space Echo" {
+  components {
+    C1: cap(100n)
+    R1: resistor(10k)
+    TAPE1: tape_loop(re201)
+    Intensity: pot(100k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, TAPE1.in
+    R1.b -> gnd
+    TAPE1.out -> Intensity.a
+    Intensity.wiper -> out
+  }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.name, "Space Echo");
+        assert_eq!(def.components.len(), 4);
+        assert!(def
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::TapeLoop(TapeLoopType::Re201))));
     }
 
     // ── Neon bulb parser tests ─────────────────────────────────────────
