@@ -798,9 +798,14 @@ impl CircuitGraph {
                     // BBDs are handled as delay line processors, not WDF elements.
                     // They connect via .in/.out pins but are processed separately.
                 }
-                ComponentKind::TapeLoop(_) => {
-                    // TapeLoops are handled as multi-tap delay line processors, not WDF elements.
-                    // They connect via .in/.out/.head1/.head2/.head3 pins but are processed separately.
+                ComponentKind::DelayLine(..) => {
+                    // Delay lines split the WDF tree into write/read subtrees.
+                    // The compiler processes them separately as ring buffer processors.
+                    // Connect via .input/.output pins; taps provide additional read ports.
+                }
+                ComponentKind::Tap(..) => {
+                    // Taps are read-only ports into a parent delay line.
+                    // They don't have WDF edges — they provide output from the delay buffer.
                 }
                 // ── Synth ICs ──────────────────────────────────────────
                 // These are complex ICs with internal behavior. They are NOT
@@ -1836,6 +1841,10 @@ enum ControlTarget {
     LfoRate(usize),
     /// Modify an LFO's depth/amplitude (index into lfos vector).
     LfoDepth(usize),
+    /// Modify a delay line's delay time (normalized 0–1).
+    DelayTime(usize),
+    /// Modify a delay line's feedback amount (0–1).
+    DelayFeedback(usize),
 }
 
 /// Modulation target for LFOs and envelope followers.
@@ -1859,6 +1868,27 @@ enum ModulationTarget {
     BbdClock { bbd_idx: usize },
     /// Modulate an op-amp's non-inverting input voltage.
     OpAmpVp { opamp_idx: usize },
+    /// Modulate a delay line's speed (for wow/flutter).
+    /// The modulation value is added to the speed factor (1.0 = no change).
+    DelaySpeed { delay_idx: usize },
+    /// Modulate a delay line's delay time (normalized 0–1).
+    DelayTime { delay_idx: usize },
+}
+
+/// Delay line binding in a compiled pedal.
+///
+/// Holds the generic delay line and metadata about its taps.
+/// The delay line is processed separately from the WDF tree:
+/// write once per sample, then read from each tap.
+struct DelayLineBinding {
+    /// The ring-buffer delay line.
+    delay_line: crate::elements::DelayLine,
+    /// Tap ratios for multi-tap reading (e.g., [1.0, 2.0, 4.0] for RE-201).
+    /// Each tap reads from the buffer at `base_delay * ratio`.
+    taps: Vec<f64>,
+    /// Component ID for debugging and control binding.
+    #[allow(dead_code)]
+    comp_id: String,
 }
 
 /// Op-amp stage for unity-gain buffers and gain stages.
@@ -2065,6 +2095,8 @@ pub struct CompiledPedal {
     slew_limiters: Vec<SlewRateLimiter>,
     /// BBD delay lines for delay/chorus/flanger effects.
     bbds: Vec<BbdDelayLine>,
+    /// Generic delay lines (tape echo, digital delay, Karplus-Strong, etc.).
+    delay_lines: Vec<DelayLineBinding>,
     /// Thermal model for temperature-dependent behavior.
     /// When present, modulates diode Is and BJT gain over time.
     thermal: Option<ThermalModel>,
@@ -2109,7 +2141,23 @@ fn is_rate_label(label: &str) -> bool {
 fn is_depth_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
-        "depth" | "intensity" | "width"
+        "depth" | "width"
+    )
+}
+
+/// Delay time control labels.
+fn is_delay_time_label(label: &str) -> bool {
+    matches!(
+        label.to_ascii_lowercase().as_str(),
+        "time" | "delay" | "repeat_rate" | "echo"
+    )
+}
+
+/// Delay feedback/intensity control labels.
+fn is_delay_feedback_label(label: &str) -> bool {
+    matches!(
+        label.to_ascii_lowercase().as_str(),
+        "feedback" | "repeats" | "intensity" | "regeneration"
     )
 }
 
@@ -2257,6 +2305,18 @@ impl CompiledPedal {
                         binding.lfo.set_depth(value);
                     }
                 }
+                ControlTarget::DelayTime(delay_idx) => {
+                    let delay_idx = *delay_idx;
+                    if let Some(dl) = self.delay_lines.get_mut(delay_idx) {
+                        dl.delay_line.set_delay_normalized(value);
+                    }
+                }
+                ControlTarget::DelayFeedback(delay_idx) => {
+                    let delay_idx = *delay_idx;
+                    if let Some(dl) = self.delay_lines.get_mut(delay_idx) {
+                        dl.delay_line.set_feedback(value * 0.95); // Scale to max 0.95
+                    }
+                }
             }
             return;
         }
@@ -2335,6 +2395,19 @@ impl PedalProcessor for CompiledPedal {
                         opamp_stage.opamp.set_vp(modulation);
                     }
                 }
+                ModulationTarget::DelaySpeed { delay_idx } => {
+                    if let Some(dl) = self.delay_lines.get_mut(*delay_idx) {
+                        // LFO modulates tape speed: modulation is additive offset
+                        // from 1.0 (center). Typical wow: ±0.02, flutter: ±0.005.
+                        dl.delay_line.add_speed_mod(lfo_out * binding.range);
+                    }
+                }
+                ModulationTarget::DelayTime { delay_idx } => {
+                    if let Some(dl) = self.delay_lines.get_mut(*delay_idx) {
+                        // LFO modulates delay time (normalized 0–1).
+                        dl.delay_line.set_delay_normalized(modulation.clamp(0.0, 1.0));
+                    }
+                }
             }
         }
 
@@ -2396,6 +2469,16 @@ impl PedalProcessor for CompiledPedal {
                 ModulationTarget::OpAmpVp { opamp_idx } => {
                     if let Some(opamp_stage) = self.opamp_stages.get_mut(*opamp_idx) {
                         opamp_stage.opamp.set_vp(modulation);
+                    }
+                }
+                ModulationTarget::DelaySpeed { delay_idx } => {
+                    if let Some(dl) = self.delay_lines.get_mut(*delay_idx) {
+                        dl.delay_line.add_speed_mod(env_out * binding.range);
+                    }
+                }
+                ModulationTarget::DelayTime { delay_idx } => {
+                    if let Some(dl) = self.delay_lines.get_mut(*delay_idx) {
+                        dl.delay_line.set_delay_normalized(modulation.clamp(0.0, 1.0));
                     }
                 }
             }
@@ -2482,6 +2565,33 @@ impl PedalProcessor for CompiledPedal {
             signal = signal * 0.5 + wet * 0.5;
         }
 
+        // Process through generic delay lines.
+        // Each delay line writes the current signal, then reads from all taps.
+        // Tap outputs are mixed equally and blended with the dry signal.
+        for dl_binding in &mut self.delay_lines {
+            // Reset speed modulation for this sample (LFOs will have already added offsets)
+            dl_binding.delay_line.write(signal);
+
+            // Read all taps and sum
+            let num_taps = dl_binding.taps.len();
+            if num_taps > 0 {
+                let mut wet = 0.0;
+                for (tap_idx, &ratio) in dl_binding.taps.iter().enumerate() {
+                    wet += dl_binding.delay_line.read_at_ratio(ratio, tap_idx);
+                }
+                wet /= num_taps as f64;
+
+                // Mix wet/dry equally (same convention as BBD)
+                signal = signal * 0.5 + wet * 0.5;
+
+                // Route the wet signal back as feedback
+                dl_binding.delay_line.set_feedback_sample(wet);
+            }
+
+            // Reset speed mod accumulator for next sample
+            dl_binding.delay_line.reset_speed_mod();
+        }
+
         let output = signal * self.output_gain;
 
         // Record output for debug stats
@@ -2511,6 +2621,9 @@ impl PedalProcessor for CompiledPedal {
         for bbd in &mut self.bbds {
             bbd.set_sample_rate(rate);
         }
+        for dl_binding in &mut self.delay_lines {
+            dl_binding.delay_line.set_sample_rate(rate);
+        }
         if let Some(ref mut thermal) = self.thermal {
             thermal.set_sample_rate(rate);
         }
@@ -2534,6 +2647,9 @@ impl PedalProcessor for CompiledPedal {
         }
         for bbd in &mut self.bbds {
             bbd.reset();
+        }
+        for dl_binding in &mut self.delay_lines {
+            dl_binding.delay_line.reset();
         }
         for opamp_stage in &mut self.opamp_stages {
             opamp_stage.opamp.reset();
@@ -3779,16 +3895,48 @@ pub fn compile_pedal_with_options(
         }
     }
 
-    // ── Tape loop delay lines ────────────────────────────────────────────
-    let mut tape_loops = Vec::new();
+    // ── Generic delay lines ─────────────────────────────────────────────
+    // Collect delay_line() components and their associated tap() elements.
+    // Build a map from delay line component ID → index for tap resolution.
+    let mut delay_lines: Vec<DelayLineBinding> = Vec::new();
+    let mut delay_id_to_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
     for comp in &pedal.components {
-        if let ComponentKind::TapeLoop(tl) = &comp.kind {
-            let model = match tl {
-                TapeLoopType::Re201 => TapeLoopModel::re201(),
-                TapeLoopType::Echoplex => TapeLoopModel::echoplex(),
-                TapeLoopType::Echorec => TapeLoopModel::echorec(),
-            };
-            tape_loops.push(TapeLoop::new(model, sample_rate));
+        if let ComponentKind::DelayLine(min_delay, max_delay, interp, medium) = &comp.kind {
+            let idx = delay_lines.len();
+            delay_id_to_idx.insert(comp.id.clone(), idx);
+            let mut dl = crate::elements::DelayLine::new(
+                *min_delay,
+                *max_delay,
+                sample_rate,
+                *interp,
+            );
+            dl.set_medium(*medium);
+            delay_lines.push(DelayLineBinding {
+                delay_line: dl,
+                taps: vec![1.0], // Default: single tap at 1× base delay
+                comp_id: comp.id.clone(),
+            });
+        }
+    }
+
+    // Resolve tap() components → attach to parent delay lines.
+    for comp in &pedal.components {
+        if let ComponentKind::Tap(parent_id, ratio) = &comp.kind {
+            if let Some(&dl_idx) = delay_id_to_idx.get(parent_id) {
+                delay_lines[dl_idx].taps.push(*ratio);
+            }
+            // Silently ignore taps that reference unknown delay lines
+            // (the DSL validator should catch this).
+        }
+    }
+
+    // Auto-configure medium zones from tap positions.
+    // Each tap creates a zone boundary for incremental medium processing.
+    for dl_binding in &mut delay_lines {
+        if dl_binding.delay_line.medium() != crate::elements::Medium::None {
+            let taps = dl_binding.taps.clone();
+            dl_binding.delay_line.configure_zones_from_taps(&taps, None);
         }
     }
 
@@ -3888,6 +4036,10 @@ pub fn compile_pedal_with_options(
             } else {
                 ControlTarget::PreGain // fallback
             }
+        } else if is_delay_time_label(&ctrl.label) && !delay_lines.is_empty() {
+            ControlTarget::DelayTime(0) // Control first delay line by default
+        } else if is_delay_feedback_label(&ctrl.label) && !delay_lines.is_empty() {
+            ControlTarget::DelayFeedback(0)
         } else {
             // Check if this pot connects to an LFO.rate via nets
             let mut lfo_target = None;
@@ -3907,6 +4059,18 @@ pub fn compile_pedal_with_options(
                                         lfo_ids.iter().position(|id| id == target_comp)
                                     {
                                         lfo_target = Some(ControlTarget::LfoRate(idx));
+                                        break;
+                                    }
+                                }
+                                if target_pin == "delay_time" {
+                                    if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
+                                        lfo_target = Some(ControlTarget::DelayTime(idx));
+                                        break;
+                                    }
+                                }
+                                if target_pin == "feedback" {
+                                    if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
+                                        lfo_target = Some(ControlTarget::DelayFeedback(idx));
                                         break;
                                     }
                                 }
@@ -4068,6 +4232,21 @@ pub fn compile_pedal_with_options(
                                         let bbd_idx = 0; // First BBD by default
                                         ModulationTarget::BbdClock { bbd_idx }
                                     }
+                                    "speed_mod" => {
+                                        // Find which delay line to modulate
+                                        let delay_idx = delay_id_to_idx
+                                            .get(target_comp.as_str())
+                                            .copied()
+                                            .unwrap_or(0);
+                                        ModulationTarget::DelaySpeed { delay_idx }
+                                    }
+                                    "delay_time" => {
+                                        let delay_idx = delay_id_to_idx
+                                            .get(target_comp.as_str())
+                                            .copied()
+                                            .unwrap_or(0);
+                                        ModulationTarget::DelayTime { delay_idx }
+                                    }
                                     _ => continue,
                                 };
 
@@ -4093,6 +4272,10 @@ pub fn compile_pedal_with_options(
                                     ModulationTarget::BbdClock { .. } => (0.15, 0.10),
                                     // Op-amp Vp: follows input signal
                                     ModulationTarget::OpAmpVp { .. } => (0.0, 1.0),
+                                    // Delay speed: wow ±2%, flutter ±0.5%
+                                    ModulationTarget::DelaySpeed { .. } => (0.0, 0.02),
+                                    // Delay time: center 0.5, full sweep
+                                    ModulationTarget::DelayTime { .. } => (0.5, 0.5),
                                 };
 
                                 lfos.push(LfoBinding {
@@ -4177,6 +4360,20 @@ pub fn compile_pedal_with_options(
                                     "clock" => {
                                         ModulationTarget::BbdClock { bbd_idx: 0 }
                                     }
+                                    "speed_mod" => {
+                                        let delay_idx = delay_id_to_idx
+                                            .get(target_comp.as_str())
+                                            .copied()
+                                            .unwrap_or(0);
+                                        ModulationTarget::DelaySpeed { delay_idx }
+                                    }
+                                    "delay_time" => {
+                                        let delay_idx = delay_id_to_idx
+                                            .get(target_comp.as_str())
+                                            .copied()
+                                            .unwrap_or(0);
+                                        ModulationTarget::DelayTime { delay_idx }
+                                    }
                                     _ => continue,
                                 };
 
@@ -4192,6 +4389,8 @@ pub fn compile_pedal_with_options(
                                     ModulationTarget::BbdClock { .. } => (0.15, 0.10),
                                     // Op-amp Vp: follows input signal
                                     ModulationTarget::OpAmpVp { .. } => (0.0, 1.0),
+                                    ModulationTarget::DelaySpeed { .. } => (0.0, 0.02),
+                                    ModulationTarget::DelayTime { .. } => (0.5, 0.5),
                                 };
 
                                 envelopes.push(EnvelopeBinding {
@@ -4234,6 +4433,7 @@ pub fn compile_pedal_with_options(
         envelopes,
         slew_limiters,
         bbds,
+        delay_lines,
         thermal,
         tolerance_seed: tolerance.seed(),
         oversampling,

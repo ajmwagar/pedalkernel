@@ -1704,6 +1704,15 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         qty_per_unit: 1,
                     }]
                 }
+                // Virtual/software elements — no physical BOM entries
+                ComponentKind::DelayLine(..) => {
+                    // Delay line is a virtual WDF element — no physical part.
+                    vec![]
+                }
+                ComponentKind::Tap(..) => {
+                    // Tap is a virtual read port — no physical part.
+                    vec![]
+                }
             }
         })
         .collect()
