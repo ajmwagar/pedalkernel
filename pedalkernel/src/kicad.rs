@@ -60,13 +60,10 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
             BbdType::Mn3007 => ("Analog_Delay:MN3007", "IC"),
             BbdType::Mn3005 => ("Analog_Delay:MN3005", "IC"),
         },
-        ComponentKind::TapeLoop(tl) => match tl {
-            // Tape heads are electrically inductors - map to inductor symbol
-            // with tape head part numbers for BOM generation
-            TapeLoopType::Re201 => ("Device:Inductor", "TAPE"), // Roland RE-201 tape transport
-            TapeLoopType::Echoplex => ("Device:Inductor", "TAPE"), // Echoplex EP-3 tape transport
-            TapeLoopType::Echorec => ("Device:Inductor", "TAPE"), // Binson Echorec drum
-        },
+        // DelayLine and Tap are virtual WDF elements — no physical schematic symbol.
+        // They map to a comment/annotation in KiCad.
+        ComponentKind::DelayLine(..) => ("", "DL"),
+        ComponentKind::Tap(..) => ("", "TAP"),
         ComponentKind::Neon(nt) => match nt {
             NeonType::Ne2 => ("Device:Lamp_Neon", "NE"),
             NeonType::Ne51 => ("Device:Lamp_Neon", "NE"),
@@ -230,12 +227,10 @@ fn value_str(kind: &ComponentKind) -> String {
         ComponentKind::Nmos(mt) => format!("N-MOS_{mt:?}"),
         ComponentKind::Pmos(mt) => format!("P-MOS_{mt:?}"),
         ComponentKind::Bbd(bt) => format!("BBD_{bt:?}"),
-        ComponentKind::TapeLoop(tl) => match tl {
-            // Include head count and buyable part references for BOM
-            TapeLoopType::Re201 => "TapeLoop_RE201_3head_TEAC_RP22".into(),
-            TapeLoopType::Echoplex => "TapeLoop_Echoplex_1head_TEAC_PB22".into(),
-            TapeLoopType::Echorec => "TapeLoop_Echorec_4head_drum".into(),
-        },
+        ComponentKind::DelayLine(min, max, interp, medium) => {
+            format!("DelayLine_{}-{}_{:?}_{:?}", format_eng(*min, "s"), format_eng(*max, "s"), interp, medium)
+        }
+        ComponentKind::Tap(parent, ratio) => format!("Tap_{}_{:.1}x", parent, ratio),
         ComponentKind::Neon(nt) => match nt {
             NeonType::Ne2 => "NE-2".into(),
             NeonType::Ne51 => "NE-51".into(),

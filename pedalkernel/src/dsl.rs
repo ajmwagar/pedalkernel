@@ -86,8 +86,14 @@ pub enum ComponentKind {
     Pmos(MosfetType),
     /// BBD (Bucket-Brigade Device) delay line
     Bbd(BbdType),
-    /// Tape loop delay (Roland RE-201, Echoplex, Binson Echorec)
-    TapeLoop(TapeLoopType),
+    /// Generic delay line backed by a ring buffer.
+    /// Parameters: min_delay, max_delay, interpolation mode, medium model.
+    /// Splits the WDF tree into write and read subtrees coupled by an
+    /// implicit one-sample delay — the standard technique for feedback loops.
+    DelayLine(f64, f64, crate::elements::Interpolation, crate::elements::Medium),
+    /// Read-only tap into a named delay line at a ratio of the base delay.
+    /// Parameters: parent delay line component ID, ratio (e.g., 2.0 = 2× base).
+    Tap(String, f64),
     /// Neon bulb (NE-2, etc.) - used in relaxation oscillators and optocouplers.
     /// Exhibits negative resistance: conducts when striking voltage reached,
     /// extinguishes when voltage drops below maintaining voltage.
@@ -380,22 +386,6 @@ pub enum BbdType {
     Mn3007,
     /// MN3005 — 4096-stage long delay, Memory Man
     Mn3005,
-}
-
-/// Tape loop delay types for tape echo units.
-///
-/// Unlike BBD which has a single tap, tape loops have multiple fixed
-/// playback heads at different distances from the record head. The
-/// tape speed controls all delays proportionally.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TapeLoopType {
-    /// Roland RE-201 Space Echo — 3 playback heads at 3/6/12 cm
-    /// Delay range: ~80ms to ~1.2s per head depending on motor speed
-    Re201,
-    /// Maestro Echoplex EP-3 — Single movable playback head
-    Echoplex,
-    /// Binson Echorec — 4 playback heads, uses magnetic drum not tape
-    Echorec,
 }
 
 /// Neon bulb types for relaxation oscillators and optocouplers.
@@ -978,21 +968,75 @@ fn parse_bbd(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Bbd(bt)))
 }
 
-fn tape_loop_type(input: &str) -> IResult<&str, TapeLoopType> {
+/// Parse interpolation mode keyword.
+fn interpolation_mode(input: &str) -> IResult<&str, crate::elements::Interpolation> {
     alt((
-        value(TapeLoopType::Re201, alt((tag("re201"), tag("re-201"), tag("RE201"), tag("RE-201")))),
-        value(TapeLoopType::Echoplex, alt((tag("echoplex"), tag("ep3"), tag("ep-3")))),
-        value(TapeLoopType::Echorec, alt((tag("echorec"), tag("binson")))),
+        value(crate::elements::Interpolation::Linear, tag("linear")),
+        value(crate::elements::Interpolation::Allpass, tag("allpass")),
+        value(crate::elements::Interpolation::Cubic, tag("cubic")),
     ))(input)
 }
 
-/// `tape_loop(re201)` — Tape loop delay (multi-tap tape echo).
-fn parse_tape_loop(input: &str) -> IResult<&str, ComponentKind> {
-    let (input, _) = tag("tape_loop")(input)?;
+/// Parse medium type keyword.
+fn medium_type(input: &str) -> IResult<&str, crate::elements::Medium> {
+    alt((
+        value(crate::elements::Medium::None, tag("none")),
+        value(crate::elements::Medium::TapeOxide, tag("tape_oxide")),
+        value(crate::elements::Medium::BbdLeakage, tag("bbd_leakage")),
+        value(crate::elements::Medium::DigitalQuantize, tag("digital_quantize")),
+    ))(input)
+}
+
+/// `delay_line(1ms, 1200ms)` — Generic delay line.
+///
+/// Supports optional interpolation mode and medium type:
+/// - `delay_line(1ms, 1200ms)` — defaults: allpass interpolation, no medium
+/// - `delay_line(1ms, 1200ms, allpass)` — explicit interpolation
+/// - `delay_line(1ms, 1200ms, medium: tape_oxide)` — with medium
+/// - `delay_line(1ms, 1200ms, allpass, medium: tape_oxide)` — both
+fn parse_delay_line(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("delay_line")(input)?;
     let (input, _) = char('(')(input)?;
-    let (input, tl) = tape_loop_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, min_delay) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, max_delay) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    // Optional interpolation mode
+    let (input, interp) = opt(preceded(
+        pair(char(','), ws_comments),
+        interpolation_mode,
+    ))(input)?;
+    let (input, _) = ws_comments(input)?;
+    // Optional medium: keyword
+    let (input, medium) = opt(preceded(
+        pair(char(','), ws_comments),
+        preceded(pair(tag("medium:"), ws_comments), medium_type),
+    ))(input)?;
+    let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::TapeLoop(tl)))
+    let interp = interp.unwrap_or(crate::elements::Interpolation::Allpass);
+    let medium = medium.unwrap_or(crate::elements::Medium::None);
+    Ok((input, ComponentKind::DelayLine(min_delay, max_delay, interp, medium)))
+}
+
+/// `tap(DL1, 2.0)` — Read-only tap into a named delay line.
+///
+/// Parameters: parent delay line component ID, ratio relative to base delay.
+fn parse_tap(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("tap")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, parent_id) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, ratio) = double(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::Tap(parent_id.to_string(), ratio)))
 }
 
 fn neon_type(input: &str) -> IResult<&str, NeonType> {
@@ -1468,16 +1512,17 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_nmos,
             parse_pmos,
             parse_bbd,
-            parse_tape_loop,
+            parse_delay_line,
+            parse_tap,
             parse_neon,
             parse_vco,
             parse_vcf,
             parse_vca,
             parse_comparator,
-            parse_analog_switch,
-            parse_matched_npn, // must come before parse_matched_pnp
         )),
         alt((
+            parse_analog_switch,
+            parse_matched_npn, // must come before parse_matched_pnp
             parse_matched_pnp,
             parse_tempco,
             parse_transformer,
@@ -2445,61 +2490,6 @@ pedal "Chorus" {
             .components
             .iter()
             .any(|c| matches!(c.kind, ComponentKind::Bbd(BbdType::Mn3207))));
-    }
-
-    // ── Tape loop parser tests ──────────────────────────────────────────────
-
-    #[test]
-    fn parse_tape_loop_re201() {
-        let (_, c) = component_def("TAPE1: tape_loop(re201)").unwrap();
-        assert_eq!(c.id, "TAPE1");
-        assert_eq!(c.kind, ComponentKind::TapeLoop(TapeLoopType::Re201));
-    }
-
-    #[test]
-    fn parse_tape_loop_re201_hyphen() {
-        let (_, c) = component_def("TAPE1: tape_loop(re-201)").unwrap();
-        assert_eq!(c.kind, ComponentKind::TapeLoop(TapeLoopType::Re201));
-    }
-
-    #[test]
-    fn parse_tape_loop_echoplex() {
-        let (_, c) = component_def("TAPE1: tape_loop(echoplex)").unwrap();
-        assert_eq!(c.kind, ComponentKind::TapeLoop(TapeLoopType::Echoplex));
-    }
-
-    #[test]
-    fn parse_tape_loop_echorec() {
-        let (_, c) = component_def("TAPE1: tape_loop(echorec)").unwrap();
-        assert_eq!(c.kind, ComponentKind::TapeLoop(TapeLoopType::Echorec));
-    }
-
-    #[test]
-    fn parse_pedal_with_tape_loop() {
-        let src = r#"
-pedal "Space Echo" {
-  components {
-    C1: cap(100n)
-    R1: resistor(10k)
-    TAPE1: tape_loop(re201)
-    Intensity: pot(100k)
-  }
-  nets {
-    in -> C1.a
-    C1.b -> R1.a, TAPE1.in
-    R1.b -> gnd
-    TAPE1.out -> Intensity.a
-    Intensity.wiper -> out
-  }
-}
-"#;
-        let def = parse_pedal_file(src).unwrap();
-        assert_eq!(def.name, "Space Echo");
-        assert_eq!(def.components.len(), 4);
-        assert!(def
-            .components
-            .iter()
-            .any(|c| matches!(c.kind, ComponentKind::TapeLoop(TapeLoopType::Re201))));
     }
 
     // ── Neon bulb parser tests ─────────────────────────────────────────

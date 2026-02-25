@@ -72,6 +72,9 @@ Each component is declared as `<id>: <type>(<params>)`.
 | P-channel JFET | `pjfet(<model>)` | P-channel JFET (nonlinear WDF root) |
 | Photocoupler | `photocoupler(<model>)` | Vactrol / optocoupler (controlled resistance) |
 | Neon bulb | `neon()` or `neon(<model>)` | Neon lamp for relaxation oscillators |
+| BBD | `bbd(<model>)` | Bucket-brigade device delay line |
+| Delay line | `delay_line(<min>, <max> [, <interp>] [, medium: <medium>])` | Generic ring-buffer delay |
+| Tap | `tap(<delay_id>, <ratio>)` | Read-only tap into a delay line |
 | LFO | `lfo(<waveform>, <R>, <C>)` | LFO with RC timing (f = 1/2piRC) |
 | Envelope Follower | `envelope_follower(<atk_R>, <atk_C>, <rel_R>, <rel_C>, <sens_R>)` | Envelope detector with RC timing |
 
@@ -159,6 +162,81 @@ EF1: envelope_follower(1k, 4.7u, 100k, 1u, 20k)
 # Release τ = 100kΩ × 1µF = 100ms (smooth release)
 # Sensitivity = 20kΩ / 10kΩ = 2.0x gain
 EF1.out -> J1.vgs                # modulate JFET gate voltage
+```
+
+### Delay Components
+
+**BBD (Bucket-Brigade Device)** — Models analog bucket-brigade delay ICs with compander, charge leakage, clock feedthrough, and noise. Internally uses a `DelayLine` for buffer management.
+
+```
+BBD1: bbd(mn3207)                # MN3207 (512 stages, typical chorus/flanger)
+BBD1: bbd(mn3007)                # MN3007 (1024 stages, longer delays)
+BBD1: bbd(mn3005)                # MN3005 (4096 stages, up to ~300ms)
+```
+
+**BBD models**: `mn3207`, `mn3007`, `mn3005`
+
+BBD pins: `in` (audio input), `out` (audio output), `clock` (modulation target for LFO).
+
+**Delay Line** — Generic ring-buffer delay with configurable interpolation and optional physical medium simulation. Splits the WDF tree at its boundaries: the write side accepts signal from one subtree, the read side feeds another.
+
+```
+# Basic (defaults: allpass interpolation, no medium)
+DL1: delay_line(1ms, 1200ms)
+
+# Explicit interpolation mode
+DL1: delay_line(1ms, 1200ms, allpass)
+
+# With physical medium simulation
+DL1: delay_line(80ms, 1200ms, medium: tape_oxide)
+
+# Both interpolation and medium
+DL1: delay_line(80ms, 1200ms, allpass, medium: bbd_leakage)
+```
+
+**Interpolation modes**: `linear`, `allpass` (default — Thiran approximation, zipper-free), `cubic` (Hermite)
+
+**Medium types**:
+| Medium | Description |
+|--------|-------------|
+| `none` | Clean digital buffer (default) |
+| `tape_oxide` | Tape self-demagnetization — progressive HF loss with distance |
+| `bbd_leakage` | BBD charge leakage — amplitude decay across stages |
+| `digital_quantize` | Bit-depth reduction (placeholder) |
+
+Delay line pins: `delay_time` (control target), `feedback` (control target), `speed_mod` (modulation target for LFO wow/flutter).
+
+**Tap** — Read-only output port into a parent delay line at a fixed ratio of the base delay time. Multiple taps model multi-head tape machines (e.g., RE-201 heads at 1×, 2×, 4× base delay).
+
+```
+TAP1: tap(DL1, 1.0)    # reads at 1× base delay
+TAP2: tap(DL1, 2.0)    # reads at 2× base delay
+TAP3: tap(DL1, 4.0)    # reads at 4× base delay
+```
+
+**Delay + Tap example (RE-201 Space Echo):**
+
+```
+pedal "Space Echo" {
+  components {
+    DL1: delay_line(80ms, 1200ms, allpass, medium: tape_oxide)
+    TAP1: tap(DL1, 1.0)     # Head 1 (3cm from write)
+    TAP2: tap(DL1, 2.0)     # Head 2 (6cm from write)
+    TAP3: tap(DL1, 4.0)     # Head 3 (12cm from write)
+    LFO1: lfo(sine, 680k, 1u)  # wow/flutter
+  }
+  nets {
+    in -> DL1.in
+    TAP1.out -> out
+    TAP2.out -> out
+    TAP3.out -> out
+    LFO1.out -> DL1.speed_mod
+  }
+  controls {
+    DL1.delay_time -> "Repeat Rate" [0.0, 1.0] = 0.5
+    DL1.feedback -> "Intensity" [0.0, 1.0] = 0.3
+  }
+}
 ```
 
 ### Complete Example
