@@ -77,24 +77,94 @@ pedal "Fuzz Face" {
 
 ## Components
 
-Everything you'd find on a pedal builder's bench:
+Everything you'd find on a pedal builder's bench -- and a tube amp chassis, and a synth rack:
 
-| Component | Syntax | What it does to the sound |
-|-----------|--------|--------------------------|
+### Passives
+
+| Component | Syntax | What it does |
+|-----------|--------|-------------|
 | Resistor | `resistor(4.7k)` | Sets impedance, biasing, gain structure |
 | Capacitor | `cap(220n)` | Frequency-dependent -- shapes the EQ curve |
 | Inductor | `inductor(100m)` | Wah-style resonant peaks |
+| Potentiometer | `pot(500k)` | Variable resistance, bound to knobs |
+| Zener diode | `zener(4.7)` | Voltage clamp at a specific breakdown voltage |
+
+### Diodes and clipping
+
+| Component | Syntax | What it does |
+|-----------|--------|-------------|
 | Diode pair | `diode_pair(silicon\|germanium\|led)` | Symmetric clipping -- the core of overdrive |
 | Single diode | `diode(silicon\|germanium\|led)` | Asymmetric clipping -- fuzz character |
-| Potentiometer | `pot(500k)` | Variable resistance, bound to knobs |
-| BJT | `npn()` / `pnp()` | Gain stages, biasing networks |
-| Op-amp | `opamp()` | Clean gain, buffering |
-| N-JFET | `njfet(j201\|2n5457)` | Voltage-controlled resistance (tremolo, compression) |
-| P-JFET | `pjfet(2n5460)` | Complementary modulation |
-| Vactrol | `photocoupler(vtl5c3\|vtl5c1\|nsl32)` | Optical compression, smooth envelope following |
-| Triode | `triode(12ax7\|12at7\|12au7)` | Tube saturation -- plate starve to full breakup |
-| LFO | `lfo(sine, 10k, 100n)` | Modulation source from physical RC timing |
-| Envelope follower | `envelope_follower(10k, 100n, 100k, 1u, 47k)` | Dynamics-reactive modulation from RC networks |
+
+### Transistors
+
+| Component | Syntax | Variants |
+|-----------|--------|----------|
+| NPN BJT | `npn(2n3904)` | `2n3904`, `2n2222`, `bc108`, `bc109`, `2n5088`, `2n5089` |
+| PNP BJT | `pnp(ac128)` | `2n3906`, `ac128`, `oc44`, `nkt275` (germanium) |
+| N-JFET | `njfet(j201)` | `j201`, `2n5457`, `2n5952`, `2sk30a` (+ GR/Y/BL grades) |
+| P-JFET | `pjfet(2n5460)` | `2n5460` |
+| N-MOSFET | `nmos(2n7000)` | `2n7000`, `irf520` |
+| P-MOSFET | `pmos(bs250)` | `bs250`, `irf9520` |
+| Matched NPN | `matched_npn(ssm2210)` | `ssm2210`, `ca3046`, `lm394`, `that340` |
+| Matched PNP | `matched_pnp(ssm2210)` | Same as matched NPN |
+
+### Op-amps
+
+| Component | Syntax | Character |
+|-----------|--------|-----------|
+| Op-amp | `opamp(tl072)` | `tl072` (clean, fast), `jrc4558` (warm, compressed), `lm308` (slow slew -- the RAT sound), `lm741`, `ne5532` (low noise), `rc4558`, `tl082`, `op07` |
+| OTA | `opamp(ca3080)` | CA3080 operational transconductance amplifier |
+
+### Vacuum tubes
+
+| Component | Syntax | Character |
+|-----------|--------|-----------|
+| Triode | `triode(12ax7)` | `12ax7` (high gain), `12at7` (medium), `12au7` (low), `12ay7` (Fender tweed), `12bh7` (high current), `6386` (variable-mu) |
+| Pentode | `pentode(el34)` | `ef86` (Vox preamp), `el84` (Vox output), `6l6gc`/`5881`/`kt66` (Fender Twin, Dumble), `el34`/`6ca7`/`kt77` (Marshall), `6550`/`kt88`/`kt90` (Ampeg SVT), `6aq5a`, `6973` |
+
+The pentode Koren models capture the real differences between tube types -- 6L6GC's gradual Fender compression vs EL34's sharp Marshall breakup vs 6550's extended clean headroom.
+
+### Delay and modulation
+
+| Component | Syntax | What it does |
+|-----------|--------|-------------|
+| BBD | `bbd(mn3207)` | Bucket-brigade delay: `mn3207` (1024-stage, Boss CE-2 chorus), `mn3007` (low-noise, Boss DM-2), `mn3005` (4096-stage, Memory Man) |
+| Delay line | `delay_line(1ms, 500ms, allpass, tape_oxide)` | Composable WDF delay with configurable range, interpolation (`linear`, `allpass`, `cubic`), and medium simulation |
+| Tap | `tap(DL1, 0.75)` | Tap point on a delay line at a fractional position -- build multi-tap delays, ping-pong, rhythmic patterns |
+| LFO | `lfo(sine, 10k, 100n)` | Modulation from physical RC timing. Waveforms: `sine`, `triangle`, `square`, `saw_up`, `saw_down`, `sample_and_hold` |
+| Envelope follower | `envelope_follower(10k, 100n, 100k, 1u, 47k)` | Dynamics-reactive modulation from RC attack/release networks |
+
+The delay line system models physical medium degradation -- magnetic tape oxide causes frequency-dependent high-frequency loss (like a real Roland RE-201), BBD charge leakage causes amplitude decay, and digital quantization models PT2399-style bit reduction. Medium presets: `re201`, `echoplex`, `lo_fi`.
+
+### Opto and neon
+
+| Component | Syntax | What it does |
+|-----------|--------|-------------|
+| Vactrol | `photocoupler(vtl5c3)` | Optical compression: `vtl5c3`, `vtl5c1`, `nsl32`, `t4b` (LA-2A) |
+| Neon bulb | `neon(ne2)` | Vintage tremolo oscillator: `ne2`, `ne51`, `ne83` |
+
+### Transformers and switching
+
+| Component | Syntax | What it does |
+|-----------|--------|-------------|
+| Transformer | `transformer(15:1, 10H, ct_primary)` | Audio/output transformer with configurable turns ratio, inductance, and winding types (standard, center-tap, push-pull) |
+| Switched cap | `cap_switched([100n, 220n, 470n])` | Capacitor with switchable values |
+| Switched inductor | `inductor_switched([100m, 200m])` | Inductor with switchable values |
+| Switched resistor | `resistor_switched([1k, 2.2k, 4.7k])` | Resistor with switchable values |
+| Rotary switch | `rotary_switch([C_bright, C_normal, C_dark])` | Controls which switched component value is active |
+| Switch | `switch(2)` | Simple SPST/SPDT mechanical switch |
+
+### Synth ICs
+
+| Component | Syntax | What it does |
+|-----------|--------|-------------|
+| VCO | `vco(cem3340)` | Voltage-controlled oscillator: `cem3340`, `as3340`, `v3340` |
+| VCF | `vcf(cem3320)` | Voltage-controlled filter: `cem3320`, `as3320` |
+| VCA | `vca(ssm2164)` | Voltage-controlled amplifier: `ssm2164`, `v2164` |
+| Comparator | `comparator(lm311)` | `lm311`, `lm393` |
+| Analog switch | `analog_switch(cd4066)` | `cd4066`, `dg411` |
+| Tempco resistor | `tempco(1k, 3300)` | Temperature-compensating resistor for exponential converters |
 
 ### Engineering notation
 
@@ -180,7 +250,7 @@ The same `.pedal` file drives three outputs:
 
 ### KiCad export
 
-Every component maps to a real KiCad symbol. Triodes get `Valve:ECC83`/`ECC81`/`ECC82`. JFETs get `Device:Q_NJFET_DGS`. Nets are preserved exactly. Open the `.net` file in KiCad and start laying out copper.
+Every component maps to a real KiCad symbol. Triodes get `Valve:ECC83`/`ECC81`/`ECC82`. Power pentodes get `Valve:6L6GC`/`Valve:EL34`/`Valve:6550`. JFETs get `Device:Q_NJFET_DGS`. Transformers get `Transformer:Transformer_1P_CT_1S_CT`. Nets are preserved exactly. Open the `.net` file in KiCad and start laying out copper.
 
 ### Bill of materials
 
@@ -252,9 +322,12 @@ Works with any pedal file. `big_muff.pedal` gives you three knobs. The control s
 
 Pedals run at 9V by default. Crank it to 12V or 18V for more headroom -- the WDF engine models how the active elements respond to higher rail voltage. The clipping threshold shifts, the gain stages swing further before saturating, the whole feel opens up. Just like plugging a real Tube Screamer into an 18V adapter.
 
+For tube amps, supply voltage goes up to 500V. Set `supply 460V` in a `.pedal` file and the pentode plate curves, triode operating points, and Newton-Raphson bounds all adjust to match real B+ rails.
+
 ```rust
-proc.set_supply_voltage(12.0);  // More headroom, cleaner clipping
-proc.set_supply_voltage(18.0);  // Even more -- like a Voodoo Lab Pedal Power
+proc.set_supply_voltage(12.0);   // More headroom, cleaner clipping
+proc.set_supply_voltage(18.0);   // Even more -- like a Voodoo Lab Pedal Power
+proc.set_supply_voltage(460.0);  // Fender Twin Reverb B+ rail
 ```
 
 ---
@@ -265,7 +338,7 @@ The compiler transforms your circuit into a Wave Digital Filter tree:
 
 1. **Circuit graph** -- Union-Find merges connected pins into nodes. Components become edges.
 
-2. **Nonlinear root identification** -- BFS from the input finds diodes, JFETs, and triodes. Each becomes a WDF root. Its neighboring passives form the WDF tree.
+2. **Nonlinear root identification** -- BFS from the input finds diodes, JFETs, triodes, pentodes, and BJTs. Each becomes a WDF root. Its neighboring passives form the WDF tree.
 
 3. **Series-parallel decomposition** -- The passive subgraph around each nonlinear element reduces into a binary tree of Series and Parallel adaptors.
 
@@ -273,7 +346,7 @@ The compiler transforms your circuit into a Wave Digital Filter tree:
 
 5. **Per-sample processing** -- Four phases, zero allocation:
    - Scatter up: leaves to root (reflected waves propagate)
-   - Root solve: Newton-Raphson on the nonlinear element (Shockley equation for diodes, Koren equation for triodes)
+   - Root solve: Newton-Raphson on the nonlinear element (Shockley equation for diodes, Koren equation for triodes/pentodes)
    - Scatter down: root to leaves (incident waves propagate)
    - State update: capacitors and inductors latch
 
@@ -335,7 +408,7 @@ cargo build --no-default-features
 
 ---
 
-## Included pedals & amps
+## Included pedals, amps & synths
 
 `.pedal` files are organized under `examples/`:
 
@@ -350,8 +423,9 @@ cargo build --no-default-features
 | Fuzz Face | fuzz | Velcro-rip fuzz, NPN/PNP polarity flip |
 | Big Muff | fuzz | Sustained wall of fuzz, Smashing Pumpkins territory |
 | ProCo RAT | distortion | Tight distortion, filter sweep |
-| Dyna Comp | compressor | Optical compression, country squish |
+| MXR Phase 90 | phaser | 4-stage JFET phaser, swept comb filtering |
 | Boss CE-2 | modulation | BBD analog chorus |
+| Dyna Comp | compressor | Optical compression, country squish |
 
 **Amps** (`examples/amps/`)
 
@@ -360,6 +434,16 @@ cargo build --no-default-features
 | Tweed Deluxe 5E3 | 12AY7 + 12AX7 | Touch-sensitive breakup, Neil Young |
 | Bassman 5F6-A | 12AY7 + 12AX7 | TMB tone stack, the grandfather of Marshall |
 | Marshall JTM45 | ECC83 x3 | British crunch, Clapton "Beano" tone |
+
+Power pentode support for 6L6GC, EL34, and 6550 is now in the engine -- Fender Twin Reverb, Marshall JCM800, and Dumble ODS amp models are next.
+
+**Synth modules** (`examples/synths/`)
+
+| Circuit | ICs | Character |
+|---------|-----|-----------|
+| CEM3340 VCO | CEM3340 | Classic Curtis sawtooth/pulse/triangle oscillator |
+| Moog Ladder VCF | Matched NPN pairs | 4-pole transistor ladder lowpass |
+| Minisynth | CEM3340 + CEM3320 + SSM2164 | Complete mono voice: VCO + VCF + VCA |
 
 ---
 
