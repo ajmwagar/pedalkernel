@@ -86,6 +86,8 @@ pub struct PedalDef {
     pub controls: Vec<ControlDef>,
     /// Internal trim pots (not user-facing, factory adjustments)
     pub trims: Vec<ControlDef>,
+    /// Monitor definitions for real-time metering visualization
+    pub monitors: Vec<MonitorDef>,
 }
 
 impl PedalDef {
@@ -692,6 +694,48 @@ pub struct ControlDef {
     pub label: String,
     pub range: (f64, f64),
     pub default: f64,
+}
+
+/// Monitor definition for real-time metering visualization.
+///
+/// Specifies which circuit nodes/components to tap for VU meters and visualizations.
+///
+/// # Syntax
+/// ```text
+/// monitors {
+///   V1.plate_current -> "Tube 1" [vu]
+///   output -> "Output Level" [ppm]
+///   GR.reduction -> "Gain Reduction" [gr]
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorDef {
+    /// Component to monitor (e.g., "V1", "input", "output", "GR")
+    pub component: String,
+    /// Property to monitor (e.g., "plate_current", "level", "reduction")
+    pub property: String,
+    /// Display label for the meter
+    pub label: String,
+    /// Meter type (VU, PPM, peak, gain reduction)
+    pub meter_type: MeterType,
+}
+
+/// Meter type for monitor visualization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MeterType {
+    /// VU meter (300ms rise/fall, RMS-responding)
+    #[default]
+    Vu,
+    /// Peak Programme Meter (10ms rise, 1.5s fall)
+    Ppm,
+    /// True peak with hold
+    Peak,
+    /// Gain reduction meter (for compressors)
+    GainReduction,
+    /// Tube glow visualization
+    TubeGlow,
+    /// Supply sag indicator
+    SupplySag,
 }
 
 // ---------------------------------------------------------------------------
@@ -1879,6 +1923,95 @@ fn trims_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
 }
 
 // ---------------------------------------------------------------------------
+// Monitors Section
+// ---------------------------------------------------------------------------
+
+/// Parse meter type: vu, ppm, peak, gr, glow, sag
+fn meter_type(input: &str) -> IResult<&str, MeterType> {
+    alt((
+        value(MeterType::Vu, alt((tag("vu"), tag("VU")))),
+        value(MeterType::Ppm, alt((tag("ppm"), tag("PPM")))),
+        value(MeterType::Peak, alt((tag("peak"), tag("PEAK")))),
+        value(MeterType::GainReduction, alt((tag("gr"), tag("GR"), tag("gain_reduction")))),
+        value(MeterType::TubeGlow, alt((tag("glow"), tag("tube_glow")))),
+        value(MeterType::SupplySag, alt((tag("sag"), tag("supply_sag")))),
+    ))(input)
+}
+
+/// Parse a single monitor definition:
+/// `V1.plate_current -> "Tube 1" [vu]`
+/// `output -> "Output Level" [ppm]`
+fn monitor_def(input: &str) -> IResult<&str, MonitorDef> {
+    let (input, _) = ws_comments(input)?;
+    let (input, component) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Optional property (defaults to "level")
+    let (input, property) = opt(preceded(char('.'), identifier))(input)?;
+    let property = property.unwrap_or("level").to_string();
+
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("->")(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Label in quotes
+    let (input, label) = quoted_string(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Meter type in brackets: [vu] or [ppm]
+    let (input, _) = char('[')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, mtype) = meter_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(']')(input)?;
+
+    Ok((
+        input,
+        MonitorDef {
+            component: component.to_string(),
+            property,
+            label: label.to_string(),
+            meter_type: mtype,
+        },
+    ))
+}
+
+/// Try to parse a monitor_def, or skip the line if we can't understand it.
+fn monitor_or_skip(input: &str) -> IResult<&str, Option<MonitorDef>> {
+    let (input, _) = ws_comments(input)?;
+
+    // Check if we're at closing brace
+    if input.starts_with('}') {
+        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)));
+    }
+
+    // Try to parse a monitor_def
+    if let Ok((remaining, mon)) = monitor_def(input) {
+        return Ok((remaining, Some(mon)));
+    }
+
+    // Couldn't parse, skip this line
+    let (remaining, _) = skip_line(input)?;
+    Ok((remaining, None))
+}
+
+/// Parse the monitors section.
+fn monitors_section(input: &str) -> IResult<&str, Vec<MonitorDef>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("monitors")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+
+    // Parse monitors, skipping lines we can't understand
+    let (input, maybe_mons) = many0(monitor_or_skip)(input)?;
+    let mons: Vec<MonitorDef> = maybe_mons.into_iter().flatten().collect();
+
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+    Ok((input, mons))
+}
+
+// ---------------------------------------------------------------------------
 // Top-level
 // ---------------------------------------------------------------------------
 
@@ -2020,6 +2153,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, nets) = nets_section(input)?;
     let (input, controls) = opt(controls_section)(input)?;
     let (input, trims) = opt(trims_section)(input)?;
+    let (input, monitors) = opt(monitors_section)(input)?;
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
@@ -2034,6 +2168,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
             nets,
             controls: controls.unwrap_or_default(),
             trims: trims.unwrap_or_default(),
+            monitors: monitors.unwrap_or_default(),
         },
     ))
 }
@@ -3316,5 +3451,86 @@ pedal "Commented Supply" {
         assert!((supply.impedance.unwrap() - 100.0).abs() < 1e-6);
         assert!((supply.filter_cap.unwrap() - 47e-6).abs() < 1e-12);
         assert_eq!(supply.rectifier, RectifierType::Tube);
+    }
+
+    // ── Monitors section tests ────────────────────────────────────────
+
+    #[test]
+    fn parse_monitors_section() {
+        let src = r#"
+pedal "Tube Preamp" {
+    supply 250V
+    components {
+        V1: triode(12ax7)
+        R1: resistor(100k)
+    }
+    nets {
+        in -> V1.grid
+        V1.plate -> R1.a
+        R1.b -> out
+    }
+    monitors {
+        V1.plate_current -> "Tube 1" [vu]
+        output -> "Output Level" [ppm]
+        input -> "Input Level" [peak]
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.monitors.len(), 3);
+
+        let tube_mon = &def.monitors[0];
+        assert_eq!(tube_mon.component, "V1");
+        assert_eq!(tube_mon.property, "plate_current");
+        assert_eq!(tube_mon.label, "Tube 1");
+        assert_eq!(tube_mon.meter_type, MeterType::Vu);
+
+        let output_mon = &def.monitors[1];
+        assert_eq!(output_mon.component, "output");
+        assert_eq!(output_mon.property, "level");
+        assert_eq!(output_mon.meter_type, MeterType::Ppm);
+
+        let input_mon = &def.monitors[2];
+        assert_eq!(input_mon.component, "input");
+        assert_eq!(input_mon.meter_type, MeterType::Peak);
+    }
+
+    #[test]
+    fn parse_monitors_gain_reduction() {
+        let src = r#"
+pedal "Compressor" {
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> R1.a
+        R1.b -> out
+    }
+    monitors {
+        GR.reduction -> "Gain Reduction" [gr]
+        supply.sag -> "Sag" [sag]
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.monitors.len(), 2);
+        assert_eq!(def.monitors[0].meter_type, MeterType::GainReduction);
+        assert_eq!(def.monitors[1].meter_type, MeterType::SupplySag);
+    }
+
+    #[test]
+    fn parse_empty_monitors() {
+        let src = r#"
+pedal "No Monitors" {
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert!(def.monitors.is_empty());
     }
 }

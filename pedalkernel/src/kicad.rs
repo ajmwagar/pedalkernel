@@ -569,6 +569,7 @@ mod tests {
             controls: vec![],
             supply: None,
             trims: vec![],
+            monitors: vec![],
         };
 
         let netlist = export_kicad_netlist(&pedal);

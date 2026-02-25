@@ -179,6 +179,13 @@ fn build_half(
         .cloned()
         .collect();
 
+    let monitors: Vec<MonitorDef> = pedal
+        .monitors
+        .iter()
+        .filter(|m| component_ids.contains(&m.component) || m.component == "input" || m.component == "output")
+        .cloned()
+        .collect();
+
     PedalDef {
         name: format!("{} ({})", pedal.name, suffix),
         supply: pedal.supply.clone(),
@@ -186,6 +193,7 @@ fn build_half(
         nets,
         controls,
         trims,
+        monitors,
     }
 }
 

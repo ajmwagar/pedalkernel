@@ -1560,6 +1560,8 @@ pub fn compile_pedal_with_options(
         power_supply,
         #[cfg(debug_assertions)]
         debug_stats: None,
+        metrics_accumulator: None,
+        metrics_buffer: None,
     };
 
     // Apply supply voltage - this propagates v_max to all op-amp stages

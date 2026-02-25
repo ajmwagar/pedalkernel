@@ -13,6 +13,7 @@
 //! - [`loading`] — electrical loading and impedance interaction between stages
 //! - [`tolerance`] — component tolerance randomization for realistic variation
 //! - [`thermal`] — thermal drift model for temperature-dependent behavior
+//! - [`metering`] — lock-free audio-to-UI metrics for VU meters and visualizations
 
 pub mod board;
 pub mod compiler;
@@ -23,6 +24,7 @@ pub mod elements;
 pub mod hw;
 pub mod kicad;
 pub mod loading;
+pub mod metering;
 pub mod oversampling;
 pub mod pedalboard;
 pub mod pedals;

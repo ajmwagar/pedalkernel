@@ -1,9 +1,11 @@
 //! Compiled pedal processor: the runtime audio processing chain.
 
 use crate::elements::*;
+use crate::metering::{MetricsAccumulator, MetricsRingBuffer, UiMetrics};
 use crate::oversampling::OversamplingFactor;
 use crate::thermal::ThermalModel;
 use crate::PedalProcessor;
+use std::sync::Arc;
 
 use super::stage::{RootKind, WdfStage};
 
@@ -306,6 +308,11 @@ pub struct CompiledPedal {
     /// When set, the processor will record per-sample stats for debugging.
     #[cfg(debug_assertions)]
     pub(super) debug_stats: Option<std::sync::Arc<crate::debug::DebugStats>>,
+    /// Metrics accumulator for real-time UI visualization.
+    /// Accumulates per-sample data and reduces to `UiMetrics` every block.
+    pub(super) metrics_accumulator: Option<MetricsAccumulator>,
+    /// Ring buffer for sending metrics to the UI thread (shared via Arc).
+    pub(super) metrics_buffer: Option<Arc<MetricsRingBuffer>>,
 }
 
 /// Gain-like control labels.
@@ -455,6 +462,41 @@ impl CompiledPedal {
         if let Some(stats) = &self.debug_stats {
             stats.set_enabled(enabled);
         }
+    }
+
+    /// Enable metering for real-time UI visualization.
+    ///
+    /// Creates a metrics accumulator and ring buffer. Call this before starting
+    /// audio processing, then retrieve the ring buffer with `metrics_buffer()`
+    /// to read metrics in the UI thread.
+    ///
+    /// `block_size`: Number of samples between metric reductions (typically 128 or 256).
+    pub fn enable_metering(&mut self, block_size: usize) {
+        let buffer = Arc::new(MetricsRingBuffer::new(16)); // ~16 frames buffered
+        self.metrics_accumulator = Some(MetricsAccumulator::new(block_size));
+        self.metrics_buffer = Some(buffer);
+
+        // Set nominal supply voltage for sag calculation
+        if let Some(ref mut acc) = self.metrics_accumulator {
+            acc.set_nominal_supply(self.supply_voltage as f32);
+        }
+    }
+
+    /// Get a reference to the metrics ring buffer for UI thread reading.
+    ///
+    /// Returns `None` if metering is not enabled.
+    pub fn metrics_buffer(&self) -> Option<Arc<MetricsRingBuffer>> {
+        self.metrics_buffer.clone()
+    }
+
+    /// Read the latest metrics (convenience method for the UI thread).
+    ///
+    /// Returns default metrics if metering is not enabled.
+    pub fn read_metrics(&self) -> UiMetrics {
+        self.metrics_buffer
+            .as_ref()
+            .map(|b| b.read_latest())
+            .unwrap_or_default()
     }
 
     /// Set a control by its label (e.g., "Drive", "Level", "Rate").
@@ -827,6 +869,52 @@ impl PedalProcessor for CompiledPedal {
         #[cfg(debug_assertions)]
         if let Some(ref stats) = self.debug_stats {
             stats.record_output(output);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Metering: accumulate per-sample, reduce per-block, write to ring buffer
+        // ═══════════════════════════════════════════════════════════════════════
+        if let Some(ref mut acc) = self.metrics_accumulator {
+            // Accumulate input/output levels
+            acc.accumulate_levels(input, output);
+
+            // Record tube state from WDF stages (plate current for glow shaders)
+            let mut tube_idx = 0;
+            for stage in &self.stages {
+                match &stage.root {
+                    RootKind::Triode(t) => {
+                        // Get plate voltage from last WDF wave (approximate)
+                        // For more accurate values, we'd need to track v_pk from process()
+                        let vpk = (self.supply_voltage * 0.6) as f32; // Typical idle point
+                        let ip_ma = (t.plate_current(vpk as f64) * 1000.0) as f32;
+                        acc.record_tube(tube_idx, ip_ma, vpk);
+                        tube_idx += 1;
+                    }
+                    RootKind::Pentode(p) => {
+                        let vpk = (self.supply_voltage * 0.6) as f32;
+                        let ip_ma = (p.plate_current(vpk as f64) * 1000.0) as f32;
+                        acc.record_tube(tube_idx, ip_ma, vpk);
+                        tube_idx += 1;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Record LFO phase (first LFO for tremolo indicator)
+            if let Some(binding) = self.lfos.first() {
+                acc.record_lfo_phase(binding.lfo.phase() as f32);
+            }
+
+            // Record supply voltage (for sag visualization when we add dynamic sag)
+            acc.record_supply(self.supply_voltage as f32);
+
+            // Check if block is complete — reduce and write to ring buffer
+            if acc.is_block_complete() {
+                let metrics = acc.reduce();
+                if let Some(ref buffer) = self.metrics_buffer {
+                    buffer.write(metrics);
+                }
+            }
         }
 
         output
