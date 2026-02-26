@@ -367,6 +367,76 @@ Vs    C1(100n)                   Vs    C2(100n)
 
 ---
 
+## Performance
+
+All pedals run comfortably in real-time. Benchmarks on an Apple M-series chip at 48 kHz:
+
+| Pedal | CPU Budget | Samples/sec | Realtime × |
+|-------|------------|-------------|------------|
+| Tube Screamer | 1.2% | 3.8M | 80× |
+| Big Muff | 1.7% | 2.8M | 59× |
+| Fuzz Face | 0.04% | 122M | 2500× |
+| Blues Driver | 5.9% | 818K | 17× |
+| Dyna Comp | 0.4% | 12M | 252× |
+| Klon Centaur | 1.4% | 3.5M | 72× |
+| ProCo RAT | 0.3% | 16M | 330× |
+| Boss CE-2 (BBD) | 0.5% | 9.9M | 207× |
+
+**CPU Budget** = fraction of real-time budget consumed. Under 100% means glitch-free audio.
+
+### FLOPS breakdown
+
+WDF processing cost per sample depends on circuit complexity:
+
+| Element | Est. FLOPs |
+|---------|------------|
+| Series adaptor | 9 |
+| Parallel adaptor | 10 |
+| Capacitor | 2 |
+| Diode Newton solve | 220 (55 × 4 iterations) |
+| **Typical clipper stage** | **~250 total** |
+
+A Tube Screamer (1 clipping stage) needs ~12 MFLOPS at 48 kHz. A Big Muff (4 cascaded stages) needs ~48 MFLOPS.
+
+The BBD model (Boss CE-2) includes full analog bucket-brigade emulation:
+- **Companding** — NE571-style 2:1 compression/expansion with mismatched attack/release (causes "breathing")
+- **Charge leakage** — per-stage loss accumulates across 1024+ stages, darkening long delays (the Memory Man warmth)
+- **Clock feedthrough** — parasitic capacitance couples switching clock into signal (the characteristic BBD whine)
+- **Bandwidth limiting** — Nyquist limit at half clock frequency with anti-alias LPF
+- **Soft clipping** — BBD voltage swing saturation with cubic waveshaping
+
+Despite this, BBD overhead is modest (~0.5% CPU) because most operations are simple one-pole filters.
+
+### Scalability
+
+Cascaded WDF stages scale linearly:
+
+| Stages | ns/sample | CPU @ 48kHz |
+|--------|-----------|-------------|
+| 1 | 173 | 0.8% |
+| 2 | 268 | 1.3% |
+| 4 | 592 | 2.8% |
+| 8 | 1249 | 6.0% |
+
+### Sample rate scaling
+
+The Tube Screamer at various sample rates:
+
+| Sample Rate | Realtime × |
+|-------------|------------|
+| 44.1 kHz | 90× |
+| 48 kHz | 82× |
+| 96 kHz | 42× |
+| 192 kHz | 21× |
+
+Run benchmarks yourself:
+
+```bash
+cargo bench --bench wdf_bench
+```
+
+---
+
 ## API
 
 ```rust
