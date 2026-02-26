@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ----------------------------------------------------------------
+  # Format check
+  # ----------------------------------------------------------------
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # ----------------------------------------------------------------
+  # Clippy lint (feature matrix)
+  # ----------------------------------------------------------------
+  clippy:
+    name: clippy (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: "no features"
+            args: "--no-default-features"
+          - label: "tui only"
+            args: "--no-default-features --features tui"
+          - label: "jack-rt only"
+            args: "--no-default-features --features jack-rt"
+            jack: true
+          - label: "all features"
+            args: "--all-features"
+            jack: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install libjack-dev
+        if: matrix.jack
+        run: sudo apt-get update && sudo apt-get install -y libjack-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy ${{ matrix.args }} -- -D warnings
+
+  # ----------------------------------------------------------------
+  # Test (feature matrix)
+  # ----------------------------------------------------------------
+  test:
+    name: test (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: "no features"
+            args: "--no-default-features"
+          - label: "tui only"
+            args: "--no-default-features --features tui"
+          - label: "jack-rt only"
+            args: "--no-default-features --features jack-rt"
+            jack: true
+          - label: "all features"
+            args: ""
+            jack: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libjack-dev
+        if: matrix.jack
+        run: sudo apt-get update && sudo apt-get install -y libjack-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test ${{ matrix.args }}
+
+  # ----------------------------------------------------------------
+  # Build examples
+  # ----------------------------------------------------------------
+  examples:
+    name: build examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libjack-dev
+        run: sudo apt-get update && sudo apt-get install -y libjack-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --examples
+
+  # ----------------------------------------------------------------
+  # Benchmarks (informational — never fails the build)
+  # ----------------------------------------------------------------
+  bench:
+    name: benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libjack-dev
+        run: sudo apt-get update && sudo apt-get install -y libjack-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmarks
+        run: cargo bench --bench wdf_bench 2>&1 | tee bench-output.txt
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: |
+            bench-output.txt
+            target/criterion/

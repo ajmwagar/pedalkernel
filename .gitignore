@@ -1,0 +1,15 @@
+/target
+Cargo.lock
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+.idea/
+*.wav
+!examples/wav/**/*.wav
+*.mp3
+*.ogg
+/output/
+tools/.venv/
+*.net

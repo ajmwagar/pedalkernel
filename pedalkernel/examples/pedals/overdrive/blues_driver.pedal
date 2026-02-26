@@ -1,0 +1,117 @@
+# Boss Blues Driver BD-2 (1995)
+# Discrete FET input + op-amp clipping stages
+# "Amp-like" transparent overdrive
+# Multiple clipping stages with asymmetric diodes
+#
+# Key: JFET input buffer, dual op-amp gain, 3 diodes (2+1) for asymmetry
+
+pedal "Boss Blues Driver" {
+  components {
+    # Input buffer (JFET for high impedance)
+    C1: cap(22n)            # Input coupling
+    R1: resistor(1M)        # Input impedance
+    Q1: njfet(2n5457)       # JFET input buffer
+    R2: resistor(10k)       # JFET drain resistor
+    R3: resistor(2.2k)      # JFET source resistor
+    C2: cap(10u)            # Source bypass
+
+    # First gain stage (op-amp)
+    C3: cap(100n)           # Coupling to gain stage
+    R4: resistor(10k)       # Gain input resistor
+    U1: opamp(tl072)        # TL072 first gain stage
+    R5: resistor(470k)      # Feedback resistor
+    Gain: pot(250k)         # Gain control
+    R6: resistor(1k)        # Gain minimum resistance
+    C4: cap(47n)            # Feedback cap
+
+    # First clipping stage (asymmetric: 2 diodes one way)
+    D1: diode(silicon)      # 1N4148 pair (series)
+    D2: diode(silicon)      # 1N4148 (single other direction)
+    R7: resistor(47k)       # Clipping load
+
+    # Second gain stage
+    C5: cap(100n)           # Interstage coupling
+    R8: resistor(10k)       # Input resistor
+    U2: opamp(tl072)        # TL072 second gain stage
+    R9: resistor(100k)      # Feedback
+    C6: cap(100p)           # HF rolloff
+
+    # Second clipping (single diode for asymmetry)
+    D3: diode(silicon)      # Asymmetric clip
+    R10: resistor(22k)      # Load
+
+    # Tone control
+    R11: resistor(10k)      # Tone input
+    C7: cap(6.8n)           # Treble cap
+    C8: cap(100n)           # Bass cap
+    Tone: pot(20k)          # Tone control
+    R12: resistor(4.7k)     # Tone mixing
+
+    # Output stage
+    C9: cap(10u)            # Output coupling
+    R13: resistor(100k)     # Output load
+    Level: pot(100k)        # Level control
+    R14: resistor(1k)       # Output impedance
+  }
+  nets {
+    # JFET input buffer
+    in -> C1.a
+    C1.b -> R1.a, Q1.gate
+    R1.b -> gnd
+    vcc -> R2.a
+    R2.b -> Q1.drain
+    Q1.source -> R3.a, C2.a
+    R3.b -> gnd
+    C2.b -> gnd
+
+    # First op-amp gain stage
+    Q1.drain -> C3.a
+    C3.b -> R4.a
+    R4.b -> U1.neg
+    U1.pos -> gnd
+
+    # Gain control in feedback
+    U1.neg -> R5.a, Gain.a, C4.a
+    R5.b -> U1.out
+    Gain.b -> R6.a
+    R6.b -> U1.out
+    C4.b -> U1.out
+
+    # First asymmetric clipping (2 diodes vs 1)
+    U1.out -> D1.a, D2.b, R7.a
+    D1.b -> gnd
+    D2.a -> gnd
+    R7.b -> C5.a
+
+    # Second gain stage
+    C5.b -> R8.a
+    R8.b -> U2.neg
+    U2.pos -> gnd
+    U2.neg -> R9.a, C6.a
+    R9.b -> U2.out
+    C6.b -> U2.out
+
+    # Second clipping
+    U2.out -> D3.a, R10.a
+    D3.b -> gnd
+
+    # Tone control
+    R10.b -> R11.a
+    R11.b -> Tone.a
+    Tone.b -> C7.a, C8.a
+    C7.b -> R12.a
+    C8.b -> R12.a
+    R12.b -> C9.a
+
+    # Output
+    C9.b -> R13.a, Level.a
+    R13.b -> gnd
+    Level.b -> R14.a
+    R14.b -> out
+  }
+  controls {
+    Gain.position -> "Gain" [0.0, 1.0] = 0.5
+    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+    Level.position -> "Level" [0.0, 1.0] = 0.7
+  }
+}

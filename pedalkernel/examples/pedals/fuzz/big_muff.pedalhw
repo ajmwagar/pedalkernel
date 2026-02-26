@@ -1,0 +1,32 @@
+# Electro-Harmonix Big Muff Pi Hardware Specs
+# Reference: "Ram's Head" V2 circa 1973
+
+# Transistors - 2N5088 or similar high-gain NPN
+# hFE > 400 preferred for maximum sustain
+Q1: part("2N5088") vce_max(30)
+Q2: part("2N5088") vce_max(30)
+Q3: part("2N5088") vce_max(30)
+Q4: part("2N5088") vce_max(30)
+
+# Clipping diodes - 1N914 or 1N4148
+D1: part("1N914") breakdown(100)
+D2: part("1N914") breakdown(100)
+
+# Film capacitors for tone shaping
+C1: voltage_rating(50) part("100nF Film")
+C2: voltage_rating(50) part("100nF Film")
+C3: voltage_rating(50) part("100nF Film")
+C4: voltage_rating(50) part("100nF Film")
+C5: voltage_rating(50) part("100nF Film")
+C6: voltage_rating(50) part("100nF Film")
+C7: voltage_rating(50) part("100nF Film")
+
+# Tone stack caps
+C8: voltage_rating(50) part("4nF Film")
+C9: voltage_rating(50) part("100nF Film")
+C10: voltage_rating(50) part("100nF Film")
+
+# Pots
+Sustain: part("100k Log")
+Tone: part("100k Linear")
+Volume: part("100k Log")

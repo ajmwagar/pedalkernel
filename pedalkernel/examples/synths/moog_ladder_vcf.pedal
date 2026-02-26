@@ -1,0 +1,122 @@
+# Moog Transistor Ladder Filter (Discrete)
+#
+# The classic 4-pole (24dB/oct) lowpass filter from the Minimoog.
+# Built entirely from discrete components that pedalkernel already supports:
+# - 4 differential transistor pairs (8 NPN transistors)
+# - 4 filter capacitors (set cutoff frequency range)
+# - Biasing resistor chain
+# - Resonance feedback path
+#
+# The cutoff frequency is controlled by the bias current through the
+# transistor pairs. CV modulation varies this bias current exponentially.
+# At high resonance, the filter self-oscillates (produces a sine wave).
+
+synth "Moog Ladder VCF" {
+  components {
+    # 4 differential pairs (ladder core) — 8 matched 2N3904 NPN transistors
+    Q1: npn(2n3904)    Q2: npn(2n3904)
+    Q3: npn(2n3904)    Q4: npn(2n3904)
+    Q5: npn(2n3904)    Q6: npn(2n3904)
+    Q7: npn(2n3904)    Q8: npn(2n3904)
+
+    # Filter capacitors (matched values set cutoff range)
+    # Smaller C = higher cutoff range, larger C = lower/bassier range
+    C1: cap(1n)
+    C2: cap(1n)
+    C3: cap(1n)
+    C4: cap(1n)
+
+    # Emitter biasing resistors (set quiescent current through each pair)
+    R_bias1: resistor(18k)
+    R_bias2: resistor(18k)
+    R_bias3: resistor(18k)
+    R_bias4: resistor(18k)
+
+    # Collector load resistors
+    R_load1: resistor(22k)
+    R_load2: resistor(22k)
+    R_load3: resistor(22k)
+    R_load4: resistor(22k)
+
+    # Input attenuation (prevents overloading the ladder)
+    R_in: resistor(10k)
+
+    # Resonance feedback (from output back to input)
+    Resonance: pot(100k)
+    R_fb: resistor(10k)
+
+    # Output buffer
+    R_out: resistor(10k)
+
+    # Cutoff frequency control
+    Cutoff: pot(100k)
+    R_cv: resistor(100k)
+  }
+  nets {
+    # Signal input
+    in -> R_in.a
+    R_in.b -> Q1.base
+
+    # Ladder: each stage is a differential pair with a grounded cap
+    # Stage 1
+    Q1.collector -> R_load1.a
+    R_load1.b -> vcc
+    Q1.emitter -> R_bias1.a, C1.a
+    R_bias1.b -> gnd
+    C1.b -> gnd
+    Q2.base -> Q1.collector
+    Q2.emitter -> R_bias1.a
+    Q2.collector -> vcc
+
+    # Stage 2
+    Q3.base -> Q1.collector
+    Q3.collector -> R_load2.a
+    R_load2.b -> vcc
+    Q3.emitter -> R_bias2.a, C2.a
+    R_bias2.b -> gnd
+    C2.b -> gnd
+    Q4.base -> Q3.collector
+    Q4.emitter -> R_bias2.a
+    Q4.collector -> vcc
+
+    # Stage 3
+    Q5.base -> Q3.collector
+    Q5.collector -> R_load3.a
+    R_load3.b -> vcc
+    Q5.emitter -> R_bias3.a, C3.a
+    R_bias3.b -> gnd
+    C3.b -> gnd
+    Q6.base -> Q5.collector
+    Q6.emitter -> R_bias3.a
+    Q6.collector -> vcc
+
+    # Stage 4
+    Q7.base -> Q5.collector
+    Q7.collector -> R_load4.a
+    R_load4.b -> vcc
+    Q7.emitter -> R_bias4.a, C4.a
+    R_bias4.b -> gnd
+    C4.b -> gnd
+    Q8.base -> Q7.collector
+    Q8.emitter -> R_bias4.a
+    Q8.collector -> vcc
+
+    # Output from stage 4
+    Q7.collector -> R_out.a
+    R_out.b -> out
+
+    # Resonance feedback (inverted output back to input)
+    R_out.b -> Resonance.a
+    Resonance.b -> R_fb.a
+    R_fb.b -> Q2.base
+
+    # Cutoff CV (modulates bias current through all stages)
+    cv_filter -> R_cv.a
+    R_cv.b -> Cutoff.a
+    Cutoff.b -> gnd
+  }
+  controls {
+    Resonance.position -> "Resonance" [0.0, 1.0] = 0.0
+    Cutoff.position -> "Cutoff" [0.0, 1.0] = 0.5
+  }
+}

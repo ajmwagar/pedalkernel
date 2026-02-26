@@ -1,0 +1,131 @@
+# Fender Bassman 5F6-A (1958-1960)
+# The grandfather of Marshall — Jim Marshall literally copied this circuit.
+# Hendrix, Clapton (Bluesbreakers era), Muddy Waters, Buddy Guy.
+#
+# Circuit topology (preamp only):
+#   V1a: 12AY7 first gain stage (Normal channel input)
+#   TMB tone stack: the classic Fender Treble/Mid/Bass EQ
+#   V1b: 12AX7 second gain stage (drives the phase inverter/output)
+#
+# The 5F6-A's TMB tone stack is the most copied circuit in guitar amp
+# history. It sits between the first and second gain stages and provides
+# the classic scooped Fender EQ. The interaction between the three
+# controls is non-trivial — turning up Bass actually cuts mids.
+#
+# Key characteristics:
+#   - 12AY7 front end gives clean headroom and touch sensitivity
+#   - TMB tone stack with its characteristic mid-scoop
+#   - 12AX7 second stage adds gain and drives into breakup
+#   - Bright cap on the volume pot adds sparkle at low volume settings
+
+pedal "Bassman 5F6-A" {
+  supply 380V {
+    impedance: 120      # GZ34 tube rectifier (~60Ω) + transformer winding (~60Ω)
+    filter_cap: 40u     # larger filter cap than 5E3 — slightly stiffer
+    rectifier: tube     # GZ34 — moderate sag, classic blues compression
+  }
+
+  components {
+    # Input stage
+    C1: cap(22n)            # Input coupling cap (typical Fender value)
+    R1: resistor(1M)        # Grid leak resistor (high impedance input)
+    R2: resistor(100k)      # Plate load resistor
+
+    # V1a: 12AY7 first gain stage
+    V1: triode(12ay7)       # 12AY7 — classic Fender tweed first stage
+    R3: resistor(820)       # Cathode resistor (self-bias)
+    C2: cap(25u)            # Cathode bypass cap (full frequency bypass)
+
+    # Volume control with bright cap
+    Volume: pot(1M)         # 1M audio taper volume pot
+    C3: cap(120p)           # Bright cap across volume pot (adds treble at low settings)
+
+    # Coupling to tone stack
+    C4: cap(22n)            # Coupling cap to tone stack
+
+    # TMB Tone Stack — the classic Fender/Marshall EQ
+    # This is a passive RC ladder network that provides interactive
+    # Treble, Mid, and Bass controls. Component values define the
+    # center frequencies and Q of each band.
+    R4: resistor(56k)       # Slope resistor (sets overall insertion loss)
+    Treble: pot(250k)       # Treble pot
+    C5: cap(250p)           # Treble cap (sets treble frequency ~6.4kHz)
+    Bass: pot(1M)           # Bass pot
+    C6: cap(22n)            # Bass cap (sets bass frequency ~7.2Hz)
+    R5: resistor(25k)       # Mid resistor (sets mid scoop depth)
+    C7: cap(22n)            # Mid cap (sets mid frequency ~720Hz)
+    Mid: pot(10k)           # Mid pot (controls mid scoop depth)
+
+    # V1b: 12AX7 second gain stage
+    C8: cap(22n)            # Coupling cap to second stage
+    R6: resistor(100k)      # Plate load resistor
+    V2: triode(12ax7)       # 12AX7 — higher gain, drives into breakup
+    R7: resistor(820)       # Cathode resistor (self-bias)
+    C9: cap(25u)            # Cathode bypass cap
+
+    # Output coupling
+    C10: cap(22n)           # Output coupling cap
+    R8: resistor(1M)        # Grid leak / output load
+  }
+  nets {
+    # Input coupling and grid leak
+    in -> C1.a
+    C1.b -> R1.a, V1.grid
+    R1.b -> gnd
+
+    # V1a: 12AY7 plate circuit
+    vcc -> R2.a
+    R2.b -> V1.plate
+
+    # V1a: cathode bias
+    V1.cathode -> R3.a, C2.a
+    R3.b -> gnd
+    C2.b -> gnd
+
+    # Volume control with bright cap
+    V1.plate -> Volume.a, C3.a
+    C3.b -> Volume.b
+    Volume.b -> C4.a
+
+    # TMB Tone Stack
+    # The Fender tone stack topology:
+    #   signal -> R_slope -> treble_pot -> junction
+    #   junction -> treble_cap -> ground
+    #   junction -> bass_pot -> bass_cap -> ground
+    #   junction -> mid_resistor -> mid_cap -> mid_pot -> ground
+    C4.b -> R4.a
+    R4.b -> Treble.a
+    Treble.b -> C5.a, Bass.a, R5.a
+    C5.b -> gnd
+    Bass.b -> C6.a
+    C6.b -> gnd
+    R5.b -> C7.a
+    C7.b -> Mid.a
+    Mid.b -> gnd
+
+    # Coupling to second stage (from treble pot wiper area)
+    Treble.b -> C8.a
+
+    # V2: 12AX7 plate circuit
+    C8.b -> V2.grid
+    vcc -> R6.a
+    R6.b -> V2.plate
+
+    # V2: cathode bias
+    V2.cathode -> R7.a, C9.a
+    R7.b -> gnd
+    C9.b -> gnd
+
+    # Output coupling
+    V2.plate -> C10.a
+    C10.b -> R8.a
+    R8.b -> gnd
+    C10.b -> out
+  }
+  controls {
+    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+    Treble.position -> "Treble" [0.0, 1.0] = 0.5
+    Mid.position -> "Mid" [0.0, 1.0] = 0.5
+    Bass.position -> "Bass" [0.0, 1.0] = 0.5
+  }
+}

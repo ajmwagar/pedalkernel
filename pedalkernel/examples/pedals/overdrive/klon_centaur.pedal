@@ -1,0 +1,114 @@
+# Klon Centaur Professional Overdrive (1994)
+# Bill Finnegan's legendary "transparent" overdrive
+# TL072 dual op-amp with germanium diodes in feedback loop
+# Unique gain/clean blend architecture
+#
+# Key features: Charge pump for +/-9V headroom, clean blend, germanium soft clip
+
+pedal "Klon Centaur" {
+  components {
+    # Power supply (charge pump gives ±9V headroom)
+    C_pwr1: cap(100u)         # V+ filtering
+    C_pwr2: cap(100u)         # V- filtering
+    R_bias1: resistor(100k)   # Virtual ground bias
+    R_bias2: resistor(100k)   # Virtual ground bias
+
+    # Input buffer (first half of TL072)
+    C1: cap(100n)             # Input DC blocking
+    R1: resistor(1M)          # Input impedance
+    U1: opamp(tl072)          # TL072A - fast, clean input buffer
+    R2: resistor(2k)          # Buffer output resistor
+
+    # Clean path (the Klon's secret: blend of clean and dirty)
+    R3: resistor(27k)         # Clean signal scaling
+    C2: cap(82n)              # Clean path coupling
+
+    # Gain/clipping stage (second half of TL072)
+    R4: resistor(1.5k)        # Gain stage input resistor
+    U2: opamp(tl072)          # TL072B - clipping amp with headroom
+    R5: resistor(422k)        # Feedback resistor (famous value!)
+    R6: resistor(15k)         # Feedback network
+    C3: cap(68n)              # Feedback cap (HF rolloff)
+    D1: diode(germanium)      # MA856 / 1N34A clipping diode
+    D2: diode(germanium)      # MA856 / 1N34A clipping diode
+
+    # Gain control (crossfades clean/dirty blend)
+    Gain: pot(100k)           # Dual-gang in real circuit (simplified here)
+    R7: resistor(2k)          # Gain minimum resistor
+
+    # Active treble control
+    R8: resistor(15k)         # Treble input resistor
+    C4: cap(390p)             # Treble cap
+    Treble: pot(10k)          # Treble control
+    R9: resistor(1.5k)        # Treble mixing resistor
+
+    # Output driver
+    C5: cap(68n)              # Output coupling
+    R10: resistor(560k)       # Output stage bias
+    U3: opamp(tl072)          # TL072 output buffer (third section)
+    R11: resistor(10k)        # Output impedance
+    Output: pot(100k)         # Output level (log taper)
+    R12: resistor(100k)       # Output load
+  }
+  nets {
+    # Power supply bias point
+    vcc -> R_bias1.a, C_pwr1.a
+    R_bias1.b -> R_bias2.a    # Creates virtual ground
+    R_bias2.b -> gnd
+    C_pwr1.b -> gnd
+    C_pwr2.a -> R_bias2.b
+    C_pwr2.b -> gnd
+
+    # Input buffer (voltage follower)
+    in -> C1.a
+    C1.b -> R1.a, U1.pos
+    R1.b -> gnd
+    U1.neg -> U1.out
+    U1.out -> R2.a
+
+    # Split to clean and dirty paths
+    R2.b -> R3.a, R4.a
+
+    # Clean path
+    R3.b -> C2.a
+    C2.b -> Gain.a            # Clean signal to gain pot
+
+    # Gain/clipping stage (inverting amplifier)
+    R4.b -> U2.neg
+    U2.pos -> R_bias1.b       # Referenced to virtual ground
+
+    # Feedback network with germanium clipping
+    U2.neg -> R5.a, R6.a, C3.a
+    R5.b -> U2.out
+    R6.b -> D1.a
+    D1.b -> U2.out
+    R6.b -> D2.b
+    D2.a -> U2.out
+    C3.b -> U2.out
+
+    # Gain pot blends clean and clipped
+    U2.out -> R7.a
+    R7.b -> Gain.b
+    Gain.b -> R8.a
+
+    # Treble control (shelving EQ)
+    R8.b -> C4.a, Treble.a
+    C4.b -> R9.a
+    Treble.b -> R9.a
+    R9.b -> C5.a
+
+    # Output buffer
+    C5.b -> R10.a, U3.pos
+    R10.b -> gnd
+    U3.neg -> U3.out
+    U3.out -> R11.a
+    R11.b -> Output.a, R12.a
+    R12.b -> gnd
+    Output.b -> out
+  }
+  controls {
+    Gain.position -> "Gain" [0.0, 1.0] = 0.5
+    Treble.position -> "Treble" [0.0, 1.0] = 0.5
+    Output.position -> "Output" [0.0, 1.0] = 0.7
+  }
+}

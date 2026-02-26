@@ -1,0 +1,82 @@
+# Fulltone OCD (Obsessive Compulsive Drive) V1.7
+# MOSFET-based overdrive/distortion
+# Known for its transparent, amp-like overdrive character
+# Uses 2N7000 MOSFET pair for clipping (the OCD's signature)
+#
+# Real circuit: JFET input buffer, op-amp gain stage, MOSFET clipping to ground
+# HP/LP toggle switch modeled as tone control position
+
+pedal "Fulltone OCD" {
+  components {
+    # Input stage
+    C1: cap(100n)           # Input coupling
+    R1: resistor(1M)        # Input impedance to ground
+
+    # Op-amp gain stage
+    R2: resistor(10k)       # Input resistor to inverting input
+    U1: opamp(tl072)        # Gain stage op-amp
+    R3: resistor(470)       # Op-amp output current limit
+
+    # Feedback / Drive control
+    Drive: pot(500k)        # Drive control (log taper)
+    R4: resistor(1k)        # Minimum gain resistor
+    C2: cap(100p)           # HF rolloff in feedback
+
+    # MOSFET clipping stage (the OCD's signature)
+    M1: nmos(2n7000)        # MOSFET clipper - positive half
+    M2: nmos(2n7000)        # MOSFET clipper - negative half
+    R5: resistor(4.7k)      # Clipping bias resistor
+    C3: cap(47n)            # Clipping coupling cap
+
+    # Tone control
+    C4: cap(22n)            # Tone shaping cap
+    Tone: pot(100k)         # HP/LP tone control
+    R6: resistor(10k)       # Tone minimum resistance
+
+    # Output stage
+    C5: cap(10u)            # Output coupling
+    Volume: pot(100k)       # Volume control (audio taper)
+    R7: resistor(100k)      # Output load
+  }
+  nets {
+    # Input coupling and bias
+    in -> C1.a
+    C1.b -> R1.a, R2.a
+    R1.b -> gnd
+
+    # Op-amp gain stage (inverting)
+    R2.b -> U1.neg
+    U1.pos -> gnd
+    U1.out -> R3.a
+
+    # Feedback loop with drive control
+    U1.neg -> R4.a
+    R4.b -> Drive.a
+    Drive.b -> R3.b
+    U1.neg -> C2.a
+    C2.b -> R3.b
+
+    # MOSFET clipping to ground (anti-parallel via coupling)
+    R3.b -> C3.a
+    C3.b -> R5.a, M1.drain, M2.drain
+    R5.b -> gnd
+    M1.source -> gnd
+    M2.source -> gnd
+
+    # Tone control
+    C3.b -> C4.a
+    C4.b -> Tone.a
+    Tone.b -> R6.a
+    R6.b -> C5.a
+
+    # Output
+    C5.b -> Volume.a, R7.a
+    R7.b -> gnd
+    Volume.b -> out
+  }
+  controls {
+    Drive.position -> "Drive" [0.0, 1.0] = 0.5
+    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+    Volume.position -> "Volume" [0.0, 1.0] = 0.7
+  }
+}

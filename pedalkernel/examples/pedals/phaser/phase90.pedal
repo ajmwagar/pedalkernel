@@ -1,0 +1,245 @@
+# PK:
+# MXR Phase 90 — The swirly, swooshy classic. Four stages of JFET-driven phase shifting for that unmistakable jet-plane sweep. One knob, infinite vibes.
+# Type: phaser
+#
+# MXR Phase 90 (Script Logo - Original 1974)
+#
+# The script logo Phase 90 is the simpler, more organic-sounding version.
+# NO feedback resistor (that was added in later "block logo" versions).
+#
+# Core topology:
+# - LFO (triangle wave ~0.3-3Hz) modulates 4 matched 2N5952 JFETs
+# - 4 cascaded all-pass stages create phase shift
+# - Wet/dry mix creates the characteristic sweeping comb filter
+#
+# Original components: 2N5952 JFETs (US), LM741 op-amps (1974 script logo)
+# Each all-pass stage: signal -> 24k -> JFET (variable R) -> cap -> op-amp
+# The JFET acts as a variable resistor, changing the phase shift frequency.
+
+pedal "MXR Phase 90" {
+  supply 9V
+
+  components {
+    # Input/output coupling
+    C_in: cap(100n)
+    C_out: cap(100n)
+    R_in: resistor(1M)
+
+    # Virtual ground biasing (Vcc/2)
+    R_vref1: resistor(470k)
+    R_vref2: resistor(470k)
+    C_vref: cap(10u)
+
+    # === ALL-PASS STAGE 1 ===
+    R_ap1: resistor(24k)         # Input resistor
+    C_ap1: cap(47n)              # Phase shift cap
+    J1: njfet(2n5952)         # Variable resistance
+    R_jb1a: resistor(150k)       # Gate bias to Vref
+    R_jb1b: resistor(150k)       # Gate bias to gnd
+    R_load1: resistor(10M)       # Op-amp input impedance (high-Z load for WDF)
+    U1: opamp(lm741)
+
+    # === ALL-PASS STAGE 2 ===
+    R_ap2: resistor(24k)
+    C_ap2: cap(47n)
+    J2: njfet(2n5952)
+    R_jb2a: resistor(150k)
+    R_jb2b: resistor(150k)
+    R_load2: resistor(10M)       # Op-amp input impedance
+    U2: opamp(lm741)
+
+    # === ALL-PASS STAGE 3 ===
+    R_ap3: resistor(24k)
+    C_ap3: cap(47n)
+    J3: njfet(2n5952)
+    R_jb3a: resistor(150k)
+    R_jb3b: resistor(150k)
+    R_load3: resistor(10M)       # Op-amp input impedance
+    U3: opamp(lm741)
+
+    # === ALL-PASS STAGE 4 ===
+    R_ap4: resistor(24k)
+    C_ap4: cap(47n)
+    J4: njfet(2n5952)
+    R_jb4a: resistor(150k)
+    R_jb4b: resistor(150k)
+    R_load4: resistor(10M)       # Op-amp input impedance
+    U4: opamp(lm741)
+
+    # === OUTPUT MIXER ===
+    R_dry: resistor(10k)
+    R_wet: resistor(10k)
+    R_mix_fb: resistor(10k)
+    U_mix: opamp(lm741)
+
+    # === LFO OSCILLATOR (for BOM - physical circuit) ===
+    # Triangle wave oscillator: integrator + Schmitt trigger
+    # Uses 2 sections of a quad op-amp (original used CD4049 or LM324)
+    #
+    # Integrator section (U_lfo_int):
+    #   - Speed pot (1M) sets charge rate into C_lfo_int (220n)
+    #   - Output is triangle wave
+    #
+    # Schmitt trigger section (U_lfo_cmp):
+    #   - Positive feedback creates hysteresis
+    #   - Drives integrator input, swings between rails
+    #
+    U_lfo_int: opamp(lm741)      # Integrator - triangle output
+    U_lfo_cmp: opamp(lm741)      # Schmitt trigger / comparator
+    R_lfo_in: resistor(150k)     # Integrator input from comparator
+    C_lfo_int: cap(220n)         # Integrator timing cap (sets base freq)
+    R_lfo_hys1: resistor(100k)   # Schmitt trigger positive feedback
+    R_lfo_hys2: resistor(100k)   # Schmitt trigger reference divider
+    R_lfo_bias: resistor(1M)     # Integrator DC bias
+
+    # Software LFO for actual simulation (WDF can't model oscillators)
+    LFO1: lfo(triangle, 1M, 220n)
+    C_lfo: cap(1u)               # AC coupling to JFET gates
+    R_lfo: resistor(100k)        # LFO output attenuation
+
+    # Speed control
+    Speed: pot(1M)
+  }
+
+  nets {
+    # Virtual ground (Vref = Vcc/2)
+    vcc -> R_vref1.a
+    R_vref1.b -> R_vref2.a
+    R_vref2.b -> gnd
+    R_vref1.b -> C_vref.a
+    C_vref.b -> gnd
+
+    # Input stage
+    in -> C_in.a
+    C_in.b -> R_in.a
+    R_in.b -> gnd
+
+    # === ALL-PASS STAGE 1 ===
+    # Classic JFET all-pass: R -> JFET source, JFET drain to gnd
+    # Cap from R/JFET junction to op-amp inverting input
+    C_in.b -> R_ap1.a
+    R_ap1.b -> J1.source
+    J1.drain -> gnd
+    R_ap1.b -> C_ap1.a
+    C_ap1.b -> U1.neg
+    C_ap1.b -> R_load1.a          # High-Z load simulates op-amp input
+    R_load1.b -> R_vref1.b        # Load to virtual ground
+    U1.neg -> U1.out              # Unity gain follower for all-pass
+    U1.pos -> R_vref1.b
+
+    # J1 gate DC bias (Vref through resistor divider)
+    R_jb1a.a -> R_vref1.b
+    R_jb1a.b -> J1.gate
+    R_jb1b.a -> J1.gate
+    R_jb1b.b -> gnd
+
+    # === ALL-PASS STAGE 2 ===
+    U1.out -> R_ap2.a
+    R_ap2.b -> J2.source
+    J2.drain -> gnd
+    R_ap2.b -> C_ap2.a
+    C_ap2.b -> U2.neg
+    C_ap2.b -> R_load2.a
+    R_load2.b -> R_vref1.b
+    U2.neg -> U2.out
+    U2.pos -> R_vref1.b
+
+    R_jb2a.a -> R_vref1.b
+    R_jb2a.b -> J2.gate
+    R_jb2b.a -> J2.gate
+    R_jb2b.b -> gnd
+
+    # === ALL-PASS STAGE 3 ===
+    U2.out -> R_ap3.a
+    R_ap3.b -> J3.source
+    J3.drain -> gnd
+    R_ap3.b -> C_ap3.a
+    C_ap3.b -> U3.neg
+    C_ap3.b -> R_load3.a
+    R_load3.b -> R_vref1.b
+    U3.neg -> U3.out
+    U3.pos -> R_vref1.b
+
+    R_jb3a.a -> R_vref1.b
+    R_jb3a.b -> J3.gate
+    R_jb3b.a -> J3.gate
+    R_jb3b.b -> gnd
+
+    # === ALL-PASS STAGE 4 ===
+    U3.out -> R_ap4.a
+    R_ap4.b -> J4.source
+    J4.drain -> gnd
+    R_ap4.b -> C_ap4.a
+    C_ap4.b -> U4.neg
+    C_ap4.b -> R_load4.a
+    R_load4.b -> R_vref1.b
+    U4.neg -> U4.out
+    U4.pos -> R_vref1.b
+
+    R_jb4a.a -> R_vref1.b
+    R_jb4a.b -> J4.gate
+    R_jb4b.a -> J4.gate
+    R_jb4b.b -> gnd
+
+    # === LFO OSCILLATOR CIRCUIT (for schematic export) ===
+    # Schmitt trigger (comparator with hysteresis)
+    # Positive feedback from output to non-inverting input
+    U_lfo_cmp.out -> R_lfo_hys1.a
+    R_lfo_hys1.b -> U_lfo_cmp.pos
+    R_lfo_hys2.a -> U_lfo_cmp.pos
+    R_lfo_hys2.b -> R_vref1.b          # Reference to Vcc/2
+    U_lfo_cmp.neg -> R_vref1.b         # Compare against Vcc/2
+
+    # Integrator - creates triangle wave from square wave input
+    # Speed pot in series with input resistor controls rate
+    U_lfo_cmp.out -> Speed.a
+    Speed.wiper -> R_lfo_in.a
+    Speed.b -> R_lfo_in.a              # Wiper + fixed R in series
+    R_lfo_in.b -> U_lfo_int.neg
+    C_lfo_int.a -> U_lfo_int.neg       # Integrator feedback cap
+    C_lfo_int.b -> U_lfo_int.out
+    R_lfo_bias.a -> U_lfo_int.neg      # DC bias for integrator
+    R_lfo_bias.b -> R_vref1.b
+    U_lfo_int.pos -> R_vref1.b         # Non-inverting to Vcc/2
+
+    # Triangle output back to comparator completes oscillator loop
+    U_lfo_int.out -> U_lfo_cmp.neg
+
+    # === LFO SOFTWARE SIMULATION ===
+    # Speed pot controls software LFO rate for actual audio processing
+    Speed.wiper -> LFO1.rate
+
+    # Physical circuit: LFO -> R_lfo -> C_lfo -> gates (for schematic)
+    LFO1.out -> R_lfo.a
+    R_lfo.b -> C_lfo.a
+    C_lfo.b -> J1.gate
+    C_lfo.b -> J2.gate
+    C_lfo.b -> J3.gate
+    C_lfo.b -> J4.gate
+
+    # Digital modulation: LFO directly drives JFET Vgs for simulation
+    # (compiler can't trace through passive components)
+    LFO1.out -> J1.vgs
+    LFO1.out -> J2.vgs
+    LFO1.out -> J3.vgs
+    LFO1.out -> J4.vgs
+
+    # === OUTPUT MIXER ===
+    # Inverted sum of dry and wet (creates phase cancellation = phasing)
+    C_in.b -> R_dry.a
+    R_dry.b -> U_mix.neg
+    U4.out -> R_wet.a
+    R_wet.b -> U_mix.neg
+    R_mix_fb.a -> U_mix.neg
+    R_mix_fb.b -> U_mix.out
+    U_mix.pos -> R_vref1.b
+
+    # Output
+    U_mix.out -> C_out.a
+    C_out.b -> out
+  }
+
+  controls {
+    Speed.position -> "Speed" [0.0, 1.0] = 0.5
+  }
+}

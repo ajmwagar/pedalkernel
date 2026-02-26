@@ -1,0 +1,1142 @@
+//! PedalKernel — compile guitar pedal circuit definitions into real-time
+//! audio DSP kernels using Wave Digital Filters (WDFs).
+//!
+//! # Modules
+//!
+//! - [`dsl`] — nom-based parser for `.pedal` circuit definition files
+//! - [`elements`] — WDF one-port elements (R, C, L) and nonlinear roots (diodes)
+//! - [`tree`] — WDF adaptors (series, parallel) and processing engine
+//! - [`pedals`] — ready-to-use pedal implementations (Overdrive, Fuzz, Delay)
+//! - [`kicad`] — KiCad netlist export from the parsed AST
+//! - [`wav`] — WAV file I/O for offline rendering and testing
+//! - [`oversampling`] — antialiasing via oversampling at nonlinear stages
+//! - [`loading`] — electrical loading and impedance interaction between stages
+//! - [`tolerance`] — component tolerance randomization for realistic variation
+//! - [`thermal`] — thermal drift model for temperature-dependent behavior
+//! - [`metering`] — lock-free audio-to-UI metrics for VU meters and visualizations
+
+pub mod board;
+pub mod compiler;
+pub mod debug;
+pub mod dsl;
+pub mod elements;
+#[cfg(feature = "hardware")]
+pub mod hw;
+pub mod kicad;
+pub mod loading;
+pub mod metering;
+pub mod oversampling;
+pub mod pedalboard;
+pub mod pedals;
+pub mod thermal;
+pub mod tolerance;
+pub mod tree;
+pub mod wav;
+
+pub use debug::DebugStats;
+
+/// Audio processor trait for pedals.
+pub trait PedalProcessor {
+    /// Process a single sample.
+    fn process(&mut self, input: f64) -> f64;
+
+    /// Set sample rate (call before processing).
+    fn set_sample_rate(&mut self, rate: f64);
+
+    /// Reset all internal state.
+    fn reset(&mut self);
+
+    /// Set a named control parameter (0.0–1.0). Default: no-op.
+    fn set_control(&mut self, _label: &str, _value: f64) {}
+
+    /// Set supply voltage in volts (default 9.0).
+    ///
+    /// Real pedals run at 9V (standard battery), but many players and boutique
+    /// builders run them at 12V or 18V for more headroom.  Higher voltage means
+    /// the active gain stages (opamps / transistors) can swing further before
+    /// hitting their supply rails, preserving more dynamics before the diode
+    /// clipping stage.  The diode clipping threshold itself is unchanged.
+    fn set_supply_voltage(&mut self, _voltage: f64) {}
+}
+
+// ---------------------------------------------------------------------------
+// JACK real-time audio engine (requires `jack-rt` feature)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "jack-rt")]
+mod jack_engine {
+    use crate::PedalProcessor;
+    use jack::{AudioIn, AudioOut, Client, ClientOptions, Control, ProcessHandler, ProcessScope};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    // ── Output coupling capacitor ─────────────────────────────────────
+    //
+    // Models the physical output coupling capacitor found in every real
+    // pedal and amp.  A typical coupling cap (1µF–10µF electrolytic in
+    // series with the output) forms a first-order high-pass with the
+    // load impedance, blocking DC bias from reaching the next stage.
+    //
+    // In a real circuit: fc = 1 / (2π × R_load × C_coupling)
+    // With R_load = 1MΩ (typical guitar amp input) and C = 1µF: fc ≈ 0.16 Hz
+    // With R_load = 10kΩ (typical pedal input) and C = 1µF: fc ≈ 16 Hz
+    //
+    // We model the conservative case (pedal-to-pedal coupling) at ~10 Hz,
+    // which matches a 1µF cap into a 15kΩ load — a very common real value.
+
+    /// Output coupling capacitor model (first-order high-pass).
+    ///
+    /// Equivalent circuit: series capacitor + shunt load resistor.
+    /// Transfer function: H(z) = (1 - z⁻¹) / (1 - α·z⁻¹)
+    /// where α = exp(-2π·fc/fs), fc = 1/(2π·R·C).
+    struct CouplingCap {
+        x_prev: f64,
+        y_prev: f64,
+        alpha: f64,
+    }
+
+    impl CouplingCap {
+        /// Create a coupling cap with the specified R·C time constant.
+        ///
+        /// `r_ohms`: load resistance in ohms (typ. 10k–1M)
+        /// `c_farads`: coupling capacitor in farads (typ. 1µF–10µF)
+        fn new(sample_rate: f64, r_ohms: f64, c_farads: f64) -> Self {
+            let fc = 1.0 / (2.0 * std::f64::consts::PI * r_ohms * c_farads);
+            let alpha = (-2.0 * std::f64::consts::PI * fc / sample_rate).exp();
+            Self {
+                x_prev: 0.0,
+                y_prev: 0.0,
+                alpha,
+            }
+        }
+
+        /// Standard pedal output coupling: 1µF into 15kΩ load (~10.6 Hz).
+        fn pedal_output(sample_rate: f64) -> Self {
+            Self::new(sample_rate, 15_000.0, 1.0e-6)
+        }
+
+        #[inline]
+        fn process(&mut self, x: f64) -> f64 {
+            // First-order HP: y[n] = α·(y[n-1] + x[n] - x[n-1])
+            // This is the exact discrete-time model of a series capacitor.
+            self.y_prev = self.alpha * (self.y_prev + x - self.x_prev);
+            self.x_prev = x;
+            self.y_prev
+        }
+    }
+
+    // ── Output stage ──────────────────────────────────────────────────
+    //
+    // Models the physical output stage that exists between the pedal's
+    // internal circuitry and the external world.  In a real pedal this
+    // includes the output coupling cap (DC blocking) and the output
+    // buffer's current-limiting behavior (soft saturation when driving
+    // low-impedance loads near the supply rails).
+    //
+    // The output buffer model is based on a BJT emitter-follower output
+    // stage: linear below the supply rails, with soft compression as the
+    // output transistor runs out of collector current near the rails.
+
+    /// Output stage: coupling cap + emitter-follower output buffer model.
+    struct OutputStage {
+        coupling_cap: CouplingCap,
+        /// Emitter-follower output buffer saturation current limit.
+        /// In a real BJT emitter follower, Iout_max = Ibias × β.
+        /// When the load demands more current, the output compresses.
+        /// Normalized: 1.0 = full-scale DAC output.
+        output_headroom: f64,
+    }
+
+    impl OutputStage {
+        fn new(sample_rate: f64) -> Self {
+            Self {
+                coupling_cap: CouplingCap::pedal_output(sample_rate),
+                // Emitter-follower headroom: the output transistor can swing
+                // to within ~0.2V of the rail.  At 9V single-supply biased
+                // at 4.5V, that's ±4.3V swing = 0.956 of half-supply.
+                output_headroom: 0.956,
+            }
+        }
+
+        /// Process a sample through coupling cap + output buffer.
+        ///
+        /// The output buffer uses the emitter-follower saturation model:
+        /// - Linear region: |x| < headroom → passthrough
+        /// - Saturation region: |x| ≥ headroom → collector current limiting
+        ///   causes soft compression following 1/√(1 + (x/headroom)²),
+        ///   which matches the measured behavior of a BJT output stage
+        ///   running out of current near the rails.
+        /// - Hard ceiling at ±1.0 (DAC full scale, should rarely reach).
+        #[inline]
+        fn process(&mut self, sample: f64) -> f64 {
+            let x = self.coupling_cap.process(sample);
+            let abs_x = x.abs();
+            if abs_x <= self.output_headroom * 0.9 {
+                // Well within linear region: clean passthrough.
+                x
+            } else if abs_x >= 1.0 {
+                // Beyond DAC full scale: hard ceiling (safety).
+                x.signum()
+            } else {
+                // Emitter-follower current limiting: soft compression.
+                // Models Ic rolling off as Vce → Vce_sat.
+                // Uses inverse-sqrt saturation: smoother than cubic,
+                // matches BJT output stage I-V curves.
+                let norm = abs_x / self.output_headroom;
+                let compressed = self.output_headroom * norm / (1.0 + (norm - 1.0).powi(2)).sqrt();
+                compressed.min(1.0).copysign(x)
+            }
+        }
+    }
+
+    // ── Lock-free control slot ────────────────────────────────────────
+    //
+    // Replaces the `Mutex<Vec<(String, f64)>>` on the hot path.  The UI
+    // thread writes control updates into fixed slots keyed by label.
+    // The RT callback reads them without locking — no priority inversion,
+    // no heap allocation, no xruns.
+
+    /// A single lock-free control value slot using atomic f64.
+    struct ControlSlot {
+        label: String,
+        /// Atomic storage for the f64 value (bit-cast via u64).
+        value: AtomicU64,
+        /// Generation counter: bumped on each write so the reader knows
+        /// whether a new value is available without a separate dirty flag.
+        generation: AtomicU64,
+        /// Last generation the reader saw.
+        last_read_gen: std::cell::UnsafeCell<u64>,
+    }
+
+    // SAFETY: The AtomicU64 fields are inherently thread-safe.
+    // `last_read_gen` is only accessed from the RT thread (reader side).
+    unsafe impl Send for ControlSlot {}
+    unsafe impl Sync for ControlSlot {}
+
+    impl ControlSlot {
+        fn new(label: String, initial: f64) -> Self {
+            Self {
+                label,
+                value: AtomicU64::new(initial.to_bits()),
+                generation: AtomicU64::new(0),
+                last_read_gen: std::cell::UnsafeCell::new(0),
+            }
+        }
+
+        /// Write a new value (UI thread).
+        fn store(&self, value: f64) {
+            self.value.store(value.to_bits(), Ordering::Release);
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+
+        /// Check if a new value is available and read it (RT thread).
+        /// Returns `Some(value)` if updated since last read.
+        #[inline]
+        fn load_if_changed(&self) -> Option<f64> {
+            let gen = self.generation.load(Ordering::Acquire);
+            // SAFETY: only called from the single RT thread
+            let last = unsafe { &mut *self.last_read_gen.get() };
+            if gen != *last {
+                *last = gen;
+                Some(f64::from_bits(self.value.load(Ordering::Acquire)))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Result of activating a JACK client: the async handle plus registered
+    /// input/output port names.
+    pub type ActiveJackClient<P> = (jack::AsyncClient<(), JackProcessorLive<P>>, String, String);
+
+    /// JACK process handler wrapping a PedalProcessor.
+    pub struct JackProcessor<P: PedalProcessor> {
+        processor: P,
+        in_port: jack::Port<AudioIn>,
+        out_port: jack::Port<AudioOut>,
+    }
+
+    impl<P: PedalProcessor + Send> ProcessHandler for JackProcessor<P> {
+        fn process(&mut self, _client: &Client, ps: &ProcessScope) -> Control {
+            let input = self.in_port.as_slice(ps);
+            let output = self.out_port.as_mut_slice(ps);
+
+            for (out, &inp) in output.iter_mut().zip(input.iter()) {
+                *out = self.processor.process(inp as f64) as f32;
+            }
+
+            Control::Continue
+        }
+    }
+
+    // ── Shared controls for real-time TUI ↔ JACK communication ──────────
+
+    /// Shared control state for real-time parameter updates between a UI
+    /// thread and the JACK process callback.
+    ///
+    /// Uses lock-free atomic slots instead of a `Mutex<Vec<>>` to avoid
+    /// priority inversion and heap allocation in the RT callback — the
+    /// most common cause of xruns (crackle/static) in JACK applications.
+    pub struct SharedControls {
+        slots: Vec<ControlSlot>,
+        /// Fallback for controls not pre-registered as slots.
+        pending: Mutex<Vec<(String, f64)>>,
+        bypassed: AtomicBool,
+        /// Supply voltage in f64 bits (default 9.0V).  Lock-free path for
+        /// headroom adjustment from the TUI.
+        supply_voltage_bits: AtomicU64,
+    }
+
+    impl Default for SharedControls {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl SharedControls {
+        pub fn new() -> Self {
+            Self {
+                slots: Vec::new(),
+                pending: Mutex::new(Vec::new()),
+                bypassed: AtomicBool::new(false),
+                supply_voltage_bits: AtomicU64::new(9.0_f64.to_bits()),
+            }
+        }
+
+        /// Create SharedControls with pre-registered lock-free slots for
+        /// known control labels.  This is the preferred constructor — it
+        /// eliminates all locking from the RT callback for these controls.
+        pub fn with_controls(labels: &[(String, f64)]) -> Self {
+            let slots = labels
+                .iter()
+                .map(|(label, default)| ControlSlot::new(label.clone(), *default))
+                .collect();
+            Self {
+                slots,
+                pending: Mutex::new(Vec::new()),
+                bypassed: AtomicBool::new(false),
+                supply_voltage_bits: AtomicU64::new(9.0_f64.to_bits()),
+            }
+        }
+
+        /// Set a control value (called from the UI thread).
+        ///
+        /// If the label matches a pre-registered slot, uses lock-free
+        /// atomic write.  Otherwise falls back to the Mutex path.
+        pub fn set_control(&self, label: &str, value: f64) {
+            for slot in &self.slots {
+                if slot.label == label {
+                    slot.store(value);
+                    return;
+                }
+            }
+            // Fallback for unknown labels
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.push((label.to_string(), value));
+            }
+        }
+
+        /// Drain changed controls into the processor (called from RT thread).
+        /// Lock-free for pre-registered slots; `try_lock` for the fallback.
+        #[inline]
+        fn drain_into(&self, processor: &mut dyn PedalProcessor) {
+            // Lock-free path: check each atomic slot
+            for slot in &self.slots {
+                if let Some(value) = slot.load_if_changed() {
+                    processor.set_control(&slot.label, value);
+                }
+            }
+            // Fallback path (rare): drain any Mutex-queued controls
+            if let Ok(mut pending) = self.pending.try_lock() {
+                for (label, value) in pending.drain(..) {
+                    processor.set_control(&label, value);
+                }
+            }
+            // Supply voltage (lock-free, always applied)
+            processor.set_supply_voltage(self.supply_voltage());
+        }
+
+        /// Set the supply voltage (called from UI thread, lock-free).
+        pub fn set_supply_voltage(&self, voltage: f64) {
+            self.supply_voltage_bits
+                .store(voltage.to_bits(), Ordering::Relaxed);
+        }
+
+        /// Read the current supply voltage.
+        pub fn supply_voltage(&self) -> f64 {
+            f64::from_bits(self.supply_voltage_bits.load(Ordering::Relaxed))
+        }
+
+        pub fn set_bypassed(&self, bypassed: bool) {
+            self.bypassed.store(bypassed, Ordering::Relaxed);
+        }
+
+        pub fn is_bypassed(&self) -> bool {
+            self.bypassed.load(Ordering::Relaxed)
+        }
+    }
+
+    /// JACK process handler with live control updates from a shared state.
+    pub struct JackProcessorLive<P: PedalProcessor> {
+        processor: P,
+        in_port: jack::Port<AudioIn>,
+        out_port: jack::Port<AudioOut>,
+        controls: Arc<SharedControls>,
+        output_stage: OutputStage,
+    }
+
+    impl<P: PedalProcessor + Send> ProcessHandler for JackProcessorLive<P> {
+        fn process(&mut self, _client: &Client, ps: &ProcessScope) -> Control {
+            // Drain pending control updates (lock-free for registered slots).
+            self.controls.drain_into(&mut self.processor);
+
+            let input = self.in_port.as_slice(ps);
+            let output = self.out_port.as_mut_slice(ps);
+
+            if self.controls.bypassed.load(Ordering::Relaxed) {
+                for (out, &inp) in output.iter_mut().zip(input.iter()) {
+                    *out = inp;
+                }
+            } else {
+                for (out, &inp) in output.iter_mut().zip(input.iter()) {
+                    let processed = self.processor.process(inp as f64);
+                    // DC-block + soft-limit to prevent DAC hard clipping.
+                    *out = self.output_stage.process(processed) as f32;
+                }
+            }
+
+            Control::Continue
+        }
+    }
+
+    /// A `PedalProcessor` wrapper that ignores JACK input and feeds samples
+    /// from a pre-loaded circular buffer (looping WAV file) into the inner processor.
+    pub struct WavLoopProcessor<P: PedalProcessor> {
+        samples: Vec<f64>,
+        position: usize,
+        inner: P,
+    }
+
+    impl<P: PedalProcessor> WavLoopProcessor<P> {
+        pub fn new(samples: Vec<f64>, inner: P) -> Self {
+            Self {
+                samples,
+                position: 0,
+                inner,
+            }
+        }
+    }
+
+    impl<P: PedalProcessor + Send> PedalProcessor for WavLoopProcessor<P> {
+        fn process(&mut self, _input: f64) -> f64 {
+            let sample = if self.samples.is_empty() {
+                0.0
+            } else {
+                let s = self.samples[self.position];
+                self.position = (self.position + 1) % self.samples.len();
+                s
+            };
+            self.inner.process(sample)
+        }
+
+        fn set_sample_rate(&mut self, rate: f64) {
+            self.inner.set_sample_rate(rate);
+        }
+
+        fn reset(&mut self) {
+            self.position = 0;
+            self.inner.reset();
+        }
+
+        fn set_control(&mut self, label: &str, value: f64) {
+            self.inner.set_control(label, value);
+        }
+    }
+
+    /// JACK-based real-time audio engine.
+    ///
+    /// Connects a `PedalProcessor` to the system audio graph via JACK.
+    /// Target: sub-5 ms total latency through a Scarlett 2i2 on Linux
+    /// (48 kHz, 64-sample buffer).
+    ///
+    /// Enable with: `cargo build --features jack-rt`
+    pub struct AudioEngine;
+
+    impl AudioEngine {
+        /// Create a JACK client, register ports, and start processing.
+        ///
+        /// Blocks until the returned `AsyncClient` is dropped.
+        pub fn run<P: PedalProcessor + Send + 'static>(
+            name: &str,
+            mut processor: P,
+        ) -> Result<jack::AsyncClient<(), JackProcessor<P>>, jack::Error> {
+            let (client, _status) = Client::new(name, ClientOptions::NO_START_SERVER)?;
+            processor.set_sample_rate(client.sample_rate() as f64);
+
+            let in_port = client.register_port("in", AudioIn)?;
+            let out_port = client.register_port("out", AudioOut)?;
+
+            let handler = JackProcessor {
+                processor,
+                in_port,
+                out_port,
+            };
+            client.activate_async((), handler)
+        }
+
+        /// Create a JACK client (for port enumeration before activation).
+        ///
+        /// Tries to connect to an existing JACK server first; falls back to
+        /// allowing the server to auto-start if `NO_START_SERVER` fails.
+        pub fn create_client(name: &str) -> Result<Client, jack::Error> {
+            match Client::new(name, ClientOptions::NO_START_SERVER) {
+                Ok((client, _status)) => Ok(client),
+                Err(_) => {
+                    let (client, _status) = Client::new(name, ClientOptions::empty())?;
+                    Ok(client)
+                }
+            }
+        }
+
+        /// List available audio input sources (JACK ports that produce audio).
+        /// These are ports you can read from — typically `system:capture_*`.
+        pub fn list_input_sources(client: &Client) -> Vec<String> {
+            client.ports(
+                None,
+                Some("32 bit float mono audio"),
+                jack::PortFlags::IS_OUTPUT,
+            )
+        }
+
+        /// List available audio output destinations (JACK ports that consume audio).
+        /// These are ports you can write to — typically `system:playback_*`.
+        pub fn list_output_destinations(client: &Client) -> Vec<String> {
+            client.ports(
+                None,
+                Some("32 bit float mono audio"),
+                jack::PortFlags::IS_INPUT,
+            )
+        }
+
+        /// Activate a processor with shared controls for live parameter updates.
+        ///
+        /// Returns the async client and the full names of the registered
+        /// input and output ports (for connecting to other JACK ports).
+        pub fn start<P: PedalProcessor + Send + 'static>(
+            client: Client,
+            mut processor: P,
+            controls: Arc<SharedControls>,
+        ) -> Result<ActiveJackClient<P>, jack::Error> {
+            let sample_rate = client.sample_rate() as f64;
+            processor.set_sample_rate(sample_rate);
+
+            let in_port = client.register_port("in", AudioIn)?;
+            let out_port = client.register_port("out", AudioOut)?;
+
+            // Build full port names: "<client_name>:<port_name>"
+            let client_name = client.name().to_string();
+            let in_name = format!("{client_name}:in");
+            let out_name = format!("{client_name}:out");
+
+            let handler = JackProcessorLive {
+                processor,
+                in_port,
+                out_port,
+                controls,
+                output_stage: OutputStage::new(sample_rate),
+            };
+            let async_client = client.activate_async((), handler)?;
+
+            Ok((async_client, in_name, out_name))
+        }
+    }
+}
+
+#[cfg(feature = "jack-rt")]
+pub use jack_engine::{AudioEngine, SharedControls, WavLoopProcessor};
+
+// ---------------------------------------------------------------------------
+// Integration tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dsl_to_kicad_roundtrip() {
+        let src = r#"
+pedal "Test Pedal" {
+  components {
+    R1: resistor(10k)
+    C1: cap(100n)
+    D1: diode_pair(silicon)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, D1.a
+    D1.b -> gnd
+    R1.b -> out
+  }
+  controls {
+    R1.position -> "Tone" [0.0, 1.0] = 0.5
+  }
+}
+"#;
+        let pedal = dsl::parse_pedal_file(src).unwrap();
+        assert_eq!(pedal.name, "Test Pedal");
+        assert_eq!(pedal.components.len(), 3);
+        assert_eq!(pedal.nets.len(), 4);
+        assert_eq!(pedal.controls.len(), 1);
+
+        let netlist = kicad::export_kicad_netlist(&pedal);
+        assert!(netlist.contains("(export (version D)"));
+        assert!(netlist.contains("10.0kΩ"));
+    }
+
+    #[test]
+    fn wdf_overdrive_pipeline() {
+        use pedals::Overdrive;
+
+        let mut od = Overdrive::new(48000.0);
+        od.set_gain(0.7);
+
+        // Process a short burst
+        let input = wav::sine_wave(440.0, 0.1, 48000);
+        let output: Vec<f64> = input.iter().map(|&s| od.process(s)).collect();
+
+        // Should have nonzero output
+        let max_out = output.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
+        assert!(max_out > 0.001);
+
+        // Should be clipped relative to input
+        let max_in = input.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
+        // At high gain the output peak may be less than input peak (clipping)
+        // or at least the waveform is modified
+        assert!(max_out < max_in * 5.0, "output shouldn't blow up");
+    }
+
+    #[test]
+    fn wdf_fuzz_pipeline() {
+        use pedals::FuzzFace;
+
+        let mut ff = FuzzFace::new(48000.0);
+        ff.set_fuzz(0.8);
+
+        let input = wav::sine_wave(196.0, 0.1, 48000);
+        let output: Vec<f64> = input.iter().map(|&s| ff.process(s)).collect();
+        let max_out = output.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
+        assert!(max_out > 0.0001, "fuzz should produce output");
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-pedal .pedal file parse tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: read and parse a .pedal example file, panicking with context on failure.
+    fn parse_example(filename: &str) -> dsl::PedalDef {
+        let path = find_example_file(filename);
+        let src =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        dsl::parse_pedal_file(&src).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"))
+    }
+
+    /// Search examples/ subdirectories for a file by name.
+    fn find_example_file(filename: &str) -> String {
+        fn walk(dir: &str, target: &str) -> Option<String> {
+            for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(found) = walk(path.to_str()?, target) {
+                        return Some(found);
+                    }
+                } else if path.file_name().and_then(|n| n.to_str()) == Some(target) {
+                    return Some(path.to_string_lossy().to_string());
+                }
+            }
+            None
+        }
+        walk("examples", filename)
+            .unwrap_or_else(|| panic!("example file not found: {filename}"))
+    }
+
+    #[test]
+    fn pedal_tube_screamer() {
+        let p = parse_example("tube_screamer.pedal");
+        assert_eq!(p.name, "Tube Screamer");
+        assert_eq!(p.components.len(), 20);
+        assert_eq!(p.nets.len(), 26);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Drive"));
+        assert!(labels.contains(&"Tone"));
+        assert!(labels.contains(&"Level"));
+        // Verify dual JRC4558 opamps + feedback clipping diodes
+        let opamp_count = p
+            .components
+            .iter()
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Jrc4558)))
+            .count();
+        assert_eq!(opamp_count, 2, "TS808 uses dual JRC4558D");
+        assert!(p
+            .components
+            .iter()
+            .any(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)));
+    }
+
+    #[test]
+    fn pedal_fuzz_face() {
+        let p = parse_example("fuzz_face.pedal");
+        assert_eq!(p.name, "Fuzz Face");
+        assert_eq!(p.components.len(), 16);
+        assert_eq!(p.nets.len(), 22);
+        assert_eq!(p.controls.len(), 2);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Fuzz"));
+        assert!(labels.contains(&"Volume"));
+        // Verify PNP transistors (germanium)
+        let pnp_count = p
+            .components
+            .iter()
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::Pnp(_)))
+            .count();
+        assert_eq!(pnp_count, 2, "Fuzz Face uses 2 PNP transistors");
+    }
+
+    #[test]
+    fn pedal_big_muff() {
+        let p = parse_example("big_muff.pedal");
+        assert_eq!(p.name, "Big Muff");
+        assert_eq!(p.components.len(), 37);
+        assert_eq!(p.nets.len(), 49);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Sustain"));
+        assert!(labels.contains(&"Tone"));
+        assert!(labels.contains(&"Volume"));
+        // Verify 4 NPN gain stages + 2 clipping diode pairs
+        let npn_count = p
+            .components
+            .iter()
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::Npn(_)))
+            .count();
+        assert_eq!(npn_count, 4, "Big Muff uses 4 NPN transistor stages");
+    }
+
+    #[test]
+    fn pedal_dyna_comp() {
+        let p = parse_example("dyna_comp.pedal");
+        assert_eq!(p.name, "MXR Dyna Comp");
+        assert_eq!(p.components.len(), 9);
+        assert_eq!(p.nets.len(), 11);
+        assert_eq!(p.controls.len(), 2);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Sensitivity"));
+        assert!(labels.contains(&"Output"));
+        // Verify opamp is present (OTA topology)
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_))));
+    }
+
+    #[test]
+    fn pedal_proco_rat() {
+        let p = parse_example("proco_rat.pedal");
+        assert_eq!(p.name, "ProCo RAT");
+        assert_eq!(p.components.len(), 22);
+        assert_eq!(p.nets.len(), 28);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Distortion"));
+        assert!(labels.contains(&"Filter"));
+        assert!(labels.contains(&"Volume"));
+        // Verify LM308 opamp + hard clipping diodes
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Lm308))));
+        let diode_count = p
+            .components
+            .iter()
+            .filter(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon))
+            .count();
+        assert_eq!(diode_count, 2, "RAT uses 2 silicon clipping diodes");
+    }
+
+    #[test]
+    fn pedal_blues_driver() {
+        let p = parse_example("blues_driver.pedal");
+        assert_eq!(p.name, "Boss Blues Driver");
+        assert_eq!(p.components.len(), 32);
+        assert_eq!(p.nets.len(), 39);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Gain"));
+        assert!(labels.contains(&"Tone"));
+        assert!(labels.contains(&"Level"));
+        // Verify JFET input buffer + dual TL072 + asymmetric diodes
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::NJfet(_))));
+        let opamp_count = p
+            .components
+            .iter()
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(_)))
+            .count();
+        assert_eq!(opamp_count, 2, "Blues Driver uses dual TL072");
+        let diode_count = p
+            .components
+            .iter()
+            .filter(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon))
+            .count();
+        assert_eq!(diode_count, 3, "Blues Driver uses 3 asymmetric clipping diodes");
+    }
+
+    #[test]
+    fn pedal_klon_centaur() {
+        let p = parse_example("klon_centaur.pedal");
+        assert_eq!(p.name, "Klon Centaur");
+        assert_eq!(p.components.len(), 29);
+        assert_eq!(p.nets.len(), 37);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Gain"));
+        assert!(labels.contains(&"Treble"));
+        assert!(labels.contains(&"Output"));
+        // Verify 3 TL072 opamps + germanium feedback clipping diodes
+        let opamp_count = p
+            .components
+            .iter()
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072)))
+            .count();
+        assert_eq!(opamp_count, 3, "Klon uses 3 opamps (2 gain + 1 output buffer)");
+        let ge_diode_count = p
+            .components
+            .iter()
+            .filter(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Germanium))
+            .count();
+        assert_eq!(ge_diode_count, 2, "Klon uses 2 germanium clipping diodes in feedback");
+    }
+
+    #[test]
+    fn pedal_fulltone_ocd() {
+        let p = parse_example("fulltone_ocd.pedal");
+        assert_eq!(p.name, "Fulltone OCD");
+        assert_eq!(p.components.len(), 18);
+        assert_eq!(p.nets.len(), 23);
+        assert_eq!(p.controls.len(), 3);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Drive"));
+        assert!(labels.contains(&"Tone"));
+        assert!(labels.contains(&"Volume"));
+        // Verify MOSFET clipping (the OCD's signature)
+        let mosfet_count = p
+            .components
+            .iter()
+            .filter(|c| matches!(c.kind, dsl::ComponentKind::Nmos(_)))
+            .count();
+        assert_eq!(mosfet_count, 2, "OCD uses 2 NMOS MOSFETs for clipping");
+    }
+
+    #[test]
+    fn pedal_boss_ce2() {
+        let p = parse_example("boss_ce2.pedal");
+        assert_eq!(p.name, "Boss CE-2");
+        assert_eq!(p.components.len(), 16);
+        assert_eq!(p.controls.len(), 2);
+        let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Rate"));
+        assert!(labels.contains(&"Depth"));
+        // Verify BBD delay line component
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::Bbd(dsl::BbdType::Mn3207))));
+        // Verify LFO for chorus modulation
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::Lfo(..))));
+        // Verify TL072 op-amp (input buffer)
+        assert!(p
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072))));
+    }
+
+    #[test]
+    fn all_pedal_files_export_kicad() {
+        let files = [
+            "tube_screamer.pedal",
+            "fuzz_face.pedal",
+            "big_muff.pedal",
+            "dyna_comp.pedal",
+            "proco_rat.pedal",
+            "blues_driver.pedal",
+            "klon_centaur.pedal",
+            "fulltone_ocd.pedal",
+            "boss_ce2.pedal",
+        ];
+        for f in files {
+            let p = parse_example(f);
+            let netlist = kicad::export_kicad_netlist(&p);
+            assert!(
+                netlist.contains("(export (version D)"),
+                "{f} KiCad export missing header"
+            );
+            assert!(
+                netlist.contains(&p.name),
+                "{f} KiCad export missing pedal name"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Schematic accuracy: verify component type counts match real circuits
+    // -----------------------------------------------------------------------
+
+    /// Count components by predicate.
+    fn count_kind(p: &dsl::PedalDef, f: impl Fn(&dsl::ComponentKind) -> bool) -> usize {
+        p.components.iter().filter(|c| f(&c.kind)).count()
+    }
+
+    /// TS808: real schematic has 2 JRC4558 op-amps (dual package),
+    /// 2 silicon diodes (1N914) in anti-parallel in feedback, 3 pots.
+    #[test]
+    fn schematic_ts808_component_types() {
+        let p = parse_example("tube_screamer.pedal");
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Jrc4558))),
+            2,
+            "TS808: 2x JRC4558D (dual op-amp package used as 2 separate amps)"
+        );
+        assert_eq!(
+            count_kind(&p, |k| *k == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)),
+            2,
+            "TS808: 2x 1N914 silicon diodes in anti-parallel in feedback loop"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            3,
+            "TS808: 3 pots (Drive, Tone, Level)"
+        );
+        // Verify NO MOSFETs, NO transistors, NO JFETs — pure op-amp circuit
+        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Npn(_) | dsl::ComponentKind::Pnp(_))), 0);
+        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::NJfet(_))), 0);
+        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Nmos(_))), 0);
+    }
+
+    /// Fuzz Face: real schematic has 2 PNP germanium transistors,
+    /// NO op-amps, NO diodes — gain comes from transistor saturation.
+    #[test]
+    fn schematic_fuzz_face_component_types() {
+        let p = parse_example("fuzz_face.pedal");
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Pnp(_))),
+            2,
+            "Fuzz Face: 2x AC128/NKT275 PNP germanium transistors"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            2,
+            "Fuzz Face: 2 pots (Fuzz, Volume)"
+        );
+        // No op-amps or diodes in a Fuzz Face
+        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(_))), 0);
+        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Diode(_) | dsl::ComponentKind::DiodePair(_))), 0);
+    }
+
+    /// Big Muff: 4 NPN transistor gain stages + 2 diode pairs for clipping.
+    #[test]
+    fn schematic_big_muff_component_types() {
+        let p = parse_example("big_muff.pedal");
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Npn(_))),
+            4,
+            "Big Muff: 4x 2N5088 NPN transistor stages"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::DiodePair(_))),
+            2,
+            "Big Muff: 2x anti-parallel diode pairs for clipping"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            3,
+            "Big Muff: 3 pots (Sustain, Tone, Volume)"
+        );
+        // No op-amps in a Big Muff — all discrete
+        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(_))), 0);
+    }
+
+    /// ProCo RAT: LM308 op-amp (unique slow slew rate), 2 silicon diodes
+    /// to ground (hard clipping), 3 pots.
+    #[test]
+    fn schematic_rat_component_types() {
+        let p = parse_example("proco_rat.pedal");
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Lm308))),
+            1,
+            "RAT: 1x LM308 op-amp (the slow slew rate shapes the RAT's tone)"
+        );
+        assert_eq!(
+            count_kind(&p, |k| *k == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)),
+            2,
+            "RAT: 2x 1N914 diodes to ground (hard clipping — NOT in feedback)"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            3,
+            "RAT: 3 pots (Distortion, Filter, Volume)"
+        );
+    }
+
+    /// Blues Driver: JFET input buffer + 2 TL072 op-amps + 3 asymmetric diodes.
+    #[test]
+    fn schematic_blues_driver_component_types() {
+        let p = parse_example("blues_driver.pedal");
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::NJfet(_))),
+            1,
+            "BD-2: 1x 2N5457 N-JFET input buffer"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072))),
+            2,
+            "BD-2: 2x TL072 op-amp gain stages"
+        );
+        assert_eq!(
+            count_kind(&p, |k| *k == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)),
+            3,
+            "BD-2: 3x asymmetric clipping diodes (2+1 for asymmetry)"
+        );
+    }
+
+    /// Klon Centaur: 3 TL072 op-amps + 2 germanium diodes in feedback.
+    #[test]
+    fn schematic_klon_component_types() {
+        let p = parse_example("klon_centaur.pedal");
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072))),
+            3,
+            "Klon: 3x TL072 (input buffer + clipping amp + output buffer)"
+        );
+        assert_eq!(
+            count_kind(&p, |k| *k == dsl::ComponentKind::Diode(dsl::DiodeType::Germanium)),
+            2,
+            "Klon: 2x germanium diodes (MA856) in anti-parallel in feedback"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            3,
+            "Klon: 3 pots (Gain, Treble, Output)"
+        );
+        // No transistors — pure op-amp design
+        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Npn(_) | dsl::ComponentKind::Pnp(_))), 0);
+    }
+
+    /// OCD: 2 NMOS MOSFETs (2N7000) + 1 TL072 op-amp — NO silicon diodes.
+    #[test]
+    fn schematic_ocd_component_types() {
+        let p = parse_example("fulltone_ocd.pedal");
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Nmos(_))),
+            2,
+            "OCD: 2x 2N7000 NMOS MOSFETs for clipping (the OCD's signature)"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072))),
+            1,
+            "OCD: 1x TL072 op-amp gain stage"
+        );
+        // OCD uses MOSFETs, NOT silicon diodes
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Diode(_))),
+            0,
+            "OCD: no diodes — MOSFETs do the clipping"
+        );
+    }
+
+    /// Dyna Comp: CA3080 OTA (not a generic op-amp).
+    #[test]
+    fn schematic_dyna_comp_component_types() {
+        let p = parse_example("dyna_comp.pedal");
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Ca3080))),
+            1,
+            "Dyna Comp: 1x CA3080 OTA for current-controlled gain"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            2,
+            "Dyna Comp: 2 pots (Sensitivity, Output)"
+        );
+    }
+
+    /// CE-2: MN3207 BBD + TL072 op-amp + triangle LFO.
+    #[test]
+    fn schematic_ce2_component_types() {
+        let p = parse_example("boss_ce2.pedal");
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Bbd(dsl::BbdType::Mn3207))),
+            1,
+            "CE-2: 1x MN3207 BBD (1024 stages for chorus delay)"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072))),
+            1,
+            "CE-2: 1x TL072 input buffer"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Lfo(..))),
+            1,
+            "CE-2: 1x triangle LFO for chorus sweep"
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            2,
+            "CE-2: 2 pots (Rate, Depth)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Compile + process: every pedal file produces non-silent output
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn all_pedals_compile_and_produce_audio() {
+        let files = [
+            "tube_screamer.pedal",
+            "fuzz_face.pedal",
+            "big_muff.pedal",
+            "dyna_comp.pedal",
+            "proco_rat.pedal",
+            "blues_driver.pedal",
+            "klon_centaur.pedal",
+            "fulltone_ocd.pedal",
+            "boss_ce2.pedal",
+        ];
+        let sample_rate = 48000.0;
+        let input = wav::sine_wave(330.0, 0.05, sample_rate as u32);
+
+        for filename in files {
+            let p = parse_example(filename);
+            let mut proc = compiler::compile_pedal(&p, sample_rate)
+                .unwrap_or_else(|e| panic!("{filename}: compile failed: {e}"));
+
+            // Apply default controls
+            for ctrl in &p.controls {
+                proc.set_control(&ctrl.label, ctrl.default);
+            }
+
+            let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+            let max_out = output.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
+            assert!(
+                max_out > 1e-6,
+                "{filename}: pedal produced silent output (max={max_out})"
+            );
+        }
+    }
+}

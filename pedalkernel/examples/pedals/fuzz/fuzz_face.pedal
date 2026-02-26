@@ -1,0 +1,81 @@
+# Dallas Arbiter Fuzz Face (Germanium, ~1966)
+# Two-stage PNP germanium transistor fuzz
+# Q1 = input buffer/driver, Q2 = gain/clipping stage
+# Note: PNP circuit - positive ground design (vcc is actually negative)
+#
+# Classic components: AC128, NKT275, or similar germanium PNP transistors
+
+pedal "Fuzz Face" {
+  components {
+    # Input stage
+    C1: cap(2.2u)           # Input coupling (2.2µF electrolytic)
+    R1: resistor(33k)       # Q1 collector load / Q2 bias
+
+    # Q1 - Input buffer / driver stage
+    Q1: pnp(ac128)          # AC128 germanium PNP
+    R2: resistor(330)       # Q1 emitter stabilization (some versions)
+
+    # Interstage coupling
+    R3: resistor(8.2k)      # Q1 collector to Q2 base bias
+
+    # Q2 - Main gain / clipping stage
+    Q2: pnp(ac128)          # AC128 germanium PNP
+    R4: resistor(470)       # Q2 emitter resistor
+    C2: cap(22u)            # Q2 emitter bypass (more gain)
+    R5: resistor(100k)      # Q2 collector load
+
+    # Feedback / Fuzz control
+    Fuzz: pot(1k)           # Fuzz amount (linear taper)
+    R6: resistor(100)       # Minimum fuzz resistance
+
+    # Bias stabilization
+    R7: resistor(100k)      # Input bias resistor
+    C3: cap(100n)           # Power supply bypass
+
+    # Output stage
+    C4: cap(10u)            # Output coupling (blocks DC)
+    Volume: pot(500k)       # Output volume (log taper)
+    R8: resistor(10k)       # Output load
+  }
+  nets {
+    # Power supply bypass
+    vcc -> C3.a
+    C3.b -> gnd
+
+    # Input stage
+    in -> C1.a
+    C1.b -> R7.a, Q1.base
+    R7.b -> gnd
+
+    # Q1 configuration (common emitter)
+    vcc -> R1.a
+    R1.b -> Q1.collector, R3.a
+    Q1.emitter -> R2.a, Fuzz.a
+    R2.b -> gnd
+    Fuzz.b -> R6.a
+    R6.b -> gnd
+
+    # Interstage bias
+    R3.b -> Q2.base
+
+    # Q2 configuration (common emitter)
+    Q2.emitter -> R4.a, C2.a
+    R4.b -> vcc
+    C2.b -> vcc
+    Q2.collector -> R5.a
+    R5.b -> gnd
+
+    # Feedback from Q2 collector to Q1 base
+    Q2.collector -> Q1.base
+
+    # Output
+    Q2.collector -> C4.a
+    C4.b -> Volume.a, R8.a
+    R8.b -> gnd
+    Volume.b -> out
+  }
+  controls {
+    Fuzz.position -> "Fuzz" [0.0, 1.0] = 0.7
+    Volume.position -> "Volume" [0.0, 1.0] = 0.6
+  }
+}

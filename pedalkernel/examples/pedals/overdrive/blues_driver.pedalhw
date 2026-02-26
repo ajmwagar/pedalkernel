@@ -1,0 +1,31 @@
+# Boss Blues Driver BD-2 Hardware Specs
+# Reference: 1995 original design
+
+# JFET input buffer
+Q1: part("2N5457") vce_max(25)
+
+# Op-amps - dual op-amp for gain stages
+U1: part("TL072CP") supply_max(36)
+U2: part("TL072CP") supply_max(36)
+
+# Clipping diodes - asymmetric configuration
+# 2 diodes one direction, 1 the other for asymmetric clipping
+D1: part("1N4148") breakdown(100)
+D2: part("1N4148") breakdown(100)
+D3: part("1N4148") breakdown(100)
+
+# Coupling capacitors
+C1: voltage_rating(50) part("22nF Film")
+C2: voltage_rating(25) part("10uF Electrolytic")
+C3: voltage_rating(50) part("100nF Film")
+C4: voltage_rating(50) part("47nF Film")
+C5: voltage_rating(50) part("100nF Film")
+C6: voltage_rating(50) part("100pF Ceramic")
+C7: voltage_rating(50) part("6.8nF Film")
+C8: voltage_rating(50) part("100nF Film")
+C9: voltage_rating(25) part("10uF Electrolytic")
+
+# Pots
+Gain: part("250k Log")
+Tone: part("20k Linear")
+Level: part("100k Log")
