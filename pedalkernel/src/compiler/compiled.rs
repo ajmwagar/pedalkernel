@@ -789,6 +789,15 @@ impl PedalProcessor for CompiledPedal {
                 signal *= self.pre_gain;
             }
             prev_was_clipping = stage.root.is_clipping_stage();
+
+            // For stages with a paired op-amp buffer (all-pass circuits),
+            // set the op-amp's Vp to the stage input BEFORE processing.
+            // The op-amp buffer models the unity-gain amplifier that
+            // compensates for passive R/C network attenuation in the WDF tree.
+            if stage.has_paired_opamp() {
+                stage.set_paired_opamp_vp(signal);
+            }
+
             signal = stage.process(signal);
             // Record per-stage level for debug
             #[cfg(debug_assertions)]

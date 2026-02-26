@@ -242,16 +242,13 @@ fn compile_phase90() {
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     assert_finite(&output, "Phase 90");
 
-    // Should produce output.  The peak is lower than ideal because
-    // op-amp feedback loops aren't yet modeled inside the WDF tree:
-    // each all-pass stage's LM741 enforces unity gain in hardware, but
-    // the WDF tree only sees the passive R/C/JFET network, which
-    // attenuates.  Once op-amp feedback is integrated into the WDF
-    // tree, the threshold here should rise back to ~0.1.
+    // With op-amp feedback integrated into the WDF tree, each all-pass
+    // stage's unity-gain op-amp buffer compensates for passive R/C/JFET
+    // attenuation.  The output should be at a healthy level (~-10dB).
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     assert!(
-        peak > 0.0001,
-        "Phase 90 should produce output: peak={peak}"
+        peak > 0.05,
+        "Phase 90 should produce output at healthy level: peak={peak}"
     );
 
     // Verify the circuit is actively creating the sweeping effect
@@ -263,10 +260,9 @@ fn compile_phase90() {
     let rms_first = (first_half.iter().map(|x| x * x).sum::<f64>() / 24000.0).sqrt();
     let rms_second = (second_half.iter().map(|x| x * x).sum::<f64>() / 24000.0).sqrt();
 
-    // Both halves should have similar RMS (not cutting out).
-    // Threshold is low due to missing op-amp feedback in WDF tree.
+    // Both halves should have signal at a reasonable level.
     assert!(
-        rms_first > 0.0001 && rms_second > 0.0001,
+        rms_first > 0.01 && rms_second > 0.01,
         "Both halves should have signal: rms_first={rms_first}, rms_second={rms_second}"
     );
 }

@@ -1,6 +1,6 @@
 //! Main compiler entry point: PedalDef -> CompiledPedal.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
 use crate::elements::*;
@@ -294,18 +294,28 @@ pub fn compile_pedal_with_options(
             compensation: 1.0,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: Some(model),
+            paired_opamp: None,
         });
     }
 
+    // ── Op-amp feedback detection ───────────────────────────────────────────
+    // Detect unity-gain op-amp feedback loops (neg=out) so they can be
+    // paired with JFET WDF stages instead of processed standalone.
+    let feedback_loops = graph.find_opamp_feedback_loops(pedal);
+    let feedback_opamp_ids: HashSet<String> = feedback_loops
+        .iter()
+        .map(|info| info.comp_id.clone())
+        .collect();
+
     // ── Op-amp stages ──────────────────────────────────────────────────────
     // Create OpAmpRoot elements for each non-OTA op-amp in the circuit.
-    // These model the op-amp as a VCVS (voltage-controlled voltage source)
-    // with slew rate limiting and output saturation.
+    // Op-amps with detected feedback loops are NOT added here — they will
+    // be paired with their corresponding JFET WDF stages instead.
     let mut opamp_stages: Vec<OpAmpStage> = Vec::new();
     for comp in &pedal.components {
         if let ComponentKind::OpAmp(ot) = &comp.kind {
             // OTAs (CA3080) are handled separately as OtaRoot, not OpAmpRoot
-            if !ot.is_ota() {
+            if !ot.is_ota() && !feedback_opamp_ids.contains(&comp.id) {
                 let model = OpAmpModel::from_opamp_type(ot);
                 let mut opamp = OpAmpRoot::new(model);
                 opamp.set_sample_rate(sample_rate);
@@ -316,6 +326,19 @@ pub fn compile_pedal_with_options(
             }
         }
     }
+
+    // Build a queue of feedback op-amps to pair with JFET stages.
+    // Each feedback op-amp will be attached to the next JFET stage
+    // in the signal chain (ordered by topological distance from input).
+    let mut feedback_opamp_queue: Vec<OpAmpRoot> = feedback_loops
+        .iter()
+        .map(|info| {
+            let model = OpAmpModel::from_opamp_type(&info.opamp_type);
+            let mut opamp = OpAmpRoot::new(model);
+            opamp.set_sample_rate(sample_rate);
+            opamp
+        })
+        .collect();
 
     // Build WDF stages for JFETs.
     let jfets = graph.find_jfets();
@@ -391,12 +414,22 @@ pub fn compile_pedal_with_options(
         let model = jfet_model(jfet_info.jfet_type, jfet_info.is_n_channel);
         let root = RootKind::Jfet(JfetRoot::new(model));
 
+        // Pair this JFET stage with a feedback op-amp if available.
+        // In all-pass circuits (Phase 90), each JFET stage is followed
+        // by a unity-gain op-amp buffer that maintains signal level.
+        let paired_opamp = if !feedback_opamp_queue.is_empty() {
+            Some(feedback_opamp_queue.remove(0))
+        } else {
+            None
+        };
+
         stages.push(WdfStage {
             tree,
             root,
             compensation: 1.0,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
+            paired_opamp,
         });
     }
 
@@ -482,6 +515,7 @@ pub fn compile_pedal_with_options(
             compensation: 1.0,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
+            paired_opamp: None,
         });
     }
 
@@ -564,6 +598,7 @@ pub fn compile_pedal_with_options(
             compensation: 1.0,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
+            paired_opamp: None,
         });
     }
 
@@ -644,6 +679,7 @@ pub fn compile_pedal_with_options(
             compensation: 1.0,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
+            paired_opamp: None,
         });
     }
 
@@ -722,6 +758,7 @@ pub fn compile_pedal_with_options(
             compensation: 1.0,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
+            paired_opamp: None,
         });
     }
 
@@ -800,6 +837,7 @@ pub fn compile_pedal_with_options(
             compensation: 1.0,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
+            paired_opamp: None,
         });
     }
 
@@ -884,6 +922,7 @@ pub fn compile_pedal_with_options(
             compensation: feedback_compensation,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
+            paired_opamp: None,
         });
     }
 
@@ -961,6 +1000,7 @@ pub fn compile_pedal_with_options(
             compensation: 1.0,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
+            paired_opamp: None,
         });
     }
 

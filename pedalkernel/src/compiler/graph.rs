@@ -1017,6 +1017,115 @@ impl CircuitGraph {
         otas
     }
 
+    /// Find op-amp feedback loops (unity-gain buffers).
+    ///
+    /// Detects op-amps where the `neg` and `out` pins resolve to the same
+    /// circuit node, indicating a direct feedback connection (voltage follower).
+    /// This is the topology used in Phase 90 all-pass stages, where the op-amp
+    /// buffers the signal with unity gain.
+    ///
+    /// Returns a list of `OpAmpFeedbackInfo` ordered by topological distance
+    /// from the input node.
+    pub(super) fn find_opamp_feedback_loops(
+        &self,
+        pedal: &PedalDef,
+    ) -> Vec<OpAmpFeedbackInfo> {
+        // Build a pin → resolved node map from the netlist.
+        // We need to re-resolve pins because CircuitGraph doesn't store the
+        // full pin_ids map (only edges and resolved nodes).
+        let mut uf = UnionFind::new();
+        let mut pin_ids: HashMap<String, usize> = HashMap::new();
+        let mut next_id = 0usize;
+
+        let mut get_id = |key: &str, uf: &mut UnionFind| -> usize {
+            if let Some(&id) = pin_ids.get(key) {
+                id
+            } else {
+                let id = next_id;
+                next_id += 1;
+                pin_ids.insert(key.to_string(), id);
+                uf.ensure(id);
+                id
+            }
+        };
+
+        for name in &["in", "out", "gnd", "vcc"] {
+            get_id(name, &mut uf);
+        }
+        for net in &pedal.nets {
+            let from_id = get_id(&pin_key(&net.from), &mut uf);
+            for to_pin in &net.to {
+                let to_id = get_id(&pin_key(to_pin), &mut uf);
+                uf.union(from_id, to_id);
+            }
+        }
+
+        // BFS distances for ordering.
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &self.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(self.in_node, 0);
+        queue.push_back(self.in_node);
+        while let Some(n) = queue.pop_front() {
+            let d = dist[&n];
+            if let Some(neighbors) = adj.get(&n) {
+                for &nb in neighbors {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
+                        queue.push_back(nb);
+                    }
+                }
+            }
+        }
+
+        let mut results: Vec<OpAmpFeedbackInfo> = Vec::new();
+
+        for comp in &pedal.components {
+            let opamp_type = match &comp.kind {
+                ComponentKind::OpAmp(ot) if !ot.is_ota() => *ot,
+                _ => continue,
+            };
+
+            // Check for 3-pin form (pos/neg/out).
+            let neg_key = format!("{}.neg", comp.id);
+            let out_key = format!("{}.out", comp.id);
+            let pos_key = format!("{}.pos", comp.id);
+
+            let neg_id = pin_ids.get(&neg_key).copied();
+            let out_id = pin_ids.get(&out_key).copied();
+            let pos_id = pin_ids.get(&pos_key).copied();
+
+            if let (Some(neg_raw), Some(out_raw), Some(pos_raw)) = (neg_id, out_id, pos_id) {
+                let neg_node = uf.find(neg_raw);
+                let out_node = uf.find(out_raw);
+                let pos_node = uf.find(pos_raw);
+
+                // Unity-gain buffer: neg and out resolve to the same node.
+                if neg_node == out_node {
+                    results.push(OpAmpFeedbackInfo {
+                        comp_id: comp.id.clone(),
+                        opamp_type,
+                        feedback_kind: OpAmpFeedbackKind::UnityGain,
+                        neg_node,
+                        pos_node,
+                    });
+                }
+            }
+        }
+
+        // Sort by topological distance from input (using pos_node as reference
+        // since that's where the signal enters the op-amp).
+        results.sort_by_key(|info| {
+            dist.get(&info.pos_node).copied().unwrap_or(usize::MAX)
+        });
+
+        results
+    }
+
 }
 
 pub(super) struct DiodeInfo {
@@ -1077,6 +1186,32 @@ pub(super) struct OtaInfo {
     pub(super) junction_node: NodeId,
     #[allow(dead_code)]
     pub(super) ground_node: NodeId,
+}
+
+/// Op-amp feedback loop information.
+///
+/// Detected when an op-amp's `neg` and `out` pins resolve to the same node
+/// (unity-gain buffer / voltage follower), or when they connect through a
+/// feedback resistor network.
+pub(super) struct OpAmpFeedbackInfo {
+    /// Component ID of the op-amp (e.g., "U1").
+    pub(super) comp_id: String,
+    /// Op-amp type for model selection.
+    pub(super) opamp_type: OpAmpType,
+    /// The kind of feedback topology detected.
+    pub(super) feedback_kind: OpAmpFeedbackKind,
+    /// Node where the inverting input meets the passive network.
+    /// For unity-gain buffers, this is the output/neg node.
+    pub(super) neg_node: NodeId,
+    /// Non-inverting input node (signal reference or bias).
+    pub(super) pos_node: NodeId,
+}
+
+/// The feedback topology of an op-amp.
+pub(super) enum OpAmpFeedbackKind {
+    /// Direct connection: neg tied to out (voltage follower).
+    /// Closed-loop gain = 1.0.
+    UnityGain,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
