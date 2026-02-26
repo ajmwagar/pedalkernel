@@ -74,8 +74,8 @@ pub fn compile_pedal_with_options(
             ComponentKind::Resistor(r) => {
                 *r = tolerance.apply_resistor(*r, i);
             }
-            ComponentKind::Capacitor(c) => {
-                *c = tolerance.apply_capacitor(*c, i);
+            ComponentKind::Capacitor(cfg) => {
+                cfg.value = tolerance.apply_capacitor(cfg.value, i);
             }
             ComponentKind::Potentiometer(max_r) => {
                 *max_r = tolerance.apply_resistor(*max_r, i);

@@ -494,7 +494,7 @@ fn value_label(kind: &ComponentKind) -> Option<String> {
     use pedalkernel::kicad::format_eng;
     match kind {
         ComponentKind::Resistor(v) => Some(format_eng(*v, "Ω")),
-        ComponentKind::Capacitor(v) => Some(format_eng(*v, "F")),
+        ComponentKind::Capacitor(v) => Some(format_eng(v.value, "F")),
         ComponentKind::Inductor(v) => Some(format_eng(*v, "H")),
         ComponentKind::Potentiometer(v) => Some(format_eng(*v, "Ω")),
         ComponentKind::Zener(v) => Some(format!("{v}V")),

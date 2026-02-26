@@ -115,7 +115,8 @@ pub struct ComponentDef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComponentKind {
     Resistor(f64),
-    Capacitor(f64),
+    /// Capacitor with optional parasitics (leakage, dielectric absorption).
+    Capacitor(CapConfig),
     Inductor(f64),
     DiodePair(DiodeType),
     Diode(DiodeType),
@@ -343,6 +344,78 @@ pub enum DiodeType {
     Silicon,
     Germanium,
     Led,
+}
+
+/// Capacitor dielectric types with different parasitic characteristics.
+///
+/// Different dielectric materials have different leakage and dielectric
+/// absorption properties. Film caps are nearly ideal, while electrolytics
+/// have significant leakage and aging effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CapType {
+    /// Film capacitor (polyester, polypropylene, etc.)
+    /// Negligible leakage, no dielectric absorption.
+    /// Used in: coupling caps, tone stacks, most pedal applications.
+    #[default]
+    Film,
+    /// Electrolytic capacitor (aluminum, tantalum).
+    /// Significant leakage (typ. 100kΩ-10MΩ parallel resistance).
+    /// Aging increases leakage. Can exhibit dielectric absorption.
+    /// Used in: power supply filtering, bias decoupling, large coupling caps.
+    Electrolytic,
+    /// Ceramic capacitor (X7R, C0G/NP0, Y5V).
+    /// Low leakage but can have voltage coefficient (capacitance changes with voltage).
+    /// C0G/NP0 types are stable; X7R/Y5V lose capacitance under DC bias.
+    /// Used in: HF bypass, decoupling, RF applications.
+    Ceramic,
+    /// Tantalum capacitor (solid electrolytic).
+    /// Better leakage than aluminum electrolytic, smaller size.
+    /// Used in: compact designs, stable bypass applications.
+    Tantalum,
+}
+
+/// Extended capacitor configuration with parasitic modeling.
+///
+/// Supports leakage resistance (parallel R) and dielectric absorption.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CapConfig {
+    /// Capacitance value in Farads.
+    pub value: f64,
+    /// Dielectric type (affects default parasitics).
+    pub cap_type: CapType,
+    /// Parallel leakage resistance in ohms. None = ideal (infinite).
+    /// Typical values: 100kΩ (worn electrolytic) to 10MΩ (new electrolytic).
+    pub leakage: Option<f64>,
+    /// Dielectric absorption coefficient (0.0 to 1.0). None = no DA.
+    /// Represents fraction of charge that "soaks in" and slowly returns.
+    /// Typical: 0.01-0.05 for electrolytics, <0.001 for film.
+    pub da: Option<f64>,
+}
+
+impl CapConfig {
+    pub fn new(value: f64) -> Self {
+        Self {
+            value,
+            cap_type: CapType::Film,
+            leakage: None,
+            da: None,
+        }
+    }
+
+    pub fn with_type(mut self, cap_type: CapType) -> Self {
+        self.cap_type = cap_type;
+        self
+    }
+
+    pub fn with_leakage(mut self, leakage: f64) -> Self {
+        self.leakage = Some(leakage);
+        self
+    }
+
+    pub fn with_da(mut self, da: f64) -> Self {
+        self.da = Some(da);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -811,12 +884,97 @@ fn parse_resistor(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Resistor(val)))
 }
 
+/// Parse capacitor type keyword.
+fn cap_type(input: &str) -> IResult<&str, CapType> {
+    alt((
+        value(CapType::Film, tag("film")),
+        value(CapType::Electrolytic, tag("electrolytic")),
+        value(CapType::Ceramic, tag("ceramic")),
+        value(CapType::Tantalum, tag("tantalum")),
+    ))(input)
+}
+
+/// Parse `leakage: 100k` parameter (resistance in ohms).
+fn cap_field_leakage(input: &str) -> IResult<&str, f64> {
+    let (input, _) = tag("leakage")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, val) = eng_value(input)?;
+    Ok((input, val))
+}
+
+/// Parse `da: 0.05` parameter (dielectric absorption coefficient 0-1).
+fn cap_field_da(input: &str) -> IResult<&str, f64> {
+    let (input, _) = tag("da")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, val) = double(input)?;
+    Ok((input, val))
+}
+
+/// Parse capacitor with optional type and parasitics.
+///
+/// Syntax:
+/// - `cap(22u)` - film cap (default), no parasitics
+/// - `cap(22u, electrolytic)` - electrolytic, no explicit parasitics
+/// - `cap(22u, electrolytic, leakage: 100k)` - with leakage resistance
+/// - `cap(22u, electrolytic, leakage: 10k, da: 0.05)` - with leakage and DA
 fn parse_cap(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("cap")(input)?;
     let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
     let (input, val) = eng_value(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Optional cap type (electrolytic, film, ceramic, tantalum)
+    let (input, ctype) = opt(preceded(
+        tuple((char(','), ws_comments)),
+        cap_type,
+    ))(input)?;
+
+    let (input, _) = ws_comments(input)?;
+
+    // Parse optional named parameters (leakage, da) in any order
+    let mut leakage = None;
+    let mut da = None;
+    let mut input = input;
+
+    loop {
+        let (rest, _) = ws_comments(input)?;
+
+        // Check for comma-separated parameter
+        if let Ok((rest2, _)) = char::<_, nom::error::Error<&str>>(',')(rest) {
+            let (rest3, _) = ws_comments(rest2)?;
+
+            // Try parsing each parameter type
+            if let Ok((rest4, val)) = cap_field_leakage(rest3) {
+                leakage = Some(val);
+                input = rest4;
+                continue;
+            }
+            if let Ok((rest4, val)) = cap_field_da(rest3) {
+                da = Some(val);
+                input = rest4;
+                continue;
+            }
+        }
+        break;
+    }
+
+    let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Capacitor(val)))
+
+    Ok((
+        input,
+        ComponentKind::Capacitor(CapConfig {
+            value: val,
+            cap_type: ctype.unwrap_or(CapType::Film),
+            leakage,
+            da,
+        }),
+    ))
 }
 
 fn parse_inductor(input: &str) -> IResult<&str, ComponentKind> {
@@ -2226,8 +2384,50 @@ mod tests {
     fn parse_component_cap() {
         let (_, c) = component_def("C1: cap(220n)").unwrap();
         assert_eq!(c.id, "C1");
-        if let ComponentKind::Capacitor(v) = c.kind {
-            assert!((v - 220e-9).abs() < 1e-18);
+        if let ComponentKind::Capacitor(cfg) = c.kind {
+            assert!((cfg.value - 220e-9).abs() < 1e-18);
+            assert_eq!(cfg.cap_type, CapType::Film); // default
+            assert!(cfg.leakage.is_none());
+            assert!(cfg.da.is_none());
+        } else {
+            panic!("expected Capacitor");
+        }
+    }
+
+    #[test]
+    fn parse_component_cap_electrolytic() {
+        let (_, c) = component_def("C1: cap(22u, electrolytic)").unwrap();
+        if let ComponentKind::Capacitor(cfg) = c.kind {
+            assert!((cfg.value - 22e-6).abs() < 1e-15);
+            assert_eq!(cfg.cap_type, CapType::Electrolytic);
+            assert!(cfg.leakage.is_none());
+            assert!(cfg.da.is_none());
+        } else {
+            panic!("expected Capacitor");
+        }
+    }
+
+    #[test]
+    fn parse_component_cap_with_leakage() {
+        let (_, c) = component_def("C1: cap(22u, electrolytic, leakage: 100k)").unwrap();
+        if let ComponentKind::Capacitor(cfg) = c.kind {
+            assert!((cfg.value - 22e-6).abs() < 1e-15);
+            assert_eq!(cfg.cap_type, CapType::Electrolytic);
+            assert!((cfg.leakage.unwrap() - 100_000.0).abs() < 1.0);
+            assert!(cfg.da.is_none());
+        } else {
+            panic!("expected Capacitor");
+        }
+    }
+
+    #[test]
+    fn parse_component_cap_with_da() {
+        let (_, c) = component_def("C1: cap(22u, electrolytic, leakage: 10k, da: 0.05)").unwrap();
+        if let ComponentKind::Capacitor(cfg) = c.kind {
+            assert!((cfg.value - 22e-6).abs() < 1e-15);
+            assert_eq!(cfg.cap_type, CapType::Electrolytic);
+            assert!((cfg.leakage.unwrap() - 10_000.0).abs() < 1.0);
+            assert!((cfg.da.unwrap() - 0.05).abs() < 0.001);
         } else {
             panic!("expected Capacitor");
         }

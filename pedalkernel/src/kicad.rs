@@ -160,7 +160,7 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
 fn value_str(kind: &ComponentKind) -> String {
     match kind {
         ComponentKind::Resistor(v) => format_eng(*v, "Ω"),
-        ComponentKind::Capacitor(v) => format_eng(*v, "F"),
+        ComponentKind::Capacitor(cfg) => format_eng(cfg.value, "F"),
         ComponentKind::Inductor(v) => format_eng(*v, "H"),
         ComponentKind::DiodePair(dt) => format!("{dt:?}_pair"),
         ComponentKind::Diode(dt) => format!("{dt:?}"),
@@ -534,7 +534,7 @@ mod tests {
                 },
                 ComponentDef {
                     id: "C1".into(),
-                    kind: ComponentKind::Capacitor(220e-9),
+                    kind: ComponentKind::Capacitor(CapConfig::new(220e-9)),
                 },
                 ComponentDef {
                     id: "D1".into(),

@@ -443,8 +443,9 @@ fn check_heuristic_voltage(
                 });
             }
         }
-        ComponentKind::Capacitor(farads) => {
-            if *farads >= 1e-6 {
+        ComponentKind::Capacitor(cfg) => {
+            let farads = cfg.value;
+            if farads >= 1e-6 {
                 if voltage > 16.0 {
                     warnings.push(VoltageWarning {
                         component_id: id.to_string(),
@@ -702,9 +703,9 @@ pub fn auto_populate_specs(pedal: &PedalDef, limits: &mut HardwareLimits) {
                     spec.power_rating = Some(0.25); // 1/4W default
                 }
             }
-            ComponentKind::Capacitor(farads) => {
+            ComponentKind::Capacitor(cfg) => {
                 if spec.voltage_rating.is_none() {
-                    if let Some((_, _, vr)) = find_closest_cap(*farads) {
+                    if let Some((_, _, vr)) = find_closest_cap(cfg.value) {
                         spec.voltage_rating = Some(vr);
                     }
                 }
@@ -825,21 +826,22 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         qty_per_unit: 1,
                     }]
                 }
-                ComponentKind::Capacitor(val) => {
+                ComponentKind::Capacitor(cfg) => {
+                    let val = cfg.value;
                     let (pn, desc) = if let Some(part_name) = hw_part {
                         (None, part_name.to_string())
-                    } else if let Some((cpn, cdesc, _)) = find_closest_cap(*val) {
+                    } else if let Some((cpn, cdesc, _)) = find_closest_cap(val) {
                         (Some(cpn.to_string()), cdesc.to_string())
                     } else {
                         (
                             None,
-                            format!("{} Capacitor", crate::kicad::format_eng(*val, "F")),
+                            format!("{} Capacitor", crate::kicad::format_eng(val, "F")),
                         )
                     };
                     vec![BomEntry {
                         reference: comp.id.clone(),
                         display: "Capacitor".into(),
-                        value: crate::kicad::format_eng(*val, "F"),
+                        value: crate::kicad::format_eng(val, "F"),
                         mouser_pn: pn,
                         description: desc,
                         qty_per_unit: 1,

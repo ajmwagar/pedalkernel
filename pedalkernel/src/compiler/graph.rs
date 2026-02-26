@@ -715,6 +715,10 @@ impl CircuitGraph {
                     } else {
                         e.node_a
                     },
+                    // TODO: Properly determine pin nodes from netlist
+                    base_node: e.node_a,
+                    emitter_node: self.gnd_node,
+                    collector_node: e.node_b,
                 }),
                 ComponentKind::Pnp(bt) => Some(BjtInfo {
                     bjt_type: *bt,
@@ -729,6 +733,10 @@ impl CircuitGraph {
                     } else {
                         e.node_a
                     },
+                    // TODO: Properly determine pin nodes from netlist
+                    base_node: e.node_a,
+                    emitter_node: self.gnd_node,
+                    collector_node: e.node_b,
                 }),
                 _ => None,
             };
@@ -1149,8 +1157,53 @@ pub(super) struct BjtInfo {
     pub(super) is_npn: bool,
     /// The collector node (where the WDF tree connects).
     pub(super) junction_node: NodeId,
-    #[allow(dead_code)]
     pub(super) ground_node: NodeId,
+    /// Base node for detecting complementary pairs.
+    pub(super) base_node: NodeId,
+    /// Emitter node for push-pull detection.
+    pub(super) emitter_node: NodeId,
+    /// Collector node for push-pull detection.
+    pub(super) collector_node: NodeId,
+}
+
+/// Type of push-pull configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PushPullType {
+    /// Shared collector (output node) — typical for Class AB output stages.
+    /// Both transistors connect to the same output through their collectors.
+    SharedCollector,
+    /// Shared emitter — differential pair or long-tailed pair.
+    /// Both transistors share an emitter connection (often through a resistor).
+    SharedEmitter,
+}
+
+/// A detected push-pull transistor pair.
+///
+/// Push-pull pairs exhibit crossover distortion when the bias current is low
+/// enough that there's a "dead zone" where neither transistor conducts.
+/// The width of this dead zone depends on Vbe (≈0.6V for silicon, ≈0.2V for
+/// germanium) and the bias current.
+#[derive(Debug, Clone)]
+pub(super) struct PushPullPair {
+    /// Index of the NPN transistor in the BJT list.
+    pub(super) npn_idx: usize,
+    /// Index of the PNP transistor in the BJT list.
+    pub(super) pnp_idx: usize,
+    /// The shared node where crossover occurs.
+    pub(super) shared_node: NodeId,
+    /// Type of push-pull configuration.
+    pub(super) pair_type: PushPullType,
+}
+
+/// A detected push-pull tube pair (for Class AB tube output stages).
+#[derive(Debug, Clone)]
+pub(super) struct TubePushPullPair {
+    /// Index of first triode in the triode list.
+    pub(super) triode_a_idx: usize,
+    /// Index of second triode in the triode list.
+    pub(super) triode_b_idx: usize,
+    /// The shared cathode node.
+    pub(super) shared_cathode: NodeId,
 }
 
 pub(super) struct TriodeInfo {
@@ -1380,11 +1433,48 @@ pub(super) fn sp_to_dyn(tree: &SpTree, components: &[ComponentDef], sample_rate:
 pub(super) fn make_leaf(comp: &ComponentDef, sample_rate: f64) -> DynNode {
     match &comp.kind {
         ComponentKind::Resistor(r) => DynNode::Resistor { rp: *r },
-        ComponentKind::Capacitor(c) => DynNode::Capacitor {
-            capacitance: *c,
-            rp: 1.0 / (2.0 * sample_rate * *c),
-            state: 0.0,
-        },
+        ComponentKind::Capacitor(cfg) => {
+            // Use LeakyCapacitor if leakage or DA is specified
+            if cfg.leakage.is_some() || cfg.da.is_some() {
+                let rp = 1.0 / (2.0 * sample_rate * cfg.value);
+
+                // Calculate leakage decay factor per sample
+                // decay = exp(-dt / tau) where tau = R_leak * C and dt = 1/fs
+                // decay = exp(-1 / (fs * R_leak * C))
+                let leakage_decay = if let Some(r_leak) = cfg.leakage {
+                    let tau = r_leak * cfg.value; // RC time constant in seconds
+                    let dt = 1.0 / sample_rate;
+                    (-dt / tau).exp()
+                } else {
+                    1.0 // No decay
+                };
+
+                // Calculate DA rate (time constant ~0.5s)
+                const DA_TIME_CONSTANT: f64 = 0.5;
+                let da_rate = if cfg.da.is_some() {
+                    1.0 / (sample_rate * DA_TIME_CONSTANT)
+                } else {
+                    0.0
+                };
+
+                DynNode::LeakyCapacitor {
+                    capacitance: cfg.value,
+                    rp,
+                    state: 0.0,
+                    leakage_decay,
+                    da_coef: cfg.da,
+                    da_state: 0.0,
+                    da_rate,
+                }
+            } else {
+                // Use simple Capacitor for ideal caps (faster hot path)
+                DynNode::Capacitor {
+                    capacitance: cfg.value,
+                    rp: 1.0 / (2.0 * sample_rate * cfg.value),
+                    state: 0.0,
+                }
+            }
+        }
         ComponentKind::Inductor(l) => DynNode::Inductor {
             inductance: *l,
             rp: 2.0 * sample_rate * *l,

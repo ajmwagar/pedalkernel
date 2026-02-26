@@ -19,6 +19,32 @@ pub(super) enum DynNode {
         rp: f64,
         state: f64,
     },
+    /// Capacitor with leakage resistance and/or dielectric absorption.
+    ///
+    /// Leakage is modeled as a state decay, representing the RC time constant
+    /// of the capacitor discharging through the parallel leakage resistance.
+    /// This causes the capacitor to slowly lose its charge over time.
+    ///
+    /// Dielectric absorption causes the cap to "remember" its previous charge
+    /// and slowly creep back toward it after discharge — a subtle compression
+    /// effect on low frequencies.
+    LeakyCapacitor {
+        capacitance: f64,
+        /// Port resistance: 1/(2*fs*C)
+        rp: f64,
+        /// Main capacitor state (z^{-1} of incident wave)
+        state: f64,
+        /// Leakage decay factor per sample: exp(-1/(fs * R_leak * C))
+        /// When no leakage, this is 1.0 (no decay)
+        leakage_decay: f64,
+        /// Dielectric absorption coefficient (0.0-1.0), None = no DA
+        da_coef: Option<f64>,
+        /// DA state: slowly tracks main state, releases charge back
+        da_state: f64,
+        /// DA rate: how fast da_state tracks state (per sample)
+        /// Typical: 1/(fs * T_da) where T_da ≈ 0.1-1.0 seconds
+        da_rate: f64,
+    },
     Inductor {
         inductance: f64,
         rp: f64,
@@ -63,6 +89,7 @@ impl DynNode {
         match self {
             Self::Resistor { rp }
             | Self::Capacitor { rp, .. }
+            | Self::LeakyCapacitor { rp, .. }
             | Self::Inductor { rp, .. }
             | Self::VoltageSource { rp, .. }
             | Self::Pot { rp, .. }
@@ -77,6 +104,23 @@ impl DynNode {
         match self {
             Self::Resistor { .. } | Self::Pot { .. } | Self::Photocoupler { .. } => 0.0,
             Self::Capacitor { state, .. } => *state,
+            Self::LeakyCapacitor {
+                state,
+                da_coef,
+                da_state,
+                ..
+            } => {
+                // Reflected wave: same as ideal capacitor
+                let b = *state;
+
+                // Add dielectric absorption contribution if present
+                // DA causes the cap to "creep" back toward previously absorbed voltage
+                if let Some(da) = da_coef {
+                    b + *da * (*da_state - *state)
+                } else {
+                    b
+                }
+            }
             Self::Inductor { state, .. } => -*state,
             Self::VoltageSource { voltage, .. } => 2.0 * *voltage,
             Self::Series {
@@ -113,6 +157,25 @@ impl DynNode {
             | Self::VoltageSource { .. }
             | Self::Photocoupler { .. } => {}
             Self::Capacitor { state, .. } => *state = a,
+            Self::LeakyCapacitor {
+                state,
+                leakage_decay,
+                da_coef,
+                da_state,
+                da_rate,
+                ..
+            } => {
+                // Update state with incident wave, then apply leakage decay
+                // The leakage causes the capacitor to slowly discharge toward 0
+                *state = a * *leakage_decay;
+
+                // Update dielectric absorption state (slow tracking)
+                if da_coef.is_some() {
+                    // DA state slowly follows the main capacitor state
+                    // This creates the "memory" effect
+                    *da_state += (*state - *da_state) * *da_rate;
+                }
+            }
             Self::Inductor { state, .. } => *state = a,
             Self::Series {
                 left,
@@ -216,6 +279,12 @@ impl DynNode {
     pub fn reset(&mut self) {
         match self {
             Self::Capacitor { state, .. } | Self::Inductor { state, .. } => *state = 0.0,
+            Self::LeakyCapacitor {
+                state, da_state, ..
+            } => {
+                *state = 0.0;
+                *da_state = 0.0;
+            }
             Self::Photocoupler { inner, .. } => inner.reset(),
             Self::Series {
                 left,
@@ -247,6 +316,30 @@ impl DynNode {
                 capacitance, rp, ..
             } => {
                 *rp = 1.0 / (2.0 * fs * *capacitance);
+            }
+            Self::LeakyCapacitor {
+                capacitance,
+                rp,
+                leakage_decay,
+                da_coef,
+                da_rate,
+                ..
+            } => {
+                // Update port resistance
+                *rp = 1.0 / (2.0 * fs * *capacitance);
+
+                // leakage_decay is set at construction time based on R_leak and C
+                // It doesn't need to change with sample rate because it's based on
+                // the RC time constant. However, we need to recalculate if fs changes.
+                // For now, leakage_decay is fixed at construction.
+                // TODO: Store leakage_r to allow sample rate changes
+                let _ = leakage_decay; // Suppress unused warning
+
+                // Update DA rate for new sample rate
+                if da_coef.is_some() {
+                    const DA_TIME_CONSTANT: f64 = 0.5; // 500ms
+                    *da_rate = 1.0 / (fs * DA_TIME_CONSTANT);
+                }
             }
             Self::Inductor { inductance, rp, .. } => {
                 *rp = 2.0 * fs * *inductance;

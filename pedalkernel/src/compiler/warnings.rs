@@ -106,10 +106,11 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                     });
                 }
             }
-            ComponentKind::Capacitor(farads) => {
+            ComponentKind::Capacitor(cfg) => {
+                let farads = cfg.value;
                 // Electrolytics (≥ 1µF) often have low voltage ratings.
                 // 10µF caps commonly rated 10V or 16V.
-                if *farads >= 1e-6 {
+                if farads >= 1e-6 {
                     if voltage > 16.0 {
                         warnings.push(VoltageWarning {
                             component_id: comp.id.clone(),
