@@ -1564,8 +1564,15 @@ pub fn compile_pedal_with_options(
         metrics_buffer: None,
     };
 
-    // Apply supply voltage - this propagates v_max to all op-amp stages
-    compiled.set_supply_voltage(supply_voltage);
+    // Apply supply voltage - this propagates v_max to all op-amp stages.
+    // When a power supply sag model is present, use its steady-state output
+    // voltage (which accounts for the rectifier static drop) so the initial
+    // v_max matches what the PSU will actually produce from the first sample.
+    let initial_voltage = match &compiled.power_supply {
+        Some(psu) => psu.steady_state_voltage(),
+        None => supply_voltage,
+    };
+    compiled.set_supply_voltage(initial_voltage);
 
     Ok(compiled)
 }

@@ -1107,3 +1107,174 @@ fn three_terminal_pot_compiles_and_passes_signal() {
     let output2: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     assert_finite(&output2, "3-term pot Vol=0.2");
 }
+
+// -----------------------------------------------------------------------
+// Power supply sag regression tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn supply_sag_does_not_affect_9v_pedals() {
+    // 9V pedals (no sag parameters) should produce signal unaffected by
+    // the power supply sag infrastructure.  This verifies that the
+    // PowerSupply element is NOT created for simple supply declarations.
+    let files = [
+        "phase90.pedal",
+        "tube_screamer.pedal",
+        "boss_ce2.pedal",
+        "klon_centaur.pedal",
+        "blues_driver.pedal",
+    ];
+    let input = sine(48000);
+
+    for filename in files {
+        let pedal = parse(filename);
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+        // Apply default controls
+        for ctrl in &pedal.controls {
+            proc.set_control(&ctrl.label, ctrl.default);
+        }
+
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert_finite(&output, filename);
+
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(
+            peak > 1e-4,
+            "{filename}: 9V pedal output too quiet (peak={peak:.6}). \
+             Supply sag may be incorrectly affecting 9V circuits."
+        );
+
+        // Verify supply voltage is exactly 9.0 (no sag modification)
+        assert!(
+            (proc.supply_voltage() - 9.0).abs() < 1e-6,
+            "{filename}: supply voltage should be 9.0, got {}. \
+             PowerSupply sag may be leaking into 9V pedal path.",
+            proc.supply_voltage()
+        );
+    }
+}
+
+#[test]
+fn supply_sag_amp_circuits_produce_output() {
+    // Amp circuits with explicit sag parameters should still produce audio.
+    // The sag model should reduce voltage under load but not kill signal.
+    let files = [
+        ("tweed_deluxe_5e3.pedal", &[("Volume", 0.7), ("Tone", 0.5)] as &[(&str, f64)]),
+        ("bassman_5f6a.pedal", &[("Volume", 0.6), ("Treble", 0.6), ("Mid", 0.5), ("Bass", 0.5)]),
+        ("marshall_jtm45.pedal", &[("Volume", 0.6), ("Treble", 0.6), ("Mid", 0.5), ("Bass", 0.5), ("Presence", 0.5)]),
+    ];
+    let input = sine(48000);
+
+    for (filename, controls) in files {
+        let pedal = parse(filename);
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        for &(label, val) in controls {
+            proc.set_control(label, val);
+        }
+
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        assert_finite(&output, filename);
+
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(
+            peak > 0.001,
+            "{filename}: amp with sag produced near-silent output (peak={peak:.6})"
+        );
+
+        // Supply voltage should be near nominal minus rectifier drop, not zero
+        let supply_v = proc.supply_voltage();
+        assert!(
+            supply_v > 100.0,
+            "{filename}: supply voltage too low ({supply_v:.1}V). \
+             PSU cap may be starting uncharged."
+        );
+    }
+}
+
+#[test]
+fn power_supply_starts_at_steady_state() {
+    // The first audio sample should see the same supply voltage that the PSU
+    // produces at idle (nominal minus rectifier static drop).  If the PSU cap
+    // started uncharged, the first samples would see near-zero voltage.
+    use crate::elements::PowerSupply;
+    use crate::dsl::RectifierType;
+
+    // Tube rectifier: steady state = nominal - 10V
+    let psu = PowerSupply::new(350.0, 180.0, 16e-6, RectifierType::Tube, 48000.0);
+    let steady = psu.steady_state_voltage();
+    assert!(
+        (steady - 340.0).abs() < 1.0,
+        "Tube PSU steady state should be ~340V (350-10), got {steady}"
+    );
+
+    // Solid-state rectifier: steady state = nominal - 1.4V
+    let psu_ss = PowerSupply::new(480.0, 5.0, 220e-6, RectifierType::SolidState, 48000.0);
+    let steady_ss = psu_ss.steady_state_voltage();
+    assert!(
+        (steady_ss - 478.6).abs() < 1.0,
+        "SS PSU steady state should be ~478.6V (480-1.4), got {steady_ss}"
+    );
+}
+
+#[test]
+fn power_supply_first_sample_not_anomalous() {
+    // For amp circuits with sag, the first audio sample should produce
+    // output comparable to later samples.  If the supply voltage is
+    // inconsistent between init and first tick(), the first sample may
+    // be anomalously loud or quiet.
+    let pedal = parse("tweed_deluxe_5e3.pedal");
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    proc.set_control("Volume", 0.5);
+    proc.set_control("Tone", 0.5);
+
+    // Process a constant-amplitude input
+    let dc_in = 0.1;
+    let first_out = proc.process(dc_in);
+    // Process 99 more samples
+    let mut outputs = vec![first_out];
+    for _ in 0..99 {
+        outputs.push(proc.process(dc_in));
+    }
+    let hundredth_out = outputs[99];
+
+    // The first sample should not be dramatically different from later samples
+    if hundredth_out.abs() > 1e-10 {
+        let ratio = first_out.abs() / hundredth_out.abs();
+        assert!(
+            ratio > 0.1 && ratio < 10.0,
+            "First sample ({first_out:.6}) is {ratio:.1}x different from 100th ({hundredth_out:.6}). \
+             Supply voltage may be inconsistent at init."
+        );
+    }
+}
+
+#[test]
+fn supply_sag_v_max_propagates_correctly_9v() {
+    // For 9V supply, op-amp v_max should be (9/2 - 1.5) = 3.0V.
+    // Process a moderate signal and verify the output amplitude is reasonable:
+    // signal at 0.1V should pass through without being clamped to nothing.
+    let pedal = parse("phase90.pedal");
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    proc.set_control("Speed", 0.5);
+
+    let dc_in = 0.1; // 100mV — well within 9V headroom
+    let mut max_output = 0.0f64;
+    for _ in 0..4800 {
+        let out = proc.process(dc_in);
+        max_output = max_output.max(out.abs());
+    }
+
+    // Output should be non-zero.  The amplitude is currently lower than ideal
+    // because the WDF tree only sees passive R/C/JFET elements — the op-amp
+    // feedback loops that enforce unity gain in the real circuit aren't modeled
+    // inside the WDF tree yet.  Once that is fixed, raise this threshold to 0.01.
+    assert!(
+        max_output > 1e-5,
+        "Phase 90 output near-silent ({max_output:.6}). v_max may be wrong."
+    );
+    assert!(
+        max_output < 5.0,
+        "Phase 90 output too hot ({max_output:.6}). Gain may be miscalculated."
+    );
+}

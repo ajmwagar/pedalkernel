@@ -329,6 +329,23 @@ impl PowerSupply {
     pub fn nominal_voltage(&self) -> f64 {
         self.nominal_voltage
     }
+
+    /// Get the steady-state output voltage at no load.
+    ///
+    /// This accounts for the rectifier static voltage drop that is always
+    /// present, even with zero current draw. The cap charges to nominal
+    /// voltage, but the output seen by the circuit is always reduced by the
+    /// rectifier forward voltage drop (tube: ~10V, solid-state: ~1.4V).
+    ///
+    /// Use this to initialize `set_supply_voltage()` so the first audio
+    /// sample sees the same voltage the PSU will produce at idle.
+    pub fn steady_state_voltage(&self) -> f64 {
+        let static_drop = match self.rectifier {
+            RectifierType::Tube => 10.0,
+            RectifierType::SolidState => 1.4,
+        };
+        (self.nominal_voltage - static_drop).max(0.0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +524,42 @@ mod tests {
         assert!(
             (v_48k - v_96k).abs() < 2.0,
             "sample rate shouldn't affect sag amount: 48k={v_48k}, 96k={v_96k}"
+        );
+    }
+
+    #[test]
+    fn power_supply_steady_state_matches_first_tick() {
+        // steady_state_voltage() should match the output of the first tick(0.0)
+        // call so that set_supply_voltage() initializes consistently with what
+        // the PSU will actually produce.
+        let mut psu = PowerSupply::new(350.0, 180.0, 16e-6, RectifierType::Tube, 48000.0);
+        let steady = psu.steady_state_voltage();
+        let first_tick = psu.tick(0.0);
+        assert!(
+            (steady - first_tick).abs() < 0.01,
+            "steady_state_voltage ({steady}) should match first tick ({first_tick})"
+        );
+    }
+
+    #[test]
+    fn power_supply_steady_state_solid_state() {
+        let psu = PowerSupply::new(480.0, 5.0, 220e-6, RectifierType::SolidState, 48000.0);
+        let steady = psu.steady_state_voltage();
+        assert!(
+            (steady - 478.6).abs() < 0.1,
+            "SS steady state should be ~478.6V, got {steady}"
+        );
+    }
+
+    #[test]
+    fn power_supply_steady_state_low_voltage_clamped() {
+        // A supply with very low nominal voltage should not go negative
+        // even with the static drop subtracted.
+        let psu = PowerSupply::new(5.0, 10.0, 100e-6, RectifierType::Tube, 48000.0);
+        let steady = psu.steady_state_voltage();
+        assert!(
+            steady >= 0.0,
+            "steady state should not be negative, got {steady}"
         );
     }
 }
