@@ -584,7 +584,7 @@ mod tests {
             supplies: vec![],
             components: vec![
                 ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(4700.0) },
-                ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(100e-9) },
+                ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(CapConfig::new(100e-9)) },
             ],
             nets: vec![
                 NetDef {

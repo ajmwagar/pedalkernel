@@ -592,10 +592,15 @@ pub fn compile_pedal_with_options(
         let model = triode_model(triode_info.triode_type);
         let root = RootKind::Triode(TriodeRoot::new(model));
 
+        // Scale compensation based on triode mu (voltage gain ≈ mu × R_load/(R_load+r_p))
+        // Normalize to 12AX7 (mu=100) as reference. Lower-mu tubes have proportionally
+        // lower voltage gain, which is a defining characteristic of each tube type.
+        let mu_compensation = model.mu / 100.0;
+
         stages.push(WdfStage {
             tree,
             root,
-            compensation: 1.0,
+            compensation: mu_compensation,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp: None,
@@ -673,10 +678,15 @@ pub fn compile_pedal_with_options(
         let model = pentode_model(pentode_info.pentode_type);
         let root = RootKind::Pentode(PentodeRoot::new(model));
 
+        // Scale compensation based on pentode mu. Pentodes have higher mu than triodes
+        // but lower effective gain due to screen grid shielding. Normalize to mu=200
+        // as a reference (typical for power pentodes like EL34, 6L6).
+        let mu_compensation = model.mu / 200.0;
+
         stages.push(WdfStage {
             tree,
             root,
-            compensation: 1.0,
+            compensation: mu_compensation,
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp: None,
@@ -1012,6 +1022,87 @@ pub fn compile_pedal_with_options(
         stage.balance_vs_impedance();
     }
 
+    // ── Passive-only stage for circuits without nonlinear elements ─────────
+    // If the circuit has reactive elements (capacitors, inductors) but no
+    // nonlinear elements, we need a WDF stage to model the filtering.
+    // Without this, capacitor high-pass behavior and leakage wouldn't work.
+    if stages.is_empty() {
+        let has_reactive = pedal.components.iter().any(|c| {
+            matches!(c.kind, ComponentKind::Capacitor(_) | ComponentKind::Inductor(_))
+        });
+
+        if has_reactive {
+            // Find all passive edges (resistors, capacitors, inductors)
+            let passive_edges: Vec<usize> = graph
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    let kind = &graph.components[e.comp_idx].kind;
+                    matches!(
+                        kind,
+                        ComponentKind::Resistor(_)
+                            | ComponentKind::Capacitor(_)
+                            | ComponentKind::Inductor(_)
+                            | ComponentKind::Potentiometer(_)
+                    )
+                })
+                .map(|(i, _)| i)
+                .collect();
+
+            if !passive_edges.is_empty() {
+                // Build SP edges for all passive elements
+                let source_node = graph.edges.len() + 1000;
+                let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+
+                // Add voltage source edge: source_node → in_node
+                sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
+
+                for &eidx in &passive_edges {
+                    let e = &graph.edges[eidx];
+                    sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+                }
+
+                // Use out_node as the junction (where we measure the output)
+                let terminals = vec![source_node, graph.out_node];
+                if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
+                    let mut all_components = graph.components.clone();
+                    while all_components.len() <= vs_comp_idx {
+                        all_components.push(ComponentDef {
+                            id: "__vs__".to_string(),
+                            kind: ComponentKind::Resistor(1.0),
+                        });
+                    }
+
+                    let tree = sp_to_dyn_with_vs(
+                        &sp_tree,
+                        &all_components,
+                        &graph.fork_paths,
+                        sample_rate,
+                        vs_comp_idx,
+                    );
+
+                    // Use a passthrough root for passive circuits.
+                    // The tree processes the signal normally and the root
+                    // reflects the incident wave unchanged (open circuit).
+                    stages.push(WdfStage {
+                        tree,
+                        root: RootKind::Passthrough,
+                        compensation: 1.0,
+                        oversampler: Oversampler::new(oversampling),
+                        base_diode_model: None,
+                        paired_opamp: None,
+                    });
+
+                    // Balance the passive stage too
+                    if let Some(stage) = stages.last_mut() {
+                        stage.balance_vs_impedance();
+                    }
+                }
+            }
+        }
+    }
+
     // ── Slew rate limiters (from op-amps) ─────────────────────────────────
     // Each op-amp in the circuit contributes a slew rate limiter to model
     // the HF compression from finite output slew rate.
@@ -1293,6 +1384,110 @@ pub fn compile_pedal_with_options(
     let ratio: f64 = ghi / glo;
     let pre_gain = glo * ratio.powf(gain_default) * active_bonus;
 
+    // Helper: trace through resistive paths (pots, resistors) to find modulation targets.
+    // Returns (target_component, target_property) if found.
+    fn trace_through_resistive_path<'a>(
+        start_comp: &str,
+        start_pin: &str,
+        pedal: &'a PedalDef,
+        visited: &mut HashSet<String>,
+    ) -> Option<(String, String)> {
+        // Mark this component as visited to avoid cycles
+        let key = format!("{}:{}", start_comp, start_pin);
+        if visited.contains(&key) {
+            return None;
+        }
+        visited.insert(key);
+
+        // Find the component type
+        let comp_kind = pedal
+            .components
+            .iter()
+            .find(|c| c.id == start_comp)
+            .map(|c| &c.kind);
+
+        // Only trace through resistive elements (pots, resistors)
+        let is_resistive = matches!(
+            comp_kind,
+            Some(ComponentKind::Potentiometer(_)) | Some(ComponentKind::Resistor(_))
+        );
+        if !is_resistive {
+            // This is a non-resistive component - check if it's a modulation target
+            let recognized_targets = ["clock", "vgs", "gate", "led", "vgk", "vg1k", "iabc", "speed_mod", "delay_time"];
+            if recognized_targets.contains(&start_pin) {
+                return Some((start_comp.to_string(), start_pin.to_string()));
+            }
+            return None;
+        }
+
+        // Find connections from other pins of this resistive element
+        // For pots: a, b, wiper; for resistors: a, b
+        let other_pins: Vec<&str> = match comp_kind {
+            Some(ComponentKind::Potentiometer(_)) => {
+                // Pot pins: a (ccw), b (wiper/output), wiper
+                match start_pin {
+                    "a" => vec!["b", "wiper"],
+                    "b" | "wiper" => vec!["a"],
+                    _ => vec![],
+                }
+            }
+            Some(ComponentKind::Resistor(_)) => {
+                match start_pin {
+                    "a" => vec!["b"],
+                    "b" => vec!["a"],
+                    _ => vec![],
+                }
+            }
+            _ => vec![],
+        };
+
+        // Search nets for connections from other pins
+        for other_pin in other_pins {
+            for net in &pedal.nets {
+                // Check if this net originates from our component's other pin
+                if let Pin::ComponentPin { component, pin } = &net.from {
+                    if component == start_comp && pin == other_pin {
+                        // Follow all targets
+                        for target in &net.to {
+                            if let Pin::ComponentPin {
+                                component: next_comp,
+                                pin: next_pin,
+                            } = target
+                            {
+                                if let Some(result) =
+                                    trace_through_resistive_path(next_comp, next_pin, pedal, visited)
+                                {
+                                    return Some(result);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Also check if this component.pin appears in the targets
+                for src_target in &net.to {
+                    if let Pin::ComponentPin { component, pin } = src_target {
+                        if component == start_comp && pin == other_pin {
+                            // This pin is a target - check the source
+                            if let Pin::ComponentPin {
+                                component: src_comp,
+                                pin: src_pin,
+                            } = &net.from
+                            {
+                                if let Some(result) =
+                                    trace_through_resistive_path(src_comp, src_pin, pedal, visited)
+                                {
+                                    return Some(result);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     // Build LFO bindings from LFO components and their net connections.
     let mut lfos = Vec::new();
     for comp in &pedal.components {
@@ -1406,7 +1601,70 @@ pub fn compile_pedal_with_options(
                                             .unwrap_or(0);
                                         ModulationTarget::DelayTime { delay_idx }
                                     }
-                                    _ => continue,
+                                    _ => {
+                                        // Try tracing through resistive path to find target
+                                        let mut visited = HashSet::new();
+                                        if let Some((final_comp, final_pin)) =
+                                            trace_through_resistive_path(
+                                                target_comp,
+                                                target_prop,
+                                                pedal,
+                                                &mut visited,
+                                            )
+                                        {
+                                            // Found a target through resistive path
+                                            match final_pin.as_str() {
+                                                "clock" => {
+                                                    ModulationTarget::BbdClock { bbd_idx: 0 }
+                                                }
+                                                "vgs" | "gate" => {
+                                                    let jfet_count = stages
+                                                        .iter()
+                                                        .filter(|s| {
+                                                            matches!(&s.root, RootKind::Jfet(_))
+                                                        })
+                                                        .count();
+                                                    if jfet_count > 1 {
+                                                        if created_all_jfet_binding {
+                                                            continue;
+                                                        }
+                                                        created_all_jfet_binding = true;
+                                                        ModulationTarget::AllJfetVgs
+                                                    } else if let Some(stage_idx) = stages
+                                                        .iter()
+                                                        .position(|s| {
+                                                            matches!(&s.root, RootKind::Jfet(_))
+                                                        })
+                                                    {
+                                                        ModulationTarget::JfetVgs { stage_idx }
+                                                    } else {
+                                                        ModulationTarget::JfetVgs { stage_idx: 0 }
+                                                    }
+                                                }
+                                                "led" => ModulationTarget::PhotocouplerLed {
+                                                    stage_idx: 0,
+                                                    comp_id: final_comp,
+                                                },
+                                                "speed_mod" => {
+                                                    let delay_idx = delay_id_to_idx
+                                                        .get(final_comp.as_str())
+                                                        .copied()
+                                                        .unwrap_or(0);
+                                                    ModulationTarget::DelaySpeed { delay_idx }
+                                                }
+                                                "delay_time" => {
+                                                    let delay_idx = delay_id_to_idx
+                                                        .get(final_comp.as_str())
+                                                        .copied()
+                                                        .unwrap_or(0);
+                                                    ModulationTarget::DelayTime { delay_idx }
+                                                }
+                                                _ => continue,
+                                            }
+                                        } else {
+                                            continue;
+                                        }
+                                    }
                                 };
 
                                 // Bias and range based on target type

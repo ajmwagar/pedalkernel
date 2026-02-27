@@ -94,6 +94,7 @@ fn da_cap_has_residual_voltage() {
 fn da_coefficient_scales_effect() {
     // Two DA caps: da:0.1 vs da:0.02
     // Higher DA coefficient should show more residual effect
+    // Highpass filter: output at C/R junction, not at ground
     let da_high_src = r#"
 pedal "DA High" {
   components {
@@ -102,8 +103,8 @@ pedal "DA High" {
   }
   nets {
     in -> C1.a
-    C1.b -> R1.a
-    R1.b -> out, gnd
+    C1.b -> R1.a, out
+    R1.b -> gnd
   }
 }
 "#;
@@ -115,8 +116,8 @@ pedal "DA Low" {
   }
   nets {
     in -> C1.a
-    C1.b -> R1.a
-    R1.b -> out, gnd
+    C1.b -> R1.a, out
+    R1.b -> gnd
   }
 }
 "#;
@@ -129,13 +130,29 @@ pedal "DA Low" {
     assert!(high_out.iter().all(|x| x.is_finite()));
     assert!(low_out.iter().all(|x| x.is_finite()));
 
-    // BUG: Different DA coefficients (0.1 vs 0.02) produce identical output
-    //      (corr=1.0). The DA model parameters don't affect the WDF behavior.
-    //      Higher DA should produce more residual voltage after discharge.
-    let corr = correlation(&high_out, &low_out).abs();
+    // Calculate residual energy in discharge phase
+    let step_end = (SAMPLE_RATE * 0.5) as usize;
+    let high_discharge_rms: f64 = (high_out[step_end..].iter().map(|x| x*x).sum::<f64>()
+        / (high_out.len() - step_end) as f64).sqrt();
+    let low_discharge_rms: f64 = (low_out[step_end..].iter().map(|x| x*x).sum::<f64>()
+        / (low_out.len() - step_end) as f64).sqrt();
+
+    // DA causes the capacitor to "remember" its previous charge and resist changes.
+    // Higher DA means the cap holds its charge better during discharge:
+    // - High DA (0.1): cap retains charge → less current through R → lower output
+    // - Low DA (0.02): cap releases more → more current through R → higher output
+
+    // Higher DA should produce LESS discharge output (cap holds charge better)
     assert!(
-        corr < 0.999,
-        "DA coefficient 0.1 vs 0.02 should produce different output: corr={corr:.6}"
+        high_discharge_rms < low_discharge_rms,
+        "Higher DA should produce less discharge output: high_rms={high_discharge_rms:.8} vs low_rms={low_discharge_rms:.8}"
+    );
+
+    // The ratio should reflect the DA coefficient difference (~5x)
+    let ratio = low_discharge_rms / high_discharge_rms;
+    assert!(
+        ratio > 2.0,
+        "DA coefficient 5x difference (0.1 vs 0.02) should produce >2x RMS difference: ratio={ratio:.4}"
     );
 }
 

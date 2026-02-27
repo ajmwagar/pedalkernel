@@ -8,7 +8,7 @@ pedal "Ideal Cap Reference" {
   }
   nets {
     in -> C1.a
-    C1.b -> R1.a
-    R1.b -> out, gnd
+    C1.b -> R1.a, out
+    R1.b -> gnd
   }
 }

@@ -100,10 +100,8 @@ pub(super) fn pentode_model(pt: PentodeType) -> PentodeModel {
     match pt {
         PentodeType::Ef86 => PentodeModel::p_ef86(),
         PentodeType::El84 => PentodeModel::p_el84(),
-        // 6AQ5A is a beam power tube similar to EL84, use that model as approximation
-        PentodeType::A6aq5a => PentodeModel::p_el84(),
-        // 6973 is a 9W beam power tube similar to EL84, used in Fairchild 670 sidechain
-        PentodeType::A6973 => PentodeModel::p_el84(),
+        PentodeType::A6aq5a => PentodeModel::p_6aq5a(),
+        PentodeType::A6973 => PentodeModel::p_6973(),
         PentodeType::A6l6gc => PentodeModel::p_6l6gc(),
         PentodeType::El34 => PentodeModel::p_el34(),
         PentodeType::A6550 => PentodeModel::p_6550(),

@@ -28,6 +28,11 @@ pub(super) enum RootKind {
     /// PNP BJT transistor (2N3906, AC128, NKT275, etc.).
     /// Modeled with Ebers-Moll equations.
     BjtPnp(BjtPnpRoot),
+    /// Passthrough (transparent) root for passive-only circuits.
+    /// Models an open-circuit termination: b = a (reflected = incident).
+    /// Used when the circuit has reactive elements (caps/inductors) but no
+    /// nonlinear elements, allowing the WDF tree to process the filtering.
+    Passthrough,
 }
 
 impl RootKind {
@@ -104,6 +109,12 @@ impl WdfStage {
                 RootKind::OpAmp(op) => op.process(b_tree, rp),
                 RootKind::BjtNpn(bjt) => bjt.process(b_tree, rp),
                 RootKind::BjtPnp(bjt) => bjt.process(b_tree, rp),
+                // Passthrough: open-circuit termination (b = a)
+                // The tree processes normally but the root just reflects.
+                RootKind::Passthrough => {
+                    let _ = rp; // Unused for passthrough
+                    b_tree // Reflect incident wave unchanged
+                }
             };
             tree.set_incident(a_root);
             (a_root + b_tree) / 2.0

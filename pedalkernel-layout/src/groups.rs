@@ -504,12 +504,12 @@ mod tests {
             name: "Test".into(),
             supplies: vec![],
             components: vec![
-                ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(100e-9) },
+                ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(CapConfig::new(100e-9)) },
                 ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(1e6) },
                 ComponentDef { id: "V1".into(), kind: ComponentKind::Triode(TriodeType::T12ax7) },
                 ComponentDef { id: "R2".into(), kind: ComponentKind::Resistor(100e3) },
                 ComponentDef { id: "R3".into(), kind: ComponentKind::Resistor(1500.0) },
-                ComponentDef { id: "C2".into(), kind: ComponentKind::Capacitor(25e-6) },
+                ComponentDef { id: "C2".into(), kind: ComponentKind::Capacitor(CapConfig::new(25e-6)) },
             ],
             nets: vec![
                 NetDef {

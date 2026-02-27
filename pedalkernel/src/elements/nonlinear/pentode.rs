@@ -155,6 +155,50 @@ impl PentodeModel {
             vg2_default: 450.0,
         }
     }
+
+    /// 6AQ5A / 6005 — Small beam power tetrode.
+    ///
+    /// A miniature power tube used in small amps like the Gibson GA-5,
+    /// Fender Champ (early), and various portable amplifiers.
+    /// Lower power (9W max plate dissipation) but musical breakup.
+    ///
+    /// Typical operating point: Va=180-250V, Vg2=180-250V, Vg1=-12.5V.
+    /// Lower mu than EL84 (≈10-12 vs 19) and different plate curves.
+    ///
+    /// Koren model parameters derived from curve fitting:
+    /// mu=11.0, kp=450.0, kvb=180.0, ex=1.3
+    pub fn p_6aq5a() -> Self {
+        Self {
+            mu: 11.0,
+            kp: 450.0,
+            kvb: 180.0,
+            ex: 1.3,
+            kvb2: 15.0,
+            vg2_default: 180.0,
+        }
+    }
+
+    /// 6973 — Beam power tetrode.
+    ///
+    /// A unique 9-pin power tube used in some Valco/Supro amps and the
+    /// Fairchild 670 limiter's sidechain. Higher transconductance than
+    /// 6AQ5A, different harmonic character from EL84.
+    ///
+    /// Typical operating point: Va=350V, Vg2=350V, Vg1=-15V.
+    /// Max plate dissipation: 9W. Notable for spongy, compressed feel.
+    ///
+    /// Koren model parameters:
+    /// mu=14.0, kp=520.0, kvb=220.0, ex=1.35
+    pub fn p_6973() -> Self {
+        Self {
+            mu: 14.0,
+            kp: 520.0,
+            kvb: 220.0,
+            ex: 1.35,
+            kvb2: 18.0,
+            vg2_default: 350.0,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +499,65 @@ mod tests {
         assert!(
             ip_cutoff < ip_operating * 0.1,
             "6550 at Vg1=-120V ({ip_cutoff}) should be <10% of operating point ({ip_operating})"
+        );
+    }
+
+    // ── 6AQ5A tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn p_6aq5a_positive_current_at_operating_point() {
+        // Typical 6AQ5A operating point: Vg1=-12.5V, Vg2=180V, Vp=180V
+        let ip = plate_current_at(PentodeModel::p_6aq5a(), -12.5, 180.0, 180.0);
+        assert!(ip > 0.0, "6AQ5A should conduct at operating point, got {ip}");
+        assert!(ip.is_finite(), "6AQ5A plate current must be finite");
+    }
+
+    #[test]
+    fn p_6aq5a_differs_from_el84() {
+        // At similar operating conditions, 6AQ5A and EL84 should produce different currents
+        let ip_6aq5a = plate_current_at(PentodeModel::p_6aq5a(), -10.0, 200.0, 200.0);
+        let ip_el84 = plate_current_at(PentodeModel::p_el84(), -10.0, 200.0, 200.0);
+        assert!(ip_6aq5a > 0.0 && ip_6aq5a.is_finite());
+        assert!(ip_el84 > 0.0 && ip_el84.is_finite());
+        assert!(
+            (ip_6aq5a - ip_el84).abs() / ip_6aq5a.max(ip_el84) > 0.05,
+            "6AQ5A ({ip_6aq5a}) and EL84 ({ip_el84}) should have >5% difference"
+        );
+    }
+
+    // ── 6973 tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn p_6973_positive_current_at_operating_point() {
+        // Typical 6973 operating point: Vg1=-15V, Vg2=350V, Vp=350V
+        let ip = plate_current_at(PentodeModel::p_6973(), -15.0, 350.0, 350.0);
+        assert!(ip > 0.0, "6973 should conduct at operating point, got {ip}");
+        assert!(ip.is_finite(), "6973 plate current must be finite");
+    }
+
+    #[test]
+    fn p_6973_differs_from_el84_and_6aq5a() {
+        // All three should have distinct characteristics
+        let ip_6973 = plate_current_at(PentodeModel::p_6973(), -12.0, 250.0, 250.0);
+        let ip_el84 = plate_current_at(PentodeModel::p_el84(), -12.0, 250.0, 250.0);
+        let ip_6aq5a = plate_current_at(PentodeModel::p_6aq5a(), -12.0, 250.0, 250.0);
+
+        assert!(ip_6973 > 0.0 && ip_6973.is_finite());
+        assert!(ip_el84 > 0.0 && ip_el84.is_finite());
+        assert!(ip_6aq5a > 0.0 && ip_6aq5a.is_finite());
+
+        // They should all differ from each other
+        assert!(
+            (ip_6973 - ip_el84).abs() > 1e-6,
+            "6973 ({ip_6973}) and EL84 ({ip_el84}) should differ"
+        );
+        assert!(
+            (ip_6973 - ip_6aq5a).abs() > 1e-6,
+            "6973 ({ip_6973}) and 6AQ5A ({ip_6aq5a}) should differ"
+        );
+        assert!(
+            (ip_el84 - ip_6aq5a).abs() > 1e-6,
+            "EL84 ({ip_el84}) and 6AQ5A ({ip_6aq5a}) should differ"
         );
     }
 

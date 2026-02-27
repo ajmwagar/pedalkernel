@@ -11,7 +11,7 @@ fn tube_screamer_pedal() -> PedalDef {
         name: "Tube Screamer".into(),
         supplies: vec![],
         components: vec![
-            ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(100e-9) },
+            ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(CapConfig::new(100e-9)) },
             ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(510e3) },
             ComponentDef { id: "U1".into(), kind: ComponentKind::OpAmp(OpAmpType::Jrc4558) },
             ComponentDef { id: "R3".into(), kind: ComponentKind::Resistor(4700.0) },
@@ -21,7 +21,7 @@ fn tube_screamer_pedal() -> PedalDef {
             ComponentDef { id: "D1".into(), kind: ComponentKind::Diode(DiodeType::Silicon) },
             ComponentDef { id: "D2".into(), kind: ComponentKind::Diode(DiodeType::Silicon) },
             ComponentDef { id: "Tone".into(), kind: ComponentKind::Potentiometer(20e3) },
-            ComponentDef { id: "C4".into(), kind: ComponentKind::Capacitor(220e-9) },
+            ComponentDef { id: "C4".into(), kind: ComponentKind::Capacitor(CapConfig::new(220e-9)) },
             ComponentDef { id: "Level".into(), kind: ComponentKind::Potentiometer(100e3) },
             ComponentDef { id: "R7".into(), kind: ComponentKind::Resistor(10e3) },
         ],
@@ -136,13 +136,13 @@ fn triode_gain_stage() -> PedalDef {
         name: "Triode Stage".into(),
         supplies: vec![NamedSupply::new("vcc", 350.0)],
         components: vec![
-            ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(20e-9) },
+            ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(CapConfig::new(20e-9)) },
             ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(1e6) },
             ComponentDef { id: "V1".into(), kind: ComponentKind::Triode(TriodeType::T12ax7) },
             ComponentDef { id: "R2".into(), kind: ComponentKind::Resistor(100e3) },
             ComponentDef { id: "R3".into(), kind: ComponentKind::Resistor(1500.0) },
-            ComponentDef { id: "C2".into(), kind: ComponentKind::Capacitor(25e-6) },
-            ComponentDef { id: "C3".into(), kind: ComponentKind::Capacitor(22e-9) },
+            ComponentDef { id: "C2".into(), kind: ComponentKind::Capacitor(CapConfig::new(25e-6)) },
+            ComponentDef { id: "C3".into(), kind: ComponentKind::Capacitor(CapConfig::new(22e-9)) },
         ],
         nets: vec![
             NetDef {

@@ -1633,3 +1633,58 @@ pedal "Infinite Resistance Test" {
         }
     }
 }
+
+// -----------------------------------------------------------------------
+// Passive-only circuit (RC highpass) creates WDF stage
+// -----------------------------------------------------------------------
+
+#[test]
+fn passive_rc_circuit_creates_stage() {
+    // Simple RC highpass: no nonlinear elements, but should still create
+    // a WDF stage to model the capacitor's highpass behavior.
+    // Output at C/R junction (highpass filter topology)
+    let src = r#"
+pedal "RC Highpass" {
+  components {
+    C1: cap(1u)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, out
+    R1.b -> gnd
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Should have exactly one (passthrough) stage
+    assert_eq!(proc.stages.len(), 1, "Passive RC should create 1 WDF stage");
+
+    // Process a step input and check for highpass behavior
+    let mut p = proc;
+    let mut output = Vec::new();
+    for i in 0..4800 {
+        let input = if i < 2400 { 0.5 } else { 0.0 };
+        output.push(p.process(input));
+    }
+
+    // Highpass: DC should be blocked, but transients should pass
+    let dc_portion = &output[1000..2000]; // After initial transient, during DC
+    let dc_rms: f64 = (dc_portion.iter().map(|x| x * x).sum::<f64>() / dc_portion.len() as f64).sqrt();
+
+    // DC should be heavily attenuated (RC time constant = 10ms)
+    assert!(
+        dc_rms < 0.1,
+        "DC should be blocked by highpass: dc_rms={dc_rms:.6}"
+    );
+
+    // Initial transient should have passed some signal
+    let transient = &output[0..100];
+    let transient_peak = transient.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    assert!(
+        transient_peak > 0.01,
+        "Highpass should pass initial transient: peak={transient_peak:.6}"
+    );
+}
