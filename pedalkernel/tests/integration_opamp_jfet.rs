@@ -62,27 +62,28 @@ fn opamp_buffer_bounded_by_rails() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn opamp_gain_stage_produces_output() {
-    // Inverting amp with Rf/Ri = 47k/4.7k = 10. The OpAmpRoot element
-    // models VCVS behavior with the feedback network. Use small input
+fn opamp_gain_stage_amplifies() {
+    // Inverting amp with Rf/Ri = 47k/4.7k = 10. Use small input
     // so the output stays within the 9V rail headroom.
+    //
+    // BUG: The OpAmpRoot variant is never constructed by the compiler
+    //      (see warning: "variant `OpAmp` is never constructed").
+    //      Op-amps are treated as bridge edges for graph connectivity
+    //      but don't process signal in the WDF tree, so this circuit
+    //      produces attenuated output instead of gain ≈ 10.
     let input = sine_at(440.0, 0.05, 0.2, SAMPLE_RATE);
     let output = compile_test_pedal_and_process("opamp_gain.pedal", &input, SAMPLE_RATE, &[]);
 
     assert_healthy(&output, "JRC4558 gain", 5.0);
 
-    // The output should have measurable signal
+    let in_rms = rms(&input);
     let out_rms = rms(&output);
-    assert!(
-        out_rms > 1e-6,
-        "Gain stage should produce output: out_rms={out_rms:.6}"
-    );
 
-    // The gain stage should modify the signal (not just pass through)
-    let corr = correlation(&input, &output).abs();
+    // With Rf/Ri = 10, the gain stage should amplify by approximately 10x.
+    // Allow margin for WDF loss, but output must exceed input.
     assert!(
-        corr < 0.9999 || out_rms > rms(&input) * 0.5,
-        "Gain stage should affect signal: corr={corr:.6}"
+        out_rms > in_rms,
+        "Op-amp gain stage (Rf/Ri=10) should amplify: out_rms={out_rms:.6}, in_rms={in_rms:.6}"
     );
 }
 

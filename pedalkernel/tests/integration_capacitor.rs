@@ -40,10 +40,14 @@ fn leaky_cap_decays_faster_than_ideal() {
     let ideal_e = energy(ideal_discharge);
     let leaky_e = energy(leaky_discharge);
 
-    // Leaky cap should have less energy in discharge (decays faster)
+    // BUG: Leaky cap (1kΩ parallel resistance) produces identical output
+    //      to ideal cap (corr=1.0). The capacitor leakage model may not be
+    //      wired into the WDF element correctly.
+    //      With 1kΩ leakage on a 10µF cap, the RC discharge time constant
+    //      is just 10ms — it should decay dramatically faster.
     assert!(
-        leaky_e < ideal_e * 0.99 || (ideal_e < 1e-10 && leaky_e < 1e-10),
-        "Leaky cap should decay faster: ideal_energy={ideal_e:.8}, leaky_energy={leaky_e:.8}"
+        leaky_e < ideal_e * 0.99,
+        "Leaky cap (1kΩ) should decay faster than ideal: ideal_energy={ideal_e:.8}, leaky_energy={leaky_e:.8}"
     );
 }
 
@@ -125,14 +129,13 @@ pedal "DA Low" {
     assert!(high_out.iter().all(|x| x.is_finite()));
     assert!(low_out.iter().all(|x| x.is_finite()));
 
-    // Both should produce valid output. The DA model applies a subtle
-    // effect that may or may not be large enough to change correlation
-    // at the macro level, so we verify both compile and produce signal.
-    let high_rms = rms(&high_out);
-    let low_rms = rms(&low_out);
+    // BUG: Different DA coefficients (0.1 vs 0.02) produce identical output
+    //      (corr=1.0). The DA model parameters don't affect the WDF behavior.
+    //      Higher DA should produce more residual voltage after discharge.
+    let corr = correlation(&high_out, &low_out).abs();
     assert!(
-        high_rms > 1e-10 || low_rms > 1e-10,
-        "DA caps should produce output: high_rms={high_rms:.8}, low_rms={low_rms:.8}"
+        corr < 0.999,
+        "DA coefficient 0.1 vs 0.02 should produce different output: corr={corr:.6}"
     );
 }
 

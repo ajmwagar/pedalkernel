@@ -74,6 +74,9 @@ fn lfo_all_waveforms_modulate() {
 
 #[test]
 fn phase90_speed_changes_rate() {
+    // BUG: The Speed control (pot → LFO.rate) doesn't affect the
+    //      compiled model output. Slow and fast produce identical output
+    //      (corr=1.0), indicating the control-to-LFO-rate routing is broken.
     let input = sine(440.0, 2.0, SAMPLE_RATE);
 
     let slow = compile_example_and_process(
@@ -89,17 +92,14 @@ fn phase90_speed_changes_rate() {
         &[("Speed", 0.8)],
     );
 
-    // Both should produce valid output.
-    // The Speed control routes through pot → LFO.rate. If the control
-    // path doesn't modulate the LFO rate in the compiled model, the
-    // outputs may be identical — that would indicate a routing issue
-    // worth investigating, but shouldn't crash the test.
     assert!(slow.iter().all(|x| x.is_finite()), "Slow: NaN/inf");
     assert!(fast.iter().all(|x| x.is_finite()), "Fast: NaN/inf");
-    let slow_rms = rms(&slow);
-    let fast_rms = rms(&fast);
-    assert!(slow_rms > 1e-6, "Slow should produce output");
-    assert!(fast_rms > 1e-6, "Fast should produce output");
+
+    let corr = correlation(&slow, &fast).abs();
+    assert!(
+        corr < 0.999,
+        "Phase 90 Speed control should change sweep rate: corr={corr:.6} (identical output = routing bug)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -137,18 +137,16 @@ fn lfo_modulated_phaser_sweeps_spectrum() {
     } else {
         0.0
     };
-    // Any measurable variation in centroid shows the phaser is sweeping.
-    // Even very small variation (0.01%) proves notch movement.
-    // If range is effectively zero, the LFO may not be modulating the JFETs
-    // strongly enough — still a valid result worth logging.
-    assert!(
-        range >= 0.0, // Always true; the real check is that we get here without NaN
-        "Phaser centroid data: centroids={centroids:?}, range={range:.6}"
-    );
-    // Verify all centroids are finite
+    // BUG: The phaser sweep produces near-zero centroid variation (range ≈ 0.0005).
+    //      A real 4-stage phaser with LFO modulating JFET Rds should produce
+    //      significant spectral movement (range > 1%).
     assert!(
         centroids.iter().all(|c| c.is_finite()),
         "Phaser centroids should be finite"
+    );
+    assert!(
+        range > 0.01,
+        "Phaser sweep should cause >1% spectral centroid variation: range={range:.6}, centroids={centroids:?}"
     );
 }
 

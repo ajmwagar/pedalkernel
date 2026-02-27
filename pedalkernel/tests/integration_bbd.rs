@@ -176,6 +176,39 @@ fn boss_ce2_depth_affects_output() {
 }
 
 // ---------------------------------------------------------------------------
+// CE-2 Rate control
+// ---------------------------------------------------------------------------
+
+#[test]
+fn boss_ce2_rate_affects_output() {
+    // BUG: The Rate control doesn't change CE-2 output (corr=1.0).
+    //      Same issue as Phase 90 Speed — pot → LFO.rate routing is broken.
+    let input = sine(440.0, 2.0, SAMPLE_RATE);
+
+    let slow = compile_example_and_process(
+        "boss_ce2.pedal",
+        &input,
+        SAMPLE_RATE,
+        &[("Rate", 0.1), ("Depth", 0.5)],
+    );
+    let fast = compile_example_and_process(
+        "boss_ce2.pedal",
+        &input,
+        SAMPLE_RATE,
+        &[("Rate", 0.9), ("Depth", 0.5)],
+    );
+
+    assert!(slow.iter().all(|x| x.is_finite()), "Slow: NaN/inf");
+    assert!(fast.iter().all(|x| x.is_finite()), "Fast: NaN/inf");
+
+    let corr = correlation(&slow, &fast).abs();
+    assert!(
+        corr < 0.999,
+        "CE-2 Rate control should change chorus speed: corr={corr:.6} (identical output = routing bug)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // All BBD models stable
 // ---------------------------------------------------------------------------
 

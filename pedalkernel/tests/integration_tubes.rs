@@ -370,6 +370,67 @@ fn pentode_variants_diagnostic_comparison() {
 }
 
 // ===========================================================================
+// BUG: Triode variants nearly indistinguishable (corr ≥ 0.9999)
+// ===========================================================================
+
+#[test]
+fn triode_variants_produce_distinguishable_output() {
+    // BUG: All triode variants (12AX7, 12AT7, 12AU7, 12AY7, 12BH7, 6386)
+    //      produce nearly identical output (pairwise corr ≥ 0.9999).
+    //      Despite having very different mu values (20–100) and plate
+    //      resistance, the WDF triode model doesn't differentiate them.
+    //      12AX7 (mu=100) vs 12AU7 (mu=20) should sound distinctly different.
+    let input = sine(440.0, 0.3, SAMPLE_RATE);
+
+    let ax7 = compile_test_pedal_and_process("triode_overdrive.pedal", &input, SAMPLE_RATE, &[]);
+    let au7 = compile_test_pedal_and_process("triode_clean.pedal", &input, SAMPLE_RATE, &[]);
+    let at7 = compile_test_pedal_and_process("triode_12at7.pedal", &input, SAMPLE_RATE, &[]);
+
+    // 12AX7 (mu=100) vs 12AU7 (mu=20) should have correlation well below 1.0
+    let corr_ax7_au7 = correlation(&ax7, &au7).abs();
+    assert!(
+        corr_ax7_au7 < 0.999,
+        "12AX7 vs 12AU7 should differ (mu=100 vs mu=20): corr={corr_ax7_au7:.6}"
+    );
+
+    // 12AT7 (mu=60) should differ from both
+    let corr_ax7_at7 = correlation(&ax7, &at7).abs();
+    assert!(
+        corr_ax7_at7 < 0.999,
+        "12AX7 vs 12AT7 should differ (mu=100 vs mu=60): corr={corr_ax7_at7:.6}"
+    );
+}
+
+// ===========================================================================
+// BUG: EL84/6AQ5A/6973 pentodes bit-identical (corr = 1.0)
+// ===========================================================================
+
+#[test]
+fn pentode_power_variants_distinguishable() {
+    // BUG: EL84, 6AQ5A, and 6973 produce bit-identical output (corr=1.0).
+    //      These are physically different tubes with different power ratings,
+    //      plate characteristics, and transconductance values.
+    //      The pentode model likely uses the same parameters for all three.
+    let input = sine(440.0, 0.3, SAMPLE_RATE);
+
+    let el84 = compile_test_pedal_and_process("pentode_el84.pedal", &input, SAMPLE_RATE, &[]);
+    let aq5a = compile_test_pedal_and_process("pentode_6aq5a.pedal", &input, SAMPLE_RATE, &[]);
+    let p6973 = compile_test_pedal_and_process("pentode_6973.pedal", &input, SAMPLE_RATE, &[]);
+
+    let corr_el84_aq5a = correlation(&el84, &aq5a).abs();
+    let corr_el84_6973 = correlation(&el84, &p6973).abs();
+
+    assert!(
+        corr_el84_aq5a < 0.9999,
+        "EL84 vs 6AQ5A should differ: corr={corr_el84_aq5a:.8} (bit-identical = model bug)"
+    );
+    assert!(
+        corr_el84_6973 < 0.9999,
+        "EL84 vs 6973 should differ: corr={corr_el84_6973:.8} (bit-identical = model bug)"
+    );
+}
+
+// ===========================================================================
 // Full amp models with guitar input
 // ===========================================================================
 

@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::sync::LazyLock;
 
-use pedalkernel::compiler::compile_pedal;
+use pedalkernel::compiler::{compile_pedal, compile_pedal_with_options, CompileOptions};
 use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::wav::{read_wav_mono, write_wav};
 use pedalkernel::PedalProcessor;
@@ -326,6 +326,54 @@ pub fn compile_and_process(
         proc.set_control(label, val);
     }
     input.iter().map(|&s| proc.process(s)).collect()
+}
+
+/// Compile a .pedal source string with custom options and process input.
+pub fn compile_and_process_with_options(
+    pedal_src: &str,
+    input: &[f64],
+    sample_rate: f64,
+    controls: &[(&str, f64)],
+    options: CompileOptions,
+) -> Vec<f64> {
+    let pedal = parse_pedal_file(pedal_src).expect("failed to parse pedal source");
+    let mut proc =
+        compile_pedal_with_options(&pedal, sample_rate, options).expect("failed to compile pedal");
+    for &(label, val) in controls {
+        proc.set_control(label, val);
+    }
+    input.iter().map(|&s| proc.process(s)).collect()
+}
+
+/// Load a .pedal file from tests/test_pedals/ and process with custom options.
+pub fn compile_test_pedal_with_options(
+    filename: &str,
+    input: &[f64],
+    sample_rate: f64,
+    controls: &[(&str, f64)],
+    options: CompileOptions,
+) -> Vec<f64> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/test_pedals")
+        .join(filename);
+    let src = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    compile_and_process_with_options(&src, input, sample_rate, controls, options)
+}
+
+/// Load an example .pedal file and process with custom options.
+pub fn compile_example_with_options(
+    filename: &str,
+    input: &[f64],
+    sample_rate: f64,
+    controls: &[(&str, f64)],
+    options: CompileOptions,
+) -> Vec<f64> {
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let path = find_file_recursive(&examples_dir, filename)
+        .unwrap_or_else(|| panic!("example file not found: {filename}"));
+    let src = std::fs::read_to_string(&path).unwrap();
+    compile_and_process_with_options(&src, input, sample_rate, controls, options)
 }
 
 /// Load a .pedal file from tests/test_pedals/ and process input through it.

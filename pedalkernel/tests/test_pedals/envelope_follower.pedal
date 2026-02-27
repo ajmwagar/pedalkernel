@@ -1,0 +1,23 @@
+# Envelope follower test
+# Tests attack/release envelope detection
+
+pedal "Envelope Follower Test" {
+  components {
+    C1: cap(100n)
+    R1: resistor(100k)
+    EF1: envelope_follower(10k, 1u, 100k, 10u, 10k)
+    R2: resistor(10k)
+    C2: cap(100n)
+    R3: resistor(100k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, EF1.in
+    R1.b -> gnd
+    EF1.out -> R2.a
+    R2.b -> C2.a
+    C2.b -> R3.a
+    R3.b -> gnd
+    C2.b -> out
+  }
+}

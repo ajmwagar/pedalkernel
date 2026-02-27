@@ -1,0 +1,24 @@
+# CA3080 — OTA (Operational Transconductance Amplifier)
+# Simple OTA buffer/follower test circuit
+
+pedal "OTA CA3080 Test" {
+  components {
+    C1: cap(1u)
+    R1: resistor(10k)
+    U1: opamp(ca3080)
+    R2: resistor(150k)
+    C2: cap(100n)
+    R3: resistor(100k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> U1.pos
+    U1.neg -> R2.a
+    R2.b -> U1.out
+    U1.out -> C2.a
+    C2.b -> R3.a
+    R3.b -> gnd
+    C2.b -> out
+  }
+}
