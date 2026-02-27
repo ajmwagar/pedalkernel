@@ -399,6 +399,10 @@ fn pin_to_string(pin: &Pin) -> String {
     match pin {
         Pin::Reserved(n) => n.clone(),
         Pin::ComponentPin { component, pin } => format!("{component}.{pin}"),
+        Pin::Fork { switch, destinations } => {
+            let dests: Vec<_> = destinations.iter().map(pin_to_string).collect();
+            format!("fork({}, [{}])", switch, dests.join(", "))
+        }
     }
 }
 
@@ -567,7 +571,7 @@ mod tests {
                 },
             ],
             controls: vec![],
-            supply: None,
+            supplies: vec![],
             trims: vec![],
             monitors: vec![],
         };

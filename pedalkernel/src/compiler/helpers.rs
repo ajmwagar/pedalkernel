@@ -1,15 +1,18 @@
 //! Model conversion helpers and WDF tree utilities.
 
+use std::collections::HashMap;
+
 use crate::dsl::*;
 use crate::elements::*;
 
 use super::dyn_node::DynNode;
-use super::graph::{SpTree, make_leaf};
+use super::graph::{ForkPathInfo, SpTree, make_leaf};
 
 /// Convert SP tree to DynNode, inserting a VoltageSource for the virtual leaf.
 pub(super) fn sp_to_dyn_with_vs(
     tree: &SpTree,
     components: &[ComponentDef],
+    fork_paths: &HashMap<usize, ForkPathInfo>,
     sample_rate: f64,
     vs_idx: usize,
 ) -> DynNode {
@@ -18,10 +21,10 @@ pub(super) fn sp_to_dyn_with_vs(
             voltage: 0.0,
             rp: 1.0,
         },
-        SpTree::Leaf(idx) => make_leaf(&components[*idx], sample_rate),
+        SpTree::Leaf(idx) => make_leaf(*idx, &components[*idx], fork_paths.get(idx), sample_rate),
         SpTree::Series(left, right) => {
-            let l = sp_to_dyn_with_vs(left, components, sample_rate, vs_idx);
-            let r = sp_to_dyn_with_vs(right, components, sample_rate, vs_idx);
+            let l = sp_to_dyn_with_vs(left, components, fork_paths, sample_rate, vs_idx);
+            let r = sp_to_dyn_with_vs(right, components, fork_paths, sample_rate, vs_idx);
             let r1 = l.port_resistance();
             let r2 = r.port_resistance();
             let rp = r1 + r2;
@@ -35,8 +38,8 @@ pub(super) fn sp_to_dyn_with_vs(
             }
         }
         SpTree::Parallel(left, right) => {
-            let l = sp_to_dyn_with_vs(left, components, sample_rate, vs_idx);
-            let r = sp_to_dyn_with_vs(right, components, sample_rate, vs_idx);
+            let l = sp_to_dyn_with_vs(left, components, fork_paths, sample_rate, vs_idx);
+            let r = sp_to_dyn_with_vs(right, components, fork_paths, sample_rate, vs_idx);
             let r1 = l.port_resistance();
             let r2 = r.port_resistance();
             let rp = r1 * r2 / (r1 + r2);

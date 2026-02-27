@@ -279,7 +279,7 @@ pub fn compile_pedal_with_options(
             });
         }
 
-        let tree = sp_to_dyn_with_vs(&sp_tree, &all_components, sample_rate, vs_comp_idx);
+        let tree = sp_to_dyn_with_vs(&sp_tree, &all_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = diode_model(diode_info.diode_type);
         let root = if diode_info.is_pair {
@@ -409,7 +409,7 @@ pub fn compile_pedal_with_options(
             });
         }
 
-        let tree = sp_to_dyn_with_vs(&sp_tree, &jfet_components, sample_rate, vs_comp_idx);
+        let tree = sp_to_dyn_with_vs(&sp_tree, &jfet_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = jfet_model(jfet_info.jfet_type, jfet_info.is_n_channel);
         let root = RootKind::Jfet(JfetRoot::new(model));
@@ -500,7 +500,7 @@ pub fn compile_pedal_with_options(
             });
         }
 
-        let tree = sp_to_dyn_with_vs(&sp_tree, &bjt_components, sample_rate, vs_comp_idx);
+        let tree = sp_to_dyn_with_vs(&sp_tree, &bjt_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = BjtModel::from_bjt_type(&bjt_info.bjt_type);
         let root = if bjt_info.is_npn {
@@ -587,7 +587,7 @@ pub fn compile_pedal_with_options(
             });
         }
 
-        let tree = sp_to_dyn_with_vs(&sp_tree, &triode_components, sample_rate, vs_comp_idx);
+        let tree = sp_to_dyn_with_vs(&sp_tree, &triode_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = triode_model(triode_info.triode_type);
         let root = RootKind::Triode(TriodeRoot::new(model));
@@ -668,7 +668,7 @@ pub fn compile_pedal_with_options(
             });
         }
 
-        let tree = sp_to_dyn_with_vs(&sp_tree, &pentode_components, sample_rate, vs_comp_idx);
+        let tree = sp_to_dyn_with_vs(&sp_tree, &pentode_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = pentode_model(pentode_info.pentode_type);
         let root = RootKind::Pentode(PentodeRoot::new(model));
@@ -747,7 +747,7 @@ pub fn compile_pedal_with_options(
             });
         }
 
-        let tree = sp_to_dyn_with_vs(&sp_tree, &mosfet_components, sample_rate, vs_comp_idx);
+        let tree = sp_to_dyn_with_vs(&sp_tree, &mosfet_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = mosfet_model(mosfet_info.mosfet_type, mosfet_info.is_n_channel);
         let root = RootKind::Mosfet(MosfetRoot::new(model));
@@ -826,7 +826,7 @@ pub fn compile_pedal_with_options(
             });
         }
 
-        let tree = sp_to_dyn_with_vs(&sp_tree, &zener_components, sample_rate, vs_comp_idx);
+        let tree = sp_to_dyn_with_vs(&sp_tree, &zener_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = ZenerModel::new(zener_info.voltage);
         let root = RootKind::Zener(ZenerRoot::new(model));
@@ -905,7 +905,7 @@ pub fn compile_pedal_with_options(
             });
         }
 
-        let tree = sp_to_dyn_with_vs(&sp_tree, &ota_components, sample_rate, vs_comp_idx);
+        let tree = sp_to_dyn_with_vs(&sp_tree, &ota_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = OtaModel::ca3080();
         let root = RootKind::Ota(OtaRoot::new(model));
@@ -989,7 +989,7 @@ pub fn compile_pedal_with_options(
             });
         }
 
-        let tree = sp_to_dyn_with_vs(&sp_tree, &zener_components, sample_rate, vs_comp_idx);
+        let tree = sp_to_dyn_with_vs(&sp_tree, &zener_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = ZenerModel::with_voltage(zener_info.voltage);
         let root = RootKind::Zener(ZenerRoot::new(model));
@@ -1163,7 +1163,22 @@ pub fn compile_pedal_with_options(
     // Build control bindings.
     let mut controls = Vec::new();
     for ctrl in &pedal.controls {
-        let target = if is_gain_label(&ctrl.label) {
+        // First check if this control targets a Switch/RotarySwitch component
+        let switch_info = pedal.components.iter().find_map(|c| {
+            if c.id == ctrl.component {
+                match &c.kind {
+                    ComponentKind::Switch(positions) => Some((c.id.clone(), *positions)),
+                    ComponentKind::RotarySwitch(labels) => Some((c.id.clone(), labels.len())),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        });
+
+        let target = if let Some((switch_id, num_positions)) = switch_info {
+            ControlTarget::SwitchPosition { switch_id, num_positions }
+        } else if is_gain_label(&ctrl.label) {
             ControlTarget::PreGain
         } else if is_level_label(&ctrl.label) {
             ControlTarget::OutputGain
@@ -1561,13 +1576,13 @@ pub fn compile_pedal_with_options(
         None
     };
 
-    // Use supply voltage from .pedal file, defaulting to 9V for typical pedals
-    let supply_config = pedal.supply.clone();
-    let supply_voltage = supply_config.as_ref().map_or(9.0, |s| s.voltage);
+    // Use primary supply voltage from .pedal file, defaulting to 9V for typical pedals
+    // For multi-rail circuits, use the first (primary) supply.
+    let primary_supply = pedal.supplies.first().map(|s| &s.config);
+    let supply_voltage = primary_supply.map_or(9.0, |s| s.voltage);
 
     // Build power supply sag model if impedance parameters are specified
-    let power_supply = supply_config
-        .as_ref()
+    let power_supply = primary_supply
         .filter(|s| s.has_sag())
         .map(|s| {
             crate::elements::PowerSupply::new(

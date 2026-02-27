@@ -66,6 +66,25 @@ pub(super) enum DynNode {
         comp_id: String,
         inner: Photocoupler,
     },
+    /// Switched resistor for fork() routing paths.
+    /// When active (switch position matches path_index), uses low resistance.
+    /// When inactive, uses high resistance (effectively open circuit).
+    SwitchedResistor {
+        /// ID of the controlling switch component
+        switch_id: String,
+        /// Which fork path this resistor represents (0, 1, 2, ...)
+        path_index: usize,
+        /// Total number of paths in this fork
+        num_paths: usize,
+        /// Resistance when this path is active (typically ~1Ω)
+        r_active: f64,
+        /// Resistance when this path is inactive (typically ~1MΩ)
+        r_inactive: f64,
+        /// Current switch position
+        position: usize,
+        /// Port resistance (changes based on active state)
+        rp: f64,
+    },
     Series {
         left: Box<DynNode>,
         right: Box<DynNode>,
@@ -93,6 +112,7 @@ impl DynNode {
             | Self::Inductor { rp, .. }
             | Self::VoltageSource { rp, .. }
             | Self::Pot { rp, .. }
+            | Self::SwitchedResistor { rp, .. }
             | Self::Series { rp, .. }
             | Self::Parallel { rp, .. } => *rp,
             Self::Photocoupler { inner, .. } => inner.port_resistance(),
@@ -102,7 +122,10 @@ impl DynNode {
     /// Scatter-up: compute reflected wave (bottom → root), caching child waves.
     pub fn reflected(&mut self) -> f64 {
         match self {
-            Self::Resistor { .. } | Self::Pot { .. } | Self::Photocoupler { .. } => 0.0,
+            Self::Resistor { .. }
+            | Self::Pot { .. }
+            | Self::Photocoupler { .. }
+            | Self::SwitchedResistor { .. } => 0.0,
             Self::Capacitor { state, .. } => *state,
             Self::LeakyCapacitor {
                 state,
@@ -155,7 +178,8 @@ impl DynNode {
             Self::Resistor { .. }
             | Self::Pot { .. }
             | Self::VoltageSource { .. }
-            | Self::Photocoupler { .. } => {}
+            | Self::Photocoupler { .. }
+            | Self::SwitchedResistor { .. } => {}
             Self::Capacitor { state, .. } => *state = a,
             Self::LeakyCapacitor {
                 state,
@@ -367,6 +391,37 @@ impl DynNode {
                     || right.set_photocoupler_led(target_id, led_drive)
             }
             _ => false,
+        }
+    }
+
+    /// Set switch position for all SwitchedResistor nodes controlled by this switch.
+    /// Updates port resistance based on whether the path is active.
+    /// Returns the number of switched resistors updated.
+    pub fn set_switch_position(&mut self, target_switch: &str, new_position: usize) -> usize {
+        match self {
+            Self::SwitchedResistor {
+                switch_id,
+                path_index,
+                position,
+                r_active,
+                r_inactive,
+                rp,
+                ..
+            } if switch_id == target_switch => {
+                *position = new_position;
+                // Update port resistance based on whether this path is now active
+                *rp = if *path_index == new_position {
+                    *r_active
+                } else {
+                    *r_inactive
+                };
+                1
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                left.set_switch_position(target_switch, new_position)
+                    + right.set_switch_position(target_switch, new_position)
+            }
+            _ => 0,
         }
     }
 }

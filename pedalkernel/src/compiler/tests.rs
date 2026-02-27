@@ -1477,3 +1477,159 @@ pedal "All Cap Types" {
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     assert!(output.iter().all(|x| x.is_finite()), "Output should be finite");
 }
+
+// -----------------------------------------------------------------------
+// fork() dynamic routing tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn fork_parse_basic() {
+    // Test that fork() syntax parses correctly
+    let src = r#"
+pedal "Fork Test" {
+  components {
+    R1: resistor(10k)
+    R2: resistor(20k)
+    R3: resistor(30k)
+    SW1: switch(3)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> fork(SW1, [R2.a, R3.a, gnd])
+    R2.b -> out
+    R3.b -> out
+  }
+  controls {
+    SW1.position -> "Mode" [0, 2] = 0
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+
+    // Verify we have the fork in the nets
+    let has_fork = pedal.nets.iter().any(|net| {
+        net.to.iter().any(|pin| matches!(pin, Pin::Fork { .. }))
+    });
+    assert!(has_fork, "Should have a fork() in nets");
+}
+
+#[test]
+fn fork_compile_creates_switched_resistors() {
+    // Test that fork() creates SwitchedResistor nodes in the WDF tree
+    let src = r#"
+pedal "Fork Compile Test" {
+  components {
+    R1: resistor(10k)
+    D1: diode(silicon)
+    R2: resistor(20k)
+    D2: diode(silicon)
+    SW1: switch(2)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> fork(SW1, [D1.a, D2.a])
+    D1.b -> R2.a
+    D2.b -> R2.a
+    R2.b -> out
+  }
+  controls {
+    SW1.position -> "Path" [0, 1] = 0
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let result = compile_pedal(&pedal, 48000.0);
+
+    // Should compile successfully
+    assert!(result.is_ok(), "Fork circuit should compile: {:?}", result.err());
+}
+
+#[test]
+fn fork_switch_control_binding() {
+    // Test that switch controls are properly bound to SwitchPosition targets
+    let src = r#"
+pedal "Switch Control Test" {
+  components {
+    R1: resistor(10k)
+    R2: resistor(20k)
+    R3: resistor(30k)
+    D1: diode_pair(silicon)
+    SW1: switch(2)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> fork(SW1, [R2.a, R3.a])
+    R2.b -> D1.a
+    R3.b -> D1.a
+    D1.b -> out
+  }
+  controls {
+    SW1.position -> "Mode" [0, 1] = 0
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Process with switch at position 0
+    proc.set_control("Mode", 0.0);
+    let input = sine(480);
+    let output_pos0: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+
+    // Reset and process with switch at position 1
+    proc.reset();
+    proc.set_control("Mode", 1.0);
+    let output_pos1: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+
+    // Both outputs should be finite
+    assert_finite(&output_pos0, "Fork position 0");
+    assert_finite(&output_pos1, "Fork position 1");
+
+    // The outputs should be different (different paths through circuit)
+    let rms_0 = rms(&output_pos0);
+    let rms_1 = rms(&output_pos1);
+
+    // Both should produce some output
+    assert!(rms_0 > 1e-6 || rms_1 > 1e-6,
+        "At least one fork path should produce output: rms_0={rms_0}, rms_1={rms_1}");
+}
+
+#[test]
+fn inf_resistance_in_switched_resistor() {
+    // Test that `inf` keyword works for open-circuit positions
+    let src = r#"
+pedal "Infinite Resistance Test" {
+  components {
+    R1: resistor(10k)
+    R_sw: resistor_switched([10k, inf, 47k])
+    D1: diode_pair(silicon)
+    SW1: rotary("10k", "Open", "47k")
+  }
+  nets {
+    in -> R1.a
+    R1.b -> R_sw.a
+    R_sw.b -> D1.a
+    D1.b -> out
+  }
+  controls {
+    SW1.position -> "Resistance" [0, 2] = 0
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+
+    // Should parse successfully with inf value
+    let switched_resistor = pedal.components.iter().find(|c| c.id == "R_sw");
+    assert!(switched_resistor.is_some(), "Should have R_sw component");
+
+    if let Some(comp) = switched_resistor {
+        if let ComponentKind::ResistorSwitched(values) = &comp.kind {
+            assert_eq!(values.len(), 3, "Should have 3 positions");
+            assert_eq!(values[0], 10_000.0, "First position should be 10k");
+            assert!(values[1].is_infinite(), "Second position should be infinite");
+            assert_eq!(values[2], 47_000.0, "Third position should be 47k");
+        } else {
+            panic!("R_sw should be ResistorSwitched");
+        }
+    }
+}

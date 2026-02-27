@@ -322,6 +322,8 @@ fn pin_component_id(pin: &Pin) -> Option<String> {
     match pin {
         Pin::Reserved(name) => reserved_to_anchor(name).map(|s| s.to_string()),
         Pin::ComponentPin { component, .. } => Some(component.clone()),
+        // For Fork, use the switch component as the main reference
+        Pin::Fork { switch, .. } => Some(switch.clone()),
     }
 }
 
@@ -579,7 +581,7 @@ mod tests {
     fn simple_pedal() -> PedalDef {
         PedalDef {
             name: "Test".into(),
-            supply: None,
+            supplies: vec![],
             components: vec![
                 ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(4700.0) },
                 ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(100e-9) },

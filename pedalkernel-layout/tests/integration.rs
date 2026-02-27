@@ -9,7 +9,7 @@ use pedalkernel_layout::{generate_layout, to_json, to_kicad_schematic};
 fn tube_screamer_pedal() -> PedalDef {
     PedalDef {
         name: "Tube Screamer".into(),
-        supply: None,
+        supplies: vec![],
         components: vec![
             ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(100e-9) },
             ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(510e3) },
@@ -134,7 +134,7 @@ fn tube_screamer_pedal() -> PedalDef {
 fn triode_gain_stage() -> PedalDef {
     PedalDef {
         name: "Triode Stage".into(),
-        supply: Some(SupplyConfig::voltage_only(350.0)),
+        supplies: vec![NamedSupply::new("vcc", 350.0)],
         components: vec![
             ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(20e-9) },
             ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(1e6) },
@@ -397,7 +397,7 @@ fn layout_score_is_finite() {
 fn empty_pedal_produces_empty_layout() {
     let pedal = PedalDef {
         name: "Empty".into(),
-        supply: None,
+        supplies: vec![],
         components: vec![],
         nets: vec![],
         controls: vec![],

@@ -6,11 +6,18 @@ PedalKernel uses two file formats: `.pedal` files define individual guitar pedal
 
 A `.pedal` file describes a guitar pedal's circuit topology as a netlist. The compiler transforms this into a real-time Wave Digital Filter (WDF) audio processor.
 
+The keywords `pedal`, `synth`, and `equipment` are interchangeable — all produce the same AST. Use `synth` for synthesizer modules and `equipment` for studio gear like compressors and preamps.
+
 ### Structure
 
 ```
 pedal "<Name>" {
-  supply <voltage>V        # optional — defaults to 9V if omitted
+  supply <voltage>V        # single supply (optional — defaults to 9V)
+  # OR for multiple rails:
+  supplies {
+    <rail_name>: <voltage>V [{ sag params }]
+    ...
+  }
   components {
     <component declarations>
   }
@@ -69,6 +76,86 @@ Sag is more pronounced with:
 
 Sag creates the "breathing" feel of vintage tube amps and contributes to dynamic compression in studio compressors like the Fairchild 670.
 
+**Supply block syntax** for explicit sag modeling:
+
+```
+pedal "Tube Amp Sag" {
+  supply 480V {
+    impedance: 150      # ohms (rectifier + transformer + ESR)
+    filter_cap: 40u     # main filter capacitance in farads
+    rectifier: tube     # or solid_state
+  }
+  ...
+}
+```
+
+| Parameter | Description | Typical Values |
+|-----------|-------------|----------------|
+| `impedance` | Supply output impedance | Tube rectifier: 50–200Ω, solid-state: 1–10Ω |
+| `filter_cap` | Main filter capacitance | 40µF (vintage) to 220µF (modern) |
+| `rectifier` | Rectifier type: `tube` or `solid_state` | `tube` for sag, `solid_state` for stiff supply |
+
+### Multiple Supply Rails
+
+For circuits requiring multiple voltage rails (bipolar op-amp supplies, tube amps with separate B+ voltages, or isolated supply domains), use the `supplies { }` block:
+
+```
+pedal "Bipolar Op-Amp Circuit" {
+  supplies {
+    V+: 15V
+    V-: -15V           # Negative voltages supported
+  }
+  components {
+    R1: resistor(10k)
+    U1: opamp(tl072)
+  }
+  nets {
+    R1.a -> V+         # Connect to positive rail
+    R1.b -> V-         # Connect to negative rail
+    ...
+  }
+}
+```
+
+**Tube amplifier with multiple rails:**
+
+```
+pedal "Tube Preamp Multi-Rail" {
+  supplies {
+    B+: 300V { impedance: 100, rectifier: tube }
+    bias: -50V         # Grid bias supply
+    filament: 6.3V     # Heater supply
+  }
+  components {
+    V1: triode(12ax7)
+    R1: resistor(100k)
+    ...
+  }
+  nets {
+    V1.plate -> R1.a
+    R1.b -> B+         # Plate load to B+ rail
+    ...
+  }
+}
+```
+
+**Key features:**
+- Rail names can include `+` or `-` suffixes (e.g., `V+`, `V-`, `B+`)
+- Negative voltages are supported (e.g., `-15V`, `-50V`)
+- Each rail can have its own sag parameters
+- Rails are referenced in `nets` just like `vcc` and `gnd`
+
+**Backwards compatibility:** The single `supply 9V` syntax still works and creates a "vcc" rail:
+
+```
+# These are equivalent:
+supply 9V
+# Same as:
+supplies { vcc: 9V }
+```
+
+If no supply is specified, the compiler defaults to 9V on a "vcc" rail.
+
 ### Components
 
 Each component is declared as `<id>: <type>(<params>)`.
@@ -78,13 +165,18 @@ Each component is declared as `<id>: <type>(<params>)`.
 | Resistor | `resistor(<value>)` | Fixed resistor |
 | Capacitor | `cap(<value>)` | Capacitor |
 | Inductor | `inductor(<value>)` | Inductor |
+| Switched Resistor | `resistor_switched(<v1>, <v2>, ...)` | Resistor with switchable values |
+| Switched Capacitor | `cap_switched(<v1>, <v2>, ...)` | Capacitor with switchable values |
+| Switched Inductor | `inductor_switched(<v1>, <v2>, ...)` | Inductor with switchable values |
 | Potentiometer | `pot(<value>)` | Variable resistor (controllable knob) |
 | Diode pair | `diode_pair(<type>)` | Symmetric clipping diode pair |
 | Single diode | `diode(<type>)` | Asymmetric single diode |
 | Zener diode | `zener(<voltage>)` | Zener diode with breakdown voltage (e.g., `zener(5.1)`) |
-| NPN transistor | `npn()` | NPN BJT (modeled as gain stage) |
-| PNP transistor | `pnp()` | PNP BJT (modeled as gain stage) |
-| Op-amp | `opamp()` | Operational amplifier |
+| NPN transistor | `npn()` or `npn(<type>)` | NPN BJT (modeled as gain stage) |
+| PNP transistor | `pnp()` or `pnp(<type>)` | PNP BJT (modeled as gain stage) |
+| N-channel MOSFET | `nmos(<model>)` | N-channel MOSFET |
+| P-channel MOSFET | `pmos(<model>)` | P-channel MOSFET |
+| Op-amp | `opamp()` or `opamp(<type>)` | Operational amplifier |
 | N-channel JFET | `njfet(<model>)` | N-channel JFET (nonlinear WDF root) |
 | P-channel JFET | `pjfet(<model>)` | P-channel JFET (nonlinear WDF root) |
 | Triode | `triode(<type>)` | Vacuum tube triode (see below) |
@@ -96,6 +188,17 @@ Each component is declared as `<id>: <type>(<params>)`.
 | Tap | `tap(<delay_id>, <ratio>)` | Read-only tap into a delay line |
 | LFO | `lfo(<waveform>, <R>, <C>)` | LFO with RC timing (f = 1/2piRC) |
 | Envelope Follower | `envelope_follower(<atk_R>, <atk_C>, <rel_R>, <rel_C>, <sens_R>)` | Envelope detector with RC timing |
+| Switch | `switch(<positions>)` | Simple n-position mechanical switch |
+| Rotary Switch | `rotary(<label1>, <label2>, ...)` | Labeled rotary switch |
+| Analog Switch | `switch(<model>)` | Analog switch IC (CD4066, DG411) |
+| VCO | `vco(<model>)` | Voltage-controlled oscillator IC |
+| VCF | `vcf(<model>)` | Voltage-controlled filter IC |
+| VCA | `vca(<model>)` | Voltage-controlled amplifier IC |
+| Comparator | `comparator(<model>)` | Comparator IC |
+| Matched NPN | `matched_npn(<model>)` | Matched NPN transistor pair/array |
+| Matched PNP | `matched_pnp(<model>)` | Matched PNP transistor pair |
+| Tempco Resistor | `tempco(<resistance>, <ppm>)` | Temperature-compensating resistor |
+| Transformer | `transformer(<ratio>, <inductance> [, ...])` | Audio transformer (see below) |
 
 **Engineering notation** is supported for component values:
 
@@ -107,6 +210,13 @@ Each component is declared as `<id>: <type>(<params>)`.
 | `m` | 10^-3 (milli) | `100m` = 100 mH |
 | `k` | 10^3 (kilo) | `4.7k` = 4.7 kOhm |
 | `M` | 10^6 (mega) | `1M` = 1 MOhm |
+| `inf` | ∞ (infinity) | Open circuit |
+
+The `inf` keyword represents infinite impedance (open circuit). This is useful for switched components where one position should disconnect the signal:
+
+```
+R_sel: resistor_switched([10k, inf, 47k])  # Position 1 = open circuit
+```
 
 **Diode types**: `silicon`, `germanium`, `led`
 
@@ -114,7 +224,7 @@ Each component is declared as `<id>: <type>(<params>)`.
 
 **JFET models**: `j201`, `2n5457`, `2n5460`, `2sk30` (or `2sk30a`, `2sk30-gr`, `2sk30-y`, `2sk30-bl` for graded variants)
 
-**Triode types**: `12ax7`, `12at7`, `12au7`, `12bh7`, `12ay7`
+**Triode types**: `12ax7`, `12at7`, `12au7`, `12bh7`, `12ay7`, `6386`
 
 | Type   | µ (mu) | Use case                              |
 |--------|--------|---------------------------------------|
@@ -123,10 +233,15 @@ Each component is declared as `<id>: <type>(<params>)`.
 | 12AU7  | 17     | Low gain, cathode follower            |
 | 12BH7  | 17     | High-current cathode follower         |
 | 12AY7  | 44     | Lower-gain preamp (cleaner)           |
+| 6386   | ~50    | Remote-cutoff (variable-mu) triode    |
+
+European equivalents: `ecc83` (12AX7), `ecc81` (12AT7), `ecc82` (12AU7), `6072` (12AY7)
+
+The **6386** is a remote-cutoff (variable-mu) dual triode used in the Fairchild 670 compressor. Unlike regular triodes, its mu varies with grid bias (~50 at low bias to ~5 at high bias), enabling gain control via bias modulation.
 
 Triode pins: `.grid`, `.plate`, `.cathode`
 
-**Pentode types**: `ef86`, `el84`, `el34`, `6l6gc`, `6v6`, `kt66`, `6aq5a`
+**Pentode types**: `ef86`, `el84`, `el34`, `6l6gc`, `6v6`, `kt66`, `6aq5a`, `6973`, `6550`
 
 | Type   | Max Watts | Use case                              |
 |--------|-----------|---------------------------------------|
@@ -137,6 +252,12 @@ Triode pins: `.grid`, `.plate`, `.cathode`
 | 6V6    | 14        | Medium power amp (Tweed Deluxe)       |
 | KT66   | 35        | Power amp (early Marshall, Quad)      |
 | 6AQ5A  | 12        | Output stage, small amps              |
+| 6973   | 12        | Power amp (Ampeg Reverberocket)       |
+| 6550   | 35        | High-power output (SVT, Hiwatt)       |
+
+Equivalents and variants:
+- `6267` = EF86, `6bq5` = EL84, `6ca7` = EL34, `5881` = 6L6GC
+- `kt77` = EL34 equivalent, `kt88`/`kt90` = 6550 equivalents
 
 Pentode pins: `.grid`, `.plate`, `.cathode`, `.screen`
 
@@ -147,7 +268,7 @@ R_screen.b -> V1.screen, C_screen.a
 C_screen.b -> gnd
 ```
 
-**Photocoupler models**: `vtl5c3`, `vtl5c1`, `nsl32`
+**Photocoupler models**: `vtl5c3`, `vtl5c1`, `nsl32`, `t4b`
 
 **Neon bulb models**: `ne2` (default), `ne51`, `ne83`
 - NE-2: 90V striking, 60V maintaining — standard miniature neon
@@ -158,6 +279,83 @@ Neon bulbs are used in vintage tremolo circuits (Fender Vibrato, Wurlitzer) as p
 
 **LFO waveforms**: `sine`, `triangle`, `square`, `saw_up`, `saw_down`, `sample_and_hold`
 
+**Switched components**: Values can be provided with or without brackets:
+```
+R_sel: resistor_switched(12k, 6.8k, 3.9k, 1.5k)
+C_lf: cap_switched([27n, 68n, 220n, 1.5u])
+L_hf: inductor_switched(27m, 47m, 82m, 150m)
+```
+Position is controlled via `.position` property in the controls section.
+
+**MOSFET models**:
+| Model | Type | Use case |
+|-------|------|----------|
+| 2n7000 | N-channel | Small-signal switching |
+| irf520 | N-channel | Medium power switching |
+| bs250 | P-channel | Small-signal switching |
+| irf9520 | P-channel | Medium power switching |
+
+**Op-amp models**: `tl072`, `tl082`, `jrc4558` (or `4558`), `rc4558`, `lm308`, `lm741`, `ne5532`, `ca3080`, `op07`
+
+**VCO models**: `cem3340`, `as3340`, `v3340`
+- CEM3340 — Curtis VCO (Prophet 5, Memorymoog)
+- AS3340 / V3340 — Modern clones (Alfa RPAR, CoolAudio)
+
+**VCF models**: `cem3320`, `as3320`
+- CEM3320 — Curtis 4-pole lowpass (Prophet 5, Oberheim OB-Xa)
+- AS3320 — Alfa RPAR clone
+
+**VCA models**: `ssm2164`, `v2164`
+- SSM2164 — Quad exponential VCA (Eurorack standard)
+- V2164 — CoolAudio clone
+
+**Comparator models**: `lm311`, `lm393`
+- LM311 — Single comparator, open-collector output
+- LM393 — Dual comparator
+
+**Analog switch models**: `cd4066`, `dg411`
+- CD4066 — Quad bilateral switch (~100Ω on-resistance)
+- DG411 — Quad SPST analog switch (~25Ω on-resistance)
+
+**Matched transistor models**: `ssm2210`, `ca3046`, `lm394`, `that340`
+- SSM2210 — Matched dual NPN for V/Oct tracking
+- CA3046 — 5-NPN transistor array (common substrate)
+- LM394 — Supermatch pair, ultralow Vbe offset
+- THAT340 — Modern matched quad NPN
+
+**Switch types**:
+```
+SW1: switch(3)                            # 3-position mechanical switch
+MODE: rotary("Clean", "Crunch", "Lead")   # Labeled rotary switch
+AS1: switch(cd4066)                       # Analog switch IC
+```
+
+**Temperature-compensating resistor**:
+```
+RT1: tempco(2k, 3500)   # 2kΩ nominal, 3500 ppm/°C
+```
+Used in exponential converters for temperature compensation.
+
+**Transformer syntax**:
+```
+# Basic: ratio, primary inductance
+T1: transformer(10:1, 2H)
+
+# With parasitics: ratio, inductance, DCR, parasitic capacitance
+T2: transformer(1:4, 2H, 75, 200p)
+
+# Center-tapped secondary
+T3: transformer(1:1, 4H, ct)
+
+# Push-pull primary, center-tapped secondary
+T4: transformer(1:1, 4H, pp, ct)
+
+# Named parameters
+T5: transformer(10:1, 2H, dcr=75, Cp=200p, k=0.98)
+```
+
+Winding modifiers: `ct` (center-tap secondary), `pp` (push-pull primary), `ct_primary` (center-tap primary)
+
 ### Nets
 
 Nets describe how component pins connect. Each net is `<from> -> <to1>, <to2>, ...`.
@@ -166,7 +364,8 @@ Nets describe how component pins connect. Each net is `<from> -> <to1>, <to2>, .
 - `in` — audio input
 - `out` — audio output
 - `gnd` — ground reference
-- `vcc` — power supply
+- `vcc` — default power supply rail
+- Named supply rails (e.g., `V+`, `V-`, `B+`) — when using `supplies { }` block
 
 **Component pins** use dot notation: `C1.a`, `R1.b`, `D1.a`, `Q1.base`.
 
@@ -180,6 +379,30 @@ C1.b -> R1.a, D1.a              # capacitor pin b fans out to R1 and D1
 D1.b -> gnd                     # diode to ground
 R1.b -> out                     # resistor to output
 ```
+
+**Dynamic routing with `fork()`**: Routes signal to different destinations based on a switch position.
+
+```
+<from> -> fork(<switch_id>, [<dest1>, <dest2>, ...])
+```
+
+The switch component controls which destination receives the signal:
+- Position 0 → routes to `dest1`
+- Position 1 → routes to `dest2`
+- etc.
+
+```
+# Route signal based on MODE switch (3-position)
+stage1.out -> fork(MODE, [clean.a, crunch.a, lead.a])
+
+# Mute switch — routes to output or ground
+amp.out -> fork(MUTE, [out, gnd])
+
+# Time constant selector for phaser stages
+B7.a -> fork(SW_time, [B8.a, B9.a])
+```
+
+This enables topology switching for multi-mode circuits without runtime recompilation.
 
 ### Controls
 
@@ -290,6 +513,43 @@ pedal "Space Echo" {
   }
 }
 ```
+
+### Trims Section
+
+Internal trim pots for factory adjustments (not user-facing):
+
+```
+trims {
+  R_trim.position -> "Bias Adjust" [0.0, 1.0] = 0.5
+  R_cal.position -> "Calibration" [0.0, 1.0] = 0.5
+}
+```
+
+Same syntax as `controls`, but trims are not exposed in the UI.
+
+### Monitors Section
+
+For real-time metering visualization (VU meters, gain reduction, etc.):
+
+```
+monitors {
+  V1.plate_current -> "Tube 1" [vu]
+  output -> "Output Level" [ppm]
+  GR.reduction -> "Gain Reduction" [gr]
+  V2.plate_current -> "Tube 2" [glow]
+  supply -> "B+ Sag" [sag]
+}
+```
+
+**Meter types**:
+| Type | Description |
+|------|-------------|
+| `vu` | VU meter (300ms rise/fall, RMS-responding) |
+| `ppm` | Peak Programme Meter (10ms rise, 1.5s fall) |
+| `peak` | True peak with hold |
+| `gr` | Gain reduction meter (for compressors) |
+| `glow` | Tube glow visualization |
+| `sag` | Supply sag indicator |
 
 ### Complete Example
 

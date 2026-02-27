@@ -5,8 +5,8 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while, take_while1},
-    character::complete::{char, multispace1, not_line_ending},
+    bytes::complete::{tag, take_till, take_while, take_while1},
+    character::complete::{alpha1, char, multispace1, not_line_ending},
     combinator::{map, opt, recognize, value},
     multi::{many0, separated_list1},
     number::complete::double,
@@ -74,13 +74,44 @@ impl SupplyConfig {
     }
 }
 
+/// A named power supply rail.
+///
+/// Allows circuits to have multiple supply voltages with different names
+/// (e.g., `V+`, `V-`, `B+` for bipolar supplies or tube circuits).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedSupply {
+    /// Rail name (e.g., "vcc", "V+", "V-", "B+")
+    pub name: String,
+    /// Supply configuration (voltage and optional sag parameters)
+    pub config: SupplyConfig,
+}
+
+impl NamedSupply {
+    /// Create a named supply with just a voltage (no sag modeling).
+    pub fn new(name: impl Into<String>, voltage: f64) -> Self {
+        Self {
+            name: name.into(),
+            config: SupplyConfig::voltage_only(voltage),
+        }
+    }
+
+    /// Create a named supply with full configuration.
+    pub fn with_config(name: impl Into<String>, config: SupplyConfig) -> Self {
+        Self {
+            name: name.into(),
+            config,
+        }
+    }
+}
+
 /// Top-level pedal definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PedalDef {
     pub name: String,
-    /// Power supply configuration.
-    /// If None, defaults to 9V with no sag in the compiler.
-    pub supply: Option<SupplyConfig>,
+    /// Power supply rails.
+    /// Multiple named supplies are supported (e.g., V+, V-, B+).
+    /// If empty, defaults to a single 9V "vcc" rail in the compiler.
+    pub supplies: Vec<NamedSupply>,
     pub components: Vec<ComponentDef>,
     pub nets: Vec<NetDef>,
     pub controls: Vec<ControlDef>,
@@ -102,6 +133,27 @@ impl PedalDef {
                 || n.to.contains(&Pin::Reserved("fx_return".into()))
         });
         has_send && has_return
+    }
+
+    /// Get the primary supply voltage (first supply, or default 9V).
+    /// For backwards compatibility with single-supply code.
+    pub fn primary_supply_voltage(&self) -> f64 {
+        self.supplies.first().map(|s| s.config.voltage).unwrap_or(9.0)
+    }
+
+    /// Get a supply by name.
+    pub fn get_supply(&self, name: &str) -> Option<&NamedSupply> {
+        self.supplies.iter().find(|s| s.name == name)
+    }
+
+    /// Get all supply rail names.
+    pub fn supply_names(&self) -> Vec<&str> {
+        self.supplies.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    /// Check if a name is a supply rail.
+    pub fn is_supply_rail(&self, name: &str) -> bool {
+        self.supplies.iter().any(|s| s.name == name)
     }
 }
 
@@ -751,12 +803,21 @@ pub struct NetDef {
     pub to: Vec<Pin>,
 }
 
-/// A pin reference – either a reserved node (`in`, `out`, `gnd`, `vcc`)
-/// or a component pin (`C1.a`, `R1.b`).
+/// A pin reference – either a reserved node (`in`, `out`, `gnd`, `vcc`),
+/// a component pin (`C1.a`, `R1.b`), or a fork for dynamic routing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Pin {
     Reserved(String),
     ComponentPin { component: String, pin: String },
+    /// Dynamic routing controlled by a switch component.
+    /// `fork(SW_time, [B8.a, B9.a])` routes signal to one of the destinations
+    /// based on the switch position.
+    Fork {
+        /// The switch component that controls routing
+        switch: String,
+        /// Destination pins for each switch position
+        destinations: Vec<Pin>,
+    },
 }
 
 /// Control mapping: `Gain.position -> "Drive" [0.0, 1.0] = 0.5`
@@ -849,7 +910,13 @@ fn eng_suffix(input: &str) -> IResult<&str, f64> {
 }
 
 /// Parse a number with optional engineering suffix, e.g. `4.7k`, `220n`, `100m`.
+/// Also accepts `inf` for infinite impedance (open circuit).
 fn eng_value(input: &str) -> IResult<&str, f64> {
+    // Try `inf` keyword first (infinite impedance / open circuit)
+    if let Ok((rest, _)) = tag::<&str, &str, nom::error::Error<&str>>("inf")(input) {
+        return Ok((rest, f64::INFINITY));
+    }
+    // Otherwise parse numeric value with optional suffix
     let (input, num) = double(input)?;
     let (input, mult) = opt(eng_suffix)(input)?;
     Ok((input, num * mult.unwrap_or(1.0)))
@@ -1878,14 +1945,50 @@ fn pin(input: &str) -> IResult<&str, Pin> {
     }
 }
 
-/// `in -> C1.a`  or  `C1.b -> R1.a, D1.a`
+/// Parse a fork destination: `fork(SW_time, [B8.a, B9.a])`
+/// Routes signal dynamically based on switch position.
+fn parse_fork(input: &str) -> IResult<&str, Pin> {
+    let (input, _) = tag("fork")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    // Switch component ID
+    let (input, switch_id) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    // Destination list: [pin1, pin2, ...]
+    let (input, _) = char('[')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, destinations) =
+        separated_list1(tuple((ws_comments, char(','), ws_comments)), pin)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(']')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((
+        input,
+        Pin::Fork {
+            switch: switch_id.to_string(),
+            destinations,
+        },
+    ))
+}
+
+/// Parse a destination pin - either a fork or a regular pin.
+fn dest_pin(input: &str) -> IResult<&str, Pin> {
+    alt((parse_fork, pin))(input)
+}
+
+/// `in -> C1.a`  or  `C1.b -> R1.a, D1.a`  or  `B7.a -> fork(SW_time, [B8.a, B9.a])`
 fn net_def(input: &str) -> IResult<&str, NetDef> {
     let (input, _) = ws_comments(input)?;
     let (input, from) = pin(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("->")(input)?;
     let (input, _) = ws_comments(input)?;
-    let (input, to) = separated_list1(tuple((ws_comments, char(','), ws_comments)), pin)(input)?;
+    // Destinations can be regular pins or fork() constructs
+    let (input, to) =
+        separated_list1(tuple((ws_comments, char(','), ws_comments)), dest_pin)(input)?;
     Ok((input, NetDef { from, to }))
 }
 
@@ -2229,6 +2332,13 @@ fn supply_block(
     let mut input = input;
     loop {
         let (rest, _) = ws_comments(input)?;
+        // Skip optional comma separators between fields
+        let rest = if let Ok((r, _)) = char::<&str, nom::error::Error<&str>>(',')(rest) {
+            let (r, _) = ws_comments(r)?;
+            r
+        } else {
+            rest
+        };
         // Check for closing brace
         if let Ok((rest2, _)) = char::<&str, nom::error::Error<&str>>('}')(rest) {
             input = rest2;
@@ -2245,8 +2355,8 @@ fn supply_block(
             rectifier = Some(val);
             input = rest2;
         } else {
-            // Unknown field — skip to next line or closing brace
-            let (rest2, _) = not_line_ending(rest)?;
+            // Unknown field — skip to next comma, line, or closing brace
+            let (rest2, _) = take_till(|c| c == ',' || c == '\n' || c == '}')(rest)?;
             input = rest2;
         }
     }
@@ -2293,6 +2403,86 @@ fn supply_field_rectifier(input: &str) -> IResult<&str, RectifierType> {
     Ok((input, rtype))
 }
 
+/// Parse a single named supply rail declaration.
+///
+/// Examples:
+/// - `V+: 15V`
+/// - `V-: -15V`
+/// - `B+: 300V { impedance: 100, rectifier: tube }`
+fn named_supply(input: &str) -> IResult<&str, NamedSupply> {
+    let (input, _) = ws_comments(input)?;
+    // Parse rail name - can be identifier or special chars like "V+", "V-"
+    let (input, name) = alt((
+        // Special rail names with + or -
+        recognize(pair(
+            alpha1,
+            opt(alt((char('+'), char('-')))),
+        )),
+        // Regular identifier
+        identifier,
+    ))(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // Parse optional negative sign for voltage
+    let (input, is_negative) = opt(char('-'))(input)?;
+
+    // Parse the voltage value
+    let (input, voltage_str) = recognize(pair(
+        double,
+        opt(alt((char('V'), char('v')))),
+    ))(input)?;
+    let num_str = voltage_str.trim_end_matches(|c| c == 'V' || c == 'v');
+    let mut volts = num_str.parse::<f64>().unwrap_or(9.0);
+    if is_negative.is_some() {
+        volts = -volts;
+    }
+
+    // Try to parse an optional block with sag parameters
+    let (input, block) = opt(supply_block)(input)?;
+
+    let config = if let Some((impedance, filter_cap, rectifier)) = block {
+        SupplyConfig {
+            voltage: volts,
+            impedance,
+            filter_cap,
+            rectifier: rectifier.unwrap_or_default(),
+        }
+    } else {
+        SupplyConfig::voltage_only(volts)
+    };
+
+    Ok((input, NamedSupply {
+        name: name.to_string(),
+        config,
+    }))
+}
+
+/// Parse a `supplies { }` block with multiple named supply rails.
+///
+/// Example:
+/// ```text
+/// supplies {
+///     V+: 15V
+///     V-: -15V
+///     B+: 300V { impedance: 100, rectifier: tube }
+/// }
+/// ```
+fn supplies_section(input: &str) -> IResult<&str, Vec<NamedSupply>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("supplies")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+
+    let (input, supplies) = many0(named_supply)(input)?;
+
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+
+    Ok((input, supplies))
+}
+
 /// Parse a complete `.pedal` or `.synth` file.
 /// Both `pedal "Name" { ... }` and `synth "Name" { ... }` produce the same AST.
 pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
@@ -2304,8 +2494,17 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('{')(input)?;
 
-    // Optional supply voltage declaration (before components)
-    let (input, supply) = opt(supply_section)(input)?;
+    // Try multi-supply block first: `supplies { V+: 15V, V-: -15V }`
+    // Fall back to legacy single supply: `supply 9V`
+    // If neither, supplies will be empty (compiler defaults to 9V "vcc")
+    let (input, supplies) = if let Ok((rest, multi)) = supplies_section(input) {
+        (rest, multi)
+    } else if let Ok((rest, single)) = supply_section(input) {
+        // Convert legacy single supply to named "vcc" rail
+        (rest, vec![NamedSupply::with_config("vcc", single)])
+    } else {
+        (input, Vec::new())
+    };
 
     let (input, components) = components_section(input)?;
     let (input, nets) = nets_section(input)?;
@@ -2321,7 +2520,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
         input,
         PedalDef {
             name: name.to_string(),
-            supply,
+            supplies,
             components,
             nets,
             controls: controls.unwrap_or_default(),
@@ -2371,6 +2570,38 @@ mod tests {
     fn parse_eng_value_M() {
         let (_, v) = eng_value("1M").unwrap();
         assert!((v - 1e6).abs() < 1e-2);
+    }
+
+    #[test]
+    fn parse_eng_value_inf() {
+        let (_, v) = eng_value("inf").unwrap();
+        assert!(v.is_infinite() && v.is_sign_positive());
+    }
+
+    #[test]
+    fn parse_resistor_switched_with_inf() {
+        let (_, c) = component_def("R_sel: resistor_switched(10k, inf, 47k)").unwrap();
+        assert_eq!(c.id, "R_sel");
+        if let ComponentKind::ResistorSwitched(values) = c.kind {
+            assert_eq!(values.len(), 3);
+            assert!((values[0] - 10_000.0).abs() < 1e-6);
+            assert!(values[1].is_infinite());
+            assert!((values[2] - 47_000.0).abs() < 1e-6);
+        } else {
+            panic!("expected ResistorSwitched");
+        }
+    }
+
+    #[test]
+    fn parse_resistor_switched_inf_only() {
+        // Open circuit position only
+        let (_, c) = component_def("R_open: resistor_switched([inf])").unwrap();
+        if let ComponentKind::ResistorSwitched(values) = c.kind {
+            assert_eq!(values.len(), 1);
+            assert!(values[0].is_infinite());
+        } else {
+            panic!("expected ResistorSwitched");
+        }
     }
 
     #[test]
@@ -2462,6 +2693,76 @@ mod tests {
     fn parse_net_multi() {
         let (_, n) = net_def("C1.b -> R1.a, D1.a").unwrap();
         assert_eq!(n.to.len(), 2);
+    }
+
+    #[test]
+    fn parse_net_fork_simple() {
+        let (_, n) = net_def("B7.a -> fork(SW_time, [B8.a, B9.a])").unwrap();
+        assert_eq!(
+            n.from,
+            Pin::ComponentPin {
+                component: "B7".to_string(),
+                pin: "a".to_string()
+            }
+        );
+        assert_eq!(n.to.len(), 1);
+        match &n.to[0] {
+            Pin::Fork {
+                switch,
+                destinations,
+            } => {
+                assert_eq!(switch, "SW_time");
+                assert_eq!(destinations.len(), 2);
+                assert_eq!(
+                    destinations[0],
+                    Pin::ComponentPin {
+                        component: "B8".to_string(),
+                        pin: "a".to_string()
+                    }
+                );
+                assert_eq!(
+                    destinations[1],
+                    Pin::ComponentPin {
+                        component: "B9".to_string(),
+                        pin: "a".to_string()
+                    }
+                );
+            }
+            _ => panic!("expected Fork"),
+        }
+    }
+
+    #[test]
+    fn parse_net_fork_three_destinations() {
+        let (_, n) = net_def("in -> fork(MODE, [clean.a, crunch.a, lead.a])").unwrap();
+        assert_eq!(n.from, Pin::Reserved("in".to_string()));
+        match &n.to[0] {
+            Pin::Fork {
+                switch,
+                destinations,
+            } => {
+                assert_eq!(switch, "MODE");
+                assert_eq!(destinations.len(), 3);
+            }
+            _ => panic!("expected Fork"),
+        }
+    }
+
+    #[test]
+    fn parse_net_fork_with_reserved_dest() {
+        // Fork can route to reserved nodes like gnd (for muting)
+        let (_, n) = net_def("sig.out -> fork(MUTE, [out, gnd])").unwrap();
+        match &n.to[0] {
+            Pin::Fork {
+                switch,
+                destinations,
+            } => {
+                assert_eq!(switch, "MUTE");
+                assert_eq!(destinations[0], Pin::Reserved("out".to_string()));
+                assert_eq!(destinations[1], Pin::Reserved("gnd".to_string()));
+            }
+            _ => panic!("expected Fork"),
+        }
     }
 
     #[test]
@@ -3496,9 +3797,11 @@ pedal "9V Pedal" {
 "#;
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "9V Pedal");
-        let supply = def.supply.unwrap();
-        assert_eq!(supply.voltage, 9.0);
-        assert!(!supply.has_sag());
+        assert_eq!(def.supplies.len(), 1);
+        let supply = &def.supplies[0];
+        assert_eq!(supply.name, "vcc");
+        assert_eq!(supply.config.voltage, 9.0);
+        assert!(!supply.config.has_sag());
     }
 
     #[test]
@@ -3519,7 +3822,7 @@ pedal "Tube Amp" {
 "#;
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "Tube Amp");
-        assert_eq!(def.supply.unwrap().voltage, 250.0);
+        assert_eq!(def.supplies[0].config.voltage, 250.0);
     }
 
     #[test]
@@ -3536,7 +3839,7 @@ pedal "Test" {
 }
 "#;
         let def = parse_pedal_file(src).unwrap();
-        assert_eq!(def.supply.unwrap().voltage, 12.0);
+        assert_eq!(def.supplies[0].config.voltage, 12.0);
     }
 
     #[test]
@@ -3553,11 +3856,11 @@ pedal "Test" {
 }
 "#;
         let def = parse_pedal_file(src).unwrap();
-        assert!((def.supply.unwrap().voltage - 9.6).abs() < 0.01);
+        assert!((def.supplies[0].config.voltage - 9.6).abs() < 0.01);
     }
 
     #[test]
-    fn parse_no_supply_defaults_none() {
+    fn parse_no_supply_defaults_empty() {
         let src = r#"
 pedal "Default" {
     components {
@@ -3569,7 +3872,7 @@ pedal "Default" {
 }
 "#;
         let def = parse_pedal_file(src).unwrap();
-        assert_eq!(def.supply, None);
+        assert!(def.supplies.is_empty());
     }
 
     #[test]
@@ -3593,7 +3896,7 @@ pedal "Tube Amp Sag" {
 }
 "#;
         let def = parse_pedal_file(src).unwrap();
-        let supply = def.supply.unwrap();
+        let supply = &def.supplies[0].config;
         assert_eq!(supply.voltage, 480.0);
         assert!((supply.impedance.unwrap() - 150.0).abs() < 1e-6);
         assert!((supply.filter_cap.unwrap() - 40e-6).abs() < 1e-12);
@@ -3620,7 +3923,7 @@ pedal "Modern Amp" {
 }
 "#;
         let def = parse_pedal_file(src).unwrap();
-        let supply = def.supply.unwrap();
+        let supply = &def.supplies[0].config;
         assert_eq!(supply.voltage, 480.0);
         assert!((supply.impedance.unwrap() - 5.0).abs() < 1e-6);
         assert!((supply.filter_cap.unwrap() - 220e-6).abs() < 1e-12);
@@ -3646,11 +3949,141 @@ pedal "Commented Supply" {
 }
 "#;
         let def = parse_pedal_file(src).unwrap();
-        let supply = def.supply.unwrap();
+        let supply = &def.supplies[0].config;
         assert_eq!(supply.voltage, 400.0);
         assert!((supply.impedance.unwrap() - 100.0).abs() < 1e-6);
         assert!((supply.filter_cap.unwrap() - 47e-6).abs() < 1e-12);
         assert_eq!(supply.rectifier, RectifierType::Tube);
+    }
+
+    // ── Multiple supplies tests ────────────────────────────────────────
+
+    #[test]
+    fn parse_supplies_block_dual_rail() {
+        let src = r#"
+pedal "Dual Supply" {
+    supplies {
+        V+: 15V
+        V-: -15V
+    }
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> R1.a
+        R1.b -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.supplies.len(), 2);
+
+        let vpos = &def.supplies[0];
+        assert_eq!(vpos.name, "V+");
+        assert_eq!(vpos.config.voltage, 15.0);
+
+        let vneg = &def.supplies[1];
+        assert_eq!(vneg.name, "V-");
+        assert_eq!(vneg.config.voltage, -15.0);
+    }
+
+    #[test]
+    fn parse_supplies_block_tube_multiple_rails() {
+        let src = r#"
+pedal "Tube Amp Multi-Rail" {
+    supplies {
+        B+: 300V { impedance: 100, rectifier: tube }
+        bias: -50V
+        filament: 6.3V
+    }
+    components {
+        V1: triode(12ax7)
+        R1: resistor(100k)
+    }
+    nets {
+        in -> V1.grid
+        V1.plate -> R1.a
+        R1.b -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.supplies.len(), 3);
+
+        let bplus = &def.supplies[0];
+        assert_eq!(bplus.name, "B+");
+        assert_eq!(bplus.config.voltage, 300.0);
+        assert!(bplus.config.has_sag());
+        assert_eq!(bplus.config.rectifier, RectifierType::Tube);
+
+        let bias = &def.supplies[1];
+        assert_eq!(bias.name, "bias");
+        assert_eq!(bias.config.voltage, -50.0);
+        assert!(!bias.config.has_sag());
+
+        let filament = &def.supplies[2];
+        assert_eq!(filament.name, "filament");
+        assert_eq!(filament.config.voltage, 6.3);
+    }
+
+    #[test]
+    fn parse_supplies_vcc_legacy_compat() {
+        // Legacy `supply 9V` should create "vcc" rail
+        let src = r#"
+pedal "Legacy" {
+    supply 9V
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> R1.a
+        R1.b -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.supplies.len(), 1);
+        assert_eq!(def.supplies[0].name, "vcc");
+        assert_eq!(def.supplies[0].config.voltage, 9.0);
+    }
+
+    #[test]
+    fn pedal_def_helper_methods() {
+        let src = r#"
+pedal "Test Helpers" {
+    supplies {
+        V+: 15V
+        V-: -15V
+        vcc: 5V
+    }
+    components {
+        R1: resistor(10k)
+    }
+    nets {
+        in -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+
+        // primary_supply_voltage returns first supply
+        assert_eq!(def.primary_supply_voltage(), 15.0);
+
+        // get_supply finds by name
+        assert!(def.get_supply("V+").is_some());
+        assert!(def.get_supply("V-").is_some());
+        assert!(def.get_supply("vcc").is_some());
+        assert!(def.get_supply("nonexistent").is_none());
+
+        // supply_names returns all names
+        let names = def.supply_names();
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&"V+"));
+
+        // is_supply_rail checks if name is a rail
+        assert!(def.is_supply_rail("V+"));
+        assert!(def.is_supply_rail("V-"));
+        assert!(!def.is_supply_rail("gnd"));
     }
 
     // ── Monitors section tests ────────────────────────────────────────

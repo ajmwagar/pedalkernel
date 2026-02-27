@@ -34,6 +34,9 @@ pub(super) struct CircuitGraph {
     /// Edge indices for virtual bridge edges through active elements.
     /// These exist for BFS traversal but are not passive WDF tree elements.
     pub(super) active_edge_indices: Vec<usize>,
+    /// Fork path information: maps component index to ForkPathInfo.
+    /// Only contains entries for synthetic fork path components.
+    pub(super) fork_paths: HashMap<usize, ForkPathInfo>,
 }
 
 /// Simple union-find for grouping connected pins into circuit nodes.
@@ -71,17 +74,118 @@ fn pin_key(pin: &Pin) -> String {
     match pin {
         Pin::Reserved(s) => s.clone(),
         Pin::ComponentPin { component, pin } => format!("{}.{}", component, pin),
+        // Fork destinations are handled specially in graph building
+        Pin::Fork { switch, .. } => format!("__fork_{}", switch),
     }
+}
+
+/// Information about a synthetic fork path component.
+/// Created when a `fork()` construct is encountered in nets.
+#[derive(Clone)]
+pub(super) struct ForkPathInfo {
+    /// The switch component that controls this fork
+    pub(super) switch_id: String,
+    /// Which path index this represents (0, 1, 2, ...)
+    pub(super) path_index: usize,
+    /// Total number of paths in this fork
+    pub(super) num_paths: usize,
+}
+
+/// Expand all Pin::Fork constructs into synthetic fork path components and modified nets.
+/// Returns: (expanded_nets, fork_path_components)
+fn expand_forks(
+    nets: &[NetDef],
+    component_base_idx: usize,
+) -> (Vec<NetDef>, Vec<(ComponentDef, ForkPathInfo)>) {
+    let mut expanded_nets = Vec::new();
+    let mut fork_components: Vec<(ComponentDef, ForkPathInfo)> = Vec::new();
+    let mut fork_counter = 0usize;
+
+    for net in nets {
+        let mut new_to: Vec<Pin> = Vec::new();
+
+        for dest in &net.to {
+            match dest {
+                Pin::Fork { switch, destinations } => {
+                    // Create a synthetic fork path component for each destination
+                    let num_paths = destinations.len();
+                    for (path_idx, dest_pin) in destinations.iter().enumerate() {
+                        // Synthetic component ID: __fork_<counter>_path_<idx>
+                        let comp_id = format!("__fork_{}_path_{}", fork_counter, path_idx);
+
+                        // Create a synthetic resistor component (value will be set at runtime)
+                        // Use a small resistance for active path, large for inactive
+                        let comp = ComponentDef {
+                            id: comp_id.clone(),
+                            kind: ComponentKind::Resistor(1.0), // Placeholder - actual value set by SwitchedResistor
+                        };
+
+                        let info = ForkPathInfo {
+                            switch_id: switch.clone(),
+                            path_index: path_idx,
+                            num_paths,
+                        };
+
+                        fork_components.push((comp, info));
+
+                        // Connect source → fork_path.a (done by adding fork_path.a to new_to)
+                        new_to.push(Pin::ComponentPin {
+                            component: comp_id.clone(),
+                            pin: "a".to_string(),
+                        });
+
+                        // Connect fork_path.b → destination (new net)
+                        expanded_nets.push(NetDef {
+                            from: Pin::ComponentPin {
+                                component: comp_id,
+                                pin: "b".to_string(),
+                            },
+                            to: vec![dest_pin.clone()],
+                        });
+                    }
+                    fork_counter += 1;
+                }
+                _ => {
+                    // Regular pin - keep as-is
+                    new_to.push(dest.clone());
+                }
+            }
+        }
+
+        // Add the original net with fork destinations replaced by fork path components
+        if !new_to.is_empty() {
+            expanded_nets.push(NetDef {
+                from: net.from.clone(),
+                to: new_to,
+            });
+        }
+    }
+
+    (expanded_nets, fork_components)
 }
 
 impl CircuitGraph {
     pub(super) fn from_pedal(pedal: &PedalDef) -> Self {
+        // Expand fork() constructs into synthetic fork path components
+        let (expanded_nets, fork_components) =
+            expand_forks(&pedal.nets, pedal.components.len());
+
+        // Build combined component list: original + fork paths
+        let mut all_components: Vec<ComponentDef> = pedal.components.clone();
+        let mut fork_paths: HashMap<usize, ForkPathInfo> = HashMap::new();
+
+        for (comp, info) in fork_components {
+            let comp_idx = all_components.len();
+            fork_paths.insert(comp_idx, info);
+            all_components.push(comp);
+        }
+
         // Pre-scan: identify pots that use .w (wiper) pin in nets.
         // A pot with .w is a 3-terminal pot: lug A, wiper, lug B.
         // Must be done before the get_id closure borrows pin_ids.
         let pots_with_wiper: HashSet<String> = {
             let mut set = HashSet::new();
-            for net in &pedal.nets {
+            for net in &expanded_nets {
                 let check_pin = |p: &Pin, s: &mut HashSet<String>| {
                     if let Pin::ComponentPin { component, pin } = p {
                         if pin == "w" {
@@ -117,9 +221,13 @@ impl CircuitGraph {
         for name in &["in", "out", "gnd", "vcc"] {
             get_id(name, &mut uf);
         }
+        // Also create nodes for named supply rails (e.g., "V+", "V-", "B+").
+        for supply in &pedal.supplies {
+            get_id(&supply.name, &mut uf);
+        }
 
-        // Union connected pins.
-        for net in &pedal.nets {
+        // Union connected pins (using expanded nets).
+        for net in &expanded_nets {
             let from_id = get_id(&pin_key(&net.from), &mut uf);
             for to_pin in &net.to {
                 let to_id = get_id(&pin_key(to_pin), &mut uf);
@@ -132,7 +240,7 @@ impl CircuitGraph {
         let mut num_active = 0usize;
         let mut deferred_3term: Vec<(usize, String)> = Vec::new();
 
-        for (idx, comp) in pedal.components.iter().enumerate() {
+        for (idx, comp) in all_components.iter().enumerate() {
             match &comp.kind {
                 ComponentKind::Potentiometer(_) => {
                     if pots_with_wiper.contains(&comp.id) {
@@ -486,7 +594,8 @@ impl CircuitGraph {
         let gnd_node = uf.find(*pin_ids.get("gnd").unwrap());
 
         // Append synthetic 3-terminal pot halves to the component list.
-        let mut components = pedal.components.clone();
+        // Start from all_components (which includes fork paths) instead of pedal.components.
+        let mut components = all_components;
         components.extend(extra_components);
 
         CircuitGraph {
@@ -497,6 +606,7 @@ impl CircuitGraph {
             gnd_node,
             num_active,
             active_edge_indices,
+            fork_paths,
         }
     }
 
@@ -1060,6 +1170,10 @@ impl CircuitGraph {
         for name in &["in", "out", "gnd", "vcc"] {
             get_id(name, &mut uf);
         }
+        // Also create nodes for named supply rails.
+        for supply in &pedal.supplies {
+            get_id(&supply.name, &mut uf);
+        }
         for net in &pedal.nets {
             let from_id = get_id(&pin_key(&net.from), &mut uf);
             for to_pin in &net.to {
@@ -1394,12 +1508,17 @@ pub(super) fn sp_reduce(
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[allow(dead_code)]
-pub(super) fn sp_to_dyn(tree: &SpTree, components: &[ComponentDef], sample_rate: f64) -> DynNode {
+pub(super) fn sp_to_dyn(
+    tree: &SpTree,
+    components: &[ComponentDef],
+    fork_paths: &HashMap<usize, ForkPathInfo>,
+    sample_rate: f64,
+) -> DynNode {
     match tree {
-        SpTree::Leaf(idx) => make_leaf(&components[*idx], sample_rate),
+        SpTree::Leaf(idx) => make_leaf(*idx, &components[*idx], fork_paths.get(idx), sample_rate),
         SpTree::Series(left, right) => {
-            let l = sp_to_dyn(left, components, sample_rate);
-            let r = sp_to_dyn(right, components, sample_rate);
+            let l = sp_to_dyn(left, components, fork_paths, sample_rate);
+            let r = sp_to_dyn(right, components, fork_paths, sample_rate);
             let r1 = l.port_resistance();
             let r2 = r.port_resistance();
             let rp = r1 + r2;
@@ -1413,8 +1532,8 @@ pub(super) fn sp_to_dyn(tree: &SpTree, components: &[ComponentDef], sample_rate:
             }
         }
         SpTree::Parallel(left, right) => {
-            let l = sp_to_dyn(left, components, sample_rate);
-            let r = sp_to_dyn(right, components, sample_rate);
+            let l = sp_to_dyn(left, components, fork_paths, sample_rate);
+            let r = sp_to_dyn(right, components, fork_paths, sample_rate);
             let r1 = l.port_resistance();
             let r2 = r.port_resistance();
             let rp = r1 * r2 / (r1 + r2);
@@ -1430,8 +1549,37 @@ pub(super) fn sp_to_dyn(tree: &SpTree, components: &[ComponentDef], sample_rate:
     }
 }
 
-pub(super) fn make_leaf(comp: &ComponentDef, sample_rate: f64) -> DynNode {
+/// Active resistance for fork paths (effectively a short circuit)
+const FORK_R_ACTIVE: f64 = 1.0;
+/// Inactive resistance for fork paths (effectively open circuit)
+const FORK_R_INACTIVE: f64 = 1_000_000.0;
+
+pub(super) fn make_leaf(
+    _comp_idx: usize,
+    comp: &ComponentDef,
+    fork_info: Option<&ForkPathInfo>,
+    sample_rate: f64,
+) -> DynNode {
+    // Check if this is a fork path component
+    if let Some(info) = fork_info {
+        // Fork path: create a SwitchedResistor
+        // Default to position 0 (first path active)
+        let is_active = info.path_index == 0;
+        return DynNode::SwitchedResistor {
+            switch_id: info.switch_id.clone(),
+            path_index: info.path_index,
+            num_paths: info.num_paths,
+            r_active: FORK_R_ACTIVE,
+            r_inactive: FORK_R_INACTIVE,
+            position: 0,
+            rp: if is_active { FORK_R_ACTIVE } else { FORK_R_INACTIVE },
+        };
+    }
+
+    // Regular component handling
     match &comp.kind {
+        // Handle inf (infinite) resistor as very high resistance (open circuit)
+        ComponentKind::Resistor(r) if r.is_infinite() => DynNode::Resistor { rp: FORK_R_INACTIVE },
         ComponentKind::Resistor(r) => DynNode::Resistor { rp: *r },
         ComponentKind::Capacitor(cfg) => {
             // Use LeakyCapacitor if leakage or DA is specified

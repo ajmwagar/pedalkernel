@@ -38,6 +38,9 @@ pub(super) enum ControlTarget {
     DelayTime(usize),
     /// Modify a delay line's feedback amount (0–1).
     DelayFeedback(usize),
+    /// Modify a switch position for fork() routing.
+    /// Contains: (switch_id, num_positions)
+    SwitchPosition { switch_id: String, num_positions: usize },
 }
 
 /// Modulation target for LFOs and envelope followers.
@@ -552,6 +555,21 @@ impl CompiledPedal {
                     let delay_idx = *delay_idx;
                     if let Some(dl) = self.delay_lines.get_mut(delay_idx) {
                         dl.delay_line.set_feedback(value * 0.95); // Scale to max 0.95
+                    }
+                }
+                ControlTarget::SwitchPosition { switch_id, num_positions } => {
+                    // Convert normalized 0-1 value to discrete position index
+                    // value=0 → pos=0, value=1 → pos=num_positions-1
+                    let num_positions = *num_positions;
+                    let position = if num_positions <= 1 {
+                        0
+                    } else {
+                        ((value * (num_positions as f64 - 0.001)) as usize).min(num_positions - 1)
+                    };
+                    // Update all stages' switched resistors
+                    for stage in &mut self.stages {
+                        stage.tree.set_switch_position(switch_id, position);
+                        stage.tree.recompute();
                     }
                 }
             }

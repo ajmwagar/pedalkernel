@@ -8,6 +8,16 @@ use crate::PedalProcessor;
 use super::compile::compile_pedal;
 use super::compiled::CompiledPedal;
 
+/// Extract the primary node name from a Pin for graph connectivity purposes.
+fn pin_node_name(pin: &Pin) -> String {
+    match pin {
+        Pin::Reserved(n) => n.clone(),
+        Pin::ComponentPin { component, .. } => component.clone(),
+        // For Fork, we use the switch component as the node
+        Pin::Fork { switch, .. } => switch.clone(),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // FX loop split — partition a PedalDef at fx_send/fx_return
 // ═══════════════════════════════════════════════════════════════════════════
@@ -24,15 +34,9 @@ pub fn split_pedal_def(pedal: &PedalDef) -> Option<(PedalDef, PedalDef)> {
     // Collect all node names that each component touches.
     let mut component_nodes: HashMap<String, Vec<String>> = HashMap::new();
     for net in &pedal.nets {
-        let node_name = match &net.from {
-            Pin::Reserved(n) => n.clone(),
-            Pin::ComponentPin { component, .. } => component.clone(),
-        };
+        let node_name = pin_node_name(&net.from);
         for pin in &net.to {
-            let to_name = match pin {
-                Pin::Reserved(n) => n.clone(),
-                Pin::ComponentPin { component, .. } => component.clone(),
-            };
+            let to_name = pin_node_name(pin);
             component_nodes
                 .entry(node_name.clone())
                 .or_default()
@@ -126,18 +130,27 @@ fn build_half(
             let to: Vec<Pin> = net.to.iter().map(&rename).collect();
 
             // A pin is "relevant" if it references a component in this half
-            // or is a standard reserved node (in, out, gnd, vcc).
+            // or is a standard reserved node (in, out, gnd, vcc, or a supply rail).
             let relevant = |p: &Pin| match p {
                 Pin::Reserved(n) => {
                     n == "in" || n == "out" || n == "gnd" || n == "vcc" || n == new_node
+                        || pedal.is_supply_rail(n)
                 }
                 Pin::ComponentPin { component, .. } => component_ids.contains(component),
+                Pin::Fork { switch, destinations } => {
+                    component_ids.contains(switch)
+                        || destinations.iter().any(|d| match d {
+                            Pin::ComponentPin { component, .. } => component_ids.contains(component),
+                            _ => false,
+                        })
+                }
             };
 
             // A pin "belongs" to this half — only component pins in our set.
             let belongs = |p: &Pin| match p {
                 Pin::Reserved(_) => true,
                 Pin::ComponentPin { component, .. } => component_ids.contains(component),
+                Pin::Fork { switch, .. } => component_ids.contains(switch),
             };
 
             // Keep this net only if at least one component pin belongs to this half.
@@ -188,7 +201,7 @@ fn build_half(
 
     PedalDef {
         name: format!("{} ({})", pedal.name, suffix),
-        supply: pedal.supply.clone(),
+        supplies: pedal.supplies.clone(),
         components,
         nets,
         controls,

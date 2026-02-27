@@ -502,7 +502,7 @@ mod tests {
     fn detect_triode_gain_stage() {
         let pedal = PedalDef {
             name: "Test".into(),
-            supply: None,
+            supplies: vec![],
             components: vec![
                 ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(100e-9) },
                 ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(1e6) },
