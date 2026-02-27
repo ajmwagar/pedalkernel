@@ -2326,10 +2326,10 @@ equipment "Push-Pull Test" {
     let pedal = parse_pedal_file(src).unwrap();
     let graph = CircuitGraph::from_pedal(&pedal);
 
-    let (triodes, _) = graph.find_triodes();
+    let (triodes, all_triode_edges) = graph.find_triodes();
     assert_eq!(triodes.len(), 2, "Should have 2 triode groups");
 
-    let pairs = graph.find_push_pull_triode_pairs(&triodes);
+    let pairs = graph.find_push_pull_triode_pairs(&triodes, &all_triode_edges);
     assert_eq!(
         pairs.len(),
         1,
@@ -2415,9 +2415,30 @@ equipment "Push-Pull Compile" {
 
     assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf in push-pull output");
 
-    // NOTE: Signal level depends on proper WDF tree construction and tube bias.
-    // For now, we verify the stage exists and produces finite output.
-    // Signal amplitude tuning is part of Phase 3 validation work.
+    // Verify port resistance is reasonable (not 1Ω degenerate).
+    // With R_plate=33kΩ, R_cathode=470Ω, and virtual_Rp=62.5kΩ, port resistance
+    // should be in the thousands of ohms range, not near 1Ω.
+    for pp in &proc.push_pull_stages {
+        let push_rp = pp.push_tree.port_resistance();
+        let pull_rp = pp.pull_tree.port_resistance();
+        assert!(
+            push_rp > 100.0,
+            "Push tree port resistance {push_rp:.1}Ω is degenerate (should be >> 1Ω)"
+        );
+        assert!(
+            pull_rp > 100.0,
+            "Pull tree port resistance {pull_rp:.1}Ω is degenerate (should be >> 1Ω)"
+        );
+    }
+
+    // Verify signal passes through (not zero output).
+    // Skip first 480 samples (10ms warmup) then check RMS.
+    let rms: f64 = output[480..].iter().map(|x| x * x).sum::<f64>() / (output.len() - 480) as f64;
+    let rms = rms.sqrt();
+    assert!(
+        rms > 1e-6,
+        "Push-pull stage output RMS {rms:.2e} is too low — signal not passing through"
+    );
 }
 
 /// Transformer pin aliasing: .primary.a/.primary.b should be unified with .a/.b

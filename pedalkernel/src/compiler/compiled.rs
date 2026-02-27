@@ -802,6 +802,14 @@ impl CompiledPedal {
             s.push('\n');
         }
 
+        if !self.push_pull_stages.is_empty() {
+            s.push_str(&format!("\nPush-Pull Stages: {}\n", self.push_pull_stages.len()));
+            s.push_str("───────────────────────────────────────────────────────────────────────────\n");
+            for (i, pp) in self.push_pull_stages.iter().enumerate() {
+                s.push_str(&format!("  [{}] {}\n", i, pp.debug_dump()));
+            }
+        }
+
         if !self.delay_lines.is_empty() {
             s.push_str(&format!("\nDelay Lines: {}\n", self.delay_lines.len()));
             s.push_str("───────────────────────────────────────────────────────────────────────────\n");

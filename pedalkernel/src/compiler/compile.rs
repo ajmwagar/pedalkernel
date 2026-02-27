@@ -758,7 +758,7 @@ pub fn compile_pedal_with_options(
 
     // Detect push-pull pairs connected through center-tapped transformers.
     // Paired triodes get a PushPullStage instead of individual WdfStages.
-    let push_pull_pairs = graph.find_push_pull_triode_pairs(&triodes);
+    let push_pull_pairs = graph.find_push_pull_triode_pairs(&triodes, &all_nonlinear_with_triodes);
     let paired_triode_indices: HashSet<usize> = push_pull_pairs
         .iter()
         .flat_map(|p| [p.push_triode_idx, p.pull_triode_idx])
@@ -773,16 +773,23 @@ pub fn compile_pedal_with_options(
         // Build WDF trees for each half.
         // Each half gets its plate-side and cathode-side passives.
         let build_half_tree = |info: &TriodeInfo| -> Option<(DynNode, f64)> {
-            let plate_passives = graph.elements_at_junction(
-                info.plate_node,
-                &all_nonlinear_with_triodes,
-                &graph.active_edge_indices,
-            );
-            let cathode_passives = graph.elements_at_junction(
-                info.cathode_node,
-                &all_nonlinear_with_triodes,
-                &graph.active_edge_indices,
-            );
+            // For push-pull halves, collect passives WITHOUT filtering supply nodes.
+            // In the 670, the plate connects to a balance supply rail (A_bal) through
+            // R_bal — this resistor IS part of the signal path and must be included.
+            let collect_passives_at = |junction: NodeId| -> Vec<usize> {
+                graph.edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, e)| {
+                        if all_nonlinear_with_triodes.contains(idx) { return false; }
+                        if graph.active_edge_indices.contains(idx) { return false; }
+                        (e.node_a == junction || e.node_b == junction)
+                    })
+                    .map(|(idx, _)| idx)
+                    .collect()
+            };
+            let plate_passives = collect_passives_at(info.plate_node);
+            let cathode_passives = collect_passives_at(info.cathode_node);
 
             let mut passive_idxs: Vec<usize> = plate_passives.clone();
             for idx in &cathode_passives {
@@ -796,6 +803,8 @@ pub fn compile_pedal_with_options(
             }
 
             // Find injection node (prefer plate-side).
+            // BFS from in_node may not reach plate/cathode neighborhood in
+            // equipment circuits (grid blocks traversal). Fall back to VCC node.
             let mut injection_node = graph.gnd_node;
             let mut best_dist = usize::MAX;
             for &eidx in &plate_passives {
@@ -820,11 +829,40 @@ pub fn compile_pedal_with_options(
                     }
                 }
             }
+            // Fallback: BFS couldn't reach plate/cathode neighborhood.
+            // Inject at the supply node (far end of plate load) to create a
+            // proper series path: source → VCC → R_plate → plate → tube → cathode → gnd.
+            // Using gnd_node is degenerate (VS between both terminals → 1Ω port resistance).
+            if best_dist == usize::MAX {
+                for &eidx in &plate_passives {
+                    let e = &graph.edges[eidx];
+                    let other = if e.node_a == info.plate_node { e.node_b } else { e.node_a };
+                    if other != graph.gnd_node && other != info.cathode_node {
+                        injection_node = other;
+                        break;
+                    }
+                }
+            }
 
             // Build SP edges.
             let source_node = graph.edges.len() + 5000;
             let virtual_rp_idx = vs_comp_idx + 1;
-            let gnd_node = graph.gnd_node;
+
+            // For push-pull halves, the cathode may not connect to gnd_node
+            // (e.g., 670 cathodes couple through a delay line, not to ground).
+            // Use the far end of the cathode passive chain as the ground terminal
+            // so the SP tree forms a proper 2-terminal network.
+            let mut ground_terminal = graph.gnd_node;
+            for &eidx in &cathode_passives {
+                let e = &graph.edges[eidx];
+                let far = if e.node_a == info.cathode_node { e.node_b } else { e.node_a };
+                if far != info.plate_node && far != injection_node {
+                    ground_terminal = far;
+                    break;
+                }
+            }
+            // If no cathode passive leads away, fall back to gnd_node.
+            // Also fall back if the only cathode far node IS gnd.
 
             let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
             sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
@@ -834,7 +872,7 @@ pub fn compile_pedal_with_options(
             }
             sp_edges.push((info.plate_node, info.cathode_node, SpTree::Leaf(virtual_rp_idx)));
 
-            let terminals = vec![source_node, gnd_node];
+            let terminals = vec![source_node, ground_terminal];
             let sp_tree = sp_reduce(sp_edges, &terminals).ok()?;
 
             let mut half_components = graph.components.clone();
@@ -997,9 +1035,23 @@ pub fn compile_pedal_with_options(
             }
         }
 
-        // Fallback: use ground as injection point
+        // Fallback: BFS couldn't reach plate/cathode neighborhood (equipment circuits).
+        // Inject at the supply node (far end of plate load) instead of gnd_node.
+        // Using gnd_node is degenerate: VS between both terminals → 1Ω port resistance.
         if best_dist == usize::MAX {
-            injection_node = graph.gnd_node;
+            let mut found_supply = false;
+            for &eidx in &plate_passives {
+                let e = &graph.edges[eidx];
+                let other = if e.node_a == plate_node { e.node_b } else { e.node_a };
+                if other != graph.gnd_node && other != cathode_node {
+                    injection_node = other;
+                    found_supply = true;
+                    break;
+                }
+            }
+            if !found_supply {
+                injection_node = graph.gnd_node;
+            }
         }
 
         // Build SP edges for the triode stage.

@@ -1031,6 +1031,7 @@ impl CircuitGraph {
     pub(super) fn find_push_pull_triode_pairs(
         &self,
         triodes: &[(usize, TriodeInfo)],
+        nonlinear_edge_indices: &[usize],
     ) -> Vec<PushPullPairInfo> {
         // Find CT transformers (primary_type = CenterTap or PushPull).
         let mut ct_transformers: Vec<(usize, &TransformerConfig)> = Vec::new();
@@ -1044,41 +1045,53 @@ impl CircuitGraph {
         }
 
         let mut pairs = Vec::new();
+        let mut used_triodes: HashSet<usize> = HashSet::new();
 
         for (xfmr_edge_idx, cfg) in &ct_transformers {
             let xfmr_edge = &self.edges[*xfmr_edge_idx];
-            // Transformer primary: node_a = primary.a end, node_b = primary.b end
             let primary_a_node = xfmr_edge.node_a;
             let primary_b_node = xfmr_edge.node_b;
 
-            // Find triodes whose plate nodes are adjacent to primary.a or primary.b.
-            // "Adjacent" = connected through 1 passive element (e.g., a sense resistor).
-            // Exclude the transformer edge itself — it connects primary.a to primary.b,
-            // and we need to keep those neighborhoods separate.
-            let exclude = [*xfmr_edge_idx];
-            let nodes_near_a = self.nodes_reachable_through_passives(
+            // BFS through passives only: exclude nonlinear edges (triodes, diodes,
+            // JFETs, BJTs), active edges (op-amps, other transformers), and the
+            // transformer edge itself.
+            let mut exclude: Vec<usize> = nonlinear_edge_indices.to_vec();
+            exclude.push(*xfmr_edge_idx);
+
+            let nodes_near_a = self.bfs_through_passives(
                 primary_a_node,
                 &exclude,
                 &self.active_edge_indices,
             );
-            let nodes_near_b = self.nodes_reachable_through_passives(
+            let nodes_near_b = self.bfs_through_passives(
                 primary_b_node,
                 &exclude,
                 &self.active_edge_indices,
             );
 
-            // Match triodes: plate near primary.a = push, plate near primary.b = pull
-            let mut push_idx = None;
-            let mut pull_idx = None;
+            // Find triode groups whose plate is reachable from either transformer end.
+            // In the 670, both transformer ends reach both triode plates through a
+            // shared balance node (A_bal). We collect all reachable triode groups
+            // and pair them — push/pull phase assignment is arbitrary (doesn't affect
+            // the differential output, only inverts polarity).
+            let mut candidates: Vec<usize> = Vec::new();
             for (i, (_, info)) in triodes.iter().enumerate() {
-                if nodes_near_a.contains(&info.plate_node) && push_idx.is_none() {
-                    push_idx = Some(i);
-                } else if nodes_near_b.contains(&info.plate_node) && pull_idx.is_none() {
-                    pull_idx = Some(i);
+                if used_triodes.contains(&i) {
+                    continue;
+                }
+                if nodes_near_a.contains(&info.plate_node)
+                    || nodes_near_b.contains(&info.plate_node)
+                {
+                    candidates.push(i);
                 }
             }
 
-            if let (Some(push), Some(pull)) = (push_idx, pull_idx) {
+            // Need at least 2 triode groups for a push-pull pair.
+            if candidates.len() >= 2 {
+                let push = candidates[0];
+                let pull = candidates[1];
+                used_triodes.insert(push);
+                used_triodes.insert(pull);
                 pairs.push(PushPullPairInfo {
                     push_triode_idx: push,
                     pull_triode_idx: pull,
@@ -1091,26 +1104,38 @@ impl CircuitGraph {
         pairs
     }
 
-    /// Find nodes reachable from `start` through at most one passive element,
-    /// excluding nonlinear and active edges.
-    fn nodes_reachable_through_passives(
+    /// BFS through passive edges only, excluding specified nonlinear and active edges.
+    fn bfs_through_passives(
         &self,
         start: NodeId,
-        nonlinear_indices: &[usize],
+        exclude_indices: &[usize],
         active_indices: &[usize],
     ) -> HashSet<NodeId> {
         let mut reachable = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
         reachable.insert(start);
-        for (idx, e) in self.edges.iter().enumerate() {
-            if nonlinear_indices.contains(&idx) || active_indices.contains(&idx) {
-                continue;
-            }
-            if e.node_a == start {
-                reachable.insert(e.node_b);
-            } else if e.node_b == start {
-                reachable.insert(e.node_a);
+        queue.push_back(start);
+
+        while let Some(node) = queue.pop_front() {
+            for (idx, e) in self.edges.iter().enumerate() {
+                if exclude_indices.contains(&idx) || active_indices.contains(&idx) {
+                    continue;
+                }
+                let neighbor = if e.node_a == node {
+                    Some(e.node_b)
+                } else if e.node_b == node {
+                    Some(e.node_a)
+                } else {
+                    None
+                };
+                if let Some(n) = neighbor {
+                    if reachable.insert(n) {
+                        queue.push_back(n);
+                    }
+                }
             }
         }
+
         reachable
     }
 
