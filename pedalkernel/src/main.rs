@@ -26,6 +26,21 @@ enum Command {
         #[arg(trailing_var_arg = true)]
         knobs: Vec<String>,
     },
+    /// Validate .pedal files — check for common errors and warnings.
+    ///
+    /// Accepts files, directories (recursive), or glob patterns.
+    /// Examples:
+    ///   pedalkernel validate examples/
+    ///   pedalkernel validate "examples/**/*.pedal"
+    ///   pedalkernel validate my_pedal.pedal --fix
+    Validate {
+        /// Paths to .pedal files, directories, or glob patterns.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Auto-fix obvious issues (e.g., pin renames) in place.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Interactive TUI with live JACK audio — select I/O ports and tweak knobs.
     #[cfg(all(feature = "jack-rt", feature = "tui"))]
     Tui {
@@ -47,6 +62,7 @@ fn main() {
             output,
             knobs,
         } => cli::process::run(&file, &input, &output, &knobs),
+        Command::Validate { paths, fix } => cli::validate::run(&paths, fix),
         #[cfg(all(feature = "jack-rt", feature = "tui"))]
         Command::Tui { file, input } => {
             let wav_input = input.as_deref();
