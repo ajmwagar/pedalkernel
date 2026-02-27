@@ -1,17 +1,19 @@
 # Symmetric silicon diode clipper
-# Simple topology: resistor → anti-parallel diode pair to ground → output
+# Topology matches SPICE: C1 (100n) → R1 (2.2k) → diodes → RL (10k)
 # Clips at ±0.6V (typical silicon Vf)
 
 pedal "Diode Clipper" {
   components {
-    R_in: resistor(4.7k)
+    C1: cap(100n)       # Input coupling capacitor
+    R1: resistor(2.2k)  # Series resistor (matches SPICE)
     D1: diode_pair(silicon)
-    R_load: resistor(10k)
+    RL: resistor(10k)   # Load resistor
   }
   nets {
-    in -> R_in.a
-    R_in.b -> D1.a, R_load.a
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> D1.a, RL.a
     D1.b -> gnd
-    R_load.b -> out
+    RL.b -> out
   }
 }

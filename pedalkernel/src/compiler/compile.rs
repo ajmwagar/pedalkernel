@@ -15,6 +15,211 @@ use super::helpers::*;
 use super::stage::{RootKind, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Passive circuit gain helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Compute the voltage divider gain for a resistor-only circuit.
+///
+/// For a simple divider topology (in -> R_series -> out -> R_shunt -> gnd),
+/// the gain is R_shunt / (R_series + R_shunt).
+///
+/// Returns 1.0 if topology doesn't match a simple divider.
+fn compute_resistor_divider_gain(graph: &CircuitGraph) -> f64 {
+    // Find total series resistance from in_node to out_node
+    let r_series = find_resistance_between(graph, graph.in_node, graph.out_node);
+
+    // Find total shunt resistance from out_node to gnd_node
+    let r_shunt = find_resistance_between(graph, graph.out_node, graph.gnd_node);
+
+    match (r_series, r_shunt) {
+        (Some(rs), Some(rsh)) if rs > 0.0 && rsh > 0.0 => {
+            // Voltage divider: V_out = V_in * R_shunt / (R_series + R_shunt)
+            rsh / (rs + rsh)
+        }
+        (None, Some(_)) => {
+            // No series resistance, direct connection: gain = 1.0
+            1.0
+        }
+        (Some(_), None) => {
+            // No shunt to ground: output floats, assume unity for now
+            // (This would be an open-circuit output in reality)
+            1.0
+        }
+        _ => 1.0,
+    }
+}
+
+/// Find the total resistance between two nodes in a resistor network.
+///
+/// For simple series paths, sums the resistances.
+/// Returns None if no resistive path exists between the nodes.
+fn find_resistance_between(graph: &CircuitGraph, from: NodeId, to: NodeId) -> Option<f64> {
+    if from == to {
+        return Some(0.0); // Same node = short circuit
+    }
+
+    // Simple case: find direct resistor(s) between the two nodes
+    let mut total_r = 0.0;
+    let mut found_direct = false;
+
+    for edge in &graph.edges {
+        let connects = (edge.node_a == from && edge.node_b == to)
+            || (edge.node_a == to && edge.node_b == from);
+
+        if connects {
+            if let ComponentKind::Resistor(r) = &graph.components[edge.comp_idx].kind {
+                if found_direct {
+                    // Parallel resistors: 1/R_total = 1/R1 + 1/R2
+                    total_r = (total_r * r) / (total_r + r);
+                } else {
+                    total_r = *r;
+                    found_direct = true;
+                }
+            } else if let ComponentKind::Potentiometer(max_r) = &graph.components[edge.comp_idx].kind
+            {
+                // Use 50% as default position for pots
+                let r = max_r * 0.5;
+                if found_direct {
+                    total_r = (total_r * r) / (total_r + r);
+                } else {
+                    total_r = r;
+                    found_direct = true;
+                }
+            }
+        }
+    }
+
+    if found_direct {
+        return Some(total_r);
+    }
+
+    // TODO: For more complex networks, use BFS to find series paths
+    // and nodal analysis for general networks.
+    None
+}
+
+/// Filter topology type for simple RC/RL circuits.
+enum FilterTopology {
+    /// RC lowpass: R from in→out, C from out→gnd
+    RcLowpass { r: f64, c: f64, a1: f64, b0: f64 },
+    /// RC highpass: C from in→out, R from out→gnd
+    RcHighpass { r: f64, c: f64, a1: f64, b0: f64 },
+}
+
+/// Detect simple RC filter topology and compute IIR filter coefficients.
+///
+/// Detects:
+/// - RC lowpass: R from in→out, C from out→gnd
+/// - RC highpass: C from in→out, R from out→gnd
+///
+/// Returns IIR coefficients for the bilinear transform of the analog filter.
+fn detect_rc_filter_topology(graph: &CircuitGraph, sample_rate: f64) -> Option<FilterTopology> {
+    // Count resistors and capacitors
+    let resistors: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|e| matches!(graph.components[e.comp_idx].kind, ComponentKind::Resistor(_)))
+        .collect();
+    let capacitors: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|e| matches!(graph.components[e.comp_idx].kind, ComponentKind::Capacitor(_)))
+        .collect();
+
+    // Must have exactly one R and one C
+    if resistors.len() != 1 || capacitors.len() != 1 {
+        return None;
+    }
+
+    let r_edge = resistors[0];
+    let c_edge = capacitors[0];
+
+    // Get R and C values
+    let r = match &graph.components[r_edge.comp_idx].kind {
+        ComponentKind::Resistor(r) => *r,
+        _ => return None,
+    };
+    let c = match &graph.components[c_edge.comp_idx].kind {
+        ComponentKind::Capacitor(cfg) => cfg.value,
+        _ => return None,
+    };
+
+    // Check for lowpass topology: R from in→out, C from out→gnd
+    let r_connects_in_out = (r_edge.node_a == graph.in_node && r_edge.node_b == graph.out_node)
+        || (r_edge.node_a == graph.out_node && r_edge.node_b == graph.in_node);
+    let c_connects_out_gnd = (c_edge.node_a == graph.out_node && c_edge.node_b == graph.gnd_node)
+        || (c_edge.node_a == graph.gnd_node && c_edge.node_b == graph.out_node);
+
+    if r_connects_in_out && c_connects_out_gnd {
+        // Lowpass: H(s) = 1 / (1 + sRC)
+        // H(z) = b0*(1 + z^-1) / (1 - a1*z^-1)
+        let omega_rc = 2.0 * sample_rate * r * c;
+        let a1 = (omega_rc - 1.0) / (omega_rc + 1.0);
+        let b0 = 1.0 / (omega_rc + 1.0);
+        return Some(FilterTopology::RcLowpass { r, c, a1, b0 });
+    }
+
+    // Check for highpass topology: C from in→out, R from out→gnd
+    let c_connects_in_out = (c_edge.node_a == graph.in_node && c_edge.node_b == graph.out_node)
+        || (c_edge.node_a == graph.out_node && c_edge.node_b == graph.in_node);
+    let r_connects_out_gnd = (r_edge.node_a == graph.out_node && r_edge.node_b == graph.gnd_node)
+        || (r_edge.node_a == graph.gnd_node && r_edge.node_b == graph.out_node);
+
+    if c_connects_in_out && r_connects_out_gnd {
+        // Highpass: H(s) = sRC / (1 + sRC)
+        // H(z) = b0*(1 - z^-1) / (1 - a1*z^-1)
+        let omega_rc = 2.0 * sample_rate * r * c;
+        let a1 = (omega_rc - 1.0) / (omega_rc + 1.0);
+        let b0 = omega_rc / (omega_rc + 1.0);
+        return Some(FilterTopology::RcHighpass { r, c, a1, b0 });
+    }
+
+    None
+}
+
+/// Compute compensation factor for passive WDF circuits with Passthrough root.
+///
+/// The Passthrough root reflects incident waves unchanged, modeling an open
+/// circuit termination. We simulate at DC and compensate for any gain error.
+///
+/// For RC lowpass: at DC, V_out should equal V_in.
+/// For highpass: DC is blocked, no compensation applied.
+fn compute_passive_compensation(tree: &DynNode) -> f64 {
+    // Clone the tree to simulate without affecting state
+    let mut test_tree = tree.clone();
+
+    // Reset state
+    test_tree.reset();
+
+    // Apply a unit DC voltage and iterate to steady state
+    let test_voltage = 1.0;
+    let mut output = 0.0;
+
+    // Run enough iterations for RC time constants to settle
+    // (Most passive circuits settle within 1000 samples at 48kHz)
+    for _ in 0..2000 {
+        test_tree.set_voltage(test_voltage);
+        let b_tree = test_tree.reflected();
+        // Passthrough root: a = b (open circuit reflection)
+        let a_root = b_tree;
+        test_tree.set_incident(a_root);
+        // Root port voltage (same as stage.process)
+        output = (a_root + b_tree) / 2.0;
+    }
+
+    // Compensation = expected / actual
+    // For lowpass at DC: expected = 1.0, actual = output
+    // For highpass at DC: expected = 0.0, but we don't compensate DC-blocking
+    if output.abs() > 0.01 {
+        // Significant DC output - compensate to unity DC gain
+        1.0 / output
+    } else {
+        // Near-zero DC output (highpass) - don't compensate
+        1.0
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Main compiler entry point
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1135,80 +1340,120 @@ pub fn compile_pedal_with_options(
     // If the circuit has reactive elements (capacitors, inductors) but no
     // nonlinear elements, we need a WDF stage to model the filtering.
     // Without this, capacitor high-pass behavior and leakage wouldn't work.
+    //
+    // For resistor-only circuits, we compute the analytical voltage divider
+    // gain instead of building a WDF stage (resistors don't need WDF dynamics).
+    let mut passive_attenuation = 1.0;
+
     if stages.is_empty() {
         let has_reactive = pedal.components.iter().any(|c| {
             matches!(c.kind, ComponentKind::Capacitor(_) | ComponentKind::Inductor(_))
         });
 
         if has_reactive {
-            // Find all passive edges (resistors, capacitors, inductors)
-            let passive_edges: Vec<usize> = graph
-                .edges
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| {
-                    let kind = &graph.components[e.comp_idx].kind;
-                    matches!(
-                        kind,
-                        ComponentKind::Resistor(_)
-                            | ComponentKind::Capacitor(_)
-                            | ComponentKind::Inductor(_)
-                            | ComponentKind::Potentiometer(_)
-                    )
-                })
-                .map(|(i, _)| i)
-                .collect();
+            // Check for simple RC filter topologies (lowpass or highpass)
+            let rc_filter = detect_rc_filter_topology(&graph, sample_rate);
 
-            if !passive_edges.is_empty() {
-                // Build SP edges for all passive elements
-                let source_node = graph.edges.len() + 1000;
-                let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+            if let Some(filter) = rc_filter {
+                // Use analytical IIR filter for correct frequency response
+                // This bypasses WDF which has issues with voltage-source-driven trees
+                let tree = DynNode::VoltageSource {
+                    voltage: 0.0,
+                    rp: 1.0,
+                }; // Dummy tree (not used by IIR)
 
-                // Add voltage source edge: source_node → in_node
-                sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
+                let root = match filter {
+                    FilterTopology::RcLowpass { a1, b0, .. } => RootKind::IirLowpass {
+                        a1,
+                        b0,
+                        y_prev: 0.0,
+                        x_prev: 0.0,
+                    },
+                    FilterTopology::RcHighpass { a1, b0, .. } => RootKind::IirHighpass {
+                        a1,
+                        b0,
+                        y_prev: 0.0,
+                        x_prev: 0.0,
+                    },
+                };
 
-                for &eidx in &passive_edges {
-                    let e = &graph.edges[eidx];
-                    sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-                }
+                stages.push(WdfStage {
+                    tree,
+                    root,
+                    compensation: 1.0, // IIR filter has correct gain built-in
+                    oversampler: Oversampler::new(oversampling),
+                    base_diode_model: None,
+                    paired_opamp: None,
+                });
+            } else {
+                // Fall back to WDF for complex passive circuits
+                let passive_edges: Vec<usize> = graph
+                    .edges
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| {
+                        let kind = &graph.components[e.comp_idx].kind;
+                        matches!(
+                            kind,
+                            ComponentKind::Resistor(_)
+                                | ComponentKind::Capacitor(_)
+                                | ComponentKind::Inductor(_)
+                                | ComponentKind::Potentiometer(_)
+                        )
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
 
-                // Use out_node as the junction (where we measure the output)
-                let terminals = vec![source_node, graph.out_node];
-                if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
-                    let mut all_components = graph.components.clone();
-                    while all_components.len() <= vs_comp_idx {
-                        all_components.push(ComponentDef {
-                            id: "__vs__".to_string(),
-                            kind: ComponentKind::Resistor(1.0),
-                        });
+                if !passive_edges.is_empty() {
+                    // Build SP edges for all passive elements
+                    let source_node = graph.edges.len() + 1000;
+                    let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+
+                    // Add voltage source edge: source_node → in_node
+                    sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
+
+                    for &eidx in &passive_edges {
+                        let e = &graph.edges[eidx];
+                        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
                     }
 
-                    let tree = sp_to_dyn_with_vs(
-                        &sp_tree,
-                        &all_components,
-                        &graph.fork_paths,
-                        sample_rate,
-                        vs_comp_idx,
-                    );
+                    // Use out_node as the junction (where we measure the output)
+                    let terminals = vec![source_node, graph.out_node];
+                    if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
+                        let mut all_components = graph.components.clone();
+                        while all_components.len() <= vs_comp_idx {
+                            all_components.push(ComponentDef {
+                                id: "__vs__".to_string(),
+                                kind: ComponentKind::Resistor(1.0),
+                            });
+                        }
 
-                    // Use a passthrough root for passive circuits.
-                    // The tree processes the signal normally and the root
-                    // reflects the incident wave unchanged (open circuit).
-                    stages.push(WdfStage {
-                        tree,
-                        root: RootKind::Passthrough,
-                        compensation: 1.0,
-                        oversampler: Oversampler::new(oversampling),
-                        base_diode_model: None,
-                        paired_opamp: None,
-                    });
+                        let tree = sp_to_dyn_with_vs(
+                            &sp_tree,
+                            &all_components,
+                            &graph.fork_paths,
+                            sample_rate,
+                            vs_comp_idx,
+                        );
 
-                    // Balance the passive stage too
-                    if let Some(stage) = stages.last_mut() {
-                        stage.balance_vs_impedance();
+                        // Compute compensation factor for passive circuits.
+                        let compensation = compute_passive_compensation(&tree);
+
+                        stages.push(WdfStage {
+                            tree,
+                            root: RootKind::Passthrough,
+                            compensation,
+                            oversampler: Oversampler::new(oversampling),
+                            base_diode_model: None,
+                            paired_opamp: None,
+                        });
                     }
                 }
             }
+        } else {
+            // Resistor-only circuit: compute analytical voltage divider gain.
+            // No WDF stage needed since resistors don't have dynamics.
+            passive_attenuation = compute_resistor_divider_gain(&graph);
         }
     }
 
@@ -1497,13 +1742,14 @@ pub fn compile_pedal_with_options(
         .iter()
         .find(|c| is_level_label(&c.label))
         .map(|c| c.default)
-        .unwrap_or(0.8);
+        .unwrap_or(1.0); // If no Level control, use unity gain
 
     let (glo, ghi) = gain_range;
     let ratio: f64 = ghi / glo;
     // Apply op-amp feedback gain (from detected inverting/non-inverting topologies)
     // This is the actual closed-loop gain from Rf/Ri ratios.
-    let pre_gain = glo * ratio.powf(gain_default) * active_bonus * opamp_feedback_gain;
+    // Also apply passive attenuation for resistor-only circuits (voltage dividers).
+    let pre_gain = glo * ratio.powf(gain_default) * active_bonus * opamp_feedback_gain * passive_attenuation;
 
     // Helper: trace through resistive paths (pots, resistors) to find modulation targets.
     // Returns (target_component, target_property) if found.

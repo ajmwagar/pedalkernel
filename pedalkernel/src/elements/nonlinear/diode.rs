@@ -16,15 +16,19 @@ pub struct DiodeModel {
     pub is: f64,
     /// Thermal voltage * ideality factor (V). Vt ≈ 25.85 mV at 20 °C.
     pub n_vt: f64,
+    /// Series resistance (Ω). Accounts for ohmic contact and bulk resistance.
+    /// SPICE: RS parameter. Typical: 0.5-1Ω for silicon, 2-5Ω for germanium.
+    pub rs: f64,
 }
 
 impl DiodeModel {
     /// Generic silicon diode — averaged parameters for 1N914/1N4148 family.
     pub fn silicon() -> Self {
-        // 1N4148 datasheet: Is ≈ 2.52nA, n ≈ 1.752 (fitted to Vf=0.62V @ 1mA)
+        // 1N4148 datasheet: Is ≈ 2.52nA, n ≈ 1.752, Rs ≈ 0.568Ω
         Self {
             is: 2.52e-9,
             n_vt: 1.752 * 25.85e-3,
+            rs: 0.568, // SPICE: RS=0.568
         }
     }
 
@@ -34,6 +38,7 @@ impl DiodeModel {
         Self {
             is: 3.44e-9,
             n_vt: 1.80 * 25.85e-3,
+            rs: 0.64, // Slightly higher Rs than 1N4148
         }
     }
 
@@ -43,6 +48,7 @@ impl DiodeModel {
         Self {
             is: 2.52e-9,
             n_vt: 1.752 * 25.85e-3,
+            rs: 0.568, // SPICE: RS=0.568
         }
     }
 
@@ -52,6 +58,7 @@ impl DiodeModel {
         Self {
             is: 14.11e-9,
             n_vt: 1.984 * 25.85e-3,
+            rs: 0.1, // Lower Rs for rectifier
         }
     }
 
@@ -60,6 +67,7 @@ impl DiodeModel {
         Self {
             is: 1e-6,
             n_vt: 1.3 * 25.85e-3,
+            rs: 3.0, // Higher Rs for germanium
         }
     }
 
@@ -69,6 +77,7 @@ impl DiodeModel {
         Self {
             is: 2.0e-6,
             n_vt: 1.25 * 25.85e-3,
+            rs: 2.5,
         }
     }
 
@@ -78,6 +87,7 @@ impl DiodeModel {
         Self {
             is: 0.8e-6,
             n_vt: 1.35 * 25.85e-3,
+            rs: 4.0, // Higher Rs for glass diode
         }
     }
 
@@ -94,6 +104,7 @@ impl DiodeModel {
         Self {
             is: 4.5e-17,
             n_vt: 2.0 * 25.85e-3,
+            rs: 1.0, // Typical LED series resistance
         }
     }
 
@@ -103,6 +114,7 @@ impl DiodeModel {
         Self {
             is: 4.5e-17,
             n_vt: 2.0 * 25.85e-3,
+            rs: 1.0,
         }
     }
 
@@ -113,6 +125,7 @@ impl DiodeModel {
         Self {
             is: 1.0e-19,
             n_vt: 2.0 * 25.85e-3,
+            rs: 1.5, // Slightly higher for green LED
         }
     }
 }
@@ -328,27 +341,68 @@ impl DiodePairRoot {
 impl WdfRoot for DiodePairRoot {
     /// Compute reflected wave from incident wave `a` and port resistance `rp`.
     ///
-    /// Anti-parallel diode pair: `i(v) = Is*(exp(v/nVt) - exp(-v/nVt))`
+    /// Anti-parallel diode pair with series resistance:
+    /// - Junction current: `i(v_j) = Is*(exp(v_j/nVt) - exp(-v_j/nVt))`
+    /// - Total voltage: `v = v_j + i*Rs` (each diode has Rs)
+    ///
+    /// We solve for junction voltage v_j using effective port resistance (Rp + Rs).
+    /// The solver returns b_eff = 2*v_j - a, then we correct for Rs:
+    /// b = b_eff + 2*i*Rs
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let is = self.model.is;
         let nvt = self.model.n_vt;
+        let rs = self.model.rs;
+
+        // If no series resistance, use original fast path
+        if rs < 1e-9 {
+            let v0 = if a.abs() > 10.0 * nvt {
+                let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
+                nvt * log_arg.ln() * a.signum()
+            } else {
+                a * 0.5
+            };
+            return newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+                let x = (v / nvt).clamp(-500.0, 500.0);
+                let ev_pos = x.exp();
+                let ev_neg = (-x).exp();
+                let i = is * (ev_pos - ev_neg);
+                let di = is * (ev_pos + ev_neg) / nvt;
+                (i, di)
+            });
+        }
+
+        // Effective port resistance including series resistance
+        let rp_eff = rp + rs;
 
         let v0 = if a.abs() > 10.0 * nvt {
-            let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
+            let log_arg = (a.abs() / (2.0 * rp_eff * is)).max(1.0);
             nvt * log_arg.ln() * a.signum()
         } else {
             a * 0.5
         };
 
-        newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
-            let x = (v / nvt).clamp(-500.0, 500.0);
+        // Solve for junction voltage with effective port resistance
+        // Solver returns b_eff = 2*v_junction - a
+        let b_eff = newton_raphson_solve(a, rp_eff, v0, self.max_iter, 1e-6, None, None, |v_j| {
+            let x = (v_j / nvt).clamp(-500.0, 500.0);
             let ev_pos = x.exp();
             let ev_neg = (-x).exp();
             let i = is * (ev_pos - ev_neg);
             let di = is * (ev_pos + ev_neg) / nvt;
             (i, di)
-        })
+        });
+
+        // Recover junction voltage from b_eff: v_junction = (a + b_eff) / 2
+        let v_junction = (a + b_eff) * 0.5;
+
+        // Compute current at junction voltage
+        let x = (v_junction / nvt).clamp(-500.0, 500.0);
+        let i = is * (x.exp() - (-x).exp());
+
+        // Correct reflected wave for series resistance
+        // b = 2*v_total - a = 2*(v_junction + i*Rs) - a = b_eff + 2*i*Rs
+        b_eff + 2.0 * i * rs
     }
 }
 
@@ -375,33 +429,68 @@ impl DiodeRoot {
 }
 
 impl WdfRoot for DiodeRoot {
-    /// Single diode: `i(v) = Is*(exp(v/nVt) - 1)`
+    /// Single diode with series resistance:
+    /// - Junction current: `i(v_j) = Is*(exp(v_j/nVt) - 1)`
+    /// - Total voltage: `v = v_j + i*Rs`
+    ///
+    /// We solve for junction voltage v_j using effective port resistance (Rp + Rs).
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let is = self.model.is;
         let nvt = self.model.n_vt;
+        let rs = self.model.rs;
+
+        // If no series resistance, use original fast path
+        if rs < 1e-9 {
+            let v0 = if a > 10.0 * nvt {
+                let log_arg = (a / (2.0 * rp * is)).max(1.0);
+                nvt * log_arg.ln()
+            } else if a < -10.0 * nvt {
+                a * 0.5
+            } else {
+                a * 0.5
+            };
+            return newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+                let x = (v / nvt).clamp(-500.0, 500.0);
+                let ev = x.exp();
+                let i = is * (ev - 1.0);
+                let di = is * ev / nvt;
+                (i, di)
+            });
+        }
+
+        // Effective port resistance including series resistance
+        let rp_eff = rp + rs;
 
         // Initial guess depends on bias direction:
-        // - Forward bias (a > 0): Use logarithmic estimate from Shockley equation
-        // - Reverse bias (a < 0): Diode blocks, i_d ≈ -Is ≈ 0, so v ≈ a/2
         let v0 = if a > 10.0 * nvt {
-            // Forward bias: logarithmic estimate
-            let log_arg = (a / (2.0 * rp * is)).max(1.0);
+            let log_arg = (a / (2.0 * rp_eff * is)).max(1.0);
             nvt * log_arg.ln()
         } else if a < -10.0 * nvt {
-            // Reverse bias: diode blocks
             a * 0.5
         } else {
-            // Small signal: linear approximation
             a * 0.5
         };
 
-        newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
-            let x = (v / nvt).clamp(-500.0, 500.0);
+        // Solve for junction voltage with effective port resistance
+        // Solver returns b_eff = 2*v_junction - a
+        let b_eff = newton_raphson_solve(a, rp_eff, v0, self.max_iter, 1e-6, None, None, |v_j| {
+            let x = (v_j / nvt).clamp(-500.0, 500.0);
             let ev = x.exp();
             let i = is * (ev - 1.0);
             let di = is * ev / nvt;
             (i, di)
-        })
+        });
+
+        // Recover junction voltage from b_eff: v_junction = (a + b_eff) / 2
+        let v_junction = (a + b_eff) * 0.5;
+
+        // Compute current at junction voltage
+        let x = (v_junction / nvt).clamp(-500.0, 500.0);
+        let i = is * (x.exp() - 1.0);
+
+        // Correct reflected wave for series resistance
+        // b = 2*v_total - a = 2*(v_junction + i*Rs) - a = b_eff + 2*i*Rs
+        b_eff + 2.0 * i * rs
     }
 }

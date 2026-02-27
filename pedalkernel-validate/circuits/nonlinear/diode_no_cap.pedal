@@ -6,8 +6,8 @@ pedal "Diode Clipper No Cap" {
   }
   nets {
     in -> R1.a
-    R1.b -> D1.anode, RL.a, out
-    D1.cathode -> gnd
-    RL.b -> gnd
+    R1.b -> D1.a, RL.a
+    D1.b -> gnd
+    RL.b -> out
   }
 }

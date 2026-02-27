@@ -27,11 +27,16 @@ pub struct JfetModel {
 
 impl JfetModel {
     /// 2N5457 N-channel JFET (common, medium Idss).
+    ///
+    /// Parameters matched to SPICE model:
+    /// - VTO = -2.0V (pinch-off voltage)
+    /// - BETA = 1.5 mA/V² → Idss = BETA × Vp² = 6 mA
+    /// - LAMBDA = 0.01 (channel-length modulation)
     pub fn n_2n5457() -> Self {
         Self {
-            idss: 5e-3,
-            vp: -2.5,
-            lambda: 0.02,
+            idss: 6e-3,     // SPICE: BETA=1.5m, Idss = 1.5e-3 * 2.0² = 6 mA
+            vp: -2.0,       // SPICE: VTO=-2.0
+            lambda: 0.01,   // SPICE: LAMBDA=0.01
             is_n_channel: true,
         }
     }

@@ -39,6 +39,55 @@ pub(super) enum RootKind {
     /// Used when the circuit has reactive elements (caps/inductors) but no
     /// nonlinear elements, allowing the WDF tree to process the filtering.
     Passthrough,
+    /// Capacitor as WDF root for RC lowpass and similar filters.
+    /// The capacitor reflects its stored state: b = state.
+    /// Output voltage = (a + state) / 2 gives correct transfer function.
+    CapacitorRoot {
+        /// Capacitance in Farads
+        capacitance: f64,
+        /// Port resistance: 1 / (2 * fs * C)
+        rp: f64,
+        /// State (previous incident wave)
+        state: f64,
+    },
+    /// Inductor as WDF root for RL highpass and similar filters.
+    /// The inductor reflects negated state: b = -state.
+    /// Output voltage = (a - state) / 2 gives correct transfer function.
+    InductorRoot {
+        /// Inductance in Henrys
+        inductance: f64,
+        /// Port resistance: 2 * fs * L
+        rp: f64,
+        /// State (previous incident wave)
+        state: f64,
+    },
+    /// First-order IIR lowpass filter (analytical, not WDF-based).
+    /// Used for simple RC lowpass circuits where WDF topology issues cause
+    /// incorrect frequency response.
+    /// H(z) = b0*(1 + z^-1) / (1 - a1*z^-1)
+    IirLowpass {
+        /// Filter coefficient a1 = (1 - ωRC)/(1 + ωRC) where ω = 2*fs
+        a1: f64,
+        /// Filter coefficient b0 = 1/(1 + ωRC)
+        b0: f64,
+        /// Previous output y[n-1]
+        y_prev: f64,
+        /// Previous input x[n-1]
+        x_prev: f64,
+    },
+    /// First-order IIR highpass filter (analytical, not WDF-based).
+    /// Used for simple RC highpass circuits.
+    /// H(z) = b0*(1 - z^-1) / (1 - a1*z^-1)
+    IirHighpass {
+        /// Filter coefficient a1 = (1 - ωRC)/(1 + ωRC) where ω = 2*fs
+        a1: f64,
+        /// Filter coefficient b0 = ωRC/(1 + ωRC)
+        b0: f64,
+        /// Previous output y[n-1]
+        y_prev: f64,
+        /// Previous input x[n-1]
+        x_prev: f64,
+    },
 }
 
 impl RootKind {
@@ -109,6 +158,7 @@ impl WdfStage {
             tree.set_voltage(sample * compensation);
             let b_tree = tree.reflected();
             let rp = tree.port_resistance();
+
             let a_root = match root {
                 RootKind::DiodePair(dp) => dp.process(b_tree, rp),
                 RootKind::SingleDiode(d) => d.process(b_tree, rp),
@@ -125,9 +175,38 @@ impl WdfStage {
                 RootKind::BjtPnp(bjt) => bjt.process(b_tree, rp),
                 // Passthrough: open-circuit termination (b = a)
                 // The tree processes normally but the root just reflects.
-                RootKind::Passthrough => {
-                    let _ = rp; // Unused for passthrough
-                    b_tree // Reflect incident wave unchanged
+                RootKind::Passthrough => b_tree,
+                // Capacitor root: b = state (reflects stored incident)
+                // This gives correct RC lowpass transfer function.
+                RootKind::CapacitorRoot { state, .. } => {
+                    let b_root = *state;
+                    *state = b_tree; // Update state with new incident
+                    b_root
+                }
+                // Inductor root: b = -state (reflects negated stored incident)
+                // This gives correct RL highpass transfer function.
+                RootKind::InductorRoot { state, .. } => {
+                    let b_root = -*state;
+                    *state = b_tree; // Update state with new incident
+                    b_root
+                }
+                // IIR lowpass: bypass WDF tree, use direct filter
+                RootKind::IirLowpass { a1, b0, y_prev, x_prev } => {
+                    // First-order IIR: y[n] = b0*(x[n] + x[n-1]) + a1*y[n-1]
+                    let x = sample * compensation;
+                    let y = *b0 * (x + *x_prev) + *a1 * *y_prev;
+                    *x_prev = x;
+                    *y_prev = y;
+                    return y; // Skip normal WDF processing
+                }
+                // IIR highpass: bypass WDF tree, use direct filter
+                RootKind::IirHighpass { a1, b0, y_prev, x_prev } => {
+                    // First-order IIR: y[n] = b0*(x[n] - x[n-1]) + a1*y[n-1]
+                    let x = sample * compensation;
+                    let y = *b0 * (x - *x_prev) + *a1 * *y_prev;
+                    *x_prev = x;
+                    *y_prev = y;
+                    return y; // Skip normal WDF processing
                 }
             };
             tree.set_incident(a_root);
@@ -380,6 +459,10 @@ impl WdfStage {
             RootKind::BjtNpn(_) => "BjtNpn",
             RootKind::BjtPnp(_) => "BjtPnp",
             RootKind::Passthrough => "Passthrough",
+            RootKind::CapacitorRoot { .. } => "CapacitorRoot",
+            RootKind::InductorRoot { .. } => "InductorRoot",
+            RootKind::IirLowpass { .. } => "IirLowpass",
+            RootKind::IirHighpass { .. } => "IirHighpass",
         };
 
         let mut s = format!(

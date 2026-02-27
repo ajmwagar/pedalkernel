@@ -10,6 +10,7 @@ use crate::elements::{Photocoupler, WdfLeaf};
 ///
 /// Leaves are one-port elements; internal nodes are series/parallel adaptors.
 /// All state is inline — zero heap allocation on the processing hot path.
+#[derive(Clone)]
 pub(super) enum DynNode {
     Resistor {
         rp: f64,
@@ -18,6 +19,8 @@ pub(super) enum DynNode {
         capacitance: f64,
         rp: f64,
         state: f64,
+        /// Last reflected wave (captured before state update, for voltage extraction)
+        last_b: f64,
     },
     /// Capacitor with leakage resistance and/or dielectric absorption.
     ///
@@ -180,7 +183,12 @@ impl DynNode {
             | Self::VoltageSource { .. }
             | Self::Photocoupler { .. }
             | Self::SwitchedResistor { .. } => {}
-            Self::Capacitor { state, .. } => *state = a,
+            Self::Capacitor { state, last_b, .. } => {
+                // Capture the reflected wave (current state) before updating
+                // This allows voltage extraction: V = (a + last_b) / 2
+                *last_b = *state;
+                *state = a;
+            }
             Self::LeakyCapacitor {
                 state,
                 leakage_decay,
@@ -302,7 +310,11 @@ impl DynNode {
     /// Reset all state (capacitor/inductor memory + adaptor caches).
     pub fn reset(&mut self) {
         match self {
-            Self::Capacitor { state, .. } | Self::Inductor { state, .. } => *state = 0.0,
+            Self::Capacitor { state, last_b, .. } => {
+                *state = 0.0;
+                *last_b = 0.0;
+            }
+            Self::Inductor { state, .. } => *state = 0.0,
             Self::LeakyCapacitor {
                 state, da_state, ..
             } => {
@@ -330,6 +342,54 @@ impl DynNode {
                 right.reset();
             }
             _ => {}
+        }
+    }
+
+    /// Extract voltage from the first reactive element (capacitor/inductor) in the tree.
+    ///
+    /// For passive filter stages (RC lowpass, RL highpass, etc.), the output voltage
+    /// should be taken from the reactive element, not the root port. This method
+    /// finds the first capacitor or inductor and returns its voltage using:
+    ///   V = (a + b) / 2
+    /// where `a` is the last incident wave and `b` is the last reflected wave.
+    ///
+    /// Returns `None` if no reactive element exists in the tree.
+    pub fn reactive_voltage(&self) -> Option<f64> {
+        match self {
+            Self::Capacitor { state, last_b, .. } => {
+                // state = last incident wave (a), last_b = last reflected wave (b)
+                // Voltage = (a + b) / 2
+                Some((*state + *last_b) / 2.0)
+            }
+            Self::LeakyCapacitor { state, .. } => {
+                // For leaky capacitor, state is the incident wave; reflected = state
+                // This is approximate; a more precise implementation would track last_b
+                Some(*state)
+            }
+            Self::Inductor { state, .. } => {
+                // For inductor: b = -state, so V = (a + (-state)) / 2 = (state - state) / 2
+                // This is also approximate; ideally we'd track last incident wave
+                // For now, inductors are rare in passive filters we're testing
+                Some(*state / 2.0)
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                // Search children for first reactive element
+                left.reactive_voltage().or_else(|| right.reactive_voltage())
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if this tree contains any reactive elements (capacitors/inductors).
+    pub fn has_reactive_elements(&self) -> bool {
+        match self {
+            Self::Capacitor { .. }
+            | Self::LeakyCapacitor { .. }
+            | Self::Inductor { .. } => true,
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                left.has_reactive_elements() || right.has_reactive_elements()
+            }
+            _ => false,
         }
     }
 
@@ -433,7 +493,7 @@ impl DynNode {
             Self::Resistor { rp } => {
                 format!("{pad}Resistor(Rp={rp:.1}Ω)")
             }
-            Self::Capacitor { capacitance, rp, state } => {
+            Self::Capacitor { capacitance, rp, state, .. } => {
                 format!("{pad}Capacitor(C={capacitance:.3e}F, Rp={rp:.1}Ω, state={state:.6})")
             }
             Self::LeakyCapacitor { capacitance, rp, state, leakage_decay, .. } => {

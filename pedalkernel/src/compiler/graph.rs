@@ -1939,6 +1939,7 @@ pub(super) fn make_leaf(
                     capacitance: cfg.value,
                     rp: 1.0 / (2.0 * sample_rate * cfg.value),
                     state: 0.0,
+                    last_b: 0.0,
                 }
             }
         }
