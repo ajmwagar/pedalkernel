@@ -1930,3 +1930,213 @@ pedal "RC Highpass" {
         "Highpass should pass initial transient: peak={transient_peak:.6}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 1: Stereo I/O aliasing + supply rail filtering
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Equipment-style circuit with in_L/out_L instead of in/out.
+/// The compiler should automatically alias in→in_L and out→out_L.
+#[test]
+fn stereo_io_aliasing_triode() {
+    let src = r#"
+equipment "Stereo Triode Test" {
+  supplies {
+    vcc: 250V
+  }
+  components {
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+    V1: triode(12ax7)
+    R_plate: resistor(100k)
+    R_cathode: resistor(1.5k)
+    C_cathode: cap(25u)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    in_L -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out_L
+    R_load.b -> gnd
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Should create at least one triode stage (not zero because in was isolated)
+    let triode_count = proc.stages.iter().filter(|s| {
+        matches!(s.root, RootKind::Triode(_))
+    }).count();
+    assert!(
+        triode_count >= 1,
+        "Equipment circuit with in_L/out_L should compile triode stages, got {triode_count}"
+    );
+}
+
+/// Verify that standard (non-equipment) pedals with in/out still work correctly.
+#[test]
+fn stereo_aliasing_no_regression_standard_pedal() {
+    let src = r#"
+pedal "Standard Triode" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+    V1: triode(12ax7)
+    R_plate: resistor(100k)
+    R_cathode: resistor(1.5k)
+    C_cathode: cap(25u)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    let triode_count = proc.stages.iter().filter(|s| {
+        matches!(s.root, RootKind::Triode(_))
+    }).count();
+    assert!(
+        triode_count >= 1,
+        "Standard pedal with in/out should still compile triode stages, got {triode_count}"
+    );
+}
+
+/// Supply rail filtering: edges to supply nodes should be excluded from
+/// passive element collection, preventing SP reduction failures.
+#[test]
+fn supply_rail_filtered_from_passives() {
+    // This circuit has a triode with plate resistor to vcc AND a resistor
+    // from the plate to a named supply rail (bias_ref). Without supply
+    // filtering, the bias_ref edge would create a non-SP subgraph.
+    let src = r#"
+equipment "Supply Rail Test" {
+  supplies {
+    vcc: 250V
+    bias_ref: -3V
+  }
+  components {
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+    V1: triode(12ax7)
+    R_plate: resistor(100k)
+    R_bias: resistor(47k)
+    R_cathode: resistor(1.5k)
+    C_cathode: cap(25u)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    in_L -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.plate -> R_bias.a
+    R_bias.b -> bias_ref
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out_L
+    R_load.b -> gnd
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // The triode stage should be created despite the supply rail edge
+    let triode_count = proc.stages.iter().filter(|s| {
+        matches!(s.root, RootKind::Triode(_))
+    }).count();
+    assert!(
+        triode_count >= 1,
+        "Supply rail edges should be filtered — triode stage should still compile, got {triode_count}"
+    );
+}
+
+/// Verify equipment circuits with named supplies produce signal output
+/// (not all zeros like before the Phase 1 fixes).
+#[test]
+fn equipment_triode_produces_signal() {
+    let src = r#"
+equipment "Equipment Signal Test" {
+  supplies {
+    vcc: 250V
+  }
+  components {
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+    V1: triode(12ax7)
+    R_plate: resistor(100k)
+    R_cathode: resistor(1.5k)
+    C_cathode: cap(25u)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    in_L -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out_L
+    R_load.b -> gnd
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Process a 1kHz sine and verify signal passes through
+    let n = 4800; // 100ms at 48kHz
+    let input: Vec<f64> = (0..n)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+
+    let rms = (output.iter().map(|x| x * x).sum::<f64>() / n as f64).sqrt();
+    let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+
+    assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf in output");
+    assert!(
+        rms > 1e-6,
+        "Equipment triode should produce signal, got rms={rms:.6}"
+    );
+    assert!(
+        peak > 1e-5,
+        "Equipment triode should produce signal, got peak={peak:.6}"
+    );
+}

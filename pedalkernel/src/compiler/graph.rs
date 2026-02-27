@@ -28,6 +28,11 @@ pub(super) struct CircuitGraph {
     pub(super) in_node: NodeId,
     pub(super) out_node: NodeId,
     pub(super) gnd_node: NodeId,
+    /// Supply rail nodes (vcc + named supplies like B+, A_bal, etc.).
+    /// Edges to these nodes are excluded from passive element collection
+    /// because supply voltages are injected as tube bias parameters, not
+    /// as part of the WDF tree.
+    pub(super) supply_nodes: HashSet<NodeId>,
     /// Number of active elements found (opamps + transistors).
     #[allow(dead_code)]
     pub(super) num_active: usize,
@@ -232,6 +237,28 @@ impl CircuitGraph {
             for to_pin in &net.to {
                 let to_id = get_id(&pin_key(to_pin), &mut uf);
                 uf.union(from_id, to_id);
+            }
+        }
+
+        // Stereo I/O aliasing for equipment circuits.
+        // When 'in'/'out' have no net connections but 'in_L'/'out_L' exist, alias them
+        // so that BFS from in_node can reach the circuit components.
+        {
+            let has_reserved = |nets: &[NetDef], name: &str| -> bool {
+                nets.iter().any(|net| {
+                    let check = |p: &Pin| matches!(p, Pin::Reserved(s) if s == name);
+                    check(&net.from) || net.to.iter().any(check)
+                })
+            };
+            if !has_reserved(&expanded_nets, "in") && has_reserved(&expanded_nets, "in_L") {
+                let in_id = get_id("in", &mut uf);
+                let in_l_id = get_id("in_L", &mut uf);
+                uf.union(in_id, in_l_id);
+            }
+            if !has_reserved(&expanded_nets, "out") && has_reserved(&expanded_nets, "out_L") {
+                let out_id = get_id("out", &mut uf);
+                let out_l_id = get_id("out_L", &mut uf);
+                uf.union(out_id, out_l_id);
             }
         }
 
@@ -593,6 +620,23 @@ impl CircuitGraph {
         let out_node = uf.find(*pin_ids.get("out").unwrap());
         let gnd_node = uf.find(*pin_ids.get("gnd").unwrap());
 
+        // Collect secondary supply rail nodes from named supplies.
+        // Edges to these nodes are excluded from passive element collection
+        // because they represent bias voltages that create non-SP subgraphs.
+        // NOTE: vcc and gnd are NOT excluded — they are valid WDF terminations
+        // (voltage source for plate loads, ground for cathode resistors).
+        let vcc_node = uf.find(*pin_ids.get("vcc").unwrap());
+        let mut supply_nodes: HashSet<NodeId> = HashSet::new();
+        for supply in &pedal.supplies {
+            if let Some(&raw_id) = pin_ids.get(&supply.name) {
+                let resolved = uf.find(raw_id);
+                // Skip vcc and gnd — they're standard WDF terminations
+                if resolved != vcc_node && resolved != gnd_node {
+                    supply_nodes.insert(resolved);
+                }
+            }
+        }
+
         // Append synthetic 3-terminal pot halves to the component list.
         // Start from all_components (which includes fork paths) instead of pedal.components.
         let mut components = all_components;
@@ -604,6 +648,7 @@ impl CircuitGraph {
             in_node,
             out_node,
             gnd_node,
+            supply_nodes,
             num_active,
             active_edge_indices,
             fork_paths,
@@ -691,7 +736,7 @@ impl CircuitGraph {
     }
 
     /// Collect edge indices of passive elements directly connected to a junction node,
-    /// excluding diode edges and edges on the direct output path.
+    /// excluding diode edges, edges on the direct output path, and edges to supply rails.
     pub(super) fn elements_at_junction(
         &self,
         junction: NodeId,
@@ -712,13 +757,18 @@ impl CircuitGraph {
                 if e.node_a != junction && e.node_b != junction {
                     return false;
                 }
-                // Skip elements going directly to output (those become output attenuation).
                 let other = if e.node_a == junction {
                     e.node_b
                 } else {
                     e.node_a
                 };
+                // Skip elements going directly to output (those become output attenuation).
                 if other == self.out_node {
+                    return false;
+                }
+                // Skip elements whose far node is a supply rail (vcc, B+, bias voltages).
+                // Supply voltages are injected as tube bias parameters, not as WDF tree nodes.
+                if self.supply_nodes.contains(&other) {
                     return false;
                 }
                 true
