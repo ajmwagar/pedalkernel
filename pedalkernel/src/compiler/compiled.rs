@@ -8,7 +8,7 @@ use crate::thermal::ThermalModel;
 use crate::PedalProcessor;
 use std::sync::Arc;
 
-use super::stage::{RootKind, WdfStage};
+use super::stage::{PushPullStage, RootKind, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Compiled pedal
@@ -287,6 +287,9 @@ impl RailSaturation {
 /// component values, and diode models — no hardcoded processor selection.
 pub struct CompiledPedal {
     pub(super) stages: Vec<WdfStage>,
+    /// Push-pull differential stages (e.g., Fairchild 670 gain cell).
+    /// These are processed after regular WDF stages.
+    pub(super) push_pull_stages: Vec<PushPullStage>,
     pub(super) pre_gain: f64,
     pub(super) output_gain: f64,
     pub(super) rail_saturation: RailSaturation,
@@ -434,6 +437,12 @@ impl CompiledPedal {
                 _ => {}
             }
         }
+
+        // Propagate v_max to push-pull stages
+        for pp in &mut self.push_pull_stages {
+            pp.push_root.set_v_max(tube_v_max);
+            pp.pull_root.set_v_max(tube_v_max);
+        }
     }
 
     /// Get the tolerance seed for this pedal unit (for diagnostics/UI).
@@ -449,7 +458,8 @@ impl CompiledPedal {
     /// Get the number of WDF stages and op-amp stages.
     /// Returns (stage_count, opamp_count).
     pub fn wdf_element_counts(&self) -> (u32, u32) {
-        (self.stages.len() as u32, self.opamp_stages.len() as u32)
+        let stage_count = self.stages.len() as u32 + self.push_pull_stages.len() as u32;
+        (stage_count, self.opamp_stages.len() as u32)
     }
 
     /// Get the supply voltage.
@@ -1011,6 +1021,10 @@ impl PedalProcessor for CompiledPedal {
                     _ => {}
                 }
             }
+            for pp in &mut self.push_pull_stages {
+                pp.push_root.set_v_max(tube_v_max);
+                pp.pull_root.set_v_max(tube_v_max);
+            }
         }
 
         // Headroom models the supply rail ceiling.  In real circuits, gain
@@ -1064,6 +1078,14 @@ impl PedalProcessor for CompiledPedal {
             if let Some(ref stats) = self.debug_stats {
                 stats.record_stage_level(stage_idx, signal);
             }
+        }
+
+        // Process through push-pull stages (differential tube amplifiers).
+        // These model circuits like the Fairchild 670 where push and pull
+        // triode halves process the signal simultaneously with opposite phase,
+        // and the output is the differential plate voltage through a CT transformer.
+        for pp_stage in &mut self.push_pull_stages {
+            signal = pp_stage.process(signal);
         }
 
         // Process through op-amp stages.
@@ -1175,6 +1197,16 @@ impl PedalProcessor for CompiledPedal {
                     }
                     _ => {}
                 }
+            }
+            // Record push-pull triode tubes
+            for pp in &self.push_pull_stages {
+                let vpk = (self.supply_voltage * 0.6) as f32;
+                let ip_push = (pp.push_root.plate_current(vpk as f64) * 1000.0) as f32;
+                acc.record_tube(tube_idx, ip_push, vpk);
+                tube_idx += 1;
+                let ip_pull = (pp.pull_root.plate_current(vpk as f64) * 1000.0) as f32;
+                acc.record_tube(tube_idx, ip_pull, vpk);
+                tube_idx += 1;
             }
 
             // Record LFO phase (first LFO for tremolo indicator)

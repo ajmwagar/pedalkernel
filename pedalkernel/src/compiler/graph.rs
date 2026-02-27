@@ -491,11 +491,32 @@ impl CircuitGraph {
                     // Transformer: primary winding is a-b, secondary is c-d.
                     // For WDF, we model the ideal transformer as a 2-port adaptor
                     // with the turns ratio. The primary side is the WDF edge.
-                    // NOTE: Full transformer WDF model needs implementation in tree.rs.
+                    //
+                    // Pin naming: the DSL supports both shorthand (.a/.b) and
+                    // explicit winding names (.primary.a/.primary.b). Union both
+                    // so that either convention works in netlists.
                     let key_a = format!("{}.a", comp.id);
                     let key_b = format!("{}.b", comp.id);
+                    let key_pri_a = format!("{}.primary.a", comp.id);
+                    let key_pri_b = format!("{}.primary.b", comp.id);
                     let id_a = get_id(&key_a, &mut uf);
                     let id_b = get_id(&key_b, &mut uf);
+                    // Union shorthand pins with explicit winding pins
+                    let id_pri_a = get_id(&key_pri_a, &mut uf);
+                    let id_pri_b = get_id(&key_pri_b, &mut uf);
+                    uf.union(id_a, id_pri_a);
+                    uf.union(id_b, id_pri_b);
+                    // Also union secondary pins: .c/.d with .secondary.a/.secondary.b
+                    let key_c = format!("{}.c", comp.id);
+                    let key_d = format!("{}.d", comp.id);
+                    let key_sec_a = format!("{}.secondary.a", comp.id);
+                    let key_sec_b = format!("{}.secondary.b", comp.id);
+                    let id_c = get_id(&key_c, &mut uf);
+                    let id_d = get_id(&key_d, &mut uf);
+                    let id_sec_a = get_id(&key_sec_a, &mut uf);
+                    let id_sec_b = get_id(&key_sec_b, &mut uf);
+                    uf.union(id_c, id_sec_a);
+                    uf.union(id_d, id_sec_b);
                     let node_a = uf.find(id_a);
                     let node_b = uf.find(id_b);
                     edges.push(GraphEdge {
@@ -614,6 +635,15 @@ impl CircuitGraph {
                     });
                 }
             }
+        }
+
+        // Re-resolve all edge node IDs through the final union-find state.
+        // This is necessary because transformer pin aliasing (and potentially
+        // other late unions) can merge nodes AFTER edges were stored.
+        // Without this, edges may reference stale union-find roots.
+        for edge in &mut edges {
+            edge.node_a = uf.find(edge.node_a);
+            edge.node_b = uf.find(edge.node_b);
         }
 
         let in_node = uf.find(*pin_ids.get("in").unwrap());
@@ -922,7 +952,11 @@ impl CircuitGraph {
     }
 
     /// Find triode edges, ordered by topological distance from `in`.
-    pub(super) fn find_triodes(&self) -> Vec<(usize, TriodeInfo)> {
+    /// Parallel tubes sharing both plate and cathode nodes are merged into
+    /// a single entry with `parallel_count > 1`.
+    /// Returns (merged_triodes, all_triode_edge_indices) where the second vec
+    /// contains ALL triode edge indices including parallel duplicates.
+    pub(super) fn find_triodes(&self) -> (Vec<(usize, TriodeInfo)>, Vec<usize>) {
         // BFS from in_node to compute distances.
         let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         for e in &self.edges {
@@ -945,31 +979,139 @@ impl CircuitGraph {
             }
         }
 
-        let mut triodes: Vec<(usize, TriodeInfo)> = Vec::new();
+        // Collect all triode edges.
+        let mut raw_triodes: Vec<(usize, TriodeType, NodeId, NodeId)> = Vec::new();
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
             if let ComponentKind::Triode(tt) = &comp.kind {
-                // Triode edge: node_a = plate, node_b = cathode
-                let plate_node = e.node_a;
-                let cathode_node = e.node_b;
-                triodes.push((
-                    edge_idx,
-                    TriodeInfo {
-                        triode_type: *tt,
-                        plate_node,
-                        cathode_node,
-                        // Keep junction_node as cathode for backwards compatibility
-                        junction_node: cathode_node,
-                        ground_node: self.gnd_node,
-                    },
-                ));
+                raw_triodes.push((edge_idx, *tt, e.node_a, e.node_b));
             }
         }
+
+        // Group by (plate_node, cathode_node) to detect parallel tubes.
+        // Tubes sharing both nodes are electrically identical and should be
+        // modeled as a single tube with scaled plate current.
+        let mut groups: HashMap<(NodeId, NodeId), Vec<(usize, TriodeType)>> = HashMap::new();
+        for &(edge_idx, tt, plate, cathode) in &raw_triodes {
+            groups.entry((plate, cathode)).or_default().push((edge_idx, tt));
+        }
+
+        let mut triodes: Vec<(usize, TriodeInfo)> = Vec::new();
+        for ((plate_node, cathode_node), group) in &groups {
+            // Use the first edge as the representative; store parallel count.
+            let (rep_edge_idx, rep_tt) = group[0];
+            triodes.push((
+                rep_edge_idx,
+                TriodeInfo {
+                    triode_type: rep_tt,
+                    plate_node: *plate_node,
+                    cathode_node: *cathode_node,
+                    junction_node: *cathode_node,
+                    ground_node: self.gnd_node,
+                    parallel_count: group.len(),
+                },
+            ));
+        }
+
+        // Collect all triode edge indices (including parallel duplicates).
+        let all_triode_edges: Vec<usize> = raw_triodes.iter().map(|(idx, _, _, _)| *idx).collect();
 
         // Sort by distance of junction node from input.
         triodes
             .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
-        triodes
+        (triodes, all_triode_edges)
+    }
+
+    /// Detect push-pull triode pairs connected through center-tapped transformers.
+    /// For the 670, push triodes connect to primary.a and pull triodes connect
+    /// to primary.b of a CT transformer.
+    ///
+    /// Returns pairs of (push_triode_idx, pull_triode_idx, transformer_edge_idx, turns_ratio)
+    /// where the indices refer to positions in the merged triodes list.
+    pub(super) fn find_push_pull_triode_pairs(
+        &self,
+        triodes: &[(usize, TriodeInfo)],
+    ) -> Vec<PushPullPairInfo> {
+        // Find CT transformers (primary_type = CenterTap or PushPull).
+        let mut ct_transformers: Vec<(usize, &TransformerConfig)> = Vec::new();
+        for (edge_idx, e) in self.edges.iter().enumerate() {
+            let comp = &self.components[e.comp_idx];
+            if let ComponentKind::Transformer(cfg) = &comp.kind {
+                if matches!(cfg.primary_type, WindingType::CenterTap | WindingType::PushPull) {
+                    ct_transformers.push((edge_idx, cfg));
+                }
+            }
+        }
+
+        let mut pairs = Vec::new();
+
+        for (xfmr_edge_idx, cfg) in &ct_transformers {
+            let xfmr_edge = &self.edges[*xfmr_edge_idx];
+            // Transformer primary: node_a = primary.a end, node_b = primary.b end
+            let primary_a_node = xfmr_edge.node_a;
+            let primary_b_node = xfmr_edge.node_b;
+
+            // Find triodes whose plate nodes are adjacent to primary.a or primary.b.
+            // "Adjacent" = connected through 1 passive element (e.g., a sense resistor).
+            // Exclude the transformer edge itself — it connects primary.a to primary.b,
+            // and we need to keep those neighborhoods separate.
+            let exclude = [*xfmr_edge_idx];
+            let nodes_near_a = self.nodes_reachable_through_passives(
+                primary_a_node,
+                &exclude,
+                &self.active_edge_indices,
+            );
+            let nodes_near_b = self.nodes_reachable_through_passives(
+                primary_b_node,
+                &exclude,
+                &self.active_edge_indices,
+            );
+
+            // Match triodes: plate near primary.a = push, plate near primary.b = pull
+            let mut push_idx = None;
+            let mut pull_idx = None;
+            for (i, (_, info)) in triodes.iter().enumerate() {
+                if nodes_near_a.contains(&info.plate_node) && push_idx.is_none() {
+                    push_idx = Some(i);
+                } else if nodes_near_b.contains(&info.plate_node) && pull_idx.is_none() {
+                    pull_idx = Some(i);
+                }
+            }
+
+            if let (Some(push), Some(pull)) = (push_idx, pull_idx) {
+                pairs.push(PushPullPairInfo {
+                    push_triode_idx: push,
+                    pull_triode_idx: pull,
+                    transformer_edge_idx: *xfmr_edge_idx,
+                    turns_ratio: cfg.turns_ratio,
+                });
+            }
+        }
+
+        pairs
+    }
+
+    /// Find nodes reachable from `start` through at most one passive element,
+    /// excluding nonlinear and active edges.
+    fn nodes_reachable_through_passives(
+        &self,
+        start: NodeId,
+        nonlinear_indices: &[usize],
+        active_indices: &[usize],
+    ) -> HashSet<NodeId> {
+        let mut reachable = HashSet::new();
+        reachable.insert(start);
+        for (idx, e) in self.edges.iter().enumerate() {
+            if nonlinear_indices.contains(&idx) || active_indices.contains(&idx) {
+                continue;
+            }
+            if e.node_a == start {
+                reachable.insert(e.node_b);
+            } else if e.node_b == start {
+                reachable.insert(e.node_a);
+            }
+        }
+        reachable
     }
 
     /// Find pentode edges, ordered by topological distance from `in`.
@@ -1621,6 +1763,7 @@ pub(super) struct BjtInfo {
 }
 
 /// Type of push-pull configuration.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PushPullType {
     /// Shared collector (output node) — typical for Class AB output stages.
@@ -1637,6 +1780,7 @@ pub(super) enum PushPullType {
 /// enough that there's a "dead zone" where neither transistor conducts.
 /// The width of this dead zone depends on Vbe (≈0.6V for silicon, ≈0.2V for
 /// germanium) and the bias current.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) struct PushPullPair {
     /// Index of the NPN transistor in the BJT list.
@@ -1650,6 +1794,7 @@ pub(super) struct PushPullPair {
 }
 
 /// A detected push-pull tube pair (for Class AB tube output stages).
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) struct TubePushPullPair {
     /// Index of first triode in the triode list.
@@ -1658,6 +1803,19 @@ pub(super) struct TubePushPullPair {
     pub(super) triode_b_idx: usize,
     /// The shared cathode node.
     pub(super) shared_cathode: NodeId,
+}
+
+/// Push-pull pair detected via center-tapped transformer.
+pub(super) struct PushPullPairInfo {
+    /// Index into the merged triodes list for the push half.
+    pub(super) push_triode_idx: usize,
+    /// Index into the merged triodes list for the pull half.
+    pub(super) pull_triode_idx: usize,
+    /// Edge index of the CT transformer connecting them.
+    #[allow(dead_code)]
+    pub(super) transformer_edge_idx: usize,
+    /// Turns ratio of the output transformer (primary:secondary).
+    pub(super) turns_ratio: f64,
 }
 
 pub(super) struct TriodeInfo {
@@ -1670,6 +1828,9 @@ pub(super) struct TriodeInfo {
     pub(super) junction_node: NodeId,
     #[allow(dead_code)]
     pub(super) ground_node: NodeId,
+    /// Number of parallel tubes sharing the same plate and cathode nodes.
+    /// Default is 1. When > 1, the tube model scales plate current by N.
+    pub(super) parallel_count: usize,
 }
 
 pub(super) struct PentodeInfo {

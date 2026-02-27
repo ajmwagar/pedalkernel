@@ -12,7 +12,7 @@ use super::compiled::*;
 use super::dyn_node::DynNode;
 use super::graph::*;
 use super::helpers::*;
-use super::stage::{RootKind, WdfStage};
+use super::stage::{PushPullStage, RootKind, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Passive circuit gain helpers
@@ -744,15 +744,153 @@ pub fn compile_pedal_with_options(
     }
 
     // Build WDF stages for triodes.
-    let triodes = graph.find_triodes();
-    let triode_edge_indices: Vec<usize> = triodes.iter().map(|(idx, _)| *idx).collect();
+    // find_triodes() returns (merged_triodes, all_edge_indices):
+    //   - merged_triodes: parallel tubes sharing (plate, cathode) nodes are merged
+    //     into one entry with parallel_count > 1
+    //   - all_edge_indices: every raw triode edge index (including duplicates),
+    //     used to exclude ALL triode edges from passive collection
+    let (triodes, all_triode_edges) = graph.find_triodes();
     let all_nonlinear_with_triodes: Vec<usize> = all_nonlinear_with_bjts
         .iter()
-        .chain(triode_edge_indices.iter())
+        .chain(all_triode_edges.iter())
         .copied()
         .collect();
 
-    for (_edge_idx, triode_info) in &triodes {
+    // Detect push-pull pairs connected through center-tapped transformers.
+    // Paired triodes get a PushPullStage instead of individual WdfStages.
+    let push_pull_pairs = graph.find_push_pull_triode_pairs(&triodes);
+    let paired_triode_indices: HashSet<usize> = push_pull_pairs
+        .iter()
+        .flat_map(|p| [p.push_triode_idx, p.pull_triode_idx])
+        .collect();
+
+    // Build PushPullStages for each detected pair.
+    let mut push_pull_stages = Vec::new();
+    for pair in &push_pull_pairs {
+        let push_info = &triodes[pair.push_triode_idx].1;
+        let pull_info = &triodes[pair.pull_triode_idx].1;
+
+        // Build WDF trees for each half.
+        // Each half gets its plate-side and cathode-side passives.
+        let build_half_tree = |info: &TriodeInfo| -> Option<(DynNode, f64)> {
+            let plate_passives = graph.elements_at_junction(
+                info.plate_node,
+                &all_nonlinear_with_triodes,
+                &graph.active_edge_indices,
+            );
+            let cathode_passives = graph.elements_at_junction(
+                info.cathode_node,
+                &all_nonlinear_with_triodes,
+                &graph.active_edge_indices,
+            );
+
+            let mut passive_idxs: Vec<usize> = plate_passives.clone();
+            for idx in &cathode_passives {
+                if !passive_idxs.contains(idx) {
+                    passive_idxs.push(*idx);
+                }
+            }
+
+            if passive_idxs.is_empty() {
+                return None;
+            }
+
+            // Find injection node (prefer plate-side).
+            let mut injection_node = graph.gnd_node;
+            let mut best_dist = usize::MAX;
+            for &eidx in &plate_passives {
+                let e = &graph.edges[eidx];
+                let other = if e.node_a == info.plate_node { e.node_b } else { e.node_a };
+                if let Some(&d) = dist_from_in.get(&other) {
+                    if d < best_dist {
+                        best_dist = d;
+                        injection_node = other;
+                    }
+                }
+            }
+            if best_dist == usize::MAX {
+                for &eidx in &cathode_passives {
+                    let e = &graph.edges[eidx];
+                    let other = if e.node_a == info.cathode_node { e.node_b } else { e.node_a };
+                    if let Some(&d) = dist_from_in.get(&other) {
+                        if d < best_dist {
+                            best_dist = d;
+                            injection_node = other;
+                        }
+                    }
+                }
+            }
+
+            // Build SP edges.
+            let source_node = graph.edges.len() + 5000;
+            let virtual_rp_idx = vs_comp_idx + 1;
+            let gnd_node = graph.gnd_node;
+
+            let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+            sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+            for &eidx in &passive_idxs {
+                let e = &graph.edges[eidx];
+                sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+            }
+            sp_edges.push((info.plate_node, info.cathode_node, SpTree::Leaf(virtual_rp_idx)));
+
+            let terminals = vec![source_node, gnd_node];
+            let sp_tree = sp_reduce(sp_edges, &terminals).ok()?;
+
+            let mut half_components = graph.components.clone();
+            while half_components.len() <= virtual_rp_idx {
+                half_components.push(ComponentDef {
+                    id: "__vs__".to_string(),
+                    kind: ComponentKind::Resistor(1.0),
+                });
+            }
+            half_components[virtual_rp_idx] = ComponentDef {
+                id: "__triode_rp__".to_string(),
+                kind: ComponentKind::Resistor(62500.0),
+            };
+
+            let tree = sp_to_dyn_with_vs(&sp_tree, &half_components, &graph.fork_paths, sample_rate, vs_comp_idx);
+
+            // Compute compensation from triode mu.
+            let model = triode_model(info.triode_type);
+            let mu_compensation = model.mu / 100.0;
+
+            Some((tree, mu_compensation))
+        };
+
+        let push_half = build_half_tree(push_info);
+        let pull_half = build_half_tree(pull_info);
+
+        if let (Some((push_tree, push_comp)), Some((pull_tree, _pull_comp))) = (push_half, pull_half) {
+            let push_model = triode_model(push_info.triode_type);
+            let pull_model = triode_model(pull_info.triode_type);
+
+            let push_root = TriodeRoot::new(push_model)
+                .with_parallel_count(push_info.parallel_count);
+            let pull_root = TriodeRoot::new(pull_model)
+                .with_parallel_count(pull_info.parallel_count);
+
+            push_pull_stages.push(PushPullStage {
+                push_tree,
+                pull_tree,
+                push_root,
+                pull_root,
+                push_oversampler: Oversampler::new(oversampling),
+                pull_oversampler: Oversampler::new(oversampling),
+                compensation: push_comp,
+                turns_ratio: pair.turns_ratio,
+                grid_bias: -2.0, // Class AB bias for 6386 in 670 (wavechild670: VgateBias ≈ -2.2V)
+                cathode_delay_state: 0.0,
+            });
+        }
+    }
+
+    for (triode_list_idx, (_edge_idx, triode_info)) in triodes.iter().enumerate() {
+        // Skip triodes that are part of a push-pull pair.
+        if paired_triode_indices.contains(&triode_list_idx) {
+            continue;
+        }
+
         let plate_node = triode_info.plate_node;
         let cathode_node = triode_info.cathode_node;
 
@@ -913,7 +1051,9 @@ pub fn compile_pedal_with_options(
         let tree = sp_to_dyn_with_vs(&sp_tree, &triode_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = triode_model(triode_info.triode_type);
-        let root = RootKind::Triode(TriodeRoot::new(model));
+        let root = RootKind::Triode(
+            TriodeRoot::new(model).with_parallel_count(triode_info.parallel_count)
+        );
 
         // Scale compensation based on triode mu and typical plate load.
         // Voltage gain ≈ mu × Rp / (Rp + rp) where:
@@ -2331,6 +2471,7 @@ pub fn compile_pedal_with_options(
 
     let mut compiled = CompiledPedal {
         stages,
+        push_pull_stages,
         pre_gain,
         output_gain,
         rail_saturation,

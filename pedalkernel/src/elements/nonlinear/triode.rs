@@ -165,6 +165,8 @@ pub struct TriodeRoot {
     v_max: f64,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
+    /// Number of parallel tubes (default 1). Plate current is scaled by N.
+    parallel_count: usize,
 }
 
 impl TriodeRoot {
@@ -174,19 +176,25 @@ impl TriodeRoot {
             vgk: 0.0,
             v_max: 500.0, // Default to high-voltage tube amp (will be set by supply)
             max_iter: 16,
+            parallel_count: 1,
         }
     }
 
     /// Create a triode root with a specific supply voltage (B+).
-    ///
-    /// Use this when the supply voltage is known at construction time.
     pub fn new_with_v_max(model: TriodeModel, v_max: f64) -> Self {
         Self {
             model,
             vgk: 0.0,
             v_max: v_max.max(1.0),
             max_iter: 16,
+            parallel_count: 1,
         }
+    }
+
+    /// Set the number of parallel tubes for current scaling.
+    pub fn with_parallel_count(mut self, count: usize) -> Self {
+        self.parallel_count = count.max(1);
+        self
     }
 
     /// Set the maximum plate voltage (B+ supply rail).
@@ -207,6 +215,10 @@ impl TriodeRoot {
     #[inline]
     pub fn v_max(&self) -> f64 {
         self.v_max
+    }
+
+    pub fn parallel_count(&self) -> usize {
+        self.parallel_count
     }
 
     /// Set the grid-cathode voltage (external control from bias, signal, LFO).
@@ -254,7 +266,8 @@ impl TriodeRoot {
             return 0.0;
         }
 
-        base.powf(ex)
+        // Scale by parallel_count: N tubes in parallel = N × single tube current.
+        base.powf(ex) * self.parallel_count as f64
     }
 
     /// Compute derivative of plate current w.r.t. Vpk for Newton-Raphson.
@@ -305,7 +318,8 @@ impl TriodeRoot {
         let dbase_dvpk = ln_term / kp + (vpk / kp) * dln_dvpk;
 
         // d(base^Ex)/dVpk = Ex * base^(Ex-1) * dbase_dvpk
-        ex * base.powf(ex - 1.0) * dbase_dvpk
+        // Scale by parallel_count to match plate_current() scaling.
+        ex * base.powf(ex - 1.0) * dbase_dvpk * self.parallel_count as f64
     }
 }
 

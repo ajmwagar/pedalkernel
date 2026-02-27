@@ -2140,3 +2140,322 @@ equipment "Equipment Signal Test" {
         "Equipment triode should produce signal, got peak={peak:.6}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 2: Parallel tube merging, push-pull detection, PushPullStage
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parallel tubes sharing the same plate and cathode nodes should be
+/// merged into a single TriodeInfo with parallel_count > 1.
+#[test]
+fn parallel_tubes_merged() {
+    use super::graph::CircuitGraph;
+
+    // 4 triodes sharing the same plate and cathode nodes
+    let src = r#"
+equipment "Parallel Tube Test" {
+  supplies {
+    vcc: 240V
+  }
+  components {
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+    V1: triode(6386)
+    V2: triode(6386)
+    V3: triode(6386)
+    V4: triode(6386)
+    R_plate: resistor(33k)
+    R_cathode: resistor(470)
+    C_cathode: cap(8u)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    in_L -> C_in.a
+    C_in.b -> R_grid.a, V1.grid, V2.grid, V3.grid, V4.grid
+    R_grid.b -> gnd
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate, V2.plate, V3.plate, V4.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    V2.cathode -> R_cathode.a
+    V3.cathode -> R_cathode.a
+    V4.cathode -> R_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out_L
+    R_load.b -> gnd
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let graph = CircuitGraph::from_pedal(&pedal);
+
+    let (triodes, all_edges) = graph.find_triodes();
+
+    // Should be merged into 1 group with parallel_count = 4
+    assert_eq!(
+        triodes.len(),
+        1,
+        "4 parallel triodes should merge into 1 group, got {}",
+        triodes.len()
+    );
+    assert_eq!(
+        triodes[0].1.parallel_count, 4,
+        "Parallel count should be 4, got {}",
+        triodes[0].1.parallel_count
+    );
+    // All 4 raw edges should still be tracked for exclusion
+    assert_eq!(
+        all_edges.len(),
+        4,
+        "All 4 raw triode edges should be in all_edges, got {}",
+        all_edges.len()
+    );
+}
+
+/// Non-parallel triodes (different nodes) should remain separate.
+#[test]
+fn non_parallel_triodes_stay_separate() {
+    use super::graph::CircuitGraph;
+
+    // Two triodes with separate plate nodes (cascaded)
+    let src = r#"
+equipment "Cascaded Tubes" {
+  supplies {
+    vcc: 250V
+  }
+  components {
+    C_in: cap(22n)
+    R_grid1: resistor(1M)
+    V1: triode(12ax7)
+    R_plate1: resistor(100k)
+    R_cathode1: resistor(1.5k)
+    C_coupling: cap(22n)
+    R_grid2: resistor(1M)
+    V2: triode(12ax7)
+    R_plate2: resistor(100k)
+    R_cathode2: resistor(1.5k)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    in_L -> C_in.a
+    C_in.b -> R_grid1.a, V1.grid
+    R_grid1.b -> gnd
+    vcc -> R_plate1.a
+    R_plate1.b -> V1.plate
+    V1.cathode -> R_cathode1.a
+    R_cathode1.b -> gnd
+    V1.plate -> C_coupling.a
+    C_coupling.b -> R_grid2.a, V2.grid
+    R_grid2.b -> gnd
+    vcc -> R_plate2.a
+    R_plate2.b -> V2.plate
+    V2.cathode -> R_cathode2.a
+    R_cathode2.b -> gnd
+    V2.plate -> C_out.a
+    C_out.b -> R_load.a, out_L
+    R_load.b -> gnd
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let graph = CircuitGraph::from_pedal(&pedal);
+
+    let (triodes, _) = graph.find_triodes();
+
+    assert_eq!(
+        triodes.len(),
+        2,
+        "Two cascaded triodes should remain 2 groups, got {}",
+        triodes.len()
+    );
+    for (_, info) in &triodes {
+        assert_eq!(info.parallel_count, 1, "Each should have parallel_count=1");
+    }
+}
+
+/// Push-pull triode pairs connected via CT transformer should be detected.
+#[test]
+fn push_pull_pair_detection() {
+    use super::graph::CircuitGraph;
+
+    let src = r#"
+equipment "Push-Pull Test" {
+  supplies {
+    vcc: 240V
+  }
+  components {
+    C_in: cap(22n)
+    R_grid_push: resistor(1M)
+    R_grid_pull: resistor(1M)
+    V_push: triode(6386)
+    V_pull: triode(6386)
+    R_plate_push: resistor(33k)
+    R_plate_pull: resistor(33k)
+    R_cathode_push: resistor(470)
+    R_cathode_pull: resistor(470)
+    R_sense_push: resistor(33)
+    R_sense_pull: resistor(33)
+    T_out: transformer(9:1, 35.7H, 5, 1p, ct_primary)
+    R_load: resistor(600)
+  }
+  nets {
+    in_L -> C_in.a
+    C_in.b -> R_grid_push.a, R_grid_pull.a
+    R_grid_push.b -> V_push.grid
+    R_grid_pull.b -> V_pull.grid
+    vcc -> R_plate_push.a, R_plate_pull.a
+    R_plate_push.b -> V_push.plate
+    R_plate_pull.b -> V_pull.plate
+    V_push.cathode -> R_cathode_push.a
+    V_pull.cathode -> R_cathode_pull.a
+    R_cathode_push.b -> gnd
+    R_cathode_pull.b -> gnd
+    V_push.plate -> R_sense_push.a
+    R_sense_push.b -> T_out.primary.a
+    V_pull.plate -> R_sense_pull.a
+    R_sense_pull.b -> T_out.primary.b
+    T_out.primary.ct -> vcc
+    T_out.secondary.a -> R_load.a, out_L
+    R_load.b -> T_out.secondary.b
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let graph = CircuitGraph::from_pedal(&pedal);
+
+    let (triodes, _) = graph.find_triodes();
+    assert_eq!(triodes.len(), 2, "Should have 2 triode groups");
+
+    let pairs = graph.find_push_pull_triode_pairs(&triodes);
+    assert_eq!(
+        pairs.len(),
+        1,
+        "Should detect 1 push-pull pair via CT transformer, got {}",
+        pairs.len()
+    );
+
+    let pair = &pairs[0];
+    assert!(pair.push_triode_idx != pair.pull_triode_idx, "Push and pull should be different");
+    assert!((pair.turns_ratio - 9.0).abs() < 0.1, "Turns ratio should be 9:1");
+}
+
+/// Push-pull pairs should produce PushPullStage in compiled output.
+#[test]
+fn push_pull_stage_compiles() {
+    let src = r#"
+equipment "Push-Pull Compile" {
+  supplies {
+    vcc: 240V
+  }
+  components {
+    C_in: cap(22n)
+    R_grid_push: resistor(1M)
+    R_grid_pull: resistor(1M)
+    V_push: triode(6386)
+    V_pull: triode(6386)
+    R_plate_push: resistor(33k)
+    R_plate_pull: resistor(33k)
+    R_cathode_push: resistor(470)
+    R_cathode_pull: resistor(470)
+    R_sense_push: resistor(33)
+    R_sense_pull: resistor(33)
+    T_out: transformer(9:1, 35.7H, 5, 1p, ct_primary)
+    R_load: resistor(600)
+  }
+  nets {
+    in_L -> C_in.a
+    C_in.b -> R_grid_push.a, R_grid_pull.a
+    R_grid_push.b -> V_push.grid
+    R_grid_pull.b -> V_pull.grid
+    vcc -> R_plate_push.a, R_plate_pull.a
+    R_plate_push.b -> V_push.plate
+    R_plate_pull.b -> V_pull.plate
+    V_push.cathode -> R_cathode_push.a
+    V_pull.cathode -> R_cathode_pull.a
+    R_cathode_push.b -> gnd
+    R_cathode_pull.b -> gnd
+    V_push.plate -> R_sense_push.a
+    R_sense_push.b -> T_out.primary.a
+    V_pull.plate -> R_sense_pull.a
+    R_sense_pull.b -> T_out.primary.b
+    T_out.primary.ct -> vcc
+    T_out.secondary.a -> R_load.a, out_L
+    R_load.b -> T_out.secondary.b
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Should have at least 1 push-pull stage
+    assert!(
+        proc.push_pull_stages.len() >= 1,
+        "Should compile at least 1 PushPullStage, got {}",
+        proc.push_pull_stages.len()
+    );
+
+    // Should NOT have regular triode stages for the paired tubes
+    let regular_triode_count = proc.stages.iter().filter(|s| {
+        matches!(s.root, RootKind::Triode(_))
+    }).count();
+    assert_eq!(
+        regular_triode_count, 0,
+        "Paired triodes should not appear as regular stages, got {regular_triode_count}"
+    );
+
+    // Process signal and verify output is finite and non-zero
+    let n = 4800;
+    let input: Vec<f64> = (0..n)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+
+    assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf in push-pull output");
+
+    // NOTE: Signal level depends on proper WDF tree construction and tube bias.
+    // For now, we verify the stage exists and produces finite output.
+    // Signal amplitude tuning is part of Phase 3 validation work.
+}
+
+/// Transformer pin aliasing: .primary.a/.primary.b should be unified with .a/.b
+#[test]
+fn transformer_pin_aliasing() {
+    use super::graph::CircuitGraph;
+
+    // Use explicit .primary.a/.primary.b pins (like the 670 does)
+    let src = r#"
+pedal "Transformer Pin Test" {
+  components {
+    R_in: resistor(100)
+    T1: transformer(10:1, 10H, 5)
+    R_load: resistor(1k)
+  }
+  nets {
+    in -> R_in.a
+    R_in.b -> T1.primary.a
+    T1.primary.b -> gnd
+    T1.secondary.a -> R_load.a, out
+    R_load.b -> T1.secondary.b
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let graph = CircuitGraph::from_pedal(&pedal);
+
+    // The transformer edge should connect properly to the nodes
+    // used by the netlist (primary.a/primary.b)
+    let xfmr_edges: Vec<_> = graph.edges.iter().enumerate().filter(|(_, e)| {
+        matches!(graph.components[e.comp_idx].kind, ComponentKind::Transformer(_))
+    }).collect();
+
+    assert_eq!(xfmr_edges.len(), 1, "Should have 1 transformer edge");
+    let (_, xfmr) = &xfmr_edges[0];
+    // One node should be connected to R_in.b (via primary.a), other to gnd (via primary.b)
+    assert!(
+        xfmr.node_a != xfmr.node_b,
+        "Transformer should connect two different nodes"
+    );
+}

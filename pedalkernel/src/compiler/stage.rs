@@ -527,3 +527,98 @@ impl WdfStage {
         s
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Push-pull stage for differential tube amplifiers (e.g., Fairchild 670)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A push-pull stage processes two triode halves simultaneously.
+/// Push gets +Vin, pull gets -Vin. Output = push_v - pull_v.
+/// Used for circuits like the Fairchild 670 where push and pull triodes
+/// connect to opposite ends of a center-tapped output transformer.
+pub(super) struct PushPullStage {
+    /// WDF tree for push half (plate load + cathode passives).
+    pub(super) push_tree: DynNode,
+    /// WDF tree for pull half (plate load + cathode passives).
+    pub(super) pull_tree: DynNode,
+    /// Push triode model (with parallel_count for 4× parallel tubes).
+    pub(super) push_root: TriodeRoot,
+    /// Pull triode model (with parallel_count for 4× parallel tubes).
+    pub(super) pull_root: TriodeRoot,
+    /// Oversampler for push half.
+    pub(super) push_oversampler: Oversampler,
+    /// Oversampler for pull half.
+    pub(super) pull_oversampler: Oversampler,
+    /// Compensation factor (mu/ref_mu).
+    pub(super) compensation: f64,
+    /// Output transformer turns ratio (primary:secondary).
+    /// Output is scaled by 1/ratio (step-down).
+    pub(super) turns_ratio: f64,
+    /// Grid bias voltage (class AB operating point).
+    pub(super) grid_bias: f64,
+    /// Cathode coupling state (1-sample delay between push and pull cathodes).
+    /// Stores the previous sample's cathode voltage difference.
+    pub(super) cathode_delay_state: f64,
+}
+
+impl PushPullStage {
+    /// Process one sample through the push-pull stage.
+    /// Input is applied with opposite polarity to push and pull halves.
+    /// Output is the differential plate voltage divided by turns ratio.
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        let comp = self.compensation;
+        let bias = self.grid_bias;
+
+        // Push: positive phase, Pull: negative phase
+        self.push_root.set_vgk(bias + input * comp);
+        self.pull_root.set_vgk(bias - input * comp);
+
+        let push_out = self.push_oversampler.process(input, |_| {
+            let vs = self.push_root.v_max();
+            self.push_tree.set_voltage(vs);
+            let b = self.push_tree.reflected();
+            let rp = self.push_tree.port_resistance();
+            let a = self.push_root.process(b, rp);
+            self.push_tree.set_incident(a);
+            (a + b) / 2.0
+        });
+
+        let pull_out = self.pull_oversampler.process(-input, |_| {
+            let vs = self.pull_root.v_max();
+            self.pull_tree.set_voltage(vs);
+            let b = self.pull_tree.reflected();
+            let rp = self.pull_tree.port_resistance();
+            let a = self.pull_root.process(b, rp);
+            self.pull_tree.set_incident(a);
+            (a + b) / 2.0
+        });
+
+        // Cathode coupling: 1-sample delay exchanges energy between halves.
+        // This models the bidirectional cathode bypass capacitor interaction.
+        let cathode_diff = push_out - pull_out;
+        let prev = self.cathode_delay_state;
+        self.cathode_delay_state = cathode_diff;
+
+        // Differential output: push - pull, scaled by transformer turns ratio.
+        // The CT transformer combines push and pull; step-down reduces voltage.
+        let diff = push_out - pull_out;
+        let coupled = diff * 0.5 + prev * 0.5; // Low-pass blend with delay
+        coupled / self.turns_ratio
+    }
+
+    pub fn debug_dump(&self) -> String {
+        format!(
+            "PushPullStage(ratio={:.1}:1, bias={:.1}V, push_par={}, pull_par={}, comp={:.4})\n  Push: rp={:.1}Ω, nodes={}\n  Pull: rp={:.1}Ω, nodes={}",
+            self.turns_ratio,
+            self.grid_bias,
+            self.push_root.parallel_count(),
+            self.pull_root.parallel_count(),
+            self.compensation,
+            self.push_tree.port_resistance(),
+            self.push_tree.node_count(),
+            self.pull_tree.port_resistance(),
+            self.pull_tree.node_count(),
+        )
+    }
+}
