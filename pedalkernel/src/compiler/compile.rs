@@ -9,6 +9,7 @@ use crate::thermal::ThermalModel;
 use crate::tolerance::ToleranceEngine;
 
 use super::compiled::*;
+use super::dyn_node::DynNode;
 use super::graph::*;
 use super::helpers::*;
 use super::stage::{RootKind, WdfStage};
@@ -299,18 +300,124 @@ pub fn compile_pedal_with_options(
     }
 
     // ── Op-amp feedback detection ───────────────────────────────────────────
-    // Detect unity-gain op-amp feedback loops (neg=out) so they can be
-    // paired with JFET WDF stages instead of processed standalone.
+    // Detect op-amp feedback topologies and calculate closed-loop gain.
+    // - Unity-gain: neg=out, gain = 1.0 (paired with JFET stages for all-pass)
+    // - Inverting: gain = Rf/Ri (creates dedicated op-amp WDF stage)
+    // - Non-inverting: gain = 1 + Rf/Ri (creates dedicated op-amp WDF stage)
     let feedback_loops = graph.find_opamp_feedback_loops(pedal);
     let feedback_opamp_ids: HashSet<String> = feedback_loops
         .iter()
         .map(|info| info.comp_id.clone())
         .collect();
 
-    // ── Op-amp stages ──────────────────────────────────────────────────────
-    // Create OpAmpRoot elements for each non-OTA op-amp in the circuit.
-    // Op-amps with detected feedback loops are NOT added here — they will
-    // be paired with their corresponding JFET WDF stages instead.
+    // Track which op-amps are unity-gain (for JFET pairing) vs gain stages
+    let unity_gain_opamp_ids: HashSet<String> = feedback_loops
+        .iter()
+        .filter(|info| matches!(info.feedback_kind, OpAmpFeedbackKind::UnityGain))
+        .map(|info| info.comp_id.clone())
+        .collect();
+
+    // No longer need opamp_feedback_gain - Phase 2 uses WDF roots directly
+    let opamp_feedback_gain = 1.0_f64;
+
+    // ── Op-amp gain stages (Inverting/Non-Inverting) ───────────────────────
+    // Create WDF stages for op-amps with detected gain configurations.
+    // These stages apply the closed-loop gain through the WDF scattering.
+    //
+    // Also build a map from pot component IDs to their gain modulation info:
+    // (stage_idx, ri, fixed_series_r, max_pot_r, parallel_fixed_r, is_inverting)
+    let mut opamp_pot_map: HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)> = HashMap::new();
+
+    for info in &feedback_loops {
+        match &info.feedback_kind {
+            OpAmpFeedbackKind::UnityGain => {
+                // Unity-gain op-amps are paired with JFET stages for all-pass filters
+                // Skip here - handled in JFET stage creation below
+            }
+            OpAmpFeedbackKind::Inverting { rf, ri, feedback_diode, rf_pot } => {
+                // Track pot info for runtime gain modulation BEFORE creating stage
+                // (so we have the correct stage index)
+                let stage_idx = stages.len();
+                if let Some((pot_id, max_pot_r, fixed_series_r, parallel_fixed_r)) = rf_pot {
+                    opamp_pot_map.insert(pot_id.clone(), (stage_idx, *ri, *fixed_series_r, *max_pot_r, *parallel_fixed_r, true));
+                }
+
+                // Create an inverting op-amp WDF stage
+                let model = OpAmpModel::from_opamp_type(&info.opamp_type);
+                let gain = rf / ri;
+                let mut root = OpAmpInvertingRoot::new(model, gain);
+                root.set_sample_rate(sample_rate);
+
+                // Set v_max based on supply voltage (single-supply biased at Vcc/2)
+                // Use default 9V supply, will be updated when supply_voltage is known
+                let default_supply = 9.0_f64;
+                let v_max = (default_supply / 2.0 - 1.5).max(0.5);
+                root.set_v_max(v_max);
+
+                // Enable soft clipping if feedback diodes are present
+                // This models Tube Screamer style soft clipping via feedback diodes
+                if let Some(diode_type) = feedback_diode {
+                    let diode_vf = match diode_type {
+                        DiodeType::Silicon => 0.6, // 1N4148, 1N914
+                        DiodeType::Germanium => 0.3, // 1N34A, OA91
+                        DiodeType::Led => 1.6, // Red LED
+                    };
+                    root.set_soft_clip(diode_vf);
+                }
+
+                // Create a tree with voltage source for signal injection.
+                // The voltage source models the input signal, and the resistor
+                // represents the load impedance. The op-amp root drives the output.
+                let tree = DynNode::VoltageSource { voltage: 0.0, rp: 10_000.0 };
+
+                stages.push(WdfStage {
+                    tree,
+                    root: RootKind::OpAmpInverting(root),
+                    compensation: 1.0,
+                    oversampler: Oversampler::new(oversampling),
+                    base_diode_model: None,
+                    paired_opamp: None,
+                });
+            }
+            OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot } => {
+                // Track pot info for runtime gain modulation BEFORE creating stage
+                let stage_idx = stages.len();
+                if let Some((pot_id, max_pot_r, fixed_series_r, parallel_fixed_r)) = rf_pot {
+                    opamp_pot_map.insert(pot_id.clone(), (stage_idx, *ri, *fixed_series_r, *max_pot_r, *parallel_fixed_r, false));
+                }
+
+                // Create a non-inverting op-amp WDF stage
+                let model = OpAmpModel::from_opamp_type(&info.opamp_type);
+                let gain = 1.0 + (rf / ri);
+                let mut root = OpAmpNonInvertingRoot::new(model, gain);
+                root.set_sample_rate(sample_rate);
+
+                // Set v_max based on supply voltage (single-supply biased at Vcc/2)
+                // Use default 9V supply, will be updated when supply_voltage is known
+                let default_supply = 9.0_f64;
+                let v_max = (default_supply / 2.0 - 1.5).max(0.5);
+                root.set_v_max(v_max);
+
+                // Create a tree with voltage source for signal injection.
+                // For non-inverting, the input goes to Vp (set in stage.process),
+                // but we still need a voltage source for the WDF to work.
+                let tree = DynNode::VoltageSource { voltage: 0.0, rp: 10_000.0 };
+
+                stages.push(WdfStage {
+                    tree,
+                    root: RootKind::OpAmpNonInverting(root),
+                    compensation: 1.0,
+                    oversampler: Oversampler::new(oversampling),
+                    base_diode_model: None,
+                    paired_opamp: None,
+                });
+            }
+        }
+    }
+
+    // ── Op-amp stages (standalone, no feedback) ────────────────────────────
+    // Create OpAmpRoot elements for each non-OTA op-amp in the circuit
+    // that doesn't have detected feedback loops.
     let mut opamp_stages: Vec<OpAmpStage> = Vec::new();
     for comp in &pedal.components {
         if let ComponentKind::OpAmp(ot) = &comp.kind {
@@ -327,11 +434,13 @@ pub fn compile_pedal_with_options(
         }
     }
 
-    // Build a queue of feedback op-amps to pair with JFET stages.
+    // Build a queue of unity-gain feedback op-amps to pair with JFET stages.
     // Each feedback op-amp will be attached to the next JFET stage
     // in the signal chain (ordered by topological distance from input).
+    // Only unity-gain op-amps are paired with JFET stages (for all-pass filters).
     let mut feedback_opamp_queue: Vec<OpAmpRoot> = feedback_loops
         .iter()
+        .filter(|info| matches!(info.feedback_kind, OpAmpFeedbackKind::UnityGain))
         .map(|info| {
             let model = OpAmpModel::from_opamp_type(&info.opamp_type);
             let mut opamp = OpAmpRoot::new(model);
@@ -1269,6 +1378,16 @@ pub fn compile_pedal_with_options(
 
         let target = if let Some((switch_id, num_positions)) = switch_info {
             ControlTarget::SwitchPosition { switch_id, num_positions }
+        } else if let Some(&(stage_idx, ri, fixed_series_r, max_pot_r, parallel_fixed_r, is_inverting)) = opamp_pot_map.get(&ctrl.component) {
+            // This pot is in an op-amp feedback path - use runtime gain modulation
+            ControlTarget::OpAmpGain {
+                stage_idx,
+                ri,
+                fixed_series_r,
+                max_pot_r,
+                parallel_fixed_r,
+                is_inverting,
+            }
         } else if is_gain_label(&ctrl.label) {
             ControlTarget::PreGain
         } else if is_level_label(&ctrl.label) {
@@ -1382,7 +1501,9 @@ pub fn compile_pedal_with_options(
 
     let (glo, ghi) = gain_range;
     let ratio: f64 = ghi / glo;
-    let pre_gain = glo * ratio.powf(gain_default) * active_bonus;
+    // Apply op-amp feedback gain (from detected inverting/non-inverting topologies)
+    // This is the actual closed-loop gain from Rf/Ri ratios.
+    let pre_gain = glo * ratio.powf(gain_default) * active_bonus * opamp_feedback_gain;
 
     // Helper: trace through resistive paths (pots, resistors) to find modulation targets.
     // Returns (target_component, target_property) if found.

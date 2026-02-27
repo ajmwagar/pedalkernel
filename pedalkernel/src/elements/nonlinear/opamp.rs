@@ -389,3 +389,289 @@ impl WdfRoot for OpAmpRoot {
         2.0 * v - a
     }
 }
+
+// ---------------------------------------------------------------------------
+// Inverting Op-Amp Gain Stage
+// ---------------------------------------------------------------------------
+
+/// Inverting op-amp amplifier for WDF trees.
+///
+/// Models the closed-loop behavior of an inverting amplifier:
+/// `Vout = -(Rf/Ri) * Vin`
+///
+/// The input signal enters through the WDF tree (representing Ri),
+/// and the output is the amplified, inverted signal.
+///
+/// Key characteristics:
+/// - Virtual ground at the inverting input (Vm ≈ 0V)
+/// - Input impedance = Ri (the resistance seen from the WDF tree)
+/// - Closed-loop gain = Rf/Ri
+/// - Phase inversion (180°)
+///
+/// Non-idealities:
+/// - Slew rate limiting (LM308's slow slew = RAT's character)
+/// - Output saturation at supply rails
+#[derive(Debug, Clone, Copy)]
+pub struct OpAmpInvertingRoot {
+    pub model: OpAmpModel,
+    /// Closed-loop gain magnitude |Rf/Ri|.
+    gain: f64,
+    /// Previous output voltage (for slew rate limiting).
+    prev_out: f64,
+    /// Sample rate (needed for slew rate limiting).
+    sample_rate: f64,
+    /// Soft clipping limit from feedback diodes.
+    /// If set, uses tanh-based soft clipping instead of hard clipping.
+    /// Value is the diode forward voltage (~0.6V silicon, ~0.3V germanium).
+    soft_clip_v: Option<f64>,
+}
+
+impl OpAmpInvertingRoot {
+    /// Create an inverting op-amp with the given gain (Rf/Ri).
+    pub fn new(model: OpAmpModel, gain: f64) -> Self {
+        Self {
+            model,
+            gain: gain.abs(), // Store magnitude, sign handled in process
+            prev_out: 0.0,
+            sample_rate: 48000.0,
+            soft_clip_v: None,
+        }
+    }
+
+    /// Enable soft clipping mode for feedback diodes.
+    ///
+    /// When diodes are present in the op-amp feedback loop (like Tube Screamer),
+    /// they create soft clipping by limiting the feedback voltage. This uses
+    /// tanh-based soft limiting instead of hard clipping at the supply rails.
+    ///
+    /// `diode_vf` is the diode forward voltage:
+    /// - Silicon (1N4148, 1N914): ~0.6V
+    /// - Germanium (1N34A): ~0.3V
+    #[inline]
+    pub fn set_soft_clip(&mut self, diode_vf: f64) {
+        self.soft_clip_v = Some(diode_vf.max(0.1));
+    }
+
+    /// Disable soft clipping (revert to hard rail clipping).
+    #[inline]
+    pub fn clear_soft_clip(&mut self) {
+        self.soft_clip_v = None;
+    }
+
+    /// Set the closed-loop gain (Rf/Ri).
+    #[inline]
+    pub fn set_gain(&mut self, gain: f64) {
+        self.gain = gain.abs();
+    }
+
+    /// Get the current gain.
+    #[inline]
+    pub fn gain(&self) -> f64 {
+        self.gain
+    }
+
+    /// Set the sample rate (for slew rate limiting).
+    #[inline]
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    /// Set the maximum output voltage (determined by supply rails).
+    #[inline]
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.model.v_max = v_max.max(0.5);
+    }
+
+    /// Apply slew rate limiting.
+    #[inline]
+    fn apply_slew_limit(&mut self, v: f64) -> f64 {
+        let max_dv = self.model.slew_rate * 1e6 / self.sample_rate;
+        let dv = v - self.prev_out;
+        let limited = if dv > max_dv {
+            self.prev_out + max_dv
+        } else if dv < -max_dv {
+            self.prev_out - max_dv
+        } else {
+            v
+        };
+        self.prev_out = limited;
+        limited
+    }
+
+    /// Reset internal state.
+    pub fn reset(&mut self) {
+        self.prev_out = 0.0;
+    }
+}
+
+impl WdfRoot for OpAmpInvertingRoot {
+    /// Inverting amplifier: Vout = -gain * Vin
+    ///
+    /// For an inverting amplifier, the WDF incident wave `a` comes from
+    /// a voltage source representing the input signal. The op-amp root
+    /// acts as a voltage-controlled voltage source, driving its output
+    /// back to the tree as the reflected wave.
+    ///
+    /// Wave variable convention:
+    /// - Input voltage: V_in = (a + b) / 2, but for source-terminated: V_in ≈ a/2
+    /// - For voltage source output: b = 2*V_out - a
+    #[inline]
+    fn process(&mut self, a: f64, _rp: f64) -> f64 {
+        // For a tree with voltage source, the incident wave `a` encodes
+        // the source voltage: a ≈ 2*V_source at the root.
+        // Extract input voltage from the wave.
+        let v_in = a / 2.0;
+
+        // Apply closed-loop gain (with inversion)
+        let mut v_out = -self.gain * v_in;
+
+        // Apply clipping:
+        // 1. First apply soft clipping if feedback diodes present
+        // 2. Then hard clip at supply rails (always applies)
+        if let Some(vd) = self.soft_clip_v {
+            // Soft clipping via feedback diodes (Tube Screamer style)
+            // Uses tanh to create smooth knee at diode forward voltage.
+            // Formula: Vout = Vd * tanh(Vout_ideal / Vd)
+            // This models the diode shunting current when voltage exceeds Vf.
+            v_out = vd * (v_out / vd).tanh();
+        }
+        // Always hard clip at supply rails - op-amps can't exceed supply
+        let v_max = self.model.v_max;
+        v_out = v_out.clamp(-v_max, v_max);
+
+        // Apply slew rate limiting - this is the key non-ideality
+        // that gives character to slow op-amps like LM308.
+        v_out = self.apply_slew_limit(v_out);
+
+        // Reflect as voltage source: b = 2*V_out - a
+        2.0 * v_out - a
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Non-Inverting Op-Amp Gain Stage
+// ---------------------------------------------------------------------------
+
+/// Non-inverting op-amp amplifier for WDF trees.
+///
+/// Models the closed-loop behavior of a non-inverting amplifier:
+/// `Vout = (1 + Rf/Ri) * Vin`
+///
+/// The input signal is set externally via `set_vp()`, representing the
+/// signal at the non-inverting input. The output is the amplified signal
+/// with no phase inversion.
+///
+/// Key characteristics:
+/// - High input impedance (signal goes directly to Vp)
+/// - Closed-loop gain = 1 + Rf/Ri
+/// - No phase inversion
+///
+/// Non-idealities:
+/// - Slew rate limiting
+/// - Output saturation at supply rails
+#[derive(Debug, Clone, Copy)]
+pub struct OpAmpNonInvertingRoot {
+    pub model: OpAmpModel,
+    /// Closed-loop gain (1 + Rf/Ri).
+    gain: f64,
+    /// Non-inverting input voltage (set externally each sample).
+    vp: f64,
+    /// Previous output voltage (for slew rate limiting).
+    prev_out: f64,
+    /// Sample rate (needed for slew rate limiting).
+    sample_rate: f64,
+}
+
+impl OpAmpNonInvertingRoot {
+    /// Create a non-inverting op-amp with the given gain (1 + Rf/Ri).
+    pub fn new(model: OpAmpModel, gain: f64) -> Self {
+        Self {
+            model,
+            gain: gain.max(1.0), // Minimum gain is 1 (unity buffer)
+            vp: 0.0,
+            prev_out: 0.0,
+            sample_rate: 48000.0,
+        }
+    }
+
+    /// Set the closed-loop gain (1 + Rf/Ri).
+    #[inline]
+    pub fn set_gain(&mut self, gain: f64) {
+        self.gain = gain.max(1.0);
+    }
+
+    /// Get the current gain.
+    #[inline]
+    pub fn gain(&self) -> f64 {
+        self.gain
+    }
+
+    /// Set the non-inverting input voltage (the signal to amplify).
+    #[inline]
+    pub fn set_vp(&mut self, vp: f64) {
+        self.vp = vp;
+    }
+
+    /// Get the current non-inverting input voltage.
+    #[inline]
+    pub fn vp(&self) -> f64 {
+        self.vp
+    }
+
+    /// Set the sample rate (for slew rate limiting).
+    #[inline]
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
+    }
+
+    /// Set the maximum output voltage (determined by supply rails).
+    #[inline]
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.model.v_max = v_max.max(0.5);
+    }
+
+    /// Apply slew rate limiting.
+    #[inline]
+    fn apply_slew_limit(&mut self, v: f64) -> f64 {
+        let max_dv = self.model.slew_rate * 1e6 / self.sample_rate;
+        let dv = v - self.prev_out;
+        let limited = if dv > max_dv {
+            self.prev_out + max_dv
+        } else if dv < -max_dv {
+            self.prev_out - max_dv
+        } else {
+            v
+        };
+        self.prev_out = limited;
+        limited
+    }
+
+    /// Reset internal state.
+    pub fn reset(&mut self) {
+        self.prev_out = 0.0;
+        self.vp = 0.0;
+    }
+}
+
+impl WdfRoot for OpAmpNonInvertingRoot {
+    /// Non-inverting amplifier: Vout = gain * Vp
+    ///
+    /// The input signal is set via `set_vp()` before calling this.
+    /// The WDF tree represents the load, and we drive it with the
+    /// amplified signal.
+    #[inline]
+    fn process(&mut self, a: f64, _rp: f64) -> f64 {
+        // Apply closed-loop gain to the input
+        let mut v_out = self.gain * self.vp;
+
+        // Hard clip at rails - this is how real op-amps behave.
+        let v_max = self.model.v_max;
+        v_out = v_out.clamp(-v_max, v_max);
+
+        // Apply slew rate limiting
+        v_out = self.apply_slew_limit(v_out);
+
+        // Convert to wave domain: for voltage source, b = 2*V - a
+        2.0 * v_out - a
+    }
+}

@@ -41,6 +41,18 @@ pub(super) enum ControlTarget {
     /// Modify a switch position for fork() routing.
     /// Contains: (switch_id, num_positions)
     SwitchPosition { switch_id: String, num_positions: usize },
+    /// Modify op-amp feedback gain (pot in Rf path).
+    /// For series topology: Rf = fixed_series_r + pot_r
+    /// For parallel topology: Rf = parallel_fixed_r || (fixed_series_r + pot_r)
+    OpAmpGain {
+        stage_idx: usize,
+        ri: f64,
+        fixed_series_r: f64,
+        max_pot_r: f64,
+        /// If Some, pot is in parallel with a fixed resistance path
+        parallel_fixed_r: Option<f64>,
+        is_inverting: bool,
+    },
 }
 
 /// Modulation target for LFOs and envelope followers.
@@ -570,6 +582,51 @@ impl CompiledPedal {
                     for stage in &mut self.stages {
                         stage.tree.set_switch_position(switch_id, position);
                         stage.tree.recompute();
+                    }
+                }
+                ControlTarget::OpAmpGain {
+                    stage_idx,
+                    ri,
+                    fixed_series_r,
+                    max_pot_r,
+                    parallel_fixed_r,
+                    is_inverting,
+                } => {
+                    // Calculate pot resistance from position
+                    let pot_r = value * *max_pot_r;
+                    // Calculate pot path resistance (series with any fixed resistors in that path)
+                    let pot_path_r = *fixed_series_r + pot_r;
+
+                    // Real pots have minimum wiper-to-end resistance of ~100-1000 ohms
+                    // even at the "0" position, due to contact resistance and track design.
+                    // Use 500 ohms as typical minimum for audio pots.
+                    let min_pot_r = 500.0;
+                    let effective_pot_path_r = pot_path_r.max(min_pot_r);
+
+                    // Calculate effective Rf based on topology
+                    let rf = if let Some(parallel_r) = parallel_fixed_r {
+                        // Parallel topology: Rf = parallel_fixed_r || pot_path_r
+                        // Formula: 1/Rf = 1/R1 + 1/R2, so Rf = (R1*R2)/(R1+R2)
+                        // When pot_path_r → min, Rf → parallel_r || min
+                        // When pot_path_r → ∞, Rf → parallel_r
+                        (parallel_r * effective_pot_path_r) / (parallel_r + effective_pot_path_r)
+                    } else {
+                        // Series topology: Rf = fixed_series_r + pot_r
+                        effective_pot_path_r
+                    };
+
+                    // Calculate gain based on op-amp configuration
+                    // - Inverting: gain = Rf/Ri
+                    // - Non-inverting: gain = 1 + Rf/Ri
+                    let gain = if *is_inverting {
+                        rf / *ri
+                    } else {
+                        1.0 + (rf / *ri)
+                    };
+
+                    let stage_idx = *stage_idx;
+                    if let Some(stage) = self.stages.get_mut(stage_idx) {
+                        stage.set_opamp_gain(gain);
                     }
                 }
             }

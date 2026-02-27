@@ -637,33 +637,44 @@ impl CircuitGraph {
         let mut diodes: Vec<(usize, DiodeInfo)> = Vec::new();
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
+
+            // Check if one terminal is connected to ground.
+            // Diodes connected to ground create "hard clipping" stages.
+            // Diodes in feedback loops (neither terminal at ground) create
+            // "soft clipping" that should be modeled within the op-amp.
+            let a_is_gnd = e.node_a == self.gnd_node;
+            let b_is_gnd = e.node_b == self.gnd_node;
+            let has_gnd = a_is_gnd || b_is_gnd;
+
             let info = match &comp.kind {
                 ComponentKind::DiodePair(dt) => Some(DiodeInfo {
                     diode_type: *dt,
                     is_pair: true,
-                    junction_node: if e.node_b == self.gnd_node {
-                        e.node_a
+                    // For ground-connected diodes, use the non-ground node as junction
+                    // For feedback diodes, use node_a as junction (arbitrary but consistent)
+                    junction_node: if has_gnd {
+                        if b_is_gnd { e.node_a } else { e.node_b }
                     } else {
-                        e.node_b
+                        e.node_a // feedback diode: junction at first node
                     },
-                    ground_node: if e.node_b == self.gnd_node {
-                        e.node_b
+                    ground_node: if has_gnd {
+                        if b_is_gnd { e.node_b } else { e.node_a }
                     } else {
-                        e.node_a
+                        e.node_b // feedback diode: "ground" at second node
                     },
                 }),
                 ComponentKind::Diode(dt) => Some(DiodeInfo {
                     diode_type: *dt,
                     is_pair: false,
-                    junction_node: if e.node_b == self.gnd_node {
-                        e.node_a
+                    junction_node: if has_gnd {
+                        if b_is_gnd { e.node_a } else { e.node_b }
                     } else {
-                        e.node_b
+                        e.node_a
                     },
-                    ground_node: if e.node_b == self.gnd_node {
-                        e.node_b
+                    ground_node: if has_gnd {
+                        if b_is_gnd { e.node_b } else { e.node_a }
                     } else {
-                        e.node_a
+                        e.node_b
                     },
                 }),
                 _ => None,
@@ -1135,12 +1146,12 @@ impl CircuitGraph {
         otas
     }
 
-    /// Find op-amp feedback loops (unity-gain buffers).
+    /// Find op-amp feedback loops and calculate closed-loop gain.
     ///
-    /// Detects op-amps where the `neg` and `out` pins resolve to the same
-    /// circuit node, indicating a direct feedback connection (voltage follower).
-    /// This is the topology used in Phase 90 all-pass stages, where the op-amp
-    /// buffers the signal with unity gain.
+    /// Detects:
+    /// - **Unity-gain buffers**: neg and out pins resolve to the same node
+    /// - **Inverting amplifiers**: pos to ground, Rf from neg to out, Ri from input to neg
+    /// - **Non-inverting amplifiers**: signal to pos, Rf from neg to out, Ri from neg to ground
     ///
     /// Returns a list of `OpAmpFeedbackInfo` ordered by topological distance
     /// from the input node.
@@ -1181,6 +1192,242 @@ impl CircuitGraph {
                 uf.union(from_id, to_id);
             }
         }
+
+        // Get resolved node IDs for special nodes
+        let in_node_resolved = uf.find(*pin_ids.get("in").unwrap_or(&0));
+        let gnd_node_resolved = uf.find(*pin_ids.get("gnd").unwrap_or(&0));
+
+        // Build a map of component → (pin_a_node, pin_b_node, resistance, is_pot, max_r)
+        // for resistors and pots. Pots use default position (0.5) for initial gain calc.
+        struct ResistorInfo {
+            id: String,
+            node_a: usize,
+            node_b: usize,
+            resistance: f64,
+            is_pot: bool,
+            max_r: f64, // For pots: max resistance; for resistors: same as resistance
+        }
+        let mut resistor_nodes: Vec<ResistorInfo> = Vec::new();
+        for comp in &pedal.components {
+            let (resistance, is_pot, max_r) = match &comp.kind {
+                ComponentKind::Resistor(r) => (Some(*r), false, *r),
+                ComponentKind::Potentiometer(max_r) => {
+                    // Use default position (0.5) for initial gain calculation
+                    (Some(*max_r * 0.5), true, *max_r)
+                }
+                _ => (None, false, 0.0),
+            };
+
+            if let Some(r) = resistance {
+                let pin_a_key = format!("{}.a", comp.id);
+                let pin_b_key = format!("{}.b", comp.id);
+                if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pin_a_key), pin_ids.get(&pin_b_key)) {
+                    let a_node = uf.find(a_id);
+                    let b_node = uf.find(b_id);
+                    resistor_nodes.push(ResistorInfo {
+                        id: comp.id.clone(),
+                        node_a: a_node,
+                        node_b: b_node,
+                        resistance: r,
+                        is_pot,
+                        max_r,
+                    });
+                }
+            }
+        }
+
+        // Helper: find the input resistor connected to neg_node
+        // For cascaded op-amps, Ri may connect to a previous stage's output, not the global input
+        let find_input_resistor = |neg_node: usize, out_node: usize, gnd_node: usize| -> Option<f64> {
+            for info in &resistor_nodes {
+                // Skip the feedback resistor (connects neg to out)
+                if (info.node_a == neg_node && info.node_b == out_node) || (info.node_a == out_node && info.node_b == neg_node) {
+                    continue;
+                }
+                // Skip resistors to ground (those are Ri for non-inverting topology)
+                if (info.node_a == neg_node && info.node_b == gnd_node) || (info.node_a == gnd_node && info.node_b == neg_node) {
+                    continue;
+                }
+                // Find any other resistor connected to neg_node - this is Ri
+                if info.node_a == neg_node || info.node_b == neg_node {
+                    return Some(info.resistance);
+                }
+            }
+            None
+        };
+
+        // Helper: find resistive path between two nodes
+        // Handles series resistances (sum) and parallel paths (1/R = 1/R1 + 1/R2)
+        // Returns (effective_resistance, component_ids, pot_info)
+        // pot_info: Option<(pot_comp_id, pot_max_r, fixed_series_r, parallel_fixed_r)>
+        // The return type includes parallel_fixed_r for pots in parallel with fixed resistors
+        let find_resistive_path = |start: usize, end: usize| -> Option<(f64, Vec<String>, Option<(String, f64, f64, Option<f64>)>)> {
+            if start == end {
+                return None; // Same node, no resistance
+            }
+
+            // Build adjacency for resistor-only edges
+            // Store (next_node, resistance, comp_id, is_pot, max_r)
+            let mut resistor_adj: HashMap<usize, Vec<(usize, f64, String, bool, f64)>> = HashMap::new();
+            for info in &resistor_nodes {
+                resistor_adj.entry(info.node_a).or_default().push((info.node_b, info.resistance, info.id.clone(), info.is_pot, info.max_r));
+                resistor_adj.entry(info.node_b).or_default().push((info.node_a, info.resistance, info.id.clone(), info.is_pot, info.max_r));
+            }
+
+            // Find all simple paths from start to end using DFS
+            // Track: (resistance, comp_ids, pot_info: Option<(id, max_r, fixed_series_r)>)
+            // Note: pot_info here is 3 elements; we add parallel_fixed_r at the end
+            #[derive(Clone)]
+            struct PathState {
+                node: usize,
+                path_r: f64,
+                path_comps: Vec<String>,
+                pot_info: Option<(String, f64)>, // (pot_id, pot_max_r)
+                fixed_r: f64, // Sum of non-pot resistors in path
+                visited: HashSet<usize>,
+            }
+
+            // Intermediate paths have 3-element pot_info (without parallel_fixed_r)
+            let mut all_paths: Vec<(f64, Vec<String>, Option<(String, f64, f64)>)> = Vec::new();
+            let mut stack: Vec<PathState> = Vec::new();
+            let mut visited_start = HashSet::new();
+            visited_start.insert(start);
+            stack.push(PathState {
+                node: start,
+                path_r: 0.0,
+                path_comps: Vec::new(),
+                pot_info: None,
+                fixed_r: 0.0,
+                visited: visited_start,
+            });
+
+            while let Some(state) = stack.pop() {
+                if state.node == end {
+                    let pot_info = state.pot_info.map(|(id, max_r)| (id, max_r, state.fixed_r));
+                    all_paths.push((state.path_r, state.path_comps, pot_info));
+                    continue;
+                }
+
+                if let Some(neighbors) = resistor_adj.get(&state.node) {
+                    for (next_node, r, comp_id, is_pot, max_r) in neighbors {
+                        if !state.visited.contains(next_node) {
+                            let mut new_visited = state.visited.clone();
+                            new_visited.insert(*next_node);
+                            let mut new_comps = state.path_comps.clone();
+                            new_comps.push(comp_id.clone());
+
+                            // Track pot info and fixed series resistance
+                            let (new_pot_info, new_fixed_r) = if *is_pot {
+                                // This is a pot - record it (only track first pot in path)
+                                let pot_info = state.pot_info.clone().or(Some((comp_id.clone(), *max_r)));
+                                (pot_info, state.fixed_r)
+                            } else {
+                                // Fixed resistor - add to fixed_r
+                                (state.pot_info.clone(), state.fixed_r + r)
+                            };
+
+                            // Series: add resistances
+                            stack.push(PathState {
+                                node: *next_node,
+                                path_r: state.path_r + r,
+                                path_comps: new_comps,
+                                pot_info: new_pot_info,
+                                fixed_r: new_fixed_r,
+                                visited: new_visited,
+                            });
+                        }
+                    }
+                }
+            }
+
+            if all_paths.is_empty() {
+                return None;
+            }
+
+            // If single path, use it directly (no parallel fixed resistance)
+            if all_paths.len() == 1 {
+                let (r, comps, pot_info) = all_paths.into_iter().next().unwrap();
+                // Convert pot_info to 4-element tuple with None for parallel_fixed_r
+                let pot_info_4 = pot_info.map(|(id, max_r, fixed_series)| (id, max_r, fixed_series, None));
+                return Some((r, comps, pot_info_4));
+            }
+
+            // Parallel paths: 1/R_total = 1/R1 + 1/R2 + ...
+            // For pots in parallel paths, track pot info AND the parallel fixed resistance
+            // (the resistance of paths that don't include the pot)
+            let mut conductance_sum = 0.0;
+            let mut all_comps: Vec<String> = Vec::new();
+            let mut first_pot_info: Option<(String, f64, f64)> = None;
+            let mut fixed_paths_conductance = 0.0; // Conductance of paths without the pot
+
+            for (r, comps, pot_info) in &all_paths {
+                if *r > 0.0 {
+                    conductance_sum += 1.0 / r;
+
+                    if pot_info.is_some() {
+                        // This path has a pot
+                        if first_pot_info.is_none() {
+                            first_pot_info = pot_info.clone();
+                        }
+                    } else {
+                        // This is a fixed path (no pot) - track its conductance
+                        fixed_paths_conductance += 1.0 / r;
+                    }
+                }
+                for c in comps {
+                    if !all_comps.contains(c) {
+                        all_comps.push(c.clone());
+                    }
+                }
+            }
+
+            // If there's a pot AND fixed parallel paths, include the parallel fixed R
+            // in the pot info as a 4th element (parallel_fixed_r)
+            let final_pot_info = if let Some((id, max_r, fixed_series)) = first_pot_info {
+                if fixed_paths_conductance > 0.0 {
+                    // There are fixed paths in parallel with the pot
+                    // parallel_fixed_r = 1 / fixed_paths_conductance
+                    let parallel_fixed_r = 1.0 / fixed_paths_conductance;
+                    Some((id, max_r, fixed_series, Some(parallel_fixed_r)))
+                } else {
+                    Some((id, max_r, fixed_series, None))
+                }
+            } else {
+                None
+            };
+
+            if conductance_sum > 0.0 {
+                Some((1.0 / conductance_sum, all_comps, final_pot_info))
+            } else {
+                None
+            }
+        };
+
+        // Build a map of diodes: (node_a, node_b) -> DiodeType
+        // Use the SAME UnionFind and pin_ids we just built to compute node IDs.
+        let mut feedback_diodes: HashMap<(usize, usize), DiodeType> = HashMap::new();
+        for comp in &pedal.components {
+            let diode_type = match &comp.kind {
+                ComponentKind::Diode(dt) | ComponentKind::DiodePair(dt) => *dt,
+                _ => continue,
+            };
+
+            let key_a = format!("{}.a", comp.id);
+            let key_b = format!("{}.b", comp.id);
+
+            if let (Some(&id_a), Some(&id_b)) = (pin_ids.get(&key_a), pin_ids.get(&key_b)) {
+                let na = uf.find(id_a);
+                let nb = uf.find(id_b);
+                // Store both orderings so lookup is order-independent
+                feedback_diodes.insert((na, nb), diode_type);
+                feedback_diodes.insert((nb, na), diode_type);
+            }
+        }
+
+        // Helper: find diodes between two nodes (for feedback diode detection)
+        let find_feedback_diode = |node_a: usize, node_b: usize| -> Option<DiodeType> {
+            feedback_diodes.get(&(node_a, node_b)).copied()
+        };
 
         // BFS distances for ordering.
         let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -1235,6 +1482,51 @@ impl CircuitGraph {
                         neg_node,
                         pos_node,
                     });
+                    continue;
+                }
+
+                // Look for feedback resistor path (Rf: neg to out)
+                // Use resistive path finding to handle series/parallel combinations
+                // Returns (rf_value, component_ids, pot_info)
+                if let Some((rf, _rf_comps, rf_pot)) = find_resistive_path(neg_node, out_node) {
+                    // Check for inverting topology: pos connected to ground
+                    if pos_node == gnd_node_resolved {
+                        // Inverting: look for Ri connected to neg (from any input source)
+                        // For cascaded op-amps, Ri may connect to a previous stage's output
+                        if let Some(ri) = find_input_resistor(neg_node, out_node, gnd_node_resolved) {
+                            // Check for feedback diodes (Tube Screamer style soft clipping)
+                            let feedback_diode = find_feedback_diode(neg_node, out_node);
+                            results.push(OpAmpFeedbackInfo {
+                                comp_id: comp.id.clone(),
+                                opamp_type,
+                                feedback_kind: OpAmpFeedbackKind::Inverting {
+                                    rf,
+                                    ri,
+                                    feedback_diode,
+                                    rf_pot,
+                                },
+                                neg_node,
+                                pos_node,
+                            });
+                            continue;
+                        }
+                    }
+
+                    // Check for non-inverting topology: pos connected to input (or signal path)
+                    // Non-inverting: look for Ri path from neg to ground
+                    if let Some((ri, _ri_comps, _ri_pot)) = find_resistive_path(neg_node, gnd_node_resolved) {
+                        results.push(OpAmpFeedbackInfo {
+                            comp_id: comp.id.clone(),
+                            opamp_type,
+                            feedback_kind: OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot },
+                            neg_node,
+                            pos_node,
+                        });
+                        continue;
+                    }
+
+                    // Rf found but no Ri - could be unity-gain buffer through resistor
+                    // or more complex topology. Skip for now.
                 }
             }
         }
@@ -1375,10 +1667,37 @@ pub(super) struct OpAmpFeedbackInfo {
 }
 
 /// The feedback topology of an op-amp.
+#[derive(Debug, Clone)]
 pub(super) enum OpAmpFeedbackKind {
     /// Direct connection: neg tied to out (voltage follower).
     /// Closed-loop gain = 1.0.
     UnityGain,
+    /// Inverting amplifier: pos tied to ground, neg connected through Ri to input
+    /// and through Rf to output. Closed-loop gain = Rf/Ri.
+    Inverting {
+        /// Feedback resistor value (neg to out)
+        rf: f64,
+        /// Input resistor value (input to neg)
+        ri: f64,
+        /// Diode type in feedback loop (if any) for soft clipping.
+        /// Tube Screamer style: diodes in parallel with Rf create soft clipping.
+        feedback_diode: Option<DiodeType>,
+        /// Potentiometer info for runtime gain modulation.
+        /// (comp_id, max_resistance, fixed_series_resistance, parallel_fixed_resistance)
+        /// parallel_fixed_r is the resistance of paths in parallel with the pot (e.g., TS R4)
+        rf_pot: Option<(String, f64, f64, Option<f64>)>,
+    },
+    /// Non-inverting amplifier: pos connected to input, neg connected through Ri
+    /// to ground and through Rf to output. Closed-loop gain = 1 + Rf/Ri.
+    NonInverting {
+        /// Feedback resistor value (neg to out)
+        rf: f64,
+        /// Ground resistor value (neg to gnd)
+        ri: f64,
+        /// Potentiometer info for runtime gain modulation.
+        /// (comp_id, max_resistance, fixed_series_resistance, parallel_fixed_resistance)
+        rf_pot: Option<(String, f64, f64, Option<f64>)>,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
