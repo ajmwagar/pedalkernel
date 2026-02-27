@@ -784,10 +784,22 @@ impl CompiledPedal {
             }
             return;
         }
+
+        // Forward unmatched controls to sidechain sub-circuits.
+        // Sidechain controls (e.g., "Lat Time Constant") are compiled into
+        // the sidechain's own CompiledPedal and handled there.
+        for sc in &mut self.sidechains {
+            sc.set_control(label, value);
+        }
     }
 
     /// Debug dump: print complete pedal structure for debugging.
     ///
+    /// Number of WDF stages (for debug reporting).
+    pub fn debug_stage_count(&self) -> usize { self.stages.len() }
+    /// Number of push-pull stages (for debug reporting).
+    pub fn debug_push_pull_count(&self) -> usize { self.push_pull_stages.len() }
+
     /// Shows gain structure, all WDF stages with their trees, and control bindings.
     pub fn debug_dump(&self) -> String {
         let mut s = String::new();

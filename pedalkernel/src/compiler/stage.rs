@@ -2,6 +2,7 @@
 
 use crate::elements::*;
 use crate::oversampling::Oversampler;
+use crate::PedalProcessor;
 
 use super::dyn_node::DynNode;
 use super::helpers::balance_parallel_vs;
@@ -627,82 +628,40 @@ impl PushPullStage {
 // Sidechain processor — feedback compression loop
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Sidechain processor for variable-mu compressors (Fairchild 670).
+/// Sidechain processor — a sub-circuit compiled through the same pipeline
+/// as the main audio path.
 ///
-/// The sidechain taps the audio output, amplifies and rectifies it to extract
-/// an envelope, then produces a control voltage (CV) that modulates the
-/// push-pull gain cell's grid bias. This implements the classic variable-mu
-/// compression characteristic.
+/// The sidechain is extracted from the parent PedalDef as a separate
+/// sub-PedalDef containing its own components, nets, controls, and supplies.
+/// It is compiled via `compile_pedal()` into a full `CompiledPedal`, giving
+/// it proper WDF trees, transformers, nonlinear elements, and passives —
+/// exactly like the main circuit.
 ///
-/// Signal flow per sample:
-///   1. Tapped audio → sidechain triode amplifier stages
-///   2. Amplified signal → full-wave bridge rectifier (diode stages)
-///   3. Rectified signal → RC time constant network (envelope follower)
-///   4. Envelope voltage (VlevelCap) → CV output → modulates grid bias
-///
-/// The processor uses 1-sample feedback delay (cv_delayed), matching the
-/// wavechild670 reference implementation.
+/// At runtime, the sidechain processes the tapped audio and produces an
+/// output (CV) that modulates the main circuit's push-pull grid bias
+/// with a 1-sample feedback delay.
 pub(super) struct SidechainProcessor {
-    /// WDF stages for sidechain amplification (12AX7, 12BH7, 6973 triodes/pentodes).
-    pub(super) stages: Vec<WdfStage>,
-    /// Time constant state: envelope capacitor voltage.
-    /// This is the "VlevelCap" from wavechild670.
-    pub(super) v_level_cap: f64,
-    /// Time constant R value (from switched R, position-dependent).
-    pub(super) r_time: f64,
-    /// Time constant C value (from switched C, position-dependent).
-    pub(super) c_time: f64,
-    /// Sample rate for dt computation.
-    pub(super) sample_rate: f64,
+    /// The compiled sidechain sub-circuit.
+    pub(super) circuit: super::compiled::CompiledPedal,
     /// 1-sample delay state for the feedback loop CV.
     pub(super) cv_delayed: f64,
 }
 
 impl SidechainProcessor {
-    /// Process one sample through the sidechain.
-    ///
-    /// Takes the tapped audio signal and returns the control voltage.
-    /// The CV represents the envelope magnitude used to modulate grid bias.
+    /// Process one sample through the sidechain sub-circuit.
     #[inline]
     pub fn process(&mut self, tapped_signal: f64) -> f64 {
-        let mut signal = tapped_signal;
-
-        // 1. Process through sidechain amplifier stages (triodes, pentodes)
-        for stage in &mut self.stages {
-            signal = stage.process(signal);
-        }
-
-        // 2. Full-wave rectification (absolute value approximation).
-        // The real circuit uses a 4-diode bridge rectifier. For the sidechain
-        // envelope extraction, the key behavior is full-wave rectification.
-        // The WDF diode stages in self.stages handle any diode-based processing;
-        // if the bridge rectifier is modeled as WDF stages, signal is already
-        // processed. Otherwise, apply absolute value as a simple full-wave rect.
-        let rectified = signal.abs();
-
-        // 3. RC time constant envelope follower.
-        // Models the charge/discharge of the time constant capacitor.
-        // Attack: capacitor charges through R when rectified > v_level_cap
-        // Release: capacitor discharges through R when rectified < v_level_cap
-        let dt = 1.0 / self.sample_rate;
-        let tau = self.r_time * self.c_time;
-        if tau > 0.0 {
-            let alpha = dt / (tau + dt);
-            // Single-pole IIR: tracks the envelope
-            self.v_level_cap += (rectified - self.v_level_cap) * alpha;
-        } else {
-            self.v_level_cap = rectified;
-        }
-
-        self.v_level_cap
+        self.circuit.process(tapped_signal)
     }
 
-    /// Reset the sidechain state (e.g., on transport stop).
+    /// Forward a control change to the sidechain sub-circuit.
+    pub fn set_control(&mut self, label: &str, value: f64) {
+        self.circuit.set_control(label, value);
+    }
+
+    /// Reset the sidechain state.
     pub fn reset(&mut self) {
-        self.v_level_cap = 0.0;
         self.cv_delayed = 0.0;
-        for stage in &mut self.stages {
-            stage.reset();
-        }
+        self.circuit.reset();
     }
 }

@@ -405,9 +405,14 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
         // Tap
         ComponentKind::Tap(..) => &["output"],
 
-        // Transformer: primary (a, b) + secondary (c, d) + optional center taps
+        // Transformer: primary (a, b) + secondary (c, d) + tertiary (e, f) + center taps
+        // Also supports hierarchical names: primary.a, secondary.a, tertiary.a
         ComponentKind::Transformer(_) => {
-            &["a", "b", "c", "d", "pri_a", "pri_b", "sec_a", "sec_b", "pri_ct", "sec_ct", "ct"]
+            &["a", "b", "c", "d", "e", "f",
+              "primary.a", "primary.b", "secondary.a", "secondary.b",
+              "tertiary.a", "tertiary.b",
+              "pri_a", "pri_b", "sec_a", "sec_b", "ter_a", "ter_b",
+              "pri_ct", "sec_ct", "ct"]
         }
 
         // Synth ICs
@@ -637,7 +642,7 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 adj.entry(ki.clone()).or_default().insert(ko.clone());
                 adj.entry(ko).or_default().insert(ki);
             }
-            ComponentKind::Transformer(_) => {
+            ComponentKind::Transformer(cfg) => {
                 // Primary and secondary are magnetically coupled
                 let ka = format!("{}.a", comp.id);
                 let kb = format!("{}.b", comp.id);
@@ -647,6 +652,13 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 adj.entry(kb).or_default().insert(ka);
                 adj.entry(kc.clone()).or_default().insert(kd.clone());
                 adj.entry(kd).or_default().insert(kc);
+                // Tertiary winding if present
+                if cfg.has_tertiary() {
+                    let ke = format!("{}.e", comp.id);
+                    let kf = format!("{}.f", comp.id);
+                    adj.entry(ke.clone()).or_default().insert(kf.clone());
+                    adj.entry(kf).or_default().insert(ke);
+                }
             }
             // LFO, EnvelopeFollower, Switches, Taps, Synth ICs — not passive signal path
             _ => {

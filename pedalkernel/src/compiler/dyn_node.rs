@@ -1,6 +1,7 @@
 //! Dynamic WDF tree node for runtime-constructed circuits.
 
 use crate::elements::{Photocoupler, WdfLeaf};
+use crate::tree::RTypeAdaptor;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Dynamic WDF tree node
@@ -126,6 +127,20 @@ pub(super) enum DynNode {
         /// Cached secondary reflected wave
         b_sec: f64,
     },
+    /// N-port R-type adaptor for non-series/parallel topologies.
+    ///
+    /// Used for 3-winding transformers, bridged-T networks, and other
+    /// topologies that cannot be decomposed into binary adaptor trees.
+    /// The scattering matrix is pre-computed at compile time from MNA.
+    ///
+    /// Children are ordered: child₀, child₁, ..., child_{n-2}.
+    /// The parent (adapted, reflection-free) port is implicit (port n-1).
+    RType {
+        /// The R-type adaptor with pre-computed scattering matrix.
+        adaptor: RTypeAdaptor,
+        /// Child subtrees (one per non-adapted port).
+        children: Vec<Box<DynNode>>,
+    },
 }
 
 impl DynNode {
@@ -141,6 +156,7 @@ impl DynNode {
             | Self::Series { rp, .. }
             | Self::Parallel { rp, .. }
             | Self::Transformer { rp, .. } => *rp,
+            Self::RType { adaptor, .. } => adaptor.port_resistance,
             Self::Photocoupler { inner, .. } => inner.port_resistance(),
         }
     }
@@ -204,6 +220,11 @@ impl DynNode {
                 // Get secondary reflected wave and scale by turns ratio
                 *b_sec = secondary.reflected();
                 *turns_ratio * *b_sec
+            }
+            Self::RType { adaptor, children } => {
+                // Collect reflected waves from all children
+                let b_children: Vec<f64> = children.iter_mut().map(|c| c.reflected()).collect();
+                adaptor.scatter_up(&b_children)
             }
         }
     }
@@ -279,6 +300,13 @@ impl DynNode {
                 let a_sec = a / *turns_ratio;
                 secondary.set_incident(a_sec);
             }
+            Self::RType { adaptor, children } => {
+                // Scatter down: parent incident wave → child incident waves
+                let a_children = adaptor.scatter_down(a);
+                for (child, &a_i) in children.iter_mut().zip(a_children.iter()) {
+                    child.set_incident(a_i);
+                }
+            }
         }
     }
 
@@ -292,6 +320,11 @@ impl DynNode {
             }
             Self::Transformer { secondary, .. } => {
                 secondary.set_voltage(v);
+            }
+            Self::RType { children, .. } => {
+                for child in children {
+                    child.set_voltage(v);
+                }
             }
             _ => {}
         }
@@ -314,6 +347,9 @@ impl DynNode {
                 left.set_pot(target_id, pos) || right.set_pot(target_id, pos)
             }
             Self::Transformer { secondary, .. } => secondary.set_pot(target_id, pos),
+            Self::RType { children, .. } => {
+                children.iter_mut().any(|c| c.set_pot(target_id, pos))
+            }
             _ => false,
         }
     }
@@ -359,6 +395,16 @@ impl DynNode {
                 let r_sec = secondary.port_resistance();
                 *rp = *turns_ratio * *turns_ratio * r_sec;
             }
+            Self::RType { adaptor, children } => {
+                for child in children.iter_mut() {
+                    child.recompute();
+                }
+                // R-type scattering matrix depends on port resistances; if children
+                // changed (pot adjustment), the matrix would need recomputation.
+                // For now, the scattering matrix is fixed at compile time.
+                // Update the parent port resistance to match the adaptor.
+                let _ = adaptor; // port_resistance is immutable for R-type
+            }
             _ => {}
         }
     }
@@ -403,6 +449,12 @@ impl DynNode {
                 *b_sec = 0.0;
                 secondary.reset();
             }
+            Self::RType { adaptor, children } => {
+                adaptor.reset();
+                for child in children {
+                    child.reset();
+                }
+            }
             _ => {}
         }
     }
@@ -439,6 +491,9 @@ impl DynNode {
                 left.reactive_voltage().or_else(|| right.reactive_voltage())
             }
             Self::Transformer { secondary, .. } => secondary.reactive_voltage(),
+            Self::RType { children, .. } => {
+                children.iter().find_map(|c| c.reactive_voltage())
+            }
             _ => None,
         }
     }
@@ -485,6 +540,9 @@ impl DynNode {
                 left.has_reactive_elements() || right.has_reactive_elements()
             }
             Self::Transformer { secondary, .. } => secondary.has_reactive_elements(),
+            Self::RType { children, .. } => {
+                children.iter().any(|c| c.has_reactive_elements())
+            }
             _ => false,
         }
     }
@@ -542,6 +600,15 @@ impl DynNode {
                 let r_sec = secondary.port_resistance();
                 *rp = *turns_ratio * *turns_ratio * r_sec;
             }
+            Self::RType { children, .. } => {
+                for child in children {
+                    child.update_sample_rate(fs);
+                }
+                // R-type scattering matrix is fixed at compile time.
+                // Port resistance depends on children, but the R-type adaptor
+                // computes it during construction. For sample rate changes,
+                // the matrix would need recomputation (not yet supported).
+            }
             _ => {}
         }
     }
@@ -556,6 +623,9 @@ impl DynNode {
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.set_photocoupler_led(target_id, led_drive)
                     || right.set_photocoupler_led(target_id, led_drive)
+            }
+            Self::RType { children, .. } => {
+                children.iter_mut().any(|c| c.set_photocoupler_led(target_id, led_drive))
             }
             _ => false,
         }
@@ -590,6 +660,9 @@ impl DynNode {
             }
             Self::Transformer { secondary, .. } => {
                 secondary.set_switch_position(target_switch, new_position)
+            }
+            Self::RType { children, .. } => {
+                children.iter_mut().map(|c| c.set_switch_position(target_switch, new_position)).sum()
             }
             _ => 0,
         }
@@ -643,6 +716,15 @@ impl DynNode {
                 s.push_str(&secondary.debug_dump(indent + 1));
                 s
             }
+            Self::RType { adaptor, children } => {
+                let mut s = format!("{pad}RType(ports={}, Rp={:.1}Ω)\n", adaptor.num_ports, adaptor.port_resistance);
+                for (i, child) in children.iter().enumerate() {
+                    s.push_str(&format!("{pad}  [port {i}]:\n"));
+                    s.push_str(&child.debug_dump(indent + 2));
+                    s.push('\n');
+                }
+                s
+            }
         }
     }
 
@@ -653,6 +735,9 @@ impl DynNode {
                 1 + left.node_count() + right.node_count()
             }
             Self::Transformer { secondary, .. } => 1 + secondary.node_count(),
+            Self::RType { children, .. } => {
+                1 + children.iter().map(|c| c.node_count()).sum::<usize>()
+            }
             _ => 1,
         }
     }

@@ -777,6 +777,10 @@ pub struct TransformerConfig {
     pub capacitance: f64,
     /// Coupling coefficient (0-1), default 0.99 for audio transformers
     pub coupling: f64,
+    /// Optional tertiary winding turns ratio (primary:tertiary).
+    /// When present, the transformer is modeled as a 3-winding R-type adaptor.
+    /// Used for transformers with NFB windings (e.g., Fairchild 670 sidechain output).
+    pub tertiary_turns_ratio: Option<f64>,
 }
 
 impl Default for TransformerConfig {
@@ -790,6 +794,7 @@ impl Default for TransformerConfig {
             secondary_dcr: 0.0,
             capacitance: 0.0,
             coupling: 0.99,
+            tertiary_turns_ratio: None,
         }
     }
 }
@@ -827,6 +832,17 @@ impl TransformerConfig {
     pub fn with_capacitance(mut self, cap: f64) -> Self {
         self.capacitance = cap;
         self
+    }
+
+    /// Add a tertiary winding with the given primary:tertiary turns ratio.
+    pub fn with_tertiary(mut self, tertiary_turns_ratio: f64) -> Self {
+        self.tertiary_turns_ratio = Some(tertiary_turns_ratio);
+        self
+    }
+
+    /// Returns true if this transformer has a tertiary (third) winding.
+    pub fn has_tertiary(&self) -> bool {
+        self.tertiary_turns_ratio.is_some()
     }
 }
 
@@ -1701,6 +1717,23 @@ fn parse_transformer(input: &str) -> IResult<&str, ComponentKind> {
                 let (input, _) = ws_comments(input)?;
                 let (input, k) = double(input)?;
                 config.coupling = k;
+                remaining = input;
+                continue;
+            }
+
+            // tertiary=N:M — adds a third winding with its own turns ratio
+            if let Ok((input, _)) = tag::<&str, &str, nom::error::Error<&str>>("tertiary")(remaining) {
+                let (input, _) = ws_comments(input)?;
+                let (input, _) = char('=')(input)?;
+                let (input, _) = ws_comments(input)?;
+                let (input, t_num) = double(input)?;
+                let (input, t_ratio) = if let Ok((input, _)) = char::<&str, nom::error::Error<&str>>(':')(input) {
+                    let (input, denom) = double(input)?;
+                    (input, t_num / denom)
+                } else {
+                    (input, t_num)
+                };
+                config.tertiary_turns_ratio = Some(t_ratio);
                 remaining = input;
                 continue;
             }

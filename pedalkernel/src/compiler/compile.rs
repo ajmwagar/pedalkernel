@@ -2559,7 +2559,7 @@ pub fn compile_pedal_with_options(
     // SidechainProcessor for each. Sidechain triode/pentode stages are
     // already excluded from the main audio path because the partition
     // identifies which edges belong to the sidechain subgraph.
-    let sidechains = build_sidechains(&pedal.sidechains, &graph, sample_rate, oversampling);
+    let sidechains = build_sidechains(pedal, &graph, sample_rate);
 
     // Store the base grid bias from the first push-pull stage (if any).
     // The sidechain CV will be subtracted from this value each sample.
@@ -2608,112 +2608,170 @@ pub fn compile_pedal_with_options(
     Ok(compiled)
 }
 
-/// Build sidechain processors from sidechain definitions.
+/// Build sidechain processors by extracting sub-PedalDefs and compiling them.
 ///
-/// For each sidechain definition, partitions the circuit graph to identify
-/// sidechain edges, then builds WDF stages for the sidechain amplifier chain.
-/// The sidechain stages process separately from the audio path with their own
-/// RC time constant for envelope extraction.
+/// Each sidechain is treated as a separate sub-circuit: we use graph
+/// partitioning to identify which components belong to the sidechain,
+/// extract a sub-PedalDef, then compile it through the same `compile_pedal()`
+/// pipeline as the main audio path. This gives the sidechain proper WDF
+/// trees, transformers, nonlinear elements, controls — everything.
 fn build_sidechains(
-    sidechain_infos: &[SidechainInfo],
+    pedal: &PedalDef,
     graph: &CircuitGraph,
     sample_rate: f64,
-    oversampling: OversamplingFactor,
 ) -> Vec<SidechainProcessor> {
     let mut processors = Vec::new();
 
-    for sc_info in sidechain_infos {
+    eprintln!("[sidechain] {} sidechain definitions", pedal.sidechains.len());
+    for sc_info in &pedal.sidechains {
         let tap = match graph.node_names.get(&sc_info.tap_node) {
             Some(&n) => n,
-            None => continue,
+            None => { eprintln!("[sidechain] tap node '{}' not found", sc_info.tap_node); continue; },
         };
         let cv = match graph.node_names.get(&sc_info.cv_node) {
             Some(&n) => n,
-            None => continue,
+            None => { eprintln!("[sidechain] cv node '{}' not found", sc_info.cv_node); continue; },
         };
 
         let partition = match graph.partition_sidechain(tap, cv) {
             Some(p) => p,
-            None => continue,
+            None => { eprintln!("[sidechain] partition returned None for tap={} cv={}", sc_info.tap_node, sc_info.cv_node); continue; },
         };
 
-        // Build WDF stages for sidechain triode/pentode amplifiers.
-        // We iterate the sidechain edges and collect triode/pentode components,
-        // building a simple WdfStage for each one.
-        let mut sc_stages: Vec<WdfStage> = Vec::new();
-
-        // Find the time constant R and C values from the sidechain edges.
-        // These are components whose IDs contain "R_time" and "C_time".
-        let mut r_time = 150_000.0; // Default: position 2 (200µs attack, 0.8s release)
-        let mut c_time = 2e-6;      // Default: position 2
-
+        // Collect the component IDs that belong to this sidechain.
+        let mut sc_component_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for &edge_idx in &partition.sidechain_edge_indices {
-            let edge = &graph.edges[edge_idx];
-            let comp = &graph.components[edge.comp_idx];
-
-            match &comp.kind {
-                ComponentKind::Triode(triode_type) => {
-                    // Build a simple WDF stage for this sidechain triode.
-                    let model = triode_model(*triode_type);
-                    let root = TriodeRoot::new(model);
-                    let tree = DynNode::VoltageSource { voltage: 0.0, rp: 100_000.0 };
-
-                    sc_stages.push(WdfStage {
-                        tree,
-                        root: RootKind::Triode(root),
-                        compensation: model.mu / 100.0,
-                        oversampler: Oversampler::new(oversampling),
-                        base_diode_model: None,
-                        paired_opamp: None,
-                        dc_block: None,
-                    });
-                }
-                ComponentKind::Pentode(pentode_type) => {
-                    let model = pentode_model(*pentode_type);
-                    let root = PentodeRoot::new(model);
-                    let tree = DynNode::VoltageSource { voltage: 0.0, rp: 100_000.0 };
-
-                    sc_stages.push(WdfStage {
-                        tree,
-                        root: RootKind::Pentode(root),
-                        compensation: 1.0,
-                        oversampler: Oversampler::new(oversampling),
-                        base_diode_model: None,
-                        paired_opamp: None,
-                        dc_block: None,
-                    });
-                }
-                ComponentKind::ResistorSwitched(values) => {
-                    if comp.id.contains("R_time") || comp.id.contains("_time") {
-                        // Use position 2 (index 1) as default — most commonly used
-                        if let Some(&v) = values.get(1) {
-                            if v.is_finite() {
-                                r_time = v;
-                            }
-                        }
-                    }
-                }
-                ComponentKind::CapSwitched(values) => {
-                    if comp.id.contains("C_time") || comp.id.contains("_time") {
-                        if let Some(&v) = values.get(1) {
-                            c_time = v;
-                        }
-                    }
-                }
-                _ => {}
-            }
+            let comp = &graph.components[graph.edges[edge_idx].comp_idx];
+            sc_component_ids.insert(comp.id.clone());
         }
 
-        processors.push(SidechainProcessor {
-            stages: sc_stages,
-            v_level_cap: 0.0,
-            r_time,
-            c_time,
-            sample_rate,
-            cv_delayed: 0.0,
-        });
+        // DEBUG
+        eprintln!("[sidechain] tap={} cv={}", sc_info.tap_node, sc_info.cv_node);
+        eprintln!("[sidechain] {} edges, {} components", partition.sidechain_edge_indices.len(), sc_component_ids.len());
+        let mut sorted: Vec<_> = sc_component_ids.iter().cloned().collect();
+        sorted.sort();
+        eprintln!("[sidechain] {}", sorted.join(", "));
+
+        // Extract a sub-PedalDef for this sidechain.
+        let sc_def = extract_sidechain_def(
+            pedal,
+            &sc_component_ids,
+            &sc_info.tap_node,
+            &sc_info.cv_node,
+        );
+
+        eprintln!("[sidechain] sub-def: {} comps, {} nets, {} controls, {} trims",
+            sc_def.components.len(), sc_def.nets.len(), sc_def.controls.len(), sc_def.trims.len());
+
+        // Compile the sidechain sub-circuit through the same pipeline.
+        match compile_pedal(&sc_def, sample_rate) {
+            Ok(compiled) => {
+                eprintln!("[sidechain] compiled OK: {} stages, {} push-pull",
+                    compiled.debug_stage_count(), compiled.debug_push_pull_count());
+                processors.push(SidechainProcessor {
+                    circuit: compiled,
+                    cv_delayed: 0.0,
+                });
+            }
+            Err(e) => {
+                eprintln!("[sidechain] FAILED: {e}");
+            }
+        }
     }
 
     processors
+}
+
+/// Extract a sub-PedalDef for a sidechain sub-circuit.
+///
+/// Filters the parent PedalDef's components, nets, controls, and trims
+/// to only those belonging to the sidechain. Renames the tap node to "in"
+/// and the CV node to "out" so the sub-circuit has standard I/O.
+fn extract_sidechain_def(
+    pedal: &PedalDef,
+    component_ids: &std::collections::HashSet<String>,
+    tap_node: &str,
+    cv_node: &str,
+) -> PedalDef {
+    // Filter components to those in the sidechain
+    let components: Vec<ComponentDef> = pedal
+        .components
+        .iter()
+        .filter(|c| component_ids.contains(&c.id))
+        .cloned()
+        .collect();
+
+    // Rename tap_node → "in" and cv_node → "out" in all pins
+    let rename = |pin: &Pin| -> Pin {
+        match pin {
+            Pin::Reserved(n) if n == tap_node => Pin::Reserved("in".to_string()),
+            Pin::Reserved(n) if n == cv_node => Pin::Reserved("out".to_string()),
+            _ => pin.clone(),
+        }
+    };
+
+    // Filter and rename nets
+    let nets: Vec<NetDef> = pedal
+        .nets
+        .iter()
+        .filter_map(|net| {
+            let from = rename(&net.from);
+            let to: Vec<Pin> = net.to.iter().map(&rename).collect();
+
+            // A pin belongs to this sidechain if it references a sidechain component
+            // or is a standard reserved node (in, out, gnd, vcc, supply rail).
+            let belongs = |p: &Pin| match p {
+                Pin::Reserved(n) => {
+                    n == "in" || n == "out" || n == "gnd" || n == "vcc"
+                        || pedal.is_supply_rail(n)
+                }
+                Pin::ComponentPin { component, .. } => component_ids.contains(component),
+                Pin::Fork { switch, .. } => component_ids.contains(switch),
+            };
+
+            // Keep only nets where at least one component pin is in this sidechain
+            let has_local_component = std::iter::once(&from).chain(to.iter()).any(|p| {
+                matches!(p, Pin::ComponentPin { component, .. } if component_ids.contains(component))
+            });
+
+            if has_local_component {
+                let filtered_to: Vec<Pin> = to.into_iter().filter(|p| belongs(p)).collect();
+                if !filtered_to.is_empty() && belongs(&from) {
+                    Some(NetDef { from, to: filtered_to })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Filter controls to those referencing sidechain components
+    let controls: Vec<ControlDef> = pedal
+        .controls
+        .iter()
+        .filter(|c| component_ids.contains(&c.component))
+        .cloned()
+        .collect();
+
+    // Filter trims to those referencing sidechain components
+    let trims: Vec<ControlDef> = pedal
+        .trims
+        .iter()
+        .filter(|c| component_ids.contains(&c.component))
+        .cloned()
+        .collect();
+
+    PedalDef {
+        name: format!("{} (sidechain)", pedal.name),
+        supplies: pedal.supplies.clone(),
+        components,
+        nets,
+        controls,
+        trims,
+        monitors: vec![],
+        sidechains: vec![], // No nested sidechains
+    }
 }
 

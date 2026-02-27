@@ -502,7 +502,7 @@ impl CircuitGraph {
                         node_b,
                     });
                 }
-                ComponentKind::Transformer(_cfg) => {
+                ComponentKind::Transformer(cfg) => {
                     // Transformer: primary winding is a-b, secondary is c-d.
                     // For WDF, we model the ideal transformer as a 2-port adaptor
                     // with the turns ratio. The primary side is the WDF edge.
@@ -532,6 +532,22 @@ impl CircuitGraph {
                     let id_sec_b = get_id(&key_sec_b, &mut uf);
                     uf.union(id_c, id_sec_a);
                     uf.union(id_d, id_sec_b);
+
+                    // Register tertiary pins if the transformer has a third winding.
+                    // .e/.f shorthand, .tertiary.a/.tertiary.b explicit names.
+                    if cfg.has_tertiary() {
+                        let key_e = format!("{}.e", comp.id);
+                        let key_f = format!("{}.f", comp.id);
+                        let key_ter_a = format!("{}.tertiary.a", comp.id);
+                        let key_ter_b = format!("{}.tertiary.b", comp.id);
+                        let id_e = get_id(&key_e, &mut uf);
+                        let id_f = get_id(&key_f, &mut uf);
+                        let id_ter_a = get_id(&key_ter_a, &mut uf);
+                        let id_ter_b = get_id(&key_ter_b, &mut uf);
+                        uf.union(id_e, id_ter_a);
+                        uf.union(id_f, id_ter_b);
+                    }
+
                     let node_a = uf.find(id_a);
                     let node_b = uf.find(id_b);
                     edges.push(GraphEdge {
@@ -716,11 +732,10 @@ impl CircuitGraph {
     /// that should be built into a `SidechainProcessor` instead of the
     /// main audio WDF chain.
     ///
-    /// The BFS stops at:
-    /// - `cv_node` (the CV output)
-    /// - `gnd_node` (ground terminations within the sidechain are fine)
-    /// - `in_node` (don't traverse back into the audio input)
-    /// - Push-pull grid nodes (these are the modulation targets, not part of the sidechain chain)
+    /// Uses bidirectional BFS intersection: nodes reachable from tap_node
+    /// intersected with nodes reachable from cv_node, both stopping at
+    /// circuit boundary nodes (in, out, gnd, vcc, supply rails). This
+    /// isolates the sidechain subgraph without relying on component names.
     pub(super) fn partition_sidechain(
         &self,
         tap_node: NodeId,
@@ -733,81 +748,53 @@ impl CircuitGraph {
             adj.entry(e.node_b).or_default().push((idx, e.node_a));
         }
 
-        // BFS from tap_node, collecting all reachable edges that are
-        // part of the sidechain (between tap and CV nodes).
-        // We identify sidechain edges as those reachable from the tap_node
-        // via sidechain components (sc_tap, sc_in transformer, threshold pots,
-        // sidechain triodes, rectifier diodes, time constant RC).
-        //
-        // Strategy: BFS from tap_node. An edge is a sidechain edge if:
-        // 1. It's reachable from tap_node without going through in_node or out_node
-        // 2. It connects to components whose IDs contain "sc" or "rect" or "time" or "prog"
-        //    OR it's on the path between tap_node and cv_node
-        //
-        // Simpler approach: BFS from tap_node, exclude edges that connect to
-        // the audio path's push-pull grid or plate nodes (which are the main signal path).
-        // The sidechain is a distinct subgraph connected only at tap_node and cv_node.
-
-        let mut visited_nodes: HashSet<NodeId> = HashSet::new();
-        let mut sidechain_edges: HashSet<usize> = HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-
-        // Start BFS from tap_node, but DON'T include the tap_node itself
-        // in the "visited" set initially — we want to traverse OUT from it
-        // into the sidechain path only.
-        visited_nodes.insert(tap_node);
-
-        // Seed the BFS with edges from tap_node that lead into the sidechain.
-        // We identify these by checking if the component ID contains sidechain markers.
-        if let Some(neighbors) = adj.get(&tap_node) {
-            for &(edge_idx, neighbor) in neighbors {
-                let comp = &self.components[self.edges[edge_idx].comp_idx];
-                // Only follow edges into the sidechain (component IDs with "sc_", "rect", etc.)
-                // Don't follow edges back to the audio output path (R_out_load, mat_*, etc.)
-                let is_sidechain_entry = comp.id.contains("sc_") || comp.id.contains("_sc");
-                if is_sidechain_entry {
-                    sidechain_edges.insert(edge_idx);
-                    if !visited_nodes.contains(&neighbor) {
-                        visited_nodes.insert(neighbor);
-                        queue.push_back(neighbor);
-                    }
-                }
-            }
+        // Boundary nodes: the BFS stops at these. They represent circuit
+        // boundaries that separate the sidechain from the audio path.
+        let mut boundary: HashSet<NodeId> = HashSet::new();
+        boundary.insert(self.in_node);
+        boundary.insert(self.out_node);
+        boundary.insert(self.gnd_node);
+        if let Some(&vcc) = self.node_names.get("vcc") {
+            boundary.insert(vcc);
         }
+        boundary.extend(&self.supply_nodes);
 
-        // BFS through sidechain subgraph
-        while let Some(node) = queue.pop_front() {
-            // Stop at the CV output node — don't traverse back into the audio path
-            if node == cv_node {
-                continue;
-            }
-            // Don't traverse back to audio input/output
-            if node == self.in_node || node == self.out_node {
-                continue;
-            }
+        // BFS from tap_node: find all nodes reachable without crossing
+        // cv_node or any boundary node.
+        let reachable_from_tap = Self::bfs_reachable(tap_node, cv_node, &boundary, &adj);
 
-            if let Some(neighbors) = adj.get(&node) {
-                for &(edge_idx, neighbor) in neighbors {
-                    if sidechain_edges.contains(&edge_idx) {
-                        continue; // Already visited this edge
-                    }
-                    if visited_nodes.contains(&neighbor) && neighbor != cv_node {
-                        continue; // Already visited this node (and it's not CV)
-                    }
-                    // Skip edges to supply nodes (they're bias, not signal path)
-                    if self.supply_nodes.contains(&neighbor) {
-                        continue;
-                    }
+        // BFS from cv_node: find all nodes reachable without crossing
+        // tap_node or any boundary node.
+        let reachable_from_cv = Self::bfs_reachable(cv_node, tap_node, &boundary, &adj);
 
-                    // Include this edge in the sidechain
-                    sidechain_edges.insert(edge_idx);
-                    if !visited_nodes.contains(&neighbor) {
-                        visited_nodes.insert(neighbor);
-                        queue.push_back(neighbor);
-                    }
-                }
-            }
-        }
+        eprintln!("[partition] reachable_from_tap: {} nodes, reachable_from_cv: {} nodes",
+            reachable_from_tap.len(), reachable_from_cv.len());
+        eprintln!("[partition] boundary has {} nodes (in={}, out={}, gnd={})",
+            boundary.len(), self.in_node, self.out_node, self.gnd_node);
+        eprintln!("[partition] tap={}, cv={}", tap_node, cv_node);
+
+        // Sidechain nodes = intersection of both reachable sets.
+        // Nodes reachable from BOTH tap and cv (without crossing boundaries)
+        // are exclusively sidechain components. Audio-path nodes are only
+        // reachable from one side because boundaries block the other direction.
+        let mut sidechain_nodes: HashSet<NodeId> = reachable_from_tap
+            .intersection(&reachable_from_cv)
+            .copied()
+            .collect();
+        // Include the boundary nodes themselves (tap and cv)
+        sidechain_nodes.insert(tap_node);
+        sidechain_nodes.insert(cv_node);
+
+        // Collect edges where both endpoints are sidechain nodes.
+        let sidechain_edges: HashSet<usize> = self
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                sidechain_nodes.contains(&e.node_a) && sidechain_nodes.contains(&e.node_b)
+            })
+            .map(|(i, _)| i)
+            .collect();
 
         if sidechain_edges.is_empty() {
             return None;
@@ -818,6 +805,49 @@ impl CircuitGraph {
             tap_node,
             cv_node,
         })
+    }
+
+    /// BFS from `start`, collecting all reachable nodes.
+    /// Stops at `opposite` (the other sidechain boundary) and at all `boundary` nodes.
+    /// The start node itself is NOT included in the result (it's a boundary).
+    fn bfs_reachable(
+        start: NodeId,
+        opposite: NodeId,
+        boundary: &HashSet<NodeId>,
+        adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
+    ) -> HashSet<NodeId> {
+        let mut visited: HashSet<NodeId> = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        visited.insert(start);
+
+        // Seed: follow all edges from start, except to boundary or opposite
+        if let Some(neighbors) = adj.get(&start) {
+            for &(_, neighbor) in neighbors {
+                if neighbor == opposite || boundary.contains(&neighbor) {
+                    continue;
+                }
+                if visited.insert(neighbor) {
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+
+        while let Some(node) = queue.pop_front() {
+            if let Some(neighbors) = adj.get(&node) {
+                for &(_, neighbor) in neighbors {
+                    if neighbor == start || neighbor == opposite || boundary.contains(&neighbor) {
+                        continue;
+                    }
+                    if visited.insert(neighbor) {
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
+
+        // Remove start from the result — it's a boundary, not a sidechain-internal node
+        visited.remove(&start);
+        visited
     }
 
     /// Find diode edges, ordered by topological distance from `in`.
@@ -2354,39 +2384,50 @@ pub(super) fn make_leaf(
         // - I_secondary / I_primary = turns_ratio (power conservation)
         // - Z_primary = turns_ratio² × Z_secondary
         ComponentKind::Transformer(cfg) => {
-            // The secondary side is typically connected to a load or further circuit.
-            // For now, model as a resistive load based on primary inductance / turns ratio.
-            // This gives a reasonable port resistance until full topology support is added.
-            //
-            // Typical audio transformer: primary inductance ~2-10H, secondary follows.
-            // Port resistance at secondary ≈ ω×L_sec ≈ (2π×1kHz) × (L_prim / n²)
             let l_primary = cfg.primary_inductance;
             let n = cfg.turns_ratio; // Primary:Secondary ratio
 
             // Secondary inductance scales by 1/n²
             let l_secondary = l_primary / (n * n);
 
-            // At 1kHz reference frequency, calculate impedance
-            let omega_ref = 2.0 * std::f64::consts::PI * 1000.0;
-            let z_secondary = omega_ref * l_secondary;
-
-            // Create a secondary stub (inductor-like element representing magnetizing inductance)
-            // This will be replaced by actual secondary subtree in full implementation
+            // Secondary stub (inductor representing magnetizing inductance)
             let secondary = Box::new(DynNode::Inductor {
                 inductance: l_secondary,
                 rp: 2.0 * sample_rate * l_secondary,
                 state: 0.0,
             });
 
-            // Primary port resistance = n² × R_secondary
-            let rp_sec = secondary.port_resistance();
-            let rp_prim = n * n * rp_sec;
+            if let Some(n_tertiary) = cfg.tertiary_turns_ratio {
+                // 3-winding transformer → R-type adaptor
+                // Ports: 0=secondary, 1=tertiary, 2=primary (adapted, reflection-free)
+                let l_tertiary = l_primary / (n_tertiary * n_tertiary);
+                let tertiary = Box::new(DynNode::Inductor {
+                    inductance: l_tertiary,
+                    rp: 2.0 * sample_rate * l_tertiary,
+                    state: 0.0,
+                });
 
-            DynNode::Transformer {
-                secondary,
-                turns_ratio: n,
-                rp: rp_prim,
-                b_sec: 0.0,
+                let r_sec = secondary.port_resistance();
+                let r_ter = tertiary.port_resistance();
+                let adaptor = crate::tree::RTypeAdaptor::three_winding_transformer(
+                    n, n_tertiary, r_sec, r_ter,
+                );
+
+                DynNode::RType {
+                    adaptor,
+                    children: vec![secondary, tertiary],
+                }
+            } else {
+                // Standard 2-winding transformer
+                let rp_sec = secondary.port_resistance();
+                let rp_prim = n * n * rp_sec;
+
+                DynNode::Transformer {
+                    secondary,
+                    turns_ratio: n,
+                    rp: rp_prim,
+                    b_sec: 0.0,
+                }
             }
         }
         // Diodes shouldn't appear as leaves (they're roots), but handle gracefully.
