@@ -1,0 +1,26 @@
+# JFET as voltage-controlled resistor test — 2N5457
+# Tests Rds variation with Vgs
+# Simple voltage divider with JFET as variable R
+
+pedal "JFET Switch Test" {
+  supply 9V
+  components {
+    C1: cap(100n)
+    R1: resistor(10k)
+    J1: njfet(2n5952)
+    R_bias_a: resistor(150k)
+    R_bias_b: resistor(150k)
+    R2: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> J1.source, R2.a
+    J1.drain -> gnd
+    R_bias_a.a -> vcc
+    R_bias_a.b -> J1.gate
+    R_bias_b.a -> J1.gate
+    R_bias_b.b -> gnd
+    R2.b -> out
+  }
+}

@@ -1,0 +1,24 @@
+# T4B — LA-2A style electroluminescent photocoupler
+# Slow response, ultra-smooth compression character
+
+pedal "Photocoupler T4B Test" {
+  components {
+    C1: cap(100n)
+    R1: resistor(100k)
+    PC1: photocoupler(t4b)
+    R2: resistor(10k)
+    C2: cap(100n)
+    R3: resistor(100k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, PC1.ldr_a
+    R1.b -> gnd
+    PC1.ldr_b -> R2.a
+    R2.b -> gnd
+    PC1.ldr_a -> C2.a
+    C2.b -> R3.a
+    R3.b -> gnd
+    C2.b -> out
+  }
+}

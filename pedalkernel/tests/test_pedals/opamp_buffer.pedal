@@ -1,0 +1,24 @@
+# Op-amp unity-gain buffer test — TL072
+# Should pass signal through with ~unity gain and low distortion
+# Tests basic op-amp VCVS modeling
+
+pedal "OpAmp Buffer Test" {
+  supply 9V
+  components {
+    C1: cap(100n)
+    R1: resistor(1M)
+    U1: opamp(tl072)
+    C2: cap(100n)
+    R2: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, U1.pos
+    R1.b -> gnd
+    U1.neg -> U1.out
+    U1.out -> C2.a
+    C2.b -> R2.a
+    R2.b -> gnd
+    C2.b -> out
+  }
+}

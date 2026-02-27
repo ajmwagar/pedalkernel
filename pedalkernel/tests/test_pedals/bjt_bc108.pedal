@@ -1,0 +1,29 @@
+# BC108 — NPN silicon, used in classic British pedals
+# Common-emitter amplifier test circuit
+
+pedal "BC108 Test" {
+  components {
+    C1: cap(100n)
+    R1: resistor(470k)
+    Q1: npn(bc108)
+    R2: resistor(10k)
+    R3: resistor(2.2k)
+    C2: cap(47u)
+    C3: cap(100n)
+    R4: resistor(100k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, Q1.base
+    R1.b -> gnd
+    vcc -> R2.a
+    R2.b -> Q1.collector
+    Q1.emitter -> R3.a, C2.a
+    R3.b -> gnd
+    C2.b -> gnd
+    Q1.collector -> C3.a
+    C3.b -> R4.a
+    R4.b -> gnd
+    C3.b -> out
+  }
+}

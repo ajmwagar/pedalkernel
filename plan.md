@@ -1,318 +1,433 @@
-# PedalKernel Synth Modeling — Implementation Plan
+# Integration Test Suite Plan: End-to-End Audio Validation
 
-**Goal**: Extend pedalkernel so that synthesizer circuits (VCO, VCF, VCA, ADSR, etc.) can be described in the `.pedal` DSL, compiled to real-time audio via WDF, exported to KiCad for PCB layout, and ordered as a Mouser BOM. Same file, same tone — from DSL to PCB.
+## Overview
 
----
+Build a comprehensive integration test suite that validates each component/effect type
+by processing audio (both synthesized test signals and the existing `clean_guitar.wav`)
+through purpose-built `.pedal` circuits, then analyzing the output WAV characteristics
+with dedicated analysis utilities.
 
-## Design Principles
-
-1. **Every component is a real part.** No abstract DSP blocks. A VCO is a CEM3340 IC (or AS3340/V3340 clone) with external R/C values that set its behavior. An ADSR is resistors + diodes + a cap + a comparator. A Moog filter is 8 matched transistors + 4 caps.
-
-2. **DSL describes circuits, not algorithms.** The `.pedal` syntax already handles this — component declarations with real values, net connections with real wiring. Synths use the same paradigm.
-
-3. **Full pipeline for every component.** Each new `ComponentKind` variant gets:
-   - DSL parser (nom)
-   - WDF/audio model (elements)
-   - KiCad symbol mapping (kicad.rs)
-   - BOM entry with Mouser P/N (hw.rs)
-   - Compiler support (compiler.rs)
-
-4. **`synth` keyword alongside `pedal`.** The DSL gains a `synth "Name" { ... }` top-level form. Internally it produces the same `PedalDef` AST — the compiler doesn't care whether it's a pedal or a synth. The keyword is for documentation and UI (different TUI layout, different KiCad sheet template).
-
----
-
-## Phase 1: New DSL Reserved Nodes & Keyword
-
-### 1a. `synth` keyword
-Add `synth` as an alias for `pedal` in the top-level parser. Both produce `PedalDef`.
+## Architecture
 
 ```
-synth "Minimod" {
-  components { ... }
-  nets { ... }
-  controls { ... }
+tests/
+├── audio_analysis.rs         # Shared analysis utilities (Goertzel, THD, modulation, etc.)
+├── test_pedals/              # Purpose-built .pedal files — one per component feature
+│   ├── clip_silicon.pedal
+│   ├── clip_germanium.pedal
+│   ├── clip_led.pedal
+│   ├── clip_zener.pedal
+│   ├── clip_asymmetric.pedal
+│   ├── bbd_chorus.pedal
+│   ├── bbd_long_delay.pedal
+│   ├── bbd_fast_clock.pedal
+│   ├── cap_leaky.pedal
+│   ├── cap_da.pedal
+│   ├── cap_ideal_reference.pedal
+│   ├── triode_clean.pedal
+│   ├── triode_overdrive.pedal
+│   ├── pentode_clean.pedal
+│   ├── pentode_power.pedal
+│   ├── opamp_buffer.pedal
+│   ├── opamp_gain.pedal
+│   ├── opamp_slew.pedal
+│   ├── jfet_allpass.pedal
+│   ├── jfet_switch.pedal
+│   ├── lfo_sine.pedal
+│   ├── lfo_triangle.pedal
+│   ├── lfo_square.pedal
+│   └── lfo_modulated_jfet.pedal
+├── integration_clipping.rs   # Diode/clipping tests
+├── integration_bbd.rs        # BBD delay + chorus tests
+├── integration_capacitor.rs  # Leakage + DA tests
+├── integration_tubes.rs      # Triode + pentode tests
+├── integration_opamp_jfet.rs # Op-amp and JFET tests
+└── integration_lfo.rs        # LFO modulation tests
+```
+
+Each `integration_*.rs` file is a standalone integration test file that uses the
+shared `audio_analysis` module. Rust's test harness runs them all in parallel.
+
+---
+
+## Step 1: Audio Analysis Utilities (`tests/audio_analysis.rs`)
+
+A `#[allow(dead_code)]` shared module providing measurement functions. No external
+FFT crate — use Goertzel algorithm for efficient single-bin DFT.
+
+### Functions
+
+```rust
+/// RMS level of a buffer.
+pub fn rms(buf: &[f64]) -> f64
+
+/// Peak absolute amplitude.
+pub fn peak(buf: &[f64]) -> f64
+
+/// DC offset (mean of buffer).
+pub fn dc_offset(buf: &[f64]) -> f64
+
+/// Goertzel algorithm: magnitude² of a single DFT bin.
+/// O(N) per bin — efficient when we only need a handful of frequencies.
+pub fn goertzel_mag(buf: &[f64], sample_rate: f64, target_hz: f64) -> f64
+
+/// Energy in a frequency band [lo_hz, hi_hz] relative to total energy.
+/// Steps through band at 10 Hz resolution using Goertzel.
+pub fn band_energy_ratio(buf: &[f64], sample_rate: f64, lo_hz: f64, hi_hz: f64) -> f64
+
+/// THD (Total Harmonic Distortion) of a signal at a known fundamental.
+/// Measures energy in harmonics 2–8 relative to fundamental.
+/// Returns ratio (0.0 = pure sine, 1.0 = harmonics equal fundamental).
+pub fn thd(buf: &[f64], sample_rate: f64, fundamental_hz: f64) -> f64
+
+/// Normalized cross-correlation between two buffers.
+pub fn correlation(a: &[f64], b: &[f64]) -> f64
+
+/// Spectral centroid — perceptual "brightness" in Hz.
+/// Computed over linearly-spaced Goertzel bins from 20 Hz to Nyquist.
+pub fn spectral_centroid(buf: &[f64], sample_rate: f64) -> f64
+
+/// Detect dominant modulation rate by envelope analysis.
+/// 1. Compute amplitude envelope (abs + lowpass)
+/// 2. Remove DC from envelope
+/// 3. Find peak frequency in envelope spectrum (0.1–20 Hz range)
+pub fn detect_modulation_rate(buf: &[f64], sample_rate: f64) -> f64
+
+/// Crest factor = peak / RMS. Low = compressed/clipped, high = dynamic.
+pub fn crest_factor(buf: &[f64]) -> f64
+
+/// Assert signal is finite, non-silent, and bounded.
+pub fn assert_healthy(buf: &[f64], name: &str, max_peak: f64)
+
+/// Compile a .pedal source string and process an input buffer through it.
+/// Returns the output buffer. Convenience wrapper for tests.
+pub fn compile_and_process(
+    pedal_src: &str,
+    input: &[f64],
+    sample_rate: f64,
+    controls: &[(&str, f64)],
+) -> Vec<f64>
+
+/// Same but loads from a .pedal file path.
+pub fn compile_file_and_process(
+    pedal_path: &str,
+    input: &[f64],
+    sample_rate: f64,
+    controls: &[(&str, f64)],
+) -> Vec<f64>
+
+/// Generate a sine wave test signal.
+pub fn sine(freq_hz: f64, duration_secs: f64, sample_rate: f64) -> Vec<f64>
+
+/// Generate a multi-harmonic guitar-like pluck.
+pub fn guitar_pluck(freq_hz: f64, duration_secs: f64, sample_rate: f64) -> Vec<f64>
+
+/// Load the shared clean_guitar.wav (cached via LazyLock).
+pub fn clean_guitar() -> &'static (Vec<f64>, u32)
+
+/// Optionally dump a WAV to disk when PEDALKERNEL_DUMP_WAV=1.
+pub fn maybe_dump_wav(samples: &[f64], name: &str, sample_rate: u32)
+```
+
+### Why Goertzel instead of FFT
+
+- No extra dependency (no `rustfft` or `realfft`)
+- O(N) per frequency bin — we only check ~10 bins per test
+- Perfectly adequate for THD and band energy checks
+- Keeps the test crate dependency-free beyond what's already in Cargo.toml
+
+---
+
+## Step 2: Test .pedal Files (24 files)
+
+Each file isolates a **single component behavior** with minimal surrounding circuit
+(typically just input coupling cap + the component under test + load resistor to output).
+This makes failures directly attributable to a specific model.
+
+### 2a. Clipping Circuits (5 files)
+
+Each is a simple "input → coupling cap → resistor → clipping element → ground, output
+tapped before clipper" topology.
+
+| File | Key Component | What It Validates |
+|------|---------------|-------------------|
+| `clip_silicon.pedal` | `diode_pair(silicon)` | Vf ≈ 0.6V symmetric hard clip |
+| `clip_germanium.pedal` | `diode_pair(germanium)` | Vf ≈ 0.3V softer knee |
+| `clip_led.pedal` | `diode_pair(led)` | Vf ≈ 1.7V wide headroom before clipping |
+| `clip_zener.pedal` | `zener(4.7)` | Asymmetric: forward ~0.6V, reverse ~4.7V |
+| `clip_asymmetric.pedal` | `diode(silicon)` | Single-diode half-wave rectification |
+
+### 2b. BBD Circuits (3 files)
+
+| File | Key Component | What It Validates |
+|------|---------------|-------------------|
+| `bbd_chorus.pedal` | `bbd(mn3207)` + `lfo(triangle)` | Modulated delay, chorus character |
+| `bbd_long_delay.pedal` | `bbd(mn3005)` | 4096-stage, leakage accumulation |
+| `bbd_fast_clock.pedal` | `bbd(mn3207)` + fast LFO | Fast sweep, anti-alias filtering |
+
+### 2c. Capacitor Parasitics (3 files)
+
+| File | Key Component | What It Validates |
+|------|---------------|-------------------|
+| `cap_leaky.pedal` | `cap(1u, electrolytic, leakage: 1k)` | Accelerated state decay |
+| `cap_da.pedal` | `cap(10u, electrolytic, da: 0.1)` | Dielectric absorption memory |
+| `cap_ideal_reference.pedal` | `cap(1u)` | Baseline ideal behavior for comparison |
+
+### 2d. Tube Circuits (4 files)
+
+Each uses a realistic single-stage amp topology with appropriate supply voltage.
+
+| File | Key Component | What It Validates |
+|------|---------------|-------------------|
+| `triode_clean.pedal` | `triode(12au7)` at 250V | Low-mu clean gain |
+| `triode_overdrive.pedal` | `triode(12ax7)` at 250V | High-mu overdrive, asymmetric clip |
+| `pentode_clean.pedal` | `pentode(ef86)` at 300V | Pentode preamp character |
+| `pentode_power.pedal` | `pentode(el34)` at 450V | Power tube saturation |
+
+### 2e. Op-Amp and JFET Circuits (5 files)
+
+| File | Key Component | What It Validates |
+|------|---------------|-------------------|
+| `opamp_buffer.pedal` | `opamp(tl072)` unity-gain | Low distortion, unity gain |
+| `opamp_gain.pedal` | `opamp(jrc4558)` with Rf/Ri feedback | Closed-loop gain |
+| `opamp_slew.pedal` | `opamp(lm308)` | Slew-rate limiting at HF |
+| `jfet_allpass.pedal` | `njfet(j201)` + R/C | All-pass phase shift |
+| `jfet_switch.pedal` | `njfet(2n5457)` as variable R | Vgs-controlled resistance |
+
+### 2f. LFO Circuits (4 files)
+
+Each routes an LFO to modulate a JFET gate, with a steady sine input.
+
+| File | Key Component | What It Validates |
+|------|---------------|-------------------|
+| `lfo_sine.pedal` | `lfo(sine, 100k, 47n)` | Smooth sinusoidal modulation |
+| `lfo_triangle.pedal` | `lfo(triangle, 100k, 47n)` | Triangle modulation |
+| `lfo_square.pedal` | `lfo(square, 100k, 47n)` | Hard on/off tremolo |
+| `lfo_modulated_jfet.pedal` | LFO → 4× JFET allpass | Full phaser sweep |
+
+---
+
+## Step 3: Integration Tests
+
+### 3a. Clipping Tests (`tests/integration_clipping.rs`)
+
+**Tests (~12):**
+
+1. **`silicon_thd_increases_with_level`** — Process 440 Hz sine at amplitudes 0.1, 0.3, 0.5, 0.8. THD should increase monotonically.
+
+2. **`germanium_clips_before_silicon`** — At same input level (0.3), Ge THD > Si THD (lower Vf).
+
+3. **`led_clips_after_silicon`** — At moderate level (0.5), LED THD < Si THD (higher Vf headroom).
+
+4. **`symmetric_pair_odd_harmonics`** — DiodePair output: 3rd harmonic > 2nd harmonic (symmetric clipping produces odd harmonics).
+
+5. **`asymmetric_diode_even_harmonics`** — Single Diode output: significant 2nd harmonic (half-wave rectification breaks symmetry).
+
+6. **`zener_asymmetric_clipping`** — Forward clips at ~0.6V, reverse at ~4.7V. Verify asymmetric waveform.
+
+7. **`all_clippers_finite_with_guitar`** — Process `clean_guitar.wav` through each clipper. All outputs finite, non-silent, bounded.
+
+8. **`clipping_reduces_crest_factor`** — Crest factor of clipped output < crest factor of input (clipping compresses peaks).
+
+9. **`silicon_vs_germanium_spectral_centroid`** — Ge output brighter than Si at same gain (softer knee creates different harmonic balance).
+
+10. **`high_drive_heavy_distortion`** — At input amplitude 0.8, all clippers have THD > 10%.
+
+11. **`low_drive_minimal_distortion`** — At input amplitude 0.05, all clippers have THD < 5% (below clipping threshold).
+
+12. **`clipping_outputs_bounded`** — No clipper produces output > 2.0 from input amplitude 0.5.
+
+### 3b. BBD Tests (`tests/integration_bbd.rs`)
+
+**Tests (~8):**
+
+1. **`bbd_chorus_produces_modulation`** — Process steady sine through BBD chorus. `detect_modulation_rate()` > 0 (non-zero modulation detected).
+
+2. **`bbd_modulation_rate_matches_lfo`** — Detected modulation rate within ±30% of expected LFO frequency (f = 1/(2π×R×C)).
+
+3. **`bbd_long_delay_leakage_decay`** — MN3005 (4096 stages): output RMS decays with delay length. Late output quieter than early output.
+
+4. **`bbd_chorus_finite_with_guitar`** — Process `clean_guitar.wav`. Output finite, non-silent.
+
+5. **`bbd_adds_spectral_richness`** — Chorus output has wider spectral spread than dry input (pitch modulation creates sidebands).
+
+6. **`bbd_fast_clock_hf_limited`** — Fast-clock BBD: high-frequency energy (>8kHz) should be attenuated (anti-alias filter).
+
+7. **`bbd_output_has_wet_signal`** — Output differs from input (correlation < 0.99).
+
+8. **`bbd_all_models_stable`** — MN3207, MN3007, MN3005 all produce finite, non-silent output.
+
+### 3c. Capacitor Tests (`tests/integration_capacitor.rs`)
+
+**Tests (~6):**
+
+1. **`leaky_cap_decays_faster`** — Charge both ideal and leaky caps with DC, then switch to zero input. Leaky cap discharge energy < ideal cap discharge energy.
+
+2. **`da_cap_has_residual_voltage`** — After charging DA cap and fully discharging, residual late-stage energy is detectable (dielectric absorption recovery).
+
+3. **`cap_types_all_compile`** — Film, electrolytic, ceramic, tantalum all compile and produce finite output.
+
+4. **`leaky_cap_affects_low_frequency`** — Leaky cap acts as a lossy HPF. Very low frequencies (10 Hz) attenuated more than with ideal cap.
+
+5. **`da_coefficient_scales_effect`** — DA=0.1 cap shows more residual than DA=0.01 cap.
+
+6. **`ideal_cap_matches_reference`** — Ideal cap circuit output matches expected RC highpass behavior (energy above cutoff freq > energy below).
+
+### 3d. Tube Tests (`tests/integration_tubes.rs`)
+
+**Tests (~10):**
+
+1. **`triode_12au7_clean_at_low_level`** — 12AU7 (low mu) with small input: THD < 10%.
+
+2. **`triode_12ax7_more_gain_than_12au7`** — At same input, 12AX7 output RMS > 12AU7 output RMS (higher mu = more gain).
+
+3. **`triode_12ax7_more_thd_than_12au7`** — At same input level, 12AX7 THD > 12AU7 THD (clips earlier due to higher gain).
+
+4. **`triode_thd_increases_with_level`** — Process 12AX7 at increasing input levels. THD monotonically increases.
+
+5. **`triode_asymmetric_clipping`** — Tube clipping produces even + odd harmonics (asymmetric transfer function). 2nd harmonic should be significant.
+
+6. **`pentode_ef86_higher_gain`** — EF86 pentode produces higher output than 12AU7 triode at same input (pentode has higher gain).
+
+7. **`pentode_different_harmonic_profile`** — Pentode harmonic spectrum differs from triode (more odd harmonics in pentode).
+
+8. **`tube_amps_with_guitar`** — Process `clean_guitar.wav` through Tweed Deluxe, Bassman, JTM45. All produce finite, non-silent output with character.
+
+9. **`tube_amps_distinct_from_each_other`** — Correlation between amp outputs < 0.99 (they sound different).
+
+10. **`pentode_power_saturates`** — EL34 at high input: crest factor drops significantly (power tube compression).
+
+### 3e. Op-Amp / JFET Tests (`tests/integration_opamp_jfet.rs`)
+
+**Tests (~10):**
+
+1. **`opamp_buffer_near_unity_gain`** — TL072 buffer: output correlation with input > 0.90.
+
+2. **`opamp_buffer_low_thd`** — THD < 5% at moderate levels.
+
+3. **`opamp_buffer_bounded_by_rails`** — Output peak < supply/2 (rail saturation).
+
+4. **`opamp_slew_lm308_vs_tl072`** — LM308 (0.3V/µs) reduces HF more than TL072 (13V/µs). Spectral centroid of LM308 output < TL072 output with same HF-rich input.
+
+5. **`opamp_slew_affects_square_wave`** — Square wave through LM308: output has rounded edges (lower crest factor than input).
+
+6. **`jfet_allpass_flat_magnitude`** — JFET allpass: RMS at 200 Hz ≈ RMS at 2 kHz (±3dB). All-pass has flat magnitude.
+
+7. **`jfet_produces_finite_output`** — All JFET circuits produce finite, non-silent output.
+
+8. **`opamp_gain_stage_amplifies`** — JRC4558 with Rf/Ri=10: output RMS > 5× input RMS (with headroom margin).
+
+9. **`opamp_all_models_compile`** — TL072, JRC4558, LM308, LM741, NE5532 all compile into working circuits.
+
+10. **`jfet_switch_attenuates`** — JFET as switch: at Vgs near pinchoff, output significantly attenuated vs Vgs=0.
+
+### 3f. LFO Tests (`tests/integration_lfo.rs`)
+
+**Tests (~8):**
+
+1. **`lfo_sine_produces_modulation`** — Sine LFO modulating JFET: amplitude envelope varies over time.
+
+2. **`lfo_rate_matches_rc`** — Detected modulation rate within ±30% of expected f=1/(2π×R×C).
+
+3. **`lfo_sine_smooth_envelope`** — Sine LFO envelope: low high-frequency content in envelope spectrum (smooth modulation).
+
+4. **`lfo_square_sharp_transitions`** — Square LFO: envelope has sharp transitions (high HF content in envelope).
+
+5. **`lfo_all_waveforms_stable`** — Sine, triangle, square all produce finite, bounded output.
+
+6. **`lfo_speed_control_changes_rate`** — Phase 90 at Speed=0.2 vs Speed=0.8: faster speed → higher detected modulation rate.
+
+7. **`lfo_modulated_phaser_sweeps`** — 4-stage phaser: spectral centroid varies over time (notches sweeping through spectrum).
+
+8. **`lfo_depth_affects_modulation_amount`** — Higher LFO depth → greater amplitude variation in output envelope.
+
+---
+
+## Step 4: Parallelization Strategy
+
+### Built-in Rust test parallelism
+
+Rust's `cargo test` already runs `#[test]` functions in parallel across threads.
+With ~54 independent tests across 6 files:
+
+- Each test compiles its own pedal and processes its own audio — no shared mutable state
+- `clean_guitar.wav` loaded once via `std::sync::LazyLock` (immutable, shared safely)
+- `cargo test -j$(nproc)` naturally saturates available cores
+
+### Batch processing helper for comparison tests
+
+Tests that compare multiple pedals (e.g., "Ge clips before Si") use `std::thread::scope`
+to compile and process pedals concurrently within a single test:
+
+```rust
+fn process_pedals_parallel(
+    configs: &[(&str, &[(&str, f64)])],
+    input: &[f64],
+    sample_rate: f64,
+) -> Vec<Vec<f64>> {
+    std::thread::scope(|s| {
+        let handles: Vec<_> = configs.iter().map(|(src, controls)| {
+            s.spawn(|| compile_and_process(src, input, sample_rate, controls))
+        }).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
 }
 ```
 
-**Files**: `dsl.rs` (parser), add `parse_synth_header` alongside `parse_pedal_header`
+### Test duration tiers
 
-### 1b. New reserved nodes for CV/Gate
+- **Fast tests** (default): Use 0.1s buffers (4800 samples at 48 kHz). Run in <5s total.
+- **Full tests** (`cargo test -- --ignored`): Use 1s+ buffers for accurate low-frequency
+  analysis. Gated behind `#[ignore]` attribute.
 
-Current reserved nodes: `in`, `out`, `gnd`, `vcc`, `fx_send`, `fx_return`
+### Expected timing
 
-Add:
-- `gate` — note on/off signal (0V or +5V). Maps to a physical gate jack on the PCB.
-- `cv_pitch` — pitch control voltage (V/Oct standard: 0V = base note, +1V = octave up). Maps to a CV input jack.
-- `cv_mod` — modulation CV input (mod wheel, aftertouch, external CV). Maps to a jack.
-- `cv_filter` — filter cutoff CV. Maps to a jack.
-
-In the WDF engine, these are voltage sources driven by MIDI-derived values (or by the TUI for testing). On the KiCad side, they're 3.5mm mono jacks (Eurorack) or 1/4" jacks.
-
-**Files**: `dsl.rs` (RESERVED_NODES), `compiler.rs` (source injection), `kicad.rs` (jack symbols)
-
----
-
-## Phase 2: New Component Types — Synth ICs
-
-Each is a real IC with real behavior, a KiCad symbol, and a Mouser part number.
-
-### 2a. CEM3340 / AS3340 / V3340 — Voltage-Controlled Oscillator
-
-**DSL syntax**: `vco(cem3340)`, `vco(as3340)`, `vco(v3340)`
-
-**Pins**: `.cv` (exponential V/Oct input, pin 15), `.saw` (sawtooth output), `.pulse` (pulse/square output), `.tri` (triangle output), `.sync` (hard sync input), `.pw` (pulse width CV)
-
-**WDF model**: The CEM3340 internally contains an exponential converter + integrator + comparator. The model:
-- Takes CV input, applies exponential V/Oct conversion (frequency = base_freq × 2^(cv/1.0))
-- Generates sawtooth core (phase accumulator parameterized by timing capacitor value from external C)
-- Derives triangle (from sawtooth via internal waveshaper) and pulse (comparator vs PW threshold)
-- External components (1nF timing cap, 100k CV summing resistors, 1k output resistors) parameterize behavior
-
-**KiCad**: `Synth:CEM3340` (or `Analog:CEM3340` — will use custom KiCad library or reference existing community symbol)
-
-**BOM**: AS3340 (Alfa RPAR) — active production, available at multiple suppliers. CoolAudio V3340 also available.
-
-**Key external components** (these go in the `.pedal` file as separate component declarations):
-- C_timing: `cap(1n)` — polystyrene timing capacitor (sets frequency range)
-- R_cv: `resistor(100k)` — CV input summing resistor (1V/Oct scaling)
-- R_out_saw: `resistor(1k)` — sawtooth output protection
-- R_tune: `pot(100k)` — coarse tune
-- R_fine: `pot(10k)` — fine tune
-
-### 2b. CEM3320 / AS3320 — Voltage-Controlled Filter (4-pole)
-
-**DSL syntax**: `vcf(cem3320)`, `vcf(as3320)`
-
-**Pins**: `.in` (signal input), `.out` (filtered output), `.cv` (cutoff frequency CV), `.res` (resonance/Q CV)
-
-**WDF model**: 4-pole lowpass with voltage-controlled cutoff. The IC internally uses OTA-based integrators. Model behavior:
-- Cutoff frequency controlled exponentially by CV (V/Oct or Hz/V depending on external resistor)
-- Resonance from 0 (no peak) to self-oscillation
-- 24dB/oct rolloff characteristic
-- External R/C values set frequency range and input scaling
-
-**KiCad**: `Synth:CEM3320` or `Analog:AS3320`
-
-**BOM**: AS3320 (Alfa RPAR)
-
-### 2c. SSM2164 / V2164 — Quad VCA
-
-**DSL syntax**: `vca(ssm2164)`, `vca(v2164)`
-
-**Pins**: Per section (4 VCAs in one IC): `.in1`/`.out1`/`.cv1` through `.in4`/`.out4`/`.cv4`
-
-**WDF model**: Each section is a current-controlled amplifier with exponential CV response. Model:
-- Gain = exp(-cv / 30mV) — exponential current-mode control
-- Low distortion at moderate levels, soft limiting at extremes
-- External feedback resistors set gain range
-
-**KiCad**: `Analog:SSM2164` or `Analog:V2164`
-
-**BOM**: CoolAudio V2164 (available, pin-compatible with SSM2164)
-
-### 2d. Comparator ICs
-
-**DSL syntax**: `comparator(lm311)`, `comparator(lm393)`
-
-**Pins**: `.pos` (non-inverting input), `.neg` (inverting input), `.out` (open-collector output)
-
-**WDF model**: Binary output — high when pos > neg, low otherwise. Used in VCO reset circuits, Schmitt triggers, window comparators. Not a WDF root — just a signal routing element (like op-amps in non-OTA mode).
-
-**KiCad**: `Comparator:LM311`, `Comparator:LM393`
-
-**BOM**: LM311 (ON Semi, 595-LM311P), LM393 (TI, 595-LM393P)
-
-### 2e. Analog Switch ICs
-
-**DSL syntax**: `switch(cd4066)`, `switch(dg411)`
-
-**Pins**: `.in1`/`.out1`/`.ctrl1` through `.in4`/`.out4`/`.ctrl4` (CD4066 is quad bilateral switch)
-
-**WDF model**: When ctrl is high, channel is a low-resistance path (~100Ω for CD4066). When ctrl is low, channel is open (very high R). Used in sample-and-hold, gate-controlled routing, ADSR switching.
-
-**KiCad**: `Analog_Switch:CD4066`, `Analog_Switch:DG411`
-
-**BOM**: CD4066BE (TI, 595-CD4066BE)
-
-### 2f. Matched Transistor Pairs/Arrays
-
-**DSL syntax**: `matched_npn(ssm2210)`, `matched_npn(lm394)`, `npn_array(ca3046)`
-
-**Pins**: Same as NPN but guaranteed matched Vbe. For CA3046: 5 transistors with `.q1_base`, `.q1_collector`, `.q1_emitter`, etc.
-
-**WDF model**: Same as NPN but with tighter parameter matching (lower Vbe offset). Used in exponential converters where matching is critical for V/Oct tracking.
-
-**KiCad**: `Transistor_BJT:SSM2210`, `Transistor_Array:CA3046`
-
-**BOM**: SSM2210 (Analog Devices), CA3046 (Intersil/Renesas)
-
-### 2g. Tempco Resistor
-
-**DSL syntax**: `tempco(2k, 3500)` — 2kΩ nominal, +3500ppm/°C
-
-**Pins**: `.a`, `.b` (standard 2-terminal)
-
-**WDF model**: Resistance varies with temperature: R(T) = R_nom × (1 + α × (T - 25°C)). Used in exponential converters to compensate transistor Vbe temperature drift.
-
-**KiCad**: `Device:R` with special value annotation
-
-**BOM**: Tempco resistor 2kΩ +3500ppm/°C (multiple suppliers)
+| Category | # Tests | Est. parallel time |
+|----------|---------|-------------------|
+| Clipping | 12 | ~2s |
+| BBD | 8 | ~3s |
+| Capacitor | 6 | ~2s |
+| Tubes | 10 | ~3s |
+| Op-Amp/JFET | 10 | ~2s |
+| LFO | 8 | ~3s |
+| **Total** | **~54** | **~5s parallel** |
 
 ---
 
-## Phase 3: Discrete Synth Circuits (Examples)
+## Step 5: WAV Output for Manual Inspection
 
-These use existing + new components wired together. No new component types needed — just example `.pedal` (or `.synth`) files demonstrating that the DSL can describe these circuits.
+Each test optionally writes output WAV to `test_output/` when `PEDALKERNEL_DUMP_WAV=1`:
 
-### 3a. Moog Transistor Ladder Filter
-
-Built entirely from existing components:
-- 8× `npn()` (matched pairs, or `npn_array(ca3046)`)
-- 4× `cap(1n)` to `cap(10n)` (set cutoff range)
-- Biasing resistor chain
-- Feedback path with `pot()` for resonance
-
-```
-synth "Moog Ladder VCF" {
-  components {
-    # 4 differential pairs (ladder core)
-    Q1: npn()   Q2: npn()
-    Q3: npn()   Q4: npn()
-    Q5: npn()   Q6: npn()
-    Q7: npn()   Q8: npn()
-
-    # Filter capacitors (set cutoff range)
-    C1: cap(1n)   C2: cap(1n)   C3: cap(1n)   C4: cap(1n)
-
-    # Biasing
-    R_bias1: resistor(18k)
-    R_bias2: resistor(18k)
-    R_bias3: resistor(18k)
-    R_bias4: resistor(18k)
-
-    # Resonance feedback
-    Resonance: pot(100k)
-
-    # Input/output buffering
-    U1: opamp(tl072)
-  }
-  nets {
-    in -> Q1.base
-    Q1.emitter -> C1.a, Q3.base
-    ...
-    Q7.collector -> C4.a
-    C4.b -> U1.pos
-    U1.out -> Resonance.a
-    Resonance.b -> Q2.base    # Feedback for resonance
-    cv_filter -> ...           # Cutoff CV controls bias current
-  }
-  controls {
-    Resonance.position -> "Resonance" [0.0, 1.0] = 0.0
-  }
+```rust
+pub fn maybe_dump_wav(samples: &[f64], name: &str, sample_rate: u32) {
+    if std::env::var("PEDALKERNEL_DUMP_WAV").is_ok() {
+        let dir = Path::new("test_output");
+        std::fs::create_dir_all(dir).ok();
+        write_wav(samples, &dir.join(format!("{name}.wav")), sample_rate).unwrap();
+    }
 }
 ```
 
-### 3b. Discrete ADSR Envelope Generator
-
-Built from existing + new components:
-- Capacitor (envelope storage)
-- Resistors (A/D/R time constants)
-- Diodes (steering: attack charges through D1+R_atk, decay/release discharges through D2+R_dec)
-- Comparator (sustain level detection, end-of-attack trigger)
-- Analog switch (gate-controlled charge/discharge path)
-
-### 3c. Complete Monosynth
-
-Combines VCO (CEM3340) + VCF (discrete Moog ladder or CEM3320) + VCA (CA3080 OTA or SSM2164) + ADSR.
-
----
-
-## Phase 4: Compiler Changes
-
-### 4a. CV/Gate source injection
-The compiler needs to recognize `gate`, `cv_pitch`, `cv_mod`, `cv_filter` as voltage sources driven by external input (MIDI or TUI). These behave like `VoltageSource` nodes in the WDF tree but are updated per-sample from the control system.
-
-### 4b. VCO as a signal source
-The CEM3340 model generates audio internally (it's an oscillator, not a filter). In the WDF tree, it acts like a `VoltageSource` whose voltage is the oscillator output. The compiler detects `vco()` components and creates an oscillator that feeds into the rest of the circuit.
-
-### 4c. Multi-output components
-The CEM3340 has 3 outputs (saw, pulse, tri). The compiler needs to handle components with multiple output pins, each carrying a different signal. This is similar to how op-amps have 3 pins.
-
-### 4d. Gate-triggered behavior
-ADSR envelopes and VCA gain are triggered by gate signals. The compiler needs to route the `gate` reserved node to components that respond to it (comparators, analog switches, ADSR ICs).
-
----
-
-## Phase 5: KiCad & BOM Updates
-
-### 5a. KiCad symbol mappings
-Add to `kicad.rs`:
-- `Vco(Cem3340)` → custom symbol or `Oscillator:CEM3340`
-- `Vcf(Cem3320)` → `Filter:CEM3320` or `Analog:AS3320`
-- `Vca(Ssm2164)` → `Analog:SSM2164`
-- `Comparator(Lm311)` → `Comparator:LM311`
-- `Switch(Cd4066)` → `Analog_Switch:CD4066`
-- `MatchedNpn(Ssm2210)` → `Transistor_BJT:SSM2210`
-- `Tempco(r, ppm)` → `Device:R` with special annotation
-
-### 5b. BOM Mouser part numbers
-Add to `hw.rs`:
-- AS3340: Alfa RPAR (or specify manual sourcing like BBD chips)
-- AS3320: Alfa RPAR
-- V2164: CoolAudio
-- LM311P: `595-LM311P`
-- LM393P: `595-LM393P`
-- CD4066BE: `595-CD4066BE`
-- SSM2210: `584-SSM2210PZ`
-- CA3046: manual sourcing (discontinued, NOS market)
-- Tempco 2kΩ: specialist supplier
-
-### 5c. CV/Gate jacks in KiCad
-Reserved nodes `gate`, `cv_pitch`, `cv_mod`, `cv_filter` export as connector symbols (3.5mm Eurorack jacks or 1/4" jacks depending on config).
-
----
-
-## Phase 6: Runtime & TUI
-
-### 6a. MIDI input
-Add optional MIDI support (via `midir` crate or JACK MIDI):
-- Note on/off → gate voltage (0V/5V) + cv_pitch voltage (V/Oct)
-- Mod wheel → cv_mod voltage (0-5V)
-- Velocity → optional cv_velocity
-
-### 6b. TUI for synths
-The TUI already adapts to whatever controls exist. For synths, it would show:
-- Knobs for cutoff, resonance, envelope times, etc.
-- A virtual keyboard (or note trigger buttons)
-- Gate indicator
-- Waveform selector
-
-### 6c. Polyphony
-Multiple instances of the compiled synth running in parallel, each with independent gate/CV. Voice allocation logic in the runtime.
+Usage: `PEDALKERNEL_DUMP_WAV=1 cargo test` to generate WAV files for listening.
 
 ---
 
 ## Implementation Order
 
-1. **Phase 1** (DSL): `synth` keyword, new reserved nodes — small, foundational
-2. **Phase 2a** (VCO): CEM3340 component type + WDF model + KiCad + BOM — the oscillator is the core of any synth
-3. **Phase 2d** (Comparator): LM311/LM393 — needed for discrete circuits
-4. **Phase 2e** (Analog Switch): CD4066 — needed for ADSR and S&H circuits
-5. **Phase 3a** (Example): Moog ladder filter — validates that existing components work for synth circuits
-6. **Phase 2b** (VCF IC): CEM3320/AS3320 — IC-based filter alternative
-7. **Phase 2c** (VCA IC): SSM2164/V2164 — dedicated VCA
-8. **Phase 3b** (Example): Discrete ADSR — validates comparator + switch components
-9. **Phase 3c** (Example): Complete monosynth — the full integration test
-10. **Phase 4** (Compiler): CV/Gate injection, VCO as source, multi-output
-11. **Phase 5** (KiCad/BOM): All new symbols and part numbers
-12. **Phase 6** (Runtime): MIDI, TUI, polyphony
+1. **Audio analysis module** (`tests/audio_analysis.rs`) — Goertzel, THD, correlation, modulation detection, helpers
+2. **Test .pedal files** (24 files in `tests/test_pedals/`)
+3. **Clipping tests** — most straightforward, validates the analysis utilities work
+4. **Tube tests** — validates triode/pentode Koren models
+5. **Op-Amp/JFET tests** — validates active device models
+6. **BBD tests** — validates delay + modulation + leakage
+7. **Capacitor tests** — validates leakage and DA parasitic models
+8. **LFO tests** — validates modulation routing and waveform generation
 
 ---
 
-## What Stays the Same
+## Dependencies
 
-- WDF engine (tree.rs, elements/) — no changes to the core DSP
-- PedalProcessor trait — synths implement the same trait
-- JACK real-time engine — same audio backend
-- Oversampling, thermal model, tolerance engine — all applicable to synth circuits
-- Pedalboard chaining — a synth into a pedal chain is a valid rig
+- **No new crate dependencies** — Goertzel + analysis utilities are pure Rust math
+- Uses existing `hound` (already in deps) for WAV I/O
+- Uses existing `pedalkernel` public API: `parse_pedal_file`, `compile_pedal`, `PedalProcessor`, `read_wav_mono`, `write_wav`
+- Uses `std::sync::LazyLock` (stable since Rust 1.80) for shared test data
