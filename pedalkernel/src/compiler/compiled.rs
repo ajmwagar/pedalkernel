@@ -1,6 +1,7 @@
 //! Compiled pedal processor: the runtime audio processing chain.
 
 use crate::elements::*;
+use crate::loading::{ImpedanceModel, InterstageLoading};
 use crate::metering::{MetricsAccumulator, MetricsRingBuffer, UiMetrics};
 use crate::oversampling::OversamplingFactor;
 use crate::thermal::ThermalModel;
@@ -328,6 +329,14 @@ pub struct CompiledPedal {
     pub(super) metrics_accumulator: Option<MetricsAccumulator>,
     /// Ring buffer for sending metrics to the UI thread (shared via Arc).
     pub(super) metrics_buffer: Option<Arc<MetricsRingBuffer>>,
+    /// Input loading model — models source impedance interaction at circuit input.
+    /// Applies DC attenuation and frequency-dependent rolloff based on the
+    /// source (e.g., guitar pickup, upstream pedal) driving this circuit.
+    pub(super) input_loading: Option<InterstageLoading>,
+    /// Output loading model — models load impedance interaction at circuit output.
+    /// Applies DC attenuation and frequency-dependent rolloff based on what
+    /// this circuit is driving (e.g., downstream pedal, amp input).
+    pub(super) output_loading: Option<InterstageLoading>,
 }
 
 /// Gain-like control labels.
@@ -470,6 +479,107 @@ impl CompiledPedal {
             .last()
             .map(|s| s.tree.port_resistance())
             .unwrap_or(1_000.0) // Low-Z default (can drive loads)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Inter-Plugin Impedance API
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Set the source impedance driving this circuit's input.
+    ///
+    /// This models the electrical interaction between whatever is driving this
+    /// circuit (guitar pickup, upstream pedal, preamp output) and the circuit's
+    /// input stage. The interaction produces:
+    ///
+    /// - **DC attenuation**: voltage divider formed by source and load impedance
+    /// - **Frequency-dependent rolloff**: combined source/load capacitance creates
+    ///   a low-pass filter that rolls off high frequencies
+    ///
+    /// # Arguments
+    ///
+    /// * `resistance` - Source resistance in Ohms (e.g., 7000 for guitar pickup)
+    /// * `capacitance` - Source capacitance in Farads (e.g., 500e-12 for cable)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Guitar pickup through 15ft cable
+    /// pedal.set_source_impedance(7000.0, 500e-12);
+    ///
+    /// // Buffered pedal output
+    /// pedal.set_source_impedance(1000.0, 50e-12);
+    /// ```
+    pub fn set_source_impedance(&mut self, resistance: f64, capacitance: f64) {
+        let source = ImpedanceModel {
+            resistance,
+            capacitance,
+        };
+
+        // Use this circuit's input impedance as the load
+        let load = ImpedanceModel {
+            resistance: self.input_impedance(),
+            capacitance: 50e-12, // Typical input capacitance
+        };
+
+        self.input_loading = Some(InterstageLoading::new(source, load, self.sample_rate));
+    }
+
+    /// Set the load impedance this circuit drives.
+    ///
+    /// This models the electrical interaction between this circuit's output stage
+    /// and whatever it's driving (downstream pedal, amp input, mixer). The
+    /// interaction produces:
+    ///
+    /// - **DC attenuation**: if the load impedance is low relative to output impedance
+    /// - **Frequency-dependent rolloff**: if significant capacitance is present
+    ///
+    /// # Arguments
+    ///
+    /// * `resistance` - Load resistance in Ohms (e.g., 1_000_000 for tube amp)
+    /// * `capacitance` - Load capacitance in Farads (e.g., 50e-12 for Miller cap)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Driving a tube amp input
+    /// pedal.set_load_impedance(1_000_000.0, 50e-12);
+    ///
+    /// // Driving a Fuzz Face (low impedance!)
+    /// pedal.set_load_impedance(10_000.0, 50e-12);
+    /// ```
+    pub fn set_load_impedance(&mut self, resistance: f64, capacitance: f64) {
+        // Use this circuit's output impedance as the source
+        let source = ImpedanceModel {
+            resistance: self.output_impedance(),
+            capacitance: 30e-12, // Typical output capacitance
+        };
+
+        let load = ImpedanceModel {
+            resistance,
+            capacitance,
+        };
+
+        self.output_loading = Some(InterstageLoading::new(source, load, self.sample_rate));
+    }
+
+    /// Clear source impedance modeling (use ideal voltage source).
+    pub fn clear_source_impedance(&mut self) {
+        self.input_loading = None;
+    }
+
+    /// Clear load impedance modeling (use ideal open-circuit load).
+    pub fn clear_load_impedance(&mut self) {
+        self.output_loading = None;
+    }
+
+    /// Check if source impedance modeling is active.
+    pub fn has_source_impedance(&self) -> bool {
+        self.input_loading.is_some()
+    }
+
+    /// Check if load impedance modeling is active.
+    pub fn has_load_impedance(&self) -> bool {
+        self.output_loading.is_some()
     }
 
     /// Set debug statistics tracking.
@@ -916,6 +1026,14 @@ impl PedalProcessor for CompiledPedal {
         // first processing stage.
         let mut signal = input * self.pre_gain;
 
+        // Apply input loading from upstream source impedance.
+        // Models the voltage divider and frequency-dependent rolloff created by
+        // the source impedance (guitar pickup, upstream pedal) driving this
+        // circuit's input impedance.
+        if let Some(ref mut loading) = self.input_loading {
+            signal = loading.process(signal);
+        }
+
         // Process through WDF stages.  Only diode-clipping stages get
         // inter-stage re-amplification: clipping squashes the signal to the
         // diode forward voltage (~0.3–0.7 V), so each subsequent clipper
@@ -1012,6 +1130,14 @@ impl PedalProcessor for CompiledPedal {
 
             // Reset speed mod accumulator for next sample
             dl_binding.delay_line.reset_speed_mod();
+        }
+
+        // Apply output loading from downstream load impedance.
+        // Models the voltage divider and frequency-dependent rolloff created by
+        // this circuit's output impedance driving the load (downstream pedal,
+        // amp input).
+        if let Some(ref mut loading) = self.output_loading {
+            signal = loading.process(signal);
         }
 
         let output = signal * self.output_gain;
