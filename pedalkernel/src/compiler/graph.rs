@@ -42,6 +42,21 @@ pub(super) struct CircuitGraph {
     /// Fork path information: maps component index to ForkPathInfo.
     /// Only contains entries for synthetic fork path components.
     pub(super) fork_paths: HashMap<usize, ForkPathInfo>,
+    /// Map from net/pin names to resolved NodeIds.
+    /// Used for looking up named nodes like "A_node_ch_out" for sidechain routing.
+    pub(super) node_names: HashMap<String, NodeId>,
+}
+
+/// Result of partitioning sidechain edges from audio edges.
+pub(super) struct SidechainPartition {
+    /// Edge indices that belong to the sidechain path.
+    pub(super) sidechain_edge_indices: HashSet<usize>,
+    /// The node where audio is tapped for the sidechain.
+    #[allow(dead_code)]
+    pub(super) tap_node: NodeId,
+    /// The node where the sidechain CV feeds back.
+    #[allow(dead_code)]
+    pub(super) cv_node: NodeId,
 }
 
 /// Simple union-find for grouping connected pins into circuit nodes.
@@ -672,6 +687,13 @@ impl CircuitGraph {
         let mut components = all_components;
         components.extend(extra_components);
 
+        // Build node_names map: resolve all pin names through union-find.
+        // This allows looking up named nodes like "A_node_ch_out" for sidechain routing.
+        let mut node_names: HashMap<String, NodeId> = HashMap::new();
+        for (name, &raw_id) in &pin_ids {
+            node_names.insert(name.clone(), uf.find(raw_id));
+        }
+
         CircuitGraph {
             edges,
             components,
@@ -682,7 +704,120 @@ impl CircuitGraph {
             num_active,
             active_edge_indices,
             fork_paths,
+            node_names,
         }
+    }
+
+    /// Partition edges into sidechain and audio paths.
+    ///
+    /// BFS from `tap_node` through all edges, collecting edges that lead
+    /// toward `cv_node`. The sidechain path branches off at the tap node
+    /// and ends at the CV node. All edges on this path are "sidechain edges"
+    /// that should be built into a `SidechainProcessor` instead of the
+    /// main audio WDF chain.
+    ///
+    /// The BFS stops at:
+    /// - `cv_node` (the CV output)
+    /// - `gnd_node` (ground terminations within the sidechain are fine)
+    /// - `in_node` (don't traverse back into the audio input)
+    /// - Push-pull grid nodes (these are the modulation targets, not part of the sidechain chain)
+    pub(super) fn partition_sidechain(
+        &self,
+        tap_node: NodeId,
+        cv_node: NodeId,
+    ) -> Option<SidechainPartition> {
+        // Build adjacency list: node → [(edge_idx, neighbor_node)]
+        let mut adj: HashMap<NodeId, Vec<(usize, NodeId)>> = HashMap::new();
+        for (idx, e) in self.edges.iter().enumerate() {
+            adj.entry(e.node_a).or_default().push((idx, e.node_b));
+            adj.entry(e.node_b).or_default().push((idx, e.node_a));
+        }
+
+        // BFS from tap_node, collecting all reachable edges that are
+        // part of the sidechain (between tap and CV nodes).
+        // We identify sidechain edges as those reachable from the tap_node
+        // via sidechain components (sc_tap, sc_in transformer, threshold pots,
+        // sidechain triodes, rectifier diodes, time constant RC).
+        //
+        // Strategy: BFS from tap_node. An edge is a sidechain edge if:
+        // 1. It's reachable from tap_node without going through in_node or out_node
+        // 2. It connects to components whose IDs contain "sc" or "rect" or "time" or "prog"
+        //    OR it's on the path between tap_node and cv_node
+        //
+        // Simpler approach: BFS from tap_node, exclude edges that connect to
+        // the audio path's push-pull grid or plate nodes (which are the main signal path).
+        // The sidechain is a distinct subgraph connected only at tap_node and cv_node.
+
+        let mut visited_nodes: HashSet<NodeId> = HashSet::new();
+        let mut sidechain_edges: HashSet<usize> = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+
+        // Start BFS from tap_node, but DON'T include the tap_node itself
+        // in the "visited" set initially — we want to traverse OUT from it
+        // into the sidechain path only.
+        visited_nodes.insert(tap_node);
+
+        // Seed the BFS with edges from tap_node that lead into the sidechain.
+        // We identify these by checking if the component ID contains sidechain markers.
+        if let Some(neighbors) = adj.get(&tap_node) {
+            for &(edge_idx, neighbor) in neighbors {
+                let comp = &self.components[self.edges[edge_idx].comp_idx];
+                // Only follow edges into the sidechain (component IDs with "sc_", "rect", etc.)
+                // Don't follow edges back to the audio output path (R_out_load, mat_*, etc.)
+                let is_sidechain_entry = comp.id.contains("sc_") || comp.id.contains("_sc");
+                if is_sidechain_entry {
+                    sidechain_edges.insert(edge_idx);
+                    if !visited_nodes.contains(&neighbor) {
+                        visited_nodes.insert(neighbor);
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
+
+        // BFS through sidechain subgraph
+        while let Some(node) = queue.pop_front() {
+            // Stop at the CV output node — don't traverse back into the audio path
+            if node == cv_node {
+                continue;
+            }
+            // Don't traverse back to audio input/output
+            if node == self.in_node || node == self.out_node {
+                continue;
+            }
+
+            if let Some(neighbors) = adj.get(&node) {
+                for &(edge_idx, neighbor) in neighbors {
+                    if sidechain_edges.contains(&edge_idx) {
+                        continue; // Already visited this edge
+                    }
+                    if visited_nodes.contains(&neighbor) && neighbor != cv_node {
+                        continue; // Already visited this node (and it's not CV)
+                    }
+                    // Skip edges to supply nodes (they're bias, not signal path)
+                    if self.supply_nodes.contains(&neighbor) {
+                        continue;
+                    }
+
+                    // Include this edge in the sidechain
+                    sidechain_edges.insert(edge_idx);
+                    if !visited_nodes.contains(&neighbor) {
+                        visited_nodes.insert(neighbor);
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
+
+        if sidechain_edges.is_empty() {
+            return None;
+        }
+
+        Some(SidechainPartition {
+            sidechain_edge_indices: sidechain_edges,
+            tap_node,
+            cv_node,
+        })
     }
 
     /// Find diode edges, ordered by topological distance from `in`.

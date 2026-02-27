@@ -12,7 +12,7 @@ use super::compiled::*;
 use super::dyn_node::DynNode;
 use super::graph::*;
 use super::helpers::*;
-use super::stage::{PushPullStage, RootKind, WdfStage};
+use super::stage::{PushPullStage, RootKind, SidechainProcessor, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Passive circuit gain helpers
@@ -290,6 +290,25 @@ pub fn compile_pedal_with_options(
         }
     }
 
+    // ── Sidechain partitioning ─────────────────────────────────────────────
+    // If the pedal has sidechain definitions, partition the graph into
+    // sidechain and audio edges. Sidechain edges will be excluded from
+    // the main audio WDF tree building.
+    let sidechain_edge_set: HashSet<usize> = {
+        let mut set = HashSet::new();
+        for sc_info in &pedal.sidechains {
+            if let (Some(&tap), Some(&cv)) = (
+                graph.node_names.get(&sc_info.tap_node),
+                graph.node_names.get(&sc_info.cv_node),
+            ) {
+                if let Some(partition) = graph.partition_sidechain(tap, cv) {
+                    set.extend(partition.sidechain_edge_indices);
+                }
+            }
+        }
+        set
+    };
+
     let diodes = graph.find_diodes();
     let diode_edge_indices: Vec<usize> = diodes.iter().map(|(idx, _)| *idx).collect();
 
@@ -328,6 +347,11 @@ pub fn compile_pedal_with_options(
     };
 
     for (_edge_idx, diode_info) in &diodes {
+        // Skip diodes that are part of the sidechain path.
+        if sidechain_edge_set.contains(_edge_idx) {
+            continue;
+        }
+
         let junction = diode_info.junction_node;
         let passive_idxs =
             graph.elements_at_junction(junction, &diode_edge_indices, &graph.active_edge_indices);
@@ -928,6 +952,10 @@ pub fn compile_pedal_with_options(
         if paired_triode_indices.contains(&triode_list_idx) {
             continue;
         }
+        // Skip triodes that are part of the sidechain path.
+        if sidechain_edge_set.contains(_edge_idx) {
+            continue;
+        }
 
         let plate_node = triode_info.plate_node;
         let cathode_node = triode_info.cathode_node;
@@ -1169,6 +1197,11 @@ pub fn compile_pedal_with_options(
         .collect();
 
     for (_edge_idx, pentode_info) in &pentodes {
+        // Skip pentodes that are part of the sidechain path.
+        if sidechain_edge_set.contains(_edge_idx) {
+            continue;
+        }
+
         let junction = pentode_info.junction_node;
         let passive_idxs = graph.elements_at_junction(
             junction,
@@ -2521,6 +2554,17 @@ pub fn compile_pedal_with_options(
             )
         });
 
+    // ── Sidechain construction ────────────────────────────────────────────
+    // If the pedal definition includes sidechain blocks, build a
+    // SidechainProcessor for each. Sidechain triode/pentode stages are
+    // already excluded from the main audio path because the partition
+    // identifies which edges belong to the sidechain subgraph.
+    let sidechains = build_sidechains(&pedal.sidechains, &graph, sample_rate, oversampling);
+
+    // Store the base grid bias from the first push-pull stage (if any).
+    // The sidechain CV will be subtracted from this value each sample.
+    let base_grid_bias = push_pull_stages.first().map_or(-2.0, |pp| pp.grid_bias);
+
     let mut compiled = CompiledPedal {
         stages,
         push_pull_stages,
@@ -2547,6 +2591,8 @@ pub fn compile_pedal_with_options(
         metrics_buffer: None,
         input_loading: None,
         output_loading: None,
+        sidechains,
+        base_grid_bias,
     };
 
     // Apply supply voltage - this propagates v_max to all op-amp stages.
@@ -2560,5 +2606,114 @@ pub fn compile_pedal_with_options(
     compiled.set_supply_voltage(initial_voltage);
 
     Ok(compiled)
+}
+
+/// Build sidechain processors from sidechain definitions.
+///
+/// For each sidechain definition, partitions the circuit graph to identify
+/// sidechain edges, then builds WDF stages for the sidechain amplifier chain.
+/// The sidechain stages process separately from the audio path with their own
+/// RC time constant for envelope extraction.
+fn build_sidechains(
+    sidechain_infos: &[SidechainInfo],
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+) -> Vec<SidechainProcessor> {
+    let mut processors = Vec::new();
+
+    for sc_info in sidechain_infos {
+        let tap = match graph.node_names.get(&sc_info.tap_node) {
+            Some(&n) => n,
+            None => continue,
+        };
+        let cv = match graph.node_names.get(&sc_info.cv_node) {
+            Some(&n) => n,
+            None => continue,
+        };
+
+        let partition = match graph.partition_sidechain(tap, cv) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Build WDF stages for sidechain triode/pentode amplifiers.
+        // We iterate the sidechain edges and collect triode/pentode components,
+        // building a simple WdfStage for each one.
+        let mut sc_stages: Vec<WdfStage> = Vec::new();
+
+        // Find the time constant R and C values from the sidechain edges.
+        // These are components whose IDs contain "R_time" and "C_time".
+        let mut r_time = 150_000.0; // Default: position 2 (200µs attack, 0.8s release)
+        let mut c_time = 2e-6;      // Default: position 2
+
+        for &edge_idx in &partition.sidechain_edge_indices {
+            let edge = &graph.edges[edge_idx];
+            let comp = &graph.components[edge.comp_idx];
+
+            match &comp.kind {
+                ComponentKind::Triode(triode_type) => {
+                    // Build a simple WDF stage for this sidechain triode.
+                    let model = triode_model(*triode_type);
+                    let root = TriodeRoot::new(model);
+                    let tree = DynNode::VoltageSource { voltage: 0.0, rp: 100_000.0 };
+
+                    sc_stages.push(WdfStage {
+                        tree,
+                        root: RootKind::Triode(root),
+                        compensation: model.mu / 100.0,
+                        oversampler: Oversampler::new(oversampling),
+                        base_diode_model: None,
+                        paired_opamp: None,
+                        dc_block: None,
+                    });
+                }
+                ComponentKind::Pentode(pentode_type) => {
+                    let model = pentode_model(*pentode_type);
+                    let root = PentodeRoot::new(model);
+                    let tree = DynNode::VoltageSource { voltage: 0.0, rp: 100_000.0 };
+
+                    sc_stages.push(WdfStage {
+                        tree,
+                        root: RootKind::Pentode(root),
+                        compensation: 1.0,
+                        oversampler: Oversampler::new(oversampling),
+                        base_diode_model: None,
+                        paired_opamp: None,
+                        dc_block: None,
+                    });
+                }
+                ComponentKind::ResistorSwitched(values) => {
+                    if comp.id.contains("R_time") || comp.id.contains("_time") {
+                        // Use position 2 (index 1) as default — most commonly used
+                        if let Some(&v) = values.get(1) {
+                            if v.is_finite() {
+                                r_time = v;
+                            }
+                        }
+                    }
+                }
+                ComponentKind::CapSwitched(values) => {
+                    if comp.id.contains("C_time") || comp.id.contains("_time") {
+                        if let Some(&v) = values.get(1) {
+                            c_time = v;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        processors.push(SidechainProcessor {
+            stages: sc_stages,
+            v_level_cap: 0.0,
+            r_time,
+            c_time,
+            sample_rate,
+            cv_delayed: 0.0,
+        });
+    }
+
+    processors
 }
 

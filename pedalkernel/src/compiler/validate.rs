@@ -1107,6 +1107,7 @@ mod tests {
             controls: vec![],
             trims: vec![],
             monitors: vec![],
+            sidechains: vec![],
         }
     }
 
@@ -1244,6 +1245,7 @@ mod tests {
             controls: vec![],
             trims: vec![],
             monitors: vec![],
+            sidechains: vec![],
         };
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "no-signal-path"));

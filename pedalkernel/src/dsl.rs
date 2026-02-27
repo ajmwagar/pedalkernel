@@ -104,6 +104,37 @@ impl NamedSupply {
     }
 }
 
+/// Sidechain target — what the sidechain CV modulates.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SidechainTarget {
+    /// Modulate the push-pull grid bias (variable-mu compression).
+    /// CV is subtracted from the grid bias: Vgrid = Vbias - Vcv.
+    PushPullGridBias,
+}
+
+/// Sidechain definition for feedback compression loops.
+///
+/// Describes a sidechain path that taps the audio output, extracts an
+/// envelope via amplification + rectification + RC time constant, and
+/// feeds back a control voltage to modulate the audio path gain.
+///
+/// ```text
+/// sidechain {
+///     tap: A_node_ch_out          # node to tap audio from
+///     cv: A_node_sc_cv            # node where CV feeds back
+///     target: push_pull_grid      # modulation target
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct SidechainInfo {
+    /// Node name where audio is tapped (e.g., "A_node_ch_out").
+    pub tap_node: String,
+    /// Node name where the CV feeds back (e.g., "A_node_sc_cv").
+    pub cv_node: String,
+    /// What the sidechain CV modulates.
+    pub target: SidechainTarget,
+}
+
 /// Top-level pedal definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PedalDef {
@@ -119,6 +150,9 @@ pub struct PedalDef {
     pub trims: Vec<ControlDef>,
     /// Monitor definitions for real-time metering visualization
     pub monitors: Vec<MonitorDef>,
+    /// Sidechain definitions for feedback compression loops.
+    /// Each entry defines a tap point, CV return, and modulation target.
+    pub sidechains: Vec<SidechainInfo>,
 }
 
 impl PedalDef {
@@ -2276,6 +2310,81 @@ fn monitors_section(input: &str) -> IResult<&str, Vec<MonitorDef>> {
 }
 
 // ---------------------------------------------------------------------------
+// Sidechain section
+// ---------------------------------------------------------------------------
+
+/// Parse a single sidechain field: `key: value`
+fn sidechain_field<'a>(input: &'a str, key: &str) -> IResult<&'a str, &'a str> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag(key)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, val) = take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)?;
+    Ok((input, val))
+}
+
+/// Parse a `sidechain { tap: ..., cv: ..., target: ... }` block.
+fn sidechain_def(input: &str) -> IResult<&str, SidechainInfo> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("sidechain")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+
+    let mut tap_node = None;
+    let mut cv_node = None;
+    let mut target = None;
+
+    let mut input = input;
+    loop {
+        let (rest, _) = ws_comments(input)?;
+        if let Ok((rest2, _)) = char::<&str, nom::error::Error<&str>>('}')(rest) {
+            input = rest2;
+            break;
+        }
+        if let Ok((rest2, val)) = sidechain_field(rest, "tap") {
+            tap_node = Some(val.to_string());
+            input = rest2;
+        } else if let Ok((rest2, val)) = sidechain_field(rest, "cv") {
+            cv_node = Some(val.to_string());
+            input = rest2;
+        } else if let Ok((rest2, val)) = sidechain_field(rest, "target") {
+            target = Some(match val {
+                "push_pull_grid" => SidechainTarget::PushPullGridBias,
+                _ => SidechainTarget::PushPullGridBias, // default
+            });
+            input = rest2;
+        } else {
+            // Skip unknown line
+            let (rest2, _) = take_till(|c| c == '\n' || c == '}')(rest)?;
+            input = rest2;
+        }
+    }
+
+    let info = SidechainInfo {
+        tap_node: tap_node.unwrap_or_default(),
+        cv_node: cv_node.unwrap_or_default(),
+        target: target.unwrap_or(SidechainTarget::PushPullGridBias),
+    };
+
+    Ok((input, info))
+}
+
+/// Parse a `sidechains { ... }` section containing one or more sidechain definitions.
+fn sidechains_section(input: &str) -> IResult<&str, Vec<SidechainInfo>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("sidechains")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+
+    let (input, sidechains) = many0(sidechain_def)(input)?;
+
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+    Ok((input, sidechains))
+}
+
+// ---------------------------------------------------------------------------
 // Top-level
 // ---------------------------------------------------------------------------
 
@@ -2514,6 +2623,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, controls) = opt(controls_section)(input)?;
     let (input, trims) = opt(trims_section)(input)?;
     let (input, monitors) = opt(monitors_section)(input)?;
+    let (input, sidechains) = opt(sidechains_section)(input)?;
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
@@ -2529,6 +2639,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
             controls: controls.unwrap_or_default(),
             trims: trims.unwrap_or_default(),
             monitors: monitors.unwrap_or_default(),
+            sidechains: sidechains.unwrap_or_default(),
         },
     ))
 }

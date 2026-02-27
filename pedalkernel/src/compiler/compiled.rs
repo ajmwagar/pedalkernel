@@ -8,7 +8,7 @@ use crate::thermal::ThermalModel;
 use crate::PedalProcessor;
 use std::sync::Arc;
 
-use super::stage::{PushPullStage, RootKind, WdfStage};
+use super::stage::{PushPullStage, RootKind, SidechainProcessor, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Compiled pedal
@@ -340,6 +340,14 @@ pub struct CompiledPedal {
     /// Applies DC attenuation and frequency-dependent rolloff based on what
     /// this circuit is driving (e.g., downstream pedal, amp input).
     pub(super) output_loading: Option<InterstageLoading>,
+    /// Sidechain processors for feedback compression loops.
+    /// Each sidechain taps audio, extracts an envelope, and modulates
+    /// the push-pull grid bias. Multiple sidechains are supported
+    /// (e.g., one per channel in a stereo compressor like the 670).
+    pub(super) sidechains: Vec<SidechainProcessor>,
+    /// Base (unmodulated) grid bias for push-pull stages.
+    /// Stored so sidechain CV can be subtracted without accumulation.
+    pub(super) base_grid_bias: f64,
 }
 
 /// Gain-like control labels.
@@ -1092,8 +1100,28 @@ impl PedalProcessor for CompiledPedal {
         // These model circuits like the Fairchild 670 where push and pull
         // triode halves process the signal simultaneously with opposite phase,
         // and the output is the differential plate voltage through a CT transformer.
-        for pp_stage in &mut self.push_pull_stages {
-            signal = pp_stage.process(signal);
+        //
+        // When sidechains are present, the CV from the previous sample modulates
+        // the grid bias: Vgrid = base_bias - cv_delayed. This implements
+        // variable-mu compression — higher CV = more negative bias = less gain.
+        // Multiple sidechains sum their CVs (e.g., stereo 670 with per-channel SC).
+        if !self.sidechains.is_empty() {
+            let total_cv: f64 = self.sidechains.iter().map(|sc| sc.cv_delayed).sum();
+            for pp_stage in &mut self.push_pull_stages {
+                pp_stage.grid_bias = self.base_grid_bias - total_cv;
+                signal = pp_stage.process(signal);
+            }
+        } else {
+            for pp_stage in &mut self.push_pull_stages {
+                signal = pp_stage.process(signal);
+            }
+        }
+
+        // Process sidechains: tap the audio output and compute CV for next sample.
+        // The 1-sample delay is inherent and correct for discrete-time feedback.
+        for sc in &mut self.sidechains {
+            let cv = sc.process(signal);
+            sc.cv_delayed = cv;
         }
 
         // Process through op-amp stages.
@@ -1296,6 +1324,9 @@ impl PedalProcessor for CompiledPedal {
         }
         if let Some(ref mut psu) = self.power_supply {
             psu.reset();
+        }
+        for sc in &mut self.sidechains {
+            sc.reset();
         }
     }
 

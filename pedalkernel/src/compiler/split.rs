@@ -207,6 +207,7 @@ fn build_half(
         controls,
         trims,
         monitors,
+        sidechains: vec![],
     }
 }
 
