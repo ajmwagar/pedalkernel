@@ -1,0 +1,17 @@
+# Symmetric silicon diode clipper
+# Simple topology: resistor → anti-parallel diode pair to ground → output
+# Clips at ±0.6V (typical silicon Vf)
+
+pedal "Diode Clipper" {
+  components {
+    R_in: resistor(4.7k)
+    D1: diode_pair(silicon)
+    R_load: resistor(10k)
+  }
+  nets {
+    in -> R_in.a
+    R_in.b -> D1.a, R_load.a
+    D1.b -> gnd
+    R_load.b -> out
+  }
+}

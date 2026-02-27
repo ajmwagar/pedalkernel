@@ -1,0 +1,453 @@
+//! YAML-based validation configuration.
+//!
+//! This module defines the configuration schema for validation test suites.
+//! Configuration can be loaded from YAML files or constructed programmatically.
+//!
+//! # Configuration Structure
+//!
+//! ```yaml
+//! global:
+//!   sample_rate: 96000
+//!   oversample: 4
+//!   fft_size: 65536
+//!
+//! suites:
+//!   linear:
+//!     description: "Linear circuit tests"
+//!     tests:
+//!       rc_lowpass:
+//!         circuit: "linear/rc_lowpass.pedal"
+//!         description: "RC lowpass filter"
+//!         signals:
+//!           - type: impulse
+//!             amplitude: 1.0
+//!           - type: sine
+//!             frequency: 1000.0
+//!             duration: 0.1
+//!         pass_criteria:
+//!           normalized_rms_error_db: -60.0
+//!           peak_error_db: -40.0
+//! ```
+//!
+//! # Programmatic Usage
+//!
+//! ```rust
+//! use pedalkernel_validate::config::{ValidationConfig, PassCriteria};
+//!
+//! // Load from file
+//! // let config = ValidationConfig::load("validate.yaml").unwrap();
+//!
+//! // Or use defaults
+//! let config = ValidationConfig::default_config();
+//!
+//! // Define custom pass criteria
+//! let criteria = PassCriteria {
+//!     normalized_rms_error_db: Some(-60.0),
+//!     peak_error_db: Some(-40.0),
+//!     thd_error_db: Some(1.0),
+//!     ..Default::default()
+//! };
+//! ```
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ConfigError {
+    #[error("Failed to read config file: {0}")]
+    IoError(#[from] std::io::Error),
+    #[error("Failed to parse YAML: {0}")]
+    YamlError(#[from] serde_yaml::Error),
+}
+
+/// Root configuration structure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationConfig {
+    pub global: GlobalConfig,
+    pub suites: HashMap<String, TestSuite>,
+}
+
+/// Global settings for all tests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalConfig {
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: u32,
+    #[serde(default = "default_oversample")]
+    pub oversample: u32,
+    #[serde(default = "default_fft_size")]
+    pub fft_size: usize,
+}
+
+fn default_sample_rate() -> u32 { 96000 }
+fn default_oversample() -> u32 { 4 }
+fn default_fft_size() -> usize { 65536 }
+
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: default_sample_rate(),
+            oversample: default_oversample(),
+            fft_size: default_fft_size(),
+        }
+    }
+}
+
+/// A test suite (e.g., "linear", "nonlinear", "fairchild").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestSuite {
+    pub description: String,
+    pub tests: HashMap<String, TestCase>,
+}
+
+/// A single test case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestCase {
+    /// Path to the circuit file (.pedal for WDF, .spice for reference)
+    pub circuit: String,
+    pub description: String,
+    pub signals: Vec<SignalConfig>,
+    #[serde(default)]
+    pub metrics: Vec<MetricConfig>,
+    pub pass_criteria: PassCriteria,
+}
+
+/// Signal configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SignalConfig {
+    #[serde(rename = "impulse")]
+    Impulse {
+        #[serde(default = "default_amplitude")]
+        amplitude: f64,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    #[serde(rename = "sine")]
+    Sine {
+        frequency: f64,
+        #[serde(default = "default_amplitude")]
+        amplitude: f64,
+        #[serde(default = "default_duration")]
+        duration: f64,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    #[serde(rename = "two_tone")]
+    TwoTone {
+        f1: f64,
+        f2: f64,
+        #[serde(default = "default_amplitude")]
+        amplitude: f64,
+        #[serde(default = "default_duration")]
+        duration: f64,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    #[serde(rename = "exp_sweep")]
+    ExpSweep {
+        f_start: f64,
+        f_end: f64,
+        #[serde(default = "default_amplitude")]
+        amplitude: f64,
+        #[serde(default = "default_sweep_duration")]
+        duration: f64,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    #[serde(rename = "silence")]
+    Silence {
+        #[serde(default = "default_duration")]
+        duration: f64,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    #[serde(rename = "tone_burst")]
+    ToneBurst {
+        frequency: f64,
+        #[serde(default)]
+        amplitude_dbvu: Option<f64>,
+        #[serde(default = "default_amplitude")]
+        amplitude: f64,
+        on_ms: f64,
+        off_ms: f64,
+        #[serde(default = "default_repetitions")]
+        repetitions: usize,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    #[serde(rename = "level_sweep")]
+    LevelSweep {
+        frequency: f64,
+        levels_dbvu: Vec<f64>,
+        #[serde(default = "default_duration_per_level")]
+        duration_per_level: f64,
+        #[serde(default)]
+        label: Option<String>,
+    },
+}
+
+fn default_amplitude() -> f64 { 1.0 }
+fn default_duration() -> f64 { 0.1 }
+fn default_sweep_duration() -> f64 { 1.0 }
+fn default_repetitions() -> usize { 1 }
+fn default_duration_per_level() -> f64 { 0.5 }
+
+impl SignalConfig {
+    /// Get the label for this signal.
+    pub fn label(&self) -> String {
+        match self {
+            SignalConfig::Impulse { label, .. } => label.clone().unwrap_or_else(|| "impulse".to_string()),
+            SignalConfig::Sine { label, .. } => label.clone().unwrap_or_else(|| "sine".to_string()),
+            SignalConfig::TwoTone { label, .. } => label.clone().unwrap_or_else(|| "two_tone".to_string()),
+            SignalConfig::ExpSweep { label, .. } => label.clone().unwrap_or_else(|| "sweep".to_string()),
+            SignalConfig::Silence { label, .. } => label.clone().unwrap_or_else(|| "silence".to_string()),
+            SignalConfig::ToneBurst { label, .. } => label.clone().unwrap_or_else(|| "burst".to_string()),
+            SignalConfig::LevelSweep { label, .. } => label.clone().unwrap_or_else(|| "level_sweep".to_string()),
+        }
+    }
+
+    /// Convert to a SignalSpec for generation.
+    pub fn to_spec(&self) -> crate::signals::SignalSpec {
+        use crate::signals::SignalSpec;
+        match self {
+            SignalConfig::Impulse { amplitude, .. } => SignalSpec::Impulse { amplitude: *amplitude },
+            SignalConfig::Sine { frequency, amplitude, duration, .. } => {
+                SignalSpec::Sine { frequency: *frequency, amplitude: *amplitude, duration: *duration }
+            }
+            SignalConfig::TwoTone { f1, f2, amplitude, duration, .. } => {
+                SignalSpec::TwoTone { f1: *f1, f2: *f2, amplitude: *amplitude, duration: *duration }
+            }
+            SignalConfig::ExpSweep { f_start, f_end, amplitude, duration, .. } => {
+                SignalSpec::ExpSweep { f_start: *f_start, f_end: *f_end, amplitude: *amplitude, duration: *duration }
+            }
+            SignalConfig::Silence { duration, .. } => SignalSpec::Silence { duration: *duration },
+            SignalConfig::ToneBurst { frequency, amplitude_dbvu, amplitude, on_ms, off_ms, repetitions, .. } => {
+                let amp = amplitude_dbvu.map(crate::signals::dbvu_to_peak).unwrap_or(*amplitude);
+                SignalSpec::ToneBurst {
+                    frequency: *frequency,
+                    amplitude: amp,
+                    on_ms: *on_ms,
+                    off_ms: *off_ms,
+                    repetitions: *repetitions,
+                }
+            }
+            SignalConfig::LevelSweep { frequency, levels_dbvu, duration_per_level, .. } => {
+                SignalSpec::LevelSweep {
+                    frequency: *frequency,
+                    levels_dbvu: levels_dbvu.clone(),
+                    duration_per_level: *duration_per_level,
+                }
+            }
+        }
+    }
+
+    /// Get the fundamental frequency if applicable (for THD measurement).
+    pub fn fundamental_hz(&self) -> Option<f64> {
+        match self {
+            SignalConfig::Sine { frequency, .. } => Some(*frequency),
+            SignalConfig::TwoTone { f1, .. } => Some(*f1),
+            SignalConfig::ToneBurst { frequency, .. } => Some(*frequency),
+            SignalConfig::LevelSweep { frequency, .. } => Some(*frequency),
+            _ => None,
+        }
+    }
+}
+
+/// Metric type configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum MetricConfig {
+    #[serde(rename = "time_domain")]
+    TimeDomain,
+    #[serde(rename = "thd")]
+    Thd { fundamental: f64 },
+    #[serde(rename = "imd")]
+    Imd { f1: f64, f2: f64 },
+    #[serde(rename = "spectral")]
+    Spectral,
+    #[serde(rename = "even_odd_ratio")]
+    EvenOddRatio,
+    #[serde(rename = "dc_drift")]
+    DcDrift,
+    #[serde(rename = "transfer_function")]
+    TransferFunction { reference: String },
+}
+
+/// Pass/fail criteria for a test.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PassCriteria {
+    /// Maximum normalized RMS error in dB (e.g., -60.0)
+    pub normalized_rms_error_db: Option<f64>,
+    /// Maximum peak error in dB (e.g., -40.0)
+    pub peak_error_db: Option<f64>,
+    /// Maximum THD difference in dB (e.g., 1.0)
+    pub thd_error_db: Option<f64>,
+    /// Maximum spectral error in dB (e.g., 3.0)
+    pub spectral_error_db: Option<f64>,
+    /// Even harmonic suppression threshold in dB (e.g., 40.0 means even < -40dB relative to odd)
+    pub even_harmonic_suppression_db: Option<f64>,
+    /// Maximum DC drift in mV
+    pub max_dc_drift_mv: Option<f64>,
+    /// Maximum magnitude error for transfer function in dB
+    pub max_magnitude_error_db: Option<f64>,
+    /// Maximum phase error in degrees
+    pub max_phase_error_deg: Option<f64>,
+}
+
+impl ValidationConfig {
+    /// Load configuration from a YAML file.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let contents = std::fs::read_to_string(path)?;
+        let config: Self = serde_yaml::from_str(&contents)?;
+        Ok(config)
+    }
+
+    /// Create a default configuration with the standard test suites.
+    pub fn default_config() -> Self {
+        Self {
+            global: GlobalConfig::default(),
+            suites: default_suites(),
+        }
+    }
+}
+
+/// Create default test suites matching the SPICE harness.
+fn default_suites() -> HashMap<String, TestSuite> {
+    let mut suites = HashMap::new();
+
+    // Linear suite
+    suites.insert("linear".to_string(), TestSuite {
+        description: "Linear circuit transfer function validation".to_string(),
+        tests: {
+            let mut tests = HashMap::new();
+            tests.insert("rc_lowpass".to_string(), TestCase {
+                circuit: "linear/rc_lowpass.pedal".to_string(),
+                description: "First-order RC lowpass, R=10k C=10n, fc≈1.59kHz".to_string(),
+                signals: vec![
+                    SignalConfig::Impulse { amplitude: 1.0, label: Some("impulse".to_string()) },
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 1.0,
+                        duration: 0.1,
+                        label: Some("sine".to_string()),
+                    },
+                    SignalConfig::ExpSweep {
+                        f_start: 20.0,
+                        f_end: 20000.0,
+                        amplitude: 1.0,
+                        duration: 1.0,
+                        label: Some("sweep".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                pass_criteria: PassCriteria {
+                    // WDF should match analytical within -60dB (0.1% error)
+                    normalized_rms_error_db: Some(-40.0),
+                    peak_error_db: Some(-30.0),
+                    spectral_error_db: Some(1.0),
+                    ..Default::default()
+                },
+            });
+            tests
+        },
+    });
+
+    // Nonlinear suite
+    suites.insert("nonlinear".to_string(), TestSuite {
+        description: "Nonlinear circuit SPICE comparison".to_string(),
+        tests: {
+            let mut tests = HashMap::new();
+            tests.insert("diode_clipper".to_string(), TestCase {
+                circuit: "nonlinear/diode_clipper.pedal".to_string(),
+                description: "Symmetric Si diode clipper".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.5,
+                        duration: 0.05,
+                        label: Some("low_level".to_string()),
+                    },
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 5.0,
+                        duration: 0.05,
+                        label: Some("clipping".to_string()),
+                    },
+                    SignalConfig::ExpSweep {
+                        f_start: 20.0,
+                        f_end: 20000.0,
+                        duration: 1.0,
+                        amplitude: 2.0,
+                        label: Some("sweep".to_string()),
+                    },
+                ],
+                metrics: vec![
+                    MetricConfig::TimeDomain,
+                    MetricConfig::Thd { fundamental: 1000.0 },
+                    MetricConfig::Spectral,
+                ],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(-60.0),
+                    peak_error_db: Some(-40.0),
+                    thd_error_db: Some(1.0),
+                    spectral_error_db: Some(3.0),
+                    ..Default::default()
+                },
+            });
+            tests.insert("common_cathode_12ax7".to_string(), TestCase {
+                circuit: "nonlinear/common_cathode_12ax7.pedal".to_string(),
+                description: "Single 12AX7 triode, common cathode".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.125,
+                        duration: 0.05,
+                        label: Some("clean".to_string()),
+                    },
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 1.5,
+                        duration: 0.05,
+                        label: Some("driven".to_string()),
+                    },
+                ],
+                metrics: vec![
+                    MetricConfig::TimeDomain,
+                    MetricConfig::Thd { fundamental: 1000.0 },
+                    MetricConfig::Spectral,
+                ],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(-55.0),
+                    peak_error_db: Some(-35.0),
+                    thd_error_db: Some(1.5),
+                    spectral_error_db: Some(3.0),
+                    ..Default::default()
+                },
+            });
+            tests
+        },
+    });
+
+    // Stress suite
+    suites.insert("stress".to_string(), TestSuite {
+        description: "Edge cases and stress conditions".to_string(),
+        tests: {
+            let mut tests = HashMap::new();
+            tests.insert("dc_stability".to_string(), TestCase {
+                circuit: "nonlinear/diode_clipper.pedal".to_string(),
+                description: "DC offset accumulation over long run".to_string(),
+                signals: vec![SignalConfig::Silence { duration: 10.0, label: Some("silence".to_string()) }],
+                metrics: vec![MetricConfig::DcDrift],
+                pass_criteria: PassCriteria {
+                    max_dc_drift_mv: Some(1.0),
+                    ..Default::default()
+                },
+            });
+            tests
+        },
+    });
+
+    suites
+}

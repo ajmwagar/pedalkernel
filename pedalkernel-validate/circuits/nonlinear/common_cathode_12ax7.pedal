@@ -1,0 +1,48 @@
+# Single 12AX7 triode, common cathode configuration
+# Classic preamp stage: input coupling → grid leak → triode → output coupling
+# High gain (~40-60), asymmetric soft clipping
+
+pedal "12AX7 Common Cathode" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    # Input coupling
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+
+    # Triode
+    V1: triode(12ax7)
+
+    # Plate load
+    R_plate: resistor(100k)
+
+    # Cathode bias (bypassed for full gain)
+    R_cathode: resistor(1.5k)
+    C_cathode: cap(25u)
+
+    # Output coupling
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    # Input stage
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+
+    # Triode bias and load
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+
+    # Output stage
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}

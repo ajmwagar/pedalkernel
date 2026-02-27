@@ -1,0 +1,15 @@
+# First-order RC lowpass filter
+# R = 10k, C = 10nF
+# fc = 1 / (2 * pi * R * C) ≈ 1.59 kHz
+
+pedal "RC Lowpass" {
+  components {
+    R1: resistor(10k)
+    C1: cap(10n)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> C1.a, out
+    C1.b -> gnd
+  }
+}
