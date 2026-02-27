@@ -1,0 +1,23 @@
+* ============================================================================
+* Simple Delay Line — 10ms fixed delay with 50/50 wet/dry mix
+* PedalKernel Validation Circuit
+* ============================================================================
+* Models the PedalKernel delay line behavior:
+* - 10ms delay via transmission line
+* - 50% dry + 50% wet mix at output
+*
+* Expected: Output = 0.5 * Input + 0.5 * Delayed_Input
+* ============================================================================
+
+* Delay path: transmission line for pure delay
+T1 v_in 0 v_delayed 0 Z0=1k TD=10ms
+R_term v_delayed 0 1k
+
+* Mix network: 50% dry + 50% wet
+* Using voltage divider/summer: v_out = 0.5*v_in + 0.5*v_delayed
+* Implemented with resistor network and buffer
+R_dry v_in v_mix 1k
+R_wet v_delayed v_mix 1k
+* Output is at the mixing node (effectively halves each input)
+* But we need to double the result, so use a VCVS with gain 1
+E_out v_out 0 v_mix 0 1

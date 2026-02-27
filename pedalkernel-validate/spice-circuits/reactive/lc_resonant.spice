@@ -1,0 +1,13 @@
+* ============================================================================
+* LC Resonant Filter — Series LC bandpass
+* PedalKernel Validation Circuit
+* ============================================================================
+* L = 100mH, C = 100nF
+* f0 = 1/(2*pi*sqrt(LC)) = 1/(2*pi*sqrt(0.1*100e-9)) ≈ 1592 Hz
+*
+* Tests combined inductor + capacitor WDF elements
+* ============================================================================
+
+L1 v_in v_mid 100mH
+C1 v_mid v_out 100nF
+R1 v_out 0 10k

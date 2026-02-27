@@ -293,105 +293,10 @@ pub fn compile_pedal_with_options(
     let diodes = graph.find_diodes();
     let diode_edge_indices: Vec<usize> = diodes.iter().map(|(idx, _)| *idx).collect();
 
-    // Determine gain range based on circuit characteristics.
-    //
-    // The gain taxonomy considers:
-    //   - Diode type (germanium clips softer → needs more drive)
-    //   - Single vs pair diodes (single = asymmetric = fuzz-like)
-    //   - Number of clipping stages (multi-stage = less gain per stage)
-    //   - Active device count and type (each contributes specific gain)
+    // Check for germanium diodes (affects thermal model and BJT saturation voltage).
     let has_germanium = diodes
         .iter()
         .any(|(_, d)| d.diode_type == DiodeType::Germanium);
-    let has_single_diode = diodes.iter().any(|(_, d)| !d.is_pair);
-    let has_led = diodes
-        .iter()
-        .any(|(_, d)| d.diode_type == DiodeType::Led);
-    // Check what types of active elements the circuit has.
-    let has_bjts = pedal
-        .components
-        .iter()
-        .any(|c| matches!(&c.kind, ComponentKind::Npn(_) | ComponentKind::Pnp(_)));
-    let has_tubes = pedal
-        .components
-        .iter()
-        .any(|c| matches!(&c.kind, ComponentKind::Triode(_) | ComponentKind::Pentode(_)));
-
-    let gain_range = if diodes.is_empty() && !has_bjts && !has_tubes {
-        // Effects circuits (phasers, chorus, compressors) using only JFETs
-        // and/or op-amps — no clipping or gain stages.  JFETs act as variable
-        // resistors, op-amps as buffers.  Signal should pass at unity gain.
-        // NOTE: output is currently attenuated because op-amp feedback loops
-        // aren't modeled inside the WDF tree.  The fix is integrating op-amp
-        // feedback into the tree, not inflating the gain range.
-        (1.0, 1.0)
-    } else if diodes.is_empty() {
-        // Active gain stages (BJTs, triodes, pentodes) without diode clipping.
-        // The active elements clip through device saturation. They need drive,
-        // but less than diode circuits since the active element IS the clipper.
-        (2.0, 30.0)
-    } else if has_germanium && has_single_diode {
-        (5.0, 250.0) // Fuzz-like: single germanium diode needs high drive
-    } else if has_germanium {
-        (3.0, 150.0) // Germanium overdrive (Klon-ish)
-    } else if has_led {
-        (4.0, 120.0) // LED clipping: higher Vf → needs more drive, but cleaner
-    } else if diodes.len() > 2 {
-        (1.5, 40.0) // Many stages: each clips a little, cumulative is heavy
-    } else if diodes.len() > 1 {
-        (2.0, 60.0) // Two stages (e.g., Big Muff topology)
-    } else {
-        (2.0, 100.0) // Standard single-stage overdrive
-    };
-
-    // Active elements contribute gain based on their type.
-    //
-    // IMPORTANT: Use the maximum single-element bonus, NOT the product.
-    // Each active element already has its own processing stage:
-    //   - Op-amps → OpAmpStage (separate processing loop)
-    //   - JFETs → WDF stages with JfetRoot
-    //   - BJTs → WDF stages with BjtRoot
-    //   - Triodes → WDF stages with TriodeRoot
-    //   - Pentodes → WDF stages with PentodeRoot
-    //
-    // The active_bonus only models the gain that drives signal INTO diode
-    // clipping stages. Using a product (bonus *= N per element) causes
-    // exponential gain growth: 4 op-amps → 2^4 = 16x, 4 JFETs → 1.5^4 ≈ 5x,
-    // combined = 81x — catastrophically wrong for unity-gain circuits like
-    // phasers, buffers, and all-pass filters.
-    //
-    // When there are no diode stages, active_bonus = 1.0 because the active
-    // elements' own WDF/opamp stages handle gain correctly.
-    let active_bonus = if diodes.is_empty() {
-        // No diode clipping: all active elements have their own stages.
-        1.0
-    } else {
-        // Find the strongest active gain element that drives a clipping stage.
-        // Use max (not product) since pre_gain is applied once at the input
-        // (and again only between consecutive clipping stages).
-        let mut max_bonus = 1.0_f64;
-        for comp in &pedal.components {
-            let bonus = match &comp.kind {
-                ComponentKind::OpAmp(ot) if !ot.is_ota() => {
-                    match ot {
-                        OpAmpType::Ne5532 => 3.5,
-                        OpAmpType::Tl072 | OpAmpType::Tl082 | OpAmpType::Generic => 3.0,
-                        OpAmpType::Jrc4558 | OpAmpType::Rc4558 => 2.5,
-                        OpAmpType::Lm741 | OpAmpType::Op07 => 2.0,
-                        OpAmpType::Lm308 => 1.8,
-                        _ => 2.5,
-                    }
-                }
-                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => 2.5,
-                ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => 1.5,
-                ComponentKind::Triode(_) => 2.0,
-                ComponentKind::Pentode(_) => 3.0,
-                _ => 1.0,
-            };
-            max_bonus = max_bonus.max(bonus);
-        }
-        max_bonus
-    };
 
     // Build WDF stages.
     let mut stages = Vec::new();
@@ -501,6 +406,7 @@ pub fn compile_pedal_with_options(
             oversampler: Oversampler::new(oversampling),
             base_diode_model: Some(model),
             paired_opamp: None,
+            dc_block: None,
         });
     }
 
@@ -582,6 +488,7 @@ pub fn compile_pedal_with_options(
                     oversampler: Oversampler::new(oversampling),
                     base_diode_model: None,
                     paired_opamp: None,
+                    dc_block: None,
                 });
             }
             OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot } => {
@@ -615,6 +522,7 @@ pub fn compile_pedal_with_options(
                     oversampler: Oversampler::new(oversampling),
                     base_diode_model: None,
                     paired_opamp: None,
+                    dc_block: None,
                 });
             }
         }
@@ -744,6 +652,7 @@ pub fn compile_pedal_with_options(
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp,
+            dc_block: None,
         });
     }
 
@@ -830,6 +739,7 @@ pub fn compile_pedal_with_options(
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp: None,
+            dc_block: None,
         });
     }
 
@@ -843,23 +753,82 @@ pub fn compile_pedal_with_options(
         .collect();
 
     for (_edge_idx, triode_info) in &triodes {
-        let junction = triode_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(
-            junction,
+        let plate_node = triode_info.plate_node;
+        let cathode_node = triode_info.cathode_node;
+
+        // Find passive elements at BOTH plate and cathode junctions.
+        // The plate load resistor is at the plate node.
+        // The cathode resistor and bypass cap are at the cathode node.
+        let plate_passives = graph.elements_at_junction(
+            plate_node,
             &all_nonlinear_with_triodes,
             &graph.active_edge_indices,
         );
+        let cathode_passives = graph.elements_at_junction(
+            cathode_node,
+            &all_nonlinear_with_triodes,
+            &graph.active_edge_indices,
+        );
+
+        // For triodes, also find elements connecting plate to output (e.g., C_out).
+        // These are normally skipped by elements_at_junction but are needed for
+        // proper AC coupling of the triode output.
+        let plate_to_output: Vec<usize> = graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(idx, e)| {
+                if all_nonlinear_with_triodes.contains(idx) {
+                    return false;
+                }
+                if graph.active_edge_indices.contains(idx) {
+                    return false;
+                }
+                // Must connect plate_node to out_node
+                (e.node_a == plate_node && e.node_b == graph.out_node)
+                    || (e.node_a == graph.out_node && e.node_b == plate_node)
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+
+        // Also find elements at out_node (e.g., R_load to ground)
+        let output_passives = graph.elements_at_junction(
+            graph.out_node,
+            &all_nonlinear_with_triodes,
+            &graph.active_edge_indices,
+        );
+
+        // Combine all sets of passive elements
+        let mut passive_idxs: Vec<usize> = plate_passives.clone();
+        for idx in &cathode_passives {
+            if !passive_idxs.contains(idx) {
+                passive_idxs.push(*idx);
+            }
+        }
+        for idx in &plate_to_output {
+            if !passive_idxs.contains(idx) {
+                passive_idxs.push(*idx);
+            }
+        }
+        for idx in &output_passives {
+            if !passive_idxs.contains(idx) {
+                passive_idxs.push(*idx);
+            }
+        }
 
         if passive_idxs.is_empty() {
             continue;
         }
 
         // Find the best injection node for the voltage source.
+        // For triodes, prefer injecting at the plate side (where the plate load is).
         let mut injection_node = graph.in_node;
         let mut best_dist = usize::MAX;
-        for &eidx in &passive_idxs {
+
+        // Check plate-side elements first
+        for &eidx in &plate_passives {
             let e = &graph.edges[eidx];
-            let other = if e.node_a == junction {
+            let other = if e.node_a == plate_node {
                 e.node_b
             } else {
                 e.node_a
@@ -871,45 +840,121 @@ pub fn compile_pedal_with_options(
                 }
             }
         }
-        // Fallback: if in_node is disconnected (e.g. split pedal post-half
-        // where in maps to a triode grid), use gnd as the injection point.
+
+        // If no plate-side injection found, check cathode side
+        if best_dist == usize::MAX {
+            for &eidx in &cathode_passives {
+                let e = &graph.edges[eidx];
+                let other = if e.node_a == cathode_node {
+                    e.node_b
+                } else {
+                    e.node_a
+                };
+                if let Some(&d) = dist_from_in.get(&other) {
+                    if d < best_dist {
+                        best_dist = d;
+                        injection_node = other;
+                    }
+                }
+            }
+        }
+
+        // Fallback: use ground as injection point
         if best_dist == usize::MAX {
             injection_node = graph.gnd_node;
         }
 
-        // Build SP edges.
-        let source_node = graph.edges.len() + 3000; // virtual source node (unique offset)
-        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+        // Build SP edges for the triode stage.
+        // The triode stage topology is:
+        //   source -> R_plate -> plate -- triode -- cathode -> R_cathode||C_cathode -> GND
+        // We use ground as the second terminal to create a proper two-port network.
+        let source_node = graph.edges.len() + 3000;
+        let virtual_plate_cathode_idx = vs_comp_idx + 1;
+        let gnd_node = graph.gnd_node;
 
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-        }
+        // Helper closure to build the sp_edges vector
+        let build_sp_edges = || {
+            let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+            sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
 
-        let terminals = vec![source_node, junction];
-        let sp_tree = match sp_reduce(sp_edges, &terminals) {
+            for &eidx in &passive_idxs {
+                let e = &graph.edges[eidx];
+                sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+            }
+
+            // Connect plate and cathode nodes through a virtual edge.
+            // This represents the triode's internal plate resistance (rp).
+            sp_edges.push((plate_node, cathode_node, SpTree::Leaf(virtual_plate_cathode_idx)));
+            sp_edges
+        };
+
+        // Use source and ground as terminals - this creates a proper two-port network
+        // where all nodes can reduce to these two terminals.
+        let terminals = vec![source_node, gnd_node];
+        let sp_tree = match sp_reduce(build_sp_edges(), &terminals) {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(_) => continue, // Skip if SP reduction fails
         };
 
         let mut triode_components = graph.components.clone();
-        while triode_components.len() <= vs_comp_idx {
+        while triode_components.len() <= virtual_plate_cathode_idx {
             triode_components.push(ComponentDef {
                 id: "__vs__".to_string(),
                 kind: ComponentKind::Resistor(1.0),
             });
         }
+        // Add virtual high-impedance resistor for plate-cathode connection
+        // This represents the triode's internal resistance (rp ≈ 60kΩ for 12AX7)
+        triode_components[virtual_plate_cathode_idx] = ComponentDef {
+            id: "__triode_rp__".to_string(),
+            kind: ComponentKind::Resistor(62500.0), // 12AX7 plate resistance
+        };
 
         let tree = sp_to_dyn_with_vs(&sp_tree, &triode_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
         let model = triode_model(triode_info.triode_type);
         let root = RootKind::Triode(TriodeRoot::new(model));
 
-        // Scale compensation based on triode mu (voltage gain ≈ mu × R_load/(R_load+r_p))
-        // Normalize to 12AX7 (mu=100) as reference. Lower-mu tubes have proportionally
-        // lower voltage gain, which is a defining characteristic of each tube type.
+        // Scale compensation based on triode mu and typical plate load.
+        // Voltage gain ≈ mu × Rp / (Rp + rp) where:
+        // - mu = amplification factor (100 for 12AX7)
+        // - Rp = plate load resistance (typically 100k)
+        // - rp = plate resistance (62.5k for 12AX7)
+        // For 100k load: gain ≈ 100 × 100k / (100k + 62.5k) ≈ 61.5
         let mu_compensation = model.mu / 100.0;
+
+        // Compute DC-blocking filter coefficients from C_out and R_load.
+        // C_out is the coupling cap (plate to output), R_load is the output resistor.
+        let dc_block = {
+            // Find C_out (capacitor connecting plate to output)
+            let c_out = plate_to_output.iter().find_map(|&idx| {
+                let e = &graph.edges[idx];
+                match &graph.components[e.comp_idx].kind {
+                    ComponentKind::Capacitor(cap_cfg) => Some(cap_cfg.value),
+                    _ => None,
+                }
+            });
+            // Find R_load (resistor at output node)
+            let r_load = output_passives.iter().find_map(|&idx| {
+                let e = &graph.edges[idx];
+                match &graph.components[e.comp_idx].kind {
+                    ComponentKind::Resistor(r) => Some(*r),
+                    _ => None,
+                }
+            });
+            // Compute IIR highpass coefficients if both are found
+            match (c_out, r_load) {
+                (Some(c), Some(r)) => {
+                    // fc = 1 / (2π * R * C)
+                    let omega = (std::f64::consts::PI * 2.0 / sample_rate) / (r * c);
+                    let omega_tan = omega.tan();
+                    let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
+                    let b0 = 1.0 / (1.0 + omega_tan);
+                    Some((a1, b0, 0.0, 0.0))
+                }
+                _ => None,
+            }
+        };
 
         stages.push(WdfStage {
             tree,
@@ -918,6 +963,7 @@ pub fn compile_pedal_with_options(
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp: None,
+            dc_block,
         });
     }
 
@@ -1004,6 +1050,7 @@ pub fn compile_pedal_with_options(
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp: None,
+            dc_block: None,
         });
     }
 
@@ -1083,6 +1130,7 @@ pub fn compile_pedal_with_options(
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp: None,
+            dc_block: None,
         });
     }
 
@@ -1162,6 +1210,7 @@ pub fn compile_pedal_with_options(
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp: None,
+            dc_block: None,
         });
     }
 
@@ -1247,6 +1296,7 @@ pub fn compile_pedal_with_options(
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp: None,
+            dc_block: None,
         });
     }
 
@@ -1325,6 +1375,7 @@ pub fn compile_pedal_with_options(
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp: None,
+            dc_block: None,
         });
     }
 
@@ -1384,6 +1435,7 @@ pub fn compile_pedal_with_options(
                     oversampler: Oversampler::new(oversampling),
                     base_diode_model: None,
                     paired_opamp: None,
+                    dc_block: None,
                 });
             } else {
                 // Fall back to WDF for complex passive circuits
@@ -1446,6 +1498,7 @@ pub fn compile_pedal_with_options(
                             oversampler: Oversampler::new(oversampling),
                             base_diode_model: None,
                             paired_opamp: None,
+                            dc_block: None,
                         });
                     }
                 }
@@ -1454,6 +1507,62 @@ pub fn compile_pedal_with_options(
             // Resistor-only circuit: compute analytical voltage divider gain.
             // No WDF stage needed since resistors don't have dynamics.
             passive_attenuation = compute_resistor_divider_gain(&graph);
+        }
+    }
+
+    // ── Transformer gain for passive transformer circuits ─────────────────
+    // If the circuit contains transformers but no WDF stages were created,
+    // apply the transformer's voltage gain (turns ratio) as a scaling factor.
+    //
+    // For step-down (n > 1): V_secondary = V_primary / n
+    // For step-up (n < 1): V_secondary = V_primary / n (gain > 1)
+    let mut transformer_gain = 1.0;
+    for comp in &pedal.components {
+        if let ComponentKind::Transformer(cfg) = &comp.kind {
+            // Helper to check if a pin matches component and pin name
+            let pin_matches = |p: &Pin, comp_id: &str, pin_name: &str| -> bool {
+                matches!(p, Pin::ComponentPin { component, pin } if component == comp_id && pin == pin_name)
+            };
+
+            // Helper to check if a pin is a reserved input
+            let is_input_pin = |p: &Pin| -> bool {
+                matches!(p, Pin::Reserved(name) if name == "in")
+            };
+
+            // Helper to check if a pin is a reserved output
+            let is_output_pin = |p: &Pin| -> bool {
+                matches!(p, Pin::Reserved(name) if name == "out")
+            };
+
+            // Check if any net connects transformer secondary (c or d) to output
+            let output_from_secondary = pedal.nets.iter().any(|net| {
+                let has_secondary =
+                    pin_matches(&net.from, &comp.id, "c") || pin_matches(&net.from, &comp.id, "d");
+                let has_secondary_to =
+                    net.to.iter().any(|p| pin_matches(p, &comp.id, "c") || pin_matches(p, &comp.id, "d"));
+                let has_output =
+                    is_output_pin(&net.from) || net.to.iter().any(|p| is_output_pin(p));
+
+                (has_secondary || has_secondary_to) && has_output
+            });
+
+            // Check if input goes to primary
+            let input_to_primary = pedal.nets.iter().any(|net| {
+                let has_primary =
+                    pin_matches(&net.from, &comp.id, "a") || pin_matches(&net.from, &comp.id, "b");
+                let has_primary_to =
+                    net.to.iter().any(|p| pin_matches(p, &comp.id, "a") || pin_matches(p, &comp.id, "b"));
+                let has_input =
+                    is_input_pin(&net.from) || net.to.iter().any(|p| is_input_pin(p));
+
+                (has_primary || has_primary_to) && has_input
+            });
+
+            if input_to_primary && output_from_secondary {
+                // Signal goes through transformer: apply voltage gain
+                // V_out = V_in / n (step-down) or V_out = V_in * (1/n) (step-up)
+                transformer_gain *= 1.0 / cfg.turns_ratio;
+            }
         }
     }
 
@@ -1730,13 +1839,7 @@ pub fn compile_pedal_with_options(
         });
     }
 
-    // Compute initial pre-gain from default control values.
-    let gain_default = pedal
-        .controls
-        .iter()
-        .find(|c| is_gain_label(&c.label))
-        .map(|c| c.default)
-        .unwrap_or(0.5);
+    // Get default level from controls (for output_gain).
     let level_default = pedal
         .controls
         .iter()
@@ -1744,12 +1847,19 @@ pub fn compile_pedal_with_options(
         .map(|c| c.default)
         .unwrap_or(1.0); // If no Level control, use unity gain
 
-    let (glo, ghi) = gain_range;
-    let ratio: f64 = ghi / glo;
-    // Apply op-amp feedback gain (from detected inverting/non-inverting topologies)
-    // This is the actual closed-loop gain from Rf/Ri ratios.
-    // Also apply passive attenuation for resistor-only circuits (voltage dividers).
-    let pre_gain = glo * ratio.powf(gain_default) * active_bonus * opamp_feedback_gain * passive_attenuation;
+    // Physical gains always apply (transformer turns ratio, passive attenuation, op-amp feedback).
+    // These represent actual circuit behavior, not user-controllable gain.
+    let physical_gain = opamp_feedback_gain * passive_attenuation * transformer_gain;
+
+    // All gain should come from the circuit itself:
+    // - Op-amps: gain from feedback network (Rf/Ri), modeled in OpAmpInvertingRoot/NonInvertingRoot
+    // - BJTs/JFETs: gain from transconductance, modeled in BjtRoot/JfetRoot
+    // - Triodes/Pentodes: gain from mu/gm, modeled in TriodeRoot/PentodeRoot
+    // - Transformers: voltage ratio from turns ratio
+    // - Passive: attenuation from resistor dividers
+    //
+    // No artificial "distortion gain" should be needed if circuit models are correct.
+    let (pre_gain, output_gain, gain_range_final) = (physical_gain, level_default, (1.0, 1.0));
 
     // Helper: trace through resistive paths (pots, resistors) to find modulation targets.
     // Returns (target_component, target_property) if found.
@@ -2222,11 +2332,11 @@ pub fn compile_pedal_with_options(
     let mut compiled = CompiledPedal {
         stages,
         pre_gain,
-        output_gain: level_default,
+        output_gain,
         rail_saturation,
         sample_rate,
         controls,
-        gain_range: (glo * active_bonus, ghi * active_bonus),
+        gain_range: gain_range_final,
         supply_voltage: 9.0, // Will be updated by set_supply_voltage
         lfos,
         envelopes,

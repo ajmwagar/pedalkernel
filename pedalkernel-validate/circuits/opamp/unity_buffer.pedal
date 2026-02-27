@@ -1,0 +1,19 @@
+# Unity Gain Buffer (Voltage Follower)
+# Output follows input with unity gain
+# Vout = Vin (gain = 1, high input impedance, low output impedance)
+
+pedal "Unity Gain Buffer" {
+  components {
+    U1: opamp(tl072)
+  }
+  nets {
+    # Input to non-inverting input
+    in -> U1.pos
+
+    # Direct feedback (output to inverting input)
+    U1.out -> U1.neg
+
+    # Output
+    U1.out -> out
+  }
+}

@@ -1,0 +1,17 @@
+* ============================================================================
+* Unity Gain Buffer (Voltage Follower)
+* PedalKernel Validation Circuit
+* ============================================================================
+* Classic voltage follower configuration
+* 100% negative feedback (output directly to inverting input)
+* Gain = 1 (unity)
+*
+* Expected: Vout = Vin (unity gain, no inversion)
+* ============================================================================
+
+* Ideal op-amp as VCVS with very high gain
+* Vout = A * (Vpos - Vneg) = A * (Vin - Vout)
+* With A very large, Vout ≈ Vin
+* Direct connection: v_neg = v_out
+Eop v_out 0 v_in v_out 100000
+

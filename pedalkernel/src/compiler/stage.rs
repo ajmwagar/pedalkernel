@@ -126,6 +126,10 @@ pub(super) struct WdfStage {
     /// modeling the all-pass behavior where the op-amp buffers the signal
     /// at unity gain while the R/C/JFET network shifts phase.
     pub(super) paired_opamp: Option<OpAmpRoot>,
+    /// DC-blocking highpass filter for triode stages.
+    /// Models the output coupling capacitor's DC blocking behavior.
+    /// Format: (a1, b0, y_prev, x_prev) for IIR highpass.
+    pub(super) dc_block: Option<(f64, f64, f64, f64)>,
 }
 
 impl WdfStage {
@@ -154,8 +158,26 @@ impl WdfStage {
             noninv.set_vp(input * compensation);
         }
 
+        // For triode stages, the input signal modulates Vgk (grid-cathode voltage).
+        // This is the key to triode amplification: the input controls the grid,
+        // which modulates plate current and creates voltage drop across R_plate.
+        // Vgk = Vbias + Vin (Vbias ~-2V for 12AX7 with typical biasing)
+        if let RootKind::Triode(ref mut t) = root {
+            // Apply input signal to grid. The bias point is typically around -2V
+            // for class A operation with a 12AX7. The input signal swings around this.
+            const TRIODE_GRID_BIAS: f64 = -2.0;
+            t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+        }
+
         let wdf_out = self.oversampler.process(input, |sample| {
-            tree.set_voltage(sample * compensation);
+            // For triodes, the voltage source is the B+ supply (v_max).
+            // The input already modulated Vgk; the supply biases the plate circuit.
+            let vs_voltage = if let RootKind::Triode(t) = root {
+                t.v_max() // B+ supply voltage for triode bias
+            } else {
+                sample * compensation
+            };
+            tree.set_voltage(vs_voltage);
             let b_tree = tree.reflected();
             let rp = tree.port_resistance();
 
@@ -231,6 +253,18 @@ impl WdfStage {
             return (a + b) / 2.0;
         }
 
+        // Apply DC-blocking filter for triode stages.
+        // This models the output coupling capacitor (C_out) which blocks DC
+        // and passes AC. The filter is a single-pole IIR highpass.
+        if let Some((a1, b0, ref mut y_prev, ref mut x_prev)) = self.dc_block {
+            // IIR highpass: y[n] = b0 * (x[n] - x[n-1]) + a1 * y[n-1]
+            let x = wdf_out;
+            let y = b0 * (x - *x_prev) + a1 * *y_prev;
+            *x_prev = x;
+            *y_prev = y;
+            return y;
+        }
+
         wdf_out
     }
 
@@ -239,6 +273,10 @@ impl WdfStage {
         self.oversampler.reset();
         if let Some(ref mut opamp) = self.paired_opamp {
             opamp.reset();
+        }
+        if let Some((_, _, ref mut y_prev, ref mut x_prev)) = self.dc_block {
+            *y_prev = 0.0;
+            *x_prev = 0.0;
         }
     }
 

@@ -1,0 +1,46 @@
+# Fuzz Core - Single Transistor Clipper
+# Simplified fuzz stage using NPN transistor
+# Common emitter amplifier driven into saturation
+#
+# This captures the core fuzz behavior: transistor clipping
+# Similar to Fuzz Face Q2 stage or Big Muff stages
+
+pedal "Fuzz Core" {
+  components {
+    # Input coupling
+    C1: cap(100n)           # Input coupling
+
+    # Bias network
+    R1: resistor(470k)      # Base bias to ground
+    R2: resistor(10k)       # Collector load
+
+    # Transistor stage
+    Q1: npn(2n5088)         # High-gain silicon (like Big Muff)
+    R3: resistor(1k)        # Emitter resistor (some degeneration)
+    C2: cap(47u)            # Emitter bypass (maximum gain)
+
+    # Output
+    C3: cap(100n)           # Output coupling
+    R4: resistor(10k)       # Output load
+  }
+  nets {
+    # Input to base
+    in -> C1.a
+    C1.b -> R1.a, Q1.base
+    R1.b -> gnd
+
+    # Collector circuit
+    vcc -> R2.a
+    R2.b -> Q1.collector
+
+    # Emitter circuit
+    Q1.emitter -> R3.a, C2.a
+    R3.b -> gnd
+    C2.b -> gnd
+
+    # Output from collector
+    Q1.collector -> C3.a
+    C3.b -> R4.a, out
+    R4.b -> gnd
+  }
+}

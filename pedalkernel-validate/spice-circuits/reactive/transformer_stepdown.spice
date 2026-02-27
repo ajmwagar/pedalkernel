@@ -1,0 +1,23 @@
+* ============================================================================
+* Transformer Step-Down — 10:1 turns ratio
+* PedalKernel Validation Circuit
+* ============================================================================
+* Turns ratio n = 10:1
+* Primary inductance Lp = 2H
+* Secondary inductance Ls = Lp/n^2 = 2H/100 = 20mH
+* Coupling coefficient k = 0.99 (typical audio transformer)
+*
+* Expected: Vout = Vin / n = Vin / 10
+* ============================================================================
+
+* Primary winding: v_in to ground
+L1 v_in 0 2H
+
+* Secondary winding: v_out to ground
+L2 v_out 0 20mH
+
+* Magnetic coupling between windings
+K1 L1 L2 0.99
+
+* Load resistor
+R1 v_out 0 1k

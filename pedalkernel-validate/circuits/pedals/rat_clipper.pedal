@@ -1,0 +1,52 @@
+# ProCo RAT Core Clipper
+# Op-amp gain stage with hard clipping diodes to ground
+# This is the signature RAT distortion circuit
+#
+# Key topology: Diodes clip to GROUND (hard clipping)
+# LM308 is slow slew rate, but we use ideal op-amp for SPICE comparison
+# Gain = Rf/Ri = 100k/1k = 100x (40dB) before clipping
+
+pedal "RAT Clipper" {
+  components {
+    # Input coupling
+    C1: cap(22n)            # Input DC blocking
+    R1: resistor(1k)        # Input resistor (sets gain)
+
+    # Op-amp gain stage
+    U1: opamp(lm308)        # LM308 (slow slew shapes tone)
+    R2: resistor(100k)      # Feedback resistor (max gain)
+
+    # Hard clipping to ground (the RAT's signature)
+    D1: diode(silicon)      # 1N914 positive clip
+    D2: diode(silicon)      # 1N914 negative clip
+    R3: resistor(1k)        # Isolation resistor
+
+    # Output
+    C2: cap(4.7u)           # Output coupling
+    R4: resistor(10k)       # Output load
+  }
+  nets {
+    # Input stage
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> U1.neg
+
+    # Op-amp reference
+    U1.pos -> gnd
+
+    # Feedback network
+    U1.neg -> R2.a
+    R2.b -> U1.out
+
+    # Hard clipping diodes to ground
+    U1.out -> R3.a
+    R3.b -> D1.a, D2.b
+    D1.b -> gnd
+    D2.a -> gnd
+
+    # Output from clipped node
+    R3.b -> C2.a
+    C2.b -> R4.a, out
+    R4.b -> gnd
+  }
+}

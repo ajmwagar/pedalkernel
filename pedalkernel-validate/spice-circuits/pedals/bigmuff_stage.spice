@@ -1,0 +1,42 @@
+* ============================================================================
+* Big Muff Pi Single Clipping Stage
+* PedalKernel Validation Circuit
+* ============================================================================
+* Transistor gain stage with diode clipping at collector
+* This is the repeating block in the Big Muff circuit
+* Combines transistor saturation + diode hard clipping
+* ============================================================================
+
+* Supply voltage
+Vcc vcc 0 DC 9
+
+* Input coupling
+C1 v_in v_base 100n
+
+* Bias resistor
+R1 v_base 0 470k
+
+* Collector load
+R2 vcc v_coll 10k
+
+* 2N5088 NPN transistor
+Q1 v_coll v_base v_emit Q2N5088
+.model Q2N5088 NPN(Is=14.34f Xti=3 Eg=1.11 Vaf=74.03 Bf=400
++                  Ne=1.307 Ise=14.34f Ikf=.2847 Xtb=1.5 Br=6.092
++                  Nc=2 Isc=0 Ikr=0 Rc=1 Cjc=7.306p Mjc=.3416
++                  Vjc=.75 Fc=.5 Cje=22.01p Mje=.377 Vje=.75
++                  Tr=46.91n Tf=411.1p Itf=.6 Vtf=1.7 Xtf=3)
+
+* Emitter resistor and bypass
+R3 v_emit 0 100
+C2 v_emit 0 100n
+
+* Clipping diodes (1N914)
+D1 v_coll 0 D1N914
+D2 0 v_coll D1N914
+.model D1N914 D(Is=4.35n N=1.906 Rs=0.6 Cjo=2p)
+
+* Output coupling and load
+C3 v_coll v_out 100n
+Rload v_out 0 10k
+

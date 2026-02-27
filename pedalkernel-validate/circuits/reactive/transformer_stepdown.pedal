@@ -1,0 +1,18 @@
+# Transformer Step-Down Test
+# 10:1 turns ratio, 2H primary inductance
+# Input 1V should produce ~0.1V output (after settling)
+# Tests basic transformer voltage transfer
+
+pedal "Transformer Step-Down" {
+  components {
+    T1: transformer(10:1, 2H)
+    R_load: resistor(1k)
+  }
+  nets {
+    in -> T1.a
+    T1.b -> gnd
+    T1.c -> out, R_load.a
+    T1.d -> gnd
+    R_load.b -> gnd
+  }
+}

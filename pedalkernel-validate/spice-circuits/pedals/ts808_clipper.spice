@@ -1,0 +1,32 @@
+* ============================================================================
+* Tube Screamer TS-808 Core Clipper
+* PedalKernel Validation Circuit
+* ============================================================================
+* Op-amp with diode soft clipping in feedback loop
+* Key: Diodes in FEEDBACK = soft clipping (gradual)
+* Gain = Rf/Ri = 51k/4.7k = ~10.8x (20.7dB) before clipping
+* Diodes limit output to ~0.6V peak
+* ============================================================================
+
+* Input coupling capacitor
+C1 v_in v_r1 47n
+
+* Input resistor (sets gain with R2)
+R1 v_r1 v_neg 4.7k
+
+* Feedback resistor
+R2 v_neg v_opamp_out 51k
+
+* Soft clipping diodes (anti-parallel, 1N914)
+* Using Shockley diode model: Is=4.35nA, N=1.906
+D1 v_neg v_opamp_out D1N914
+D2 v_opamp_out v_neg D1N914
+.model D1N914 D(Is=4.35n N=1.906 Rs=0.6 Cjo=2p)
+
+* Ideal op-amp as VCVS (inverting: v_pos=0)
+Eop v_opamp_out 0 0 v_neg 100000
+
+* Output coupling and load
+C2 v_opamp_out v_out 100n
+Rload v_out 0 10k
+

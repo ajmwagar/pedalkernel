@@ -1,0 +1,23 @@
+* ============================================================================
+* Inverting Amplifier - Gain = -10
+* PedalKernel Validation Circuit
+* ============================================================================
+* Classic inverting op-amp configuration
+* Rf = 100k, Ri = 10k
+* Gain = -Rf/Ri = -10
+*
+* Expected: Vout = -10 * Vin (inverted, 10x gain)
+* ============================================================================
+
+* Input resistor
+Ri v_in v_neg 10k
+
+* Feedback resistor
+Rf v_neg v_out 100k
+
+* Ideal op-amp as VCVS with very high gain
+* E<name> <n+> <n-> <nc+> <nc-> <gain>
+* Output referenced to ground, controlled by (v_pos - v_neg)
+* v_pos is grounded, so controlled by -v_neg
+Eop v_out 0 0 v_neg 100000
+

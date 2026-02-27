@@ -1,0 +1,18 @@
+# Transformer Step-Up Test
+# 1:4 turns ratio, 500mH primary inductance
+# Input 1V should produce ~4V output (after settling)
+# Tests transformer voltage gain
+
+pedal "Transformer Step-Up" {
+  components {
+    T1: transformer(1:4, 500m)
+    R_load: resistor(10k)
+  }
+  nets {
+    in -> T1.a
+    T1.b -> gnd
+    T1.c -> out, R_load.a
+    T1.d -> gnd
+    R_load.b -> gnd
+  }
+}

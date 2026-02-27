@@ -1,0 +1,26 @@
+# Inverting Amplifier - Gain = -10 (Rf/Ri = 100k/10k)
+# Classic inverting op-amp configuration
+# Vout = -(Rf/Ri) * Vin = -10 * Vin
+
+pedal "Inverting Amplifier x10" {
+  components {
+    U1: opamp(tl072)
+    Ri: resistor(10k)   # Input resistor
+    Rf: resistor(100k)  # Feedback resistor
+  }
+  nets {
+    # Input through Ri to inverting input
+    in -> Ri.a
+    Ri.b -> U1.neg
+
+    # Feedback from output to inverting input
+    U1.out -> Rf.a
+    Rf.b -> U1.neg
+
+    # Non-inverting input to ground
+    U1.pos -> gnd
+
+    # Output
+    U1.out -> out
+  }
+}

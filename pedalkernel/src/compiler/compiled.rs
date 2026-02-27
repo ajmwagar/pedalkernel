@@ -682,6 +682,14 @@ impl CompiledPedal {
             s.push('\n');
         }
 
+        if !self.delay_lines.is_empty() {
+            s.push_str(&format!("\nDelay Lines: {}\n", self.delay_lines.len()));
+            s.push_str("───────────────────────────────────────────────────────────────────────────\n");
+            for (i, dl) in self.delay_lines.iter().enumerate() {
+                s.push_str(&format!("  [{}] {} - {} taps\n", i, dl.comp_id, dl.taps.len()));
+            }
+        }
+
         if !self.controls.is_empty() {
             s.push_str("\nControls:\n");
             s.push_str("───────────────────────────────────────────────────────────────────────────\n");

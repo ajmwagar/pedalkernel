@@ -1,0 +1,52 @@
+# Big Muff Pi Single Clipping Stage
+# Transistor gain + diode pair clipping
+# This is the repeating building block of the Big Muff
+#
+# Each Big Muff stage: transistor gain -> diode clip -> coupling
+# The diodes clip the collector swing symmetrically
+
+pedal "Big Muff Stage" {
+  components {
+    # Input coupling
+    C1: cap(100n)           # Input coupling
+
+    # Bias network
+    R1: resistor(470k)      # Base bias to ground
+
+    # Transistor stage
+    Q1: npn(2n5088)         # High-gain NPN
+    R2: resistor(10k)       # Collector load
+    R3: resistor(100)       # Emitter resistor
+    C2: cap(100n)           # Emitter bypass
+
+    # Clipping diodes at collector
+    D1: diode(silicon)      # Positive clip
+    D2: diode(silicon)      # Negative clip
+
+    # Output
+    C3: cap(100n)           # Output coupling
+    R4: resistor(10k)       # Output load
+  }
+  nets {
+    # Input to base
+    in -> C1.a
+    C1.b -> R1.a, Q1.base
+    R1.b -> gnd
+
+    # Collector with clipping
+    vcc -> R2.a
+    R2.b -> Q1.collector, D1.a, D2.b
+    D1.b -> gnd
+    D2.a -> gnd
+
+    # Emitter circuit
+    Q1.emitter -> R3.a, C2.a
+    R3.b -> gnd
+    C2.b -> gnd
+
+    # Output from collector
+    Q1.collector -> C3.a
+    C3.b -> R4.a, out
+    R4.b -> gnd
+  }
+}

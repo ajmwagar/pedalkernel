@@ -104,6 +104,28 @@ pub(super) enum DynNode {
         b1: f64,
         b2: f64,
     },
+    /// Ideal transformer adaptor connecting a secondary subtree to the main tree.
+    ///
+    /// The transformer scales waves by the turns ratio:
+    /// - scatter_up: b_primary = n × b_secondary
+    /// - scatter_down: a_secondary = a_primary / n
+    ///
+    /// Port resistance at primary = n² × R_secondary
+    ///
+    /// The `secondary` child is the subtree connected at the transformer's
+    /// secondary winding. The primary side faces the parent (root direction).
+    Transformer {
+        /// Secondary subtree (the child of this adaptor)
+        secondary: Box<DynNode>,
+        /// Turns ratio: n = N_primary / N_secondary
+        /// - n > 1: step-down (voltage decreases primary→secondary)
+        /// - n < 1: step-up (voltage increases primary→secondary)
+        turns_ratio: f64,
+        /// Port resistance seen from primary = n² × R_secondary
+        rp: f64,
+        /// Cached secondary reflected wave
+        b_sec: f64,
+    },
 }
 
 impl DynNode {
@@ -117,7 +139,8 @@ impl DynNode {
             | Self::Pot { rp, .. }
             | Self::SwitchedResistor { rp, .. }
             | Self::Series { rp, .. }
-            | Self::Parallel { rp, .. } => *rp,
+            | Self::Parallel { rp, .. }
+            | Self::Transformer { rp, .. } => *rp,
             Self::Photocoupler { inner, .. } => inner.port_resistance(),
         }
     }
@@ -171,6 +194,16 @@ impl DynNode {
                 *b1 = left.reflected();
                 *b2 = right.reflected();
                 *b1 + *gamma * (*b2 - *b1)
+            }
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                b_sec,
+                ..
+            } => {
+                // Get secondary reflected wave and scale by turns ratio
+                *b_sec = secondary.reflected();
+                *turns_ratio * *b_sec
             }
         }
     }
@@ -237,6 +270,15 @@ impl DynNode {
                 left.set_incident(a1);
                 right.set_incident(a2);
             }
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                ..
+            } => {
+                // Scale incident wave down by turns ratio and propagate to secondary
+                let a_sec = a / *turns_ratio;
+                secondary.set_incident(a_sec);
+            }
         }
     }
 
@@ -247,6 +289,9 @@ impl DynNode {
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.set_voltage(v);
                 right.set_voltage(v);
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.set_voltage(v);
             }
             _ => {}
         }
@@ -268,6 +313,7 @@ impl DynNode {
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.set_pot(target_id, pos) || right.set_pot(target_id, pos)
             }
+            Self::Transformer { secondary, .. } => secondary.set_pot(target_id, pos),
             _ => false,
         }
     }
@@ -302,6 +348,16 @@ impl DynNode {
                 let r2 = right.port_resistance();
                 *rp = r1 * r2 / (r1 + r2);
                 *gamma = r2 / (r1 + r2);
+            }
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                rp,
+                ..
+            } => {
+                secondary.recompute();
+                let r_sec = secondary.port_resistance();
+                *rp = *turns_ratio * *turns_ratio * r_sec;
             }
             _ => {}
         }
@@ -341,6 +397,12 @@ impl DynNode {
                 left.reset();
                 right.reset();
             }
+            Self::Transformer {
+                secondary, b_sec, ..
+            } => {
+                *b_sec = 0.0;
+                secondary.reset();
+            }
             _ => {}
         }
     }
@@ -376,6 +438,7 @@ impl DynNode {
                 // Search children for first reactive element
                 left.reactive_voltage().or_else(|| right.reactive_voltage())
             }
+            Self::Transformer { secondary, .. } => secondary.reactive_voltage(),
             _ => None,
         }
     }
@@ -389,6 +452,7 @@ impl DynNode {
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.has_reactive_elements() || right.has_reactive_elements()
             }
+            Self::Transformer { secondary, .. } => secondary.has_reactive_elements(),
             _ => false,
         }
     }
@@ -435,6 +499,17 @@ impl DynNode {
                 left.update_sample_rate(fs);
                 right.update_sample_rate(fs);
             }
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                rp,
+                ..
+            } => {
+                secondary.update_sample_rate(fs);
+                // Recompute port resistance after secondary updates
+                let r_sec = secondary.port_resistance();
+                *rp = *turns_ratio * *turns_ratio * r_sec;
+            }
             _ => {}
         }
     }
@@ -480,6 +555,9 @@ impl DynNode {
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.set_switch_position(target_switch, new_position)
                     + right.set_switch_position(target_switch, new_position)
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.set_switch_position(target_switch, new_position)
             }
             _ => 0,
         }
@@ -528,6 +606,11 @@ impl DynNode {
                 s.push_str(&right.debug_dump(indent + 1));
                 s
             }
+            Self::Transformer { secondary, turns_ratio, rp, .. } => {
+                let mut s = format!("{pad}Transformer(n={turns_ratio:.3}, Rp={rp:.1}Ω)\n");
+                s.push_str(&secondary.debug_dump(indent + 1));
+                s
+            }
         }
     }
 
@@ -537,6 +620,7 @@ impl DynNode {
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 1 + left.node_count() + right.node_count()
             }
+            Self::Transformer { secondary, .. } => 1 + secondary.node_count(),
             _ => 1,
         }
     }

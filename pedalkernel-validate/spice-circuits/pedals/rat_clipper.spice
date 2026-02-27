@@ -1,0 +1,34 @@
+* ============================================================================
+* ProCo RAT Core Clipper
+* PedalKernel Validation Circuit
+* ============================================================================
+* Op-amp gain stage with hard clipping diodes to ground
+* Key: Diodes clip to GROUND = hard clipping (aggressive)
+* Gain = Rf/Ri = 100k/1k = 100x (40dB) before clipping
+* Diodes hard limit output to ~0.6V
+* ============================================================================
+
+* Input coupling capacitor
+C1 v_in v_r1 22n
+
+* Input resistor (sets gain with R2)
+R1 v_r1 v_neg 1k
+
+* Feedback resistor (high gain)
+R2 v_neg v_opout 100k
+
+* Ideal op-amp as VCVS
+Eop v_opout 0 0 v_neg 100000
+
+* Isolation resistor before clipping
+R3 v_opout v_clip 1k
+
+* Hard clipping diodes to ground (1N914)
+D1 v_clip 0 D1N914
+D2 0 v_clip D1N914
+.model D1N914 D(Is=4.35n N=1.906 Rs=0.6 Cjo=2p)
+
+* Output coupling and load
+C2 v_clip v_out 4.7u
+Rload v_out 0 10k
+

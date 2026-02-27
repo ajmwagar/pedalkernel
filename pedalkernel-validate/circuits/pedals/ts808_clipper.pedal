@@ -1,0 +1,51 @@
+# Tube Screamer TS-808 Core Clipper
+# Op-amp with diode soft clipping in feedback loop
+# This is the "heart" of the Tube Screamer sound
+#
+# Key topology: Diodes are in FEEDBACK (soft clipping)
+# Gain set by Rf/Ri = 51k/4.7k = ~10.8
+# Diodes limit output swing to ~0.6V peak
+
+pedal "TS808 Clipper" {
+  components {
+    # Input coupling
+    C1: cap(47n)            # AC coupling
+    R1: resistor(4.7k)      # Input resistor (sets gain)
+
+    # Op-amp clipping stage
+    U1: opamp(jrc4558)      # JRC4558 (warm, compressed)
+    R2: resistor(51k)       # Feedback resistor (Rf)
+
+    # Soft clipping diodes (anti-parallel in feedback)
+    D1: diode(silicon)      # 1N914 positive clip
+    D2: diode(silicon)      # 1N914 negative clip
+
+    # Output
+    C2: cap(100n)           # Output coupling
+    R3: resistor(10k)       # Output load
+  }
+  nets {
+    # Input stage
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> U1.neg
+
+    # Op-amp reference
+    U1.pos -> gnd
+
+    # Feedback network with diodes
+    U1.neg -> R2.a
+    R2.b -> U1.out
+
+    # Soft clipping diodes (anti-parallel across feedback)
+    U1.neg -> D1.a
+    D1.b -> U1.out
+    U1.neg -> D2.b
+    D2.a -> U1.out
+
+    # Output
+    U1.out -> C2.a
+    C2.b -> R3.a, out
+    R3.b -> gnd
+  }
+}

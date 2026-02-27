@@ -1,0 +1,13 @@
+# Simple Delay Line Test
+# Fixed 10ms delay, no feedback
+# Tests basic delay line signal path
+
+pedal "Simple Delay" {
+  components {
+    DL1: delay_line(0.01, 0.01)
+  }
+  nets {
+    in -> DL1.input
+    DL1.output -> out
+  }
+}

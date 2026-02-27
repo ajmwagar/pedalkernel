@@ -78,12 +78,13 @@ fn opamp_gain_stage_amplifies() {
 
     let in_rms = rms(&input);
     let out_rms = rms(&output);
+    let actual_gain = out_rms / in_rms;
 
     // With Rf/Ri = 10, the gain stage should amplify by approximately 10x.
-    // Allow margin for WDF loss, but output must exceed input.
+    // Allow some margin for WDF loss, but should be close.
     assert!(
-        out_rms > in_rms,
-        "Op-amp gain stage (Rf/Ri=10) should amplify: out_rms={out_rms:.6}, in_rms={in_rms:.6}"
+        actual_gain > 8.0 && actual_gain < 12.0,
+        "Op-amp gain stage (Rf/Ri=10) should have gain ~10: actual={actual_gain:.2}x"
     );
 }
 

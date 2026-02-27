@@ -1,0 +1,21 @@
+* ============================================================================
+* Inverting Integrator
+* PedalKernel Validation Circuit
+* ============================================================================
+* Classic integrator with RC time constant
+* At 1kHz with R=10k, C=15.9nF: Gain ≈ 1 at 1kHz
+* Vout = -(1/RC) * integral(Vin dt)
+* For sine wave: magnitude = 1/(2*pi*f*RC)
+*
+* Expected: At 1kHz, gain ≈ 1 (frequency-dependent)
+* ============================================================================
+
+* Input resistor
+Ri v_in v_neg 10k
+
+* Feedback capacitor (15.9nF gives gain ~1 at 1kHz)
+Cf v_neg v_out 15.9n
+
+* Ideal op-amp as VCVS
+Eop v_out 0 0 v_neg 100000
+

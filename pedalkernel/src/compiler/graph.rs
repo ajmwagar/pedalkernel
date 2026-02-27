@@ -899,20 +899,18 @@ impl CircuitGraph {
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
             if let ComponentKind::Triode(tt) = &comp.kind {
+                // Triode edge: node_a = plate, node_b = cathode
+                let plate_node = e.node_a;
+                let cathode_node = e.node_b;
                 triodes.push((
                     edge_idx,
                     TriodeInfo {
                         triode_type: *tt,
-                        junction_node: if e.node_b == self.gnd_node {
-                            e.node_a
-                        } else {
-                            e.node_b
-                        },
-                        ground_node: if e.node_b == self.gnd_node {
-                            e.node_b
-                        } else {
-                            e.node_a
-                        },
+                        plate_node,
+                        cathode_node,
+                        // Keep junction_node as cathode for backwards compatibility
+                        junction_node: cathode_node,
+                        ground_node: self.gnd_node,
                     },
                 ));
             }
@@ -1614,6 +1612,11 @@ pub(super) struct TubePushPullPair {
 
 pub(super) struct TriodeInfo {
     pub(super) triode_type: TriodeType,
+    /// Plate node - connected to plate load resistor and output
+    pub(super) plate_node: NodeId,
+    /// Cathode node - connected to cathode resistor and bypass cap
+    pub(super) cathode_node: NodeId,
+    /// Legacy junction_node - kept for compatibility, equals cathode_node
     pub(super) junction_node: NodeId,
     #[allow(dead_code)]
     pub(super) ground_node: NodeId,
@@ -1969,6 +1972,52 @@ pub(super) fn make_leaf(
         // Tempco resistor: modeled as a standard resistor (nominal value).
         // Temperature compensation handled by the thermal model separately.
         ComponentKind::Tempco(r, _ppm) => DynNode::Resistor { rp: *r },
+        // Transformer: create a transformer adaptor with secondary load stub.
+        //
+        // The transformer connects primary and secondary windings.
+        // For now, we model the secondary as a simple resistive load (the output impedance).
+        // Full transformer modeling requires building the secondary subtree separately.
+        //
+        // The turns ratio determines voltage/current transformation:
+        // - V_primary / V_secondary = turns_ratio
+        // - I_secondary / I_primary = turns_ratio (power conservation)
+        // - Z_primary = turns_ratio² × Z_secondary
+        ComponentKind::Transformer(cfg) => {
+            // The secondary side is typically connected to a load or further circuit.
+            // For now, model as a resistive load based on primary inductance / turns ratio.
+            // This gives a reasonable port resistance until full topology support is added.
+            //
+            // Typical audio transformer: primary inductance ~2-10H, secondary follows.
+            // Port resistance at secondary ≈ ω×L_sec ≈ (2π×1kHz) × (L_prim / n²)
+            let l_primary = cfg.primary_inductance;
+            let n = cfg.turns_ratio; // Primary:Secondary ratio
+
+            // Secondary inductance scales by 1/n²
+            let l_secondary = l_primary / (n * n);
+
+            // At 1kHz reference frequency, calculate impedance
+            let omega_ref = 2.0 * std::f64::consts::PI * 1000.0;
+            let z_secondary = omega_ref * l_secondary;
+
+            // Create a secondary stub (inductor-like element representing magnetizing inductance)
+            // This will be replaced by actual secondary subtree in full implementation
+            let secondary = Box::new(DynNode::Inductor {
+                inductance: l_secondary,
+                rp: 2.0 * sample_rate * l_secondary,
+                state: 0.0,
+            });
+
+            // Primary port resistance = n² × R_secondary
+            let rp_sec = secondary.port_resistance();
+            let rp_prim = n * n * rp_sec;
+
+            DynNode::Transformer {
+                secondary,
+                turns_ratio: n,
+                rp: rp_prim,
+                b_sec: 0.0,
+            }
+        }
         // Diodes shouldn't appear as leaves (they're roots), but handle gracefully.
         _ => DynNode::Resistor { rp: 1000.0 },
     }

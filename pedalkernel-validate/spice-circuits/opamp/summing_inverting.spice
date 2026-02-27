@@ -1,0 +1,24 @@
+* ============================================================================
+* Inverting Summing Amplifier
+* PedalKernel Validation Circuit
+* ============================================================================
+* Two-input summing amplifier with equal weights
+* R1 = R2 = Rf = 10k
+* With one input and the other grounded:
+* Vout = -Rf/R1 * Vin = -1 * Vin
+*
+* Expected: Vout = -Vin (unity gain, inverted)
+* ============================================================================
+
+* Input 1 resistor
+R1 v_in v_neg 10k
+
+* Input 2 resistor (grounded for single input test)
+R2 0 v_neg 10k
+
+* Feedback resistor
+Rf v_neg v_out 10k
+
+* Ideal op-amp as VCVS
+Eop v_out 0 0 v_neg 100000
+

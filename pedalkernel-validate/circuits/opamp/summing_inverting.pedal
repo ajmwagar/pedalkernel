@@ -1,0 +1,32 @@
+# Inverting Summing Amplifier
+# Sums two inputs with equal weighting
+# For testing, we use one input (the second would be grounded)
+# Vout = -Rf/Ri * Vin = -1 * Vin (unity gain inverting)
+
+pedal "Inverting Summing Amplifier" {
+  components {
+    U1: opamp(tl072)
+    R1: resistor(10k)   # Input 1 resistor
+    R2: resistor(10k)   # Input 2 resistor (to ground for single input test)
+    Rf: resistor(10k)   # Feedback resistor
+  }
+  nets {
+    # Input 1 through R1 to inverting input
+    in -> R1.a
+    R1.b -> U1.neg
+
+    # Input 2 tied to ground (single input test)
+    gnd -> R2.a
+    R2.b -> U1.neg
+
+    # Feedback from output to inverting input
+    U1.out -> Rf.a
+    Rf.b -> U1.neg
+
+    # Non-inverting input to ground
+    U1.pos -> gnd
+
+    # Output
+    U1.out -> out
+  }
+}

@@ -1,0 +1,19 @@
+# LC Resonant Filter Test
+# Series LC with parallel load resistor
+# L = 100mH, C = 100nF
+# f0 = 1/(2*pi*sqrt(LC)) = 1/(2*pi*sqrt(0.1*100e-9)) = ~1592 Hz
+# Q depends on load resistance
+
+pedal "LC Resonant" {
+  components {
+    L1: inductor(100m)
+    C1: cap(100n)
+    R_load: resistor(10k)
+  }
+  nets {
+    in -> L1.a
+    L1.b -> C1.a
+    C1.b -> out, R_load.a
+    R_load.b -> gnd
+  }
+}

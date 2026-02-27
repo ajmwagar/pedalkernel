@@ -1,0 +1,28 @@
+# Inverting Integrator
+# Classic integrator with RC time constant
+# At 1kHz with R=10k, C=15.9nF: Gain ≈ 1 at 1kHz
+# Vout = -(1/RC) * integral(Vin dt)
+# For sine wave: magnitude = 1/(2*pi*f*RC)
+
+pedal "Integrator" {
+  components {
+    U1: opamp(tl072)
+    Ri: resistor(10k)     # Input resistor
+    Cf: cap(15.9n)  # Feedback capacitor (gives gain ~1 at 1kHz)
+  }
+  nets {
+    # Input through Ri to inverting input
+    in -> Ri.a
+    Ri.b -> U1.neg
+
+    # Capacitor feedback from output to inverting input
+    U1.out -> Cf.a
+    Cf.b -> U1.neg
+
+    # Non-inverting input to ground
+    U1.pos -> gnd
+
+    # Output
+    U1.out -> out
+  }
+}

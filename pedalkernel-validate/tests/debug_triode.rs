@@ -4,6 +4,7 @@ use pedalkernel::compiler::compile_pedal;
 use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::PedalProcessor;
 use std::fs;
+use std::path::Path;
 
 #[test]
 fn debug_triode_structure() {
@@ -115,4 +116,141 @@ pedal "Simple Triode" {
             println!("Compilation failed: {:?}", e);
         }
     }
+}
+
+/// Test that all triode types compile with unity pre-gain (no double-counting amplification)
+#[test]
+fn all_triode_types_have_unity_pregain() {
+    let test_pedals_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("pedalkernel/tests/test_pedals");
+
+    let triode_files = [
+        "triode_12at7.pedal",
+        "triode_12ay7.pedal",
+        "triode_12bh7.pedal",
+        "triode_6072.pedal",
+        "triode_6386.pedal",
+        "triode_clean.pedal",
+        "triode_ecc81.pedal",
+        "triode_ecc82.pedal",
+        "triode_ecc83.pedal",
+        "triode_overdrive.pedal",
+    ];
+
+    println!("\n=== Testing All Triode Types for Unity Pre-Gain ===\n");
+
+    let mut all_pass = true;
+    for file in &triode_files {
+        let path = test_pedals_dir.join(file);
+        if !path.exists() {
+            println!("  SKIP {}: file not found", file);
+            continue;
+        }
+
+        let source = fs::read_to_string(&path).expect("Failed to read");
+        let def = match parse_pedal_file(&source) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("  FAIL {}: parse error: {}", file, e);
+                all_pass = false;
+                continue;
+            }
+        };
+
+        match compile_pedal(&def, 48000.0) {
+            Ok(proc) => {
+                let dump = proc.debug_dump();
+                // Check that pre-gain is 1.0 (unity)
+                if dump.contains("Pre-Gain: 1.0") {
+                    println!("  PASS {}: Pre-Gain: 1.0", file);
+                } else {
+                    // Extract pre-gain value from dump
+                    let pre_gain_line = dump.lines()
+                        .find(|l| l.contains("Pre-Gain:"))
+                        .unwrap_or("Pre-Gain: unknown");
+                    println!("  FAIL {}: {}", file, pre_gain_line);
+                    all_pass = false;
+                }
+            }
+            Err(e) => {
+                println!("  FAIL {}: compile error: {:?}", file, e);
+                all_pass = false;
+            }
+        }
+    }
+
+    assert!(all_pass, "Some triode types did not have unity pre-gain");
+}
+
+/// Test that all pentode types compile with unity pre-gain
+#[test]
+fn all_pentode_types_have_unity_pregain() {
+    let test_pedals_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("pedalkernel/tests/test_pedals");
+
+    let pentode_files = [
+        "pentode_5881.pedal",
+        "pentode_6267.pedal",
+        "pentode_6550.pedal",
+        "pentode_6973.pedal",
+        "pentode_6aq5a.pedal",
+        "pentode_6bq5.pedal",
+        "pentode_6ca7.pedal",
+        "pentode_6l6gc.pedal",
+        "pentode_clean.pedal",
+        "pentode_el84.pedal",
+        "pentode_kt66.pedal",
+        "pentode_kt77.pedal",
+        "pentode_kt88.pedal",
+        "pentode_kt90.pedal",
+        "pentode_power.pedal",
+    ];
+
+    println!("\n=== Testing All Pentode Types for Unity Pre-Gain ===\n");
+
+    let mut all_pass = true;
+    for file in &pentode_files {
+        let path = test_pedals_dir.join(file);
+        if !path.exists() {
+            println!("  SKIP {}: file not found", file);
+            continue;
+        }
+
+        let source = fs::read_to_string(&path).expect("Failed to read");
+        let def = match parse_pedal_file(&source) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("  FAIL {}: parse error: {}", file, e);
+                all_pass = false;
+                continue;
+            }
+        };
+
+        match compile_pedal(&def, 48000.0) {
+            Ok(proc) => {
+                let dump = proc.debug_dump();
+                // Check that pre-gain is 1.0 (unity)
+                if dump.contains("Pre-Gain: 1.0") {
+                    println!("  PASS {}: Pre-Gain: 1.0", file);
+                } else {
+                    // Extract pre-gain value from dump
+                    let pre_gain_line = dump.lines()
+                        .find(|l| l.contains("Pre-Gain:"))
+                        .unwrap_or("Pre-Gain: unknown");
+                    println!("  FAIL {}: {}", file, pre_gain_line);
+                    all_pass = false;
+                }
+            }
+            Err(e) => {
+                println!("  FAIL {}: compile error: {:?}", file, e);
+                all_pass = false;
+            }
+        }
+    }
+
+    assert!(all_pass, "Some pentode types did not have unity pre-gain");
 }

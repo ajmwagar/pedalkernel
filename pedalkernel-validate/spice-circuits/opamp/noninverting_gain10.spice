@@ -1,0 +1,23 @@
+* ============================================================================
+* Non-Inverting Amplifier - Gain = 10
+* PedalKernel Validation Circuit
+* ============================================================================
+* Classic non-inverting op-amp configuration
+* Rf = 90k, Ri = 10k
+* Gain = 1 + Rf/Ri = 1 + 9 = 10
+*
+* Expected: Vout = 10 * Vin (non-inverted, 10x gain)
+* ============================================================================
+
+* Input goes directly to positive terminal (v_in = v_pos)
+
+* Ground resistor
+Ri v_neg 0 10k
+
+* Feedback resistor
+Rf v_neg v_out 90k
+
+* Ideal op-amp as VCVS with very high gain
+* Vout = A * (Vpos - Vneg) where Vpos = Vin
+Eop v_out 0 v_in v_neg 100000
+

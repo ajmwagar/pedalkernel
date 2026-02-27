@@ -1,0 +1,37 @@
+* ============================================================================
+* Fuzz Core - Single Transistor Clipper
+* PedalKernel Validation Circuit
+* ============================================================================
+* Common emitter amplifier driven into saturation
+* High-gain NPN (2N5088 hFE ~400-800) with emitter bypass
+* Clips via transistor saturation (asymmetric)
+* ============================================================================
+
+* Supply voltage (9V typical for pedals)
+Vcc vcc 0 DC 9
+
+* Input coupling
+C1 v_in v_base 100n
+
+* Bias resistor
+R1 v_base 0 470k
+
+* Collector load
+R2 vcc v_coll 10k
+
+* 2N5088 NPN transistor
+Q1 v_coll v_base v_emit Q2N5088
+.model Q2N5088 NPN(Is=14.34f Xti=3 Eg=1.11 Vaf=74.03 Bf=400
++                  Ne=1.307 Ise=14.34f Ikf=.2847 Xtb=1.5 Br=6.092
++                  Nc=2 Isc=0 Ikr=0 Rc=1 Cjc=7.306p Mjc=.3416
++                  Vjc=.75 Fc=.5 Cje=22.01p Mje=.377 Vje=.75
++                  Tr=46.91n Tf=411.1p Itf=.6 Vtf=1.7 Xtf=3)
+
+* Emitter resistor and bypass
+R3 v_emit 0 1k
+C2 v_emit 0 47u
+
+* Output coupling and load
+C3 v_coll v_out 100n
+Rload v_out 0 10k
+

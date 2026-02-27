@@ -1,0 +1,27 @@
+* ============================================================================
+* Difference Amplifier
+* PedalKernel Validation Circuit
+* ============================================================================
+* Classic difference amplifier configuration
+* R1 = R2 = R3 = R4 = 10k (unity gain)
+* Vout = (R2/R1) * (V1 - V2)
+* With V2 = 0: Vout = V1
+*
+* Expected: Vout = Vin (unity gain when V2 grounded)
+* ============================================================================
+
+* Input 1 resistor to inverting input
+R1 v_in v_neg 10k
+
+* Feedback resistor
+R2 v_neg v_out 10k
+
+* Input 2 resistor (input 2 is grounded)
+R3 0 v_pos 10k
+
+* Ground resistor on non-inverting side
+R4 v_pos 0 10k
+
+* Ideal op-amp as VCVS
+Eop v_out 0 v_pos v_neg 100000
+

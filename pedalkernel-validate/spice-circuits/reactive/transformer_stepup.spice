@@ -1,0 +1,23 @@
+* ============================================================================
+* Transformer Step-Up — 1:4 turns ratio
+* PedalKernel Validation Circuit
+* ============================================================================
+* Turns ratio n = 1:4 (step up)
+* Primary inductance Lp = 500mH
+* Secondary inductance Ls = Lp * 4^2 = 500mH * 16 = 8H
+* Coupling coefficient k = 0.99
+*
+* Expected: Vout = Vin * 4
+* ============================================================================
+
+* Primary winding
+L1 v_in 0 500mH
+
+* Secondary winding
+L2 v_out 0 8H
+
+* Magnetic coupling
+K1 L1 L2 0.99
+
+* Load resistor (high impedance for step-up)
+R1 v_out 0 10k

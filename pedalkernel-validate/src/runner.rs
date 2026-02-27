@@ -284,6 +284,8 @@ impl ValidationRunner {
 
         let effective_sr = (self.config.sample_rate * self.config.oversample) as f64;
 
+        // Test circuits have no Gain/Drive controls, so they automatically get unity gain.
+        // Only pedals with explicit gain controls get automatic distortion gain.
         pedalkernel::compiler::compile_pedal(&pedal_def, effective_sr)
             .map_err(|e| RunnerError::CompileError(format!("Compile error: {}", e)))
     }
