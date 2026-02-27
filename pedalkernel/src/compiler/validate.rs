@@ -266,7 +266,11 @@ fn check_component_values(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 /// Nets referencing component IDs that don't exist.
 fn check_net_references(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     let comp_ids: HashSet<&str> = pedal.components.iter().map(|c| c.id.as_str()).collect();
-    let reserved: HashSet<&str> = ["in", "out", "gnd", "vcc", "fx_send", "fx_return"]
+    let reserved: HashSet<&str> = [
+        "in", "out", "gnd", "vcc", "fx_send", "fx_return",
+        // Synth-specific CV/Gate nodes (from dsl.rs RESERVED_NODES)
+        "gate", "cv_pitch", "cv_mod", "cv_filter",
+    ]
         .iter()
         .copied()
         .collect();
@@ -407,9 +411,14 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
         }
 
         // Synth ICs
-        ComponentKind::Vco(_) => &["cv", "saw", "tri", "pulse", "sync", "out"],
+        ComponentKind::Vco(_) => &["cv", "saw", "tri", "pulse", "pw", "sync", "out"],
         ComponentKind::Vcf(_) => &["in", "out", "cv", "res"],
-        ComponentKind::Vca(_) => &["in", "out", "cv"],
+        ComponentKind::Vca(_) => &[
+            "in", "out", "cv",
+            // Quad VCA (SSM2164/V2164) numbered channel pins
+            "in1", "out1", "cv1", "in2", "out2", "cv2",
+            "in3", "out3", "cv3", "in4", "out4", "cv4",
+        ],
         ComponentKind::Comparator(_) => &["pos", "neg", "out"],
         ComponentKind::AnalogSwitch(_) => {
             &["in1", "out1", "ctrl1", "in2", "out2", "ctrl2",
@@ -519,6 +528,13 @@ fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
 /// Check that there's a plausible signal path from `in` to `out`.
 fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
+    // Synths (circuits with VCOs) generate their own signal — they don't need
+    // an in → out path since audio originates from the oscillator.
+    let is_synth = pedal.components.iter().any(|c| matches!(&c.kind, ComponentKind::Vco(_)));
+    if is_synth {
+        return;
+    }
+
     // Build adjacency based on net connections (node = pin key, edges = same net).
     let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
 
@@ -579,10 +595,18 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 adj.entry(kk).or_default().insert(kp);
             }
             ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
+                // Signal can flow base→collector (common-emitter),
+                // collector↔emitter, or base→emitter (follower).
+                // Connect all three terminals for reachability.
+                let kb = format!("{}.base", comp.id);
                 let kc = format!("{}.collector", comp.id);
                 let ke = format!("{}.emitter", comp.id);
+                adj.entry(kb.clone()).or_default().insert(kc.clone());
+                adj.entry(kc.clone()).or_default().insert(kb.clone());
                 adj.entry(kc.clone()).or_default().insert(ke.clone());
-                adj.entry(ke).or_default().insert(kc);
+                adj.entry(ke.clone()).or_default().insert(kc);
+                adj.entry(kb.clone()).or_default().insert(ke.clone());
+                adj.entry(ke).or_default().insert(kb);
             }
             ComponentKind::OpAmp(_) => {
                 // Op-amp: pos/neg are inputs, out is output.
