@@ -6,8 +6,8 @@ pedal "Single Diode" {
   }
   nets {
     in -> R1.a
-    R1.b -> D1.anode, RL.a, out
-    D1.cathode -> gnd
+    R1.b -> D1.a, RL.a, out
+    D1.b -> gnd
     RL.b -> gnd
   }
 }
