@@ -12,11 +12,11 @@ pedal "Photocoupler T4B Test" {
   }
   nets {
     in -> C1.a
-    C1.b -> R1.a, PC1.ldr_a
+    C1.b -> R1.a, PC1.a
     R1.b -> gnd
-    PC1.ldr_b -> R2.a
+    PC1.b -> R2.a
     R2.b -> gnd
-    PC1.ldr_a -> C2.a
+    PC1.a -> C2.a
     C2.b -> R3.a
     R3.b -> gnd
     C2.b -> out

@@ -1,4 +1,5 @@
 pub mod process;
+pub mod validate;
 
 #[cfg(all(feature = "jack-rt", feature = "tui"))]
 pub mod tui_widgets;
