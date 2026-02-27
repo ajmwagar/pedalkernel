@@ -218,6 +218,21 @@ The `inf` keyword represents infinite impedance (open circuit). This is useful f
 R_sel: resistor_switched([10k, inf, 47k])  # Position 1 = open circuit
 ```
 
+**Capacitor types**: `film` (default), `electrolytic`, `ceramic`, `tantalum`
+
+Capacitors support optional parasitic parameters:
+```
+C1: cap(22u)                              # Film cap (default), ideal
+C2: cap(22u, electrolytic)                # Electrolytic, default parasitics
+C3: cap(22u, electrolytic, leakage: 100k) # With explicit leakage resistance
+C4: cap(22u, electrolytic, leakage: 10k, da: 0.05)  # With dielectric absorption
+```
+
+| Parameter | Description | Typical Values |
+|-----------|-------------|----------------|
+| `leakage` | Parallel leakage resistance (Ω) | 100kΩ (worn) to 10MΩ (new electrolytic) |
+| `da` | Dielectric absorption coefficient (0-1) | 0.01-0.05 (electrolytic), <0.001 (film) |
+
 **Diode types**: `silicon`, `germanium`, `led`
 
 **Zener voltages**: Common values are 3.3, 4.7, 5.1, 5.6, 6.2, 9.1, 12 (in volts)
@@ -241,7 +256,7 @@ The **6386** is a remote-cutoff (variable-mu) dual triode used in the Fairchild 
 
 Triode pins: `.grid`, `.plate`, `.cathode`
 
-**Pentode types**: `ef86`, `el84`, `el34`, `6l6gc`, `6v6`, `kt66`, `6aq5a`, `6973`, `6550`
+**Pentode types**: `ef86`, `el84`, `el34`, `6l6gc`, `kt66`, `6aq5a`, `6973`, `6550`
 
 | Type   | Max Watts | Use case                              |
 |--------|-----------|---------------------------------------|
@@ -249,7 +264,6 @@ Triode pins: `.grid`, `.plate`, `.cathode`
 | EL84   | 12        | Small power amp (Champ, AC15)         |
 | EL34   | 25        | Power amp (Marshall, Hiwatt)          |
 | 6L6GC  | 30        | Power amp (Bassman, Twin)             |
-| 6V6    | 14        | Medium power amp (Tweed Deluxe)       |
 | KT66   | 35        | Power amp (early Marshall, Quad)      |
 | 6AQ5A  | 12        | Output stage, small amps              |
 | 6973   | 12        | Power amp (Ampeg Reverberocket)       |
@@ -277,7 +291,7 @@ C_screen.b -> gnd
 
 Neon bulbs are used in vintage tremolo circuits (Fender Vibrato, Wurlitzer) as part of relaxation oscillators. When paired with an LDR (photocoupler), they create smooth optical modulation.
 
-**LFO waveforms**: `sine`, `triangle`, `square`, `saw_up`, `saw_down`, `sample_and_hold`
+**LFO waveforms**: `sine`, `triangle`, `square`, `saw_up`, `saw_down`, `sample_hold`
 
 **Switched components**: Values can be provided with or without brackets:
 ```
@@ -365,6 +379,8 @@ Nets describe how component pins connect. Each net is `<from> -> <to1>, <to2>, .
 - `out` — audio output
 - `gnd` — ground reference
 - `vcc` — default power supply rail
+- `fx_send` — effects loop send (for amp-style FX loops)
+- `fx_return` — effects loop return (for amp-style FX loops)
 - Named supply rails (e.g., `V+`, `V-`, `B+`) — when using `supplies { }` block
 
 **Component pins** use dot notation: `C1.a`, `R1.b`, `D1.a`, `Q1.base`.
@@ -575,17 +591,38 @@ pedal "Tube Screamer" {
 }
 ```
 
-### Included Pedals
+### Included Examples
 
-| File | Pedal | Controls |
-|------|-------|----------|
-| `tube_screamer.pedal` | Tube Screamer TS-808 | Drive, Level |
-| `fuzz_face.pedal` | Fuzz Face | Fuzz, Volume |
-| `big_muff.pedal` | Big Muff | Sustain, Tone, Volume |
-| `dyna_comp.pedal` | MXR Dyna Comp | Sensitivity, Output |
-| `proco_rat.pedal` | ProCo RAT | Distortion, Filter, Volume |
-| `blues_driver.pedal` | Boss Blues Driver | Gain, Tone, Level |
-| `klon_centaur.pedal` | Klon Centaur | Gain, Treble, Output |
+**Pedals** (`examples/pedals/`):
+
+| File | Pedal | Type |
+|------|-------|------|
+| `overdrive/tube_screamer.pedal` | Tube Screamer TS-808 | Overdrive |
+| `overdrive/blues_driver.pedal` | Boss Blues Driver | Overdrive |
+| `overdrive/klon_centaur.pedal` | Klon Centaur | Overdrive |
+| `overdrive/fulltone_ocd.pedal` | Fulltone OCD | Overdrive |
+| `fuzz/fuzz_face.pedal` | Fuzz Face | Fuzz |
+| `fuzz/big_muff.pedal` | Big Muff | Fuzz |
+| `distortion/proco_rat.pedal` | ProCo RAT | Distortion |
+| `compressor/dyna_comp.pedal` | MXR Dyna Comp | Compressor |
+| `modulation/boss_ce2.pedal` | Boss CE-2 | Chorus |
+| `phaser/phase90.pedal` | MXR Phase 90 | Phaser |
+
+**Amplifiers** (`examples/amps/`):
+
+| File | Amp |
+|------|-----|
+| `tweed_deluxe_5e3.pedal` | Fender Tweed Deluxe 5E3 |
+| `bassman_5f6a.pedal` | Fender Bassman 5F6-A |
+| `marshall_jtm45.pedal` | Marshall JTM45 |
+
+**Synthesizer Modules** (`examples/synths/`):
+
+| File | Module |
+|------|--------|
+| `cem3340_vco.pedal` | CEM3340 VCO |
+| `moog_ladder_vcf.pedal` | Moog Ladder VCF |
+| `minisynth.pedal` | Complete mini-synth
 
 ---
 
@@ -650,6 +687,22 @@ pedalkernel process tube_screamer.pedal input.wav out.wav Drive=0.9 Level=0.5
 pedalkernel process blues_rig.board input.wav out.wav ts.Drive=0.9 bd.Gain=0.7
 ```
 
+### Validation
+
+```bash
+# Validate a single file
+pedalkernel validate my_pedal.pedal
+
+# Validate a directory (recursive)
+pedalkernel validate examples/
+
+# Validate with glob pattern
+pedalkernel validate "examples/**/*.pedal"
+
+# Auto-fix obvious issues (pin renames, etc.)
+pedalkernel validate my_pedal.pedal --fix
+```
+
 ### Interactive TUI (requires JACK)
 
 ```bash
@@ -658,6 +711,12 @@ pedalkernel tui <file.pedal>
 
 # Pedalboard
 pedalkernel tui <file.board>
+
+# Directory browser (opens folder picker)
+pedalkernel tui examples/
+
+# Loop a WAV file as input instead of JACK port
+pedalkernel tui <file.pedal> --input test.wav
 ```
 
 The TUI provides:
