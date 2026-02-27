@@ -34,7 +34,6 @@
 //! ).unwrap();
 //! ```
 
-use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -138,16 +137,12 @@ impl SpiceRunner {
 
         // Create temp directory for simulation files
         let tmpdir = TempDir::new()?;
-        let pwl_path = tmpdir.path().join("input.pwl");
         let netlist_path = tmpdir.path().join("circuit.spice");
         let output_path = tmpdir.path().join("output.txt");
 
-        // Write PWL input file
-        self.write_pwl_file(input, &pwl_path)?;
-
-        // Generate complete netlist
+        // Generate complete netlist with inline PWL
         let duration = input.len() as f64 / self.config.internal_rate();
-        let netlist = self.generate_netlist(circuit_path, &pwl_path, duration, output_node, &output_path)?;
+        let netlist = self.generate_netlist(circuit_path, input, duration, output_node, &output_path)?;
 
         std::fs::write(&netlist_path, &netlist)?;
 
@@ -179,30 +174,20 @@ impl SpiceRunner {
         Ok(resampled)
     }
 
-    /// Write input signal as PWL (piecewise-linear) file.
-    fn write_pwl_file(&self, signal: &[f64], path: &Path) -> Result<(), SpiceError> {
-        let mut file = std::fs::File::create(path)?;
-        let dt = self.config.timestep();
-
-        for (i, &sample) in signal.iter().enumerate() {
-            let t = i as f64 * dt;
-            writeln!(file, "{:.12e} {:.12e}", t, sample)?;
-        }
-
-        Ok(())
-    }
-
     /// Generate complete ngspice netlist from circuit template.
     fn generate_netlist(
         &self,
         circuit_path: &Path,
-        pwl_path: &Path,
+        input_signal: &[f64],
         duration: f64,
         output_node: &str,
         output_file: &Path,
     ) -> Result<String, SpiceError> {
         let circuit_body = std::fs::read_to_string(circuit_path)?;
         let timestep = self.config.timestep();
+
+        // Generate inline PWL data (more portable than file= syntax)
+        let pwl_data = self.generate_pwl_inline(input_signal);
 
         let netlist = format!(
             r#"* PedalKernel Golden Reference Generation
@@ -214,15 +199,13 @@ impl SpiceRunner {
 
 {circuit_body}
 
-* Input source — driven by PWL file
-VIN v_in 0 PWL file="{pwl_path}"
+* Input source — inline PWL data
+VIN v_in 0 PWL({pwl_data})
 
 * Simulation control
 .OPTIONS RELTOL=1e-6 ABSTOL=1e-12 VNTOL=1e-9
 .OPTIONS METHOD=GEAR MAXORD=2
 .OPTIONS ITL1=500 ITL2=200 ITL4=50
-* Disable random number generation for determinism
-.OPTIONS SEED=42
 
 .TRAN {timestep:.12e} {duration:.12e} 0 {timestep:.12e} UIC
 
@@ -241,12 +224,35 @@ VIN v_in 0 PWL file="{pwl_path}"
             timestep = timestep,
             duration = duration,
             circuit_body = circuit_body,
-            pwl_path = pwl_path.display(),
+            pwl_data = pwl_data,
             output_file = output_file.display(),
             output_node = output_node,
         );
 
         Ok(netlist)
+    }
+
+    /// Generate inline PWL string (decimated to reduce netlist size).
+    fn generate_pwl_inline(&self, signal: &[f64]) -> String {
+        let dt = self.config.timestep();
+
+        // Decimate signal for PWL to keep netlist manageable
+        // ngspice will interpolate between points
+        let decimate_factor = 10.max(signal.len() / 10000);
+
+        let mut pwl_points = Vec::new();
+        for (i, &sample) in signal.iter().enumerate().step_by(decimate_factor) {
+            let t = i as f64 * dt;
+            pwl_points.push(format!("{:.9e} {:.9e}", t, sample));
+        }
+
+        // Ensure we include the last point
+        if signal.len() % decimate_factor != 0 {
+            let t = (signal.len() - 1) as f64 * dt;
+            pwl_points.push(format!("{:.9e} {:.9e}", t, signal[signal.len() - 1]));
+        }
+
+        pwl_points.join(" ")
     }
 
     /// Parse wrdata output file (time, value columns).
