@@ -1495,4 +1495,54 @@ mod tests {
             errors
         );
     }
+
+    /// Scan ALL .pedal files and print every warning found.
+    /// This test always passes — it's for visibility, not assertions.
+    #[test]
+    fn scan_all_pedal_files() {
+        fn walk(dir: &std::path::Path, results: &mut Vec<(String, Vec<PedalWarning>)>) {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk(&path, results);
+                    } else if path.extension().map_or(false, |e| e == "pedal") {
+                        let src = std::fs::read_to_string(&path).unwrap();
+                        if let Ok(pedal) = parse_pedal_file(&src) {
+                            let warnings = validate_pedal(&pedal);
+                            if !warnings.is_empty() {
+                                results.push((
+                                    path.display().to_string(),
+                                    warnings,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut results = Vec::new();
+        walk(std::path::Path::new("examples"), &mut results);
+        walk(std::path::Path::new("tests/test_pedals"), &mut results);
+
+        if results.is_empty() {
+            eprintln!("\n=== All .pedal files validated clean ===\n");
+        } else {
+            let mut total = 0;
+            for (path, warnings) in &results {
+                eprintln!("\n--- {} ---", path);
+                for w in warnings {
+                    let tag = match w.severity {
+                        Severity::Info => "INFO",
+                        Severity::Warning => "WARN",
+                        Severity::Error => "ERR ",
+                    };
+                    eprintln!("  [{}] {}: {}", tag, w.code, w.message);
+                    total += 1;
+                }
+            }
+            eprintln!("\n=== {} warnings across {} files ===\n", total, results.len());
+        }
+    }
 }
