@@ -1,0 +1,15 @@
+# Dielectric absorption capacitor test
+# 10% DA coefficient — significant memory effect
+# After charging + discharging, voltage should creep back
+
+pedal "DA Cap Test" {
+  components {
+    C1: cap(10u, electrolytic, leakage: 1M, da: 0.1)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> out, gnd
+  }
+}

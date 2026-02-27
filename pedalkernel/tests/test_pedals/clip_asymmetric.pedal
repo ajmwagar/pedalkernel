@@ -1,0 +1,19 @@
+# Single silicon diode clipping test circuit
+# Half-wave rectification: clips only positive half
+# Produces even harmonics (asymmetric transfer function)
+
+pedal "Asymmetric Clip Test" {
+  components {
+    C1: cap(100n)
+    R1: resistor(4.7k)
+    D1: diode(silicon)
+    R2: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> D1.a, R2.a
+    D1.b -> gnd
+    R2.b -> out
+  }
+}

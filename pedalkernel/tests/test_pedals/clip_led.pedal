@@ -1,0 +1,19 @@
+# LED diode pair clipping test circuit
+# High Vf ≈ 1.7V — much more headroom before clipping
+# Same topology as silicon/germanium for direct comparison
+
+pedal "LED Clip Test" {
+  components {
+    C1: cap(100n)
+    R1: resistor(4.7k)
+    D1: diode_pair(led)
+    R2: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> D1.a, R2.a
+    D1.b -> gnd
+    R2.b -> out
+  }
+}

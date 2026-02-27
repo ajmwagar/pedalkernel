@@ -1,0 +1,14 @@
+# Ideal capacitor reference circuit
+# No leakage, no DA — baseline for comparison with leaky/DA caps
+
+pedal "Ideal Cap Reference" {
+  components {
+    C1: cap(1u)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> out, gnd
+  }
+}

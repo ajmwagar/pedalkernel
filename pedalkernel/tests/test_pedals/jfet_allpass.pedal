@@ -1,0 +1,47 @@
+# JFET all-pass filter test — J201 with R/C network
+# All-pass: flat magnitude, variable phase shift
+# Core building block of phaser circuits
+
+pedal "JFET Allpass Test" {
+  supply 9V
+  components {
+    C_in: cap(100n)
+    R_in: resistor(1M)
+    R_ap: resistor(24k)
+    C_ap: cap(47n)
+    J1: njfet(2n5952)
+    R_jba: resistor(150k)
+    R_jbb: resistor(150k)
+    R_load: resistor(10M)
+    U1: opamp(lm741)
+    R_vref1: resistor(470k)
+    R_vref2: resistor(470k)
+    C_vref: cap(10u)
+    C_out: cap(100n)
+  }
+  nets {
+    vcc -> R_vref1.a
+    R_vref1.b -> R_vref2.a
+    R_vref2.b -> gnd
+    R_vref1.b -> C_vref.a
+    C_vref.b -> gnd
+    in -> C_in.a
+    C_in.b -> R_in.a
+    R_in.b -> gnd
+    C_in.b -> R_ap.a
+    R_ap.b -> J1.source
+    J1.drain -> gnd
+    R_ap.b -> C_ap.a
+    C_ap.b -> U1.neg
+    C_ap.b -> R_load.a
+    R_load.b -> R_vref1.b
+    U1.neg -> U1.out
+    U1.pos -> R_vref1.b
+    R_jba.a -> R_vref1.b
+    R_jba.b -> J1.gate
+    R_jbb.a -> J1.gate
+    R_jbb.b -> gnd
+    U1.out -> C_out.a
+    C_out.b -> out
+  }
+}

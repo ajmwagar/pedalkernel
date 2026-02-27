@@ -1,0 +1,150 @@
+# LFO-modulated 4-stage JFET all-pass phaser test
+# Simplified Phase 90 — validates full phaser sweep behavior
+# LFO modulates all 4 JFETs simultaneously
+
+pedal "LFO Phaser Test" {
+  supply 9V
+  components {
+    C_in: cap(100n)
+    R_in: resistor(1M)
+    R_vref1: resistor(470k)
+    R_vref2: resistor(470k)
+    C_vref: cap(10u)
+
+    # Stage 1
+    R_ap1: resistor(24k)
+    C_ap1: cap(47n)
+    J1: njfet(2n5952)
+    R_jb1a: resistor(150k)
+    R_jb1b: resistor(150k)
+    R_load1: resistor(10M)
+    U1: opamp(lm741)
+
+    # Stage 2
+    R_ap2: resistor(24k)
+    C_ap2: cap(47n)
+    J2: njfet(2n5952)
+    R_jb2a: resistor(150k)
+    R_jb2b: resistor(150k)
+    R_load2: resistor(10M)
+    U2: opamp(lm741)
+
+    # Stage 3
+    R_ap3: resistor(24k)
+    C_ap3: cap(47n)
+    J3: njfet(2n5952)
+    R_jb3a: resistor(150k)
+    R_jb3b: resistor(150k)
+    R_load3: resistor(10M)
+    U3: opamp(lm741)
+
+    # Stage 4
+    R_ap4: resistor(24k)
+    C_ap4: cap(47n)
+    J4: njfet(2n5952)
+    R_jb4a: resistor(150k)
+    R_jb4b: resistor(150k)
+    R_load4: resistor(10M)
+    U4: opamp(lm741)
+
+    # Output mixer
+    R_dry: resistor(10k)
+    R_wet: resistor(10k)
+    R_mix_fb: resistor(10k)
+    U_mix: opamp(lm741)
+
+    # LFO
+    LFO1: lfo(triangle, 1M, 220n)
+    C_out: cap(100n)
+  }
+  nets {
+    # Virtual ground
+    vcc -> R_vref1.a
+    R_vref1.b -> R_vref2.a
+    R_vref2.b -> gnd
+    R_vref1.b -> C_vref.a
+    C_vref.b -> gnd
+
+    # Input
+    in -> C_in.a
+    C_in.b -> R_in.a
+    R_in.b -> gnd
+
+    # Stage 1
+    C_in.b -> R_ap1.a
+    R_ap1.b -> J1.source
+    J1.drain -> gnd
+    R_ap1.b -> C_ap1.a
+    C_ap1.b -> U1.neg
+    C_ap1.b -> R_load1.a
+    R_load1.b -> R_vref1.b
+    U1.neg -> U1.out
+    U1.pos -> R_vref1.b
+    R_jb1a.a -> R_vref1.b
+    R_jb1a.b -> J1.gate
+    R_jb1b.a -> J1.gate
+    R_jb1b.b -> gnd
+
+    # Stage 2
+    U1.out -> R_ap2.a
+    R_ap2.b -> J2.source
+    J2.drain -> gnd
+    R_ap2.b -> C_ap2.a
+    C_ap2.b -> U2.neg
+    C_ap2.b -> R_load2.a
+    R_load2.b -> R_vref1.b
+    U2.neg -> U2.out
+    U2.pos -> R_vref1.b
+    R_jb2a.a -> R_vref1.b
+    R_jb2a.b -> J2.gate
+    R_jb2b.a -> J2.gate
+    R_jb2b.b -> gnd
+
+    # Stage 3
+    U2.out -> R_ap3.a
+    R_ap3.b -> J3.source
+    J3.drain -> gnd
+    R_ap3.b -> C_ap3.a
+    C_ap3.b -> U3.neg
+    C_ap3.b -> R_load3.a
+    R_load3.b -> R_vref1.b
+    U3.neg -> U3.out
+    U3.pos -> R_vref1.b
+    R_jb3a.a -> R_vref1.b
+    R_jb3a.b -> J3.gate
+    R_jb3b.a -> J3.gate
+    R_jb3b.b -> gnd
+
+    # Stage 4
+    U3.out -> R_ap4.a
+    R_ap4.b -> J4.source
+    J4.drain -> gnd
+    R_ap4.b -> C_ap4.a
+    C_ap4.b -> U4.neg
+    C_ap4.b -> R_load4.a
+    R_load4.b -> R_vref1.b
+    U4.neg -> U4.out
+    U4.pos -> R_vref1.b
+    R_jb4a.a -> R_vref1.b
+    R_jb4a.b -> J4.gate
+    R_jb4b.a -> J4.gate
+    R_jb4b.b -> gnd
+
+    # LFO → all JFETs
+    LFO1.out -> J1.vgs
+    LFO1.out -> J2.vgs
+    LFO1.out -> J3.vgs
+    LFO1.out -> J4.vgs
+
+    # Output mixer
+    C_in.b -> R_dry.a
+    R_dry.b -> U_mix.neg
+    U4.out -> R_wet.a
+    R_wet.b -> U_mix.neg
+    R_mix_fb.a -> U_mix.neg
+    R_mix_fb.b -> U_mix.out
+    U_mix.pos -> R_vref1.b
+    U_mix.out -> C_out.a
+    C_out.b -> out
+  }
+}

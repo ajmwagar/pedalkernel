@@ -1,0 +1,19 @@
+# Germanium diode pair clipping test circuit
+# Softer knee, lower Vf ≈ 0.3V (1N34A / OA91)
+# Same topology as silicon test for direct comparison
+
+pedal "Germanium Clip Test" {
+  components {
+    C1: cap(100n)
+    R1: resistor(4.7k)
+    D1: diode_pair(germanium)
+    R2: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> D1.a, R2.a
+    D1.b -> gnd
+    R2.b -> out
+  }
+}

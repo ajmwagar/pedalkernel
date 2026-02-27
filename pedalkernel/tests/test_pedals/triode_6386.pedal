@@ -1,0 +1,34 @@
+# 6386 — remote-cutoff dual triode (mu ≈ 25)
+# Used in compressors and VCA circuits, variable-mu design
+
+pedal "Triode 6386 Test" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    C1: cap(22n)
+    R1: resistor(1M)
+    V1: triode(6386)
+    R2: resistor(100k)
+    R3: resistor(1.5k)
+    C2: cap(25u)
+    C3: cap(22n)
+    R4: resistor(1M)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, V1.grid
+    R1.b -> gnd
+    vcc -> R2.a
+    R2.b -> V1.plate
+    V1.cathode -> R3.a, C2.a
+    R3.b -> gnd
+    C2.b -> gnd
+    V1.plate -> C3.a
+    C3.b -> R4.a
+    R4.b -> gnd
+    C3.b -> out
+  }
+}

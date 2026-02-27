@@ -1,0 +1,23 @@
+# BBD long delay test — MN3005 (4096 stages)
+# Tests leakage accumulation over many stages, HF roll-off
+
+pedal "BBD Long Delay Test" {
+  components {
+    C1: cap(100n)
+    R1: resistor(10k)
+    BBD1: bbd(mn3005)
+    LFO1: lfo(triangle, 220k, 22n)
+    C2: cap(100n)
+    R2: resistor(47k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, BBD1.in
+    R1.b -> gnd
+    BBD1.out -> C2.a
+    C2.b -> R2.a
+    R2.b -> gnd
+    C2.b -> out
+    LFO1.out -> BBD1.clock
+  }
+}

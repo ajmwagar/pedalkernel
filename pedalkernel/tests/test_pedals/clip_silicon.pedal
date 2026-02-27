@@ -1,0 +1,19 @@
+# Silicon diode pair clipping test circuit
+# Symmetric hard clipping at Vf ≈ 0.6V (1N4148 / 1N914)
+# Simple topology: input coupling → resistor → diode pair to ground → output
+
+pedal "Silicon Clip Test" {
+  components {
+    C1: cap(100n)
+    R1: resistor(4.7k)
+    D1: diode_pair(silicon)
+    R2: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> D1.a, R2.a
+    D1.b -> gnd
+    R2.b -> out
+  }
+}

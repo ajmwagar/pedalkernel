@@ -1,0 +1,31 @@
+# Triangle LFO modulation test
+# Same circuit as sine LFO but with triangle waveform
+# Should produce linear ramp modulation
+
+pedal "LFO Triangle Test" {
+  supply 9V
+  components {
+    C_in: cap(100n)
+    R_in: resistor(1M)
+    R1: resistor(10k)
+    J1: njfet(2n5952)
+    R_bias_a: resistor(150k)
+    R_bias_b: resistor(150k)
+    LFO1: lfo(triangle, 100k, 47n)
+    R2: resistor(10k)
+  }
+  nets {
+    in -> C_in.a
+    C_in.b -> R_in.a
+    R_in.b -> gnd
+    C_in.b -> R1.a
+    R1.b -> J1.source, R2.a
+    J1.drain -> gnd
+    R_bias_a.a -> vcc
+    R_bias_a.b -> J1.gate
+    R_bias_b.a -> J1.gate
+    R_bias_b.b -> gnd
+    LFO1.out -> J1.vgs
+    R2.b -> out
+  }
+}

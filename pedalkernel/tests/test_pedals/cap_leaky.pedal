@@ -1,0 +1,15 @@
+# Leaky capacitor test — electrolytic with low leakage resistance
+# 1kΩ leakage is severely worn — tau = 1ms at 48kHz
+# Compare to cap_ideal_reference.pedal for A/B
+
+pedal "Leaky Cap Test" {
+  components {
+    C1: cap(1u, electrolytic, leakage: 1k)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> out, gnd
+  }
+}

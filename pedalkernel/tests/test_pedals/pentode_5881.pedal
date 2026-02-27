@@ -1,0 +1,34 @@
+# 5881 — military equivalent of 6L6GC
+# Should be identical to 6L6GC until individually modeled
+
+pedal "Pentode 5881 Test" {
+  supply 450V {
+    impedance: 80
+    filter_cap: 50u
+    rectifier: solid_state
+  }
+  components {
+    C1: cap(22n)
+    R1: resistor(1M)
+    V1: pentode(5881)
+    R2: resistor(100k)
+    R3: resistor(470)
+    C2: cap(100u)
+    C3: cap(22n)
+    R4: resistor(1M)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, V1.grid
+    R1.b -> gnd
+    vcc -> R2.a
+    R2.b -> V1.plate
+    V1.cathode -> R3.a, C2.a
+    R3.b -> gnd
+    C2.b -> gnd
+    V1.plate -> C3.a
+    C3.b -> R4.a
+    R4.b -> gnd
+    C3.b -> out
+  }
+}
