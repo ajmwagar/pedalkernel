@@ -1,0 +1,408 @@
+# ============================================================================
+# PedalKernel SPICE Validation Suite Configuration
+# ============================================================================
+# This file defines every test case in the validation harness.
+# Each test specifies: circuit, input signals, comparison metrics, and pass criteria.
+#
+# The harness runs ngspice with FIXED timestep = 1/(sample_rate * oversample)
+# to ensure deterministic, sample-aligned output for comparison.
+# ============================================================================
+
+global:
+  sample_rate: 96000
+  oversample: 4            # effective internal rate = 384 kHz
+  ngspice_opts:
+    reltol: 1.0e-6
+    abstol: 1.0e-12
+    vntol: 1.0e-9
+    method: gear            # BDF — stable for stiff tube circuits
+    maxord: 2
+  fft_window: blackmanharris
+  fft_size: 65536
+
+# ============================================================================
+# LAYER 1 — Linear circuits (analytical + SPICE reference)
+# ============================================================================
+suites:
+  linear:
+    description: "Linear circuit transfer function validation"
+
+    tests:
+      rc_lowpass:
+        circuit: linear/rc_lowpass.spice
+        description: "First-order RC lowpass, R=10k C=10n, fc≈1.59kHz"
+        signals:
+          - type: impulse
+            amplitude: 1.0
+        metrics:
+          - type: transfer_function
+            reference: analytical    # H(s) = 1/(1 + sRC), BLT'd
+            params: { R: 10000, C: 10.0e-9 }
+        pass_criteria:
+          max_magnitude_error_db: -120.0   # essentially floating-point exact
+          max_phase_error_deg: 0.01
+
+      rlc_bandpass:
+        circuit: linear/rlc_bandpass.spice
+        description: "Series RLC bandpass, R=1k L=10mH C=100n"
+        signals:
+          - type: impulse
+            amplitude: 1.0
+        metrics:
+          - type: transfer_function
+            reference: analytical
+            params: { R: 1000, L: 10.0e-3, C: 100.0e-9 }
+        pass_criteria:
+          max_magnitude_error_db: -100.0
+          max_phase_error_deg: 0.1
+
+      bridged_t:
+        circuit: linear/bridged_t.spice
+        description: "Bridged-T notch filter (requires R-type adaptor)"
+        signals:
+          - type: impulse
+            amplitude: 1.0
+        metrics:
+          - type: transfer_function
+            reference: spice_ac       # compare WDF IR FFT to ngspice .AC
+        pass_criteria:
+          max_magnitude_error_db: -80.0
+          max_phase_error_deg: 0.5
+
+      bassman_tonestack:
+        circuit: linear/bassman_tonestack.spice
+        description: "Fender Bassman tone stack — 3 pot settings"
+        signals:
+          - type: impulse
+            amplitude: 1.0
+        sweep_params:
+          treble: [0.1, 0.5, 0.9]
+          mid:    [0.1, 0.5, 0.9]
+          bass:   [0.1, 0.5, 0.9]
+        metrics:
+          - type: transfer_function
+            reference: spice_ac
+        pass_criteria:
+          max_magnitude_error_db: -60.0
+          max_phase_error_deg: 2.0
+
+      fairchild_input_transformer:
+        circuit: linear/fairchild_input_xfmr.spice
+        description: "Fairchild input transformer (linear model: Rp,Lp,Rs,Ls,Cw,Rc,Lm,n=1:9)"
+        signals:
+          - type: impulse
+            amplitude: 1.0
+        metrics:
+          - type: transfer_function
+            reference: spice_ac
+        pass_criteria:
+          max_magnitude_error_db: -60.0
+          max_phase_error_deg: 3.0
+
+  # ============================================================================
+  # LAYER 3 — Nonlinear circuits (SPICE ground truth)
+  # ============================================================================
+  nonlinear:
+    description: "Nonlinear circuit SPICE comparison"
+
+    tests:
+      diode_clipper:
+        circuit: nonlinear/diode_clipper.spice
+        description: "Symmetric Si diode clipper — simplest nonlinear test"
+        signals:
+          - type: sine
+            frequency: 1000
+            amplitude: 0.5
+            duration: 0.05
+            label: "low_level"
+          - type: sine
+            frequency: 1000
+            amplitude: 5.0
+            duration: 0.05
+            label: "clipping"
+          - type: exp_sweep
+            f_start: 20
+            f_end: 20000
+            duration: 1.0
+            amplitude: 2.0
+            label: "sweep"
+        metrics:
+          - type: time_domain
+          - type: thd
+            fundamental: 1000
+          - type: spectral
+        pass_criteria:
+          normalized_rms_error_db: -60.0
+          peak_error_db: -40.0
+          thd_error_db: 1.0
+          spectral_error_db: 3.0
+
+      common_cathode_12ax7:
+        circuit: nonlinear/common_cathode_12ax7.spice
+        description: "Single 12AX7 triode, common cathode — Dempwolf model"
+        signals:
+          - type: sine
+            frequency: 1000
+            amplitude: 0.125
+            duration: 0.05
+            label: "clean"
+          - type: sine
+            frequency: 1000
+            amplitude: 1.5
+            duration: 0.05
+            label: "driven"
+          - type: exp_sweep
+            f_start: 20
+            f_end: 20000
+            duration: 1.0
+            amplitude: 0.5
+            label: "sweep"
+          - type: two_tone
+            f1: 1000
+            f2: 1100
+            amplitude: 0.5
+            duration: 0.1
+            label: "imd"
+        metrics:
+          - type: time_domain
+          - type: thd
+            fundamental: 1000
+          - type: imd
+            f1: 1000
+            f2: 1100
+          - type: spectral
+        pass_criteria:
+          normalized_rms_error_db: -55.0
+          peak_error_db: -35.0
+          thd_error_db: 1.5
+          spectral_error_db: 3.0
+
+      push_pull_6386:
+        circuit: nonlinear/push_pull_6386.spice
+        description: "Push-pull 6386 pair — core Fairchild gain element"
+        signals:
+          - type: sine
+            frequency: 1000
+            amplitude: 0.125
+            duration: 0.05
+            label: "nominal"
+          - type: sine
+            frequency: 1000
+            amplitude: 0.125
+            duration: 0.05
+            bias_sweep: [-5, -10, -20, -40]    # sweep sidechain bias
+            label: "gain_reduction"
+          - type: exp_sweep
+            f_start: 20
+            f_end: 20000
+            duration: 1.0
+            amplitude: 0.125
+            label: "sweep"
+        metrics:
+          - type: time_domain
+          - type: thd
+            fundamental: 1000
+          - type: even_odd_ratio        # push-pull cancellation metric
+          - type: spectral
+        pass_criteria:
+          normalized_rms_error_db: -50.0
+          peak_error_db: -30.0
+          thd_error_db: 2.0
+          even_harmonic_suppression_db: 40.0    # even harmonics must be >40dB below odd
+
+      sidechain_detector:
+        circuit: nonlinear/fairchild_sidechain.spice
+        description: "Fairchild sidechain — 12AX7 detector + 12BH7 driver + 6973 PP output + rectifier"
+        signals:
+          - type: sine
+            frequency: 1000
+            amplitude_sweep: [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+            duration: 0.2
+            label: "level_sweep"
+        metrics:
+          - type: dc_output              # rectified control voltage vs. input amplitude
+          - type: time_domain
+        pass_criteria:
+          dc_output_error_percent: 5.0
+          normalized_rms_error_db: -40.0
+
+  # ============================================================================
+  # LAYER 4 — Fairchild-specific behavioral tests
+  # ============================================================================
+  fairchild:
+    description: "Fairchild 670/660 system-level behavioral validation"
+
+    tests:
+      static_gain_curves:
+        circuit: dynamics/fairchild_670_full.spice
+        description: "Input/output transfer curves at various threshold settings"
+        signals:
+          - type: level_sweep
+            frequency: 1000
+            levels_dbvu: [-30, -25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30]
+            duration_per_level: 0.5      # hold each level for settling
+        sweep_params:
+          threshold_ac: [0.2, 0.5, 0.8]
+          threshold_dc: [0.3, 0.5, 0.7]
+        metrics:
+          - type: static_gain
+            reference: fairchild_manual_curves
+        pass_criteria:
+          gain_error_db: 2.0             # within 2dB of manual curves
+          knee_shape: soft               # must not exhibit hard knee
+
+      time_constant_positions:
+        circuit: dynamics/fairchild_670_full.spice
+        description: "Attack/release timing for all 6 TC positions"
+        signals:
+          - type: tone_burst
+            frequency: 1000
+            amplitude_dbvu: 10           # 10 dB above threshold
+            on_ms: 100
+            off_ms: 5000
+            repetitions: 1
+        sweep_params:
+          tc_position: [1, 2, 3, 4, 5, 6]
+        metrics:
+          - type: envelope_timing
+            attack_measure: [10, 90]     # 10% to 90% of final GR
+            release_measure: [90, 10]    # 90% to 10% recovery
+        pass_criteria:
+          attack_tolerance_percent: 20
+          release_tolerance_percent: 20
+        expected_timing:                 # from Fairchild manual
+          1: { attack_ms: 0.2, release_s: 0.3 }
+          2: { attack_ms: 0.2, release_s: 0.8 }
+          3: { attack_ms: 0.4, release_s: 2.0 }
+          4: { attack_ms: 0.8, release_s: 5.0 }
+          5: { attack_ms: 0.4, release_s: 2.0 }   # single burst
+          6: { attack_ms: 0.2, release_s: 0.3 }    # single burst
+
+      programme_dependent_release:
+        circuit: dynamics/fairchild_670_full.spice
+        description: "Multi-tier release behavior on TC positions 5 and 6"
+        signals:
+          - type: tone_burst
+            frequency: 1000
+            amplitude_dbvu: 10
+            on_ms: 100
+            off_ms: 900
+            repetitions: 10              # repeated bursts charge CU, CV
+            label: "repeated_bursts"
+          - type: tone_burst
+            frequency: 1000
+            amplitude_dbvu: 10
+            on_ms: 100
+            off_ms: 30000
+            repetitions: 1
+            label: "single_burst"
+        sweep_params:
+          tc_position: [5, 6]
+        metrics:
+          - type: release_comparison
+            # release after repeated bursts must be SLOWER than single burst
+        pass_criteria:
+          repeated_release_slower: true
+          release_ratio_min: 2.0         # repeated should be ≥2x slower
+
+      push_pull_cancellation:
+        circuit: dynamics/fairchild_670_full.spice
+        description: "Even harmonic suppression from push-pull topology"
+        signals:
+          - type: sine
+            frequency: 1000
+            amplitude_dbvu: 0
+            duration: 0.1
+        metrics:
+          - type: even_odd_ratio
+        pass_criteria:
+          even_harmonic_suppression_db: 40.0
+
+      stereo_matrix:
+        circuit: dynamics/fairchild_670_stereo.spice
+        description: "Lateral/vertical matrix encoding and decoding"
+        signals:
+          - type: stereo_test
+            left: { frequency: 1000, amplitude: 1.0 }
+            right: { frequency: 0, amplitude: 0 }    # L-only
+            duration: 0.1
+            label: "left_only"
+          - type: stereo_test
+            left: { frequency: 1000, amplitude: 1.0 }
+            right: { frequency: 1000, amplitude: 1.0, phase: 0 }
+            duration: 0.1
+            label: "mono_sum"
+          - type: stereo_test
+            left: { frequency: 1000, amplitude: 1.0 }
+            right: { frequency: 1000, amplitude: 1.0, phase: 180 }
+            duration: 0.1
+            label: "difference_only"
+        sweep_params:
+          mode: [ab, lat_vert]
+        metrics:
+          - type: channel_separation
+          - type: matrix_accuracy
+        pass_criteria:
+          ab_separation_db: 60.0
+          lat_vert_separation_db: 40.0
+
+      feedback_stability:
+        circuit: dynamics/fairchild_670_full.spice
+        description: "AGC feedback loop stability across sample rates"
+        signals:
+          - type: impulse
+            amplitude: 10.0             # hard hit
+        sweep_params:
+          sample_rate: [44100, 48000, 96000, 192000]
+        metrics:
+          - type: decay_envelope
+        pass_criteria:
+          divergence: false              # output must decay, never grow
+          settled_within_ms: 5000        # must reach noise floor within 5s
+
+  # ============================================================================
+  # LAYER 5 — Stress tests
+  # ============================================================================
+  stress:
+    description: "Edge cases and stress conditions"
+
+    tests:
+      dc_stability:
+        circuit: nonlinear/push_pull_6386.spice
+        description: "DC offset accumulation over long run"
+        signals:
+          - type: silence
+            duration: 10.0
+        metrics:
+          - type: dc_drift
+        pass_criteria:
+          max_dc_drift_mv: 1.0
+
+      sample_rate_invariance:
+        circuit: nonlinear/diode_clipper.spice
+        description: "Output must be perceptually identical across sample rates"
+        signals:
+          - type: sine
+            frequency: 1000
+            amplitude: 2.0
+            duration: 0.1
+        sweep_params:
+          sample_rate: [44100, 48000, 88200, 96000]
+        metrics:
+          - type: cross_rate_comparison
+            reference_rate: 96000
+        pass_criteria:
+          thd_variance_db: 2.0           # THD should not change by >2dB across rates
+
+      energy_conservation:
+        circuit: nonlinear/push_pull_6386.spice
+        description: "Passive circuit must not create energy"
+        signals:
+          - type: sine
+            frequency: 1000
+            amplitude: 0.5
+            duration: 1.0
+        metrics:
+          - type: energy_balance
+        pass_criteria:
+          max_energy_creation_db: -80.0  # energy in - energy out - stored ≈ 0

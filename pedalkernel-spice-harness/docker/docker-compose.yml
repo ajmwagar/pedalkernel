@@ -1,0 +1,68 @@
+# ============================================================================
+# PedalKernel SPICE Validation Harness — Docker Compose
+# ============================================================================
+# Usage:
+#   docker compose run --rm validate --suite all
+#   docker compose run --rm validate --suite linear
+#   docker compose run --rm validate --suite nonlinear --circuit diode_clipper
+#   docker compose run --rm validate --suite fairchild --test tc_positions
+#   docker compose run --rm golden-regen                # regenerate golden refs
+#
+# Mount your PedalKernel WDF output into ./wdf_output/ before running.
+# Results (JSON reports, plots) appear in ./results/
+# ============================================================================
+
+services:
+
+  # Main validation runner
+  validate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ../golden:/harness/golden
+      - ../wdf_output:/harness/wdf_output:ro
+      - ../results:/harness/results
+      - ../circuits:/harness/circuits:ro
+      - ../config:/harness/config:ro
+    environment:
+      - SAMPLE_RATE=${SAMPLE_RATE:-96000}
+      - OVERSAMPLE=${OVERSAMPLE:-4}
+      - NGSPICE_THREADS=1            # Force single-thread for determinism
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+
+  # Golden reference regeneration
+  # Run this once to populate golden/ with SPICE reference outputs
+  golden-regen:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    entrypoint: ["python3", "/harness/scripts/generate_golden.py"]
+    command: ["--all"]
+    volumes:
+      - ../golden:/harness/golden
+      - ../circuits:/harness/circuits:ro
+      - ../config:/harness/config:ro
+    environment:
+      - SAMPLE_RATE=${SAMPLE_RATE:-96000}
+      - OVERSAMPLE=${OVERSAMPLE:-4}
+      - NGSPICE_THREADS=1
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+
+  # Interactive shell for debugging
+  debug:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    entrypoint: ["/bin/bash"]
+    stdin_open: true
+    tty: true
+    volumes:
+      - ../golden:/harness/golden
+      - ../wdf_output:/harness/wdf_output
+      - ../results:/harness/results
+      - ../circuits:/harness/circuits
+      - ../config:/harness/config
+      - ../scripts:/harness/scripts

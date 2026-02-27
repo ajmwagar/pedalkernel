@@ -657,6 +657,41 @@ impl CompiledPedal {
             return;
         }
     }
+
+    /// Debug dump: print complete pedal structure for debugging.
+    ///
+    /// Shows gain structure, all WDF stages with their trees, and control bindings.
+    pub fn debug_dump(&self) -> String {
+        let mut s = String::new();
+        s.push_str("═══════════════════════════════════════════════════════════════════════════\n");
+        s.push_str(&format!("CompiledPedal Debug Dump\n"));
+        s.push_str("═══════════════════════════════════════════════════════════════════════════\n\n");
+
+        s.push_str(&format!("Sample Rate: {} Hz\n", self.sample_rate));
+        s.push_str(&format!("Supply Voltage: {:.1}V\n", self.supply_voltage));
+        s.push_str(&format!("Pre-Gain: {:.6} ({:.2} dB)\n", self.pre_gain, 20.0 * self.pre_gain.log10()));
+        s.push_str(&format!("Output Gain: {:.6} ({:.2} dB)\n", self.output_gain, 20.0 * self.output_gain.log10()));
+        s.push_str(&format!("Gain Range: ({:.6}, {:.6})\n", self.gain_range.0, self.gain_range.1));
+        s.push_str(&format!("Oversampling: {:?}\n\n", self.oversampling));
+
+        s.push_str(&format!("WDF Stages: {}\n", self.stages.len()));
+        s.push_str("───────────────────────────────────────────────────────────────────────────\n");
+        for (i, stage) in self.stages.iter().enumerate() {
+            s.push_str(&format!("\n[Stage {}]\n", i));
+            s.push_str(&stage.debug_dump());
+            s.push('\n');
+        }
+
+        if !self.controls.is_empty() {
+            s.push_str("\nControls:\n");
+            s.push_str("───────────────────────────────────────────────────────────────────────────\n");
+            for ctrl in &self.controls {
+                s.push_str(&format!("  {} -> {:?}\n", ctrl.label, ctrl.target));
+            }
+        }
+
+        s
+    }
 }
 
 impl PedalProcessor for CompiledPedal {

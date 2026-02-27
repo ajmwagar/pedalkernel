@@ -424,5 +424,61 @@ impl DynNode {
             _ => 0,
         }
     }
+
+    /// Debug dump: print tree structure with port resistances and coefficients.
+    /// Returns a multi-line string showing the WDF tree hierarchy.
+    pub fn debug_dump(&self, indent: usize) -> String {
+        let pad = "  ".repeat(indent);
+        match self {
+            Self::Resistor { rp } => {
+                format!("{pad}Resistor(Rp={rp:.1}Ω)")
+            }
+            Self::Capacitor { capacitance, rp, state } => {
+                format!("{pad}Capacitor(C={capacitance:.3e}F, Rp={rp:.1}Ω, state={state:.6})")
+            }
+            Self::LeakyCapacitor { capacitance, rp, state, leakage_decay, .. } => {
+                format!("{pad}LeakyCapacitor(C={capacitance:.3e}F, Rp={rp:.1}Ω, state={state:.6}, decay={leakage_decay:.6})")
+            }
+            Self::Inductor { inductance, rp, state } => {
+                format!("{pad}Inductor(L={inductance:.3e}H, Rp={rp:.1}Ω, state={state:.6})")
+            }
+            Self::VoltageSource { voltage, rp } => {
+                format!("{pad}VoltageSource(V={voltage:.3}V, Rp={rp:.1}Ω)")
+            }
+            Self::Pot { comp_id, max_resistance, position, rp } => {
+                format!("{pad}Pot(id=\"{comp_id}\", max={max_resistance:.1}Ω, pos={position:.3}, Rp={rp:.1}Ω)")
+            }
+            Self::Photocoupler { comp_id, inner } => {
+                format!("{pad}Photocoupler(id=\"{comp_id}\", Rp={:.1}Ω)", inner.port_resistance())
+            }
+            Self::SwitchedResistor { switch_id, path_index, position, rp, .. } => {
+                format!("{pad}SwitchedResistor(switch=\"{switch_id}\", path={path_index}, pos={position}, Rp={rp:.1}Ω)")
+            }
+            Self::Series { left, right, rp, gamma, b1, b2 } => {
+                let mut s = format!("{pad}Series(Rp={rp:.1}Ω, γ={gamma:.6}, b1={b1:.6}, b2={b2:.6})\n");
+                s.push_str(&left.debug_dump(indent + 1));
+                s.push('\n');
+                s.push_str(&right.debug_dump(indent + 1));
+                s
+            }
+            Self::Parallel { left, right, rp, gamma, b1, b2 } => {
+                let mut s = format!("{pad}Parallel(Rp={rp:.1}Ω, γ={gamma:.6}, b1={b1:.6}, b2={b2:.6})\n");
+                s.push_str(&left.debug_dump(indent + 1));
+                s.push('\n');
+                s.push_str(&right.debug_dump(indent + 1));
+                s
+            }
+        }
+    }
+
+    /// Count total nodes in tree (for statistics).
+    pub fn node_count(&self) -> usize {
+        match self {
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                1 + left.node_count() + right.node_count()
+            }
+            _ => 1,
+        }
+    }
 }
 

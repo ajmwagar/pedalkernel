@@ -1,0 +1,248 @@
+# ============================================================================
+# PedalKernel Compiler Validation — GitHub Actions CI
+# ============================================================================
+# Runs the SPICE validation harness on every push/PR that touches
+# the WDF compiler. Uses cached Docker images and golden references.
+# ============================================================================
+
+name: WDF Compiler Validation
+
+on:
+  push:
+    paths:
+      - 'compiler/**'
+      - 'wdf-engine/**'
+      - 'models/**'
+  pull_request:
+    paths:
+      - 'compiler/**'
+      - 'wdf-engine/**'
+      - 'models/**'
+
+env:
+  SAMPLE_RATE: 96000
+  OVERSAMPLE: 4
+
+jobs:
+  # ----------------------------------------------------------------
+  # Build the validation harness Docker image (cached)
+  # ----------------------------------------------------------------
+  build-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-harness-${{ hashFiles('validation/docker/Dockerfile', 'validation/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-harness-
+
+      - name: Build harness image
+        uses: docker/build-push-action@v5
+        with:
+          context: validation
+          file: validation/docker/Dockerfile
+          tags: pk-validation-harness:latest
+          load: true
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Save Docker image
+        run: docker save pk-validation-harness:latest | gzip > /tmp/harness-image.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harness-image
+          path: /tmp/harness-image.tar.gz
+          retention-days: 1
+
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+  # ----------------------------------------------------------------
+  # Compile test circuits with PedalKernel compiler under test
+  # ----------------------------------------------------------------
+  compile-circuits:
+    runs-on: ubuntu-latest
+    needs: build-harness
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build PedalKernel compiler
+        run: |
+          cd compiler
+          cargo build --release
+
+      - name: Compile all validation circuits to WDF
+        run: |
+          mkdir -p validation/wdf_output
+          python3 scripts/compile_validation_circuits.py \
+            --compiler ./compiler/target/release/pedalkernel \
+            --circuits validation/circuits/ \
+            --output validation/wdf_output/ \
+            --sample-rate $SAMPLE_RATE \
+            --oversample $OVERSAMPLE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wdf-output
+          path: validation/wdf_output/
+          retention-days: 1
+
+  # ----------------------------------------------------------------
+  # Run validation suite
+  # ----------------------------------------------------------------
+  validate:
+    runs-on: ubuntu-latest
+    needs: [build-harness, compile-circuits]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: harness-image
+          path: /tmp
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wdf-output
+          path: validation/wdf_output
+
+      - name: Load Docker image
+        run: docker load < /tmp/harness-image.tar.gz
+
+      # Golden references are stored in the repo (LFS) or a cache
+      - name: Cache golden references
+        uses: actions/cache@v4
+        with:
+          path: validation/golden
+          key: golden-refs-${{ hashFiles('validation/circuits/**', 'validation/config/validation_suite.yml') }}
+          restore-keys: |
+            golden-refs-
+
+      - name: Generate missing golden references
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/validation/golden:/harness/golden \
+            -v ${{ github.workspace }}/validation/circuits:/harness/circuits:ro \
+            -v ${{ github.workspace }}/validation/config:/harness/config:ro \
+            -e SAMPLE_RATE=$SAMPLE_RATE \
+            -e OVERSAMPLE=$OVERSAMPLE \
+            -e NGSPICE_THREADS=1 \
+            -e OMP_NUM_THREADS=1 \
+            --entrypoint python3 \
+            pk-validation-harness:latest \
+            /harness/scripts/generate_golden.py --all
+
+      # --- Layer 1: Linear circuits ---
+      - name: "Validate: Linear circuits"
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/validation/golden:/harness/golden:ro \
+            -v ${{ github.workspace }}/validation/wdf_output:/harness/wdf_output:ro \
+            -v ${{ github.workspace }}/validation/results:/harness/results \
+            -v ${{ github.workspace }}/validation/circuits:/harness/circuits:ro \
+            -v ${{ github.workspace }}/validation/config:/harness/config:ro \
+            -e SAMPLE_RATE=$SAMPLE_RATE \
+            -e OVERSAMPLE=$OVERSAMPLE \
+            pk-validation-harness:latest \
+            --suite linear -v
+
+      # --- Layer 3: Nonlinear circuits ---
+      - name: "Validate: Nonlinear circuits"
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/validation/golden:/harness/golden:ro \
+            -v ${{ github.workspace }}/validation/wdf_output:/harness/wdf_output:ro \
+            -v ${{ github.workspace }}/validation/results:/harness/results \
+            -v ${{ github.workspace }}/validation/circuits:/harness/circuits:ro \
+            -v ${{ github.workspace }}/validation/config:/harness/config:ro \
+            -e SAMPLE_RATE=$SAMPLE_RATE \
+            -e OVERSAMPLE=$OVERSAMPLE \
+            pk-validation-harness:latest \
+            --suite nonlinear -v
+
+      # --- Layer 4: Fairchild behavioral ---
+      - name: "Validate: Fairchild behavioral tests"
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/validation/golden:/harness/golden:ro \
+            -v ${{ github.workspace }}/validation/wdf_output:/harness/wdf_output:ro \
+            -v ${{ github.workspace }}/validation/results:/harness/results \
+            -v ${{ github.workspace }}/validation/circuits:/harness/circuits:ro \
+            -v ${{ github.workspace }}/validation/config:/harness/config:ro \
+            -e SAMPLE_RATE=$SAMPLE_RATE \
+            -e OVERSAMPLE=$OVERSAMPLE \
+            pk-validation-harness:latest \
+            --suite fairchild -v
+
+      # --- Layer 5: Stress ---
+      - name: "Validate: Stress tests"
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/validation/golden:/harness/golden:ro \
+            -v ${{ github.workspace }}/validation/wdf_output:/harness/wdf_output:ro \
+            -v ${{ github.workspace }}/validation/results:/harness/results \
+            -v ${{ github.workspace }}/validation/circuits:/harness/circuits:ro \
+            -v ${{ github.workspace }}/validation/config:/harness/config:ro \
+            -e SAMPLE_RATE=$SAMPLE_RATE \
+            -e OVERSAMPLE=$OVERSAMPLE \
+            pk-validation-harness:latest \
+            --suite stress -v
+
+      # --- Upload results ---
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-results
+          path: validation/results/
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const resultsDir = 'validation/results';
+            const files = fs.readdirSync(resultsDir).filter(f => f.endsWith('.json'));
+            if (files.length === 0) return;
+
+            const report = JSON.parse(fs.readFileSync(`${resultsDir}/${files[files.length-1]}`));
+            const s = report.summary;
+            const emoji = s.total_fail === 0 ? '✅' : '❌';
+
+            let body = `## ${emoji} WDF Compiler Validation\n\n`;
+            body += `| Metric | Value |\n|--------|-------|\n`;
+            body += `| Passed | ${s.total_pass} |\n`;
+            body += `| Failed | ${s.total_fail} |\n`;
+            body += `| Sample Rate | ${report.config.sample_rate} Hz |\n`;
+            body += `| Oversample | ${report.config.oversample}x |\n\n`;
+
+            if (s.total_fail > 0) {
+              body += `### Failed Tests\n\n`;
+              for (const suite of report.suites) {
+                for (const r of suite.results) {
+                  if (!r.passed) {
+                    body += `- **${suite.suite}/${r.test}** [${r.signal_label}] `;
+                    body += `${r.metric}: ${r.value.toFixed(2)} ${r.unit} `;
+                    body += `(threshold: ${r.threshold.toFixed(2)})\n`;
+                  }
+                }
+              }
+            }
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

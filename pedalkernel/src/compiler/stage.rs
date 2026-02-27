@@ -362,4 +362,34 @@ impl WdfStage {
     pub fn has_paired_opamp(&self) -> bool {
         self.paired_opamp.is_some()
     }
+
+    /// Debug dump: print stage structure with tree and root details.
+    pub fn debug_dump(&self) -> String {
+        let root_name = match &self.root {
+            RootKind::DiodePair(_) => "DiodePair",
+            RootKind::SingleDiode(_) => "SingleDiode",
+            RootKind::Zener(_) => "Zener",
+            RootKind::Jfet(_) => "Jfet",
+            RootKind::Triode(_) => "Triode",
+            RootKind::Pentode(_) => "Pentode",
+            RootKind::Mosfet(_) => "Mosfet",
+            RootKind::Ota(_) => "Ota",
+            RootKind::OpAmp(_) => "OpAmp",
+            RootKind::OpAmpInverting(_) => "OpAmpInverting",
+            RootKind::OpAmpNonInverting(_) => "OpAmpNonInverting",
+            RootKind::BjtNpn(_) => "BjtNpn",
+            RootKind::BjtPnp(_) => "BjtPnp",
+            RootKind::Passthrough => "Passthrough",
+        };
+
+        let mut s = format!(
+            "WdfStage(root={}, compensation={:.6}, tree_rp={:.1}Ω, nodes={})\n",
+            root_name,
+            self.compensation,
+            self.tree.port_resistance(),
+            self.tree.node_count()
+        );
+        s.push_str(&self.tree.debug_dump(1));
+        s
+    }
 }
