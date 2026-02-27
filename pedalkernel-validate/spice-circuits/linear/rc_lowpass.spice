@@ -1,0 +1,12 @@
+* ============================================================================
+* RC Lowpass Filter — First-order
+* PedalKernel Validation Circuit — Simplest linear test
+* ============================================================================
+* fc = 1/(2*pi*R*C) = 1/(2*pi*10000*10e-9) ≈ 1591.5 Hz
+*
+* Analytical H(s) = 1 / (1 + s*R*C)
+* BLT: H(z) known exactly — WDF must match to floating-point precision.
+* ============================================================================
+
+R1 v_in v_out 10k
+C1 v_out 0 10n

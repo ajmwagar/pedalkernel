@@ -1,0 +1,68 @@
+* ============================================================================
+* Common Cathode 12AX7 Triode Amplifier
+* PedalKernel Validation Circuit — Single triode nonlinear stage
+* ============================================================================
+* Classic guitar amp first stage topology.
+* Uses the Dempwolf-compatible Koren model for 12AX7.
+*
+* Operating point: Vp ≈ 160V, Vg ≈ -1.5V, Ip ≈ 0.8mA
+* Voltage gain: ~-60 (inverting)
+* ============================================================================
+
+* B+ supply
+VB vb 0 DC 250
+
+* Plate load
+RP vb v_plate 100k
+
+* Coupling cap (input)
+CIN v_in v_grid 22n
+
+* Grid leak resistor
+RG v_grid 0 1M
+
+* Triode (12AX7 section A)
+* Using subcircuit with Koren model parameters
+X1 v_plate v_grid v_cathode TRIODE_12AX7
+
+* Cathode resistor + bypass cap
+RK v_cathode 0 1.5k
+CK v_cathode 0 25u
+
+* Output coupling cap
+COUT v_plate v_out 22n
+
+* Output load
+RLOAD v_out 0 1M
+
+* ============================================================================
+* 12AX7 Triode Model — Koren equations
+* Parameters from Dempwolf (DAFx-11) / Koren (Glass Audio 1996)
+* ============================================================================
+.SUBCKT TRIODE_12AX7 anode grid cathode
+* Koren model parameters for 12AX7
+.PARAM MU=100 EX=1.4 KG1=1060 KP=600 KVB=300
+
+* Behavioral voltage source for plate current
+* E1 = log(1 + exp(KP * (1/MU + Vgk/sqrt(KVB + Vak^2)))) * Vak/KP
+* Ip = (E1^EX / KG1) * (1 + sgn(E1)) / 2
+
+* Internal nodes for computation
+Bgk gk 0 V = V(grid,cathode)
+Bak ak 0 V = V(anode,cathode)
+
+* Plate current as controlled current source
+Bip anode cathode I = {
++ (PWR(
++   LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2)))))
++   * MAX(V(ak), 0.001) / KP,
++   EX)
++ / KG1)
++ * (1 + SGN(LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2))))) * MAX(V(ak),0.001) / KP)) / 2
++ }
+
+* Grid current (simplified — diode model for grid conduction)
+Dgc grid cathode DGRID
+.MODEL DGRID D(IS=1e-12 N=1.5 RS=1k)
+
+.ENDS TRIODE_12AX7

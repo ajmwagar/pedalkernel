@@ -113,6 +113,20 @@ enum Commands {
         #[arg(short, long, default_value = "all")]
         suite: String,
     },
+
+    /// Generate golden references from SPICE simulation
+    GenerateSpice {
+        /// Test suite to generate
+        #[arg(short, long, default_value = "all")]
+        suite: String,
+
+        /// Directory containing .spice circuit files
+        #[arg(long, default_value = "spice-circuits")]
+        spice_dir: PathBuf,
+    },
+
+    /// Check if ngspice is available
+    CheckSpice,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -136,6 +150,12 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Bootstrap { suite }) => {
             bootstrap_golden(&cli, suite)?;
+        }
+        Some(Commands::GenerateSpice { suite, spice_dir }) => {
+            generate_spice_golden(&cli, suite, spice_dir)?;
+        }
+        Some(Commands::CheckSpice) => {
+            check_spice()?;
         }
         None => {
             run_validation(&cli, "all", None)?;
@@ -446,6 +466,134 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
 
     println!("\n{}", "Done! Golden references generated.".green().bold());
     println!("Run 'pedalkernel-validate run --suite linear' to validate.");
+
+    Ok(())
+}
+
+fn check_spice() -> anyhow::Result<()> {
+    use pedalkernel_validate::spice::SpiceRunner;
+
+    println!("{} Checking ngspice installation...", "▶".blue());
+
+    match SpiceRunner::check_ngspice() {
+        Ok(version) => {
+            println!("{} ngspice found: {}", "✓".green(), version);
+            Ok(())
+        }
+        Err(e) => {
+            println!("{} {}", "✗".red(), e);
+            println!("\nInstall ngspice:");
+            println!("  macOS:  brew install ngspice");
+            println!("  Ubuntu: apt install ngspice");
+            println!("  Arch:   pacman -S ngspice");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn generate_spice_golden(cli: &Cli, suite: &str, spice_dir: &std::path::Path) -> anyhow::Result<()> {
+    use pedalkernel_validate::spice::{SpiceConfig, SpiceRunner};
+    use pedalkernel_validate::npy;
+
+    println!("{} Generating SPICE golden references...", "▶".blue());
+
+    // Check ngspice first
+    match SpiceRunner::check_ngspice() {
+        Ok(version) => println!("  Using: {}", version.dimmed()),
+        Err(e) => {
+            println!("{} {}", "✗".red(), e);
+            std::process::exit(1);
+        }
+    }
+
+    let config = SpiceConfig {
+        sample_rate: cli.sample_rate,
+        oversample: cli.oversample,
+    };
+    let runner = SpiceRunner::new(config.clone());
+
+    println!("  Sample rate: {} Hz × {}x = {} Hz internal",
+        cli.sample_rate, cli.oversample, config.internal_rate());
+
+    // Load validation config
+    let validation_config = if cli.config.exists() {
+        ValidationConfig::load(&cli.config)?
+    } else {
+        ValidationConfig::default_config()
+    };
+
+    // Build list of suites to process
+    let suites_to_process: Vec<(String, pedalkernel_validate::TestSuite)> = if suite == "all" {
+        validation_config.suites.iter()
+            .map(|(n, s)| (n.clone(), s.clone()))
+            .collect()
+    } else {
+        let suite_config = validation_config
+            .suites
+            .get(suite)
+            .ok_or_else(|| anyhow::anyhow!("Suite '{}' not found", suite))?;
+        vec![(suite.to_string(), suite_config.clone())]
+    };
+
+    let mut total_generated = 0;
+    let mut total_skipped = 0;
+    let mut total_failed = 0;
+
+    for (suite_name, suite_config) in &suites_to_process {
+        println!("\n{} Suite: {}", "•".green(), suite_name.bold());
+
+        for (test_name, test_case) in &suite_config.tests {
+            // Look for corresponding .spice file
+            let spice_path = spice_dir.join(&test_case.circuit.replace(".pedal", ".spice"));
+
+            if !spice_path.exists() {
+                println!("  {} {} - SPICE file not found: {}",
+                    "⚠".yellow(), test_name, spice_path.display());
+                total_skipped += 1;
+                continue;
+            }
+
+            println!("  {} Test: {}", "→".blue(), test_name);
+
+            for signal_config in &test_case.signals {
+                let label = signal_config.label();
+                let spec = signal_config.to_spec();
+                let input = spec.generate(config.internal_rate());
+
+                print!("    {} {}... ", "◦".dimmed(), label);
+                std::io::Write::flush(&mut std::io::stdout())?;
+
+                match runner.simulate(&spice_path, &input, "v_out") {
+                    Ok(output) => {
+                        // Save as golden reference
+                        let golden_path = cli.golden
+                            .join(&suite_name)
+                            .join(test_name)
+                            .join(format!("{}.npy", label));
+
+                        npy::write_f64(&golden_path, &output)?;
+                        println!("{} ({} samples)", "✓".green(), output.len());
+                        total_generated += 1;
+                    }
+                    Err(e) => {
+                        println!("{} {}", "✗".red(), e);
+                        total_failed += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    println!("\n{}", "─".repeat(50));
+    println!("Generated: {} | Skipped: {} | Failed: {}",
+        total_generated.to_string().green(),
+        total_skipped.to_string().yellow(),
+        total_failed.to_string().red()
+    );
+
+    if total_failed > 0 {
+        std::process::exit(1);
+    }
 
     Ok(())
 }

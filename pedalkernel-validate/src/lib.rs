@@ -183,6 +183,7 @@
 //! - [`signals`] - Deterministic test signal generators
 //! - [`metrics`] - Audio comparison metrics (RMS, THD, spectral, etc.)
 //! - [`analytical`] - Mathematically exact references for linear circuits
+//! - [`spice`] - ngspice integration for golden reference generation
 //! - [`npy`] - NumPy .npy file I/O
 //! - [`config`] - YAML-based test configuration
 //! - [`runner`] - Test orchestration
@@ -199,6 +200,7 @@ pub mod npy;
 pub mod report;
 pub mod runner;
 pub mod signals;
+pub mod spice;
 
 // ============================================================================
 // Top-level re-exports for convenience
@@ -234,6 +236,9 @@ pub use report::{
 
 // Signal types
 pub use signals::SignalSpec;
+
+// SPICE types
+pub use spice::{SpiceConfig, SpiceError, SpiceRunner};
 
 /// Prelude module - import everything commonly needed
 ///
@@ -272,4 +277,7 @@ pub mod prelude {
 
     // Report
     pub use crate::report::{SignalResult, SuiteResult, TestResult, ValidationReport};
+
+    // SPICE
+    pub use crate::spice::{SpiceConfig, SpiceRunner};
 }

@@ -33,6 +33,8 @@ colored = "2.1"
 thiserror = "1.0"
 anyhow = "1.0"
 
+# SPICE integration
+tempfile = "3.10"
+
 [dev-dependencies]
 approx = "0.5"
-tempfile = "3.10"

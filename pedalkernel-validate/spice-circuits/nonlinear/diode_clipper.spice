@@ -1,0 +1,30 @@
+* ============================================================================
+* Diode Clipper — Symmetric Si Diode Pair
+* PedalKernel Validation Circuit — Simplest nonlinear test
+* ============================================================================
+* Topology: Input → R → output node → two anti-parallel diodes to ground
+*
+* This is the canonical WDF nonlinear test circuit. Every WDF library
+* validates against this first (chowdsp_wdf, RT-WDF, wdmodels, etc.)
+*
+* Node convention:
+*   v_in  = input (driven by harness PWL source)
+*   v_out = output (measured by harness)
+* ============================================================================
+
+* Input coupling capacitor (AC coupling)
+C1 v_in n1 100n
+
+* Series resistor
+R1 n1 v_out 2.2k
+
+* Anti-parallel diode pair (1N4148 equivalent)
+D1 v_out 0 DMOD
+D2 0 v_out DMOD
+
+* Output load
+RL v_out 0 10k
+
+* Diode model — 1N4148 parameters
+.MODEL DMOD D(IS=2.52e-9 RS=0.568 N=1.752 BV=100 IBV=100u
++ CJO=4p M=0.4 TT=20n)
