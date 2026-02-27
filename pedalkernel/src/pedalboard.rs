@@ -547,6 +547,52 @@ impl PedalboardProcessor {
                 InterstageLoading::new(source, load, sample_rate);
         }
     }
+
+    /// Get the input impedance of the pedalboard (Ω).
+    ///
+    /// Returns the input impedance of the first pedal in the chain.
+    /// If the chain is empty or the first pedal has no processor, returns high-Z (1MΩ).
+    pub fn input_impedance(&self) -> f64 {
+        for slot in &self.chain {
+            match slot {
+                ChainSlot::Pedal(p) => {
+                    if !p.bypassed {
+                        if let Some(ref proc) = p.processor {
+                            return proc.input_impedance();
+                        }
+                    }
+                }
+                ChainSlot::FxLoop(fx) => {
+                    // FX loop's input impedance is the amp's preamp input
+                    return fx.amp.input_impedance();
+                }
+            }
+        }
+        1_000_000.0 // High-Z default
+    }
+
+    /// Get the output impedance of the pedalboard (Ω).
+    ///
+    /// Returns the output impedance of the last pedal in the chain.
+    /// If the chain is empty or the last pedal has no processor, returns low-Z (1kΩ).
+    pub fn output_impedance(&self) -> f64 {
+        for slot in self.chain.iter().rev() {
+            match slot {
+                ChainSlot::Pedal(p) => {
+                    if !p.bypassed {
+                        if let Some(ref proc) = p.processor {
+                            return proc.output_impedance();
+                        }
+                    }
+                }
+                ChainSlot::FxLoop(fx) => {
+                    // FX loop's output impedance is the amp's poweramp output
+                    return fx.amp.output_impedance();
+                }
+            }
+        }
+        1_000.0 // Low-Z default
+    }
 }
 
 /// Process a single pedal slot, respecting bypass.

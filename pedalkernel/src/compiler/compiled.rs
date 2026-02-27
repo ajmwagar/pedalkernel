@@ -448,6 +448,30 @@ impl CompiledPedal {
         self.supply_voltage
     }
 
+    /// Get the input impedance of this pedal (Ω).
+    ///
+    /// Returns the WDF port resistance seen looking into the input.
+    /// This is the impedance of the first WDF stage's tree.
+    /// If the pedal has no stages, returns high impedance (1MΩ).
+    pub fn input_impedance(&self) -> f64 {
+        self.stages
+            .first()
+            .map(|s| s.tree.port_resistance())
+            .unwrap_or(1_000_000.0) // High-Z default (doesn't load source)
+    }
+
+    /// Get the output impedance of this pedal (Ω).
+    ///
+    /// Returns the WDF port resistance seen looking back into the output.
+    /// This is the impedance of the last WDF stage's tree.
+    /// If the pedal has no stages, returns low impedance (1kΩ).
+    pub fn output_impedance(&self) -> f64 {
+        self.stages
+            .last()
+            .map(|s| s.tree.port_resistance())
+            .unwrap_or(1_000.0) // Low-Z default (can drive loads)
+    }
+
     /// Set debug statistics tracking.
     ///
     /// When set, the processor will record per-sample statistics for debugging

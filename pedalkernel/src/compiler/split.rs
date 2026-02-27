@@ -249,6 +249,20 @@ impl SplitCompiledPedal {
         self.pre.set_control(label, value);
         self.post.set_control(label, value);
     }
+
+    /// Get the input impedance of the split pedal (Ω).
+    ///
+    /// Returns the input impedance of the pre-section.
+    pub fn input_impedance(&self) -> f64 {
+        self.pre.input_impedance()
+    }
+
+    /// Get the output impedance of the split pedal (Ω).
+    ///
+    /// Returns the output impedance of the post-section.
+    pub fn output_impedance(&self) -> f64 {
+        self.post.output_impedance()
+    }
 }
 
 /// Compile a pedal with an FX loop, splitting at `fx_send`/`fx_return`.
