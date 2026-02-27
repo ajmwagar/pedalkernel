@@ -3857,6 +3857,31 @@ synth "CV Test" {
     }
 
     #[test]
+    fn parse_transformer_with_tertiary() {
+        let (_, c) = component_def("T_sc: transformer(4:1, 5.7H, 10, 10p, tertiary=9.5:1)").unwrap();
+        if let ComponentKind::Transformer(cfg) = c.kind {
+            assert!((cfg.turns_ratio - 4.0).abs() < 1e-6);
+            assert!((cfg.primary_inductance - 5.7).abs() < 1e-6);
+            assert!((cfg.primary_dcr - 10.0).abs() < 1e-6);
+            assert!((cfg.capacitance - 10e-12).abs() < 1e-15);
+            assert!(cfg.tertiary_turns_ratio.is_some());
+            assert!((cfg.tertiary_turns_ratio.unwrap() - 9.5).abs() < 1e-6);
+        } else {
+            panic!("expected Transformer");
+        }
+    }
+
+    #[test]
+    fn parse_transformer_no_tertiary() {
+        let (_, c) = component_def("T1: transformer(10:1, 2H)").unwrap();
+        if let ComponentKind::Transformer(cfg) = c.kind {
+            assert!(cfg.tertiary_turns_ratio.is_none());
+        } else {
+            panic!("expected Transformer");
+        }
+    }
+
+    #[test]
     fn parse_cap_switched() {
         let (_, c) = component_def("C_lf: cap_switched(27n, 68n, 220n, 1.5u)").unwrap();
         assert_eq!(c.id, "C_lf");
