@@ -443,6 +443,38 @@ impl DynNode {
         }
     }
 
+    /// Compute output voltage for passive WDF stages using resistive termination.
+    ///
+    /// For passive filters with embedded voltage sources (Passthrough root), the
+    /// standard open-circuit extraction V = (a + b) / 2 with a = b gives wrong results
+    /// because it doesn't properly account for the voltage source's wave contribution.
+    ///
+    /// Instead, we use resistive termination (a = 0) at the root port, which models
+    /// the output being taken across a matched load. This gives:
+    ///   V_out = b_tree / 2
+    ///
+    /// Returns None if this optimization doesn't apply.
+    pub fn resistive_termination_voltage(&self, b_tree: f64) -> Option<f64> {
+        match self {
+            // For parallel adaptor with resistor (load to ground) as one child,
+            // the output voltage is b_tree / 2 (resistive termination)
+            Self::Parallel { left, .. } => {
+                match left.as_ref() {
+                    Self::Resistor { .. } | Self::Pot { .. } => Some(b_tree / 2.0),
+                    _ => None,
+                }
+            }
+            // For series adaptor with resistor as one child
+            Self::Series { left, .. } => {
+                match left.as_ref() {
+                    Self::Resistor { .. } | Self::Pot { .. } => Some(b_tree / 2.0),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Check if this tree contains any reactive elements (capacitors/inductors).
     pub fn has_reactive_elements(&self) -> bool {
         match self {

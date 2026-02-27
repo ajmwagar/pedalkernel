@@ -197,7 +197,20 @@ impl WdfStage {
                 RootKind::BjtPnp(bjt) => bjt.process(b_tree, rp),
                 // Passthrough: open-circuit termination (b = a)
                 // The tree processes normally but the root just reflects.
-                RootKind::Passthrough => b_tree,
+                // For passive filters with voltage source, the output voltage
+                // should be extracted at the load resistor, not the root port.
+                RootKind::Passthrough => {
+                    // Standard open-circuit behavior for state updates
+                    tree.set_incident(b_tree);
+                    // For passive filters with embedded voltage source, the output
+                    // voltage at the load is half the root wave (resistive extraction)
+                    if let Some(_) = tree.resistive_termination_voltage(b_tree) {
+                        // V_out = b_tree / 2 (but keep open-circuit for state updates)
+                        return b_tree / 2.0;
+                    }
+                    // Fallback: standard open-circuit extraction
+                    b_tree
+                }
                 // Capacitor root: b = state (reflects stored incident)
                 // This gives correct RC lowpass transfer function.
                 RootKind::CapacitorRoot { state, .. } => {
