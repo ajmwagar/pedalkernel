@@ -1,0 +1,12 @@
+* ============================================================================
+* RC Highpass Filter — First-order
+* PedalKernel Validation Circuit
+* ============================================================================
+* fc = 1/(2*pi*R*C) = 1/(2*pi*10000*100e-9) ≈ 159.15 Hz
+*
+* Same components as RC lowpass, different topology.
+* Tests if gain error is topology-dependent.
+* ============================================================================
+
+C1 v_in v_out 100n
+R1 v_out 0 10k

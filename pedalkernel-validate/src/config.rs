@@ -322,6 +322,27 @@ fn default_suites() -> HashMap<String, TestSuite> {
         description: "Linear circuit transfer function validation".to_string(),
         tests: {
             let mut tests = HashMap::new();
+
+            // Simplest possible - pure resistor divider
+            tests.insert("resistor_divider".to_string(), TestCase {
+                circuit: "linear/resistor_divider.pedal".to_string(),
+                description: "Resistor divider, 10k/10k, expected -6dB".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 1.0,
+                        duration: 0.1,
+                        label: Some("sine".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(-60.0),
+                    peak_error_db: Some(-50.0),
+                    ..Default::default()
+                },
+            });
+
             tests.insert("rc_lowpass".to_string(), TestCase {
                 circuit: "linear/rc_lowpass.pedal".to_string(),
                 description: "First-order RC lowpass, R=10k C=10n, fc≈1.59kHz".to_string(),
@@ -343,13 +364,58 @@ fn default_suites() -> HashMap<String, TestSuite> {
                 ],
                 metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
                 pass_criteria: PassCriteria {
-                    // WDF should match analytical within -60dB (0.1% error)
                     normalized_rms_error_db: Some(-40.0),
                     peak_error_db: Some(-30.0),
                     spectral_error_db: Some(1.0),
                     ..Default::default()
                 },
             });
+
+            tests.insert("rc_highpass".to_string(), TestCase {
+                circuit: "linear/rc_highpass.pedal".to_string(),
+                description: "First-order RC highpass, R=10k C=100n, fc≈159Hz".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 1.0,
+                        duration: 0.1,
+                        label: Some("sine".to_string()),
+                    },
+                    SignalConfig::ExpSweep {
+                        f_start: 20.0,
+                        f_end: 20000.0,
+                        amplitude: 1.0,
+                        duration: 1.0,
+                        label: Some("sweep".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(-40.0),
+                    peak_error_db: Some(-30.0),
+                    ..Default::default()
+                },
+            });
+
+            tests.insert("rl_lowpass".to_string(), TestCase {
+                circuit: "linear/rl_lowpass.pedal".to_string(),
+                description: "First-order RL lowpass, R=1k L=100mH, fc≈1.59kHz".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 1.0,
+                        duration: 0.1,
+                        label: Some("sine".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(-40.0),
+                    peak_error_db: Some(-30.0),
+                    ..Default::default()
+                },
+            });
+
             tests
         },
     });
@@ -359,6 +425,55 @@ fn default_suites() -> HashMap<String, TestSuite> {
         description: "Nonlinear circuit SPICE comparison".to_string(),
         tests: {
             let mut tests = HashMap::new();
+
+            // Simplest nonlinear - single diode
+            tests.insert("single_diode".to_string(), TestCase {
+                circuit: "nonlinear/single_diode.pedal".to_string(),
+                description: "Single diode half-wave rectifier".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 1.0,
+                        duration: 0.05,
+                        label: Some("sine".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain, MetricConfig::Thd { fundamental: 1000.0 }],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(-40.0),
+                    peak_error_db: Some(-30.0),
+                    thd_error_db: Some(3.0),
+                    ..Default::default()
+                },
+            });
+
+            // Anti-parallel diodes without input cap
+            tests.insert("diode_no_cap".to_string(), TestCase {
+                circuit: "nonlinear/diode_no_cap.pedal".to_string(),
+                description: "Diode clipper without input coupling cap".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.5,
+                        duration: 0.05,
+                        label: Some("low_level".to_string()),
+                    },
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 5.0,
+                        duration: 0.05,
+                        label: Some("clipping".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain, MetricConfig::Thd { fundamental: 1000.0 }],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(-40.0),
+                    peak_error_db: Some(-30.0),
+                    thd_error_db: Some(3.0),
+                    ..Default::default()
+                },
+            });
+
             tests.insert("diode_clipper".to_string(), TestCase {
                 circuit: "nonlinear/diode_clipper.pedal".to_string(),
                 description: "Symmetric Si diode clipper".to_string(),
@@ -426,6 +541,35 @@ fn default_suites() -> HashMap<String, TestSuite> {
                     ..Default::default()
                 },
             });
+            tests
+        },
+    });
+
+    // Active device suite
+    suites.insert("active".to_string(), TestSuite {
+        description: "Active device (JFET, BJT, triode) validation".to_string(),
+        tests: {
+            let mut tests = HashMap::new();
+
+            tests.insert("jfet_source_follower".to_string(), TestCase {
+                circuit: "active/jfet_source_follower.pedal".to_string(),
+                description: "JFET source follower (unity gain buffer)".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.1,
+                        duration: 0.05,
+                        label: Some("sine".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(-30.0),
+                    peak_error_db: Some(-20.0),
+                    ..Default::default()
+                },
+            });
+
             tests
         },
     });

@@ -1,0 +1,15 @@
+* ============================================================================
+* Diode Clipper Without Input Cap
+* PedalKernel Validation Circuit
+* ============================================================================
+* Same as diode_clipper but without the input coupling capacitor.
+* Tests if the cap is causing issues.
+* ============================================================================
+
+R1 v_in v_out 2.2k
+D1 v_out 0 DMOD
+D2 0 v_out DMOD
+RL v_out 0 10k
+
+* Diode model — 1N4148 parameters
+.MODEL DMOD D(IS=2.52e-9 RS=0.568 N=1.752 BV=100 IBV=100u CJO=4p M=0.4 TT=20n)

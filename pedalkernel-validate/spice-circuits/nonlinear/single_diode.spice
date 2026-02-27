@@ -1,0 +1,14 @@
+* ============================================================================
+* Single Diode — Half-wave rectifier
+* PedalKernel Validation Circuit — Simplest nonlinear test
+* ============================================================================
+* Just one diode to ground. Simplest possible nonlinear case.
+* Tests diode model in isolation without anti-parallel pair complexity.
+* ============================================================================
+
+R1 v_in v_out 2.2k
+D1 v_out 0 DMOD
+RL v_out 0 10k
+
+* Diode model — 1N4148 parameters
+.MODEL DMOD D(IS=2.52e-9 RS=0.568 N=1.752 BV=100 IBV=100u CJO=4p M=0.4 TT=20n)

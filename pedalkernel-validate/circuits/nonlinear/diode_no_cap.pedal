@@ -1,0 +1,13 @@
+pedal "Diode Clipper No Cap" {
+  components {
+    R1: resistor(2.2k)
+    D1: diode_pair(silicon)
+    RL: resistor(10k)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> D1.anode, RL.a, out
+    D1.cathode -> gnd
+    RL.b -> gnd
+  }
+}

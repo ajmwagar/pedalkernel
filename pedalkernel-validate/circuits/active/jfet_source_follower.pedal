@@ -1,0 +1,23 @@
+pedal "JFET Source Follower" {
+  supply 9V
+  components {
+    C1: cap(100n)
+    RG: resistor(1M)
+    RS: resistor(2.2k)
+    RD: resistor(10k)
+    C2: cap(10u)
+    RL: resistor(10k)
+    J1: njfet(2n5457)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> RG.a, J1.gate
+    RG.b -> gnd
+    J1.source -> RS.a, C2.a
+    RS.b -> gnd
+    J1.drain -> RD.a
+    RD.b -> vcc
+    C2.b -> RL.a, out
+    RL.b -> gnd
+  }
+}

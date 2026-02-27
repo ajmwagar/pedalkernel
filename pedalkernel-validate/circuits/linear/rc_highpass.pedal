@@ -1,0 +1,11 @@
+pedal "RC Highpass" {
+  components {
+    C1: cap(100n)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, out
+    R1.b -> gnd
+  }
+}

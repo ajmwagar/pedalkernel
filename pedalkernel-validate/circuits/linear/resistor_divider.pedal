@@ -1,0 +1,11 @@
+pedal "Resistor Divider" {
+  components {
+    R1: resistor(10k)
+    R2: resistor(10k)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> R2.a, out
+    R2.b -> gnd
+  }
+}

@@ -1,0 +1,12 @@
+* ============================================================================
+* Resistor Divider — Simplest possible linear circuit
+* PedalKernel Validation Circuit
+* ============================================================================
+* Vout/Vin = R2/(R1+R2) = 10k/(10k+10k) = 0.5 = -6.02 dB
+*
+* This is the absolute minimum test case. If WDF doesn't match SPICE
+* exactly here, there's a fundamental gain scaling issue.
+* ============================================================================
+
+R1 v_in v_out 10k
+R2 v_out 0 10k

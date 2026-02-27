@@ -1,0 +1,31 @@
+* ============================================================================
+* JFET Source Follower — Simplest JFET circuit
+* PedalKernel Validation Circuit
+* ============================================================================
+* Unity gain buffer using 2N5457 N-channel JFET.
+* Gate biased to 0V via 1M resistor, source follows gate.
+* Simpler than common source (no voltage gain to complicate things).
+* ============================================================================
+
+* Input coupling
+C1 v_in gate 100n
+
+* Gate bias to ground
+RG gate 0 1M
+
+* Source resistor (sets bias point)
+RS source 0 2.2k
+
+* Drain to supply
+RD drain vdd 10k
+
+* Supply
+VDD vdd 0 DC 9
+
+* Output from source
+C2 source v_out 10u
+RL v_out 0 10k
+
+* JFET model — 2N5457
+J1 drain gate source JMOD
+.MODEL JMOD NJF(VTO=-2.0 BETA=1.5m LAMBDA=0.01 IS=1e-14 CGS=5p CGD=2p)
