@@ -898,14 +898,17 @@ fn eng_suffix(input: &str) -> IResult<&str, f64> {
     alt((
         value(1e-12, tag("p")),
         value(1e-9, tag("n")),
+        value(1e-6, tag("us")), // microseconds (before 'u' to consume unit)
         value(1e-6, tag("u")),
         value(1e3, tag("k")),
         value(1e6, tag("M")),
-        value(1e-3, tag("m")), // milli – after 'M' to disambiguate
-        value(1.0, tag("H")),  // Henries (unit marker, no scaling)
-        value(1.0, tag("F")),  // Farads (unit marker, no scaling)
-        value(1.0, tag("Ω")),  // Ohms (unit marker, no scaling)
-        value(1.0, tag("R")),  // Ohms alternate notation
+        value(1e-3, tag("ms")), // milliseconds (before 'm' to consume unit)
+        value(1e-3, tag("m")),  // milli – after 'M' to disambiguate
+        value(1.0, tag("H")),   // Henries (unit marker, no scaling)
+        value(1.0, tag("F")),   // Farads (unit marker, no scaling)
+        value(1.0, tag("s")),   // Seconds (unit marker, no scaling)
+        value(1.0, tag("Ω")),   // Ohms (unit marker, no scaling)
+        value(1.0, tag("R")),   // Ohms alternate notation
     ))(input)
 }
 
@@ -2413,12 +2416,12 @@ fn named_supply(input: &str) -> IResult<&str, NamedSupply> {
     let (input, _) = ws_comments(input)?;
     // Parse rail name - can be identifier or special chars like "V+", "V-"
     let (input, name) = alt((
-        // Special rail names with + or -
+        // Special rail names with + or - (e.g., "V+", "V-")
         recognize(pair(
             alpha1,
-            opt(alt((char('+'), char('-')))),
+            alt((char('+'), char('-'))),
         )),
-        // Regular identifier
+        // Regular identifier (handles underscores, digits, etc.)
         identifier,
     ))(input)?;
     let (input, _) = ws_comments(input)?;
