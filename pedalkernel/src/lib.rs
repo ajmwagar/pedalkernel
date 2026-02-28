@@ -918,7 +918,7 @@ pedal "Test Pedal" {
             "TS808: 2x 1N914 silicon diodes in anti-parallel in feedback loop"
         );
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_, _))),
             3,
             "TS808: 3 pots (Drive, Tone, Level)"
         );
@@ -939,7 +939,7 @@ pedal "Test Pedal" {
             "Fuzz Face: 2x AC128/NKT275 PNP germanium transistors"
         );
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_, _))),
             2,
             "Fuzz Face: 2 pots (Fuzz, Volume)"
         );
@@ -963,7 +963,7 @@ pedal "Test Pedal" {
             "Big Muff: 2x anti-parallel diode pairs for clipping"
         );
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_, _))),
             3,
             "Big Muff: 3 pots (Sustain, Tone, Volume)"
         );
@@ -987,7 +987,7 @@ pedal "Test Pedal" {
             "RAT: 2x 1N914 diodes to ground (hard clipping — NOT in feedback)"
         );
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_, _))),
             3,
             "RAT: 3 pots (Distortion, Filter, Volume)"
         );
@@ -1029,7 +1029,7 @@ pedal "Test Pedal" {
             "Klon: 2x germanium diodes (MA856) in anti-parallel in feedback"
         );
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_, _))),
             3,
             "Klon: 3 pots (Gain, Treble, Output)"
         );
@@ -1069,7 +1069,7 @@ pedal "Test Pedal" {
             "Dyna Comp: 1x CA3080 OTA for current-controlled gain"
         );
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_, _))),
             2,
             "Dyna Comp: 2 pots (Sensitivity, Output)"
         );
@@ -1095,7 +1095,7 @@ pedal "Test Pedal" {
             "CE-2: 1x triangle LFO for chorus sweep"
         );
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_))),
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Potentiometer(_, _))),
             2,
             "CE-2: 2 pots (Rate, Depth)"
         );

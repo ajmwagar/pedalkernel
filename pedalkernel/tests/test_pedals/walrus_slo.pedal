@@ -1,0 +1,68 @@
+# Walrus Audio Slo-style multi-tap BBD test
+# Tests long delay with modulation, feedback, and tone control
+# Uses MN3005 for long delay times characteristic of ambient effects
+
+pedal "Walrus Slo Test" {
+  components {
+    # Input section
+    C_in: cap(100n)
+    R_in: resistor(10k)
+
+    # Tone control (pre-BBD filtering)
+    R_tone1: resistor(10k)
+    C_tone: cap(22n)
+    R_tone2: resistor(47k)
+
+    # Main BBD delay (long delay for ambient effects)
+    BBD1: bbd(mn3005)
+
+    # Secondary modulation BBD (for texture)
+    BBD2: bbd(mn3007)
+
+    # LFOs for modulation
+    LFO_main: lfo(sine, 330k, 100n)    # Slow sweep
+    LFO_mod: lfo(triangle, 150k, 47n)  # Faster modulation
+
+    # Feedback network
+    R_fb: resistor(100k)
+    C_fb: cap(47n)
+
+    # Output section
+    C_out: cap(100n)
+    R_out: resistor(47k)
+
+    # Mix control (wet/dry)
+    R_dry: resistor(47k)
+    R_wet: resistor(47k)
+  }
+
+  nets {
+    # Input path
+    in -> C_in.a
+    C_in.b -> R_in.a, R_tone1.a
+    R_in.b -> gnd
+
+    # Tone filter
+    R_tone1.b -> C_tone.a
+    C_tone.b -> R_tone2.a, BBD1.in
+    R_tone2.b -> gnd
+
+    # Main delay with feedback
+    BBD1.out -> C_fb.a
+    C_fb.b -> R_fb.a, BBD2.in
+    R_fb.b -> R_tone1.b
+
+    # Secondary texture delay
+    BBD2.out -> C_out.a
+
+    # LFO routing
+    LFO_main.out -> BBD1.clock
+    LFO_mod.out -> BBD2.clock
+
+    # Output mix
+    C_out.b -> R_wet.a
+    R_wet.b -> out
+    in -> R_dry.a
+    R_dry.b -> out
+  }
+}

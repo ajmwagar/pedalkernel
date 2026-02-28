@@ -75,7 +75,7 @@ fn find_resistance_between(graph: &CircuitGraph, from: NodeId, to: NodeId) -> Op
                     total_r = *r;
                     found_direct = true;
                 }
-            } else if let ComponentKind::Potentiometer(max_r) = &graph.components[edge.comp_idx].kind
+            } else if let ComponentKind::Potentiometer(max_r, _) = &graph.components[edge.comp_idx].kind
             {
                 // Use 50% as default position for pots
                 let r = max_r * 0.5;
@@ -392,7 +392,7 @@ pub fn compile_pedal_with_options(
             ComponentKind::Capacitor(cfg) => {
                 cfg.value = tolerance.apply_capacitor(cfg.value, i);
             }
-            ComponentKind::Potentiometer(max_r) => {
+            ComponentKind::Potentiometer(max_r, _) => {
                 *max_r = tolerance.apply_resistor(*max_r, i);
             }
             _ => {}
@@ -1890,7 +1890,7 @@ pub fn compile_pedal_with_options(
                             ComponentKind::Resistor(_)
                                 | ComponentKind::Capacitor(_)
                                 | ComponentKind::Inductor(_)
-                                | ComponentKind::Potentiometer(_)
+                                | ComponentKind::Potentiometer(_, _)
                         )
                     })
                     .map(|(i, _)| i)
@@ -2290,7 +2290,7 @@ pub fn compile_pedal_with_options(
             .iter()
             .find(|c| c.id == ctrl.component)
             .and_then(|c| match &c.kind {
-                ComponentKind::Potentiometer(r) => Some(*r),
+                ComponentKind::Potentiometer(r, _) => Some(*r),
                 _ => None,
             })
             .unwrap_or(100_000.0);
@@ -2350,7 +2350,7 @@ pub fn compile_pedal_with_options(
         // Only trace through resistive elements (pots, resistors)
         let is_resistive = matches!(
             comp_kind,
-            Some(ComponentKind::Potentiometer(_)) | Some(ComponentKind::Resistor(_))
+            Some(ComponentKind::Potentiometer(_, _)) | Some(ComponentKind::Resistor(_))
         );
         if !is_resistive {
             // This is a non-resistive component - check if it's a modulation target
@@ -2364,7 +2364,7 @@ pub fn compile_pedal_with_options(
         // Find connections from other pins of this resistive element
         // For pots: a, b, wiper; for resistors: a, b
         let other_pins: Vec<&str> = match comp_kind {
-            Some(ComponentKind::Potentiometer(_)) => {
+            Some(ComponentKind::Potentiometer(_, _)) => {
                 // Pot pins: a (ccw), b (wiper/output), wiper
                 match start_pin {
                     "a" => vec!["b", "wiper"],

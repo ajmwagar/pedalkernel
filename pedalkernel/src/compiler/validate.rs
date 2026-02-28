@@ -187,7 +187,7 @@ fn check_component_values(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                     });
                 }
             }
-            ComponentKind::Potentiometer(r) => {
+            ComponentKind::Potentiometer(r, _) => {
                 if *r <= 0.0 {
                     w.push(PedalWarning {
                         severity: Severity::Error,
@@ -358,7 +358,7 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
         | ComponentKind::ResistorSwitched(_) => &["a", "b"],
 
         // Potentiometer: 2-terminal (a, b) or 3-terminal (a, wiper/w, b)
-        ComponentKind::Potentiometer(_) => &["a", "b", "w", "wiper", "position"],
+        ComponentKind::Potentiometer(_, _) => &["a", "b", "w", "wiper", "position"],
 
         // BJT
         ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
@@ -573,7 +573,7 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 adj.entry(ka.clone()).or_default().insert(kb.clone());
                 adj.entry(kb).or_default().insert(ka);
             }
-            ComponentKind::Potentiometer(_) => {
+            ComponentKind::Potentiometer(_, _) => {
                 // a-wiper and wiper-b are connected through the pot
                 let ka = format!("{}.a", comp.id);
                 let kb = format!("{}.b", comp.id);
@@ -736,7 +736,7 @@ fn check_controls(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
         // Controls typically target potentiometers or switches
         if !matches!(
             kind,
-            ComponentKind::Potentiometer(_)
+            ComponentKind::Potentiometer(_, _)
                 | ComponentKind::Switch(_)
                 | ComponentKind::RotarySwitch(_)
         ) {
@@ -868,7 +868,7 @@ fn check_modulation_targets(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                                 // This is a valid passive connection (e.g., LFO1.out -> Depth.a)
                                 // but it won't create a modulation binding. Check if the user
                                 // probably intended a modulation binding.
-                                let target_is_pot = matches!(target_kind, ComponentKind::Potentiometer(_));
+                                let target_is_pot = matches!(target_kind, ComponentKind::Potentiometer(_, _));
                                 let target_is_passive = matches!(
                                     target_kind,
                                     ComponentKind::Resistor(_)
@@ -973,7 +973,7 @@ fn component_type_name(kind: &ComponentKind) -> &'static str {
         ComponentKind::DiodePair(_) => "diode pair",
         ComponentKind::Diode(_) => "diode",
         ComponentKind::Zener(_) => "zener diode",
-        ComponentKind::Potentiometer(_) => "potentiometer",
+        ComponentKind::Potentiometer(_, _) => "potentiometer",
         ComponentKind::Npn(_) => "NPN transistor",
         ComponentKind::Pnp(_) => "PNP transistor",
         ComponentKind::OpAmp(ot) if ot.is_ota() => "OTA",
@@ -1282,7 +1282,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "Vol".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0),
+            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1311,7 +1311,7 @@ mod tests {
         });
         pedal.components.push(ComponentDef {
             id: "Depth".to_string(),
-            kind: ComponentKind::Potentiometer(50_000.0),
+            kind: ComponentKind::Potentiometer(50_000.0, PotTaper::B),
         });
         // LFO1.out -> Depth.a — this is a passive connection, not a modulation target
         // The compiler silently skips it at line 1409
@@ -1416,7 +1416,7 @@ mod tests {
         });
         pedal.components.push(ComponentDef {
             id: "Depth".to_string(),
-            kind: ComponentKind::Potentiometer(50_000.0),
+            kind: ComponentKind::Potentiometer(50_000.0, PotTaper::B),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1445,11 +1445,11 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "P1".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0),
+            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
         });
         pedal.components.push(ComponentDef {
             id: "P2".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0),
+            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {

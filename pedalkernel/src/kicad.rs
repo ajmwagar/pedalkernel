@@ -16,7 +16,7 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::DiodePair(_) => ("Device:D", "D"), // pair shown as single symbol + note
         ComponentKind::Diode(_) => ("Device:D", "D"),
         ComponentKind::Zener(_) => ("Device:D_Zener", "D"),
-        ComponentKind::Potentiometer(_) => ("Device:R_Potentiometer", "RV"),
+        ComponentKind::Potentiometer(_, _) => ("Device:R_Potentiometer", "RV"),
         ComponentKind::Npn(_) => ("Device:Q_NPN_BCE", "Q"),
         ComponentKind::Pnp(_) => ("Device:Q_PNP_BCE", "Q"),
         ComponentKind::OpAmp(ot) => {
@@ -165,7 +165,7 @@ fn value_str(kind: &ComponentKind) -> String {
         ComponentKind::DiodePair(dt) => format!("{dt:?}_pair"),
         ComponentKind::Diode(dt) => format!("{dt:?}"),
         ComponentKind::Zener(v) => format!("{v}V_Zener"),
-        ComponentKind::Potentiometer(v) => format_eng(*v, "Ω"),
+        ComponentKind::Potentiometer(v, _) => format_eng(*v, "Ω"),
         ComponentKind::Npn(bt) => match bt {
             BjtType::Generic => "NPN".into(),
             BjtType::N2n3904 => "2N3904".into(),

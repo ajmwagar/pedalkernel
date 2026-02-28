@@ -1,5 +1,6 @@
 //! Dynamic WDF tree node for runtime-constructed circuits.
 
+use crate::dsl::PotTaper;
 use crate::elements::{Photocoupler, WdfLeaf};
 use crate::tree::RTypeAdaptor;
 
@@ -63,6 +64,7 @@ pub(super) enum DynNode {
         comp_id: String,
         max_resistance: f64,
         position: f64,
+        taper: PotTaper,
         rp: f64,
     },
     /// Photocoupler (Vactrol) — LDR with CdS carrier dynamics.
@@ -331,16 +333,20 @@ impl DynNode {
     }
 
     /// Update a pot's position and resistance.  Returns true if found.
+    /// The taper curve is applied to convert linear knob position to resistance.
     pub fn set_pot(&mut self, target_id: &str, pos: f64) -> bool {
         match self {
             Self::Pot {
                 comp_id,
                 max_resistance,
                 position,
+                taper,
                 rp,
             } if comp_id == target_id => {
                 *position = pos;
-                *rp = (pos * *max_resistance).max(1.0);
+                // Apply taper curve to convert linear position to resistance ratio
+                let tapered_pos = taper.apply(pos);
+                *rp = (tapered_pos * *max_resistance).max(1.0);
                 true
             }
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
@@ -842,8 +848,8 @@ impl DynNode {
             Self::VoltageSource { voltage, rp } => {
                 format!("{pad}VoltageSource(V={voltage:.3}V, Rp={rp:.1}Ω)")
             }
-            Self::Pot { comp_id, max_resistance, position, rp } => {
-                format!("{pad}Pot(id=\"{comp_id}\", max={max_resistance:.1}Ω, pos={position:.3}, Rp={rp:.1}Ω)")
+            Self::Pot { comp_id, max_resistance, position, taper, rp } => {
+                format!("{pad}Pot(id=\"{comp_id}\", max={max_resistance:.1}Ω, pos={position:.3}, taper={taper:?}, Rp={rp:.1}Ω)")
             }
             Self::Photocoupler { comp_id, inner } => {
                 format!("{pad}Photocoupler(id=\"{comp_id}\", Rp={:.1}Ω)", inner.port_resistance())

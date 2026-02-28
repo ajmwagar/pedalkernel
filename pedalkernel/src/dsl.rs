@@ -198,6 +198,43 @@ pub struct ComponentDef {
     pub kind: ComponentKind,
 }
 
+/// Potentiometer taper type.
+///
+/// Following the Asian/European convention:
+/// - A (Audio/Logarithmic): Slow start, fast finish. Used for volume controls.
+/// - B (Linear): Proportional change. Used for tone/blend controls.
+/// - C (Reverse Log): Fast start, slow finish. Rare, for specific compensation.
+///
+/// Note: Some American manufacturers flip A and B. Always check datasheets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PotTaper {
+    /// Audio/Logarithmic taper - slow at start, fast at end (volume controls)
+    A,
+    /// Linear taper - proportional change (default for most controls)
+    #[default]
+    B,
+    /// Reverse logarithmic - fast at start, slow at end (rare)
+    C,
+}
+
+impl PotTaper {
+    /// Apply the taper curve to a linear position (0.0 to 1.0).
+    /// Returns the effective resistance ratio (0.0 to 1.0).
+    #[inline]
+    pub fn apply(self, pos: f64) -> f64 {
+        let pos = pos.clamp(0.0, 1.0);
+        match self {
+            // Linear: direct mapping
+            PotTaper::B => pos,
+            // Audio/Log: slow start, fast end
+            // Using (10^pos - 1) / 9 which gives ~10% at 50% rotation
+            PotTaper::A => (10.0_f64.powf(pos) - 1.0) / 9.0,
+            // Reverse log: fast start, slow end (inverse of A)
+            PotTaper::C => 1.0 - (10.0_f64.powf(1.0 - pos) - 1.0) / 9.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComponentKind {
     Resistor(f64),
@@ -208,7 +245,8 @@ pub enum ComponentKind {
     Diode(DiodeType),
     /// Zener diode with breakdown voltage (V). Common: 3.3, 4.7, 5.1, 6.2, 9.1, 12
     Zener(f64),
-    Potentiometer(f64),
+    /// Potentiometer with max resistance and taper type
+    Potentiometer(f64, PotTaper),
     Npn(BjtType),
     Pnp(BjtType),
     OpAmp(OpAmpType),
@@ -1152,16 +1190,28 @@ fn parse_pot(input: &str) -> IResult<&str, ComponentKind> {
     let (input, val) = eng_value(input)?;
     let (input, _) = ws_comments(input)?;
 
-    // Optional taper type: log, linear, audio (ignored for WDF, but allows parsing)
-    let (input, _taper) = opt(tuple((
+    // Optional taper type: a (audio/log), b (linear), c (reverse log)
+    // Also support legacy names: log, linear, audio
+    let (input, taper) = opt(tuple((
         char(','),
         ws_comments,
-        alt((tag("log"), tag("linear"), tag("audio"))),
+        alt((
+            // Single-letter tapers (preferred)
+            value(PotTaper::A, tag("a")),
+            value(PotTaper::B, tag("b")),
+            value(PotTaper::C, tag("c")),
+            // Legacy names
+            value(PotTaper::A, tag("log")),
+            value(PotTaper::A, tag("audio")),
+            value(PotTaper::B, tag("linear")),
+        )),
     )))(input)?;
+
+    let taper = taper.map(|(_, _, t)| t).unwrap_or(PotTaper::B);
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Potentiometer(val)))
+    Ok((input, ComponentKind::Potentiometer(val, taper)))
 }
 
 fn bjt_type(input: &str) -> IResult<&str, BjtType> {
@@ -2820,7 +2870,55 @@ mod tests {
     #[test]
     fn parse_component_pot() {
         let (_, c) = component_def("Gain: pot(500k)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Potentiometer(500_000.0));
+        assert_eq!(c.kind, ComponentKind::Potentiometer(500_000.0, PotTaper::B));
+    }
+
+    #[test]
+    fn parse_component_pot_with_taper() {
+        // Audio taper
+        let (_, c) = component_def("Vol: pot(100k, a)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Potentiometer(100_000.0, PotTaper::A));
+
+        // Linear taper
+        let (_, c) = component_def("Tone: pot(10k, b)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Potentiometer(10_000.0, PotTaper::B));
+
+        // Reverse log taper
+        let (_, c) = component_def("Mix: pot(50k, c)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Potentiometer(50_000.0, PotTaper::C));
+
+        // Legacy names
+        let (_, c) = component_def("P1: pot(1M, log)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Potentiometer(1_000_000.0, PotTaper::A));
+
+        let (_, c) = component_def("P2: pot(25k, linear)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Potentiometer(25_000.0, PotTaper::B));
+    }
+
+    #[test]
+    fn pot_taper_curves() {
+        // Linear (B): direct mapping
+        assert!((PotTaper::B.apply(0.0) - 0.0).abs() < 1e-9);
+        assert!((PotTaper::B.apply(0.5) - 0.5).abs() < 1e-9);
+        assert!((PotTaper::B.apply(1.0) - 1.0).abs() < 1e-9);
+
+        // Audio (A): slow start, fast end
+        // Using (10^x - 1)/9 formula: at 50% gives ~24% resistance
+        let a_mid = PotTaper::A.apply(0.5);
+        assert!(a_mid > 0.2 && a_mid < 0.3, "A taper at 50% should be ~24%");
+        assert!((PotTaper::A.apply(0.0) - 0.0).abs() < 1e-9);
+        assert!((PotTaper::A.apply(1.0) - 1.0).abs() < 1e-9);
+
+        // Reverse log (C): fast start, slow end (inverse of A)
+        let c_mid = PotTaper::C.apply(0.5);
+        assert!(c_mid > 0.7 && c_mid < 0.8, "C taper at 50% should be ~76%");
+        assert!((PotTaper::C.apply(0.0) - 0.0).abs() < 1e-9);
+        assert!((PotTaper::C.apply(1.0) - 1.0).abs() < 1e-9);
+
+        // A and C should be symmetric around 0.5
+        let a_25 = PotTaper::A.apply(0.25);
+        let c_75 = PotTaper::C.apply(0.75);
+        assert!((a_25 - (1.0 - c_75)).abs() < 0.01, "A and C should be symmetric");
     }
 
     #[test]

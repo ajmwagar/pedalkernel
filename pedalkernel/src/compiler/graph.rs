@@ -284,7 +284,7 @@ impl CircuitGraph {
 
         for (idx, comp) in all_components.iter().enumerate() {
             match &comp.kind {
-                ComponentKind::Potentiometer(_) => {
+                ComponentKind::Potentiometer(_, _) => {
                     if pots_with_wiper.contains(&comp.id) {
                         // 3-terminal pot — defer to after loop
                         deferred_3term.push((idx, comp.id.clone()));
@@ -590,8 +590,8 @@ impl CircuitGraph {
         //   {id}__wb: wiper → b (R = (1 - position) * max_R)
         let mut extra_components: Vec<ComponentDef> = Vec::new();
         for (_original_idx, pot_id) in &deferred_3term {
-            let max_r = match &pedal.components[*_original_idx].kind {
-                ComponentKind::Potentiometer(r) => *r,
+            let (max_r, taper) = match &pedal.components[*_original_idx].kind {
+                ComponentKind::Potentiometer(r, t) => (*r, *t),
                 _ => unreachable!(),
             };
 
@@ -599,14 +599,14 @@ impl CircuitGraph {
             let aw_idx = pedal.components.len() + extra_components.len();
             extra_components.push(ComponentDef {
                 id: format!("{pot_id}__aw"),
-                kind: ComponentKind::Potentiometer(max_r),
+                kind: ComponentKind::Potentiometer(max_r, taper),
             });
 
             // Synthetic lower-half: wiper → b
             let wb_idx = pedal.components.len() + extra_components.len();
             extra_components.push(ComponentDef {
                 id: format!("{pot_id}__wb"),
-                kind: ComponentKind::Potentiometer(max_r),
+                kind: ComponentKind::Potentiometer(max_r, taper),
             });
 
             let key_a = format!("{pot_id}.a");
@@ -1593,7 +1593,7 @@ impl CircuitGraph {
         for comp in &pedal.components {
             let (resistance, is_pot, max_r) = match &comp.kind {
                 ComponentKind::Resistor(r) => (Some(*r), false, *r),
-                ComponentKind::Potentiometer(max_r) => {
+                ComponentKind::Potentiometer(max_r, _) => {
                     // Use default position (0.5) for initial gain calculation
                     (Some(*max_r * 0.5), true, *max_r)
                 }
@@ -2362,12 +2362,18 @@ pub(super) fn make_leaf(
             rp: 2.0 * sample_rate * *l,
             state: 0.0,
         },
-        ComponentKind::Potentiometer(max_r) => DynNode::Pot {
-            comp_id: comp.id.clone(),
-            max_resistance: *max_r,
-            position: 0.5,
-            rp: 0.5 * *max_r,
-        },
+        ComponentKind::Potentiometer(max_r, taper) => {
+            // Apply taper for initial position (0.5)
+            let initial_pos = 0.5;
+            let tapered_pos = taper.apply(initial_pos);
+            DynNode::Pot {
+                comp_id: comp.id.clone(),
+                max_resistance: *max_r,
+                position: initial_pos,
+                taper: *taper,
+                rp: (tapered_pos * *max_r).max(1.0),
+            }
+        }
         ComponentKind::Photocoupler(pt) => {
             let model = match pt {
                 PhotocouplerType::Vtl5c3 => PhotocouplerModel::vtl5c3(),

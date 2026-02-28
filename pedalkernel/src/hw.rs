@@ -855,7 +855,7 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     description: format!("{} Inductor", crate::kicad::format_eng(*val, "H")),
                     qty_per_unit: 1,
                 }],
-                ComponentKind::Potentiometer(val) => {
+                ComponentKind::Potentiometer(val, _) => {
                     let (pn, desc) = if let Some(part_name) = hw_part {
                         (None, part_name.to_string())
                     } else if let Some((ppn, pdesc)) = find_closest(POTS, *val) {

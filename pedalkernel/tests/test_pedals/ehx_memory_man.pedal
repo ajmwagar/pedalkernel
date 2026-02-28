@@ -1,0 +1,84 @@
+# EHX Deluxe Memory Man-style BBD delay test
+# Classic analog delay with chorus/vibrato, MN3005 4096-stage BBD
+# Known for warm, dark repeats and modulation
+
+pedal "EHX Memory Man Test" {
+  components {
+    # Input buffer / gain
+    C_in: cap(100n)
+    R_in: resistor(470k)
+
+    # Input filter (anti-alias)
+    R_aa1: resistor(10k)
+    C_aa1: cap(10n)
+    R_aa2: resistor(10k)
+    C_aa2: cap(10n)
+
+    # Main BBD (MN3005 - the heart of Memory Man)
+    BBD1: bbd(mn3005)
+
+    # Delay time LFO (for chorus/vibrato)
+    LFO1: lfo(triangle, 500k, 1u)  # Very slow for delay
+
+    # Chorus/vibrato modulation depth
+    R_mod: resistor(47k)
+    C_mod: cap(100n)
+
+    # Feedback path
+    R_fb1: resistor(100k)
+    R_fb2: resistor(100k)
+    C_fb: cap(100n)
+
+    # Output reconstruction filter
+    R_out1: resistor(10k)
+    C_out1: cap(10n)
+    R_out2: resistor(10k)
+    C_out2: cap(10n)
+
+    # Output mix
+    R_blend: resistor(47k)
+    C_out: cap(1u)
+  }
+
+  nets {
+    # Input path with high impedance
+    in -> C_in.a
+    C_in.b -> R_in.a
+    R_in.b -> gnd
+
+    # Anti-alias filter (2-pole LP)
+    C_in.b -> R_aa1.a
+    R_aa1.b -> C_aa1.a, R_aa2.a
+    C_aa1.b -> gnd
+    R_aa2.b -> C_aa2.a, BBD1.in
+    C_aa2.b -> gnd
+
+    # Feedback injection point
+    R_aa2.b -> R_fb2.b
+
+    # LFO to clock
+    LFO1.out -> BBD1.clock
+
+    # Modulation shaping
+    LFO1.out -> R_mod.a
+    R_mod.b -> C_mod.a
+    C_mod.b -> gnd
+
+    # BBD output with reconstruction filter
+    BBD1.out -> R_out1.a
+    R_out1.b -> C_out1.a, R_out2.a
+    C_out1.b -> gnd
+    R_out2.b -> C_out2.a
+    C_out2.b -> gnd
+
+    # Feedback tap
+    R_out2.b -> C_fb.a
+    C_fb.b -> R_fb1.a
+    R_fb1.b -> R_fb2.a
+
+    # Output with blend
+    R_out2.b -> R_blend.a
+    R_blend.b -> C_out.a
+    C_out.b -> out
+  }
+}
