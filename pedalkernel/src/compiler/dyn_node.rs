@@ -530,6 +530,46 @@ impl DynNode {
         }
     }
 
+    /// Compute junction voltage for series filters (RL lowpass, LC filters, etc.).
+    ///
+    /// For a Series(L, R) tree driven by a voltage source at the root:
+    /// - a_root = 2 * V_in (incident wave from VS)
+    /// - b_tree = -(b1 + b2) (reflected wave from series adaptor)
+    /// - The junction voltage (between L and R) is the voltage across R
+    ///
+    /// After scattering:
+    /// - a2 = b2 - (1 - γ) * (b1 + b2 + a_root)
+    /// - V_junction = (a2 + b2) / 2
+    ///
+    /// This is needed because (a_root + b_tree) / 2 gives the voltage at the root
+    /// (input node), not at the internal junction (output node).
+    ///
+    /// Returns None if this is not a series filter topology.
+    pub fn series_junction_voltage(&self, a_root: f64) -> Option<f64> {
+        match self {
+            Self::Series { gamma, b1, b2, right, .. } => {
+                // Check if right child is a simple element (R, C, or L)
+                // The junction voltage is the voltage at the right child's port
+                match right.as_ref() {
+                    Self::Resistor { .. }
+                    | Self::Capacitor { .. }
+                    | Self::Inductor { .. }
+                    | Self::Pot { .. } => {
+                        // Compute a2 (incident wave to right child) using series scattering
+                        let sum = *b1 + *b2 + a_root;
+                        let a2 = *b2 - (1.0 - *gamma) * sum;
+                        // Junction voltage = voltage at right port
+                        Some((a2 + *b2) / 2.0)
+                    }
+                    // Nested series: recurse into right child
+                    Self::Series { .. } => right.series_junction_voltage(a_root),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Check if this tree contains any reactive elements (capacitors/inductors).
     pub fn has_reactive_elements(&self) -> bool {
         match self {

@@ -246,10 +246,11 @@ fn compute_passive_compensation(tree: &DynNode) -> f64 {
 /// Compute compensation factor for VoltageSourceDriver architecture.
 ///
 /// The VoltageSourceDriver root injects input as incident wave (a = 2 * V)
-/// and computes output as (a + b) / 2. The tree contains only passive elements
-/// (no embedded voltage source).
+/// and computes output based on topology:
+/// - Series filters: junction voltage via series_junction_voltage()
+/// - Other: root voltage (a + b) / 2
 ///
-/// For RC lowpass: at DC, V_out should equal V_in.
+/// For RC/RL lowpass: at DC, V_out should equal V_in.
 /// For highpass: DC is blocked, no compensation applied.
 fn compute_vsdriver_compensation(tree: &DynNode) -> f64 {
     // Clone the tree to simulate without affecting state
@@ -267,8 +268,13 @@ fn compute_vsdriver_compensation(tree: &DynNode) -> f64 {
     for _ in 0..2000 {
         let b_tree = test_tree.reflected();
         test_tree.set_incident(a_root);
-        // VoltageSourceDriver output: (a + b) / 2
-        output = (a_root + b_tree) / 2.0;
+
+        // Use same output extraction as runtime processing
+        output = if let Some(v_junction) = test_tree.series_junction_voltage(a_root) {
+            v_junction
+        } else {
+            (a_root + b_tree) / 2.0
+        };
     }
 
     // Compensation = expected / actual
@@ -493,6 +499,8 @@ pub fn compile_pedal_with_options(
             base_diode_model: Some(model),
             paired_opamp: None,
             dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
         });
     }
 
@@ -575,6 +583,8 @@ pub fn compile_pedal_with_options(
                     base_diode_model: None,
                     paired_opamp: None,
                     dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
                 });
             }
             OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot } => {
@@ -609,6 +619,8 @@ pub fn compile_pedal_with_options(
                     base_diode_model: None,
                     paired_opamp: None,
                     dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
                 });
             }
         }
@@ -659,68 +671,144 @@ pub fn compile_pedal_with_options(
 
     for (_edge_idx, jfet_info) in &jfets {
         let junction = jfet_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(
+
+        // Get elements at the junction (like RS for source follower)
+        let junction_passives = graph.elements_at_junction(
             junction,
             &all_nonlinear_indices,
             &graph.active_edge_indices,
         );
 
+        // Also find elements connecting junction to output (like C2 for source follower)
+        // This is critical for source followers where output is taken from source.
+        let junction_to_output: Vec<usize> = graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(idx, e)| {
+                if all_nonlinear_indices.contains(idx) {
+                    return false;
+                }
+                if graph.active_edge_indices.contains(idx) {
+                    return false;
+                }
+                // Must connect junction to out_node
+                (e.node_a == junction && e.node_b == graph.out_node)
+                    || (e.node_a == graph.out_node && e.node_b == junction)
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+
+        // Also find elements at out_node (e.g., R_load to ground)
+        let output_passives = graph.elements_at_junction(
+            graph.out_node,
+            &all_nonlinear_indices,
+            &graph.active_edge_indices,
+        );
+
+        // Combine all passive elements
+        let mut passive_idxs: Vec<usize> = junction_passives.clone();
+        for idx in &junction_to_output {
+            if !passive_idxs.contains(idx) {
+                passive_idxs.push(*idx);
+            }
+        }
+        for idx in &output_passives {
+            if !passive_idxs.contains(idx) {
+                passive_idxs.push(*idx);
+            }
+        }
+
         if passive_idxs.is_empty() {
             continue;
         }
 
-        // Find the best injection node for the voltage source.
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            let other = if e.node_a == junction {
-                e.node_b
-            } else {
-                e.node_a
+        // Detect source follower topology early: junction (source) connects to output.
+        // Source followers require a different WDF architecture:
+        // - Input modulates Vgs (gate-source voltage)
+        // - JFET current drives the source resistor network
+        // - Output is taken from the source node
+        // - NO voltage source in tree (JFET is the driver)
+        //
+        // Detection: junction connects to output via an edge, OR junction IS the output node
+        // (e.g., "J1.source -> RS.a, out" makes junction == out_node)
+        let is_source_follower = !junction_to_output.is_empty() || junction == graph.out_node;
+
+        // Build the WDF tree
+        let (tree, root) = if is_source_follower {
+            // Source follower: JFET-driven architecture (no voltage source)
+            // The tree contains only the source network: RS || (C2 series RL)
+            // The JFET acts as a current source controlled by Vgs
+            let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+            for &eidx in &passive_idxs {
+                let e = &graph.edges[eidx];
+                sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+            }
+
+            // Terminals: ground and JFET source (junction)
+            let terminals = vec![graph.gnd_node, junction];
+            let sp_tree = match sp_reduce(sp_edges, &terminals) {
+                Ok(t) => t,
+                Err(_) => continue,
             };
-            if let Some(&d) = dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
+
+            let tree = sp_to_dyn(&sp_tree, &graph.components, &graph.fork_paths, sample_rate);
+            let model = jfet_model(jfet_info.jfet_type, jfet_info.is_n_channel);
+            (tree, RootKind::Jfet(JfetRoot::new(model)))
+        } else {
+            // Normal JFET stage (phaser, common-source): voltage source drives input
+            // Find the best injection node for the voltage source.
+            let mut injection_node = graph.in_node;
+            let mut best_dist = usize::MAX;
+            for &eidx in &passive_idxs {
+                let e = &graph.edges[eidx];
+                let other = if e.node_a == junction {
+                    e.node_b
+                } else {
+                    e.node_a
+                };
+                if let Some(&d) = dist_from_in.get(&other) {
+                    if d < best_dist {
+                        best_dist = d;
+                        injection_node = other;
+                    }
                 }
             }
-        }
-        // Fallback: if in_node is disconnected (e.g. split pedal post-half
-        // where in maps to a triode grid), use gnd as the injection point.
-        if best_dist == usize::MAX {
-            injection_node = graph.gnd_node;
-        }
+            // Fallback: if in_node is disconnected (e.g. split pedal post-half
+            // where in maps to a triode grid), use gnd as the injection point.
+            if best_dist == usize::MAX {
+                injection_node = graph.gnd_node;
+            }
 
-        // Build SP edges.
-        let source_node = graph.edges.len() + 2000; // virtual source node (different from diodes)
-        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
+            // Build SP edges with voltage source.
+            let source_node = graph.edges.len() + 2000; // virtual source node
+            let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+            sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
 
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-        }
+            for &eidx in &passive_idxs {
+                let e = &graph.edges[eidx];
+                sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+            }
 
-        let terminals = vec![source_node, junction];
-        let sp_tree = match sp_reduce(sp_edges, &terminals) {
-            Ok(t) => t,
-            Err(_) => continue,
+            let terminals = vec![source_node, junction];
+            let sp_tree = match sp_reduce(sp_edges, &terminals) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            // Create components list with virtual voltage source.
+            let mut jfet_components = graph.components.clone();
+            while jfet_components.len() <= vs_comp_idx {
+                jfet_components.push(ComponentDef {
+                    id: "__vs__".to_string(),
+                    kind: ComponentKind::Resistor(1.0),
+                });
+            }
+
+            let tree = sp_to_dyn_with_vs(&sp_tree, &jfet_components, &graph.fork_paths, sample_rate, vs_comp_idx);
+            let model = jfet_model(jfet_info.jfet_type, jfet_info.is_n_channel);
+            (tree, RootKind::Jfet(JfetRoot::new(model)))
         };
-
-        // Create components list with virtual voltage source for JFET stages.
-        let mut jfet_components = graph.components.clone();
-        while jfet_components.len() <= vs_comp_idx {
-            jfet_components.push(ComponentDef {
-                id: "__vs__".to_string(),
-                kind: ComponentKind::Resistor(1.0),
-            });
-        }
-
-        let tree = sp_to_dyn_with_vs(&sp_tree, &jfet_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
-        let model = jfet_model(jfet_info.jfet_type, jfet_info.is_n_channel);
-        let root = RootKind::Jfet(JfetRoot::new(model));
 
         // Pair this JFET stage with a feedback op-amp if available.
         // In all-pass circuits (Phase 90), each JFET stage is followed
@@ -739,6 +827,8 @@ pub fn compile_pedal_with_options(
             base_diode_model: None,
             paired_opamp,
             dc_block: None,
+            is_source_follower,
+            prev_source_voltage: 0.0,
         });
     }
 
@@ -826,6 +916,8 @@ pub fn compile_pedal_with_options(
             base_diode_model: None,
             paired_opamp: None,
             dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
         });
     }
 
@@ -1246,6 +1338,8 @@ pub fn compile_pedal_with_options(
             base_diode_model: None,
             paired_opamp: None,
             dc_block,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
         });
     }
 
@@ -1338,6 +1432,8 @@ pub fn compile_pedal_with_options(
             base_diode_model: None,
             paired_opamp: None,
             dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
         });
     }
 
@@ -1418,6 +1514,8 @@ pub fn compile_pedal_with_options(
             base_diode_model: None,
             paired_opamp: None,
             dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
         });
     }
 
@@ -1498,6 +1596,8 @@ pub fn compile_pedal_with_options(
             base_diode_model: None,
             paired_opamp: None,
             dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
         });
     }
 
@@ -1584,6 +1684,8 @@ pub fn compile_pedal_with_options(
             base_diode_model: None,
             paired_opamp: None,
             dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
         });
     }
 
@@ -1663,6 +1765,8 @@ pub fn compile_pedal_with_options(
             base_diode_model: None,
             paired_opamp: None,
             dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
         });
     }
 
@@ -1723,6 +1827,8 @@ pub fn compile_pedal_with_options(
                     base_diode_model: None,
                     paired_opamp: None,
                     dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
                 });
             } else {
                 // Fall back to WDF for complex passive circuits
@@ -1744,44 +1850,14 @@ pub fn compile_pedal_with_options(
                     .collect();
 
                 if !passive_edges.is_empty() {
-                    // Check if this is a truly passive-only circuit (no active elements).
-                    // If so, we can use the proper VoltageSourceDriver architecture.
-                    // Otherwise, use the fallback Passthrough approach which handles
-                    // circuits where active elements break the passive path.
-                    let truly_passive = is_truly_passive_only(pedal);
-
-                    if truly_passive {
-                        // VoltageSourceDriver: build tree WITHOUT embedded VS
-                        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-                        for &eidx in &passive_edges {
-                            let e = &graph.edges[eidx];
-                            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-                        }
-
-                        // Terminals: in_node (VS injection) and out_node (measurement)
-                        let terminals = vec![graph.in_node, graph.out_node];
-                        if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
-                            let tree = sp_to_dyn(
-                                &sp_tree,
-                                &graph.components,
-                                &graph.fork_paths,
-                                sample_rate,
-                            );
-
-                            let compensation = compute_vsdriver_compensation(&tree);
-
-                            stages.push(WdfStage {
-                                tree,
-                                root: RootKind::VoltageSourceDriver,
-                                compensation,
-                                oversampler: Oversampler::new(oversampling),
-                                base_diode_model: None,
-                                paired_opamp: None,
-                                dc_block: None,
-                            });
-                        }
-                    } else {
-                        // Fallback: Passthrough with embedded VS (handles active element breaks)
+                    // Use Passthrough architecture with embedded VS for all passive circuits.
+                    // The VoltageSourceDriver approach has issues with series filter topologies
+                    // (like RL lowpass) where the junction voltage extraction doesn't work
+                    // due to WDF adaptor impedance mismatch.
+                    //
+                    // The Passthrough approach embeds the VS in the tree, ensuring proper
+                    // impedance matching and correct voltage distribution.
+                    {
                         let source_node = graph.edges.len() + 1000;
                         let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
 
@@ -1793,8 +1869,10 @@ pub fn compile_pedal_with_options(
                             sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
                         }
 
-                        // Use out_node as the junction (where we measure the output)
-                        let terminals = vec![source_node, graph.out_node];
+                        // Terminals: source_node to gnd_node (full circuit path)
+                        // For RL lowpass: VS → L → junction → R → gnd
+                        // The output is at junction (out_node), which is internal to the tree.
+                        let terminals = vec![source_node, graph.gnd_node];
                         if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
                             let mut all_components = graph.components.clone();
                             while all_components.len() <= vs_comp_idx {
@@ -1823,6 +1901,8 @@ pub fn compile_pedal_with_options(
                                 base_diode_model: None,
                                 paired_opamp: None,
                                 dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
                             });
                         }
                     }
@@ -2012,12 +2092,20 @@ pub fn compile_pedal_with_options(
         }
         // Priority: tube > BJT > FET > op-amp.
         // The dominant nonlinear device determines the rail saturation character.
+        //
+        // Exception: Source follower JFETs are voltage buffers, not clipping stages.
+        // Their DC-biased output (e.g., 1.4V at 0V input) is normal operation,
+        // not an "excessive" signal to compress.
+        let has_source_follower = stages.iter().any(|s| s.is_source_follower);
+
         if has_tube {
             RailSaturation::Tube { mu: tube_mu }
         } else if has_bjt {
             let vce_sat = if has_germanium { 0.3 } else { 0.2 };
             RailSaturation::Bjt { vce_sat }
-        } else if has_fet {
+        } else if has_fet && !has_source_follower {
+            // Only apply FET rail saturation for clipping stages (common-source, etc.)
+            // not for source followers which are linear buffers
             RailSaturation::Fet
         } else if has_opamp {
             RailSaturation::OpAmp { output_swing_ratio: opamp_swing }

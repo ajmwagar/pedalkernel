@@ -145,6 +145,13 @@ pub(super) struct WdfStage {
     /// Models the output coupling capacitor's DC blocking behavior.
     /// Format: (a1, b0, y_prev, x_prev) for IIR highpass.
     pub(super) dc_block: Option<(f64, f64, f64, f64)>,
+    /// Source follower mode for JFETs.
+    /// When true, Vgs is computed as Vgate (input) - Vsource (output).
+    /// This enables proper source follower behavior where the source follows the gate.
+    pub(super) is_source_follower: bool,
+    /// Previous source voltage for source follower Vgs calculation.
+    /// Vgs[n] = input[n] - Vsource[n-1]
+    pub(super) prev_source_voltage: f64,
 }
 
 impl WdfStage {
@@ -184,11 +191,33 @@ impl WdfStage {
             t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
         }
 
+        // For JFET source followers, compute Vgs from input (gate) and previous output (source).
+        // Vgs = Vgate - Vsource, where Vgate ≈ input and Vsource is the WDF output.
+        // We use the previous sample's source voltage for stability.
+        if self.is_source_follower {
+            if let RootKind::Jfet(ref mut j) = root {
+                // Bias point: Vgs typically -0.5 to -2V for N-channel JFET
+                // The input modulates around this bias point
+                let vgs = input - self.prev_source_voltage;
+                j.set_vgs(vgs);
+            }
+        }
+
+        // For source followers, the voltage source in the tree should NOT be
+        // driven by input. The input signal modulates Vgs (gate voltage), and
+        // the source follows via the JFET current. The voltage source is just
+        // a WDF artifact that should be 0.
+        let is_sf = self.is_source_follower;
+
         let wdf_out = self.oversampler.process(input, |sample| {
-            // For triodes, the voltage source is the B+ supply (v_max).
-            // The input already modulated Vgk; the supply biases the plate circuit.
+            // Determine voltage source value based on stage type:
+            // - Triode: VS = B+ supply (plate bias)
+            // - Source follower: VS = 0 (input goes to gate, not VS)
+            // - Other: VS = input * compensation
             let vs_voltage = if let RootKind::Triode(t) = root {
                 t.v_max() // B+ supply voltage for triode bias
+            } else if is_sf {
+                0.0 // Source follower: input modulates Vgs, not VS
             } else {
                 sample * compensation
             };
@@ -200,7 +229,16 @@ impl WdfStage {
                 RootKind::DiodePair(dp) => dp.process(b_tree, rp),
                 RootKind::SingleDiode(d) => d.process(b_tree, rp),
                 RootKind::Zener(z) => z.process(b_tree, rp),
-                RootKind::Jfet(j) => j.process(b_tree, rp),
+                RootKind::Jfet(j) => {
+                    if is_sf {
+                        // Source follower: solve Vs where Ids(Vgate - Vs) = Vs/Rs
+                        // Vgate = input signal (sample), Vs is what we're solving for
+                        j.process_source_follower(b_tree, rp, sample * compensation)
+                    } else {
+                        // Normal JFET (phaser, common-source): Vgs set externally
+                        j.process(b_tree, rp)
+                    }
+                }
                 RootKind::Triode(t) => t.process(b_tree, rp),
                 RootKind::Pentode(p) => p.process(b_tree, rp),
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
@@ -229,14 +267,23 @@ impl WdfStage {
                 // VoltageSourceDriver: inject input as incident wave
                 // Tree contains reactive elements WITHOUT embedded VS.
                 // a_root = 2 * V_in (wave representation of voltage)
-                // Output = (a_root + b_tree) / 2 = proper load voltage
+                //
+                // For series filters (RL lowpass, LC filters), the output is at
+                // the junction between elements, not at the root. We need to
+                // extract the junction voltage using series_junction_voltage().
                 RootKind::VoltageSourceDriver => {
                     // Inject input signal as incident wave (wave = 2 * voltage)
                     let a_root = sample * compensation * 2.0;
                     // Update tree with incident wave from root
                     tree.set_incident(a_root);
-                    // Output voltage at load = (a + b) / 2
-                    (a_root + b_tree) / 2.0
+
+                    // For series filters, output is at the junction, not root
+                    if let Some(v_junction) = tree.series_junction_voltage(a_root) {
+                        v_junction
+                    } else {
+                        // Fallback: output at root = (a + b) / 2
+                        (a_root + b_tree) / 2.0
+                    }
                 }
                 // Capacitor root: b = state (reflects stored incident)
                 // This gives correct RC lowpass transfer function.
@@ -293,6 +340,11 @@ impl WdfStage {
             return (a + b) / 2.0;
         }
 
+        // Update source follower state (for next sample's Vgs calculation)
+        if self.is_source_follower {
+            self.prev_source_voltage = wdf_out;
+        }
+
         // Apply DC-blocking filter for triode stages.
         // This models the output coupling capacitor (C_out) which blocks DC
         // and passes AC. The filter is a single-pole IIR highpass.
@@ -318,6 +370,7 @@ impl WdfStage {
             *y_prev = 0.0;
             *x_prev = 0.0;
         }
+        self.prev_source_voltage = 0.0;
     }
 
     /// Apply thermal drift to temperature-sensitive root elements.

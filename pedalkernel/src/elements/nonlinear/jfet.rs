@@ -249,6 +249,87 @@ impl JfetRoot {
     }
 }
 
+impl JfetRoot {
+    /// Source follower processing: solve for Vs where Ids(Vgate - Vs) = Vs / Rs.
+    ///
+    /// In a source follower:
+    /// - The gate voltage (Vgate) is the input signal
+    /// - The source voltage (Vs) follows the gate with ~unity gain
+    /// - Vgs = Vgate - Vs (computed during Newton-Raphson solve)
+    /// - The JFET operates in saturation: Ids ≈ Idss * (1 - Vgs/Vp)^2
+    /// - The WDF constraint: Ids = Vs / Rp (source current into load)
+    ///
+    /// Returns the reflected wave b = 2*Vs - a.
+    #[inline]
+    pub fn process_source_follower(&mut self, a: f64, rp: f64, vgate: f64) -> f64 {
+        let model = self.model;
+        let max_iter = self.max_iter;
+
+        // Source follower current equation:
+        // Ids = f(Vgs) = f(Vgate - Vs)
+        // WDF constraint: Ids = (a - b) / (2*Rp) = (a - v) / Rp where v = (a+b)/2 = Vs
+        // So: Ids(Vgate - Vs) = (a - Vs) / Rp
+
+        // Source follower current equation:
+        // WDF constraint: I_port = (a - b) / (2*Rp) where I_port is current INTO the port
+        // For source follower: current flows OUT of source (into Rs), so I_port = -Ids
+        //
+        // Ids = Idss * (1 - Vgs/Vp)^2 in saturation
+        // Vgs = Vgate - Vs (computed during solve)
+        let source_follower_current = |vs: f64| -> (f64, f64) {
+            let vgs = vgate - vs;
+
+            // Cutoff check
+            if model.is_n_channel {
+                if vgs <= model.vp {
+                    // Cutoff: no current, but small leakage for numerical stability
+                    return (0.0, LEAKAGE_CONDUCTANCE);
+                }
+            } else if vgs >= model.vp {
+                return (0.0, LEAKAGE_CONDUCTANCE);
+            }
+
+            let vgs_factor = (1.0 - vgs / model.vp).clamp(0.0, 1.0);
+
+            // Saturation current (assuming Vds >> Vdsat, typical for source follower)
+            let ids = model.idss * vgs_factor * vgs_factor;
+
+            // Derivative of Ids w.r.t. Vs:
+            // dIds/dVs = dIds/dVgs * dVgs/dVs
+            //
+            // dIds/dVgs: For Ids = Idss * (1 - Vgs/Vp)^2
+            //   = 2 * Idss * (1 - Vgs/Vp) * (-1/Vp)
+            //   = -2 * Idss / Vp * vgs_factor
+            //   For N-channel (Vp < 0): = -2 * Idss / (-|Vp|) * vgs_factor = 2*Idss/|Vp| * vgs_factor > 0
+            //
+            // dVgs/dVs = -1 (Vgs = Vgate - Vs)
+            //
+            // dIds/dVs = dIds/dVgs * dVgs/dVs = (2*Idss/|Vp| * vgs_factor) * (-1) < 0
+            //
+            // Current INTO port = -Ids
+            // d(I_port)/dVs = -dIds/dVs = -(negative) = positive
+            // Derivative chain:
+            // dIds/dVgs = 2 * Idss * vgs_factor / |Vp| (positive for N-channel)
+            // dVgs/dVs = -1 (Vgs = Vgate - Vs)
+            // dIds/dVs = dIds/dVgs * (-1) = -2 * Idss * vgs_factor / |Vp| (negative)
+            //
+            // i = -Ids, so di/dVs = -dIds/dVs (positive)
+            let d_ids_dvgs = 2.0 * model.idss / model.vp.abs() * vgs_factor;
+            let d_ids_dvs = -d_ids_dvgs;  // negative
+            let di_dvs = -d_ids_dvs;      // positive (i = -Ids)
+
+            // Return (i, di/dVs) where i = -Ids
+            (-ids, di_dvs)
+        };
+
+        // Initial guess: source follows gate minus typical Vgs
+        // For N-channel at moderate bias, Vgs ≈ -Vp/2
+        let v0 = (vgate + model.vp.abs() * 0.5).max(0.0);
+
+        newton_raphson_solve(a, rp, v0, max_iter, 1e-6, None, None, source_follower_current)
+    }
+}
+
 impl WdfRoot for JfetRoot {
     /// JFET drain-source path: `i = Ids(v, Vgs)`
     #[inline]
