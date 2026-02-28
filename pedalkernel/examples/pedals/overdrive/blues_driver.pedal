@@ -20,7 +20,7 @@ pedal "Boss Blues Driver" {
     R4: resistor(10k)       # Gain input resistor
     U1: opamp(tl072)        # TL072 first gain stage
     R5: resistor(470k)      # Feedback resistor
-    Gain: pot(250k)         # Gain control
+    Gain: pot(250k, a)      # Gain control (audio taper)
     R6: resistor(1k)        # Gain minimum resistance
     C4: cap(47n)            # Feedback cap
 
@@ -44,13 +44,13 @@ pedal "Boss Blues Driver" {
     R11: resistor(10k)      # Tone input
     C7: cap(6.8n)           # Treble cap
     C8: cap(100n)           # Bass cap
-    Tone: pot(20k)          # Tone control
+    Tone: pot(20k, b)       # Tone control (linear taper)
     R12: resistor(4.7k)     # Tone mixing
 
     # Output stage
     C9: cap(10u)            # Output coupling
     R13: resistor(100k)     # Output load
-    Level: pot(100k)        # Level control
+    Level: pot(100k, a)     # Level control (audio taper)
     R14: resistor(1k)       # Output impedance
   }
   nets {

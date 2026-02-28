@@ -15,8 +15,8 @@ pedal "Boss CE-2" {
     C3: cap(100n)           # Output coupling
     R4: resistor(47k)       # Output load
     LFO1: lfo(triangle, 150k, 1u)   # Triangle LFO for smooth chorus sweep
-    Rate: pot(500k)         # Rate control
-    Depth: pot(50k)         # Depth control — scales LFO modulation amount
+    Rate: pot(500k, b)      # Rate control (linear taper)
+    Depth: pot(50k, b)      # Depth control (linear taper)
     R7: resistor(22k)       # Depth scaling resistor
     C4: cap(1u)             # Output smoothing
     R5: resistor(100k)      # Mix resistor (dry)

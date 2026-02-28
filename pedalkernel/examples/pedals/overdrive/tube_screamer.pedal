@@ -17,21 +17,21 @@ pedal "Tube Screamer" {
     R3: resistor(4.7k)      # Input resistor to inverting input
     U2: opamp(jrc4558)      # JRC4558D clipping amplifier (warm, compressed)
     R4: resistor(51k)       # Feedback resistor (sets minimum gain)
-    Drive: pot(500k)        # Drive control (increases feedback R)
+    Drive: pot(500k, a)     # Drive control (audio taper)
     C3: cap(47n)            # Feedback cap (HF rolloff in feedback)
     D1: diode(silicon)      # 1N914 clipping diode (positive half)
     D2: diode(silicon)      # 1N914 clipping diode (negative half)
 
     # Tone control (gyrator-based mid-hump)
     R5: resistor(1k)        # Tone input resistor
-    Tone: pot(20k)          # Tone control
+    Tone: pot(20k, b)       # Tone control (linear taper)
     C4: cap(220n)           # Tone bass cap
     C5: cap(100n)           # Tone treble cap
     R6: resistor(220)       # Tone mixing resistor
 
     # Output stage
     C6: cap(100n)           # Output coupling
-    Level: pot(100k)        # Output level (log taper)
+    Level: pot(100k, a)     # Output level (audio taper)
     R7: resistor(10k)       # Output load
   }
   nets {

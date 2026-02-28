@@ -34,7 +34,7 @@ pedal "Big Muff" {
     # Stage 3: Second clipping stage (Sustain control here)
     Q3: npn(2n5088)         # 2N5088 gain stage
     R8: resistor(470k)      # Q3 base bias
-    Sustain: pot(100k)      # Sustain (feedback/gain control)
+    Sustain: pot(100k, a)   # Sustain (audio taper)
     R9: resistor(1k)        # Sustain minimum resistance
     R10: resistor(100)      # Q3 emitter resistor
     C5: cap(100n)           # Q3 emitter bypass
@@ -52,12 +52,12 @@ pedal "Big Muff" {
     R14: resistor(22k)      # Tone input resistor
     C8: cap(4n)             # Treble cap (high-pass path)
     C9: cap(100n)           # Bass cap (low-pass path)
-    Tone: pot(100k)         # Tone control
+    Tone: pot(100k, b)      # Tone control (linear taper)
     R15: resistor(22k)      # Tone mixing resistor
 
     # Output stage
     C10: cap(100n)          # Final output coupling
-    Volume: pot(100k)       # Volume control (log taper)
+    Volume: pot(100k, a)    # Volume control (audio taper)
     R16: resistor(100k)     # Output load
   }
   nets {

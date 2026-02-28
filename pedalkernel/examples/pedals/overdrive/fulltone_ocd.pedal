@@ -18,7 +18,7 @@ pedal "Fulltone OCD" {
     R3: resistor(470)       # Op-amp output current limit
 
     # Feedback / Drive control
-    Drive: pot(500k)        # Drive control (log taper)
+    Drive: pot(500k, a)     # Drive control (audio taper)
     R4: resistor(1k)        # Minimum gain resistor
     C2: cap(100p)           # HF rolloff in feedback
 
@@ -30,12 +30,12 @@ pedal "Fulltone OCD" {
 
     # Tone control
     C4: cap(22n)            # Tone shaping cap
-    Tone: pot(100k)         # HP/LP tone control
+    Tone: pot(100k, b)      # HP/LP tone control (linear taper)
     R6: resistor(10k)       # Tone minimum resistance
 
     # Output stage
     C5: cap(10u)            # Output coupling
-    Volume: pot(100k)       # Volume control (audio taper)
+    Volume: pot(100k, a)    # Volume control (audio taper)
     R7: resistor(100k)      # Output load
   }
   nets {

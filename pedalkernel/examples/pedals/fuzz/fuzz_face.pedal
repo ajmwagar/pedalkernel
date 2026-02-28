@@ -25,7 +25,7 @@ pedal "Fuzz Face" {
     R5: resistor(100k)      # Q2 collector load
 
     # Feedback / Fuzz control
-    Fuzz: pot(1k)           # Fuzz amount (linear taper)
+    Fuzz: pot(1k, b)        # Fuzz amount (linear taper)
     R6: resistor(100)       # Minimum fuzz resistance
 
     # Bias stabilization
@@ -34,7 +34,7 @@ pedal "Fuzz Face" {
 
     # Output stage
     C4: cap(10u)            # Output coupling (blocks DC)
-    Volume: pot(500k)       # Output volume (log taper)
+    Volume: pot(500k, a)    # Output volume (audio taper)
     R8: resistor(10k)       # Output load
   }
   nets {

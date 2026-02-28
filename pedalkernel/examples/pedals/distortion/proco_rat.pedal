@@ -23,7 +23,7 @@ pedal "ProCo RAT" {
     C3: cap(33p)              # Additional HF rolloff (some versions)
 
     # Feedback / Gain control
-    Distortion: pot(100k)     # Gain control (log taper)
+    Distortion: pot(100k, a)  # Gain control (audio taper)
     R4: resistor(560)         # Minimum gain resistor (series with pot)
 
     # Clipping stage
@@ -33,13 +33,13 @@ pedal "ProCo RAT" {
 
     # Tone control (passive low-pass)
     C4: cap(3.3n)             # Filter cap
-    Filter: pot(100k)         # Filter control (audio taper)
+    Filter: pot(100k, c)      # Filter control (reverse log - cuts highs)
     R6: resistor(1.5k)        # Filter minimum resistance
 
     # Output stage
     C5: cap(4.7u)             # Output coupling
     R7: resistor(100k)        # Output load resistor
-    Volume: pot(100k)         # Volume control (audio taper)
+    Volume: pot(100k, a)      # Volume control (audio taper)
     R8: resistor(1k)          # Output buffer resistor
   }
   nets {

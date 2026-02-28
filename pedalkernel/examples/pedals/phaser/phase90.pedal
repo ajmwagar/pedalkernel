@@ -98,7 +98,7 @@ pedal "MXR Phase 90" {
     R_lfo: resistor(100k)        # LFO output attenuation
 
     # Speed control
-    Speed: pot(1M)
+    Speed: pot(1M, b)       # Speed control (linear taper)
   }
 
   nets {
