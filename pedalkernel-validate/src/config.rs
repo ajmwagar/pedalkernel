@@ -50,7 +50,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
 
@@ -66,7 +66,7 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationConfig {
     pub global: GlobalConfig,
-    pub suites: HashMap<String, TestSuite>,
+    pub suites: BTreeMap<String, TestSuite>,
 }
 
 /// Global settings for all tests.
@@ -98,7 +98,7 @@ impl Default for GlobalConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestSuite {
     pub description: String,
-    pub tests: HashMap<String, TestCase>,
+    pub tests: BTreeMap<String, TestCase>,
 }
 
 /// A single test case.
@@ -314,14 +314,14 @@ impl ValidationConfig {
 }
 
 /// Create default test suites matching the SPICE harness.
-fn default_suites() -> HashMap<String, TestSuite> {
-    let mut suites = HashMap::new();
+fn default_suites() -> BTreeMap<String, TestSuite> {
+    let mut suites = BTreeMap::new();
 
     // Linear suite
     suites.insert("linear".to_string(), TestSuite {
         description: "Linear circuit transfer function validation".to_string(),
         tests: {
-            let mut tests = HashMap::new();
+            let mut tests = BTreeMap::new();
 
             // Simplest possible - pure resistor divider
             tests.insert("resistor_divider".to_string(), TestCase {
@@ -424,7 +424,7 @@ fn default_suites() -> HashMap<String, TestSuite> {
     suites.insert("nonlinear".to_string(), TestSuite {
         description: "Nonlinear circuit SPICE comparison".to_string(),
         tests: {
-            let mut tests = HashMap::new();
+            let mut tests = BTreeMap::new();
 
             // Simplest nonlinear - single diode
             // WDF vs SPICE: ~2-3dB difference is expected due to algorithm differences
@@ -558,7 +558,7 @@ fn default_suites() -> HashMap<String, TestSuite> {
     suites.insert("active".to_string(), TestSuite {
         description: "Active device (JFET, BJT, triode) validation".to_string(),
         tests: {
-            let mut tests = HashMap::new();
+            let mut tests = BTreeMap::new();
 
             // KNOWN LIMITATION: JFET source follower topology isn't properly supported.
             // The WDF JFET model uses externally-controlled Vgs (for phasers), not
@@ -593,7 +593,7 @@ fn default_suites() -> HashMap<String, TestSuite> {
     suites.insert("stress".to_string(), TestSuite {
         description: "Edge cases and stress conditions".to_string(),
         tests: {
-            let mut tests = HashMap::new();
+            let mut tests = BTreeMap::new();
             tests.insert("dc_stability".to_string(), TestCase {
                 circuit: "nonlinear/diode_clipper.pedal".to_string(),
                 description: "DC offset accumulation over long run".to_string(),
@@ -612,7 +612,7 @@ fn default_suites() -> HashMap<String, TestSuite> {
     suites.insert("reactive".to_string(), TestSuite {
         description: "Reactive component validation (transformers, delay, LC)".to_string(),
         tests: {
-            let mut tests = HashMap::new();
+            let mut tests = BTreeMap::new();
 
             // Transformer step-down (10:1)
             // Note: SPICE uses coupled inductors (k=0.99) which has frequency-dependent
@@ -721,7 +721,7 @@ fn default_suites() -> HashMap<String, TestSuite> {
     suites.insert("opamp".to_string(), TestSuite {
         description: "Op-amp circuit configuration validation".to_string(),
         tests: {
-            let mut tests = HashMap::new();
+            let mut tests = BTreeMap::new();
 
             // Inverting amplifier with gain = -10 (Rf/Ri = 100k/10k)
             tests.insert("inverting_gain10".to_string(), TestCase {
@@ -851,7 +851,7 @@ fn default_suites() -> HashMap<String, TestSuite> {
     suites.insert("pedals".to_string(), TestSuite {
         description: "Classic pedal core circuit validation".to_string(),
         tests: {
-            let mut tests = HashMap::new();
+            let mut tests = BTreeMap::new();
 
             // Tube Screamer TS-808 core clipper
             // Op-amp with soft clipping diodes in feedback loop

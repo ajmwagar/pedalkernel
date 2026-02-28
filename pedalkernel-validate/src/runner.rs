@@ -59,7 +59,7 @@ use crate::npy;
 use crate::report::{SignalResult, TestResult, SuiteResult};
 use pedalkernel::compiler::CompiledPedal;
 use pedalkernel::PedalProcessor;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -125,8 +125,8 @@ impl ValidationRunner {
     }
 
     /// Run all test suites.
-    pub fn run_all(&self) -> Result<HashMap<String, SuiteResult>, RunnerError> {
-        let mut results = HashMap::new();
+    pub fn run_all(&self) -> Result<BTreeMap<String, SuiteResult>, RunnerError> {
+        let mut results = BTreeMap::new();
         for (suite_name, suite) in &self.validation_config.suites {
             let suite_result = self.run_suite(suite_name, suite)?;
             results.insert(suite_name.clone(), suite_result);
@@ -136,7 +136,7 @@ impl ValidationRunner {
 
     /// Run a specific suite by name.
     pub fn run_suite(&self, suite_name: &str, suite: &TestSuite) -> Result<SuiteResult, RunnerError> {
-        let mut test_results = HashMap::new();
+        let mut test_results = BTreeMap::new();
         let mut passed = 0;
         let mut failed = 0;
 

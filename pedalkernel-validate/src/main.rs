@@ -225,7 +225,7 @@ fn run_validation(cli: &Cli, suite: &str, test: Option<String>) -> anyhow::Resul
         };
 
         let result = runner.run_suite(suite, &suite_to_run)?;
-        let mut results = std::collections::HashMap::new();
+        let mut results = std::collections::BTreeMap::new();
         results.insert(suite.to_string(), result);
         results
     };

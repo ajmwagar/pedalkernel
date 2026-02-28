@@ -40,7 +40,7 @@
 
 use crate::metrics::ComparisonResult;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Full validation report.
@@ -55,7 +55,7 @@ pub struct ValidationReport {
     /// Oversampling factor.
     pub oversample: u32,
     /// Suite results.
-    pub suites: HashMap<String, SuiteResult>,
+    pub suites: BTreeMap<String, SuiteResult>,
     /// Summary statistics.
     pub summary: ReportSummary,
 }
@@ -76,7 +76,7 @@ pub struct SuiteResult {
     pub description: String,
     pub passed: usize,
     pub failed: usize,
-    pub tests: HashMap<String, TestResult>,
+    pub tests: BTreeMap<String, TestResult>,
 }
 
 /// Result for a single test case.
@@ -123,7 +123,7 @@ impl From<ComparisonResult> for ComparisonMetrics {
 impl ValidationReport {
     /// Create a new report from suite results.
     pub fn new(
-        suites: HashMap<String, SuiteResult>,
+        suites: BTreeMap<String, SuiteResult>,
         sample_rate: u32,
         oversample: u32,
     ) -> Self {
@@ -377,14 +377,14 @@ mod tests {
 
     #[test]
     fn report_summary_calculation() {
-        let mut suites = HashMap::new();
+        let mut suites = BTreeMap::new();
         suites.insert(
             "test_suite".to_string(),
             SuiteResult {
                 description: "Test".to_string(),
                 passed: 3,
                 failed: 1,
-                tests: HashMap::new(),
+                tests: BTreeMap::new(),
             },
         );
 
