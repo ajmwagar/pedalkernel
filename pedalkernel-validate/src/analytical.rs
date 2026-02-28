@@ -47,7 +47,7 @@ pub fn rc_lowpass_impulse_response(
 
     for i in 0..n_samples {
         let x = if i == 0 { 1.0 } else { 0.0 };
-        let y = b0 * x + b1 * x_prev - a1 * y_prev;
+        let y = b0 * x + b1 * x_prev + a1 * y_prev;
         output.push(y);
         x_prev = x;
         y_prev = y;
@@ -96,7 +96,7 @@ pub fn rc_lowpass_filter(
     let mut y_prev = 0.0;
 
     for &x in signal {
-        let y = b0 * x + b1 * x_prev - a1 * y_prev;
+        let y = b0 * x + b1 * x_prev + a1 * y_prev;
         output.push(y);
         x_prev = x;
         y_prev = y;
@@ -117,53 +117,38 @@ pub fn rl_lowpass_magnitude(l_henrys: f64, r_ohms: f64, freq_hz: f64) -> f64 {
 
 /// Process a signal through an ideal first-order RL lowpass.
 ///
-/// Uses the proper WDF series adaptor algorithm:
-/// - Source sets incident wave: a_s = 2 * v_in
-/// - Inductor reflects: b_L = a_L[n-1]
-/// - Resistor reflects: b_R = 0 (matched)
-/// - Series adaptor scatters
-/// - Output: v_out = a_R / 2
+/// Uses bilinear transform for exact discrete-time response.
+/// H(s) = R / (R + sL) = 1 / (1 + sL/R)
+/// Time constant τ = L/R (same form as RC lowpass with τ = RC)
 ///
-/// This gives H(s) = R / (R + sL) with fc = R / (2*pi*L)
+/// This gives fc = R / (2*pi*L)
 pub fn rl_lowpass_filter(
     signal: &[f64],
     l_henrys: f64,
     r_ohms: f64,
     sample_rate: f64,
 ) -> Vec<f64> {
-    // WDF port resistances
-    let r_l = 2.0 * l_henrys * sample_rate;  // Inductor: R = 2*L*fs
-    let r_r = r_ohms;                         // Resistor: R = R
-    let r_total = r_l + r_r;
+    // Time constant τ = L/R
+    let tau = l_henrys / r_ohms;
+    let dt = 1.0 / sample_rate;
 
-    // Scattering coefficients for series adaptor
-    let gamma_l = r_l / r_total;
-    let gamma_r = r_r / r_total;
+    // Bilinear transform coefficients (same form as RC lowpass)
+    // α = 2*fs*τ
+    let k = 2.0 / dt;
+    let denom = 1.0 + k * tau;
+    let b0 = 1.0 / denom;
+    let b1 = b0;
+    let a1 = (1.0 - k * tau) / denom;
 
     let mut output = Vec::with_capacity(signal.len());
-    let mut a_l_prev = 0.0; // Inductor state
+    let mut x_prev = 0.0;
+    let mut y_prev = 0.0;
 
-    for &v_in in signal {
-        // 1. Source sets incident wave (wave = 2 * voltage)
-        let a_s = 2.0 * v_in;
-
-        // 2. Inductor reflects previous incident wave
-        let b_l = a_l_prev;
-
-        // 3. Resistor reflects zero (matched load)
-        // let b_r = 0.0;
-
-        // 4. Series adaptor scattering
-        let sum = a_s + b_l; // + b_r, but b_r = 0
-        let a_l = a_s - gamma_l * sum;
-        let a_r = a_s - gamma_r * sum;
-
-        // 5. Update inductor state
-        a_l_prev = a_l;
-
-        // 6. Output voltage across resistor: v_out = (a_R + b_R) / 2 = a_R / 2
-        let v_out = a_r / 2.0;
-        output.push(v_out);
+    for &x in signal {
+        let y = b0 * x + b1 * x_prev + a1 * y_prev;
+        output.push(y);
+        x_prev = x;
+        y_prev = y;
     }
 
     output

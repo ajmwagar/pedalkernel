@@ -105,21 +105,8 @@ enum FilterTopology {
     /// RC highpass: C from in→out, R from out→gnd
     RcHighpass { r: f64, c: f64, a1: f64, b0: f64 },
     /// RL lowpass: L from in→out, R from out→gnd
-    /// Uses proper WDF series adaptor algorithm
-    RlLowpass {
-        /// Inductance in Henrys
-        l: f64,
-        /// Resistance in Ohms
-        r: f64,
-        /// R_L = 2*L*fs (inductor port resistance)
-        r_l: f64,
-        /// R_R = R (resistor port resistance)
-        r_r: f64,
-        /// γ_L = R_L / (R_L + R_R)
-        gamma_l: f64,
-        /// γ_R = R_R / (R_L + R_R)
-        gamma_r: f64,
-    },
+    /// Uses IIR with time constant τ = L/R (same form as RC lowpass)
+    RlLowpass { l: f64, r: f64, a1: f64, b0: f64 },
 }
 
 /// Detect simple RC/RL filter topology and compute filter parameters.
@@ -169,21 +156,14 @@ fn detect_rc_filter_topology(graph: &CircuitGraph, sample_rate: f64) -> Option<F
             || (r_edge.node_a == graph.gnd_node && r_edge.node_b == graph.out_node);
 
         if l_connects_in_out && r_connects_out_gnd {
-            // RL lowpass using proper WDF series adaptor
-            let r_l = 2.0 * l * sample_rate;
-            let r_r = r;
-            let r_total = r_l + r_r;
-            let gamma_l = r_l / r_total;
-            let gamma_r = r_r / r_total;
+            // RL lowpass using IIR (time constant τ = L/R, same form as RC lowpass)
+            // α = 2*fs*τ = 2*fs*L/R
+            let tau = l / r;
+            let alpha = 2.0 * sample_rate * tau;
+            let a1 = (1.0 - alpha) / (1.0 + alpha);
+            let b0 = 1.0 / (1.0 + alpha);
 
-            return Some(FilterTopology::RlLowpass {
-                l,
-                r,
-                r_l,
-                r_r,
-                gamma_l,
-                gamma_r,
-            });
+            return Some(FilterTopology::RlLowpass { l, r, a1, b0 });
         }
     }
 
@@ -1878,18 +1858,11 @@ pub fn compile_pedal_with_options(
                         y_prev: 0.0,
                         x_prev: 0.0,
                     },
-                    FilterTopology::RlLowpass {
-                        r_l,
-                        r_r,
-                        gamma_l,
-                        gamma_r,
-                        ..
-                    } => RootKind::RlLowpass {
-                        r_l,
-                        r_r,
-                        gamma_l,
-                        gamma_r,
-                        a_l_prev: 0.0,
+                    FilterTopology::RlLowpass { a1, b0, .. } => RootKind::IirLowpass {
+                        a1,
+                        b0,
+                        y_prev: 0.0,
+                        x_prev: 0.0,
                     },
                 };
 
