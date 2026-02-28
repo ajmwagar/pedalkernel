@@ -585,6 +585,109 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 },
             });
 
+            // Fuzz Face - PNP germanium common emitter cascade
+            // Tests BJT (PNP) modeling and transistor clipping behavior
+            tests.insert("fuzz_face_pnp".to_string(), TestCase {
+                circuit: "active/fuzz_face_pnp.pedal".to_string(),
+                description: "Fuzz Face PNP germanium two-transistor fuzz".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 440.0,
+                        amplitude: 0.05,  // Low level for clean-ish
+                        duration: 0.05,
+                        label: Some("clean".to_string()),
+                    },
+                    SignalConfig::Sine {
+                        frequency: 440.0,
+                        amplitude: 0.5,  // Drive into saturation
+                        duration: 0.05,
+                        label: Some("saturated".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain, MetricConfig::Thd { fundamental: 440.0 }],
+                pass_criteria: PassCriteria {
+                    // BJT modeling has some differences from SPICE
+                    normalized_rms_error_db: Some(10.0),
+                    peak_error_db: Some(12.0),
+                    thd_error_db: Some(20.0),
+                    ..Default::default()
+                },
+            });
+
+            // Push-pull 6L6 output stage
+            // Tests pentode modeling and push-pull transformer topology
+            tests.insert("push_pull_6l6".to_string(), TestCase {
+                circuit: "active/push_pull_6l6.pedal".to_string(),
+                description: "Push-pull 6L6GC pentode output stage".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 440.0,
+                        amplitude: 1.0,
+                        duration: 0.05,
+                        label: Some("sine".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain],
+                pass_criteria: PassCriteria {
+                    // Pentode + push-pull is complex, allow more error
+                    normalized_rms_error_db: Some(15.0),
+                    peak_error_db: Some(15.0),
+                    ..Default::default()
+                },
+            });
+
+            // Phase all-pass stage (single stage from Phase 90)
+            // Tests JFET variable resistance + op-amp buffer
+            tests.insert("phase_allpass_stage".to_string(), TestCase {
+                circuit: "active/phase_allpass_stage.pedal".to_string(),
+                description: "Single JFET all-pass stage (phaser building block)".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.5,
+                        duration: 0.05,
+                        label: Some("sine".to_string()),
+                    },
+                    SignalConfig::ExpSweep {
+                        f_start: 100.0,
+                        f_end: 10000.0,
+                        amplitude: 0.5,
+                        duration: 0.5,
+                        label: Some("sweep".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                pass_criteria: PassCriteria {
+                    // All-pass should have unity gain, focus on phase accuracy
+                    normalized_rms_error_db: Some(6.0),
+                    peak_error_db: Some(8.0),
+                    spectral_error_db: Some(3.0),
+                    ..Default::default()
+                },
+            });
+
+            // Optical attenuator (VTL5C3 photocoupler)
+            // Tests photocoupler LDR behavior
+            tests.insert("optical_attenuator".to_string(), TestCase {
+                circuit: "active/optical_attenuator.pedal".to_string(),
+                description: "VTL5C3 photocoupler optical attenuator".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 1.0,
+                        duration: 0.05,
+                        label: Some("sine".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain],
+                pass_criteria: PassCriteria {
+                    // Photocoupler has slow dynamics, allow some error
+                    normalized_rms_error_db: Some(10.0),
+                    peak_error_db: Some(12.0),
+                    ..Default::default()
+                },
+            });
+
             tests
         },
     });

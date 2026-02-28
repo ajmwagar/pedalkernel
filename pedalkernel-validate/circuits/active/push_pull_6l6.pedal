@@ -1,0 +1,78 @@
+# Push-Pull 6L6 Output Stage
+# Class AB power amplifier topology
+# Two pentodes in push-pull driving a center-tapped transformer
+#
+# This is a simplified output stage without phase inverter
+# (assumes balanced input on both grids, antiphase)
+#
+# T1: Output transformer with push-pull primary
+#     Primary: center-tap to B+ (plates to each half)
+#     Secondary: speaker load
+
+pedal "Push-Pull 6L6" {
+  supply 400V
+  components {
+    # Input coupling
+    C1: cap(22n)            # Grid coupling cap (V1)
+    C2: cap(22n)            # Grid coupling cap (V2)
+
+    # Grid leak resistors
+    Rg1: resistor(220k)     # Grid leak V1
+    Rg2: resistor(220k)     # Grid leak V2
+
+    # Cathode bias (shared)
+    Rk: resistor(250)       # Cathode bias resistor
+    Ck: cap(100u)           # Cathode bypass (large for bass)
+
+    # Power pentodes
+    V1: pentode(6l6gc)      # Push tube
+    V2: pentode(6l6gc)      # Pull tube
+
+    # Screen grid supply
+    Rsg1: resistor(1k)      # Screen grid dropper V1
+    Rsg2: resistor(1k)      # Screen grid dropper V2
+    Csg: cap(47u)           # Screen grid bypass
+
+    # Output transformer (push-pull primary)
+    # 5k plate-to-plate : 8 ohm load, ~25:1 turns ratio
+    T1: transformer(25:1, 10H, pp)
+
+    # Load
+    RL: resistor(8)         # Speaker load
+  }
+  nets {
+    # Input to V1 grid (one phase)
+    in -> C1.a
+    C1.b -> Rg1.a, V1.g1
+    Rg1.b -> gnd
+
+    # V2 grid (other phase - in real circuit from phase inverter)
+    # For testing, we tie to ground via grid leak (will see half-wave)
+    gnd -> C2.a
+    C2.b -> Rg2.a, V2.g1
+    Rg2.b -> gnd
+
+    # Shared cathode
+    V1.cathode -> Rk.a, Ck.a
+    V2.cathode -> Rk.a
+    Rk.b -> gnd
+    Ck.b -> gnd
+
+    # Screen grids
+    vcc -> Rsg1.a
+    Rsg1.b -> V1.g2, Csg.a
+    vcc -> Rsg2.a
+    Rsg2.b -> V2.g2, Csg.a
+    Csg.b -> gnd
+
+    # Push-pull plates to transformer
+    V1.plate -> T1.a        # Push plate to primary half A
+    V2.plate -> T1.b        # Pull plate to primary half B
+    # T1.ct (center tap) is implicit - connected to B+ internally
+
+    # Secondary to load
+    T1.c -> RL.a, out
+    T1.d -> gnd
+    RL.b -> gnd
+  }
+}

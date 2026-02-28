@@ -1,0 +1,80 @@
+# Single All-Pass Stage (Phase 90 style)
+# JFET variable resistance + op-amp unity-gain buffer
+#
+# This is ONE stage of a typical phaser circuit.
+# The JFET acts as a voltage-controlled resistor.
+# Combined with a fixed capacitor, it creates a variable
+# first-order all-pass filter.
+#
+# All-pass characteristics:
+# - Unity gain at all frequencies
+# - Phase shift varies with frequency
+# - Phase at fc = -90 degrees
+# - fc = 1 / (2 * pi * R_jfet * C)
+#
+# At 1kHz with 47nF cap: needs ~3.4k JFET resistance
+
+pedal "Phase All-Pass Stage" {
+  supply 9V
+  components {
+    # Input coupling
+    C_in: cap(100n)
+    R_in: resistor(1M)
+
+    # Virtual ground (Vref = Vcc/2)
+    R_vref1: resistor(470k)
+    R_vref2: resistor(470k)
+    C_vref: cap(10u)
+
+    # All-pass network
+    R_ap: resistor(24k)       # Input resistor
+    C_ap: cap(47n)            # Phase shift cap
+    J1: njfet(2n5952)         # Variable resistance element
+
+    # JFET bias (sets operating point)
+    R_jb1: resistor(150k)     # Gate to Vref
+    R_jb2: resistor(150k)     # Gate to ground
+
+    # Op-amp buffer (unity gain)
+    U1: opamp(tl072)
+    R_load: resistor(10k)     # Output load
+
+    # Output coupling
+    C_out: cap(100n)
+  }
+  nets {
+    # Virtual ground
+    vcc -> R_vref1.a
+    R_vref1.b -> R_vref2.a, C_vref.a
+    R_vref2.b -> gnd
+    C_vref.b -> gnd
+
+    # Input
+    in -> C_in.a
+    C_in.b -> R_in.a, R_ap.a
+    R_in.b -> gnd
+
+    # All-pass network:
+    # Signal through R_ap to JFET source
+    # JFET drain to ground (source follower for variable R)
+    # Cap from junction to op-amp input
+    R_ap.b -> J1.source, C_ap.a
+    J1.drain -> gnd
+    C_ap.b -> U1.neg
+
+    # JFET gate bias
+    R_jb1.a -> R_vref1.b
+    R_jb1.b -> J1.gate
+    R_jb2.a -> J1.gate
+    R_jb2.b -> gnd
+
+    # Op-amp unity-gain buffer
+    U1.neg -> U1.out          # Direct feedback = unity gain
+    U1.pos -> R_vref1.b       # Non-inverting to Vref
+
+    # Output
+    U1.out -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}

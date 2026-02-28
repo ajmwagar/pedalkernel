@@ -1,0 +1,58 @@
+# Fuzz Face - Classic PNP Germanium Fuzz
+# Two-transistor common emitter cascade
+# Uses PNP transistors with positive ground topology
+#
+# Q1: Low-gain driver stage (AC128 style)
+# Q2: High-gain clipping stage (AC128 style)
+#
+# The negative feedback from Q2 collector to Q1 base (via R2)
+# creates the characteristic "cleanup" behavior with guitar volume.
+
+pedal "Fuzz Face PNP" {
+  supply 9V
+  components {
+    # Input
+    C1: cap(2.2u)           # Input coupling (large for bass response)
+
+    # Q1 - Driver stage
+    R1: resistor(33k)       # Q1 collector load
+    R2: resistor(8.2k)      # Feedback from Q2 collector to Q1 base
+    Q1: pnp(ac128)          # Germanium PNP (low hfe ~70)
+
+    # Q2 - Output/clipping stage
+    R3: resistor(470)       # Q2 emitter resistor
+    R4: resistor(100k)      # Q2 bias (from Q1 collector)
+    Q2: pnp(ac128)          # Germanium PNP (higher hfe ~120)
+
+    # Output
+    C2: cap(10u)            # Output coupling
+    RL: resistor(10k)       # Output load
+  }
+  nets {
+    # Input coupling
+    in -> C1.a
+    C1.b -> Q1.base
+
+    # Q1 stage (PNP: emitter to Vcc, collector toward gnd)
+    vcc -> Q1.emitter
+    Q1.collector -> R1.a
+    R1.b -> gnd
+
+    # Feedback network: Q2 collector -> Q1 base
+    Q2.collector -> R2.a
+    R2.b -> Q1.base
+
+    # Interstage coupling: Q1 collector -> Q2 base
+    Q1.collector -> R4.a
+    R4.b -> Q2.base
+
+    # Q2 stage
+    vcc -> R3.a
+    R3.b -> Q2.emitter
+    Q2.collector -> C2.a
+
+    # Output
+    C2.b -> RL.a, out
+    RL.b -> gnd
+  }
+}
