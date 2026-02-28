@@ -49,8 +49,8 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
 
     for comp in &pedal.components {
         match &comp.kind {
-            ComponentKind::Npn(bt) | ComponentKind::Pnp(bt) => {
-                let is_ge = bt.is_germanium();
+            ComponentKind::Npn(name) | ComponentKind::Pnp(name) => {
+                let is_ge = crate::models::bjt_is_germanium(name);
                 if is_ge {
                     // Germanium PNPs: typical Vce(max) = 15–32V
                     if voltage > 18.0 {

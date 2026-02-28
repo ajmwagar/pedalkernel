@@ -247,11 +247,15 @@ pub enum ComponentKind {
     Zener(f64),
     /// Potentiometer with max resistance and taper type
     Potentiometer(f64, PotTaper),
-    Npn(BjtType),
-    Pnp(BjtType),
+    /// NPN BJT — model name looked up from transistors.model (e.g. "2N3904")
+    Npn(String),
+    /// PNP BJT — model name looked up from transistors.model (e.g. "AC128")
+    Pnp(String),
     OpAmp(OpAmpType),
-    NJfet(JfetType),
-    PJfet(JfetType),
+    /// N-channel JFET — model name looked up from jfets.model (e.g. "2N5457")
+    NJfet(String),
+    /// P-channel JFET — model name looked up from jfets.model (e.g. "2N5460")
+    PJfet(String),
     Photocoupler(PhotocouplerType),
     /// LFO: waveform, timing_r (Ω), timing_c (F) -> f = 1/(2πRC)
     Lfo(LfoWaveformDsl, f64, f64),
@@ -408,77 +412,10 @@ impl OpAmpType {
     }
 }
 
-/// BJT (Bipolar Junction Transistor) types with Ebers-Moll parameters.
-/// Each type has distinct beta (hFE), saturation current, and Early voltage
-/// that affect gain, clipping character, and frequency response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BjtType {
-    /// Generic BJT with typical small-signal values
-    #[default]
-    Generic,
-
-    // ── NPN Silicon ──────────────────────────────────────────────────────
-    /// 2N3904 — Workhorse NPN, ubiquitous in audio circuits
-    N2n3904,
-    /// 2N2222 — Classic NPN switching/amplifier
-    N2n2222,
-    /// BC108 — British/European small-signal NPN (Vox, Marshall)
-    Bc108,
-    /// BC109 — Low-noise variant of BC108 (Tone Bender)
-    Bc109,
-    /// 2N5088 — High-gain NPN for fuzz/distortion (Big Muff)
-    N2n5088,
-    /// 2N5089 — Ultra-high-gain NPN (Big Muff, boosters)
-    N2n5089,
-
-    // ── PNP Silicon ──────────────────────────────────────────────────────
-    /// 2N3906 — Standard PNP complement to 2N3904
-    N2n3906,
-
-    // ── Germanium (Fuzz Face, vintage) ───────────────────────────────────
-    /// AC128 — Classic germanium PNP for Fuzz Face
-    /// Low beta (~70), high leakage, temperature-sensitive
-    Ac128,
-    /// OC44 — Vintage germanium PNP (early Tone Benders)
-    /// Very low beta (~50), vintage character
-    Oc44,
-    /// NKT275 — "Holy grail" germanium PNP for Fuzz Face
-    /// Medium-low beta (~85) with sweet spot character
-    Nkt275,
-}
-
-impl BjtType {
-    /// The SPICE model name used to look up parameters from the model file.
-    pub fn model_name(&self) -> &'static str {
-        match self {
-            BjtType::Generic => "GENERIC_NPN",
-            BjtType::N2n3904 => "2N3904",
-            BjtType::N2n2222 => "2N2222",
-            BjtType::Bc108 => "BC108",
-            BjtType::Bc109 => "BC109",
-            BjtType::N2n5088 => "2N5088",
-            BjtType::N2n5089 => "2N5089",
-            BjtType::N2n3906 => "2N3906",
-            BjtType::Ac128 => "AC128",
-            BjtType::Oc44 => "OC44",
-            BjtType::Nkt275 => "NKT275",
-        }
-    }
-
-    /// Whether this is a germanium transistor.
-    /// Germanium transistors have lower voltage tolerance and higher leakage.
-    pub fn is_germanium(&self) -> bool {
-        matches!(self, BjtType::Ac128 | BjtType::Oc44 | BjtType::Nkt275)
-    }
-
-    /// Whether this is a PNP transistor type.
-    pub fn is_pnp(&self) -> bool {
-        matches!(
-            self,
-            BjtType::N2n3906 | BjtType::Ac128 | BjtType::Oc44 | BjtType::Nkt275
-        )
-    }
-}
+/// Default SPICE model name for a generic NPN BJT.
+pub const DEFAULT_NPN_MODEL: &str = "GENERIC_NPN";
+/// Default SPICE model name for a generic PNP BJT.
+pub const DEFAULT_PNP_MODEL: &str = "GENERIC_PNP";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiodeType {
@@ -556,40 +493,6 @@ impl CapConfig {
     pub fn with_da(mut self, da: f64) -> Self {
         self.da = Some(da);
         self
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JfetType {
-    J201,
-    N2n5457,
-    P2n5460,
-    /// 2N5952 - US phaser JFET (original MXR Phase 90)
-    /// Idss: 1.0-5.0 mA (typical 2.4 mA), Vgs(off): -0.5V to -4.0V
-    N2n5952,
-    /// 2SK30A - Classic phaser JFET (Toshiba), generic mid-grade
-    N2sk30a,
-    /// 2SK30A-GR - Low Idss grade (0.6-1.4 mA)
-    N2sk30aGr,
-    /// 2SK30A-Y - Medium Idss grade (1.2-3.0 mA)
-    N2sk30aY,
-    /// 2SK30A-BL - High Idss grade (2.6-6.5 mA)
-    N2sk30aBl,
-}
-
-impl JfetType {
-    /// SPICE model name for lookup in the embedded jfets.model file.
-    pub fn model_name(&self) -> &'static str {
-        match self {
-            JfetType::J201 => "J201",
-            JfetType::N2n5457 => "2N5457",
-            JfetType::P2n5460 => "2N5460",
-            JfetType::N2n5952 => "2N5952",
-            JfetType::N2sk30a => "2SK30A",
-            JfetType::N2sk30aGr => "2SK30A-GR",
-            JfetType::N2sk30aY => "2SK30A-Y",
-            JfetType::N2sk30aBl => "2SK30A-BL",
-        }
     }
 }
 
@@ -1247,42 +1150,30 @@ fn parse_pot(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Potentiometer(val, taper)))
 }
 
-fn bjt_type(input: &str) -> IResult<&str, BjtType> {
-    alt((
-        // NPN Silicon
-        value(BjtType::N2n3904, tag("2n3904")),
-        value(BjtType::N2n2222, tag("2n2222")),
-        value(BjtType::Bc108, tag("bc108")),
-        value(BjtType::Bc109, tag("bc109")),
-        value(BjtType::N2n5088, tag("2n5088")),
-        value(BjtType::N2n5089, tag("2n5089")),
-        // PNP Silicon
-        value(BjtType::N2n3906, tag("2n3906")),
-        // Germanium
-        value(BjtType::Ac128, tag("ac128")),
-        value(BjtType::Oc44, tag("oc44")),
-        value(BjtType::Nkt275, tag("nkt275")),
-    ))(input)
+/// Parse a SPICE model name: alphanumeric, hyphens, underscores → uppercase.
+fn model_name_str(input: &str) -> IResult<&str, String> {
+    let (input, name) = take_while1(|c: char| c.is_alphanumeric() || c == '-' || c == '_')(input)?;
+    Ok((input, name.to_uppercase()))
 }
 
 fn parse_npn(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("npn")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
-    let (input, bt) = opt(bjt_type)(input)?;
+    let (input, name) = opt(model_name_str)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Npn(bt.unwrap_or(BjtType::Generic))))
+    Ok((input, ComponentKind::Npn(name.unwrap_or_else(|| DEFAULT_NPN_MODEL.to_string()))))
 }
 
 fn parse_pnp(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("pnp")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
-    let (input, bt) = opt(bjt_type)(input)?;
+    let (input, name) = opt(model_name_str)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Pnp(bt.unwrap_or(BjtType::Generic))))
+    Ok((input, ComponentKind::Pnp(name.unwrap_or_else(|| DEFAULT_PNP_MODEL.to_string()))))
 }
 
 fn opamp_type(input: &str) -> IResult<&str, OpAmpType> {
@@ -1309,34 +1200,24 @@ fn parse_opamp(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::OpAmp(ot.unwrap_or(OpAmpType::Generic))))
 }
 
-fn jfet_type(input: &str) -> IResult<&str, JfetType> {
-    alt((
-        value(JfetType::J201, tag("j201")),
-        value(JfetType::N2n5457, tag("2n5457")),
-        value(JfetType::P2n5460, tag("2n5460")),
-        value(JfetType::N2n5952, tag("2n5952")),
-        // 2SK30A variants - order matters: specific grades before generic
-        value(JfetType::N2sk30aGr, alt((tag("2sk30a_gr"), tag("2sk30-gr")))),
-        value(JfetType::N2sk30aY, alt((tag("2sk30a_y"), tag("2sk30-y")))),
-        value(JfetType::N2sk30aBl, alt((tag("2sk30a_bl"), tag("2sk30-bl")))),
-        value(JfetType::N2sk30a, alt((tag("2sk30a"), tag("2sk30")))),
-    ))(input)
-}
-
 fn parse_njfet(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("njfet")(input)?;
     let (input, _) = char('(')(input)?;
-    let (input, jt) = jfet_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, name) = model_name_str(input)?;
+    let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::NJfet(jt)))
+    Ok((input, ComponentKind::NJfet(name)))
 }
 
 fn parse_pjfet(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("pjfet")(input)?;
     let (input, _) = char('(')(input)?;
-    let (input, jt) = jfet_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, name) = model_name_str(input)?;
+    let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::PJfet(jt)))
+    Ok((input, ComponentKind::PJfet(name)))
 }
 
 fn photocoupler_type(input: &str) -> IResult<&str, PhotocouplerType> {
@@ -3127,25 +3008,32 @@ pedal "All" {
     fn parse_njfet_j201() {
         let (_, c) = component_def("J1: njfet(j201)").unwrap();
         assert_eq!(c.id, "J1");
-        assert_eq!(c.kind, ComponentKind::NJfet(JfetType::J201));
+        assert_eq!(c.kind, ComponentKind::NJfet("J201".to_string()));
     }
 
     #[test]
     fn parse_njfet_2n5457() {
         let (_, c) = component_def("J2: njfet(2n5457)").unwrap();
-        assert_eq!(c.kind, ComponentKind::NJfet(JfetType::N2n5457));
+        assert_eq!(c.kind, ComponentKind::NJfet("2N5457".to_string()));
     }
 
     #[test]
     fn parse_njfet_2n5952() {
         let (_, c) = component_def("J1: njfet(2n5952)").unwrap();
-        assert_eq!(c.kind, ComponentKind::NJfet(JfetType::N2n5952));
+        assert_eq!(c.kind, ComponentKind::NJfet("2N5952".to_string()));
     }
 
     #[test]
     fn parse_pjfet_2n5460() {
         let (_, c) = component_def("J3: pjfet(2n5460)").unwrap();
-        assert_eq!(c.kind, ComponentKind::PJfet(JfetType::P2n5460));
+        assert_eq!(c.kind, ComponentKind::PJfet("2N5460".to_string()));
+    }
+
+    #[test]
+    fn parse_njfet_any_model() {
+        // Any model name from the .model file should be accepted
+        let (_, c) = component_def("J1: njfet(2N3819-VSH)").unwrap();
+        assert_eq!(c.kind, ComponentKind::NJfet("2N3819-VSH".to_string()));
     }
 
     #[test]
@@ -3168,7 +3056,7 @@ pedal "Tremolo" {
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "Tremolo");
         assert_eq!(def.components.len(), 3);
-        assert_eq!(def.components[1].kind, ComponentKind::NJfet(JfetType::J201));
+        assert_eq!(def.components[1].kind, ComponentKind::NJfet("J201".to_string()));
     }
 
     #[test]

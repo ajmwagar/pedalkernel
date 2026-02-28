@@ -63,11 +63,10 @@ pub(super) fn diode_model(dt: DiodeType) -> DiodeModel {
     }
 }
 
-pub(super) fn jfet_model(jt: JfetType, is_n_channel: bool) -> JfetModel {
-    let model = JfetModel::from_jfet_type(&jt);
+pub(super) fn jfet_model(name: &str, is_n_channel: bool) -> JfetModel {
+    let model = JfetModel::by_name(name);
     // Handle polarity mismatch: if DSL says N-channel but model is P-channel
     if is_n_channel != model.is_n_channel {
-        // Fall back to a reasonable N-channel model
         JfetModel::by_name("2N5457")
     } else {
         model

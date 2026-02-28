@@ -41,6 +41,24 @@ enum Command {
         #[arg(long)]
         fix: bool,
     },
+    /// List and search available component models (BJTs, JFETs, etc.)
+    ///
+    /// Examples:
+    ///   pedalkernel models                   # List all models
+    ///   pedalkernel models --type bjt         # Only BJTs
+    ///   pedalkernel models --type jfet -s 2N5 # Search JFETs matching "2N5"
+    ///   pedalkernel models --show 2N3904      # Show full details for a model
+    Models {
+        /// Filter by component type: bjt, npn, pnp, jfet, njf, pjf
+        #[arg(short = 't', long = "type")]
+        model_type: Option<String>,
+        /// Search model names (case-insensitive substring match)
+        #[arg(short, long)]
+        search: Option<String>,
+        /// Show full details for a specific model
+        #[arg(long)]
+        show: Option<String>,
+    },
     /// Interactive TUI with live JACK audio — select I/O ports and tweak knobs.
     #[cfg(all(feature = "jack-rt", feature = "tui"))]
     Tui {
@@ -63,6 +81,17 @@ fn main() {
             knobs,
         } => cli::process::run(&file, &input, &output, &knobs),
         Command::Validate { paths, fix } => cli::validate::run(&paths, fix),
+        Command::Models {
+            model_type,
+            search,
+            show,
+        } => {
+            if let Some(name) = show {
+                cli::models::show(&name);
+            } else {
+                cli::models::run(model_type.as_deref(), search.as_deref());
+            }
+        }
         #[cfg(all(feature = "jack-rt", feature = "tui"))]
         Command::Tui { file, input } => {
             let wav_input = input.as_deref();

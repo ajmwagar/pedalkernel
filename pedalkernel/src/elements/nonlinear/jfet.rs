@@ -59,11 +59,6 @@ impl JfetModel {
         jfet_by_name(name).map(Self::from)
     }
 
-    /// Build a JfetModel from a DSL JfetType enum.
-    pub fn from_jfet_type(jt: &crate::dsl::JfetType) -> Self {
-        Self::by_name(jt.model_name())
-    }
-
     /// Zero-gate-voltage drain saturation current: Idss = BETA × VTO².
     #[inline]
     pub fn idss(&self) -> f64 {

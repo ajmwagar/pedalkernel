@@ -794,7 +794,7 @@ pub fn compile_pedal_with_options(
             };
 
             let tree = sp_to_dyn(&sp_tree, &graph.components, &graph.fork_paths, sample_rate);
-            let model = jfet_model(jfet_info.jfet_type, jfet_info.is_n_channel);
+            let model = jfet_model(&jfet_info.model_name, jfet_info.is_n_channel);
             (tree, RootKind::Jfet(JfetRoot::new(model)))
         } else {
             // Normal JFET stage (phaser, common-source): voltage source drives input
@@ -847,7 +847,7 @@ pub fn compile_pedal_with_options(
             }
 
             let tree = sp_to_dyn_with_vs(&sp_tree, &jfet_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-            let model = jfet_model(jfet_info.jfet_type, jfet_info.is_n_channel);
+            let model = jfet_model(&jfet_info.model_name, jfet_info.is_n_channel);
             (tree, RootKind::Jfet(JfetRoot::new(model)))
         };
 
@@ -942,7 +942,7 @@ pub fn compile_pedal_with_options(
 
         let tree = sp_to_dyn_with_vs(&sp_tree, &bjt_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
-        let model = BjtModel::from_bjt_type(&bjt_info.bjt_type);
+        let model = BjtModel::by_name(&bjt_info.model_name);
         let root = if bjt_info.is_npn {
             RootKind::BjtNpn(BjtNpnRoot::new(model))
         } else {

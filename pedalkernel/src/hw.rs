@@ -998,55 +998,31 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         qty_per_unit: 1,
                     }]
                 }
-                ComponentKind::NJfet(jt) => {
+                ComponentKind::NJfet(name) => {
                     let (pn, desc) = if let Some(part_name) = hw_part {
                         (None, part_name.to_string())
                     } else {
-                        match jt {
-                            crate::dsl::JfetType::J201 => {
-                                (Some("512-J201".to_string()), "J201 N-JFET".to_string())
-                            }
-                            crate::dsl::JfetType::N2n5457 => {
-                                (Some("512-2N5457".to_string()), "2N5457 N-JFET".to_string())
-                            }
-                            crate::dsl::JfetType::N2n5952 => {
-                                (Some("512-2N5952".to_string()), "2N5952 N-JFET".to_string())
-                            }
-                            crate::dsl::JfetType::P2n5460 => {
-                                (None, "N-JFET (unknown model)".to_string())
-                            }
-                            crate::dsl::JfetType::N2sk30a
-                            | crate::dsl::JfetType::N2sk30aGr
-                            | crate::dsl::JfetType::N2sk30aY
-                            | crate::dsl::JfetType::N2sk30aBl => {
-                                (None, format!("2SK30A N-JFET ({jt:?})"))
-                            }
-                        }
+                        (None, format!("{name} N-JFET"))
                     };
                     vec![BomEntry {
                         reference: comp.id.clone(),
-                        display: format!("N-JFET ({jt:?})"),
-                        value: format!("{jt:?}"),
+                        display: format!("N-JFET ({name})"),
+                        value: name.clone(),
                         mouser_pn: pn,
                         description: desc,
                         qty_per_unit: 1,
                     }]
                 }
-                ComponentKind::PJfet(jt) => {
+                ComponentKind::PJfet(name) => {
                     let (pn, desc) = if let Some(part_name) = hw_part {
                         (None, part_name.to_string())
                     } else {
-                        match jt {
-                            crate::dsl::JfetType::P2n5460 => {
-                                (Some("512-2N5460".to_string()), "2N5460 P-JFET".to_string())
-                            }
-                            _ => (None, "P-JFET".to_string()),
-                        }
+                        (None, format!("{name} P-JFET"))
                     };
                     vec![BomEntry {
                         reference: comp.id.clone(),
-                        display: format!("P-JFET ({jt:?})"),
-                        value: format!("{jt:?}"),
+                        display: format!("P-JFET ({name})"),
+                        value: name.clone(),
                         mouser_pn: pn,
                         description: desc,
                         qty_per_unit: 1,

@@ -1368,7 +1368,7 @@ mod tests {
         });
         pedal.components.push(ComponentDef {
             id: "J1".to_string(),
-            kind: ComponentKind::NJfet(JfetType::N2n5952),
+            kind: ComponentKind::NJfet("2N5952".to_string()),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {

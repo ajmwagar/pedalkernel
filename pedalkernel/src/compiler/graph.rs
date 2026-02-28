@@ -1000,8 +1000,8 @@ impl CircuitGraph {
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
             let info = match &comp.kind {
-                ComponentKind::NJfet(jt) => Some(JfetInfo {
-                    jfet_type: *jt,
+                ComponentKind::NJfet(name) => Some(JfetInfo {
+                    model_name: name.clone(),
                     is_n_channel: true,
                     junction_node: if e.node_b == self.gnd_node {
                         e.node_a
@@ -1014,8 +1014,8 @@ impl CircuitGraph {
                         e.node_a
                     },
                 }),
-                ComponentKind::PJfet(jt) => Some(JfetInfo {
-                    jfet_type: *jt,
+                ComponentKind::PJfet(name) => Some(JfetInfo {
+                    model_name: name.clone(),
                     is_n_channel: false,
                     junction_node: if e.node_b == self.gnd_node {
                         e.node_a
@@ -1068,8 +1068,8 @@ impl CircuitGraph {
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
             let info = match &comp.kind {
-                ComponentKind::Npn(bt) => Some(BjtInfo {
-                    bjt_type: *bt,
+                ComponentKind::Npn(name) => Some(BjtInfo {
+                    model_name: name.clone(),
                     is_npn: true,
                     junction_node: if e.node_b == self.gnd_node {
                         e.node_a
@@ -1086,8 +1086,8 @@ impl CircuitGraph {
                     emitter_node: self.gnd_node,
                     collector_node: e.node_b,
                 }),
-                ComponentKind::Pnp(bt) => Some(BjtInfo {
-                    bjt_type: *bt,
+                ComponentKind::Pnp(name) => Some(BjtInfo {
+                    model_name: name.clone(),
                     is_npn: false,
                     junction_node: if e.node_b == self.gnd_node {
                         e.node_a
@@ -1933,7 +1933,7 @@ pub(super) struct DiodeInfo {
 }
 
 pub(super) struct JfetInfo {
-    pub(super) jfet_type: JfetType,
+    pub(super) model_name: String,
     pub(super) is_n_channel: bool,
     pub(super) junction_node: NodeId,
     #[allow(dead_code)]
@@ -1941,7 +1941,7 @@ pub(super) struct JfetInfo {
 }
 
 pub(super) struct BjtInfo {
-    pub(super) bjt_type: BjtType,
+    pub(super) model_name: String,
     pub(super) is_npn: bool,
     /// The collector node (where the WDF tree connects).
     pub(super) junction_node: NodeId,

@@ -414,6 +414,19 @@ pub fn bjt_by_name(name: &str) -> Option<&'static SpiceBjtModel> {
     BJT_MODELS.get(&name.to_uppercase())
 }
 
+/// Check if a BJT model is germanium based on its saturation current.
+///
+/// Germanium transistors have IS in the µA range (typ. 1–100 µA),
+/// while silicon transistors have IS in the fA–pA range.
+pub fn bjt_is_germanium(name: &str) -> bool {
+    bjt_by_name(name).map(|m| m.is > 1e-6).unwrap_or(false)
+}
+
+/// Check if a BJT model is PNP.
+pub fn bjt_is_pnp(name: &str) -> bool {
+    bjt_by_name(name).map(|m| m.is_pnp).unwrap_or(false)
+}
+
 /// List all available BJT model names.
 pub fn bjt_model_names() -> Vec<&'static str> {
     BJT_MODELS.keys().map(|s| s.as_str()).collect()

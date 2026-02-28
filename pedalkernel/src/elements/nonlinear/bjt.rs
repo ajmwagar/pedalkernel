@@ -57,10 +57,6 @@ impl BjtModel {
         bjt_by_name(name).map(Self::from)
     }
 
-    /// Convert from DSL BjtType to runtime BjtModel.
-    pub fn from_bjt_type(bt: &crate::dsl::BjtType) -> Self {
-        Self::by_name(bt.model_name())
-    }
 }
 
 impl From<&SpiceBjtModel> for BjtModel {
