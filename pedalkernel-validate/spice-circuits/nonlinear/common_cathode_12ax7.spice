@@ -19,7 +19,7 @@ RP vb v_plate 100k
 CIN v_in v_grid 22n
 
 * Grid leak resistor
-RG v_grid 0 1M
+RG v_grid 0 1MEG
 
 * Triode (12AX7 section A)
 * Using subcircuit with Koren model parameters
@@ -33,7 +33,7 @@ CK v_cathode 0 25u
 COUT v_plate v_out 22n
 
 * Output load
-RLOAD v_out 0 1M
+RLOAD v_out 0 1MEG
 
 * ============================================================================
 * 12AX7 Triode Model — Koren equations

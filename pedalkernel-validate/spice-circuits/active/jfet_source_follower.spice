@@ -11,7 +11,7 @@
 C1 v_in gate 100n
 
 * Gate bias to ground
-RG gate 0 1M
+RG gate 0 1MEG
 
 * Source resistor (sets bias point)
 RS source 0 2.2k

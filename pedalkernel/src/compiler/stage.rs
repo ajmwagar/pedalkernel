@@ -40,6 +40,20 @@ pub(super) enum RootKind {
     /// Used when the circuit has reactive elements (caps/inductors) but no
     /// nonlinear elements, allowing the WDF tree to process the filtering.
     Passthrough,
+    /// Voltage source driver for truly passive-only filters.
+    ///
+    /// The input signal is injected as the incident wave at the root port,
+    /// and the tree (containing L, C, R without embedded VS) reflects.
+    /// Output voltage = (a_root + b_tree) / 2.
+    ///
+    /// This is the proper WDF architecture for passive filters:
+    /// - No voltage source embedded in tree
+    /// - Signal injected at root as wave: a = 2 * V_in
+    /// - Load resistor is adapted as part of tree
+    ///
+    /// Only used when circuit contains NO active elements (op-amps, transistors, etc.)
+    /// since active element breaks require the fallback Passthrough approach.
+    VoltageSourceDriver,
     /// Capacitor as WDF root for RC lowpass and similar filters.
     /// The capacitor reflects its stored state: b = state.
     /// Output voltage = (a + state) / 2 gives correct transfer function.
@@ -211,6 +225,18 @@ impl WdfStage {
                     }
                     // Fallback: standard open-circuit extraction
                     b_tree
+                }
+                // VoltageSourceDriver: inject input as incident wave
+                // Tree contains reactive elements WITHOUT embedded VS.
+                // a_root = 2 * V_in (wave representation of voltage)
+                // Output = (a_root + b_tree) / 2 = proper load voltage
+                RootKind::VoltageSourceDriver => {
+                    // Inject input signal as incident wave (wave = 2 * voltage)
+                    let a_root = sample * compensation * 2.0;
+                    // Update tree with incident wave from root
+                    tree.set_incident(a_root);
+                    // Output voltage at load = (a + b) / 2
+                    (a_root + b_tree) / 2.0
                 }
                 // Capacitor root: b = state (reflects stored incident)
                 // This gives correct RC lowpass transfer function.
@@ -511,6 +537,7 @@ impl WdfStage {
             RootKind::BjtNpn(_) => "BjtNpn",
             RootKind::BjtPnp(_) => "BjtPnp",
             RootKind::Passthrough => "Passthrough",
+            RootKind::VoltageSourceDriver => "VoltageSourceDriver",
             RootKind::CapacitorRoot { .. } => "CapacitorRoot",
             RootKind::InductorRoot { .. } => "InductorRoot",
             RootKind::IirLowpass { .. } => "IirLowpass",

@@ -177,6 +177,30 @@ fn detect_rc_filter_topology(graph: &CircuitGraph, sample_rate: f64) -> Option<F
     None
 }
 
+/// Check if a pedal contains only passive elements (no op-amps, transistors, JFETs, etc.).
+///
+/// This determines whether we can use the proper VoltageSourceDriver architecture
+/// vs the fallback Passthrough approach which handles active element breaks.
+fn is_truly_passive_only(pedal: &PedalDef) -> bool {
+    !pedal.components.iter().any(|c| {
+        matches!(
+            c.kind,
+            ComponentKind::OpAmp(_)
+                | ComponentKind::Diode(_)
+                | ComponentKind::DiodePair(_)
+                | ComponentKind::Npn(_)
+                | ComponentKind::Pnp(_)
+                | ComponentKind::NJfet(_)
+                | ComponentKind::PJfet(_)
+                | ComponentKind::Nmos(_)
+                | ComponentKind::Pmos(_)
+                | ComponentKind::Triode(_)
+                | ComponentKind::Pentode(_)
+                | ComponentKind::Zener(_)
+        )
+    })
+}
+
 /// Compute compensation factor for passive WDF circuits with Passthrough root.
 ///
 /// The Passthrough root reflects incident waves unchanged, modeling an open
@@ -213,6 +237,44 @@ fn compute_passive_compensation(tree: &DynNode) -> f64 {
     if output.abs() > 0.01 {
         // Significant DC output - compensate to unity DC gain
         1.0 / output
+    } else {
+        // Near-zero DC output (highpass) - don't compensate
+        1.0
+    }
+}
+
+/// Compute compensation factor for VoltageSourceDriver architecture.
+///
+/// The VoltageSourceDriver root injects input as incident wave (a = 2 * V)
+/// and computes output as (a + b) / 2. The tree contains only passive elements
+/// (no embedded voltage source).
+///
+/// For RC lowpass: at DC, V_out should equal V_in.
+/// For highpass: DC is blocked, no compensation applied.
+fn compute_vsdriver_compensation(tree: &DynNode) -> f64 {
+    // Clone the tree to simulate without affecting state
+    let mut test_tree = tree.clone();
+
+    // Reset state
+    test_tree.reset();
+
+    // Apply a unit DC voltage as incident wave
+    let test_voltage = 1.0;
+    let a_root = test_voltage * 2.0; // Wave = 2 * voltage
+    let mut output = 0.0;
+
+    // Run enough iterations for RC time constants to settle
+    for _ in 0..2000 {
+        let b_tree = test_tree.reflected();
+        test_tree.set_incident(a_root);
+        // VoltageSourceDriver output: (a + b) / 2
+        output = (a_root + b_tree) / 2.0;
+    }
+
+    // Compensation = expected / actual
+    if output.abs() > 0.01 {
+        // Significant DC output - compensate to unity DC gain
+        test_voltage / output
     } else {
         // Near-zero DC output (highpass) - don't compensate
         1.0
@@ -1682,49 +1744,87 @@ pub fn compile_pedal_with_options(
                     .collect();
 
                 if !passive_edges.is_empty() {
-                    // Build SP edges for all passive elements
-                    let source_node = graph.edges.len() + 1000;
-                    let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+                    // Check if this is a truly passive-only circuit (no active elements).
+                    // If so, we can use the proper VoltageSourceDriver architecture.
+                    // Otherwise, use the fallback Passthrough approach which handles
+                    // circuits where active elements break the passive path.
+                    let truly_passive = is_truly_passive_only(pedal);
 
-                    // Add voltage source edge: source_node → in_node
-                    sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
-
-                    for &eidx in &passive_edges {
-                        let e = &graph.edges[eidx];
-                        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-                    }
-
-                    // Use out_node as the junction (where we measure the output)
-                    let terminals = vec![source_node, graph.out_node];
-                    if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
-                        let mut all_components = graph.components.clone();
-                        while all_components.len() <= vs_comp_idx {
-                            all_components.push(ComponentDef {
-                                id: "__vs__".to_string(),
-                                kind: ComponentKind::Resistor(1.0),
-                            });
+                    if truly_passive {
+                        // VoltageSourceDriver: build tree WITHOUT embedded VS
+                        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+                        for &eidx in &passive_edges {
+                            let e = &graph.edges[eidx];
+                            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
                         }
 
-                        let tree = sp_to_dyn_with_vs(
-                            &sp_tree,
-                            &all_components,
-                            &graph.fork_paths,
-                            sample_rate,
-                            vs_comp_idx,
-                        );
+                        // Terminals: in_node (VS injection) and out_node (measurement)
+                        let terminals = vec![graph.in_node, graph.out_node];
+                        if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
+                            let tree = sp_to_dyn(
+                                &sp_tree,
+                                &graph.components,
+                                &graph.fork_paths,
+                                sample_rate,
+                            );
 
-                        // Compute compensation factor for passive circuits.
-                        let compensation = compute_passive_compensation(&tree);
+                            let compensation = compute_vsdriver_compensation(&tree);
 
-                        stages.push(WdfStage {
-                            tree,
-                            root: RootKind::Passthrough,
-                            compensation,
-                            oversampler: Oversampler::new(oversampling),
-                            base_diode_model: None,
-                            paired_opamp: None,
-                            dc_block: None,
-                        });
+                            stages.push(WdfStage {
+                                tree,
+                                root: RootKind::VoltageSourceDriver,
+                                compensation,
+                                oversampler: Oversampler::new(oversampling),
+                                base_diode_model: None,
+                                paired_opamp: None,
+                                dc_block: None,
+                            });
+                        }
+                    } else {
+                        // Fallback: Passthrough with embedded VS (handles active element breaks)
+                        let source_node = graph.edges.len() + 1000;
+                        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+
+                        // Add voltage source edge: source_node → in_node
+                        sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
+
+                        for &eidx in &passive_edges {
+                            let e = &graph.edges[eidx];
+                            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+                        }
+
+                        // Use out_node as the junction (where we measure the output)
+                        let terminals = vec![source_node, graph.out_node];
+                        if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
+                            let mut all_components = graph.components.clone();
+                            while all_components.len() <= vs_comp_idx {
+                                all_components.push(ComponentDef {
+                                    id: "__vs__".to_string(),
+                                    kind: ComponentKind::Resistor(1.0),
+                                });
+                            }
+
+                            let tree = sp_to_dyn_with_vs(
+                                &sp_tree,
+                                &all_components,
+                                &graph.fork_paths,
+                                sample_rate,
+                                vs_comp_idx,
+                            );
+
+                            // Compute compensation factor for passive circuits.
+                            let compensation = compute_passive_compensation(&tree);
+
+                            stages.push(WdfStage {
+                                tree,
+                                root: RootKind::Passthrough,
+                                compensation,
+                                oversampler: Oversampler::new(oversampling),
+                                base_diode_model: None,
+                                paired_opamp: None,
+                                dc_block: None,
+                            });
+                        }
                     }
                 }
             }
