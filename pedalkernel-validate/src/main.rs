@@ -464,6 +464,28 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
     npy::write_f64(&sweep_path, &sweep_golden)?;
     println!("  {} Wrote sweep response: {}", "✓".green(), sweep_path.display());
 
+    // RL Lowpass: L=100mH, R=1k
+    let l = 0.1;      // 100mH
+    let r_rl = 1000.0; // 1k
+    let fc_rl = r_rl / (2.0 * std::f64::consts::PI * l);
+
+    println!(
+        "\n{} RL Lowpass (L=100mH, R=1k, fc={:.1} Hz)",
+        "•".green(),
+        fc_rl
+    );
+
+    // Generate sine response
+    let sine_input_rl = signals::sine(sample_rate, 1000.0, 0.1, 1.0);
+    let sine_golden_rl = analytical::rl_lowpass_filter(&sine_input_rl, l, r_rl, sample_rate);
+
+    // Create directory if needed
+    std::fs::create_dir_all(cli.golden.join("linear/rl_lowpass"))?;
+
+    let sine_path_rl = cli.golden.join("linear/rl_lowpass/sine.npy");
+    npy::write_f64(&sine_path_rl, &sine_golden_rl)?;
+    println!("  {} Wrote sine response: {}", "✓".green(), sine_path_rl.display());
+
     println!("\n{}", "Done! Golden references generated.".green().bold());
     println!("Run 'pedalkernel-validate run --suite linear' to validate.");
 

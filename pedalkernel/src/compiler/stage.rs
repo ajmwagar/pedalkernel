@@ -40,6 +40,17 @@ pub(super) enum RootKind {
     /// Used when the circuit has reactive elements (caps/inductors) but no
     /// nonlinear elements, allowing the WDF tree to process the filtering.
     Passthrough,
+    /// Short-circuit root for passive filters terminated to ground.
+    /// Models a short-circuit: a = -b (total reflection, inverted).
+    ///
+    /// In physical terms, ground has zero impedance, so it reflects
+    /// incident waves with inverted sign. This allows current to flow
+    /// through series elements (L, R) to ground, enabling voltage divider
+    /// behavior in series filters like RL lowpass.
+    ///
+    /// The output is taken at an internal junction (e.g., between L and R),
+    /// not at the grounded root port.
+    ShortCircuit,
     /// Voltage source driver for truly passive-only filters.
     ///
     /// The input signal is injected as the incident wave at the root port,
@@ -102,6 +113,28 @@ pub(super) enum RootKind {
         y_prev: f64,
         /// Previous input x[n-1]
         x_prev: f64,
+    },
+    /// RL lowpass filter using proper WDF series adaptor.
+    ///
+    /// Tree: Series(L, R) driven by voltage source at root.
+    /// - Source sets a_s = v_in
+    /// - Inductor reflects b_L = a_L[n-1] (state)
+    /// - Resistor reflects b_R = 0 (matched load)
+    /// - Series adaptor scatters: a_L = a_s - γ_L*(a_s + b_L), a_R = a_s - γ_R*(a_s + b_L)
+    /// - Output: v_out = a_R / 2 (Kirchhoff voltage across R)
+    ///
+    /// This implements the user's exact WDF algorithm without embedded VS complexity.
+    RlLowpass {
+        /// R_L = 2*L*fs (inductor port resistance)
+        r_l: f64,
+        /// R_R = R (resistor port resistance)
+        r_r: f64,
+        /// γ_L = R_L / (R_L + R_R)
+        gamma_l: f64,
+        /// γ_R = R_R / (R_L + R_R)
+        gamma_r: f64,
+        /// Inductor state: previous incident wave a_L[n-1]
+        a_l_prev: f64,
     },
 }
 
@@ -264,6 +297,23 @@ impl WdfStage {
                     // Fallback: standard open-circuit extraction
                     b_tree
                 }
+                // ShortCircuit: ground termination (a = -b)
+                // Ground has zero impedance, so it reflects with inverted sign.
+                // This allows current to flow through series elements to ground.
+                RootKind::ShortCircuit => {
+                    // Short-circuit reflection: a = -b
+                    let a_root = -b_tree;
+                    tree.set_incident(a_root);
+                    // Extract output at junction (voltage across load resistor)
+                    // For Series(VS, Series(L, R)) with short at gnd:
+                    // - VS emits b_vs = 2 * Vin (already done in reflected())
+                    // - We need V_R = voltage across R (between L.b/R.a and gnd)
+                    if let Some(v_junction) = tree.short_circuit_junction_voltage(a_root) {
+                        return v_junction;
+                    }
+                    // Fallback: V at grounded port is 0 (short circuit)
+                    0.0
+                }
                 // VoltageSourceDriver: inject input as incident wave
                 // Tree contains reactive elements WITHOUT embedded VS.
                 // a_root = 2 * V_in (wave representation of voltage)
@@ -316,6 +366,45 @@ impl WdfStage {
                     *x_prev = x;
                     *y_prev = y;
                     return y; // Skip normal WDF processing
+                }
+                // RL lowpass: proper WDF series adaptor (bypasses complex tree)
+                //
+                // This implements the exact WDF algorithm for Series(L, R):
+                // - Source sets incident wave: a_s = v_in
+                // - Inductor reflects: b_L = a_L[n-1] (previous incident wave)
+                // - Resistor reflects: b_R = 0 (matched load, absorbs energy)
+                // - Series adaptor scatters to children
+                // - Output: v_out = a_R / 2 (voltage across resistor)
+                //
+                // This gives the correct transfer function: H(s) = R / (R + sL)
+                RootKind::RlLowpass {
+                    gamma_l,
+                    gamma_r,
+                    a_l_prev,
+                    ..
+                } => {
+                    // 1. Source sets incident wave at root
+                    // In WDF, voltage source emits a = 2*V (wave variable representation)
+                    let a_s = 2.0 * sample * compensation;
+
+                    // 2. Inductor reflects previous incident wave
+                    let b_l = *a_l_prev;
+
+                    // 3. Resistor reflects zero (matched load)
+                    // let b_r = 0.0;
+
+                    // 4. Series adaptor scattering
+                    // sum = a_s + b_L + b_R (b_R = 0)
+                    let sum = a_s + b_l;
+                    let a_l = a_s - *gamma_l * sum;
+                    let a_r = a_s - *gamma_r * sum;
+
+                    // 5. Update inductor state
+                    *a_l_prev = a_l;
+
+                    // 6. Output voltage across resistor: v_out = (a_R + b_R) / 2 = a_R / 2
+                    let v_out = a_r / 2.0;
+                    return v_out;
                 }
             };
             tree.set_incident(a_root);
@@ -590,11 +679,13 @@ impl WdfStage {
             RootKind::BjtNpn(_) => "BjtNpn",
             RootKind::BjtPnp(_) => "BjtPnp",
             RootKind::Passthrough => "Passthrough",
+            RootKind::ShortCircuit => "ShortCircuit",
             RootKind::VoltageSourceDriver => "VoltageSourceDriver",
             RootKind::CapacitorRoot { .. } => "CapacitorRoot",
             RootKind::InductorRoot { .. } => "InductorRoot",
             RootKind::IirLowpass { .. } => "IirLowpass",
             RootKind::IirHighpass { .. } => "IirHighpass",
+            RootKind::RlLowpass { .. } => "RlLowpass",
         };
 
         let mut s = format!(

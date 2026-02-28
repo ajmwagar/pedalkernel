@@ -570,6 +570,120 @@ impl DynNode {
         }
     }
 
+    /// Extract junction voltage for short-circuit terminated passive filters.
+    ///
+    /// For a tree like `Series(VS, Series(L, R))` with short-circuit at ground:
+    /// 1. VS is embedded in tree, emits b_vs = 2 * Vin
+    /// 2. Series(L, R) forms the filter network
+    /// 3. Short-circuit root: a_root = -b_tree
+    /// 4. Output is at junction between L and R (voltage across R)
+    ///
+    /// This method scatters down through the tree to compute the voltage
+    /// at the load resistor R.
+    pub fn short_circuit_junction_voltage(&self, a_root: f64) -> Option<f64> {
+        match self {
+            Self::Series { gamma, b1, b2, left, right, .. } => {
+                // Check if this is Series(VS, inner) where inner contains the filter
+                match (left.as_ref(), right.as_ref()) {
+                    // VS on left, filter network on right
+                    (Self::VoltageSource { .. }, right_node) => {
+                        // Scatter: a_inner = b2 - (1 - γ) * (b1 + b2 + a_root)
+                        let sum = *b1 + *b2 + a_root;
+                        let a_inner = *b2 - (1.0 - *gamma) * sum;
+                        // Recursively extract junction voltage from inner tree
+                        right_node.extract_load_voltage(a_inner)
+                    }
+                    // Filter network on left, something else on right - try left
+                    (left_node, Self::VoltageSource { .. }) => {
+                        let sum = *b1 + *b2 + a_root;
+                        let a_left = *b1 - *gamma * sum;
+                        left_node.extract_load_voltage(a_left)
+                    }
+                    // Not Series(VS, _), try to find load directly
+                    _ => {
+                        // If right child is a load element, extract its voltage
+                        if right.is_load_element() {
+                            let sum = *b1 + *b2 + a_root;
+                            let a2 = *b2 - (1.0 - *gamma) * sum;
+                            Some((a2 + *b2) / 2.0)
+                        } else if left.is_load_element() {
+                            let sum = *b1 + *b2 + a_root;
+                            let a1 = *b1 - *gamma * sum;
+                            Some((a1 + *b1) / 2.0)
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+            // Direct resistor - voltage is (a + b) / 2
+            Self::Resistor { .. } | Self::Pot { .. } => {
+                // For resistor: b = 0, so V = a / 2
+                Some(a_root / 2.0)
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract voltage at the load element (resistor) in a filter subtree.
+    ///
+    /// Used by short_circuit_junction_voltage to recursively find the load.
+    fn extract_load_voltage(&self, a_parent: f64) -> Option<f64> {
+        match self {
+            // Direct load element - voltage = (a + b) / 2
+            // For resistor: b = 0, so V = a / 2
+            Self::Resistor { .. } | Self::Pot { .. } => {
+                Some(a_parent / 2.0)
+            }
+            // Series(L, R) or Series(C, R) - extract R's voltage
+            Self::Series { gamma, b1, b2, left, right, .. } => {
+                // Try right child first (common case: Series(L, R))
+                if right.is_load_element() {
+                    let sum = *b1 + *b2 + a_parent;
+                    let a2 = *b2 - (1.0 - *gamma) * sum;
+                    Some((a2 + *b2) / 2.0)
+                } else if left.is_load_element() {
+                    let sum = *b1 + *b2 + a_parent;
+                    let a1 = *b1 - *gamma * sum;
+                    Some((a1 + *b1) / 2.0)
+                } else {
+                    // Recurse into nested series
+                    if matches!(right.as_ref(), Self::Series { .. }) {
+                        let sum = *b1 + *b2 + a_parent;
+                        let a2 = *b2 - (1.0 - *gamma) * sum;
+                        right.extract_load_voltage(a2)
+                    } else if matches!(left.as_ref(), Self::Series { .. }) {
+                        let sum = *b1 + *b2 + a_parent;
+                        let a1 = *b1 - *gamma * sum;
+                        left.extract_load_voltage(a1)
+                    } else {
+                        None
+                    }
+                }
+            }
+            // Parallel - try to find load in children
+            Self::Parallel { gamma, b1, b2, left, right, .. } => {
+                if right.is_load_element() {
+                    let sum = *b1 + *b2 + a_parent;
+                    let a2 = *b2 - (1.0 - *gamma) * sum;
+                    Some((a2 + *b2) / 2.0)
+                } else if left.is_load_element() {
+                    let sum = *b1 + *b2 + a_parent;
+                    let a1 = *b1 - *gamma * sum;
+                    Some((a1 + *b1) / 2.0)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if this node is a load element (resistor or potentiometer).
+    fn is_load_element(&self) -> bool {
+        matches!(self, Self::Resistor { .. } | Self::Pot { .. })
+    }
+
     /// Check if this tree contains any reactive elements (capacitors/inductors).
     pub fn has_reactive_elements(&self) -> bool {
         match self {

@@ -104,17 +104,34 @@ enum FilterTopology {
     RcLowpass { r: f64, c: f64, a1: f64, b0: f64 },
     /// RC highpass: C from in→out, R from out→gnd
     RcHighpass { r: f64, c: f64, a1: f64, b0: f64 },
+    /// RL lowpass: L from in→out, R from out→gnd
+    /// Uses proper WDF series adaptor algorithm
+    RlLowpass {
+        /// Inductance in Henrys
+        l: f64,
+        /// Resistance in Ohms
+        r: f64,
+        /// R_L = 2*L*fs (inductor port resistance)
+        r_l: f64,
+        /// R_R = R (resistor port resistance)
+        r_r: f64,
+        /// γ_L = R_L / (R_L + R_R)
+        gamma_l: f64,
+        /// γ_R = R_R / (R_L + R_R)
+        gamma_r: f64,
+    },
 }
 
-/// Detect simple RC filter topology and compute IIR filter coefficients.
+/// Detect simple RC/RL filter topology and compute filter parameters.
 ///
 /// Detects:
 /// - RC lowpass: R from in→out, C from out→gnd
 /// - RC highpass: C from in→out, R from out→gnd
+/// - RL lowpass: L from in→out, R from out→gnd
 ///
-/// Returns IIR coefficients for the bilinear transform of the analog filter.
+/// Returns filter parameters for the detected topology.
 fn detect_rc_filter_topology(graph: &CircuitGraph, sample_rate: f64) -> Option<FilterTopology> {
-    // Count resistors and capacitors
+    // Count passive elements
     let resistors: Vec<_> = graph
         .edges
         .iter()
@@ -125,8 +142,52 @@ fn detect_rc_filter_topology(graph: &CircuitGraph, sample_rate: f64) -> Option<F
         .iter()
         .filter(|e| matches!(graph.components[e.comp_idx].kind, ComponentKind::Capacitor(_)))
         .collect();
+    let inductors: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|e| matches!(graph.components[e.comp_idx].kind, ComponentKind::Inductor(_)))
+        .collect();
 
-    // Must have exactly one R and one C
+    // Check for RL lowpass first: 1 R, 1 L, 0 C
+    if resistors.len() == 1 && inductors.len() == 1 && capacitors.is_empty() {
+        let r_edge = resistors[0];
+        let l_edge = inductors[0];
+
+        let r = match &graph.components[r_edge.comp_idx].kind {
+            ComponentKind::Resistor(r) => *r,
+            _ => return None,
+        };
+        let l = match &graph.components[l_edge.comp_idx].kind {
+            ComponentKind::Inductor(l) => *l,
+            _ => return None,
+        };
+
+        // Check for lowpass: L from in→out, R from out→gnd
+        let l_connects_in_out = (l_edge.node_a == graph.in_node && l_edge.node_b == graph.out_node)
+            || (l_edge.node_a == graph.out_node && l_edge.node_b == graph.in_node);
+        let r_connects_out_gnd = (r_edge.node_a == graph.out_node && r_edge.node_b == graph.gnd_node)
+            || (r_edge.node_a == graph.gnd_node && r_edge.node_b == graph.out_node);
+
+        if l_connects_in_out && r_connects_out_gnd {
+            // RL lowpass using proper WDF series adaptor
+            let r_l = 2.0 * l * sample_rate;
+            let r_r = r;
+            let r_total = r_l + r_r;
+            let gamma_l = r_l / r_total;
+            let gamma_r = r_r / r_total;
+
+            return Some(FilterTopology::RlLowpass {
+                l,
+                r,
+                r_l,
+                r_r,
+                gamma_l,
+                gamma_r,
+            });
+        }
+    }
+
+    // Check for RC filters: 1 R, 1 C
     if resistors.len() != 1 || capacitors.len() != 1 {
         return None;
     }
@@ -1817,6 +1878,19 @@ pub fn compile_pedal_with_options(
                         y_prev: 0.0,
                         x_prev: 0.0,
                     },
+                    FilterTopology::RlLowpass {
+                        r_l,
+                        r_r,
+                        gamma_l,
+                        gamma_r,
+                        ..
+                    } => RootKind::RlLowpass {
+                        r_l,
+                        r_r,
+                        gamma_l,
+                        gamma_r,
+                        a_l_prev: 0.0,
+                    },
                 };
 
                 stages.push(WdfStage {
@@ -1893,16 +1967,20 @@ pub fn compile_pedal_with_options(
                             // Compute compensation factor for passive circuits.
                             let compensation = compute_passive_compensation(&tree);
 
+                            // Use ShortCircuit root since tree terminates at ground.
+                            // Ground has zero impedance (short circuit), allowing
+                            // current to flow through series elements (L, R).
+                            // This enables proper voltage divider behavior.
                             stages.push(WdfStage {
                                 tree,
-                                root: RootKind::Passthrough,
+                                root: RootKind::ShortCircuit,
                                 compensation,
                                 oversampler: Oversampler::new(oversampling),
                                 base_diode_model: None,
                                 paired_opamp: None,
                                 dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
+                                is_source_follower: false,
+                                prev_source_voltage: 0.0,
                             });
                         }
                     }
