@@ -135,9 +135,23 @@ impl BbdModel {
 /// - Anti-alias filtering (models the BBD's Nyquist limit)
 /// - Subtle soft clipping (BBDs clip gently at high levels)
 /// - Noise injection (characteristic BBD hiss)
+/// - Compander with proper envelope tracking (per patent architecture)
 ///
 /// The delay buffer uses linear interpolation for fractional-sample
 /// delay, modeling the smooth time modulation of chorus/flanger effects.
+///
+/// ## Compander Architecture (Patent-Based)
+///
+/// Real BBD companders (NE570/NE571) work by:
+/// 1. Compressing the input signal using the INPUT envelope
+/// 2. Delaying the compressed signal through the BBD
+/// 3. Expanding using a DELAYED version of the compression envelope
+/// 4. The tracking error between compression and expansion envelopes
+///    causes characteristic "breathing" and "pumping" artifacts
+///
+/// The expander must use the delayed compression envelope, NOT an
+/// independent envelope of the output signal, to achieve unity gain
+/// in steady state while preserving the analog artifacts.
 #[derive(Debug, Clone)]
 pub struct BbdDelayLine {
     pub model: BbdModel,
@@ -164,14 +178,27 @@ pub struct BbdDelayLine {
     clock_phase: f64,
     /// Clock feedthrough phase increment per sample.
     clock_phase_inc: f64,
-    /// Compander envelope state: tracks the input RMS level for the
-    /// compressor side.  The expander side sees a slightly delayed/smoothed
-    /// version, causing tracking error.
+
+    // ── Compander state (patent-based architecture) ──────────────────────
+    /// Compression envelope: tracks input signal level for compressor gain.
     compander_env_in: f64,
+    /// Delayed compression envelope buffer: small ring buffer that delays
+    /// the compression envelope to match the audio delay through the BBD.
+    /// The expander uses this delayed envelope to restore dynamic range.
+    env_delay_buffer: Vec<f64>,
+    /// Write position in envelope delay buffer.
+    env_delay_write_pos: usize,
+    /// Current envelope delay in samples (tracks audio delay).
+    env_delay_samples: usize,
+    /// Output envelope: tracks actual output level for computing tracking error.
+    /// This is NOT used for expansion gain, only for artifact modeling.
     compander_env_out: f64,
+
     /// Compander attack/release coefficients.
     compander_attack: f64,
     compander_release: f64,
+    /// Sample rate (cached for envelope delay calculations).
+    sample_rate: f64,
 }
 
 impl BbdDelayLine {
@@ -204,9 +231,16 @@ impl BbdDelayLine {
         let clock_phase_inc = 2.0 * std::f64::consts::PI * clock_freq / sample_rate;
 
         // Compander: NE571-style attack/release time constants.
-        // Attack ~1ms, release ~10ms — the mismatch causes "breathing" artifacts.
-        let compander_attack = (-1.0 / (0.001 * sample_rate)).exp();
-        let compander_release = (-1.0 / (0.010 * sample_rate)).exp();
+        // Attack ~5ms, release ~50ms (per patent Claim 5: 1-50ms range).
+        // The mismatch causes "breathing" artifacts.
+        let compander_attack = (-1.0 / (0.005 * sample_rate)).exp();
+        let compander_release = (-1.0 / (0.050 * sample_rate)).exp();
+
+        // Envelope delay buffer: sized for maximum BBD delay time.
+        // This delays the compression envelope to match the audio delay.
+        let max_env_delay_samples = (max_delay * sample_rate) as usize + 16;
+        let env_delay_buffer = vec![0.0; max_env_delay_samples];
+        let env_delay_samples = (model.delay_at_clock(clock_freq) * sample_rate) as usize;
 
         Self {
             model,
@@ -222,9 +256,13 @@ impl BbdDelayLine {
             clock_phase: 0.0,
             clock_phase_inc,
             compander_env_in: 0.0,
+            env_delay_buffer,
+            env_delay_write_pos: 0,
+            env_delay_samples,
             compander_env_out: 0.0,
             compander_attack,
             compander_release,
+            sample_rate,
         }
     }
 
@@ -255,7 +293,7 @@ impl BbdDelayLine {
         self.clock_freq = clock_hz.clamp(self.model.clock_min, self.model.clock_max);
         self.inner.set_delay_seconds(self.model.delay_at_clock(self.clock_freq));
 
-        let sample_rate = self.inner.sample_rate();
+        let sample_rate = self.sample_rate;
 
         // Update anti-alias filter
         let lpf_cutoff = self.model.bandwidth_ratio * self.clock_freq;
@@ -268,6 +306,11 @@ impl BbdDelayLine {
         // Update clock feedthrough frequency
         self.clock_phase_inc =
             2.0 * std::f64::consts::PI * self.clock_freq / sample_rate;
+
+        // Update envelope delay to match audio delay
+        let delay_secs = self.model.delay_at_clock(self.clock_freq);
+        self.env_delay_samples =
+            (delay_secs * sample_rate).round() as usize % self.env_delay_buffer.len();
     }
 
     /// Set delay time as a normalized value (0.0 = min delay, 1.0 = max delay).
@@ -290,20 +333,26 @@ impl BbdDelayLine {
 
     /// Process one sample through the BBD delay line.
     ///
-    /// Signal chain (models real BBD circuit):
+    /// Signal chain (models real BBD circuit per patent architecture):
     /// 1. Compander input stage: compress dynamic range (NE571 compressor)
-    /// 2. Soft clip to BBD voltage swing limit
-    /// 3. Write to delay buffer (with feedback)
-    /// 4. Read from buffer with interpolation
-    /// 5. Charge leakage LPF (darker at longer delays)
-    /// 6. Anti-alias LPF (BBD Nyquist bandwidth limit)
-    /// 7. Clock feedthrough injection
-    /// 8. Noise injection
-    /// 9. Compander output stage: expand dynamic range (NE571 expander)
+    /// 2. Store compression envelope in delay buffer
+    /// 3. Soft clip to BBD voltage swing limit
+    /// 4. Write to delay buffer (with feedback)
+    /// 5. Read from buffer with interpolation
+    /// 6. Charge leakage LPF (darker at longer delays)
+    /// 7. Anti-alias LPF (BBD Nyquist bandwidth limit)
+    /// 8. Clock feedthrough injection
+    /// 9. Noise injection
+    /// 10. Read DELAYED compression envelope for expander
+    /// 11. Expand using delayed envelope (restores original dynamics)
+    /// 12. Apply tracking error as small modulation artifact
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
-        // ── Compander input (compressor) ──────────────────────────────
-        // Track input envelope with fast attack, slow release.
+        // ══════════════════════════════════════════════════════════════
+        // COMPANDER INPUT (COMPRESSOR)
+        // ══════════════════════════════════════════════════════════════
+        // Track input envelope with syllabic time constants (5ms attack, 50ms release)
+        // per patent Claim 5: "time constant between 1 and 50 milliseconds"
         let abs_in = input.abs();
         let coef_in = if abs_in > self.compander_env_in {
             self.compander_attack
@@ -312,6 +361,13 @@ impl BbdDelayLine {
         };
         self.compander_env_in =
             coef_in * self.compander_env_in + (1.0 - coef_in) * abs_in;
+
+        // Store compression envelope in delay buffer for expander to use later.
+        // This is the key insight from the patent: the expander needs the
+        // DELAYED compression envelope, not an independent output envelope.
+        let buf_len = self.env_delay_buffer.len();
+        self.env_delay_buffer[self.env_delay_write_pos] = self.compander_env_in;
+        self.env_delay_write_pos = (self.env_delay_write_pos + 1) % buf_len;
 
         // Compress: reduce dynamic range by 2:1 (typical NE571 ratio).
         // gain = 1/sqrt(envelope) — louder signals get compressed more.
@@ -322,70 +378,97 @@ impl BbdDelayLine {
         };
         let compressed = input * comp_gain.min(10.0); // Limit expansion of quiet signals
 
-        // ── Mix with feedback and soft-clip ───────────────────────────
+        // ══════════════════════════════════════════════════════════════
+        // BBD DELAY MEDIUM
+        // ══════════════════════════════════════════════════════════════
+        // Mix with feedback and soft-clip
         let write_sample = compressed + self.feedback * self.feedback_sample;
         let clipped = bbd_soft_clip(write_sample);
 
-        // Write to inner delay line's buffer (direct — feedback is handled above)
+        // Write to inner delay line's buffer
         self.inner.write_direct(clipped);
 
-        // ── Read with interpolation ───────────────────────────────────
+        // Read with interpolation
         let delay_samples = self.inner.effective_delay_samples();
         let out_raw = self.inner.buffer_read(delay_samples, 0);
 
-        // Advance write position (and process medium if configured)
+        // Advance write position
         self.inner.advance_write();
 
-        // ── Charge leakage LPF ───────────────────────────────────────
-        // Models accumulated charge loss across BBD stages.  More stages
-        // and lower clock frequency → more leakage → darker output.
-        // This is what gives long BBD delays their characteristic warmth.
+        // ══════════════════════════════════════════════════════════════
+        // BBD ANALOG CHARACTERISTICS
+        // ══════════════════════════════════════════════════════════════
+        // Charge leakage LPF: darker at longer delays
         self.leakage_lpf_state = self.leakage_lpf_coef * self.leakage_lpf_state
             + (1.0 - self.leakage_lpf_coef) * out_raw;
 
-        // ── Anti-alias LPF (BBD Nyquist bandwidth limit) ─────────────
+        // Anti-alias LPF (BBD Nyquist bandwidth limit)
         self.lpf_state = self.lpf_coef * self.lpf_state
             + (1.0 - self.lpf_coef) * self.leakage_lpf_state;
 
-        // ── Clock feedthrough ─────────────────────────────────────────
-        // The BBD switching clock couples into the signal through parasitic
-        // capacitance.  Audible as a high-pitched whine, especially at
-        // lower clock frequencies where it falls into the audio band.
+        // Clock feedthrough
         self.clock_phase += self.clock_phase_inc;
         if self.clock_phase > 2.0 * std::f64::consts::PI {
             self.clock_phase -= 2.0 * std::f64::consts::PI;
         }
         let clock_bleed = self.model.clock_feedthrough * self.clock_phase.sin();
 
-        // ── Noise injection ───────────────────────────────────────────
+        // Noise injection
         let noise = self.next_noise() * self.model.noise_floor;
 
         let bbd_output = self.lpf_state + clock_bleed + noise;
 
-        // ── Compander output (expander) ───────────────────────────────
-        // Track output envelope — deliberately uses slightly different
-        // time constants to model NE571 tracking error.
-        let abs_out = bbd_output.abs();
-        // Expander envelope is intentionally sluggish compared to compressor,
-        // scaled by compander_error to control the magnitude of the artifact.
-        let error_scale = 1.0 + self.model.compander_error;
-        let coef_out = if abs_out > self.compander_env_out {
-            // Expander attack is slower than compressor attack
-            self.compander_attack * error_scale
-        } else {
-            // Expander release is faster than compressor release
-            self.compander_release / error_scale
-        };
-        self.compander_env_out =
-            coef_out.min(0.9999) * self.compander_env_out + (1.0 - coef_out.min(0.9999)) * abs_out;
+        // ══════════════════════════════════════════════════════════════
+        // COMPANDER OUTPUT (EXPANDER) — Patent Architecture
+        // ══════════════════════════════════════════════════════════════
+        // Read the DELAYED compression envelope. The expander should use
+        // the same envelope the compressor used, delayed to match the audio.
+        // This achieves unity gain in steady state.
+        let read_pos = (self.env_delay_write_pos + buf_len - self.env_delay_samples) % buf_len;
+        let delayed_env = self.env_delay_buffer[read_pos];
 
-        // Expand: restore dynamic range.
-        let exp_gain = if self.compander_env_out > 0.001 {
-            self.compander_env_out.sqrt()
+        // Base expansion gain from delayed compression envelope.
+        // This restores the original dynamic range (ideally cancels compression).
+        let base_exp_gain = if delayed_env > 0.001 {
+            delayed_env.sqrt()
         } else {
             1.0
         };
-        let output = bbd_output * exp_gain.min(10.0);
+
+        // ── Tracking Error (per patent Claim 1, Figure 1) ─────────────
+        // Track the actual output envelope to compute tracking error.
+        // The error is the difference between what the compressor saw and
+        // what the expander sees, caused by:
+        // - BBD signal attenuation (LPF, soft clip, leakage)
+        // - Envelope detector time constant differences
+        // - Clock rate effects (Claim 7: "error varies inversely with clock frequency")
+        let abs_out = bbd_output.abs();
+        let error_scale = 1.0 + self.model.compander_error;
+        let coef_out = if abs_out > self.compander_env_out {
+            self.compander_attack * error_scale
+        } else {
+            self.compander_release / error_scale
+        };
+        self.compander_env_out = coef_out.min(0.9999) * self.compander_env_out
+            + (1.0 - coef_out.min(0.9999)) * abs_out;
+
+        // Compute tracking error as modulation (per patent Figure 1).
+        // Error is larger when:
+        // - Envelope is changing rapidly (Claim 6: "function of envelope slope")
+        // - Clock frequency is lower (Claim 7: "varies inversely with clock frequency")
+        let envelope_delta = (delayed_env - self.compander_env_out).abs();
+        let clock_factor = self.model.clock_min / self.clock_freq; // Higher at lower clock
+
+        // Scale error by compander_error parameter and clock factor.
+        // This creates the characteristic "breathing" and "pumping" artifacts.
+        let tracking_error = self.model.compander_error * envelope_delta * clock_factor;
+
+        // Apply tracking error as gain modulation on top of base expansion.
+        // Small perturbation that creates analog character without breaking unity gain.
+        let error_modulation = 1.0 + tracking_error.min(0.5); // Limit to ±50% modulation
+
+        let exp_gain = (base_exp_gain * error_modulation).min(10.0);
+        let output = bbd_output * exp_gain;
 
         // Store for feedback (post-compander, as in real circuits)
         self.feedback_sample = output;
@@ -395,6 +478,7 @@ impl BbdDelayLine {
 
     /// Update sample rate and resize buffer.
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.sample_rate = sample_rate;
         self.inner.set_sample_rate(sample_rate);
         self.inner.set_delay_seconds(self.model.delay_at_clock(self.clock_freq));
 
@@ -404,8 +488,17 @@ impl BbdDelayLine {
             Self::compute_leakage_coef(&self.model, self.clock_freq, sample_rate);
         self.clock_phase_inc =
             2.0 * std::f64::consts::PI * self.clock_freq / sample_rate;
-        self.compander_attack = (-1.0 / (0.001 * sample_rate)).exp();
-        self.compander_release = (-1.0 / (0.010 * sample_rate)).exp();
+        self.compander_attack = (-1.0 / (0.005 * sample_rate)).exp();
+        self.compander_release = (-1.0 / (0.050 * sample_rate)).exp();
+
+        // Resize envelope delay buffer for new sample rate
+        let max_delay = self.model.delay_at_clock(self.model.clock_min);
+        let max_env_delay_samples = (max_delay * sample_rate) as usize + 16;
+        self.env_delay_buffer.resize(max_env_delay_samples, 0.0);
+        self.env_delay_write_pos = 0;
+        self.env_delay_samples =
+            (self.model.delay_at_clock(self.clock_freq) * sample_rate) as usize
+                % self.env_delay_buffer.len();
     }
 
     /// Reset all state.
@@ -417,6 +510,10 @@ impl BbdDelayLine {
         self.clock_phase = 0.0;
         self.compander_env_in = 0.0;
         self.compander_env_out = 0.0;
+        self.env_delay_write_pos = 0;
+        for s in &mut self.env_delay_buffer {
+            *s = 0.0;
+        }
     }
 
     /// Get current delay time in seconds.
