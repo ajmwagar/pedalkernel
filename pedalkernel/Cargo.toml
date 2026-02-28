@@ -16,6 +16,8 @@ jack-rt = ["jack"]
 tui = ["dep:ratatui", "dep:crossterm"]
 cli = ["dep:clap"]
 hardware = []
+# Advanced BJT model with base charge modulation, junction capacitances
+gummel-poon = []
 
 [dependencies]
 # DSL parser
