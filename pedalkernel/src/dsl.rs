@@ -448,6 +448,23 @@ pub enum BjtType {
 }
 
 impl BjtType {
+    /// The SPICE model name used to look up parameters from the model file.
+    pub fn model_name(&self) -> &'static str {
+        match self {
+            BjtType::Generic => "GENERIC_NPN",
+            BjtType::N2n3904 => "2N3904",
+            BjtType::N2n2222 => "2N2222",
+            BjtType::Bc108 => "BC108",
+            BjtType::Bc109 => "BC109",
+            BjtType::N2n5088 => "2N5088",
+            BjtType::N2n5089 => "2N5089",
+            BjtType::N2n3906 => "2N3906",
+            BjtType::Ac128 => "AC128",
+            BjtType::Oc44 => "OC44",
+            BjtType::Nkt275 => "NKT275",
+        }
+    }
+
     /// Whether this is a germanium transistor.
     /// Germanium transistors have lower voltage tolerance and higher leakage.
     pub fn is_germanium(&self) -> bool {
@@ -558,6 +575,22 @@ pub enum JfetType {
     N2sk30aY,
     /// 2SK30A-BL - High Idss grade (2.6-6.5 mA)
     N2sk30aBl,
+}
+
+impl JfetType {
+    /// SPICE model name for lookup in the embedded jfets.model file.
+    pub fn model_name(&self) -> &'static str {
+        match self {
+            JfetType::J201 => "J201",
+            JfetType::N2n5457 => "2N5457",
+            JfetType::P2n5460 => "2N5460",
+            JfetType::N2n5952 => "2N5952",
+            JfetType::N2sk30a => "2SK30A",
+            JfetType::N2sk30aGr => "2SK30A-GR",
+            JfetType::N2sk30aY => "2SK30A-Y",
+            JfetType::N2sk30aBl => "2SK30A-BL",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

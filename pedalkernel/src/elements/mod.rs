@@ -529,8 +529,8 @@ mod tests {
     // JFET tests
     #[test]
     fn jfet_cutoff_at_pinchoff() {
-        let mut jfet = JfetRoot::new(JfetModel::n_2n5457());
-        // Vp = -2.5V, so Vgs = -3.0V should be in cutoff
+        let mut jfet = JfetRoot::new(JfetModel::by_name("2N5457"));
+        // VTO = -1.25V (InterFET 2N5457), so Vgs = -3.0V should be in cutoff
         jfet.set_vgs(-3.0);
         let ids = jfet.drain_current(5.0);
         assert!(ids.abs() < 1e-9, "should be cutoff: ids={ids}");
@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn jfet_triode_region() {
-        let model = JfetModel::n_2n5457();
+        let model = JfetModel::by_name("2N5457");
         let mut jfet = JfetRoot::new(model);
         jfet.set_vgs(0.0); // Fully on
                            // Small Vds (triode region)
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn jfet_saturation_region() {
-        let model = JfetModel::n_2n5457();
+        let model = JfetModel::by_name("2N5457");
         let mut jfet = JfetRoot::new(model);
         jfet.set_vgs(0.0); // Fully on
                            // Large Vds should saturate
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn jfet_vgs_modulates_current() {
-        let mut jfet = JfetRoot::new(JfetModel::n_2n5457());
+        let mut jfet = JfetRoot::new(JfetModel::by_name("2N5457"));
         // Test that drain current decreases as Vgs becomes more negative
         jfet.set_vgs(0.0);
         let ids_0 = jfet.drain_current(5.0);
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn jfet_newton_converges() {
-        let model = JfetModel::n_j201();
+        let model = JfetModel::by_name("J201");
         let mut jfet = JfetRoot::new(model);
         jfet.set_vgs(-0.5);
 
@@ -590,7 +590,7 @@ mod tests {
 
     #[test]
     fn jfet_wdf_constraint_satisfied() {
-        let model = JfetModel::n_2n5457();
+        let model = JfetModel::by_name("2N5457");
         let mut jfet = JfetRoot::new(model);
         jfet.set_vgs(-1.0);
 
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn jfet_p_channel_polarity() {
-        let model = JfetModel::p_2n5460();
+        let model = JfetModel::by_name("2N5460");
         let mut jfet = JfetRoot::new(model);
         jfet.set_vgs(0.0); // Fully on for P-channel
 
@@ -1749,7 +1749,7 @@ mod tests {
     #[test]
     fn bjt_npn_forward_active() {
         // Basic NPN test: collector current should flow when Vbe > 0 and Vce > 0
-        let model = BjtModel::n2n3904();
+        let model = BjtModel::by_name("2N3904");
         let mut root = BjtNpnRoot::new(model);
 
         // Set forward bias on base-emitter junction
@@ -1778,7 +1778,7 @@ mod tests {
     #[test]
     fn bjt_npn_cutoff() {
         // When Vbe < 0, BJT is in cutoff - minimal current
-        let model = BjtModel::n2n3904();
+        let model = BjtModel::by_name("2N3904");
         let mut root = BjtNpnRoot::new(model);
 
         root.set_vbe(-0.5); // Reverse bias
@@ -1796,7 +1796,7 @@ mod tests {
     #[test]
     fn bjt_npn_vbe_affects_ic() {
         // Higher Vbe should produce higher Ic (exponential relationship)
-        let model = BjtModel::n2n3904();
+        let model = BjtModel::by_name("2N3904");
         let mut root = BjtNpnRoot::new(model);
 
         // Low Vbe
@@ -1819,7 +1819,7 @@ mod tests {
     #[test]
     fn bjt_pnp_forward_active() {
         // PNP test: collector current should flow when Veb > 0 and Vec > 0
-        let model = BjtModel::ac128(); // Classic germanium PNP
+        let model = BjtModel::by_name("AC128"); // Classic germanium PNP
         let mut root = BjtPnpRoot::new(model);
 
         // Set forward bias on emitter-base junction
@@ -1838,8 +1838,8 @@ mod tests {
     #[test]
     fn bjt_germanium_higher_leakage() {
         // Germanium transistors (AC128) have much higher leakage than silicon
-        let ge_model = BjtModel::ac128();
-        let si_model = BjtModel::n2n3904();
+        let ge_model = BjtModel::by_name("AC128");
+        let si_model = BjtModel::by_name("2N3904");
 
         // Germanium Is is ~1e-6, silicon Is is ~1e-14
         assert!(
@@ -1853,8 +1853,8 @@ mod tests {
     #[test]
     fn bjt_beta_affects_base_current() {
         // Higher beta = less base current for same Ic
-        let high_beta = BjtModel::n2n5089(); // beta ~700
-        let low_beta = BjtModel::n2n3904();  // beta ~150
+        let high_beta = BjtModel::by_name("2N5089"); // beta ~700
+        let low_beta = BjtModel::by_name("2N3904");  // beta ~150
 
         let mut root_high = BjtNpnRoot::new(high_beta);
         let mut root_low = BjtNpnRoot::new(low_beta);
@@ -1886,7 +1886,7 @@ mod tests {
     #[test]
     fn bjt_wdf_convergence() {
         // Verify WDF root converges to valid solution
-        let model = BjtModel::n2n3904();
+        let model = BjtModel::by_name("2N3904");
         let mut root = BjtNpnRoot::new(model);
 
         root.set_vbe(0.6);
@@ -1907,18 +1907,10 @@ mod tests {
     #[test]
     fn bjt_model_presets() {
         // Verify all model presets have reasonable values
-        let models = vec![
-            ("2N3904", BjtModel::n2n3904()),
-            ("2N2222", BjtModel::n2n2222()),
-            ("BC108", BjtModel::bc108()),
-            ("BC109", BjtModel::bc109()),
-            ("2N5088", BjtModel::n2n5088()),
-            ("2N5089", BjtModel::n2n5089()),
-            ("2N3906", BjtModel::n2n3906()),
-            ("AC128", BjtModel::ac128()),
-            ("OC44", BjtModel::oc44()),
-            ("NKT275", BjtModel::nkt275()),
-        ];
+        let models: Vec<(&str, BjtModel)> = [
+            "2N3904", "2N2222", "BC108", "BC109", "2N5088",
+            "2N5089", "2N3906", "AC128", "OC44", "NKT275",
+        ].iter().map(|name| (*name, BjtModel::by_name(name))).collect();
 
         for (name, model) in models {
             // Is should be positive
@@ -1946,7 +1938,7 @@ mod tests {
     #[test]
     fn bjt_pnp_cutoff() {
         // When Veb < 0, PNP is in cutoff - minimal current
-        let model = BjtModel::ac128();
+        let model = BjtModel::by_name("AC128");
         let mut root = BjtPnpRoot::new(model);
 
         root.set_veb(-0.5); // Reverse bias
@@ -1964,7 +1956,7 @@ mod tests {
     #[test]
     fn bjt_pnp_veb_affects_ic() {
         // Higher Veb should produce higher Ic (exponential relationship)
-        let model = BjtModel::ac128();
+        let model = BjtModel::by_name("AC128");
         let mut root = BjtPnpRoot::new(model);
 
         // Low Veb
@@ -1987,7 +1979,7 @@ mod tests {
     #[test]
     fn bjt_pnp_wdf_convergence() {
         // Verify PNP WDF root converges to valid solution
-        let model = BjtModel::ac128();
+        let model = BjtModel::by_name("AC128");
         let mut root = BjtPnpRoot::new(model);
 
         root.set_veb(0.25);
@@ -2008,7 +2000,7 @@ mod tests {
     #[test]
     fn bjt_pnp_base_current() {
         // Verify PNP base current tracking
-        let model = BjtModel::ac128();
+        let model = BjtModel::by_name("AC128");
         let mut root = BjtPnpRoot::new(model);
 
         root.set_veb(0.25);

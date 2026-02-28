@@ -1,0 +1,56 @@
+* PedalKernel BJT Transistor Models — SPICE .MODEL format
+*
+* Standard SPICE BJT parameters (Gummel-Poon / Ebers-Moll compatible):
+*   IS  — Saturation current (A)
+*   BF  — Forward current gain (hFE)
+*   BR  — Reverse current gain
+*   NF  — Forward ideality factor
+*   NR  — Reverse ideality factor
+*   VT  — Thermal voltage (V), default 25.85mV @ 25°C
+*   VAF — Forward Early voltage (V)
+*   VAR — Reverse Early voltage (V)
+*   IKF — Forward knee current (A)
+*   IKR — Reverse knee current (A)
+*   ISE — B-E leakage saturation current (A)
+*   ISC — B-C leakage saturation current (A)
+*   NE  — B-E leakage ideality factor
+*   NC  — B-C leakage ideality factor
+*   RB  — Base resistance (Ω)
+*   RE  — Emitter resistance (Ω)
+*   RC  — Collector resistance (Ω)
+*   CJE — Zero-bias B-E junction capacitance (F)
+*   VJE — B-E built-in potential (V)
+*   MJE — B-E grading coefficient
+*   CJC — Zero-bias B-C junction capacitance (F)
+*   VJC — B-C built-in potential (V)
+*   MJC — B-C grading coefficient
+*   TF  — Forward transit time (s)
+*   TR  — Reverse transit time (s)
+*
+* Engineering suffixes: f=1e-15, p=1e-12, n=1e-9, u=1e-6, m=1e-3, k=1e3, MEG=1e6
+*
+* Sources: ON Semi, Fairchild, Philips, Mullard datasheets & SPICE libraries
+
+* ── NPN Silicon ──────────────────────────────────────────────────────────────
+
+.MODEL 2N3904 NPN(IS=6.734f BF=416.4 BR=0.7371 NF=1.0 NR=1.0 VAF=74.03 VAR=28.0 IKF=66.78m IKR=10m ISE=6.734f NE=1.259 ISC=0 NC=2.0 RB=10 RE=0.1 RC=1 CJE=4.493p VJE=0.7 MJE=0.2593 CJC=3.638p VJC=0.75 MJC=0.2593 TF=301.2p TR=24n)
+.MODEL 2N2222 NPN(IS=32.95f BF=270 BR=6.0 NF=1.0 NR=1.0 VAF=100 VAR=30 IKF=300m IKR=30m ISE=12f NE=1.5 ISC=0 NC=2.0 RB=10 RE=0.2 RC=0.3 CJE=8p VJE=0.7 MJE=0.33 CJC=8p VJC=0.7 MJC=0.33 TF=400p TR=50n)
+.MODEL BC108 NPN(IS=20f BF=300 BR=5.0 NF=1.0 NR=1.0 VAF=100 VAR=30 IKF=100m IKR=10m ISE=10f NE=1.5 ISC=0 NC=2.0 RB=15 RE=0.2 RC=0.5 CJE=6p VJE=0.7 MJE=0.33 CJC=4p VJC=0.7 MJC=0.33 TF=350p TR=30n)
+.MODEL BC109 NPN(IS=15f BF=350 BR=5.0 NF=1.0 NR=1.0 VAF=100 VAR=30 IKF=100m IKR=10m ISE=8f NE=1.5 ISC=0 NC=2.0 RB=12 RE=0.15 RC=0.4 CJE=5p VJE=0.7 MJE=0.33 CJC=3.5p VJC=0.7 MJC=0.33 TF=300p TR=25n)
+.MODEL 2N5088 NPN(IS=18f BF=600 BR=4.0 NF=1.0 NR=1.0 VAF=100 VAR=25 IKF=50m IKR=10m ISE=5f NE=1.5 ISC=0 NC=2.0 RB=10 RE=0.2 RC=0.3 CJE=6p VJE=0.7 MJE=0.33 CJC=4p VJC=0.7 MJC=0.33 TF=300p TR=30n)
+.MODEL 2N5089 NPN(IS=10f BF=700 BR=4.0 NF=1.0 NR=1.0 VAF=100 VAR=25 IKF=40m IKR=8m ISE=4f NE=1.5 ISC=0 NC=2.0 RB=10 RE=0.2 RC=0.3 CJE=5p VJE=0.7 MJE=0.33 CJC=3.5p VJC=0.7 MJC=0.33 TF=280p TR=28n)
+
+* ── PNP Silicon ──────────────────────────────────────────────────────────────
+
+.MODEL 2N3906 PNP(IS=1.41f BF=180.7 BR=4.0 NF=1.0 NR=1.0 VAF=18.7 VAR=18 IKF=80m IKR=10m ISE=0 NE=1.5 ISC=0 NC=2.0 RB=10 RE=0.15 RC=0.3 CJE=4.5p VJE=0.7 MJE=0.33 CJC=3.5p VJC=0.75 MJC=0.33 TF=300p TR=30n)
+
+* ── Germanium PNP ────────────────────────────────────────────────────────────
+
+.MODEL AC128 PNP(IS=20.66u BF=229.6 BR=14.66 NF=1.133 NR=1.140 VAF=19.68 VAR=88.28 IKF=463m IKR=241.5m ISE=2.190u ISC=7.546u NE=1.796 NC=1.364 RB=1.885 RE=306.4m RC=1.727u CJE=100p VJE=0.3 MJE=0.5 CJC=100p VJC=0.3 MJC=0.5 TF=1n TR=100n)
+.MODEL OC44 PNP(IS=1.423u BF=307 BR=20.27 NF=1.022 NR=1.025 VAF=8.167 VAR=14.84 IKF=43.82m IKR=611.7m ISE=30.54n ISC=213.5n NE=1.316 NC=1.258 RB=32.83 RE=968.7m RC=989.9u CJE=410p VJE=0.3 MJE=0.5 CJC=10p VJC=0.3 MJC=0.5 TF=1.5n TR=150n)
+.MODEL NKT275 PNP(IS=1.5u BF=85 BR=8.0 NF=1.05 NR=1.05 VAF=40 VAR=20 IKF=50m IKR=20m ISE=10n ISC=1n NE=1.5 NC=1.3 RB=20 RE=0.5 RC=0.5 CJE=80p VJE=0.3 MJE=0.5 CJC=30p VJC=0.3 MJC=0.5 TF=1.2n TR=120n)
+
+* ── Generics ─────────────────────────────────────────────────────────────────
+
+.MODEL GENERIC_NPN NPN(IS=10f BF=200 BR=5.0 NF=1.0 NR=1.0 VAF=100 VAR=30 IKF=100m IKR=10m ISE=0 NE=1.5 ISC=0 NC=2.0 RB=10 RE=0.1 RC=0.5 CJE=5p VJE=0.7 MJE=0.33 CJC=5p VJC=0.7 MJC=0.33 TF=400p TR=40n)
+.MODEL GENERIC_PNP PNP(IS=10f BF=200 BR=5.0 NF=1.0 NR=1.0 VAF=100 VAR=30 IKF=100m IKR=10m ISE=0 NE=1.5 ISC=0 NC=2.0 RB=10 RE=0.1 RC=0.5 CJE=5p VJE=0.7 MJE=0.33 CJC=5p VJC=0.7 MJC=0.33 TF=400p TR=40n)

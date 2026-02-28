@@ -11,7 +11,7 @@ categories = ["multimedia::audio"]
 rust-version = "1.75"
 
 [features]
-default = ["jack-rt", "tui", "cli"]
+default = ["jack-rt", "tui", "cli", "gummel-poon"]
 jack-rt = ["jack"]
 tui = ["dep:ratatui", "dep:crossterm"]
 cli = ["dep:clap"]

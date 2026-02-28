@@ -25,6 +25,7 @@ pub mod hw;
 pub mod kicad;
 pub mod loading;
 pub mod metering;
+pub mod models;
 pub mod oversampling;
 pub mod pedalboard;
 pub mod pedals;

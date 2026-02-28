@@ -4,6 +4,7 @@
 
 use super::solver::newton_raphson_solve;
 use crate::elements::WdfRoot;
+use crate::models::{bjt_by_name, SpiceBjtModel};
 
 // ---------------------------------------------------------------------------
 // BJT (Bipolar Junction Transistor) Models
@@ -39,175 +40,37 @@ pub struct BjtModel {
 }
 
 impl BjtModel {
-    /// 2N3904 — The workhorse NPN small-signal transistor.
+    /// Look up a BJT model by name from the embedded SPICE model library.
     ///
-    /// A ubiquitous general-purpose NPN used in countless audio circuits.
-    /// Medium beta, good linearity, silicon.
-    pub fn n2n3904() -> Self {
-        Self {
-            is: 1e-14,
-            bf: 200.0,   // hFE typically 100-300
-            vt: 0.02585, // 25.85mV at 25°C
-            va: 100.0,   // Early voltage
-            is_pnp: false,
-        }
-    }
-
-    /// 2N2222 — Classic NPN switching/amplifier transistor.
+    /// Extracts the Ebers-Moll subset (IS, BF, VAF) from the full SPICE
+    /// Gummel-Poon parameter set. Case-insensitive.
     ///
-    /// Higher current capability than 2N3904, very common.
-    pub fn n2n2222() -> Self {
-        Self {
-            is: 1.4e-14,
-            bf: 150.0,
-            vt: 0.02585,
-            va: 80.0,
-            is_pnp: false,
-        }
+    /// # Panics
+    /// Panics if the model name is not found. Use `try_by_name` for fallible lookup.
+    pub fn by_name(name: &str) -> Self {
+        Self::try_by_name(name)
+            .unwrap_or_else(|| panic!("Unknown BJT model: '{name}'"))
     }
 
-    /// BC108 — British/European small-signal NPN.
-    ///
-    /// Used in Vox, Marshall, and many UK-designed pedals.
-    pub fn bc108() -> Self {
-        Self {
-            is: 2e-14,
-            bf: 300.0, // BC108 has high gain
-            vt: 0.02585,
-            va: 100.0,
-            is_pnp: false,
-        }
-    }
-
-    /// BC109 — Low-noise variant of BC108.
-    ///
-    /// Common in Tone Bender and other fuzz circuits.
-    pub fn bc109() -> Self {
-        Self {
-            is: 1.5e-14,
-            bf: 350.0,
-            vt: 0.02585,
-            va: 100.0,
-            is_pnp: false,
-        }
-    }
-
-    /// 2N5088 — High-gain NPN for fuzz/distortion.
-    ///
-    /// Very high beta (300-900), used in Big Muff and high-gain circuits.
-    pub fn n2n5088() -> Self {
-        Self {
-            is: 1e-14,
-            bf: 500.0, // Can be 300-900
-            vt: 0.02585,
-            va: 100.0,
-            is_pnp: false,
-        }
-    }
-
-    /// 2N5089 — Ultra-high-gain NPN.
-    ///
-    /// Even higher beta than 2N5088. Used in Big Muff and boosters.
-    pub fn n2n5089() -> Self {
-        Self {
-            is: 1e-14,
-            bf: 700.0, // Can be 400-1200
-            vt: 0.02585,
-            va: 100.0,
-            is_pnp: false,
-        }
-    }
-
-    // ── PNP Transistors ──────────────────────────────────────────────────
-
-    /// 2N3906 — Standard PNP complement to 2N3904.
-    pub fn n2n3906() -> Self {
-        Self {
-            is: 1e-14,
-            bf: 200.0,
-            vt: 0.02585,
-            va: 100.0,
-            is_pnp: true,
-        }
-    }
-
-    /// AC128 — Classic germanium PNP for Fuzz Face.
-    ///
-    /// THE Fuzz Face transistor. Low beta, high leakage, temperature-sensitive.
-    /// Germanium has lower Vbe (~0.2V vs 0.6V silicon).
-    pub fn ac128() -> Self {
-        Self {
-            is: 1e-6,    // Germanium: much higher leakage
-            bf: 70.0,    // Lower gain than silicon
-            vt: 0.02585, // Same thermal voltage
-            va: 50.0,    // Lower Early voltage
-            is_pnp: true,
-        }
-    }
-
-    /// OC44 — Vintage germanium PNP.
-    ///
-    /// Used in early Tone Benders. Very low beta, vintage character.
-    pub fn oc44() -> Self {
-        Self {
-            is: 2e-6,
-            bf: 50.0, // Very low gain
-            vt: 0.02585,
-            va: 30.0,
-            is_pnp: true,
-        }
-    }
-
-    /// NKT275 — Sought-after germanium PNP.
-    ///
-    /// "Holy grail" Fuzz Face transistor. Medium-low beta with sweet spot.
-    pub fn nkt275() -> Self {
-        Self {
-            is: 1.5e-6,
-            bf: 85.0,
-            vt: 0.02585,
-            va: 40.0,
-            is_pnp: true,
-        }
-    }
-
-    /// Generic NPN with typical values.
-    pub fn generic_npn() -> Self {
-        Self {
-            is: 1e-14,
-            bf: 200.0,
-            vt: 0.02585,
-            va: 100.0,
-            is_pnp: false,
-        }
-    }
-
-    /// Generic PNP with typical values.
-    pub fn generic_pnp() -> Self {
-        Self {
-            is: 1e-14,
-            bf: 200.0,
-            vt: 0.02585,
-            va: 100.0,
-            is_pnp: true,
-        }
+    /// Try to look up a BJT model by name. Returns `None` if not found.
+    pub fn try_by_name(name: &str) -> Option<Self> {
+        bjt_by_name(name).map(Self::from)
     }
 
     /// Convert from DSL BjtType to runtime BjtModel.
     pub fn from_bjt_type(bt: &crate::dsl::BjtType) -> Self {
-        use crate::dsl::BjtType;
-        match bt {
-            BjtType::Generic => Self::generic_npn(),
-            BjtType::N2n3904 => Self::n2n3904(),
-            BjtType::N2n2222 => Self::n2n2222(),
-            BjtType::Bc108 => Self::bc108(),
-            BjtType::Bc109 => Self::bc109(),
-            BjtType::N2n5088 => Self::n2n5088(),
-            BjtType::N2n5089 => Self::n2n5089(),
-            BjtType::N2n3906 => Self::n2n3906(),
-            BjtType::Ac128 => Self::ac128(),
-            BjtType::Oc44 => Self::oc44(),
-            BjtType::Nkt275 => Self::nkt275(),
+        Self::by_name(bt.model_name())
+    }
+}
+
+impl From<&SpiceBjtModel> for BjtModel {
+    fn from(spice: &SpiceBjtModel) -> Self {
+        Self {
+            is: spice.is,
+            bf: spice.bf,
+            vt: 0.02585, // kT/q at 25°C — always computed from temperature
+            va: if spice.vaf.is_finite() { spice.vaf } else { 1e6 },
+            is_pnp: spice.is_pnp,
         }
     }
 }
@@ -595,7 +458,6 @@ impl WdfRoot for BjtPnpRoot {
 ///
 /// **Reference:** H.K. Gummel and H.C. Poon, "An Integral Charge Control Model
 /// of Bipolar Transistors", Bell Syst. Tech. J., 1970.
-#[cfg(feature = "gummel-poon")]
 #[derive(Debug, Clone, Copy)]
 pub struct GummelPoonModel {
     // --- DC parameters ---
@@ -664,193 +526,22 @@ pub struct GummelPoonModel {
     pub is_pnp: bool,
 }
 
-#[cfg(feature = "gummel-poon")]
 impl GummelPoonModel {
-    /// 2N3904 — Workhorse NPN with full Gummel-Poon parameters.
+    /// Look up a Gummel-Poon BJT model by name from the embedded SPICE model library.
     ///
-    /// Parameters from typical SPICE models.
-    pub fn n2n3904() -> Self {
-        Self {
-            is: 6.734e-15,
-            bf: 416.4,
-            br: 0.7371,
-            nf: 1.0,
-            nr: 1.0,
-            vt: 0.02585,
-            vaf: 74.03,
-            var: 28.0,
-            ikf: 0.06678,
-            ikr: 0.01,
-            ise: 6.734e-15,
-            ne: 1.259,
-            isc: 0.0,
-            nc: 2.0,
-            cje: 4.493e-12,
-            vje: 0.7,
-            mje: 0.2593,
-            cjc: 3.638e-12,
-            vjc: 0.75,
-            mjc: 0.2593,
-            tf: 3.012e-10,
-            tr: 2.4e-8,
-            is_pnp: false,
-        }
-    }
-
-    /// 2N2222 — Classic NPN switching transistor.
-    pub fn n2n2222() -> Self {
-        Self {
-            is: 3.295e-14,
-            bf: 270.0,
-            br: 6.0,
-            nf: 1.0,
-            nr: 1.0,
-            vt: 0.02585,
-            vaf: 100.0,
-            var: 30.0,
-            ikf: 0.3,
-            ikr: 0.03,
-            ise: 1.2e-14,
-            ne: 1.5,
-            isc: 0.0,
-            nc: 2.0,
-            cje: 8e-12,
-            vje: 0.7,
-            mje: 0.33,
-            cjc: 8e-12,
-            vjc: 0.7,
-            mjc: 0.33,
-            tf: 4e-10,
-            tr: 5e-8,
-            is_pnp: false,
-        }
-    }
-
-    /// 2N5088 — High-gain NPN for fuzz/distortion.
-    pub fn n2n5088() -> Self {
-        Self {
-            is: 1.8e-14,
-            bf: 600.0,
-            br: 4.0,
-            nf: 1.0,
-            nr: 1.0,
-            vt: 0.02585,
-            vaf: 100.0,
-            var: 25.0,
-            ikf: 0.05,
-            ikr: 0.01,
-            ise: 5e-15,
-            ne: 1.5,
-            isc: 0.0,
-            nc: 2.0,
-            cje: 6e-12,
-            vje: 0.7,
-            mje: 0.33,
-            cjc: 4e-12,
-            vjc: 0.7,
-            mjc: 0.33,
-            tf: 3e-10,
-            tr: 3e-8,
-            is_pnp: false,
-        }
-    }
-
-    /// 2N3906 — Standard PNP complement to 2N3904.
-    pub fn n2n3906() -> Self {
-        Self {
-            is: 1.41e-15,
-            bf: 180.7,
-            br: 4.0,
-            nf: 1.0,
-            nr: 1.0,
-            vt: 0.02585,
-            vaf: 18.7,
-            var: 18.0,
-            ikf: 0.08,
-            ikr: 0.01,
-            ise: 0.0,
-            ne: 1.5,
-            isc: 0.0,
-            nc: 2.0,
-            cje: 4.5e-12,
-            vje: 0.7,
-            mje: 0.33,
-            cjc: 3.5e-12,
-            vjc: 0.75,
-            mjc: 0.33,
-            tf: 3e-10,
-            tr: 3e-8,
-            is_pnp: true,
-        }
-    }
-
-    /// AC128 — Classic germanium PNP for Fuzz Face.
+    /// All parameters (IS, BF, BR, NF, NR, VAF, VAR, IKF, IKR, ISE, ISC, NE, NC,
+    /// CJE, VJE, MJE, CJC, VJC, MJC, TF, TR) are populated from the SPICE model file.
     ///
-    /// Germanium transistors have higher leakage, lower Vbe, and are
-    /// temperature-sensitive. The Gummel-Poon model captures these
-    /// characteristics better than Ebers-Moll.
-    pub fn ac128() -> Self {
-        Self {
-            is: 1e-6, // Much higher leakage than silicon
-            bf: 70.0, // Lower gain
-            br: 5.0,
-            nf: 1.0,
-            nr: 1.0,
-            vt: 0.02585,
-            vaf: 50.0, // Lower Early voltage
-            var: 20.0,
-            ikf: 0.1,
-            ikr: 0.02,
-            ise: 1e-8, // Significant B-E leakage
-            ne: 2.0,
-            isc: 1e-9,
-            nc: 2.0,
-            cje: 50e-12, // Larger junction caps (germanium)
-            vje: 0.3,    // Lower built-in voltage (~0.2-0.3V for Ge)
-            mje: 0.5,
-            cjc: 30e-12,
-            vjc: 0.3,
-            mjc: 0.5,
-            tf: 1e-9, // Slower than silicon
-            tr: 1e-7,
-            is_pnp: true,
-        }
+    /// # Panics
+    /// Panics if the model name is not found. Use `try_by_name` for fallible lookup.
+    pub fn by_name(name: &str) -> Self {
+        Self::try_by_name(name)
+            .unwrap_or_else(|| panic!("Unknown BJT model: '{name}'"))
     }
 
-    /// Generic NPN with typical Gummel-Poon values.
-    pub fn generic_npn() -> Self {
-        Self {
-            is: 1e-14,
-            bf: 200.0,
-            br: 5.0,
-            nf: 1.0,
-            nr: 1.0,
-            vt: 0.02585,
-            vaf: 100.0,
-            var: 30.0,
-            ikf: 0.1,
-            ikr: 0.01,
-            ise: 0.0,
-            ne: 1.5,
-            isc: 0.0,
-            nc: 2.0,
-            cje: 5e-12,
-            vje: 0.7,
-            mje: 0.33,
-            cjc: 5e-12,
-            vjc: 0.7,
-            mjc: 0.33,
-            tf: 4e-10,
-            tr: 4e-8,
-            is_pnp: false,
-        }
-    }
-
-    /// Generic PNP with typical Gummel-Poon values.
-    pub fn generic_pnp() -> Self {
-        let mut m = Self::generic_npn();
-        m.is_pnp = true;
-        m
+    /// Try to look up a Gummel-Poon model by name. Returns `None` if not found.
+    pub fn try_by_name(name: &str) -> Option<Self> {
+        bjt_by_name(name).map(Self::from)
     }
 
     /// Compute the base charge factor Qb.
@@ -973,6 +664,36 @@ impl GummelPoonModel {
     }
 }
 
+impl From<&SpiceBjtModel> for GummelPoonModel {
+    fn from(spice: &SpiceBjtModel) -> Self {
+        Self {
+            is: spice.is,
+            bf: spice.bf,
+            br: spice.br,
+            nf: spice.nf,
+            nr: spice.nr,
+            vt: 0.02585, // kT/q at 25°C
+            vaf: spice.vaf,
+            var: spice.var,
+            ikf: spice.ikf,
+            ikr: spice.ikr,
+            ise: spice.ise,
+            ne: spice.ne,
+            isc: spice.isc,
+            nc: spice.nc,
+            cje: spice.cje,
+            vje: spice.vje,
+            mje: spice.mje,
+            cjc: spice.cjc,
+            vjc: spice.vjc,
+            mjc: spice.mjc,
+            tf: spice.tf,
+            tr: spice.tr,
+            is_pnp: spice.is_pnp,
+        }
+    }
+}
+
 /// 3-port R-type adaptor for Gummel-Poon BJT.
 ///
 /// Models the BJT as a 3-terminal nonlinear element where:
@@ -987,7 +708,6 @@ impl GummelPoonModel {
 /// Each port has a Thévenin equivalent (a_i, R_i). The BJT equations
 /// constrain the terminal voltages and currents. We solve for the
 /// reflected waves b that satisfy both WDF port equations and BJT physics.
-#[cfg(feature = "gummel-poon")]
 #[derive(Debug, Clone)]
 pub struct BjtGummelPoonRoot {
     pub model: GummelPoonModel,
@@ -1009,7 +729,6 @@ pub struct BjtGummelPoonRoot {
     tolerance: f64,
 }
 
-#[cfg(feature = "gummel-poon")]
 impl BjtGummelPoonRoot {
     /// Create a new Gummel-Poon BJT root.
     ///
@@ -1231,7 +950,6 @@ impl BjtGummelPoonRoot {
 /// with Vbe set externally.
 ///
 /// For full 3-port behavior, use `BjtGummelPoonRoot::process_3port()`.
-#[cfg(feature = "gummel-poon")]
 #[derive(Debug, Clone)]
 pub struct BjtGummelPoon1Port {
     pub model: GummelPoonModel,
@@ -1245,7 +963,6 @@ pub struct BjtGummelPoon1Port {
     tolerance: f64,
 }
 
-#[cfg(feature = "gummel-poon")]
 impl BjtGummelPoon1Port {
     pub fn new(model: GummelPoonModel) -> Self {
         Self {
@@ -1312,7 +1029,6 @@ impl BjtGummelPoon1Port {
     }
 }
 
-#[cfg(feature = "gummel-poon")]
 impl WdfRoot for BjtGummelPoon1Port {
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
@@ -1350,13 +1066,13 @@ impl WdfRoot for BjtGummelPoon1Port {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(all(test, feature = "gummel-poon"))]
+#[cfg(test)]
 mod gummel_poon_tests {
     use super::*;
 
     #[test]
     fn gummel_poon_base_charge_unity_at_zero() {
-        let model = GummelPoonModel::n2n3904();
+        let model = GummelPoonModel::by_name("2N3904");
         let qb = model.base_charge(0.0, 0.0);
         // At zero bias, Qb should be ~1.0
         assert!(
@@ -1367,7 +1083,7 @@ mod gummel_poon_tests {
 
     #[test]
     fn gummel_poon_base_charge_increases_with_current() {
-        let model = GummelPoonModel::n2n3904();
+        let model = GummelPoonModel::by_name("2N3904");
         let qb_low = model.base_charge(0.5, 0.0);
         let qb_high = model.base_charge(0.7, 0.0);
         // Qb should increase at higher Vbe (high injection)
@@ -1381,7 +1097,7 @@ mod gummel_poon_tests {
 
     #[test]
     fn gummel_poon_forward_active() {
-        let model = GummelPoonModel::n2n3904();
+        let model = GummelPoonModel::by_name("2N3904");
         // Typical forward-active: Vbe=0.65V, Vbc=-5V (Vce=5.65V)
         let (ic, ib) = model.currents(0.65, -5.0);
 
@@ -1399,7 +1115,7 @@ mod gummel_poon_tests {
 
     #[test]
     fn gummel_poon_cutoff() {
-        let model = GummelPoonModel::n2n3904();
+        let model = GummelPoonModel::by_name("2N3904");
         // Cutoff: Vbe < 0
         let (ic, ib) = model.currents(-0.5, -5.0);
 
@@ -1410,7 +1126,7 @@ mod gummel_poon_tests {
 
     #[test]
     fn gummel_poon_capacitance_be() {
-        let model = GummelPoonModel::n2n3904();
+        let model = GummelPoonModel::by_name("2N3904");
 
         // Zero-bias capacitance
         let c0 = model.capacitance_be(0.0);
@@ -1430,7 +1146,7 @@ mod gummel_poon_tests {
 
     #[test]
     fn gummel_poon_1port_dc_gain() {
-        let model = GummelPoonModel::n2n3904();
+        let model = GummelPoonModel::by_name("2N3904");
         let mut bjt = BjtGummelPoon1Port::new(model);
         bjt.set_vbe(0.65);
         bjt.set_v_max(9.0);
@@ -1451,7 +1167,7 @@ mod gummel_poon_tests {
 
     #[test]
     fn gummel_poon_3port_basic() {
-        let model = GummelPoonModel::n2n3904();
+        let model = GummelPoonModel::by_name("2N3904");
         let mut bjt = BjtGummelPoonRoot::new(model, [1000.0, 10000.0, 100.0], 48000.0);
 
         // Test that 3-port solver produces finite, stable output
@@ -1480,8 +1196,8 @@ mod gummel_poon_tests {
 
     #[test]
     fn gummel_poon_germanium_higher_leakage() {
-        let si = GummelPoonModel::n2n3904();
-        let ge = GummelPoonModel::ac128();
+        let si = GummelPoonModel::by_name("2N3904");
+        let ge = GummelPoonModel::by_name("AC128");
 
         // At same Vbe (near turn-on), germanium should have more leakage
         let (ic_si, _) = si.currents(0.2, -5.0);
@@ -1495,8 +1211,8 @@ mod gummel_poon_tests {
 
     #[test]
     fn gummel_poon_pnp_polarity() {
-        let npn = GummelPoonModel::n2n3904();
-        let pnp = GummelPoonModel::n2n3906();
+        let npn = GummelPoonModel::by_name("2N3904");
+        let pnp = GummelPoonModel::by_name("2N3906");
 
         // Same magnitude bias, opposite polarity for PNP
         let (ic_npn, _) = npn.currents(0.65, -5.0);
