@@ -591,7 +591,7 @@ pub fn compile_pedal_with_options(
                 // Create an inverting op-amp WDF stage
                 let model = OpAmpModel::from_opamp_type(&info.opamp_type);
                 let gain = rf / ri;
-                let mut root = OpAmpInvertingRoot::new(model, gain);
+                let mut root = OpAmpRoot::new_inverting(model, gain);
                 root.set_sample_rate(sample_rate);
 
                 // Set v_max based on supply voltage (single-supply biased at Vcc/2)
@@ -618,7 +618,7 @@ pub fn compile_pedal_with_options(
 
                 stages.push(WdfStage {
                     tree,
-                    root: RootKind::OpAmpInverting(root),
+                    root: RootKind::OpAmp(root),
                     compensation: 1.0,
                     oversampler: Oversampler::new(oversampling),
                     base_diode_model: None,
@@ -638,7 +638,7 @@ pub fn compile_pedal_with_options(
                 // Create a non-inverting op-amp WDF stage
                 let model = OpAmpModel::from_opamp_type(&info.opamp_type);
                 let gain = 1.0 + (rf / ri);
-                let mut root = OpAmpNonInvertingRoot::new(model, gain);
+                let mut root = OpAmpRoot::new_non_inverting(model, gain);
                 root.set_sample_rate(sample_rate);
 
                 // Set v_max based on supply voltage (single-supply biased at Vcc/2)
@@ -654,7 +654,7 @@ pub fn compile_pedal_with_options(
 
                 stages.push(WdfStage {
                     tree,
-                    root: RootKind::OpAmpNonInverting(root),
+                    root: RootKind::OpAmp(root),
                     compensation: 1.0,
                     oversampler: Oversampler::new(oversampling),
                     base_diode_model: None,
@@ -2316,7 +2316,7 @@ pub fn compile_pedal_with_options(
     let physical_gain = opamp_feedback_gain * passive_attenuation * transformer_gain;
 
     // All gain should come from the circuit itself:
-    // - Op-amps: gain from feedback network (Rf/Ri), modeled in OpAmpInvertingRoot/NonInvertingRoot
+    // - Op-amps: gain from feedback network (Rf/Ri), modeled in OpAmpRoot
     // - BJTs/JFETs: gain from transconductance, modeled in BjtRoot/JfetRoot
     // - Triodes/Pentodes: gain from mu/gm, modeled in TriodeRoot/PentodeRoot
     // - Transformers: voltage ratio from turns ratio

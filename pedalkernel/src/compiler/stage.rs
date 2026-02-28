@@ -20,15 +20,11 @@ pub(super) enum RootKind {
     Pentode(PentodeRoot),
     Mosfet(MosfetRoot),
     Ota(OtaRoot),
-    /// Voltage-mode op-amp (TL072, LM308, JRC4558, etc.).
-    /// Modeled as a VCVS: Vout = Aol * (Vp - Vm).
+    /// Op-amp gain stage (TL072, LM308, JRC4558, etc.).
+    /// Topology (inverting vs non-inverting) is stored in the root itself.
+    /// - Inverting: Vout = -(Rf/Ri) * Vin
+    /// - Non-inverting: Vout = (1 + Rf/Ri) * Vin
     OpAmp(OpAmpRoot),
-    /// Inverting op-amp amplifier with closed-loop gain.
-    /// Vout = -(Rf/Ri) * Vin. The input comes through the WDF tree.
-    OpAmpInverting(OpAmpInvertingRoot),
-    /// Non-inverting op-amp amplifier with closed-loop gain.
-    /// Vout = (1 + Rf/Ri) * Vp. The input is set via set_vp().
-    OpAmpNonInverting(OpAmpNonInvertingRoot),
     /// NPN BJT transistor (2N3904, BC109, 2N5089, etc.).
     /// Modeled with Ebers-Moll equations.
     BjtNpn(BjtNpnRoot),
@@ -185,12 +181,6 @@ impl WdfStage {
         let root = &mut self.root;
         let compensation = self.compensation;
 
-        // For non-inverting op-amp stages, the input signal goes directly to Vp.
-        // Set this before the oversampler so each oversampled cycle uses the correct input.
-        if let RootKind::OpAmpNonInverting(ref mut noninv) = root {
-            noninv.set_vp(input * compensation);
-        }
-
         // For triode stages, the input signal modulates Vgk (grid-cathode voltage).
         // This is the key to triode amplification: the input controls the grid,
         // which modulates plate current and creates voltage drop across R_plate.
@@ -255,8 +245,6 @@ impl WdfStage {
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
                 RootKind::Ota(o) => o.process(b_tree, rp),
                 RootKind::OpAmp(op) => op.process(b_tree, rp),
-                RootKind::OpAmpInverting(inv) => inv.process(b_tree, rp),
-                RootKind::OpAmpNonInverting(noninv) => noninv.process(b_tree, rp),
                 RootKind::BjtNpn(bjt) => bjt.process(b_tree, rp),
                 RootKind::BjtPnp(bjt) => bjt.process(b_tree, rp),
                 // Passthrough: open-circuit termination (b = a)
@@ -579,18 +567,15 @@ impl WdfStage {
     /// Has no effect if the root is not an op-amp gain stage.
     #[inline]
     pub fn set_opamp_gain(&mut self, gain: f64) {
-        match &mut self.root {
-            RootKind::OpAmpInverting(inv) => inv.set_gain(gain),
-            RootKind::OpAmpNonInverting(noninv) => noninv.set_gain(gain),
-            _ => {}
+        if let RootKind::OpAmp(op) = &mut self.root {
+            op.set_gain(gain);
         }
     }
 
     /// Get the current gain if this is an op-amp gain stage.
     pub fn opamp_gain(&self) -> Option<f64> {
         match &self.root {
-            RootKind::OpAmpInverting(inv) => Some(inv.gain()),
-            RootKind::OpAmpNonInverting(noninv) => Some(noninv.gain()),
+            RootKind::OpAmp(op) => Some(op.gain()),
             _ => None,
         }
     }
@@ -613,8 +598,6 @@ impl WdfStage {
             RootKind::Mosfet(_) => "Mosfet",
             RootKind::Ota(_) => "Ota",
             RootKind::OpAmp(_) => "OpAmp",
-            RootKind::OpAmpInverting(_) => "OpAmpInverting",
-            RootKind::OpAmpNonInverting(_) => "OpAmpNonInverting",
             RootKind::BjtNpn(_) => "BjtNpn",
             RootKind::BjtPnp(_) => "BjtPnp",
             RootKind::Passthrough => "Passthrough",
