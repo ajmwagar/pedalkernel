@@ -135,12 +135,12 @@ impl BbdModel {
 /// - Anti-alias filtering (models the BBD's Nyquist limit)
 /// - Subtle soft clipping (BBDs clip gently at high levels)
 /// - Noise injection (characteristic BBD hiss)
-/// - Compander with proper envelope tracking (per patent architecture)
+/// - Compander with proper envelope tracking
 ///
 /// The delay buffer uses linear interpolation for fractional-sample
 /// delay, modeling the smooth time modulation of chorus/flanger effects.
 ///
-/// ## Compander Architecture (Patent-Based)
+/// ## Compander Architecture
 ///
 /// Real BBD companders (NE570/NE571) work by:
 /// 1. Compressing the input signal using the INPUT envelope
@@ -179,7 +179,7 @@ pub struct BbdDelayLine {
     /// Clock feedthrough phase increment per sample.
     clock_phase_inc: f64,
 
-    // ── Compander state (patent-based architecture) ──────────────────────
+    // ── Compander state ───────────────────────────────────────────────────
     /// Compression envelope: tracks input signal level for compressor gain.
     compander_env_in: f64,
     /// Delayed compression envelope buffer: small ring buffer that delays
@@ -231,7 +231,7 @@ impl BbdDelayLine {
         let clock_phase_inc = 2.0 * std::f64::consts::PI * clock_freq / sample_rate;
 
         // Compander: NE571-style attack/release time constants.
-        // Attack ~5ms, release ~50ms (per patent Claim 5: 1-50ms range).
+        // Attack ~5ms, release ~50ms (NE571 syllabic time constants).
         // The mismatch causes "breathing" artifacts.
         let compander_attack = (-1.0 / (0.005 * sample_rate)).exp();
         let compander_release = (-1.0 / (0.050 * sample_rate)).exp();
@@ -333,7 +333,7 @@ impl BbdDelayLine {
 
     /// Process one sample through the BBD delay line.
     ///
-    /// Signal chain (models real BBD circuit per patent architecture):
+    /// Signal chain (models real BBD circuit with NE571-style companding):
     /// 1. Compander input stage: compress dynamic range (NE571 compressor)
     /// 2. Store compression envelope in delay buffer
     /// 3. Soft clip to BBD voltage swing limit
@@ -352,7 +352,7 @@ impl BbdDelayLine {
         // COMPANDER INPUT (COMPRESSOR)
         // ══════════════════════════════════════════════════════════════
         // Track input envelope with syllabic time constants (5ms attack, 50ms release)
-        // per patent Claim 5: "time constant between 1 and 50 milliseconds"
+        // Syllabic envelope detection with 5ms attack, 50ms release.
         let abs_in = input.abs();
         let coef_in = if abs_in > self.compander_env_in {
             self.compander_attack
@@ -363,7 +363,7 @@ impl BbdDelayLine {
             coef_in * self.compander_env_in + (1.0 - coef_in) * abs_in;
 
         // Store compression envelope in delay buffer for expander to use later.
-        // This is the key insight from the patent: the expander needs the
+        // Key insight: the expander needs the
         // DELAYED compression envelope, not an independent output envelope.
         let buf_len = self.env_delay_buffer.len();
         self.env_delay_buffer[self.env_delay_write_pos] = self.compander_env_in;
@@ -419,7 +419,7 @@ impl BbdDelayLine {
         let bbd_output = self.lpf_state + clock_bleed + noise;
 
         // ══════════════════════════════════════════════════════════════
-        // COMPANDER OUTPUT (EXPANDER) — Patent Architecture
+        // COMPANDER OUTPUT (EXPANDER)
         // ══════════════════════════════════════════════════════════════
         // Read the DELAYED compression envelope. The expander should use
         // the same envelope the compressor used, delayed to match the audio.
@@ -435,7 +435,7 @@ impl BbdDelayLine {
             1.0
         };
 
-        // ── Tracking Error (per patent Claim 1, Figure 1) ─────────────
+        // ── Tracking Error ─────────────────────────────────────────────
         // Track the actual output envelope to compute tracking error.
         // The error is the difference between what the compressor saw and
         // what the expander sees, caused by:
@@ -452,7 +452,7 @@ impl BbdDelayLine {
         self.compander_env_out = coef_out.min(0.9999) * self.compander_env_out
             + (1.0 - coef_out.min(0.9999)) * abs_out;
 
-        // Compute tracking error as modulation (per patent Figure 1).
+        // Compute tracking error as gain modulation.
         // Error is larger when:
         // - Envelope is changing rapidly (Claim 6: "function of envelope slope")
         // - Clock frequency is lower (Claim 7: "varies inversely with clock frequency")
