@@ -1181,9 +1181,11 @@ impl CircuitGraph {
         // Collect all triode edge indices (including parallel duplicates).
         let all_triode_edges: Vec<usize> = raw_triodes.iter().map(|(idx, _, _, _)| *idx).collect();
 
-        // Sort by distance of junction node from input.
-        triodes
-            .sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
+        // Sort by distance of junction node from input, with edge_idx as tiebreaker
+        // for deterministic ordering when distances are equal.
+        triodes.sort_by_key(|(edge_idx, info)| {
+            (dist.get(&info.junction_node).copied().unwrap_or(usize::MAX), *edge_idx)
+        });
         (triodes, all_triode_edges)
     }
 
@@ -2130,13 +2132,17 @@ pub(super) fn sp_reduce(
             degree.entry(*a).or_default().push(idx);
             degree.entry(*b).or_default().push(idx);
         }
-        for (node, idxs) in &degree {
-            if terminals.contains(node) || idxs.len() != 1 {
+        // Sort nodes for deterministic iteration order
+        let mut sorted_nodes: Vec<_> = degree.keys().copied().collect();
+        sorted_nodes.sort();
+        for node in sorted_nodes {
+            let idxs = &degree[&node];
+            if terminals.contains(&node) || idxs.len() != 1 {
                 continue;
             }
             // Dead-end: redirect this edge's dead side to terminals[0].
             let eidx = idxs[0];
-            if edges[eidx].0 == *node {
+            if edges[eidx].0 == node {
                 edges[eidx].0 = terminals[0];
             } else {
                 edges[eidx].1 = terminals[0];
@@ -2188,18 +2194,22 @@ pub(super) fn sp_reduce(
             degree.entry(*a).or_default().push(idx);
             degree.entry(*b).or_default().push(idx);
         }
-        for (node, idxs) in &degree {
-            if terminals.contains(node) || idxs.len() != 2 {
+        // Sort nodes for deterministic iteration order
+        let mut sorted_nodes: Vec<_> = degree.keys().copied().collect();
+        sorted_nodes.sort();
+        for node in sorted_nodes {
+            let idxs = &degree[&node];
+            if terminals.contains(&node) || idxs.len() != 2 {
                 continue;
             }
             let i1 = idxs[0];
             let i2 = idxs[1];
-            let other1 = if edges[i1].0 == *node {
+            let other1 = if edges[i1].0 == node {
                 edges[i1].1
             } else {
                 edges[i1].0
             };
-            let other2 = if edges[i2].0 == *node {
+            let other2 = if edges[i2].0 == node {
                 edges[i2].1
             } else {
                 edges[i2].0
