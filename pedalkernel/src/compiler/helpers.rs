@@ -81,6 +81,10 @@ pub(super) fn pentode_model(name: &str) -> PentodeModel {
     PentodeModel::by_name(name)
 }
 
+pub(super) fn vari_mu_model(name: &str) -> VariMuModel {
+    VariMuModel::by_name(name)
+}
+
 pub(super) fn mosfet_model(mt: MosfetType, is_n_channel: bool) -> MosfetModel {
     match mt {
         MosfetType::N2n7000 => MosfetModel::n_2n7000(),

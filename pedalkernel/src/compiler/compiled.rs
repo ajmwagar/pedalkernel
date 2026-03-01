@@ -69,6 +69,8 @@ pub(super) enum ModulationTarget {
     TriodeVgk { stage_idx: usize },
     /// Modulate a Pentode's Vg1k (control grid bias).
     PentodeVg1k { stage_idx: usize },
+    /// Modulate a Variable-mu triode's Vgk (grid-cathode bias).
+    VariMuVgk { stage_idx: usize },
     /// Modulate a MOSFET's Vgs.
     MosfetVgs { stage_idx: usize },
     /// Modulate an OTA's bias current (for VCA/compressor).
@@ -499,6 +501,7 @@ impl CompiledPedal {
             match &mut stage.root {
                 RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
                 RootKind::Triode(t) => t.set_v_max(tube_v_max),
+                RootKind::VariMu(t) => t.set_v_max(tube_v_max),
                 RootKind::Pentode(p) => p.set_v_max(tube_v_max),
                 RootKind::BjtNpn(bjt) => bjt.set_v_max(bjt_v_max),
                 RootKind::BjtPnp(bjt) => bjt.set_v_max(bjt_v_max),
@@ -1000,6 +1003,11 @@ impl PedalProcessor for CompiledPedal {
                         stage.set_pentode_vg1k(modulation);
                     }
                 }
+                ModulationTarget::VariMuVgk { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_vari_mu_vgk(modulation);
+                    }
+                }
                 ModulationTarget::MosfetVgs { stage_idx } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         stage.set_mosfet_vgs(modulation);
@@ -1074,6 +1082,11 @@ impl PedalProcessor for CompiledPedal {
                 ModulationTarget::PentodeVg1k { stage_idx } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
                         stage.set_pentode_vg1k(modulation);
+                    }
+                }
+                ModulationTarget::VariMuVgk { stage_idx } => {
+                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                        stage.set_vari_mu_vgk(modulation);
                     }
                 }
                 ModulationTarget::MosfetVgs { stage_idx } => {
@@ -1186,6 +1199,8 @@ impl PedalProcessor for CompiledPedal {
         // pre_gain before them causes exponential level growth
         // (pre_gain^N for N stages).
         let mut prev_was_clipping = false;
+        let num_stages = self.stages.len();
+        let mut stage_levels = [0.0f64; crate::metering::MAX_STAGES];
         for (stage_idx, stage) in self.stages.iter_mut().enumerate() {
             // Re-amplify only after the *previous* stage clipped.
             if prev_was_clipping {
@@ -1202,6 +1217,12 @@ impl PedalProcessor for CompiledPedal {
             }
 
             signal = stage.process(signal);
+
+            // Capture per-stage output level for metering (fed to accumulator below)
+            if stage_idx < crate::metering::MAX_STAGES {
+                stage_levels[stage_idx] = signal;
+            }
+
             // Record per-stage level for debug
             #[cfg(debug_assertions)]
             if let Some(ref stats) = self.debug_stats {
@@ -1325,6 +1346,11 @@ impl PedalProcessor for CompiledPedal {
         if let Some(ref mut acc) = self.metrics_accumulator {
             // Accumulate input/output levels
             acc.accumulate_levels(input, output);
+
+            // Accumulate per-stage signal levels for circuit view visualization
+            for i in 0..num_stages.min(crate::metering::MAX_STAGES) {
+                acc.accumulate_stage(i, stage_levels[i]);
+            }
 
             // Record tube state from WDF stages (plate current for glow shaders)
             let mut tube_idx = 0;

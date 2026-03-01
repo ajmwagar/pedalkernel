@@ -463,6 +463,7 @@ fn kind_to_string(kind: &ComponentKind) -> String {
         ComponentKind::NJfet(_) => "njfet".into(),
         ComponentKind::PJfet(_) => "pjfet".into(),
         ComponentKind::Triode(_) => "triode".into(),
+        ComponentKind::VariMu(_) => "vari_mu".into(),
         ComponentKind::Pentode(_) => "pentode".into(),
         ComponentKind::Nmos(_) => "nmos".into(),
         ComponentKind::Pmos(_) => "pmos".into(),

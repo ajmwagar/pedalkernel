@@ -20,6 +20,7 @@ mod opamp;
 mod pentode;
 mod slew;
 mod triode;
+mod vari_mu;
 
 pub use bjt::*;
 pub use bbd::*;
@@ -32,3 +33,4 @@ pub use opamp::*;
 pub use pentode::*;
 pub use slew::*;
 pub use triode::*;
+pub use vari_mu::*;

@@ -38,7 +38,7 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::PJfet(_) => ("Device:Q_PJFET_DGS", "J"),
         ComponentKind::Photocoupler(_) => ("Isolator:PC817", "OC"),
         ComponentKind::Lfo(..) => ("", "LFO"), // Expands to timing R + C
-        ComponentKind::Triode(_) | ComponentKind::Pentode(_) => {
+        ComponentKind::Triode(_) | ComponentKind::Pentode(_) | ComponentKind::VariMu(_) => {
             ("Valve:Triode", "V")
         },
         ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
@@ -178,6 +178,7 @@ fn value_str(kind: &ComponentKind) -> String {
             )
         }
         ComponentKind::Triode(tt) => format!("Triode_{tt:?}"),
+        ComponentKind::VariMu(name) => format!("VariMu_{name}"),
         ComponentKind::Pentode(pt) => format!("Pentode_{pt:?}"),
         ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) => {
             format!(

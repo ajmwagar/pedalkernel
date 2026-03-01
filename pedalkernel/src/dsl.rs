@@ -263,6 +263,8 @@ pub enum ComponentKind {
     Triode(String),
     /// Pentode vacuum tube — model name looked up from pentodes.model (e.g. "EL34")
     Pentode(String),
+    /// Variable-mu (remote-cutoff) triode — Raffensperger model (e.g. "6386")
+    VariMu(String),
     /// Envelope follower: attack_r (Ω), attack_c (F), release_r (Ω), release_c (F), sensitivity_r (Ω)
     /// Attack τ = attack_r × attack_c, Release τ = release_r × release_c
     /// Sensitivity = sensitivity_r / 10kΩ
@@ -1208,6 +1210,16 @@ fn parse_pentode(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Pentode(name)))
 }
 
+fn parse_vari_mu(input: &str) -> IResult<&str, ComponentKind> {
+    let (input, _) = tag("vari_mu")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, name) = model_name_str(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ComponentKind::VariMu(name)))
+}
+
 fn mosfet_type(input: &str) -> IResult<&str, MosfetType> {
     alt((
         value(MosfetType::N2n7000, tag("2n7000")),
@@ -1806,6 +1818,7 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_lfo,
             parse_triode,
             parse_pentode,
+            parse_vari_mu,
         )),
         alt((
             parse_nmos,
@@ -3064,6 +3077,13 @@ pedal "Optical Tremolo" {
         // 6072 = military designation for 12AY7 — stored as "6072", resolved at model lookup
         let (_, c) = component_def("V1: triode(6072)").unwrap();
         assert_eq!(c.kind, ComponentKind::Triode("6072".into()));
+    }
+
+    #[test]
+    fn parse_vari_mu_6386() {
+        let (_, c) = component_def("V1: vari_mu(6386)").unwrap();
+        assert_eq!(c.id, "V1");
+        assert_eq!(c.kind, ComponentKind::VariMu("6386".into()));
     }
 
     #[test]

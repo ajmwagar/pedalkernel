@@ -387,6 +387,9 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
         // Triode tube
         ComponentKind::Triode(_) => &["plate", "cathode", "grid", "vgk"],
 
+        // Variable-mu triode (Raffensperger model)
+        ComponentKind::VariMu(_) => &["plate", "cathode", "grid", "vgk"],
+
         // Pentode tube
         ComponentKind::Pentode(_) => &["plate", "cathode", "g1", "g2", "grid", "screen", "vg1k"],
 
@@ -593,7 +596,7 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 adj.entry(kd.clone()).or_default().insert(ks.clone());
                 adj.entry(ks).or_default().insert(kd);
             }
-            ComponentKind::Triode(_) | ComponentKind::Pentode(_) => {
+            ComponentKind::Triode(_) | ComponentKind::Pentode(_) | ComponentKind::VariMu(_) => {
                 let kp = format!("{}.plate", comp.id);
                 let kk = format!("{}.cathode", comp.id);
                 adj.entry(kp.clone()).or_default().insert(kk.clone());
@@ -929,7 +932,7 @@ fn check_mod_target_compatibility(
                 | ComponentKind::Nmos(_) | ComponentKind::Pmos(_)
         ),
         "led" => !matches!(target_kind, ComponentKind::Photocoupler(_)),
-        "vgk" => !matches!(target_kind, ComponentKind::Triode(_)),
+        "vgk" => !matches!(target_kind, ComponentKind::Triode(_) | ComponentKind::VariMu(_)),
         "vg1k" => !matches!(target_kind, ComponentKind::Pentode(_)),
         "iabc" => !matches!(target_kind, ComponentKind::OpAmp(OpAmpType::Ca3080)),
         "clock" => !matches!(target_kind, ComponentKind::Bbd(_)),
@@ -984,6 +987,7 @@ fn component_type_name(kind: &ComponentKind) -> &'static str {
         ComponentKind::Pmos(_) => "P-channel MOSFET",
         ComponentKind::Photocoupler(_) => "photocoupler",
         ComponentKind::Triode(_) => "triode",
+        ComponentKind::VariMu(_) => "variable-mu triode",
         ComponentKind::Pentode(_) => "pentode",
         ComponentKind::Lfo(..) => "LFO",
         ComponentKind::EnvelopeFollower(..) => "envelope follower",

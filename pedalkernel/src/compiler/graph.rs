@@ -368,6 +368,21 @@ impl CircuitGraph {
                         node_b: node_k,
                     });
                 }
+                ComponentKind::VariMu(_) => {
+                    // Variable-mu triode: plate-cathode path is the WDF edge.
+                    // Grid is external control, same topology as standard triode.
+                    let key_p = format!("{}.plate", comp.id);
+                    let key_k = format!("{}.cathode", comp.id);
+                    let id_p = get_id(&key_p, &mut uf);
+                    let id_k = get_id(&key_k, &mut uf);
+                    let node_p = uf.find(id_p);
+                    let node_k = uf.find(id_k);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a: node_p,
+                        node_b: node_k,
+                    });
+                }
                 ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => {
                     // MOSFET: drain-source path is the WDF edge (like a JFET).
                     // Gate is external control, not part of WDF tree.
@@ -1150,27 +1165,33 @@ impl CircuitGraph {
             }
         }
 
-        // Collect all triode edges.
-        let mut raw_triodes: Vec<(usize, String, NodeId, NodeId)> = Vec::new();
+        // Collect all triode edges (including variable-mu triodes).
+        let mut raw_triodes: Vec<(usize, String, NodeId, NodeId, bool)> = Vec::new();
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
-            if let ComponentKind::Triode(name) = &comp.kind {
-                raw_triodes.push((edge_idx, name.clone(), e.node_a, e.node_b));
+            match &comp.kind {
+                ComponentKind::Triode(name) => {
+                    raw_triodes.push((edge_idx, name.clone(), e.node_a, e.node_b, false));
+                }
+                ComponentKind::VariMu(name) => {
+                    raw_triodes.push((edge_idx, name.clone(), e.node_a, e.node_b, true));
+                }
+                _ => {}
             }
         }
 
         // Group by (plate_node, cathode_node) to detect parallel tubes.
         // Tubes sharing both nodes are electrically identical and should be
         // modeled as a single tube with scaled plate current.
-        let mut groups: HashMap<(NodeId, NodeId), Vec<(usize, String)>> = HashMap::new();
-        for (edge_idx, name, plate, cathode) in &raw_triodes {
-            groups.entry((*plate, *cathode)).or_default().push((*edge_idx, name.clone()));
+        let mut groups: HashMap<(NodeId, NodeId), Vec<(usize, String, bool)>> = HashMap::new();
+        for (edge_idx, name, plate, cathode, is_vm) in &raw_triodes {
+            groups.entry((*plate, *cathode)).or_default().push((*edge_idx, name.clone(), *is_vm));
         }
 
         let mut triodes: Vec<(usize, TriodeInfo)> = Vec::new();
         for ((plate_node, cathode_node), group) in &groups {
             // Use the first edge as the representative; store parallel count.
-            let (rep_edge_idx, ref rep_name) = group[0];
+            let (rep_edge_idx, ref rep_name, rep_is_vari_mu) = group[0];
             triodes.push((
                 rep_edge_idx,
                 TriodeInfo {
@@ -1180,12 +1201,13 @@ impl CircuitGraph {
                     junction_node: *cathode_node,
                     ground_node: self.gnd_node,
                     parallel_count: group.len(),
+                    is_vari_mu: rep_is_vari_mu,
                 },
             ));
         }
 
         // Collect all triode edge indices (including parallel duplicates).
-        let all_triode_edges: Vec<usize> = raw_triodes.iter().map(|(idx, _, _, _)| *idx).collect();
+        let all_triode_edges: Vec<usize> = raw_triodes.iter().map(|(idx, _, _, _, _)| *idx).collect();
 
         // Sort by distance of junction node from input, with edge_idx as tiebreaker
         // for deterministic ordering when distances are equal.
@@ -2029,6 +2051,8 @@ pub(super) struct TriodeInfo {
     /// Number of parallel tubes sharing the same plate and cathode nodes.
     /// Default is 1. When > 1, the tube model scales plate current by N.
     pub(super) parallel_count: usize,
+    /// True if this is a variable-mu triode (Raffensperger model).
+    pub(super) is_vari_mu: bool,
 }
 
 pub(super) struct PentodeInfo {

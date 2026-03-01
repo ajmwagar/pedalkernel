@@ -17,6 +17,7 @@ pub(super) enum RootKind {
     Zener(ZenerRoot),
     Jfet(JfetRoot),
     Triode(TriodeRoot),
+    VariMu(VariMuTriodeRoot),
     Pentode(PentodeRoot),
     Mosfet(MosfetRoot),
     Ota(OtaRoot),
@@ -185,11 +186,19 @@ impl WdfStage {
         // This is the key to triode amplification: the input controls the grid,
         // which modulates plate current and creates voltage drop across R_plate.
         // Vgk = Vbias + Vin (Vbias ~-2V for 12AX7 with typical biasing)
-        if let RootKind::Triode(ref mut t) = root {
-            // Apply input signal to grid. The bias point is typically around -2V
-            // for class A operation with a 12AX7. The input signal swings around this.
-            const TRIODE_GRID_BIAS: f64 = -2.0;
-            t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+        match root {
+            RootKind::Triode(ref mut t) => {
+                // Apply input signal to grid. The bias point is typically around -2V
+                // for class A operation with a 12AX7. The input signal swings around this.
+                const TRIODE_GRID_BIAS: f64 = -2.0;
+                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+            }
+            RootKind::VariMu(ref mut t) => {
+                // Variable-mu triode: same grid drive as standard triode.
+                const TRIODE_GRID_BIAS: f64 = -2.0;
+                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+            }
+            _ => {}
         }
 
         // For BJT stages, the input signal modulates Vbe (base-emitter voltage).
@@ -240,7 +249,9 @@ impl WdfStage {
             // - Source follower: VS = 0 (input goes to gate, not VS)
             // - Other: VS = input * compensation
             let vs_voltage = if let RootKind::Triode(t) = root {
-                t.v_max() // B+ supply voltage for triode bias
+                t.v_max()
+            } else if let RootKind::VariMu(t) = root {
+                t.v_max()
             } else if is_sf {
                 0.0 // Source follower: input modulates Vgs, not VS
             } else {
@@ -265,6 +276,7 @@ impl WdfStage {
                     }
                 }
                 RootKind::Triode(t) => t.process(b_tree, rp),
+                RootKind::VariMu(t) => t.process(b_tree, rp),
                 RootKind::Pentode(p) => p.process(b_tree, rp),
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
                 RootKind::Ota(o) => o.process(b_tree, rp),
@@ -489,6 +501,22 @@ impl WdfStage {
         }
     }
 
+    /// Set the grid-cathode voltage for variable-mu triode root elements.
+    #[inline]
+    pub fn set_vari_mu_vgk(&mut self, vgk: f64) {
+        if let RootKind::VariMu(t) = &mut self.root {
+            t.set_vgk(vgk);
+        }
+    }
+
+    /// Get the current grid-cathode voltage if this is a variable-mu triode stage.
+    pub fn vari_mu_vgk(&self) -> Option<f64> {
+        match &self.root {
+            RootKind::VariMu(t) => Some(t.vgk()),
+            _ => None,
+        }
+    }
+
     /// Set the control grid voltage (g1-cathode) for pentode root elements.
     #[inline]
     pub fn set_pentode_vg1k(&mut self, vg1k: f64) {
@@ -625,6 +653,7 @@ impl WdfStage {
             RootKind::Zener(_) => "Zener",
             RootKind::Jfet(_) => "Jfet",
             RootKind::Triode(_) => "Triode",
+            RootKind::VariMu(_) => "VariMu",
             RootKind::Pentode(_) => "Pentode",
             RootKind::Mosfet(_) => "Mosfet",
             RootKind::Ota(_) => "Ota",
@@ -656,6 +685,63 @@ impl WdfStage {
 // Push-pull stage for differential tube amplifiers (e.g., Fairchild 670)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Tube root that dispatches to either a standard Koren triode or a
+/// Raffensperger variable-mu triode. Used in PushPullStage where
+/// both types may appear.
+pub(super) enum TubeRoot {
+    Koren(TriodeRoot),
+    VariMu(VariMuTriodeRoot),
+}
+
+impl TubeRoot {
+    #[inline]
+    pub fn set_vgk(&mut self, vgk: f64) {
+        match self {
+            TubeRoot::Koren(t) => t.set_vgk(vgk),
+            TubeRoot::VariMu(t) => t.set_vgk(vgk),
+        }
+    }
+
+    #[inline]
+    pub fn v_max(&self) -> f64 {
+        match self {
+            TubeRoot::Koren(t) => t.v_max(),
+            TubeRoot::VariMu(t) => t.v_max(),
+        }
+    }
+
+    #[inline]
+    pub fn set_v_max(&mut self, v_max: f64) {
+        match self {
+            TubeRoot::Koren(t) => t.set_v_max(v_max),
+            TubeRoot::VariMu(t) => t.set_v_max(v_max),
+        }
+    }
+
+    #[inline]
+    pub fn process(&mut self, b_tree: f64, rp: f64) -> f64 {
+        match self {
+            TubeRoot::Koren(t) => t.process(b_tree, rp),
+            TubeRoot::VariMu(t) => t.process(b_tree, rp),
+        }
+    }
+
+    #[inline]
+    pub fn plate_current(&self, vpk: f64) -> f64 {
+        match self {
+            TubeRoot::Koren(t) => t.plate_current(vpk),
+            TubeRoot::VariMu(t) => t.plate_current(vpk),
+        }
+    }
+
+    pub fn parallel_count(&self) -> usize {
+        match self {
+            TubeRoot::Koren(t) => t.parallel_count(),
+            TubeRoot::VariMu(t) => t.parallel_count(),
+        }
+    }
+}
+
 /// A push-pull stage processes two triode halves simultaneously.
 /// Push gets +Vin, pull gets -Vin. Output = push_v - pull_v.
 /// Used for circuits like the Fairchild 670 where push and pull triodes
@@ -665,10 +751,10 @@ pub(super) struct PushPullStage {
     pub(super) push_tree: DynNode,
     /// WDF tree for pull half (plate load + cathode passives).
     pub(super) pull_tree: DynNode,
-    /// Push triode model (with parallel_count for 4× parallel tubes).
-    pub(super) push_root: TriodeRoot,
-    /// Pull triode model (with parallel_count for 4× parallel tubes).
-    pub(super) pull_root: TriodeRoot,
+    /// Push tube model (Koren triode or Raffensperger variable-mu).
+    pub(super) push_root: TubeRoot,
+    /// Pull tube model (Koren triode or Raffensperger variable-mu).
+    pub(super) pull_root: TubeRoot,
     /// Oversampler for push half.
     pub(super) push_oversampler: Oversampler,
     /// Oversampler for pull half.

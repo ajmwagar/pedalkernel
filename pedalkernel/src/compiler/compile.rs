@@ -12,7 +12,7 @@ use super::compiled::*;
 use super::dyn_node::DynNode;
 use super::graph::*;
 use super::helpers::*;
-use super::stage::{PushPullStage, RootKind, SidechainProcessor, WdfStage};
+use super::stage::{PushPullStage, RootKind, SidechainProcessor, TubeRoot, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Passive circuit gain helpers
@@ -236,6 +236,7 @@ fn is_truly_passive_only(pedal: &PedalDef) -> bool {
                 | ComponentKind::Nmos(_)
                 | ComponentKind::Pmos(_)
                 | ComponentKind::Triode(_)
+                | ComponentKind::VariMu(_)
                 | ComponentKind::Pentode(_)
                 | ComponentKind::Zener(_)
         )
@@ -1367,8 +1368,12 @@ pub fn compile_pedal_with_options(
             let tree = sp_to_dyn_with_vs(&sp_tree, &half_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
             // Compute compensation from triode mu.
-            let model = triode_model(&info.model_name);
-            let mu_compensation = model.mu / 100.0;
+            let mu_compensation = if info.is_vari_mu {
+                0.35 // Variable-mu: max mu ≈ 35-40
+            } else {
+                let model = triode_model(&info.model_name);
+                model.mu / 100.0
+            };
 
             Some((tree, mu_compensation))
         };
@@ -1377,13 +1382,33 @@ pub fn compile_pedal_with_options(
         let pull_half = build_half_tree(pull_info);
 
         if let (Some((push_tree, push_comp)), Some((pull_tree, _pull_comp))) = (push_half, pull_half) {
-            let push_model = triode_model(&push_info.model_name);
-            let pull_model = triode_model(&pull_info.model_name);
-
-            let push_root = TriodeRoot::new(push_model)
-                .with_parallel_count(push_info.parallel_count);
-            let pull_root = TriodeRoot::new(pull_model)
-                .with_parallel_count(pull_info.parallel_count);
+            let (push_root, pull_root) = if push_info.is_vari_mu {
+                let push_model = vari_mu_model(&push_info.model_name);
+                let pull_model = vari_mu_model(&pull_info.model_name);
+                (
+                    TubeRoot::VariMu(
+                        VariMuTriodeRoot::new(push_model)
+                            .with_parallel_count(push_info.parallel_count),
+                    ),
+                    TubeRoot::VariMu(
+                        VariMuTriodeRoot::new(pull_model)
+                            .with_parallel_count(pull_info.parallel_count),
+                    ),
+                )
+            } else {
+                let push_model = triode_model(&push_info.model_name);
+                let pull_model = triode_model(&pull_info.model_name);
+                (
+                    TubeRoot::Koren(
+                        TriodeRoot::new(push_model)
+                            .with_parallel_count(push_info.parallel_count),
+                    ),
+                    TubeRoot::Koren(
+                        TriodeRoot::new(pull_model)
+                            .with_parallel_count(pull_info.parallel_count),
+                    ),
+                )
+            };
 
             push_pull_stages.push(PushPullStage {
                 push_tree,
@@ -1583,18 +1608,26 @@ pub fn compile_pedal_with_options(
 
         let tree = sp_to_dyn_with_vs(&sp_tree, &triode_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
-        let model = triode_model(&triode_info.model_name);
-        let root = RootKind::Triode(
-            TriodeRoot::new(model).with_parallel_count(triode_info.parallel_count)
-        );
-
-        // Scale compensation based on triode mu and typical plate load.
-        // Voltage gain ≈ mu × Rp / (Rp + rp) where:
-        // - mu = amplification factor (100 for 12AX7)
-        // - Rp = plate load resistance (typically 100k)
-        // - rp = plate resistance (62.5k for 12AX7)
-        // For 100k load: gain ≈ 100 × 100k / (100k + 62.5k) ≈ 61.5
-        let mu_compensation = model.mu / 100.0;
+        let (root, mu_compensation) = if triode_info.is_vari_mu {
+            let model = vari_mu_model(&triode_info.model_name);
+            let root = RootKind::VariMu(
+                VariMuTriodeRoot::new(model).with_parallel_count(triode_info.parallel_count)
+            );
+            // Variable-mu: max mu ≈ 35-40, normalize to 100 reference
+            (root, 0.35)
+        } else {
+            let model = triode_model(&triode_info.model_name);
+            let root = RootKind::Triode(
+                TriodeRoot::new(model).with_parallel_count(triode_info.parallel_count)
+            );
+            // Scale compensation based on triode mu and typical plate load.
+            // Voltage gain ≈ mu × Rp / (Rp + rp) where:
+            // - mu = amplification factor (100 for 12AX7)
+            // - Rp = plate load resistance (typically 100k)
+            // - rp = plate resistance (62.5k for 12AX7)
+            // For 100k load: gain ≈ 100 × 100k / (100k + 62.5k) ≈ 61.5
+            (root, model.mu / 100.0)
+        };
 
         // Compute DC-blocking filter coefficients from C_out and R_load.
         // C_out is the coupling cap (plate to output), R_load is the output resistor.
@@ -2387,6 +2420,10 @@ pub fn compile_pedal_with_options(
                         .map(|m| m.mu)
                         .unwrap_or(100.0);
                 }
+                ComponentKind::VariMu(_) => {
+                    has_tube = true;
+                    tube_mu = 35.0; // variable-mu triode max mu ≈ 35-40
+                }
                 ComponentKind::Pentode(_) => {
                     has_tube = true;
                     tube_mu = 200.0; // pentodes have higher effective gain
@@ -2752,12 +2789,19 @@ pub fn compile_pedal_with_options(
                                         comp_id: target_comp.clone(),
                                     },
                                     "vgk" => {
-                                        // Find which stage contains this triode
-                                        let stage_idx = stages
+                                        // Find which stage contains a triode or variable-mu triode
+                                        if let Some(stage_idx) = stages
                                             .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Triode(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::TriodeVgk { stage_idx }
+                                            .position(|s| matches!(&s.root, RootKind::VariMu(_)))
+                                        {
+                                            ModulationTarget::VariMuVgk { stage_idx }
+                                        } else {
+                                            let stage_idx = stages
+                                                .iter()
+                                                .position(|s| matches!(&s.root, RootKind::Triode(_)))
+                                                .unwrap_or(0);
+                                            ModulationTarget::TriodeVgk { stage_idx }
+                                        }
                                     }
                                     "vg1k" => {
                                         // Find which stage contains this pentode
@@ -2873,6 +2917,8 @@ pub fn compile_pedal_with_options(
                                     ModulationTarget::PhotocouplerLed { .. } => (0.5, 0.5),
                                     // Triode grid bias: -2V center with ±2V swing
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
+                                    // Variable-mu triode: -2V center with ±2V swing
+                                    ModulationTarget::VariMuVgk { .. } => (-2.0, 2.0),
                                     // Pentode control grid: -2V center with ±2V swing
                                     ModulationTarget::PentodeVg1k { .. } => (-2.0, 2.0),
                                     // MOSFET: bias above threshold with swing
@@ -2948,11 +2994,18 @@ pub fn compile_pedal_with_options(
                                         comp_id: target_comp.clone(),
                                     },
                                     "vgk" => {
-                                        let stage_idx = stages
+                                        if let Some(stage_idx) = stages
                                             .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Triode(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::TriodeVgk { stage_idx }
+                                            .position(|s| matches!(&s.root, RootKind::VariMu(_)))
+                                        {
+                                            ModulationTarget::VariMuVgk { stage_idx }
+                                        } else {
+                                            let stage_idx = stages
+                                                .iter()
+                                                .position(|s| matches!(&s.root, RootKind::Triode(_)))
+                                                .unwrap_or(0);
+                                            ModulationTarget::TriodeVgk { stage_idx }
+                                        }
                                     }
                                     "vg1k" => {
                                         let stage_idx = stages
@@ -2994,6 +3047,7 @@ pub fn compile_pedal_with_options(
                                     ModulationTarget::AllJfetVgs => (-0.45, 0.25),
                                     ModulationTarget::PhotocouplerLed { .. } => (0.0, 1.0),
                                     ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
+                                    ModulationTarget::VariMuVgk { .. } => (-2.0, 2.0),
                                     ModulationTarget::PentodeVg1k { .. } => (-2.0, 2.0),
                                     ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
                                     ModulationTarget::OtaIabc { .. } => (0.5, 0.5),
