@@ -6,9 +6,21 @@ use crate::metering::{MetricsAccumulator, MetricsRingBuffer, UiMetrics};
 use crate::oversampling::OversamplingFactor;
 use crate::thermal::ThermalModel;
 use crate::PedalProcessor;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::stage::{PushPullStage, RootKind, SidechainProcessor, WdfStage};
+
+#[cfg(feature = "debug-trace")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Count of traced pipeline samples (non-zero only).
+#[cfg(feature = "debug-trace")]
+static TRACE_COUNT_PIPELINE: AtomicU64 = AtomicU64::new(0);
+
+/// Max pipeline samples to trace (non-zero only).
+#[cfg(feature = "debug-trace")]
+const MAX_TRACE_PIPELINE: u64 = 10;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Compiled pedal
@@ -78,6 +90,7 @@ pub(super) enum ModulationTarget {
     /// Modulate a BBD's clock frequency (for chorus/flanger).
     BbdClock { bbd_idx: usize },
     /// Modulate an op-amp's non-inverting input voltage.
+    #[allow(dead_code)]
     OpAmpVp { opamp_idx: usize },
     /// Modulate a delay line's speed (for wow/flutter).
     /// The modulation value is added to the speed factor (1.0 = no change).
@@ -409,6 +422,9 @@ pub struct CompiledPedal {
     /// Smoothed parameters for zipper-free pot control.
     /// One per pot in the circuit that needs smoothing.
     pub(super) pot_smoothers: Vec<SmoothedParam>,
+    /// Mirrored pot mappings: source_comp_id → list of mirrored_comp_ids.
+    /// When a source pot is updated, each mirror gets position = 1.0 - source.
+    pub(super) pot_mirrors: HashMap<String, Vec<String>>,
     /// Base (unmodulated) grid bias for push-pull stages.
     /// Stored so sidechain CV can be subtracted without accumulation.
     pub(super) base_grid_bias: f64,
@@ -762,6 +778,18 @@ impl CompiledPedal {
                             stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
                             stage.tree.recompute();
                         }
+                        // Update mirrored pots (position = 1.0 - source)
+                        if let Some(mirror_ids) = self.pot_mirrors.get(&comp_id) {
+                            let inv = 1.0 - value;
+                            for mirror_id in mirror_ids.clone() {
+                                for stage in &mut self.stages {
+                                    stage.tree.set_pot(&mirror_id, inv);
+                                    stage.tree.set_pot(&format!("{mirror_id}__aw"), inv);
+                                    stage.tree.set_pot(&format!("{mirror_id}__wb"), 1.0 - inv);
+                                    stage.tree.recompute();
+                                }
+                            }
+                        }
                     }
                 }
                 ControlTarget::LfoRate(lfo_idx) => {
@@ -887,6 +915,18 @@ impl CompiledPedal {
                         stage.tree.set_pot(&format!("{comp_id}__aw"), value);
                         stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
                         stage.tree.recompute();
+                    }
+                    // Update mirrored pots (position = 1.0 - source)
+                    if let Some(mirror_ids) = self.pot_mirrors.get(&comp_id) {
+                        let inv = 1.0 - value;
+                        for mirror_id in mirror_ids.clone() {
+                            for stage in &mut self.stages {
+                                stage.tree.set_pot(&mirror_id, inv);
+                                stage.tree.set_pot(&format!("{mirror_id}__aw"), inv);
+                                stage.tree.set_pot(&format!("{mirror_id}__wb"), 1.0 - inv);
+                                stage.tree.recompute();
+                            }
+                        }
                     }
                 }
             }
@@ -1182,6 +1222,22 @@ impl PedalProcessor for CompiledPedal {
         // first processing stage.
         let mut signal = input * self.pre_gain;
 
+        #[cfg(feature = "debug-trace")]
+        let trace_on = if input.abs() > 1e-10 {
+            let n = TRACE_COUNT_PIPELINE.fetch_add(1, Ordering::Relaxed);
+            if n < MAX_TRACE_PIPELINE {
+                eprintln!(
+                    "[PIPE n={n}] input={input:.6e} pre_gain={:.6} signal={signal:.6e} supply={:.1}V stages={} pp={}",
+                    self.pre_gain, self.supply_voltage, self.stages.len(), self.push_pull_stages.len()
+                );
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         // Apply input loading from upstream source impedance.
         // Models the voltage divider and frequency-dependent rolloff created by
         // the source impedance (guitar pickup, upstream pedal) driving this
@@ -1216,7 +1272,16 @@ impl PedalProcessor for CompiledPedal {
                 stage.set_paired_opamp_vp(signal);
             }
 
+            let pre_stage = signal;
             signal = stage.process(signal);
+
+            #[cfg(feature = "debug-trace")]
+            if trace_on {
+                eprintln!(
+                    "  [WDF {stage_idx}] in={pre_stage:.6e} out={signal:.6e} rp={:.1}",
+                    stage.tree.port_resistance()
+                );
+            }
 
             // Capture per-stage output level for metering (fed to accumulator below)
             if stage_idx < crate::metering::MAX_STAGES {
@@ -1230,6 +1295,14 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
+        #[cfg(feature = "debug-trace")]
+        if trace_on {
+            eprintln!(
+                "  [PRE-PP] signal={signal:.6e} n_pp={} n_sc={}",
+                self.push_pull_stages.len(), self.sidechains.len()
+            );
+        }
+
         // Process through push-pull stages (differential tube amplifiers).
         // These model circuits like the Fairchild 670 where push and pull
         // triode halves process the signal simultaneously with opposite phase,
@@ -1238,15 +1311,29 @@ impl PedalProcessor for CompiledPedal {
         // When sidechains are present, the CV from the previous sample modulates
         // the grid bias: Vgrid = base_bias - cv_delayed. This implements
         // variable-mu compression — higher CV = more negative bias = less gain.
-        // Multiple sidechains sum their CVs (e.g., stereo 670 with per-channel SC).
+        //
+        // For stereo equipment (multiple identical push-pull stages), the stages
+        // represent parallel channels (e.g., Fairchild 670 Lat/Vert). Only
+        // process the first stage to avoid incorrect cascading.
+        let pp_active = if self.push_pull_stages.len() > 1
+            && self.push_pull_stages.windows(2).all(|w| {
+                w[0].turns_ratio == w[1].turns_ratio
+                    && w[0].compensation == w[1].compensation
+            })
+        {
+            1
+        } else {
+            self.push_pull_stages.len()
+        };
+
         if !self.sidechains.is_empty() {
             let total_cv: f64 = self.sidechains.iter().map(|sc| sc.cv_delayed).sum();
-            for pp_stage in &mut self.push_pull_stages {
+            for pp_stage in self.push_pull_stages[..pp_active].iter_mut() {
                 pp_stage.grid_bias = self.base_grid_bias - total_cv;
                 signal = pp_stage.process(signal);
             }
         } else {
-            for pp_stage in &mut self.push_pull_stages {
+            for pp_stage in self.push_pull_stages[..pp_active].iter_mut() {
                 signal = pp_stage.process(signal);
             }
         }
@@ -1333,6 +1420,14 @@ impl PedalProcessor for CompiledPedal {
         }
 
         let output = signal * self.output_gain;
+
+        #[cfg(feature = "debug-trace")]
+        if trace_on {
+            eprintln!(
+                "  [OUT] pre_out={signal:.6e} output_gain={:.6} output={output:.6e}",
+                self.output_gain
+            );
+        }
 
         // Record output for debug stats
         #[cfg(debug_assertions)]

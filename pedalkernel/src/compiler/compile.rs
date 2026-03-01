@@ -627,6 +627,14 @@ pub fn compile_pedal_with_options(
         output_loading: None,
         sidechains,
         pot_smoothers,
+        pot_mirrors: {
+            // Build reverse mapping: source_id → [mirrored_ids]
+            let mut m: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for (mirrored, source) in &pedal.mirrors {
+                m.entry(source.clone()).or_default().push(mirrored.clone());
+            }
+            m
+        },
         base_grid_bias,
     };
 

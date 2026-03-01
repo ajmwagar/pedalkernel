@@ -25,7 +25,7 @@ mod warnings;
 pub use compile::{compile_pedal, compile_pedal_with_options, CompileOptions};
 pub use compiled::CompiledPedal;
 pub use split::{compile_split_pedal, SplitCompiledPedal};
-pub use validate::{validate_pedal, PedalWarning, Severity};
+pub use validate::{validate_pedal, validate_pedal_files, PedalWarning, Severity};
 pub use warnings::{check_voltage_compatibility, VoltageWarning, WarningSeverity};
 
 #[cfg(test)]

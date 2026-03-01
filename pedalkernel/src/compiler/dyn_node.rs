@@ -81,6 +81,7 @@ pub(super) enum DynNode {
         /// Which fork path this resistor represents (0, 1, 2, ...)
         path_index: usize,
         /// Total number of paths in this fork
+        #[allow(dead_code)]
         num_paths: usize,
         /// Resistance when this path is active (typically ~1Ω)
         r_active: f64,
@@ -474,6 +475,7 @@ impl DynNode {
     /// where `a` is the last incident wave and `b` is the last reflected wave.
     ///
     /// Returns `None` if no reactive element exists in the tree.
+    #[allow(dead_code)]
     pub fn reactive_voltage(&self) -> Option<f64> {
         match self {
             Self::Capacitor { state, last_b, .. } => {
@@ -691,6 +693,7 @@ impl DynNode {
     }
 
     /// Check if this tree contains any reactive elements (capacitors/inductors).
+    #[allow(dead_code)]
     pub fn has_reactive_elements(&self) -> bool {
         match self {
             Self::Capacitor { .. }

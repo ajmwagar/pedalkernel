@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use crate::dsl::*;
 use crate::elements::*;
 
-use super::graph::{CircuitGraph, NodeId, OpAmpFeedbackInfo, OpAmpFeedbackKind};
+use super::graph::{CircuitGraph, OpAmpFeedbackInfo, OpAmpFeedbackKind};
 use super::stage::WdfStage;
 
 /// Result of op-amp analysis.
@@ -24,6 +24,7 @@ pub(super) struct OpAmpAnalysis {
     /// IDs of op-amps that have feedback (excludes standalone op-amps).
     pub(super) feedback_opamp_ids: HashSet<String>,
     /// IDs of unity-gain op-amps (for JFET pairing).
+    #[allow(dead_code)]
     pub(super) unity_gain_opamp_ids: HashSet<String>,
     /// Map from pot component ID → gain modulation info:
     /// (stage_idx, ri, fixed_series_r, max_pot_r, parallel_fixed_r, is_inverting)

@@ -199,6 +199,14 @@ fn build_half(
         .cloned()
         .collect();
 
+    // Filter mirrors to only include components in this half
+    let mirrors = pedal
+        .mirrors
+        .iter()
+        .filter(|(k, v)| component_ids.contains(*k) && component_ids.contains(*v))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     PedalDef {
         name: format!("{} ({})", pedal.name, suffix),
         supplies: pedal.supplies.clone(),
@@ -208,6 +216,7 @@ fn build_half(
         trims,
         monitors,
         sidechains: vec![],
+        mirrors,
     }
 }
 

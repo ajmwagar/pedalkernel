@@ -31,6 +31,10 @@ pub struct TriodeModel {
     /// Plate current scaling factor (KG1). Scales the absolute plate current
     /// magnitude. 12AX7 ≈ 1060, 12AU7 ≈ 1180.
     pub kg1: f64,
+    /// Plate resistance at typical operating point (Ω).
+    /// Used as virtual resistance in WDF tree construction.
+    /// 12AX7 ≈ 62.5kΩ, 12AU7 ≈ 7.7kΩ, 12AT7 ≈ 10.9kΩ.
+    pub rp: f64,
 }
 
 impl TriodeModel {
@@ -56,6 +60,7 @@ impl From<&SpiceTriodeModel> for TriodeModel {
             kvb: spice.kvb,
             ex: spice.ex,
             kg1: spice.kg1,
+            rp: spice.rp,
         }
     }
 }

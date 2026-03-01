@@ -623,6 +623,7 @@ fn extract_sidechain_def(
         trims,
         monitors: vec![],
         sidechains: vec![],
+        mirrors: std::collections::HashMap::new(),
     }
 }
 

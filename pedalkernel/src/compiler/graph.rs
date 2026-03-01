@@ -28,6 +28,9 @@ pub(super) struct CircuitGraph {
     pub(super) in_node: NodeId,
     pub(super) out_node: NodeId,
     pub(super) gnd_node: NodeId,
+    /// The Vcc power rail node. Used as a BFS boundary (edges collected
+    /// but traversal does not continue through it).
+    pub(super) vcc_node: NodeId,
     /// Supply rail nodes (vcc + named supplies like B+, A_bal, etc.).
     /// Edges to these nodes are excluded from passive element collection
     /// because supply voltages are injected as tube bias parameters, not
@@ -45,6 +48,11 @@ pub(super) struct CircuitGraph {
     /// Map from net/pin names to resolved NodeIds.
     /// Used for looking up named nodes like "A_node_ch_out" for sidechain routing.
     pub(super) node_names: HashMap<String, NodeId>,
+    /// Magnetic/amplifying coupling: when one pin node of a multi-port device is
+    /// reached during sidechain BFS, all other pin nodes should also be reachable.
+    /// This covers transformers (primary↔secondary) and tubes (grid↔plate↔cathode).
+    /// Maps each pin node → all other pin nodes of the same device.
+    pub(super) coupled_nodes: HashMap<NodeId, Vec<NodeId>>,
 }
 
 /// Result of partitioning sidechain edges from audio edges.
@@ -115,7 +123,7 @@ pub(super) struct ForkPathInfo {
 /// Returns: (expanded_nets, fork_path_components)
 fn expand_forks(
     nets: &[NetDef],
-    component_base_idx: usize,
+    _component_base_idx: usize,
 ) -> (Vec<NetDef>, Vec<(ComponentDef, ForkPathInfo)>) {
     let mut expanded_nets = Vec::new();
     let mut fork_components: Vec<(ComponentDef, ForkPathInfo)> = Vec::new();
@@ -281,6 +289,7 @@ impl CircuitGraph {
         let mut edges = Vec::new();
         let mut num_active = 0usize;
         let mut deferred_3term: Vec<(usize, String)> = Vec::new();
+        let mut coupled_nodes: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
 
         for (idx, comp) in all_components.iter().enumerate() {
             match &comp.kind {
@@ -343,45 +352,72 @@ impl CircuitGraph {
                     // Grid is external control, not part of WDF tree.
                     let key_p = format!("{}.plate", comp.id);
                     let key_k = format!("{}.cathode", comp.id);
+                    let key_g = format!("{}.grid", comp.id);
                     let id_p = get_id(&key_p, &mut uf);
                     let id_k = get_id(&key_k, &mut uf);
+                    let id_g = get_id(&key_g, &mut uf);
                     let node_p = uf.find(id_p);
                     let node_k = uf.find(id_k);
+                    let node_g = uf.find(id_g);
                     edges.push(GraphEdge {
                         comp_idx: idx,
                         node_a: node_p,
                         node_b: node_k,
                     });
+                    // Tube coupling: grid↔plate↔cathode for sidechain BFS traversal
+                    for &n in &[node_p, node_k, node_g] {
+                        let others: Vec<_> = [node_p, node_k, node_g].iter().copied().filter(|&x| x != n).collect();
+                        coupled_nodes.entry(n).or_default().extend(others);
+                    }
                 }
                 ComponentKind::Pentode(_) => {
                     // Pentode: plate-cathode path is the WDF edge.
                     // Control grid (g1) and screen grid (g2) are external control.
                     let key_p = format!("{}.plate", comp.id);
                     let key_k = format!("{}.cathode", comp.id);
+                    let key_g = format!("{}.grid", comp.id);
+                    let key_s = format!("{}.screen", comp.id);
                     let id_p = get_id(&key_p, &mut uf);
                     let id_k = get_id(&key_k, &mut uf);
+                    let id_g = get_id(&key_g, &mut uf);
+                    let id_s = get_id(&key_s, &mut uf);
                     let node_p = uf.find(id_p);
                     let node_k = uf.find(id_k);
+                    let node_g = uf.find(id_g);
+                    let node_s = uf.find(id_s);
                     edges.push(GraphEdge {
                         comp_idx: idx,
                         node_a: node_p,
                         node_b: node_k,
                     });
+                    // Tube coupling: all pins for sidechain BFS traversal
+                    for &n in &[node_p, node_k, node_g, node_s] {
+                        let others: Vec<_> = [node_p, node_k, node_g, node_s].iter().copied().filter(|&x| x != n).collect();
+                        coupled_nodes.entry(n).or_default().extend(others);
+                    }
                 }
                 ComponentKind::VariMu(_) => {
                     // Variable-mu triode: plate-cathode path is the WDF edge.
                     // Grid is external control, same topology as standard triode.
                     let key_p = format!("{}.plate", comp.id);
                     let key_k = format!("{}.cathode", comp.id);
+                    let key_g = format!("{}.grid", comp.id);
                     let id_p = get_id(&key_p, &mut uf);
                     let id_k = get_id(&key_k, &mut uf);
+                    let id_g = get_id(&key_g, &mut uf);
                     let node_p = uf.find(id_p);
                     let node_k = uf.find(id_k);
+                    let node_g = uf.find(id_g);
                     edges.push(GraphEdge {
                         comp_idx: idx,
                         node_a: node_p,
                         node_b: node_k,
                     });
+                    // Tube coupling: grid↔plate↔cathode for sidechain BFS traversal
+                    for &n in &[node_p, node_k, node_g] {
+                        let others: Vec<_> = [node_p, node_k, node_g].iter().copied().filter(|&x| x != n).collect();
+                        coupled_nodes.entry(n).or_default().extend(others);
+                    }
                 }
                 ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => {
                     // MOSFET: drain-source path is the WDF edge (like a JFET).
@@ -583,6 +619,30 @@ impl CircuitGraph {
                         node_a,
                         node_b,
                     });
+
+                    // Record transformer winding coupling for sidechain BFS.
+                    // All winding pin nodes are magnetically coupled and should
+                    // be traversable during sidechain partition discovery.
+                    let node_c = uf.find(id_c);
+                    let node_d = uf.find(id_d);
+                    let mut all_winding_nodes = vec![node_a, node_b, node_c, node_d];
+                    if cfg.has_tertiary() {
+                        let ter_e = get_id(&format!("{}.e", comp.id), &mut uf);
+                        let ter_f = get_id(&format!("{}.f", comp.id), &mut uf);
+                        all_winding_nodes.push(uf.find(ter_e));
+                        all_winding_nodes.push(uf.find(ter_f));
+                    }
+                    if matches!(cfg.primary_type, WindingType::CenterTap | WindingType::PushPull) {
+                        let ct_key = format!("{}.primary.ct", comp.id);
+                        let ct_id = get_id(&ct_key, &mut uf);
+                        all_winding_nodes.push(uf.find(ct_id));
+                    }
+                    all_winding_nodes.sort();
+                    all_winding_nodes.dedup();
+                    for &n in &all_winding_nodes {
+                        let others: Vec<NodeId> = all_winding_nodes.iter().copied().filter(|&x| x != n).collect();
+                        coupled_nodes.entry(n).or_default().extend(others);
+                    }
                 }
                 ComponentKind::RotarySwitch(_) => {
                     // Rotary switch is a control element, not a circuit element.
@@ -744,11 +804,13 @@ impl CircuitGraph {
             in_node,
             out_node,
             gnd_node,
+            vcc_node,
             supply_nodes,
             num_active,
             active_edge_indices,
             fork_paths,
             node_names,
+            coupled_nodes,
         }
     }
 
@@ -776,30 +838,39 @@ impl CircuitGraph {
             adj.entry(e.node_b).or_default().push((idx, e.node_a));
         }
 
-        // Boundary nodes: the BFS stops at these. They represent circuit
-        // boundaries that separate the sidechain from the audio path.
+        // Hard boundary nodes: the BFS stops here completely.
+        // Only audio I/O nodes are hard boundaries — they truly separate
+        // the sidechain from the audio input/output path.
         let mut boundary: HashSet<NodeId> = HashSet::new();
         boundary.insert(self.in_node);
         boundary.insert(self.out_node);
-        boundary.insert(self.gnd_node);
+
+        // Soft boundaries: reachable (included in node set) but NOT traversed.
+        // This includes gnd and all supply rails (vcc, vcc_sc, bias rails).
+        // Both audio path and sidechain components connect to gnd/supply, so
+        // these are shared infrastructure, not path boundaries. Making them
+        // "soft" means BFS discovers edges TO them but doesn't follow edges
+        // FROM them (which would leak into the entire circuit).
+        let mut supply_boundary: HashSet<NodeId> = HashSet::new();
+        supply_boundary.insert(self.gnd_node);
         if let Some(&vcc) = self.node_names.get("vcc") {
-            boundary.insert(vcc);
+            supply_boundary.insert(vcc);
         }
-        boundary.extend(&self.supply_nodes);
+        supply_boundary.extend(&self.supply_nodes);
 
         // BFS from tap_node: find all nodes reachable without crossing
-        // cv_node or any boundary node.
-        let reachable_from_tap = Self::bfs_reachable(tap_node, cv_node, &boundary, &adj);
+        // cv_node or any hard boundary. Supply/gnd nodes are reachable but not
+        // traversed. Transformer windings allow crossing magnetic isolation.
+        let reachable_from_tap = Self::bfs_reachable(
+            tap_node, cv_node, &boundary, &supply_boundary,
+            &self.coupled_nodes, &adj,
+        );
 
-        // BFS from cv_node: find all nodes reachable without crossing
-        // tap_node or any boundary node.
-        let reachable_from_cv = Self::bfs_reachable(cv_node, tap_node, &boundary, &adj);
-
-        eprintln!("[partition] reachable_from_tap: {} nodes, reachable_from_cv: {} nodes",
-            reachable_from_tap.len(), reachable_from_cv.len());
-        eprintln!("[partition] boundary has {} nodes (in={}, out={}, gnd={})",
-            boundary.len(), self.in_node, self.out_node, self.gnd_node);
-        eprintln!("[partition] tap={}, cv={}", tap_node, cv_node);
+        // BFS from cv_node: same rules, opposite direction.
+        let reachable_from_cv = Self::bfs_reachable(
+            cv_node, tap_node, &boundary, &supply_boundary,
+            &self.coupled_nodes, &adj,
+        );
 
         // Sidechain nodes = intersection of both reachable sets.
         // Nodes reachable from BOTH tap and cv (without crossing boundaries)
@@ -809,6 +880,7 @@ impl CircuitGraph {
             .intersection(&reachable_from_cv)
             .copied()
             .collect();
+
         // Include the boundary nodes themselves (tap and cv)
         sidechain_nodes.insert(tap_node);
         sidechain_nodes.insert(cv_node);
@@ -836,39 +908,66 @@ impl CircuitGraph {
     }
 
     /// BFS from `start`, collecting all reachable nodes.
-    /// Stops at `opposite` (the other sidechain boundary) and at all `boundary` nodes.
+    ///
+    /// - Stops completely at `opposite` and hard `boundary` nodes (in/out only).
+    /// - Supply/gnd nodes (`supply_boundary`) are reachable and included in the
+    ///   result, but the BFS does NOT traverse through them to their neighbors.
+    /// - Transformer magnetic coupling (`xfmr_coupled`): when a transformer winding
+    ///   pin is reached, all other winding pins of that transformer are also seeded
+    ///   into the BFS. This allows traversal across galvanic isolation boundaries.
+    ///
     /// The start node itself is NOT included in the result (it's a boundary).
     fn bfs_reachable(
         start: NodeId,
         opposite: NodeId,
         boundary: &HashSet<NodeId>,
+        supply_boundary: &HashSet<NodeId>,
+        xfmr_coupled: &HashMap<NodeId, Vec<NodeId>>,
         adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
     ) -> HashSet<NodeId> {
         let mut visited: HashSet<NodeId> = HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         visited.insert(start);
 
-        // Seed: follow all edges from start, except to boundary or opposite
+        // Helper: try to enqueue a node (returns true if newly visited)
+        let try_enqueue = |node: NodeId,
+                               visited: &mut HashSet<NodeId>,
+                               queue: &mut std::collections::VecDeque<NodeId>| {
+            if node == start || node == opposite || boundary.contains(&node) {
+                return;
+            }
+            if visited.insert(node) {
+                // Supply/gnd nodes are reachable but not traversed
+                if !supply_boundary.contains(&node) {
+                    queue.push_back(node);
+                }
+            }
+        };
+
+        // Seed: follow all edges from start
         if let Some(neighbors) = adj.get(&start) {
             for &(_, neighbor) in neighbors {
-                if neighbor == opposite || boundary.contains(&neighbor) {
-                    continue;
-                }
-                if visited.insert(neighbor) {
-                    queue.push_back(neighbor);
-                }
+                try_enqueue(neighbor, &mut visited, &mut queue);
+            }
+        }
+        // Also seed transformer-coupled nodes of start
+        if let Some(coupled) = xfmr_coupled.get(&start) {
+            for &c in coupled {
+                try_enqueue(c, &mut visited, &mut queue);
             }
         }
 
         while let Some(node) = queue.pop_front() {
+            // Follow graph edges
             if let Some(neighbors) = adj.get(&node) {
                 for &(_, neighbor) in neighbors {
-                    if neighbor == start || neighbor == opposite || boundary.contains(&neighbor) {
-                        continue;
-                    }
-                    if visited.insert(neighbor) {
-                        queue.push_back(neighbor);
-                    }
+                    try_enqueue(neighbor, &mut visited, &mut queue);
+                }
+            }
+            // Follow transformer magnetic coupling
+            if let Some(coupled) = xfmr_coupled.get(&node) {
+                for &c in coupled {
+                    try_enqueue(c, &mut visited, &mut queue);
                 }
             }
         }
@@ -925,6 +1024,7 @@ impl CircuitGraph {
     /// a single entry with `parallel_count > 1`.
     /// Returns (merged_triodes, all_triode_edge_indices) where the second vec
     /// contains ALL triode edge indices including parallel duplicates.
+    #[cfg(test)]
     pub(super) fn find_triodes(&self) -> (Vec<(usize, TriodeInfo)>, Vec<usize>) {
         // BFS from in_node to compute distances.
         let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -1075,6 +1175,7 @@ impl CircuitGraph {
                     pull_triode_idx: pull,
                     transformer_edge_idx: *xfmr_edge_idx,
                     turns_ratio: cfg.turns_ratio,
+                    is_ct_primary: matches!(cfg.primary_type, WindingType::CenterTap),
                 });
             }
         }
@@ -1115,6 +1216,72 @@ impl CircuitGraph {
         }
 
         reachable
+    }
+
+    /// BFS through passive edges starting from `start`, returning **edge indices**.
+    ///
+    /// Boundary rules:
+    /// - Excludes nonlinear and active edges (same as `bfs_through_passives`).
+    /// - Stops at transformer edges (don't cross magnetic isolation).
+    /// - Stops at `gnd_node` and `vcc_node`: the edge TO them is collected but
+    ///   BFS does not continue THROUGH them (they are global hubs).
+    /// - Named supply nodes (A_bal, etc.) ARE traversed through — they are
+    ///   local circuit junctions, not global hubs.
+    pub(super) fn bfs_passive_edges(
+        &self,
+        start: NodeId,
+        nonlinear_indices: &[usize],
+        active_indices: &[usize],
+    ) -> Vec<usize> {
+        let mut visited_nodes: HashSet<NodeId> = HashSet::new();
+        let mut collected_edges: Vec<usize> = Vec::new();
+        let mut queue = std::collections::VecDeque::new();
+        visited_nodes.insert(start);
+        queue.push_back(start);
+
+        while let Some(node) = queue.pop_front() {
+            for (idx, e) in self.edges.iter().enumerate() {
+                // Skip nonlinear and active edges.
+                if nonlinear_indices.contains(&idx) || active_indices.contains(&idx) {
+                    continue;
+                }
+                // Determine neighbor through this edge.
+                let neighbor = if e.node_a == node {
+                    Some(e.node_b)
+                } else if e.node_b == node {
+                    Some(e.node_a)
+                } else {
+                    None
+                };
+                let Some(n) = neighbor else { continue };
+                // Skip transformer edges (magnetic isolation boundary).
+                if matches!(self.components[e.comp_idx].kind, ComponentKind::Transformer(_)) {
+                    continue;
+                }
+                // Skip edges to output node (those become output attenuation).
+                if n == self.out_node {
+                    continue;
+                }
+                // Skip elements whose far node is a named supply rail.
+                // (supply_nodes excludes vcc and gnd — those are standard WDF
+                //  terminations handled by the gnd/vcc boundary below.)
+                if self.supply_nodes.contains(&n) {
+                    continue;
+                }
+                // Collect the edge if we haven't already visited the neighbor
+                // through another path. We still collect edges to gnd/vcc
+                // but don't continue BFS through them.
+                if visited_nodes.insert(n) {
+                    collected_edges.push(idx);
+                    // Don't traverse through global power rails.
+                    if n != self.gnd_node && n != self.vcc_node {
+                        queue.push_back(n);
+                    }
+                }
+            }
+        }
+
+        collected_edges
     }
 
     /// Find op-amp feedback loops and calculate closed-loop gain.
@@ -1165,7 +1332,7 @@ impl CircuitGraph {
         }
 
         // Get resolved node IDs for special nodes
-        let in_node_resolved = uf.find(*pin_ids.get("in").unwrap_or(&0));
+        let _in_node_resolved = uf.find(*pin_ids.get("in").unwrap_or(&0));
         let gnd_node_resolved = uf.find(*pin_ids.get("gnd").unwrap_or(&0));
 
         // Build a map of component → (pin_a_node, pin_b_node, resistance, is_pot, max_r)
@@ -1524,8 +1691,11 @@ pub(super) struct PushPullPairInfo {
     pub(super) transformer_edge_idx: usize,
     /// Turns ratio of the output transformer (primary:secondary).
     pub(super) turns_ratio: f64,
+    /// Whether the transformer primary is center-tapped.
+    pub(super) is_ct_primary: bool,
 }
 
+#[allow(dead_code)]
 pub(super) struct TriodeInfo {
     pub(super) model_name: String,
     /// Plate node - connected to plate load resistor and output
@@ -1534,7 +1704,6 @@ pub(super) struct TriodeInfo {
     pub(super) cathode_node: NodeId,
     /// Legacy junction_node - kept for compatibility, equals cathode_node
     pub(super) junction_node: NodeId,
-    #[allow(dead_code)]
     pub(super) ground_node: NodeId,
     /// Number of parallel tubes sharing the same plate and cathode nodes.
     /// Default is 1. When > 1, the tube model scales plate current by N.
@@ -1557,6 +1726,7 @@ pub(super) struct OpAmpFeedbackInfo {
     pub(super) feedback_kind: OpAmpFeedbackKind,
     /// Node where the inverting input meets the passive network.
     /// For unity-gain buffers, this is the output/neg node.
+    #[allow(dead_code)]
     pub(super) neg_node: NodeId,
     /// Non-inverting input node (signal reference or bias).
     pub(super) pos_node: NodeId,

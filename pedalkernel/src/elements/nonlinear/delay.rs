@@ -603,6 +603,7 @@ impl DelayLine {
     ///
     /// Called automatically by `set_delay_normalized` and `set_delay_seconds`
     /// to keep zone boundaries aligned with the current delay time.
+    #[allow(dead_code)]
     fn update_zone_distances(&mut self, tap_ratios: &[f64]) {
         for (zone, &ratio) in self.zones.iter_mut().zip(tap_ratios.iter()) {
             zone.distance_samples = self.current_delay_samples * ratio;

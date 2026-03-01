@@ -260,7 +260,7 @@ impl RTypeAdaptor {
         //
         // For 3-winding transformer with turns n1:n2:n3 (we use 1:n2:n3):
         // The scattering matrix (with port 3 adapted) is:
-        let denom = r1 * n2 * n2 + r2 * n3 * n3 + r3;
+        let _denom = r1 * n2 * n2 + r2 * n3 * n3 + r3;
 
         // S11 = (r1*n2² - r2*n3² - r3) / denom
         // S12 = 2*n2*n3*sqrt(r1*r2) / denom ... but this gets complex with normalization

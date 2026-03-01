@@ -63,6 +63,10 @@ pub(super) struct PushPullPlan {
     pub(super) pull_triode_list_idx: usize,
     /// Turns ratio of the CT transformer.
     pub(super) turns_ratio: f64,
+    /// Whether the transformer primary is center-tapped.
+    /// When true, each push/pull tube drives half the primary,
+    /// so the effective per-tube ratio is turns_ratio / 2.
+    pub(super) is_ct_primary: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -126,6 +130,7 @@ pub(super) fn plan_stages(
             push_triode_list_idx: triode_to_classified[p.push_triode_idx],
             pull_triode_list_idx: triode_to_classified[p.pull_triode_idx],
             turns_ratio: p.turns_ratio,
+            is_ct_primary: p.is_ct_primary,
         })
         .collect();
 
@@ -188,22 +193,19 @@ pub(super) fn plan_push_pull_half(
     graph: &CircuitGraph,
 ) -> Option<StagePlan> {
     if let NonlinearKind::Triode { plate_node, cathode_node, model_name, is_vari_mu, .. } = &elem.kind {
-        // For push-pull halves, collect passives WITHOUT filtering supply nodes.
-        let collect_passives_at = |junction: NodeId| -> Vec<usize> {
-            graph.edges
-                .iter()
-                .enumerate()
-                .filter(|(idx, e)| {
-                    if classified.all_nonlinear_edge_indices.contains(idx) { return false; }
-                    if graph.active_edge_indices.contains(idx) { return false; }
-                    e.node_a == junction || e.node_b == junction
-                })
-                .map(|(idx, _)| idx)
-                .collect()
-        };
-
-        let plate_passives = collect_passives_at(*plate_node);
-        let cathode_passives = collect_passives_at(*cathode_node);
+        // Multi-hop BFS: collect all passive edges reachable from plate/cathode,
+        // stopping at transformers, gnd, and vcc (but traversing through named
+        // supply junctions like A_bal).
+        let plate_passives = graph.bfs_passive_edges(
+            *plate_node,
+            &classified.all_nonlinear_edge_indices,
+            &graph.active_edge_indices,
+        );
+        let cathode_passives = graph.bfs_passive_edges(
+            *cathode_node,
+            &classified.all_nonlinear_edge_indices,
+            &graph.active_edge_indices,
+        );
 
         let mut passive_idxs: Vec<usize> = plate_passives.clone();
         extend_dedup(&mut passive_idxs, &cathode_passives);
@@ -212,59 +214,89 @@ pub(super) fn plan_push_pull_half(
             return None;
         }
 
-        // Find injection node (prefer plate-side).
+        // Find injection node: scan ALL nodes across ALL collected plate passive
+        // edges (multi-hop), pick the node with minimum dist_from_in, excluding
+        // plate_node and cathode_node.
         let mut injection_node = graph.gnd_node;
         let mut best_dist = usize::MAX;
         for &eidx in &plate_passives {
             let e = &graph.edges[eidx];
-            let other = if e.node_a == *plate_node { e.node_b } else { e.node_a };
-            if let Some(&d) = classified.dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
+            for candidate in [e.node_a, e.node_b] {
+                if candidate == *plate_node || candidate == *cathode_node {
+                    continue;
                 }
-            }
-        }
-        if best_dist == usize::MAX {
-            for &eidx in &cathode_passives {
-                let e = &graph.edges[eidx];
-                let other = if e.node_a == *cathode_node { e.node_b } else { e.node_a };
-                if let Some(&d) = classified.dist_from_in.get(&other) {
+                if let Some(&d) = classified.dist_from_in.get(&candidate) {
                     if d < best_dist {
                         best_dist = d;
-                        injection_node = other;
+                        injection_node = candidate;
                     }
                 }
             }
         }
+        // Fallback: try cathode passive edges if plate side yielded nothing.
+        if best_dist == usize::MAX {
+            for &eidx in &cathode_passives {
+                let e = &graph.edges[eidx];
+                for candidate in [e.node_a, e.node_b] {
+                    if candidate == *plate_node || candidate == *cathode_node {
+                        continue;
+                    }
+                    if let Some(&d) = classified.dist_from_in.get(&candidate) {
+                        if d < best_dist {
+                            best_dist = d;
+                            injection_node = candidate;
+                        }
+                    }
+                }
+            }
+        }
+        // Last resort: first non-special node from plate passives.
         if best_dist == usize::MAX {
             for &eidx in &plate_passives {
                 let e = &graph.edges[eidx];
-                let other = if e.node_a == *plate_node { e.node_b } else { e.node_a };
-                if other != graph.gnd_node && other != *cathode_node {
-                    injection_node = other;
+                for candidate in [e.node_a, e.node_b] {
+                    if candidate != graph.gnd_node && candidate != *cathode_node && candidate != *plate_node {
+                        injection_node = candidate;
+                        break;
+                    }
+                }
+                if injection_node != graph.gnd_node { break; }
+            }
+        }
+
+        // Ground terminal for push-pull halves: build degree map across
+        // cathode passive edges, find a degree-1 leaf that isn't a special node.
+        let mut ground_terminal = graph.gnd_node;
+        {
+            let mut degree: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
+            for &eidx in &cathode_passives {
+                let e = &graph.edges[eidx];
+                *degree.entry(e.node_a).or_insert(0) += 1;
+                *degree.entry(e.node_b).or_insert(0) += 1;
+            }
+            for (&node, &deg) in &degree {
+                if deg == 1
+                    && node != *plate_node
+                    && node != *cathode_node
+                    && node != injection_node
+                {
+                    ground_terminal = node;
                     break;
                 }
             }
         }
 
-        // Ground terminal for push-pull halves.
-        let mut ground_terminal = graph.gnd_node;
-        for &eidx in &cathode_passives {
-            let e = &graph.edges[eidx];
-            let far = if e.node_a == *cathode_node { e.node_b } else { e.node_a };
-            if far != *plate_node && far != injection_node {
-                ground_terminal = far;
-                break;
-            }
-        }
-
         let source_node = graph.edges.len() + 5000;
 
+        let model = super::helpers::triode_model(model_name);
+        // For standard triodes, compensation scales by mu (e.g. 12AX7 mu=100 → 1.0).
+        // For vari_mu tubes, compensation is the input transformer's voltage gain
+        // per push-pull grid. The input transformer is not modeled as a WDF stage
+        // (it's a passive coupling network), so its gain is folded into the
+        // compensation factor here.
         let compensation = if *is_vari_mu {
-            0.35
+            find_input_transformer_gain_pp(graph, classified)
         } else {
-            let model = super::helpers::triode_model(model_name);
             model.mu / 100.0
         };
 
@@ -276,7 +308,7 @@ pub(super) fn plan_push_pull_half(
             virtual_edge: Some(VirtualEdge {
                 node_a: *plate_node,
                 node_b: *cathode_node,
-                resistance: 62500.0,
+                resistance: model.rp,
                 name: "__triode_rp__",
             }),
 
@@ -596,6 +628,15 @@ fn plan_bjt_stage(
 
     let source_node = graph.edges.len() + source_node_offset;
 
+    // Compute r_ce from Early voltage: r_ce = Va / Ic at quiescent Ic ≈ 1mA.
+    let r_ce = match &elem.kind {
+        NonlinearKind::BjtNpn { model_name, .. } | NonlinearKind::BjtPnp { model_name, .. } => {
+            let model = crate::elements::BjtModel::by_name(model_name);
+            model.va * 1000.0 // Va / 1mA
+        }
+        _ => 50000.0, // Fallback
+    };
+
     Some(StagePlan {
         passive_idxs,
         injection_node,
@@ -604,7 +645,7 @@ fn plan_bjt_stage(
         virtual_edge: Some(VirtualEdge {
             node_a: collector_node,
             node_b: emitter_node,
-            resistance: 50000.0, // BJT r_ce ≈ 50kΩ
+            resistance: r_ce,
             name: "__bjt_rce__",
         }),
         skip_vs: false,
@@ -730,16 +771,13 @@ fn plan_triode_stage(
         }
     };
 
-    // Compensation from triode mu.
-    let compensation = if let NonlinearKind::Triode { model_name, is_vari_mu, .. } = &elem.kind {
-        if *is_vari_mu {
-            0.35
-        } else {
-            let model = super::helpers::triode_model(model_name);
-            model.mu / 100.0
-        }
+    // Compensation and plate resistance from triode model.
+    let (compensation, rp) = if let NonlinearKind::Triode { model_name, is_vari_mu, .. } = &elem.kind {
+        let model = super::helpers::triode_model(model_name);
+        let comp = if *is_vari_mu { 0.35 } else { model.mu / 100.0 };
+        (comp, model.rp)
     } else {
-        1.0
+        (1.0, 62500.0)
     };
 
     let source_node = graph.edges.len() + source_node_offset;
@@ -752,7 +790,7 @@ fn plan_triode_stage(
         virtual_edge: Some(VirtualEdge {
             node_a: plate_node,
             node_b: cathode_node,
-            resistance: 62500.0, // 12AX7 plate resistance
+            resistance: rp,
             name: "__triode_rp__",
         }),
         skip_vs: false,
@@ -773,6 +811,54 @@ fn extend_dedup(dst: &mut Vec<usize>, src: &[usize]) {
             dst.push(idx);
         }
     }
+}
+
+/// Find the input transformer voltage gain for a push-pull pair.
+///
+/// Scans the circuit for Standard-winding (non-CT/PushPull) transformers
+/// that are on the audio input path (not in the sidechain). Returns the
+/// per-grid voltage gain: `(1/turns_ratio) / 2` because each push-pull
+/// grid sees half the secondary swing.
+///
+/// Falls back to 1.0 if no input transformer is found.
+fn find_input_transformer_gain_pp(
+    graph: &CircuitGraph,
+    classified: &ClassifiedCircuit,
+) -> f64 {
+    let mut best_gain = None;
+    let mut best_dist = usize::MAX;
+
+    for (_edge_idx, edge) in graph.edges.iter().enumerate() {
+        let comp = &graph.components[edge.comp_idx];
+        if let ComponentKind::Transformer(cfg) = &comp.kind {
+            // Skip output transformers (CT or PushPull primary).
+            if matches!(cfg.primary_type, WindingType::CenterTap | WindingType::PushPull) {
+                continue;
+            }
+
+            // Pick the Standard transformer closest to the input.
+            // Distance-based selection naturally prefers the input transformer
+            // over sidechain transformers (which are further from input).
+            let dist_a = classified.dist_from_in.get(&edge.node_a).copied().unwrap_or(usize::MAX);
+            let dist_b = classified.dist_from_in.get(&edge.node_b).copied().unwrap_or(usize::MAX);
+            let min_dist = dist_a.min(dist_b);
+
+            if min_dist < best_dist {
+                best_dist = min_dist;
+                // Voltage gain = Ns/Np = 1/turns_ratio.
+                // Push-pull halving: each grid sees half the secondary.
+                best_gain = Some((1.0 / cfg.turns_ratio) / 2.0);
+
+                #[cfg(feature = "debug-trace")]
+                eprintln!(
+                    "[TX-COMP] input transformer: id={} ratio={:.4} gain={:.2} dist={min_dist}",
+                    comp.id, cfg.turns_ratio, best_gain.unwrap(),
+                );
+            }
+        }
+    }
+
+    best_gain.unwrap_or(1.0)
 }
 
 /// Find the best injection node for the voltage source.

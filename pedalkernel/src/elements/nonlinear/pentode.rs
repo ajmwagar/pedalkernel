@@ -51,6 +51,10 @@ pub struct PentodeModel {
     /// Screen current scaling factor (KG2). Reserved for future screen
     /// current modeling (requires separate WDF current source).
     pub kg2: f64,
+    /// Plate resistance at typical operating point (Ω).
+    /// Used as virtual resistance in WDF tree construction.
+    /// Power pentodes: 15k–50kΩ. Signal pentodes (EF86): ~2.5MΩ.
+    pub rp: f64,
 }
 
 impl PentodeModel {
@@ -79,6 +83,7 @@ impl From<&SpicePentodeModel> for PentodeModel {
             vg2_default: spice.vg2_default,
             kg1: spice.kg1,
             kg2: spice.kg2,
+            rp: spice.rp,
         }
     }
 }

@@ -112,6 +112,12 @@ pub(super) fn build_push_pull_stages(
             if let (Some((push_tree, push_comp)), Some((pull_tree, _))) = (push_half, pull_half) {
                 let (push_root, pull_root) = build_push_pull_roots(push_elem, pull_elem);
 
+                // Determine grid bias from tube type.
+                // Variable-mu (6386): -7.2V per Raffensperger's wavechild670 model.
+                // Standard triodes: -2.0V (class A/AB operation).
+                let is_vari_mu = matches!(&push_root, TubeRoot::VariMu(_));
+                let grid_bias = if is_vari_mu { -7.2 } else { -2.0 };
+
                 stages.push(PushPullStage {
                     push_tree,
                     pull_tree,
@@ -121,8 +127,9 @@ pub(super) fn build_push_pull_stages(
                     pull_oversampler: Oversampler::new(oversampling),
                     compensation: push_comp,
                     turns_ratio: pp_plan.turns_ratio,
-                    grid_bias: -2.0,
+                    grid_bias,
                     cathode_delay_state: 0.0,
+                    is_ct_primary: pp_plan.is_ct_primary,
                 });
             }
         }

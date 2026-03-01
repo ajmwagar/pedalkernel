@@ -19,6 +19,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
+use crate::models;
 
 /// Severity of a validation warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +70,8 @@ pub fn validate_pedal(pedal: &PedalDef) -> Vec<PedalWarning> {
     check_modulation_targets(pedal, &mut warnings);
     check_supply_config(pedal, &mut warnings);
     check_monitor_references(pedal, &mut warnings);
+    check_model_names(pedal, &mut warnings);
+    check_mirrors(pedal, &mut warnings);
 
     warnings
 }
@@ -1085,6 +1088,274 @@ fn check_monitor_references(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     }
 }
 
+/// Check mirrored pot declarations.
+///
+/// Validates:
+/// - Mirror target exists and is a potentiometer
+/// - No mirror chains (A mirrors B mirrors C)
+/// - Mirrored pots do not appear in the controls block
+/// - Warns if mirrored and source pots have different resistances
+fn check_mirrors(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
+    let comp_map: HashMap<&str, &ComponentKind> = pedal
+        .components
+        .iter()
+        .map(|c| (c.id.as_str(), &c.kind))
+        .collect();
+
+    for (mirrored_id, source_id) in &pedal.mirrors {
+        // 1. Source must exist
+        let Some(source_kind) = comp_map.get(source_id.as_str()) else {
+            w.push(PedalWarning {
+                severity: Severity::Error,
+                code: "mirror-target-missing",
+                message: format!(
+                    "Mirrored pot '{}' references '{}' which is not declared",
+                    mirrored_id, source_id
+                ),
+            });
+            continue;
+        };
+
+        // 2. Source must be a potentiometer
+        if !matches!(source_kind, ComponentKind::Potentiometer(_, _)) {
+            w.push(PedalWarning {
+                severity: Severity::Error,
+                code: "mirror-target-not-pot",
+                message: format!(
+                    "Mirrored pot '{}' references '{}' which is a {}, not a potentiometer",
+                    mirrored_id, source_id, component_type_name(source_kind)
+                ),
+            });
+            continue;
+        }
+
+        // 3. Mirrored component must itself be a pot
+        if let Some(mirrored_kind) = comp_map.get(mirrored_id.as_str()) {
+            if !matches!(mirrored_kind, ComponentKind::Potentiometer(_, _)) {
+                w.push(PedalWarning {
+                    severity: Severity::Error,
+                    code: "mirror-not-pot",
+                    message: format!(
+                        "'{}' uses `mirrors` but is a {}, not a potentiometer",
+                        mirrored_id, component_type_name(mirrored_kind)
+                    ),
+                });
+            }
+        }
+
+        // 4. No chains: source must not itself be mirrored
+        if pedal.mirrors.contains_key(source_id) {
+            w.push(PedalWarning {
+                severity: Severity::Error,
+                code: "mirror-chain",
+                message: format!(
+                    "'{}' mirrors '{}' which itself mirrors '{}' — mirror chains are not allowed",
+                    mirrored_id,
+                    source_id,
+                    pedal.mirrors.get(source_id).unwrap()
+                ),
+            });
+        }
+
+        // 5. Mirrored pot must not appear in controls
+        if pedal.controls.iter().any(|c| c.component == *mirrored_id) {
+            w.push(PedalWarning {
+                severity: Severity::Error,
+                code: "mirror-in-controls",
+                message: format!(
+                    "Mirrored pot '{}' must not appear in the controls block — \
+                     its position is derived from '{}'",
+                    mirrored_id, source_id
+                ),
+            });
+        }
+
+        // 6. Warn if resistances differ
+        if let (Some(ComponentKind::Potentiometer(r_mirrored, _)), Some(ComponentKind::Potentiometer(r_source, _))) =
+            (comp_map.get(mirrored_id.as_str()), comp_map.get(source_id.as_str()))
+        {
+            if (r_mirrored - r_source).abs() > f64::EPSILON {
+                w.push(PedalWarning {
+                    severity: Severity::Warning,
+                    code: "mirror-resistance-mismatch",
+                    message: format!(
+                        "Mirrored pot '{}' ({:.0} Ω) has different resistance than source '{}' ({:.0} Ω) — \
+                         dual-gang pots typically have matched gangs",
+                        mirrored_id, r_mirrored, source_id, r_source
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// Check that SPICE model names referenced by components actually exist in
+/// the model registry. Emits `"unknown-model"` errors with suggestions for
+/// near-matches.
+fn check_model_names(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
+    for comp in &pedal.components {
+        let (name, kind_label, lookup, all_names): (
+            &str,
+            &str,
+            fn(&str) -> bool,
+            fn() -> Vec<&'static str>,
+        ) = match &comp.kind {
+            ComponentKind::Npn(n) | ComponentKind::Pnp(n) => (
+                n.as_str(),
+                "BJT",
+                |n| models::bjt_by_name(n).is_some(),
+                models::bjt_model_names,
+            ),
+            ComponentKind::NJfet(n) | ComponentKind::PJfet(n) => (
+                n.as_str(),
+                "JFET",
+                |n| models::jfet_by_name(n).is_some(),
+                models::jfet_model_names,
+            ),
+            ComponentKind::Triode(n) | ComponentKind::VariMu(n) => (
+                n.as_str(),
+                "triode",
+                |n| models::triode_by_name(n).is_some(),
+                models::triode_model_names,
+            ),
+            ComponentKind::Pentode(n) => (
+                n.as_str(),
+                "pentode",
+                |n| models::pentode_by_name(n).is_some(),
+                models::pentode_model_names,
+            ),
+            _ => continue,
+        };
+
+        if !lookup(name) {
+            let available = all_names();
+            let suggestions = find_similar_names(name, &available, 3);
+            let suggestion_text = if suggestions.is_empty() {
+                String::new()
+            } else {
+                format!(". Did you mean: {}?", suggestions.join(", "))
+            };
+            w.push(PedalWarning {
+                severity: Severity::Error,
+                code: "unknown-model",
+                message: format!(
+                    "Component '{}' references unknown {} model '{}'{} ({} models available)",
+                    comp.id, kind_label, name, suggestion_text, available.len()
+                ),
+            });
+        }
+    }
+}
+
+/// Find model names similar to `query` using case-insensitive edit distance.
+/// Returns up to `max` suggestions sorted by distance.
+fn find_similar_names<'a>(query: &str, candidates: &[&'a str], max: usize) -> Vec<&'a str> {
+    let query_upper = query.to_uppercase();
+    let mut scored: Vec<(&str, usize)> = candidates
+        .iter()
+        .filter_map(|&candidate| {
+            let dist = edit_distance(&query_upper, &candidate.to_uppercase());
+            // Only suggest if reasonably close (within half the query length + 2)
+            let threshold = query_upper.len() / 2 + 2;
+            if dist <= threshold {
+                Some((candidate, dist))
+            } else {
+                None
+            }
+        })
+        .collect();
+    scored.sort_by_key(|&(_, d)| d);
+    scored.into_iter().take(max).map(|(name, _)| name).collect()
+}
+
+/// Simple Levenshtein edit distance.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 0..=m {
+        dp[i][0] = i;
+    }
+    for j in 0..=n {
+        dp[0][j] = j;
+    }
+    for i in 1..=m {
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            dp[i][j] = (dp[i - 1][j] + 1)
+                .min(dp[i][j - 1] + 1)
+                .min(dp[i - 1][j - 1] + cost);
+        }
+    }
+    dp[m][n]
+}
+
+/// Validate `.pedal` files for use in build scripts.
+///
+/// Reads each file, parses it, runs full validation, and prints
+/// `cargo::warning=` directives. Panics (failing the build) if any
+/// errors are found.
+///
+/// Call this from your crate's `build.rs`:
+/// ```no_run
+/// // build.rs
+/// fn main() {
+///     pedalkernel::compiler::validate_pedal_files(&[
+///         "pedals/my_overdrive.pedal",
+///         "pedals/my_phaser.pedal",
+///     ]);
+/// }
+/// ```
+pub fn validate_pedal_files(paths: &[&str]) {
+    // Re-run if any model file changes
+    for model_file in [
+        "models/transistors.model",
+        "models/jfets.model",
+        "models/triodes.model",
+        "models/pentodes.model",
+        "models/diodes.model",
+        "models/leds.model",
+        "models/schottky.model",
+        "models/zeners.model",
+    ] {
+        println!("cargo:rerun-if-changed={model_file}");
+    }
+
+    let mut all_errors = Vec::new();
+
+    for path in paths {
+        println!("cargo:rerun-if-changed={path}");
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("Cannot read {path}: {e}"));
+        let pedal = crate::dsl::parse_pedal_file(&src)
+            .unwrap_or_else(|e| panic!("{path}: parse error: {e}"));
+        let warnings = validate_pedal(&pedal);
+        for w in &warnings {
+            match w.severity {
+                Severity::Error => {
+                    println!("cargo::warning={path}: error[{}]: {}", w.code, w.message);
+                    all_errors.push(format!("{path}: {w}"));
+                }
+                Severity::Warning => {
+                    println!("cargo::warning={path}: warn[{}]: {}", w.code, w.message);
+                }
+                Severity::Info => {
+                    println!("cargo::warning={path}: info[{}]: {}", w.code, w.message);
+                }
+            }
+        }
+    }
+
+    if !all_errors.is_empty() {
+        panic!(
+            "\n{} .pedal validation error(s):\n  {}\n",
+            all_errors.len(),
+            all_errors.join("\n  ")
+        );
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1124,6 +1395,7 @@ mod tests {
             trims: vec![],
             monitors: vec![],
             sidechains: vec![],
+            mirrors: std::collections::HashMap::new(),
         }
     }
 
@@ -1262,6 +1534,7 @@ mod tests {
             trims: vec![],
             monitors: vec![],
             sidechains: vec![],
+            mirrors: std::collections::HashMap::new(),
         };
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "no-signal-path"));
@@ -1586,5 +1859,339 @@ mod tests {
             }
             eprintln!("\n=== {} warnings across {} files ===\n", total, results.len());
         }
+    }
+
+    // ── Model name validation tests ─────────────────────────────────────
+
+    #[test]
+    fn valid_bjt_model_name_no_warning() {
+        let mut pedal = minimal_pedal();
+        pedal.components.push(ComponentDef {
+            id: "Q1".to_string(),
+            kind: ComponentKind::Npn("2N3904".to_string()),
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "Q1".to_string(),
+                pin: "collector".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "Q1".to_string(),
+                pin: "emitter".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "Q1".to_string(),
+                pin: "base".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            !has_code(&warnings, "unknown-model"),
+            "Valid BJT '2N3904' should not trigger unknown-model: {:?}",
+            warnings_with_code(&warnings, "unknown-model")
+        );
+    }
+
+    #[test]
+    fn invalid_bjt_model_name_emits_error() {
+        let mut pedal = minimal_pedal();
+        pedal.components.push(ComponentDef {
+            id: "Q1".to_string(),
+            kind: ComponentKind::Npn("2N3904X".to_string()),
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "Q1".to_string(),
+                pin: "collector".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "Q1".to_string(),
+                pin: "emitter".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "Q1".to_string(),
+                pin: "base".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        let model_errors = warnings_with_code(&warnings, "unknown-model");
+        assert!(
+            !model_errors.is_empty(),
+            "Invalid BJT '2N3904X' should emit unknown-model error"
+        );
+        assert_eq!(model_errors[0].severity, Severity::Error);
+        // Should suggest the real model name
+        assert!(
+            model_errors[0].message.contains("2N3904"),
+            "Should suggest '2N3904', got: {}",
+            model_errors[0].message
+        );
+    }
+
+    #[test]
+    fn valid_triode_model_name_no_warning() {
+        let mut pedal = minimal_pedal();
+        pedal.components.push(ComponentDef {
+            id: "V1".to_string(),
+            kind: ComponentKind::Triode("12AX7".to_string()),
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "V1".to_string(),
+                pin: "plate".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "V1".to_string(),
+                pin: "cathode".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            !has_code(&warnings, "unknown-model"),
+            "Valid triode '12AX7' should not trigger unknown-model: {:?}",
+            warnings_with_code(&warnings, "unknown-model")
+        );
+    }
+
+    #[test]
+    fn invalid_jfet_model_name_emits_error() {
+        let mut pedal = minimal_pedal();
+        pedal.components.push(ComponentDef {
+            id: "J1".to_string(),
+            kind: ComponentKind::NJfet("NOTREAL".to_string()),
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "J1".to_string(),
+                pin: "drain".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "J1".to_string(),
+                pin: "source".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            has_code(&warnings, "unknown-model"),
+            "Invalid JFET 'NOTREAL' should emit unknown-model error"
+        );
+    }
+
+    #[test]
+    fn invalid_pentode_model_name_emits_error() {
+        let mut pedal = minimal_pedal();
+        pedal.components.push(ComponentDef {
+            id: "V1".to_string(),
+            kind: ComponentKind::Pentode("FAKETUBE".to_string()),
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "V1".to_string(),
+                pin: "plate".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "V1".to_string(),
+                pin: "cathode".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            has_code(&warnings, "unknown-model"),
+            "Invalid pentode 'FAKETUBE' should emit unknown-model error"
+        );
+    }
+
+    #[test]
+    fn edit_distance_basic() {
+        assert_eq!(super::edit_distance("abc", "abc"), 0);
+        assert_eq!(super::edit_distance("abc", "abd"), 1);
+        assert_eq!(super::edit_distance("", "abc"), 3);
+        assert_eq!(super::edit_distance("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn find_similar_names_suggests_close_matches() {
+        let candidates = ["2N3904", "2N3906", "BC184C", "2N5088"];
+        let suggestions = super::find_similar_names("2N3904X", &candidates, 3);
+        assert!(
+            suggestions.contains(&"2N3904"),
+            "Should suggest '2N3904' for '2N3904X', got: {:?}",
+            suggestions
+        );
+    }
+
+    // ── Mirror validation tests ─────────────────────────────────────
+
+    fn dual_gang_pedal() -> PedalDef {
+        let mut pedal = minimal_pedal();
+        pedal.components.push(ComponentDef {
+            id: "Gain_A".to_string(),
+            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+        });
+        pedal.components.push(ComponentDef {
+            id: "Gain_B".to_string(),
+            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+        });
+        // Wire pots into the circuit
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "Gain_A".to_string(),
+                pin: "a".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "Gain_B".to_string(),
+                pin: "a".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.mirrors.insert("Gain_B".to_string(), "Gain_A".to_string());
+        pedal
+    }
+
+    #[test]
+    fn valid_mirror_no_errors() {
+        let pedal = dual_gang_pedal();
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            !has_code(&warnings, "mirror-target-missing"),
+            "Valid mirror should not trigger errors: {:?}",
+            warnings_with_code(&warnings, "mirror-target-missing")
+        );
+        assert!(!has_code(&warnings, "mirror-target-not-pot"));
+        assert!(!has_code(&warnings, "mirror-chain"));
+        assert!(!has_code(&warnings, "mirror-in-controls"));
+    }
+
+    #[test]
+    fn mirror_target_missing() {
+        let mut pedal = minimal_pedal();
+        pedal.mirrors.insert("Gain_B".to_string(), "NONEXISTENT".to_string());
+        pedal.components.push(ComponentDef {
+            id: "Gain_B".to_string(),
+            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "Gain_B".to_string(),
+                pin: "a".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(has_code(&warnings, "mirror-target-missing"));
+    }
+
+    #[test]
+    fn mirror_target_not_pot() {
+        let mut pedal = minimal_pedal();
+        // R1 exists but is a resistor, not a pot
+        pedal.mirrors.insert("P1".to_string(), "R1".to_string());
+        pedal.components.push(ComponentDef {
+            id: "P1".to_string(),
+            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "P1".to_string(),
+                pin: "a".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(has_code(&warnings, "mirror-target-not-pot"));
+    }
+
+    #[test]
+    fn mirror_chain_not_allowed() {
+        let mut pedal = dual_gang_pedal();
+        // Add a third pot that mirrors Gain_B (which itself mirrors Gain_A)
+        pedal.components.push(ComponentDef {
+            id: "Gain_C".to_string(),
+            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "Gain_C".to_string(),
+                pin: "a".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.mirrors.insert("Gain_C".to_string(), "Gain_B".to_string());
+        let warnings = validate_pedal(&pedal);
+        assert!(has_code(&warnings, "mirror-chain"));
+    }
+
+    #[test]
+    fn mirrored_pot_in_controls_is_error() {
+        let mut pedal = dual_gang_pedal();
+        // Add Gain_B to controls — this should be an error
+        pedal.controls.push(ControlDef {
+            component: "Gain_B".to_string(),
+            property: "position".to_string(),
+            label: "Gain B".to_string(),
+            range: (0.0, 1.0),
+            default: 0.5,
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(has_code(&warnings, "mirror-in-controls"));
+    }
+
+    #[test]
+    fn mirror_resistance_mismatch_warns() {
+        let mut pedal = minimal_pedal();
+        pedal.components.push(ComponentDef {
+            id: "P_A".to_string(),
+            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+        });
+        pedal.components.push(ComponentDef {
+            id: "P_B".to_string(),
+            kind: ComponentKind::Potentiometer(50_000.0, PotTaper::B), // different!
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "P_A".to_string(),
+                pin: "a".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "P_B".to_string(),
+                pin: "a".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.mirrors.insert("P_B".to_string(), "P_A".to_string());
+        let warnings = validate_pedal(&pedal);
+        assert!(has_code(&warnings, "mirror-resistance-mismatch"));
     }
 }

@@ -274,7 +274,7 @@ impl ShockleyDiodeModel {
 
 /// A parsed triode tube model with Koren equation parameters.
 ///
-/// Format: `.TRIODE <name> MU= EX= KG1= KP= KVB=`
+/// Format: `.TRIODE <name> MU= EX= KG1= KP= KVB= RP=`
 #[derive(Debug, Clone)]
 pub struct SpiceTriodeModel {
     pub name: String,
@@ -288,6 +288,9 @@ pub struct SpiceTriodeModel {
     pub kp: f64,
     /// Knee voltage constant (V)
     pub kvb: f64,
+    /// Plate resistance at typical operating point (Ω). Datasheet rp.
+    /// 12AX7 ≈ 62.5kΩ, 12AU7 ≈ 7.7kΩ, 12AT7 ≈ 10.9kΩ.
+    pub rp: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +299,7 @@ pub struct SpiceTriodeModel {
 
 /// A parsed pentode tube model with screen-referenced Koren equation parameters.
 ///
-/// Format: `.PENTODE <name> MU= EX= KG1= KG2= KP= KVB= KVB2= VG2=`
+/// Format: `.PENTODE <name> MU= EX= KG1= KG2= KP= KVB= KVB2= VG2= RP=`
 #[derive(Debug, Clone)]
 pub struct SpicePentodeModel {
     pub name: String,
@@ -316,6 +319,9 @@ pub struct SpicePentodeModel {
     pub kvb2: f64,
     /// Default screen grid voltage (V) for typical operating point
     pub vg2_default: f64,
+    /// Plate resistance at typical operating point (Ω). Datasheet rp.
+    /// Power pentodes: 15k–50kΩ. Signal pentodes (EF86): ~2.5MΩ.
+    pub rp: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -659,7 +665,7 @@ fn parse_triode_models(src: &str) -> HashMap<String, SpiceTriodeModel> {
     models
 }
 
-/// Parse a single `.TRIODE <name> MU= EX= KG1= KP= KVB=` line.
+/// Parse a single `.TRIODE <name> MU= EX= KG1= KP= KVB= RP=` line.
 fn parse_triode_model_line(line: &str) -> Option<SpiceTriodeModel> {
     // Strip ".TRIODE" prefix
     let rest = line[7..].trim_start();
@@ -670,6 +676,7 @@ fn parse_triode_model_line(line: &str) -> Option<SpiceTriodeModel> {
     let mut kg1 = 1060.0;
     let mut kp = 600.0;
     let mut kvb = 300.0;
+    let mut rp = 62500.0; // Default: 12AX7 plate resistance
 
     for pair in params.split_whitespace() {
         if let Some((key, val_str)) = pair.split_once('=') {
@@ -681,6 +688,7 @@ fn parse_triode_model_line(line: &str) -> Option<SpiceTriodeModel> {
                     "KG1" => kg1 = val,
                     "KP" => kp = val,
                     "KVB" => kvb = val,
+                    "RP" => rp = val,
                     _ => {}
                 }
             }
@@ -694,6 +702,7 @@ fn parse_triode_model_line(line: &str) -> Option<SpiceTriodeModel> {
         kg1,
         kp,
         kvb,
+        rp,
     })
 }
 
@@ -724,7 +733,7 @@ fn parse_pentode_models(src: &str) -> HashMap<String, SpicePentodeModel> {
     models
 }
 
-/// Parse a single `.PENTODE <name> MU= EX= KG1= KG2= KP= KVB= KVB2= VG2=` line.
+/// Parse a single `.PENTODE <name> MU= EX= KG1= KG2= KP= KVB= KVB2= VG2= RP=` line.
 fn parse_pentode_model_line(line: &str) -> Option<SpicePentodeModel> {
     // Strip ".PENTODE" prefix
     let rest = line[8..].trim_start();
@@ -738,6 +747,7 @@ fn parse_pentode_model_line(line: &str) -> Option<SpicePentodeModel> {
     let mut kvb = 24.0;
     let mut kvb2 = 20.0;
     let mut vg2_default = 250.0;
+    let mut rp = 50000.0; // Default: mid-range power pentode
 
     for pair in params.split_whitespace() {
         if let Some((key, val_str)) = pair.split_once('=') {
@@ -752,6 +762,7 @@ fn parse_pentode_model_line(line: &str) -> Option<SpicePentodeModel> {
                     "KVB" => kvb = val,
                     "KVB2" => kvb2 = val,
                     "VG2" => vg2_default = val,
+                    "RP" => rp = val,
                     _ => {}
                 }
             }
@@ -768,6 +779,7 @@ fn parse_pentode_model_line(line: &str) -> Option<SpicePentodeModel> {
         kvb,
         kvb2,
         vg2_default,
+        rp,
     })
 }
 

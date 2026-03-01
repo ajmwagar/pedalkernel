@@ -7,10 +7,22 @@ use crate::PedalProcessor;
 use super::dyn_node::DynNode;
 use super::helpers::balance_parallel_vs;
 
+#[cfg(feature = "debug-trace")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Count of traced push-pull samples. Only active with `debug-trace` feature.
+#[cfg(feature = "debug-trace")]
+static TRACE_COUNT_PP: AtomicU64 = AtomicU64::new(0);
+
+/// Max push-pull samples to trace (only non-zero signals are counted).
+#[cfg(feature = "debug-trace")]
+const MAX_TRACE_PP: u64 = 10;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // WDF clipping stage
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 pub(super) enum RootKind {
     DiodePair(DiodePairRoot),
     SingleDiode(DiodeRoot),
@@ -440,6 +452,7 @@ impl WdfStage {
     }
 
     /// Get the current gate-source voltage if this is a JFET stage.
+    #[allow(dead_code)]
     pub fn jfet_vgs(&self) -> Option<f64> {
         match &self.root {
             RootKind::Jfet(j) => Some(j.vgs()),
@@ -459,6 +472,7 @@ impl WdfStage {
     }
 
     /// Get the current grid-cathode voltage if this is a triode stage.
+    #[allow(dead_code)]
     pub fn triode_vgk(&self) -> Option<f64> {
         match &self.root {
             RootKind::Triode(t) => Some(t.vgk()),
@@ -475,6 +489,7 @@ impl WdfStage {
     }
 
     /// Get the current grid-cathode voltage if this is a variable-mu triode stage.
+    #[allow(dead_code)]
     pub fn vari_mu_vgk(&self) -> Option<f64> {
         match &self.root {
             RootKind::VariMu(t) => Some(t.vgk()),
@@ -491,6 +506,7 @@ impl WdfStage {
     }
 
     /// Set the screen grid voltage (g2-cathode) for pentode root elements.
+    #[allow(dead_code)]
     #[inline]
     pub fn set_pentode_vg2k(&mut self, vg2k: f64) {
         if let RootKind::Pentode(p) = &mut self.root {
@@ -499,6 +515,7 @@ impl WdfStage {
     }
 
     /// Get the current control grid voltage if this is a pentode stage.
+    #[allow(dead_code)]
     pub fn pentode_vg1k(&self) -> Option<f64> {
         match &self.root {
             RootKind::Pentode(p) => Some(p.vg1k()),
@@ -515,6 +532,7 @@ impl WdfStage {
     }
 
     /// Get the current gate-source voltage if this is a MOSFET stage.
+    #[allow(dead_code)]
     pub fn mosfet_vgs(&self) -> Option<f64> {
         match &self.root {
             RootKind::Mosfet(m) => Some(m.vgs()),
@@ -523,6 +541,7 @@ impl WdfStage {
     }
 
     /// Set the OTA bias current (for envelope-controlled gain).
+    #[allow(dead_code)]
     #[inline]
     pub fn set_ota_iabc(&mut self, iabc: f64) {
         if let RootKind::Ota(o) = &mut self.root {
@@ -542,6 +561,7 @@ impl WdfStage {
     ///
     /// For unity-gain buffers, the op-amp output will follow this voltage.
     /// Has no effect if the root is not an op-amp.
+    #[allow(dead_code)]
     #[inline]
     pub fn set_opamp_vp(&mut self, vp: f64) {
         if let RootKind::OpAmp(op) = &mut self.root {
@@ -550,6 +570,7 @@ impl WdfStage {
     }
 
     /// Get the current non-inverting input voltage if this is an op-amp stage.
+    #[allow(dead_code)]
     pub fn opamp_vp(&self) -> Option<f64> {
         match &self.root {
             RootKind::OpAmp(op) => Some(op.vp()),
@@ -561,6 +582,7 @@ impl WdfStage {
     ///
     /// - `ratio = 1.0`: Unity-gain buffer (Vm = Vout)
     /// - `ratio < 1.0`: Gain stage with feedback network
+    #[allow(dead_code)]
     #[inline]
     pub fn set_opamp_feedback(&mut self, ratio: f64, vm_external: f64) {
         if let RootKind::OpAmp(op) = &mut self.root {
@@ -597,6 +619,7 @@ impl WdfStage {
     }
 
     /// Get the current gain if this is an op-amp gain stage.
+    #[allow(dead_code)]
     pub fn opamp_gain(&self) -> Option<f64> {
         match &self.root {
             RootKind::OpAmp(op) => Some(op.gain()),
@@ -733,6 +756,10 @@ pub(super) struct PushPullStage {
     /// Cathode coupling state (1-sample delay between push and pull cathodes).
     /// Stores the previous sample's cathode voltage difference.
     pub(super) cathode_delay_state: f64,
+    /// Whether the transformer primary is center-tapped.
+    /// When true, each tube drives half the primary, so the effective
+    /// per-tube turns ratio is `turns_ratio / 2`.
+    pub(super) is_ct_primary: bool,
 }
 
 impl PushPullStage {
@@ -745,8 +772,10 @@ impl PushPullStage {
         let bias = self.grid_bias;
 
         // Push: positive phase, Pull: negative phase
-        self.push_root.set_vgk(bias + input * comp);
-        self.pull_root.set_vgk(bias - input * comp);
+        let vgk_push = bias + input * comp;
+        let vgk_pull = bias - input * comp;
+        self.push_root.set_vgk(vgk_push);
+        self.pull_root.set_vgk(vgk_pull);
 
         let push_out = self.push_oversampler.process(input, |_| {
             let vs = self.push_root.v_max();
@@ -775,16 +804,52 @@ impl PushPullStage {
         self.cathode_delay_state = cathode_diff;
 
         // Differential output: push - pull, scaled by transformer turns ratio.
-        // The CT transformer combines push and pull; step-down reduces voltage.
+        // For a center-tapped primary, each tube drives half the primary winding,
+        // so the effective per-tube ratio is turns_ratio/2 (e.g., 9:1 CT → 4.5:1).
+        // This matches wavechild670's model where each push/pull half has its own
+        // transformer at half the total turns ratio.
         let diff = push_out - pull_out;
         let coupled = diff * 0.5 + prev * 0.5; // Low-pass blend with delay
-        coupled / self.turns_ratio
+        let effective_ratio = if self.is_ct_primary {
+            self.turns_ratio / 2.0
+        } else {
+            self.turns_ratio
+        };
+        let output = coupled / effective_ratio;
+
+        #[cfg(feature = "debug-trace")]
+        if input.abs() > 1e-10 {
+            let n = TRACE_COUNT_PP.fetch_add(1, Ordering::Relaxed);
+            if n < MAX_TRACE_PP {
+                let push_rp = self.push_tree.port_resistance();
+                let push_vs = self.push_root.v_max();
+                eprintln!(
+                    "[PP n={n}] in={input:.6e} comp={comp:.4} bias={bias:.2} \
+                     vgk_push={vgk_push:.4} vgk_pull={vgk_pull:.4} \
+                     vs={push_vs:.1} rp={push_rp:.1}"
+                );
+                eprintln!(
+                    "  push_out={push_out:.6e} pull_out={pull_out:.6e} \
+                     diff={diff:.6e} coupled={coupled:.6e} \
+                     eff_ratio={effective_ratio:.2} out={output:.6e}"
+                );
+            }
+        }
+
+        output
     }
 
     pub fn debug_dump(&self) -> String {
+        let effective_ratio = if self.is_ct_primary {
+            self.turns_ratio / 2.0
+        } else {
+            self.turns_ratio
+        };
         format!(
-            "PushPullStage(ratio={:.1}:1, bias={:.1}V, push_par={}, pull_par={}, comp={:.4})\n  Push: rp={:.1}Ω, nodes={}\n  Pull: rp={:.1}Ω, nodes={}",
+            "PushPullStage(ratio={:.1}:1{}, eff_ratio={:.1}:1, bias={:.1}V, push_par={}, pull_par={}, comp={:.4})\n  Push: rp={:.1}Ω, nodes={}\n  Pull: rp={:.1}Ω, nodes={}",
             self.turns_ratio,
+            if self.is_ct_primary { " CT" } else { "" },
+            effective_ratio,
             self.grid_bias,
             self.push_root.parallel_count(),
             self.pull_root.parallel_count(),

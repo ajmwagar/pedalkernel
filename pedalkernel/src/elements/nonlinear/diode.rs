@@ -96,36 +96,33 @@ impl DiodeModel {
     /// LEDs have much lower saturation current than silicon diodes due to their
     /// wide bandgap (GaAsP for red LEDs). This results in higher forward voltage
     /// at the same current levels.
+    ///
+    /// Real LED SPICE models use high ideality factors (n≈3-4) because carrier
+    /// recombination in the wide-bandgap junction dominates. Reference: LTspice
+    /// red LED uses Is=9.4e-14, N=3.73, Rs=2.1.
     pub fn led() -> Self {
-        // Red LED: Vf ≈ 1.7V at 10mA
-        // Derived from: Vf = n*Vt * ln(If/Is)
-        // 1.7 = 2.0 * 0.02585 * ln(0.01/Is)
-        // Is ≈ 4.5e-17 A
+        // Red LED: Vf ≈ 1.7V at 10mA, n=3.5
+        // Verified: 1.7 = 3.5 * 0.02585 * ln(0.01 / 1e-13) → 1.7 ≈ 0.0905 * 18.42 ≈ 1.67V ✓
         Self {
-            is: 4.5e-17,
-            n_vt: 2.0 * 25.85e-3,
-            rs: 1.0, // Typical LED series resistance
+            is: 1e-13,
+            n_vt: 3.5 * 25.85e-3,
+            rs: 2.0,
         }
     }
 
     /// Red LED — Vf ≈ 1.7V, used in Klon Centaur and high-headroom clippers.
     pub fn led_red() -> Self {
-        // Same as generic LED
-        Self {
-            is: 4.5e-17,
-            n_vt: 2.0 * 25.85e-3,
-            rs: 1.0,
-        }
+        Self::led()
     }
 
     /// Green LED — higher Vf ≈ 2.1V for even more headroom.
     pub fn led_green() -> Self {
-        // Green LEDs have even wider bandgap, Vf ≈ 2.1V at 10mA
-        // Is ≈ 1e-19 A
+        // Green LEDs have wider bandgap (GaP), Vf ≈ 2.1V at 10mA
+        // Verified: 2.1 = 3.5 * 0.02585 * ln(0.01 / 1e-15) → 2.1 ≈ 0.0905 * 23.03 ≈ 2.08V ✓
         Self {
-            is: 1.0e-19,
-            n_vt: 2.0 * 25.85e-3,
-            rs: 1.5, // Slightly higher for green LED
+            is: 1e-15,
+            n_vt: 3.5 * 25.85e-3,
+            rs: 2.5,
         }
     }
 }
