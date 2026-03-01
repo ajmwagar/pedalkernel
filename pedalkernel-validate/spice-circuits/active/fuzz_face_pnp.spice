@@ -1,0 +1,50 @@
+* ============================================================================
+* Fuzz Face PNP - Germanium Two-Transistor Fuzz
+* PedalKernel Validation Circuit
+* ============================================================================
+* Classic Arbiter Fuzz Face topology with AC128 PNP germanium transistors.
+* Q1: Common emitter with collector feedback to Q2 base
+* Q2: Common emitter gain stage with output coupling
+* PNP transistors: emitters to Vcc, collectors toward ground
+* ============================================================================
+
+* Supply voltage
+Vcc vcc 0 DC 9
+
+* Input coupling capacitor
+C1 v_in net2 2.2u
+
+* Bias resistor (R1 from ground to Vcc sets bias network)
+R1 0 vcc 33k
+
+* Q1 base to Q2 collector feedback resistor
+R2 net6 net2 8.2k
+
+* Q1 emitter resistor (to Vcc)
+R3 vcc net8 470
+
+* Q1 collector to Q2 base bias resistor
+R4 net4 net7 100k
+
+* First PNP transistor Q1 (AC128)
+* Collector at net4, base at net2, emitter at vcc
+Q1 net4 net2 vcc QAC128
+
+* Second PNP transistor Q2 (AC128)
+* Collector at net6, base at net7, emitter at net8
+Q2 net6 net7 net8 QAC128
+
+* Output coupling capacitor
+C2 net6 v_out 10u
+
+* Load resistor
+RL v_out 0 10k
+
+* AC128 PNP Germanium transistor model
+* Germanium: lower Vbe (~0.2V), higher leakage, lower beta than silicon
+.MODEL QAC128 PNP(IS=2.5e-6 BF=120 NF=1.1 VAF=50 IKF=0.1
++                 ISE=5e-9 NE=1.8 BR=3 NR=1 VAR=20 IKR=0.01
++                 ISC=1e-9 NC=1.5 RB=30 RE=0.5 RC=1.5
++                 CJE=40p VJE=0.3 MJE=0.4 CJC=25p VJC=0.4 MJC=0.35
++                 TF=500p TR=50n XTB=1.5 EG=0.67)
+

@@ -1,0 +1,51 @@
+* ============================================================================
+* Optical Attenuator - VTL5C3 Photocoupler
+* PedalKernel Validation Circuit
+* ============================================================================
+* Variable attenuator using light-dependent resistor (LDR).
+* VTL5C3 Vactrol: LED current controls LDR resistance.
+* Dark resistance ~1M, lit resistance ~1k.
+* Used in LA-2A compressor, tremolos, Uni-Vibe.
+* This test uses fixed LED current for steady-state LDR behavior.
+* ============================================================================
+
+* Supply voltage
+Vcc vcc 0 DC 9
+
+* Input coupling capacitor
+C_in v_in vin_ac 100n
+
+* Top of voltage divider
+R_top vin_ac vdiv 10k
+
+* LDR modeled as fixed resistor for this test
+* With ~5mA LED current, LDR is approximately 2k-5k ohms
+* Using behavioral model based on LED current
+Bldr vdiv 0 I = V(vdiv) / V(ldr_r)
+
+* LDR resistance calculation from LED current
+* VTL5C3 characteristic: R_ldr ≈ 1M * exp(-I_led * 500)
+* At 5mA: R ≈ 1M * exp(-2.5) ≈ 82k -> too high, use empirical
+* Simplified: R = 1k + 999k * exp(-I_led * 800)
+Bldr_r ldr_r 0 V = 1k + 999k * EXP(-I(Vled) * 800)
+
+* LED drive circuit
+* Fixed control current for this test (simulates sidechain at 50%)
+R_led vcc vled_a 1k
+Vled vled_a vldr_b DC 0  ; Current sense
+R_ctrl vldr_b 0 100k
+
+* LED forward voltage drop (modeled as diode)
+Dled vldr_b vled_c LEDMOD
+Rled_gnd vled_c 0 1
+
+* Output coupling
+C_out vdiv vout_ac 100n
+R_out vout_ac 0 10k
+
+* Output node
+Eout v_out 0 vout_ac 0 1
+
+* LED model (red LED, Vf ≈ 1.7V)
+.MODEL LEDMOD D(IS=1e-20 N=1.8 RS=5 BV=5 IBV=1u)
+

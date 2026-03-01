@@ -1,0 +1,74 @@
+* ============================================================================
+* Push-Pull 6L6GC Output Stage
+* PedalKernel Validation Circuit
+* ============================================================================
+* Class AB pentode power amplifier with push-pull topology.
+* Two 6L6GC beam tetrodes driving a center-tapped output transformer.
+* Simplified test: V1 receives signal, V2 at DC bias (half-wave test).
+* Real circuit would have phase inverter driving both grids antiphase.
+* ============================================================================
+
+* B+ supply (typical for 6L6 output stage)
+VB vb 0 DC 400
+
+* Input coupling capacitors
+C1 v_in vg1 22n
+C2 0 vg2 22n
+
+* Grid leak resistors
+Rg1 vg1 0 220k
+Rg2 vg2 0 220k
+
+* Shared cathode bias
+Rk vk 0 250
+Ck vk 0 100u
+
+* Screen grid supply resistors
+Rsg1 vb vsg1 1k
+Rsg2 vb vsg2 1k
+* Screen bypass (shared)
+Csg vsg1 0 47u
+
+* Output transformer - simplified model for numerical stability
+* Instead of coupled inductors, use resistive model with turns ratio
+* Primary impedance ~2.5k per side, transformer ratio 25:1
+* Using resistors to model plate load (simpler for transient analysis)
+Rpri1 vb vp1 2.5k
+Rpri2 vb vp2 2.5k
+
+* Differential output voltage scaled by turns ratio
+* E_out = (V_p1 - V_p2) / 25
+Ediff vdiff 0 vp2 vp1 0.04
+
+* Output coupling to load
+Rout vdiff v_out 1
+RL v_out 0 8
+
+* 6L6GC Pentode model (beam tetrode)
+XV1 vp1 vg1 vsg1 vk PENTODE_6L6GC
+XV2 vp2 vg2 vsg2 vk PENTODE_6L6GC
+
+* ============================================================================
+* 6L6GC Pentode Model - Koren-style beam tetrode equations
+* Parameters from typical 6L6GC datasheet curves
+* ============================================================================
+.SUBCKT PENTODE_6L6GC anode g1 g2 cathode
+.PARAM MU=8.7 EX=1.35 KG1=1460 KP=48 KVB=12 KG2=4500
+
+* Internal voltage references
+Bvg1 vg1_int 0 V = V(g1,cathode)
+Bvg2 vg2_int 0 V = V(g2,cathode)
+Bva va_int 0 V = V(anode,cathode)
+
+* Plate current (simplified single-line expression)
+Bip anode cathode I = MAX(0, PWR(LOG(1 + EXP(KP * (1/MU + V(vg1_int)/SQRT(KVB + PWR(V(vg2_int),2))))) * V(vg2_int) / KP, EX) / KG1 * TANH(V(va_int)/15))
+
+* Screen current (approximately 20% of plate current for beam tetrode)
+Big2 g2 cathode I = MAX(0, PWR(LOG(1 + EXP(KP * (1/MU + V(vg1_int)/SQRT(KVB + PWR(V(vg2_int),2))))) * V(vg2_int) / KP, EX) / KG2)
+
+* Grid current (when grid goes positive)
+Dg1 g1 cathode DGRID
+.MODEL DGRID D(IS=1e-12 N=1.5 RS=1k)
+
+.ENDS PENTODE_6L6GC
+
