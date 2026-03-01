@@ -1951,8 +1951,22 @@ const RESERVED_NODES: &[&str] = &[
     "cv_filter",  // Filter cutoff CV
 ];
 
+/// Parse an identifier or supply rail name (V+, V-, B+, etc.)
+/// Supply rails can have + or - suffix which regular identifiers don't allow.
+fn identifier_or_supply_rail(input: &str) -> IResult<&str, &str> {
+    alt((
+        // Special rail names with + or - (e.g., "V+", "V-", "B+")
+        recognize(pair(
+            alpha1,
+            alt((char('+'), char('-'))),
+        )),
+        // Regular identifier
+        identifier,
+    ))(input)
+}
+
 fn pin(input: &str) -> IResult<&str, Pin> {
-    let (input, first) = identifier(input)?;
+    let (input, first) = identifier_or_supply_rail(input)?;
 
     // Parse all dot-separated parts: T1.primary.a -> ["primary", "a"]
     let (input, rest_parts) = many0(preceded(char('.'), identifier))(input)?;
@@ -1962,7 +1976,7 @@ fn pin(input: &str) -> IResult<&str, Pin> {
         if RESERVED_NODES.contains(&first) {
             Ok((input, Pin::Reserved(first.to_string())))
         } else {
-            // Bare component name treated as reserved-style node
+            // Bare component name treated as reserved-style node (includes supply rails like V+, V-)
             Ok((input, Pin::Reserved(first.to_string())))
         }
     } else {
@@ -2521,15 +2535,7 @@ fn supply_field_rectifier(input: &str) -> IResult<&str, RectifierType> {
 fn named_supply(input: &str) -> IResult<&str, NamedSupply> {
     let (input, _) = ws_comments(input)?;
     // Parse rail name - can be identifier or special chars like "V+", "V-"
-    let (input, name) = alt((
-        // Special rail names with + or - (e.g., "V+", "V-")
-        recognize(pair(
-            alpha1,
-            alt((char('+'), char('-'))),
-        )),
-        // Regular identifier (handles underscores, digits, etc.)
-        identifier,
-    ))(input)?;
+    let (input, name) = identifier_or_supply_rail(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(':')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -4275,6 +4281,42 @@ pedal "Test Helpers" {
         assert!(def.is_supply_rail("V+"));
         assert!(def.is_supply_rail("V-"));
         assert!(!def.is_supply_rail("gnd"));
+    }
+
+    #[test]
+    fn parse_supply_rails_in_nets() {
+        // Test that V+ and V- can be used in nets section (bipolar supply circuit)
+        let src = r#"
+pedal "Bipolar Op-Amp" {
+    supplies {
+        V+: 15V
+        V-: -15V
+    }
+    components {
+        R1: resistor(10k)
+        R2: resistor(10k)
+        C1: cap(100u)
+    }
+    nets {
+        V+ -> R1.a
+        R1.b -> R2.a, C1.a
+        R2.b -> gnd
+        C1.b -> gnd
+        V- -> R2.b
+        in -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.nets.len(), 6);
+
+        // Check V+ is parsed as a reserved pin
+        let v_plus_net = &def.nets[0];
+        assert_eq!(v_plus_net.from, Pin::Reserved("V+".to_string()));
+
+        // Check V- is parsed as a reserved pin
+        let v_minus_net = &def.nets[4];
+        assert_eq!(v_minus_net.from, Pin::Reserved("V-".to_string()));
     }
 
     // ── Monitors section tests ────────────────────────────────────────
