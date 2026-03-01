@@ -18,6 +18,10 @@ static TRANSISTOR_MODELS_SRC: &str = include_str!("../models/transistors.model")
 static JFET_MODELS_SRC: &str = include_str!("../models/jfets.model");
 static TRIODE_MODELS_SRC: &str = include_str!("../models/triodes.model");
 static PENTODE_MODELS_SRC: &str = include_str!("../models/pentodes.model");
+static DIODE_MODELS_SRC: &str = include_str!("../models/diodes.model");
+static LED_MODELS_SRC: &str = include_str!("../models/leds.model");
+static SCHOTTKY_MODELS_SRC: &str = include_str!("../models/schottky.model");
+static ZENER_MODELS_SRC: &str = include_str!("../models/zeners.model");
 
 // ---------------------------------------------------------------------------
 // Parsed model registry (lazy-initialized)
@@ -41,6 +45,26 @@ pub static TRIODE_MODELS: LazyLock<HashMap<String, SpiceTriodeModel>> = LazyLock
 /// All pentode models parsed from the embedded pentodes.model file.
 pub static PENTODE_MODELS: LazyLock<HashMap<String, SpicePentodeModel>> = LazyLock::new(|| {
     parse_pentode_models(PENTODE_MODELS_SRC)
+});
+
+/// All diode models parsed from the embedded diodes.model file.
+pub static DIODE_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> = LazyLock::new(|| {
+    parse_diode_models(DIODE_MODELS_SRC)
+});
+
+/// All LED models parsed from the embedded leds.model file.
+pub static LED_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> = LazyLock::new(|| {
+    parse_diode_models(LED_MODELS_SRC)
+});
+
+/// All Schottky diode models parsed from the embedded schottky.model file.
+pub static SCHOTTKY_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> = LazyLock::new(|| {
+    parse_diode_models(SCHOTTKY_MODELS_SRC)
+});
+
+/// All Zener diode models parsed from the embedded zeners.model file.
+pub static ZENER_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> = LazyLock::new(|| {
+    parse_diode_models(ZENER_MODELS_SRC)
 });
 
 // ---------------------------------------------------------------------------
@@ -174,6 +198,72 @@ impl SpiceJfetModel {
             cgs: 0.0,
             cgd: 0.0,
             pb: 1.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parsed SPICE Diode model
+// ---------------------------------------------------------------------------
+
+/// Shockley diode equation model parameters.
+///
+/// Models the I-V characteristic: `I = IS * (exp(V / (N * Vt)) - 1)`
+/// with series resistance RS and junction capacitance CJO.
+///
+/// Used for standard diodes, LEDs, Schottky diodes, and Zener diodes.
+/// Parameters not present in the `.MODEL` line get SPICE defaults.
+#[derive(Debug, Clone)]
+pub struct ShockleyDiodeModel {
+    pub name: String,
+
+    // DC parameters
+    /// Saturation current (A). Typically 1e-14 to 1e-6.
+    pub is: f64,
+    /// Series resistance (Ω).
+    pub rs: f64,
+    /// Emission coefficient (ideality factor). Typically 1.0-2.0 for Si, higher for LEDs.
+    pub n: f64,
+    /// Transit time (s).
+    pub tt: f64,
+
+    // Junction capacitance
+    /// Zero-bias junction capacitance (F).
+    pub cjo: f64,
+    /// Junction potential (V). Typically 0.7 for Si.
+    pub vj: f64,
+    /// Grading coefficient. Typically 0.33-0.5.
+    pub m: f64,
+
+    // Breakdown
+    /// Reverse breakdown voltage (V). For zeners, this is the zener voltage.
+    pub bv: f64,
+    /// Current at breakdown voltage (A).
+    pub ibv: f64,
+
+    // Temperature
+    /// Bandgap energy (eV): 1.11=Si, 0.69=Schottky, 0.67=Ge.
+    pub eg: f64,
+    /// IS temperature exponent: 3=Si junction, 2=Schottky.
+    pub xti: f64,
+}
+
+impl ShockleyDiodeModel {
+    /// SPICE defaults for parameters not specified in the .MODEL line.
+    fn defaults(name: &str) -> Self {
+        Self {
+            name: name.to_uppercase(),
+            is: 1e-14,
+            rs: 0.0,
+            n: 1.0,
+            tt: 0.0,
+            cjo: 0.0,
+            vj: 1.0,
+            m: 0.5,
+            bv: f64::INFINITY,
+            ibv: 1e-3,
+            eg: 1.11,
+            xti: 3.0,
         }
     }
 }
@@ -466,6 +556,83 @@ fn parse_jfet_model_line(line: &str) -> Option<SpiceJfetModel> {
 }
 
 // ---------------------------------------------------------------------------
+// Diode .MODEL D(...) line parser
+// ---------------------------------------------------------------------------
+
+/// Parse all `.MODEL <name> D(...)` entries from a SPICE model file string.
+///
+/// Handles standard diodes, LEDs, Schottky, and Zener diodes — they all
+/// share the same SPICE `D` type and parameter set.
+fn parse_diode_models(src: &str) -> HashMap<String, ShockleyDiodeModel> {
+    let mut models = HashMap::new();
+
+    for line in src.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if !trimmed.to_uppercase().starts_with(".MODEL") {
+            continue;
+        }
+
+        if let Some(model) = parse_diode_model_line(trimmed) {
+            models.insert(model.name.clone(), model);
+        }
+    }
+
+    models
+}
+
+/// Parse a single `.MODEL <name> D(<params>)` line.
+fn parse_diode_model_line(line: &str) -> Option<ShockleyDiodeModel> {
+    let rest = &line[6..].trim_start();
+    let (name, rest) = rest.split_once(|c: char| c.is_whitespace())?;
+    let rest = rest.trim_start();
+
+    // Must be type D
+    let (type_str, params_block) = if let Some(paren_pos) = rest.find('(') {
+        let type_str = rest[..paren_pos].trim();
+        let close_paren = rest.rfind(')')?;
+        let params = &rest[paren_pos + 1..close_paren];
+        (type_str, params)
+    } else {
+        return None;
+    };
+
+    if !type_str.eq_ignore_ascii_case("D") {
+        return None;
+    }
+
+    let mut model = ShockleyDiodeModel::defaults(name);
+
+    for pair in params_block.split_whitespace() {
+        if let Some((key, val_str)) = pair.split_once('=') {
+            let key_upper = key.to_uppercase();
+            if let Some(val) = parse_spice_value(val_str) {
+                match key_upper.as_str() {
+                    "IS" => model.is = val,
+                    "RS" => model.rs = val,
+                    "N" => model.n = val,
+                    "TT" => model.tt = val,
+                    "CJO" => model.cjo = val,
+                    "VJ" => model.vj = val,
+                    "M" => model.m = val,
+                    "BV" => model.bv = val,
+                    "IBV" => model.ibv = val,
+                    "EG" => model.eg = val,
+                    "XTI" => model.xti = val,
+                    _ => {} // Ignore unknown parameters (KF, AF, FC, etc.)
+                }
+            }
+        }
+    }
+
+    Some(model)
+}
+
+// ---------------------------------------------------------------------------
 // Triode .TRIODE line parser
 // ---------------------------------------------------------------------------
 
@@ -663,6 +830,65 @@ pub fn pentode_by_name(name: &str) -> Option<&'static SpicePentodeModel> {
 /// List all available pentode model names.
 pub fn pentode_model_names() -> Vec<&'static str> {
     PENTODE_MODELS.keys().map(|s| s.as_str()).collect()
+}
+
+/// Look up a diode model by name (case-insensitive).
+///
+/// Searches the standard diodes library (1N34, 1N914, 1N4148, 1N4001–1N4007, etc.)
+pub fn diode_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
+    DIODE_MODELS.get(&name.to_uppercase())
+}
+
+/// List all available diode model names.
+pub fn diode_model_names() -> Vec<&'static str> {
+    DIODE_MODELS.keys().map(|s| s.as_str()).collect()
+}
+
+/// Look up an LED model by name (case-insensitive).
+///
+/// Available names: LED_IR, LED_RED, LED_GREEN, LED_YELLOW, LED_AMBER, LED_BLUE,
+/// DLED0–DLED3.
+pub fn led_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
+    LED_MODELS.get(&name.to_uppercase())
+}
+
+/// List all available LED model names.
+pub fn led_model_names() -> Vec<&'static str> {
+    LED_MODELS.keys().map(|s| s.as_str()).collect()
+}
+
+/// Look up a Schottky diode model by name (case-insensitive).
+pub fn schottky_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
+    SCHOTTKY_MODELS.get(&name.to_uppercase())
+}
+
+/// List all available Schottky diode model names.
+pub fn schottky_model_names() -> Vec<&'static str> {
+    SCHOTTKY_MODELS.keys().map(|s| s.as_str()).collect()
+}
+
+/// Look up a Zener diode model by name (case-insensitive).
+///
+/// Searches the zener library (1N746–1N759, 1N4728–1N4764, 1N5221–1N5267B, etc.)
+pub fn zener_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
+    ZENER_MODELS.get(&name.to_uppercase())
+}
+
+/// List all available Zener diode model names.
+pub fn zener_model_names() -> Vec<&'static str> {
+    ZENER_MODELS.keys().map(|s| s.as_str()).collect()
+}
+
+/// Look up any diode-type model by name across all registries.
+///
+/// Searches in order: diodes → LEDs → Schottky → zeners.
+/// Use the specific `*_by_name()` functions when the category is known.
+pub fn any_diode_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
+    let upper = name.to_uppercase();
+    DIODE_MODELS.get(&upper)
+        .or_else(|| LED_MODELS.get(&upper))
+        .or_else(|| SCHOTTKY_MODELS.get(&upper))
+        .or_else(|| ZENER_MODELS.get(&upper))
 }
 
 // ---------------------------------------------------------------------------
@@ -983,5 +1209,136 @@ mod tests {
         let p6ca7 = pentode_by_name("6CA7").unwrap();
         assert!((el34.mu - p6ca7.mu).abs() < 1e-10);
         assert!((el34.kp - p6ca7.kp).abs() < 1e-10);
+    }
+
+    // -----------------------------------------------------------------------
+    // Diode tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_diode_line() {
+        let line = ".MODEL 1N914 D(IS=7.075E-9 RS=0.78 N=1.95 TT=7.2E-9 CJO=4E-12 VJ=0.657 M=0.4 BV=100 IBV=0.0001)";
+        let model = parse_diode_model_line(line).unwrap();
+        assert_eq!(model.name, "1N914");
+        assert!((model.is - 7.075e-9).abs() < 1e-20);
+        assert!((model.rs - 0.78).abs() < 1e-10);
+        assert!((model.n - 1.95).abs() < 1e-10);
+        assert!((model.bv - 100.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn diode_embedded_models_load() {
+        let names = [
+            "1N34", "1N914", "1N4001", "1N4002", "1N4003", "1N4004",
+            "1N4005", "1N4006", "1N4007", "1N4148", "1N5400",
+        ];
+        for name in &names {
+            assert!(
+                diode_by_name(name).is_some(),
+                "Diode model '{}' not found in embedded diodes.model",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn diode_case_insensitive() {
+        assert!(diode_by_name("1n914").is_some());
+        assert!(diode_by_name("1N914").is_some());
+        assert!(diode_by_name("1n4148").is_some());
+    }
+
+    #[test]
+    fn diode_germanium_higher_is() {
+        let ge = diode_by_name("1N34").unwrap();
+        let si = diode_by_name("1N914").unwrap();
+        // Germanium has much higher IS (typ ~200pA vs ~7nA but GE N is higher)
+        assert!(ge.n > si.n, "Ge diode should have higher N: Ge={} Si={}", ge.n, si.n);
+    }
+
+    // -----------------------------------------------------------------------
+    // LED tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn led_embedded_models_load() {
+        let names = ["DLED0", "DLED1", "DLED2", "DLED3", "LED_IR", "LED_RED", "LED_GREEN", "LED_BLUE"];
+        for name in &names {
+            assert!(
+                led_by_name(name).is_some(),
+                "LED model '{}' not found in embedded leds.model",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn led_blue_higher_n() {
+        let red = led_by_name("LED_RED").unwrap();
+        let blue = led_by_name("LED_BLUE").unwrap();
+        // Blue LED has higher Vf → higher N
+        assert!(blue.n > red.n, "Blue LED should have higher N (Vf): {} vs {}", blue.n, red.n);
+    }
+
+    // -----------------------------------------------------------------------
+    // Schottky tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn schottky_embedded_models_load() {
+        let names = ["11DQ03", "11DQ04", "1N5828"];
+        for name in &names {
+            assert!(
+                schottky_by_name(name).is_some(),
+                "Schottky model '{}' not found in embedded schottky.model",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn schottky_has_low_bandgap() {
+        let s = schottky_by_name("11DQ03").unwrap();
+        assert!((s.eg - 0.69).abs() < 0.01, "Schottky EG should be ~0.69: {}", s.eg);
+        assert!((s.xti - 2.0).abs() < 0.1, "Schottky XTI should be ~2: {}", s.xti);
+    }
+
+    // -----------------------------------------------------------------------
+    // Zener tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn zener_embedded_models_load() {
+        let names = [
+            "1N746", "1N750", "1N753", "1N758", "1N759",
+            "1N4728", "1N4733", "1N4742", "1N4751",
+        ];
+        for name in &names {
+            assert!(
+                zener_by_name(name).is_some(),
+                "Zener model '{}' not found in embedded zeners.model",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn zener_voltage_from_bv() {
+        let z4v7 = zener_by_name("1N750").unwrap();
+        // 1N750 is a 4.7V zener
+        assert!(z4v7.bv > 4.0 && z4v7.bv < 5.0, "1N750 BV should be ~4.7V: {}", z4v7.bv);
+
+        let z12v = zener_by_name("1N759").unwrap();
+        // 1N759 is a 12V zener
+        assert!(z12v.bv > 11.0 && z12v.bv < 13.0, "1N759 BV should be ~12V: {}", z12v.bv);
+    }
+
+    #[test]
+    fn any_diode_cross_registry() {
+        // Should find across all registries
+        assert!(any_diode_by_name("1N914").is_some(), "Standard diode");
+        assert!(any_diode_by_name("LED_RED").is_some(), "LED");
+        assert!(any_diode_by_name("11DQ03").is_some(), "Schottky");
+        assert!(any_diode_by_name("1N750").is_some(), "Zener");
     }
 }

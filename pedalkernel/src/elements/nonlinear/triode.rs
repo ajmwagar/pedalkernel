@@ -17,7 +17,7 @@ use crate::models::{SpiceTriodeModel, triode_by_name};
 /// Koren model for accurate tube amplifier simulation.
 ///
 /// The Koren equation:
-/// `Ip = (Vpk/Kp * ln(1 + exp(Kp * (1/mu + Vgk/sqrt(Kvb + Vpk^2)))))^Ex`
+/// `Ip = (Vpk/Kp * ln(1 + exp(Kp * (1/mu + Vgk/sqrt(Kvb + Vpk^2)))))^Ex / KG1`
 #[derive(Debug, Clone, Copy)]
 pub struct TriodeModel {
     /// Amplification factor (mu). Higher = more gain. 12AX7 ≈ 100, 12AU7 ≈ 20.
@@ -28,8 +28,8 @@ pub struct TriodeModel {
     pub kvb: f64,
     /// Exponent (typically 1.3-1.5). Affects transfer curve shape.
     pub ex: f64,
-    /// Plate current scaling factor. Stored for reference but not yet used
-    /// in the plate_current() equation (future KG1 incorporation).
+    /// Plate current scaling factor (KG1). Scales the absolute plate current
+    /// magnitude. 12AX7 ≈ 1060, 12AU7 ≈ 1180.
     pub kg1: f64,
 }
 
@@ -153,7 +153,7 @@ impl TriodeRoot {
     /// Compute plate current for given Vpk at current Vgk using Koren model.
     ///
     /// The Koren equation:
-    /// `Ip = (Vpk/Kp * ln(1 + exp(Kp * (1/mu + Vgk/sqrt(Kvb + Vpk^2)))))^Ex`
+    /// `Ip = (Vpk/Kp * ln(1 + exp(Kp * (1/mu + Vgk/sqrt(Kvb + Vpk^2)))))^Ex / KG1`
     #[inline]
     pub fn plate_current(&self, vpk: f64) -> f64 {
         let mu = self.model.mu;
@@ -183,8 +183,8 @@ impl TriodeRoot {
             return 0.0;
         }
 
-        // Scale by parallel_count: N tubes in parallel = N × single tube current.
-        base.powf(ex) * self.parallel_count as f64
+        // Ip = base^Ex / KG1, scaled by parallel_count for N tubes in parallel.
+        (base.powf(ex) / self.model.kg1) * self.parallel_count as f64
     }
 
     /// Compute derivative of plate current w.r.t. Vpk for Newton-Raphson.
@@ -234,9 +234,9 @@ impl TriodeRoot {
         // d(Vpk/Kp * ln_term)/dVpk = ln_term/Kp + (Vpk/Kp) * dln_dvpk
         let dbase_dvpk = ln_term / kp + (vpk / kp) * dln_dvpk;
 
-        // d(base^Ex)/dVpk = Ex * base^(Ex-1) * dbase_dvpk
+        // d(base^Ex / KG1)/dVpk = Ex * base^(Ex-1) * dbase_dvpk / KG1
         // Scale by parallel_count to match plate_current() scaling.
-        ex * base.powf(ex - 1.0) * dbase_dvpk * self.parallel_count as f64
+        (ex * base.powf(ex - 1.0) * dbase_dvpk / self.model.kg1) * self.parallel_count as f64
     }
 }
 
@@ -250,5 +250,41 @@ impl WdfRoot for TriodeRoot {
             Some((-50.0, v_max)), None,
             |v| (root.plate_current(v), root.plate_current_derivative(v)),
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SPICE-reference validation: 12AX7 at Vgk=-1.5V, Vpk=200V.
+    ///
+    /// Hand-computed from Koren's equation with 12AX7 parameters
+    /// (MU=100, EX=1.4, KG1=1060, KP=600, KVB=300):
+    ///
+    /// ```text
+    /// E1_arg = 600 * (1/100 + (-1.5)/sqrt(300 + 200²))
+    ///        = 600 * (0.01 - 1.5/200.749) = 600 * 0.002528 = 1.517
+    /// ln_term = ln(1 + exp(1.517)) = ln(5.559) = 1.715
+    /// base = (200/600) * 1.715 = 0.5717
+    /// Ip = 0.5717^1.4 / 1060 = 0.457 / 1060 ≈ 4.31e-4 A
+    /// ```
+    #[test]
+    fn triode_12ax7_spice_reference() {
+        let mut triode = TriodeRoot::new(TriodeModel::by_name("12AX7"));
+        triode.set_vgk(-1.5);
+        let ip = triode.plate_current(200.0);
+
+        // Hand-computed: ~4.31e-4 A (0.431 mA)
+        let expected = 4.31e-4;
+        let error = (ip - expected).abs() / expected;
+        assert!(
+            error < 0.01,
+            "12AX7 Ip should match SPICE reference within 1%: got {ip:.6e}, expected {expected:.6e}, error={error:.4}"
+        );
     }
 }

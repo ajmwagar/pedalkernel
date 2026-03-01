@@ -635,10 +635,10 @@ mod tests {
         // Typical operating point: Vgk around -1 to -2V
         triode.set_vgk(-1.5);
         let ip = triode.plate_current(200.0);
-        // Should have measurable plate current (Koren model scale)
+        // 12AX7 at Vgk=-1.5V, Vpk=200V should give ~0.1–5mA plate current
         assert!(
-            ip > 0.0 && ip < 10.0,
-            "should be in active region with reasonable current: ip={ip}"
+            ip > 1e-4 && ip < 5e-3,
+            "should be in active region with realistic 12AX7 current (0.1-5mA): ip={ip} A"
         );
     }
 

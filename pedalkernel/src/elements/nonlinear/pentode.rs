@@ -22,11 +22,13 @@ use crate::models::{SpicePentodeModel, pentode_by_name};
 ///
 /// The screen-referenced Koren equation:
 /// ```text
-/// Ip_base = (Vg2k/Kp * ln(1 + exp(Kp * (1/mu + Vg1k/sqrt(Kvb + Vg2k^2)))))^Ex
-/// Ip = Ip_base * (2/π) * atan(Vpk / Kvb2)
+/// E1 = Kp * (1/mu + Vg1k/Vg2k)
+/// Ip_base = (Vg2k/Kp * ln(1 + exp(E1)))^Ex
+/// Ip = (Ip_base / KG1) * atan(Vpk / KVB)
 /// ```
 /// The atan term models the pentode's plate saturation characteristic —
 /// plate current is nearly independent of Vpk in the normal operating region.
+/// KG1 scales the absolute plate current magnitude.
 #[derive(Debug, Clone, Copy)]
 pub struct PentodeModel {
     /// Amplification factor (mu), screen-referenced. EF86 ≈ 38, EL84 ≈ 19.
@@ -43,11 +45,11 @@ pub struct PentodeModel {
     pub kvb2: f64,
     /// Default screen grid voltage (V) for typical operating point.
     pub vg2_default: f64,
-    /// Plate current scaling factor. Stored for reference but not yet used
-    /// in the plate_current() equation (future KG1 incorporation).
+    /// Plate current scaling factor (KG1). Scales the absolute plate current
+    /// magnitude in the Koren equation.
     pub kg1: f64,
-    /// Screen current scaling factor. Stored for reference but not yet used
-    /// in the plate_current() equation (future KG2 incorporation).
+    /// Screen current scaling factor (KG2). Reserved for future screen
+    /// current modeling (requires separate WDF current source).
     pub kg2: f64,
 }
 
@@ -181,9 +183,9 @@ impl PentodeRoot {
     ///
     /// Screen-referenced Koren model:
     /// ```text
-    /// E1 = Kp * (1/mu + Vg1k / sqrt(Kvb + Vg2k^2))
+    /// E1 = Kp * (1/mu + Vg1k/Vg2k)
     /// Ip_base = (Vg2k/Kp * ln(1 + exp(E1)))^Ex
-    /// Ip = Ip_base * (2/π) * atan(Vpk / Kvb2)
+    /// Ip = (Ip_base / KG1) * atan(Vpk / KVB)
     /// ```
     #[inline]
     pub fn plate_current(&self, vpk: f64) -> f64 {
@@ -191,17 +193,16 @@ impl PentodeRoot {
         let kp = self.model.kp;
         let kvb = self.model.kvb;
         let ex = self.model.ex;
-        let kvb2 = self.model.kvb2;
         let vg1k = self.vg1k;
         let vg2k = self.vg2k;
 
-        // No current for negative plate voltage
-        if vpk <= 0.0 {
+        // No current for negative plate or screen voltage
+        if vpk <= 0.0 || vg2k <= 0.0 {
             return 0.0;
         }
 
-        // Screen-referenced Koren: E1 uses Vg2k instead of Vpk
-        let e1 = kp * (1.0 / mu + vg1k / (kvb + vg2k * vg2k).sqrt());
+        // Screen-referenced Koren: E1 = Kp * (1/mu + Vg1k/Vg2k)
+        let e1 = kp * (1.0 / mu + vg1k / vg2k);
 
         let ln_term = softplus(e1);
         let base = (vg2k / kp) * ln_term;
@@ -211,33 +212,33 @@ impl PentodeRoot {
 
         let ip_base = base.powf(ex);
 
-        // Pentode plate saturation: atan-based transition
-        // Normalized to approach 1.0 for large Vpk
-        let plate_factor = (2.0 / std::f64::consts::PI) * (vpk / kvb2).atan();
+        // Pentode plate saturation: atan(Vpk/KVB)
+        // For typical operating Vpk/KVB ratios this is ~1.5 (close to π/2).
+        // KG1 absorbs the overall current scale.
+        let plate_factor = (vpk / kvb).atan();
 
-        ip_base * plate_factor.max(0.0)
+        (ip_base / self.model.kg1) * plate_factor.max(0.0)
     }
 
     /// Compute derivative of plate current w.r.t. Vpk for Newton-Raphson.
     ///
     /// Since Ip_base is independent of Vpk in the pentode model,
     /// only the plate saturation factor contributes:
-    /// `dIp/dVpk = Ip_base * (2/π) * (1 / (1 + (Vpk/Kvb2)^2)) * (1/Kvb2)`
+    /// `dIp/dVpk = (Ip_base / KG1) * (1 / (1 + (Vpk/KVB)^2)) * (1/KVB)`
     #[inline]
     fn plate_current_derivative(&self, vpk: f64) -> f64 {
         let mu = self.model.mu;
         let kp = self.model.kp;
         let kvb = self.model.kvb;
         let ex = self.model.ex;
-        let kvb2 = self.model.kvb2;
         let vg1k = self.vg1k;
         let vg2k = self.vg2k;
 
-        if vpk <= 0.0 {
+        if vpk <= 0.0 || vg2k <= 0.0 {
             return LEAKAGE_CONDUCTANCE;
         }
 
-        let e1 = kp * (1.0 / mu + vg1k / (kvb + vg2k * vg2k).sqrt());
+        let e1 = kp * (1.0 / mu + vg1k / vg2k);
 
         let ln_term = softplus(e1);
         let base = (vg2k / kp) * ln_term;
@@ -247,11 +248,11 @@ impl PentodeRoot {
 
         let ip_base = base.powf(ex);
 
-        // d/dVpk of (2/π) * atan(Vpk/Kvb2) = (2/π) * 1/(1 + (Vpk/Kvb2)^2) * 1/Kvb2
-        let vpk_ratio = vpk / kvb2;
-        let d_plate_factor = (2.0 / std::f64::consts::PI) / (1.0 + vpk_ratio * vpk_ratio) / kvb2;
+        // d/dVpk of atan(Vpk/KVB) = 1/(1 + (Vpk/KVB)^2) * 1/KVB
+        let vpk_ratio = vpk / kvb;
+        let d_plate_factor = 1.0 / (1.0 + vpk_ratio * vpk_ratio) / kvb;
 
-        ip_base * d_plate_factor
+        (ip_base / self.model.kg1) * d_plate_factor
     }
 }
 
@@ -514,5 +515,45 @@ mod tests {
         // Minimum clamp
         root.set_v_max(0.5);
         assert_eq!(root.v_max(), 1.0);
+    }
+
+    // ── Quantitative sanity tests ────────────────────────────────────
+
+    #[test]
+    fn p_6l6gc_realistic_plate_current_magnitude() {
+        // 6L6GC at Vg1k=-30V, Vg2k=450V, Vpk=460V should give ~60-80mA
+        let ip = plate_current_at(PentodeModel::by_name("6L6GC"), -30.0, 450.0, 460.0);
+        assert!(
+            ip > 0.03 && ip < 0.15,
+            "6L6GC plate current should be in realistic range (30-150mA): got {ip:.4} A"
+        );
+    }
+
+    // ── SPICE-reference validation tests ─────────────────────────────
+
+    /// SPICE-reference validation: 6550 at Vg1k=-50V, Vg2k=450V, Vpk=460V.
+    ///
+    /// Hand-computed from Koren's pentode equation with 6550 parameters
+    /// (MU=7.9, EX=1.35, KG1=890, KP=60, KVB=24):
+    ///
+    /// ```text
+    /// E1_arg = (1/7.9 + (-50)/450) * 60 = 0.01547 * 60 = 0.928
+    /// ln_term = ln(1 + exp(0.928)) = ln(3.530) = 1.262
+    /// base = (450/60) * 1.262 = 9.466
+    /// ip_base = 9.466^1.35 = 20.77
+    /// plate_factor = atan(460/24) = atan(19.17) = 1.519
+    /// Ip = (20.77 / 890) * 1.519 ≈ 0.0355 A
+    /// ```
+    #[test]
+    fn pentode_6550_spice_reference() {
+        let ip = plate_current_at(PentodeModel::by_name("6550"), -50.0, 450.0, 460.0);
+
+        // Hand-computed: ~0.0355 A (35.5 mA)
+        let expected = 0.0355;
+        let error = (ip - expected).abs() / expected;
+        assert!(
+            error < 0.01,
+            "6550 Ip should match SPICE reference within 1%: got {ip:.6e}, expected {expected:.6e}, error={error:.4}"
+        );
     }
 }

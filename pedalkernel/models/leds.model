@@ -1,0 +1,27 @@
+* PedalKernel LED Models — SPICE .MODEL format
+*
+* LED forward voltage is primarily determined by the emission coefficient (N).
+* Higher N = higher Vf. The IS values are similar across types.
+*
+* LED_IR:     Infrared GaAs (Vf≈1.2V)
+* LED_RED:    Red GaAs (Vf≈1.7V)
+* LED_GREEN:  Red/Green/Yellow/Amber GaAs (Vf≈2.1V)
+* LED_BLUE:   Blue SiC (Vf≈3.4V)
+
+* Infrared GaAs, Vf≈1.2V
+.MODEL DLED0 D(IS=93.5P RS=84M N=2.63 BV=5 IBV=10U CJO=2.97P VJ=.75 M=.333 TT=4.32U)
+* Red GaAs, Vf≈1.7V
+.MODEL DLED1 D(IS=93.2P RS=42M N=3.73 BV=4 IBV=10U CJO=2.97P VJ=.75 M=.333 TT=4.32U)
+* Red/Green/Yellow/Amber GaAs, Vf≈2.1V
+.MODEL DLED2 D(IS=93.1P RS=42M N=4.61 BV=4 IBV=10U CJO=2.97P VJ=.75 M=.333 TT=4.32U)
+* Blue SiC, Vf≈3.4V
+.MODEL DLED3 D(IS=93.1P RS=42M N=7.47 BV=5 IBV=30U CJO=2.97P VJ=.75 M=.333 TT=4.32U)
+
+* ── Friendly Aliases ───────────────────────────────────────────────────────
+
+.MODEL LED_IR D(IS=93.5P RS=84M N=2.63 BV=5 IBV=10U CJO=2.97P VJ=.75 M=.333 TT=4.32U)
+.MODEL LED_RED D(IS=93.2P RS=42M N=3.73 BV=4 IBV=10U CJO=2.97P VJ=.75 M=.333 TT=4.32U)
+.MODEL LED_GREEN D(IS=93.1P RS=42M N=4.61 BV=4 IBV=10U CJO=2.97P VJ=.75 M=.333 TT=4.32U)
+.MODEL LED_BLUE D(IS=93.1P RS=42M N=7.47 BV=5 IBV=30U CJO=2.97P VJ=.75 M=.333 TT=4.32U)
+.MODEL LED_YELLOW D(IS=93.1P RS=42M N=4.61 BV=4 IBV=10U CJO=2.97P VJ=.75 M=.333 TT=4.32U)
+.MODEL LED_AMBER D(IS=93.1P RS=42M N=4.61 BV=4 IBV=10U CJO=2.97P VJ=.75 M=.333 TT=4.32U)
