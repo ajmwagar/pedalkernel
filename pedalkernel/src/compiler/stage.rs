@@ -192,6 +192,30 @@ impl WdfStage {
             t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
         }
 
+        // For BJT stages, the input signal modulates Vbe (base-emitter voltage).
+        // This is the key to BJT amplification: the input controls the base,
+        // which modulates collector current and creates voltage drop across R_collector.
+        //
+        // BJT Vbe sensitivity: Ic ∝ exp(Vbe/Vt) where Vt ≈ 26mV (thermal voltage)
+        // For significant nonlinearity, Vbe swing should be comparable to Vt.
+        // A ±100mV swing (4×Vt) produces strong exponential distortion.
+        //
+        // Fuzz Face operation: Germanium PNPs biased near cutoff, large signal swings
+        // push into saturation/cutoff for asymmetric clipping characteristic.
+        if let RootKind::BjtNpn(ref mut bjt) = root {
+            // Silicon BJT: Vbe_bias ≈ 0.6V at typical operating point
+            // Scale: 0.15 gives ±75mV swing with ±0.5V input (3×Vt)
+            const BJT_VBE_BIAS: f64 = 0.6;
+            bjt.set_vbe(BJT_VBE_BIAS + input * compensation * 0.15);
+        }
+        if let RootKind::BjtPnp(ref mut bjt) = root {
+            // PNP (germanium Fuzz Face): Veb_bias ≈ 0.15V, biased near edge of conduction
+            // Scale: 0.3 gives ±150mV swing with ±0.5V input - strong clipping
+            // Lower bias + higher swing = asymmetric fuzz distortion
+            const PNP_VEB_BIAS: f64 = 0.15;
+            bjt.set_veb(PNP_VEB_BIAS + input * compensation * 0.3);
+        }
+
         // For JFET source followers, compute Vgs from input (gate) and previous output (source).
         // Vgs = Vgate - Vsource, where Vgate ≈ input and Vsource is the WDF output.
         // We use the previous sample's source voltage for stability.

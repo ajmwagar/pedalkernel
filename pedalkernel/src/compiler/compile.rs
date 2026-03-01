@@ -902,24 +902,215 @@ pub fn compile_pedal_with_options(
         .copied()
         .collect();
 
-    for (_edge_idx, bjt_info) in &bjts {
-        let junction = bjt_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(
-            junction,
+    // Compute distance from out_node for "connects to output" detection.
+    // A stage connects to output if its collector passives lead toward out_node.
+    let dist_from_out = {
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &graph.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(graph.out_node, 0);
+        queue.push_back(graph.out_node);
+        while let Some(n) = queue.pop_front() {
+            let d = dist[&n];
+            if let Some(neighbors) = adj.get(&n) {
+                for &nb in neighbors {
+                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                        e.insert(d + 1);
+                        queue.push_back(nb);
+                    }
+                }
+            }
+        }
+        dist
+    };
+
+    // Collect all BJT base nodes to handle feedback paths.
+    // When a BJT's collector connects to another BJT's base (feedback), we need
+    // to stop passive collection at that node to avoid pulling in the other stage.
+    let all_bjt_base_nodes: HashSet<NodeId> = bjts
+        .iter()
+        .map(|(_, info)| info.base_node)
+        .collect();
+
+    for (_bjt_idx, (_edge_idx, bjt_info)) in bjts.iter().enumerate() {
+        let collector_node = bjt_info.collector_node;
+        let emitter_node = bjt_info.emitter_node;
+
+        // Find passive elements at collector junction.
+        // For multi-BJT circuits with feedback (e.g., Fuzz Face: Q2.collector → Q1.base),
+        // the collector node may be merged with another BJT's base. This creates a
+        // non-series-parallel topology because both stages' passives connect to the same node.
+        //
+        // Strategy: when the collector has feedback, only include elements that are
+        // clearly part of THIS BJT's output stage:
+        // 1. Output coupling cap (connects toward out_node path)
+        // 2. The emitter passives (separate node, no issue)
+        //
+        // This excludes parallel load resistors from the input stage that create the
+        // non-SP condition.
+        let has_feedback = all_bjt_base_nodes.contains(&collector_node);
+        let collector_passives: Vec<usize> = if has_feedback {
+            // Collector has feedback: carefully select passives to avoid non-SP topology
+            // For Fuzz Face: Q2.collector = Q1.base due to feedback
+            // Multiple resistors to gnd (R5, R7) create parallel paths that sp_reduce can't handle.
+            //
+            // Strategy:
+            // 1. Include output-path edges (toward out_node, not gnd/supply/in_node)
+            // 2. Include at most ONE resistor to gnd (the load) to enable voltage gain
+            let mut passives: Vec<usize> = Vec::new();
+            let mut found_gnd_resistor = false;
+
+            for (idx, e) in graph.edges.iter().enumerate() {
+                if all_nonlinear_with_bjts.contains(&idx) {
+                    continue;
+                }
+                if graph.active_edge_indices.contains(&idx) {
+                    continue;
+                }
+                // Must touch collector
+                if e.node_a != collector_node && e.node_b != collector_node {
+                    continue;
+                }
+                let other = if e.node_a == collector_node { e.node_b } else { e.node_a };
+
+                // Skip input-path edges
+                if other == graph.in_node {
+                    continue;
+                }
+                // Skip supply edges
+                if graph.supply_nodes.contains(&other) {
+                    continue;
+                }
+
+                // For gnd edges, only include ONE (the load resistor)
+                if other == graph.gnd_node {
+                    if !found_gnd_resistor {
+                        if let ComponentKind::Resistor(_) = &graph.components[e.comp_idx].kind {
+                            found_gnd_resistor = true;
+                            passives.push(idx);
+                        }
+                    }
+                    continue;
+                }
+
+                // Skip output-path edges (like C4 → Volume) for feedback stages
+                // These create dangling nodes since we exclude output_passives
+                // for feedback stages to avoid non-SP topology.
+                // Skip for now - the load resistor provides the essential gain element.
+            }
+            passives
+        } else {
+            // No feedback: use standard junction detection
+            graph.elements_at_junction(
+                collector_node,
+                &all_nonlinear_with_bjts,
+                &graph.active_edge_indices,
+            )
+        };
+
+        // Find emitter passives, excluding those that connect to VCC.
+        // For PNP transistors, emitter biasing goes to VCC but that's not
+        // part of the AC signal path when using GND as the WDF terminal.
+        let vcc_node = *graph.node_names.get("vcc").unwrap_or(&graph.gnd_node);
+        let emitter_passives: Vec<usize> = graph.elements_at_junction(
+            emitter_node,
+            &all_nonlinear_with_bjts,
+            &graph.active_edge_indices,
+        ).into_iter()
+        .filter(|&idx| {
+            let e = &graph.edges[idx];
+            let other = if e.node_a == emitter_node { e.node_b } else { e.node_a };
+            // Skip edges to VCC (emitter biasing for PNP, not in AC path)
+            other != vcc_node
+        })
+        .collect();
+
+        // For BJTs, also find elements connecting collector to output (e.g., C_out).
+        // These are normally skipped by elements_at_junction but are needed for
+        // proper AC coupling of the BJT output.
+        let collector_to_output: Vec<usize> = graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(idx, e)| {
+                if all_nonlinear_with_bjts.contains(idx) {
+                    return false;
+                }
+                if graph.active_edge_indices.contains(idx) {
+                    return false;
+                }
+                // Must connect collector_node to out_node
+                (e.node_a == collector_node && e.node_b == graph.out_node)
+                    || (e.node_a == graph.out_node && e.node_b == collector_node)
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+
+        // Also find elements at out_node (e.g., R_load to ground)
+        let output_passives = graph.elements_at_junction(
+            graph.out_node,
             &all_nonlinear_with_bjts,
             &graph.active_edge_indices,
         );
+
+        // Combine all sets of passive elements
+        let mut passive_idxs: Vec<usize> = collector_passives.clone();
+        for idx in &emitter_passives {
+            if !passive_idxs.contains(idx) {
+                passive_idxs.push(*idx);
+            }
+        }
+        for idx in &collector_to_output {
+            if !passive_idxs.contains(idx) {
+                passive_idxs.push(*idx);
+            }
+        }
+        // Only include output passives if this stage is the FINAL stage on the output path.
+        // For cascaded BJTs (e.g., Fuzz Face Q1 → Q2 → output), only the final
+        // stage should include output passives. Otherwise intermediate stages
+        // would incorrectly include the Volume pot.
+        //
+        // Heuristic: a stage "connects to output" if any collector passive leads
+        // TOWARD output (closer to out_node than the collector itself), and that
+        // path doesn't go through another BJT's base (which would be an interstage connection).
+        let collector_dist_out = dist_from_out.get(&collector_node).copied().unwrap_or(usize::MAX);
+        let connects_to_output = !collector_to_output.is_empty() ||
+            collector_passives.iter().any(|&idx| {
+                let e = &graph.edges[idx];
+                let other = if e.node_a == collector_node { e.node_b } else { e.node_a };
+                // Check if "other" is closer to output than collector
+                let other_dist_out = dist_from_out.get(&other).copied().unwrap_or(usize::MAX);
+                // Also ensure "other" is not another BJT's base (interstage connection)
+                other_dist_out < collector_dist_out && !all_bjt_base_nodes.contains(&other)
+            });
+        // For feedback stages, skip output_passives to simplify the tree.
+        // The output passives (Volume pot, R_load) can create non-SP topology
+        // when combined with feedback connections.
+        if connects_to_output && !has_feedback {
+            for idx in &output_passives {
+                if !passive_idxs.contains(idx) {
+                    passive_idxs.push(*idx);
+                }
+            }
+        }
 
         if passive_idxs.is_empty() {
             continue;
         }
 
         // Find the best injection node for the voltage source.
+        // For BJTs, prefer injecting at the collector side (where the load is).
         let mut injection_node = graph.in_node;
         let mut best_dist = usize::MAX;
-        for &eidx in &passive_idxs {
+
+        // Check collector-side elements first
+        for &eidx in &collector_passives {
             let e = &graph.edges[eidx];
-            let other = if e.node_a == junction {
+            let other = if e.node_a == collector_node {
                 e.node_b
             } else {
                 e.node_a
@@ -931,12 +1122,46 @@ pub fn compile_pedal_with_options(
                 }
             }
         }
-        if best_dist == usize::MAX {
-            injection_node = graph.gnd_node;
+
+        // Then check emitter-side and output elements
+        for &eidx in emitter_passives.iter().chain(collector_to_output.iter()).chain(output_passives.iter()) {
+            let e = &graph.edges[eidx];
+            for node in [e.node_a, e.node_b] {
+                if node != collector_node && node != emitter_node {
+                    if let Some(&d) = dist_from_in.get(&node) {
+                        if d < best_dist {
+                            best_dist = d;
+                            injection_node = node;
+                        }
+                    }
+                }
+            }
         }
 
-        // Build SP edges.
+        // Fallback: inject at supply node if reachable (like triodes)
+        if best_dist == usize::MAX {
+            let mut found_supply = false;
+            for &eidx in &collector_passives {
+                let e = &graph.edges[eidx];
+                if graph.supply_nodes.contains(&e.node_a) || graph.supply_nodes.contains(&e.node_b) {
+                    injection_node = if graph.supply_nodes.contains(&e.node_a) { e.node_a } else { e.node_b };
+                    found_supply = true;
+                    break;
+                }
+            }
+            if !found_supply {
+                injection_node = graph.gnd_node;
+            }
+        }
+
+        // Build SP edges for the BJT stage.
+        // The BJT stage topology is:
+        //   source -> R_collector -> collector -- BJT -- emitter -> R_emitter||C_emitter -> GND
+        // We use ground as the second terminal to create a proper two-port network.
         let source_node = graph.edges.len() + 3000; // virtual source node for BJTs
+        let virtual_ce_idx = vs_comp_idx + 1; // Virtual collector-emitter path
+        let gnd_node = graph.gnd_node;
+
         let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
         sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
 
@@ -945,20 +1170,33 @@ pub fn compile_pedal_with_options(
             sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
         }
 
-        let terminals = vec![source_node, junction];
+        // Connect collector and emitter nodes through a virtual edge.
+        // This represents the BJT's internal collector-emitter path.
+        sp_edges.push((collector_node, emitter_node, SpTree::Leaf(virtual_ce_idx)));
+
+        // Use source and ground as terminals - this creates a proper two-port network
+        // where all nodes can reduce to these two terminals.
+        let terminals = vec![source_node, gnd_node];
+        let num_sp_edges = sp_edges.len();
         let sp_tree = match sp_reduce(sp_edges, &terminals) {
             Ok(t) => t,
             Err(_) => continue,
         };
 
-        // Create components list with virtual voltage source for BJT stages.
+        // Create components list with virtual elements for BJT stages.
         let mut bjt_components = graph.components.clone();
-        while bjt_components.len() <= vs_comp_idx {
+        while bjt_components.len() <= virtual_ce_idx {
             bjt_components.push(ComponentDef {
                 id: "__vs__".to_string(),
                 kind: ComponentKind::Resistor(1.0),
             });
         }
+        // Add virtual high-impedance resistor for collector-emitter connection
+        // This represents the BJT's output impedance (r_ce ≈ 50kΩ for typical small signal)
+        bjt_components[virtual_ce_idx] = ComponentDef {
+            id: "__bjt_rce__".to_string(),
+            kind: ComponentKind::Resistor(50000.0),
+        };
 
         let tree = sp_to_dyn_with_vs(&sp_tree, &bjt_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 

@@ -384,6 +384,19 @@ impl CircuitGraph {
                     });
                 }
                 ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
+                    // BJT: collector-emitter path is the WDF edge (like JFET drain-source).
+                    // Base is external control, not part of WDF tree.
+                    let key_c = format!("{}.collector", comp.id);
+                    let key_e = format!("{}.emitter", comp.id);
+                    let id_c = get_id(&key_c, &mut uf);
+                    let id_e = get_id(&key_e, &mut uf);
+                    let node_c = uf.find(id_c);
+                    let node_e = uf.find(id_e);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a: node_c,
+                        node_b: node_e,
+                    });
                     num_active += 1;
                 }
                 ComponentKind::OpAmp(ot) if ot.is_ota() => {
@@ -1067,42 +1080,31 @@ impl CircuitGraph {
         let mut bjts: Vec<(usize, BjtInfo)> = Vec::new();
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
+            // For BJT edges: node_a = collector, node_b = emitter (from edge creation)
             let info = match &comp.kind {
                 ComponentKind::Npn(name) => Some(BjtInfo {
                     model_name: name.clone(),
                     is_npn: true,
-                    junction_node: if e.node_b == self.gnd_node {
-                        e.node_a
-                    } else {
-                        e.node_b
-                    },
-                    ground_node: if e.node_b == self.gnd_node {
-                        e.node_b
-                    } else {
-                        e.node_a
-                    },
-                    // TODO: Properly determine pin nodes from netlist
-                    base_node: e.node_a,
-                    emitter_node: self.gnd_node,
-                    collector_node: e.node_b,
+                    // For common-emitter stages, the collector is where passive network connects.
+                    // Always use collector as junction_node for consistent WDF tree building.
+                    junction_node: e.node_a,
+                    // ground_node fallback: emitter for NPN CE stages (may not be at gnd_node).
+                    ground_node: e.node_b,
+                    // Base is looked up via node_names if needed.
+                    base_node: self.node_names.get(&format!("{}.base", comp.id)).copied().unwrap_or(e.node_a),
+                    emitter_node: e.node_b,
+                    collector_node: e.node_a,
                 }),
                 ComponentKind::Pnp(name) => Some(BjtInfo {
                     model_name: name.clone(),
                     is_npn: false,
-                    junction_node: if e.node_b == self.gnd_node {
-                        e.node_a
-                    } else {
-                        e.node_b
-                    },
-                    ground_node: if e.node_b == self.gnd_node {
-                        e.node_b
-                    } else {
-                        e.node_a
-                    },
-                    // TODO: Properly determine pin nodes from netlist
-                    base_node: e.node_a,
-                    emitter_node: self.gnd_node,
-                    collector_node: e.node_b,
+                    // PNP: collector at lower potential, connected to ground-referenced load.
+                    // Still use collector as junction_node for WDF tree.
+                    junction_node: e.node_a,
+                    ground_node: e.node_b,
+                    base_node: self.node_names.get(&format!("{}.base", comp.id)).copied().unwrap_or(e.node_a),
+                    emitter_node: e.node_b,
+                    collector_node: e.node_a,
                 }),
                 _ => None,
             };
@@ -1111,8 +1113,12 @@ impl CircuitGraph {
             }
         }
 
-        // Sort by distance of junction node from input.
-        bjts.sort_by_key(|(_, info)| dist.get(&info.junction_node).copied().unwrap_or(usize::MAX));
+        // Sort by distance of BASE node from input.
+        // For cascaded BJT circuits (like Fuzz Face), the signal flow is:
+        //   input → Q1.base → Q1 amplifies → Q1.collector → Q2.base → Q2 amplifies → output
+        // Using base_node distance ensures Q1 (input stage) is processed before Q2 (output stage).
+        // Note: junction_node (collector) can be misleading with feedback (Q2.collector = Q1.base).
+        bjts.sort_by_key(|(_, info)| dist.get(&info.base_node).copied().unwrap_or(usize::MAX));
         bjts
     }
 
