@@ -1,0 +1,35 @@
+* ============================================================================
+* Zener Clipper — Symmetric Zener Diode Pair (5.1V)
+* PedalKernel Validation Circuit
+* ============================================================================
+* Topology: Input → R → output node → two back-to-back zeners to ground
+*
+* Similar to Boss DS-1 hard clipping stage. Zeners clip harder than
+* silicon diodes, with a defined knee at Vz. Total clipping threshold
+* is Vz + Vf (~5.1 + 0.7 = 5.8V) in each direction.
+*
+* Node convention:
+*   v_in  = input (driven by harness PWL source)
+*   v_out = output (measured by harness)
+* ============================================================================
+
+* Input coupling capacitor
+C1 v_in n1 100n
+
+* Series resistor (limits current into zeners)
+R1 n1 v_out 4.7k
+
+* Back-to-back zener pair (1N4733A - 5.1V)
+* D1: cathode to output, anode to ground (clips positive)
+* D2: anode to output, cathode to ground (clips negative)
+D1 0 v_out ZMOD
+D2 v_out 0 ZMOD
+
+* Output load
+RL v_out 0 10k
+
+* Zener model — 1N4733A (5.1V, 500mW)
+* BV is the zener breakdown voltage (reverse breakdown)
+* IBV is the current at which BV is specified
+.MODEL ZMOD D(IS=1e-12 RS=10 N=1.8 BV=5.1 IBV=20m
++ CJO=100p M=0.5 TT=50n)

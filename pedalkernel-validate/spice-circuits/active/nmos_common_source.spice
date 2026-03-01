@@ -1,0 +1,42 @@
+* ============================================================================
+* NMOS Common Source Amplifier — 2N7000
+* PedalKernel Validation Circuit
+* ============================================================================
+* Basic NMOS gain stage. 2N7000 is a popular small-signal enhancement-mode
+* NMOS used in guitar pedals for clean boost and switching applications.
+*
+* Unlike JFETs (depletion mode, Vgs < 0 to turn off), enhancement MOSFETs
+* require Vgs > Vth to conduct. 2N7000 has Vth ~2V.
+*
+* Biasing: R1/R2 voltage divider sets gate voltage above Vth.
+* Gain: ~gm * RD (typically 5-15x for this topology)
+* ============================================================================
+
+* Input coupling
+C1 v_in gate 100n
+
+* Gate bias network (sets Vg ~ 3.6V for proper bias point)
+R1 vdd gate 100k
+R2 gate 0 47k
+
+* Source resistor (with bypass cap for AC gain)
+RS source 0 470
+CS source 0 10u
+
+* Drain resistor (load)
+RD vdd drain 2.2k
+
+* Supply (9V typical pedal supply)
+VDD vdd 0 DC 9
+
+* Output coupling
+C2 drain v_out 1u
+RL v_out 0 10k
+
+* MOSFET — 2N7000 N-channel enhancement mode
+M1 drain gate source 0 NMOD
+
+* 2N7000 SPICE model (Level 1 for ngspice compatibility)
+* Vth=2.1V, Kp=0.1 A/V^2, typical small-signal NMOS
+.MODEL NMOD NMOS(LEVEL=1 VTO=2.1 KP=0.1 LAMBDA=0.04
++ CBD=35p CBS=40p CGSO=8p CGDO=4p)

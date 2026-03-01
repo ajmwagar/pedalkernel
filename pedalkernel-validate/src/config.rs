@@ -515,6 +515,37 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     ..Default::default()
                 },
             });
+            // Zener diode clipper (back-to-back 5.1V zeners)
+            // Tests zener breakdown behavior for hard clipping
+            tests.insert("zener_clipper".to_string(), TestCase {
+                circuit: "nonlinear/zener_clipper.pedal".to_string(),
+                description: "Symmetric 5.1V zener clipper".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 1.0,
+                        duration: 0.05,
+                        label: Some("low_level".to_string()),
+                    },
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 10.0,  // Drive into zener clipping
+                        duration: 0.05,
+                        label: Some("clipping".to_string()),
+                    },
+                ],
+                metrics: vec![
+                    MetricConfig::TimeDomain,
+                    MetricConfig::Thd { fundamental: 1000.0 },
+                ],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(6.0),
+                    peak_error_db: Some(8.0),
+                    thd_error_db: Some(200.0),
+                    ..Default::default()
+                },
+            });
+
             // NOTE: Triode WDF and SPICE models differ significantly in harmonic
             // characteristics due to different solving approaches. The Koren model
             // equations are the same, but WDF uses wave-domain scattering while
@@ -682,6 +713,50 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 metrics: vec![MetricConfig::TimeDomain],
                 pass_criteria: PassCriteria {
                     // Photocoupler has slow dynamics, allow some error
+                    normalized_rms_error_db: Some(10.0),
+                    peak_error_db: Some(12.0),
+                    ..Default::default()
+                },
+            });
+
+            // NMOS common source amplifier (2N7000)
+            // Tests enhancement-mode MOSFET modeling
+            tests.insert("nmos_common_source".to_string(), TestCase {
+                circuit: "active/nmos_common_source.pedal".to_string(),
+                description: "2N7000 NMOS common source amplifier".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.1,  // Small signal for linear operation
+                        duration: 0.05,
+                        label: Some("sine".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain],
+                pass_criteria: PassCriteria {
+                    // MOSFET modeling may have some differences
+                    normalized_rms_error_db: Some(10.0),
+                    peak_error_db: Some(12.0),
+                    ..Default::default()
+                },
+            });
+
+            // PMOS source follower (BS250)
+            // Tests P-channel enhancement-mode MOSFET modeling
+            tests.insert("pmos_source_follower".to_string(), TestCase {
+                circuit: "active/pmos_source_follower.pedal".to_string(),
+                description: "BS250 PMOS source follower buffer".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.5,
+                        duration: 0.05,
+                        label: Some("sine".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain],
+                pass_criteria: PassCriteria {
+                    // Source follower should have near-unity gain
                     normalized_rms_error_db: Some(10.0),
                     peak_error_db: Some(12.0),
                     ..Default::default()

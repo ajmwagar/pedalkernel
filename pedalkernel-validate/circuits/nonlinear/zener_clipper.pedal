@@ -1,0 +1,21 @@
+# Symmetric 5.1V zener clipper
+# Topology matches SPICE: C1 (100n) -> R1 (4.7k) -> back-to-back zeners -> RL (10k)
+# Clips at ±5.8V (Vz + Vf)
+
+pedal "Zener Clipper" {
+  components {
+    C1: cap(100n)       # Input coupling capacitor
+    R1: resistor(4.7k)  # Series resistor (limits zener current)
+    Z1: zener(5.1)      # 5.1V zener (clips positive)
+    Z2: zener(5.1)      # 5.1V zener (clips negative)
+    RL: resistor(10k)   # Load resistor
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> Z1.a, Z2.b, RL.a
+    Z1.b -> gnd
+    Z2.a -> gnd
+    RL.b -> out
+  }
+}

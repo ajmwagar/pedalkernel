@@ -1,0 +1,26 @@
+# BS250 PMOS Source Follower
+# P-channel enhancement-mode MOSFET unity gain buffer
+
+pedal "PMOS Source Follower" {
+  supply 9V
+  components {
+    C1: cap(100n)       # Input coupling
+    RG: resistor(1M)    # Gate bias to VCC
+    RS: resistor(2.2k)  # Source resistor (to VCC)
+    RD: resistor(10k)   # Drain resistor (to GND)
+    C2: cap(10u)        # Output coupling
+    RL: resistor(10k)   # Load resistor
+    M1: pmos(bs250)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> RG.a, M1.gate
+    RG.b -> vcc
+    M1.source -> RS.a, C2.a
+    RS.b -> vcc
+    M1.drain -> RD.a
+    RD.b -> gnd
+    C2.b -> RL.a, out
+    RL.b -> gnd
+  }
+}

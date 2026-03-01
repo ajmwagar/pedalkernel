@@ -1,0 +1,40 @@
+* ============================================================================
+* PMOS Source Follower — BS250
+* PedalKernel Validation Circuit
+* ============================================================================
+* Unity gain buffer using BS250 P-channel enhancement MOSFET.
+* PMOS source followers are used in high-impedance input stages.
+*
+* BS250 is the P-channel complement to 2N7000. Enhancement mode
+* means Vgs must be negative (below Vth) relative to source to conduct.
+* Vth ~ -3.5V for BS250.
+*
+* Topology: Source follows gate voltage (minus Vgs drop).
+* ============================================================================
+
+* Input coupling
+C1 v_in gate 100n
+
+* Gate bias resistor (sets DC operating point)
+RG gate vdd 1MEG
+
+* Source resistor (output taken from source)
+RS vdd source 2.2k
+
+* Drain to ground
+RD drain 0 10k
+
+* Supply (9V)
+VDD vdd 0 DC 9
+
+* Output from source
+C2 source v_out 10u
+RL v_out 0 10k
+
+* MOSFET — BS250 P-channel enhancement mode
+M1 drain gate source vdd PMOD
+
+* BS250 SPICE model (Level 1)
+* Vth=-3.5V (negative for PMOS), Kp=0.05 A/V^2
+.MODEL PMOD PMOS(LEVEL=1 VTO=-3.5 KP=0.05 LAMBDA=0.03
++ CBD=45p CBS=50p CGSO=10p CGDO=5p)

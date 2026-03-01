@@ -1,0 +1,30 @@
+# 2N7000 NMOS Common Source Amplifier
+# Enhancement-mode NMOS gain stage with resistive bias
+
+pedal "NMOS Common Source" {
+  supply 9V
+  components {
+    C1: cap(100n)       # Input coupling
+    R1: resistor(100k)  # Gate bias (to VCC)
+    R2: resistor(47k)   # Gate bias (to GND)
+    RS: resistor(470)   # Source resistor
+    CS: cap(10u)        # Source bypass
+    RD: resistor(2.2k)  # Drain load
+    C2: cap(1u)         # Output coupling
+    RL: resistor(10k)   # Load resistor
+    M1: nmos(2n7000)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, R2.a, M1.gate
+    R1.b -> vcc
+    R2.b -> gnd
+    M1.source -> RS.a, CS.a
+    RS.b -> gnd
+    CS.b -> gnd
+    M1.drain -> RD.a, C2.a
+    RD.b -> vcc
+    C2.b -> RL.a, out
+    RL.b -> gnd
+  }
+}
