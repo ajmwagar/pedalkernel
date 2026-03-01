@@ -40,11 +40,6 @@ fn leaky_cap_decays_faster_than_ideal() {
     let ideal_e = energy(ideal_discharge);
     let leaky_e = energy(leaky_discharge);
 
-    // BUG: Leaky cap (1kΩ parallel resistance) produces identical output
-    //      to ideal cap (corr=1.0). The capacitor leakage model may not be
-    //      wired into the WDF element correctly.
-    //      With 1kΩ leakage on a 10µF cap, the RC discharge time constant
-    //      is just 10ms — it should decay dramatically faster.
     assert!(
         leaky_e < ideal_e * 0.99,
         "Leaky cap (1kΩ) should decay faster than ideal: ideal_energy={ideal_e:.8}, leaky_energy={leaky_e:.8}"

@@ -118,7 +118,17 @@ fn detect_rc_filter_topology(graph: &CircuitGraph, sample_rate: f64) -> Option<F
     let r_edge = resistors[0];
     let c_edge = capacitors[0];
     let r = match &graph.components[r_edge.comp_idx].kind { ComponentKind::Resistor(r) => *r, _ => return None };
-    let c = match &graph.components[c_edge.comp_idx].kind { ComponentKind::Capacitor(cfg) => cfg.value, _ => return None };
+    let c = match &graph.components[c_edge.comp_idx].kind {
+        ComponentKind::Capacitor(cfg) => {
+            // Don't use IIR shortcut for caps with parasitics — fall through to WDF path
+            // which properly creates LeakyCapacitor nodes with leakage decay and DA state.
+            if cfg.leakage.is_some() || cfg.da.is_some() {
+                return None;
+            }
+            cfg.value
+        }
+        _ => return None,
+    };
 
     let r_in_out = (r_edge.node_a == graph.in_node && r_edge.node_b == graph.out_node)
         || (r_edge.node_a == graph.out_node && r_edge.node_b == graph.in_node);
