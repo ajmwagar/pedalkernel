@@ -56,7 +56,7 @@ pub fn infer_pin_direction(kind: &ComponentKind, pin_name: &str) -> PinDirection
             }
         }
         // Potentiometer: wiper=output
-        ComponentKind::Potentiometer(_) => match pin_name {
+        ComponentKind::Potentiometer(..) => match pin_name {
             "wiper" | "b" => PinDirection::Output,
             "a" => PinDirection::Input,
             _ => PinDirection::Bidirectional,
@@ -603,6 +603,7 @@ mod tests {
             controls: vec![],
             trims: vec![],
             monitors: vec![],
+            sidechains: vec![],
         }
     }
 

@@ -313,6 +313,7 @@ mod tests {
             controls: vec![],
             trims: vec![],
             monitors: vec![],
+            sidechains: vec![],
         };
 
         let graph = LayoutGraph::from_pedal(&pedal);

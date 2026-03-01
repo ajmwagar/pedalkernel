@@ -256,7 +256,7 @@ fn place_tone_stack(
             None => continue,
         };
 
-        let is_pot = matches!(comp.kind, ComponentKind::Potentiometer(_));
+        let is_pot = matches!(comp.kind, ComponentKind::Potentiometer(..));
         let x = center_x + (i as f32 - count / 2.0) * spacing;
         let y = if is_pot {
             signal_y
@@ -456,7 +456,7 @@ fn kind_to_string(kind: &ComponentKind) -> String {
         ComponentKind::DiodePair(_) => "diode_pair".into(),
         ComponentKind::Diode(_) => "diode".into(),
         ComponentKind::Zener(_) => "zener".into(),
-        ComponentKind::Potentiometer(_) => "pot".into(),
+        ComponentKind::Potentiometer(..) => "pot".into(),
         ComponentKind::Npn(_) => "npn".into(),
         ComponentKind::Pnp(_) => "pnp".into(),
         ComponentKind::OpAmp(_) => "opamp".into(),
@@ -496,7 +496,7 @@ fn value_label(kind: &ComponentKind) -> Option<String> {
         ComponentKind::Resistor(v) => Some(format_eng(*v, "Ω")),
         ComponentKind::Capacitor(v) => Some(format_eng(v.value, "F")),
         ComponentKind::Inductor(v) => Some(format_eng(*v, "H")),
-        ComponentKind::Potentiometer(v) => Some(format_eng(*v, "Ω")),
+        ComponentKind::Potentiometer(v, _) => Some(format_eng(*v, "Ω")),
         ComponentKind::Zener(v) => Some(format!("{v}V")),
         _ => None,
     }

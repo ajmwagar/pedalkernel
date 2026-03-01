@@ -362,6 +362,11 @@ impl BbdDelayLine {
         self.compander_env_in =
             coef_in * self.compander_env_in + (1.0 - coef_in) * abs_in;
 
+        // Model analog noise floor - prevents expansion from true zero which causes pops.
+        // Real NE571 companders have finite noise that prevents infinite expansion gain.
+        const ANALOG_NOISE_FLOOR: f64 = 0.001; // ~-60dB
+        self.compander_env_in = self.compander_env_in.max(ANALOG_NOISE_FLOOR);
+
         // Store compression envelope in delay buffer for expander to use later.
         // Key insight: the expander needs the
         // DELAYED compression envelope, not an independent output envelope.

@@ -17,7 +17,7 @@ pub fn symbol_for_kind(kind: &ComponentKind) -> String {
         ComponentKind::DiodePair(_) => "diode".into(),
         ComponentKind::Diode(_) => "diode".into(),
         ComponentKind::Zener(_) => "zener".into(),
-        ComponentKind::Potentiometer(_) => "pot".into(),
+        ComponentKind::Potentiometer(..) => "pot".into(),
         ComponentKind::Npn(_) => "npn_bjt".into(),
         ComponentKind::Pnp(_) => "pnp_bjt".into(),
         ComponentKind::OpAmp(_) => "opamp".into(),

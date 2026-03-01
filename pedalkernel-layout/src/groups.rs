@@ -237,7 +237,7 @@ fn detect_opamp_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fu
                         | ComponentKind::Capacitor(_)
                         | ComponentKind::Diode(_)
                         | ComponentKind::DiodePair(_)
-                        | ComponentKind::Potentiometer(_)
+                        | ComponentKind::Potentiometer(..)
                 )
             );
             if is_feedback_component {
@@ -337,7 +337,7 @@ fn detect_tone_stacks(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
         .iter()
         .filter(|n| {
             !assigned.contains(&n.id)
-                && matches!(n.comp.as_ref().map(|c| &c.kind), Some(ComponentKind::Potentiometer(_)))
+                && matches!(n.comp.as_ref().map(|c| &c.kind), Some(ComponentKind::Potentiometer(..)))
         })
         .map(|n| n.id)
         .collect();
@@ -400,7 +400,7 @@ fn detect_tone_stacks(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
         let pot_names: Vec<&str> = members
             .iter()
             .filter_map(|&m| {
-                if matches!(graph.node_kind(m), Some(ComponentKind::Potentiometer(_))) {
+                if matches!(graph.node_kind(m), Some(ComponentKind::Potentiometer(..))) {
                     Some(graph.nodes[m].comp_id.as_str())
                 } else {
                     None
@@ -558,6 +558,7 @@ mod tests {
             controls: vec![],
             trims: vec![],
             monitors: vec![],
+            sidechains: vec![],
         };
 
         let graph = LayoutGraph::from_pedal(&pedal);

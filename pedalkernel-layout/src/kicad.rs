@@ -136,7 +136,7 @@ fn kicad_symbol_ref(kind: &ComponentKind) -> (&'static str, &'static str) {
         ComponentKind::Inductor(_) => ("Device:L", "L"),
         ComponentKind::DiodePair(_) | ComponentKind::Diode(_) => ("Device:D", "D"),
         ComponentKind::Zener(_) => ("Device:D_Zener", "D"),
-        ComponentKind::Potentiometer(_) => ("Device:R_Potentiometer", "RV"),
+        ComponentKind::Potentiometer(..) => ("Device:R_Potentiometer", "RV"),
         ComponentKind::Npn(_) => ("Device:Q_NPN_BCE", "Q"),
         ComponentKind::Pnp(_) => ("Device:Q_PNP_BCE", "Q"),
         ComponentKind::OpAmp(_) => ("Amplifier_Operational:TL072", "U"),
