@@ -1,6 +1,14 @@
 //! Main compiler entry point: PedalDef -> CompiledPedal.
+//!
+//! Orchestrates the 6-pass compilation pipeline:
+//! - Pass 0: Graph construction (CircuitGraph::from_pedal)
+//! - Pass 1: Element classification (classify.rs)
+//! - Pass 2: Op-amp analysis (opamp_analysis.rs)
+//! - Pass 3: Stage planning (plan.rs)
+//! - Pass 4: Tree building (build.rs)
+//! - Pass 5: Binding & assembly (bind.rs)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::dsl::*;
 use crate::elements::*;
@@ -12,345 +20,154 @@ use super::compiled::*;
 use super::dyn_node::DynNode;
 use super::graph::*;
 use super::helpers::*;
-use super::stage::{PushPullStage, RootKind, SidechainProcessor, TubeRoot, WdfStage};
+use super::stage::{RootKind, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Passive circuit gain helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Compute the voltage divider gain for a resistor-only circuit.
-///
-/// For a simple divider topology (in -> R_series -> out -> R_shunt -> gnd),
-/// the gain is R_shunt / (R_series + R_shunt).
-///
-/// Returns 1.0 if topology doesn't match a simple divider.
 fn compute_resistor_divider_gain(graph: &CircuitGraph) -> f64 {
-    // Find total series resistance from in_node to out_node
     let r_series = find_resistance_between(graph, graph.in_node, graph.out_node);
-
-    // Find total shunt resistance from out_node to gnd_node
     let r_shunt = find_resistance_between(graph, graph.out_node, graph.gnd_node);
 
     match (r_series, r_shunt) {
-        (Some(rs), Some(rsh)) if rs > 0.0 && rsh > 0.0 => {
-            // Voltage divider: V_out = V_in * R_shunt / (R_series + R_shunt)
-            rsh / (rs + rsh)
-        }
-        (None, Some(_)) => {
-            // No series resistance, direct connection: gain = 1.0
-            1.0
-        }
-        (Some(_), None) => {
-            // No shunt to ground: output floats, assume unity for now
-            // (This would be an open-circuit output in reality)
-            1.0
-        }
+        (Some(rs), Some(rsh)) => rsh / (rs + rsh),
         _ => 1.0,
     }
 }
 
-/// Find the total resistance between two nodes in a resistor network.
-///
-/// For simple series paths, sums the resistances.
-/// Returns None if no resistive path exists between the nodes.
+/// Find total resistance between two nodes via BFS through resistive elements.
 fn find_resistance_between(graph: &CircuitGraph, from: NodeId, to: NodeId) -> Option<f64> {
     if from == to {
-        return Some(0.0); // Same node = short circuit
+        return Some(0.0);
     }
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    visited.insert(from);
+    queue.push_back((from, 0.0));
 
-    // Simple case: find direct resistor(s) between the two nodes
-    let mut total_r = 0.0;
-    let mut found_direct = false;
+    while let Some((node, r_so_far)) = queue.pop_front() {
+        for (_, e) in graph.edges.iter().enumerate() {
+            let (other, matches) = if e.node_a == node {
+                (e.node_b, true)
+            } else if e.node_b == node {
+                (e.node_a, true)
+            } else {
+                (0, false)
+            };
+            if !matches {
+                continue;
+            }
 
-    for edge in &graph.edges {
-        let connects = (edge.node_a == from && edge.node_b == to)
-            || (edge.node_a == to && edge.node_b == from);
-
-        if connects {
-            if let ComponentKind::Resistor(r) = &graph.components[edge.comp_idx].kind {
-                if found_direct {
-                    // Parallel resistors: 1/R_total = 1/R1 + 1/R2
-                    total_r = (total_r * r) / (total_r + r);
-                } else {
-                    total_r = *r;
-                    found_direct = true;
+            if let ComponentKind::Resistor(r) = &graph.components[e.comp_idx].kind {
+                if other == to {
+                    return Some(r_so_far + r);
                 }
-            } else if let ComponentKind::Potentiometer(max_r, _) = &graph.components[edge.comp_idx].kind
-            {
-                // Use 50% as default position for pots
-                let r = max_r * 0.5;
-                if found_direct {
-                    total_r = (total_r * r) / (total_r + r);
-                } else {
-                    total_r = r;
-                    found_direct = true;
+                if visited.insert(other) {
+                    queue.push_back((other, r_so_far + r));
                 }
             }
         }
     }
-
-    if found_direct {
-        return Some(total_r);
-    }
-
-    // TODO: For more complex networks, use BFS to find series paths
-    // and nodal analysis for general networks.
     None
 }
 
 /// Filter topology type for simple RC/RL circuits.
 enum FilterTopology {
-    /// RC lowpass: R from in→out, C from out→gnd
-    RcLowpass { r: f64, c: f64, a1: f64, b0: f64 },
-    /// RC highpass: C from in→out, R from out→gnd
-    RcHighpass { r: f64, c: f64, a1: f64, b0: f64 },
-    /// RL lowpass: L from in→out, R from out→gnd
-    /// Uses IIR with time constant τ = L/R (same form as RC lowpass)
-    RlLowpass { l: f64, r: f64, a1: f64, b0: f64 },
+    RcLowpass { a1: f64, b0: f64 },
+    RcHighpass { a1: f64, b0: f64 },
+    RlLowpass { a1: f64, b0: f64 },
 }
 
 /// Detect simple RC/RL filter topology and compute filter parameters.
-///
-/// Detects:
-/// - RC lowpass: R from in→out, C from out→gnd
-/// - RC highpass: C from in→out, R from out→gnd
-/// - RL lowpass: L from in→out, R from out→gnd
-///
-/// Returns filter parameters for the detected topology.
 fn detect_rc_filter_topology(graph: &CircuitGraph, sample_rate: f64) -> Option<FilterTopology> {
-    // Count passive elements
-    let resistors: Vec<_> = graph
-        .edges
-        .iter()
+    let resistors: Vec<_> = graph.edges.iter()
         .filter(|e| matches!(graph.components[e.comp_idx].kind, ComponentKind::Resistor(_)))
         .collect();
-    let capacitors: Vec<_> = graph
-        .edges
-        .iter()
+    let capacitors: Vec<_> = graph.edges.iter()
         .filter(|e| matches!(graph.components[e.comp_idx].kind, ComponentKind::Capacitor(_)))
         .collect();
-    let inductors: Vec<_> = graph
-        .edges
-        .iter()
+    let inductors: Vec<_> = graph.edges.iter()
         .filter(|e| matches!(graph.components[e.comp_idx].kind, ComponentKind::Inductor(_)))
         .collect();
 
-    // Check for RL lowpass first: 1 R, 1 L, 0 C
+    // RL lowpass: 1 R, 1 L, 0 C
     if resistors.len() == 1 && inductors.len() == 1 && capacitors.is_empty() {
         let r_edge = resistors[0];
         let l_edge = inductors[0];
+        let r = match &graph.components[r_edge.comp_idx].kind { ComponentKind::Resistor(r) => *r, _ => return None };
+        let l = match &graph.components[l_edge.comp_idx].kind { ComponentKind::Inductor(l) => *l, _ => return None };
 
-        let r = match &graph.components[r_edge.comp_idx].kind {
-            ComponentKind::Resistor(r) => *r,
-            _ => return None,
-        };
-        let l = match &graph.components[l_edge.comp_idx].kind {
-            ComponentKind::Inductor(l) => *l,
-            _ => return None,
-        };
-
-        // Check for lowpass: L from in→out, R from out→gnd
         let l_connects_in_out = (l_edge.node_a == graph.in_node && l_edge.node_b == graph.out_node)
             || (l_edge.node_a == graph.out_node && l_edge.node_b == graph.in_node);
         let r_connects_out_gnd = (r_edge.node_a == graph.out_node && r_edge.node_b == graph.gnd_node)
             || (r_edge.node_a == graph.gnd_node && r_edge.node_b == graph.out_node);
 
         if l_connects_in_out && r_connects_out_gnd {
-            // RL lowpass using IIR (time constant τ = L/R, same form as RC lowpass)
-            // α = 2*fs*τ = 2*fs*L/R
             let tau = l / r;
             let alpha = 2.0 * sample_rate * tau;
             let a1 = (1.0 - alpha) / (1.0 + alpha);
             let b0 = 1.0 / (1.0 + alpha);
-
-            return Some(FilterTopology::RlLowpass { l, r, a1, b0 });
+            return Some(FilterTopology::RlLowpass { a1, b0 });
         }
     }
 
-    // Check for RC filters: 1 R, 1 C
-    if resistors.len() != 1 || capacitors.len() != 1 {
-        return None;
-    }
-
+    // RC filters: 1 R, 1 C
+    if resistors.len() != 1 || capacitors.len() != 1 { return None; }
     let r_edge = resistors[0];
     let c_edge = capacitors[0];
+    let r = match &graph.components[r_edge.comp_idx].kind { ComponentKind::Resistor(r) => *r, _ => return None };
+    let c = match &graph.components[c_edge.comp_idx].kind { ComponentKind::Capacitor(cfg) => cfg.value, _ => return None };
 
-    // Get R and C values
-    let r = match &graph.components[r_edge.comp_idx].kind {
-        ComponentKind::Resistor(r) => *r,
-        _ => return None,
-    };
-    let c = match &graph.components[c_edge.comp_idx].kind {
-        ComponentKind::Capacitor(cfg) => cfg.value,
-        _ => return None,
-    };
-
-    // Check for lowpass topology: R from in→out, C from out→gnd
-    let r_connects_in_out = (r_edge.node_a == graph.in_node && r_edge.node_b == graph.out_node)
+    let r_in_out = (r_edge.node_a == graph.in_node && r_edge.node_b == graph.out_node)
         || (r_edge.node_a == graph.out_node && r_edge.node_b == graph.in_node);
-    let c_connects_out_gnd = (c_edge.node_a == graph.out_node && c_edge.node_b == graph.gnd_node)
+    let c_out_gnd = (c_edge.node_a == graph.out_node && c_edge.node_b == graph.gnd_node)
         || (c_edge.node_a == graph.gnd_node && c_edge.node_b == graph.out_node);
 
-    if r_connects_in_out && c_connects_out_gnd {
-        // Lowpass: H(s) = 1 / (1 + sRC)
-        // H(z) = b0*(1 + z^-1) / (1 - a1*z^-1)
+    if r_in_out && c_out_gnd {
         let omega_rc = 2.0 * sample_rate * r * c;
         let a1 = (omega_rc - 1.0) / (omega_rc + 1.0);
         let b0 = 1.0 / (omega_rc + 1.0);
-        return Some(FilterTopology::RcLowpass { r, c, a1, b0 });
+        return Some(FilterTopology::RcLowpass { a1, b0 });
     }
 
-    // Check for highpass topology: C from in→out, R from out→gnd
-    let c_connects_in_out = (c_edge.node_a == graph.in_node && c_edge.node_b == graph.out_node)
+    let c_in_out = (c_edge.node_a == graph.in_node && c_edge.node_b == graph.out_node)
         || (c_edge.node_a == graph.out_node && c_edge.node_b == graph.in_node);
-    let r_connects_out_gnd = (r_edge.node_a == graph.out_node && r_edge.node_b == graph.gnd_node)
+    let r_out_gnd = (r_edge.node_a == graph.out_node && r_edge.node_b == graph.gnd_node)
         || (r_edge.node_a == graph.gnd_node && r_edge.node_b == graph.out_node);
 
-    if c_connects_in_out && r_connects_out_gnd {
-        // Highpass: H(s) = sRC / (1 + sRC)
-        // H(z) = b0*(1 - z^-1) / (1 - a1*z^-1)
+    if c_in_out && r_out_gnd {
         let omega_rc = 2.0 * sample_rate * r * c;
         let a1 = (omega_rc - 1.0) / (omega_rc + 1.0);
         let b0 = omega_rc / (omega_rc + 1.0);
-        return Some(FilterTopology::RcHighpass { r, c, a1, b0 });
+        return Some(FilterTopology::RcHighpass { a1, b0 });
     }
 
     None
 }
 
-/// Check if a pedal contains only passive elements (no op-amps, transistors, JFETs, etc.).
-///
-/// This determines whether we can use the proper VoltageSourceDriver architecture
-/// vs the fallback Passthrough approach which handles active element breaks.
-fn is_truly_passive_only(pedal: &PedalDef) -> bool {
-    !pedal.components.iter().any(|c| {
-        matches!(
-            c.kind,
-            ComponentKind::OpAmp(_)
-                | ComponentKind::Diode(_)
-                | ComponentKind::DiodePair(_)
-                | ComponentKind::Npn(_)
-                | ComponentKind::Pnp(_)
-                | ComponentKind::NJfet(_)
-                | ComponentKind::PJfet(_)
-                | ComponentKind::Nmos(_)
-                | ComponentKind::Pmos(_)
-                | ComponentKind::Triode(_)
-                | ComponentKind::VariMu(_)
-                | ComponentKind::Pentode(_)
-                | ComponentKind::Zener(_)
-        )
-    })
-}
-
-/// Compute compensation factor for passive WDF circuits with Passthrough root.
-///
-/// The Passthrough root reflects incident waves unchanged, modeling an open
-/// circuit termination. We simulate at DC and compensate for any gain error.
-///
-/// For RC lowpass: at DC, V_out should equal V_in.
-/// For highpass: DC is blocked, no compensation applied.
+/// DC simulation to compute gain correction for passive WDF circuits.
 fn compute_passive_compensation(tree: &DynNode) -> f64 {
-    // Clone the tree to simulate without affecting state
-    let mut test_tree = tree.clone();
-
-    // Reset state
-    test_tree.reset();
-
-    // Apply a unit DC voltage and iterate to steady state
-    let test_voltage = 1.0;
-    let mut output = 0.0;
-
-    // Run enough iterations for RC time constants to settle
-    // (Most passive circuits settle within 1000 samples at 48kHz)
-    for _ in 0..2000 {
-        test_tree.set_voltage(test_voltage);
-        let b_tree = test_tree.reflected();
-        // Passthrough root: a = b (open circuit reflection)
-        let a_root = b_tree;
-        test_tree.set_incident(a_root);
-        // Root port voltage (same as stage.process)
-        output = (a_root + b_tree) / 2.0;
-    }
-
-    // Compensation = expected / actual
-    // For lowpass at DC: expected = 1.0, actual = output
-    // For highpass at DC: expected = 0.0, but we don't compensate DC-blocking
-    if output.abs() > 0.01 {
-        // Significant DC output - compensate to unity DC gain
-        1.0 / output
-    } else {
-        // Near-zero DC output (highpass) - don't compensate
-        1.0
-    }
-}
-
-/// Compute compensation factor for VoltageSourceDriver architecture.
-///
-/// The VoltageSourceDriver root injects input as incident wave (a = 2 * V)
-/// and computes output based on topology:
-/// - Series filters: junction voltage via series_junction_voltage()
-/// - Other: root voltage (a + b) / 2
-///
-/// For RC/RL lowpass: at DC, V_out should equal V_in.
-/// For highpass: DC is blocked, no compensation applied.
-fn compute_vsdriver_compensation(tree: &DynNode) -> f64 {
-    // Clone the tree to simulate without affecting state
-    let mut test_tree = tree.clone();
-
-    // Reset state
-    test_tree.reset();
-
-    // Apply a unit DC voltage as incident wave
-    let test_voltage = 1.0;
-    let a_root = test_voltage * 2.0; // Wave = 2 * voltage
-    let mut output = 0.0;
-
-    // Run enough iterations for RC time constants to settle
-    for _ in 0..2000 {
-        let b_tree = test_tree.reflected();
-        test_tree.set_incident(a_root);
-
-        // Use same output extraction as runtime processing
-        output = if let Some(v_junction) = test_tree.series_junction_voltage(a_root) {
-            v_junction
-        } else {
-            (a_root + b_tree) / 2.0
-        };
-    }
-
-    // Compensation = expected / actual
-    if output.abs() > 0.01 {
-        // Significant DC output - compensate to unity DC gain
-        test_voltage / output
-    } else {
-        // Near-zero DC output (highpass) - don't compensate
-        1.0
-    }
+    let mut tree_copy = tree.clone();
+    let rp = tree_copy.port_resistance();
+    if rp <= 0.0 { return 1.0; }
+    tree_copy.set_voltage(1.0);
+    let b = tree_copy.reflected();
+    tree_copy.set_incident(-b);
+    let v_out = (-b + tree_copy.reflected()) / 2.0;
+    if v_out.abs() < 1e-12 { return 1.0; }
+    (1.0 / v_out.abs()).min(10.0)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Main compiler entry point
+// Compile options
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Compile a parsed `.pedal` file into a real-time audio processor.
-///
-/// The compiler analyzes the netlist topology and builds one or more WDF
-/// clipping stages, each with its own binary tree derived from the circuit's
-/// passive elements and a nonlinear diode root.
-///
-/// Active elements (transistors, opamps) are modeled as gain stages.
-/// Controls are automatically bound to gain/level/pot parameters.
 /// Options for pedal compilation.
-///
-/// Controls optional features like oversampling, component tolerance,
-/// and thermal modeling.
 pub struct CompileOptions {
-    /// Oversampling factor for nonlinear stages (default: X1 = off).
     pub oversampling: OversamplingFactor,
-    /// Component tolerance engine (default: ideal = no variation).
     pub tolerance: ToleranceEngine,
-    /// Whether to enable thermal drift modeling.
     pub thermal: bool,
 }
 
@@ -364,12 +181,24 @@ impl Default for CompileOptions {
     }
 }
 
-/// Compile a pedal definition with default options (no oversampling, no tolerance).
+// ═══════════════════════════════════════════════════════════════════════════
+// Main compilation pipeline
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Compile a pedal definition with default options.
 pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal, String> {
     compile_pedal_with_options(pedal, sample_rate, CompileOptions::default())
 }
 
 /// Compile a pedal definition with custom options.
+///
+/// Orchestrates the 6-pass compilation pipeline:
+/// 1. Graph construction
+/// 2. Element classification
+/// 3. Op-amp analysis
+/// 4. Stage planning
+/// 5. Tree building
+/// 6. Binding & assembly
 pub fn compile_pedal_with_options(
     pedal: &PedalDef,
     sample_rate: f64,
@@ -379,1744 +208,68 @@ pub fn compile_pedal_with_options(
     let tolerance = options.tolerance;
     let enable_thermal = options.thermal;
 
+    // ══ Pass 0: Graph construction ════════════════════════════════════
     let mut graph = CircuitGraph::from_pedal(pedal);
 
-    // Apply component tolerance to resistors and capacitors.
-    // This deterministically shifts component values from nominal based on the
-    // tolerance seed, so two instances of the same pedal model will sound
-    // slightly different (like real hardware).
+    // Apply component tolerance.
     for (i, comp) in graph.components.iter_mut().enumerate() {
         match &mut comp.kind {
-            ComponentKind::Resistor(r) => {
-                *r = tolerance.apply_resistor(*r, i);
-            }
-            ComponentKind::Capacitor(cfg) => {
-                cfg.value = tolerance.apply_capacitor(cfg.value, i);
-            }
-            ComponentKind::Potentiometer(max_r, _) => {
-                *max_r = tolerance.apply_resistor(*max_r, i);
-            }
+            ComponentKind::Resistor(r) => { *r = tolerance.apply_resistor(*r, i); }
+            ComponentKind::Capacitor(cfg) => { cfg.value = tolerance.apply_capacitor(cfg.value, i); }
+            ComponentKind::Potentiometer(max_r, _) => { *max_r = tolerance.apply_resistor(*max_r, i); }
             _ => {}
         }
     }
 
-    // ── Sidechain partitioning ─────────────────────────────────────────────
-    // If the pedal has sidechain definitions, partition the graph into
-    // sidechain and audio edges. Sidechain edges will be excluded from
-    // the main audio WDF tree building.
-    let sidechain_edge_set: HashSet<usize> = {
-        let mut set = HashSet::new();
-        for sc_info in &pedal.sidechains {
-            if let (Some(&tap), Some(&cv)) = (
-                graph.node_names.get(&sc_info.tap_node),
-                graph.node_names.get(&sc_info.cv_node),
-            ) {
-                if let Some(partition) = graph.partition_sidechain(tap, cv) {
-                    set.extend(partition.sidechain_edge_indices);
-                }
-            }
-        }
-        set
-    };
+    // ══ Pass 1: Element classification ════════════════════════════════
+    let classified = super::classify::classify_circuit(&graph, pedal);
 
-    let diodes = graph.find_diodes();
-    let diode_edge_indices: Vec<usize> = diodes.iter().map(|(idx, _)| *idx).collect();
-
-    // Check for germanium diodes (affects thermal model and BJT saturation voltage).
-    let has_germanium = diodes
-        .iter()
-        .any(|(_, d)| d.diode_type == DiodeType::Germanium);
-
-    // Build WDF stages.
-    let mut stages = Vec::new();
-    let vs_comp_idx = graph.components.len(); // virtual voltage source index
-
-    // BFS distances from in_node for Vs placement.
-    let dist_from_in = {
-        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        for e in &graph.edges {
-            adj.entry(e.node_a).or_default().push(e.node_b);
-            adj.entry(e.node_b).or_default().push(e.node_a);
-        }
-        let mut dist: HashMap<NodeId, usize> = HashMap::new();
-        let mut queue = std::collections::VecDeque::new();
-        dist.insert(graph.in_node, 0);
-        queue.push_back(graph.in_node);
-        while let Some(n) = queue.pop_front() {
-            let d = dist[&n];
-            if let Some(neighbors) = adj.get(&n) {
-                for &nb in neighbors {
-                    dist.entry(nb).or_insert_with(|| {
-                        queue.push_back(nb);
-                        d + 1
-                    });
-                }
-            }
-        }
-        dist
-    };
-
-    for (_edge_idx, diode_info) in &diodes {
-        // Skip diodes that are part of the sidechain path.
-        if sidechain_edge_set.contains(_edge_idx) {
-            continue;
-        }
-
-        let junction = diode_info.junction_node;
-        let passive_idxs =
-            graph.elements_at_junction(junction, &diode_edge_indices, &graph.active_edge_indices);
-
-        if passive_idxs.is_empty() {
-            continue;
-        }
-
-        // Find the best injection node for the voltage source: the non-junction
-        // endpoint closest to in_node.  This ensures the Vs is reachable from the
-        // passive elements in this stage (critical for multi-stage circuits).
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            let other = if e.node_a == junction {
-                e.node_b
-            } else {
-                e.node_a
-            };
-            if let Some(&d) = dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
-                }
-            }
-        }
-        // Fallback: if in_node is disconnected (e.g. split pedal post-half
-        // where in maps to a triode grid), use gnd as the injection point.
-        if best_dist == usize::MAX {
-            injection_node = graph.gnd_node;
-        }
-
-        // Build SP edges: one edge per passive element, plus a virtual VoltageSource.
-        let source_node = graph.edges.len() + 1000; // virtual source node
-        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-
-        // Add voltage source edge: source_node → injection_node.
-        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-        }
-
-        let terminals = vec![source_node, junction];
-        let sp_tree = match sp_reduce(sp_edges, &terminals) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        // Convert SP tree to dynamic WDF nodes.
-        // We need to handle the virtual VoltageSource leaf specially.
-        let mut all_components = graph.components.clone();
-        // Add a virtual VoltageSource component at vs_comp_idx.
-        while all_components.len() <= vs_comp_idx {
-            all_components.push(ComponentDef {
-                id: "__vs__".to_string(),
-                kind: ComponentKind::Resistor(1.0), // placeholder
-            });
-        }
-
-        let tree = sp_to_dyn_with_vs(&sp_tree, &all_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
-        let model = diode_model(diode_info.diode_type);
-        let root = if diode_info.is_pair {
-            RootKind::DiodePair(DiodePairRoot::new(model))
-        } else {
-            RootKind::SingleDiode(DiodeRoot::new(model))
-        };
-
-        stages.push(WdfStage {
-            tree,
-            root,
-            compensation: 1.0,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: Some(model),
-            paired_opamp: None,
-            dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-        });
-    }
-
-    // ── Op-amp feedback detection ───────────────────────────────────────────
-    // Detect op-amp feedback topologies and calculate closed-loop gain.
-    // - Unity-gain: neg=out, gain = 1.0 (paired with JFET stages for all-pass)
-    // - Inverting: gain = Rf/Ri (creates dedicated op-amp WDF stage)
-    // - Non-inverting: gain = 1 + Rf/Ri (creates dedicated op-amp WDF stage)
-    let feedback_loops = graph.find_opamp_feedback_loops(pedal);
-    let feedback_opamp_ids: HashSet<String> = feedback_loops
-        .iter()
-        .map(|info| info.comp_id.clone())
-        .collect();
-
-    // Track which op-amps are unity-gain (for JFET pairing) vs gain stages
-    let unity_gain_opamp_ids: HashSet<String> = feedback_loops
-        .iter()
-        .filter(|info| matches!(info.feedback_kind, OpAmpFeedbackKind::UnityGain))
-        .map(|info| info.comp_id.clone())
-        .collect();
-
-    // No longer need opamp_feedback_gain - Phase 2 uses WDF roots directly
+    // ══ Pass 2: Op-amp analysis ═══════════════════════════════════════
+    let mut opamp_analysis = super::opamp_analysis::analyze_opamps(&graph, pedal);
     let opamp_feedback_gain = 1.0_f64;
 
-    // ── Op-amp gain stages (Inverting/Non-Inverting) ───────────────────────
-    // Create WDF stages for op-amps with detected gain configurations.
-    // These stages apply the closed-loop gain through the WDF scattering.
-    //
-    // Also build a map from pot component IDs to their gain modulation info:
-    // (stage_idx, ri, fixed_series_r, max_pot_r, parallel_fixed_r, is_inverting)
-    let mut opamp_pot_map: HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)> = HashMap::new();
-
-    for info in &feedback_loops {
-        match &info.feedback_kind {
-            OpAmpFeedbackKind::UnityGain => {
-                // Unity-gain op-amps are paired with JFET stages for all-pass filters
-                // Skip here - handled in JFET stage creation below
-            }
-            OpAmpFeedbackKind::Inverting { rf, ri, feedback_diode, rf_pot } => {
-                // Track pot info for runtime gain modulation BEFORE creating stage
-                // (so we have the correct stage index)
-                let stage_idx = stages.len();
-                if let Some((pot_id, max_pot_r, fixed_series_r, parallel_fixed_r)) = rf_pot {
-                    opamp_pot_map.insert(pot_id.clone(), (stage_idx, *ri, *fixed_series_r, *max_pot_r, *parallel_fixed_r, true));
-                }
-
-                // Create an inverting op-amp WDF stage
-                let model = OpAmpModel::from_opamp_type(&info.opamp_type);
-                let gain = rf / ri;
-                let mut root = OpAmpRoot::new_inverting(model, gain);
-                root.set_sample_rate(sample_rate);
-
-                // Set v_max based on supply voltage (single-supply biased at Vcc/2)
-                // Use default 9V supply, will be updated when supply_voltage is known
-                let default_supply = 9.0_f64;
-                let v_max = (default_supply / 2.0 - 1.5).max(0.5);
-                root.set_v_max(v_max);
-
-                // Enable soft clipping if feedback diodes are present
-                // This models Tube Screamer style soft clipping via feedback diodes
-                if let Some(diode_type) = feedback_diode {
-                    let diode_vf = match diode_type {
-                        DiodeType::Silicon => 0.6, // 1N4148, 1N914
-                        DiodeType::Germanium => 0.3, // 1N34A, OA91
-                        DiodeType::Led => 1.6, // Red LED
-                    };
-                    root.set_soft_clip(diode_vf);
-                }
-
-                // Create a tree with voltage source for signal injection.
-                // The voltage source models the input signal, and the resistor
-                // represents the load impedance. The op-amp root drives the output.
-                let tree = DynNode::VoltageSource { voltage: 0.0, rp: 10_000.0 };
-
-                stages.push(WdfStage {
-                    tree,
-                    root: RootKind::OpAmp(root),
-                    compensation: 1.0,
-                    oversampler: Oversampler::new(oversampling),
-                    base_diode_model: None,
-                    paired_opamp: None,
-                    dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-                });
-            }
-            OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot } => {
-                // Track pot info for runtime gain modulation BEFORE creating stage
-                let stage_idx = stages.len();
-                if let Some((pot_id, max_pot_r, fixed_series_r, parallel_fixed_r)) = rf_pot {
-                    opamp_pot_map.insert(pot_id.clone(), (stage_idx, *ri, *fixed_series_r, *max_pot_r, *parallel_fixed_r, false));
-                }
-
-                // Create a non-inverting op-amp WDF stage
-                let model = OpAmpModel::from_opamp_type(&info.opamp_type);
-                let gain = 1.0 + (rf / ri);
-                let mut root = OpAmpRoot::new_non_inverting(model, gain);
-                root.set_sample_rate(sample_rate);
-
-                // Set v_max based on supply voltage (single-supply biased at Vcc/2)
-                // Use default 9V supply, will be updated when supply_voltage is known
-                let default_supply = 9.0_f64;
-                let v_max = (default_supply / 2.0 - 1.5).max(0.5);
-                root.set_v_max(v_max);
-
-                // Create a tree with voltage source for signal injection.
-                // For non-inverting, the input goes to Vp (set in stage.process),
-                // but we still need a voltage source for the WDF to work.
-                let tree = DynNode::VoltageSource { voltage: 0.0, rp: 10_000.0 };
-
-                stages.push(WdfStage {
-                    tree,
-                    root: RootKind::OpAmp(root),
-                    compensation: 1.0,
-                    oversampler: Oversampler::new(oversampling),
-                    base_diode_model: None,
-                    paired_opamp: None,
-                    dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-                });
-            }
-        }
-    }
-
-    // ── Op-amp stages (standalone, no feedback) ────────────────────────────
-    // Create OpAmpRoot elements for each non-OTA op-amp in the circuit
-    // that doesn't have detected feedback loops.
-    let mut opamp_stages: Vec<OpAmpStage> = Vec::new();
-    for comp in &pedal.components {
-        if let ComponentKind::OpAmp(ot) = &comp.kind {
-            // OTAs (CA3080) are handled separately as OtaRoot, not OpAmpRoot
-            if !ot.is_ota() && !feedback_opamp_ids.contains(&comp.id) {
-                let model = OpAmpModel::from_opamp_type(ot);
-                let mut opamp = OpAmpRoot::new(model);
-                opamp.set_sample_rate(sample_rate);
-                opamp_stages.push(OpAmpStage {
-                    opamp,
-                    comp_id: comp.id.clone(),
-                });
-            }
-        }
-    }
-
-    // Build a queue of unity-gain feedback op-amps to pair with JFET stages.
-    // Each feedback op-amp will be attached to the next JFET stage
-    // in the signal chain (ordered by topological distance from input).
-    // Only unity-gain op-amps are paired with JFET stages (for all-pass filters).
-    let mut feedback_opamp_queue: Vec<OpAmpRoot> = feedback_loops
-        .iter()
-        .filter(|info| matches!(info.feedback_kind, OpAmpFeedbackKind::UnityGain))
-        .map(|info| {
-            let model = OpAmpModel::from_opamp_type(&info.opamp_type);
-            let mut opamp = OpAmpRoot::new(model);
-            opamp.set_sample_rate(sample_rate);
-            opamp
-        })
-        .collect();
-
-    // Build WDF stages for JFETs.
-    let jfets = graph.find_jfets();
-    let jfet_edge_indices: Vec<usize> = jfets.iter().map(|(idx, _)| *idx).collect();
-    let all_nonlinear_indices: Vec<usize> = diode_edge_indices
-        .iter()
-        .chain(jfet_edge_indices.iter())
-        .copied()
-        .collect();
-
-    for (_edge_idx, jfet_info) in &jfets {
-        let junction = jfet_info.junction_node;
-
-        // Get elements at the junction (like RS for source follower)
-        let junction_passives = graph.elements_at_junction(
-            junction,
-            &all_nonlinear_indices,
-            &graph.active_edge_indices,
-        );
-
-        // Also find elements connecting junction to output (like C2 for source follower)
-        // This is critical for source followers where output is taken from source.
-        let junction_to_output: Vec<usize> = graph
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(idx, e)| {
-                if all_nonlinear_indices.contains(idx) {
-                    return false;
-                }
-                if graph.active_edge_indices.contains(idx) {
-                    return false;
-                }
-                // Must connect junction to out_node
-                (e.node_a == junction && e.node_b == graph.out_node)
-                    || (e.node_a == graph.out_node && e.node_b == junction)
-            })
-            .map(|(idx, _)| idx)
-            .collect();
-
-        // Also find elements at out_node (e.g., R_load to ground)
-        let output_passives = graph.elements_at_junction(
-            graph.out_node,
-            &all_nonlinear_indices,
-            &graph.active_edge_indices,
-        );
-
-        // Combine all passive elements
-        let mut passive_idxs: Vec<usize> = junction_passives.clone();
-        for idx in &junction_to_output {
-            if !passive_idxs.contains(idx) {
-                passive_idxs.push(*idx);
-            }
-        }
-        for idx in &output_passives {
-            if !passive_idxs.contains(idx) {
-                passive_idxs.push(*idx);
-            }
-        }
-
-        if passive_idxs.is_empty() {
-            continue;
-        }
-
-        // Detect source follower topology early: junction (source) connects to output.
-        // Source followers require a different WDF architecture:
-        // - Input modulates Vgs (gate-source voltage)
-        // - JFET current drives the source resistor network
-        // - Output is taken from the source node
-        // - NO voltage source in tree (JFET is the driver)
-        //
-        // Detection: junction connects to output via an edge, OR junction IS the output node
-        // (e.g., "J1.source -> RS.a, out" makes junction == out_node)
-        let is_source_follower = !junction_to_output.is_empty() || junction == graph.out_node;
-
-        // Build the WDF tree
-        let (tree, root) = if is_source_follower {
-            // Source follower: JFET-driven architecture (no voltage source)
-            // The tree contains only the source network: RS || (C2 series RL)
-            // The JFET acts as a current source controlled by Vgs
-            let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-            for &eidx in &passive_idxs {
-                let e = &graph.edges[eidx];
-                sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-            }
-
-            // Terminals: ground and JFET source (junction)
-            let terminals = vec![graph.gnd_node, junction];
-            let sp_tree = match sp_reduce(sp_edges, &terminals) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-
-            let tree = sp_to_dyn(&sp_tree, &graph.components, &graph.fork_paths, sample_rate);
-            let model = jfet_model(&jfet_info.model_name, jfet_info.is_n_channel);
-            (tree, RootKind::Jfet(JfetRoot::new(model)))
-        } else {
-            // Normal JFET stage (phaser, common-source): voltage source drives input
-            // Find the best injection node for the voltage source.
-            let mut injection_node = graph.in_node;
-            let mut best_dist = usize::MAX;
-            for &eidx in &passive_idxs {
-                let e = &graph.edges[eidx];
-                let other = if e.node_a == junction {
-                    e.node_b
-                } else {
-                    e.node_a
-                };
-                if let Some(&d) = dist_from_in.get(&other) {
-                    if d < best_dist {
-                        best_dist = d;
-                        injection_node = other;
-                    }
-                }
-            }
-            // Fallback: if in_node is disconnected (e.g. split pedal post-half
-            // where in maps to a triode grid), use gnd as the injection point.
-            if best_dist == usize::MAX {
-                injection_node = graph.gnd_node;
-            }
-
-            // Build SP edges with voltage source.
-            let source_node = graph.edges.len() + 2000; // virtual source node
-            let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-            sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-
-            for &eidx in &passive_idxs {
-                let e = &graph.edges[eidx];
-                sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-            }
-
-            let terminals = vec![source_node, junction];
-            let sp_tree = match sp_reduce(sp_edges, &terminals) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-
-            // Create components list with virtual voltage source.
-            let mut jfet_components = graph.components.clone();
-            while jfet_components.len() <= vs_comp_idx {
-                jfet_components.push(ComponentDef {
-                    id: "__vs__".to_string(),
-                    kind: ComponentKind::Resistor(1.0),
-                });
-            }
-
-            let tree = sp_to_dyn_with_vs(&sp_tree, &jfet_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-            let model = jfet_model(&jfet_info.model_name, jfet_info.is_n_channel);
-            (tree, RootKind::Jfet(JfetRoot::new(model)))
-        };
-
-        // Pair this JFET stage with a feedback op-amp if available.
-        // In all-pass circuits (Phase 90), each JFET stage is followed
-        // by a unity-gain op-amp buffer that maintains signal level.
-        let paired_opamp = if !feedback_opamp_queue.is_empty() {
-            Some(feedback_opamp_queue.remove(0))
-        } else {
-            None
-        };
-
-        stages.push(WdfStage {
-            tree,
-            root,
-            compensation: 1.0,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: None,
-            paired_opamp,
-            dc_block: None,
-            is_source_follower,
-            prev_source_voltage: 0.0,
-        });
-    }
-
-    // Handle remaining unity-gain op-amps that weren't paired with JFETs.
-    // These are standalone unity buffers (no JFET all-pass network).
-    for opamp in feedback_opamp_queue.drain(..) {
-        // Create a voltage source tree for the unity buffer.
-        // The input signal will be set via set_vp() before processing.
-        let tree = DynNode::VoltageSource { voltage: 0.0, rp: 10_000.0 };
-
-        stages.push(WdfStage {
-            tree,
-            root: RootKind::OpAmp(opamp),
-            compensation: 1.0,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: None,
-            paired_opamp: None,
-            dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-        });
-    }
-
-    // Build WDF stages for BJTs.
-    let bjts = graph.find_bjts();
-    let bjt_edge_indices: Vec<usize> = bjts.iter().map(|(idx, _)| *idx).collect();
-    let all_nonlinear_with_bjts: Vec<usize> = all_nonlinear_indices
-        .iter()
-        .chain(bjt_edge_indices.iter())
-        .copied()
-        .collect();
-
-    // Compute distance from out_node for "connects to output" detection.
-    // A stage connects to output if its collector passives lead toward out_node.
-    let dist_from_out = {
-        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        for e in &graph.edges {
-            adj.entry(e.node_a).or_default().push(e.node_b);
-            adj.entry(e.node_b).or_default().push(e.node_a);
-        }
-        let mut dist: HashMap<NodeId, usize> = HashMap::new();
-        let mut queue = std::collections::VecDeque::new();
-        dist.insert(graph.out_node, 0);
-        queue.push_back(graph.out_node);
-        while let Some(n) = queue.pop_front() {
-            let d = dist[&n];
-            if let Some(neighbors) = adj.get(&n) {
-                for &nb in neighbors {
-                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
-                        e.insert(d + 1);
-                        queue.push_back(nb);
-                    }
-                }
-            }
-        }
-        dist
-    };
-
-    // Collect all BJT base nodes to handle feedback paths.
-    // When a BJT's collector connects to another BJT's base (feedback), we need
-    // to stop passive collection at that node to avoid pulling in the other stage.
-    let all_bjt_base_nodes: HashSet<NodeId> = bjts
-        .iter()
-        .map(|(_, info)| info.base_node)
-        .collect();
-
-    for (_bjt_idx, (_edge_idx, bjt_info)) in bjts.iter().enumerate() {
-        let collector_node = bjt_info.collector_node;
-        let emitter_node = bjt_info.emitter_node;
-
-        // Find passive elements at collector junction.
-        // For multi-BJT circuits with feedback (e.g., Fuzz Face: Q2.collector → Q1.base),
-        // the collector node may be merged with another BJT's base. This creates a
-        // non-series-parallel topology because both stages' passives connect to the same node.
-        //
-        // Strategy: when the collector has feedback, only include elements that are
-        // clearly part of THIS BJT's output stage:
-        // 1. Output coupling cap (connects toward out_node path)
-        // 2. The emitter passives (separate node, no issue)
-        //
-        // This excludes parallel load resistors from the input stage that create the
-        // non-SP condition.
-        let has_feedback = all_bjt_base_nodes.contains(&collector_node);
-        let collector_passives: Vec<usize> = if has_feedback {
-            // Collector has feedback: carefully select passives to avoid non-SP topology
-            // For Fuzz Face: Q2.collector = Q1.base due to feedback
-            // Multiple resistors to gnd (R5, R7) create parallel paths that sp_reduce can't handle.
-            //
-            // Strategy:
-            // 1. Include output-path edges (toward out_node, not gnd/supply/in_node)
-            // 2. Include at most ONE resistor to gnd (the load) to enable voltage gain
-            let mut passives: Vec<usize> = Vec::new();
-            let mut found_gnd_resistor = false;
-
-            for (idx, e) in graph.edges.iter().enumerate() {
-                if all_nonlinear_with_bjts.contains(&idx) {
-                    continue;
-                }
-                if graph.active_edge_indices.contains(&idx) {
-                    continue;
-                }
-                // Must touch collector
-                if e.node_a != collector_node && e.node_b != collector_node {
-                    continue;
-                }
-                let other = if e.node_a == collector_node { e.node_b } else { e.node_a };
-
-                // Skip input-path edges
-                if other == graph.in_node {
-                    continue;
-                }
-                // Skip supply edges
-                if graph.supply_nodes.contains(&other) {
-                    continue;
-                }
-
-                // For gnd edges, only include ONE (the load resistor)
-                if other == graph.gnd_node {
-                    if !found_gnd_resistor {
-                        if let ComponentKind::Resistor(_) = &graph.components[e.comp_idx].kind {
-                            found_gnd_resistor = true;
-                            passives.push(idx);
-                        }
-                    }
-                    continue;
-                }
-
-                // Skip output-path edges (like C4 → Volume) for feedback stages
-                // These create dangling nodes since we exclude output_passives
-                // for feedback stages to avoid non-SP topology.
-                // Skip for now - the load resistor provides the essential gain element.
-            }
-            passives
-        } else {
-            // No feedback: use standard junction detection
-            graph.elements_at_junction(
-                collector_node,
-                &all_nonlinear_with_bjts,
-                &graph.active_edge_indices,
-            )
-        };
-
-        // Find emitter passives, excluding those that connect to VCC.
-        // For PNP transistors, emitter biasing goes to VCC but that's not
-        // part of the AC signal path when using GND as the WDF terminal.
-        let vcc_node = *graph.node_names.get("vcc").unwrap_or(&graph.gnd_node);
-        let emitter_passives: Vec<usize> = graph.elements_at_junction(
-            emitter_node,
-            &all_nonlinear_with_bjts,
-            &graph.active_edge_indices,
-        ).into_iter()
-        .filter(|&idx| {
-            let e = &graph.edges[idx];
-            let other = if e.node_a == emitter_node { e.node_b } else { e.node_a };
-            // Skip edges to VCC (emitter biasing for PNP, not in AC path)
-            other != vcc_node
-        })
-        .collect();
-
-        // For BJTs, also find elements connecting collector to output (e.g., C_out).
-        // These are normally skipped by elements_at_junction but are needed for
-        // proper AC coupling of the BJT output.
-        let collector_to_output: Vec<usize> = graph
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(idx, e)| {
-                if all_nonlinear_with_bjts.contains(idx) {
-                    return false;
-                }
-                if graph.active_edge_indices.contains(idx) {
-                    return false;
-                }
-                // Must connect collector_node to out_node
-                (e.node_a == collector_node && e.node_b == graph.out_node)
-                    || (e.node_a == graph.out_node && e.node_b == collector_node)
-            })
-            .map(|(idx, _)| idx)
-            .collect();
-
-        // Also find elements at out_node (e.g., R_load to ground)
-        let output_passives = graph.elements_at_junction(
-            graph.out_node,
-            &all_nonlinear_with_bjts,
-            &graph.active_edge_indices,
-        );
-
-        // Combine all sets of passive elements
-        let mut passive_idxs: Vec<usize> = collector_passives.clone();
-        for idx in &emitter_passives {
-            if !passive_idxs.contains(idx) {
-                passive_idxs.push(*idx);
-            }
-        }
-        for idx in &collector_to_output {
-            if !passive_idxs.contains(idx) {
-                passive_idxs.push(*idx);
-            }
-        }
-        // Only include output passives if this stage is the FINAL stage on the output path.
-        // For cascaded BJTs (e.g., Fuzz Face Q1 → Q2 → output), only the final
-        // stage should include output passives. Otherwise intermediate stages
-        // would incorrectly include the Volume pot.
-        //
-        // Heuristic: a stage "connects to output" if any collector passive leads
-        // TOWARD output (closer to out_node than the collector itself), and that
-        // path doesn't go through another BJT's base (which would be an interstage connection).
-        let collector_dist_out = dist_from_out.get(&collector_node).copied().unwrap_or(usize::MAX);
-        let connects_to_output = !collector_to_output.is_empty() ||
-            collector_passives.iter().any(|&idx| {
-                let e = &graph.edges[idx];
-                let other = if e.node_a == collector_node { e.node_b } else { e.node_a };
-                // Check if "other" is closer to output than collector
-                let other_dist_out = dist_from_out.get(&other).copied().unwrap_or(usize::MAX);
-                // Also ensure "other" is not another BJT's base (interstage connection)
-                other_dist_out < collector_dist_out && !all_bjt_base_nodes.contains(&other)
-            });
-        // For feedback stages, skip output_passives to simplify the tree.
-        // The output passives (Volume pot, R_load) can create non-SP topology
-        // when combined with feedback connections.
-        if connects_to_output && !has_feedback {
-            for idx in &output_passives {
-                if !passive_idxs.contains(idx) {
-                    passive_idxs.push(*idx);
-                }
-            }
-        }
-
-        if passive_idxs.is_empty() {
-            continue;
-        }
-
-        // Find the best injection node for the voltage source.
-        // For BJTs, prefer injecting at the collector side (where the load is).
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-
-        // Check collector-side elements first
-        for &eidx in &collector_passives {
-            let e = &graph.edges[eidx];
-            let other = if e.node_a == collector_node {
-                e.node_b
-            } else {
-                e.node_a
-            };
-            if let Some(&d) = dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
-                }
-            }
-        }
-
-        // Then check emitter-side and output elements
-        for &eidx in emitter_passives.iter().chain(collector_to_output.iter()).chain(output_passives.iter()) {
-            let e = &graph.edges[eidx];
-            for node in [e.node_a, e.node_b] {
-                if node != collector_node && node != emitter_node {
-                    if let Some(&d) = dist_from_in.get(&node) {
-                        if d < best_dist {
-                            best_dist = d;
-                            injection_node = node;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fallback: inject at supply node if reachable (like triodes)
-        if best_dist == usize::MAX {
-            let mut found_supply = false;
-            for &eidx in &collector_passives {
-                let e = &graph.edges[eidx];
-                if graph.supply_nodes.contains(&e.node_a) || graph.supply_nodes.contains(&e.node_b) {
-                    injection_node = if graph.supply_nodes.contains(&e.node_a) { e.node_a } else { e.node_b };
-                    found_supply = true;
-                    break;
-                }
-            }
-            if !found_supply {
-                injection_node = graph.gnd_node;
-            }
-        }
-
-        // Build SP edges for the BJT stage.
-        // The BJT stage topology is:
-        //   source -> R_collector -> collector -- BJT -- emitter -> R_emitter||C_emitter -> GND
-        // We use ground as the second terminal to create a proper two-port network.
-        let source_node = graph.edges.len() + 3000; // virtual source node for BJTs
-        let virtual_ce_idx = vs_comp_idx + 1; // Virtual collector-emitter path
-        let gnd_node = graph.gnd_node;
-
-        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-        }
-
-        // Connect collector and emitter nodes through a virtual edge.
-        // This represents the BJT's internal collector-emitter path.
-        sp_edges.push((collector_node, emitter_node, SpTree::Leaf(virtual_ce_idx)));
-
-        // Use source and ground as terminals - this creates a proper two-port network
-        // where all nodes can reduce to these two terminals.
-        let terminals = vec![source_node, gnd_node];
-        let num_sp_edges = sp_edges.len();
-        let sp_tree = match sp_reduce(sp_edges, &terminals) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        // Create components list with virtual elements for BJT stages.
-        let mut bjt_components = graph.components.clone();
-        while bjt_components.len() <= virtual_ce_idx {
-            bjt_components.push(ComponentDef {
-                id: "__vs__".to_string(),
-                kind: ComponentKind::Resistor(1.0),
-            });
-        }
-        // Add virtual high-impedance resistor for collector-emitter connection
-        // This represents the BJT's output impedance (r_ce ≈ 50kΩ for typical small signal)
-        bjt_components[virtual_ce_idx] = ComponentDef {
-            id: "__bjt_rce__".to_string(),
-            kind: ComponentKind::Resistor(50000.0),
-        };
-
-        let tree = sp_to_dyn_with_vs(&sp_tree, &bjt_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
-        let model = BjtModel::by_name(&bjt_info.model_name);
-        let root = if bjt_info.is_npn {
-            RootKind::BjtNpn(BjtNpnRoot::new(model))
-        } else {
-            RootKind::BjtPnp(BjtPnpRoot::new(model))
-        };
-
-        stages.push(WdfStage {
-            tree,
-            root,
-            compensation: 1.0,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: None,
-            paired_opamp: None,
-            dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-        });
-    }
-
-    // Build WDF stages for triodes.
-    // find_triodes() returns (merged_triodes, all_edge_indices):
-    //   - merged_triodes: parallel tubes sharing (plate, cathode) nodes are merged
-    //     into one entry with parallel_count > 1
-    //   - all_edge_indices: every raw triode edge index (including duplicates),
-    //     used to exclude ALL triode edges from passive collection
-    let (triodes, all_triode_edges) = graph.find_triodes();
-    let all_nonlinear_with_triodes: Vec<usize> = all_nonlinear_with_bjts
-        .iter()
-        .chain(all_triode_edges.iter())
-        .copied()
-        .collect();
-
-    // Detect push-pull pairs connected through center-tapped transformers.
-    // Paired triodes get a PushPullStage instead of individual WdfStages.
-    let push_pull_pairs = graph.find_push_pull_triode_pairs(&triodes, &all_nonlinear_with_triodes);
-    let paired_triode_indices: HashSet<usize> = push_pull_pairs
-        .iter()
-        .flat_map(|p| [p.push_triode_idx, p.pull_triode_idx])
-        .collect();
-
-    // Build PushPullStages for each detected pair.
-    let mut push_pull_stages = Vec::new();
-    for pair in &push_pull_pairs {
-        let push_info = &triodes[pair.push_triode_idx].1;
-        let pull_info = &triodes[pair.pull_triode_idx].1;
-
-        // Build WDF trees for each half.
-        // Each half gets its plate-side and cathode-side passives.
-        let build_half_tree = |info: &TriodeInfo| -> Option<(DynNode, f64)> {
-            // For push-pull halves, collect passives WITHOUT filtering supply nodes.
-            // In the 670, the plate connects to a balance supply rail (A_bal) through
-            // R_bal — this resistor IS part of the signal path and must be included.
-            let collect_passives_at = |junction: NodeId| -> Vec<usize> {
-                graph.edges
-                    .iter()
-                    .enumerate()
-                    .filter(|(idx, e)| {
-                        if all_nonlinear_with_triodes.contains(idx) { return false; }
-                        if graph.active_edge_indices.contains(idx) { return false; }
-                        (e.node_a == junction || e.node_b == junction)
-                    })
-                    .map(|(idx, _)| idx)
-                    .collect()
-            };
-            let plate_passives = collect_passives_at(info.plate_node);
-            let cathode_passives = collect_passives_at(info.cathode_node);
-
-            let mut passive_idxs: Vec<usize> = plate_passives.clone();
-            for idx in &cathode_passives {
-                if !passive_idxs.contains(idx) {
-                    passive_idxs.push(*idx);
-                }
-            }
-
-            if passive_idxs.is_empty() {
-                return None;
-            }
-
-            // Find injection node (prefer plate-side).
-            // BFS from in_node may not reach plate/cathode neighborhood in
-            // equipment circuits (grid blocks traversal). Fall back to VCC node.
-            let mut injection_node = graph.gnd_node;
-            let mut best_dist = usize::MAX;
-            for &eidx in &plate_passives {
-                let e = &graph.edges[eidx];
-                let other = if e.node_a == info.plate_node { e.node_b } else { e.node_a };
-                if let Some(&d) = dist_from_in.get(&other) {
-                    if d < best_dist {
-                        best_dist = d;
-                        injection_node = other;
-                    }
-                }
-            }
-            if best_dist == usize::MAX {
-                for &eidx in &cathode_passives {
-                    let e = &graph.edges[eidx];
-                    let other = if e.node_a == info.cathode_node { e.node_b } else { e.node_a };
-                    if let Some(&d) = dist_from_in.get(&other) {
-                        if d < best_dist {
-                            best_dist = d;
-                            injection_node = other;
-                        }
-                    }
-                }
-            }
-            // Fallback: BFS couldn't reach plate/cathode neighborhood.
-            // Inject at the supply node (far end of plate load) to create a
-            // proper series path: source → VCC → R_plate → plate → tube → cathode → gnd.
-            // Using gnd_node is degenerate (VS between both terminals → 1Ω port resistance).
-            if best_dist == usize::MAX {
-                for &eidx in &plate_passives {
-                    let e = &graph.edges[eidx];
-                    let other = if e.node_a == info.plate_node { e.node_b } else { e.node_a };
-                    if other != graph.gnd_node && other != info.cathode_node {
-                        injection_node = other;
-                        break;
-                    }
-                }
-            }
-
-            // Build SP edges.
-            let source_node = graph.edges.len() + 5000;
-            let virtual_rp_idx = vs_comp_idx + 1;
-
-            // For push-pull halves, the cathode may not connect to gnd_node
-            // (e.g., 670 cathodes couple through a delay line, not to ground).
-            // Use the far end of the cathode passive chain as the ground terminal
-            // so the SP tree forms a proper 2-terminal network.
-            let mut ground_terminal = graph.gnd_node;
-            for &eidx in &cathode_passives {
-                let e = &graph.edges[eidx];
-                let far = if e.node_a == info.cathode_node { e.node_b } else { e.node_a };
-                if far != info.plate_node && far != injection_node {
-                    ground_terminal = far;
-                    break;
-                }
-            }
-            // If no cathode passive leads away, fall back to gnd_node.
-            // Also fall back if the only cathode far node IS gnd.
-
-            let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-            sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-            for &eidx in &passive_idxs {
-                let e = &graph.edges[eidx];
-                sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-            }
-            sp_edges.push((info.plate_node, info.cathode_node, SpTree::Leaf(virtual_rp_idx)));
-
-            let terminals = vec![source_node, ground_terminal];
-            let sp_tree = sp_reduce(sp_edges, &terminals).ok()?;
-
-            let mut half_components = graph.components.clone();
-            while half_components.len() <= virtual_rp_idx {
-                half_components.push(ComponentDef {
-                    id: "__vs__".to_string(),
-                    kind: ComponentKind::Resistor(1.0),
-                });
-            }
-            half_components[virtual_rp_idx] = ComponentDef {
-                id: "__triode_rp__".to_string(),
-                kind: ComponentKind::Resistor(62500.0),
-            };
-
-            let tree = sp_to_dyn_with_vs(&sp_tree, &half_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
-            // Compute compensation from triode mu.
-            let mu_compensation = if info.is_vari_mu {
-                0.35 // Variable-mu: max mu ≈ 35-40
-            } else {
-                let model = triode_model(&info.model_name);
-                model.mu / 100.0
-            };
-
-            Some((tree, mu_compensation))
-        };
-
-        let push_half = build_half_tree(push_info);
-        let pull_half = build_half_tree(pull_info);
-
-        if let (Some((push_tree, push_comp)), Some((pull_tree, _pull_comp))) = (push_half, pull_half) {
-            let (push_root, pull_root) = if push_info.is_vari_mu {
-                let push_model = vari_mu_model(&push_info.model_name);
-                let pull_model = vari_mu_model(&pull_info.model_name);
-                (
-                    TubeRoot::VariMu(
-                        VariMuTriodeRoot::new(push_model)
-                            .with_parallel_count(push_info.parallel_count),
-                    ),
-                    TubeRoot::VariMu(
-                        VariMuTriodeRoot::new(pull_model)
-                            .with_parallel_count(pull_info.parallel_count),
-                    ),
-                )
-            } else {
-                let push_model = triode_model(&push_info.model_name);
-                let pull_model = triode_model(&pull_info.model_name);
-                (
-                    TubeRoot::Koren(
-                        TriodeRoot::new(push_model)
-                            .with_parallel_count(push_info.parallel_count),
-                    ),
-                    TubeRoot::Koren(
-                        TriodeRoot::new(pull_model)
-                            .with_parallel_count(pull_info.parallel_count),
-                    ),
-                )
-            };
-
-            push_pull_stages.push(PushPullStage {
-                push_tree,
-                pull_tree,
-                push_root,
-                pull_root,
-                push_oversampler: Oversampler::new(oversampling),
-                pull_oversampler: Oversampler::new(oversampling),
-                compensation: push_comp,
-                turns_ratio: pair.turns_ratio,
-                grid_bias: -2.0, // Class AB bias for 6386 in 670 (wavechild670: VgateBias ≈ -2.2V)
-                cathode_delay_state: 0.0,
-            });
-        }
-    }
-
-    for (triode_list_idx, (_edge_idx, triode_info)) in triodes.iter().enumerate() {
-        // Skip triodes that are part of a push-pull pair.
-        if paired_triode_indices.contains(&triode_list_idx) {
-            continue;
-        }
-        // Skip triodes that are part of the sidechain path.
-        if sidechain_edge_set.contains(_edge_idx) {
-            continue;
-        }
-
-        let plate_node = triode_info.plate_node;
-        let cathode_node = triode_info.cathode_node;
-
-        // Find passive elements at BOTH plate and cathode junctions.
-        // The plate load resistor is at the plate node.
-        // The cathode resistor and bypass cap are at the cathode node.
-        let plate_passives = graph.elements_at_junction(
-            plate_node,
-            &all_nonlinear_with_triodes,
-            &graph.active_edge_indices,
-        );
-        let cathode_passives = graph.elements_at_junction(
-            cathode_node,
-            &all_nonlinear_with_triodes,
-            &graph.active_edge_indices,
-        );
-
-        // For triodes, also find elements connecting plate to output (e.g., C_out).
-        // These are normally skipped by elements_at_junction but are needed for
-        // proper AC coupling of the triode output.
-        let plate_to_output: Vec<usize> = graph
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(idx, e)| {
-                if all_nonlinear_with_triodes.contains(idx) {
-                    return false;
-                }
-                if graph.active_edge_indices.contains(idx) {
-                    return false;
-                }
-                // Must connect plate_node to out_node
-                (e.node_a == plate_node && e.node_b == graph.out_node)
-                    || (e.node_a == graph.out_node && e.node_b == plate_node)
-            })
-            .map(|(idx, _)| idx)
-            .collect();
-
-        // Also find elements at out_node (e.g., R_load to ground)
-        let output_passives = graph.elements_at_junction(
-            graph.out_node,
-            &all_nonlinear_with_triodes,
-            &graph.active_edge_indices,
-        );
-
-        // Combine all sets of passive elements
-        let mut passive_idxs: Vec<usize> = plate_passives.clone();
-        for idx in &cathode_passives {
-            if !passive_idxs.contains(idx) {
-                passive_idxs.push(*idx);
-            }
-        }
-        for idx in &plate_to_output {
-            if !passive_idxs.contains(idx) {
-                passive_idxs.push(*idx);
-            }
-        }
-        for idx in &output_passives {
-            if !passive_idxs.contains(idx) {
-                passive_idxs.push(*idx);
-            }
-        }
-
-        if passive_idxs.is_empty() {
-            continue;
-        }
-
-        // Find the best injection node for the voltage source.
-        // For triodes, prefer injecting at the plate side (where the plate load is).
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-
-        // Check plate-side elements first
-        for &eidx in &plate_passives {
-            let e = &graph.edges[eidx];
-            let other = if e.node_a == plate_node {
-                e.node_b
-            } else {
-                e.node_a
-            };
-            if let Some(&d) = dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
-                }
-            }
-        }
-
-        // If no plate-side injection found, check cathode side
-        if best_dist == usize::MAX {
-            for &eidx in &cathode_passives {
-                let e = &graph.edges[eidx];
-                let other = if e.node_a == cathode_node {
-                    e.node_b
-                } else {
-                    e.node_a
-                };
-                if let Some(&d) = dist_from_in.get(&other) {
-                    if d < best_dist {
-                        best_dist = d;
-                        injection_node = other;
-                    }
-                }
-            }
-        }
-
-        // Fallback: BFS couldn't reach plate/cathode neighborhood (equipment circuits).
-        // Inject at the supply node (far end of plate load) instead of gnd_node.
-        // Using gnd_node is degenerate: VS between both terminals → 1Ω port resistance.
-        if best_dist == usize::MAX {
-            let mut found_supply = false;
-            for &eidx in &plate_passives {
-                let e = &graph.edges[eidx];
-                let other = if e.node_a == plate_node { e.node_b } else { e.node_a };
-                if other != graph.gnd_node && other != cathode_node {
-                    injection_node = other;
-                    found_supply = true;
-                    break;
-                }
-            }
-            if !found_supply {
-                injection_node = graph.gnd_node;
-            }
-        }
-
-        // Build SP edges for the triode stage.
-        // The triode stage topology is:
-        //   source -> R_plate -> plate -- triode -- cathode -> R_cathode||C_cathode -> GND
-        // We use ground as the second terminal to create a proper two-port network.
-        let source_node = graph.edges.len() + 3000;
-        let virtual_plate_cathode_idx = vs_comp_idx + 1;
-        let gnd_node = graph.gnd_node;
-
-        // Helper closure to build the sp_edges vector
-        let build_sp_edges = || {
-            let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-            sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-
-            for &eidx in &passive_idxs {
-                let e = &graph.edges[eidx];
-                sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-            }
-
-            // Connect plate and cathode nodes through a virtual edge.
-            // This represents the triode's internal plate resistance (rp).
-            sp_edges.push((plate_node, cathode_node, SpTree::Leaf(virtual_plate_cathode_idx)));
-            sp_edges
-        };
-
-        // Use source and ground as terminals - this creates a proper two-port network
-        // where all nodes can reduce to these two terminals.
-        let terminals = vec![source_node, gnd_node];
-        let sp_tree = match sp_reduce(build_sp_edges(), &terminals) {
-            Ok(t) => t,
-            Err(_) => continue, // Skip if SP reduction fails
-        };
-
-        let mut triode_components = graph.components.clone();
-        while triode_components.len() <= virtual_plate_cathode_idx {
-            triode_components.push(ComponentDef {
-                id: "__vs__".to_string(),
-                kind: ComponentKind::Resistor(1.0),
-            });
-        }
-        // Add virtual high-impedance resistor for plate-cathode connection
-        // This represents the triode's internal resistance (rp ≈ 60kΩ for 12AX7)
-        triode_components[virtual_plate_cathode_idx] = ComponentDef {
-            id: "__triode_rp__".to_string(),
-            kind: ComponentKind::Resistor(62500.0), // 12AX7 plate resistance
-        };
-
-        let tree = sp_to_dyn_with_vs(&sp_tree, &triode_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
-        let (root, mu_compensation) = if triode_info.is_vari_mu {
-            let model = vari_mu_model(&triode_info.model_name);
-            let root = RootKind::VariMu(
-                VariMuTriodeRoot::new(model).with_parallel_count(triode_info.parallel_count)
-            );
-            // Variable-mu: max mu ≈ 35-40, normalize to 100 reference
-            (root, 0.35)
-        } else {
-            let model = triode_model(&triode_info.model_name);
-            let root = RootKind::Triode(
-                TriodeRoot::new(model).with_parallel_count(triode_info.parallel_count)
-            );
-            // Scale compensation based on triode mu and typical plate load.
-            // Voltage gain ≈ mu × Rp / (Rp + rp) where:
-            // - mu = amplification factor (100 for 12AX7)
-            // - Rp = plate load resistance (typically 100k)
-            // - rp = plate resistance (62.5k for 12AX7)
-            // For 100k load: gain ≈ 100 × 100k / (100k + 62.5k) ≈ 61.5
-            (root, model.mu / 100.0)
-        };
-
-        // Compute DC-blocking filter coefficients from C_out and R_load.
-        // C_out is the coupling cap (plate to output), R_load is the output resistor.
-        let dc_block = {
-            // Find C_out (capacitor connecting plate to output)
-            let c_out = plate_to_output.iter().find_map(|&idx| {
-                let e = &graph.edges[idx];
-                match &graph.components[e.comp_idx].kind {
-                    ComponentKind::Capacitor(cap_cfg) => Some(cap_cfg.value),
-                    _ => None,
-                }
-            });
-            // Find R_load (resistor at output node)
-            let r_load = output_passives.iter().find_map(|&idx| {
-                let e = &graph.edges[idx];
-                match &graph.components[e.comp_idx].kind {
-                    ComponentKind::Resistor(r) => Some(*r),
-                    _ => None,
-                }
-            });
-            // Compute IIR highpass coefficients if both are found
-            match (c_out, r_load) {
-                (Some(c), Some(r)) => {
-                    // fc = 1 / (2π * R * C)
-                    let omega = (std::f64::consts::PI * 2.0 / sample_rate) / (r * c);
-                    let omega_tan = omega.tan();
-                    let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
-                    let b0 = 1.0 / (1.0 + omega_tan);
-                    Some((a1, b0, 0.0, 0.0))
-                }
-                _ => None,
-            }
-        };
-
-        stages.push(WdfStage {
-            tree,
-            root,
-            compensation: mu_compensation,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: None,
-            paired_opamp: None,
-            dc_block,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-        });
-    }
-
-    // Build WDF stages for pentodes.
-    let pentodes = graph.find_pentodes();
-    let pentode_edge_indices: Vec<usize> = pentodes.iter().map(|(idx, _)| *idx).collect();
-    let all_nonlinear_with_pentodes: Vec<usize> = all_nonlinear_with_triodes
-        .iter()
-        .chain(pentode_edge_indices.iter())
-        .copied()
-        .collect();
-
-    for (_edge_idx, pentode_info) in &pentodes {
-        // Skip pentodes that are part of the sidechain path.
-        if sidechain_edge_set.contains(_edge_idx) {
-            continue;
-        }
-
-        let junction = pentode_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(
-            junction,
-            &all_nonlinear_with_pentodes,
-            &graph.active_edge_indices,
-        );
-
-        if passive_idxs.is_empty() {
-            continue;
-        }
-
-        // Find the best injection node for the voltage source.
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            let other = if e.node_a == junction {
-                e.node_b
-            } else {
-                e.node_a
-            };
-            if let Some(&d) = dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
-                }
-            }
-        }
-        if best_dist == usize::MAX {
-            injection_node = graph.gnd_node;
-        }
-
-        // Build SP edges.
-        let source_node = graph.edges.len() + 4000; // unique offset for pentodes
-        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-        }
-
-        let terminals = vec![source_node, junction];
-        let sp_tree = match sp_reduce(sp_edges, &terminals) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        let mut pentode_components = graph.components.clone();
-        while pentode_components.len() <= vs_comp_idx {
-            pentode_components.push(ComponentDef {
-                id: "__vs__".to_string(),
-                kind: ComponentKind::Resistor(1.0),
-            });
-        }
-
-        let tree = sp_to_dyn_with_vs(&sp_tree, &pentode_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
-        let model = pentode_model(&pentode_info.model_name);
-        let root = RootKind::Pentode(PentodeRoot::new(model));
-
-        // Scale compensation based on pentode mu. Pentodes have higher mu than triodes
-        // but lower effective gain due to screen grid shielding. Normalize to mu=200
-        // as a reference (typical for power pentodes like EL34, 6L6).
-        let mu_compensation = model.mu / 200.0;
-
-        stages.push(WdfStage {
-            tree,
-            root,
-            compensation: mu_compensation,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: None,
-            paired_opamp: None,
-            dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-        });
-    }
-
-    // Build WDF stages for MOSFETs.
-    let mosfets = graph.find_mosfets();
-    let mosfet_edge_indices: Vec<usize> = mosfets.iter().map(|(idx, _)| *idx).collect();
-    let all_nonlinear_with_mosfets: Vec<usize> = all_nonlinear_with_pentodes
-        .iter()
-        .chain(mosfet_edge_indices.iter())
-        .copied()
-        .collect();
-
-    for (_edge_idx, mosfet_info) in &mosfets {
-        let junction = mosfet_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(
-            junction,
-            &all_nonlinear_with_mosfets,
-            &graph.active_edge_indices,
-        );
-
-        if passive_idxs.is_empty() {
-            continue;
-        }
-
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            let other = if e.node_a == junction {
-                e.node_b
-            } else {
-                e.node_a
-            };
-            if let Some(&d) = dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
-                }
-            }
-        }
-        if best_dist == usize::MAX {
-            injection_node = graph.gnd_node;
-        }
-
-        let source_node = graph.edges.len() + 4000;
-        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-        }
-
-        let terminals = vec![source_node, junction];
-        let sp_tree = match sp_reduce(sp_edges, &terminals) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        let mut mosfet_components = graph.components.clone();
-        while mosfet_components.len() <= vs_comp_idx {
-            mosfet_components.push(ComponentDef {
-                id: "__vs__".to_string(),
-                kind: ComponentKind::Resistor(1.0),
-            });
-        }
-
-        let tree = sp_to_dyn_with_vs(&sp_tree, &mosfet_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
-        let model = mosfet_model(mosfet_info.mosfet_type, mosfet_info.is_n_channel);
-        let root = RootKind::Mosfet(MosfetRoot::new(model));
-
-        stages.push(WdfStage {
-            tree,
-            root,
-            compensation: 1.0,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: None,
-            paired_opamp: None,
-            dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-        });
-    }
-
-    // Build WDF stages for Zener diodes.
-    let zeners = graph.find_zeners();
-    let zener_edge_indices: Vec<usize> = zeners.iter().map(|(idx, _)| *idx).collect();
-    let all_nonlinear_final: Vec<usize> = all_nonlinear_with_mosfets
-        .iter()
-        .chain(zener_edge_indices.iter())
-        .copied()
-        .collect();
-
-    for (_edge_idx, zener_info) in &zeners {
-        let junction = zener_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(
-            junction,
-            &all_nonlinear_final,
-            &graph.active_edge_indices,
-        );
-
-        if passive_idxs.is_empty() {
-            continue;
-        }
-
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            let other = if e.node_a == junction {
-                e.node_b
-            } else {
-                e.node_a
-            };
-            if let Some(&d) = dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
-                }
-            }
-        }
-        if best_dist == usize::MAX {
-            injection_node = graph.gnd_node;
-        }
-
-        let source_node = graph.edges.len() + 5000;
-        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-        }
-
-        let terminals = vec![source_node, junction];
-        let sp_tree = match sp_reduce(sp_edges, &terminals) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        let mut zener_components = graph.components.clone();
-        while zener_components.len() <= vs_comp_idx {
-            zener_components.push(ComponentDef {
-                id: "__vs__".to_string(),
-                kind: ComponentKind::Resistor(1.0),
-            });
-        }
-
-        let tree = sp_to_dyn_with_vs(&sp_tree, &zener_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
-        let model = ZenerModel::new(zener_info.voltage);
-        let root = RootKind::Zener(ZenerRoot::new(model));
-
-        stages.push(WdfStage {
-            tree,
-            root,
-            compensation: 1.0,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: None,
-            paired_opamp: None,
-            dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-        });
-    }
-
-    // ── OTA (CA3080) stages ──────────────────────────────────────────────
-    let otas = graph.find_otas();
-    let ota_edge_indices: Vec<usize> = otas.iter().map(|(idx, _)| *idx).collect();
-    let all_nonlinear_with_otas: Vec<usize> = all_nonlinear_final
-        .iter()
-        .chain(ota_edge_indices.iter())
-        .copied()
-        .collect();
-
-    for (_edge_idx, ota_info) in &otas {
-        let junction = ota_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(
-            junction,
-            &all_nonlinear_with_otas,
-            &graph.active_edge_indices,
-        );
-
-        if passive_idxs.is_empty() {
-            continue;
-        }
-
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            let other = if e.node_a == junction {
-                e.node_b
-            } else {
-                e.node_a
-            };
-            if let Some(&d) = dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
-                }
-            }
-        }
-        if best_dist == usize::MAX {
-            injection_node = graph.gnd_node;
-        }
-
-        let source_node = graph.edges.len() + 6000;
-        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-        }
-
-        let terminals = vec![source_node, junction];
-        let sp_tree = match sp_reduce(sp_edges, &terminals) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        let mut ota_components = graph.components.clone();
-        while ota_components.len() <= vs_comp_idx {
-            ota_components.push(ComponentDef {
-                id: "__vs__".to_string(),
-                kind: ComponentKind::Resistor(1.0),
-            });
-        }
-
-        let tree = sp_to_dyn_with_vs(&sp_tree, &ota_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
-        let model = OtaModel::ca3080();
-        let root = RootKind::Ota(OtaRoot::new(model));
-
-        // OTA stages need compensation: the transconductance amplifier's
-        // voltage gain (gm * Rp) can be very high. In real circuits, negative
-        // feedback (R2 in Dyna Comp) tames this. We apply a compensation
-        // factor based on the feedback network impedance.
-        let feedback_compensation = 0.08; // Models closed-loop gain reduction from feedback R
-
-        stages.push(WdfStage {
-            tree,
-            root,
-            compensation: feedback_compensation,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: None,
-            paired_opamp: None,
-            dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-        });
-    }
-
-    // Build WDF stages for zener diodes.
-    let zeners = graph.find_zeners();
-    let zener_edge_indices: Vec<usize> = zeners.iter().map(|(idx, _)| *idx).collect();
-    let all_nonlinear_with_zeners: Vec<usize> = all_nonlinear_with_triodes
-        .iter()
-        .chain(zener_edge_indices.iter())
-        .copied()
-        .collect();
-
-    for (_edge_idx, zener_info) in &zeners {
-        let junction = zener_info.junction_node;
-        let passive_idxs = graph.elements_at_junction(
-            junction,
-            &all_nonlinear_with_zeners,
-            &graph.active_edge_indices,
-        );
-
-        if passive_idxs.is_empty() {
-            continue;
-        }
-
-        // Find the best injection node for the voltage source.
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            let other = if e.node_a == junction {
-                e.node_b
-            } else {
-                e.node_a
-            };
-            if let Some(&d) = dist_from_in.get(&other) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = other;
-                }
-            }
-        }
-
-        // Build SP edges.
-        let source_node = graph.edges.len() + 4000; // virtual source node (unique offset for zeners)
-        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-        sp_edges.push((source_node, injection_node, SpTree::Leaf(vs_comp_idx)));
-
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-        }
-
-        let terminals = vec![source_node, junction];
-        let sp_tree = match sp_reduce(sp_edges, &terminals) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        let mut zener_components = graph.components.clone();
-        while zener_components.len() <= vs_comp_idx {
-            zener_components.push(ComponentDef {
-                id: "__vs__".to_string(),
-                kind: ComponentKind::Resistor(1.0),
-            });
-        }
-
-        let tree = sp_to_dyn_with_vs(&sp_tree, &zener_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
-        let model = ZenerModel::with_voltage(zener_info.voltage);
-        let root = RootKind::Zener(ZenerRoot::new(model));
-
-        stages.push(WdfStage {
-            tree,
-            root,
-            compensation: 1.0,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: None,
-            paired_opamp: None,
-            dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
-        });
-    }
-
-    // Balance voltage source impedance in each stage.
-    // This fixes topologies where the Vs branch sits in a Parallel adaptor
-    // opposite a high-impedance element (e.g. Big Muff: Parallel(Series(Vs,C), R)
-    // with R >> C causes gamma ≈ 1.0 and severe signal attenuation).
-    for stage in &mut stages {
-        stage.balance_vs_impedance();
-    }
-
-    // ── Passive-only stage for circuits without nonlinear elements ─────────
-    // If the circuit has reactive elements (capacitors, inductors) but no
-    // nonlinear elements, we need a WDF stage to model the filtering.
-    // Without this, capacitor high-pass behavior and leakage wouldn't work.
-    //
-    // For resistor-only circuits, we compute the analytical voltage divider
-    // gain instead of building a WDF stage (resistors don't need WDF dynamics).
+    // Build op-amp feedback stages (inverting, non-inverting).
+    let mut stages: Vec<WdfStage> = Vec::new();
+    let opamp_feedback_stages = super::opamp_analysis::build_opamp_feedback_stages(
+        &mut opamp_analysis,
+        stages.len(),
+        sample_rate,
+        oversampling,
+    );
+    stages.extend(opamp_feedback_stages);
+
+    // Build standalone op-amp stages (no feedback).
+    let opamp_stages = super::opamp_analysis::build_standalone_opamp_stages(
+        pedal,
+        &opamp_analysis.feedback_opamp_ids,
+        sample_rate,
+    );
+
+    // ══ Pass 3: Stage planning ════════════════════════════════════════
+    let (stage_plans, push_pull_plans) = super::plan::plan_stages(&classified, &graph, sample_rate);
+
+    // ══ Pass 4: Tree building ═════════════════════════════════════════
+    // Build nonlinear WDF stages from plans.
+    let nonlinear_stages = super::build::build_stages(
+        &stage_plans,
+        &classified,
+        &graph,
+        &opamp_analysis,
+        sample_rate,
+        oversampling,
+    );
+    stages.extend(nonlinear_stages);
+
+    // Build push-pull stages.
+    let push_pull_stages = super::build::build_push_pull_stages(
+        &push_pull_plans,
+        &classified,
+        &graph,
+        sample_rate,
+        oversampling,
+    );
+
+    // ══ Passive-only fallback ═════════════════════════════════════════
     let mut passive_attenuation = 1.0;
 
     if stages.is_empty() {
@@ -2125,209 +278,109 @@ pub fn compile_pedal_with_options(
         });
 
         if has_reactive {
-            // Check for simple RC filter topologies (lowpass or highpass)
             let rc_filter = detect_rc_filter_topology(&graph, sample_rate);
 
             if let Some(filter) = rc_filter {
-                // Use analytical IIR filter for correct frequency response
-                // This bypasses WDF which has issues with voltage-source-driven trees
-                let tree = DynNode::VoltageSource {
-                    voltage: 0.0,
-                    rp: 1.0,
-                }; // Dummy tree (not used by IIR)
-
+                let tree = DynNode::VoltageSource { voltage: 0.0, rp: 1.0 };
                 let root = match filter {
-                    FilterTopology::RcLowpass { a1, b0, .. } => RootKind::IirLowpass {
-                        a1,
-                        b0,
-                        y_prev: 0.0,
-                        x_prev: 0.0,
-                    },
-                    FilterTopology::RcHighpass { a1, b0, .. } => RootKind::IirHighpass {
-                        a1,
-                        b0,
-                        y_prev: 0.0,
-                        x_prev: 0.0,
-                    },
-                    FilterTopology::RlLowpass { a1, b0, .. } => RootKind::IirLowpass {
-                        a1,
-                        b0,
-                        y_prev: 0.0,
-                        x_prev: 0.0,
-                    },
+                    FilterTopology::RcLowpass { a1, b0, .. } => RootKind::IirLowpass { a1, b0, y_prev: 0.0, x_prev: 0.0 },
+                    FilterTopology::RcHighpass { a1, b0, .. } => RootKind::IirHighpass { a1, b0, y_prev: 0.0, x_prev: 0.0 },
+                    FilterTopology::RlLowpass { a1, b0, .. } => RootKind::IirLowpass { a1, b0, y_prev: 0.0, x_prev: 0.0 },
                 };
-
                 stages.push(WdfStage {
-                    tree,
-                    root,
-                    compensation: 1.0, // IIR filter has correct gain built-in
+                    tree, root,
+                    compensation: 1.0,
                     oversampler: Oversampler::new(oversampling),
-                    base_diode_model: None,
-                    paired_opamp: None,
-                    dc_block: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
+                    base_diode_model: None, paired_opamp: None, dc_block: None,
+                    is_source_follower: false, prev_source_voltage: 0.0,
                 });
             } else {
-                // Fall back to WDF for complex passive circuits
-                let passive_edges: Vec<usize> = graph
-                    .edges
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| {
-                        let kind = &graph.components[e.comp_idx].kind;
-                        matches!(
-                            kind,
-                            ComponentKind::Resistor(_)
-                                | ComponentKind::Capacitor(_)
-                                | ComponentKind::Inductor(_)
-                                | ComponentKind::Potentiometer(_, _)
-                        )
-                    })
+                // Fall back to WDF for complex passive circuits.
+                let vs_comp_idx = graph.components.len();
+                let passive_edges: Vec<usize> = graph.edges.iter().enumerate()
+                    .filter(|(_, e)| matches!(
+                        graph.components[e.comp_idx].kind,
+                        ComponentKind::Resistor(_) | ComponentKind::Capacitor(_)
+                            | ComponentKind::Inductor(_) | ComponentKind::Potentiometer(_, _)
+                    ))
                     .map(|(i, _)| i)
                     .collect();
 
                 if !passive_edges.is_empty() {
-                    // Use Passthrough architecture with embedded VS for all passive circuits.
-                    // The VoltageSourceDriver approach has issues with series filter topologies
-                    // (like RL lowpass) where the junction voltage extraction doesn't work
-                    // due to WDF adaptor impedance mismatch.
-                    //
-                    // The Passthrough approach embeds the VS in the tree, ensuring proper
-                    // impedance matching and correct voltage distribution.
-                    {
-                        let source_node = graph.edges.len() + 1000;
-                        let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-
-                        // Add voltage source edge: source_node → in_node
-                        sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
-
-                        for &eidx in &passive_edges {
-                            let e = &graph.edges[eidx];
-                            sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-                        }
-
-                        // Terminals: source_node to gnd_node (full circuit path)
-                        // For RL lowpass: VS → L → junction → R → gnd
-                        // The output is at junction (out_node), which is internal to the tree.
-                        let terminals = vec![source_node, graph.gnd_node];
-                        if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
-                            let mut all_components = graph.components.clone();
-                            while all_components.len() <= vs_comp_idx {
-                                all_components.push(ComponentDef {
-                                    id: "__vs__".to_string(),
-                                    kind: ComponentKind::Resistor(1.0),
-                                });
-                            }
-
-                            let tree = sp_to_dyn_with_vs(
-                                &sp_tree,
-                                &all_components,
-                                &graph.fork_paths,
-                                sample_rate,
-                                vs_comp_idx,
-                            );
-
-                            // Compute compensation factor for passive circuits.
-                            let compensation = compute_passive_compensation(&tree);
-
-                            // Use ShortCircuit root since tree terminates at ground.
-                            // Ground has zero impedance (short circuit), allowing
-                            // current to flow through series elements (L, R).
-                            // This enables proper voltage divider behavior.
-                            stages.push(WdfStage {
-                                tree,
-                                root: RootKind::ShortCircuit,
-                                compensation,
-                                oversampler: Oversampler::new(oversampling),
-                                base_diode_model: None,
-                                paired_opamp: None,
-                                dc_block: None,
-                                is_source_follower: false,
-                                prev_source_voltage: 0.0,
+                    let source_node = graph.edges.len() + 1000;
+                    let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+                    sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
+                    for &eidx in &passive_edges {
+                        let e = &graph.edges[eidx];
+                        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+                    }
+                    let terminals = vec![source_node, graph.gnd_node];
+                    if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
+                        let mut all_components = graph.components.clone();
+                        while all_components.len() <= vs_comp_idx {
+                            all_components.push(ComponentDef {
+                                id: "__vs__".to_string(),
+                                kind: ComponentKind::Resistor(1.0),
                             });
                         }
+                        let tree = sp_to_dyn_with_vs(&sp_tree, &all_components, &graph.fork_paths, sample_rate, vs_comp_idx);
+                        let compensation = compute_passive_compensation(&tree);
+                        stages.push(WdfStage {
+                            tree,
+                            root: RootKind::ShortCircuit,
+                            compensation,
+                            oversampler: Oversampler::new(oversampling),
+                            base_diode_model: None, paired_opamp: None, dc_block: None,
+                            is_source_follower: false, prev_source_voltage: 0.0,
+                        });
                     }
                 }
             }
         } else {
-            // Resistor-only circuit: compute analytical voltage divider gain.
-            // No WDF stage needed since resistors don't have dynamics.
             passive_attenuation = compute_resistor_divider_gain(&graph);
         }
     }
 
-    // ── Transformer gain for passive transformer circuits ─────────────────
-    // If the circuit contains transformers but no WDF stages were created,
-    // apply the transformer's voltage gain (turns ratio) as a scaling factor.
-    //
-    // For step-down (n > 1): V_secondary = V_primary / n
-    // For step-up (n < 1): V_secondary = V_primary / n (gain > 1)
+    // ══ Transformer gain ══════════════════════════════════════════════
     let mut transformer_gain = 1.0;
     for comp in &pedal.components {
         if let ComponentKind::Transformer(cfg) = &comp.kind {
-            // Helper to check if a pin matches component and pin name
             let pin_matches = |p: &Pin, comp_id: &str, pin_name: &str| -> bool {
                 matches!(p, Pin::ComponentPin { component, pin } if component == comp_id && pin == pin_name)
             };
+            let is_input_pin = |p: &Pin| -> bool { matches!(p, Pin::Reserved(name) if name == "in") };
+            let is_output_pin = |p: &Pin| -> bool { matches!(p, Pin::Reserved(name) if name == "out") };
 
-            // Helper to check if a pin is a reserved input
-            let is_input_pin = |p: &Pin| -> bool {
-                matches!(p, Pin::Reserved(name) if name == "in")
-            };
-
-            // Helper to check if a pin is a reserved output
-            let is_output_pin = |p: &Pin| -> bool {
-                matches!(p, Pin::Reserved(name) if name == "out")
-            };
-
-            // Check if any net connects transformer secondary (c or d) to output
             let output_from_secondary = pedal.nets.iter().any(|net| {
-                let has_secondary =
-                    pin_matches(&net.from, &comp.id, "c") || pin_matches(&net.from, &comp.id, "d");
-                let has_secondary_to =
-                    net.to.iter().any(|p| pin_matches(p, &comp.id, "c") || pin_matches(p, &comp.id, "d"));
-                let has_output =
-                    is_output_pin(&net.from) || net.to.iter().any(|p| is_output_pin(p));
-
+                let has_secondary = pin_matches(&net.from, &comp.id, "c") || pin_matches(&net.from, &comp.id, "d");
+                let has_secondary_to = net.to.iter().any(|p| pin_matches(p, &comp.id, "c") || pin_matches(p, &comp.id, "d"));
+                let has_output = is_output_pin(&net.from) || net.to.iter().any(|p| is_output_pin(p));
                 (has_secondary || has_secondary_to) && has_output
             });
-
-            // Check if input goes to primary
             let input_to_primary = pedal.nets.iter().any(|net| {
-                let has_primary =
-                    pin_matches(&net.from, &comp.id, "a") || pin_matches(&net.from, &comp.id, "b");
-                let has_primary_to =
-                    net.to.iter().any(|p| pin_matches(p, &comp.id, "a") || pin_matches(p, &comp.id, "b"));
-                let has_input =
-                    is_input_pin(&net.from) || net.to.iter().any(|p| is_input_pin(p));
-
+                let has_primary = pin_matches(&net.from, &comp.id, "a") || pin_matches(&net.from, &comp.id, "b");
+                let has_primary_to = net.to.iter().any(|p| pin_matches(p, &comp.id, "a") || pin_matches(p, &comp.id, "b"));
+                let has_input = is_input_pin(&net.from) || net.to.iter().any(|p| is_input_pin(p));
                 (has_primary || has_primary_to) && has_input
             });
 
             if input_to_primary && output_from_secondary {
-                // Signal goes through transformer: apply voltage gain
-                // V_out = V_in / n (step-down) or V_out = V_in * (1/n) (step-up)
                 transformer_gain *= 1.0 / cfg.turns_ratio;
             }
         }
     }
 
-    // ── Slew rate limiters (from op-amps) ─────────────────────────────────
-    // Each op-amp in the circuit contributes a slew rate limiter to model
-    // the HF compression from finite output slew rate.
+    // ══ Slew rate limiters ════════════════════════════════════════════
     let mut slew_limiters = Vec::new();
     for comp in &pedal.components {
         if let ComponentKind::OpAmp(ot) = &comp.kind {
-            // OTAs (CA3080) are very fast (50 V/µs) — slew limiting is negligible.
-            // Only add slew limiters for voltage-mode op-amps with slow slew rates.
             if !ot.is_ota() {
                 slew_limiters.push(SlewRateLimiter::new(ot.slew_rate(), sample_rate));
             }
         }
     }
 
-    // ── BBD delay lines ──────────────────────────────────────────────────
+    // ══ BBD delay lines ═══════════════════════════════════════════════
     let mut bbds = Vec::new();
     for comp in &pedal.components {
         if let ComponentKind::Bbd(bt) = &comp.kind {
@@ -2340,44 +393,32 @@ pub fn compile_pedal_with_options(
         }
     }
 
-    // ── Generic delay lines ─────────────────────────────────────────────
-    // Collect delay_line() components and their associated tap() elements.
-    // Build a map from delay line component ID → index for tap resolution.
+    // ══ Generic delay lines ═══════════════════════════════════════════
     let mut delay_lines: Vec<DelayLineBinding> = Vec::new();
-    let mut delay_id_to_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut delay_id_to_idx: HashMap<String, usize> = HashMap::new();
 
     for comp in &pedal.components {
         if let ComponentKind::DelayLine(min_delay, max_delay, interp, medium) = &comp.kind {
             let idx = delay_lines.len();
             delay_id_to_idx.insert(comp.id.clone(), idx);
-            let mut dl = crate::elements::DelayLine::new(
-                *min_delay,
-                *max_delay,
-                sample_rate,
-                *interp,
-            );
+            let mut dl = crate::elements::DelayLine::new(*min_delay, *max_delay, sample_rate, *interp);
             dl.set_medium(*medium);
             delay_lines.push(DelayLineBinding {
                 delay_line: dl,
-                taps: vec![1.0], // Default: single tap at 1× base delay
+                taps: vec![1.0],
                 comp_id: comp.id.clone(),
             });
         }
     }
 
-    // Resolve tap() components → attach to parent delay lines.
     for comp in &pedal.components {
         if let ComponentKind::Tap(parent_id, ratio) = &comp.kind {
             if let Some(&dl_idx) = delay_id_to_idx.get(parent_id) {
                 delay_lines[dl_idx].taps.push(*ratio);
             }
-            // Silently ignore taps that reference unknown delay lines
-            // (the DSL validator should catch this).
         }
     }
 
-    // Auto-configure medium zones from tap positions.
-    // Each tap creates a zone boundary for incremental medium processing.
     for dl_binding in &mut delay_lines {
         if dl_binding.delay_line.medium() != crate::elements::Medium::None {
             let taps = dl_binding.taps.clone();
@@ -2385,20 +426,18 @@ pub fn compile_pedal_with_options(
         }
     }
 
-    // Determine device-aware rail saturation model from the circuit's active devices.
-    // Scan components to find the dominant active device type that shapes rail clipping.
+    // ══ Rail saturation model ═════════════════════════════════════════
     let rail_saturation = {
         let mut has_opamp = false;
         let mut has_bjt = false;
         let mut has_fet = false;
         let mut has_tube = false;
         let mut tube_mu = 100.0_f64;
-        let mut opamp_swing = 0.85_f64; // default output swing ratio
+        let mut opamp_swing = 0.85_f64;
         for comp in &pedal.components {
             match &comp.kind {
                 ComponentKind::OpAmp(ot) if !ot.is_ota() => {
                     has_opamp = true;
-                    // JFET-input op-amps (TL072) swing closer to rails than BJT-input
                     opamp_swing = match ot {
                         OpAmpType::Tl072 | OpAmpType::Tl082 | OpAmpType::Generic => 0.92,
                         OpAmpType::Ne5532 => 0.90,
@@ -2407,46 +446,25 @@ pub fn compile_pedal_with_options(
                         _ => 0.85,
                     };
                 }
-                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
-                    has_bjt = true;
-                }
+                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => { has_bjt = true; }
                 ComponentKind::NJfet(_) | ComponentKind::PJfet(_)
-                | ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => {
-                    has_fet = true;
-                }
+                | ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => { has_fet = true; }
                 ComponentKind::Triode(name) => {
                     has_tube = true;
-                    tube_mu = TriodeModel::try_by_name(name)
-                        .map(|m| m.mu)
-                        .unwrap_or(100.0);
+                    tube_mu = TriodeModel::try_by_name(name).map(|m| m.mu).unwrap_or(100.0);
                 }
-                ComponentKind::VariMu(_) => {
-                    has_tube = true;
-                    tube_mu = 35.0; // variable-mu triode max mu ≈ 35-40
-                }
-                ComponentKind::Pentode(_) => {
-                    has_tube = true;
-                    tube_mu = 200.0; // pentodes have higher effective gain
-                }
+                ComponentKind::VariMu(_) => { has_tube = true; tube_mu = 35.0; }
+                ComponentKind::Pentode(_) => { has_tube = true; tube_mu = 200.0; }
                 _ => {}
             }
         }
-        // Priority: tube > BJT > FET > op-amp.
-        // The dominant nonlinear device determines the rail saturation character.
-        //
-        // Exception: Source follower JFETs are voltage buffers, not clipping stages.
-        // Their DC-biased output (e.g., 1.4V at 0V input) is normal operation,
-        // not an "excessive" signal to compress.
         let has_source_follower = stages.iter().any(|s| s.is_source_follower);
-
         if has_tube {
             RailSaturation::Tube { mu: tube_mu }
         } else if has_bjt {
-            let vce_sat = if has_germanium { 0.3 } else { 0.2 };
+            let vce_sat = if classified.has_germanium { 0.3 } else { 0.2 };
             RailSaturation::Bjt { vce_sat }
         } else if has_fet && !has_source_follower {
-            // Only apply FET rail saturation for clipping stages (common-source, etc.)
-            // not for source followers which are linear buffers
             RailSaturation::Fet
         } else if has_opamp {
             RailSaturation::OpAmp { output_swing_ratio: opamp_swing }
@@ -2455,626 +473,33 @@ pub fn compile_pedal_with_options(
         }
     };
 
-    // Collect LFO component IDs for control binding.
-    let lfo_ids: Vec<String> = pedal
-        .components
-        .iter()
-        .filter_map(|c| {
-            if matches!(c.kind, ComponentKind::Lfo(..)) {
-                Some(c.id.clone())
-            } else {
-                None
-            }
-        })
+    // ══ Pass 5: Binding & assembly ════════════════════════════════════
+    let lfo_ids: Vec<String> = pedal.components.iter()
+        .filter_map(|c| if matches!(c.kind, ComponentKind::Lfo(..)) { Some(c.id.clone()) } else { None })
         .collect();
 
-    // Build control bindings.
-    let mut controls = Vec::new();
-    for ctrl in &pedal.controls {
-        // First check if this control targets a Switch/RotarySwitch component
-        let switch_info = pedal.components.iter().find_map(|c| {
-            if c.id == ctrl.component {
-                match &c.kind {
-                    ComponentKind::Switch(positions) => Some((c.id.clone(), *positions)),
-                    ComponentKind::RotarySwitch(labels) => Some((c.id.clone(), labels.len())),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        });
+    let controls = super::bind::build_controls(
+        pedal,
+        &stages,
+        &opamp_analysis.pot_map,
+        &lfo_ids,
+        &delay_id_to_idx,
+        delay_lines.is_empty(),
+    );
 
-        let target = if let Some((switch_id, num_positions)) = switch_info {
-            ControlTarget::SwitchPosition { switch_id, num_positions }
-        } else if let Some(&(stage_idx, ri, fixed_series_r, max_pot_r, parallel_fixed_r, is_inverting)) = opamp_pot_map.get(&ctrl.component) {
-            // This pot is in an op-amp feedback path - use runtime gain modulation
-            ControlTarget::OpAmpGain {
-                stage_idx,
-                ri,
-                fixed_series_r,
-                max_pot_r,
-                parallel_fixed_r,
-                is_inverting,
-            }
-        } else if is_gain_label(&ctrl.label) {
-            ControlTarget::PreGain
-        } else if is_level_label(&ctrl.label) {
-            ControlTarget::OutputGain
-        } else if is_rate_label(&ctrl.label) {
-            // Check if there's an LFO to control
-            if !lfo_ids.is_empty() {
-                ControlTarget::LfoRate(0) // Control first LFO by default
-            } else {
-                ControlTarget::PreGain // fallback
-            }
-        } else if is_depth_label(&ctrl.label) {
-            if !lfo_ids.is_empty() {
-                ControlTarget::LfoDepth(0)
-            } else {
-                ControlTarget::PreGain // fallback
-            }
-        } else if is_delay_time_label(&ctrl.label) && !delay_lines.is_empty() {
-            ControlTarget::DelayTime(0) // Control first delay line by default
-        } else if is_delay_feedback_label(&ctrl.label) && !delay_lines.is_empty() {
-            ControlTarget::DelayFeedback(0)
-        } else {
-            // Check if this pot connects to an LFO.rate via nets
-            let mut lfo_target = None;
-            for net in &pedal.nets {
-                if let Pin::ComponentPin { component, pin } = &net.from {
-                    if component == &ctrl.component && pin == "wiper" {
-                        // This pot's wiper connects somewhere
-                        for to_pin in &net.to {
-                            if let Pin::ComponentPin {
-                                component: target_comp,
-                                pin: target_pin,
-                            } = to_pin
-                            {
-                                if target_pin == "rate" {
-                                    // Find the LFO index
-                                    if let Some(idx) =
-                                        lfo_ids.iter().position(|id| id == target_comp)
-                                    {
-                                        lfo_target = Some(ControlTarget::LfoRate(idx));
-                                        break;
-                                    }
-                                }
-                                if target_pin == "delay_time" {
-                                    if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
-                                        lfo_target = Some(ControlTarget::DelayTime(idx));
-                                        break;
-                                    }
-                                }
-                                if target_pin == "feedback" {
-                                    if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
-                                        lfo_target = Some(ControlTarget::DelayFeedback(idx));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(target) = lfo_target {
-                target
-            } else {
-                // Try to find this pot in a WDF stage.
-                let mut found_stage = None;
-                for (si, stage) in stages.iter().enumerate() {
-                    if has_pot(&stage.tree, &ctrl.component) {
-                        found_stage = Some(si);
-                        break;
-                    }
-                }
-                match found_stage {
-                    Some(si) => ControlTarget::PotInStage(si),
-                    None => ControlTarget::PreGain, // fallback: map unknown controls to gain
-                }
-            }
-        };
-
-        let max_r = pedal
-            .components
-            .iter()
-            .find(|c| c.id == ctrl.component)
-            .and_then(|c| match &c.kind {
-                ComponentKind::Potentiometer(r, _) => Some(*r),
-                _ => None,
-            })
-            .unwrap_or(100_000.0);
-
-        controls.push(ControlBinding {
-            label: ctrl.label.clone(),
-            target,
-            component_id: ctrl.component.clone(),
-            max_resistance: max_r,
-        });
-    }
-
-    // Get default level from controls (for output_gain).
-    let level_default = pedal
-        .controls
-        .iter()
+    let level_default = pedal.controls.iter()
         .find(|c| is_level_label(&c.label))
         .map(|c| c.default)
-        .unwrap_or(1.0); // If no Level control, use unity gain
+        .unwrap_or(1.0);
 
-    // Physical gains always apply (transformer turns ratio, passive attenuation, op-amp feedback).
-    // These represent actual circuit behavior, not user-controllable gain.
     let physical_gain = opamp_feedback_gain * passive_attenuation * transformer_gain;
-
-    // All gain should come from the circuit itself:
-    // - Op-amps: gain from feedback network (Rf/Ri), modeled in OpAmpRoot
-    // - BJTs/JFETs: gain from transconductance, modeled in BjtRoot/JfetRoot
-    // - Triodes/Pentodes: gain from mu/gm, modeled in TriodeRoot/PentodeRoot
-    // - Transformers: voltage ratio from turns ratio
-    // - Passive: attenuation from resistor dividers
-    //
-    // No artificial "distortion gain" should be needed if circuit models are correct.
     let (pre_gain, output_gain, gain_range_final) = (physical_gain, level_default, (1.0, 1.0));
 
-    // Helper: trace through resistive paths (pots, resistors) to find modulation targets.
-    // Returns (target_component, target_property) if found.
-    fn trace_through_resistive_path<'a>(
-        start_comp: &str,
-        start_pin: &str,
-        pedal: &'a PedalDef,
-        visited: &mut HashSet<String>,
-    ) -> Option<(String, String)> {
-        // Mark this component as visited to avoid cycles
-        let key = format!("{}:{}", start_comp, start_pin);
-        if visited.contains(&key) {
-            return None;
-        }
-        visited.insert(key);
+    let lfos = super::bind::build_lfo_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);
+    let envelopes = super::bind::build_envelope_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);
 
-        // Find the component type
-        let comp_kind = pedal
-            .components
-            .iter()
-            .find(|c| c.id == start_comp)
-            .map(|c| &c.kind);
-
-        // Only trace through resistive elements (pots, resistors)
-        let is_resistive = matches!(
-            comp_kind,
-            Some(ComponentKind::Potentiometer(_, _)) | Some(ComponentKind::Resistor(_))
-        );
-        if !is_resistive {
-            // This is a non-resistive component - check if it's a modulation target
-            let recognized_targets = ["clock", "vgs", "gate", "led", "vgk", "vg1k", "iabc", "speed_mod", "delay_time"];
-            if recognized_targets.contains(&start_pin) {
-                return Some((start_comp.to_string(), start_pin.to_string()));
-            }
-            return None;
-        }
-
-        // Find connections from other pins of this resistive element
-        // For pots: a, b, wiper; for resistors: a, b
-        let other_pins: Vec<&str> = match comp_kind {
-            Some(ComponentKind::Potentiometer(_, _)) => {
-                // Pot pins: a (ccw), b (wiper/output), wiper
-                match start_pin {
-                    "a" => vec!["b", "wiper"],
-                    "b" | "wiper" => vec!["a"],
-                    _ => vec![],
-                }
-            }
-            Some(ComponentKind::Resistor(_)) => {
-                match start_pin {
-                    "a" => vec!["b"],
-                    "b" => vec!["a"],
-                    _ => vec![],
-                }
-            }
-            _ => vec![],
-        };
-
-        // Search nets for connections from other pins
-        for other_pin in other_pins {
-            for net in &pedal.nets {
-                // Check if this net originates from our component's other pin
-                if let Pin::ComponentPin { component, pin } = &net.from {
-                    if component == start_comp && pin == other_pin {
-                        // Follow all targets
-                        for target in &net.to {
-                            if let Pin::ComponentPin {
-                                component: next_comp,
-                                pin: next_pin,
-                            } = target
-                            {
-                                if let Some(result) =
-                                    trace_through_resistive_path(next_comp, next_pin, pedal, visited)
-                                {
-                                    return Some(result);
-                                }
-                            }
-                        }
-                    }
-                }
-                // Also check if this component.pin appears in the targets
-                for src_target in &net.to {
-                    if let Pin::ComponentPin { component, pin } = src_target {
-                        if component == start_comp && pin == other_pin {
-                            // This pin is a target - check the source
-                            if let Pin::ComponentPin {
-                                component: src_comp,
-                                pin: src_pin,
-                            } = &net.from
-                            {
-                                if let Some(result) =
-                                    trace_through_resistive_path(src_comp, src_pin, pedal, visited)
-                                {
-                                    return Some(result);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    // Build LFO bindings from LFO components and their net connections.
-    let mut lfos = Vec::new();
-    for comp in &pedal.components {
-        if let ComponentKind::Lfo(waveform_dsl, timing_r, timing_c) = &comp.kind {
-            // Convert DSL waveform to elements waveform
-            let waveform = match waveform_dsl {
-                LfoWaveformDsl::Sine => crate::elements::LfoWaveform::Sine,
-                LfoWaveformDsl::Triangle => crate::elements::LfoWaveform::Triangle,
-                LfoWaveformDsl::Square => crate::elements::LfoWaveform::Square,
-                LfoWaveformDsl::SawUp => crate::elements::LfoWaveform::SawUp,
-                LfoWaveformDsl::SawDown => crate::elements::LfoWaveform::SawDown,
-                LfoWaveformDsl::SampleAndHold => crate::elements::LfoWaveform::SampleAndHold,
-            };
-
-            // Compute base frequency from RC timing: f = 1/(2πRC)
-            let base_freq = 1.0 / (2.0 * std::f64::consts::PI * timing_r * timing_c);
-
-            // Create LFO with base frequency
-            let mut lfo = crate::elements::Lfo::new(waveform, sample_rate);
-            lfo.set_rate(base_freq);
-
-            // Track if we've already created an AllJfetVgs binding for this LFO
-            let mut created_all_jfet_binding = false;
-
-            // Find what this LFO connects to via nets (LFO.out -> target.property)
-            for net in &pedal.nets {
-                if let Pin::ComponentPin { component, pin } = &net.from {
-                    if component == &comp.id && pin == "out" {
-                        // This LFO's output connects to targets in net.to
-                        for target_pin in &net.to {
-                            if let Pin::ComponentPin {
-                                component: target_comp,
-                                pin: target_prop,
-                            } = target_pin
-                            {
-                                let target = match target_prop.as_str() {
-                                    "vgs" | "gate" => {
-                                        // Count how many JFETs this LFO connects to
-                                        let jfet_count = stages
-                                            .iter()
-                                            .filter(|s| matches!(&s.root, RootKind::Jfet(_)))
-                                            .count();
-
-                                        if jfet_count > 1 {
-                                            // Multiple JFETs - use AllJfetVgs
-                                            // Only create ONE binding for AllJfetVgs
-                                            if created_all_jfet_binding {
-                                                continue; // Skip duplicate bindings
-                                            }
-                                            created_all_jfet_binding = true;
-                                            ModulationTarget::AllJfetVgs
-                                        } else if let Some(stage_idx) = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Jfet(_)))
-                                        {
-                                            ModulationTarget::JfetVgs { stage_idx }
-                                        } else if let Some(stage_idx) = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Mosfet(_)))
-                                        {
-                                            ModulationTarget::MosfetVgs { stage_idx }
-                                        } else {
-                                            ModulationTarget::JfetVgs { stage_idx: 0 }
-                                        }
-                                    }
-                                    "led" => ModulationTarget::PhotocouplerLed {
-                                        stage_idx: 0,
-                                        comp_id: target_comp.clone(),
-                                    },
-                                    "vgk" => {
-                                        // Find which stage contains a triode or variable-mu triode
-                                        if let Some(stage_idx) = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::VariMu(_)))
-                                        {
-                                            ModulationTarget::VariMuVgk { stage_idx }
-                                        } else {
-                                            let stage_idx = stages
-                                                .iter()
-                                                .position(|s| matches!(&s.root, RootKind::Triode(_)))
-                                                .unwrap_or(0);
-                                            ModulationTarget::TriodeVgk { stage_idx }
-                                        }
-                                    }
-                                    "vg1k" => {
-                                        // Find which stage contains this pentode
-                                        let stage_idx = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Pentode(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::PentodeVg1k { stage_idx }
-                                    }
-                                    "iabc" => {
-                                        // Find which stage contains an OTA
-                                        let stage_idx = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Ota(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::OtaIabc { stage_idx }
-                                    }
-                                    "clock" => {
-                                        // Find which BBD to modulate
-                                        let bbd_idx = 0; // First BBD by default
-                                        ModulationTarget::BbdClock { bbd_idx }
-                                    }
-                                    "speed_mod" => {
-                                        // Find which delay line to modulate
-                                        let delay_idx = delay_id_to_idx
-                                            .get(target_comp.as_str())
-                                            .copied()
-                                            .unwrap_or(0);
-                                        ModulationTarget::DelaySpeed { delay_idx }
-                                    }
-                                    "delay_time" => {
-                                        let delay_idx = delay_id_to_idx
-                                            .get(target_comp.as_str())
-                                            .copied()
-                                            .unwrap_or(0);
-                                        ModulationTarget::DelayTime { delay_idx }
-                                    }
-                                    _ => {
-                                        // Try tracing through resistive path to find target
-                                        let mut visited = HashSet::new();
-                                        if let Some((final_comp, final_pin)) =
-                                            trace_through_resistive_path(
-                                                target_comp,
-                                                target_prop,
-                                                pedal,
-                                                &mut visited,
-                                            )
-                                        {
-                                            // Found a target through resistive path
-                                            match final_pin.as_str() {
-                                                "clock" => {
-                                                    ModulationTarget::BbdClock { bbd_idx: 0 }
-                                                }
-                                                "vgs" | "gate" => {
-                                                    let jfet_count = stages
-                                                        .iter()
-                                                        .filter(|s| {
-                                                            matches!(&s.root, RootKind::Jfet(_))
-                                                        })
-                                                        .count();
-                                                    if jfet_count > 1 {
-                                                        if created_all_jfet_binding {
-                                                            continue;
-                                                        }
-                                                        created_all_jfet_binding = true;
-                                                        ModulationTarget::AllJfetVgs
-                                                    } else if let Some(stage_idx) = stages
-                                                        .iter()
-                                                        .position(|s| {
-                                                            matches!(&s.root, RootKind::Jfet(_))
-                                                        })
-                                                    {
-                                                        ModulationTarget::JfetVgs { stage_idx }
-                                                    } else {
-                                                        ModulationTarget::JfetVgs { stage_idx: 0 }
-                                                    }
-                                                }
-                                                "led" => ModulationTarget::PhotocouplerLed {
-                                                    stage_idx: 0,
-                                                    comp_id: final_comp,
-                                                },
-                                                "speed_mod" => {
-                                                    let delay_idx = delay_id_to_idx
-                                                        .get(final_comp.as_str())
-                                                        .copied()
-                                                        .unwrap_or(0);
-                                                    ModulationTarget::DelaySpeed { delay_idx }
-                                                }
-                                                "delay_time" => {
-                                                    let delay_idx = delay_id_to_idx
-                                                        .get(final_comp.as_str())
-                                                        .copied()
-                                                        .unwrap_or(0);
-                                                    ModulationTarget::DelayTime { delay_idx }
-                                                }
-                                                _ => continue,
-                                            }
-                                        } else {
-                                            continue;
-                                        }
-                                    }
-                                };
-
-                                // Bias and range based on target type
-                                let (bias, range) = match &target {
-                                    // JFET phaser: Vgs must stay in variable-resistance region
-                                    // 2SK30A-GR: Vp ~ -0.8V to -1.2V
-                                    // Keep Vgs between -0.2V and -0.7V to avoid pinch-off
-                                    // At -0.2V: low Rds (signal passes)
-                                    // At -0.7V: high Rds (but still conducting)
-                                    ModulationTarget::JfetVgs { .. } => (-0.45, 0.25),
-                                    ModulationTarget::AllJfetVgs => (-0.45, 0.25),
-                                    ModulationTarget::PhotocouplerLed { .. } => (0.5, 0.5),
-                                    // Triode grid bias: -2V center with ±2V swing
-                                    ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
-                                    // Variable-mu triode: -2V center with ±2V swing
-                                    ModulationTarget::VariMuVgk { .. } => (-2.0, 2.0),
-                                    // Pentode control grid: -2V center with ±2V swing
-                                    ModulationTarget::PentodeVg1k { .. } => (-2.0, 2.0),
-                                    // MOSFET: bias above threshold with swing
-                                    ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
-                                    // OTA: normalized gain 0-1
-                                    ModulationTarget::OtaIabc { .. } => (0.5, 0.5),
-                                    // BBD: short-delay chorus range (center ~3.3 ms, sweep ~3–5 ms)
-                                    ModulationTarget::BbdClock { .. } => (0.15, 0.10),
-                                    // Op-amp Vp: follows input signal
-                                    ModulationTarget::OpAmpVp { .. } => (0.0, 1.0),
-                                    // Delay speed: wow ±2%, flutter ±0.5%
-                                    ModulationTarget::DelaySpeed { .. } => (0.0, 0.02),
-                                    // Delay time: center 0.5, full sweep
-                                    ModulationTarget::DelayTime { .. } => (0.5, 0.5),
-                                };
-
-                                lfos.push(LfoBinding {
-                                    lfo: lfo.clone(),
-                                    target,
-                                    bias,
-                                    range,
-                                    base_freq,
-                                    lfo_id: comp.id.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Build EnvelopeFollower bindings from EnvelopeFollower components and their net connections.
-    let mut envelopes = Vec::new();
-    for comp in &pedal.components {
-        if let ComponentKind::EnvelopeFollower(
-            attack_r,
-            attack_c,
-            release_r,
-            release_c,
-            sensitivity_r,
-        ) = &comp.kind
-        {
-            let envelope = crate::elements::EnvelopeFollower::from_rc(
-                *attack_r,
-                *attack_c,
-                *release_r,
-                *release_c,
-                *sensitivity_r,
-                sample_rate,
-            );
-
-            // Find what this envelope follower connects to via nets (EF.out -> target.property)
-            for net in &pedal.nets {
-                if let Pin::ComponentPin { component, pin } = &net.from {
-                    if component == &comp.id && pin == "out" {
-                        for target_pin in &net.to {
-                            if let Pin::ComponentPin {
-                                component: target_comp,
-                                pin: target_prop,
-                            } = target_pin
-                            {
-                                let target = match target_prop.as_str() {
-                                    "vgs" => {
-                                        let stage_idx = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Jfet(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::JfetVgs { stage_idx }
-                                    }
-                                    "led" => ModulationTarget::PhotocouplerLed {
-                                        stage_idx: 0,
-                                        comp_id: target_comp.clone(),
-                                    },
-                                    "vgk" => {
-                                        if let Some(stage_idx) = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::VariMu(_)))
-                                        {
-                                            ModulationTarget::VariMuVgk { stage_idx }
-                                        } else {
-                                            let stage_idx = stages
-                                                .iter()
-                                                .position(|s| matches!(&s.root, RootKind::Triode(_)))
-                                                .unwrap_or(0);
-                                            ModulationTarget::TriodeVgk { stage_idx }
-                                        }
-                                    }
-                                    "vg1k" => {
-                                        let stage_idx = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Pentode(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::PentodeVg1k { stage_idx }
-                                    }
-                                    "iabc" => {
-                                        let stage_idx = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Ota(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::OtaIabc { stage_idx }
-                                    }
-                                    "clock" => {
-                                        ModulationTarget::BbdClock { bbd_idx: 0 }
-                                    }
-                                    "speed_mod" => {
-                                        let delay_idx = delay_id_to_idx
-                                            .get(target_comp.as_str())
-                                            .copied()
-                                            .unwrap_or(0);
-                                        ModulationTarget::DelaySpeed { delay_idx }
-                                    }
-                                    "delay_time" => {
-                                        let delay_idx = delay_id_to_idx
-                                            .get(target_comp.as_str())
-                                            .copied()
-                                            .unwrap_or(0);
-                                        ModulationTarget::DelayTime { delay_idx }
-                                    }
-                                    _ => continue,
-                                };
-
-                                let (bias, range) = match &target {
-                                    // JFET: Keep in variable-resistance region (avoid pinch-off)
-                                    ModulationTarget::JfetVgs { .. } => (-0.45, 0.25),
-                                    ModulationTarget::AllJfetVgs => (-0.45, 0.25),
-                                    ModulationTarget::PhotocouplerLed { .. } => (0.0, 1.0),
-                                    ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
-                                    ModulationTarget::VariMuVgk { .. } => (-2.0, 2.0),
-                                    ModulationTarget::PentodeVg1k { .. } => (-2.0, 2.0),
-                                    ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
-                                    ModulationTarget::OtaIabc { .. } => (0.5, 0.5),
-                                    ModulationTarget::BbdClock { .. } => (0.15, 0.10),
-                                    // Op-amp Vp: follows input signal
-                                    ModulationTarget::OpAmpVp { .. } => (0.0, 1.0),
-                                    ModulationTarget::DelaySpeed { .. } => (0.0, 0.02),
-                                    ModulationTarget::DelayTime { .. } => (0.5, 0.5),
-                                };
-
-                                envelopes.push(EnvelopeBinding {
-                                    envelope: envelope.clone(),
-                                    target,
-                                    bias,
-                                    range,
-                                    env_id: comp.id.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Set up thermal model if enabled and circuit uses germanium.
-    let thermal = if enable_thermal && has_germanium {
+    // Thermal model.
+    let thermal = if enable_thermal && classified.has_germanium {
         Some(ThermalModel::germanium_fuzz(sample_rate))
     } else if enable_thermal {
         Some(ThermalModel::silicon_standard(sample_rate))
@@ -3082,40 +507,26 @@ pub fn compile_pedal_with_options(
         None
     };
 
-    // Use primary supply voltage from .pedal file, defaulting to 9V for typical pedals
-    // For multi-rail circuits, use the first (primary) supply.
+    // Power supply.
     let primary_supply = pedal.supplies.first().map(|s| &s.config);
     let supply_voltage = primary_supply.map_or(9.0, |s| s.voltage);
 
-    // Build power supply sag model if impedance parameters are specified
     let power_supply = primary_supply
         .filter(|s| s.has_sag())
         .map(|s| {
             crate::elements::PowerSupply::new(
-                s.voltage,
-                s.impedance.unwrap_or(0.0),
-                s.filter_cap.unwrap_or(100e-6),
-                s.rectifier,
-                sample_rate,
+                s.voltage, s.impedance.unwrap_or(0.0), s.filter_cap.unwrap_or(100e-6),
+                s.rectifier, sample_rate,
             )
         });
 
-    // ── Sidechain construction ────────────────────────────────────────────
-    // If the pedal definition includes sidechain blocks, build a
-    // SidechainProcessor for each. Sidechain triode/pentode stages are
-    // already excluded from the main audio path because the partition
-    // identifies which edges belong to the sidechain subgraph.
-    let sidechains = build_sidechains(pedal, &graph, sample_rate);
+    // Sidechain construction.
+    let sidechains = super::bind::build_sidechains(pedal, &graph, sample_rate);
 
-    // Store the base grid bias from the first push-pull stage (if any).
-    // The sidechain CV will be subtracted from this value each sample.
     let base_grid_bias = push_pull_stages.first().map_or(-2.0, |pp| pp.grid_bias);
 
-    // Build pot smoothers for all PotInStage controls.
-    // These provide zipper-free pot control by smoothly interpolating values.
-    let pot_smoothers: Vec<SmoothedParam> = controls
-        .iter()
-        .enumerate()
+    // Build pot smoothers.
+    let pot_smoothers: Vec<SmoothedParam> = controls.iter().enumerate()
         .filter_map(|(i, ctrl)| {
             if matches!(ctrl.target, ControlTarget::PotInStage(_)) {
                 Some(SmoothedParam::new(0.5, i, sample_rate))
@@ -3125,6 +536,7 @@ pub fn compile_pedal_with_options(
         })
         .collect();
 
+    // ══ Assembly ══════════════════════════════════════════════════════
     let mut compiled = CompiledPedal {
         stages,
         push_pull_stages,
@@ -3134,7 +546,7 @@ pub fn compile_pedal_with_options(
         sample_rate,
         controls,
         gain_range: gain_range_final,
-        supply_voltage: 9.0, // Will be updated by set_supply_voltage
+        supply_voltage: 9.0,
         lfos,
         envelopes,
         slew_limiters,
@@ -3156,10 +568,6 @@ pub fn compile_pedal_with_options(
         base_grid_bias,
     };
 
-    // Apply supply voltage - this propagates v_max to all op-amp stages.
-    // When a power supply sag model is present, use its steady-state output
-    // voltage (which accounts for the rectifier static drop) so the initial
-    // v_max matches what the PSU will actually produce from the first sample.
     let initial_voltage = match &compiled.power_supply {
         Some(psu) => psu.steady_state_voltage(),
         None => supply_voltage,
@@ -3168,171 +576,3 @@ pub fn compile_pedal_with_options(
 
     Ok(compiled)
 }
-
-/// Build sidechain processors by extracting sub-PedalDefs and compiling them.
-///
-/// Each sidechain is treated as a separate sub-circuit: we use graph
-/// partitioning to identify which components belong to the sidechain,
-/// extract a sub-PedalDef, then compile it through the same `compile_pedal()`
-/// pipeline as the main audio path. This gives the sidechain proper WDF
-/// trees, transformers, nonlinear elements, controls — everything.
-fn build_sidechains(
-    pedal: &PedalDef,
-    graph: &CircuitGraph,
-    sample_rate: f64,
-) -> Vec<SidechainProcessor> {
-    let mut processors = Vec::new();
-
-    eprintln!("[sidechain] {} sidechain definitions", pedal.sidechains.len());
-    for sc_info in &pedal.sidechains {
-        let tap = match graph.node_names.get(&sc_info.tap_node) {
-            Some(&n) => n,
-            None => { eprintln!("[sidechain] tap node '{}' not found", sc_info.tap_node); continue; },
-        };
-        let cv = match graph.node_names.get(&sc_info.cv_node) {
-            Some(&n) => n,
-            None => { eprintln!("[sidechain] cv node '{}' not found", sc_info.cv_node); continue; },
-        };
-
-        let partition = match graph.partition_sidechain(tap, cv) {
-            Some(p) => p,
-            None => { eprintln!("[sidechain] partition returned None for tap={} cv={}", sc_info.tap_node, sc_info.cv_node); continue; },
-        };
-
-        // Collect the component IDs that belong to this sidechain.
-        let mut sc_component_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for &edge_idx in &partition.sidechain_edge_indices {
-            let comp = &graph.components[graph.edges[edge_idx].comp_idx];
-            sc_component_ids.insert(comp.id.clone());
-        }
-
-        // DEBUG
-        eprintln!("[sidechain] tap={} cv={}", sc_info.tap_node, sc_info.cv_node);
-        eprintln!("[sidechain] {} edges, {} components", partition.sidechain_edge_indices.len(), sc_component_ids.len());
-        let mut sorted: Vec<_> = sc_component_ids.iter().cloned().collect();
-        sorted.sort();
-        eprintln!("[sidechain] {}", sorted.join(", "));
-
-        // Extract a sub-PedalDef for this sidechain.
-        let sc_def = extract_sidechain_def(
-            pedal,
-            &sc_component_ids,
-            &sc_info.tap_node,
-            &sc_info.cv_node,
-        );
-
-        eprintln!("[sidechain] sub-def: {} comps, {} nets, {} controls, {} trims",
-            sc_def.components.len(), sc_def.nets.len(), sc_def.controls.len(), sc_def.trims.len());
-
-        // Compile the sidechain sub-circuit through the same pipeline.
-        match compile_pedal(&sc_def, sample_rate) {
-            Ok(compiled) => {
-                eprintln!("[sidechain] compiled OK: {} stages, {} push-pull",
-                    compiled.debug_stage_count(), compiled.debug_push_pull_count());
-                processors.push(SidechainProcessor {
-                    circuit: compiled,
-                    cv_delayed: 0.0,
-                });
-            }
-            Err(e) => {
-                eprintln!("[sidechain] FAILED: {e}");
-            }
-        }
-    }
-
-    processors
-}
-
-/// Extract a sub-PedalDef for a sidechain sub-circuit.
-///
-/// Filters the parent PedalDef's components, nets, controls, and trims
-/// to only those belonging to the sidechain. Renames the tap node to "in"
-/// and the CV node to "out" so the sub-circuit has standard I/O.
-fn extract_sidechain_def(
-    pedal: &PedalDef,
-    component_ids: &std::collections::HashSet<String>,
-    tap_node: &str,
-    cv_node: &str,
-) -> PedalDef {
-    // Filter components to those in the sidechain
-    let components: Vec<ComponentDef> = pedal
-        .components
-        .iter()
-        .filter(|c| component_ids.contains(&c.id))
-        .cloned()
-        .collect();
-
-    // Rename tap_node → "in" and cv_node → "out" in all pins
-    let rename = |pin: &Pin| -> Pin {
-        match pin {
-            Pin::Reserved(n) if n == tap_node => Pin::Reserved("in".to_string()),
-            Pin::Reserved(n) if n == cv_node => Pin::Reserved("out".to_string()),
-            _ => pin.clone(),
-        }
-    };
-
-    // Filter and rename nets
-    let nets: Vec<NetDef> = pedal
-        .nets
-        .iter()
-        .filter_map(|net| {
-            let from = rename(&net.from);
-            let to: Vec<Pin> = net.to.iter().map(&rename).collect();
-
-            // A pin belongs to this sidechain if it references a sidechain component
-            // or is a standard reserved node (in, out, gnd, vcc, supply rail).
-            let belongs = |p: &Pin| match p {
-                Pin::Reserved(n) => {
-                    n == "in" || n == "out" || n == "gnd" || n == "vcc"
-                        || pedal.is_supply_rail(n)
-                }
-                Pin::ComponentPin { component, .. } => component_ids.contains(component),
-                Pin::Fork { switch, .. } => component_ids.contains(switch),
-            };
-
-            // Keep only nets where at least one component pin is in this sidechain
-            let has_local_component = std::iter::once(&from).chain(to.iter()).any(|p| {
-                matches!(p, Pin::ComponentPin { component, .. } if component_ids.contains(component))
-            });
-
-            if has_local_component {
-                let filtered_to: Vec<Pin> = to.into_iter().filter(|p| belongs(p)).collect();
-                if !filtered_to.is_empty() && belongs(&from) {
-                    Some(NetDef { from, to: filtered_to })
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Filter controls to those referencing sidechain components
-    let controls: Vec<ControlDef> = pedal
-        .controls
-        .iter()
-        .filter(|c| component_ids.contains(&c.component))
-        .cloned()
-        .collect();
-
-    // Filter trims to those referencing sidechain components
-    let trims: Vec<ControlDef> = pedal
-        .trims
-        .iter()
-        .filter(|c| component_ids.contains(&c.component))
-        .cloned()
-        .collect();
-
-    PedalDef {
-        name: format!("{} (sidechain)", pedal.name),
-        supplies: pedal.supplies.clone(),
-        components,
-        nets,
-        controls,
-        trims,
-        monitors: vec![],
-        sidechains: vec![], // No nested sidechains
-    }
-}
-

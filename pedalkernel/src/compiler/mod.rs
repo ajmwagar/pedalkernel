@@ -7,11 +7,16 @@
 //! 4. Modeling active elements (transistors, opamps) as gain stages
 //! 5. Chaining everything into a cascaded `PedalProcessor`
 
+mod bind;
+mod build;
+mod classify;
 mod compile;
 mod compiled;
 mod dyn_node;
 mod graph;
 mod helpers;
+mod opamp_analysis;
+mod plan;
 mod split;
 mod stage;
 pub mod validate;
