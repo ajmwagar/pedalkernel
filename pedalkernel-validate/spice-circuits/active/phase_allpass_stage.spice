@@ -3,76 +3,46 @@
 * PedalKernel Validation Circuit
 * ============================================================================
 * First-order all-pass filter for phaser circuits.
-* JFET (2N5952) acts as voltage-controlled resistor.
-* Op-amp (TL072) provides unity-gain buffering.
-* Phase shift at fc = -90 degrees, where fc = 1/(2*pi*R_jfet*C)
+* JFET (2N5952) acts as voltage-controlled resistor in triode region.
+* Op-amp provides unity-gain buffering.
 * ============================================================================
 
-* Supply voltage
-Vcc vcc 0 DC 9
+* Supply
+VCC vcc 0 DC 9
 
-* Input coupling
-C_in v_in vin_ac 100n
-R_in vin_ac 0 1MEG
-
-* Virtual ground (Vref = Vcc/2)
+* Virtual ground (Vref = Vcc/2 = 4.5V)
 R_vref1 vcc vref 470k
 R_vref2 vref 0 470k
 C_vref vref 0 10u
 
-* All-pass network input resistor
+* Input coupling (AC couples to Vref bias)
+C_in v_in vin_ac 100n
+R_in vin_ac vref 1MEG
+
+* All-pass network
+* Standard first-order all-pass: R in series, RC to virtual ground via JFET
 R_ap vin_ac vap 24k
 
-* JFET as variable resistor
-* 2N5952 in triode region (low Vds)
-J1 0 vgate vap JMOD2N5952
-
-* All-pass capacitor
+* JFET as variable resistor (source follower config for Rds)
+* Drain to ground, source is the resistive element
+J1 0 vgate vap JMOD
 C_ap vap vneg 47n
 
-* JFET gate bias (sets operating point)
-* Divider from Vref to ground
+* JFET gate bias - divider from Vref
 R_jb1 vref vgate 150k
 R_jb2 vgate 0 150k
 
-* TL072 Op-amp (unity-gain buffer with direct feedback)
-* Modeled as VCVS with high gain, input resistance, output resistance
-XU1 vref vneg vcc 0 vopout OPAMP_TL072
-
-* Unity gain feedback
-Rfb vneg vopout 1
+* Op-amp unity buffer (TL072)
+* Uses simple VCVS model - we just need unity gain behavior
+E_opamp vopout vref vneg vref 100k
+R_opfb vneg vopout 100
 
 * Output coupling
 C_out vopout vout_ac 100n
 R_load vout_ac 0 10k
 
-* Output node
+* Output measurement
 Eout v_out 0 vout_ac 0 1
 
-* ============================================================================
-* 2N5952 N-channel JFET Model
-* Vp = -2V to -6V (typical -4V), Idss = 1-5mA (typical 2mA)
-* ============================================================================
-.MODEL JMOD2N5952 NJF(VTO=-4.0 BETA=0.5m LAMBDA=0.02 IS=1e-14 CGS=4p CGD=1.5p RD=10 RS=10)
-
-* ============================================================================
-* TL072 Op-Amp Subcircuit (simplified behavioral model)
-* GBW = 3MHz, Slew Rate = 13V/us, Vsat = Vcc-1.5V
-* ============================================================================
-.SUBCKT OPAMP_TL072 inp inn vp vm out
-* Input differential pair (high impedance)
-Rin inp inn 1T
-
-* Differential gain stage
-Eint vint 0 inp inn 100k
-
-* Single-pole rolloff (GBW = 3MHz)
-Rlp vint vlp 1k
-Clp vlp 0 53p
-
-* Output stage with rail limits
-Eout out 0 vlp 0 1
-Rout out 0 100
-
-.ENDS OPAMP_TL072
-
+* 2N5952 JFET model
+.MODEL JMOD NJF(VTO=-4.0 BETA=0.5m LAMBDA=0.02 IS=1e-14 CGS=4p CGD=1.5p)
