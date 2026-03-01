@@ -323,6 +323,15 @@ impl OpAmpRoot {
         }
     }
 
+    /// Check if this op-amp is in non-inverting mode.
+    ///
+    /// Non-inverting op-amps require input via `set_vp()`.
+    /// Inverting op-amps get input from the WDF wave variable.
+    #[inline]
+    pub fn is_non_inverting(&self) -> bool {
+        matches!(self.mode, OpAmpMode::NonInverting { .. })
+    }
+
     /// Enable soft clipping mode for feedback diodes.
     #[inline]
     pub fn set_soft_clip(&mut self, diode_vf: f64) {

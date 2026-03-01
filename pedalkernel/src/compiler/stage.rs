@@ -244,7 +244,14 @@ impl WdfStage {
                 RootKind::Pentode(p) => p.process(b_tree, rp),
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
                 RootKind::Ota(o) => o.process(b_tree, rp),
-                RootKind::OpAmp(op) => op.process(b_tree, rp),
+                RootKind::OpAmp(op) => {
+                    // For non-inverting op-amps, the input signal must be set via set_vp().
+                    // Inverting op-amps derive input from the WDF wave variable.
+                    if op.is_non_inverting() {
+                        op.set_vp(sample * compensation);
+                    }
+                    op.process(b_tree, rp)
+                }
                 RootKind::BjtNpn(bjt) => bjt.process(b_tree, rp),
                 RootKind::BjtPnp(bjt) => bjt.process(b_tree, rp),
                 // Passthrough: open-circuit termination (b = a)

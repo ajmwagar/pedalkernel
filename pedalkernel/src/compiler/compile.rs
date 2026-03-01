@@ -873,6 +873,26 @@ pub fn compile_pedal_with_options(
         });
     }
 
+    // Handle remaining unity-gain op-amps that weren't paired with JFETs.
+    // These are standalone unity buffers (no JFET all-pass network).
+    for opamp in feedback_opamp_queue.drain(..) {
+        // Create a voltage source tree for the unity buffer.
+        // The input signal will be set via set_vp() before processing.
+        let tree = DynNode::VoltageSource { voltage: 0.0, rp: 10_000.0 };
+
+        stages.push(WdfStage {
+            tree,
+            root: RootKind::OpAmp(opamp),
+            compensation: 1.0,
+            oversampler: Oversampler::new(oversampling),
+            base_diode_model: None,
+            paired_opamp: None,
+            dc_block: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
+        });
+    }
+
     // Build WDF stages for BJTs.
     let bjts = graph.find_bjts();
     let bjt_edge_indices: Vec<usize> = bjts.iter().map(|(idx, _)| *idx).collect();
