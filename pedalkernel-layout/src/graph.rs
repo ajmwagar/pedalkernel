@@ -623,15 +623,15 @@ mod tests {
     #[test]
     fn pin_direction_triode() {
         assert_eq!(
-            infer_pin_direction(&ComponentKind::Triode(TriodeType::T12ax7), "grid"),
+            infer_pin_direction(&ComponentKind::Triode("12AX7".into()), "grid"),
             PinDirection::Input
         );
         assert_eq!(
-            infer_pin_direction(&ComponentKind::Triode(TriodeType::T12ax7), "plate"),
+            infer_pin_direction(&ComponentKind::Triode("12AX7".into()), "plate"),
             PinDirection::Output
         );
         assert_eq!(
-            infer_pin_direction(&ComponentKind::Triode(TriodeType::T12ax7), "cathode"),
+            infer_pin_direction(&ComponentKind::Triode("12AX7".into()), "cathode"),
             PinDirection::Down
         );
     }

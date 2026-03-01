@@ -17,12 +17,12 @@ fn tube_screamer_pedal() -> PedalDef {
             ComponentDef { id: "R3".into(), kind: ComponentKind::Resistor(4700.0) },
             ComponentDef { id: "U2".into(), kind: ComponentKind::OpAmp(OpAmpType::Jrc4558) },
             ComponentDef { id: "R4".into(), kind: ComponentKind::Resistor(51e3) },
-            ComponentDef { id: "Drive".into(), kind: ComponentKind::Potentiometer(500e3) },
+            ComponentDef { id: "Drive".into(), kind: ComponentKind::Potentiometer(500e3, PotTaper::B) },
             ComponentDef { id: "D1".into(), kind: ComponentKind::Diode(DiodeType::Silicon) },
             ComponentDef { id: "D2".into(), kind: ComponentKind::Diode(DiodeType::Silicon) },
-            ComponentDef { id: "Tone".into(), kind: ComponentKind::Potentiometer(20e3) },
+            ComponentDef { id: "Tone".into(), kind: ComponentKind::Potentiometer(20e3, PotTaper::B) },
             ComponentDef { id: "C4".into(), kind: ComponentKind::Capacitor(CapConfig::new(220e-9)) },
-            ComponentDef { id: "Level".into(), kind: ComponentKind::Potentiometer(100e3) },
+            ComponentDef { id: "Level".into(), kind: ComponentKind::Potentiometer(100e3, PotTaper::B) },
             ComponentDef { id: "R7".into(), kind: ComponentKind::Resistor(10e3) },
         ],
         nets: vec![
@@ -127,6 +127,7 @@ fn tube_screamer_pedal() -> PedalDef {
         ],
         trims: vec![],
         monitors: vec![],
+        sidechains: vec![],
     }
 }
 
@@ -138,7 +139,7 @@ fn triode_gain_stage() -> PedalDef {
         components: vec![
             ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(CapConfig::new(20e-9)) },
             ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(1e6) },
-            ComponentDef { id: "V1".into(), kind: ComponentKind::Triode(TriodeType::T12ax7) },
+            ComponentDef { id: "V1".into(), kind: ComponentKind::Triode("12AX7".into()) },
             ComponentDef { id: "R2".into(), kind: ComponentKind::Resistor(100e3) },
             ComponentDef { id: "R3".into(), kind: ComponentKind::Resistor(1500.0) },
             ComponentDef { id: "C2".into(), kind: ComponentKind::Capacitor(CapConfig::new(25e-6)) },
@@ -195,6 +196,7 @@ fn triode_gain_stage() -> PedalDef {
         controls: vec![],
         trims: vec![],
         monitors: vec![],
+        sidechains: vec![],
     }
 }
 
@@ -403,6 +405,7 @@ fn empty_pedal_produces_empty_layout() {
         controls: vec![],
         trims: vec![],
         monitors: vec![],
+        sidechains: vec![],
     };
 
     let layout = generate_layout(&pedal, 1024.0, 512.0);

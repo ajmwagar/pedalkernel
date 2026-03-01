@@ -1145,30 +1145,30 @@ impl CircuitGraph {
         }
 
         // Collect all triode edges.
-        let mut raw_triodes: Vec<(usize, TriodeType, NodeId, NodeId)> = Vec::new();
+        let mut raw_triodes: Vec<(usize, String, NodeId, NodeId)> = Vec::new();
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
-            if let ComponentKind::Triode(tt) = &comp.kind {
-                raw_triodes.push((edge_idx, *tt, e.node_a, e.node_b));
+            if let ComponentKind::Triode(name) = &comp.kind {
+                raw_triodes.push((edge_idx, name.clone(), e.node_a, e.node_b));
             }
         }
 
         // Group by (plate_node, cathode_node) to detect parallel tubes.
         // Tubes sharing both nodes are electrically identical and should be
         // modeled as a single tube with scaled plate current.
-        let mut groups: HashMap<(NodeId, NodeId), Vec<(usize, TriodeType)>> = HashMap::new();
-        for &(edge_idx, tt, plate, cathode) in &raw_triodes {
-            groups.entry((plate, cathode)).or_default().push((edge_idx, tt));
+        let mut groups: HashMap<(NodeId, NodeId), Vec<(usize, String)>> = HashMap::new();
+        for (edge_idx, name, plate, cathode) in &raw_triodes {
+            groups.entry((*plate, *cathode)).or_default().push((*edge_idx, name.clone()));
         }
 
         let mut triodes: Vec<(usize, TriodeInfo)> = Vec::new();
         for ((plate_node, cathode_node), group) in &groups {
             // Use the first edge as the representative; store parallel count.
-            let (rep_edge_idx, rep_tt) = group[0];
+            let (rep_edge_idx, ref rep_name) = group[0];
             triodes.push((
                 rep_edge_idx,
                 TriodeInfo {
-                    triode_type: rep_tt,
+                    model_name: rep_name.clone(),
                     plate_node: *plate_node,
                     cathode_node: *cathode_node,
                     junction_node: *cathode_node,
@@ -1332,11 +1332,11 @@ impl CircuitGraph {
         let mut pentodes: Vec<(usize, PentodeInfo)> = Vec::new();
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
-            if let ComponentKind::Pentode(pt) = &comp.kind {
+            if let ComponentKind::Pentode(name) = &comp.kind {
                 pentodes.push((
                     edge_idx,
                     PentodeInfo {
-                        pentode_type: *pt,
+                        model_name: name.clone(),
                         junction_node: if e.node_b == self.gnd_node {
                             e.node_a
                         } else {
@@ -2011,7 +2011,7 @@ pub(super) struct PushPullPairInfo {
 }
 
 pub(super) struct TriodeInfo {
-    pub(super) triode_type: TriodeType,
+    pub(super) model_name: String,
     /// Plate node - connected to plate load resistor and output
     pub(super) plate_node: NodeId,
     /// Cathode node - connected to cathode resistor and bypass cap
@@ -2026,7 +2026,7 @@ pub(super) struct TriodeInfo {
 }
 
 pub(super) struct PentodeInfo {
-    pub(super) pentode_type: PentodeType,
+    pub(super) model_name: String,
     pub(super) junction_node: NodeId,
     #[allow(dead_code)]
     pub(super) ground_node: NodeId,

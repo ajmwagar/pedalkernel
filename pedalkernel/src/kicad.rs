@@ -38,22 +38,8 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::PJfet(_) => ("Device:Q_PJFET_DGS", "J"),
         ComponentKind::Photocoupler(_) => ("Isolator:PC817", "OC"),
         ComponentKind::Lfo(..) => ("", "LFO"), // Expands to timing R + C
-        ComponentKind::Triode(tt) => match tt {
-            TriodeType::T12ax7 => ("Valve:ECC83", "V"),
-            TriodeType::T12at7 => ("Valve:ECC81", "V"),
-            TriodeType::T12au7 => ("Valve:ECC82", "V"),
-            TriodeType::T12ay7 => ("Valve:12AY7", "V"),
-            TriodeType::T12bh7 => ("Valve:12BH7", "V"),
-            TriodeType::T6386 => ("Valve:6386", "V"),
-        },
-        ComponentKind::Pentode(pt) => match pt {
-            PentodeType::Ef86 => ("Valve:EF86", "V"),
-            PentodeType::El84 => ("Valve:EL84", "V"),
-            PentodeType::A6aq5a => ("Valve:6AQ5", "V"),
-            PentodeType::A6973 => ("Valve:6973", "V"),
-            PentodeType::A6l6gc => ("Valve:6L6GC", "V"),
-            PentodeType::El34 => ("Valve:EL34", "V"),
-            PentodeType::A6550 => ("Valve:6550", "V"),
+        ComponentKind::Triode(_) | ComponentKind::Pentode(_) => {
+            ("Valve:Triode", "V")
         },
         ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
         ComponentKind::Nmos(_) => ("Device:Q_NMOS_DGS", "Q"),

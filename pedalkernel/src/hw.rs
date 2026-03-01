@@ -1089,41 +1089,16 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
 
                     entries
                 }
-                ComponentKind::Triode(tt) => {
+                ComponentKind::Triode(name) => {
                     let (pn, desc) = if let Some(part_name) = hw_part {
                         (None, part_name.to_string())
                     } else {
-                        match tt {
-                            crate::dsl::TriodeType::T12ax7 => (
-                                Some("JJ-12AX7".to_string()),
-                                "12AX7 / ECC83 Preamp Tube (JJ Electronic)".to_string(),
-                            ),
-                            crate::dsl::TriodeType::T12at7 => (
-                                Some("JJ-12AT7".to_string()),
-                                "12AT7 / ECC81 Preamp Tube (JJ Electronic)".to_string(),
-                            ),
-                            crate::dsl::TriodeType::T12au7 => (
-                                Some("JJ-12AU7".to_string()),
-                                "12AU7 / ECC82 Preamp Tube (JJ Electronic)".to_string(),
-                            ),
-                            crate::dsl::TriodeType::T12ay7 => (
-                                Some("JJ-12AY7".to_string()),
-                                "12AY7 Preamp Tube (JJ Electronic)".to_string(),
-                            ),
-                            crate::dsl::TriodeType::T12bh7 => (
-                                Some("JJ-12BH7A".to_string()),
-                                "12BH7A Dual Triode (JJ Electronic)".to_string(),
-                            ),
-                            crate::dsl::TriodeType::T6386 => (
-                                Some("NOS-6386".to_string()),
-                                "6386 Remote-Cutoff Dual Triode (NOS)".to_string(),
-                            ),
-                        }
+                        (None, format!("{} Triode Vacuum Tube", name))
                     };
                     vec![BomEntry {
                         reference: comp.id.clone(),
-                        display: format!("Vacuum Tube ({tt:?})"),
-                        value: format!("{tt:?}"),
+                        display: format!("Triode ({})", name),
+                        value: name.clone(),
                         mouser_pn: pn,
                         description: desc,
                         qty_per_unit: 1,
@@ -1144,33 +1119,16 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         qty_per_unit: 1,
                     }]
                 }
-                ComponentKind::Pentode(pt) => {
+                ComponentKind::Pentode(name) => {
                     let (pn, desc) = if let Some(part_name) = hw_part {
                         (None, part_name.to_string())
                     } else {
-                        match pt {
-                            crate::dsl::PentodeType::Ef86 => (
-                                Some("JJ-EF86".to_string()),
-                                "EF86 / 6267 Pentode (JJ Electronic)".to_string(),
-                            ),
-                            crate::dsl::PentodeType::El84 => (
-                                Some("JJ-EL84".to_string()),
-                                "EL84 / 6BQ5 Power Pentode (JJ Electronic)".to_string(),
-                            ),
-                            crate::dsl::PentodeType::A6aq5a => (
-                                Some("6AQ5A".to_string()),
-                                "6AQ5A Beam Power Tube".to_string(),
-                            ),
-                            crate::dsl::PentodeType::A6973 => (
-                                Some("NOS-6973".to_string()),
-                                "6973 Beam Power Tube (NOS)".to_string(),
-                            ),
-                        }
+                        (None, format!("{} Pentode Vacuum Tube", name))
                     };
                     vec![BomEntry {
                         reference: comp.id.clone(),
-                        display: format!("Pentode ({pt:?})"),
-                        value: format!("{pt:?}"),
+                        display: format!("Pentode ({})", name),
+                        value: name.clone(),
                         mouser_pn: pn,
                         description: desc,
                         qty_per_unit: 1,

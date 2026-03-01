@@ -1,9 +1,12 @@
 //! Pentode vacuum tube WDF root elements.
 //!
-//! Models screen-referenced pentodes (EF86, EL84) using the Koren equation.
+//! Models screen-referenced pentodes (EF86, EL84, 6L6GC, EL34, etc.)
+//! using the Koren equation. Parameters are loaded from the embedded
+//! `pentodes.model` file.
 
 use super::solver::{softplus, newton_raphson_solve, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
+use crate::models::{SpicePentodeModel, pentode_by_name};
 
 // ---------------------------------------------------------------------------
 // Pentode (Vacuum Tube) Models
@@ -40,163 +43,40 @@ pub struct PentodeModel {
     pub kvb2: f64,
     /// Default screen grid voltage (V) for typical operating point.
     pub vg2_default: f64,
+    /// Plate current scaling factor. Stored for reference but not yet used
+    /// in the plate_current() equation (future KG1 incorporation).
+    pub kg1: f64,
+    /// Screen current scaling factor. Stored for reference but not yet used
+    /// in the plate_current() equation (future KG2 incorporation).
+    pub kg2: f64,
 }
 
 impl PentodeModel {
-    /// EF86 / 6267 — Small-signal pentode.
-    ///
-    /// The preamp tube in the Vox AC15 and AC30 (V1 position).
-    /// Very high gain, low noise. Used for its chimey, glassy character.
-    /// Typical operating point: Va=170V, Vg2=140V, Vg1=-2V, Ia=3mA.
-    pub fn p_ef86() -> Self {
-        Self {
-            mu: 38.0,
-            kp: 1460.0,
-            kvb: 300.0,
-            ex: 1.35,
-            kvb2: 12.0,
-            vg2_default: 140.0,
-        }
+    /// Look up a pentode model by name from the model registry.
+    /// Panics if the name is not found.
+    pub fn by_name(name: &str) -> Self {
+        Self::try_by_name(name).unwrap_or_else(|| {
+            panic!("Unknown pentode model: '{}'. Use pentode_model_names() to list available models.", name)
+        })
     }
 
-    /// EL84 / 6BQ5 — Power pentode.
-    ///
-    /// The output tube in the Vox AC15, AC30, and many boutique amps.
-    /// Known for musical, chimey distortion and relatively low headroom
-    /// (12-17W per push-pull pair). Class A operation in the AC15.
-    /// Typical operating point: Va=250V, Vg2=250V, Vg1=-7.3V, Ia=48mA.
-    pub fn p_el84() -> Self {
-        Self {
-            mu: 19.0,
-            kp: 600.0,
-            kvb: 300.0,
-            ex: 1.35,
-            kvb2: 20.0,
-            vg2_default: 250.0,
-        }
+    /// Look up a pentode model by name, returning None if not found.
+    pub fn try_by_name(name: &str) -> Option<Self> {
+        pentode_by_name(name).map(Self::from)
     }
+}
 
-    /// 6L6GC — Beam power tetrode.
-    ///
-    /// The American power tube standard, used in virtually every Fender amp
-    /// above 40W. Higher plate dissipation (30W) and cleaner headroom than 6V6.
-    /// Gradual compression when overdriven — the core of the Fender clean sound.
-    ///
-    /// Koren model parameters derived from curve fitting:
-    /// mu=8.7, ex=1.35, kg1=1460, kg2=4500, kp=48.0, kvb=12.0
-    ///
-    /// Typical operating point: Va=460V, Vg2=450V, Vg1=-45V (fixed bias), Ia≈40mA.
-    /// Plate resistance ≈33kΩ, transconductance ≈6.0 mA/V.
-    ///
-    /// Equivalent types: 6L6, 5881 (military), KT66 (British).
-    pub fn p_6l6gc() -> Self {
+impl From<&SpicePentodeModel> for PentodeModel {
+    fn from(spice: &SpicePentodeModel) -> Self {
         Self {
-            mu: 8.7,
-            kp: 48.0,
-            kvb: 12.0,
-            ex: 1.35,
-            kvb2: 25.0,
-            vg2_default: 450.0,
-        }
-    }
-
-    /// EL34 / 6CA7 — True pentode (not a beam tetrode).
-    ///
-    /// The European power tube standard. THE Marshall sound.
-    /// Dominant midrange character, earlier breakup, more aggressive harmonics.
-    /// Lower plate resistance (≈15kΩ) and higher transconductance (≈11 mA/V)
-    /// than 6L6GC — draws more current with less clean headroom per tube.
-    /// Sharper clipping knee than 6L6GC: abrupt clean-to-clip transition
-    /// vs the 6L6's gradual compression. This is the core Fender-vs-Marshall
-    /// power section character difference.
-    ///
-    /// Koren model parameters:
-    /// mu=11.0, ex=1.35, kg1=650, kg2=4200, kp=60.0, kvb=24.0
-    ///
-    /// Typical operating point: Va=480V, Vg2=470V, Vg1=-37V (fixed bias), Ia≈60mA.
-    /// Max plate dissipation: 25W. Max screen dissipation: 8W.
-    ///
-    /// Note: As a true pentode, the EL34's screen intercepts more current than
-    /// beam tetrodes, especially when plate voltage drops below screen voltage
-    /// (the "kink" region during hard push-pull clipping).
-    ///
-    /// Equivalent types: 6CA7 (American designation), KT77 (drop-in alternative).
-    pub fn p_el34() -> Self {
-        Self {
-            mu: 11.0,
-            kp: 60.0,
-            kvb: 24.0,
-            ex: 1.35,
-            kvb2: 18.0,
-            vg2_default: 470.0,
-        }
-    }
-
-    /// 6550 — High-power beam tetrode.
-    ///
-    /// More headroom than 6L6GC, tighter bass. Used in hi-fi amps,
-    /// Ampeg SVT, some Mesa Boogies, and some Dumble builds.
-    /// Max plate dissipation: 35W, max screen dissipation: 6.5W.
-    ///
-    /// Koren model parameters:
-    /// mu=7.9, ex=1.35, kg1=890, kg2=4800, kp=36.0, kvb=12.0
-    ///
-    /// Typical operating point: Va=460V, Vg2=450V, Vg1=-50V (fixed bias).
-    /// Plate resistance ≈38kΩ, transconductance ≈5.0 mA/V.
-    ///
-    /// Equivalent types: KT88 (British), KT90 (higher dissipation variant).
-    pub fn p_6550() -> Self {
-        Self {
-            mu: 7.9,
-            kp: 36.0,
-            kvb: 12.0,
-            ex: 1.35,
-            kvb2: 28.0,
-            vg2_default: 450.0,
-        }
-    }
-
-    /// 6AQ5A / 6005 — Small beam power tetrode.
-    ///
-    /// A miniature power tube used in small amps like the Gibson GA-5,
-    /// Fender Champ (early), and various portable amplifiers.
-    /// Lower power (9W max plate dissipation) but musical breakup.
-    ///
-    /// Typical operating point: Va=180-250V, Vg2=180-250V, Vg1=-12.5V.
-    /// Lower mu than EL84 (≈10-12 vs 19) and different plate curves.
-    ///
-    /// Koren model parameters derived from curve fitting:
-    /// mu=11.0, kp=450.0, kvb=180.0, ex=1.3
-    pub fn p_6aq5a() -> Self {
-        Self {
-            mu: 11.0,
-            kp: 450.0,
-            kvb: 180.0,
-            ex: 1.3,
-            kvb2: 15.0,
-            vg2_default: 180.0,
-        }
-    }
-
-    /// 6973 — Beam power tetrode.
-    ///
-    /// A unique 9-pin power tube used in some Valco/Supro amps and the
-    /// Fairchild 670 limiter's sidechain. Higher transconductance than
-    /// 6AQ5A, different harmonic character from EL84.
-    ///
-    /// Typical operating point: Va=350V, Vg2=350V, Vg1=-15V.
-    /// Max plate dissipation: 9W. Notable for spongy, compressed feel.
-    ///
-    /// Koren model parameters:
-    /// mu=14.0, kp=520.0, kvb=220.0, ex=1.35
-    pub fn p_6973() -> Self {
-        Self {
-            mu: 14.0,
-            kp: 520.0,
-            kvb: 220.0,
-            ex: 1.35,
-            kvb2: 18.0,
-            vg2_default: 350.0,
+            mu: spice.mu,
+            kp: spice.kp,
+            kvb: spice.kvb,
+            ex: spice.ex,
+            kvb2: spice.kvb2,
+            vg2_default: spice.vg2_default,
+            kg1: spice.kg1,
+            kg2: spice.kg2,
         }
     }
 }
@@ -409,7 +289,7 @@ mod tests {
     #[test]
     fn p_6l6gc_positive_current_at_operating_point() {
         // At typical Fender Twin operating point: Vg1=-45V, Vg2=450V, Vp=460V
-        let ip = plate_current_at(PentodeModel::p_6l6gc(), -45.0, 450.0, 460.0);
+        let ip = plate_current_at(PentodeModel::by_name("6L6GC"), -45.0, 450.0, 460.0);
         assert!(ip > 0.0, "6L6GC should conduct at operating point, got {ip}");
         assert!(ip.is_finite(), "6L6GC plate current must be finite");
     }
@@ -419,8 +299,8 @@ mod tests {
         // Deep cutoff: Vg1 far below pinch-off. Current should be much less
         // than at the operating point. The screen-referenced Koren model has
         // some residual leakage at deep cutoff.
-        let ip_cutoff = plate_current_at(PentodeModel::p_6l6gc(), -100.0, 450.0, 460.0);
-        let ip_operating = plate_current_at(PentodeModel::p_6l6gc(), -45.0, 450.0, 460.0);
+        let ip_cutoff = plate_current_at(PentodeModel::by_name("6L6GC"), -100.0, 450.0, 460.0);
+        let ip_operating = plate_current_at(PentodeModel::by_name("6L6GC"), -45.0, 450.0, 460.0);
         assert!(
             ip_cutoff < ip_operating * 0.1,
             "6L6GC at Vg1=-100V ({ip_cutoff}) should be <10% of operating point ({ip_operating})"
@@ -429,13 +309,13 @@ mod tests {
 
     #[test]
     fn p_6l6gc_no_current_negative_plate() {
-        let ip = plate_current_at(PentodeModel::p_6l6gc(), -45.0, 450.0, -10.0);
+        let ip = plate_current_at(PentodeModel::by_name("6L6GC"), -45.0, 450.0, -10.0);
         assert_eq!(ip, 0.0, "No current for negative plate voltage");
     }
 
     #[test]
     fn p_6l6gc_derivative_positive() {
-        let mut root = PentodeRoot::new(PentodeModel::p_6l6gc());
+        let mut root = PentodeRoot::new(PentodeModel::by_name("6L6GC"));
         root.set_vg1k(-45.0);
         root.set_vg2k(450.0);
         let d = root.plate_current_derivative(200.0);
@@ -448,15 +328,15 @@ mod tests {
     #[test]
     fn p_el34_positive_current_at_operating_point() {
         // Marshall JCM800 operating point: Vg1=-37V, Vg2=470V, Vp=480V
-        let ip = plate_current_at(PentodeModel::p_el34(), -37.0, 470.0, 480.0);
+        let ip = plate_current_at(PentodeModel::by_name("EL34"), -37.0, 470.0, 480.0);
         assert!(ip > 0.0, "EL34 should conduct at operating point, got {ip}");
         assert!(ip.is_finite(), "EL34 plate current must be finite");
     }
 
     #[test]
     fn p_el34_cutoff_at_large_negative_grid() {
-        let ip_cutoff = plate_current_at(PentodeModel::p_el34(), -100.0, 470.0, 480.0);
-        let ip_operating = plate_current_at(PentodeModel::p_el34(), -37.0, 470.0, 480.0);
+        let ip_cutoff = plate_current_at(PentodeModel::by_name("EL34"), -100.0, 470.0, 480.0);
+        let ip_operating = plate_current_at(PentodeModel::by_name("EL34"), -37.0, 470.0, 480.0);
         assert!(
             ip_cutoff < ip_operating * 0.1,
             "EL34 at Vg1=-100V ({ip_cutoff}) should be <10% of operating point ({ip_operating})"
@@ -470,8 +350,8 @@ mod tests {
         // We verify this by checking that the EL34 and 6L6GC have different
         // plate current characteristics (i.e., different models produce
         // meaningfully different outputs).
-        let ip_el34 = plate_current_at(PentodeModel::p_el34(), -37.0, 460.0, 460.0);
-        let ip_6l6gc = plate_current_at(PentodeModel::p_6l6gc(), -45.0, 450.0, 460.0);
+        let ip_el34 = plate_current_at(PentodeModel::by_name("EL34"), -37.0, 460.0, 460.0);
+        let ip_6l6gc = plate_current_at(PentodeModel::by_name("6L6GC"), -45.0, 450.0, 460.0);
         // Both must be positive and finite at their respective operating points
         assert!(ip_el34 > 0.0 && ip_el34.is_finite(), "EL34 Ip={ip_el34}");
         assert!(ip_6l6gc > 0.0 && ip_6l6gc.is_finite(), "6L6GC Ip={ip_6l6gc}");
@@ -487,15 +367,15 @@ mod tests {
     #[test]
     fn p_6550_positive_current_at_operating_point() {
         // Typical 6550 operating point: Vg1=-50V, Vg2=450V, Vp=460V
-        let ip = plate_current_at(PentodeModel::p_6550(), -50.0, 450.0, 460.0);
+        let ip = plate_current_at(PentodeModel::by_name("6550"), -50.0, 450.0, 460.0);
         assert!(ip > 0.0, "6550 should conduct at operating point, got {ip}");
         assert!(ip.is_finite(), "6550 plate current must be finite");
     }
 
     #[test]
     fn p_6550_cutoff_at_large_negative_grid() {
-        let ip_cutoff = plate_current_at(PentodeModel::p_6550(), -120.0, 450.0, 460.0);
-        let ip_operating = plate_current_at(PentodeModel::p_6550(), -50.0, 450.0, 460.0);
+        let ip_cutoff = plate_current_at(PentodeModel::by_name("6550"), -120.0, 450.0, 460.0);
+        let ip_operating = plate_current_at(PentodeModel::by_name("6550"), -50.0, 450.0, 460.0);
         assert!(
             ip_cutoff < ip_operating * 0.1,
             "6550 at Vg1=-120V ({ip_cutoff}) should be <10% of operating point ({ip_operating})"
@@ -507,7 +387,7 @@ mod tests {
     #[test]
     fn p_6aq5a_positive_current_at_operating_point() {
         // Typical 6AQ5A operating point: Vg1=-12.5V, Vg2=180V, Vp=180V
-        let ip = plate_current_at(PentodeModel::p_6aq5a(), -12.5, 180.0, 180.0);
+        let ip = plate_current_at(PentodeModel::by_name("6AQ5A"), -12.5, 180.0, 180.0);
         assert!(ip > 0.0, "6AQ5A should conduct at operating point, got {ip}");
         assert!(ip.is_finite(), "6AQ5A plate current must be finite");
     }
@@ -515,8 +395,8 @@ mod tests {
     #[test]
     fn p_6aq5a_differs_from_el84() {
         // At similar operating conditions, 6AQ5A and EL84 should produce different currents
-        let ip_6aq5a = plate_current_at(PentodeModel::p_6aq5a(), -10.0, 200.0, 200.0);
-        let ip_el84 = plate_current_at(PentodeModel::p_el84(), -10.0, 200.0, 200.0);
+        let ip_6aq5a = plate_current_at(PentodeModel::by_name("6AQ5A"), -10.0, 200.0, 200.0);
+        let ip_el84 = plate_current_at(PentodeModel::by_name("EL84"), -10.0, 200.0, 200.0);
         assert!(ip_6aq5a > 0.0 && ip_6aq5a.is_finite());
         assert!(ip_el84 > 0.0 && ip_el84.is_finite());
         assert!(
@@ -530,7 +410,7 @@ mod tests {
     #[test]
     fn p_6973_positive_current_at_operating_point() {
         // Typical 6973 operating point: Vg1=-15V, Vg2=350V, Vp=350V
-        let ip = plate_current_at(PentodeModel::p_6973(), -15.0, 350.0, 350.0);
+        let ip = plate_current_at(PentodeModel::by_name("6973"), -15.0, 350.0, 350.0);
         assert!(ip > 0.0, "6973 should conduct at operating point, got {ip}");
         assert!(ip.is_finite(), "6973 plate current must be finite");
     }
@@ -538,9 +418,9 @@ mod tests {
     #[test]
     fn p_6973_differs_from_el84_and_6aq5a() {
         // All three should have distinct characteristics
-        let ip_6973 = plate_current_at(PentodeModel::p_6973(), -12.0, 250.0, 250.0);
-        let ip_el84 = plate_current_at(PentodeModel::p_el84(), -12.0, 250.0, 250.0);
-        let ip_6aq5a = plate_current_at(PentodeModel::p_6aq5a(), -12.0, 250.0, 250.0);
+        let ip_6973 = plate_current_at(PentodeModel::by_name("6973"), -12.0, 250.0, 250.0);
+        let ip_el84 = plate_current_at(PentodeModel::by_name("EL84"), -12.0, 250.0, 250.0);
+        let ip_6aq5a = plate_current_at(PentodeModel::by_name("6AQ5A"), -12.0, 250.0, 250.0);
 
         assert!(ip_6973 > 0.0 && ip_6973.is_finite());
         assert!(ip_el84 > 0.0 && ip_el84.is_finite());
@@ -567,9 +447,9 @@ mod tests {
     fn pentode_types_have_distinct_characteristics() {
         // All three power pentodes at Vg1=-40V, Vg2=450V, Vp=400V
         // should produce different plate currents (different models matter)
-        let ip_6l6gc = plate_current_at(PentodeModel::p_6l6gc(), -40.0, 450.0, 400.0);
-        let ip_el34 = plate_current_at(PentodeModel::p_el34(), -40.0, 450.0, 400.0);
-        let ip_6550 = plate_current_at(PentodeModel::p_6550(), -40.0, 450.0, 400.0);
+        let ip_6l6gc = plate_current_at(PentodeModel::by_name("6L6GC"), -40.0, 450.0, 400.0);
+        let ip_el34 = plate_current_at(PentodeModel::by_name("EL34"), -40.0, 450.0, 400.0);
+        let ip_6550 = plate_current_at(PentodeModel::by_name("6550"), -40.0, 450.0, 400.0);
 
         // All should be finite and positive at this operating point
         assert!(ip_6l6gc > 0.0 && ip_6l6gc.is_finite());
@@ -595,7 +475,7 @@ mod tests {
 
     #[test]
     fn p_6l6gc_wdf_root_converges_at_high_voltage() {
-        let model = PentodeModel::p_6l6gc();
+        let model = PentodeModel::by_name("6L6GC");
         let mut root = PentodeRoot::new_with_v_max(model, 460.0);
         root.set_vg1k(-45.0);
         root.set_vg2k(450.0);
@@ -606,7 +486,7 @@ mod tests {
 
     #[test]
     fn p_el34_wdf_root_converges_at_high_voltage() {
-        let model = PentodeModel::p_el34();
+        let model = PentodeModel::by_name("EL34");
         let mut root = PentodeRoot::new_with_v_max(model, 480.0);
         root.set_vg1k(-37.0);
         root.set_vg2k(470.0);
@@ -616,7 +496,7 @@ mod tests {
 
     #[test]
     fn p_6550_wdf_root_converges_at_high_voltage() {
-        let model = PentodeModel::p_6550();
+        let model = PentodeModel::by_name("6550");
         let mut root = PentodeRoot::new_with_v_max(model, 460.0);
         root.set_vg1k(-50.0);
         root.set_vg2k(450.0);
@@ -626,7 +506,7 @@ mod tests {
 
     #[test]
     fn pentode_set_v_max_propagates() {
-        let model = PentodeModel::p_6l6gc();
+        let model = PentodeModel::by_name("6L6GC");
         let mut root = PentodeRoot::new(model);
         assert_eq!(root.v_max(), 500.0); // default
         root.set_v_max(460.0);

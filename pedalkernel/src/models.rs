@@ -16,6 +16,8 @@ use std::sync::LazyLock;
 
 static TRANSISTOR_MODELS_SRC: &str = include_str!("../models/transistors.model");
 static JFET_MODELS_SRC: &str = include_str!("../models/jfets.model");
+static TRIODE_MODELS_SRC: &str = include_str!("../models/triodes.model");
+static PENTODE_MODELS_SRC: &str = include_str!("../models/pentodes.model");
 
 // ---------------------------------------------------------------------------
 // Parsed model registry (lazy-initialized)
@@ -29,6 +31,16 @@ pub static BJT_MODELS: LazyLock<HashMap<String, SpiceBjtModel>> = LazyLock::new(
 /// All JFET models parsed from the embedded jfets.model file.
 pub static JFET_MODELS: LazyLock<HashMap<String, SpiceJfetModel>> = LazyLock::new(|| {
     parse_jfet_models(JFET_MODELS_SRC)
+});
+
+/// All triode models parsed from the embedded triodes.model file.
+pub static TRIODE_MODELS: LazyLock<HashMap<String, SpiceTriodeModel>> = LazyLock::new(|| {
+    parse_triode_models(TRIODE_MODELS_SRC)
+});
+
+/// All pentode models parsed from the embedded pentodes.model file.
+pub static PENTODE_MODELS: LazyLock<HashMap<String, SpicePentodeModel>> = LazyLock::new(|| {
+    parse_pentode_models(PENTODE_MODELS_SRC)
 });
 
 // ---------------------------------------------------------------------------
@@ -164,6 +176,56 @@ impl SpiceJfetModel {
             pb: 1.0,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Parsed SPICE Triode model
+// ---------------------------------------------------------------------------
+
+/// A parsed triode tube model with Koren equation parameters.
+///
+/// Format: `.TRIODE <name> MU= EX= KG1= KP= KVB=`
+#[derive(Debug, Clone)]
+pub struct SpiceTriodeModel {
+    pub name: String,
+    /// Amplification factor
+    pub mu: f64,
+    /// Exponent (transfer curve shape)
+    pub ex: f64,
+    /// Plate current scaling factor (A)
+    pub kg1: f64,
+    /// Plate resistance factor
+    pub kp: f64,
+    /// Knee voltage constant (V)
+    pub kvb: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Parsed SPICE Pentode model
+// ---------------------------------------------------------------------------
+
+/// A parsed pentode tube model with screen-referenced Koren equation parameters.
+///
+/// Format: `.PENTODE <name> MU= EX= KG1= KG2= KP= KVB= KVB2= VG2=`
+#[derive(Debug, Clone)]
+pub struct SpicePentodeModel {
+    pub name: String,
+    /// Amplification factor (screen-referenced)
+    pub mu: f64,
+    /// Exponent (transfer curve shape)
+    pub ex: f64,
+    /// Plate current scaling factor (A)
+    pub kg1: f64,
+    /// Screen current scaling factor (A)
+    pub kg2: f64,
+    /// Plate resistance factor
+    pub kp: f64,
+    /// Knee voltage constant (V)
+    pub kvb: f64,
+    /// Knee voltage for pentode plate saturation (V)
+    pub kvb2: f64,
+    /// Default screen grid voltage (V) for typical operating point
+    pub vg2_default: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +466,145 @@ fn parse_jfet_model_line(line: &str) -> Option<SpiceJfetModel> {
 }
 
 // ---------------------------------------------------------------------------
+// Triode .TRIODE line parser
+// ---------------------------------------------------------------------------
+
+/// Parse all `.TRIODE` entries from a model file string.
+fn parse_triode_models(src: &str) -> HashMap<String, SpiceTriodeModel> {
+    let mut models = HashMap::new();
+
+    for line in src.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if !trimmed.to_uppercase().starts_with(".TRIODE") {
+            continue;
+        }
+
+        if let Some(model) = parse_triode_model_line(trimmed) {
+            models.insert(model.name.clone(), model);
+        }
+    }
+
+    models
+}
+
+/// Parse a single `.TRIODE <name> MU= EX= KG1= KP= KVB=` line.
+fn parse_triode_model_line(line: &str) -> Option<SpiceTriodeModel> {
+    // Strip ".TRIODE" prefix
+    let rest = line[7..].trim_start();
+    let (name, params) = rest.split_once(|c: char| c.is_whitespace())?;
+
+    let mut mu = 100.0;
+    let mut ex = 1.4;
+    let mut kg1 = 1060.0;
+    let mut kp = 600.0;
+    let mut kvb = 300.0;
+
+    for pair in params.split_whitespace() {
+        if let Some((key, val_str)) = pair.split_once('=') {
+            let key_upper = key.to_uppercase();
+            if let Some(val) = parse_spice_value(val_str) {
+                match key_upper.as_str() {
+                    "MU" => mu = val,
+                    "EX" => ex = val,
+                    "KG1" => kg1 = val,
+                    "KP" => kp = val,
+                    "KVB" => kvb = val,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Some(SpiceTriodeModel {
+        name: name.to_uppercase(),
+        mu,
+        ex,
+        kg1,
+        kp,
+        kvb,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Pentode .PENTODE line parser
+// ---------------------------------------------------------------------------
+
+/// Parse all `.PENTODE` entries from a model file string.
+fn parse_pentode_models(src: &str) -> HashMap<String, SpicePentodeModel> {
+    let mut models = HashMap::new();
+
+    for line in src.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if !trimmed.to_uppercase().starts_with(".PENTODE") {
+            continue;
+        }
+
+        if let Some(model) = parse_pentode_model_line(trimmed) {
+            models.insert(model.name.clone(), model);
+        }
+    }
+
+    models
+}
+
+/// Parse a single `.PENTODE <name> MU= EX= KG1= KG2= KP= KVB= KVB2= VG2=` line.
+fn parse_pentode_model_line(line: &str) -> Option<SpicePentodeModel> {
+    // Strip ".PENTODE" prefix
+    let rest = line[8..].trim_start();
+    let (name, params) = rest.split_once(|c: char| c.is_whitespace())?;
+
+    let mut mu = 10.0;
+    let mut ex = 1.35;
+    let mut kg1 = 1000.0;
+    let mut kg2 = 4200.0;
+    let mut kp = 60.0;
+    let mut kvb = 24.0;
+    let mut kvb2 = 20.0;
+    let mut vg2_default = 250.0;
+
+    for pair in params.split_whitespace() {
+        if let Some((key, val_str)) = pair.split_once('=') {
+            let key_upper = key.to_uppercase();
+            if let Some(val) = parse_spice_value(val_str) {
+                match key_upper.as_str() {
+                    "MU" => mu = val,
+                    "EX" => ex = val,
+                    "KG1" => kg1 = val,
+                    "KG2" => kg2 = val,
+                    "KP" => kp = val,
+                    "KVB" => kvb = val,
+                    "KVB2" => kvb2 = val,
+                    "VG2" => vg2_default = val,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Some(SpicePentodeModel {
+        name: name.to_uppercase(),
+        mu,
+        ex,
+        kg1,
+        kg2,
+        kp,
+        kvb,
+        kvb2,
+        vg2_default,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Public lookup API
 // ---------------------------------------------------------------------------
 
@@ -442,6 +643,26 @@ pub fn jfet_by_name(name: &str) -> Option<&'static SpiceJfetModel> {
 /// List all available JFET model names.
 pub fn jfet_model_names() -> Vec<&'static str> {
     JFET_MODELS.keys().map(|s| s.as_str()).collect()
+}
+
+/// Look up a triode model by name (case-insensitive).
+pub fn triode_by_name(name: &str) -> Option<&'static SpiceTriodeModel> {
+    TRIODE_MODELS.get(&name.to_uppercase())
+}
+
+/// List all available triode model names.
+pub fn triode_model_names() -> Vec<&'static str> {
+    TRIODE_MODELS.keys().map(|s| s.as_str()).collect()
+}
+
+/// Look up a pentode model by name (case-insensitive).
+pub fn pentode_by_name(name: &str) -> Option<&'static SpicePentodeModel> {
+    PENTODE_MODELS.get(&name.to_uppercase())
+}
+
+/// List all available pentode model names.
+pub fn pentode_model_names() -> Vec<&'static str> {
+    PENTODE_MODELS.keys().map(|s| s.as_str()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -626,5 +847,141 @@ mod tests {
     #[test]
     fn jfet_rejects_bjt() {
         assert!(parse_jfet_model_line(".MODEL 2N3904 NPN(IS=6.734f BF=416.4)").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Triode tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_triode_line() {
+        let line = ".TRIODE 12AX7 MU=100 EX=1.4 KG1=1060 KP=600 KVB=300";
+        let model = parse_triode_model_line(line).unwrap();
+        assert_eq!(model.name, "12AX7");
+        assert!((model.mu - 100.0).abs() < 1e-10);
+        assert!((model.ex - 1.4).abs() < 1e-10);
+        assert!((model.kg1 - 1060.0).abs() < 1e-10);
+        assert!((model.kp - 600.0).abs() < 1e-10);
+        assert!((model.kvb - 300.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn triode_embedded_models_load() {
+        let names = [
+            "12AX7", "12AT7", "12AU7", "12AY7", "12BH7", "6386",
+            "6DJ8", "2A3", "300B", "6C33C", "6AN8T",
+            "ECC83", "ECC81", "ECC82", "6072",
+        ];
+        for name in &names {
+            assert!(
+                triode_by_name(name).is_some(),
+                "Triode model '{}' not found in embedded triodes.model",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn triode_case_insensitive_lookup() {
+        assert!(triode_by_name("12ax7").is_some());
+        assert!(triode_by_name("12AX7").is_some());
+        assert!(triode_by_name("ecc83").is_some());
+    }
+
+    #[test]
+    fn triode_koren_values_correct() {
+        // Verify Koren parameters match the Tube.lib reference
+        let ax7 = triode_by_name("12AX7").unwrap();
+        assert!((ax7.mu - 100.0).abs() < 1e-10);
+        assert!((ax7.ex - 1.4).abs() < 1e-10);
+        assert!((ax7.kg1 - 1060.0).abs() < 1e-10);
+
+        let at7 = triode_by_name("12AT7").unwrap();
+        assert!((at7.mu - 60.0).abs() < 1e-10);
+        assert!((at7.ex - 1.35).abs() < 1e-10);
+
+        let au7 = triode_by_name("12AU7").unwrap();
+        assert!((au7.mu - 21.5).abs() < 1e-10);
+        assert!((au7.ex - 1.3).abs() < 1e-10);
+    }
+
+    #[test]
+    fn triode_aliases_match() {
+        let ax7 = triode_by_name("12AX7").unwrap();
+        let ecc83 = triode_by_name("ECC83").unwrap();
+        assert!((ax7.mu - ecc83.mu).abs() < 1e-10);
+        assert!((ax7.kp - ecc83.kp).abs() < 1e-10);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pentode tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_pentode_line() {
+        let line = ".PENTODE 6550 MU=7.9 EX=1.35 KG1=890 KG2=4200 KP=60 KVB=24 KVB2=28 VG2=450";
+        let model = parse_pentode_model_line(line).unwrap();
+        assert_eq!(model.name, "6550");
+        assert!((model.mu - 7.9).abs() < 1e-10);
+        assert!((model.ex - 1.35).abs() < 1e-10);
+        assert!((model.kg1 - 890.0).abs() < 1e-10);
+        assert!((model.kg2 - 4200.0).abs() < 1e-10);
+        assert!((model.kp - 60.0).abs() < 1e-10);
+        assert!((model.kvb - 24.0).abs() < 1e-10);
+        assert!((model.kvb2 - 28.0).abs() < 1e-10);
+        assert!((model.vg2_default - 450.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pentode_embedded_models_load() {
+        let names = [
+            "6550", "EL34", "6L6GC", "KT88", "6AN8P",
+            "EF86", "EL84", "6AQ5A", "6973",
+            "6CA7", "KT77", "5881", "KT66", "KT90", "6L6",
+            "6BQ5", "6267", "6AQ5",
+        ];
+        for name in &names {
+            assert!(
+                pentode_by_name(name).is_some(),
+                "Pentode model '{}' not found in embedded pentodes.model",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn pentode_case_insensitive_lookup() {
+        assert!(pentode_by_name("el34").is_some());
+        assert!(pentode_by_name("EL34").is_some());
+        assert!(pentode_by_name("kt88").is_some());
+    }
+
+    #[test]
+    fn pentode_koren_values_correct() {
+        // Verify Koren parameters match the Tube.lib reference
+        let p6550 = pentode_by_name("6550").unwrap();
+        assert!((p6550.mu - 7.9).abs() < 1e-10);
+        assert!((p6550.kp - 60.0).abs() < 1e-10);
+        assert!((p6550.kvb - 24.0).abs() < 1e-10);
+
+        let kt88 = pentode_by_name("KT88").unwrap();
+        assert!((kt88.mu - 8.8).abs() < 1e-10);
+        assert!((kt88.kp - 32.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pentode_kt88_is_distinct_from_6550() {
+        let p6550 = pentode_by_name("6550").unwrap();
+        let kt88 = pentode_by_name("KT88").unwrap();
+        // KT88 is a distinct tube — different KG1, KP, KVB values
+        assert!((p6550.kp - kt88.kp).abs() > 1.0);
+    }
+
+    #[test]
+    fn pentode_aliases_match() {
+        let el34 = pentode_by_name("EL34").unwrap();
+        let p6ca7 = pentode_by_name("6CA7").unwrap();
+        assert!((el34.mu - p6ca7.mu).abs() < 1e-10);
+        assert!((el34.kp - p6ca7.kp).abs() < 1e-10);
     }
 }

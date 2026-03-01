@@ -1,9 +1,11 @@
 //! Triode vacuum tube WDF root elements.
 //!
 //! Models preamp tubes (12AX7, 12AT7, 12AU7) using the Koren equation.
+//! Parameters are loaded from the embedded `triodes.model` file.
 
 use super::solver::{softplus, newton_raphson_solve, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
+use crate::models::{SpiceTriodeModel, triode_by_name};
 
 // ---------------------------------------------------------------------------
 // Triode (Vacuum Tube) Models
@@ -24,121 +26,36 @@ pub struct TriodeModel {
     pub kp: f64,
     /// Knee voltage constant. Affects saturation behavior.
     pub kvb: f64,
-    /// Exponent (typically 1.4-1.5). Affects transfer curve shape.
+    /// Exponent (typically 1.3-1.5). Affects transfer curve shape.
     pub ex: f64,
+    /// Plate current scaling factor. Stored for reference but not yet used
+    /// in the plate_current() equation (future KG1 incorporation).
+    pub kg1: f64,
 }
 
 impl TriodeModel {
-    /// 12AX7 / ECC83 - High gain preamp tube.
-    ///
-    /// The most common guitar amp tube. High mu (100) gives strong gain,
-    /// making it ideal for preamp stages. Produces warm, musical distortion.
-    pub fn t_12ax7() -> Self {
+    /// Look up a triode model by name from the model registry.
+    /// Panics if the name is not found.
+    pub fn by_name(name: &str) -> Self {
+        Self::try_by_name(name).unwrap_or_else(|| {
+            panic!("Unknown triode model: '{}'. Use triode_model_names() to list available models.", name)
+        })
+    }
+
+    /// Look up a triode model by name, returning None if not found.
+    pub fn try_by_name(name: &str) -> Option<Self> {
+        triode_by_name(name).map(Self::from)
+    }
+}
+
+impl From<&SpiceTriodeModel> for TriodeModel {
+    fn from(spice: &SpiceTriodeModel) -> Self {
         Self {
-            mu: 100.0,
-            kp: 600.0,
-            kvb: 300.0,
-            ex: 1.4,
-        }
-    }
-
-    /// 12AT7 / ECC81 - Medium gain preamp tube.
-    ///
-    /// Lower gain than 12AX7 but higher transconductance. Often used in
-    /// reverb drivers, phase inverters, and where cleaner gain is needed.
-    pub fn t_12at7() -> Self {
-        Self {
-            mu: 60.0,
-            kp: 300.0,
-            kvb: 300.0,
-            ex: 1.5,
-        }
-    }
-
-    /// 12AU7 / ECC82 - Low gain preamp tube.
-    ///
-    /// Much lower mu (20) gives clean, linear amplification. Used in
-    /// phase inverters, cathode followers, and hi-fi applications.
-    pub fn t_12au7() -> Self {
-        Self {
-            mu: 20.0,
-            kp: 84.0,
-            kvb: 300.0,
-            ex: 1.5,
-        }
-    }
-
-    /// ECC83 - European designation for 12AX7.
-    pub fn t_ecc83() -> Self {
-        Self::t_12ax7()
-    }
-
-    /// ECC81 - European designation for 12AT7.
-    pub fn t_ecc81() -> Self {
-        Self::t_12at7()
-    }
-
-    /// ECC82 - European designation for 12AU7.
-    pub fn t_ecc82() -> Self {
-        Self::t_12au7()
-    }
-
-    /// 12AY7 / 6072 - Low-medium gain preamp tube.
-    ///
-    /// The original Fender tweed tube. Lower mu (44) than 12AX7 gives a
-    /// cleaner, more dynamic response — the amp cleans up beautifully with
-    /// guitar volume. Used in the Fender 5E3 Tweed Deluxe V1 position.
-    /// Produces warm, touch-sensitive breakup that's highly responsive to
-    /// picking dynamics.
-    pub fn t_12ay7() -> Self {
-        Self {
-            mu: 44.0,
-            kp: 420.0,
-            kvb: 300.0,
-            ex: 1.4,
-        }
-    }
-
-    /// 6072 - Military/industrial designation for 12AY7.
-    pub fn t_6072() -> Self {
-        Self::t_12ay7()
-    }
-
-    /// 12BH7A - Medium-mu dual triode with high current capability.
-    /// Used in cathode follower stages requiring higher current than 12AU7.
-    /// Popular in LA-2A totem-pole output stage, hi-fi amplifiers.
-    /// Mu ≈ 17 (similar to 12AU7), max Ip = 15mA per section.
-    pub fn t_12bh7() -> Self {
-        Self {
-            mu: 17.0,       // Same as 12AU7
-            kp: 60.0,       // Lower Kp for higher current handling
-            kvb: 400.0,     // Similar to 12AU7
-            ex: 1.3,
-        }
-    }
-
-    /// 6386 - Remote-cutoff (variable-mu) dual triode.
-    ///
-    /// THE tube that makes the Fairchild 670 compressor possible.
-    /// Unlike regular triodes, mu varies with grid bias:
-    ///   - At low negative bias (~0V): mu ≈ 50
-    ///   - At high negative bias (-5V): mu ≈ 5
-    ///
-    /// This variable-mu characteristic provides smooth, musical gain reduction.
-    /// The compression ratio is set by how much the side-chain drives the grid.
-    ///
-    /// Note: For full variable-mu modeling, use RemoteCutoffTriodeRoot which
-    /// dynamically calculates mu from Vgk. This basic model uses nominal mu=40
-    /// which represents mid-range operation.
-    ///
-    /// Developed by General Electric for audio AGC applications. The Fairchild
-    /// 670 uses two matched sections per channel in push-pull configuration.
-    pub fn t_6386() -> Self {
-        Self {
-            mu: 40.0,       // Nominal mu (varies 5-50 with bias in real tube)
-            kp: 180.0,      // Medium Kp for variable-mu characteristic
-            kvb: 300.0,     // Standard knee voltage
-            ex: 1.4,        // Standard exponent
+            mu: spice.mu,
+            kp: spice.kp,
+            kvb: spice.kvb,
+            ex: spice.ex,
+            kg1: spice.kg1,
         }
     }
 }

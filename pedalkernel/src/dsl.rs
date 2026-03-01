@@ -259,10 +259,10 @@ pub enum ComponentKind {
     Photocoupler(PhotocouplerType),
     /// LFO: waveform, timing_r (Ω), timing_c (F) -> f = 1/(2πRC)
     Lfo(LfoWaveformDsl, f64, f64),
-    /// Triode vacuum tube
-    Triode(TriodeType),
-    /// Pentode vacuum tube
-    Pentode(PentodeType),
+    /// Triode vacuum tube — model name looked up from triodes.model (e.g. "12AX7")
+    Triode(String),
+    /// Pentode vacuum tube — model name looked up from pentodes.model (e.g. "EL34")
+    Pentode(String),
     /// Envelope follower: attack_r (Ω), attack_c (F), release_r (Ω), release_c (F), sensitivity_r (Ω)
     /// Attack τ = attack_r × attack_c, Release τ = release_r × release_c
     /// Sensitivity = sensitivity_r / 10kΩ
@@ -517,58 +517,9 @@ pub enum LfoWaveformDsl {
     SampleAndHold,
 }
 
-/// Triode vacuum tube types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TriodeType {
-    /// 12AX7 / ECC83 - High gain preamp tube
-    T12ax7,
-    /// 12AT7 / ECC81 - Medium gain
-    T12at7,
-    /// 12AU7 / ECC82 - Low gain
-    T12au7,
-    /// 12AY7 / 6072 - Low-medium gain, original Fender tweed tube
-    T12ay7,
-    /// 12BH7A - Medium-mu dual triode, high current capability
-    /// Used in cathode follower stages like LA-2A totem-pole output
-    T12bh7,
-    /// 6386 - Remote-cutoff (variable-mu) dual triode
-    /// THE tube that makes the Fairchild 670 possible.
-    /// Unlike regular triodes, mu varies with grid bias (~50 at low bias
-    /// to ~5 at high negative bias). This is the gain reduction mechanism.
-    /// The smooth, musical compression character comes from this gradual
-    /// gain change rather than hard limiting.
-    T6386,
-}
-
-/// Pentode vacuum tube types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PentodeType {
-    /// EF86 / 6267 - Small-signal pentode, Vox AC15/AC30 preamp
-    Ef86,
-    /// EL84 / 6BQ5 - Power pentode, Vox AC15/AC30 output stage
-    El84,
-    /// 6AQ5A - Beam power tube, used in Pultec MEQ-5 output stage
-    A6aq5a,
-    /// 6973 - Beam power tube, 9W output
-    /// Used in Fairchild 670 sidechain push-pull output stage.
-    /// Similar to EL84 but different pin-out and slightly higher power.
-    A6973,
-    /// 6L6GC - Beam power tetrode, the American power tube standard.
-    /// Used in Fender Twin Reverb, Dumble ODS, and virtually every Fender >40W.
-    /// Higher plate dissipation (30W), gradual compression when overdriven.
-    /// Aliases: 6L6, 5881 (military), KT66 (British equivalent).
-    A6l6gc,
-    /// EL34 / 6CA7 - True pentode, the European power tube standard.
-    /// Used in Marshall JCM800 and most Marshall amps.
-    /// Dominant midrange, earlier breakup, sharper clipping knee than 6L6GC.
-    /// Aliases: 6CA7 (American designation), KT77 (drop-in alternative).
-    El34,
-    /// 6550 - High-power beam tetrode.
-    /// Used in Ampeg SVT, some Mesa Boogies, some Dumble builds.
-    /// More headroom than 6L6GC, tighter bass.
-    /// Aliases: KT88 (British), KT90 (higher dissipation variant).
-    A6550,
-}
+// Triode and Pentode types use String model names, looked up from the
+// embedded model files (triodes.model, pentodes.model) at compile time.
+// See `ComponentKind::Triode(String)` and `ComponentKind::Pentode(String)`.
 
 /// MOSFET types for enhancement-mode devices used in guitar pedals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1237,65 +1188,24 @@ fn parse_photocoupler(input: &str) -> IResult<&str, ComponentKind> {
     Ok((input, ComponentKind::Photocoupler(pt)))
 }
 
-fn triode_type(input: &str) -> IResult<&str, TriodeType> {
-    alt((
-        value(TriodeType::T12ax7, tag("12ax7")),
-        value(TriodeType::T12at7, tag("12at7")),
-        value(TriodeType::T12ay7, tag("12ay7")),
-        value(TriodeType::T12au7, tag("12au7")),
-        value(TriodeType::T12bh7, tag("12bh7")),
-        // Remote-cutoff (variable-mu) triode for Fairchild 670
-        value(TriodeType::T6386, tag("6386")),
-        // European/military designations
-        value(TriodeType::T12ax7, tag("ecc83")),
-        value(TriodeType::T12at7, tag("ecc81")),
-        value(TriodeType::T12au7, tag("ecc82")),
-        value(TriodeType::T12ay7, tag("6072")),
-    ))(input)
-}
-
 fn parse_triode(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("triode")(input)?;
     let (input, _) = char('(')(input)?;
-    let (input, tt) = triode_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, name) = model_name_str(input)?;
+    let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Triode(tt)))
-}
-
-fn pentode_type(input: &str) -> IResult<&str, PentodeType> {
-    alt((
-        alt((
-            value(PentodeType::Ef86, tag("ef86")),
-            value(PentodeType::El84, tag("el84")),
-            value(PentodeType::El34, tag("el34")),
-            value(PentodeType::A6aq5a, tag("6aq5a")),
-            value(PentodeType::A6aq5a, tag("6aq5")),
-            value(PentodeType::A6973, tag("6973")),
-            // 6L6GC and aliases — order matters: longer tags first
-            value(PentodeType::A6l6gc, tag("6l6gc")),
-            value(PentodeType::A6l6gc, tag("6l6")),
-            value(PentodeType::A6l6gc, tag("5881")),
-        )),
-        alt((
-            value(PentodeType::A6550, tag("6550")),
-            // Alternative / equivalent designations
-            value(PentodeType::Ef86, tag("6267")),
-            value(PentodeType::El84, tag("6bq5")),
-            value(PentodeType::El34, tag("6ca7")),
-            value(PentodeType::El34, tag("kt77")),
-            value(PentodeType::A6l6gc, tag("kt66")),
-            value(PentodeType::A6550, tag("kt88")),
-            value(PentodeType::A6550, tag("kt90")),
-        )),
-    ))(input)
+    Ok((input, ComponentKind::Triode(name)))
 }
 
 fn parse_pentode(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("pentode")(input)?;
     let (input, _) = char('(')(input)?;
-    let (input, pt) = pentode_type(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, name) = model_name_str(input)?;
+    let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Pentode(pt)))
+    Ok((input, ComponentKind::Pentode(name)))
 }
 
 fn mosfet_type(input: &str) -> IResult<&str, MosfetType> {
@@ -3120,40 +3030,40 @@ pedal "Optical Tremolo" {
     fn parse_triode_12ax7() {
         let (_, c) = component_def("V1: triode(12ax7)").unwrap();
         assert_eq!(c.id, "V1");
-        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12ax7));
+        assert_eq!(c.kind, ComponentKind::Triode("12AX7".into()));
     }
 
     #[test]
     fn parse_triode_12at7() {
         let (_, c) = component_def("V2: triode(12at7)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12at7));
+        assert_eq!(c.kind, ComponentKind::Triode("12AT7".into()));
     }
 
     #[test]
     fn parse_triode_12au7() {
         let (_, c) = component_def("V3: triode(12au7)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12au7));
+        assert_eq!(c.kind, ComponentKind::Triode("12AU7".into()));
     }
 
     #[test]
     fn parse_triode_ecc83() {
-        // ECC83 = European 12AX7
+        // ECC83 = European 12AX7 — stored as "ECC83", resolved at model lookup
         let (_, c) = component_def("V4: triode(ecc83)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12ax7));
+        assert_eq!(c.kind, ComponentKind::Triode("ECC83".into()));
     }
 
     #[test]
     fn parse_triode_12ay7() {
         let (_, c) = component_def("V1: triode(12ay7)").unwrap();
         assert_eq!(c.id, "V1");
-        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12ay7));
+        assert_eq!(c.kind, ComponentKind::Triode("12AY7".into()));
     }
 
     #[test]
     fn parse_triode_6072() {
-        // 6072 = military designation for 12AY7
+        // 6072 = military designation for 12AY7 — stored as "6072", resolved at model lookup
         let (_, c) = component_def("V1: triode(6072)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Triode(TriodeType::T12ay7));
+        assert_eq!(c.kind, ComponentKind::Triode("6072".into()));
     }
 
     #[test]
@@ -3557,27 +3467,27 @@ pedal "Fender Vibrato" {
     fn parse_pentode_ef86() {
         let (_, c) = component_def("V1: pentode(ef86)").unwrap();
         assert_eq!(c.id, "V1");
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::Ef86));
+        assert_eq!(c.kind, ComponentKind::Pentode("EF86".into()));
     }
 
     #[test]
     fn parse_pentode_el84() {
         let (_, c) = component_def("V1: pentode(el84)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::El84));
+        assert_eq!(c.kind, ComponentKind::Pentode("EL84".into()));
     }
 
     #[test]
     fn parse_pentode_6267() {
-        // 6267 = US designation for EF86
+        // 6267 = US designation for EF86 — stored as "6267", resolved at model lookup
         let (_, c) = component_def("V1: pentode(6267)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::Ef86));
+        assert_eq!(c.kind, ComponentKind::Pentode("6267".into()));
     }
 
     #[test]
     fn parse_pentode_6bq5() {
-        // 6BQ5 = US designation for EL84
+        // 6BQ5 = US designation for EL84 — stored as "6BQ5", resolved at model lookup
         let (_, c) = component_def("V1: pentode(6bq5)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::El84));
+        assert_eq!(c.kind, ComponentKind::Pentode("6BQ5".into()));
     }
 
     #[test]
@@ -3610,74 +3520,74 @@ pedal "Vox Preamp" {
         assert!(def
             .components
             .iter()
-            .any(|c| matches!(c.kind, ComponentKind::Pentode(PentodeType::Ef86))));
+            .any(|c| matches!(&c.kind, ComponentKind::Pentode(name) if name == "EF86")));
     }
 
     #[test]
     fn parse_pentode_6l6gc() {
         let (_, c) = component_def("V1: pentode(6l6gc)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6l6gc));
+        assert_eq!(c.kind, ComponentKind::Pentode("6L6GC".into()));
     }
 
     #[test]
     fn parse_pentode_6l6_alias() {
-        // 6L6 = original lower-dissipation variant, treated as 6L6GC
+        // 6L6 = original lower-dissipation variant — stored as "6L6", resolved at model lookup
         let (_, c) = component_def("V1: pentode(6l6)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6l6gc));
+        assert_eq!(c.kind, ComponentKind::Pentode("6L6".into()));
     }
 
     #[test]
     fn parse_pentode_5881_alias() {
-        // 5881 = military equivalent of 6L6GC
+        // 5881 = military equivalent of 6L6GC — stored as "5881", resolved at model lookup
         let (_, c) = component_def("V1: pentode(5881)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6l6gc));
+        assert_eq!(c.kind, ComponentKind::Pentode("5881".into()));
     }
 
     #[test]
     fn parse_pentode_kt66_alias() {
-        // KT66 = British equivalent of 6L6GC
+        // KT66 = British equivalent of 6L6GC — stored as "KT66", resolved at model lookup
         let (_, c) = component_def("V1: pentode(kt66)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6l6gc));
+        assert_eq!(c.kind, ComponentKind::Pentode("KT66".into()));
     }
 
     #[test]
     fn parse_pentode_el34() {
         let (_, c) = component_def("V1: pentode(el34)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::El34));
+        assert_eq!(c.kind, ComponentKind::Pentode("EL34".into()));
     }
 
     #[test]
     fn parse_pentode_6ca7_alias() {
-        // 6CA7 = American designation for EL34
+        // 6CA7 = American designation for EL34 — stored as "6CA7", resolved at model lookup
         let (_, c) = component_def("V1: pentode(6ca7)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::El34));
+        assert_eq!(c.kind, ComponentKind::Pentode("6CA7".into()));
     }
 
     #[test]
     fn parse_pentode_kt77_alias() {
-        // KT77 = drop-in alternative for EL34
+        // KT77 = drop-in alternative for EL34 — stored as "KT77", resolved at model lookup
         let (_, c) = component_def("V1: pentode(kt77)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::El34));
+        assert_eq!(c.kind, ComponentKind::Pentode("KT77".into()));
     }
 
     #[test]
     fn parse_pentode_6550() {
         let (_, c) = component_def("V1: pentode(6550)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6550));
+        assert_eq!(c.kind, ComponentKind::Pentode("6550".into()));
     }
 
     #[test]
     fn parse_pentode_kt88_alias() {
-        // KT88 = British equivalent of 6550
+        // KT88 = distinct tube — stored as "KT88", resolved at model lookup
         let (_, c) = component_def("V1: pentode(kt88)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6550));
+        assert_eq!(c.kind, ComponentKind::Pentode("KT88".into()));
     }
 
     #[test]
     fn parse_pentode_kt90_alias() {
-        // KT90 = higher dissipation variant of 6550
+        // KT90 = higher dissipation variant of 6550 — stored as "KT90", resolved at model lookup
         let (_, c) = component_def("V1: pentode(kt90)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode(PentodeType::A6550));
+        assert_eq!(c.kind, ComponentKind::Pentode("KT90".into()));
     }
 
     // ── Synth component parser tests ──────────────────────────────────

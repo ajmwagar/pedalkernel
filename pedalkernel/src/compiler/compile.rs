@@ -1109,7 +1109,7 @@ pub fn compile_pedal_with_options(
             let tree = sp_to_dyn_with_vs(&sp_tree, &half_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
             // Compute compensation from triode mu.
-            let model = triode_model(info.triode_type);
+            let model = triode_model(&info.model_name);
             let mu_compensation = model.mu / 100.0;
 
             Some((tree, mu_compensation))
@@ -1119,8 +1119,8 @@ pub fn compile_pedal_with_options(
         let pull_half = build_half_tree(pull_info);
 
         if let (Some((push_tree, push_comp)), Some((pull_tree, _pull_comp))) = (push_half, pull_half) {
-            let push_model = triode_model(push_info.triode_type);
-            let pull_model = triode_model(pull_info.triode_type);
+            let push_model = triode_model(&push_info.model_name);
+            let pull_model = triode_model(&pull_info.model_name);
 
             let push_root = TriodeRoot::new(push_model)
                 .with_parallel_count(push_info.parallel_count);
@@ -1325,7 +1325,7 @@ pub fn compile_pedal_with_options(
 
         let tree = sp_to_dyn_with_vs(&sp_tree, &triode_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
-        let model = triode_model(triode_info.triode_type);
+        let model = triode_model(&triode_info.model_name);
         let root = RootKind::Triode(
             TriodeRoot::new(model).with_parallel_count(triode_info.parallel_count)
         );
@@ -1457,7 +1457,7 @@ pub fn compile_pedal_with_options(
 
         let tree = sp_to_dyn_with_vs(&sp_tree, &pentode_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
-        let model = pentode_model(pentode_info.pentode_type);
+        let model = pentode_model(&pentode_info.model_name);
         let root = RootKind::Pentode(PentodeRoot::new(model));
 
         // Scale compensation based on pentode mu. Pentodes have higher mu than triodes
@@ -2123,16 +2123,11 @@ pub fn compile_pedal_with_options(
                 | ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => {
                     has_fet = true;
                 }
-                ComponentKind::Triode(tt) => {
+                ComponentKind::Triode(name) => {
                     has_tube = true;
-                    tube_mu = match tt {
-                        TriodeType::T12ax7 => 100.0,
-                        TriodeType::T12at7 => 60.0,
-                        TriodeType::T12ay7 => 40.0,
-                        TriodeType::T12au7 => 17.0,
-                        TriodeType::T12bh7 => 17.0, // Similar mu to 12AU7, higher current
-                        TriodeType::T6386 => 40.0,  // Variable-mu: 5-50, nominal 40
-                    };
+                    tube_mu = TriodeModel::try_by_name(name)
+                        .map(|m| m.mu)
+                        .unwrap_or(100.0);
                 }
                 ComponentKind::Pentode(_) => {
                     has_tube = true;

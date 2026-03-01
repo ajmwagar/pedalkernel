@@ -622,7 +622,7 @@ mod tests {
     // Triode tests
     #[test]
     fn triode_cutoff_at_negative_grid() {
-        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        let mut triode = TriodeRoot::new(TriodeModel::by_name("12AX7"));
         // Very negative grid voltage should cut off the tube
         triode.set_vgk(-50.0);
         let ip = triode.plate_current(200.0);
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn triode_active_region() {
-        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        let mut triode = TriodeRoot::new(TriodeModel::by_name("12AX7"));
         // Typical operating point: Vgk around -1 to -2V
         triode.set_vgk(-1.5);
         let ip = triode.plate_current(200.0);
@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn triode_plate_current_increases_with_vpk() {
-        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        let mut triode = TriodeRoot::new(TriodeModel::by_name("12AX7"));
         triode.set_vgk(-1.0);
         let ip_100 = triode.plate_current(100.0);
         let ip_200 = triode.plate_current(200.0);
@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn triode_vgk_modulates_current() {
-        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        let mut triode = TriodeRoot::new(TriodeModel::by_name("12AX7"));
         // More negative Vgk = less plate current
         triode.set_vgk(0.0);
         let ip_0 = triode.plate_current(200.0);
@@ -673,7 +673,7 @@ mod tests {
 
     #[test]
     fn triode_newton_converges() {
-        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        let mut triode = TriodeRoot::new(TriodeModel::by_name("12AX7"));
         triode.set_vgk(-1.5);
 
         // Test convergence for various input levels
@@ -685,20 +685,20 @@ mod tests {
 
     #[test]
     fn triode_12ax7_high_gain() {
-        let model = TriodeModel::t_12ax7();
+        let model = TriodeModel::by_name("12AX7");
         assert_eq!(model.mu, 100.0, "12AX7 should have mu=100");
     }
 
     #[test]
     fn triode_12au7_low_gain() {
-        let model = TriodeModel::t_12au7();
-        assert_eq!(model.mu, 20.0, "12AU7 should have mu=20");
+        let model = TriodeModel::by_name("12AU7");
+        assert!((model.mu - 21.5).abs() < 0.01, "12AU7 should have mu=21.5 (Koren)");
     }
 
     #[test]
     fn triode_different_tubes_different_current() {
-        let mut ax7 = TriodeRoot::new(TriodeModel::t_12ax7());
-        let mut au7 = TriodeRoot::new(TriodeModel::t_12au7());
+        let mut ax7 = TriodeRoot::new(TriodeModel::by_name("12AX7"));
+        let mut au7 = TriodeRoot::new(TriodeModel::by_name("12AU7"));
         ax7.set_vgk(-1.0);
         au7.set_vgk(-1.0);
 
@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn triode_wdf_constraint_satisfied() {
-        let mut triode = TriodeRoot::new(TriodeModel::t_12ax7());
+        let mut triode = TriodeRoot::new(TriodeModel::by_name("12AX7"));
         triode.set_vgk(-1.5);
 
         let a = 100.0;

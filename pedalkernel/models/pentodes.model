@@ -1,0 +1,32 @@
+* Pentode vacuum tube models — screen-referenced Koren equation parameters.
+*
+* Format: .PENTODE <name> MU= EX= KG1= KG2= KP= KVB= KVB2= VG2=
+*
+* Parameters from Norman Koren's "Improved Vacuum-Tube Models for SPICE
+* Simulations," Glass Audio, Vol. 8, No. 5, 1996.
+* KVB2 and VG2 (default screen voltage) are not in Koren's original model;
+* they are estimated from datasheets for the pentode plate saturation term.
+
+* ── Power pentodes (from Koren Tube.lib) ───────────────────────────────
+.PENTODE 6550   MU=7.9  EX=1.35 KG1=890  KG2=4200 KP=60  KVB=24  KVB2=28 VG2=450
+.PENTODE EL34   MU=11   EX=1.35 KG1=650  KG2=4200 KP=60  KVB=24  KVB2=18 VG2=470
+.PENTODE 6L6GC  MU=8.7  EX=1.35 KG1=1460 KG2=4500 KP=48  KVB=12  KVB2=25 VG2=450
+.PENTODE KT88   MU=8.8  EX=1.35 KG1=730  KG2=4800 KP=32  KVB=16  KVB2=24 VG2=450
+.PENTODE 6AN8P  MU=45   EX=1.35 KG1=520  KG2=120  KP=120 KVB=18  KVB2=10 VG2=150
+
+* ── Custom models (not in Koren, estimated from datasheets) ────────────
+.PENTODE EF86   MU=38   EX=1.35 KG1=1460 KG2=4500 KP=1460 KVB=300 KVB2=12 VG2=140
+.PENTODE EL84   MU=19   EX=1.35 KG1=650  KG2=4200 KP=600  KVB=300 KVB2=20 VG2=250
+.PENTODE 6AQ5A  MU=11   EX=1.3  KG1=900  KG2=4000 KP=450  KVB=180 KVB2=15 VG2=180
+.PENTODE 6973   MU=14   EX=1.35 KG1=800  KG2=4000 KP=520  KVB=220 KVB2=18 VG2=350
+
+* ── Aliases (same parameters as base model) ────────────────────────────
+.PENTODE 6CA7   MU=11   EX=1.35 KG1=650  KG2=4200 KP=60  KVB=24  KVB2=18 VG2=470
+.PENTODE KT77   MU=11   EX=1.35 KG1=650  KG2=4200 KP=60  KVB=24  KVB2=18 VG2=470
+.PENTODE 5881   MU=8.7  EX=1.35 KG1=1460 KG2=4500 KP=48  KVB=12  KVB2=25 VG2=450
+.PENTODE KT66   MU=8.7  EX=1.35 KG1=1460 KG2=4500 KP=48  KVB=12  KVB2=25 VG2=450
+.PENTODE KT90   MU=7.9  EX=1.35 KG1=890  KG2=4200 KP=60  KVB=24  KVB2=28 VG2=450
+.PENTODE 6L6    MU=8.7  EX=1.35 KG1=1460 KG2=4500 KP=48  KVB=12  KVB2=25 VG2=450
+.PENTODE 6BQ5   MU=19   EX=1.35 KG1=650  KG2=4200 KP=600  KVB=300 KVB2=20 VG2=250
+.PENTODE 6267   MU=38   EX=1.35 KG1=1460 KG2=4500 KP=1460 KVB=300 KVB2=12 VG2=140
+.PENTODE 6AQ5   MU=11   EX=1.3  KG1=900  KG2=4000 KP=450  KVB=180 KVB2=15 VG2=180

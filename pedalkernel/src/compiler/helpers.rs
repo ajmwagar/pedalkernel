@@ -73,27 +73,12 @@ pub(super) fn jfet_model(name: &str, is_n_channel: bool) -> JfetModel {
     }
 }
 
-pub(super) fn triode_model(tt: TriodeType) -> TriodeModel {
-    match tt {
-        TriodeType::T12ax7 => TriodeModel::t_12ax7(),
-        TriodeType::T12at7 => TriodeModel::t_12at7(),
-        TriodeType::T12au7 => TriodeModel::t_12au7(),
-        TriodeType::T12ay7 => TriodeModel::t_12ay7(),
-        TriodeType::T12bh7 => TriodeModel::t_12bh7(),
-        TriodeType::T6386 => TriodeModel::t_6386(),
-    }
+pub(super) fn triode_model(name: &str) -> TriodeModel {
+    TriodeModel::by_name(name)
 }
 
-pub(super) fn pentode_model(pt: PentodeType) -> PentodeModel {
-    match pt {
-        PentodeType::Ef86 => PentodeModel::p_ef86(),
-        PentodeType::El84 => PentodeModel::p_el84(),
-        PentodeType::A6aq5a => PentodeModel::p_6aq5a(),
-        PentodeType::A6973 => PentodeModel::p_6973(),
-        PentodeType::A6l6gc => PentodeModel::p_6l6gc(),
-        PentodeType::El34 => PentodeModel::p_el34(),
-        PentodeType::A6550 => PentodeModel::p_6550(),
-    }
+pub(super) fn pentode_model(name: &str) -> PentodeModel {
+    PentodeModel::by_name(name)
 }
 
 pub(super) fn mosfet_model(mt: MosfetType, is_n_channel: bool) -> MosfetModel {

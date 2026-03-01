@@ -1,6 +1,9 @@
 //! CLI subcommand for listing and searching available component models.
 
-use pedalkernel::models::{bjt_by_name, jfet_by_name, BJT_MODELS, JFET_MODELS};
+use pedalkernel::models::{
+    bjt_by_name, jfet_by_name, triode_by_name, pentode_by_name,
+    BJT_MODELS, JFET_MODELS, TRIODE_MODELS, PENTODE_MODELS,
+};
 
 /// Run the `models` subcommand.
 pub fn run(type_filter: Option<&str>, search: Option<&str>) {
@@ -13,9 +16,15 @@ pub fn run(type_filter: Option<&str>, search: Option<&str>) {
         Some("jfet") | Some("njf") | Some("pjf") => {
             print_jfets(search_upper.as_deref(), type_filter);
         }
+        Some("triode") => {
+            print_triodes(search_upper.as_deref());
+        }
+        Some("pentode") => {
+            print_pentodes(search_upper.as_deref());
+        }
         Some(other) => {
             eprintln!("Unknown type filter: '{other}'");
-            eprintln!("Available types: bjt, npn, pnp, jfet, njf, pjf");
+            eprintln!("Available types: bjt, npn, pnp, jfet, njf, pjf, triode, pentode");
             std::process::exit(1);
         }
         None => {
@@ -23,6 +32,10 @@ pub fn run(type_filter: Option<&str>, search: Option<&str>) {
             print_bjts(search_upper.as_deref(), None);
             println!();
             print_jfets(search_upper.as_deref(), None);
+            println!();
+            print_triodes(search_upper.as_deref());
+            println!();
+            print_pentodes(search_upper.as_deref());
         }
     }
 }
@@ -115,6 +128,64 @@ fn print_jfets(search: Option<&str>, polarity_filter: Option<&str>) {
     }
 }
 
+fn print_triodes(search: Option<&str>) {
+    let mut models: Vec<_> = TRIODE_MODELS.values().collect();
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if let Some(term) = search {
+        models.retain(|m| m.name.contains(term));
+    }
+
+    if models.is_empty() {
+        println!("No triode models found.");
+        return;
+    }
+
+    println!("Triode Models ({} found)", models.len());
+    println!("{:-<78}", "");
+    println!(
+        "{:<20} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "Name", "MU", "EX", "KG1", "KP", "KVB"
+    );
+    println!("{:-<78}", "");
+
+    for m in &models {
+        println!(
+            "{:<20} {:>8.1} {:>8.2} {:>8.0} {:>8.0} {:>8.0}",
+            m.name, m.mu, m.ex, m.kg1, m.kp, m.kvb
+        );
+    }
+}
+
+fn print_pentodes(search: Option<&str>) {
+    let mut models: Vec<_> = PENTODE_MODELS.values().collect();
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if let Some(term) = search {
+        models.retain(|m| m.name.contains(term));
+    }
+
+    if models.is_empty() {
+        println!("No pentode models found.");
+        return;
+    }
+
+    println!("Pentode Models ({} found)", models.len());
+    println!("{:-<88}", "");
+    println!(
+        "{:<12} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        "Name", "MU", "EX", "KG1", "KG2", "KP", "KVB", "KVB2", "VG2"
+    );
+    println!("{:-<88}", "");
+
+    for m in &models {
+        println!(
+            "{:<12} {:>6.1} {:>6.2} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0}",
+            m.name, m.mu, m.ex, m.kg1, m.kg2, m.kp, m.kvb, m.kvb2, m.vg2_default
+        );
+    }
+}
+
 /// Print details for a specific model.
 pub fn show(name: &str) {
     let name_upper = name.to_uppercase();
@@ -162,6 +233,31 @@ pub fn show(name: &str) {
         println!("  RS     = {:.2} Ohm    (source resistance)", m.rs);
         println!("  CGS    = {:.4e} F   (gate-source capacitance)", m.cgs);
         println!("  CGD    = {:.4e} F   (gate-drain capacitance)", m.cgd);
+        return;
+    }
+
+    if let Some(m) = triode_by_name(&name_upper) {
+        println!("Triode: {}", m.name);
+        println!("{:-<50}", "");
+        println!("  MU   = {:.1}       (amplification factor)", m.mu);
+        println!("  EX   = {:.2}       (exponent)", m.ex);
+        println!("  KG1  = {:.0}       (plate current scaling)", m.kg1);
+        println!("  KP   = {:.0}       (plate resistance factor)", m.kp);
+        println!("  KVB  = {:.0}       (knee voltage)", m.kvb);
+        return;
+    }
+
+    if let Some(m) = pentode_by_name(&name_upper) {
+        println!("Pentode: {}", m.name);
+        println!("{:-<50}", "");
+        println!("  MU   = {:.1}       (amplification factor)", m.mu);
+        println!("  EX   = {:.2}       (exponent)", m.ex);
+        println!("  KG1  = {:.0}       (plate current scaling)", m.kg1);
+        println!("  KG2  = {:.0}       (screen current scaling)", m.kg2);
+        println!("  KP   = {:.0}       (plate resistance factor)", m.kp);
+        println!("  KVB  = {:.0}       (knee voltage)", m.kvb);
+        println!("  KVB2 = {:.0}       (plate saturation knee)", m.kvb2);
+        println!("  VG2  = {:.0} V     (default screen voltage)", m.vg2_default);
         return;
     }
 
