@@ -186,145 +186,33 @@ pub(super) fn build_lfo_bindings(
                                 pin: target_prop,
                             } = target_pin
                             {
-                                let target = match target_prop.as_str() {
-                                    "vgs" | "gate" => {
-                                        let jfet_count = stages
-                                            .iter()
-                                            .filter(|s| matches!(&s.root, RootKind::Jfet(_)))
-                                            .count();
-
-                                        if jfet_count > 1 {
-                                            if created_all_jfet_binding { continue; }
-                                            created_all_jfet_binding = true;
-                                            ModulationTarget::AllJfetVgs
-                                        } else if let Some(stage_idx) = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Jfet(_)))
-                                        {
-                                            ModulationTarget::JfetVgs { stage_idx }
-                                        } else if let Some(stage_idx) = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Mosfet(_)))
-                                        {
-                                            ModulationTarget::MosfetVgs { stage_idx }
-                                        } else {
-                                            ModulationTarget::JfetVgs { stage_idx: 0 }
-                                        }
-                                    }
-                                    "led" => ModulationTarget::PhotocouplerLed {
-                                        stage_idx: 0,
-                                        comp_id: target_comp.clone(),
-                                    },
-                                    "vgk" => {
-                                        if let Some(stage_idx) = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::VariMu(_)))
-                                        {
-                                            ModulationTarget::VariMuVgk { stage_idx }
-                                        } else {
-                                            let stage_idx = stages
-                                                .iter()
-                                                .position(|s| matches!(&s.root, RootKind::Triode(_)))
-                                                .unwrap_or(0);
-                                            ModulationTarget::TriodeVgk { stage_idx }
-                                        }
-                                    }
-                                    "vg1k" => {
-                                        let stage_idx = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Pentode(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::PentodeVg1k { stage_idx }
-                                    }
-                                    "iabc" => {
-                                        let stage_idx = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Ota(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::OtaIabc { stage_idx }
-                                    }
-                                    "clock" => ModulationTarget::BbdClock { bbd_idx: 0 },
-                                    "speed_mod" => {
-                                        let delay_idx = delay_id_to_idx
-                                            .get(target_comp.as_str())
-                                            .copied()
-                                            .unwrap_or(0);
-                                        ModulationTarget::DelaySpeed { delay_idx }
-                                    }
-                                    "delay_time" => {
-                                        let delay_idx = delay_id_to_idx
-                                            .get(target_comp.as_str())
-                                            .copied()
-                                            .unwrap_or(0);
-                                        ModulationTarget::DelayTime { delay_idx }
-                                    }
-                                    _ => {
-                                        // Try tracing through resistive path.
-                                        let mut visited = HashSet::new();
-                                        if let Some((final_comp, final_pin)) =
-                                            trace_through_resistive_path(
-                                                target_comp,
-                                                target_prop,
-                                                pedal,
-                                                &mut visited,
-                                            )
-                                        {
-                                            match final_pin.as_str() {
-                                                "clock" => ModulationTarget::BbdClock { bbd_idx: 0 },
-                                                "vgs" | "gate" => {
-                                                    let jfet_count = stages
-                                                        .iter()
-                                                        .filter(|s| matches!(&s.root, RootKind::Jfet(_)))
-                                                        .count();
-                                                    if jfet_count > 1 {
-                                                        if created_all_jfet_binding { continue; }
-                                                        created_all_jfet_binding = true;
-                                                        ModulationTarget::AllJfetVgs
-                                                    } else if let Some(stage_idx) = stages
-                                                        .iter()
-                                                        .position(|s| matches!(&s.root, RootKind::Jfet(_)))
-                                                    {
-                                                        ModulationTarget::JfetVgs { stage_idx }
-                                                    } else {
-                                                        ModulationTarget::JfetVgs { stage_idx: 0 }
-                                                    }
-                                                }
-                                                "led" => ModulationTarget::PhotocouplerLed {
-                                                    stage_idx: 0,
-                                                    comp_id: final_comp,
-                                                },
-                                                "speed_mod" => {
-                                                    let delay_idx = delay_id_to_idx
-                                                        .get(final_comp.as_str())
-                                                        .copied()
-                                                        .unwrap_or(0);
-                                                    ModulationTarget::DelaySpeed { delay_idx }
-                                                }
-                                                "delay_time" => {
-                                                    let delay_idx = delay_id_to_idx
-                                                        .get(final_comp.as_str())
-                                                        .copied()
-                                                        .unwrap_or(0);
-                                                    ModulationTarget::DelayTime { delay_idx }
-                                                }
-                                                _ => continue,
-                                            }
-                                        } else {
-                                            continue;
-                                        }
-                                    }
-                                };
-
-                                let (bias, range) = modulation_bias_range(&target);
-
-                                lfos.push(LfoBinding {
-                                    lfo: lfo.clone(),
-                                    target,
-                                    bias,
-                                    range,
-                                    base_freq,
-                                    lfo_id: comp.id.clone(),
+                                // Direct resolution first.
+                                let target = resolve_modulation_target(
+                                    target_prop, target_comp, stages, delay_id_to_idx,
+                                    &mut created_all_jfet_binding,
+                                ).or_else(|| {
+                                    // Trace through resistive path for indirect connections.
+                                    let mut visited = HashSet::new();
+                                    let (final_comp, final_pin) = trace_through_resistive_path(
+                                        target_comp, target_prop, pedal, &mut visited,
+                                    )?;
+                                    resolve_modulation_target(
+                                        &final_pin, &final_comp, stages, delay_id_to_idx,
+                                        &mut created_all_jfet_binding,
+                                    )
                                 });
+
+                                if let Some(target) = target {
+                                    let (bias, range) = modulation_bias_range(&target);
+                                    lfos.push(LfoBinding {
+                                        lfo: lfo.clone(),
+                                        target,
+                                        bias,
+                                        range,
+                                        base_freq,
+                                        lfo_id: comp.id.clone(),
+                                    });
+                                }
                             }
                         }
                     }
@@ -355,6 +243,8 @@ pub(super) fn build_envelope_bindings(
                 *attack_r, *attack_c, *release_r, *release_c, *sensitivity_r, sample_rate,
             );
 
+            let mut unused_flag = false;
+
             for net in &pedal.nets {
                 if let Pin::ComponentPin { component, pin } = &net.from {
                     if component == &comp.id && pin == "out" {
@@ -364,73 +254,19 @@ pub(super) fn build_envelope_bindings(
                                 pin: target_prop,
                             } = target_pin
                             {
-                                let target = match target_prop.as_str() {
-                                    "vgs" => {
-                                        let stage_idx = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Jfet(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::JfetVgs { stage_idx }
-                                    }
-                                    "led" => ModulationTarget::PhotocouplerLed {
-                                        stage_idx: 0,
-                                        comp_id: target_comp.clone(),
-                                    },
-                                    "vgk" => {
-                                        if let Some(stage_idx) = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::VariMu(_)))
-                                        {
-                                            ModulationTarget::VariMuVgk { stage_idx }
-                                        } else {
-                                            let stage_idx = stages
-                                                .iter()
-                                                .position(|s| matches!(&s.root, RootKind::Triode(_)))
-                                                .unwrap_or(0);
-                                            ModulationTarget::TriodeVgk { stage_idx }
-                                        }
-                                    }
-                                    "vg1k" => {
-                                        let stage_idx = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Pentode(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::PentodeVg1k { stage_idx }
-                                    }
-                                    "iabc" => {
-                                        let stage_idx = stages
-                                            .iter()
-                                            .position(|s| matches!(&s.root, RootKind::Ota(_)))
-                                            .unwrap_or(0);
-                                        ModulationTarget::OtaIabc { stage_idx }
-                                    }
-                                    "clock" => ModulationTarget::BbdClock { bbd_idx: 0 },
-                                    "speed_mod" => {
-                                        let delay_idx = delay_id_to_idx
-                                            .get(target_comp.as_str())
-                                            .copied()
-                                            .unwrap_or(0);
-                                        ModulationTarget::DelaySpeed { delay_idx }
-                                    }
-                                    "delay_time" => {
-                                        let delay_idx = delay_id_to_idx
-                                            .get(target_comp.as_str())
-                                            .copied()
-                                            .unwrap_or(0);
-                                        ModulationTarget::DelayTime { delay_idx }
-                                    }
-                                    _ => continue,
-                                };
-
-                                let (bias, range) = modulation_bias_range(&target);
-
-                                envelopes.push(EnvelopeBinding {
-                                    envelope: envelope.clone(),
-                                    target,
-                                    bias,
-                                    range,
-                                    env_id: comp.id.clone(),
-                                });
+                                if let Some(target) = resolve_modulation_target(
+                                    target_prop, target_comp, stages, delay_id_to_idx,
+                                    &mut unused_flag,
+                                ) {
+                                    let (bias, range) = modulation_bias_range(&target);
+                                    envelopes.push(EnvelopeBinding {
+                                        envelope: envelope.clone(),
+                                        target,
+                                        bias,
+                                        range,
+                                        env_id: comp.id.clone(),
+                                    });
+                                }
                             }
                         }
                     }
@@ -513,6 +349,92 @@ pub(super) fn build_sidechains(
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Resolve a target pin name and component to a ModulationTarget.
+///
+/// Shared by both LFO and envelope follower binding.
+/// `created_all_jfet_binding` is only used by LFO (pass `&mut false` for envelopes).
+fn resolve_modulation_target(
+    target_pin: &str,
+    target_comp: &str,
+    stages: &[WdfStage],
+    delay_id_to_idx: &HashMap<String, usize>,
+    created_all_jfet_binding: &mut bool,
+) -> Option<ModulationTarget> {
+    match target_pin {
+        "vgs" | "gate" => {
+            let jfet_count = stages
+                .iter()
+                .filter(|s| matches!(&s.root, RootKind::Jfet(_)))
+                .count();
+            if jfet_count > 1 {
+                if *created_all_jfet_binding { return None; }
+                *created_all_jfet_binding = true;
+                Some(ModulationTarget::AllJfetVgs)
+            } else if let Some(stage_idx) = stages
+                .iter()
+                .position(|s| matches!(&s.root, RootKind::Jfet(_)))
+            {
+                Some(ModulationTarget::JfetVgs { stage_idx })
+            } else if let Some(stage_idx) = stages
+                .iter()
+                .position(|s| matches!(&s.root, RootKind::Mosfet(_)))
+            {
+                Some(ModulationTarget::MosfetVgs { stage_idx })
+            } else {
+                Some(ModulationTarget::JfetVgs { stage_idx: 0 })
+            }
+        }
+        "led" => Some(ModulationTarget::PhotocouplerLed {
+            stage_idx: 0,
+            comp_id: target_comp.to_string(),
+        }),
+        "vgk" => {
+            if let Some(stage_idx) = stages
+                .iter()
+                .position(|s| matches!(&s.root, RootKind::VariMu(_)))
+            {
+                Some(ModulationTarget::VariMuVgk { stage_idx })
+            } else {
+                let stage_idx = stages
+                    .iter()
+                    .position(|s| matches!(&s.root, RootKind::Triode(_)))
+                    .unwrap_or(0);
+                Some(ModulationTarget::TriodeVgk { stage_idx })
+            }
+        }
+        "vg1k" => {
+            let stage_idx = stages
+                .iter()
+                .position(|s| matches!(&s.root, RootKind::Pentode(_)))
+                .unwrap_or(0);
+            Some(ModulationTarget::PentodeVg1k { stage_idx })
+        }
+        "iabc" => {
+            let stage_idx = stages
+                .iter()
+                .position(|s| matches!(&s.root, RootKind::Ota(_)))
+                .unwrap_or(0);
+            Some(ModulationTarget::OtaIabc { stage_idx })
+        }
+        "clock" => Some(ModulationTarget::BbdClock { bbd_idx: 0 }),
+        "speed_mod" => {
+            let delay_idx = delay_id_to_idx
+                .get(target_comp)
+                .copied()
+                .unwrap_or(0);
+            Some(ModulationTarget::DelaySpeed { delay_idx })
+        }
+        "delay_time" => {
+            let delay_idx = delay_id_to_idx
+                .get(target_comp)
+                .copied()
+                .unwrap_or(0);
+            Some(ModulationTarget::DelayTime { delay_idx })
+        }
+        _ => None,
+    }
+}
 
 /// Return (bias, range) for a modulation target.
 fn modulation_bias_range(target: &ModulationTarget) -> (f64, f64) {

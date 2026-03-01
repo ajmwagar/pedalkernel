@@ -78,8 +78,6 @@ pub(super) fn plan_stages(
     graph: &CircuitGraph,
     sample_rate: f64,
 ) -> (Vec<StagePlan>, Vec<PushPullPlan>) {
-    let vs_comp_idx = graph.components.len();
-
     // ── Push-pull detection for triodes ────────────────────────────────
     // Collect triode elements indices to detect push-pull pairs.
     let triode_elements: Vec<(usize, &NonlinearElement)> = classified
@@ -172,7 +170,6 @@ pub(super) fn plan_stages(
             graph,
             &all_bjt_base_nodes,
             source_node_offset,
-            vs_comp_idx,
             sample_rate,
         ) {
             plans.push(plan);
@@ -189,8 +186,6 @@ pub(super) fn plan_push_pull_half(
     elem: &NonlinearElement,
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
-    _vs_comp_idx: usize,
-    _sample_rate: f64,
 ) -> Option<StagePlan> {
     if let NonlinearKind::Triode { plate_node, cathode_node, model_name, is_vari_mu, .. } = &elem.kind {
         // For push-pull halves, collect passives WITHOUT filtering supply nodes.
@@ -211,11 +206,7 @@ pub(super) fn plan_push_pull_half(
         let cathode_passives = collect_passives_at(*cathode_node);
 
         let mut passive_idxs: Vec<usize> = plate_passives.clone();
-        for idx in &cathode_passives {
-            if !passive_idxs.contains(idx) {
-                passive_idxs.push(*idx);
-            }
-        }
+        extend_dedup(&mut passive_idxs, &cathode_passives);
 
         if passive_idxs.is_empty() {
             return None;
@@ -310,7 +301,6 @@ fn plan_single_stage(
     graph: &CircuitGraph,
     all_bjt_base_nodes: &HashSet<NodeId>,
     source_node_offset: usize,
-    vs_comp_idx: usize,
     sample_rate: f64,
 ) -> Option<StagePlan> {
     match &elem.kind {
@@ -318,22 +308,22 @@ fn plan_single_stage(
         NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_) |
         NonlinearKind::Pentode { .. } | NonlinearKind::Mosfet { .. } |
         NonlinearKind::Zener { .. } | NonlinearKind::Ota => {
-            plan_simple_stage(elem, elem_idx, classified, graph, source_node_offset, vs_comp_idx)
+            plan_simple_stage(elem, elem_idx, classified, graph, source_node_offset)
         }
 
         // ── JFET (source follower detection) ───────────────────────────
         NonlinearKind::Jfet { .. } => {
-            plan_jfet_stage(elem, elem_idx, classified, graph, source_node_offset, vs_comp_idx)
+            plan_jfet_stage(elem, elem_idx, classified, graph, source_node_offset)
         }
 
         // ── BJT (feedback detection, 2-junction) ───────────────────────
         NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. } => {
-            plan_bjt_stage(elem, elem_idx, classified, graph, all_bjt_base_nodes, source_node_offset, vs_comp_idx)
+            plan_bjt_stage(elem, elem_idx, classified, graph, all_bjt_base_nodes, source_node_offset)
         }
 
         // ── Triode (2-junction, DC block, push-pull) ───────────────────
         NonlinearKind::Triode { .. } => {
-            plan_triode_stage(elem, elem_idx, classified, graph, source_node_offset, vs_comp_idx, sample_rate)
+            plan_triode_stage(elem, elem_idx, classified, graph, source_node_offset, sample_rate)
         }
     }
 }
@@ -345,7 +335,6 @@ fn plan_simple_stage(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     source_node_offset: usize,
-    _vs_comp_idx: usize,
 ) -> Option<StagePlan> {
     let junction = elem.junction_nodes[0];
     let passive_idxs = graph.elements_at_junction(
@@ -391,7 +380,6 @@ fn plan_jfet_stage(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     source_node_offset: usize,
-    _vs_comp_idx: usize,
 ) -> Option<StagePlan> {
     let junction = elem.junction_nodes[0];
 
@@ -422,16 +410,8 @@ fn plan_jfet_stage(
     );
 
     let mut passive_idxs: Vec<usize> = junction_passives.clone();
-    for idx in &junction_to_output {
-        if !passive_idxs.contains(idx) {
-            passive_idxs.push(*idx);
-        }
-    }
-    for idx in &output_passives {
-        if !passive_idxs.contains(idx) {
-            passive_idxs.push(*idx);
-        }
-    }
+    extend_dedup(&mut passive_idxs, &junction_to_output);
+    extend_dedup(&mut passive_idxs, &output_passives);
 
     if passive_idxs.is_empty() {
         return None;
@@ -485,7 +465,6 @@ fn plan_bjt_stage(
     graph: &CircuitGraph,
     all_bjt_base_nodes: &HashSet<NodeId>,
     source_node_offset: usize,
-    _vs_comp_idx: usize,
 ) -> Option<StagePlan> {
     let (collector_node, emitter_node) = (elem.junction_nodes[0], elem.junction_nodes[1]);
 
@@ -558,12 +537,8 @@ fn plan_bjt_stage(
 
     // Combine passive sets.
     let mut passive_idxs: Vec<usize> = collector_passives.clone();
-    for idx in &emitter_passives {
-        if !passive_idxs.contains(idx) { passive_idxs.push(*idx); }
-    }
-    for idx in &collector_to_output {
-        if !passive_idxs.contains(idx) { passive_idxs.push(*idx); }
-    }
+    extend_dedup(&mut passive_idxs, &emitter_passives);
+    extend_dedup(&mut passive_idxs, &collector_to_output);
 
     // Only include output passives for final stage.
     let collector_dist_out = classified.dist_from_out.get(&collector_node).copied().unwrap_or(usize::MAX);
@@ -576,9 +551,7 @@ fn plan_bjt_stage(
         });
 
     if connects_to_output && !has_feedback {
-        for idx in &output_passives {
-            if !passive_idxs.contains(idx) { passive_idxs.push(*idx); }
-        }
+        extend_dedup(&mut passive_idxs, &output_passives);
     }
 
     if passive_idxs.is_empty() {
@@ -648,7 +621,6 @@ fn plan_triode_stage(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     source_node_offset: usize,
-    _vs_comp_idx: usize,
     sample_rate: f64,
 ) -> Option<StagePlan> {
     let (plate_node, cathode_node) = (elem.junction_nodes[0], elem.junction_nodes[1]);
@@ -686,15 +658,9 @@ fn plan_triode_stage(
     );
 
     let mut passive_idxs: Vec<usize> = plate_passives.clone();
-    for idx in &cathode_passives {
-        if !passive_idxs.contains(idx) { passive_idxs.push(*idx); }
-    }
-    for idx in &plate_to_output {
-        if !passive_idxs.contains(idx) { passive_idxs.push(*idx); }
-    }
-    for idx in &output_passives {
-        if !passive_idxs.contains(idx) { passive_idxs.push(*idx); }
-    }
+    extend_dedup(&mut passive_idxs, &cathode_passives);
+    extend_dedup(&mut passive_idxs, &plate_to_output);
+    extend_dedup(&mut passive_idxs, &output_passives);
 
     if passive_idxs.is_empty() {
         return None;
@@ -799,6 +765,15 @@ fn plan_triode_stage(
 // ═══════════════════════════════════════════════════════════════════════════
 // Shared helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Extend a vec with items from another, skipping duplicates.
+fn extend_dedup(dst: &mut Vec<usize>, src: &[usize]) {
+    for &idx in src {
+        if !dst.contains(&idx) {
+            dst.push(idx);
+        }
+    }
+}
 
 /// Find the best injection node for the voltage source.
 /// The non-junction endpoint closest to in_node.

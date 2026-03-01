@@ -46,14 +46,9 @@ pub(super) fn build_stages(
         let elem = &classified.nonlinear_elements[plan.element_idx];
 
         let stage = if plan.skip_vs {
-            // Source follower: no voltage source in tree.
             build_source_follower_stage(plan, elem, graph, sample_rate, oversampling)
-        } else if plan.virtual_edge.is_some() {
-            // 3-terminal element with virtual internal edge.
-            build_virtual_edge_stage(plan, elem, graph, sample_rate, oversampling, vs_comp_idx)
         } else {
-            // Simple 1-junction element with voltage source.
-            build_simple_stage(plan, elem, graph, sample_rate, oversampling, vs_comp_idx)
+            build_vs_stage(plan, elem, graph, sample_rate, oversampling, vs_comp_idx)
         };
 
         if let Some(mut stage) = stage {
@@ -107,12 +102,12 @@ pub(super) fn build_push_pull_stages(
         let push_elem = &classified.nonlinear_elements[pp_plan.push_triode_list_idx];
         let pull_elem = &classified.nonlinear_elements[pp_plan.pull_triode_list_idx];
 
-        let push_plan = super::plan::plan_push_pull_half(push_elem, classified, graph, vs_comp_idx, sample_rate);
-        let pull_plan = super::plan::plan_push_pull_half(pull_elem, classified, graph, vs_comp_idx, sample_rate);
+        let push_plan = super::plan::plan_push_pull_half(push_elem, classified, graph);
+        let pull_plan = super::plan::plan_push_pull_half(pull_elem, classified, graph);
 
         if let (Some(push_plan), Some(pull_plan)) = (push_plan, pull_plan) {
-            let push_half = build_push_pull_half(&push_plan, push_elem, graph, sample_rate, vs_comp_idx);
-            let pull_half = build_push_pull_half(&pull_plan, pull_elem, graph, sample_rate, vs_comp_idx);
+            let push_half = build_push_pull_half(&push_plan, graph, sample_rate, vs_comp_idx);
+            let pull_half = build_push_pull_half(&pull_plan, graph, sample_rate, vs_comp_idx);
 
             if let (Some((push_tree, push_comp)), Some((pull_tree, _))) = (push_half, pull_half) {
                 let (push_root, pull_root) = build_push_pull_roots(push_elem, pull_elem);
@@ -140,8 +135,62 @@ pub(super) fn build_push_pull_stages(
 // Internal builders
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Build a simple stage with voltage source (diode, pentode, MOSFET, zener, OTA).
-fn build_simple_stage(
+/// Collect SP edges from a plan.
+///
+/// Adds the voltage source edge (if `vs_comp_idx` is Some), passive edges,
+/// and virtual edge (if present). Returns the virtual edge component index if applicable.
+fn collect_sp_edges(
+    plan: &StagePlan,
+    graph: &CircuitGraph,
+    vs_comp_idx: Option<usize>,
+) -> (Vec<(usize, usize, SpTree)>, Option<usize>) {
+    let mut sp_edges: Vec<(usize, usize, SpTree)> = Vec::new();
+
+    if let Some(vs_idx) = vs_comp_idx {
+        sp_edges.push((plan.source_node, plan.injection_node, SpTree::Leaf(vs_idx)));
+    }
+
+    for &eidx in &plan.passive_idxs {
+        let e = &graph.edges[eidx];
+        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+    }
+
+    let virtual_edge_idx = if let Some(ve) = &plan.virtual_edge {
+        let ve_idx = vs_comp_idx.unwrap_or(graph.components.len()) + 1;
+        sp_edges.push((ve.node_a, ve.node_b, SpTree::Leaf(ve_idx)));
+        Some(ve_idx)
+    } else {
+        None
+    };
+
+    (sp_edges, virtual_edge_idx)
+}
+
+/// Build a component list with virtual voltage source and optional virtual edge.
+fn build_components_with_virtuals(
+    graph: &CircuitGraph,
+    vs_comp_idx: usize,
+    virtual_edge: Option<(&super::plan::VirtualEdge, usize)>,
+) -> Vec<ComponentDef> {
+    let max_idx = virtual_edge.map(|(_, idx)| idx).unwrap_or(vs_comp_idx);
+    let mut components = graph.components.clone();
+    while components.len() <= max_idx {
+        components.push(ComponentDef {
+            id: "__vs__".to_string(),
+            kind: ComponentKind::Resistor(1.0),
+        });
+    }
+    if let Some((ve, ve_idx)) = virtual_edge {
+        components[ve_idx] = ComponentDef {
+            id: ve.name.to_string(),
+            kind: ComponentKind::Resistor(ve.resistance),
+        };
+    }
+    components
+}
+
+/// Build a standard VS-driven stage (simple, virtual edge, or push-pull half).
+fn build_vs_stage(
     plan: &StagePlan,
     elem: &super::classify::NonlinearElement,
     graph: &CircuitGraph,
@@ -149,25 +198,11 @@ fn build_simple_stage(
     oversampling: OversamplingFactor,
     vs_comp_idx: usize,
 ) -> Option<WdfStage> {
-    // Build SP edges.
-    let mut sp_edges: Vec<(usize, usize, SpTree)> = Vec::new();
-    sp_edges.push((plan.source_node, plan.injection_node, SpTree::Leaf(vs_comp_idx)));
-
-    for &eidx in &plan.passive_idxs {
-        let e = &graph.edges[eidx];
-        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-    }
-
+    let (sp_edges, virtual_edge_idx) = collect_sp_edges(plan, graph, Some(vs_comp_idx));
     let sp_tree = sp_reduce(sp_edges, &plan.terminals).ok()?;
 
-    // Build component list with virtual voltage source.
-    let mut components = graph.components.clone();
-    while components.len() <= vs_comp_idx {
-        components.push(ComponentDef {
-            id: "__vs__".to_string(),
-            kind: ComponentKind::Resistor(1.0),
-        });
-    }
+    let ve_info = plan.virtual_edge.as_ref().zip(virtual_edge_idx);
+    let components = build_components_with_virtuals(graph, vs_comp_idx, ve_info);
 
     let tree = sp_to_dyn_with_vs(&sp_tree, &components, &graph.fork_paths, sample_rate, vs_comp_idx);
     let (root, base_diode_model) = create_root(&elem.kind);
@@ -193,13 +228,7 @@ fn build_source_follower_stage(
     sample_rate: f64,
     oversampling: OversamplingFactor,
 ) -> Option<WdfStage> {
-    let mut sp_edges: Vec<(usize, usize, SpTree)> = Vec::new();
-
-    for &eidx in &plan.passive_idxs {
-        let e = &graph.edges[eidx];
-        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-    }
-
+    let (sp_edges, _) = collect_sp_edges(plan, graph, None);
     let sp_tree = sp_reduce(sp_edges, &plan.terminals).ok()?;
     let tree = sp_to_dyn(&sp_tree, &graph.components, &graph.fork_paths, sample_rate);
     let (root, _) = create_root(&elem.kind);
@@ -217,101 +246,20 @@ fn build_source_follower_stage(
     })
 }
 
-/// Build a stage with a virtual internal edge (BJT r_ce, triode r_p).
-fn build_virtual_edge_stage(
-    plan: &StagePlan,
-    elem: &super::classify::NonlinearElement,
-    graph: &CircuitGraph,
-    sample_rate: f64,
-    oversampling: OversamplingFactor,
-    vs_comp_idx: usize,
-) -> Option<WdfStage> {
-    let virtual_edge = plan.virtual_edge.as_ref().unwrap();
-    let virtual_edge_idx = vs_comp_idx + 1;
-
-    // Build SP edges.
-    let mut sp_edges: Vec<(usize, usize, SpTree)> = Vec::new();
-    sp_edges.push((plan.source_node, plan.injection_node, SpTree::Leaf(vs_comp_idx)));
-
-    for &eidx in &plan.passive_idxs {
-        let e = &graph.edges[eidx];
-        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-    }
-
-    // Add virtual internal edge.
-    sp_edges.push((
-        virtual_edge.node_a,
-        virtual_edge.node_b,
-        SpTree::Leaf(virtual_edge_idx),
-    ));
-
-    let sp_tree = sp_reduce(sp_edges, &plan.terminals).ok()?;
-
-    // Build component list with virtual elements.
-    let mut components = graph.components.clone();
-    while components.len() <= virtual_edge_idx {
-        components.push(ComponentDef {
-            id: "__vs__".to_string(),
-            kind: ComponentKind::Resistor(1.0),
-        });
-    }
-    components[virtual_edge_idx] = ComponentDef {
-        id: virtual_edge.name.to_string(),
-        kind: ComponentKind::Resistor(virtual_edge.resistance),
-    };
-
-    let tree = sp_to_dyn_with_vs(&sp_tree, &components, &graph.fork_paths, sample_rate, vs_comp_idx);
-    let (root, base_diode_model) = create_root(&elem.kind);
-
-    Some(WdfStage {
-        tree,
-        root,
-        compensation: plan.compensation,
-        oversampler: Oversampler::new(oversampling),
-        base_diode_model,
-        paired_opamp: None,
-        dc_block: plan.dc_block,
-        is_source_follower: false,
-        prev_source_voltage: 0.0,
-    })
-}
-
 /// Build a push-pull half tree.
 fn build_push_pull_half(
     plan: &StagePlan,
-    _elem: &super::classify::NonlinearElement,
     graph: &CircuitGraph,
     sample_rate: f64,
     vs_comp_idx: usize,
 ) -> Option<(DynNode, f64)> {
-    let virtual_edge = plan.virtual_edge.as_ref()?;
-    let virtual_rp_idx = vs_comp_idx + 1;
-
-    let mut sp_edges: Vec<(usize, usize, SpTree)> = Vec::new();
-    sp_edges.push((plan.source_node, plan.injection_node, SpTree::Leaf(vs_comp_idx)));
-
-    for &eidx in &plan.passive_idxs {
-        let e = &graph.edges[eidx];
-        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-    }
-    sp_edges.push((virtual_edge.node_a, virtual_edge.node_b, SpTree::Leaf(virtual_rp_idx)));
-
+    let (sp_edges, virtual_edge_idx) = collect_sp_edges(plan, graph, Some(vs_comp_idx));
     let sp_tree = sp_reduce(sp_edges, &plan.terminals).ok()?;
 
-    let mut components = graph.components.clone();
-    while components.len() <= virtual_rp_idx {
-        components.push(ComponentDef {
-            id: "__vs__".to_string(),
-            kind: ComponentKind::Resistor(1.0),
-        });
-    }
-    components[virtual_rp_idx] = ComponentDef {
-        id: virtual_edge.name.to_string(),
-        kind: ComponentKind::Resistor(virtual_edge.resistance),
-    };
+    let ve_info = plan.virtual_edge.as_ref().zip(virtual_edge_idx);
+    let components = build_components_with_virtuals(graph, vs_comp_idx, ve_info);
 
     let tree = sp_to_dyn_with_vs(&sp_tree, &components, &graph.fork_paths, sample_rate, vs_comp_idx);
-
     Some((tree, plan.compensation))
 }
 

@@ -170,77 +170,44 @@ pub(super) fn classify_circuit(
 
         let classified = match &comp.kind {
             // ── Diodes ─────────────────────────────────────────────
-            ComponentKind::DiodePair(dt) => {
+            ComponentKind::DiodePair(dt) | ComponentKind::Diode(dt) => {
                 if *dt == DiodeType::Germanium {
                     has_germanium = true;
                 }
+                let is_pair = matches!(&comp.kind, ComponentKind::DiodePair(_));
                 let junction = diode_junction(e.node_a, e.node_b);
-                Some((
-                    NonlinearKind::DiodePair(*dt),
-                    vec![junction],
-                ))
-            }
-            ComponentKind::Diode(dt) => {
-                if *dt == DiodeType::Germanium {
-                    has_germanium = true;
-                }
-                let junction = diode_junction(e.node_a, e.node_b);
-                Some((
-                    NonlinearKind::SingleDiode(*dt),
-                    vec![junction],
-                ))
+                let kind = if is_pair {
+                    NonlinearKind::DiodePair(*dt)
+                } else {
+                    NonlinearKind::SingleDiode(*dt)
+                };
+                Some((kind, vec![junction]))
             }
 
             // ── JFETs ──────────────────────────────────────────────
-            ComponentKind::NJfet(name) => {
+            ComponentKind::NJfet(name) | ComponentKind::PJfet(name) => {
+                let is_n = matches!(&comp.kind, ComponentKind::NJfet(_));
                 let junction = nondiode_junction(e.node_a, e.node_b);
                 Some((
-                    NonlinearKind::Jfet {
-                        model_name: name.clone(),
-                        is_n_channel: true,
-                    },
-                    vec![junction],
-                ))
-            }
-            ComponentKind::PJfet(name) => {
-                let junction = nondiode_junction(e.node_a, e.node_b);
-                Some((
-                    NonlinearKind::Jfet {
-                        model_name: name.clone(),
-                        is_n_channel: false,
-                    },
+                    NonlinearKind::Jfet { model_name: name.clone(), is_n_channel: is_n },
                     vec![junction],
                 ))
             }
 
             // ── BJTs ───────────────────────────────────────────────
-            ComponentKind::Npn(name) => {
+            ComponentKind::Npn(name) | ComponentKind::Pnp(name) => {
+                let is_npn = matches!(&comp.kind, ComponentKind::Npn(_));
                 let base_node = graph
                     .node_names
                     .get(&format!("{}.base", comp.id))
                     .copied()
                     .unwrap_or(e.node_a);
-                Some((
-                    NonlinearKind::BjtNpn {
-                        model_name: name.clone(),
-                        base_node,
-                    },
-                    vec![e.node_a, e.node_b], // collector, emitter
-                ))
-            }
-            ComponentKind::Pnp(name) => {
-                let base_node = graph
-                    .node_names
-                    .get(&format!("{}.base", comp.id))
-                    .copied()
-                    .unwrap_or(e.node_a);
-                Some((
-                    NonlinearKind::BjtPnp {
-                        model_name: name.clone(),
-                        base_node,
-                    },
-                    vec![e.node_a, e.node_b], // collector, emitter
-                ))
+                let kind = if is_npn {
+                    NonlinearKind::BjtNpn { model_name: name.clone(), base_node }
+                } else {
+                    NonlinearKind::BjtPnp { model_name: name.clone(), base_node }
+                };
+                Some((kind, vec![e.node_a, e.node_b])) // collector, emitter
             }
 
             // ── Triodes (merged parallel) ──────────────────────────
@@ -280,23 +247,11 @@ pub(super) fn classify_circuit(
             }
 
             // ── MOSFETs ────────────────────────────────────────────
-            ComponentKind::Nmos(mt) => {
+            ComponentKind::Nmos(mt) | ComponentKind::Pmos(mt) => {
+                let is_n = matches!(&comp.kind, ComponentKind::Nmos(_));
                 let junction = nondiode_junction(e.node_a, e.node_b);
                 Some((
-                    NonlinearKind::Mosfet {
-                        mosfet_type: *mt,
-                        is_n_channel: true,
-                    },
-                    vec![junction],
-                ))
-            }
-            ComponentKind::Pmos(mt) => {
-                let junction = nondiode_junction(e.node_a, e.node_b);
-                Some((
-                    NonlinearKind::Mosfet {
-                        mosfet_type: *mt,
-                        is_n_channel: false,
-                    },
+                    NonlinearKind::Mosfet { mosfet_type: *mt, is_n_channel: is_n },
                     vec![junction],
                 ))
             }
