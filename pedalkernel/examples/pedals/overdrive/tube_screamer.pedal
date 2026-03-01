@@ -49,8 +49,10 @@ pedal "Tube Screamer" {
     U2.pos -> gnd           # Reference to virtual ground
 
     # Feedback network with soft clipping diodes
-    U2.neg -> R4.a, Drive.a, C3.a
-    R4.b -> U2.out
+    # R4 and Drive in SERIES for variable gain (not parallel!)
+    # Rf = R4 + Drive = 51k + (0-500k) = 51k to 551k
+    U2.neg -> R4.a, C3.a
+    R4.b -> Drive.a
     Drive.b -> U2.out
     C3.b -> U2.out
     # Diodes in anti-parallel across feedback (SOFT clipping)

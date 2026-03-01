@@ -1,0 +1,54 @@
+# PNP Common Emitter Amplifier
+# Validation circuit for PNP BJT modeling
+# Classic CE stage similar to Fuzz Face Q2
+
+pedal "PNP Common Emitter" {
+  supply 9V
+
+  components {
+    # Bias network
+    R_bias1: resistor(100k)
+    R_bias2: resistor(33k)
+
+    # Input coupling
+    C_in: cap(1u)
+    R_in: resistor(10k)
+
+    # PNP transistor
+    Q1: pnp(2n3906)
+
+    # Emitter resistor
+    R_E: resistor(2.2k)
+
+    # Collector load
+    R_C: resistor(4.7k)
+
+    # Output coupling
+    C_out: cap(10u)
+    R_load: resistor(10k)
+  }
+
+  nets {
+    # Bias divider
+    vcc -> R_bias1.a
+    R_bias1.b -> R_bias2.a
+    R_bias2.b -> gnd
+
+    # Input to base
+    in -> C_in.a
+    C_in.b -> R_in.a
+    R_in.b -> R_bias1.b, Q1.base
+
+    # PNP transistor connections
+    Q1.emitter -> R_E.a
+    R_E.b -> vcc
+    Q1.collector -> R_C.a
+    R_C.b -> gnd
+
+    # Output
+    Q1.collector -> C_out.a
+    C_out.b -> R_load.a
+    R_load.b -> gnd
+    C_out.b -> out
+  }
+}

@@ -1,0 +1,44 @@
+* ============================================================================
+* PNP Common Emitter Amplifier
+* PedalKernel Validation Circuit
+* ============================================================================
+* Classic PNP CE amplifier stage (like Fuzz Face Q2).
+* Note: PNP uses positive ground convention - VCC is at ground reference,
+* and the "negative" supply provides the working voltage.
+* For simplicity, we model this with NPN-style biasing but inverted polarities.
+* ============================================================================
+
+* Supply (9V, but PNP sees it as -9V relative to emitter)
+VCC vcc 0 DC 9
+
+* Bias network (voltage divider for base)
+R_bias1 vcc vb 100k
+R_bias2 vb 0 33k
+
+* Input coupling
+C_in v_in vin_ac 1u
+R_in vin_ac vb 10k
+
+* PNP transistor Q1 (2N3906 model)
+* For PNP: collector is more negative than base, emitter most positive
+Q1 vc vb ve PNP_2N3906
+
+* Emitter resistor (RE) - sets DC operating point
+R_E ve vcc 2.2k
+
+* Collector load resistor
+R_C vc 0 4.7k
+
+* Output coupling
+C_out vc vout_ac 10u
+R_load vout_ac 0 10k
+
+* Output measurement
+Eout v_out 0 vout_ac 0 1
+
+* 2N3906 PNP model
+.MODEL PNP_2N3906 PNP(IS=1.0e-14 BF=200 VAF=100 IKF=0.3
++  NE=1.5 ISE=1e-13 IKR=0.1 ISC=1e-13 NC=1.2 NR=1 BR=4
++  RC=1 CJC=4.5p CJE=10p TR=250n TF=350p VJC=0.75 VJE=0.75
++  MJC=0.33 MJE=0.33 XTB=1.5 EG=1.11 XTI=3)
+

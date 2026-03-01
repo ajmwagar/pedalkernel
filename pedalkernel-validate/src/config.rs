@@ -791,6 +791,34 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 },
             });
 
+            // PNP common emitter amplifier (2N3906)
+            // Tests PNP BJT modeling - essential for Fuzz Face, vintage fuzzes
+            tests.insert("pnp_common_emitter".to_string(), TestCase {
+                circuit: "active/pnp_common_emitter.pedal".to_string(),
+                description: "2N3906 PNP common emitter gain stage".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.05,  // Small signal for linear operation
+                        duration: 0.05,
+                        label: Some("clean".to_string()),
+                    },
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.3,  // Drive harder
+                        duration: 0.05,
+                        label: Some("driven".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(10.0),
+                    peak_error_db: Some(12.0),
+                    // THD comparison not meaningful for linear amplifier
+                    ..Default::default()
+                },
+            });
+
             // OTA (CA3080) voltage-controlled amplifier
             // Tests transconductance amplifier modeling for compressors/VCAs
             tests.insert("ota_ca3080".to_string(), TestCase {

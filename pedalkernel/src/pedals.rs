@@ -159,14 +159,28 @@ impl crate::PedalProcessor for FuzzFace {
         // Gain is from transistor biasing / feedback, not supply voltage.
         let raw = self.clipper.process(input * self.pre_gain);
         // The single-diode clipper only clips one polarity; the reverse-bias
-        // half passes through linearly and can be very large.  tanh() provides
-        // a musically useful soft limit on both halves while preserving the
-        // asymmetric germanium character on the clipped side.
+        // half passes through linearly and can be very large.
+        //
+        // Use asymmetric soft limiting to preserve the germanium character:
+        // - Positive swings: diode forward-conducts, already clipped at ~0.3V
+        // - Negative swings: diode reverse-biased, passes through (allow larger swing)
         //
         // At higher voltages the soft-limit ceiling scales up, giving the
         // transistor stages more room to breathe before saturation.
         let ceiling = self.supply_voltage / 9.0;
-        (raw * GERMANIUM_SCALE / ceiling).tanh() * ceiling * self.volume
+        let scaled = raw * GERMANIUM_SCALE;
+
+        // Asymmetric limiting: positive clips harder, negative has more headroom
+        let limited = if scaled >= 0.0 {
+            // Positive: diode already clips, use tighter ceiling
+            (scaled / ceiling).tanh() * ceiling
+        } else {
+            // Negative: diode doesn't clip, allow ~1.5x more swing
+            let neg_ceiling = ceiling * 1.5;
+            (scaled / neg_ceiling).tanh() * neg_ceiling
+        };
+
+        limited * self.volume
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
