@@ -1,0 +1,27 @@
+# CA3080 OTA as Voltage-Controlled Amplifier
+# Single-supply configuration with virtual ground bias
+
+pedal "OTA VCA" {
+  supply 9V
+  components {
+    C1: cap(100n)       # Input coupling
+    Rbias: resistor(100k)  # Input bias to virtual ground
+    Rinv: resistor(100k)   # Inverting input bias
+    Rabc: resistor(75k)    # Iabc bias resistor
+    Rload: resistor(10k)   # Output load (I-to-V)
+    C2: cap(10u)        # Output coupling
+    RL: resistor(10k)   # Load resistor
+    U1: opamp(ca3080)   # OTA
+  }
+  nets {
+    in -> C1.a
+    C1.b -> Rbias.a, U1.pos
+    Rbias.b -> gnd
+    Rinv.a -> U1.neg
+    Rinv.b -> gnd
+    U1.out -> Rload.a, C2.a
+    Rload.b -> gnd
+    C2.b -> RL.a, out
+    RL.b -> gnd
+  }
+}

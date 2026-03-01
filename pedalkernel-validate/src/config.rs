@@ -763,6 +763,56 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 },
             });
 
+            // NPN common emitter amplifier (2N3904)
+            // Tests NPN BJT modeling - complements the PNP fuzz face test
+            tests.insert("npn_common_emitter".to_string(), TestCase {
+                circuit: "active/npn_common_emitter.pedal".to_string(),
+                description: "2N3904 NPN common emitter gain stage".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.05,  // Small signal for linear operation
+                        duration: 0.05,
+                        label: Some("clean".to_string()),
+                    },
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.3,  // Drive harder
+                        duration: 0.05,
+                        label: Some("driven".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain],
+                pass_criteria: PassCriteria {
+                    normalized_rms_error_db: Some(10.0),
+                    peak_error_db: Some(12.0),
+                    // THD comparison not meaningful for linear amplifier
+                    ..Default::default()
+                },
+            });
+
+            // OTA (CA3080) voltage-controlled amplifier
+            // Tests transconductance amplifier modeling for compressors/VCAs
+            tests.insert("ota_ca3080".to_string(), TestCase {
+                circuit: "active/ota_ca3080.pedal".to_string(),
+                description: "CA3080 OTA as voltage-controlled amplifier".to_string(),
+                signals: vec![
+                    SignalConfig::Sine {
+                        frequency: 1000.0,
+                        amplitude: 0.5,
+                        duration: 0.05,
+                        label: Some("sine".to_string()),
+                    },
+                ],
+                metrics: vec![MetricConfig::TimeDomain],
+                pass_criteria: PassCriteria {
+                    // OTA modeling may differ from SPICE behavioral model
+                    normalized_rms_error_db: Some(12.0),
+                    peak_error_db: Some(15.0),
+                    ..Default::default()
+                },
+            });
+
             tests
         },
     });

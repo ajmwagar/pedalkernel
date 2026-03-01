@@ -1,0 +1,39 @@
+* ============================================================================
+* NPN Common Emitter Amplifier — 2N3904
+* PedalKernel Validation Circuit
+* ============================================================================
+* Classic NPN gain stage. 2N3904 is ubiquitous in guitar pedals
+* (Rangemaster, treble boosters, buffer stages).
+*
+* Biasing: R1/R2 voltage divider sets base voltage.
+* Gain: ~gm * RC (typically 20-50x for this topology)
+* ============================================================================
+
+* Input coupling
+C1 v_in base 100n
+
+* Base bias network (sets Vb ~ 1.8V for proper bias)
+R1 vcc base 470k
+R2 base 0 100k
+
+* Emitter resistor (with bypass cap for AC gain)
+RE emitter 0 1k
+CE emitter 0 10u
+
+* Collector resistor (load)
+RC vcc collector 10k
+
+* Supply (9V typical pedal supply)
+VCC vcc 0 DC 9
+
+* Output coupling
+C2 collector v_out 1u
+RL v_out 0 10k
+
+* Transistor — 2N3904 NPN
+Q1 collector base emitter QMOD
+
+* 2N3904 SPICE model
+.MODEL QMOD NPN(IS=1e-14 BF=300 VAF=100 IKF=0.1
++ ISE=1e-14 NE=1.5 BR=3 RC=10 CJC=4p CJE=8p
++ TF=0.5n TR=100n)

@@ -1,0 +1,30 @@
+# 2N3904 NPN Common Emitter Amplifier
+# Classic NPN gain stage used in treble boosters, Rangemaster, etc.
+
+pedal "NPN Common Emitter" {
+  supply 9V
+  components {
+    C1: cap(100n)       # Input coupling
+    R1: resistor(470k)  # Base bias (to VCC)
+    R2: resistor(100k)  # Base bias (to GND)
+    RE: resistor(1k)    # Emitter resistor
+    CE: cap(10u)        # Emitter bypass
+    RC: resistor(10k)   # Collector load
+    C2: cap(1u)         # Output coupling
+    RL: resistor(10k)   # Load resistor
+    Q1: npn(2n3904)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, R2.a, Q1.base
+    R1.b -> vcc
+    R2.b -> gnd
+    Q1.emitter -> RE.a, CE.a
+    RE.b -> gnd
+    CE.b -> gnd
+    Q1.collector -> RC.a, C2.a
+    RC.b -> vcc
+    C2.b -> RL.a, out
+    RL.b -> gnd
+  }
+}

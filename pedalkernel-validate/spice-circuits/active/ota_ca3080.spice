@@ -1,0 +1,31 @@
+* ============================================================================
+* OTA Voltage-Controlled Amplifier — CA3080 (Single Supply)
+* PedalKernel Validation Circuit
+* ============================================================================
+* Simplified OTA as a VCA with single 9V supply.
+* Uses behavioral VCCS model for the transconductance amplifier.
+*
+* Gm = 19.2 * Iabc (typical for CA3080)
+* For Iabc ~ 100uA, Gm ~ 2mS
+* ============================================================================
+
+* Input coupling
+C1 v_in inp 100n
+Rbias inp 0 100k
+
+* Inverting input to ground
+Rinv inn 0 100k
+
+* Supply
+VCC vcc 0 DC 9
+
+* OTA modeled as voltage-controlled current source
+* Iout = Gm * (V+ - V-), Gm ~ 2mS for typical bias
+Gota out 0 inp inn 0.002
+
+* Output load resistor
+Rload out 0 10k
+
+* Output coupling
+C2 out v_out 10u
+RL v_out 0 10k
