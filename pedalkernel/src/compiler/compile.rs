@@ -73,101 +73,208 @@ fn find_resistance_between(graph: &CircuitGraph, from: NodeId, to: NodeId) -> Op
     None
 }
 
-/// Filter topology type for simple RC/RL circuits.
-enum FilterTopology {
-    RcLowpass { a1: f64, b0: f64 },
-    RcHighpass { a1: f64, b0: f64 },
-    RlLowpass { a1: f64, b0: f64 },
-}
 
-/// Detect simple RC/RL filter topology and compute filter parameters.
-fn detect_rc_filter_topology(graph: &CircuitGraph, sample_rate: f64) -> Option<FilterTopology> {
-    let resistors: Vec<_> = graph.edges.iter()
-        .filter(|e| matches!(graph.components[e.comp_idx].kind, ComponentKind::Resistor(_)))
+// ═══════════════════════════════════════════════════════════════════════════
+// Passive WDF stage builder
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build a WDF stage for a passive-only circuit.
+///
+/// Uses output-rooted tree decomposition: the load element (connected from
+/// out_node to gnd) is placed at the root, and the remaining elements + VS
+/// form the tree body. This gives correct filter behavior via the standard
+/// WDF output extraction: V_out = (a_root + b_tree) / 2.
+///
+/// For simple topologies (1R + 1C, or 1R + 1L):
+/// - RC lowpass (R in→out, C out→gnd): tree=Series(VS,R), root=CapacitorRoot
+/// - RC highpass (C in→out, R out→gnd): tree=Series(VS,C), root=ResistiveTermination
+/// - RL lowpass (L in→out, R out→gnd): tree=Series(VS,L), root=ResistiveTermination
+/// - RL highpass (R in→out, L out→gnd): tree=Series(VS,R), root=InductorRoot
+///
+/// For complex circuits: falls back to ShortCircuit with all elements in tree.
+fn build_passive_wdf_stage(
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+) -> Option<WdfStage> {
+    let vs_comp_idx = graph.components.len();
+    let passive_edges: Vec<usize> = graph.edges.iter().enumerate()
+        .filter(|(_, e)| matches!(
+            graph.components[e.comp_idx].kind,
+            ComponentKind::Resistor(_) | ComponentKind::Capacitor(_)
+                | ComponentKind::Inductor(_) | ComponentKind::Potentiometer(_, _)
+        ))
+        .map(|(i, _)| i)
         .collect();
-    let capacitors: Vec<_> = graph.edges.iter()
-        .filter(|e| matches!(graph.components[e.comp_idx].kind, ComponentKind::Capacitor(_)))
-        .collect();
-    let inductors: Vec<_> = graph.edges.iter()
-        .filter(|e| matches!(graph.components[e.comp_idx].kind, ComponentKind::Inductor(_)))
-        .collect();
 
-    // RL lowpass: 1 R, 1 L, 0 C
-    if resistors.len() == 1 && inductors.len() == 1 && capacitors.is_empty() {
-        let r_edge = resistors[0];
-        let l_edge = inductors[0];
-        let r = match &graph.components[r_edge.comp_idx].kind { ComponentKind::Resistor(r) => *r, _ => return None };
-        let l = match &graph.components[l_edge.comp_idx].kind { ComponentKind::Inductor(l) => *l, _ => return None };
-
-        let l_connects_in_out = (l_edge.node_a == graph.in_node && l_edge.node_b == graph.out_node)
-            || (l_edge.node_a == graph.out_node && l_edge.node_b == graph.in_node);
-        let r_connects_out_gnd = (r_edge.node_a == graph.out_node && r_edge.node_b == graph.gnd_node)
-            || (r_edge.node_a == graph.gnd_node && r_edge.node_b == graph.out_node);
-
-        if l_connects_in_out && r_connects_out_gnd {
-            let tau = l / r;
-            let alpha = 2.0 * sample_rate * tau;
-            let a1 = (1.0 - alpha) / (1.0 + alpha);
-            let b0 = 1.0 / (1.0 + alpha);
-            return Some(FilterTopology::RlLowpass { a1, b0 });
-        }
+    if passive_edges.is_empty() {
+        return None;
     }
 
-    // RC filters: 1 R, 1 C
-    if resistors.len() != 1 || capacitors.len() != 1 { return None; }
-    let r_edge = resistors[0];
-    let c_edge = capacitors[0];
-    let r = match &graph.components[r_edge.comp_idx].kind { ComponentKind::Resistor(r) => *r, _ => return None };
-    let c = match &graph.components[c_edge.comp_idx].kind {
+    // Try output-rooted decomposition for simple 2-element circuits.
+    if let Some(stage) = build_output_rooted_stage(graph, &passive_edges, sample_rate, oversampling, vs_comp_idx) {
+        return Some(stage);
+    }
+
+    // Fallback: full tree with ShortCircuit root (all elements in tree, gnd at root).
+    let source_node = graph.edges.len() + 1000;
+    let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+    sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
+    for &eidx in &passive_edges {
+        let e = &graph.edges[eidx];
+        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+    }
+    let terminals = vec![source_node, graph.gnd_node];
+    let sp_tree = sp_reduce(sp_edges, &terminals).ok()?;
+    let mut all_components = graph.components.clone();
+    while all_components.len() <= vs_comp_idx {
+        all_components.push(ComponentDef {
+            id: "__vs__".to_string(),
+            kind: ComponentKind::Resistor(1.0),
+        });
+    }
+    let tree = sp_to_dyn_with_vs(&sp_tree, &all_components, &graph.fork_paths, sample_rate, vs_comp_idx);
+    let mut stage = WdfStage {
+        tree,
+        root: RootKind::ShortCircuit,
+        compensation: 1.0,
+        oversampler: Oversampler::new(oversampling),
+        base_diode_model: None, paired_opamp: None, dc_block: None,
+        is_source_follower: false, prev_source_voltage: 0.0,
+    };
+    stage.balance_vs_impedance();
+    Some(stage)
+}
+
+/// Build an output-rooted WDF stage for simple 2-element passive circuits.
+///
+/// The load element (connected out→gnd) is placed at the root. The source
+/// element + VS form the tree. VS impedance is set to the load's port
+/// resistance to maintain correct circuit time constants.
+fn build_output_rooted_stage(
+    graph: &CircuitGraph,
+    passive_edges: &[usize],
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+    vs_comp_idx: usize,
+) -> Option<WdfStage> {
+    if passive_edges.len() != 2 {
+        return None;
+    }
+
+    // Find the load edge (connects out_node to gnd_node) and source edge.
+    let mut load_idx = None;
+    let mut source_idx = None;
+    for &eidx in passive_edges {
+        let e = &graph.edges[eidx];
+        let connects_out_gnd = (e.node_a == graph.out_node && e.node_b == graph.gnd_node)
+            || (e.node_a == graph.gnd_node && e.node_b == graph.out_node);
+        if connects_out_gnd {
+            load_idx = Some(eidx);
+        } else {
+            source_idx = Some(eidx);
+        }
+    }
+    let load_eidx = load_idx?;
+    let source_eidx = source_idx?;
+
+    // Verify source edge connects in→out (through the circuit).
+    let source_edge = &graph.edges[source_eidx];
+    let connects_in_out = (source_edge.node_a == graph.in_node && source_edge.node_b == graph.out_node)
+        || (source_edge.node_a == graph.out_node && source_edge.node_b == graph.in_node);
+    if !connects_in_out {
+        return None;
+    }
+
+    let load_comp = &graph.components[graph.edges[load_eidx].comp_idx];
+    let source_comp = &graph.components[source_edge.comp_idx];
+
+    // Determine root kind based on load element type.
+    let (root, load_rp) = match &load_comp.kind {
+        ComponentKind::Resistor(r) => (RootKind::ResistiveTermination, *r),
         ComponentKind::Capacitor(cfg) => {
-            // Don't use IIR shortcut for caps with parasitics — fall through to WDF path
-            // which properly creates LeakyCapacitor nodes with leakage decay and DA state.
-            if cfg.leakage.is_some() || cfg.da.is_some() {
-                return None;
-            }
-            cfg.value
+            let rp = 1.0 / (2.0 * sample_rate * cfg.value);
+            (
+                RootKind::CapacitorRoot {
+                    capacitance: cfg.value,
+                    rp,
+                    state: 0.0,
+                },
+                rp,
+            )
+        }
+        ComponentKind::Inductor(l) => {
+            let rp = 2.0 * sample_rate * *l;
+            (
+                RootKind::InductorRoot {
+                    inductance: *l,
+                    rp,
+                    state: 0.0,
+                },
+                rp,
+            )
         }
         _ => return None,
     };
 
-    let r_in_out = (r_edge.node_a == graph.in_node && r_edge.node_b == graph.out_node)
-        || (r_edge.node_a == graph.out_node && r_edge.node_b == graph.in_node);
-    let c_out_gnd = (c_edge.node_a == graph.out_node && c_edge.node_b == graph.gnd_node)
-        || (c_edge.node_a == graph.gnd_node && c_edge.node_b == graph.out_node);
+    // Build tree: Series(VS, source_element), with VS rp set to load_rp.
+    // This ensures the tree's port resistance ≈ 2 * load_rp, giving correct
+    // scattering and time constants.
+    let source_node = graph.edges.len() + 1000;
+    let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
+    sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
+    sp_edges.push((source_edge.node_a, source_edge.node_b, SpTree::Leaf(source_edge.comp_idx)));
+    let terminals = vec![source_node, graph.out_node];
+    let sp_tree = sp_reduce(sp_edges, &terminals).ok()?;
 
-    if r_in_out && c_out_gnd {
-        let omega_rc = 2.0 * sample_rate * r * c;
-        let a1 = (omega_rc - 1.0) / (omega_rc + 1.0);
-        let b0 = 1.0 / (omega_rc + 1.0);
-        return Some(FilterTopology::RcLowpass { a1, b0 });
+    // Build component list with VS having load-matched impedance.
+    let mut all_components = graph.components.clone();
+    while all_components.len() <= vs_comp_idx {
+        all_components.push(ComponentDef {
+            id: "__vs__".to_string(),
+            kind: ComponentKind::Resistor(load_rp.max(1.0)),
+        });
     }
 
-    let c_in_out = (c_edge.node_a == graph.in_node && c_edge.node_b == graph.out_node)
-        || (c_edge.node_a == graph.out_node && c_edge.node_b == graph.in_node);
-    let r_out_gnd = (r_edge.node_a == graph.out_node && r_edge.node_b == graph.gnd_node)
-        || (r_edge.node_a == graph.gnd_node && r_edge.node_b == graph.out_node);
+    let mut tree = sp_to_dyn_with_vs(&sp_tree, &all_components, &graph.fork_paths, sample_rate, vs_comp_idx);
 
-    if c_in_out && r_out_gnd {
-        let omega_rc = 2.0 * sample_rate * r * c;
-        let a1 = (omega_rc - 1.0) / (omega_rc + 1.0);
-        let b0 = omega_rc / (omega_rc + 1.0);
-        return Some(FilterTopology::RcHighpass { a1, b0 });
+    // Set VS impedance to half the load impedance for correct time constants.
+    // In WDF, the root port termination implicitly contributes impedance equal
+    // to the tree's port resistance. Total effective R = VS_rp + tree_rp ≈ 2*VS_rp.
+    // Setting VS_rp = load_rp/2 gives total ≈ load_rp, matching the actual circuit.
+    let vs_rp = (load_rp / 2.0).max(1.0);
+    set_vs_impedance(&mut tree, vs_rp);
+    tree.recompute();
+
+    // Verify source element is in the tree (not just VS).
+    let has_source = match &source_comp.kind {
+        ComponentKind::Capacitor(_) | ComponentKind::Inductor(_) | ComponentKind::Resistor(_) => true,
+        _ => false,
+    };
+    if !has_source {
+        return None;
     }
 
-    None
+    Some(WdfStage {
+        tree,
+        root,
+        compensation: 1.0,
+        oversampler: Oversampler::new(oversampling),
+        base_diode_model: None, paired_opamp: None, dc_block: None,
+        is_source_follower: false, prev_source_voltage: 0.0,
+    })
 }
 
-/// DC simulation to compute gain correction for passive WDF circuits.
-fn compute_passive_compensation(tree: &DynNode) -> f64 {
-    let mut tree_copy = tree.clone();
-    let rp = tree_copy.port_resistance();
-    if rp <= 0.0 { return 1.0; }
-    tree_copy.set_voltage(1.0);
-    let b = tree_copy.reflected();
-    tree_copy.set_incident(-b);
-    let v_out = (-b + tree_copy.reflected()) / 2.0;
-    if v_out.abs() < 1e-12 { return 1.0; }
-    (1.0 / v_out.abs()).min(10.0)
+/// Set the voltage source impedance within a tree.
+fn set_vs_impedance(node: &mut DynNode, target_rp: f64) {
+    match node {
+        DynNode::VoltageSource { rp, .. } => *rp = target_rp,
+        DynNode::Series { left, right, .. } | DynNode::Parallel { left, right, .. } => {
+            set_vs_impedance(left, target_rp);
+            set_vs_impedance(right, target_rp);
+        }
+        _ => {}
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -288,63 +395,8 @@ pub fn compile_pedal_with_options(
         });
 
         if has_reactive {
-            let rc_filter = detect_rc_filter_topology(&graph, sample_rate);
-
-            if let Some(filter) = rc_filter {
-                let tree = DynNode::VoltageSource { voltage: 0.0, rp: 1.0 };
-                let root = match filter {
-                    FilterTopology::RcLowpass { a1, b0, .. } => RootKind::IirLowpass { a1, b0, y_prev: 0.0, x_prev: 0.0 },
-                    FilterTopology::RcHighpass { a1, b0, .. } => RootKind::IirHighpass { a1, b0, y_prev: 0.0, x_prev: 0.0 },
-                    FilterTopology::RlLowpass { a1, b0, .. } => RootKind::IirLowpass { a1, b0, y_prev: 0.0, x_prev: 0.0 },
-                };
-                stages.push(WdfStage {
-                    tree, root,
-                    compensation: 1.0,
-                    oversampler: Oversampler::new(oversampling),
-                    base_diode_model: None, paired_opamp: None, dc_block: None,
-                    is_source_follower: false, prev_source_voltage: 0.0,
-                });
-            } else {
-                // Fall back to WDF for complex passive circuits.
-                let vs_comp_idx = graph.components.len();
-                let passive_edges: Vec<usize> = graph.edges.iter().enumerate()
-                    .filter(|(_, e)| matches!(
-                        graph.components[e.comp_idx].kind,
-                        ComponentKind::Resistor(_) | ComponentKind::Capacitor(_)
-                            | ComponentKind::Inductor(_) | ComponentKind::Potentiometer(_, _)
-                    ))
-                    .map(|(i, _)| i)
-                    .collect();
-
-                if !passive_edges.is_empty() {
-                    let source_node = graph.edges.len() + 1000;
-                    let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-                    sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
-                    for &eidx in &passive_edges {
-                        let e = &graph.edges[eidx];
-                        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-                    }
-                    let terminals = vec![source_node, graph.gnd_node];
-                    if let Ok(sp_tree) = sp_reduce(sp_edges, &terminals) {
-                        let mut all_components = graph.components.clone();
-                        while all_components.len() <= vs_comp_idx {
-                            all_components.push(ComponentDef {
-                                id: "__vs__".to_string(),
-                                kind: ComponentKind::Resistor(1.0),
-                            });
-                        }
-                        let tree = sp_to_dyn_with_vs(&sp_tree, &all_components, &graph.fork_paths, sample_rate, vs_comp_idx);
-                        let compensation = compute_passive_compensation(&tree);
-                        stages.push(WdfStage {
-                            tree,
-                            root: RootKind::ShortCircuit,
-                            compensation,
-                            oversampler: Oversampler::new(oversampling),
-                            base_diode_model: None, paired_opamp: None, dc_block: None,
-                            is_source_follower: false, prev_source_voltage: 0.0,
-                        });
-                    }
-                }
+            if let Some(stage) = build_passive_wdf_stage(&graph, sample_rate, oversampling) {
+                stages.push(stage);
             }
         } else {
             passive_attenuation = compute_resistor_divider_gain(&graph);
