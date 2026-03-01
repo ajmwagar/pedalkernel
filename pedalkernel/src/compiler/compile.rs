@@ -2804,6 +2804,20 @@ pub fn compile_pedal_with_options(
     // The sidechain CV will be subtracted from this value each sample.
     let base_grid_bias = push_pull_stages.first().map_or(-2.0, |pp| pp.grid_bias);
 
+    // Build pot smoothers for all PotInStage controls.
+    // These provide zipper-free pot control by smoothly interpolating values.
+    let pot_smoothers: Vec<SmoothedParam> = controls
+        .iter()
+        .enumerate()
+        .filter_map(|(i, ctrl)| {
+            if matches!(ctrl.target, ControlTarget::PotInStage(_)) {
+                Some(SmoothedParam::new(0.5, i, sample_rate))
+            } else {
+                None
+            }
+        })
+        .collect();
+
     let mut compiled = CompiledPedal {
         stages,
         push_pull_stages,
@@ -2831,6 +2845,7 @@ pub fn compile_pedal_with_options(
         input_loading: None,
         output_loading: None,
         sidechains,
+        pot_smoothers,
         base_grid_bias,
     };
 

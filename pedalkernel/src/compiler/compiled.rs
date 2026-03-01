@@ -141,6 +141,65 @@ pub(super) struct EnvelopeBinding {
     pub(super) env_id: String,
 }
 
+/// Smoothed parameter for zipper-free pot control.
+///
+/// Uses a one-pole low-pass filter to smoothly interpolate from current
+/// to target value. This eliminates clicks/pops when knobs are turned.
+///
+/// Smoothing time is ~10ms (coefficient ~0.9995 at 48kHz).
+#[derive(Debug, Clone)]
+pub(super) struct SmoothedParam {
+    /// Target value (set immediately by user input)
+    pub target: f64,
+    /// Current smoothed value (approaches target over time)
+    pub current: f64,
+    /// Smoothing coefficient (0.9995 = ~10ms at 48kHz)
+    pub coef: f64,
+    /// Control index in the controls vec (for updating the actual control)
+    pub control_idx: usize,
+}
+
+impl SmoothedParam {
+    /// Create a new smoothed parameter.
+    pub fn new(initial: f64, control_idx: usize, sample_rate: f64) -> Self {
+        // Smoothing time constant ~10ms = 0.010 seconds
+        // coef = exp(-1 / (tau * fs)) ≈ exp(-1 / (0.010 * 48000)) ≈ 0.9979
+        let tau = 0.010; // 10ms smoothing
+        let coef = (-1.0 / (tau * sample_rate)).exp();
+        Self {
+            target: initial,
+            current: initial,
+            coef,
+            control_idx,
+        }
+    }
+
+    /// Advance the smoother by one sample. Returns true if value changed significantly.
+    #[inline]
+    pub fn advance(&mut self) -> bool {
+        let prev = self.current;
+        self.current = self.coef * self.current + (1.0 - self.coef) * self.target;
+        // Consider it "changed" if difference is > 0.0001 (1/10000th of range)
+        (self.current - prev).abs() > 0.0001
+    }
+
+    /// Set the target value (called from set_control).
+    pub fn set_target(&mut self, value: f64) {
+        self.target = value;
+    }
+
+    /// Check if we're close enough to target to stop smoothing.
+    pub fn is_settled(&self) -> bool {
+        (self.current - self.target).abs() < 0.0001
+    }
+
+    /// Update smoothing coefficient for new sample rate.
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        let tau = 0.010;
+        self.coef = (-1.0 / (tau * sample_rate)).exp();
+    }
+}
+
 /// Device-aware rail saturation model.
 ///
 /// Real rail saturation depends on the active device's output stage topology.
@@ -345,6 +404,9 @@ pub struct CompiledPedal {
     /// the push-pull grid bias. Multiple sidechains are supported
     /// (e.g., one per channel in a stereo compressor like the 670).
     pub(super) sidechains: Vec<SidechainProcessor>,
+    /// Smoothed parameters for zipper-free pot control.
+    /// One per pot in the circuit that needs smoothing.
+    pub(super) pot_smoothers: Vec<SmoothedParam>,
     /// Base (unmodulated) grid bias for push-pull stages.
     /// Stored so sidechain CV can be subtracted without accumulation.
     pub(super) base_grid_bias: f64,
@@ -681,16 +743,22 @@ impl CompiledPedal {
                 ControlTarget::OutputGain => {
                     self.output_gain = value;
                 }
-                ControlTarget::PotInStage(stage_idx) => {
-                    let stage_idx = *stage_idx;
-                    let comp_id = self.controls[i].component_id.clone();
-                    if let Some(stage) = self.stages.get_mut(stage_idx) {
-                        stage.tree.set_pot(&comp_id, value);
-                        // For 3-terminal pots: update synthetic halves with
-                        // inverse coupling. No-ops for 2-terminal pots.
-                        stage.tree.set_pot(&format!("{comp_id}__aw"), value);
-                        stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
-                        stage.tree.recompute();
+                ControlTarget::PotInStage(_stage_idx) => {
+                    // Use smoothing for pot changes to avoid zipper noise / clicks.
+                    // Find the smoother for this control and set the target.
+                    // The actual pot update happens in advance_smoothers().
+                    if let Some(smoother) = self.pot_smoothers.iter_mut().find(|s| s.control_idx == i) {
+                        smoother.set_target(value);
+                    } else {
+                        // Fallback: no smoother (shouldn't happen), update immediately
+                        let stage_idx = *_stage_idx;
+                        let comp_id = self.controls[i].component_id.clone();
+                        if let Some(stage) = self.stages.get_mut(stage_idx) {
+                            stage.tree.set_pot(&comp_id, value);
+                            stage.tree.set_pot(&format!("{comp_id}__aw"), value);
+                            stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
+                            stage.tree.recompute();
+                        }
                     }
                 }
                 ControlTarget::LfoRate(lfo_idx) => {
@@ -793,6 +861,35 @@ impl CompiledPedal {
         }
     }
 
+    /// Advance all pot smoothers and update WDF trees where values have changed.
+    ///
+    /// Call this once per sample (or per block for efficiency) to smoothly
+    /// interpolate pot values toward their targets. This eliminates zipper
+    /// noise and clicks when knobs are turned.
+    #[inline]
+    fn advance_smoothers(&mut self) {
+        for smoother in &mut self.pot_smoothers {
+            if smoother.is_settled() {
+                continue;
+            }
+            if smoother.advance() {
+                // Value changed, update the actual pot
+                let ctrl_idx = smoother.control_idx;
+                let value = smoother.current;
+                if let ControlTarget::PotInStage(stage_idx) = &self.controls[ctrl_idx].target {
+                    let stage_idx = *stage_idx;
+                    let comp_id = self.controls[ctrl_idx].component_id.clone();
+                    if let Some(stage) = self.stages.get_mut(stage_idx) {
+                        stage.tree.set_pot(&comp_id, value);
+                        stage.tree.set_pot(&format!("{comp_id}__aw"), value);
+                        stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
+                        stage.tree.recompute();
+                    }
+                }
+            }
+        }
+    }
+
     /// Debug dump: print complete pedal structure for debugging.
     ///
     /// Number of WDF stages (for debug reporting).
@@ -852,6 +949,10 @@ impl CompiledPedal {
 
 impl PedalProcessor for CompiledPedal {
     fn process(&mut self, input: f64) -> f64 {
+        // Advance pot smoothers — smoothly interpolate pot values toward targets.
+        // This eliminates zipper noise and clicks when knobs are turned.
+        self.advance_smoothers();
+
         // Tick thermal model — temperature changes are very slow (updated
         // every ~1000 samples internally), so the overhead is negligible.
         // The thermal state modulates diode Is and n_vt for each stage.
@@ -1306,6 +1407,9 @@ impl PedalProcessor for CompiledPedal {
         }
         if let Some(ref mut psu) = self.power_supply {
             psu.set_sample_rate(rate);
+        }
+        for smoother in &mut self.pot_smoothers {
+            smoother.set_sample_rate(rate);
         }
     }
 
