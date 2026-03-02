@@ -1687,7 +1687,6 @@ pub(super) struct PushPullPairInfo {
     /// Index into the merged triodes list for the pull half.
     pub(super) pull_triode_idx: usize,
     /// Edge index of the CT transformer connecting them.
-    #[allow(dead_code)]
     pub(super) transformer_edge_idx: usize,
     /// Turns ratio of the output transformer (primary:secondary).
     pub(super) turns_ratio: f64,

@@ -61,6 +61,8 @@ pub(super) struct PushPullPlan {
     pub(super) push_triode_list_idx: usize,
     /// Index into classified triodes for the pull half.
     pub(super) pull_triode_list_idx: usize,
+    /// Edge index of the output transformer in the circuit graph.
+    pub(super) transformer_edge_idx: usize,
     /// Turns ratio of the CT transformer.
     pub(super) turns_ratio: f64,
     /// Whether the transformer primary is center-tapped.
@@ -129,6 +131,7 @@ pub(super) fn plan_stages(
         .map(|p| PushPullPlan {
             push_triode_list_idx: triode_to_classified[p.push_triode_idx],
             pull_triode_list_idx: triode_to_classified[p.pull_triode_idx],
+            transformer_edge_idx: p.transformer_edge_idx,
             turns_ratio: p.turns_ratio,
             is_ct_primary: p.is_ct_primary,
         })

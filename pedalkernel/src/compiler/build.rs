@@ -110,6 +110,36 @@ pub(super) fn build_push_pull_stages(
             let pull_half = build_push_pull_half(&pull_plan, graph, sample_rate, vs_comp_idx);
 
             if let (Some((push_tree, push_comp)), Some((pull_tree, _))) = (push_half, pull_half) {
+                // Look up transformer config and wrap each half with reflected load.
+                let xfmr_edge = &graph.edges[pp_plan.transformer_edge_idx];
+                let xfmr_cfg = match &graph.components[xfmr_edge.comp_idx].kind {
+                    ComponentKind::Transformer(cfg) => cfg,
+                    _ => {
+                        // Shouldn't happen — plan already validated transformer.
+                        continue;
+                    }
+                };
+                let r_load = find_secondary_load_resistance(graph, xfmr_edge.comp_idx);
+
+                let push_tree = wrap_with_transformer_load(
+                    push_tree,
+                    xfmr_cfg.turns_ratio,
+                    r_load,
+                    xfmr_cfg.primary_inductance,
+                    xfmr_cfg.primary_dcr,
+                    pp_plan.is_ct_primary,
+                    sample_rate,
+                );
+                let pull_tree = wrap_with_transformer_load(
+                    pull_tree,
+                    xfmr_cfg.turns_ratio,
+                    r_load,
+                    xfmr_cfg.primary_inductance,
+                    xfmr_cfg.primary_dcr,
+                    pp_plan.is_ct_primary,
+                    sample_rate,
+                );
+
                 let (push_root, pull_root) = build_push_pull_roots(push_elem, pull_elem);
 
                 // Determine grid bias from tube type.
@@ -295,6 +325,119 @@ fn build_push_pull_roots(
     };
 
     (build_root(push_elem), build_root(pull_elem))
+}
+
+/// Find the load resistor on the transformer's secondary side.
+///
+/// Looks up the secondary pin nodes (`.c` and `.d`) via `graph.node_names`
+/// and searches for a resistor edge between them. Falls back to 600Ω
+/// (standard line-level termination) if not found.
+fn find_secondary_load_resistance(
+    graph: &CircuitGraph,
+    xfmr_comp_idx: usize,
+) -> f64 {
+    let comp = &graph.components[xfmr_comp_idx];
+    let sec_a_key = format!("{}.c", comp.id);
+    let sec_b_key = format!("{}.d", comp.id);
+
+    if let (Some(&node_a), Some(&node_b)) = (
+        graph.node_names.get(&sec_a_key),
+        graph.node_names.get(&sec_b_key),
+    ) {
+        for edge in &graph.edges {
+            if (edge.node_a == node_a && edge.node_b == node_b)
+                || (edge.node_a == node_b && edge.node_b == node_a)
+            {
+                if let ComponentKind::Resistor(r) = &graph.components[edge.comp_idx].kind {
+                    return *r;
+                }
+            }
+        }
+    }
+    600.0 // Default: standard 600Ω line-level termination
+}
+
+/// Build a reflected-impedance sub-tree for the output transformer and add
+/// it in series with an existing WDF tree.
+///
+/// Models:
+/// - **Reflected secondary load**: `n_eff² × R_load` (resistive, determines DC load line)
+/// - **Magnetizing inductance**: `L_primary/2` per half → LF rolloff modeled as
+///   a DC-blocking high-pass on the secondary (avoids WDF inductor transient issues)
+/// - **Primary DCR**: winding resistance (small, ~2.5Ω per half)
+///
+/// The reflected load is wrapped in a polarity-inverting ideal transformer (n = -1)
+/// to cancel the sign flip introduced by the Series adaptor at the root. This
+/// preserves the tube root's expected sign convention for the reflected wave.
+fn wrap_with_transformer_load(
+    tree: DynNode,
+    turns_ratio: f64,
+    r_load: f64,
+    _l_primary: f64,
+    primary_dcr: f64,
+    is_ct: bool,
+    _sample_rate: f64,
+) -> DynNode {
+    let n_eff = if is_ct { turns_ratio / 2.0 } else { turns_ratio };
+
+    // Secondary: just the load resistor (referred to secondary side).
+    // The magnetizing inductance LF rolloff is handled as a post-process
+    // high-pass filter rather than an in-tree WDF inductor, avoiding
+    // the DC transient/initialization issue that causes tube cutoff.
+    let secondary = DynNode::Resistor { rp: r_load };
+
+    // Ideal transformer: reflects secondary impedance to primary by n².
+    let xfmr_rp = n_eff * n_eff * r_load;
+    let mut xfmr: DynNode = DynNode::Transformer {
+        secondary: Box::new(secondary),
+        turns_ratio: n_eff,
+        rp: xfmr_rp,
+        b_sec: 0.0,
+    };
+
+    // Add primary DCR in series if non-zero.
+    let xfmr_total_rp;
+    if primary_dcr > 1e-6 {
+        let dcr = if is_ct { primary_dcr / 2.0 } else { primary_dcr };
+        let combined_rp = dcr + xfmr_rp;
+        xfmr = DynNode::Series {
+            left: Box::new(DynNode::Resistor { rp: dcr }),
+            right: Box::new(xfmr),
+            rp: combined_rp,
+            gamma: dcr / combined_rp,
+            b1: 0.0,
+            b2: 0.0,
+        };
+        xfmr_total_rp = combined_rp;
+    } else {
+        xfmr_total_rp = xfmr_rp;
+    }
+
+    // Add in series with existing tree.
+    //
+    // The Series adaptor's root port reflected wave is b = -(b_tree + b_xfmr),
+    // which NEGATES the Thevenin voltage. The tube root expects a positive
+    // reflected wave for a positive supply. To correct the polarity, we wrap
+    // the Series in an ideal transformer with n = -1 (polarity inverter).
+    // This cancels the sign flip: b_out = n * b_series = -1 * (-(b_tree + b_xfmr))
+    //                                    = b_tree + b_xfmr (correct sign)
+    // Port resistance is unchanged: n² * rp = 1 * rp.
+    let tree_rp = tree.port_resistance();
+    let total_rp = tree_rp + xfmr_total_rp;
+    let inner_series = DynNode::Series {
+        left: Box::new(tree),
+        right: Box::new(xfmr),
+        rp: total_rp,
+        gamma: tree_rp / total_rp,
+        b1: 0.0,
+        b2: 0.0,
+    };
+    DynNode::Transformer {
+        secondary: Box::new(inner_series),
+        turns_ratio: -1.0,
+        rp: total_rp, // n² = 1
+        b_sec: 0.0,
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

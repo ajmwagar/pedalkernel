@@ -18,6 +18,9 @@ cli = ["dep:clap"]
 hardware = []
 # Advanced BJT model with base charge modulation, junction capacitances
 gummel-poon = []
+# Enable detailed signal-level tracing for debugging WDF pipeline.
+# Zero-cost when disabled (tracing macros are no-ops without a subscriber).
+debug-trace = []
 
 [dependencies]
 # DSL parser

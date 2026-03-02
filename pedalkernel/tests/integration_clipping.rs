@@ -93,7 +93,8 @@ fn germanium_and_silicon_both_clip() {
 fn led_and_silicon_produce_different_clipping() {
     // LED (Vf≈1.7V) and Si (Vf≈0.6V) have different forward voltages,
     // which should produce different distortion characters.
-    let input = sine_at(440.0, 0.5, 0.2, SAMPLE_RATE);
+    // Use 2.5V amplitude so both LED and Si clip (LED Vf≈1.7V needs higher drive).
+    let input = sine_at(440.0, 2.5, 0.2, SAMPLE_RATE);
 
     let si_out = compile_test_pedal_and_process("clip_silicon.pedal", &input, SAMPLE_RATE, &[]);
     let led_out = compile_test_pedal_and_process("clip_led.pedal", &input, SAMPLE_RATE, &[]);
@@ -104,6 +105,12 @@ fn led_and_silicon_produce_different_clipping() {
     // Both should produce some distortion
     assert!(si_thd > 0.01, "Si should clip: thd={si_thd:.4}");
     assert!(led_thd > 0.01, "LED should clip: thd={led_thd:.4}");
+
+    // LED should clip less than Si at same level (higher Vf = more headroom)
+    assert!(
+        led_thd < si_thd,
+        "LED should clip less than Si (higher Vf): led_thd={led_thd:.4}, si_thd={si_thd:.4}"
+    );
 
     // They should differ (different Vf = different clipping characteristics)
     let corr = correlation(&si_out, &led_out).abs();
