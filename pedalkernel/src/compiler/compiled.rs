@@ -1002,6 +1002,8 @@ impl CompiledPedal {
     pub fn debug_push_pull_count(&self) -> usize { self.push_pull_stages.len() }
     /// Number of multi-NL stages (for debug reporting).
     pub fn debug_multi_nl_count(&self) -> usize { self.multi_nl_stages.len() }
+    /// Number of coupled BJT stages (for debug reporting).
+    pub fn debug_coupled_bjt_count(&self) -> usize { self.coupled_bjt_stages.len() }
 
     /// Shows gain structure, all WDF stages with their trees, and control bindings.
     pub fn debug_dump(&self) -> String {
@@ -1382,14 +1384,17 @@ impl PedalProcessor for CompiledPedal {
             );
         }
 
+        // Process through multi-NL stages (R-type adaptor + multi-port NR solver).
+        // These run before coupled BJT stages because they may include triode
+        // fallback stages from early in the signal chain (e.g., sidechain
+        // amplifier triodes that feed into later pentode WDF stages).
+        for mnl in &mut self.multi_nl_stages {
+            signal = mnl.process(signal);
+        }
+
         // Process through coupled BJT stages (e.g., Fuzz Face feedback pairs).
         for coupled in &mut self.coupled_bjt_stages {
             signal = coupled.process(signal);
-        }
-
-        // Process through multi-NL stages (R-type adaptor + multi-port NR solver).
-        for mnl in &mut self.multi_nl_stages {
-            signal = mnl.process(signal);
         }
 
         // Process through push-pull stages (differential tube amplifiers).

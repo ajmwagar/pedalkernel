@@ -28,6 +28,10 @@ use super::stage::{CoupledBjtStage, MultiNlDeviceGroups, MultiNlStage, NlDeviceG
 ///
 /// Each plan becomes one WdfStage through the same algorithm:
 /// build SP edges → sp_reduce → sp_to_dyn → create root → package stage.
+///
+/// Triode plans that fail SP reduction are retried as single-NL MNA stages
+/// (MultiNlStage with n_nl=1) using BFS passive collection, which handles
+/// non-SP topologies like inter-stage coupling networks.
 pub(super) fn build_stages(
     plans: &[StagePlan],
     classified: &ClassifiedCircuit,
@@ -35,13 +39,14 @@ pub(super) fn build_stages(
     opamp_analysis: &OpAmpAnalysis,
     sample_rate: f64,
     oversampling: OversamplingFactor,
-) -> Vec<WdfStage> {
+) -> (Vec<WdfStage>, Vec<MultiNlStage>) {
     let vs_comp_idx = graph.components.len();
 
     // Build unity-gain feedback op-amp queue for JFET pairing.
     let mut feedback_opamp_queue = super::opamp_analysis::build_unity_gain_queue(opamp_analysis, sample_rate);
 
     let mut stages: Vec<WdfStage> = Vec::new();
+    let mut fallback_multi_nl: Vec<MultiNlStage> = Vec::new();
 
     for plan in plans {
         let elem = &classified.nonlinear_elements[plan.element_idx];
@@ -61,6 +66,16 @@ pub(super) fn build_stages(
             }
 
             stages.push(stage);
+        } else if matches!(&elem.kind, NonlinearKind::Triode { .. }) {
+            // SP reduction failed for this triode — try building as a single-NL
+            // MNA stage. Uses plate+cathode adjacency to collect passives,
+            // which handles non-SP topologies (inter-stage coupling,
+            // Miller feedback, dangling nodes).
+            if let Some(multi_nl) = build_triode_mna_fallback(
+                plan, elem, classified, graph, sample_rate, oversampling,
+            ) {
+                fallback_multi_nl.push(multi_nl);
+            }
         }
     }
 
@@ -85,7 +100,73 @@ pub(super) fn build_stages(
         stage.balance_vs_impedance();
     }
 
-    stages
+    (stages, fallback_multi_nl)
+}
+
+/// Build a single-NL MNA stage for a triode that failed SP reduction.
+///
+/// Uses BFS from plate and cathode to collect only the passives that are
+/// topologically connected to the triode's circuit, avoiding output_passives
+/// from other stages that contaminate the plan. MNA handles arbitrary
+/// topologies (dangling nodes, non-SP branches) that SP reduction can't.
+fn build_triode_mna_fallback(
+    plan: &StagePlan,
+    elem: &super::classify::NonlinearElement,
+    classified: &ClassifiedCircuit,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+) -> Option<MultiNlStage> {
+    let (plate_node, cathode_node) = (elem.junction_nodes[0], elem.junction_nodes[1]);
+
+    // Collect passives directly adjacent to plate and cathode junctions,
+    // plus supply-adjacent edges. This is the "core" passive set for this
+    // triode — no output_passives from other stages.
+    let mut passive_edges = graph.elements_at_junction(
+        plate_node,
+        &classified.all_nonlinear_edge_indices,
+        &graph.active_edge_indices,
+    );
+
+    // Add supply-adjacent plate edges (plate loads to named supply rails).
+    for (idx, e) in graph.edges.iter().enumerate() {
+        if classified.all_nonlinear_edge_indices.contains(&idx) { continue; }
+        if graph.active_edge_indices.contains(&idx) { continue; }
+        if e.node_a != plate_node && e.node_b != plate_node { continue; }
+        let other = if e.node_a == plate_node { e.node_b } else { e.node_a };
+        if graph.supply_nodes.contains(&other) && !passive_edges.contains(&idx) {
+            passive_edges.push(idx);
+        }
+    }
+
+    // Cathode passives (skip for grounded-cathode tubes).
+    if cathode_node != graph.gnd_node {
+        let cathode_edges = graph.elements_at_junction(
+            cathode_node,
+            &classified.all_nonlinear_edge_indices,
+            &graph.active_edge_indices,
+        );
+        for idx in cathode_edges {
+            if !passive_edges.contains(&idx) {
+                passive_edges.push(idx);
+            }
+        }
+    }
+
+    if passive_edges.is_empty() {
+        return None;
+    }
+
+    let multi_nl_plan = MultiNlPlan {
+        nl_element_indices: vec![plan.element_idx],
+        output_element_idx: plan.element_idx,
+        passive_edge_indices: passive_edges,
+        injection_node: plan.injection_node,
+        nl_terminals: vec![(plate_node, cathode_node)],
+        compensation: plan.compensation,
+    };
+
+    try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling)
 }
 
 /// Build push-pull stages from plans.
@@ -262,7 +343,7 @@ pub(super) fn build_coupled_bjt_stages(
                     )
                 })
                 .collect();
-            let indep_stages = super::build::build_stages(
+            let (indep_stages, _triode_fb) = super::build::build_stages(
                 &plans, classified, graph, opamp_analysis, sample_rate, oversampling,
             );
             fallback_stages.extend(indep_stages);
@@ -338,7 +419,7 @@ fn try_build_multi_nl_stage(
     // n_nl = number of NL ports (terminal pairs), which may exceed the number
     // of NL elements (e.g., a 3-port VariMu triode has 1 element but 2 ports).
     let n_nl = plan.nl_terminals.len();
-    if n_nl < 2 || plan.passive_edge_indices.is_empty() {
+    if n_nl == 0 || plan.passive_edge_indices.is_empty() {
         return None;
     }
 
@@ -661,6 +742,40 @@ fn collect_sp_edges(
     graph: &CircuitGraph,
     vs_comp_idx: Option<usize>,
 ) -> (Vec<(usize, usize, SpTree)>, Option<usize>) {
+    collect_sp_edges_inner(plan, graph, vs_comp_idx, false)
+}
+
+/// Like `collect_sp_edges` but remaps named supply rail nodes to gnd_node.
+///
+/// Named supply rails (vcc_sc, A_bal, etc.) are ideal voltage sources with
+/// zero AC impedance, so a plate load to vcc_sc is AC-equivalent to ground.
+/// This is needed for sidechain triode stages whose plate loads connect to
+/// named supply rails rather than standard vcc.
+///
+/// NOT used for push-pull halves — those handle supply nodes via the
+/// `supply_leaf_voltages` mechanism + `sp_to_dyn_with_vs_and_supplies`.
+fn collect_sp_edges_with_supply_remap(
+    plan: &StagePlan,
+    graph: &CircuitGraph,
+    vs_comp_idx: Option<usize>,
+) -> (Vec<(usize, usize, SpTree)>, Option<usize>) {
+    collect_sp_edges_inner(plan, graph, vs_comp_idx, true)
+}
+
+fn collect_sp_edges_inner(
+    plan: &StagePlan,
+    graph: &CircuitGraph,
+    vs_comp_idx: Option<usize>,
+    remap_supply_nodes: bool,
+) -> (Vec<(usize, usize, SpTree)>, Option<usize>) {
+    let remap = |node: NodeId| -> NodeId {
+        if remap_supply_nodes && graph.supply_nodes.contains(&node) {
+            graph.gnd_node
+        } else {
+            node
+        }
+    };
+
     let mut sp_edges: Vec<(usize, usize, SpTree)> = Vec::new();
 
     if let Some(vs_idx) = vs_comp_idx {
@@ -669,7 +784,12 @@ fn collect_sp_edges(
 
     for &eidx in &plan.passive_idxs {
         let e = &graph.edges[eidx];
-        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
+        let na = remap(e.node_a);
+        let nb = remap(e.node_b);
+        // Skip self-loops (both endpoints mapped to same node, e.g., gnd-to-gnd).
+        if na != nb {
+            sp_edges.push((na, nb, SpTree::Leaf(e.comp_idx)));
+        }
     }
 
     let virtual_edge_idx = if let Some(ve) = &plan.virtual_edge {
@@ -715,7 +835,9 @@ fn build_vs_stage(
     oversampling: OversamplingFactor,
     vs_comp_idx: usize,
 ) -> Option<WdfStage> {
-    let (sp_edges, virtual_edge_idx) = collect_sp_edges(plan, graph, Some(vs_comp_idx));
+    // Use supply remap so triodes with plate loads to named supply rails
+    // (vcc_sc, A_bal, etc.) can reduce to valid SP trees.
+    let (sp_edges, virtual_edge_idx) = collect_sp_edges_with_supply_remap(plan, graph, Some(vs_comp_idx));
     let sp_tree = sp_reduce(sp_edges, &plan.terminals).ok()?;
 
     let ve_info = plan.virtual_edge.as_ref().zip(virtual_edge_idx);

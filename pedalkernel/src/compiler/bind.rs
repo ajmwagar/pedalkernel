@@ -369,8 +369,9 @@ pub(super) fn build_sidechains(
 
         match super::compile::compile_pedal(&sc_def, sample_rate) {
             Ok(compiled) => {
-                eprintln!("[sidechain] compiled OK: {} stages, {} push-pull",
-                    compiled.debug_stage_count(), compiled.debug_push_pull_count());
+                eprintln!("[sidechain] compiled OK: {} stages, {} push-pull, {} multi-nl",
+                    compiled.debug_stage_count(), compiled.debug_push_pull_count(),
+                    compiled.debug_multi_nl_count());
                 processors.push(SidechainProcessor {
                     circuit: compiled,
                     cv_delayed: 0.0,

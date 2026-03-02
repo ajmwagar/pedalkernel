@@ -368,7 +368,8 @@ pub fn compile_pedal_with_options(
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
     // Build nonlinear WDF stages from plans.
-    let nonlinear_stages = super::build::build_stages(
+    // Triode plans that fail SP reduction fall back to single-NL MNA stages.
+    let (nonlinear_stages, triode_fallback_stages) = super::build::build_stages(
         &stage_plans,
         &classified,
         &graph,
@@ -389,7 +390,7 @@ pub fn compile_pedal_with_options(
 
     // Build multi-NL stages (R-type adaptor approach).
     // Falls back to old coupled BJT stages if MNA construction fails.
-    let (multi_nl_stages, coupled_bjt_stages, multi_nl_fallback_stages) =
+    let (mut multi_nl_stages, coupled_bjt_stages, multi_nl_fallback_stages) =
         super::build::build_multi_nl_stages(
             &multi_nl_plans,
             &coupled_bjt_plans,
@@ -400,6 +401,9 @@ pub fn compile_pedal_with_options(
             oversampling,
         );
     stages.extend(multi_nl_fallback_stages);
+
+    // Add triode fallback stages (SP-failed triodes built as single-NL MNA).
+    multi_nl_stages.extend(triode_fallback_stages);
 
     // ══ Passive-only fallback ═════════════════════════════════════════
     let mut passive_attenuation = 1.0;

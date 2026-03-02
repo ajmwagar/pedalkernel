@@ -2454,6 +2454,130 @@ equipment "Push-Pull Compile" {
     );
 }
 
+/// Push-pull stage with named supply rails (vcc_sc) should still produce
+/// output — regression test for supply-node remap leaking into push-pull half
+/// SP reduction. The supply remap is only needed for standard triode stages;
+/// push-pull halves handle supply nodes via supply_leaf_voltages.
+#[test]
+fn push_pull_with_named_supply_produces_output() {
+    let src = r#"
+equipment "Push-Pull Named Supply" {
+  supplies {
+    vcc_pp: 300V
+  }
+  components {
+    C_in: cap(22n)
+    R_grid_push: resistor(1M)
+    R_grid_pull: resistor(1M)
+    V_push: triode(6386)
+    V_pull: triode(6386)
+    R_plate_push: resistor(33k)
+    R_plate_pull: resistor(33k)
+    R_cathode_push: resistor(470)
+    R_cathode_pull: resistor(470)
+    T_out: transformer(9:1, 35.7H, 5, 1p, ct_primary)
+    R_load: resistor(600)
+  }
+  nets {
+    in_L -> C_in.a
+    C_in.b -> R_grid_push.a, R_grid_pull.a
+    R_grid_push.b -> V_push.grid
+    R_grid_pull.b -> V_pull.grid
+    vcc_pp -> R_plate_push.a, R_plate_pull.a
+    R_plate_push.b -> V_push.plate
+    R_plate_pull.b -> V_pull.plate
+    V_push.cathode -> R_cathode_push.a
+    V_pull.cathode -> R_cathode_pull.a
+    R_cathode_push.b -> gnd
+    R_cathode_pull.b -> gnd
+    V_push.plate -> T_out.primary.a
+    V_pull.plate -> T_out.primary.b
+    T_out.primary.ct -> vcc_pp
+    T_out.secondary.a -> R_load.a, out_L
+    R_load.b -> T_out.secondary.b
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Should have at least 1 push-pull stage.
+    assert!(
+        proc.push_pull_stages.len() >= 1,
+        "Named-supply push-pull should compile, got {} push-pull stages",
+        proc.push_pull_stages.len()
+    );
+
+    // Process signal and verify non-zero output.
+    let n = 4800;
+    for _ in 0..2400 { proc.process(0.0); } // warmup
+    let mut sum_sq = 0.0;
+    for i in 0..n {
+        let t = i as f64 / 48000.0;
+        let input = 0.5 * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
+        let output = proc.process(input);
+        assert!(output.is_finite(), "NaN/inf in push-pull output");
+        sum_sq += output * output;
+    }
+    let rms = (sum_sq / n as f64).sqrt();
+    assert!(
+        rms > 1e-4,
+        "Named-supply push-pull RMS {rms:.2e} is too low — supply remap may be \
+         leaking into push-pull SP reduction"
+    );
+}
+
+/// Triode with plate load to a named supply rail should compile as either a
+/// WDF stage (via supply remap) or a multi-NL MNA fallback stage. This
+/// verifies the supply-remap codepath works for standard triode stages.
+#[test]
+fn triode_with_named_supply_compiles() {
+    let src = r#"
+equipment "Triode Named Supply" {
+  supplies {
+    vcc_ht: 300V
+  }
+  components {
+    C_in: cap(100n)
+    R_grid: resistor(1M)
+    V1: triode(12AX7)
+    R_plate: resistor(100k)
+    R_cathode: resistor(1.5k)
+    C_cathode: cap(25u)
+    C_out: cap(100n)
+    R_out: resistor(100k)
+  }
+  nets {
+    in_L -> C_in.a
+    C_in.b -> R_grid.a
+    R_grid.b -> gnd
+    C_in.b -> V1.grid
+    vcc_ht -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_out.a, out_L
+    R_out.b -> gnd
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Should compile to at least one stage (WDF or multi-NL fallback).
+    let wdf = proc.stages.len();
+    let mnl = proc.debug_multi_nl_count();
+    eprintln!("triode_with_named_supply: {} WDF, {} multi-NL", wdf, mnl);
+    assert!(
+        wdf + mnl >= 1,
+        "Triode with named supply should compile to at least 1 stage, \
+         got {} WDF + {} multi-NL",
+        wdf, mnl
+    );
+}
+
 /// Transformer pin aliasing: .primary.a/.primary.b should be unified with .a/.b
 #[test]
 fn transformer_pin_aliasing() {

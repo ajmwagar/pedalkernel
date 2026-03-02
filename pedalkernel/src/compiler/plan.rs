@@ -952,17 +952,48 @@ fn plan_triode_stage(
 ) -> Option<StagePlan> {
     let (plate_node, cathode_node) = (elem.junction_nodes[0], elem.junction_nodes[1]);
 
-    // Collect passives at plate and cathode.
+    // Collect passives directly adjacent to plate and cathode junctions.
     let plate_passives = graph.elements_at_junction(
         plate_node,
         &classified.all_nonlinear_edge_indices,
         &graph.active_edge_indices,
     );
-    let cathode_passives = graph.elements_at_junction(
-        cathode_node,
-        &classified.all_nonlinear_edge_indices,
-        &graph.active_edge_indices,
-    );
+
+    // Additionally collect plate load edges to named supply rails (vcc_sc, etc.)
+    // that elements_at_junction() excludes. These are plate load resistors
+    // needed in the WDF tree — supply rails are AC ground (zero impedance),
+    // so the plate load to vcc_sc is equivalent to a plate load to ground.
+    let plate_supply_edges: Vec<usize> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(idx, e)| {
+            if classified.all_nonlinear_edge_indices.contains(idx) {
+                return false;
+            }
+            if graph.active_edge_indices.contains(idx) {
+                return false;
+            }
+            if e.node_a != plate_node && e.node_b != plate_node {
+                return false;
+            }
+            let other = if e.node_a == plate_node { e.node_b } else { e.node_a };
+            graph.supply_nodes.contains(&other)
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+
+    // For grounded-cathode tubes (cathode_node == gnd_node), return empty
+    // to avoid collecting the entire ground network as "cathode passives."
+    let cathode_passives = if cathode_node == graph.gnd_node {
+        Vec::new()
+    } else {
+        graph.elements_at_junction(
+            cathode_node,
+            &classified.all_nonlinear_edge_indices,
+            &graph.active_edge_indices,
+        )
+    };
 
     // Plate-to-output edges.
     let plate_to_output: Vec<usize> = graph
@@ -985,6 +1016,7 @@ fn plan_triode_stage(
     );
 
     let mut passive_idxs: Vec<usize> = plate_passives.clone();
+    extend_dedup(&mut passive_idxs, &plate_supply_edges);
     extend_dedup(&mut passive_idxs, &cathode_passives);
     extend_dedup(&mut passive_idxs, &plate_to_output);
     extend_dedup(&mut passive_idxs, &output_passives);
