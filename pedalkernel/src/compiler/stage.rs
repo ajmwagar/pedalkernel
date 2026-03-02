@@ -753,13 +753,6 @@ pub(super) struct PushPullStage {
     pub(super) turns_ratio: f64,
     /// Grid bias voltage (class AB operating point).
     pub(super) grid_bias: f64,
-    /// Cathode coupling state (1-sample delay between push and pull cathodes).
-    /// Stores the previous sample's cathode voltage difference.
-    pub(super) cathode_delay_state: f64,
-    /// Whether the transformer primary is center-tapped.
-    /// When true, each tube drives half the primary, so the effective
-    /// per-tube turns ratio is `turns_ratio / 2`.
-    pub(super) is_ct_primary: bool,
 }
 
 impl PushPullStage {
@@ -797,25 +790,19 @@ impl PushPullStage {
             (a + b) / 2.0
         });
 
-        // Cathode coupling: 1-sample delay exchanges energy between halves.
-        // This models the bidirectional cathode bypass capacitor interaction.
-        let cathode_diff = push_out - pull_out;
-        let prev = self.cathode_delay_state;
-        self.cathode_delay_state = cathode_diff;
+        // Cross-coupled cathode delay: exchange unit-delay states between
+        // push and pull halves. This models the bidirectional cathode bypass
+        // capacitor interaction with 1-sample latency (wavechild670's E_VcathodeBias).
+        let push_cath = self.push_tree.get_unit_delay_state();
+        let pull_cath = self.pull_tree.get_unit_delay_state();
+        self.push_tree.set_unit_delay_partner(pull_cath);
+        self.pull_tree.set_unit_delay_partner(push_cath);
 
         // Differential output: push - pull, scaled by transformer turns ratio.
-        // For a center-tapped primary, each tube drives half the primary winding,
-        // so the effective per-tube ratio is turns_ratio/2 (e.g., 9:1 CT → 4.5:1).
-        // This matches wavechild670's model where each push/pull half has its own
-        // transformer at half the total turns ratio.
+        // The CT transformer load wrapping (in build.rs) already accounts for
+        // center-tap halving, so we use turns_ratio directly here.
         let diff = push_out - pull_out;
-        let coupled = diff * 0.5 + prev * 0.5; // Low-pass blend with delay
-        let effective_ratio = if self.is_ct_primary {
-            self.turns_ratio / 2.0
-        } else {
-            self.turns_ratio
-        };
-        let output = coupled / effective_ratio;
+        let output = diff / self.turns_ratio;
 
         #[cfg(feature = "debug-trace")]
         if input.abs() > 1e-10 {
@@ -830,8 +817,8 @@ impl PushPullStage {
                 );
                 eprintln!(
                     "  push_out={push_out:.6e} pull_out={pull_out:.6e} \
-                     diff={diff:.6e} coupled={coupled:.6e} \
-                     eff_ratio={effective_ratio:.2} out={output:.6e}"
+                     diff={diff:.6e} ratio={:.2} out={output:.6e}",
+                    self.turns_ratio
                 );
             }
         }
@@ -840,16 +827,9 @@ impl PushPullStage {
     }
 
     pub fn debug_dump(&self) -> String {
-        let effective_ratio = if self.is_ct_primary {
-            self.turns_ratio / 2.0
-        } else {
-            self.turns_ratio
-        };
         format!(
-            "PushPullStage(ratio={:.1}:1{}, eff_ratio={:.1}:1, bias={:.1}V, push_par={}, pull_par={}, comp={:.4})\n  Push: rp={:.1}Ω, nodes={}\n  Pull: rp={:.1}Ω, nodes={}",
+            "PushPullStage(ratio={:.1}:1, bias={:.1}V, push_par={}, pull_par={}, comp={:.4})\n  Push: rp={:.1}Ω, nodes={}\n  Pull: rp={:.1}Ω, nodes={}",
             self.turns_ratio,
-            if self.is_ct_primary { " CT" } else { "" },
-            effective_ratio,
             self.grid_bias,
             self.push_root.parallel_count(),
             self.pull_root.parallel_count(),

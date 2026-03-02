@@ -130,6 +130,30 @@ pub(super) enum DynNode {
         /// Cached secondary reflected wave
         b_sec: f64,
     },
+    /// Fixed cathode bias voltage source for push-pull stages.
+    ///
+    /// Behaves like a VoltageSource but its `set_voltage()` is a no-op —
+    /// it maintains a fixed DC level representing the cathode bias rail
+    /// (e.g., -3.1V for the Fairchild 670's A_bal supply).
+    /// This prevents the plate supply sweep (`set_voltage(vs=240)`) from
+    /// overwriting the cathode bias.
+    CathodeBiasSource {
+        voltage: f64,
+        rp: f64,
+    },
+    /// Unit delay for cross-coupled cathode exchange in push-pull stages.
+    ///
+    /// Each push/pull half has a UnitDelay at the cathode. After both halves
+    /// process, the states are exchanged: push's outgoing wave becomes pull's
+    /// incoming wave (and vice versa), modeling the bidirectional cathode
+    /// bypass capacitor interaction with 1-sample latency.
+    UnitDelay {
+        rp: f64,
+        /// Outgoing state: this half's incident wave, stored for the partner.
+        state: f64,
+        /// Incoming state: partner half's incident wave from the previous sample.
+        partner_state: f64,
+    },
     /// N-port R-type adaptor for non-series/parallel topologies.
     ///
     /// Used for 3-winding transformers, bridged-T networks, and other
@@ -154,6 +178,8 @@ impl DynNode {
             | Self::LeakyCapacitor { rp, .. }
             | Self::Inductor { rp, .. }
             | Self::VoltageSource { rp, .. }
+            | Self::CathodeBiasSource { rp, .. }
+            | Self::UnitDelay { rp, .. }
             | Self::Pot { rp, .. }
             | Self::SwitchedResistor { rp, .. }
             | Self::Series { rp, .. }
@@ -190,7 +216,9 @@ impl DynNode {
                 }
             }
             Self::Inductor { state, .. } => -*state,
-            Self::VoltageSource { voltage, .. } => 2.0 * *voltage,
+            Self::VoltageSource { voltage, .. }
+            | Self::CathodeBiasSource { voltage, .. } => 2.0 * *voltage,
+            Self::UnitDelay { partner_state, .. } => *partner_state,
             Self::Series {
                 left,
                 right,
@@ -238,8 +266,10 @@ impl DynNode {
             Self::Resistor { .. }
             | Self::Pot { .. }
             | Self::VoltageSource { .. }
+            | Self::CathodeBiasSource { .. }
             | Self::Photocoupler { .. }
             | Self::SwitchedResistor { .. } => {}
+            Self::UnitDelay { state, .. } => *state = a,
             Self::Capacitor { state, last_b, .. } => {
                 // Capture the reflected wave (current state) before updating
                 // This allows voltage extraction: V = (a + last_b) / 2
@@ -314,9 +344,12 @@ impl DynNode {
     }
 
     /// Set the voltage source value (searches recursively).
+    /// Note: CathodeBiasSource is intentionally excluded — it maintains a
+    /// fixed DC level and must not be overwritten by the plate supply sweep.
     pub fn set_voltage(&mut self, v: f64) {
         match self {
             Self::VoltageSource { voltage, .. } => *voltage = v,
+            Self::CathodeBiasSource { .. } => { /* fixed DC — do not update */ }
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.set_voltage(v);
                 right.set_voltage(v);
@@ -424,6 +457,10 @@ impl DynNode {
                 *last_b = 0.0;
             }
             Self::Inductor { state, .. } => *state = 0.0,
+            Self::UnitDelay { state, partner_state, .. } => {
+                *state = 0.0;
+                *partner_state = 0.0;
+            }
             Self::LeakyCapacitor {
                 state, da_state, ..
             } => {
@@ -851,6 +888,12 @@ impl DynNode {
             Self::VoltageSource { voltage, rp } => {
                 format!("{pad}VoltageSource(V={voltage:.3}V, Rp={rp:.1}Ω)")
             }
+            Self::CathodeBiasSource { voltage, rp } => {
+                format!("{pad}CathodeBiasSource(V={voltage:.3}V, Rp={rp:.1}Ω)")
+            }
+            Self::UnitDelay { rp, state, partner_state } => {
+                format!("{pad}UnitDelay(Rp={rp:.1}Ω, state={state:.6}, partner={partner_state:.6})")
+            }
             Self::Pot { comp_id, max_resistance, position, taper, rp } => {
                 format!("{pad}Pot(id=\"{comp_id}\", max={max_resistance:.1}Ω, pos={position:.3}, taper={taper:?}, Rp={rp:.1}Ω)")
             }
@@ -888,6 +931,45 @@ impl DynNode {
                 }
                 s
             }
+        }
+    }
+
+    /// Get the UnitDelay's outgoing state (for cross-coupled cathode exchange).
+    /// Searches recursively; returns 0.0 if no UnitDelay exists.
+    pub fn get_unit_delay_state(&self) -> f64 {
+        match self {
+            Self::UnitDelay { state, .. } => *state,
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                let l = left.get_unit_delay_state();
+                if l != 0.0 { l } else { right.get_unit_delay_state() }
+            }
+            Self::Transformer { secondary, .. } => secondary.get_unit_delay_state(),
+            Self::RType { children, .. } => {
+                children.iter().find_map(|c| {
+                    let v = c.get_unit_delay_state();
+                    if v != 0.0 { Some(v) } else { None }
+                }).unwrap_or(0.0)
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Set the UnitDelay's incoming partner state (for cross-coupled cathode exchange).
+    /// Searches recursively; returns true if a UnitDelay was found and updated.
+    pub fn set_unit_delay_partner(&mut self, val: f64) -> bool {
+        match self {
+            Self::UnitDelay { partner_state, .. } => {
+                *partner_state = val;
+                true
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                left.set_unit_delay_partner(val) || right.set_unit_delay_partner(val)
+            }
+            Self::Transformer { secondary, .. } => secondary.set_unit_delay_partner(val),
+            Self::RType { children, .. } => {
+                children.iter_mut().any(|c| c.set_unit_delay_partner(val))
+            }
+            _ => false,
         }
     }
 

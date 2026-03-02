@@ -36,6 +36,9 @@ pub(super) struct CircuitGraph {
     /// because supply voltages are injected as tube bias parameters, not
     /// as part of the WDF tree.
     pub(super) supply_nodes: HashSet<NodeId>,
+    /// Map from supply node ID → nominal voltage (volts).
+    /// Used by push-pull builders to create CathodeBiasSource leaves.
+    pub(super) supply_voltages: HashMap<NodeId, f64>,
     /// Number of active elements found (opamps + transistors).
     #[allow(dead_code)]
     pub(super) num_active: usize,
@@ -776,12 +779,14 @@ impl CircuitGraph {
         // (voltage source for plate loads, ground for cathode resistors).
         let vcc_node = uf.find(*pin_ids.get("vcc").unwrap());
         let mut supply_nodes: HashSet<NodeId> = HashSet::new();
+        let mut supply_voltages: HashMap<NodeId, f64> = HashMap::new();
         for supply in &pedal.supplies {
             if let Some(&raw_id) = pin_ids.get(&supply.name) {
                 let resolved = uf.find(raw_id);
                 // Skip vcc and gnd — they're standard WDF terminations
                 if resolved != vcc_node && resolved != gnd_node {
                     supply_nodes.insert(resolved);
+                    supply_voltages.insert(resolved, supply.config.voltage);
                 }
             }
         }
@@ -806,6 +811,7 @@ impl CircuitGraph {
             gnd_node,
             vcc_node,
             supply_nodes,
+            supply_voltages,
             num_active,
             active_edge_indices,
             fork_paths,
@@ -1175,7 +1181,6 @@ impl CircuitGraph {
                     pull_triode_idx: pull,
                     transformer_edge_idx: *xfmr_edge_idx,
                     turns_ratio: cfg.turns_ratio,
-                    is_ct_primary: matches!(cfg.primary_type, WindingType::CenterTap),
                 });
             }
         }
@@ -1225,13 +1230,16 @@ impl CircuitGraph {
     /// - Stops at transformer edges (don't cross magnetic isolation).
     /// - Stops at `gnd_node` and `vcc_node`: the edge TO them is collected but
     ///   BFS does not continue THROUGH them (they are global hubs).
-    /// - Named supply nodes (A_bal, etc.) ARE traversed through — they are
-    ///   local circuit junctions, not global hubs.
+    /// - Named supply nodes (A_bal, etc.): when `include_supply_adjacent` is
+    ///   false, edges to supply nodes are skipped entirely. When true, the edge
+    ///   IS collected (it's a plate load or cathode bias path) but BFS does NOT
+    ///   continue through the supply node (it's treated as a boundary).
     pub(super) fn bfs_passive_edges(
         &self,
         start: NodeId,
         nonlinear_indices: &[usize],
         active_indices: &[usize],
+        include_supply_adjacent: bool,
     ) -> Vec<usize> {
         let mut visited_nodes: HashSet<NodeId> = HashSet::new();
         let mut collected_edges: Vec<usize> = Vec::new();
@@ -1262,10 +1270,16 @@ impl CircuitGraph {
                 if n == self.out_node {
                     continue;
                 }
-                // Skip elements whose far node is a named supply rail.
-                // (supply_nodes excludes vcc and gnd — those are standard WDF
-                //  terminations handled by the gnd/vcc boundary below.)
+                // Named supply rail handling (supply_nodes excludes vcc and gnd —
+                // those are standard WDF terminations handled below).
                 if self.supply_nodes.contains(&n) {
+                    if include_supply_adjacent {
+                        // Collect this edge (plate load / cathode bias path) but
+                        // don't BFS further — supply node is a boundary.
+                        if visited_nodes.insert(n) {
+                            collected_edges.push(idx);
+                        }
+                    }
                     continue;
                 }
                 // Collect the edge if we haven't already visited the neighbor
@@ -1690,8 +1704,6 @@ pub(super) struct PushPullPairInfo {
     pub(super) transformer_edge_idx: usize,
     /// Turns ratio of the output transformer (primary:secondary).
     pub(super) turns_ratio: f64,
-    /// Whether the transformer primary is center-tapped.
-    pub(super) is_ct_primary: bool,
 }
 
 #[allow(dead_code)]

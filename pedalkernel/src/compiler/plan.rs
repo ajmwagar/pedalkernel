@@ -65,10 +65,6 @@ pub(super) struct PushPullPlan {
     pub(super) transformer_edge_idx: usize,
     /// Turns ratio of the CT transformer.
     pub(super) turns_ratio: f64,
-    /// Whether the transformer primary is center-tapped.
-    /// When true, each push/pull tube drives half the primary,
-    /// so the effective per-tube ratio is turns_ratio / 2.
-    pub(super) is_ct_primary: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -149,7 +145,6 @@ pub(super) fn plan_stages(
             pull_triode_list_idx: triode_to_classified[p.pull_triode_idx],
             transformer_edge_idx: p.transformer_edge_idx,
             turns_ratio: p.turns_ratio,
-            is_ct_primary: p.is_ct_primary,
         })
         .collect();
 
@@ -327,17 +322,21 @@ pub(super) fn plan_push_pull_half(
 ) -> Option<StagePlan> {
     if let NonlinearKind::Triode { plate_node, cathode_node, model_name, is_vari_mu, .. } = &elem.kind {
         // Multi-hop BFS: collect all passive edges reachable from plate/cathode,
-        // stopping at transformers, gnd, and vcc (but traversing through named
-        // supply junctions like A_bal).
+        // stopping at transformers, gnd, and vcc.
+        // include_supply_adjacent=true so edges to supply nodes (A_bal, B+, etc.)
+        // ARE collected as plate load / cathode bias paths, but BFS doesn't
+        // continue through them (they're boundary terminations).
         let plate_passives = graph.bfs_passive_edges(
             *plate_node,
             &classified.all_nonlinear_edge_indices,
             &graph.active_edge_indices,
+            true, // include_supply_adjacent
         );
         let cathode_passives = graph.bfs_passive_edges(
             *cathode_node,
             &classified.all_nonlinear_edge_indices,
             &graph.active_edge_indices,
+            true, // include_supply_adjacent
         );
 
         let mut passive_idxs: Vec<usize> = plate_passives.clone();
@@ -421,6 +420,18 @@ pub(super) fn plan_push_pull_half(
 
         let source_node = graph.edges.len() + 5000;
 
+        // Collect supply nodes that appear as edge endpoints — these become
+        // additional terminal nodes for sp_reduce (boundary terminations).
+        let mut terminals = vec![source_node, ground_terminal];
+        for &eidx in &passive_idxs {
+            let e = &graph.edges[eidx];
+            for &node in &[e.node_a, e.node_b] {
+                if graph.supply_nodes.contains(&node) && !terminals.contains(&node) {
+                    terminals.push(node);
+                }
+            }
+        }
+
         let model = super::helpers::triode_model(model_name);
         // For standard triodes, compensation scales by mu (e.g. 12AX7 mu=100 → 1.0).
         // For vari_mu tubes, compensation is the input transformer's voltage gain
@@ -436,7 +447,7 @@ pub(super) fn plan_push_pull_half(
         Some(StagePlan {
             passive_idxs,
             injection_node,
-            terminals: vec![source_node, ground_terminal],
+            terminals,
             source_node,
             virtual_edge: Some(VirtualEdge {
                 node_a: *plate_node,

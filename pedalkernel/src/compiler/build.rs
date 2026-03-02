@@ -120,25 +120,35 @@ pub(super) fn build_push_pull_stages(
                     }
                 };
                 let r_load = find_secondary_load_resistance(graph, xfmr_edge.comp_idx);
+                let is_ct = matches!(
+                    xfmr_cfg.primary_type,
+                    crate::dsl::WindingType::CenterTap | crate::dsl::WindingType::PushPull
+                );
 
-                let push_tree = wrap_with_transformer_load(
+                let mut push_tree = wrap_with_transformer_load(
                     push_tree,
                     xfmr_cfg.turns_ratio,
                     r_load,
                     xfmr_cfg.primary_inductance,
                     xfmr_cfg.primary_dcr,
-                    pp_plan.is_ct_primary,
+                    is_ct,
                     sample_rate,
                 );
-                let pull_tree = wrap_with_transformer_load(
+                let mut pull_tree = wrap_with_transformer_load(
                     pull_tree,
                     xfmr_cfg.turns_ratio,
                     r_load,
                     xfmr_cfg.primary_inductance,
                     xfmr_cfg.primary_dcr,
-                    pp_plan.is_ct_primary,
+                    is_ct,
                     sample_rate,
                 );
+
+                // Balance VS impedance and recompute adaptor coefficients.
+                balance_parallel_vs(&mut push_tree);
+                balance_parallel_vs(&mut pull_tree);
+                push_tree.recompute();
+                pull_tree.recompute();
 
                 let (push_root, pull_root) = build_push_pull_roots(push_elem, pull_elem);
 
@@ -158,8 +168,6 @@ pub(super) fn build_push_pull_stages(
                     compensation: push_comp,
                     turns_ratio: pp_plan.turns_ratio,
                     grid_bias,
-                    cathode_delay_state: 0.0,
-                    is_ct_primary: pp_plan.is_ct_primary,
                 });
             }
         }
@@ -379,19 +387,41 @@ fn build_source_follower_stage(
 }
 
 /// Build a push-pull half tree.
+///
+/// Identifies edges that terminate at supply nodes and creates
+/// `CathodeBiasSource` leaves for them instead of plain resistors.
 fn build_push_pull_half(
     plan: &StagePlan,
     graph: &CircuitGraph,
     sample_rate: f64,
     vs_comp_idx: usize,
 ) -> Option<(DynNode, f64)> {
+    // Identify which passive edges terminate at supply nodes.
+    // Map: comp_idx → supply voltage for creating CathodeBiasSource leaves.
+    let mut supply_leaf_voltages: std::collections::HashMap<usize, f64> = std::collections::HashMap::new();
+    for &eidx in &plan.passive_idxs {
+        let e = &graph.edges[eidx];
+        for &node in &[e.node_a, e.node_b] {
+            if let Some(&voltage) = graph.supply_voltages.get(&node) {
+                supply_leaf_voltages.insert(e.comp_idx, voltage);
+            }
+        }
+    }
+
     let (sp_edges, virtual_edge_idx) = collect_sp_edges(plan, graph, Some(vs_comp_idx));
     let sp_tree = sp_reduce(sp_edges, &plan.terminals).ok()?;
 
     let ve_info = plan.virtual_edge.as_ref().zip(virtual_edge_idx);
     let components = build_components_with_virtuals(graph, vs_comp_idx, ve_info);
 
-    let tree = sp_to_dyn_with_vs(&sp_tree, &components, &graph.fork_paths, sample_rate, vs_comp_idx);
+    let tree = if supply_leaf_voltages.is_empty() {
+        sp_to_dyn_with_vs(&sp_tree, &components, &graph.fork_paths, sample_rate, vs_comp_idx)
+    } else {
+        super::helpers::sp_to_dyn_with_vs_and_supplies(
+            &sp_tree, &components, &graph.fork_paths, sample_rate, vs_comp_idx,
+            &supply_leaf_voltages,
+        )
+    };
     Some((tree, plan.compensation))
 }
 
