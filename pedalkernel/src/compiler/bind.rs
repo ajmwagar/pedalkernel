@@ -11,7 +11,7 @@ use crate::elements::*;
 use super::compiled::*;
 use super::graph::CircuitGraph;
 use super::helpers::has_pot;
-use super::stage::{RootKind, SidechainProcessor, WdfStage};
+use super::stage::{CoupledBjtStage, RootKind, SidechainProcessor, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Control binding
@@ -21,6 +21,7 @@ use super::stage::{RootKind, SidechainProcessor, WdfStage};
 pub(super) fn build_controls(
     pedal: &PedalDef,
     stages: &[WdfStage],
+    coupled_bjt_stages: &[CoupledBjtStage],
     opamp_pot_map: &HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)>,
     lfo_ids: &[String],
     delay_id_to_idx: &HashMap<String, usize>,
@@ -115,12 +116,23 @@ pub(super) fn build_controls(
                 let mut found_stage = None;
                 for (si, stage) in stages.iter().enumerate() {
                     if has_pot(&stage.tree, &ctrl.component) {
-                        found_stage = Some(si);
+                        found_stage = Some(ControlTarget::PotInStage(si));
                         break;
                     }
                 }
+                // Also search coupled BJT stages for the pot.
+                if found_stage.is_none() {
+                    'outer: for (ci, coupled) in coupled_bjt_stages.iter().enumerate() {
+                        for (bi, (tree, _, _)) in coupled.bjt_stages.iter().enumerate() {
+                            if has_pot(tree, &ctrl.component) {
+                                found_stage = Some(ControlTarget::PotInCoupledBjtStage(ci, bi));
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
                 match found_stage {
-                    Some(si) => ControlTarget::PotInStage(si),
+                    Some(target) => target,
                     None => ControlTarget::PreGain,
                 }
             }

@@ -66,18 +66,34 @@ pub(super) struct PushPullPlan {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Coupled BJT plan
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Plan for a tightly-coupled BJT pair (e.g., Fuzz Face).
+///
+/// Coupled BJTs share feedback paths (collector→base or shared emitter/collector
+/// nodes via passives). They are processed as a single unit with 1-sample delay
+/// feedback coupling, rather than as independent stages.
+pub(super) struct CoupledBjtPlan {
+    /// Element indices in signal-flow order (first BJT receives input).
+    pub(super) bjt_element_indices: Vec<usize>,
+    /// Index of the BJT that produces the final output.
+    pub(super) output_bjt_idx: usize,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Planning
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Plan all WDF stages from classified nonlinear elements.
 ///
-/// Returns a list of stage plans (one per nonlinear element that has passives)
-/// and a list of push-pull plans.
+/// Returns a list of stage plans (one per nonlinear element that has passives),
+/// a list of push-pull plans, and a list of coupled BJT plans.
 pub(super) fn plan_stages(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     sample_rate: f64,
-) -> (Vec<StagePlan>, Vec<PushPullPlan>) {
+) -> (Vec<StagePlan>, Vec<PushPullPlan>, Vec<CoupledBjtPlan>) {
     // ── Push-pull detection for triodes ────────────────────────────────
     // Collect triode elements indices to detect push-pull pairs.
     let triode_elements: Vec<(usize, &NonlinearElement)> = classified
@@ -141,6 +157,115 @@ pub(super) fn plan_stages(
         })
         .collect();
 
+    // ── Coupled BJT detection ────────────────────────────────────────
+    // Collect all BJTs with their terminal nodes.
+    struct BjtInfo {
+        elem_idx: usize,
+        base_node: NodeId,
+        collector_node: NodeId,
+        emitter_node: NodeId,
+    }
+    let bjt_infos: Vec<BjtInfo> = classified
+        .nonlinear_elements
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, e)| match &e.kind {
+            NonlinearKind::BjtNpn { base_node, .. }
+            | NonlinearKind::BjtPnp { base_node, .. } => {
+                Some(BjtInfo {
+                    elem_idx: idx,
+                    base_node: *base_node,
+                    collector_node: e.junction_nodes[0],
+                    emitter_node: e.junction_nodes[1],
+                })
+            }
+            _ => None,
+        })
+        .collect();
+
+    // Union-find for BJT coupling.
+    let n_bjts = bjt_infos.len();
+    let mut parent: Vec<usize> = (0..n_bjts).collect();
+    fn find(parent: &mut Vec<usize>, mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    fn union(parent: &mut Vec<usize>, a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+
+    // Build coupling edges: BJT_i ↔ BJT_j if collector_i == base_j or
+    // collector_j == base_i (DC feedback), or they share emitter/collector
+    // nodes via passives.
+    for i in 0..n_bjts {
+        for j in (i + 1)..n_bjts {
+            let bi = &bjt_infos[i];
+            let bj = &bjt_infos[j];
+
+            // Direct DC feedback: collector of one feeds base of other.
+            let dc_coupled = bi.collector_node == bj.base_node
+                || bj.collector_node == bi.base_node;
+
+            // Shared emitter/collector nodes (via passives in between).
+            let shared_nodes = bi.emitter_node == bj.emitter_node
+                || bi.emitter_node == bj.collector_node
+                || bi.collector_node == bj.emitter_node
+                || bi.collector_node == bj.collector_node;
+
+            if dc_coupled || shared_nodes {
+                union(&mut parent, i, j);
+            }
+        }
+    }
+
+    // Group coupled BJTs into clusters.
+    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n_bjts {
+        let root = find(&mut parent, i);
+        clusters.entry(root).or_default().push(i);
+    }
+
+    // Build CoupledBjtPlan for clusters of 2+ BJTs.
+    let mut coupled_bjt_plans: Vec<CoupledBjtPlan> = Vec::new();
+    let mut coupled_bjt_elem_indices: HashSet<usize> = HashSet::new();
+
+    for (_root, members) in &clusters {
+        if members.len() < 2 {
+            continue;
+        }
+
+        // Order by distance from input (signal-flow order).
+        let mut ordered: Vec<usize> = members.clone();
+        ordered.sort_by_key(|&m| {
+            let info = &bjt_infos[m];
+            classified.dist_from_in.get(&info.base_node).copied().unwrap_or(usize::MAX)
+        });
+
+        let elem_indices: Vec<usize> = ordered.iter().map(|&m| bjt_infos[m].elem_idx).collect();
+
+        // Output BJT: the one closest to the output.
+        let output_idx = *ordered.iter().min_by_key(|&&m| {
+            let info = &bjt_infos[m];
+            classified.dist_from_out.get(&info.collector_node).copied().unwrap_or(usize::MAX)
+        }).unwrap();
+
+        for &ei in &elem_indices {
+            coupled_bjt_elem_indices.insert(ei);
+        }
+
+        coupled_bjt_plans.push(CoupledBjtPlan {
+            bjt_element_indices: elem_indices,
+            output_bjt_idx: bjt_infos[output_idx].elem_idx,
+        });
+    }
+
     // ── Plan each nonlinear element ────────────────────────────────────
     let mut plans: Vec<StagePlan> = Vec::new();
     let mut source_node_offset = 1000usize;
@@ -163,6 +288,11 @@ pub(super) fn plan_stages(
             }
         }
 
+        // Skip coupled BJTs (handled as CoupledBjtStage).
+        if coupled_bjt_elem_indices.contains(&elem_idx) {
+            continue;
+        }
+
         if let Some(plan) = plan_single_stage(
             elem,
             elem_idx,
@@ -178,7 +308,7 @@ pub(super) fn plan_stages(
         source_node_offset += 1000;
     }
 
-    (plans, push_pull_plans)
+    (plans, push_pull_plans, coupled_bjt_plans)
 }
 
 /// Plan a push-pull half (for building in build.rs).
@@ -457,62 +587,28 @@ fn plan_jfet_stage(
     }
 }
 
-/// Plan a BJT stage with feedback detection.
-fn plan_bjt_stage(
+/// Plan a BJT stage (simplified, matching triode pattern).
+pub(super) fn plan_bjt_stage(
     elem: &NonlinearElement,
     elem_idx: usize,
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
-    all_bjt_base_nodes: &HashSet<NodeId>,
+    _all_bjt_base_nodes: &HashSet<NodeId>,
     source_node_offset: usize,
 ) -> Option<StagePlan> {
     let (collector_node, emitter_node) = (elem.junction_nodes[0], elem.junction_nodes[1]);
 
-    // Feedback detection: collector merged with another BJT's base.
-    let has_feedback = all_bjt_base_nodes.contains(&collector_node);
+    let collector_passives = graph.elements_at_junction(
+        collector_node,
+        &classified.all_nonlinear_edge_indices,
+        &graph.active_edge_indices,
+    );
 
-    let collector_passives: Vec<usize> = if has_feedback {
-        // Carefully select passives to avoid non-SP topology.
-        let mut passives = Vec::new();
-        let mut found_gnd_resistor = false;
-
-        for (idx, e) in graph.edges.iter().enumerate() {
-            if classified.all_nonlinear_edge_indices.contains(&idx) { continue; }
-            if graph.active_edge_indices.contains(&idx) { continue; }
-            if e.node_a != collector_node && e.node_b != collector_node { continue; }
-            let other = if e.node_a == collector_node { e.node_b } else { e.node_a };
-            if other == graph.in_node { continue; }
-            if graph.supply_nodes.contains(&other) { continue; }
-            if other == graph.gnd_node {
-                if !found_gnd_resistor {
-                    if let ComponentKind::Resistor(_) = &graph.components[e.comp_idx].kind {
-                        found_gnd_resistor = true;
-                        passives.push(idx);
-                    }
-                }
-                continue;
-            }
-        }
-        passives
-    } else {
-        graph.elements_at_junction(
-            collector_node,
-            &classified.all_nonlinear_edge_indices,
-            &graph.active_edge_indices,
-        )
-    };
-
-    // Emitter passives, excluding VCC connections.
-    let vcc_node = *graph.node_names.get("vcc").unwrap_or(&graph.gnd_node);
-    let emitter_passives: Vec<usize> = graph
-        .elements_at_junction(emitter_node, &classified.all_nonlinear_edge_indices, &graph.active_edge_indices)
-        .into_iter()
-        .filter(|&idx| {
-            let e = &graph.edges[idx];
-            let other = if e.node_a == emitter_node { e.node_b } else { e.node_a };
-            other != vcc_node
-        })
-        .collect();
+    let emitter_passives = graph.elements_at_junction(
+        emitter_node,
+        &classified.all_nonlinear_edge_indices,
+        &graph.active_edge_indices,
+    );
 
     // Collector-to-output edges.
     let collector_to_output: Vec<usize> = graph
@@ -535,24 +631,11 @@ fn plan_bjt_stage(
         &graph.active_edge_indices,
     );
 
-    // Combine passive sets.
+    // Combine passive sets (matching triode pattern: always include all).
     let mut passive_idxs: Vec<usize> = collector_passives.clone();
     extend_dedup(&mut passive_idxs, &emitter_passives);
     extend_dedup(&mut passive_idxs, &collector_to_output);
-
-    // Only include output passives for final stage.
-    let collector_dist_out = classified.dist_from_out.get(&collector_node).copied().unwrap_or(usize::MAX);
-    let connects_to_output = !collector_to_output.is_empty() ||
-        collector_passives.iter().any(|&idx| {
-            let e = &graph.edges[idx];
-            let other = if e.node_a == collector_node { e.node_b } else { e.node_a };
-            let other_dist_out = classified.dist_from_out.get(&other).copied().unwrap_or(usize::MAX);
-            other_dist_out < collector_dist_out && !all_bjt_base_nodes.contains(&other)
-        });
-
-    if connects_to_output && !has_feedback {
-        extend_dedup(&mut passive_idxs, &output_passives);
-    }
+    extend_dedup(&mut passive_idxs, &output_passives);
 
     if passive_idxs.is_empty() {
         return None;

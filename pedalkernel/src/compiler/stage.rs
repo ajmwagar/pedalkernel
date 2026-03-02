@@ -798,6 +798,108 @@ impl PushPullStage {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Coupled BJT stage — tightly-coupled BJT pairs (e.g., Fuzz Face)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A coupled BJT stage processes multiple BJTs as a single unit with
+/// inter-stage feedback coupling via 1-sample delay.
+///
+/// This models circuits like the Fuzz Face where Q1's collector feeds Q2's
+/// base and Q2's emitter feeds back to Q1's emitter, creating a tightly
+/// coupled feedback loop.
+pub(super) struct CoupledBjtStage {
+    /// Per-BJT: (WDF tree, root kind, oversampler).
+    pub(super) bjt_stages: Vec<(DynNode, RootKind, Oversampler)>,
+    /// Per-BJT compensation factors.
+    pub(super) compensations: Vec<f64>,
+    /// 1-sample delay feedback state: output of last BJT feeds back to first.
+    pub(super) feedback_state: f64,
+    /// Coupling strength (how much feedback is applied).
+    pub(super) feedback_scale: f64,
+}
+
+impl CoupledBjtStage {
+    /// Process one sample through the coupled BJT chain.
+    ///
+    /// 1. Add feedback_state * feedback_scale to input for first BJT
+    /// 2. For each BJT in order: set Vbe from signal, process WDF tree, get output
+    /// 3. Store final output as feedback_state for next sample
+    pub fn process(&mut self, input: f64) -> f64 {
+        let mut signal = input + self.feedback_state * self.feedback_scale;
+
+        for (i, (tree, root, oversampler)) in self.bjt_stages.iter_mut().enumerate() {
+            let comp = self.compensations[i];
+
+            // Set Vbe/Veb from signal (matching WdfStage behavior).
+            match root {
+                RootKind::BjtNpn(ref mut bjt) => {
+                    const BJT_VBE_BIAS: f64 = 0.6;
+                    bjt.set_vbe(BJT_VBE_BIAS + signal * comp * 0.15);
+                }
+                RootKind::BjtPnp(ref mut bjt) => {
+                    const PNP_VEB_BIAS: f64 = 0.15;
+                    bjt.set_veb(PNP_VEB_BIAS + signal * comp * 0.3);
+                }
+                _ => {}
+            }
+
+            signal = oversampler.process(signal, |sample| {
+                tree.set_voltage(sample * comp);
+                let b_tree = tree.reflected();
+                let rp = tree.port_resistance();
+
+                let a_root = match root {
+                    RootKind::BjtNpn(bjt) => bjt.process(b_tree, rp),
+                    RootKind::BjtPnp(bjt) => bjt.process(b_tree, rp),
+                    _ => b_tree, // Shouldn't happen
+                };
+                tree.set_incident(a_root);
+                (a_root + b_tree) / 2.0
+            });
+        }
+
+        // Store output for 1-sample delay feedback.
+        self.feedback_state = signal;
+
+        signal
+    }
+
+    /// Reset all internal state.
+    pub fn reset(&mut self) {
+        for (tree, _, oversampler) in &mut self.bjt_stages {
+            tree.reset();
+            oversampler.reset();
+        }
+        self.feedback_state = 0.0;
+    }
+
+    /// Debug dump: print coupled stage structure.
+    pub fn debug_dump(&self) -> String {
+        let n = self.bjt_stages.len();
+        let mut s = format!(
+            "CoupledBjtStage(n_bjts={}, feedback_scale={:.4})\n",
+            n, self.feedback_scale
+        );
+        for (i, (tree, root, _)) in self.bjt_stages.iter().enumerate() {
+            let root_name = match root {
+                RootKind::BjtNpn(_) => "BjtNpn",
+                RootKind::BjtPnp(_) => "BjtPnp",
+                _ => "Unknown",
+            };
+            s.push_str(&format!(
+                "  [{}] root={}, comp={:.6}, tree_rp={:.1}Ω, nodes={}\n",
+                i,
+                root_name,
+                self.compensations[i],
+                tree.port_resistance(),
+                tree.node_count()
+            ));
+        }
+        s
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Sidechain processor — feedback compression loop
 // ═══════════════════════════════════════════════════════════════════════════
 
