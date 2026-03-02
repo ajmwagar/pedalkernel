@@ -56,6 +56,18 @@ pub(super) struct CircuitGraph {
     /// This covers transformers (primary↔secondary) and tubes (grid↔plate↔cathode).
     /// Maps each pin node → all other pin nodes of the same device.
     pub(super) coupled_nodes: HashMap<NodeId, Vec<NodeId>>,
+    /// Transformer winding info: maps winding pin nodes to their transformer
+    /// component index, whether they are secondary-side, and the turns ratio.
+    /// Used by build.rs to apply inter-stage voltage gain across transformers.
+    pub(super) transformer_info: HashMap<NodeId, TransformerNodeInfo>,
+}
+
+/// Identifies which transformer winding a node belongs to.
+#[derive(Clone, Debug)]
+pub(super) struct TransformerNodeInfo {
+    pub(super) comp_idx: usize,
+    pub(super) is_secondary: bool,
+    pub(super) turns_ratio: f64,
 }
 
 /// Result of partitioning sidechain edges from audio edges.
@@ -293,6 +305,7 @@ impl CircuitGraph {
         let mut num_active = 0usize;
         let mut deferred_3term: Vec<(usize, String)> = Vec::new();
         let mut coupled_nodes: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut transformer_info: HashMap<NodeId, TransformerNodeInfo> = HashMap::new();
 
         for (idx, comp) in all_components.iter().enumerate() {
             match &comp.kind {
@@ -646,6 +659,23 @@ impl CircuitGraph {
                         let others: Vec<NodeId> = all_winding_nodes.iter().copied().filter(|&x| x != n).collect();
                         coupled_nodes.entry(n).or_default().extend(others);
                     }
+
+                    // Record transformer winding info for inter-stage voltage gain.
+                    let n = cfg.turns_ratio;
+                    for node in [node_a, node_b] {
+                        transformer_info.insert(node, TransformerNodeInfo {
+                            comp_idx: idx,
+                            is_secondary: false,
+                            turns_ratio: n,
+                        });
+                    }
+                    for node in [node_c, node_d] {
+                        transformer_info.insert(node, TransformerNodeInfo {
+                            comp_idx: idx,
+                            is_secondary: true,
+                            turns_ratio: n,
+                        });
+                    }
                 }
                 ComponentKind::RotarySwitch(_) => {
                     // Rotary switch is a control element, not a circuit element.
@@ -817,6 +847,7 @@ impl CircuitGraph {
             fork_paths,
             node_names,
             coupled_nodes,
+            transformer_info,
         }
     }
 
@@ -1158,7 +1189,7 @@ impl CircuitGraph {
         &self,
         triodes: &[(usize, TriodeInfo)],
         nonlinear_edge_indices: &[usize],
-    ) -> Vec<PushPullPairInfo> {
+    ) -> (Vec<PushPullPairInfo>, HashSet<usize>) {
         // Find CT transformers (primary_type = CenterTap or PushPull).
         let mut ct_transformers: Vec<(usize, &TransformerConfig)> = Vec::new();
         for (edge_idx, e) in self.edges.iter().enumerate() {
@@ -1171,6 +1202,7 @@ impl CircuitGraph {
         }
 
         let mut pairs = Vec::new();
+        let mut pp_transformer_edges: HashSet<usize> = HashSet::new();
         let mut used_triodes: HashSet<usize> = HashSet::new();
 
         for (xfmr_edge_idx, cfg) in &ct_transformers {
@@ -1218,6 +1250,7 @@ impl CircuitGraph {
                 let pull = candidates[1];
                 used_triodes.insert(push);
                 used_triodes.insert(pull);
+                pp_transformer_edges.insert(*xfmr_edge_idx);
                 pairs.push(PushPullPairInfo {
                     push_triode_idx: push,
                     pull_triode_idx: pull,
@@ -1227,7 +1260,71 @@ impl CircuitGraph {
             }
         }
 
-        pairs
+        (pairs, pp_transformer_edges)
+    }
+
+    /// Find Standard-type transformers that are functionally push-pull.
+    ///
+    /// A Standard-type transformer (like T_sc_out in the 670) is functionally
+    /// push-pull if its primary nodes are reachable from both halves of a
+    /// push-pull triode pair. These must be skipped during BFS just like
+    /// explicit CT/PP transformers.
+    pub(super) fn find_pp_driven_transformer_edges(
+        &self,
+        push_pull_pairs: &[PushPullPairInfo],
+        triodes: &[(usize, TriodeInfo)],
+        nonlinear_edge_indices: &[usize],
+    ) -> HashSet<usize> {
+        let mut pp_driven: HashSet<usize> = HashSet::new();
+
+        // Collect plate nodes from all push-pull paired triodes.
+        let mut pp_plate_nodes: Vec<(NodeId, NodeId)> = Vec::new(); // (push_plate, pull_plate)
+        for pair in push_pull_pairs {
+            let push_plate = triodes[pair.push_triode_idx].1.plate_node;
+            let pull_plate = triodes[pair.pull_triode_idx].1.plate_node;
+            pp_plate_nodes.push((push_plate, pull_plate));
+        }
+
+        // Find Standard-type transformer edges.
+        let standard_xfmr_edges: Vec<usize> = self.edges.iter().enumerate()
+            .filter(|(_, e)| {
+                if let ComponentKind::Transformer(cfg) = &self.components[e.comp_idx].kind {
+                    matches!(cfg.primary_type, WindingType::Standard)
+                } else {
+                    false
+                }
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+
+        for &xfmr_idx in &standard_xfmr_edges {
+            let xfmr_edge = &self.edges[xfmr_idx];
+            let xfmr_nodes = [xfmr_edge.node_a, xfmr_edge.node_b];
+
+            // For each push-pull pair, BFS from each plate node through passives
+            // (excluding NL edges and the transformer itself).
+            for &(push_plate, pull_plate) in &pp_plate_nodes {
+                let mut exclude: Vec<usize> = nonlinear_edge_indices.to_vec();
+                exclude.push(xfmr_idx);
+
+                let push_reachable = self.bfs_through_passives(
+                    push_plate, &exclude, &self.active_edge_indices,
+                );
+                let pull_reachable = self.bfs_through_passives(
+                    pull_plate, &exclude, &self.active_edge_indices,
+                );
+
+                // If both push and pull plates can reach a transformer primary node,
+                // this transformer is functionally push-pull.
+                let push_reaches = xfmr_nodes.iter().any(|n| push_reachable.contains(n));
+                let pull_reaches = xfmr_nodes.iter().any(|n| pull_reachable.contains(n));
+                if push_reaches && pull_reaches {
+                    pp_driven.insert(xfmr_idx);
+                }
+            }
+        }
+
+        pp_driven
     }
 
     /// BFS through passive edges only, excluding specified nonlinear and active edges.
@@ -1282,6 +1379,8 @@ impl CircuitGraph {
         nonlinear_indices: &[usize],
         active_indices: &[usize],
         include_supply_adjacent: bool,
+        skip_out_node: bool,
+        pp_transformer_edges: &HashSet<usize>,
     ) -> Vec<usize> {
         let mut visited_nodes: HashSet<NodeId> = HashSet::new();
         let mut collected_edges: Vec<usize> = Vec::new();
@@ -1304,12 +1403,15 @@ impl CircuitGraph {
                     None
                 };
                 let Some(n) = neighbor else { continue };
-                // Skip transformer edges (magnetic isolation boundary).
+                // Skip push-pull transformer edges (magnetic isolation boundary).
+                // Non-PP transformers are kept so they can be built into WDF subtrees.
                 if matches!(self.components[e.comp_idx].kind, ComponentKind::Transformer(_)) {
-                    continue;
+                    if pp_transformer_edges.contains(&idx) {
+                        continue;
+                    }
                 }
                 // Skip edges to output node (those become output attenuation).
-                if n == self.out_node {
+                if skip_out_node && n == self.out_node {
                     continue;
                 }
                 // Named supply rail handling (supply_nodes excludes vcc and gnd —

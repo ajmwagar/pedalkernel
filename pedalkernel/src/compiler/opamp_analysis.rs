@@ -125,6 +125,8 @@ pub(super) fn build_opamp_feedback_stages(
                     dc_block: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
+                    signal_flow_distance: 0,
+                    transformer_gain: 1.0,
                 });
             }
             OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot } => {
@@ -160,6 +162,8 @@ pub(super) fn build_opamp_feedback_stages(
                     dc_block: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
+                    signal_flow_distance: 0,
+                    transformer_gain: 1.0,
                 });
             }
         }

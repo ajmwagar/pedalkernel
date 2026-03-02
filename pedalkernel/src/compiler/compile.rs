@@ -141,6 +141,7 @@ fn build_passive_wdf_stage(
         oversampler: Oversampler::new(oversampling),
         base_diode_model: None, paired_opamp: None, dc_block: None,
         is_source_follower: false, prev_source_voltage: 0.0,
+        signal_flow_distance: 0, transformer_gain: 1.0,
     };
     stage.balance_vs_impedance();
     Some(stage)
@@ -262,6 +263,7 @@ fn build_output_rooted_stage(
         oversampler: Oversampler::new(oversampling),
         base_diode_model: None, paired_opamp: None, dc_block: None,
         is_source_follower: false, prev_source_voltage: 0.0,
+        signal_flow_distance: 0, transformer_gain: 1.0,
     })
 }
 
@@ -363,7 +365,7 @@ pub fn compile_pedal_with_options(
     );
 
     // ══ Pass 3: Stage planning ════════════════════════════════════════
-    let (stage_plans, push_pull_plans, coupled_bjt_plans, multi_nl_plans) =
+    let (stage_plans, push_pull_plans, coupled_bjt_plans, multi_nl_plans, pp_transformer_edges) =
         super::plan::plan_stages(&classified, &graph, sample_rate);
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
@@ -376,6 +378,7 @@ pub fn compile_pedal_with_options(
         &opamp_analysis,
         sample_rate,
         oversampling,
+        &pp_transformer_edges,
     );
     stages.extend(nonlinear_stages);
 
@@ -386,6 +389,7 @@ pub fn compile_pedal_with_options(
         &graph,
         sample_rate,
         oversampling,
+        &pp_transformer_edges,
     );
 
     // Build multi-NL stages (R-type adaptor approach).
@@ -628,6 +632,24 @@ pub fn compile_pedal_with_options(
         })
         .collect();
 
+    // ══ Topological stage ordering ═════════════════════════════════════
+    // Build a unified stage execution order sorted by signal_flow_distance.
+    // This ensures stages process in signal-flow order regardless of type.
+    let stage_order = {
+        let mut order: Vec<(StageRef, usize)> = Vec::new();
+        for (i, s) in stages.iter().enumerate() {
+            order.push((StageRef::Wdf(i), s.signal_flow_distance));
+        }
+        for (i, s) in multi_nl_stages.iter().enumerate() {
+            order.push((StageRef::MultiNl(i), s.signal_flow_distance));
+        }
+        for (i, s) in coupled_bjt_stages.iter().enumerate() {
+            order.push((StageRef::CoupledBjt(i), s.signal_flow_distance));
+        }
+        order.sort_by_key(|(_, dist)| *dist);
+        order.into_iter().map(|(sr, _)| sr).collect::<Vec<_>>()
+    };
+
     // ══ Assembly ══════════════════════════════════════════════════════
     let mut compiled = CompiledPedal {
         stages,
@@ -668,6 +690,7 @@ pub fn compile_pedal_with_options(
             m
         },
         base_grid_bias,
+        stage_order,
     };
 
     let initial_voltage = match &compiled.power_supply {

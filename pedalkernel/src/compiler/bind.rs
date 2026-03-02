@@ -369,9 +369,10 @@ pub(super) fn build_sidechains(
 
         match super::compile::compile_pedal(&sc_def, sample_rate) {
             Ok(compiled) => {
-                eprintln!("[sidechain] compiled OK: {} stages, {} push-pull, {} multi-nl",
+                eprintln!("[sidechain] compiled OK: {} stages, {} push-pull, {} multi-nl, {} coupled-bjt",
                     compiled.debug_stage_count(), compiled.debug_push_pull_count(),
-                    compiled.debug_multi_nl_count());
+                    compiled.debug_multi_nl_count(), compiled.debug_coupled_bjt_count());
+                eprintln!("[sidechain] debug_dump:\n{}", compiled.debug_dump());
                 processors.push(SidechainProcessor {
                     circuit: compiled,
                     cv_delayed: 0.0,
@@ -607,6 +608,33 @@ fn extract_sidechain_def(
         }
     };
 
+    // Collect internal sidechain node names: Reserved pin names that appear
+    // in nets alongside sidechain component pins. These are internal nodes
+    // (e.g., node_rect_pos, node_rect_neg in a bridge rectifier) that must
+    // be preserved so shared connections aren't lost.
+    let sc_internal_nodes: HashSet<String> = {
+        let mut nodes = HashSet::new();
+        for net in &pedal.nets {
+            let all_pins: Vec<&Pin> = std::iter::once(&net.from).chain(net.to.iter()).collect();
+            let has_sc_component = all_pins.iter().any(|p| {
+                matches!(p, Pin::ComponentPin { component, .. } if component_ids.contains(component))
+            });
+            if has_sc_component {
+                for p in &all_pins {
+                    if let Pin::Reserved(n) = p {
+                        // Don't include standard pins or supply rails — only internal nodes.
+                        if n != tap_node && n != cv_node && n != "gnd" && n != "vcc"
+                            && n != "in" && n != "out" && !pedal.is_supply_rail(n)
+                        {
+                            nodes.insert(n.clone());
+                        }
+                    }
+                }
+            }
+        }
+        nodes
+    };
+
     let nets: Vec<NetDef> = pedal
         .nets
         .iter()
@@ -618,6 +646,7 @@ fn extract_sidechain_def(
                 Pin::Reserved(n) => {
                     n == "in" || n == "out" || n == "gnd" || n == "vcc"
                         || pedal.is_supply_rail(n)
+                        || sc_internal_nodes.contains(n)
                 }
                 Pin::ComponentPin { component, .. } => component_ids.contains(component),
                 Pin::Fork { switch, .. } => component_ids.contains(switch),

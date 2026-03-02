@@ -2342,7 +2342,7 @@ equipment "Push-Pull Test" {
     let (triodes, all_triode_edges) = graph.find_triodes();
     assert_eq!(triodes.len(), 2, "Should have 2 triode groups");
 
-    let pairs = graph.find_push_pull_triode_pairs(&triodes, &all_triode_edges);
+    let (pairs, _pp_xfmr_edges) = graph.find_push_pull_triode_pairs(&triodes, &all_triode_edges);
     assert_eq!(
         pairs.len(),
         1,

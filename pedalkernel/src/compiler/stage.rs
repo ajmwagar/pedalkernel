@@ -151,6 +151,12 @@ pub(super) struct WdfStage {
     /// Previous source voltage for source follower Vgs calculation.
     /// Vgs[n] = input[n] - Vsource[n-1]
     pub(super) prev_source_voltage: f64,
+    /// BFS distance from input of the injection node (for topological ordering).
+    pub(super) signal_flow_distance: usize,
+    /// Inter-stage voltage gain from a transformer boundary.
+    /// When the stage's injection node is on a transformer secondary,
+    /// this is 1/turns_ratio (e.g., 17.0 for a 1:17 step-up).
+    pub(super) transformer_gain: f64,
 }
 
 impl WdfStage {
@@ -168,6 +174,9 @@ impl WdfStage {
     /// the signal's phase.
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
+        // Apply inter-stage transformer voltage gain (1.0 when no transformer).
+        let input = input * self.transformer_gain;
+
         // Borrow fields individually to satisfy the borrow checker
         let tree = &mut self.tree;
         let root = &mut self.root;
@@ -862,6 +871,8 @@ pub(super) struct CoupledBjtStage {
     pub(super) feedback_state: f64,
     /// Coupling strength (how much feedback is applied).
     pub(super) feedback_scale: f64,
+    /// BFS distance from input of the injection node (for topological ordering).
+    pub(super) signal_flow_distance: usize,
 }
 
 impl CoupledBjtStage {
@@ -1109,6 +1120,12 @@ pub(super) struct MultiNlStage {
     /// Data for recomputing scattering matrix when pots change.
     /// None if the stage has no pots (no recomputation needed).
     pub(super) recompute_data: Option<ScatteringRecomputeData>,
+    /// BFS distance from input of the injection node (for topological ordering).
+    pub(super) signal_flow_distance: usize,
+    /// Inter-stage voltage gain from a transformer boundary.
+    /// When the stage's injection node is on a transformer secondary,
+    /// this is 1/turns_ratio (e.g., 17.0 for a 1:17 step-up).
+    pub(super) transformer_gain: f64,
 }
 
 impl MultiNlStage {
@@ -1123,6 +1140,9 @@ impl MultiNlStage {
     ///    e. Output = (a_out + b_nl[output_port]) / 2 (voltage at output NL port)
     /// 3. Return output sample
     pub fn process(&mut self, input: f64) -> f64 {
+        // Apply inter-stage transformer voltage gain (1.0 when no transformer).
+        let input = input * self.transformer_gain;
+
         let compensation = self.compensation;
         let n_nl = self.n_nl;
         let n_passive = self.passive_children.len();
@@ -1205,9 +1225,13 @@ impl MultiNlStage {
                 child.set_incident(a_all[n_nl + k]);
             }
 
-            // 6. Output = (a + b) / 2 at the output NL port
+            // 6. Output = (a + b) / 2 at the output port (NL or passive)
             let a_out = a_all[output_port];
-            let b_out = b_nl[output_port];
+            let b_out = if output_port < n_nl {
+                b_nl[output_port]
+            } else {
+                b_passive[output_port - n_nl]
+            };
             (a_out + b_out) / 2.0
         })
     }
@@ -1358,8 +1382,8 @@ impl MultiNlStage {
 // Sidechain processor — feedback compression loop
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Sidechain processor — a sub-circuit compiled through the same pipeline
-/// as the main audio path.
+/// Sidechain processor — a sub-circuit compiled through the same WDF
+/// pipeline as the main audio path.
 ///
 /// The sidechain is extracted from the parent PedalDef as a separate
 /// sub-PedalDef containing its own components, nets, controls, and supplies.

@@ -11,6 +11,14 @@ use std::sync::Arc;
 
 use super::stage::{CoupledBjtStage, MultiNlStage, PushPullStage, RootKind, SidechainProcessor, WdfStage};
 
+/// Reference to a stage by type and index, for topological ordering.
+#[derive(Clone, Copy)]
+pub(super) enum StageRef {
+    Wdf(usize),
+    MultiNl(usize),
+    CoupledBjt(usize),
+}
+
 #[cfg(feature = "debug-trace")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -440,6 +448,10 @@ pub struct CompiledPedal {
     /// Base (unmodulated) grid bias for push-pull stages.
     /// Stored so sidechain CV can be subtracted without accumulation.
     pub(super) base_grid_bias: f64,
+    /// Topological ordering of WDF, multi-NL, and coupled BJT stages.
+    /// Stages are sorted by signal_flow_distance so earlier stages in the
+    /// signal path process first, regardless of stage type.
+    pub(super) stage_order: Vec<StageRef>,
 }
 
 /// Gain-like control labels.
@@ -1327,74 +1339,81 @@ impl PedalProcessor for CompiledPedal {
             signal = loading.process(signal);
         }
 
-        // Process through WDF stages.  Only diode-clipping stages get
-        // inter-stage re-amplification: clipping squashes the signal to the
-        // diode forward voltage (~0.3–0.7 V), so each subsequent clipper
-        // needs the signal re-driven.  Non-clipping stages (JFETs acting as
-        // variable resistors in phasers, op-amp buffers, BJT gain stages)
-        // pass the signal at roughly the same amplitude; re-applying
-        // pre_gain before them causes exponential level growth
-        // (pre_gain^N for N stages).
+        // Process all stages in topological (signal-flow) order.
+        // WDF, multi-NL, and coupled BJT stages are interleaved by their
+        // signal_flow_distance so earlier stages process first regardless of type.
+        // WDF clipping stages get inter-stage re-amplification.
         let mut prev_was_clipping = false;
         let num_stages = self.stages.len();
         let mut stage_levels = [0.0f64; crate::metering::MAX_STAGES];
-        for (stage_idx, stage) in self.stages.iter_mut().enumerate() {
-            // Re-amplify only after the *previous* stage clipped.
-            if prev_was_clipping {
-                signal *= self.pre_gain;
-            }
-            prev_was_clipping = stage.root.is_clipping_stage();
+        let mut wdf_stage_counter = 0usize;
 
-            // For stages with a paired op-amp buffer (all-pass circuits),
-            // set the op-amp's Vp to the stage input BEFORE processing.
-            // The op-amp buffer models the unity-gain amplifier that
-            // compensates for passive R/C network attenuation in the WDF tree.
-            if stage.has_paired_opamp() {
-                stage.set_paired_opamp_vp(signal);
-            }
+        for sr in &self.stage_order {
+            match sr {
+                StageRef::Wdf(i) => {
+                    let stage = &mut self.stages[*i];
+                    // Re-amplify only after the *previous* stage clipped.
+                    if prev_was_clipping {
+                        signal *= self.pre_gain;
+                    }
+                    prev_was_clipping = stage.root.is_clipping_stage();
 
-            let pre_stage = signal;
-            signal = stage.process(signal);
+                    if stage.has_paired_opamp() {
+                        stage.set_paired_opamp_vp(signal);
+                    }
 
-            #[cfg(feature = "debug-trace")]
-            if trace_on {
-                eprintln!(
-                    "  [WDF {stage_idx}] in={pre_stage:.6e} out={signal:.6e} rp={:.1}",
-                    stage.tree.port_resistance()
-                );
-            }
+                    #[cfg(feature = "debug-trace")]
+                    let pre_stage = signal;
+                    signal = stage.process(signal);
 
-            // Capture per-stage output level for metering (fed to accumulator below)
-            if stage_idx < crate::metering::MAX_STAGES {
-                stage_levels[stage_idx] = signal;
-            }
+                    #[cfg(feature = "debug-trace")]
+                    if trace_on {
+                        eprintln!(
+                            "  [WDF {wdf_stage_counter}] in={pre_stage:.6e} out={signal:.6e} rp={:.1}",
+                            stage.tree.port_resistance()
+                        );
+                    }
 
-            // Record per-stage level for debug
-            #[cfg(debug_assertions)]
-            if let Some(ref stats) = self.debug_stats {
-                stats.record_stage_level(stage_idx, signal);
+                    if wdf_stage_counter < crate::metering::MAX_STAGES {
+                        stage_levels[wdf_stage_counter] = signal;
+                    }
+
+                    #[cfg(debug_assertions)]
+                    if let Some(ref stats) = self.debug_stats {
+                        stats.record_stage_level(wdf_stage_counter, signal);
+                    }
+                    wdf_stage_counter += 1;
+                }
+                StageRef::MultiNl(i) => {
+                    prev_was_clipping = false;
+                    #[cfg(feature = "debug-trace")]
+                    let pre = signal;
+                    signal = self.multi_nl_stages[*i].process(signal);
+                    #[cfg(feature = "debug-trace")]
+                    if trace_on {
+                        eprintln!(
+                            "  [MNL {i}] in={pre:.6e} out={signal:.6e} n_nl={} n_passive={} out_port={}",
+                            self.multi_nl_stages[*i].n_nl,
+                            self.multi_nl_stages[*i].passive_children.len(),
+                            self.multi_nl_stages[*i].output_port,
+                        );
+                    }
+                }
+                StageRef::CoupledBjt(i) => {
+                    prev_was_clipping = false;
+                    signal = self.coupled_bjt_stages[*i].process(signal);
+                }
             }
         }
 
         #[cfg(feature = "debug-trace")]
         if trace_on {
             eprintln!(
-                "  [PRE-PP] signal={signal:.6e} n_pp={} n_sc={}",
-                self.push_pull_stages.len(), self.sidechains.len()
+                "  [PRE-PP] signal={signal:.6e} n_pp={} n_sc={} stage_order={}(wdf={}, mnl={}, cbj={})",
+                self.push_pull_stages.len(), self.sidechains.len(),
+                self.stage_order.len(), self.stages.len(),
+                self.multi_nl_stages.len(), self.coupled_bjt_stages.len()
             );
-        }
-
-        // Process through multi-NL stages (R-type adaptor + multi-port NR solver).
-        // These run before coupled BJT stages because they may include triode
-        // fallback stages from early in the signal chain (e.g., sidechain
-        // amplifier triodes that feed into later pentode WDF stages).
-        for mnl in &mut self.multi_nl_stages {
-            signal = mnl.process(signal);
-        }
-
-        // Process through coupled BJT stages (e.g., Fuzz Face feedback pairs).
-        for coupled in &mut self.coupled_bjt_stages {
-            signal = coupled.process(signal);
         }
 
         // Process through push-pull stages (differential tube amplifiers).
@@ -1434,8 +1453,13 @@ impl PedalProcessor for CompiledPedal {
 
         // Process sidechains: tap the audio output and compute CV for next sample.
         // The 1-sample delay is inherent and correct for discrete-time feedback.
-        for sc in &mut self.sidechains {
+        for (i, sc) in self.sidechains.iter_mut().enumerate() {
             let cv = sc.process(signal);
+            #[cfg(feature = "debug-trace")]
+            if trace_on {
+                eprintln!("  [SC {i}] tap={signal:.6e} cv_out={cv:.6e} cv_prev={:.6e}", sc.cv_delayed);
+            }
+            let _ = i;
             sc.cv_delayed = cv;
         }
 

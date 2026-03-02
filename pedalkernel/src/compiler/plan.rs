@@ -107,6 +107,11 @@ pub(super) struct MultiNlPlan {
     pub(super) nl_terminals: Vec<(NodeId, NodeId)>,
     /// Compensation factor.
     pub(super) compensation: f64,
+    /// Optional output node for passive-port output extraction.
+    /// When Some, the output is taken from a passive child port touching this node
+    /// rather than from an NL port. Used for bridge rectifier + RC stages where
+    /// the output is the smoothed DC voltage across a capacitor.
+    pub(super) output_node: Option<NodeId>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -122,7 +127,7 @@ pub(super) fn plan_stages(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     sample_rate: f64,
-) -> (Vec<StagePlan>, Vec<PushPullPlan>, Vec<CoupledBjtPlan>, Vec<MultiNlPlan>) {
+) -> (Vec<StagePlan>, Vec<PushPullPlan>, Vec<CoupledBjtPlan>, Vec<MultiNlPlan>, HashSet<usize>) {
     // ── Push-pull detection for triodes ────────────────────────────────
     // Collect triode elements indices to detect push-pull pairs.
     let triode_elements: Vec<(usize, &NonlinearElement)> = classified
@@ -153,10 +158,19 @@ pub(super) fn plan_stages(
         })
         .collect();
 
-    let push_pull_pairs = graph.find_push_pull_triode_pairs(
+    let (push_pull_pairs, mut pp_transformer_edges) = graph.find_push_pull_triode_pairs(
         &triode_infos,
         &classified.all_nonlinear_edge_indices,
     );
+
+    // Also detect Standard-type transformers driven push-pull (e.g., 670 T_sc_out).
+    let pp_driven = graph.find_pp_driven_transformer_edges(
+        &push_pull_pairs,
+        &triode_infos,
+        &classified.all_nonlinear_edge_indices,
+    );
+    pp_transformer_edges.extend(pp_driven);
+
     let paired_triode_indices: HashSet<usize> = push_pull_pairs
         .iter()
         .flat_map(|p| [p.push_triode_idx, p.pull_triode_idx])
@@ -311,11 +325,23 @@ pub(super) fn plan_stages(
                 &classified.all_nonlinear_edge_indices,
                 &graph.active_edge_indices,
                 true, // include supply-adjacent
+                true, // skip_out_node
+                &pp_transformer_edges,
             );
             for eidx in edges {
                 if !all_passive_edges.contains(&eidx) {
                     all_passive_edges.push(eidx);
                 }
+            }
+        }
+
+        // Case B: inject primary edge for input transformers.
+        let xfmr_inject = find_secondary_side_transformers(
+            &all_passive_edges, graph, &pp_transformer_edges,
+        );
+        for eidx in xfmr_inject {
+            if !all_passive_edges.contains(&eidx) {
+                all_passive_edges.push(eidx);
             }
         }
 
@@ -350,6 +376,7 @@ pub(super) fn plan_stages(
             injection_node,
             nl_terminals,
             compensation: 1.0,
+            output_node: None,
         });
     }
 
@@ -393,6 +420,8 @@ pub(super) fn plan_stages(
                 &classified.all_nonlinear_edge_indices,
                 &graph.active_edge_indices,
                 true,
+                true, // skip_out_node
+                &pp_transformer_edges,
             );
 
             if grid_passives.is_empty() {
@@ -405,18 +434,29 @@ pub(super) fn plan_stages(
                 &classified.all_nonlinear_edge_indices,
                 &graph.active_edge_indices,
                 true,
+                true, // skip_out_node
+                &pp_transformer_edges,
             );
             let cathode_passives = graph.bfs_passive_edges(
                 *cathode_node,
                 &classified.all_nonlinear_edge_indices,
                 &graph.active_edge_indices,
                 true,
+                true, // skip_out_node
+                &pp_transformer_edges,
             );
 
             // Merge all passive edges (grid + plate + cathode).
             let mut all_passive_edges = grid_passives.clone();
             extend_dedup(&mut all_passive_edges, &plate_passives);
             extend_dedup(&mut all_passive_edges, &cathode_passives);
+
+            // Case B: inject primary edge for input transformers whose secondary
+            // nodes are adjacent to the passive set.
+            let xfmr_inject = find_secondary_side_transformers(
+                &all_passive_edges, graph, &pp_transformer_edges,
+            );
+            extend_dedup(&mut all_passive_edges, &xfmr_inject);
 
             // Find injection node: BFS-closest to input among all passive edge endpoints,
             // excluding plate/cathode/grid nodes.
@@ -443,8 +483,8 @@ pub(super) fn plan_stages(
                 (*plate_node, *cathode_node),
             ];
 
-            let model = super::helpers::triode_model(model_name);
-            let compensation = model.mu / 100.0;
+            let _model = super::helpers::triode_model(model_name);
+            let compensation = 0.35; // always VariMu in this branch
 
             multi_nl_plans.push(MultiNlPlan {
                 nl_element_indices: vec![elem_idx],
@@ -453,9 +493,225 @@ pub(super) fn plan_stages(
                 injection_node,
                 nl_terminals,
                 compensation,
+                output_node: None,
             });
 
             three_port_triode_indices.insert(elem_idx);
+        }
+    }
+
+    // ── Coupled diode detection (bridge rectifiers) ────────────────────
+    // Diodes sharing terminal nodes are coupled (e.g., bridge rectifier).
+    // Union-find mirrors the BJT coupling pass above.
+    struct DiodeInfo {
+        elem_idx: usize,
+        node_a: NodeId, // anode
+        node_b: NodeId, // cathode
+    }
+    let diode_infos: Vec<DiodeInfo> = classified
+        .nonlinear_elements
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, e)| match &e.kind {
+            NonlinearKind::SingleDiode(_) => {
+                // Skip sidechain elements — they're compiled separately.
+                if classified.sidechain_edge_set.contains(&e.edge_idx) {
+                    return None;
+                }
+                let edge = &graph.edges[e.edge_idx];
+                Some(DiodeInfo {
+                    elem_idx: idx,
+                    node_a: edge.node_a,
+                    node_b: edge.node_b,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut coupled_diode_indices: HashSet<usize> = HashSet::new();
+
+    if diode_infos.len() >= 2 {
+        // Union-find for diode coupling.
+        let n_diodes = diode_infos.len();
+        let mut d_parent: Vec<usize> = (0..n_diodes).collect();
+        fn d_find(parent: &mut Vec<usize>, mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        fn d_union(parent: &mut Vec<usize>, a: usize, b: usize) {
+            let ra = d_find(parent, a);
+            let rb = d_find(parent, b);
+            if ra != rb {
+                parent[rb] = ra;
+            }
+        }
+
+        // Diodes sharing a non-global terminal node are coupled.
+        // Exclude gnd and vcc — they are global hubs, not coupling points.
+        let is_global = |n: NodeId| n == graph.gnd_node || n == graph.vcc_node;
+        for i in 0..n_diodes {
+            for j in (i + 1)..n_diodes {
+                let di = &diode_infos[i];
+                let dj = &diode_infos[j];
+                let shared = (!is_global(di.node_a) && (di.node_a == dj.node_a || di.node_a == dj.node_b))
+                    || (!is_global(di.node_b) && (di.node_b == dj.node_a || di.node_b == dj.node_b));
+                if shared {
+                    d_union(&mut d_parent, i, j);
+                }
+            }
+        }
+
+        // Group coupled diodes into clusters.
+        let mut d_clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+        for i in 0..n_diodes {
+            let root = d_find(&mut d_parent, i);
+            d_clusters.entry(root).or_default().push(i);
+        }
+
+        for (_root, members) in &d_clusters {
+            if members.len() < 2 {
+                continue;
+            }
+
+            // Skip antiparallel pairs: if ALL diodes in the cluster connect the
+            // same two nodes, they're antiparallel clipping diodes (e.g., Klon
+            // Centaur). These work fine as independent WDF stages. Only couple
+            // diodes that form a multi-node topology like a bridge rectifier.
+            let all_diode_nodes: HashSet<NodeId> = members.iter()
+                .flat_map(|&m| [diode_infos[m].node_a, diode_infos[m].node_b])
+                .collect();
+            if all_diode_nodes.len() <= 2 {
+                continue; // All diodes share the same 2 nodes — antiparallel pair
+            }
+
+            let elem_indices: Vec<usize> = members.iter().map(|&m| diode_infos[m].elem_idx).collect();
+            for &ei in &elem_indices {
+                coupled_diode_indices.insert(ei);
+            }
+
+            // Collect all terminal nodes from coupled diodes.
+            let mut all_diode_nodes: HashSet<NodeId> = HashSet::new();
+            for &m in members {
+                all_diode_nodes.insert(diode_infos[m].node_a);
+                all_diode_nodes.insert(diode_infos[m].node_b);
+            }
+
+            // BFS passive edges from ALL terminal nodes, with skip_out_node=false
+            // so that RC time constant edges touching out_node are collected.
+            let mut all_passive_edges: Vec<usize> = Vec::new();
+            for &dn in &all_diode_nodes {
+                let edges = graph.bfs_passive_edges(
+                    dn,
+                    &classified.all_nonlinear_edge_indices,
+                    &graph.active_edge_indices,
+                    true,  // include supply-adjacent
+                    false, // skip_out_node=false (bridge rectifier needs RC at output)
+                    &pp_transformer_edges,
+                );
+                for eidx in edges {
+                    if !all_passive_edges.contains(&eidx) {
+                        all_passive_edges.push(eidx);
+                    }
+                }
+            }
+
+            // Case B: inject primary edge for input transformers.
+            let xfmr_inject = find_secondary_side_transformers(
+                &all_passive_edges, graph, &pp_transformer_edges,
+            );
+            for eidx in xfmr_inject {
+                if !all_passive_edges.contains(&eidx) {
+                    all_passive_edges.push(eidx);
+                }
+            }
+
+            // Find injection node from diode terminal nodes (not passive
+            // endpoints). The bridge's AC-side terminals have the correct
+            // signal flow distance. Passive endpoints might reach back
+            // toward the input through the RC network, giving a misleadingly
+            // low distance.
+            // Find injection node from diode terminal nodes. Use dist_from_in
+            // when available; fall back to dist_from_out for nodes on the
+            // disconnected side of transformers (secondary side).
+            let mut injection_node = graph.in_node;
+            let mut best_dist = usize::MAX;
+            for &m in members {
+                let di = &diode_infos[m];
+                for node in [di.node_a, di.node_b] {
+                    if node == graph.out_node || node == graph.gnd_node {
+                        continue;
+                    }
+                    if let Some(&d) = classified.dist_from_in.get(&node) {
+                        if d < best_dist {
+                            best_dist = d;
+                            injection_node = node;
+                        }
+                    }
+                }
+            }
+            // If no diode terminal is reachable from input (transformer barrier),
+            // pick the terminal FARTHEST from output — this selects the AC
+            // input side of the bridge (transformer secondary), not the DC
+            // output side (RC time constant). Signal should be injected at
+            // the AC side for correct rectification.
+            if best_dist == usize::MAX {
+                let mut best_out_dist = 0usize;
+                for &m in members {
+                    let di = &diode_infos[m];
+                    for node in [di.node_a, di.node_b] {
+                        if node == graph.out_node || node == graph.gnd_node {
+                            continue;
+                        }
+                        if let Some(&d) = classified.dist_from_out.get(&node) {
+                            if d > best_out_dist {
+                                best_out_dist = d;
+                                injection_node = node;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // NL terminals: (anode, cathode) for each diode.
+            let nl_terminals: Vec<(NodeId, NodeId)> = members
+                .iter()
+                .map(|&m| (diode_infos[m].node_a, diode_infos[m].node_b))
+                .collect();
+
+            // Output element: diode closest to output.
+            let output_elem_idx = *members
+                .iter()
+                .min_by_key(|&&m| {
+                    let di = &diode_infos[m];
+                    let d_a = classified.dist_from_out.get(&di.node_a).copied().unwrap_or(usize::MAX);
+                    let d_b = classified.dist_from_out.get(&di.node_b).copied().unwrap_or(usize::MAX);
+                    d_a.min(d_b)
+                })
+                .unwrap();
+
+            // Check if any passive edge touches out_node — if so, output is a passive port.
+            let output_node = if all_passive_edges.iter().any(|&eidx| {
+                let e = &graph.edges[eidx];
+                e.node_a == graph.out_node || e.node_b == graph.out_node
+            }) {
+                Some(graph.out_node)
+            } else {
+                None
+            };
+
+            multi_nl_plans.push(MultiNlPlan {
+                nl_element_indices: elem_indices,
+                output_element_idx: diode_infos[output_elem_idx].elem_idx,
+                passive_edge_indices: all_passive_edges,
+                injection_node,
+                nl_terminals,
+                compensation: 1.0,
+                output_node,
+            });
         }
     }
 
@@ -491,6 +747,11 @@ pub(super) fn plan_stages(
             continue;
         }
 
+        // Skip coupled diodes (handled as MultiNlStage bridge rectifier).
+        if coupled_diode_indices.contains(&elem_idx) {
+            continue;
+        }
+
         if let Some(plan) = plan_single_stage(
             elem,
             elem_idx,
@@ -506,7 +767,7 @@ pub(super) fn plan_stages(
         source_node_offset += 1000;
     }
 
-    (plans, push_pull_plans, coupled_bjt_plans, multi_nl_plans)
+    (plans, push_pull_plans, coupled_bjt_plans, multi_nl_plans, pp_transformer_edges)
 }
 
 /// Plan a push-pull half (for building in build.rs).
@@ -514,6 +775,7 @@ pub(super) fn plan_push_pull_half(
     elem: &NonlinearElement,
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
+    pp_transformer_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
     if let NonlinearKind::Triode { plate_node, cathode_node, model_name, is_vari_mu, .. } = &elem.kind {
         // Multi-hop BFS: collect all passive edges reachable from plate/cathode,
@@ -526,12 +788,16 @@ pub(super) fn plan_push_pull_half(
             &classified.all_nonlinear_edge_indices,
             &graph.active_edge_indices,
             true, // include_supply_adjacent
+            true, // skip_out_node
+            pp_transformer_edges,
         );
         let cathode_passives = graph.bfs_passive_edges(
             *cathode_node,
             &classified.all_nonlinear_edge_indices,
             &graph.active_edge_indices,
             true, // include_supply_adjacent
+            true, // skip_out_node
+            pp_transformer_edges,
         );
 
         let mut passive_idxs: Vec<usize> = plate_passives.clone();
@@ -1092,7 +1358,7 @@ fn plan_triode_stage(
     // Compensation and plate resistance from triode model.
     let (compensation, rp) = if let NonlinearKind::Triode { model_name, is_vari_mu, .. } = &elem.kind {
         let model = super::helpers::triode_model(model_name);
-        let comp = if *is_vari_mu { 0.35 } else { model.mu / 100.0 };
+        let comp = if *is_vari_mu { 0.35 } else { 1.0 };
         (comp, model.rp)
     } else {
         (1.0, 62500.0)
@@ -1203,4 +1469,55 @@ fn find_injection_node(
         injection_node = graph.gnd_node;
     }
     injection_node
+}
+
+/// Detect transformer secondary nodes in a stage's passive set and inject
+/// the corresponding primary edge (Case B: input transformers).
+///
+/// When a stage's passive endpoints include a transformer's secondary-side
+/// nodes, the primary edge (pri.a ↔ pri.b) should be added to the passive
+/// set so that `sp_reduce` sees the transformer edge and `make_leaf` builds
+/// a real transformer adaptor.
+///
+/// Returns the transformer edge indices to add (may be empty).
+fn find_secondary_side_transformers(
+    passive_idxs: &[usize],
+    graph: &CircuitGraph,
+    pp_transformer_edges: &HashSet<usize>,
+) -> Vec<usize> {
+    let mut inject_edges: Vec<usize> = Vec::new();
+
+    // Collect all nodes touched by the passive set.
+    let passive_nodes: HashSet<NodeId> = passive_idxs.iter()
+        .flat_map(|&eidx| {
+            let e = &graph.edges[eidx];
+            [e.node_a, e.node_b]
+        })
+        .collect();
+
+    // Check each node for secondary-side transformer info.
+    let mut seen_comp_idx: HashSet<usize> = HashSet::new();
+    for &node in &passive_nodes {
+        if let Some(info) = graph.transformer_info.get(&node) {
+            if info.is_secondary && !seen_comp_idx.contains(&info.comp_idx) {
+                seen_comp_idx.insert(info.comp_idx);
+
+                // Find the primary edge for this transformer.
+                for (eidx, e) in graph.edges.iter().enumerate() {
+                    if e.comp_idx == info.comp_idx {
+                        // Skip push-pull transformer edges.
+                        if pp_transformer_edges.contains(&eidx) {
+                            continue;
+                        }
+                        // Don't add if already in the passive set.
+                        if !passive_idxs.contains(&eidx) {
+                            inject_edges.push(eidx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    inject_edges
 }
