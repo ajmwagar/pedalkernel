@@ -11,7 +11,7 @@ use crate::elements::*;
 use super::compiled::*;
 use super::graph::CircuitGraph;
 use super::helpers::has_pot;
-use super::stage::{CoupledBjtStage, RootKind, SidechainProcessor, WdfStage};
+use super::stage::{CoupledBjtStage, MultiNlStage, RootKind, SidechainProcessor, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Control binding
@@ -22,10 +22,12 @@ pub(super) fn build_controls(
     pedal: &PedalDef,
     stages: &[WdfStage],
     coupled_bjt_stages: &[CoupledBjtStage],
+    multi_nl_stages: &[MultiNlStage],
     opamp_pot_map: &HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)>,
     lfo_ids: &[String],
     delay_id_to_idx: &HashMap<String, usize>,
     delay_lines_empty: bool,
+    sidechain_comp_ids: &HashSet<String>,
 ) -> Vec<ControlBinding> {
     let mut controls = Vec::new();
 
@@ -131,9 +133,34 @@ pub(super) fn build_controls(
                         }
                     }
                 }
+                // Also search multi-NL stages for the pot.
+                if found_stage.is_none() {
+                    'outer_mnl: for (mi, mnl) in multi_nl_stages.iter().enumerate() {
+                        for (pi, child) in mnl.passive_children.iter().enumerate() {
+                            if has_pot(child, &ctrl.component) {
+                                found_stage = Some(ControlTarget::PotInMultiNlStage(mi, pi));
+                                break 'outer_mnl;
+                            }
+                        }
+                    }
+                }
                 match found_stage {
                     Some(target) => target,
-                    None => ControlTarget::PreGain,
+                    None => {
+                        // Check if this pot is in a sidechain sub-circuit.
+                        // Pots may be decomposed into __aw/__wb variants during
+                        // graph construction (Baxandall decomposition), so check both
+                        // the original name and its decomposed forms.
+                        let in_sidechain = sidechain_comp_ids.contains(&ctrl.component)
+                            || sidechain_comp_ids.contains(&format!("{}__aw", ctrl.component))
+                            || sidechain_comp_ids.contains(&format!("{}__wb", ctrl.component));
+                        if in_sidechain {
+                            // Don't bind to PreGain — let it fall through to
+                            // sidechain forwarding in set_control().
+                            continue;
+                        }
+                        ControlTarget::PreGain
+                    }
                 }
             }
         };
@@ -612,17 +639,26 @@ fn extract_sidechain_def(
         })
         .collect();
 
+    // Match controls whose component is in the sidechain. Pot components
+    // may be decomposed into __aw/__wb variants during graph construction
+    // (Baxandall decomposition), so also check for decomposed names.
+    let comp_in_sc = |comp: &str| -> bool {
+        component_ids.contains(comp)
+            || component_ids.contains(&format!("{comp}__aw"))
+            || component_ids.contains(&format!("{comp}__wb"))
+    };
+
     let controls: Vec<ControlDef> = pedal
         .controls
         .iter()
-        .filter(|c| component_ids.contains(&c.component))
+        .filter(|c| comp_in_sc(&c.component))
         .cloned()
         .collect();
 
     let trims: Vec<ControlDef> = pedal
         .trims
         .iter()
-        .filter(|c| component_ids.contains(&c.component))
+        .filter(|c| comp_in_sc(&c.component))
         .cloned()
         .collect();
 

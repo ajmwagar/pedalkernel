@@ -8,7 +8,7 @@
 //! - Pass 4: Tree building (build.rs)
 //! - Pass 5: Binding & assembly (bind.rs)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
 use crate::elements::*;
@@ -363,7 +363,7 @@ pub fn compile_pedal_with_options(
     );
 
     // ══ Pass 3: Stage planning ════════════════════════════════════════
-    let (stage_plans, push_pull_plans, coupled_bjt_plans) =
+    let (stage_plans, push_pull_plans, coupled_bjt_plans, multi_nl_plans) =
         super::plan::plan_stages(&classified, &graph, sample_rate);
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
@@ -387,21 +387,24 @@ pub fn compile_pedal_with_options(
         oversampling,
     );
 
-    // Build coupled BJT stages. Falls back to independent stages if SP fails.
-    let (coupled_bjt_stages, coupled_fallback_stages) = super::build::build_coupled_bjt_stages(
-        &coupled_bjt_plans,
-        &classified,
-        &graph,
-        &opamp_analysis,
-        sample_rate,
-        oversampling,
-    );
-    stages.extend(coupled_fallback_stages);
+    // Build multi-NL stages (R-type adaptor approach).
+    // Falls back to old coupled BJT stages if MNA construction fails.
+    let (multi_nl_stages, coupled_bjt_stages, multi_nl_fallback_stages) =
+        super::build::build_multi_nl_stages(
+            &multi_nl_plans,
+            &coupled_bjt_plans,
+            &classified,
+            &graph,
+            &opamp_analysis,
+            sample_rate,
+            oversampling,
+        );
+    stages.extend(multi_nl_fallback_stages);
 
     // ══ Passive-only fallback ═════════════════════════════════════════
     let mut passive_attenuation = 1.0;
 
-    if stages.is_empty() && coupled_bjt_stages.is_empty() {
+    if stages.is_empty() && coupled_bjt_stages.is_empty() && multi_nl_stages.is_empty() {
         let has_reactive = pedal.components.iter().any(|c| {
             matches!(c.kind, ComponentKind::Capacitor(_) | ComponentKind::Inductor(_))
         });
@@ -552,14 +555,24 @@ pub fn compile_pedal_with_options(
         .filter_map(|c| if matches!(c.kind, ComponentKind::Lfo(..)) { Some(c.id.clone()) } else { None })
         .collect();
 
+    // Collect sidechain component IDs so controls in the sidechain are NOT
+    // bound to PreGain fallback. Instead they fall through to sidechain forwarding.
+    let sidechain_comp_ids: HashSet<String> = classified
+        .sidechain_edge_set
+        .iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+        .collect();
+
     let controls = super::bind::build_controls(
         pedal,
         &stages,
         &coupled_bjt_stages,
+        &multi_nl_stages,
         &opamp_analysis.pot_map,
         &lfo_ids,
         &delay_id_to_idx,
         delay_lines.is_empty(),
+        &sidechain_comp_ids,
     );
 
     let level_default = pedal.controls.iter()
@@ -603,7 +616,7 @@ pub fn compile_pedal_with_options(
     // Build pot smoothers.
     let pot_smoothers: Vec<SmoothedParam> = controls.iter().enumerate()
         .filter_map(|(i, ctrl)| {
-            if matches!(ctrl.target, ControlTarget::PotInStage(_) | ControlTarget::PotInCoupledBjtStage(_, _)) {
+            if matches!(ctrl.target, ControlTarget::PotInStage(_) | ControlTarget::PotInCoupledBjtStage(_, _) | ControlTarget::PotInMultiNlStage(_, _)) {
                 Some(SmoothedParam::new(0.5, i, sample_rate))
             } else {
                 None
@@ -616,6 +629,7 @@ pub fn compile_pedal_with_options(
         stages,
         push_pull_stages,
         coupled_bjt_stages,
+        multi_nl_stages,
         pre_gain,
         output_gain,
         rail_saturation,

@@ -2493,3 +2493,196 @@ pedal "Transformer Pin Test" {
         "Transformer should connect two different nodes"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-NL stage integration tests (Phase 5)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn multi_nl_fuzz_face_compiles() {
+    // Verify that the Fuzz Face compiles and the multi-NL path is attempted.
+    // The Fuzz Face has 2 coupled PNP BJTs (Q1, Q2) with collector-base feedback.
+    let pedal = parse("fuzz_face.pedal");
+    let compiled = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // The pedal should compile successfully regardless of which path is taken.
+    // Check that it has either multi-NL stages OR coupled BJT stages (fallback).
+    let has_multi_nl = !compiled.multi_nl_stages.is_empty();
+    let has_coupled_bjt = !compiled.coupled_bjt_stages.is_empty();
+    assert!(
+        has_multi_nl || has_coupled_bjt,
+        "Fuzz Face should produce either multi-NL stages or coupled BJT stages"
+    );
+
+    // Verify the multi-NL path is being taken (not just the fallback).
+    assert!(has_multi_nl, "Fuzz Face should use the multi-NL path");
+    assert_eq!(compiled.multi_nl_stages.len(), 1, "Should produce exactly 1 multi-NL stage");
+    assert_eq!(compiled.multi_nl_stages[0].n_nl, 2, "Should have 2 NL ports (Q1, Q2)");
+}
+
+#[test]
+fn multi_nl_fuzz_face_dc_stable() {
+    // Zero input for 1 second should produce near-zero output.
+    let pedal = parse("fuzz_face.pedal");
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    proc.set_control("Fuzz", 0.7);
+    proc.set_control("Volume", 0.5);
+
+    // Run 48000 samples of silence
+    let mut max_output = 0.0f64;
+    for _ in 0..48000 {
+        let out = proc.process(0.0);
+        assert!(out.is_finite(), "Output should be finite for zero input");
+        max_output = max_output.max(out.abs());
+    }
+
+    // Allow small DC offset from biasing but should be very small
+    assert!(
+        max_output < 0.1,
+        "DC output should be small for zero input: max={max_output}"
+    );
+}
+
+#[test]
+fn multi_nl_fuzz_face_sine_response() {
+    // 440Hz sine should produce distorted output with bounded amplitude.
+    let pedal = parse("fuzz_face.pedal");
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    proc.set_control("Fuzz", 0.8);
+    proc.set_control("Volume", 0.7);
+
+    let n = 48000;
+    let input: Vec<f64> = (0..n)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+
+    // All outputs finite
+    assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf in output");
+
+    // Should produce audible output
+    let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    assert!(peak > 0.001, "Should produce output: peak={peak}");
+
+    // Should be bounded (not blowing up)
+    assert!(peak < 10.0, "Output should be bounded: peak={peak}");
+}
+
+#[test]
+fn multi_nl_fuzz_face_extreme_fuzz() {
+    // Fuzz=1.0, Volume=1.0 should still be bounded.
+    let pedal = parse("fuzz_face.pedal");
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    proc.set_control("Fuzz", 1.0);
+    proc.set_control("Volume", 1.0);
+
+    let n = 24000;
+    let input: Vec<f64> = (0..n)
+        .map(|i| 0.8 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+
+    assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf at max fuzz");
+    let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    assert!(peak < 20.0, "Output bounded at max fuzz: peak={peak}");
+}
+
+#[test]
+fn multi_nl_fuzz_face_clean() {
+    // Fuzz=0.0, Volume=0.0 should produce near-silence.
+    let pedal = parse("fuzz_face.pedal");
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    proc.set_control("Fuzz", 0.0);
+    proc.set_control("Volume", 0.0);
+
+    let n = 24000;
+    let input: Vec<f64> = (0..n)
+        .map(|i| 0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+
+    assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf at min settings");
+    let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    // With Volume=0, output should be very quiet
+    assert!(peak < 1.0, "Should be quiet at Volume=0: peak={peak}");
+}
+
+#[test]
+fn multi_nl_fuzz_face_sample_rates() {
+    // Compile at different sample rates and verify qualitatively similar output.
+    let pedal = parse("fuzz_face.pedal");
+
+    for &sr in &[44100.0, 48000.0, 96000.0] {
+        let mut proc = compile_pedal(&pedal, sr).unwrap();
+        proc.set_control("Fuzz", 0.7);
+        proc.set_control("Volume", 0.5);
+
+        let n = sr as usize;
+        let input: Vec<f64> = (0..n)
+            .map(|i| 0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sr).sin())
+            .collect();
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+
+        assert!(
+            output.iter().all(|x| x.is_finite()),
+            "No NaN/inf at {sr}Hz"
+        );
+        let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        assert!(
+            peak > 0.001 && peak < 10.0,
+            "Output bounded at {sr}Hz: peak={peak}"
+        );
+    }
+}
+
+#[test]
+fn multi_nl_fuzz_face_pot_recomputes_scattering() {
+    // Verify that changing the Fuzz pot triggers scattering matrix recomputation.
+    // The Fuzz pot sits between the two BJTs in the multi-NL R-type adaptor,
+    // so changing it must update the scattering matrix to affect the circuit.
+    let pedal = parse("fuzz_face.pedal");
+
+    // Process with Fuzz=0.1 (low distortion)
+    let mut proc_lo = compile_pedal(&pedal, 48000.0).unwrap();
+    proc_lo.set_control("Fuzz", 0.1);
+    proc_lo.set_control("Volume", 0.5);
+
+    // Verify at least one multi-NL stage has recompute_data
+    assert!(
+        proc_lo.debug_multi_nl_count() > 0,
+        "Should have multi-NL stage(s)"
+    );
+
+    let n = 4800; // 100ms at 48kHz
+    let input: Vec<f64> = (0..n)
+        .map(|i| 0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let out_lo: Vec<f64> = input.iter().map(|&s| proc_lo.process(s)).collect();
+
+    // Process with Fuzz=0.9 (high distortion)
+    let mut proc_hi = compile_pedal(&pedal, 48000.0).unwrap();
+    proc_hi.set_control("Fuzz", 0.9);
+    proc_hi.set_control("Volume", 0.5);
+
+    let out_hi: Vec<f64> = input.iter().map(|&s| proc_hi.process(s)).collect();
+
+    // Both should be finite and produce output
+    assert!(out_lo.iter().all(|x| x.is_finite()), "Lo finite");
+    assert!(out_hi.iter().all(|x| x.is_finite()), "Hi finite");
+
+    let peak_lo = out_lo.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    let peak_hi = out_hi.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    assert!(peak_lo > 0.001, "Lo should produce output: {peak_lo}");
+    assert!(peak_hi > 0.001, "Hi should produce output: {peak_hi}");
+
+    // The outputs should differ — if scattering recomputation didn't happen,
+    // both would produce identical output despite different pot positions.
+    let rms_diff: f64 = out_lo.iter().zip(out_hi.iter())
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt() / n as f64;
+    assert!(
+        rms_diff > 1e-6,
+        "Different Fuzz settings should produce different output (rms_diff={rms_diff})"
+    );
+}

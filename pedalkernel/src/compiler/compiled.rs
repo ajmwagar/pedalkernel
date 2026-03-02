@@ -9,7 +9,7 @@ use crate::PedalProcessor;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::stage::{CoupledBjtStage, PushPullStage, RootKind, SidechainProcessor, WdfStage};
+use super::stage::{CoupledBjtStage, MultiNlStage, PushPullStage, RootKind, SidechainProcessor, WdfStage};
 
 #[cfg(feature = "debug-trace")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +46,9 @@ pub(super) enum ControlTarget {
     /// Modify a pot inside a coupled BJT stage.
     /// (coupled_stage_idx, bjt_idx_within_stage)
     PotInCoupledBjtStage(usize, usize),
+    /// Modify a pot inside a multi-NL stage (R-type adaptor approach).
+    /// (multi_nl_stage_idx, passive_child_idx)
+    PotInMultiNlStage(usize, usize),
     /// Modify an LFO's rate (index into lfos vector).
     LfoRate(usize),
     /// Modify an LFO's depth/amplitude (index into lfos vector).
@@ -370,6 +373,9 @@ pub struct CompiledPedal {
     /// Coupled BJT stages (e.g., Fuzz Face feedback-coupled pairs).
     /// Processed between regular WDF stages and push-pull stages.
     pub(super) coupled_bjt_stages: Vec<CoupledBjtStage>,
+    /// Multi-NL stages using R-type adaptor + multi-port NR solver.
+    /// Replaces CoupledBjtStage when MNA construction succeeds.
+    pub(super) multi_nl_stages: Vec<MultiNlStage>,
     pub(super) pre_gain: f64,
     pub(super) output_gain: f64,
     pub(super) rail_saturation: RailSaturation,
@@ -815,6 +821,17 @@ impl CompiledPedal {
                         }
                     }
                 }
+                ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
+                    if let Some(smoother) = self.pot_smoothers.iter_mut().find(|s| s.control_idx == i) {
+                        smoother.set_target(value);
+                    } else {
+                        let stage_idx = *stage_idx;
+                        let comp_id = self.controls[i].component_id.clone();
+                        if let Some(stage) = self.multi_nl_stages.get_mut(stage_idx) {
+                            stage.set_pot(&comp_id, value);
+                        }
+                    }
+                }
                 ControlTarget::LfoRate(lfo_idx) => {
                     let lfo_idx = *lfo_idx;
                     if let Some(binding) = self.lfos.get_mut(lfo_idx) {
@@ -965,6 +982,12 @@ impl CompiledPedal {
                             }
                         }
                     }
+                    ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
+                        let stage_idx = *stage_idx;
+                        if let Some(stage) = self.multi_nl_stages.get_mut(stage_idx) {
+                            stage.set_pot(&comp_id, value);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -977,6 +1000,8 @@ impl CompiledPedal {
     pub fn debug_stage_count(&self) -> usize { self.stages.len() }
     /// Number of push-pull stages (for debug reporting).
     pub fn debug_push_pull_count(&self) -> usize { self.push_pull_stages.len() }
+    /// Number of multi-NL stages (for debug reporting).
+    pub fn debug_multi_nl_count(&self) -> usize { self.multi_nl_stages.len() }
 
     /// Shows gain structure, all WDF stages with their trees, and control bindings.
     pub fn debug_dump(&self) -> String {
@@ -1005,6 +1030,14 @@ impl CompiledPedal {
             s.push_str("───────────────────────────────────────────────────────────────────────────\n");
             for (i, coupled) in self.coupled_bjt_stages.iter().enumerate() {
                 s.push_str(&format!("  [{}] {}\n", i, coupled.debug_dump()));
+            }
+        }
+
+        if !self.multi_nl_stages.is_empty() {
+            s.push_str(&format!("\nMulti-NL Stages: {}\n", self.multi_nl_stages.len()));
+            s.push_str("───────────────────────────────────────────────────────────────────────────\n");
+            for (i, mnl) in self.multi_nl_stages.iter().enumerate() {
+                s.push_str(&format!("  [{}] {}\n", i, mnl.debug_dump()));
             }
         }
 
@@ -1354,6 +1387,11 @@ impl PedalProcessor for CompiledPedal {
             signal = coupled.process(signal);
         }
 
+        // Process through multi-NL stages (R-type adaptor + multi-port NR solver).
+        for mnl in &mut self.multi_nl_stages {
+            signal = mnl.process(signal);
+        }
+
         // Process through push-pull stages (differential tube amplifiers).
         // These model circuits like the Fairchild 670 where push and pull
         // triode halves process the signal simultaneously with opposite phase,
@@ -1591,6 +1629,9 @@ impl PedalProcessor for CompiledPedal {
         }
         for coupled in &mut self.coupled_bjt_stages {
             coupled.reset();
+        }
+        for mnl in &mut self.multi_nl_stages {
+            mnl.reset();
         }
         for binding in &mut self.lfos {
             binding.lfo.reset();

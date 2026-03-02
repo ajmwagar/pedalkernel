@@ -3,7 +3,7 @@
 //! Models preamp tubes (12AX7, 12AT7, 12AU7) using the Koren equation.
 //! Parameters are loaded from the embedded `triodes.model` file.
 
-use super::solver::{softplus, newton_raphson_solve, LEAKAGE_CONDUCTANCE};
+use super::solver::{softplus, newton_raphson_solve, NlDeviceIv, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
 use crate::models::{SpiceTriodeModel, triode_by_name};
 
@@ -255,6 +255,18 @@ impl WdfRoot for TriodeRoot {
             Some((-50.0, v_max)), None,
             |v| (root.plate_current(v), root.plate_current_derivative(v)),
         )
+    }
+}
+
+impl NlDeviceIv for TriodeRoot {
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        (self.plate_current(v), self.plate_current_derivative(v))
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-50.0, self.v_max)
     }
 }
 

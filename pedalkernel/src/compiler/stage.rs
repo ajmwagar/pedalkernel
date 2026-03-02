@@ -2,6 +2,7 @@
 
 use crate::elements::*;
 use crate::oversampling::Oversampler;
+use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
 use crate::PedalProcessor;
 
 use super::dyn_node::DynNode;
@@ -942,6 +943,415 @@ impl CoupledBjtStage {
         }
         s
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-NL coupled stage (R-type adaptor + multi-port NR solver)
+// ═══════════════════════════════════════════════════════════════════════════
+
+use crate::elements::nonlinear::solver::{multi_port_nr_solve, multi_port_nr_solve_grouped, NlDeviceIv, NlDeviceGroupIv};
+use crate::elements::nonlinear::VariMuThreePort;
+
+/// Nonlinear device kind for the multi-NL solver.
+///
+/// Each variant wraps a concrete nonlinear root type that implements
+/// `NlDeviceIv`, providing the I-V characteristic and its derivative.
+#[allow(dead_code)]
+pub(super) enum NlDeviceKind {
+    BjtNpn(BjtNpnRoot),
+    BjtPnp(BjtPnpRoot),
+    Triode(TriodeRoot),
+    VariMu(VariMuTriodeRoot),
+    Diode(DiodeRoot),
+}
+
+impl NlDeviceKind {
+    /// Set the control voltage for this NL device from the input signal.
+    pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64) {
+        match self {
+            NlDeviceKind::BjtNpn(bjt) => {
+                const BJT_VBE_BIAS: f64 = 0.6;
+                bjt.set_vbe(BJT_VBE_BIAS + input * compensation * 0.15);
+            }
+            NlDeviceKind::BjtPnp(bjt) => {
+                const PNP_VEB_BIAS: f64 = 0.15;
+                bjt.set_veb(PNP_VEB_BIAS + input * compensation * 0.3);
+            }
+            NlDeviceKind::Triode(t) => {
+                const TRIODE_GRID_BIAS: f64 = -2.0;
+                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+            }
+            NlDeviceKind::VariMu(t) => {
+                const TRIODE_GRID_BIAS: f64 = -2.0;
+                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+            }
+            NlDeviceKind::Diode(_) => {
+                // Diodes don't have a control voltage
+            }
+        }
+    }
+
+    /// Get a reference to this device as an `NlDeviceIv` trait object.
+    fn as_nl_device_iv(&self) -> &dyn NlDeviceIv {
+        match self {
+            NlDeviceKind::BjtNpn(bjt) => bjt,
+            NlDeviceKind::BjtPnp(bjt) => bjt,
+            NlDeviceKind::Triode(t) => t,
+            NlDeviceKind::VariMu(t) => t,
+            NlDeviceKind::Diode(d) => d,
+        }
+    }
+
+    fn debug_name(&self) -> &'static str {
+        match self {
+            NlDeviceKind::BjtNpn(_) => "BjtNpn",
+            NlDeviceKind::BjtPnp(_) => "BjtPnp",
+            NlDeviceKind::Triode(_) => "Triode",
+            NlDeviceKind::VariMu(_) => "VariMu",
+            NlDeviceKind::Diode(_) => "Diode",
+        }
+    }
+}
+
+/// Device group kind for multi-port NL devices with cross-coupled I-V.
+///
+/// Each variant wraps a concrete device with multiple coupled ports
+/// (e.g., a 3-port triode with grid and plate ports).
+pub(super) enum NlDeviceGroupKind {
+    /// 3-port variable-mu triode (grid-cathode + plate-cathode).
+    VariMuThreePort(VariMuThreePort),
+}
+
+impl NlDeviceGroupKind {
+    fn as_group_iv(&self) -> &dyn NlDeviceGroupIv {
+        match self {
+            NlDeviceGroupKind::VariMuThreePort(t) => t,
+        }
+    }
+
+    fn debug_name(&self) -> &'static str {
+        match self {
+            NlDeviceGroupKind::VariMuThreePort(_) => "VariMuThreePort",
+        }
+    }
+
+    fn n_ports(&self) -> usize {
+        match self {
+            NlDeviceGroupKind::VariMuThreePort(_) => 2,
+        }
+    }
+}
+
+/// Grouped device configuration for MultiNlStage.
+///
+/// When present, the multi-port NR solver uses cross-coupled device Jacobians
+/// instead of treating each port independently.
+pub(super) struct MultiNlDeviceGroups {
+    pub(super) groups: Vec<NlDeviceGroupKind>,
+    pub(super) offsets: Vec<usize>,
+}
+
+/// Data needed to recompute the scattering matrix when pot values change.
+///
+/// The MNA conductance matrix stores only fixed resistor stamps (immutable).
+/// Port node pairs are fixed; only port resistances change (from pots).
+/// On pot change, we rebuild `WdfPort`s with current resistances, re-derive
+/// the scattering matrix, and update all sub-blocks.
+pub(super) struct ScatteringRecomputeData {
+    /// MNA system with fixed resistors stamped (no pots).
+    pub(super) mna: MnaSystem,
+    /// Port node pairs: (pos_mna_idx, neg_mna_idx) for each port.
+    /// Ordering: [NL_0..NL_{n-1}, passive_0..passive_{m-1}, adapted].
+    pub(super) port_node_pairs: Vec<(Option<usize>, Option<usize>)>,
+    /// Resistance of the adapted (voltage source) port.
+    pub(super) adapted_resistance: f64,
+}
+
+/// Coupled nonlinear stage using an R-type adaptor and multi-port NR solver.
+///
+/// This replaces `CoupledBjtStage` with a physically correct formulation:
+/// the full passive network between coupled NL elements is captured as an
+/// R-type adaptor scattering matrix, and all NL ports are solved simultaneously
+/// via a multi-port Newton-Raphson solver.
+///
+/// This correctly models circuits like:
+/// - Fuzz Face (2 PNP BJTs with collector-base feedback)
+/// - Darlington pairs
+/// - Long-tailed pairs
+pub(super) struct MultiNlStage {
+    /// R-type adaptor containing the full scattering matrix.
+    pub(super) adaptor: RTypeAdaptor,
+    /// Nonlinear devices at the NL ports.
+    pub(super) nl_devices: Vec<NlDeviceKind>,
+    /// Port resistances for the NL ports.
+    pub(super) nl_port_resistances: Vec<f64>,
+    /// Passive child nodes (capacitors, inductors, pots) needing state updates.
+    pub(super) passive_children: Vec<DynNode>,
+    /// Number of nonlinear ports.
+    pub(super) n_nl: usize,
+    /// Warm-start voltages for NR solver.
+    pub(super) v_prev: Vec<f64>,
+    /// NL-to-NL scattering sub-block (n_nl × n_nl, row-major).
+    pub(super) s_nl: Vec<f64>,
+    /// NL-to-passive scattering sub-block (n_nl × n_passive, row-major).
+    pub(super) s_nl_passive: Vec<f64>,
+    /// NL-to-adapted scattering column (n_nl).
+    pub(super) s_nl_adapted: Vec<f64>,
+    /// Oversampler for antialiasing.
+    pub(super) oversampler: Oversampler,
+    /// Passive attenuation compensation factor.
+    pub(super) compensation: f64,
+    /// Which NL port to tap for output.
+    pub(super) output_port: usize,
+    /// Optional device groups for cross-coupled NR solve (3-port triodes).
+    /// When Some, uses `multi_port_nr_solve_grouped()` instead of `multi_port_nr_solve()`.
+    pub(super) device_groups: Option<MultiNlDeviceGroups>,
+    /// Data for recomputing scattering matrix when pots change.
+    /// None if the stage has no pots (no recomputation needed).
+    pub(super) recompute_data: Option<ScatteringRecomputeData>,
+}
+
+impl MultiNlStage {
+    /// Process one sample through the multi-NL stage.
+    ///
+    /// 1. Set control voltages (Vbe/Vgk) on each NL device
+    /// 2. For each oversampled sub-sample:
+    ///    a. Scatter-up passive children → b_passive[k]
+    ///    b. Compute known_a[i] = Σ_k S_nl_passive[i][k]·b_passive[k] + S_nl_adapted[i]·b_vs
+    ///    c. Multi-port NR solve → b_nl[i] for all NL ports
+    ///    d. Set all b values on adaptor → scatter_down → set_incident on passive children
+    ///    e. Output = (a_out + b_nl[output_port]) / 2 (voltage at output NL port)
+    /// 3. Return output sample
+    pub fn process(&mut self, input: f64) -> f64 {
+        let compensation = self.compensation;
+        let n_nl = self.n_nl;
+        let n_passive = self.passive_children.len();
+        let output_port = self.output_port;
+
+        // Set control voltages on each NL device (only for independent devices;
+        // grouped devices get their grid voltage from the WDF port).
+        if self.device_groups.is_none() {
+            for device in &mut self.nl_devices {
+                device.set_control_voltage(input, compensation);
+            }
+        }
+
+        self.oversampler.process(input, |sample| {
+            // 1. Scatter-up passive children
+            let mut b_passive = Vec::with_capacity(n_passive);
+            for child in &mut self.passive_children {
+                b_passive.push(child.reflected());
+            }
+
+            // 2. Compute known_a[i] for each NL port:
+            // known_a[i] = Σ_k S_nl_passive[i][k] * b_passive[k]
+            //             + S_nl_adapted[i] * b_adapted
+            // The adapted port's b-wave is the input signal (voltage source)
+            let b_adapted = sample * compensation;
+            let mut known_a = vec![0.0; n_nl];
+            for i in 0..n_nl {
+                let mut a_i = self.s_nl_adapted[i] * b_adapted;
+                for k in 0..n_passive {
+                    a_i += self.s_nl_passive[i * n_passive + k] * b_passive[k];
+                }
+                known_a[i] = a_i;
+            }
+
+            // 3. Multi-port NR solve
+            let b_nl = if let Some(ref dg) = self.device_groups {
+                // Grouped solver: cross-coupled device Jacobians
+                let groups: Vec<&dyn NlDeviceGroupIv> =
+                    dg.groups.iter().map(|g| g.as_group_iv()).collect();
+                multi_port_nr_solve_grouped(
+                    n_nl,
+                    &self.s_nl,
+                    &known_a,
+                    &self.nl_port_resistances,
+                    &groups,
+                    &dg.offsets,
+                    &mut self.v_prev,
+                    20,
+                    1e-6,
+                )
+            } else {
+                // Independent solver: each device has its own I-V
+                let devices: Vec<&dyn NlDeviceIv> =
+                    self.nl_devices.iter().map(|d| d.as_nl_device_iv()).collect();
+                multi_port_nr_solve(
+                    n_nl,
+                    &self.s_nl,
+                    &known_a,
+                    &self.nl_port_resistances,
+                    &devices,
+                    &mut self.v_prev,
+                    20,
+                    1e-6,
+                )
+            };
+
+            // 4. Build full b-vector for scatter_down:
+            //    [b_nl_0, ..., b_nl_{n-1}, b_passive_0, ..., b_passive_{m-1}, b_adapted]
+            let n_total = n_nl + n_passive + 1;
+            let mut b_all = Vec::with_capacity(n_total);
+            b_all.extend_from_slice(&b_nl);
+            b_all.extend_from_slice(&b_passive);
+            b_all.push(b_adapted);
+
+            // Use scatter_all to get incident waves for all ports
+            let a_all = self.adaptor.scatter_all(&b_all);
+
+            // 5. Set incident waves on passive children
+            for (k, child) in self.passive_children.iter_mut().enumerate() {
+                child.set_incident(a_all[n_nl + k]);
+            }
+
+            // 6. Output = (a + b) / 2 at the output NL port
+            let a_out = a_all[output_port];
+            let b_out = b_nl[output_port];
+            (a_out + b_out) / 2.0
+        })
+    }
+
+    /// Reset all internal state.
+    pub fn reset(&mut self) {
+        for child in &mut self.passive_children {
+            child.reset();
+        }
+        for v in &mut self.v_prev {
+            *v = 0.0;
+        }
+        self.oversampler.reset();
+    }
+
+    /// Debug dump: print multi-NL stage structure.
+    pub fn debug_dump(&self) -> String {
+        let n_passive = self.passive_children.len();
+        let n_total = self.n_nl + n_passive + 1;
+        let solver_type = if self.device_groups.is_some() { "grouped" } else { "independent" };
+        let mut s = format!(
+            "MultiNlStage(n_nl={}, n_passive={}, n_total={}, output_port={}, comp={:.6}, solver={})\n",
+            self.n_nl, n_passive, n_total, self.output_port, self.compensation, solver_type
+        );
+        if let Some(ref dg) = self.device_groups {
+            for (g, group) in dg.groups.iter().enumerate() {
+                s.push_str(&format!(
+                    "  Group[{}]: {} ({} ports, offset={})\n",
+                    g, group.debug_name(), group.n_ports(), dg.offsets[g]
+                ));
+            }
+        } else {
+            for (i, device) in self.nl_devices.iter().enumerate() {
+                s.push_str(&format!(
+                    "  NL[{}]: {}, Rp={:.1}Ω\n",
+                    i,
+                    device.debug_name(),
+                    self.nl_port_resistances[i]
+                ));
+            }
+        }
+        for (k, child) in self.passive_children.iter().enumerate() {
+            s.push_str(&format!(
+                "  Passive[{}]: Rp={:.1}Ω, nodes={}\n",
+                k,
+                child.port_resistance(),
+                child.node_count()
+            ));
+        }
+        s
+    }
+
+    /// Set a pot value, searching through passive children.
+    ///
+    /// When a pot is found and updated, recomputes the scattering matrix
+    /// from the stored MNA data with updated port resistances.
+    pub fn set_pot(&mut self, target_id: &str, value: f64) -> bool {
+        let mut found = false;
+        for child in &mut self.passive_children {
+            if child.set_pot(target_id, value) {
+                found = true;
+                break;
+            }
+        }
+        if found {
+            self.recompute_scattering();
+        }
+        found
+    }
+
+    /// Recompute the scattering matrix from stored MNA data after a pot change.
+    ///
+    /// Rebuilds WdfPort vec with current port resistances from nl_port_resistances
+    /// and passive_children, re-derives the scattering matrix, and updates all
+    /// sub-blocks (s_nl, s_nl_passive, s_nl_adapted) and the RTypeAdaptor.
+    fn recompute_scattering(&mut self) {
+        let recompute = match &self.recompute_data {
+            Some(r) => r,
+            None => return, // No pots — nothing to recompute
+        };
+
+        let n_nl = self.n_nl;
+        let n_passive = self.passive_children.len();
+        let n_total = n_nl + n_passive + 1;
+
+        // Rebuild ports with current resistances.
+        let mut ports: Vec<WdfPort> = Vec::with_capacity(n_total);
+
+        // NL ports (resistances don't change)
+        for i in 0..n_nl {
+            let (pos, neg) = recompute.port_node_pairs[i];
+            ports.push(WdfPort {
+                node_pos: pos,
+                node_neg: neg,
+                resistance: self.nl_port_resistances[i],
+            });
+        }
+
+        // Passive ports (resistances may have changed from pots)
+        for k in 0..n_passive {
+            let (pos, neg) = recompute.port_node_pairs[n_nl + k];
+            ports.push(WdfPort {
+                node_pos: pos,
+                node_neg: neg,
+                resistance: self.passive_children[k].port_resistance(),
+            });
+        }
+
+        // Adapted port (voltage source — resistance doesn't change)
+        let (pos, neg) = recompute.port_node_pairs[n_nl + n_passive];
+        ports.push(WdfPort {
+            node_pos: pos,
+            node_neg: neg,
+            resistance: recompute.adapted_resistance,
+        });
+
+        // Re-derive scattering matrix from the frozen MNA.
+        let scattering = recompute.mna.derive_scattering_matrix_general(&ports);
+
+        // Validate — if NaN/inf, keep old matrix.
+        if scattering.iter().any(|&s| !s.is_finite()) {
+            return;
+        }
+
+        // Extract sub-blocks.
+        for i in 0..n_nl {
+            for j in 0..n_nl {
+                self.s_nl[i * n_nl + j] = scattering[i * n_total + j];
+            }
+        }
+        for i in 0..n_nl {
+            for k in 0..n_passive {
+                self.s_nl_passive[i * n_passive + k] = scattering[i * n_total + (n_nl + k)];
+            }
+        }
+        for i in 0..n_nl {
+            self.s_nl_adapted[i] = scattering[i * n_total + (n_total - 1)];
+        }
+
+        // Update the RTypeAdaptor.
+        let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+        self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
+    }
+
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

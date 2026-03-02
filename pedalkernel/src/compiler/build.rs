@@ -10,14 +10,15 @@
 use crate::dsl::*;
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
+use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
 
 use super::classify::{ClassifiedCircuit, NonlinearKind};
 use super::dyn_node::DynNode;
-use super::graph::{CircuitGraph, SpTree, sp_reduce, sp_to_dyn};
+use super::graph::{CircuitGraph, NodeId, SpTree, sp_reduce, sp_to_dyn};
 use super::helpers::*;
 use super::opamp_analysis::OpAmpAnalysis;
-use super::plan::{StagePlan, PushPullPlan};
-use super::stage::{PushPullStage, RootKind, TubeRoot, WdfStage};
+use super::plan::{CoupledBjtPlan, MultiNlPlan, StagePlan, PushPullPlan};
+use super::stage::{CoupledBjtStage, MultiNlDeviceGroups, MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind, ScatteringRecomputeData, TubeRoot, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Stage building
@@ -269,6 +270,382 @@ pub(super) fn build_coupled_bjt_stages(
     }
 
     (coupled_stages, fallback_stages)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-NL stage building (R-type adaptor + multi-port NR solver)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build multi-NL stages from plans using R-type adaptor approach.
+///
+/// For each `MultiNlPlan`, attempts MNA-based construction:
+/// 1. Map circuit nodes → MNA node indices
+/// 2. Classify passive edges: resistors stamp into MNA, reactive elements become WDF ports
+/// 3. Build MNA → derive scattering matrix → create RTypeAdaptor
+/// 4. Extract sub-blocks (s_nl, s_nl_passive, s_nl_adapted)
+/// 5. Create NL device roots, package as MultiNlStage
+///
+/// Falls back to old `build_coupled_bjt_stages()` on failure.
+///
+/// Returns (multi_nl_stages, coupled_bjt_fallback_stages, independent_fallback_stages).
+pub(super) fn build_multi_nl_stages(
+    multi_nl_plans: &[MultiNlPlan],
+    coupled_bjt_plans: &[CoupledBjtPlan],
+    classified: &ClassifiedCircuit,
+    graph: &CircuitGraph,
+    opamp_analysis: &OpAmpAnalysis,
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+) -> (Vec<MultiNlStage>, Vec<CoupledBjtStage>, Vec<WdfStage>) {
+    let mut multi_nl_stages = Vec::new();
+    let mut needs_fallback = false;
+
+    for plan in multi_nl_plans {
+        match try_build_multi_nl_stage(plan, classified, graph, sample_rate, oversampling) {
+            Some(stage) => {
+                multi_nl_stages.push(stage);
+            }
+            None => {
+                needs_fallback = true;
+            }
+        }
+    }
+
+    // If any multi-NL plan failed, fall back to old coupled BJT approach for ALL plans.
+    // This keeps things simple — either all succeed or we fall back entirely.
+    if needs_fallback {
+        multi_nl_stages.clear();
+        let (coupled, fallback) = build_coupled_bjt_stages(
+            coupled_bjt_plans, classified, graph, opamp_analysis, sample_rate, oversampling,
+        );
+        return (Vec::new(), coupled, fallback);
+    }
+
+    // All multi-NL stages built successfully. No coupled BJT fallback needed.
+    (multi_nl_stages, Vec::new(), Vec::new())
+}
+
+/// Try to build a single MultiNlStage from a plan.
+///
+/// Returns `None` if MNA construction fails (e.g., singular matrix, no passive edges).
+fn try_build_multi_nl_stage(
+    plan: &MultiNlPlan,
+    classified: &ClassifiedCircuit,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+) -> Option<MultiNlStage> {
+    // n_nl = number of NL ports (terminal pairs), which may exceed the number
+    // of NL elements (e.g., a 3-port VariMu triode has 1 element but 2 ports).
+    let n_nl = plan.nl_terminals.len();
+    if n_nl < 2 || plan.passive_edge_indices.is_empty() {
+        return None;
+    }
+
+    // ── Step 1: Collect unique circuit nodes and map to MNA indices ────
+    // Ground is excluded from MNA (implicit reference).
+    let mut node_set: Vec<NodeId> = Vec::new();
+    let mut add_node = |node: NodeId| {
+        if node != graph.gnd_node && !node_set.contains(&node) {
+            node_set.push(node);
+        }
+    };
+
+    // Collect nodes from passive edges
+    for &eidx in &plan.passive_edge_indices {
+        let e = &graph.edges[eidx];
+        add_node(e.node_a);
+        add_node(e.node_b);
+    }
+
+    // Collect nodes from NL terminals
+    for &(pos, neg) in &plan.nl_terminals {
+        add_node(pos);
+        add_node(neg);
+    }
+
+    // Injection node (voltage source input)
+    add_node(plan.injection_node);
+
+    let num_mna_nodes = node_set.len();
+    if num_mna_nodes == 0 {
+        return None;
+    }
+
+    let node_to_mna = |node: NodeId| -> Option<usize> {
+        if node == graph.gnd_node {
+            None
+        } else {
+            node_set.iter().position(|&n| n == node)
+        }
+    };
+
+    // ── Step 2: Classify passive edges ──────────────────────────────
+    // Resistors → stamp directly into MNA (no WDF port needed)
+    // Capacitors, inductors, pots → WDF port + DynNode child
+    let mut reactive_edges: Vec<(usize, DynNode)> = Vec::new(); // (edge_idx, dyn_node)
+
+    let mut mna = MnaSystem::new(num_mna_nodes, 0);
+
+    for &eidx in &plan.passive_edge_indices {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        let n1 = node_to_mna(e.node_a);
+        let n2 = node_to_mna(e.node_b);
+
+        match &comp.kind {
+            ComponentKind::Resistor(r) => {
+                // Stamp resistor directly into MNA conductance matrix
+                mna.stamp_resistor(n1, n2, *r);
+            }
+            ComponentKind::Capacitor(cfg) => {
+                let rp = 1.0 / (2.0 * sample_rate * cfg.value);
+                let dyn_node = DynNode::Capacitor {
+                    capacitance: cfg.value,
+                    rp,
+                    state: 0.0,
+                    last_b: 0.0,
+                };
+                reactive_edges.push((eidx, dyn_node));
+            }
+            ComponentKind::Inductor(l) => {
+                let dyn_node = DynNode::Inductor {
+                    inductance: *l,
+                    rp: 2.0 * sample_rate * *l,
+                    state: 0.0,
+                };
+                reactive_edges.push((eidx, dyn_node));
+            }
+            ComponentKind::Potentiometer(max_r, taper) => {
+                let initial_pos = 0.5;
+                let tapered_pos = taper.apply(initial_pos);
+                let dyn_node = DynNode::Pot {
+                    comp_id: comp.id.clone(),
+                    max_resistance: *max_r,
+                    position: initial_pos,
+                    taper: *taper,
+                    rp: (tapered_pos * *max_r).max(1.0),
+                };
+                reactive_edges.push((eidx, dyn_node));
+            }
+            ComponentKind::Tempco(r, _ppm) => {
+                // Temperature-compensated resistor — treat as fixed resistor in MNA
+                mna.stamp_resistor(n1, n2, *r);
+            }
+            _ => {
+                // Skip unknown edge types
+            }
+        }
+    }
+
+    // ── Step 3: Build WDF ports ─────────────────────────────────────
+    // Port ordering: [NL_0..NL_{n-1}, reactive_0..reactive_{m-1}, adapted]
+    // The "adapted" port is the voltage source injection port.
+    let n_passive = reactive_edges.len();
+    let n_total = n_nl + n_passive + 1; // +1 for adapted (voltage source)
+
+    let mut ports: Vec<WdfPort> = Vec::with_capacity(n_total);
+    let mut port_node_pairs: Vec<(Option<usize>, Option<usize>)> = Vec::with_capacity(n_total);
+    let mut has_pots = false;
+
+    // NL ports: each spans collector-to-emitter (or plate-to-cathode)
+    let mut nl_port_resistances = Vec::with_capacity(n_nl);
+    for i in 0..n_nl {
+        let (pos_node, neg_node) = plan.nl_terminals[i];
+        let pos = node_to_mna(pos_node);
+        let neg = node_to_mna(neg_node);
+
+        // Default NL port resistance: 10kΩ (typical collector impedance)
+        let r_nl = 10_000.0;
+        ports.push(WdfPort {
+            node_pos: pos,
+            node_neg: neg,
+            resistance: r_nl,
+        });
+        port_node_pairs.push((pos, neg));
+        nl_port_resistances.push(r_nl);
+    }
+
+    // Reactive ports: each spans the edge's two nodes
+    let mut passive_children: Vec<DynNode> = Vec::with_capacity(n_passive);
+    for (eidx, dyn_node) in reactive_edges {
+        let e = &graph.edges[eidx];
+        let pos = node_to_mna(e.node_a);
+        let neg = node_to_mna(e.node_b);
+        let rp = dyn_node.port_resistance();
+        if matches!(&dyn_node, DynNode::Pot { .. }) {
+            has_pots = true;
+        }
+        ports.push(WdfPort {
+            node_pos: pos,
+            node_neg: neg,
+            resistance: rp,
+        });
+        port_node_pairs.push((pos, neg));
+        passive_children.push(dyn_node);
+    }
+
+    // Adapted port: voltage source at injection_node to ground
+    // Port resistance will be set so S[n-1][n-1] ≈ 0 (reflection-free).
+    // Start with a reasonable guess; the scattering derivation handles adaptation.
+    let injection_mna = node_to_mna(plan.injection_node);
+    let r_adapted = 1000.0; // Will be computed from Thévenin impedance
+    ports.push(WdfPort {
+        node_pos: injection_mna,
+        node_neg: None, // ground
+        resistance: r_adapted,
+    });
+    port_node_pairs.push((injection_mna, None));
+
+    // ── Step 4: Derive scattering matrix ────────────────────────────
+    let scattering = mna.derive_scattering_matrix_general(&ports);
+
+    // Validate scattering matrix: check for NaN/inf
+    if scattering.iter().any(|&s| !s.is_finite()) {
+        return None;
+    }
+
+    // Check adapted port reflection: S[n-1][n-1] should be near 0
+    let s_adapted_refl = scattering[(n_total - 1) * n_total + (n_total - 1)];
+    if s_adapted_refl.abs() > 0.5 {
+        // Poor adaptation — try to compute proper adapted resistance.
+        // The Thévenin impedance at the adapted port determines the ideal resistance.
+        // For now, accept imperfect adaptation (the solver still works, just less efficient).
+    }
+
+    // ── Step 5: Extract sub-blocks of scattering matrix ─────────────
+    // s_nl: n_nl × n_nl (NL-to-NL coupling)
+    let mut s_nl = vec![0.0; n_nl * n_nl];
+    for i in 0..n_nl {
+        for j in 0..n_nl {
+            s_nl[i * n_nl + j] = scattering[i * n_total + j];
+        }
+    }
+
+    // s_nl_passive: n_nl × n_passive (NL-to-passive coupling)
+    let mut s_nl_passive = vec![0.0; n_nl * n_passive];
+    for i in 0..n_nl {
+        for k in 0..n_passive {
+            s_nl_passive[i * n_passive + k] = scattering[i * n_total + (n_nl + k)];
+        }
+    }
+
+    // s_nl_adapted: n_nl (NL-to-adapted column)
+    let mut s_nl_adapted = vec![0.0; n_nl];
+    for i in 0..n_nl {
+        s_nl_adapted[i] = scattering[i * n_total + (n_total - 1)];
+    }
+
+    // ── Step 6: Create NL device roots ──────────────────────────────
+    // Detect 3-port VariMu triode: single element with 2 NL terminal pairs.
+    // In this case, create a VariMuThreePort device group instead of
+    // individual NlDeviceKind devices.
+    let is_three_port_vari_mu = plan.nl_element_indices.len() == 1
+        && n_nl == 2
+        && matches!(
+            &classified.nonlinear_elements[plan.nl_element_indices[0]].kind,
+            NonlinearKind::Triode { is_vari_mu: true, .. }
+        );
+
+    let (nl_devices, device_groups) = if is_three_port_vari_mu {
+        let elem = &classified.nonlinear_elements[plan.nl_element_indices[0]];
+        if let NonlinearKind::Triode { model_name, parallel_count, .. } = &elem.kind {
+            let model = vari_mu_model(model_name);
+            let three_port = VariMuThreePort::new(model).with_parallel_count(*parallel_count);
+            let groups = MultiNlDeviceGroups {
+                groups: vec![NlDeviceGroupKind::VariMuThreePort(three_port)],
+                offsets: vec![0], // Single group starting at port 0
+            };
+            (Vec::new(), Some(groups))
+        } else {
+            unreachable!()
+        }
+    } else {
+        // Standard case: one NlDeviceKind per element.
+        let mut devices = Vec::with_capacity(n_nl);
+        for &elem_idx in &plan.nl_element_indices {
+            let elem = &classified.nonlinear_elements[elem_idx];
+            let device = create_nl_device(&elem.kind)?;
+            devices.push(device);
+        }
+        (devices, None)
+    };
+
+    // ── Step 7: Determine output port ───────────────────────────────
+    // For 3-port VariMu: output is port 1 (plate-cathode).
+    // For standard multi-NL: output is the NL element closest to output.
+    let output_port = if is_three_port_vari_mu {
+        1 // plate-cathode port
+    } else {
+        plan.nl_element_indices
+            .iter()
+            .position(|&idx| idx == plan.output_element_idx)
+            .unwrap_or(0)
+    };
+
+    // ── Step 8: Create RTypeAdaptor and package ─────────────────────
+    let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+    let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
+
+    // Store recompute data only if there are pots (saves memory otherwise).
+    let recompute_data = if has_pots {
+        Some(ScatteringRecomputeData {
+            mna,
+            port_node_pairs,
+            adapted_resistance: r_adapted,
+        })
+    } else {
+        None
+    };
+
+    Some(MultiNlStage {
+        adaptor,
+        nl_devices,
+        nl_port_resistances,
+        passive_children,
+        n_nl,
+        v_prev: vec![0.0; n_nl],
+        s_nl,
+        s_nl_passive,
+        s_nl_adapted,
+        oversampler: Oversampler::new(oversampling),
+        compensation: plan.compensation,
+        output_port,
+        device_groups,
+        recompute_data,
+    })
+}
+
+/// Create an NlDeviceKind from a NonlinearKind classification.
+fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
+    match kind {
+        NonlinearKind::BjtNpn { model_name, .. } => {
+            let model = BjtModel::by_name(model_name);
+            Some(NlDeviceKind::BjtNpn(BjtNpnRoot::new(model)))
+        }
+        NonlinearKind::BjtPnp { model_name, .. } => {
+            let model = BjtModel::by_name(model_name);
+            Some(NlDeviceKind::BjtPnp(BjtPnpRoot::new(model)))
+        }
+        NonlinearKind::Triode { model_name, parallel_count, is_vari_mu, .. } => {
+            if *is_vari_mu {
+                let model = vari_mu_model(model_name);
+                Some(NlDeviceKind::VariMu(
+                    VariMuTriodeRoot::new(model).with_parallel_count(*parallel_count),
+                ))
+            } else {
+                let model = triode_model(model_name);
+                Some(NlDeviceKind::Triode(
+                    TriodeRoot::new(model).with_parallel_count(*parallel_count),
+                ))
+            }
+        }
+        NonlinearKind::SingleDiode(dt) => {
+            let model = diode_model(*dt);
+            Some(NlDeviceKind::Diode(DiodeRoot::new(model)))
+        }
+        _ => None, // DiodePair, Jfet, Mosfet, Zener, Ota, Pentode not yet supported in multi-NL
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

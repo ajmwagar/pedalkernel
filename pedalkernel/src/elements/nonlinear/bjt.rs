@@ -2,7 +2,7 @@
 //!
 //! Models NPN and PNP transistors using Ebers-Moll equations.
 
-use super::solver::newton_raphson_solve;
+use super::solver::{newton_raphson_solve, NlDeviceIv};
 use crate::elements::WdfRoot;
 use crate::models::{bjt_by_name, SpiceBjtModel};
 
@@ -273,6 +273,21 @@ impl WdfRoot for BjtNpnRoot {
     }
 }
 
+impl NlDeviceIv for BjtNpnRoot {
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        (
+            self.collector_current_at(v),
+            self.collector_current_derivative(v),
+        )
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-1.0, self.v_max)
+    }
+}
+
 /// BJT PNP nonlinear root for WDF trees.
 ///
 /// Same as NPN but with reversed polarities. PNP transistors conduct when
@@ -428,6 +443,21 @@ impl WdfRoot for BjtPnpRoot {
         );
         self.ic = self.collector_current_at((a + b) / 2.0);
         b
+    }
+}
+
+impl NlDeviceIv for BjtPnpRoot {
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        (
+            self.collector_current_at(v),
+            self.collector_current_derivative(v),
+        )
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-1.0, self.v_max)
     }
 }
 

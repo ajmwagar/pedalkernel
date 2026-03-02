@@ -35,6 +35,7 @@ pub(super) enum NonlinearKind {
         model_name: String,
         plate_node: NodeId,
         cathode_node: NodeId,
+        grid_node: Option<NodeId>,
         parallel_count: usize,
         is_vari_mu: bool,
     },
@@ -220,11 +221,17 @@ pub(super) fn classify_circuit(
                 } else if let Some(group) = triode_groups.get(&key) {
                     processed_triode_groups.insert(key);
                     let (_, ref rep_name, rep_is_vari_mu) = group[0];
+                    // Look up grid node from node_names using the component ID.
+                    let grid_node = graph
+                        .node_names
+                        .get(&format!("{}.grid", comp.id))
+                        .copied();
                     Some((
                         NonlinearKind::Triode {
                             model_name: rep_name.clone(),
                             plate_node: e.node_a,
                             cathode_node: e.node_b,
+                            grid_node,
                             parallel_count: group.len(),
                             is_vari_mu: rep_is_vari_mu,
                         },

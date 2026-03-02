@@ -381,12 +381,89 @@ impl RTypeAdaptor {
         a_children
     }
 
+    /// Perform full N×N matrix-vector multiply: `a = S · b_all`.
+    ///
+    /// Unlike `scatter_up`/`scatter_down`, this computes *all* output waves
+    /// (including NL ports) given *all* input waves. Needed by the multi-NL
+    /// solver which sets NL port `b` values after the NR solve.
+    #[inline]
+    pub fn scatter_all(&self, b_all: &[f64]) -> Vec<f64> {
+        let n = self.num_ports;
+        debug_assert_eq!(b_all.len(), n);
+        let mut a = vec![0.0; n];
+        for i in 0..n {
+            let mut sum = 0.0;
+            for j in 0..n {
+                sum += self.scattering_matrix[i * n + j] * b_all[j];
+            }
+            a[i] = sum;
+        }
+        a
+    }
+
+    /// Manually set the cached child reflected waves.
+    ///
+    /// After a multi-NL NR solve determines the correct `b` values for all
+    /// ports, call this to update the cached state so that a subsequent
+    /// `scatter_down` produces correct incident waves for passive children.
+    pub fn set_child_waves(&mut self, b_children: &[f64]) {
+        debug_assert_eq!(b_children.len(), self.num_ports - 1);
+        self.b_children.copy_from_slice(b_children);
+    }
+
     /// Reset state.
     pub fn reset(&mut self) {
         for b in &mut self.b_children {
             *b = 0.0;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// WDF Port for generalized scattering
+// ---------------------------------------------------------------------------
+
+/// A WDF port spanning an arbitrary node pair (not necessarily node-to-ground).
+///
+/// Used by `derive_scattering_matrix_general()` to support floating ports
+/// such as a BJT's collector-to-emitter path where neither terminal is ground.
+///
+/// The generalized Werner formula for the scattering matrix entry is:
+/// ```text
+/// S[i][j] = δ_ij + 2·R_i · (X⁻¹[ai,aj] - X⁻¹[ai,bj] - X⁻¹[bi,aj] + X⁻¹[bi,bj])
+/// ```
+/// where `ai`, `bi` are the positive and negative nodes of port `i`.
+#[derive(Debug, Clone)]
+pub struct WdfPort {
+    /// Positive node index (None = ground).
+    pub node_pos: Option<usize>,
+    /// Negative node index (None = ground).
+    pub node_neg: Option<usize>,
+    /// Port resistance (Ω).
+    pub resistance: f64,
+}
+
+/// Helper: compute the X⁻¹ entry between two port terminal pairs.
+///
+/// Returns `X⁻¹[pi, pj] - X⁻¹[pi, nj] - X⁻¹[ni, pj] + X⁻¹[ni, nj]`
+/// where `pi/ni` are positive/negative nodes of port i, `pj/nj` of port j.
+/// Ground nodes (None) contribute zero to the X⁻¹ lookup.
+#[inline]
+fn x_inv_port_entry(
+    x_inv: &[f64],
+    n: usize,
+    pos_i: Option<usize>,
+    neg_i: Option<usize>,
+    pos_j: Option<usize>,
+    neg_j: Option<usize>,
+) -> f64 {
+    let lookup = |row: Option<usize>, col: Option<usize>| -> f64 {
+        match (row, col) {
+            (Some(r), Some(c)) => x_inv[r * n + c],
+            _ => 0.0,
+        }
+    };
+    lookup(pos_i, pos_j) - lookup(pos_i, neg_j) - lookup(neg_i, pos_j) + lookup(neg_i, neg_j)
 }
 
 // ---------------------------------------------------------------------------
@@ -543,11 +620,14 @@ impl MnaSystem {
         // Invert X matrix (simple Gaussian elimination for small matrices)
         let x_inv = invert_matrix(&x_matrix, n_total);
 
-        // Derive scattering matrix using Werner DAFx-15 Eq. (6):
-        // S = I + 2·[0 R]·X⁻¹·[0 I]ᵀ
+        // Derive scattering matrix from the MNA inverse.
         //
-        // For our port arrangement (ports at specific nodes):
-        // S[i][j] = δ[i][j] + 2·R[i]·X⁻¹[port_node[i]][port_node[j]]
+        // Each port i has Thévenin resistance R_i and is connected node_i to ground.
+        // The MNA system with port conductances stamped gives:  X·V = P·diag(1/R)·a
+        // Port voltages:  v = Pᵀ·V
+        // Reflected waves: b = 2v - a
+        // Therefore: S = 2·Pᵀ·X⁻¹·P·diag(1/R) - I
+        // Which gives: S[i][j] = 2·X⁻¹[node_i][node_j] / R_j - δ_ij
 
         let mut scattering = vec![0.0; n_ports * n_ports];
         for i in 0..n_ports {
@@ -559,13 +639,103 @@ impl MnaSystem {
                 } else {
                     0.0
                 };
-                scattering[i * n_ports + j] = delta + 2.0 * port_resistances[i] * x_inv_ij;
+                scattering[i * n_ports + j] =
+                    2.0 * x_inv_ij / port_resistances[j] - delta;
             }
         }
 
-        // Adapt the last port (make S[n-1][n-1] = 0)
-        // This requires adjusting the port resistance, which we've already done
-        // if the caller computed R_adapted correctly.
+        scattering
+    }
+
+    /// Derive scattering matrix for arbitrary port terminal pairs.
+    ///
+    /// Generalizes `derive_scattering_matrix` to support ports that span
+    /// arbitrary node pairs (not just node-to-ground). This is required for
+    /// BJT collector-to-emitter ports where neither terminal is ground.
+    ///
+    /// Uses the generalized Werner formula:
+    /// ```text
+    /// S[i][j] = 2/R_j · (X⁻¹[ai,aj] - X⁻¹[ai,bj] - X⁻¹[bi,aj] + X⁻¹[bi,bj]) - δ_ij
+    /// ```
+    /// where a_k/b_k are the positive/negative terminal nodes of port k.
+    ///
+    /// The last port is adapted (reflection-free, S[n-1][n-1] ≈ 0).
+    pub fn derive_scattering_matrix_general(&self, ports: &[WdfPort]) -> Vec<f64> {
+        let n_ports = ports.len();
+
+        // Build the full MNA system matrix X
+        let n_total = self.num_nodes + self.num_vsources;
+        let mut x_matrix = vec![0.0; n_total * n_total];
+
+        // Fill G block
+        for i in 0..self.num_nodes {
+            for j in 0..self.num_nodes {
+                x_matrix[i * n_total + j] = self.g_matrix[i * self.num_nodes + j];
+            }
+        }
+
+        // Fill B block
+        for i in 0..self.num_nodes {
+            for j in 0..self.num_vsources {
+                x_matrix[i * n_total + self.num_nodes + j] =
+                    self.b_matrix[i * self.num_vsources + j];
+            }
+        }
+
+        // Fill C block
+        for i in 0..self.num_vsources {
+            for j in 0..self.num_nodes {
+                x_matrix[(self.num_nodes + i) * n_total + j] =
+                    self.c_matrix[i * self.num_nodes + j];
+            }
+        }
+
+        // Fill D block
+        for i in 0..self.num_vsources {
+            for j in 0..self.num_vsources {
+                x_matrix[(self.num_nodes + i) * n_total + self.num_nodes + j] =
+                    self.d_matrix[i * self.num_vsources + j];
+            }
+        }
+
+        // Add port Thévenin resistances: stamp each port as a conductance
+        // between its positive and negative node pair.
+        for port in ports.iter() {
+            let g = 1.0 / port.resistance;
+            if let Some(p) = port.node_pos {
+                x_matrix[p * n_total + p] += g;
+                if let Some(n) = port.node_neg {
+                    x_matrix[p * n_total + n] -= g;
+                }
+            }
+            if let Some(n) = port.node_neg {
+                x_matrix[n * n_total + n] += g;
+                if let Some(p) = port.node_pos {
+                    x_matrix[n * n_total + p] -= g;
+                }
+            }
+        }
+
+        // Invert X matrix
+        let x_inv = invert_matrix(&x_matrix, n_total);
+
+        // Derive scattering using generalized Werner formula
+        let mut scattering = vec![0.0; n_ports * n_ports];
+        for i in 0..n_ports {
+            for j in 0..n_ports {
+                let delta = if i == j { 1.0 } else { 0.0 };
+                let entry = x_inv_port_entry(
+                    &x_inv,
+                    n_total,
+                    ports[i].node_pos,
+                    ports[i].node_neg,
+                    ports[j].node_pos,
+                    ports[j].node_neg,
+                );
+                scattering[i * n_ports + j] =
+                    2.0 * entry / ports[j].resistance - delta;
+            }
+        }
 
         scattering
     }
@@ -1217,5 +1387,309 @@ mod tests {
             (v1 + v2 - v3).abs() < 1e-10,
             "KVL: {v1} + {v2} should ≈ {v3}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Generalized MNA scattering tests (Phase 1)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_general_port_matches_simple() {
+        // Verify that derive_scattering_matrix_general with node-to-ground ports
+        // produces identical results to derive_scattering_matrix.
+        //
+        // Two-port network: R=1000Ω between node0 and node1.
+        // Port 0 at node0 (to ground), Port 1 at node1 (to ground).
+        let mut mna = MnaSystem::new(2, 0);
+        mna.stamp_resistor(Some(0), Some(1), 1000.0);
+
+        let port_resistances = [500.0, 500.0];
+
+        // Original method
+        let s_old = mna.derive_scattering_matrix(&port_resistances);
+
+        // General method with node-to-ground ports
+        let ports = vec![
+            WdfPort { node_pos: Some(0), node_neg: None, resistance: 500.0 },
+            WdfPort { node_pos: Some(1), node_neg: None, resistance: 500.0 },
+        ];
+        let s_new = mna.derive_scattering_matrix_general(&ports);
+
+        for i in 0..4 {
+            assert!(
+                (s_old[i] - s_new[i]).abs() < 1e-10,
+                "S[{}][{}] mismatch: old={}, new={}",
+                i / 2, i % 2, s_old[i], s_new[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_general_port_floating_pair() {
+        // Network: R from node0→node1, Rg from node1→ground (provides ground ref).
+        // One floating port from node0 to node1 with resistance Rp.
+        //
+        // Thévenin impedance from node0 to node1 (port disconnected) = R
+        // (Rg only connects node1 to ground, doesn't affect the 2-terminal Z).
+        //
+        // Expected reflection: S[0][0] = (R - Rp) / (R + Rp)
+        let r = 1000.0;
+        let rg = 1000.0;
+        let rp = 2000.0;
+
+        let mut mna = MnaSystem::new(2, 0);
+        mna.stamp_resistor(Some(0), Some(1), r);
+        mna.stamp_resistor(Some(1), None, rg); // ground reference
+
+        let ports = vec![
+            WdfPort { node_pos: Some(0), node_neg: Some(1), resistance: rp },
+        ];
+        let s = mna.derive_scattering_matrix_general(&ports);
+
+        let expected = (r - rp) / (r + rp); // = -1/3
+        assert!(
+            (s[0] - expected).abs() < 1e-10,
+            "S[0][0] should be (R-Rp)/(R+Rp) = {expected}, got {}",
+            s[0]
+        );
+    }
+
+    #[test]
+    fn test_general_port_voltage_divider() {
+        // R1: node0 → node1, R2: node1 → gnd.
+        // Port 0: node0 to gnd, Port 1: node1 to gnd.
+        let r1 = 1000.0;
+        let r2 = 1000.0;
+        let rp0 = 500.0;
+        let rp1 = 500.0;
+
+        let mut mna = MnaSystem::new(2, 0);
+        mna.stamp_resistor(Some(0), Some(1), r1);
+        mna.stamp_resistor(Some(1), None, r2);
+
+        let ports = vec![
+            WdfPort { node_pos: Some(0), node_neg: None, resistance: rp0 },
+            WdfPort { node_pos: Some(1), node_neg: None, resistance: rp1 },
+        ];
+        let s = mna.derive_scattering_matrix_general(&ports);
+
+        // Verify basic properties: S is 2×2, finite, no NaN
+        for i in 0..4 {
+            assert!(s[i].is_finite(), "S element {} is not finite", i);
+        }
+
+        // Row passivity: |S[i][0]|² + |S[i][1]|² ≤ 1 for each row
+        for i in 0..2 {
+            let row_norm_sq = s[i * 2] * s[i * 2] + s[i * 2 + 1] * s[i * 2 + 1];
+            assert!(
+                row_norm_sq <= 1.0 + 1e-10,
+                "Row {} norm² = {} exceeds 1 (not passive)",
+                i, row_norm_sq
+            );
+        }
+    }
+
+    #[test]
+    fn test_general_port_t_network() {
+        // T-network: R1 between node0-node1, R2 between node1-node2,
+        // R3 between node1-gnd.
+        // Port 0: node0 to gnd, Port 1: node2 to gnd.
+        let r1 = 1000.0;
+        let r2 = 1000.0;
+        let r3 = 2000.0;
+        let rp0 = 1500.0;
+        let rp1 = 1500.0;
+
+        let mut mna = MnaSystem::new(3, 0);
+        mna.stamp_resistor(Some(0), Some(1), r1);
+        mna.stamp_resistor(Some(1), Some(2), r2);
+        mna.stamp_resistor(Some(1), None, r3);
+
+        let ports = vec![
+            WdfPort { node_pos: Some(0), node_neg: None, resistance: rp0 },
+            WdfPort { node_pos: Some(2), node_neg: None, resistance: rp1 },
+        ];
+        let s = mna.derive_scattering_matrix_general(&ports);
+
+        // Verify S is 2×2 and symmetric (since the circuit is symmetric)
+        assert!(
+            (s[1] - s[2]).abs() < 1e-10,
+            "Symmetric network should have S[0][1] = S[1][0]: {} vs {}",
+            s[1], s[2]
+        );
+
+        // Verify passivity
+        for i in 0..2 {
+            let row_norm_sq = s[i * 2] * s[i * 2] + s[i * 2 + 1] * s[i * 2 + 1];
+            assert!(
+                row_norm_sq <= 1.0 + 1e-10,
+                "Row {} norm² = {} exceeds 1",
+                i, row_norm_sq
+            );
+        }
+    }
+
+    #[test]
+    fn test_general_port_energy_conservation() {
+        // For a lossless junction (no internal resistors — only port resistances),
+        // the power-normalized scattering matrix Ŝ should satisfy Ŝᵀ·Ŝ = I.
+        //
+        // Power-normalized: Ŝ[i][j] = sqrt(R_i/R_j) · S[i][j]
+        //
+        // For a resistive network (lossy), we instead check passivity:
+        // all singular values of Ŝ ≤ 1.
+        //
+        // Here we test a specific analytical case: single resistor R between
+        // node0 and node1, ports at each node to ground with equal resistance Rp.
+        //
+        // Analytical: The 2×2 G matrix from R is [[1/R,-1/R],[-1/R,1/R]], plus
+        // port conductances: G_total = [[1/R+1/Rp,-1/R],[-1/R,1/R+1/Rp]].
+        // S[i][j] = 2·X⁻¹[i][j]/Rp - δ_ij.
+        let r = 1000.0;
+        let rp = 1000.0;
+        let mut mna = MnaSystem::new(2, 0);
+        mna.stamp_resistor(Some(0), Some(1), r);
+
+        let ports = vec![
+            WdfPort { node_pos: Some(0), node_neg: None, resistance: rp },
+            WdfPort { node_pos: Some(1), node_neg: None, resistance: rp },
+        ];
+        let s = mna.derive_scattering_matrix_general(&ports);
+
+        // Analytical: G_total = [[2/R, -1/R], [-1/R, 2/R]], det = 3/R²
+        // X⁻¹ = R/3 · [[2, 1], [1, 2]]
+        // S[0][0] = 2·(R/3·2)/Rp - 1 = 4/3 - 1 = 1/3  (with Rp=R)
+        // S[0][1] = 2·(R/3·1)/Rp = 2/3
+        // S[1][0] = 2/3, S[1][1] = 1/3
+        let expected = [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0];
+        for i in 0..4 {
+            assert!(
+                (s[i] - expected[i]).abs() < 1e-10,
+                "S[{}][{}]: expected {}, got {}",
+                i / 2, i % 2, expected[i], s[i]
+            );
+        }
+
+        // Verify passivity: for each row, R_i · Σ_j S[i][j]²/R_j ≤ 1
+        // With equal resistances this simplifies to row norm² ≤ 1
+        for i in 0..2 {
+            let row_norm_sq = s[i * 2] * s[i * 2] + s[i * 2 + 1] * s[i * 2 + 1];
+            assert!(
+                row_norm_sq <= 1.0 + 1e-10,
+                "Row {} norm² = {} exceeds 1 (not passive)",
+                i, row_norm_sq
+            );
+        }
+    }
+
+    #[test]
+    fn test_adapted_port_reflection_zero() {
+        // For a properly adapted last port, S[n-1][n-1] should ≈ 0.
+        // Voltage divider: R1 between node0-node1, R2 between node1-gnd.
+        // Port 0: node0→gnd with Rp0.
+        // Port 1 (adapted): node1→gnd.
+        //
+        // The adapted port resistance = Thévenin impedance seen from port 1's
+        // terminals through the network WITH all other port resistances connected.
+        // From node1: R2 to gnd in parallel with (R1 + Rp0) to gnd.
+        // Rth = R2 || (R1 + Rp0)
+        let r1 = 1000.0;
+        let r2 = 2000.0;
+        let rp0 = 1000.0;
+        let rp1 = r2 * (r1 + rp0) / (r2 + r1 + rp0); // R2 || (R1+Rp0)
+
+        let mut mna = MnaSystem::new(2, 0);
+        mna.stamp_resistor(Some(0), Some(1), r1);
+        mna.stamp_resistor(Some(1), None, r2);
+
+        let ports = vec![
+            WdfPort { node_pos: Some(0), node_neg: None, resistance: rp0 },
+            WdfPort { node_pos: Some(1), node_neg: None, resistance: rp1 },
+        ];
+        let s = mna.derive_scattering_matrix_general(&ports);
+
+        assert!(
+            s[3].abs() < 1e-8,
+            "S[1][1] should be ≈ 0 for adapted port, got {} (Rp1={})",
+            s[3], rp1
+        );
+    }
+
+    #[test]
+    fn test_scatter_all_consistency() {
+        // Verify scatter_all matches scatter_up + scatter_down for known inputs.
+        // Use a 3-port R-type from a simple network.
+        //
+        // Network: R_ab=1000 (0→1), R_bc=1500 (1→2), R_bg=2000 (1→gnd).
+        // Port 0: node0→gnd (Rp0=1000), Port 1: node2→gnd (Rp1=1000)
+        // Port 2 (adapted): node1→gnd
+        //
+        // Thévenin from node1: (R_ab+Rp0)||(R_bc+Rp1)||R_bg = 2000||2500||2000
+        let r_ab = 1000.0;
+        let r_bc = 1500.0;
+        let r_bg = 2000.0;
+        let r0 = 1000.0;
+        let r1 = 1000.0;
+
+        // Compute adapted resistance for port 2
+        let branch_a = r_ab + r0; // 2000
+        let branch_b = r_bc + r1; // 2500
+        let r2 = 1.0 / (1.0 / branch_a + 1.0 / branch_b + 1.0 / r_bg);
+
+        let mut mna = MnaSystem::new(3, 0);
+        mna.stamp_resistor(Some(0), Some(1), r_ab);
+        mna.stamp_resistor(Some(1), Some(2), r_bc);
+        mna.stamp_resistor(Some(1), None, r_bg);
+
+        let ports = vec![
+            WdfPort { node_pos: Some(0), node_neg: None, resistance: r0 },
+            WdfPort { node_pos: Some(2), node_neg: None, resistance: r1 },
+            WdfPort { node_pos: Some(1), node_neg: None, resistance: r2 },
+        ];
+        let s_matrix = mna.derive_scattering_matrix_general(&ports);
+
+        // Verify S[2][2] ≈ 0 (adapted)
+        let n = 3;
+        assert!(
+            s_matrix[2 * n + 2].abs() < 1e-8,
+            "S[2][2] should be ≈ 0 for adapted port, got {}",
+            s_matrix[2 * n + 2]
+        );
+
+        let mut adaptor = RTypeAdaptor::new(s_matrix, &[r0, r1, r2]);
+
+        // Set up known child waves
+        let b_children = [0.5, -0.3];
+
+        // scatter_up gives b_parent (uses S[2][0..1])
+        let b_parent = adaptor.scatter_up(&b_children);
+
+        // scatter_down with a known a_parent (uses S[0..1][0..2])
+        let a_parent = 0.7;
+        let a_children = adaptor.scatter_down(a_parent);
+
+        // Now use scatter_all with full wave vector
+        // b_all = [b_child_0, b_child_1, a_parent]
+        let b_all = [b_children[0], b_children[1], a_parent];
+        let a_all = adaptor.scatter_all(&b_all);
+
+        // scatter_all computes a[i] = Σ_j S[i][j]·b_all[j] for all i.
+        // For the adapted parent port (i=2): a_all[2] = Σ_j S[2][j]·b_all[j]
+        //   = S[2][0]·b0 + S[2][1]·b1 + S[2][2]·a_parent
+        //   ≈ b_parent + 0 (since S[2][2]≈0)
+        assert!(
+            (a_all[2] - b_parent).abs() < 1e-8,
+            "scatter_all parent port should match scatter_up: {} vs {}",
+            a_all[2], b_parent
+        );
+
+        // For child ports: a_all[i] = Σ_j S[i][j]·b_all[j] should match a_children[i]
+        for i in 0..2 {
+            assert!(
+                (a_all[i] - a_children[i]).abs() < 1e-8,
+                "scatter_all child {} should match scatter_down: {} vs {}",
+                i, a_all[i], a_children[i]
+            );
+        }
     }
 }

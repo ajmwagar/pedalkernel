@@ -2,7 +2,7 @@
 //!
 //! Includes anti-parallel diode pair and single diode configurations.
 
-use super::solver::newton_raphson_solve;
+use super::solver::{newton_raphson_solve, NlDeviceIv};
 use crate::elements::WdfRoot;
 
 // ---------------------------------------------------------------------------
@@ -489,5 +489,23 @@ impl WdfRoot for DiodeRoot {
         // Correct reflected wave for series resistance
         // b = 2*v_total - a = 2*(v_junction + i*Rs) - a = b_eff + 2*i*Rs
         b_eff + 2.0 * i * rs
+    }
+}
+
+impl NlDeviceIv for DiodeRoot {
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        let is = self.model.is;
+        let nvt = self.model.n_vt;
+        let x = (v / nvt).clamp(-500.0, 500.0);
+        let ev = x.exp();
+        let i = is * (ev - 1.0);
+        let di = is * ev / nvt;
+        (i, di)
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-5.0, 5.0)
     }
 }

@@ -10,7 +10,7 @@
 //! Ia = p1 × Vak^p2 / ((p3 - p4×Vgk)^p5 × (p6 + exp(p7×Vak - p8×Vgk)))
 //! ```
 
-use super::solver::{newton_raphson_solve, LEAKAGE_CONDUCTANCE};
+use super::solver::{newton_raphson_solve, NlDeviceIv, NlDeviceGroupIv, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
 
 // ---------------------------------------------------------------------------
@@ -214,11 +214,14 @@ impl VariMuTriodeRoot {
 
     /// Compute derivative of plate current w.r.t. Vak for Newton-Raphson.
     ///
-    /// Using the quotient rule on the Raffensperger equation:
+    /// Derived via quotient rule on the Raffensperger equation:
     /// ```text
-    /// dIa/dVak = Ia × (p2/Vak + p7×exp_term / (p6 + exp_term))
+    /// dIa/dVak = Ia × (p2/Vak - p7 × exp_term / (p6 + exp_term))
     /// ```
-    /// where exp_term = exp(p7×Vak - p8×Vgk)
+    /// where exp_term = exp(p7×Vak - p8×Vgk).
+    ///
+    /// Note the minus sign: ∂D/∂Vak = D_base^p5 × p7 × exp_term, and
+    /// Ia = N/D, so dIa/dVak = Ia×(dN/N - dD/D) = Ia×(p2/Vak - p7×exp/sum).
     #[inline]
     fn plate_current_derivative(&self, vak: f64) -> f64 {
         let m = &self.model;
@@ -246,8 +249,8 @@ impl VariMuTriodeRoot {
             return LEAKAGE_CONDUCTANCE;
         }
 
-        // dIa/dVak = Ia × (p2/Vak + p7 × exp_term / (p6 + exp_term))
-        let d = ia * (m.p2 / vak + m.p7 * exp_term / exp_sum);
+        // dIa/dVak = Ia × (p2/Vak - p7 × exp_term / (p6 + exp_term))
+        let d = ia * (m.p2 / vak - m.p7 * exp_term / exp_sum);
 
         // Ensure positive derivative (physical: more plate voltage → more current)
         let d_scaled = d.max(LEAKAGE_CONDUCTANCE) * self.parallel_count as f64;
@@ -271,6 +274,195 @@ impl WdfRoot for VariMuTriodeRoot {
             None,
             |v| (root.plate_current(v), root.plate_current_derivative(v)),
         )
+    }
+}
+
+impl NlDeviceIv for VariMuTriodeRoot {
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        (self.plate_current(v), self.plate_current_derivative(v))
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-50.0, self.v_max)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 3-Port Variable-Mu Triode (grid as WDF port)
+// ---------------------------------------------------------------------------
+
+/// 3-port variable-mu triode for use with the grouped multi-port NR solver.
+///
+/// Presents 2 WDF ports to the R-type adaptor:
+/// - Port 0: grid-to-cathode (grid conduction diode)
+/// - Port 1: plate-to-cathode (Raffensperger plate current, depends on Vgk)
+///
+/// The grid voltage is no longer an external parameter — it comes from
+/// the grid port of the R-type adaptor, which connects to the grid-side
+/// passive network (threshold pots, bias resistors, etc.).
+///
+/// Grid current model:
+///   i_g = I_gs × (exp(V_gk / V_tg) - 1)
+/// This is essentially zero for Vgk < 0 (normal operation) and models
+/// forward grid conduction for Vgk > 0.
+///
+/// Plate current: Raffensperger equation (same as VariMuTriodeRoot)
+///   Ia = p1 × Vak^p2 / ((p3 - p4×Vgk)^p5 × (p6 + exp(p7×Vak - p8×Vgk)))
+///
+/// The cross-derivative ∂Ia/∂Vgk (transconductance) is:
+///   ∂Ia/∂Vgk = Ia × (p4×p5/D_base + p8×exp_term/(p6 + exp_term))
+/// where D_base = p3 - p4×Vgk.
+#[derive(Debug, Clone, Copy)]
+pub struct VariMuThreePort {
+    pub model: VariMuModel,
+    /// Maximum plate voltage (B+ supply rail).
+    v_max: f64,
+    /// Number of parallel tubes.
+    parallel_count: usize,
+    /// Grid emission current (saturation current for grid diode).
+    grid_is: f64,
+    /// Grid thermal voltage.
+    grid_vt: f64,
+}
+
+impl VariMuThreePort {
+    pub fn new(model: VariMuModel) -> Self {
+        Self {
+            model,
+            v_max: 500.0,
+            parallel_count: 1,
+            // Grid diode: very small emission current (grid barely conducts)
+            grid_is: 1e-9,
+            grid_vt: 0.025,
+        }
+    }
+
+    pub fn new_with_v_max(model: VariMuModel, v_max: f64) -> Self {
+        Self {
+            v_max: v_max.max(1.0),
+            ..Self::new(model)
+        }
+    }
+
+    pub fn with_parallel_count(mut self, count: usize) -> Self {
+        self.parallel_count = count.max(1);
+        self
+    }
+
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0);
+    }
+
+    pub fn v_max(&self) -> f64 {
+        self.v_max
+    }
+
+    pub fn parallel_count(&self) -> usize {
+        self.parallel_count
+    }
+
+    /// Grid current (diode model): i_g = I_gs × (exp(Vgk/Vt) - 1).
+    /// Returns (current, di/dv_gk).
+    #[inline]
+    fn grid_iv(&self, vgk: f64) -> (f64, f64) {
+        let x = (vgk / self.grid_vt).clamp(-500.0, 500.0);
+        let ev = x.exp();
+        let ig = self.grid_is * (ev - 1.0) * self.parallel_count as f64;
+        let dig = self.grid_is * ev / self.grid_vt * self.parallel_count as f64;
+        (ig, dig)
+    }
+
+    /// Plate current using the Raffensperger equation.
+    /// Takes both Vgk and Vak as inputs.
+    /// Returns (Ia, ∂Ia/∂Vak, ∂Ia/∂Vgk).
+    #[inline]
+    fn plate_iv(&self, vgk: f64, vak: f64) -> (f64, f64, f64) {
+        let m = &self.model;
+        let pc = self.parallel_count as f64;
+
+        // No reverse current
+        if vak <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
+        }
+
+        // Denominator base: p3 - p4 * Vgk
+        let denom_base = m.p3 - m.p4 * vgk;
+        if denom_base <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
+        }
+
+        // Exponential term
+        let exp_arg = (m.p7 * vak - m.p8 * vgk).clamp(-500.0, 500.0);
+        let exp_term = exp_arg.exp();
+        let exp_sum = m.p6 + exp_term;
+
+        if exp_sum <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
+        }
+
+        let numerator = m.p1 * vak.powf(m.p2);
+        let denom_pow = denom_base.powf(m.p5);
+        let denominator = denom_pow * exp_sum;
+
+        if denominator <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
+        }
+
+        let ia = (numerator / denominator) * pc;
+
+        if ia <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
+        }
+
+        // ∂Ia/∂Vak (same as existing plate_current_derivative)
+        // dIa/dVak = Ia × (p2/Vak - p7 × exp_term / (p6 + exp_term))
+        let dia_dvak = ia * (m.p2 / vak - m.p7 * exp_term / exp_sum);
+        let dia_dvak = dia_dvak.max(LEAKAGE_CONDUCTANCE * pc);
+
+        // ∂Ia/∂Vgk (transconductance cross-derivative)
+        //
+        // Ia = N / D where D = D_base^p5 × (p6 + exp_term)
+        //
+        // ∂D/∂Vgk = -p4×p5×D_base^(p5-1)×exp_sum + D_base^p5×(-p8×exp_term)
+        //         = D_base^(p5-1) × [-p4×p5×exp_sum - D_base×p8×exp_term]
+        //
+        // -∂D/∂Vgk = D_base^(p5-1) × [p4×p5×exp_sum + D_base×p8×exp_term]
+        //
+        // ∂Ia/∂Vgk = -N/D² × ∂D/∂Vgk = Ia × (-∂D/∂Vgk) / D
+        //          = Ia × [p4×p5/(D_base) + p8×exp_term/(exp_sum)]
+        let dia_dvgk = ia * (m.p4 * m.p5 / denom_base + m.p8 * exp_term / exp_sum);
+
+        (ia, dia_dvak, dia_dvgk)
+    }
+}
+
+impl NlDeviceGroupIv for VariMuThreePort {
+    fn n_ports(&self) -> usize { 2 }
+
+    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+        let vgk = v[0]; // Port 0: grid-cathode
+        let vak = v[1]; // Port 1: plate-cathode
+
+        // Grid current
+        let (ig, dig_dvgk) = self.grid_iv(vgk);
+        currents[0] = ig;
+        jacobian[0] = dig_dvgk;   // ∂ig/∂vgk
+        jacobian[1] = 0.0;        // ∂ig/∂vak (grid current independent of plate voltage)
+
+        // Plate current
+        let (ip, dip_dvak, dip_dvgk) = self.plate_iv(vgk, vak);
+        currents[1] = ip;
+        jacobian[2] = dip_dvgk;   // ∂ip/∂vgk (transconductance — the cross-coupling!)
+        jacobian[3] = dip_dvak;   // ∂ip/∂vak
+    }
+
+    fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+        match port {
+            0 => (-50.0, 10.0),        // Grid: well below cutoff to slight forward bias
+            _ => (-50.0, self.v_max),   // Plate: 0 to B+
+        }
     }
 }
 
@@ -437,5 +629,204 @@ mod tests {
         assert_eq!(root.v_max(), 300.0);
         root.set_v_max(0.5);
         assert_eq!(root.v_max(), 1.0);
+    }
+
+    // -------------------------------------------------------------------
+    // VariMuThreePort tests
+    // -------------------------------------------------------------------
+
+    /// 3-port plate current should match 2-port for the same Vgk/Vak.
+    #[test]
+    fn three_port_plate_current_matches_two_port() {
+        let model = VariMuModel::ge_6386();
+        let mut two_port = VariMuTriodeRoot::new(model);
+        let three_port = VariMuThreePort::new(model);
+
+        for &vgk in &[-8.0, -4.0, -2.0, -1.0, 0.0] {
+            for &vak in &[50.0, 100.0, 200.0, 300.0] {
+                two_port.set_vgk(vgk);
+                let ip_2 = two_port.plate_current(vak);
+                let (ip_3, _, _) = three_port.plate_iv(vgk, vak);
+
+                assert!(
+                    (ip_2 - ip_3).abs() < 1e-15,
+                    "Plate current mismatch at Vgk={vgk}, Vak={vak}: \
+                     2-port={ip_2:.6e}, 3-port={ip_3:.6e}"
+                );
+            }
+        }
+    }
+
+    /// Grid current should be negligible for negative Vgk.
+    #[test]
+    fn three_port_grid_current_negligible_negative_vgk() {
+        let tp = VariMuThreePort::new(VariMuModel::ge_6386());
+        for &vgk in &[-10.0, -5.0, -2.0, -0.5] {
+            let (ig, _) = tp.grid_iv(vgk);
+            assert!(
+                ig.abs() < 1e-6,
+                "Grid current should be negligible at Vgk={vgk}: got {ig:.6e}"
+            );
+        }
+    }
+
+    /// Grid conduction when Vgk > 0.
+    #[test]
+    fn three_port_grid_conducts_positive_vgk() {
+        let tp = VariMuThreePort::new(VariMuModel::ge_6386());
+        let (ig_0, _) = tp.grid_iv(0.0);
+        let (ig_1, _) = tp.grid_iv(1.0);
+        assert!(ig_1 > ig_0, "Grid current should increase for positive Vgk");
+        assert!(ig_1 > 1e-6, "Grid current should be measurable at Vgk=1V: {ig_1:.6e}");
+    }
+
+    /// Transconductance (∂Ia/∂Vgk) should be positive at operating point.
+    #[test]
+    fn three_port_transconductance_positive() {
+        let tp = VariMuThreePort::new(VariMuModel::ge_6386());
+        let (_, _, gm) = tp.plate_iv(-2.0, 200.0);
+        assert!(gm > 0.0, "Transconductance should be positive, got {gm:.6e}");
+        assert!(gm.is_finite(), "Transconductance must be finite");
+    }
+
+    /// Verify ∂Ia/∂Vgk numerically via finite differences.
+    #[test]
+    fn three_port_transconductance_matches_finite_diff() {
+        let tp = VariMuThreePort::new(VariMuModel::ge_6386());
+        let vak = 200.0;
+        let delta = 1e-6;
+
+        for &vgk in &[-8.0, -4.0, -2.0, -1.0, 0.0] {
+            let (ip_lo, _, _) = tp.plate_iv(vgk - delta, vak);
+            let (ip_hi, _, _) = tp.plate_iv(vgk + delta, vak);
+            let gm_numerical = (ip_hi - ip_lo) / (2.0 * delta);
+
+            let (_, _, gm_analytical) = tp.plate_iv(vgk, vak);
+
+            let err = (gm_numerical - gm_analytical).abs();
+            let rel_err = if gm_analytical.abs() > 1e-15 {
+                err / gm_analytical.abs()
+            } else {
+                err
+            };
+
+            assert!(
+                rel_err < 1e-4,
+                "Transconductance mismatch at Vgk={vgk}: \
+                 analytical={gm_analytical:.6e}, numerical={gm_numerical:.6e}, \
+                 rel_err={rel_err:.6e}"
+            );
+        }
+    }
+
+    /// Verify ∂Ia/∂Vak numerically via finite differences.
+    #[test]
+    fn three_port_plate_derivative_matches_finite_diff() {
+        let tp = VariMuThreePort::new(VariMuModel::ge_6386());
+        let vgk = -2.0;
+        let delta = 1e-6;
+
+        for &vak in &[50.0, 100.0, 200.0, 300.0] {
+            let (ip_lo, _, _) = tp.plate_iv(vgk, vak - delta);
+            let (ip_hi, _, _) = tp.plate_iv(vgk, vak + delta);
+            let d_numerical = (ip_hi - ip_lo) / (2.0 * delta);
+
+            let (_, d_analytical, _) = tp.plate_iv(vgk, vak);
+
+            let err = (d_numerical - d_analytical).abs();
+            let rel_err = if d_analytical.abs() > 1e-15 {
+                err / d_analytical.abs()
+            } else {
+                err
+            };
+
+            assert!(
+                rel_err < 1e-4,
+                "Plate deriv mismatch at Vak={vak}: \
+                 analytical={d_analytical:.6e}, numerical={d_numerical:.6e}, \
+                 rel_err={rel_err:.6e}"
+            );
+        }
+    }
+
+    /// NlDeviceGroupIv eval should produce consistent output.
+    #[test]
+    fn three_port_eval_consistency() {
+        use crate::elements::nonlinear::solver::NlDeviceGroupIv;
+
+        let tp = VariMuThreePort::new(VariMuModel::ge_6386());
+        assert_eq!(tp.n_ports(), 2);
+
+        let v = [-2.0, 200.0];
+        let mut currents = [0.0; 2];
+        let mut jacobian = [0.0; 4];
+        tp.eval(&v, &mut currents, &mut jacobian);
+
+        // Grid current should be ~0 at Vgk=-2V
+        assert!(currents[0].abs() < 1e-6);
+        // Plate current should be positive
+        assert!(currents[1] > 0.0);
+        // Jacobian entries
+        assert!(jacobian[0] > 0.0, "∂ig/∂vgk should be positive (leakage)");
+        assert_eq!(jacobian[1], 0.0, "∂ig/∂vak should be zero");
+        assert!(jacobian[2] > 0.0, "∂ip/∂vgk (gm) should be positive");
+        assert!(jacobian[3] > 0.0, "∂ip/∂vak should be positive");
+    }
+
+    /// Parallel count should scale both grid and plate currents.
+    #[test]
+    fn three_port_parallel_count() {
+        use crate::elements::nonlinear::solver::NlDeviceGroupIv;
+
+        let single = VariMuThreePort::new(VariMuModel::ge_6386());
+        let quad = VariMuThreePort::new(VariMuModel::ge_6386()).with_parallel_count(4);
+
+        let v = [-2.0, 200.0];
+        let mut c1 = [0.0; 2];
+        let mut j1 = [0.0; 4];
+        let mut c4 = [0.0; 2];
+        let mut j4 = [0.0; 4];
+
+        single.eval(&v, &mut c1, &mut j1);
+        quad.eval(&v, &mut c4, &mut j4);
+
+        for i in 0..2 {
+            let ratio = c4[i] / c1[i];
+            assert!(
+                (ratio - 4.0).abs() < 0.01,
+                "Port {i} current ratio should be 4×: {ratio}"
+            );
+        }
+    }
+
+    /// Solve a 3-port triode in the grouped NR solver.
+    #[test]
+    fn three_port_in_grouped_solver() {
+        use crate::elements::nonlinear::solver::multi_port_nr_solve_grouped;
+        use crate::elements::nonlinear::solver::NlDeviceGroupIv;
+
+        let tp = VariMuThreePort::new_with_v_max(VariMuModel::ge_6386(), 300.0);
+        let groups: [&dyn NlDeviceGroupIv; 1] = [&tp];
+        let offsets = [0];
+
+        // S matrix: 2×2 (grid + plate NL ports)
+        // Designed for a simple circuit: grid port loosely coupled to plate
+        let s_nl = [0.05, 0.1, 0.1, 0.05];
+        let known_a = [-5.0, 100.0]; // Grid biased negative, plate ~200V
+        let port_resistances = [500_000.0, 50_000.0]; // Grid: very high Z
+        let mut v_guess = [-3.0, 150.0];
+
+        let b = multi_port_nr_solve_grouped(
+            2, &s_nl, &known_a, &port_resistances, &groups, &offsets,
+            &mut v_guess, 50, 1e-8,
+        );
+
+        assert!(b[0].is_finite(), "Grid b not finite: {}", b[0]);
+        assert!(b[1].is_finite(), "Plate b not finite: {}", b[1]);
+
+        // Grid should settle near negative bias
+        assert!(v_guess[0] < 0.0, "Grid voltage should be negative: {}", v_guess[0]);
+        // Plate should be positive
+        assert!(v_guess[1] > 0.0, "Plate voltage should be positive: {}", v_guess[1]);
     }
 }

@@ -84,18 +84,45 @@ pub(super) struct CoupledBjtPlan {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Multi-NL plan (R-type adaptor approach)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Plan for coupled nonlinear elements using R-type adaptor + multi-port NR.
+///
+/// Instead of decoupling each NL element into its own WDF tree with 1-sample
+/// feedback, this plan captures the full passive network connecting all coupled
+/// NL elements as an MNA system, derives a scattering matrix, and solves
+/// all NL ports simultaneously.
+pub(super) struct MultiNlPlan {
+    /// Indices into `classified.nonlinear_elements` for the coupled NL elements.
+    pub(super) nl_element_indices: Vec<usize>,
+    /// Index of the NL element that produces the final output.
+    pub(super) output_element_idx: usize,
+    /// All passive edge indices from the coupled network.
+    pub(super) passive_edge_indices: Vec<usize>,
+    /// Node where the voltage source (input signal) is injected.
+    pub(super) injection_node: NodeId,
+    /// Terminal pairs for each NL element: (positive_node, negative_node).
+    /// For BJTs: (collector, emitter). For triodes: (plate, cathode).
+    pub(super) nl_terminals: Vec<(NodeId, NodeId)>,
+    /// Compensation factor.
+    pub(super) compensation: f64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Planning
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Plan all WDF stages from classified nonlinear elements.
 ///
 /// Returns a list of stage plans (one per nonlinear element that has passives),
-/// a list of push-pull plans, and a list of coupled BJT plans.
+/// a list of push-pull plans, a list of coupled BJT plans, and a list of
+/// multi-NL plans (for R-type adaptor approach).
 pub(super) fn plan_stages(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     sample_rate: f64,
-) -> (Vec<StagePlan>, Vec<PushPullPlan>, Vec<CoupledBjtPlan>) {
+) -> (Vec<StagePlan>, Vec<PushPullPlan>, Vec<CoupledBjtPlan>, Vec<MultiNlPlan>) {
     // ── Push-pull detection for triodes ────────────────────────────────
     // Collect triode elements indices to detect push-pull pairs.
     let triode_elements: Vec<(usize, &NonlinearElement)> = classified
@@ -110,7 +137,7 @@ pub(super) fn plan_stages(
     let triode_infos: Vec<(usize, TriodeInfo)> = triode_elements
         .iter()
         .map(|(_, elem)| {
-            if let NonlinearKind::Triode { model_name, plate_node, cathode_node, parallel_count, is_vari_mu } = &elem.kind {
+            if let NonlinearKind::Triode { model_name, plate_node, cathode_node, parallel_count, is_vari_mu, .. } = &elem.kind {
                 (elem.edge_idx, TriodeInfo {
                     model_name: model_name.clone(),
                     plate_node: *plate_node,
@@ -235,8 +262,9 @@ pub(super) fn plan_stages(
         clusters.entry(root).or_default().push(i);
     }
 
-    // Build CoupledBjtPlan for clusters of 2+ BJTs.
+    // Build CoupledBjtPlan + MultiNlPlan for clusters of 2+ BJTs.
     let mut coupled_bjt_plans: Vec<CoupledBjtPlan> = Vec::new();
+    let mut multi_nl_plans: Vec<MultiNlPlan> = Vec::new();
     let mut coupled_bjt_elem_indices: HashSet<usize> = HashSet::new();
 
     for (_root, members) in &clusters {
@@ -264,9 +292,171 @@ pub(super) fn plan_stages(
         }
 
         coupled_bjt_plans.push(CoupledBjtPlan {
-            bjt_element_indices: elem_indices,
+            bjt_element_indices: elem_indices.clone(),
             output_bjt_idx: bjt_infos[output_idx].elem_idx,
         });
+
+        // Also build a MultiNlPlan for the R-type adaptor approach.
+        // Collect all passive edges from all junction nodes of all members.
+        let mut all_passive_edges: Vec<usize> = Vec::new();
+        let mut all_junction_nodes: HashSet<NodeId> = HashSet::new();
+        for &m in &ordered {
+            let info = &bjt_infos[m];
+            all_junction_nodes.insert(info.collector_node);
+            all_junction_nodes.insert(info.emitter_node);
+        }
+        for &jn in &all_junction_nodes {
+            let edges = graph.bfs_passive_edges(
+                jn,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true, // include supply-adjacent
+            );
+            for eidx in edges {
+                if !all_passive_edges.contains(&eidx) {
+                    all_passive_edges.push(eidx);
+                }
+            }
+        }
+
+        // Find injection node (BFS-closest to input among passive edge endpoints).
+        let mut injection_node = graph.in_node;
+        let mut best_dist = usize::MAX;
+        for &eidx in &all_passive_edges {
+            let e = &graph.edges[eidx];
+            for node in [e.node_a, e.node_b] {
+                if let Some(&d) = classified.dist_from_in.get(&node) {
+                    if d < best_dist {
+                        best_dist = d;
+                        injection_node = node;
+                    }
+                }
+            }
+        }
+
+        // NL terminals: (collector, emitter) for each BJT
+        let nl_terminals: Vec<(NodeId, NodeId)> = ordered
+            .iter()
+            .map(|&m| {
+                let info = &bjt_infos[m];
+                (info.collector_node, info.emitter_node)
+            })
+            .collect();
+
+        multi_nl_plans.push(MultiNlPlan {
+            nl_element_indices: elem_indices,
+            output_element_idx: bjt_infos[output_idx].elem_idx,
+            passive_edge_indices: all_passive_edges,
+            injection_node,
+            nl_terminals,
+            compensation: 1.0,
+        });
+    }
+
+    // ── 3-port VariMu triode detection ──────────────────────────────
+    // VariMu triodes with grid-side passives get a MultiNlPlan with
+    // 2 NL ports: (grid, cathode) and (plate, cathode). The grid-side
+    // passive network (threshold pot, bias resistors, etc.) becomes part
+    // of the R-type adaptor, allowing the NR solver to see grid voltage
+    // changes from pots.
+    let mut three_port_triode_indices: HashSet<usize> = HashSet::new();
+
+    for (elem_idx, elem) in classified.nonlinear_elements.iter().enumerate() {
+        // Only VariMu triodes with a known grid node.
+        if let NonlinearKind::Triode {
+            is_vari_mu: true,
+            grid_node: Some(grid_node),
+            plate_node,
+            cathode_node,
+            model_name,
+            ..
+        } = &elem.kind
+        {
+            // Skip sidechain elements.
+            if classified.sidechain_edge_set.contains(&elem.edge_idx) {
+                continue;
+            }
+
+            // Skip push-pull paired triodes.
+            let triode_list_idx = triode_elements
+                .iter()
+                .position(|(_, e)| std::ptr::eq(*e, elem));
+            if let Some(tli) = triode_list_idx {
+                if paired_triode_indices.contains(&tli) {
+                    continue;
+                }
+            }
+
+            // Check for grid-side passive edges.
+            let grid_passives = graph.bfs_passive_edges(
+                *grid_node,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true,
+            );
+
+            if grid_passives.is_empty() {
+                continue; // No grid-side passives — fall through to 2-port
+            }
+
+            // Collect plate + cathode passives too.
+            let plate_passives = graph.bfs_passive_edges(
+                *plate_node,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true,
+            );
+            let cathode_passives = graph.bfs_passive_edges(
+                *cathode_node,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true,
+            );
+
+            // Merge all passive edges (grid + plate + cathode).
+            let mut all_passive_edges = grid_passives.clone();
+            extend_dedup(&mut all_passive_edges, &plate_passives);
+            extend_dedup(&mut all_passive_edges, &cathode_passives);
+
+            // Find injection node: BFS-closest to input among all passive edge endpoints,
+            // excluding plate/cathode/grid nodes.
+            let mut injection_node = graph.in_node;
+            let mut best_dist = usize::MAX;
+            for &eidx in &all_passive_edges {
+                let e = &graph.edges[eidx];
+                for node in [e.node_a, e.node_b] {
+                    if node == *plate_node || node == *cathode_node || node == *grid_node {
+                        continue;
+                    }
+                    if let Some(&d) = classified.dist_from_in.get(&node) {
+                        if d < best_dist {
+                            best_dist = d;
+                            injection_node = node;
+                        }
+                    }
+                }
+            }
+
+            // NL terminals: port 0 = (grid, cathode), port 1 = (plate, cathode)
+            let nl_terminals = vec![
+                (*grid_node, *cathode_node),
+                (*plate_node, *cathode_node),
+            ];
+
+            let model = super::helpers::triode_model(model_name);
+            let compensation = model.mu / 100.0;
+
+            multi_nl_plans.push(MultiNlPlan {
+                nl_element_indices: vec![elem_idx],
+                output_element_idx: elem_idx,
+                passive_edge_indices: all_passive_edges,
+                injection_node,
+                nl_terminals,
+                compensation,
+            });
+
+            three_port_triode_indices.insert(elem_idx);
+        }
     }
 
     // ── Plan each nonlinear element ────────────────────────────────────
@@ -296,6 +486,11 @@ pub(super) fn plan_stages(
             continue;
         }
 
+        // Skip 3-port VariMu triodes (handled as MultiNlStage).
+        if three_port_triode_indices.contains(&elem_idx) {
+            continue;
+        }
+
         if let Some(plan) = plan_single_stage(
             elem,
             elem_idx,
@@ -311,7 +506,7 @@ pub(super) fn plan_stages(
         source_node_offset += 1000;
     }
 
-    (plans, push_pull_plans, coupled_bjt_plans)
+    (plans, push_pull_plans, coupled_bjt_plans, multi_nl_plans)
 }
 
 /// Plan a push-pull half (for building in build.rs).
@@ -420,17 +615,11 @@ pub(super) fn plan_push_pull_half(
 
         let source_node = graph.edges.len() + 5000;
 
-        // Collect supply nodes that appear as edge endpoints — these become
-        // additional terminal nodes for sp_reduce (boundary terminations).
-        let mut terminals = vec![source_node, ground_terminal];
-        for &eidx in &passive_idxs {
-            let e = &graph.edges[eidx];
-            for &node in &[e.node_a, e.node_b] {
-                if graph.supply_nodes.contains(&node) && !terminals.contains(&node) {
-                    terminals.push(node);
-                }
-            }
-        }
+        // Push-pull halves are simple series chains (VS → plate_load → rp → cathode_bias → gnd).
+        // Supply nodes (A_bal, B+) must NOT be terminals — that creates a 3-terminal T-network
+        // that isn't SP-reducible. Instead, supply voltage is applied via CathodeBiasSource
+        // leaves in build_push_pull_half (supply_leaf_voltages).
+        let terminals = vec![source_node, ground_terminal];
 
         let model = super::helpers::triode_model(model_name);
         // For standard triodes, compensation scales by mu (e.g. 12AX7 mu=100 → 1.0).

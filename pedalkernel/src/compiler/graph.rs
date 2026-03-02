@@ -845,11 +845,18 @@ impl CircuitGraph {
         }
 
         // Hard boundary nodes: the BFS stops here completely.
-        // Only audio I/O nodes are hard boundaries — they truly separate
+        // Audio I/O nodes are hard boundaries — they truly separate
         // the sidechain from the audio input/output path.
+        // For stereo circuits, include both L and R output/input nodes
+        // to prevent cross-channel leakage through decode matrices.
         let mut boundary: HashSet<NodeId> = HashSet::new();
         boundary.insert(self.in_node);
         boundary.insert(self.out_node);
+        for suffix in &["in_R", "out_R", "in_L", "out_L"] {
+            if let Some(&n) = self.node_names.get(*suffix) {
+                boundary.insert(n);
+            }
+        }
 
         // Soft boundaries: reachable (included in node set) but NOT traversed.
         // This includes gnd and all supply rails (vcc, vcc_sc, bias rails).
@@ -864,18 +871,53 @@ impl CircuitGraph {
         }
         supply_boundary.extend(&self.supply_nodes);
 
+        // Build filtered coupled_nodes that excludes tube coupling for
+        // tubes whose grid terminal is at cv_node (or tap_node).
+        //
+        // In variable-mu compressors (Fairchild 670), the sidechain CV node
+        // is wired directly to the push-pull tube grids. Union-find merges
+        // cv_node with all tube grid nodes. Without this filter, the BFS
+        // from cv would traverse grid→plate→cathode via tube coupling,
+        // absorbing the entire audio path into the sidechain partition.
+        //
+        // The fix: remove tube coupling entries for cv_node and its coupled
+        // partners (the plate/cathode nodes of tubes whose grid is at cv).
+        // Sidechain tubes (whose grids are at different nodes) keep their
+        // coupling. The BFS can still traverse plate↔cathode through the
+        // regular graph edge (tube WDF edge), so audio-path traversal is
+        // unaffected — only the grid↔plate shortcut is disabled.
+        let filtered_coupled = {
+            let mut fc = self.coupled_nodes.clone();
+            let mut exclude: HashSet<NodeId> = HashSet::new();
+            if self.coupled_nodes.contains_key(&cv_node) {
+                exclude.insert(cv_node);
+                if let Some(coupled) = self.coupled_nodes.get(&cv_node) {
+                    exclude.extend(coupled);
+                }
+            }
+            if !exclude.is_empty() {
+                for node in &exclude {
+                    fc.remove(node);
+                }
+                for (_, coupled_list) in fc.iter_mut() {
+                    coupled_list.retain(|n| !exclude.contains(n));
+                }
+            }
+            fc
+        };
+
         // BFS from tap_node: find all nodes reachable without crossing
         // cv_node or any hard boundary. Supply/gnd nodes are reachable but not
         // traversed. Transformer windings allow crossing magnetic isolation.
         let reachable_from_tap = Self::bfs_reachable(
             tap_node, cv_node, &boundary, &supply_boundary,
-            &self.coupled_nodes, &adj,
+            &filtered_coupled, &adj,
         );
 
         // BFS from cv_node: same rules, opposite direction.
         let reachable_from_cv = Self::bfs_reachable(
             cv_node, tap_node, &boundary, &supply_boundary,
-            &self.coupled_nodes, &adj,
+            &filtered_coupled, &adj,
         );
 
         // Sidechain nodes = intersection of both reachable sets.
