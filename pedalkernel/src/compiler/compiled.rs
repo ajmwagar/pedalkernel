@@ -9,7 +9,7 @@ use crate::PedalProcessor;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::stage::{PushPullStage, RootKind, SidechainProcessor, WdfStage};
+use super::stage::{CoupledBjtStage, PushPullStage, RootKind, SidechainProcessor, WdfStage};
 
 #[cfg(feature = "debug-trace")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,6 +43,9 @@ pub(super) enum ControlTarget {
     OutputGain,
     /// Modify a pot in a specific WDF stage.
     PotInStage(usize),
+    /// Modify a pot inside a coupled BJT stage.
+    /// (coupled_stage_idx, bjt_idx_within_stage)
+    PotInCoupledBjtStage(usize, usize),
     /// Modify an LFO's rate (index into lfos vector).
     LfoRate(usize),
     /// Modify an LFO's depth/amplitude (index into lfos vector).
@@ -364,6 +367,9 @@ pub struct CompiledPedal {
     /// Push-pull differential stages (e.g., Fairchild 670 gain cell).
     /// These are processed after regular WDF stages.
     pub(super) push_pull_stages: Vec<PushPullStage>,
+    /// Coupled BJT stages (e.g., Fuzz Face feedback-coupled pairs).
+    /// Processed between regular WDF stages and push-pull stages.
+    pub(super) coupled_bjt_stages: Vec<CoupledBjtStage>,
     pub(super) pre_gain: f64,
     pub(super) output_gain: f64,
     pub(super) rail_saturation: RailSaturation,
@@ -792,6 +798,23 @@ impl CompiledPedal {
                         }
                     }
                 }
+                ControlTarget::PotInCoupledBjtStage(coupled_idx, bjt_idx) => {
+                    if let Some(smoother) = self.pot_smoothers.iter_mut().find(|s| s.control_idx == i) {
+                        smoother.set_target(value);
+                    } else {
+                        let coupled_idx = *coupled_idx;
+                        let bjt_idx = *bjt_idx;
+                        let comp_id = self.controls[i].component_id.clone();
+                        if let Some(coupled) = self.coupled_bjt_stages.get_mut(coupled_idx) {
+                            if let Some((tree, _, _)) = coupled.bjt_stages.get_mut(bjt_idx) {
+                                tree.set_pot(&comp_id, value);
+                                tree.set_pot(&format!("{comp_id}__aw"), value);
+                                tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
+                                tree.recompute();
+                            }
+                        }
+                    }
+                }
                 ControlTarget::LfoRate(lfo_idx) => {
                     let lfo_idx = *lfo_idx;
                     if let Some(binding) = self.lfos.get_mut(lfo_idx) {
@@ -907,27 +930,42 @@ impl CompiledPedal {
                 // Value changed, update the actual pot
                 let ctrl_idx = smoother.control_idx;
                 let value = smoother.current;
-                if let ControlTarget::PotInStage(stage_idx) = &self.controls[ctrl_idx].target {
-                    let stage_idx = *stage_idx;
-                    let comp_id = self.controls[ctrl_idx].component_id.clone();
-                    if let Some(stage) = self.stages.get_mut(stage_idx) {
-                        stage.tree.set_pot(&comp_id, value);
-                        stage.tree.set_pot(&format!("{comp_id}__aw"), value);
-                        stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
-                        stage.tree.recompute();
-                    }
-                    // Update mirrored pots (position = 1.0 - source)
-                    if let Some(mirror_ids) = self.pot_mirrors.get(&comp_id) {
-                        let inv = 1.0 - value;
-                        for mirror_id in mirror_ids.clone() {
-                            for stage in &mut self.stages {
-                                stage.tree.set_pot(&mirror_id, inv);
-                                stage.tree.set_pot(&format!("{mirror_id}__aw"), inv);
-                                stage.tree.set_pot(&format!("{mirror_id}__wb"), 1.0 - inv);
-                                stage.tree.recompute();
+                let comp_id = self.controls[ctrl_idx].component_id.clone();
+                match &self.controls[ctrl_idx].target {
+                    ControlTarget::PotInStage(stage_idx) => {
+                        let stage_idx = *stage_idx;
+                        if let Some(stage) = self.stages.get_mut(stage_idx) {
+                            stage.tree.set_pot(&comp_id, value);
+                            stage.tree.set_pot(&format!("{comp_id}__aw"), value);
+                            stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
+                            stage.tree.recompute();
+                        }
+                        // Update mirrored pots (position = 1.0 - source)
+                        if let Some(mirror_ids) = self.pot_mirrors.get(&comp_id) {
+                            let inv = 1.0 - value;
+                            for mirror_id in mirror_ids.clone() {
+                                for stage in &mut self.stages {
+                                    stage.tree.set_pot(&mirror_id, inv);
+                                    stage.tree.set_pot(&format!("{mirror_id}__aw"), inv);
+                                    stage.tree.set_pot(&format!("{mirror_id}__wb"), 1.0 - inv);
+                                    stage.tree.recompute();
+                                }
                             }
                         }
                     }
+                    ControlTarget::PotInCoupledBjtStage(coupled_idx, bjt_idx) => {
+                        let coupled_idx = *coupled_idx;
+                        let bjt_idx = *bjt_idx;
+                        if let Some(coupled) = self.coupled_bjt_stages.get_mut(coupled_idx) {
+                            if let Some((tree, _, _)) = coupled.bjt_stages.get_mut(bjt_idx) {
+                                tree.set_pot(&comp_id, value);
+                                tree.set_pot(&format!("{comp_id}__aw"), value);
+                                tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
+                                tree.recompute();
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -960,6 +998,14 @@ impl CompiledPedal {
             s.push_str(&format!("\n[Stage {}]\n", i));
             s.push_str(&stage.debug_dump());
             s.push('\n');
+        }
+
+        if !self.coupled_bjt_stages.is_empty() {
+            s.push_str(&format!("\nCoupled BJT Stages: {}\n", self.coupled_bjt_stages.len()));
+            s.push_str("───────────────────────────────────────────────────────────────────────────\n");
+            for (i, coupled) in self.coupled_bjt_stages.iter().enumerate() {
+                s.push_str(&format!("  [{}] {}\n", i, coupled.debug_dump()));
+            }
         }
 
         if !self.push_pull_stages.is_empty() {
@@ -1303,6 +1349,11 @@ impl PedalProcessor for CompiledPedal {
             );
         }
 
+        // Process through coupled BJT stages (e.g., Fuzz Face feedback pairs).
+        for coupled in &mut self.coupled_bjt_stages {
+            signal = coupled.process(signal);
+        }
+
         // Process through push-pull stages (differential tube amplifiers).
         // These model circuits like the Fairchild 670 where push and pull
         // triode halves process the signal simultaneously with opposite phase,
@@ -1537,6 +1588,9 @@ impl PedalProcessor for CompiledPedal {
     fn reset(&mut self) {
         for stage in &mut self.stages {
             stage.reset();
+        }
+        for coupled in &mut self.coupled_bjt_stages {
+            coupled.reset();
         }
         for binding in &mut self.lfos {
             binding.lfo.reset();

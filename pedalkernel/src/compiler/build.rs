@@ -168,6 +168,101 @@ pub(super) fn build_push_pull_stages(
     stages
 }
 
+/// Build coupled BJT stages from plans.
+///
+/// Each CoupledBjtPlan groups 2+ tightly-coupled BJTs. For each plan:
+/// 1. Plan each BJT independently using plan_bjt_stage()
+/// 2. Build each tree with build_vs_stage()
+/// 3. Assemble into a CoupledBjtStage with 1-sample delay feedback
+///
+/// If SP reduction fails for any member (non-SP topology), falls back to
+/// building those BJTs as independent WdfStages instead.
+///
+/// Returns (coupled_stages, fallback_independent_stages).
+pub(super) fn build_coupled_bjt_stages(
+    coupled_plans: &[super::plan::CoupledBjtPlan],
+    classified: &ClassifiedCircuit,
+    graph: &CircuitGraph,
+    opamp_analysis: &OpAmpAnalysis,
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+) -> (Vec<super::stage::CoupledBjtStage>, Vec<WdfStage>) {
+    use std::collections::HashSet;
+    let vs_comp_idx = graph.components.len();
+    let empty_base_nodes: HashSet<super::graph::NodeId> = HashSet::new();
+    let mut coupled_stages = Vec::new();
+    let mut fallback_stages = Vec::new();
+
+    for coupled_plan in coupled_plans {
+        let mut bjt_stages = Vec::new();
+        let mut compensations = Vec::new();
+        let mut source_node_offset = 8000usize;
+        let mut all_built = true;
+
+        for &elem_idx in &coupled_plan.bjt_element_indices {
+            let elem = &classified.nonlinear_elements[elem_idx];
+
+            // Plan this BJT independently using the simplified planner.
+            let plan = super::plan::plan_bjt_stage(
+                elem,
+                elem_idx,
+                classified,
+                graph,
+                &empty_base_nodes,
+                source_node_offset,
+            );
+
+            if let Some(plan) = plan {
+                // Build the WDF tree for this BJT.
+                let stage = build_vs_stage(
+                    &plan, elem, graph, sample_rate, oversampling, vs_comp_idx,
+                );
+
+                if let Some(mut wdf_stage) = stage {
+                    wdf_stage.balance_vs_impedance();
+                    compensations.push(plan.compensation);
+                    bjt_stages.push((wdf_stage.tree, wdf_stage.root, wdf_stage.oversampler));
+                } else {
+                    all_built = false;
+                }
+            } else {
+                all_built = false;
+            }
+
+            source_node_offset += 1000;
+        }
+
+        if all_built && bjt_stages.len() >= 2 {
+            // All BJTs built successfully — create coupled stage.
+            coupled_stages.push(super::stage::CoupledBjtStage {
+                bjt_stages,
+                compensations,
+                feedback_state: 0.0,
+                feedback_scale: 0.1,
+            });
+        } else {
+            // SP reduction failed for at least one member — fall back to
+            // independent stage planning via the standard build pipeline.
+            let plans: Vec<_> = coupled_plan.bjt_element_indices.iter()
+                .enumerate()
+                .filter_map(|(i, &elem_idx)| {
+                    let elem = &classified.nonlinear_elements[elem_idx];
+                    super::plan::plan_bjt_stage(
+                        elem, elem_idx, classified, graph,
+                        &empty_base_nodes, 9000 + i * 1000,
+                    )
+                })
+                .collect();
+            let indep_stages = super::build::build_stages(
+                &plans, classified, graph, opamp_analysis, sample_rate, oversampling,
+            );
+            fallback_stages.extend(indep_stages);
+        }
+    }
+
+    (coupled_stages, fallback_stages)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Internal builders
 // ═══════════════════════════════════════════════════════════════════════════

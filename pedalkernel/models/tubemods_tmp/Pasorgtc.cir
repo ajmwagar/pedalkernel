@@ -1,0 +1,25 @@
+* C:\PSPICE\WORK\PASORGTC.SCH
+
+* Schematics Version 6.3 - April 1996
+* Sun Oct 27 12:30:53 1996
+
+.PARAM         PARTX={(EXP(4.60517*PAR1)-1)/99} 
+
+** Analysis setup **
+.ac DEC 20 .01 100MEG
+.STEP LIN PARAM PAR1 0 1 .25 
+.OP
+
+
+* From [SCHEMATICS NETLIST] section of msim.ini:
+.lib C:\PSPICE\WORK\TUBE.LIB
+.lib nom.lib
+
+.INC "PASORGTC.net"
+.INC "PASORGTC.als"
+
+
+.probe
+
+
+.END

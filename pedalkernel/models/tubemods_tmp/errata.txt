@@ -1,0 +1,45 @@
+
+ERRATA AND MORE ON PSPICE TUBE MODELS
+_____________________________________
+
+If you are viewing this in Notepad,
+click on Edit, Word Wrap to turn on word wrap.  It helps to maximize the window.
+
+Equation [6] in the article "Improved Vacuum-Tube Models for Spice Simulations" by Norman Koren, Glass Audio, Vol. 8, No. 6, 1996, contains an error.  This equation, which relates an output transformer's quality factor Q (the ratio of the primary shunt inductance to leakage inductance) to the coefficient of mutual coupling, KALL, used in SPICE models, should be corrected to read
+
+KALL = 1-1/(2Q)
+
+The exact expression, sqrt(1-1/Q), was derived from first principles.  The expression, 1- 1/(2Q), is an approximation that is accurate for all practical cases.
+
+Equation (3), the screen grid current for pentodes has a minor typo: the symbol mu should follow the hanging slash ("/") .  In listing 3, in SUBCKT 6550, the line that starts with "G2 4 E" should start with "G2 4 3."
+
+We have added several tube models and made some minor corrections to Table 1.  All of there are included in the accompanying TUBE.LIB file.
+
+
+                             TABLE 1
+
+
+             SPICE PARAMETERS FOR POPULAR TUBE MODELS
+
+
+TUBE	MU	EX	KG1	KG2	KP	KVB	CCG	CGP	CCP	RGI
+
+6DJ8	28	1.3	330		320	300	2.3P	2.1P	0.7P	2K
+6L6GC	8.7	1.35	1460	4500	48	12	11P	0.85P	8P	1K
+12AT7	60	1.35	460		300	300	2.7P	2.2P	1P	2k
+12AU7	21.5	1.3	1180		84	300	2.5P	2.0P	1P	2K
+12AX7	100	1.4	1060		600	300	2.3P	2.4P	0.9P	2K
+6550	7.9	1.35	890	4200	60	24	14P	.85P	12P	1K
+EL34	11	1.35	650	4200	60	24	15P	1P	8P	1K
+KT88	8.8	1.35	730	4200	32	16	14P	0.85P	12P	1K
+2A3	4.2	1.4	1500		60	300	8P	17P	6P	1K
+300B	3.95	1.4	1550		65	300	10P	16P	5P	1K
+6C33C	3.1	1.4	163		15	300	31P	31P	11P	500
+
+
+The parameters in Table 1 are used following .PARAMS in LISTING 3, the tube library. 
+They were determined from published graphs and tables, available from many sources.  Small-signal triode data was obtained from"The Audio Designer's Tube Register" by Tom Mitchell.  EL34 data came from the Audiomatica Sofia web page. 6C33C curves came from Borbely, Glass Audio 5/96, p. 8, Fig. 1 (the curve on the left for two cathodes), and capacitances came from the Gold Aero web page.  2A3 and 300B data  came from The Parts Connection Catalog & Resource Guide, volume 2.
+
+     The latest Pspice evaluation package, version 6.3, is available free on a CD ROM from MicroSim by phoning 1-800-245-3022, or can be downloaded from www.microsim.com.  I recommend ordering the CD ROM because it contains a complete set of manuals and tutorials: everything you need to know to master Pspice.  A list of free SPICE V3.0 packages and other useful information can be found on the World Wide Web site by searching "spice v3.0" and "spice 3.0" on your favorite search engine.  (Mine is Alta Vista.)
+
+     If you Email a request to kormar@cts.com, I will send a package of Pspice tube models on a shareware basis (free with no obligation unless you need telephone support).  This package contains a symbol and model library, files for generating plate curves for triodes and pentodes (for adding your own models), a sample circuit (the original PAS preamplifier), and some basic instructions on getting started with Pspice and installing the libraries.  I am preparing an article on some wonderful preamplifier designs developed using SPICE.  Stay tuned.

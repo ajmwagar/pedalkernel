@@ -363,7 +363,8 @@ pub fn compile_pedal_with_options(
     );
 
     // ══ Pass 3: Stage planning ════════════════════════════════════════
-    let (stage_plans, push_pull_plans) = super::plan::plan_stages(&classified, &graph, sample_rate);
+    let (stage_plans, push_pull_plans, coupled_bjt_plans) =
+        super::plan::plan_stages(&classified, &graph, sample_rate);
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
     // Build nonlinear WDF stages from plans.
@@ -386,10 +387,21 @@ pub fn compile_pedal_with_options(
         oversampling,
     );
 
+    // Build coupled BJT stages. Falls back to independent stages if SP fails.
+    let (coupled_bjt_stages, coupled_fallback_stages) = super::build::build_coupled_bjt_stages(
+        &coupled_bjt_plans,
+        &classified,
+        &graph,
+        &opamp_analysis,
+        sample_rate,
+        oversampling,
+    );
+    stages.extend(coupled_fallback_stages);
+
     // ══ Passive-only fallback ═════════════════════════════════════════
     let mut passive_attenuation = 1.0;
 
-    if stages.is_empty() {
+    if stages.is_empty() && coupled_bjt_stages.is_empty() {
         let has_reactive = pedal.components.iter().any(|c| {
             matches!(c.kind, ComponentKind::Capacitor(_) | ComponentKind::Inductor(_))
         });
@@ -543,6 +555,7 @@ pub fn compile_pedal_with_options(
     let controls = super::bind::build_controls(
         pedal,
         &stages,
+        &coupled_bjt_stages,
         &opamp_analysis.pot_map,
         &lfo_ids,
         &delay_id_to_idx,
@@ -590,7 +603,7 @@ pub fn compile_pedal_with_options(
     // Build pot smoothers.
     let pot_smoothers: Vec<SmoothedParam> = controls.iter().enumerate()
         .filter_map(|(i, ctrl)| {
-            if matches!(ctrl.target, ControlTarget::PotInStage(_)) {
+            if matches!(ctrl.target, ControlTarget::PotInStage(_) | ControlTarget::PotInCoupledBjtStage(_, _)) {
                 Some(SmoothedParam::new(0.5, i, sample_rate))
             } else {
                 None
@@ -602,6 +615,7 @@ pub fn compile_pedal_with_options(
     let mut compiled = CompiledPedal {
         stages,
         push_pull_stages,
+        coupled_bjt_stages,
         pre_gain,
         output_gain,
         rail_saturation,

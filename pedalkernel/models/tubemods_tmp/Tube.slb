@@ -1,0 +1,1214 @@
+*version 6.3 215529251
+@index
+symloc OUTPUT_XFRMR 0 2196
+symloc POWER_XFRMR 2196 2035
+symloc 12AX7 4231 738
+symloc 12AU7 4969 740
+symloc 6550 5709 930
+symloc PAT-4006-CFB 6639 2058
+symloc 6DJ8 8697 749
+symloc KT88 9446 934
+symloc SPST_OPEN 10380 363
+symloc DYNA_OUTPUT_XFRMR 10743 1789
+symloc 12AT7 12532 738
+symloc EL34 13270 935
+symloc 6L6GC 14205 938
+symloc 6C33C 15143 749
+symloc 300B 15892 733
+symloc D1N5292:DCR 16625 189
+symloc D1N5295:DCR 16814 189
+symloc dcr 17003 401
+symloc 6AN8T 17404 753
+symloc 6AN8P 18157 940
+*symbol OUTPUT_XFRMR
+d inductor COUPLING (transformer core)
+@type p
+@attributes
+a 0 u 0 0 15 25 hln 100 COUPLING=
+a 0 u 0 0 0 0 hln 100 L1_VALUE=
+a 0 u 0 0 0 0 hln 100 L2_VALUE=
+a 1 s 0 0 -12 -6 hln 100 REFDES=OUTPUT XFRMR
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=K^@REFDES L1^@REFDES L2^@REFDES @COUPLING\nL1^@REFDES %1 %2 @L1_VALUE\nL2^@REFDES %3 %4 @L2_VALUE
+a 0 sp 0 0 0 10 hlb 100 PART=XFRM_LINEAR
+a 0 s 0 0 0 10 hlb 100 SIMULATIONONLY=
+@pins
+p 0 0 0 hln 100 1 n 0 0 h
+a 0 u 0 0 0 0 hln 100 ERC=x
+a 0 u 0 0 5 5 hln 100 pin=1
+p 0 0 25 hln 100 3 n 0 85 h
+a 0 u 0 0 0 25 hln 100 ERC=x
+a 0 u 0 0 5 30 hln 100 pin=3
+p 0 5 10 hln 100 6 n 45 10 u
+a 0 u 0 0 5 10 hln 100 ERC=x
+a 0 u 0 0 10 12 hln 100 pin=6
+p 0 5 10 hln 100 8 n 45 70 u
+a 0 u 0 0 5 10 hln 100 ERC=x
+a 0 u 0 0 10 15 hln 100 pin=8
+p 0 5 80 hln 100 9 n 45 80 u
+a 0 u 0 0 5 80 hln 100 ERC=x
+a 0 u 0 0 10 82 hln 100 pin=9
+p 0 5 100 hln 100 11 n 45 160 u
+a 0 u 0 0 5 100 hln 100 ERC=x
+a 0 u 0 0 10 105 hln 100 pin=11
+p 0 0 55 hln 100 2 n 0 55 h
+a 0 u 0 0 0 55 hln 100 ERC=x
+a 0 u 0 0 5 60 hln 100 pin=2
+p 0 0 115 hln 100 4 n 0 115 h
+a 0 u 0 0 0 115 hln 100 ERC=x
+a 0 u 0 0 5 120 hln 100 pin=4
+p 0 0 170 hln 100 5 n 0 170 h
+a 0 u 0 0 0 170 hln 100 ERC=x
+a 0 u 0 0 5 175 hln 100 pin=5
+p 0 45 120 hln 100 10 n 45 120 u
+a 0 u 0 0 45 120 hln 100 ERC=x
+a 0 u 0 0 40 115 hln 100 pin=10
+p 0 45 40 hln 100 7 n 45 40 u
+a 0 u 0 0 45 40 hln 100 ERC=x
+a 0 u 0 0 40 35 hln 100 pin=7
+@graphics 45 170 20 90 10
+a 0 10 45 15 40 10 35
+a 0 10 35 15 30 10 25
+a 0 10 25 15 20 10 15
+a 0 10 15 15 10 10 5
+a 0 35 20 30 25 35 30
+a 0 35 30 30 35 35 40
+a 0 35 40 30 45 35 50
+a 0 35 50 30 55 35 60
+v 0 35 10
+35 20
+;
+v 0 35 60
+35 70
+;
+a 0 10 85 15 80 10 75
+a 0 10 75 15 70 10 65
+a 0 10 65 15 60 10 55
+a 0 10 55 15 50 10 45
+a 0 10 125 15 120 10 115
+a 0 10 115 15 110 10 105
+a 0 10 105 15 100 10 95
+a 0 10 95 15 90 10 85
+v 0 25 0
+25 170
+;
+a 0 35 90 30 95 35 100
+a 0 35 100 30 105 35 110
+a 0 35 110 30 115 35 120
+a 0 35 140 30 145 35 150
+v 0 35 80
+35 90
+;
+v 0 35 150
+35 160
+;
+a 0 35 120 30 125 35 130
+a 0 35 130 30 135 35 140
+a 0 10 145 15 140 10 135
+a 0 10 135 15 130 10 125
+v 0 20 0
+20 170
+;
+a 0 10 165 15 160 10 155
+a 0 10 155 15 150 10 145
+v 0 10 0
+10 5
+;
+v 0 10 165
+10 170
+;
+*symbol POWER_XFRMR
+d Plitron power transformer
+@type p
+@attributes
+a 0 u 0 0 15 25 hln 100 COUPLING=.995
+a 0 u 0 0 0 0 hln 100 L1_VALUE=33H
+a 0 u 0 0 0 0 hln 100 L2_VALUE=100H
+a 1 s 0 0 -12 -6 hln 100 REFDES=XMR1
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=K^@REFDES L1^@REFDES L2^@REFDES @COUPLING\nL1^@REFDES %1 %2 @L1_VALUE\nL2^@REFDES %3 %4 @L2_VALUE
+a 0 sp 0 0 0 10 hlb 100 PART=XFRM_LINEAR
+a 0 s 0 0 0 10 hlb 100 SIMULATIONONLY=
+a 0 sp 0 0 0 0 hln 100 MODEL=
+@pins
+p 0 0 20 hln 100 1 n 0 20 h
+a 0 u 0 0 0 20 hln 100 ERC=x
+a 0 u 0 0 5 25 hln 100 pin=1
+p 0 0 20 hln 100 3 n 0 80 h
+a 0 u 0 0 0 20 hln 100 ERC=x
+a 0 u 0 0 5 25 hln 100 pin=3
+p 0 5 0 hln 100 7 n 45 0 u
+a 0 u 0 0 5 0 hln 100 ERC=x
+a 0 u 0 0 10 2 hln 100 pin=7
+p 0 5 20 hln 100 8 n 45 80 u
+a 0 u 0 0 5 20 hln 100 ERC=x
+a 0 u 0 0 10 25 hln 100 pin=8
+p 0 5 90 hln 100 9 n 45 90 u
+a 0 u 0 0 5 90 hln 100 ERC=x
+a 0 u 0 0 10 92 hln 100 pin=9
+p 0 5 60 hln 100 10 n 45 120 u
+a 0 u 0 0 5 60 hln 100 ERC=x
+a 0 u 0 0 10 65 hln 100 pin=10
+p 0 0 155 hln 100 6 n 0 155 h
+a 0 u 0 0 0 155 hln 100 ERC=x
+a 0 u 0 0 5 160 hln 100 pin=6
+p 0 0 35 hln 100 4 n 0 95 h
+a 0 u 0 0 0 35 hln 100 ERC=x
+a 0 u 0 0 5 40 hln 100 pin=4
+p 0 5 130 hln 100 11 n 45 130 u
+a 0 u 0 0 5 130 hln 100 ERC=x
+a 0 u 0 0 10 132 hln 100 pin=11
+p 0 5 110 hln 100 12 n 45 170 u
+a 0 u 0 0 5 110 hln 100 ERC=x
+a 0 u 0 0 10 115 hln 100 pin=12
+@graphics 45 170 0 0 10
+a 0 10 60 15 55 10 50
+a 0 10 50 15 45 10 40
+a 0 10 40 15 35 10 30
+a 0 10 30 15 25 10 20
+a 0 35 10 30 15 35 20
+a 0 35 20 30 25 35 30
+a 0 35 30 30 35 35 40
+a 0 35 40 30 45 35 50
+a 0 10 80 15 75 10 70
+a 0 10 70 15 65 10 60
+a 0 10 115 15 110 10 105
+a 0 10 105 15 100 10 95
+v 0 25 0
+25 170
+;
+a 0 35 90 30 95 35 100
+a 0 35 100 30 105 35 110
+a 0 35 110 30 115 35 120
+a 0 10 135 15 130 10 125
+a 0 10 125 15 120 10 115
+v 0 20 0
+20 170
+;
+a 0 10 155 15 150 10 145
+a 0 10 145 15 140 10 135
+a 0 35 50 30 55 35 60
+a 0 35 0 30 5 35 10
+a 0 35 70 30 75 35 80
+a 0 35 130 30 135 35 140
+a 0 35 140 30 145 35 150
+a 0 35 160 30 165 35 170
+a 0 35 150 30 155 35 160
+a 0 35 60 30 65 35 70
+*symbol 12AX7
+d High-mu triode
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=12AX7
+a 0 sp 0 0 0 10 hlb 100 MODEL=12AX7
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 40 hln 100 G n 0 40 h
+a 0 u 0 0 0 40 hln 100 ERC=x
+a 0 u 0 0 5 45 hln 100 pin=2
+@graphics 70 80 40 40 10
+c 0 40 40 29
+v 0 20 40
+30 40
+;
+v 0 35 40
+45 40
+;
+v 0 50 40
+60 40
+;
+v 0 20 30
+60 30
+;
+v 0 5 40
+10 40
+;
+v 0 10 40
+5 40
+;
+v 0 5 40
+15 40
+;
+v 0 55 55
+55 50
+;
+v 0 55 50
+25 50
+;
+v 0 25 50
+25 55
+;
+v 0 40 70
+55 55
+;
+v 0 40 5
+40 30
+;
+*symbol 12AU7
+d Medium-mu triode
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=12AU7
+a 0 sp 0 0 0 10 hlb 100 MODEL=12AU7
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 40 hln 100 G n 0 40 h
+a 0 u 0 0 0 40 hln 100 ERC=x
+a 0 u 0 0 5 45 hln 100 pin=2
+@graphics 70 80 40 40 10
+c 0 40 40 29
+v 0 20 40
+30 40
+;
+v 0 35 40
+45 40
+;
+v 0 50 40
+60 40
+;
+v 0 20 30
+60 30
+;
+v 0 5 40
+10 40
+;
+v 0 10 40
+5 40
+;
+v 0 5 40
+15 40
+;
+v 0 55 55
+55 50
+;
+v 0 55 50
+25 50
+;
+v 0 25 50
+25 55
+;
+v 0 40 70
+55 55
+;
+v 0 40 5
+40 30
+;
+*symbol 6550
+d Power pentode
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C %G2 @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=6550
+a 0 sp 0 0 0 10 hlb 100 MODEL=6550
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 45 hln 100 G n 0 45 h
+a 0 u 0 0 0 45 hln 100 ERC=x
+a 0 u 0 0 5 50 hln 100 pin=2
+p 0 0 35 hln 100 G2 n 0 35 h
+a 0 u 0 0 0 35 hln 100 ERC=x
+a 0 u 0 0 5 40 hln 100 pin=4
+@graphics 75 80 40 40 10
+c 0 40 40 32
+v 0 20 45
+30 45
+;
+v 0 35 45
+45 45
+;
+v 0 50 45
+60 45
+;
+v 0 20 25
+60 25
+;
+v 0 5 45
+10 45
+;
+v 0 10 45
+5 45
+;
+v 0 5 45
+15 45
+;
+v 0 40 70
+55 60
+;
+v 0 55 60
+55 55
+;
+v 0 55 55
+25 55
+;
+v 0 25 55
+25 60
+;
+v 0 20 35
+30 35
+;
+v 0 35 35
+45 35
+;
+v 0 50 35
+60 35
+;
+v 0 5 35
+10 35
+;
+v 0 10 35
+5 35
+;
+v 0 5 35
+15 35
+;
+v 0 40 5
+40 25
+;
+*symbol PAT-4006-CFB
+d inductor COUPLING (transformer core)
+@type p
+@attributes
+a 1 s 0 0 -12 -6 hln 100 REFDES=OUT_XFRMR?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11  @MODEL
+a 0 sp 11 0 -10 -4 hlb 100 PART=PAT-4006-CFB
+a 0 s 0 0 0 10 hln 100 MODEL=PAT-4006-CFB
+@pins
+p 0 0 0 hln 100 1 n 0 0 h
+a 0 u 0 0 0 0 hln 100 ERC=x
+a 0 u 0 0 5 5 hln 100 pin=1
+p 0 0 25 hln 100 3 n 0 85 h
+a 0 u 0 0 0 25 hln 100 ERC=x
+a 0 u 0 0 5 30 hln 100 pin=3
+p 0 5 10 hln 100 6 n 45 10 u
+a 0 u 0 0 5 10 hln 100 ERC=x
+a 0 u 0 0 10 12 hln 100 pin=6
+p 0 5 10 hln 100 8 n 45 70 u
+a 0 u 0 0 5 10 hln 100 ERC=x
+a 0 u 0 0 10 15 hln 100 pin=8
+p 0 5 80 hln 100 9 n 45 80 u
+a 0 u 0 0 5 80 hln 100 ERC=x
+a 0 u 0 0 10 82 hln 100 pin=9
+p 0 5 100 hln 100 11 n 45 160 u
+a 0 u 0 0 5 100 hln 100 ERC=x
+a 0 u 0 0 10 105 hln 100 pin=11
+p 0 0 55 hln 100 2 n 0 55 h
+a 0 u 0 0 0 55 hln 100 ERC=x
+a 0 u 0 0 5 60 hln 100 pin=2
+p 0 0 115 hln 100 4 n 0 115 h
+a 0 u 0 0 0 115 hln 100 ERC=x
+a 0 u 0 0 5 120 hln 100 pin=4
+p 0 0 170 hln 100 5 n 0 170 h
+a 0 u 0 0 0 170 hln 100 ERC=x
+a 0 u 0 0 5 175 hln 100 pin=5
+p 0 45 120 hln 100 10 n 45 120 u
+a 0 u 0 0 45 120 hln 100 ERC=x
+a 0 u 0 0 40 115 hln 100 pin=10
+p 0 45 40 hln 100 7 n 45 40 u
+a 0 u 0 0 45 40 hln 100 ERC=x
+a 0 u 0 0 40 35 hln 100 pin=7
+@graphics 45 170 20 90 10
+a 0 10 45 15 40 10 35
+a 0 10 35 15 30 10 25
+a 0 10 25 15 20 10 15
+a 0 10 15 15 10 10 5
+a 0 35 20 30 25 35 30
+a 0 35 30 30 35 35 40
+a 0 35 40 30 45 35 50
+a 0 35 50 30 55 35 60
+v 0 35 10
+35 20
+;
+v 0 35 60
+35 70
+;
+a 0 10 85 15 80 10 75
+a 0 10 75 15 70 10 65
+a 0 10 65 15 60 10 55
+a 0 10 55 15 50 10 45
+a 0 10 125 15 120 10 115
+a 0 10 115 15 110 10 105
+a 0 10 105 15 100 10 95
+a 0 10 95 15 90 10 85
+v 0 25 0
+25 170
+;
+a 0 35 90 30 95 35 100
+a 0 35 100 30 105 35 110
+a 0 35 110 30 115 35 120
+a 0 35 140 30 145 35 150
+v 0 35 80
+35 90
+;
+v 0 35 150
+35 160
+;
+a 0 35 120 30 125 35 130
+a 0 35 130 30 135 35 140
+a 0 10 145 15 140 10 135
+a 0 10 135 15 130 10 125
+v 0 20 0
+20 170
+;
+a 0 10 165 15 160 10 155
+a 0 10 155 15 150 10 145
+v 0 10 0
+10 5
+;
+v 0 10 165
+10 170
+;
+*symbol 6DJ8
+d High transconductance triode
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=6DJ8
+a 0 sp 0 0 0 10 hlb 100 MODEL=6DJ8
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 40 hln 100 G n 0 40 h
+a 0 u 0 0 0 40 hln 100 ERC=x
+a 0 u 0 0 5 45 hln 100 pin=2
+@graphics 70 80 40 40 10
+c 0 40 40 29
+v 0 20 40
+30 40
+;
+v 0 35 40
+45 40
+;
+v 0 50 40
+60 40
+;
+v 0 20 30
+60 30
+;
+v 0 5 40
+10 40
+;
+v 0 10 40
+5 40
+;
+v 0 5 40
+15 40
+;
+v 0 55 55
+55 50
+;
+v 0 55 50
+25 50
+;
+v 0 25 50
+25 55
+;
+v 0 40 70
+55 55
+;
+v 0 40 5
+40 30
+;
+*symbol KT88
+d Beam power tetrode
+@type p
+@attributes
+a 1 s 9 0 -8 -4 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C %G2 @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=KT88
+a 0 sp 0 0 0 10 hlb 100 MODEL=KT88
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 45 hln 100 G n 0 45 h
+a 0 u 0 0 0 45 hln 100 ERC=x
+a 0 u 0 0 5 50 hln 100 pin=2
+p 0 0 35 hln 100 G2 n 0 35 h
+a 0 u 0 0 0 35 hln 100 ERC=x
+a 0 u 0 0 5 40 hln 100 pin=4
+@graphics 75 80 40 40 10
+c 0 40 40 32
+v 0 20 45
+30 45
+;
+v 0 35 45
+45 45
+;
+v 0 50 45
+60 45
+;
+v 0 20 25
+60 25
+;
+v 0 5 45
+10 45
+;
+v 0 10 45
+5 45
+;
+v 0 5 45
+15 45
+;
+v 0 40 70
+55 60
+;
+v 0 55 60
+55 55
+;
+v 0 55 55
+25 55
+;
+v 0 25 55
+25 60
+;
+v 0 20 35
+30 35
+;
+v 0 35 35
+45 35
+;
+v 0 50 35
+60 35
+;
+v 0 5 35
+10 35
+;
+v 0 10 35
+5 35
+;
+v 0 5 35
+15 35
+;
+v 0 40 5
+40 25
+;
+*symbol SPST_OPEN
+d SPST switch (open)
+@type p
+@attributes
+a 0 sp 0 0 10 110 hln 100 MODEL=*NOmodel*
+a 0 sp 0 0 0 0 hln 100 TEMPLATE=
+a 0 s 0 0 0 10 hlb 100 SIMULATIONONLY=
+a 1 s 0 0 6 8 hln 100 REFDES=SW?
+a 0 sp 0 0 2 30 hln 100 PART=SPST_OPEN
+@pins
+@graphics 50 15 0 15 10
+v 0 35 15
+50 15
+;
+v 0 15 15
+35 5
+;
+v 0 35 15
+37 13
+;
+v 0 35 15
+37 17
+;
+v 0 15 15
+0 15
+;
+*symbol DYNA_OUTPUT_XFRMR
+d inductor COUPLING (transformer core)
+@type p
+@attributes
+a 1 s 0 0 -12 -6 hln 100 REFDES=OUT_XFRMR?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %1 %2 %3 %4 %5 %6 %7 %8 %9 @MODEL
+a 0 sp 11 0 -6 -4 hlb 100 PART=DYNA_OUTPUT_XFRMR
+a 0 s 0 0 0 10 hln 100 MODEL=DYNA_OUTPUT_XFRMR
+@pins
+p 0 0 0 hln 100 1 n 0 0 h
+a 0 u 0 0 0 0 hln 100 ERC=x
+a 0 u 0 0 5 5 hln 100 pin=1
+p 0 0 25 hln 100 3 n 0 85 h
+a 0 u 0 0 0 25 hln 100 ERC=x
+a 0 u 0 0 5 30 hln 100 pin=3
+p 0 5 35 hln 100 6 n 45 35 u
+a 0 u 0 0 5 35 hln 100 ERC=x
+a 0 u 0 0 10 37 hln 100 pin=6
+p 0 5 25 hln 100 8 n 45 85 u
+a 0 u 0 0 5 25 hln 100 ERC=x
+a 0 u 0 0 10 30 hln 100 pin=8
+p 0 5 135 hln 100 9 n 45 135 u
+a 0 u 0 0 5 135 hln 100 ERC=x
+a 0 u 0 0 10 137 hln 100 pin=9
+p 0 0 55 hln 100 2 n 0 55 h
+a 0 u 0 0 0 55 hln 100 ERC=x
+a 0 u 0 0 5 60 hln 100 pin=2
+p 0 0 115 hln 100 4 n 0 115 h
+a 0 u 0 0 0 115 hln 100 ERC=x
+a 0 u 0 0 5 120 hln 100 pin=4
+p 0 0 170 hln 100 5 n 0 170 h
+a 0 u 0 0 0 170 hln 100 ERC=x
+a 0 u 0 0 5 175 hln 100 pin=5
+p 0 45 65 hln 100 7 n 45 65 u
+a 0 u 0 0 45 65 hln 100 ERC=x
+a 0 u 0 0 40 60 hln 100 pin=7
+@graphics 45 170 20 90 10
+a 0 10 45 15 40 10 35
+a 0 10 35 15 30 10 25
+a 0 10 25 15 20 10 15
+a 0 10 15 15 10 10 5
+a 0 35 45 30 50 35 55
+a 0 35 55 30 60 35 65
+a 0 35 65 30 70 35 75
+a 0 35 75 30 80 35 85
+v 0 35 35
+35 45
+;
+a 0 10 85 15 80 10 75
+a 0 10 75 15 70 10 65
+a 0 10 65 15 60 10 55
+a 0 10 55 15 50 10 45
+a 0 10 125 15 120 10 115
+a 0 10 115 15 110 10 105
+a 0 10 105 15 100 10 95
+a 0 10 95 15 90 10 85
+v 0 25 0
+25 170
+;
+a 0 35 85 30 90 35 95
+a 0 35 95 30 100 35 105
+a 0 35 105 30 110 35 115
+v 0 35 125
+35 135
+;
+a 0 35 115 30 120 35 125
+a 0 10 145 15 140 10 135
+a 0 10 135 15 130 10 125
+v 0 20 0
+20 170
+;
+a 0 10 165 15 160 10 155
+a 0 10 155 15 150 10 145
+v 0 10 0
+10 5
+;
+v 0 10 165
+10 170
+;
+*symbol 12AT7
+d High-mu triode
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=12AT7
+a 0 sp 0 0 0 10 hlb 100 MODEL=12AT7
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 40 hln 100 G n 0 40 h
+a 0 u 0 0 0 40 hln 100 ERC=x
+a 0 u 0 0 5 45 hln 100 pin=2
+@graphics 70 80 40 40 10
+c 0 40 40 29
+v 0 20 40
+30 40
+;
+v 0 35 40
+45 40
+;
+v 0 50 40
+60 40
+;
+v 0 20 30
+60 30
+;
+v 0 5 40
+10 40
+;
+v 0 10 40
+5 40
+;
+v 0 5 40
+15 40
+;
+v 0 55 55
+55 50
+;
+v 0 55 50
+25 50
+;
+v 0 25 50
+25 55
+;
+v 0 40 70
+55 55
+;
+v 0 40 5
+40 30
+;
+*symbol EL34
+d Beam power pentode
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C %G2 @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=EL34
+a 0 sp 0 0 0 10 hlb 100 MODEL=EL34
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 45 hln 100 G n 0 45 h
+a 0 u 0 0 0 45 hln 100 ERC=x
+a 0 u 0 0 5 50 hln 100 pin=2
+p 0 0 35 hln 100 G2 n 0 35 h
+a 0 u 0 0 0 35 hln 100 ERC=x
+a 0 u 0 0 5 40 hln 100 pin=4
+@graphics 75 80 40 40 10
+c 0 40 40 32
+v 0 20 45
+30 45
+;
+v 0 35 45
+45 45
+;
+v 0 50 45
+60 45
+;
+v 0 20 25
+60 25
+;
+v 0 5 45
+10 45
+;
+v 0 10 45
+5 45
+;
+v 0 5 45
+15 45
+;
+v 0 40 70
+55 60
+;
+v 0 55 60
+55 55
+;
+v 0 55 55
+25 55
+;
+v 0 25 55
+25 60
+;
+v 0 20 35
+30 35
+;
+v 0 35 35
+45 35
+;
+v 0 50 35
+60 35
+;
+v 0 5 35
+10 35
+;
+v 0 10 35
+5 35
+;
+v 0 5 35
+15 35
+;
+v 0 40 5
+40 25
+;
+*symbol 6L6GC
+d Beam power pentode
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C %G2 @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=6L6GC
+a 0 sp 0 0 0 10 hlb 100 MODEL=6L6GC
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 45 hln 100 G n 0 45 h
+a 0 u 0 0 0 45 hln 100 ERC=x
+a 0 u 0 0 5 50 hln 100 pin=2
+p 0 0 35 hln 100 G2 n 0 35 h
+a 0 u 0 0 0 35 hln 100 ERC=x
+a 0 u 0 0 5 40 hln 100 pin=4
+@graphics 75 80 40 40 10
+c 0 40 40 32
+v 0 20 45
+30 45
+;
+v 0 35 45
+45 45
+;
+v 0 50 45
+60 45
+;
+v 0 20 25
+60 25
+;
+v 0 5 45
+10 45
+;
+v 0 10 45
+5 45
+;
+v 0 5 45
+15 45
+;
+v 0 40 70
+55 60
+;
+v 0 55 60
+55 55
+;
+v 0 55 55
+25 55
+;
+v 0 25 55
+25 60
+;
+v 0 20 35
+30 35
+;
+v 0 35 35
+45 35
+;
+v 0 50 35
+60 35
+;
+v 0 5 35
+10 35
+;
+v 0 10 35
+5 35
+;
+v 0 5 35
+15 35
+;
+v 0 40 5
+40 25
+;
+*symbol 6C33C
+d Power triode (2 cathodes)
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=6C33C
+a 0 sp 0 0 0 10 hlb 100 MODEL=6C33C
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 40 hln 100 G n 0 40 h
+a 0 u 0 0 0 40 hln 100 ERC=x
+a 0 u 0 0 5 45 hln 100 pin=2
+@graphics 70 80 40 40 10
+c 0 40 40 29
+v 0 20 40
+30 40
+;
+v 0 35 40
+45 40
+;
+v 0 50 40
+60 40
+;
+v 0 20 30
+60 30
+;
+v 0 5 40
+10 40
+;
+v 0 10 40
+5 40
+;
+v 0 5 40
+15 40
+;
+v 0 55 55
+55 50
+;
+v 0 55 50
+25 50
+;
+v 0 25 50
+25 55
+;
+v 0 40 70
+55 55
+;
+v 0 40 5
+40 30
+;
+*symbol 300B
+d Power triode
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=300B
+a 0 sp 0 0 0 10 hlb 100 MODEL=300B
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 40 hln 100 G n 0 40 h
+a 0 u 0 0 0 40 hln 100 ERC=x
+a 0 u 0 0 5 45 hln 100 pin=2
+@graphics 70 80 40 40 10
+c 0 40 40 29
+v 0 20 40
+30 40
+;
+v 0 35 40
+45 40
+;
+v 0 50 40
+60 40
+;
+v 0 20 30
+60 30
+;
+v 0 5 40
+10 40
+;
+v 0 10 40
+5 40
+;
+v 0 5 40
+15 40
+;
+v 0 55 55
+55 50
+;
+v 0 55 50
+25 50
+;
+v 0 25 50
+25 55
+;
+v 0 40 70
+55 55
+;
+v 0 40 5
+40 30
+;
+*symbol D1N5292 ako dcr
+d current regulator diode
+@type p
+@attributes
+a 0 sp 11 0 15 25 hln 100 PART=D1N5292
+a 0 sp 0 0 15 25 hln 100 MODEL=D1N5292
+a 0 s 0 0 15 25 hln 100 COMPONENT=1N5292
+*symbol D1N5295 ako dcr
+d current regulator diode
+@type p
+@attributes
+a 0 sp 11 0 15 25 hln 100 PART=D1N5295
+a 0 sp 0 0 15 25 hln 100 MODEL=D1N5295
+a 0 s 0 0 15 25 hln 100 COMPONENT=1N5295
+*symbol dcr
+d current regulator diode
+@type p
+@attributes
+a 0 sp 11 0 15 25 hln 100 PART=
+a 0 sp 0 0 15 25 hln 100 MODEL=
+a 0 s 9 0 15 0 hln 100 refdes=D?
+a 1 sp 0 0 0 0 hln 100 template=X^@refdes %1 %2 @MODEL
+@pins
+p 0 5 10 hln 100 1 n 0 10 h
+p 0 25 30 hln 100 2 n 30 10 u
+@graphics 30 20 0 10 10
+v 0 10 5
+10 15
+;
+v 0 10 15
+20 10
+;
+v 0 20 10
+10 5
+;
+v 0 18 5
+22 5
+;
+v 0 18 15
+22 15
+;
+v 0 20 5
+20 15
+;
+*symbol 6AN8T
+d 6AN8 medium-mu triode section
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=6AN8T
+a 0 sp 0 0 0 10 hlb 100 MODEL=6AN8T
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 40 hln 100 G n 0 40 h
+a 0 u 0 0 0 40 hln 100 ERC=x
+a 0 u 0 0 5 45 hln 100 pin=2
+@graphics 70 80 40 40 10
+c 0 40 40 29
+v 0 20 40
+30 40
+;
+v 0 35 40
+45 40
+;
+v 0 50 40
+60 40
+;
+v 0 20 30
+60 30
+;
+v 0 5 40
+10 40
+;
+v 0 10 40
+5 40
+;
+v 0 5 40
+15 40
+;
+v 0 55 55
+55 50
+;
+v 0 55 50
+25 50
+;
+v 0 25 50
+25 55
+;
+v 0 40 70
+55 55
+;
+v 0 40 5
+40 30
+;
+*symbol 6AN8P
+d 6AN8 pentode section
+@type p
+@attributes
+a 1 s 9 0 -12 -6 hln 100 REFDES=TU?
+a 1 sp 0 0 0 0 hln 100 TEMPLATE=X^@REFDES %P %G %C %G2 @MODEL
+a 0 sp 11 0 0 10 hlb 100 PART=6AN8P
+a 0 sp 0 0 0 10 hlb 100 MODEL=6AN8P
+@pins
+p 0 40 0 hln 100 P n 40 0 d
+a 0 u 0 0 40 0 hln 100 ERC=x
+a 0 u 0 0 35 5 hln 100 pin=1
+p 0 -20 80 hln 100 C n 40 80 v
+a 0 u 0 0 -20 80 hln 100 ERC=x
+a 0 u 0 0 -15 75 hln 100 pin=3
+p 0 0 45 hln 100 G n 0 45 h
+a 0 u 0 0 0 45 hln 100 ERC=x
+a 0 u 0 0 5 50 hln 100 pin=2
+p 0 0 35 hln 100 G2 n 0 35 h
+a 0 u 0 0 0 35 hln 100 ERC=x
+a 0 u 0 0 5 40 hln 100 pin=4
+@graphics 75 80 40 40 10
+c 0 40 40 32
+v 0 20 45
+30 45
+;
+v 0 35 45
+45 45
+;
+v 0 50 45
+60 45
+;
+v 0 20 25
+60 25
+;
+v 0 5 45
+10 45
+;
+v 0 10 45
+5 45
+;
+v 0 5 45
+15 45
+;
+v 0 40 70
+55 60
+;
+v 0 55 60
+55 55
+;
+v 0 55 55
+25 55
+;
+v 0 25 55
+25 60
+;
+v 0 20 35
+30 35
+;
+v 0 35 35
+45 35
+;
+v 0 50 35
+60 35
+;
+v 0 5 35
+10 35
+;
+v 0 10 35
+5 35
+;
+v 0 5 35
+15 35
+;
+v 0 40 5
+40 25
+;
