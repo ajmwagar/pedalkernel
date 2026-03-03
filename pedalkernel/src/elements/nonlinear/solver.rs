@@ -451,22 +451,23 @@ pub(crate) fn multi_port_nr_solve(
         let mut jac_copy = jacobian.clone();
 
         if !solve_small_linear(n_nl, &mut jac_copy, &mut rhs) {
-            // Singular Jacobian — stop iterating
+            break;
+        }
+
+        // Bail out if the linear solve produced NaN (near-singular Jacobian)
+        if rhs.iter().any(|v| !v.is_finite()) {
             break;
         }
 
         // Apply damped Newton step: v -= alpha * delta
-        // Use full step when small, damped when large
         let mut max_dv = 0.0_f64;
         for i in 0..n_nl {
             let mut dv = rhs[i];
-            // Adaptive damping: halve large steps
             if dv.abs() > 5.0 {
                 dv *= 0.5;
                 step_limited = true;
             }
             v_guess[i] -= dv;
-            // Clamp to physical bounds
             let (lo, hi) = devices[i].v_clamp();
             let clamped = v_guess[i].clamp(lo, hi);
             if clamped != v_guess[i] {
@@ -481,12 +482,23 @@ pub(crate) fn multi_port_nr_solve(
         }
     }
 
+    // Ensure v_guess is clean after solver exits
+    for i in 0..n_nl {
+        if !v_guess[i].is_finite() {
+            let (lo, hi) = devices[i].v_clamp();
+            v_guess[i] = (lo + hi) * 0.5;
+        }
+    }
+
     // Compute final reflected waves: b_i = v_i - R_i·i_i(v_i)
     // (This is the WDF reflected wave from each NL port)
     let mut b_nl = vec![0.0; n_nl];
     for i in 0..n_nl {
         let (current, _) = devices[i].iv(v_guess[i]);
-        b_nl[i] = v_guess[i] - port_resistances[i] * current;
+        let b = v_guess[i] - port_resistances[i] * current;
+        // TODO(perf): Same as grouped solver — remove once all circuits
+        // compile with adapted NL port resistances from build.rs.
+        b_nl[i] = b.clamp(-1000.0, 1000.0);
     }
     if let Some(mut entry) = stats_entry {
         entry.residual = last_residual;
@@ -676,6 +688,11 @@ pub(crate) fn multi_port_nr_solve_grouped(
             break; // Singular
         }
 
+        // Bail out if the linear solve produced NaN (near-singular Jacobian)
+        if rhs.iter().any(|v| !v.is_finite()) {
+            break;
+        }
+
         // Apply damped Newton step
         let mut max_dv = 0.0_f64;
         for i in 0..n_nl {
@@ -700,6 +717,15 @@ pub(crate) fn multi_port_nr_solve_grouped(
         }
     }
 
+    // Ensure v_guess is clean: if NaN leaked through, reset to midpoint of clamp range
+    for i in 0..n_nl {
+        if !v_guess[i].is_finite() {
+            let (g, lp) = port_group[i];
+            let (lo, hi) = device_groups[g].v_clamp_port(lp);
+            v_guess[i] = (lo + hi) * 0.5;
+        }
+    }
+
     // Compute final reflected waves: b_i = v_i - R_i·i_i(v_i)
     // Re-evaluate all devices at final voltages
     for g in 0..n_groups {
@@ -718,7 +744,14 @@ pub(crate) fn multi_port_nr_solve_grouped(
 
     let mut b_nl = vec![0.0; n_nl];
     for i in 0..n_nl {
-        b_nl[i] = v_guess[i] - port_resistances[i] * currents[i];
+        let b = v_guess[i] - port_resistances[i] * currents[i];
+        // TODO(perf): The proper fix is to set each R_port = Z_thévenin at
+        // compile time (already done in build.rs adaptive port resistance).
+        // Once all port resistances are properly adapted, |b| should never
+        // exceed a few hundred volts and this clamp becomes a no-op.
+        // Remove this safety clamp after verifying all circuits compile
+        // with adapted NL port resistances.
+        b_nl[i] = b.clamp(-1000.0, 1000.0);
     }
     if let Some(mut entry) = stats_entry {
         entry.residual = last_residual;

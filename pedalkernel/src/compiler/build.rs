@@ -654,18 +654,6 @@ fn build_triode_mna_fallback(
             NonlinearKind::Triode { .. } => "Triode",
             _ => "Other",
         };
-        eprintln!("[MNA-fallback] {kind} plate={plate_node} cathode={cathode_node} grid={grid_node:?} passive_edges={passive_edges:?}");
-        for &eidx in &passive_edges {
-            let e = &graph.edges[eidx];
-            let comp = &graph.components[e.comp_idx];
-            eprintln!(
-                "  edge[{eidx}]: {} ({:?}) nodes=({}, {})",
-                comp.id,
-                std::mem::discriminant(&comp.kind),
-                e.node_a,
-                e.node_b
-            );
-        }
     }
 
     if passive_edges.is_empty() {
@@ -1164,35 +1152,53 @@ fn try_build_multi_nl_stage(
                     continue;
                 }
                 seen_comp.insert(e.comp_idx);
-                // Find secondary nodes via transformer_info
-                let mut sec_nodes: Vec<(NodeId, bool)> = Vec::new();
-                for (&node, info) in &graph.transformer_info {
-                    if info.comp_idx == e.comp_idx && info.is_secondary {
-                        sec_nodes.push((node, true));
+
+                // Find secondary nodes via node_names (fully resolved through
+                // final UF state). Try all naming conventions: .c/.d (shorthand),
+                // .secondary.a/.secondary.b (explicit), .sec.a/.sec.b (abbreviated).
+                let sec_pin_names: &[(&str, &str)] = &[
+                    ("c", "d"),
+                    ("secondary.a", "secondary.b"),
+                    ("sec.a", "sec.b"),
+                ];
+                let mut sec_a_node: Option<NodeId> = None;
+                let mut sec_b_node: Option<NodeId> = None;
+                for &(pin_a, pin_b) in sec_pin_names {
+                    let key_a = format!("{}.{}", comp.id, pin_a);
+                    let key_b = format!("{}.{}", comp.id, pin_b);
+                    if sec_a_node.is_none() {
+                        if let Some(&n) = graph.node_names.get(&key_a) {
+                            sec_a_node = Some(n);
+                        }
+                    }
+                    if sec_b_node.is_none() {
+                        if let Some(&n) = graph.node_names.get(&key_b) {
+                            sec_b_node = Some(n);
+                        }
                     }
                 }
-                // Check if secondary nodes appear in the MNA (via other edges or NL terminals)
-                let sec_in_circuit = sec_nodes.iter().any(|&(sn, _)| {
-                    // Check passive edges (other than this transformer)
-                    plan.passive_edge_indices.iter().any(|&ei| {
-                        let pe = &graph.edges[ei];
-                        ei != eidx && (pe.node_a == sn || pe.node_b == sn)
-                    })
-                    // Also check NL terminals
-                    || plan.nl_terminals.iter().any(|&(p, n)| p == sn || n == sn)
-                });
-                if sec_in_circuit && sec_nodes.len() >= 2 {
-                    // Add secondary nodes to node_set
-                    for &(sn, _) in &sec_nodes {
-                        add_node(sn);
-                    }
-                    coupled_transformers.push(CoupledTransformer {
-                        comp_idx: e.comp_idx,
-                        primary_edge_idx: eidx,
-                        sec_node_a: sec_nodes[0].0,
-                        sec_node_b: sec_nodes[1].0,
-                        turns_ratio: cfg.turns_ratio,
+
+                if let (Some(sna), Some(snb)) = (sec_a_node, sec_b_node) {
+                    // Check if secondary nodes appear in the MNA
+                    // (via other passive edges or NL terminals)
+                    let sec_in_circuit = [sna, snb].iter().any(|&sn| {
+                        plan.passive_edge_indices.iter().any(|&ei| {
+                            let pe = &graph.edges[ei];
+                            ei != eidx && (pe.node_a == sn || pe.node_b == sn)
+                        })
+                        || plan.nl_terminals.iter().any(|&(p, n)| p == sn || n == sn)
                     });
+                    if sec_in_circuit {
+                        add_node(sna);
+                        add_node(snb);
+                        coupled_transformers.push(CoupledTransformer {
+                            comp_idx: e.comp_idx,
+                            primary_edge_idx: eidx,
+                            sec_node_a: sna,
+                            sec_node_b: snb,
+                            turns_ratio: cfg.turns_ratio,
+                        });
+                    }
                 }
             }
         }
@@ -1217,41 +1223,6 @@ fn try_build_multi_nl_stage(
             node_set.iter().position(|&n| n == node)
         }
     };
-
-    // Debug: print coupled transformer node mappings
-    if !coupled_transformers.is_empty() {
-        eprintln!(
-            "[MNA-XFMR] {} coupled transformers, {} vsources, {} MNA nodes",
-            coupled_transformers.len(),
-            num_vsources,
-            num_mna_nodes
-        );
-        for ct in &coupled_transformers {
-            let e = &graph.edges[ct.primary_edge_idx];
-            let pp = node_to_mna(e.node_a);
-            let pn = node_to_mna(e.node_b);
-            let sp = node_to_mna(ct.sec_node_a);
-            let sn = node_to_mna(ct.sec_node_b);
-            eprintln!(
-                "[MNA-XFMR] comp={} pri=({},{})→mna({:?},{:?}) sec=({},{})→mna({:?},{:?}) n={}",
-                ct.comp_idx,
-                e.node_a,
-                e.node_b,
-                pp,
-                pn,
-                ct.sec_node_a,
-                ct.sec_node_b,
-                sp,
-                sn,
-                ct.turns_ratio
-            );
-        }
-        let inj_mna = node_to_mna(plan.injection_node);
-        eprintln!(
-            "[MNA-XFMR] injection_node={}→mna({:?})",
-            plan.injection_node, inj_mna
-        );
-    }
 
     // ── Step 2: Classify passive edges ──────────────────────────────
     // Resistors → stamp directly into MNA (no WDF port needed)
@@ -1467,7 +1438,8 @@ fn try_build_multi_nl_stage(
         let pos = node_to_mna(e.node_a);
         let neg = node_to_mna(e.node_b);
         let rp = dyn_node.port_resistance();
-        if matches!(&dyn_node, DynNode::Pot { .. }) {
+        let is_pot = matches!(&dyn_node, DynNode::Pot { .. });
+        if is_pot {
             has_pots = true;
         }
         ports.push(WdfPort {
@@ -1479,11 +1451,12 @@ fn try_build_multi_nl_stage(
         passive_children.push(dyn_node);
     }
 
-    // Adapted port: voltage source at injection_node to ground
-    // Port resistance will be set so S[n-1][n-1] ≈ 0 (reflection-free).
-    // Start with a reasonable guess; the scattering derivation handles adaptation.
+    // Adapted port: voltage source at injection_node to ground.
+    // Port resistance is set to the Thévenin impedance at the injection node
+    // so S[n-1][n-1] ≈ 0 (reflection-free). We do a 2-pass derivation:
+    // pass 1 with a guess, extract Z_th from reflection, pass 2 with R=Z_th.
     let injection_mna = node_to_mna(plan.injection_node);
-    let r_adapted = 1000.0; // Will be computed from Thévenin impedance
+    let mut r_adapted = 1000.0;
     ports.push(WdfPort {
         node_pos: injection_mna,
         node_neg: None, // ground
@@ -1492,77 +1465,53 @@ fn try_build_multi_nl_stage(
     port_node_pairs.push((injection_mna, None));
 
     // ── Step 4: Derive scattering matrix ────────────────────────────
-    // Debug: check MNA connectivity for injection node
-    if n_nl >= 10 {
-        if let Some(inj_idx) = injection_mna {
-            // Print G matrix row for injection node
-            let mut g_connections = Vec::new();
-            for j in 0..num_mna_nodes {
-                let g = mna.g_matrix[inj_idx * num_mna_nodes + j];
-                if g.abs() > 1e-15 {
-                    g_connections.push(format!("G[{},{}]={:.4e}", inj_idx, j, g));
-                }
-            }
-            eprintln!(
-                "[MNA-DIAG] injection MNA={} G-row connections: {:?}",
-                inj_idx, g_connections
-            );
-            // Print B matrix row for injection node (vsource currents)
-            for vs in 0..num_vsources {
-                let b = mna.b_matrix[inj_idx * num_vsources + vs];
-                if b.abs() > 1e-15 {
-                    eprintln!("[MNA-DIAG] B[inj={},vs={}]={:.4e}", inj_idx, vs, b);
-                }
-            }
-            // Print NL port 0 G connections
-            if let Some(nl0_pos) = ports[0].node_pos {
-                let mut nl_connections = Vec::new();
-                for j in 0..num_mna_nodes {
-                    let g = mna.g_matrix[nl0_pos * num_mna_nodes + j];
-                    if g.abs() > 1e-15 {
-                        nl_connections.push(format!("G[{},{}]={:.4e}", nl0_pos, j, g));
-                    }
-                }
-                eprintln!(
-                    "[MNA-DIAG] NL_port0_pos MNA={} G-row: {:?}",
-                    nl0_pos, nl_connections
-                );
-            }
-            // Print transformer secondary node G connections
-            for ct in &coupled_transformers {
-                let sa = node_to_mna(ct.sec_node_a);
-                let sb = node_to_mna(ct.sec_node_b);
-                for mna_idx in [sa, sb].iter().flatten() {
-                    let mut sec_conns = Vec::new();
-                    for j in 0..num_mna_nodes {
-                        let g = mna.g_matrix[*mna_idx * num_mna_nodes + j];
-                        if g.abs() > 1e-15 {
-                            sec_conns.push(format!("G[{},{}]={:.4e}", mna_idx, j, g));
-                        }
-                    }
-                    eprintln!("[MNA-DIAG] xfmr_sec MNA={} G-row: {:?}", mna_idx, sec_conns);
-                }
-            }
-            // Print node_set mapping for first 40 entries
-            eprintln!(
-                "[MNA-DIAG] node_set (first 40): {:?}",
-                &node_set[..node_set.len().min(40)]
-            );
-        }
-    }
-    let scattering = mna.derive_scattering_matrix_general(&ports);
+    // ── Pass 1: Derive scattering with initial R_adapted guess ─────
+    let mut scattering = mna.derive_scattering_matrix_general(&ports);
 
     // Validate scattering matrix: check for NaN/inf
     if scattering.iter().any(|&s| !s.is_finite()) {
         return None;
     }
 
-    // Check adapted port reflection: S[n-1][n-1] should be near 0
+    // ── Adaptive port resistance ────────────────────────────────────
+    // From WDF theory: S_refl[i] = (Z_th_i - R_i) / (Z_th_i + R_i)
+    // Solving: Z_th_i = R_i * (1 + S_refl[i]) / (1 - S_refl[i])
+    // For reflection-free port, set R = Z_th and recompute scattering.
+    //
+    // We adapt ALL ports (NL + adapted) in a single pass. This prevents
+    // reflected-wave explosions when R_port ≪ Z_thévenin.
+    let mut needs_recompute = false;
+
+    // Adapt NL port resistances
+    for i in 0..n_nl {
+        let s_refl = scattering[i * n_total + i];
+        if s_refl.abs() > 0.1 && (1.0 - s_refl.abs()) > 1e-12 {
+            let z_th = nl_port_resistances[i] * (1.0 + s_refl) / (1.0 - s_refl);
+            if z_th.is_finite() && z_th > 1.0 {
+                nl_port_resistances[i] = z_th;
+                ports[i].resistance = z_th;
+                needs_recompute = true;
+            }
+        }
+    }
+
+    // Adapt the adapted (VS) port resistance
     let s_adapted_refl = scattering[(n_total - 1) * n_total + (n_total - 1)];
-    if s_adapted_refl.abs() > 0.5 {
-        // Poor adaptation — try to compute proper adapted resistance.
-        // The Thévenin impedance at the adapted port determines the ideal resistance.
-        // For now, accept imperfect adaptation (the solver still works, just less efficient).
+    if s_adapted_refl.abs() > 0.05 && (1.0 - s_adapted_refl.abs()) > 1e-12 {
+        let z_th = r_adapted * (1.0 + s_adapted_refl) / (1.0 - s_adapted_refl);
+        if z_th.is_finite() && z_th > 0.0 {
+            r_adapted = z_th;
+            ports.last_mut().unwrap().resistance = r_adapted;
+            needs_recompute = true;
+        }
+    }
+
+    // Recompute scattering with matched impedances
+    if needs_recompute {
+        scattering = mna.derive_scattering_matrix_general(&ports);
+        if scattering.iter().any(|&s| !s.is_finite()) {
+            return None;
+        }
     }
 
     // ── Step 5: Extract sub-blocks of scattering matrix ─────────────
@@ -1587,7 +1536,6 @@ fn try_build_multi_nl_stage(
     for i in 0..n_nl {
         s_nl_adapted[i] = scattering[i * n_total + (n_total - 1)];
     }
-
     // ── Step 6: Create NL device roots ──────────────────────────────
     // Detect 3-port triodes: single element with 2 NL terminal pairs
     // (grid-cathode + plate-cathode). Create a grouped device for the

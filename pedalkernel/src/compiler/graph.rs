@@ -225,15 +225,16 @@ impl CircuitGraph {
             all_components.push(comp);
         }
 
-        // Pre-scan: identify pots that use .w (wiper) pin in nets.
-        // A pot with .w is a 3-terminal pot: lug A, wiper, lug B.
+        // Pre-scan: identify pots that use a wiper pin in nets.
+        // A pot with a wiper pin is a 3-terminal pot: lug A, wiper, lug B.
         // Must be done before the get_id closure borrows pin_ids.
+        const WIPER_PIN_NAMES: &[&str] = &["w", "wiper"];
         let pots_with_wiper: HashSet<String> = {
             let mut set = HashSet::new();
             for net in &expanded_nets {
                 let check_pin = |p: &Pin, s: &mut HashSet<String>| {
                     if let Pin::ComponentPin { component, pin } = p {
-                        if pin == "w" {
+                        if WIPER_PIN_NAMES.contains(&pin.as_str()) {
                             s.insert(component.clone());
                         }
                     }
@@ -245,7 +246,6 @@ impl CircuitGraph {
             }
             set
         };
-
         let mut uf = UnionFind::new();
         let mut pin_ids: HashMap<String, usize> = HashMap::new();
         let mut next_id = 0usize;
@@ -604,43 +604,43 @@ impl CircuitGraph {
                     // Pin naming: the DSL supports both shorthand (.a/.b) and
                     // explicit winding names (.primary.a/.primary.b). Union both
                     // so that either convention works in netlists.
-                    let key_a = format!("{}.a", comp.id);
-                    let key_b = format!("{}.b", comp.id);
-                    let key_pri_a = format!("{}.primary.a", comp.id);
-                    let key_pri_b = format!("{}.primary.b", comp.id);
-                    let id_a = get_id(&key_a, &mut uf);
-                    let id_b = get_id(&key_b, &mut uf);
-                    // Union shorthand pins with explicit winding pins
-                    let id_pri_a = get_id(&key_pri_a, &mut uf);
-                    let id_pri_b = get_id(&key_pri_b, &mut uf);
-                    uf.union(id_a, id_pri_a);
-                    uf.union(id_b, id_pri_b);
-                    // Also union secondary pins: .c/.d with .secondary.a/.secondary.b
-                    let key_c = format!("{}.c", comp.id);
-                    let key_d = format!("{}.d", comp.id);
-                    let key_sec_a = format!("{}.secondary.a", comp.id);
-                    let key_sec_b = format!("{}.secondary.b", comp.id);
-                    let id_c = get_id(&key_c, &mut uf);
-                    let id_d = get_id(&key_d, &mut uf);
-                    let id_sec_a = get_id(&key_sec_a, &mut uf);
-                    let id_sec_b = get_id(&key_sec_b, &mut uf);
-                    uf.union(id_c, id_sec_a);
-                    uf.union(id_d, id_sec_b);
-
-                    // Register tertiary pins if the transformer has a third winding.
-                    // .e/.f shorthand, .tertiary.a/.tertiary.b explicit names.
-                    if cfg.has_tertiary() {
-                        let key_e = format!("{}.e", comp.id);
-                        let key_f = format!("{}.f", comp.id);
-                        let key_ter_a = format!("{}.tertiary.a", comp.id);
-                        let key_ter_b = format!("{}.tertiary.b", comp.id);
-                        let id_e = get_id(&key_e, &mut uf);
-                        let id_f = get_id(&key_f, &mut uf);
-                        let id_ter_a = get_id(&key_ter_a, &mut uf);
-                        let id_ter_b = get_id(&key_ter_b, &mut uf);
-                        uf.union(id_e, id_ter_a);
-                        uf.union(id_f, id_ter_b);
+                    // Transformer winding pin aliases: each winding has a canonical
+                    // shorthand (.a/.b, .c/.d, .e/.f), an explicit form (.primary.a,
+                    // .secondary.a, .tertiary.a), and an abbreviated form (.pri.a,
+                    // .sec.a, .ter.a). Union all forms so any convention works.
+                    //
+                    // Table: (shorthand_a, shorthand_b, &[(alias_prefix)])
+                    let windings: &[(&str, &str, &[&str])] = &[
+                        ("a", "b", &["primary", "pri"]),
+                        ("c", "d", &["secondary", "sec"]),
+                    ];
+                    for &(short_a, short_b, prefixes) in windings {
+                        let id_short_a = get_id(&format!("{}.{}", comp.id, short_a), &mut uf);
+                        let id_short_b = get_id(&format!("{}.{}", comp.id, short_b), &mut uf);
+                        for prefix in prefixes {
+                            let alias_a = get_id(&format!("{}.{}.a", comp.id, prefix), &mut uf);
+                            let alias_b = get_id(&format!("{}.{}.b", comp.id, prefix), &mut uf);
+                            uf.union(id_short_a, alias_a);
+                            uf.union(id_short_b, alias_b);
+                        }
                     }
+
+                    // Tertiary winding aliases (only if transformer has third winding)
+                    if cfg.has_tertiary() {
+                        let id_e = get_id(&format!("{}.e", comp.id), &mut uf);
+                        let id_f = get_id(&format!("{}.f", comp.id), &mut uf);
+                        for prefix in &["tertiary", "ter"] {
+                            let alias_a = get_id(&format!("{}.{}.a", comp.id, prefix), &mut uf);
+                            let alias_b = get_id(&format!("{}.{}.b", comp.id, prefix), &mut uf);
+                            uf.union(id_e, alias_a);
+                            uf.union(id_f, alias_b);
+                        }
+                    }
+
+                    let id_a = get_id(&format!("{}.a", comp.id), &mut uf);
+                    let id_b = get_id(&format!("{}.b", comp.id), &mut uf);
+                    let id_c = get_id(&format!("{}.c", comp.id), &mut uf);
+                    let id_d = get_id(&format!("{}.d", comp.id), &mut uf);
 
                     let node_a = uf.find(id_a);
                     let node_b = uf.find(id_b);
@@ -666,8 +666,11 @@ impl CircuitGraph {
                         cfg.primary_type,
                         WindingType::CenterTap | WindingType::PushPull
                     ) {
-                        let ct_key = format!("{}.primary.ct", comp.id);
-                        let ct_id = get_id(&ct_key, &mut uf);
+                        let ct_id = get_id(&format!("{}.primary.ct", comp.id), &mut uf);
+                        let ct_abbr = get_id(&format!("{}.pri.ct", comp.id), &mut uf);
+                        let ct_short = get_id(&format!("{}.ct", comp.id), &mut uf);
+                        uf.union(ct_id, ct_abbr);
+                        uf.union(ct_id, ct_short);
                         all_winding_nodes.push(uf.find(ct_id));
                     }
                     all_winding_nodes.sort();
@@ -758,21 +761,30 @@ impl CircuitGraph {
             });
 
             let key_a = format!("{pot_id}.a");
-            let key_w = format!("{pot_id}.w");
             let key_b = format!("{pot_id}.b");
             let id_a = get_id(&key_a, &mut uf);
-            let id_w = get_id(&key_w, &mut uf);
             let id_b = get_id(&key_b, &mut uf);
 
+            // Alias all wiper pin variants so nets using any name
+            // (e.g. ".w" or ".wiper") resolve to the same UF group.
+            let id_w = get_id(&format!("{pot_id}.{}", WIPER_PIN_NAMES[0]), &mut uf);
+            for &alias in &WIPER_PIN_NAMES[1..] {
+                let id_alias = get_id(&format!("{pot_id}.{alias}"), &mut uf);
+                uf.union(id_w, id_alias);
+            }
+
+            let resolved_a = uf.find(id_a);
+            let resolved_w = uf.find(id_w);
+            let resolved_b = uf.find(id_b);
             edges.push(GraphEdge {
                 comp_idx: aw_idx,
-                node_a: uf.find(id_a),
-                node_b: uf.find(id_w),
+                node_a: resolved_a,
+                node_b: resolved_w,
             });
             edges.push(GraphEdge {
                 comp_idx: wb_idx,
-                node_a: uf.find(id_w),
-                node_b: uf.find(id_b),
+                node_a: resolved_w,
+                node_b: resolved_b,
             });
         }
 
@@ -824,6 +836,21 @@ impl CircuitGraph {
             edge.node_a = uf.find(edge.node_a);
             edge.node_b = uf.find(edge.node_b);
         }
+
+        // Re-resolve transformer_info and coupled_nodes through final UF state.
+        // These were recorded during component processing, before all unions
+        // were complete. Without re-resolution, transformer secondary nodes
+        // may not match the nodes used by downstream passive edges.
+        let transformer_info: HashMap<NodeId, TransformerNodeInfo> = transformer_info
+            .into_iter()
+            .map(|(node, info)| (uf.find(node), info))
+            .collect();
+        let coupled_nodes: HashMap<NodeId, Vec<NodeId>> = coupled_nodes
+            .into_iter()
+            .map(|(node, others)| {
+                (uf.find(node), others.into_iter().map(|n| uf.find(n)).collect())
+            })
+            .collect();
 
         let in_node = uf.find(*pin_ids.get("in").unwrap());
         let out_node = uf.find(*pin_ids.get("out").unwrap());
@@ -1470,15 +1497,17 @@ impl CircuitGraph {
                     }
                     continue;
                 }
-                // Collect the edge if we haven't already visited the neighbor
-                // through another path. We still collect edges to gnd/vcc
-                // but don't continue BFS through them.
-                if visited_nodes.insert(n) {
-                    collected_edges.push(idx);
-                    // Don't traverse through global power rails.
-                    if n != self.gnd_node && n != self.vcc_node {
-                        queue.push_back(n);
+                // Ground and VCC are "star" nodes — multiple edges from
+                // different circuit branches terminate there.  Always
+                // collect edges to them (pots, cathode Rs, etc.) even
+                // if gnd/vcc was already reached via another path.
+                if n == self.gnd_node || n == self.vcc_node {
+                    if !collected_edges.contains(&idx) {
+                        collected_edges.push(idx);
                     }
+                } else if visited_nodes.insert(n) {
+                    collected_edges.push(idx);
+                    queue.push_back(n);
                 }
             }
         }

@@ -792,20 +792,6 @@ pub(super) fn plan_stages(
             source_node_offset,
             sample_rate,
         );
-        #[cfg(feature = "debug-trace")]
-        {
-            let kind_name = match &elem.kind {
-                NonlinearKind::Pentode { .. } => "Pentode",
-                NonlinearKind::Triode { .. } => "Triode",
-                _ => "Other",
-            };
-            eprintln!(
-                "[plan] elem[{elem_idx}] {kind_name} edge={} junctions={:?} -> {}",
-                elem.edge_idx,
-                elem.junction_nodes,
-                if plan_result.is_some() { "OK" } else { "None" }
-            );
-        }
         if let Some(plan) = plan_result {
             plans.push(plan);
         }
@@ -1760,4 +1746,135 @@ fn find_secondary_side_transformers(
     }
 
     inject_edges
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Collapsed NL planning (sidechain mode)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Create a single MultiNlPlan containing ALL nonlinear elements and ALL
+/// passive edges in the circuit. Used for sidechain sub-circuits where the
+/// entire NL network should be solved as one multi-junction system.
+///
+/// For each NL element:
+/// - Triodes with grid_node → 2 NL ports (grid-cathode + plate-cathode)
+/// - Everything else → 1 NL port per element
+///
+/// All passive edges are collected via BFS from every NL terminal node.
+fn plan_collapsed_nl(
+    classified: &ClassifiedCircuit,
+    graph: &CircuitGraph,
+    pp_transformer_edges: &HashSet<usize>,
+) -> MultiNlPlan {
+    let mut nl_element_indices: Vec<usize> = Vec::new();
+    let mut nl_terminals: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut all_junction_nodes: HashSet<NodeId> = HashSet::new();
+
+    for (elem_idx, elem) in classified.nonlinear_elements.iter().enumerate() {
+        nl_element_indices.push(elem_idx);
+
+        match &elem.kind {
+            NonlinearKind::Triode { plate_node, cathode_node, grid_node: Some(gn), .. } => {
+                nl_terminals.push((*gn, *cathode_node));
+                nl_terminals.push((*plate_node, *cathode_node));
+                all_junction_nodes.insert(*gn);
+                all_junction_nodes.insert(*plate_node);
+                all_junction_nodes.insert(*cathode_node);
+            }
+            NonlinearKind::Triode { plate_node, cathode_node, .. } => {
+                nl_terminals.push((*plate_node, *cathode_node));
+                all_junction_nodes.insert(*plate_node);
+                all_junction_nodes.insert(*cathode_node);
+            }
+            NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. } => {
+                let (c, e) = (elem.junction_nodes[0], elem.junction_nodes[1]);
+                nl_terminals.push((c, e));
+                all_junction_nodes.insert(c);
+                all_junction_nodes.insert(e);
+            }
+            _ => {
+                let edge = &graph.edges[elem.edge_idx];
+                nl_terminals.push((edge.node_a, edge.node_b));
+                all_junction_nodes.insert(edge.node_a);
+                all_junction_nodes.insert(edge.node_b);
+            }
+        }
+    }
+
+    let nl_edge_set: HashSet<usize> = classified.all_nonlinear_edge_indices.iter().copied().collect();
+    let active_edge_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
+    let mut all_passive_edges: Vec<usize> = Vec::new();
+    for (eidx, _edge) in graph.edges.iter().enumerate() {
+        if nl_edge_set.contains(&eidx) || active_edge_set.contains(&eidx) || pp_transformer_edges.contains(&eidx) {
+            continue;
+        }
+        all_passive_edges.push(eidx);
+    }
+
+    // Find injection node (closest to input among passive endpoints).
+    let mut injection_node = graph.in_node;
+    let mut best_dist = usize::MAX;
+    for &eidx in &all_passive_edges {
+        let e = &graph.edges[eidx];
+        for node in [e.node_a, e.node_b] {
+            if node == graph.gnd_node || node == graph.out_node {
+                continue;
+            }
+            if let Some(&d) = classified.dist_from_in.get(&node) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = node;
+                }
+            }
+        }
+    }
+    // Fallback for transformer-isolated circuits: use dist_from_out.
+    if best_dist == usize::MAX {
+        let mut best_out_dist = 0usize;
+        for &eidx in &all_passive_edges {
+            let e = &graph.edges[eidx];
+            for node in [e.node_a, e.node_b] {
+                if node == graph.gnd_node || node == graph.out_node {
+                    continue;
+                }
+                if let Some(&d) = classified.dist_from_out.get(&node) {
+                    if d > best_out_dist {
+                        best_out_dist = d;
+                        injection_node = node;
+                    }
+                }
+            }
+        }
+    }
+
+    let output_node = if all_passive_edges.iter().any(|&eidx| {
+        let e = &graph.edges[eidx];
+        e.node_a == graph.out_node || e.node_b == graph.out_node
+    }) {
+        Some(graph.out_node)
+    } else {
+        None
+    };
+
+    let output_element_idx = nl_element_indices
+        .iter()
+        .copied()
+        .min_by_key(|&idx| {
+            let elem = &classified.nonlinear_elements[idx];
+            let edge = &graph.edges[elem.edge_idx];
+            let d_a = classified.dist_from_out.get(&edge.node_a).copied().unwrap_or(usize::MAX);
+            let d_b = classified.dist_from_out.get(&edge.node_b).copied().unwrap_or(usize::MAX);
+            d_a.min(d_b)
+        })
+        .unwrap_or(0);
+
+    MultiNlPlan {
+        nl_element_indices,
+        output_element_idx,
+        passive_edge_indices: all_passive_edges,
+        injection_node,
+        nl_terminals,
+        compensation: 1.0,
+        output_node,
+    }
 }

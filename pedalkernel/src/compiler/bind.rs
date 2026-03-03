@@ -509,11 +509,11 @@ pub(super) fn build_sidechains(
             sc_def.trims.len()
         );
 
-        // Compile the sidechain with collapse_nl=true to merge all NL elements
-        // into a single MultiNlStage. This eliminates parallel-path routing issues
-        // and produces a physically accurate multi-junction solve.
+        // Compile the sidechain as individual stages. Multi-stage amplifier
+        // cascades need per-stage NR solves for correct gain accumulation.
+        // Only tightly-coupled junctions (bridge rectifiers) are collapsed.
         let sc_options = super::compile::CompileOptions {
-            collapse_nl: true,
+            collapse_nl: false,
             ..Default::default()
         };
         match super::compile::compile_pedal_with_options(&sc_def, sample_rate, sc_options) {

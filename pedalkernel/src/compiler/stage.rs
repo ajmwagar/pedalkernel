@@ -1214,43 +1214,6 @@ impl MultiNlStage {
         let n_passive = self.passive_children.len();
         let output_port = self.output_port;
 
-        // Temporary diagnostic: print s_nl_adapted once
-        static MNL_DIAG_DONE: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        if n_nl >= 10 && !MNL_DIAG_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!(
-                "[MNL-DIAG] n_nl={} n_passive={} output_port={} comp={}",
-                n_nl, n_passive, output_port, compensation
-            );
-            eprintln!("[MNL-DIAG] s_nl_adapted = {:?}", &self.s_nl_adapted);
-            // Check scattering matrix: does VS port reach output port?
-            let n_total = n_nl + n_passive + 1;
-            let s = &self.adaptor;
-            let mut b_test = vec![0.0; n_total];
-            b_test[n_total - 1] = 1.0; // VS port = 1.0
-            let a_test = s.scatter_all(&b_test);
-            eprintln!(
-                "[MNL-DIAG] scatter VS→all: a[out={}]={:.6e}",
-                output_port, a_test[output_port]
-            );
-            eprintln!(
-                "[MNL-DIAG] first 5 NL a-values: {:?}",
-                &a_test[..n_nl.min(5)]
-            );
-            // Check NL port resistances
-            eprintln!(
-                "[MNL-DIAG] nl_port_resistances = {:?}",
-                &self.nl_port_resistances
-            );
-            // Check recompute data
-            if let Some(ref rc) = self.recompute_data {
-                eprintln!(
-                    "[MNL-DIAG] recompute port_node_pairs = {:?}",
-                    &rc.port_node_pairs
-                );
-            }
-        }
-
         // Set control voltages on each NL device (only for independent devices;
         // grouped devices get their grid voltage from the WDF port).
         if self.device_groups.is_none() {
@@ -1285,7 +1248,7 @@ impl MultiNlStage {
                 // Grouped solver: cross-coupled device Jacobians
                 let groups: Vec<&dyn NlDeviceGroupIv> =
                     dg.groups.iter().map(|g| g.as_group_iv()).collect();
-                multi_port_nr_solve_grouped(
+                let result = multi_port_nr_solve_grouped(
                     n_nl,
                     &self.s_nl,
                     &known_a,
@@ -1295,7 +1258,8 @@ impl MultiNlStage {
                     &mut self.v_prev,
                     20,
                     1e-6,
-                )
+                );
+                result
             } else {
                 // Independent solver: each device has its own I-V
                 let devices: Vec<&dyn NlDeviceIv> = self
@@ -1504,9 +1468,7 @@ impl MultiNlStage {
     fn recompute_scattering(&mut self) {
         let recompute = match &self.recompute_data {
             Some(r) => r,
-            None => {
-                return;
-            }
+            None => return,
         };
 
         let n_nl = self.n_nl;

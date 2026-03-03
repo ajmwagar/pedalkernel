@@ -1656,7 +1656,6 @@ impl PedalProcessor for CompiledPedal {
                     sc.cv_delayed
                 );
             }
-            let _ = i;
             sc.cv_delayed = cv;
         }
 

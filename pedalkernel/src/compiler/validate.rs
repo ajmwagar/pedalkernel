@@ -441,29 +441,15 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
 
         // Transformer: primary (a, b) + secondary (c, d) + tertiary (e, f) + center taps
         // Also supports hierarchical names: primary.a, secondary.a, tertiary.a
-        ComponentKind::Transformer(_) => &[
-            "a",
-            "b",
-            "c",
-            "d",
-            "e",
-            "f",
-            "primary.a",
-            "primary.b",
-            "secondary.a",
-            "secondary.b",
-            "tertiary.a",
-            "tertiary.b",
-            "pri_a",
-            "pri_b",
-            "sec_a",
-            "sec_b",
-            "ter_a",
-            "ter_b",
-            "pri_ct",
-            "sec_ct",
-            "ct",
-        ],
+        ComponentKind::Transformer(_) => {
+            &["a", "b", "c", "d", "e", "f",
+              "primary.a", "primary.b", "secondary.a", "secondary.b",
+              "tertiary.a", "tertiary.b",
+              "pri.a", "pri.b", "sec.a", "sec.b", "ter.a", "ter.b",
+              "pri_a", "pri_b", "sec_a", "sec_b", "ter_a", "ter_b",
+              "pri_ct", "pri.ct", "sec_ct", "sec.ct", "ct",
+              "primary.ct", "secondary.ct"]
+        }
 
         // Synth ICs
         ComponentKind::Vco(_) => &["cv", "saw", "tri", "pulse", "pw", "sync", "out"],
