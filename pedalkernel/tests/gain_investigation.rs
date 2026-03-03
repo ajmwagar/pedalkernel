@@ -470,10 +470,7 @@ pedal "BJT Gain Test" {
     println!("Input RMS: {:.4}", input_rms);
     println!("Output RMS: {:.4}", output_rms);
     println!("Gain: {:.1} dB", gain_db);
-    println!(
-        "Finite: {}",
-        output.iter().all(|x| x.is_finite())
-    );
+    println!("Finite: {}", output.iter().all(|x| x.is_finite()));
 
     // Simple common-emitter with bypassed emitter should give ~20dB gain
     if gain_db < 0.0 {
@@ -522,10 +519,7 @@ pedal "Op-Amp Gain Test" {
     println!("Output RMS: {:.4}", output_rms);
     println!("Expected gain: {:.1} dB (Rf/Ri = 10)", 20.0);
     println!("Actual gain: {:.1} dB", gain_db);
-    println!(
-        "Finite: {}",
-        output.iter().all(|x| x.is_finite())
-    );
+    println!("Finite: {}", output.iter().all(|x| x.is_finite()));
 
     // Inverting amp with Rf/Ri = 100k/10k = 10 should give 20dB gain
     if gain_db < 15.0 {

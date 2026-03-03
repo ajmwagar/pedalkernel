@@ -79,18 +79,8 @@ fn phase90_speed_changes_rate() {
     //      (corr=1.0), indicating the control-to-LFO-rate routing is broken.
     let input = sine(440.0, 2.0, SAMPLE_RATE);
 
-    let slow = compile_example_and_process(
-        "phase90.pedal",
-        &input,
-        SAMPLE_RATE,
-        &[("Speed", 0.2)],
-    );
-    let fast = compile_example_and_process(
-        "phase90.pedal",
-        &input,
-        SAMPLE_RATE,
-        &[("Speed", 0.8)],
-    );
+    let slow = compile_example_and_process("phase90.pedal", &input, SAMPLE_RATE, &[("Speed", 0.2)]);
+    let fast = compile_example_and_process("phase90.pedal", &input, SAMPLE_RATE, &[("Speed", 0.8)]);
 
     assert!(slow.iter().all(|x| x.is_finite()), "Slow: NaN/inf");
     assert!(fast.iter().all(|x| x.is_finite()), "Fast: NaN/inf");
@@ -183,12 +173,8 @@ fn phase90_with_guitar() {
     let (guitar, _sr) = &*CLEAN_GUITAR;
     let input: Vec<f64> = guitar.iter().copied().take(48000).collect();
 
-    let output = compile_example_and_process(
-        "phase90.pedal",
-        &input,
-        SAMPLE_RATE,
-        &[("Speed", 0.5)],
-    );
+    let output =
+        compile_example_and_process("phase90.pedal", &input, SAMPLE_RATE, &[("Speed", 0.5)]);
     assert_healthy(&output, "Phase 90 guitar", 5.0);
     maybe_dump_wav(&output, "guitar_phase90", SAMPLE_RATE_U32);
 }

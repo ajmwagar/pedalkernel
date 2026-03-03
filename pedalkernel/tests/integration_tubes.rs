@@ -17,8 +17,7 @@ macro_rules! tube_produces_output {
         #[test]
         fn $test_name() {
             let input = sine(440.0, 0.5, SAMPLE_RATE);
-            let output =
-                compile_test_pedal_and_process($pedal_file, &input, SAMPLE_RATE, &[]);
+            let output = compile_test_pedal_and_process($pedal_file, &input, SAMPLE_RATE, &[]);
             assert_healthy(&output, $label, 50.0);
         }
     };
@@ -32,8 +31,7 @@ macro_rules! tube_alias_matches {
         #[test]
         fn $test_name() {
             let input = sine(440.0, 0.5, SAMPLE_RATE);
-            let alias_out =
-                compile_test_pedal_and_process($alias_file, &input, SAMPLE_RATE, &[]);
+            let alias_out = compile_test_pedal_and_process($alias_file, &input, SAMPLE_RATE, &[]);
             let canon_out =
                 compile_test_pedal_and_process($canonical_file, &input, SAMPLE_RATE, &[]);
 
@@ -60,7 +58,11 @@ macro_rules! tube_alias_matches {
 // ===========================================================================
 
 // Canonical types
-tube_produces_output!(triode_12ax7_produces_output, "triode_overdrive.pedal", "12AX7");
+tube_produces_output!(
+    triode_12ax7_produces_output,
+    "triode_overdrive.pedal",
+    "12AX7"
+);
 tube_produces_output!(triode_12au7_produces_output, "triode_clean.pedal", "12AU7");
 tube_produces_output!(triode_12at7_produces_output, "triode_12at7.pedal", "12AT7");
 tube_produces_output!(triode_12ay7_produces_output, "triode_12ay7.pedal", "12AY7");
@@ -81,9 +83,17 @@ tube_produces_output!(triode_6072_produces_output, "triode_6072.pedal", "6072");
 tube_produces_output!(pentode_ef86_produces_output, "pentode_clean.pedal", "EF86");
 tube_produces_output!(pentode_el84_produces_output, "pentode_el84.pedal", "EL84");
 tube_produces_output!(pentode_el34_produces_output, "pentode_power.pedal", "EL34");
-tube_produces_output!(pentode_6aq5a_produces_output, "pentode_6aq5a.pedal", "6AQ5A");
+tube_produces_output!(
+    pentode_6aq5a_produces_output,
+    "pentode_6aq5a.pedal",
+    "6AQ5A"
+);
 tube_produces_output!(pentode_6973_produces_output, "pentode_6973.pedal", "6973");
-tube_produces_output!(pentode_6l6gc_produces_output, "pentode_6l6gc.pedal", "6L6GC");
+tube_produces_output!(
+    pentode_6l6gc_produces_output,
+    "pentode_6l6gc.pedal",
+    "6L6GC"
+);
 tube_produces_output!(pentode_6550_produces_output, "pentode_6550.pedal", "6550");
 
 // Aliases
@@ -264,8 +274,7 @@ fn triode_has_even_harmonics() {
     // Tube clipping is asymmetric (grid conduction vs plate cutoff)
     // Should produce even harmonics (especially 2nd)
     let input = sine_at(440.0, 0.4, 0.5, SAMPLE_RATE);
-    let output =
-        compile_test_pedal_and_process("triode_overdrive.pedal", &input, SAMPLE_RATE, &[]);
+    let output = compile_test_pedal_and_process("triode_overdrive.pedal", &input, SAMPLE_RATE, &[]);
 
     let h2 = goertzel_power(&output, SAMPLE_RATE, 880.0);
     let fundamental = goertzel_power(&output, SAMPLE_RATE, 440.0);
@@ -473,7 +482,10 @@ fn tube_amps_with_guitar() {
     let input: Vec<f64> = guitar.iter().copied().take(48000).collect();
 
     let amps = [
-        ("tweed_deluxe_5e3.pedal", &[("Volume", 0.7), ("Tone", 0.5)] as &[_]),
+        (
+            "tweed_deluxe_5e3.pedal",
+            &[("Volume", 0.7), ("Tone", 0.5)] as &[_],
+        ),
         (
             "bassman_5f6a.pedal",
             &[
@@ -545,9 +557,7 @@ fn tube_amps_distinct_from_each_other() {
     let corr_tm = correlation(&tweed, &marshall).abs();
     let corr_bm = correlation(&bassman, &marshall).abs();
 
-    eprintln!(
-        "  [diag] Amp correlations: TB={corr_tb:.6}, TM={corr_tm:.6}, BM={corr_bm:.6}"
-    );
+    eprintln!("  [diag] Amp correlations: TB={corr_tb:.6}, TM={corr_tm:.6}, BM={corr_bm:.6}");
 
     // All three amps should produce finite, non-silent output
     assert!(peak(&tweed) > 1e-4, "Tweed should produce output");

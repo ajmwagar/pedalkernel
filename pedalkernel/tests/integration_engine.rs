@@ -22,13 +22,8 @@ fn oversampling_x2_compiles_and_runs() {
         oversampling: OversamplingFactor::X2,
         ..CompileOptions::default()
     };
-    let output = compile_test_pedal_with_options(
-        "clip_silicon.pedal",
-        &input,
-        SAMPLE_RATE,
-        &[],
-        options,
-    );
+    let output =
+        compile_test_pedal_with_options("clip_silicon.pedal", &input, SAMPLE_RATE, &[], options);
     assert_healthy(&output, "clip_silicon x2", 50.0);
 }
 
@@ -39,13 +34,8 @@ fn oversampling_x4_compiles_and_runs() {
         oversampling: OversamplingFactor::X4,
         ..CompileOptions::default()
     };
-    let output = compile_test_pedal_with_options(
-        "clip_silicon.pedal",
-        &input,
-        SAMPLE_RATE,
-        &[],
-        options,
-    );
+    let output =
+        compile_test_pedal_with_options("clip_silicon.pedal", &input, SAMPLE_RATE, &[], options);
     assert_healthy(&output, "clip_silicon x4", 50.0);
 }
 
@@ -254,12 +244,7 @@ fn tolerance_wider_grade_more_variation() {
     let mut precision_corrs = Vec::new();
     let mut wide_corrs = Vec::new();
 
-    let reference = compile_test_pedal_and_process(
-        "clip_silicon.pedal",
-        &input,
-        SAMPLE_RATE,
-        &[],
-    );
+    let reference = compile_test_pedal_and_process("clip_silicon.pedal", &input, SAMPLE_RATE, &[]);
 
     for &seed in &seeds {
         let precision = compile_test_pedal_with_options(

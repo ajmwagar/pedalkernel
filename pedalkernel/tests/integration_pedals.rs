@@ -61,9 +61,7 @@ fn klon_centaur_gain_affects_output() {
     let corr = correlation(&low, &high).abs();
     let low_thd = thd(&low, SAMPLE_RATE, 440.0);
     let high_thd = thd(&high, SAMPLE_RATE, 440.0);
-    eprintln!(
-        "  [diag] Klon gain: low_thd={low_thd:.4}, high_thd={high_thd:.4}, corr={corr:.6}"
-    );
+    eprintln!("  [diag] Klon gain: low_thd={low_thd:.4}, high_thd={high_thd:.4}, corr={corr:.6}");
 }
 
 // ===========================================================================
@@ -119,9 +117,7 @@ fn blues_driver_gain_affects_output() {
     let corr = correlation(&low, &high).abs();
     let low_thd = thd(&low, SAMPLE_RATE, 440.0);
     let high_thd = thd(&high, SAMPLE_RATE, 440.0);
-    eprintln!(
-        "  [diag] BD-2 gain: low_thd={low_thd:.4}, high_thd={high_thd:.4}, corr={corr:.6}"
-    );
+    eprintln!("  [diag] BD-2 gain: low_thd={low_thd:.4}, high_thd={high_thd:.4}, corr={corr:.6}");
 }
 
 // ===========================================================================
@@ -177,9 +173,7 @@ fn fulltone_ocd_drive_affects_output() {
     let corr = correlation(&low, &high).abs();
     let low_thd = thd(&low, SAMPLE_RATE, 440.0);
     let high_thd = thd(&high, SAMPLE_RATE, 440.0);
-    eprintln!(
-        "  [diag] OCD drive: low_thd={low_thd:.4}, high_thd={high_thd:.4}, corr={corr:.6}"
-    );
+    eprintln!("  [diag] OCD drive: low_thd={low_thd:.4}, high_thd={high_thd:.4}, corr={corr:.6}");
 }
 
 // ===========================================================================
@@ -308,10 +302,22 @@ fn all_example_pedals_distinct() {
     let input = guitar_pluck(330.0, 0.5, SAMPLE_RATE);
 
     let pedals: Vec<(&str, &[(&str, f64)])> = vec![
-        ("tube_screamer.pedal", &[("Drive", 0.5), ("Tone", 0.5), ("Level", 0.7)]),
-        ("klon_centaur.pedal", &[("Gain", 0.5), ("Treble", 0.5), ("Output", 0.7)]),
-        ("blues_driver.pedal", &[("Gain", 0.5), ("Tone", 0.5), ("Level", 0.7)]),
-        ("proco_rat.pedal", &[("Distortion", 0.5), ("Filter", 0.5), ("Volume", 0.7)]),
+        (
+            "tube_screamer.pedal",
+            &[("Drive", 0.5), ("Tone", 0.5), ("Level", 0.7)],
+        ),
+        (
+            "klon_centaur.pedal",
+            &[("Gain", 0.5), ("Treble", 0.5), ("Output", 0.7)],
+        ),
+        (
+            "blues_driver.pedal",
+            &[("Gain", 0.5), ("Tone", 0.5), ("Level", 0.7)],
+        ),
+        (
+            "proco_rat.pedal",
+            &[("Distortion", 0.5), ("Filter", 0.5), ("Volume", 0.7)],
+        ),
     ];
 
     let mut outputs: Vec<(&str, Vec<f64>)> = Vec::new();

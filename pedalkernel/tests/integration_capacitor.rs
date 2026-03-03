@@ -127,10 +127,12 @@ pedal "DA Low" {
 
     // Calculate residual energy in discharge phase
     let step_end = (SAMPLE_RATE * 0.5) as usize;
-    let high_discharge_rms: f64 = (high_out[step_end..].iter().map(|x| x*x).sum::<f64>()
-        / (high_out.len() - step_end) as f64).sqrt();
-    let low_discharge_rms: f64 = (low_out[step_end..].iter().map(|x| x*x).sum::<f64>()
-        / (low_out.len() - step_end) as f64).sqrt();
+    let high_discharge_rms: f64 = (high_out[step_end..].iter().map(|x| x * x).sum::<f64>()
+        / (high_out.len() - step_end) as f64)
+        .sqrt();
+    let low_discharge_rms: f64 = (low_out[step_end..].iter().map(|x| x * x).sum::<f64>()
+        / (low_out.len() - step_end) as f64)
+        .sqrt();
 
     // DA causes the capacitor to "remember" its previous charge and resist changes.
     // Higher DA means the cap holds its charge better during discharge:

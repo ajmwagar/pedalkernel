@@ -280,8 +280,14 @@ fn bbd_aliasing_from_high_frequencies() {
         + goertzel_power(&output, SAMPLE_RATE, 1000.0)
         + goertzel_power(&output, SAMPLE_RATE, 1500.0);
 
-    println!("Original frequencies: 8k={:.2e}, 10k={:.2e}", energy_8k, energy_10k);
-    println!("Potential aliases: 2k={:.2e}, 4k={:.2e}", alias_2k, alias_4k);
+    println!(
+        "Original frequencies: 8k={:.2e}, 10k={:.2e}",
+        energy_8k, energy_10k
+    );
+    println!(
+        "Potential aliases: 2k={:.2e}, 4k={:.2e}",
+        alias_2k, alias_4k
+    );
     println!("LF garbage: {:.2e}", lf_garbage);
 
     // ARTIFACT DETECTION: Significant energy at non-input frequencies indicates aliasing
@@ -487,10 +493,7 @@ fn bbd_dc_offset_accumulation() {
     );
 
     if dc_drift > 0.05 {
-        println!(
-            "WARNING: DC drift detected: {:.4} (want <0.05)",
-            dc_drift
-        );
+        println!("WARNING: DC drift detected: {:.4} (want <0.05)", dc_drift);
     }
 
     maybe_dump_wav(&output, "bbd_dc_offset", SAMPLE_RATE_U32);
@@ -533,7 +536,11 @@ fn bbd_noise_floor_consistency() {
     // (noise modulation indicates compander tracking issues)
     if noise_floors.len() >= 2 {
         let noise_variation = noise_floors.iter().map(|(_, n)| *n).fold(0.0f64, f64::max)
-            / noise_floors.iter().map(|(_, n)| *n).fold(f64::MAX, f64::min).max(1e-20);
+            / noise_floors
+                .iter()
+                .map(|(_, n)| *n)
+                .fold(f64::MAX, f64::min)
+                .max(1e-20);
 
         println!("Noise floor variation: {:.2}x", noise_variation);
 
@@ -591,14 +598,23 @@ fn bbd_soft_clipping_character() {
 
     // Measure THD - soft clipping adds harmonics
     let thd_value = thd(&output, SAMPLE_RATE, 440.0);
-    println!("THD at high input level: {:.4} ({:.1}%)", thd_value, thd_value * 100.0);
+    println!(
+        "THD at high input level: {:.4} ({:.1}%)",
+        thd_value,
+        thd_value * 100.0
+    );
 
     // Compare to low-level THD
     let input_quiet = sine_at(440.0, 0.1, 1.0, SAMPLE_RATE);
-    let output_quiet = compile_test_pedal_and_process("bbd_chorus.pedal", &input_quiet, SAMPLE_RATE, &[]);
+    let output_quiet =
+        compile_test_pedal_and_process("bbd_chorus.pedal", &input_quiet, SAMPLE_RATE, &[]);
     let thd_quiet = thd(&output_quiet, SAMPLE_RATE, 440.0);
 
-    println!("THD at low input level: {:.4} ({:.1}%)", thd_quiet, thd_quiet * 100.0);
+    println!(
+        "THD at low input level: {:.4} ({:.1}%)",
+        thd_quiet,
+        thd_quiet * 100.0
+    );
 
     // ARTIFACT DETECTION: THD should increase gracefully with level
     // Harsh clipping would cause very high THD
@@ -910,16 +926,26 @@ fn walrus_slo_feedback_stability() {
     let all_finite = output.iter().all(|x| x.is_finite());
     let max_peak = peak(&output);
 
-    println!("Slo feedback test: finite={}, peak={:.4}", all_finite, max_peak);
+    println!(
+        "Slo feedback test: finite={}, peak={:.4}",
+        all_finite, max_peak
+    );
 
     assert!(all_finite, "Slo: feedback caused NaN/inf");
-    assert!(max_peak < 5.0, "Slo: feedback oscillation (peak={:.2})", max_peak);
+    assert!(
+        max_peak < 5.0,
+        "Slo: feedback oscillation (peak={:.2})",
+        max_peak
+    );
 
     // Check for growing oscillation
     let early_rms = rms(&output[..48000.min(output.len())]);
     let late_rms = rms(&output[output.len().saturating_sub(48000)..]);
 
-    println!("Slo feedback decay: early={:.6}, late={:.6}", early_rms, late_rms);
+    println!(
+        "Slo feedback decay: early={:.6}, late={:.6}",
+        early_rms, late_rms
+    );
 
     // Signal should decay, not grow
     if late_rms > early_rms * 2.0 && late_rms > 0.01 {
@@ -975,9 +1001,7 @@ fn memory_man_dark_character() {
 
     // Memory Man should darken the sound
     if output_centroid > input_centroid * 1.1 {
-        println!(
-            "NOTE: Output brighter than expected for Memory Man character"
-        );
+        println!("NOTE: Output brighter than expected for Memory Man character");
     }
 
     // Check HF rolloff
@@ -1112,7 +1136,13 @@ fn memory_man_feedback_breathing() {
         jitter_score / envelope.len() as f64
     );
 
-    println!("Memory Man envelope: {:?}", envelope.iter().map(|x| format!("{:.4}", x)).collect::<Vec<_>>());
+    println!(
+        "Memory Man envelope: {:?}",
+        envelope
+            .iter()
+            .map(|x| format!("{:.4}", x))
+            .collect::<Vec<_>>()
+    );
 
     maybe_dump_wav(&output, "memory_man_breathing", SAMPLE_RATE_U32);
 }
@@ -1129,10 +1159,10 @@ fn memory_man_chorus_mode() {
 
     // Check for chorus sidebands
     let fund_power = goertzel_power(&output, SAMPLE_RATE, 440.0);
-    let sideband_lo = goertzel_power(&output, SAMPLE_RATE, 435.0)
-        + goertzel_power(&output, SAMPLE_RATE, 430.0);
-    let sideband_hi = goertzel_power(&output, SAMPLE_RATE, 445.0)
-        + goertzel_power(&output, SAMPLE_RATE, 450.0);
+    let sideband_lo =
+        goertzel_power(&output, SAMPLE_RATE, 435.0) + goertzel_power(&output, SAMPLE_RATE, 430.0);
+    let sideband_hi =
+        goertzel_power(&output, SAMPLE_RATE, 445.0) + goertzel_power(&output, SAMPLE_RATE, 450.0);
 
     let total_sideband = sideband_lo + sideband_hi;
 
@@ -1171,7 +1201,8 @@ fn memory_man_snr() {
 
     for &level in &levels {
         let input = sine_at(440.0, 1.0, level, SAMPLE_RATE);
-        let output = compile_test_pedal_and_process("ehx_memory_man.pedal", &input, SAMPLE_RATE, &[]);
+        let output =
+            compile_test_pedal_and_process("ehx_memory_man.pedal", &input, SAMPLE_RATE, &[]);
 
         let signal_power = goertzel_power(&output, SAMPLE_RATE, 440.0);
         let total_power: f64 = output.iter().map(|x| x * x).sum::<f64>() / output.len() as f64;
@@ -1179,10 +1210,7 @@ fn memory_man_snr() {
 
         let snr_db = 10.0 * (signal_power / noise_power).log10();
 
-        println!(
-            "  Input level {:.2}: SNR = {:.1} dB",
-            level, snr_db
-        );
+        println!("  Input level {:.2}: SNR = {:.1} dB", level, snr_db);
 
         // ARTIFACT DETECTION: SNR should be reasonable (>30dB for analog)
         if snr_db < 30.0 && level > 0.1 {
@@ -1207,22 +1235,21 @@ fn bbd_stress_test_musical_content() {
         .map(|i| {
             let t = i as f64 / SAMPLE_RATE;
             let env = if t < 0.1 {
-                t * 10.0  // Attack
+                t * 10.0 // Attack
             } else {
-                (-0.5 * (t - 0.1)).exp()  // Decay
+                (-0.5 * (t - 0.1)).exp() // Decay
             };
 
             // Guitar-like with chord
-            let e = 82.41;  // E2
+            let e = 82.41; // E2
             let b = 123.47; // B2
-            let g = 196.0;  // G3
+            let g = 196.0; // G3
 
-            env * 0.3 * (
-                (2.0 * std::f64::consts::PI * e * t).sin() +
-                0.7 * (2.0 * std::f64::consts::PI * b * t).sin() +
-                0.5 * (2.0 * std::f64::consts::PI * g * t).sin() +
-                0.3 * (2.0 * std::f64::consts::PI * e * 2.0 * t).sin()
-            )
+            env * 0.3
+                * ((2.0 * std::f64::consts::PI * e * t).sin()
+                    + 0.7 * (2.0 * std::f64::consts::PI * b * t).sin()
+                    + 0.5 * (2.0 * std::f64::consts::PI * g * t).sin()
+                    + 0.3 * (2.0 * std::f64::consts::PI * e * 2.0 * t).sin())
         })
         .collect();
 
@@ -1232,10 +1259,18 @@ fn bbd_stress_test_musical_content() {
 
     println!("\n=== BBD Stress Test ===");
     println!("Input: RMS={:.6}, Peak={:.6}", rms(&input), peak(&input));
-    println!("Slo: RMS={:.6}, Peak={:.6}, finite={}",
-        rms(&slo_out), peak(&slo_out), slo_out.iter().all(|x| x.is_finite()));
-    println!("Memory Man: RMS={:.6}, Peak={:.6}, finite={}",
-        rms(&mm_out), peak(&mm_out), mm_out.iter().all(|x| x.is_finite()));
+    println!(
+        "Slo: RMS={:.6}, Peak={:.6}, finite={}",
+        rms(&slo_out),
+        peak(&slo_out),
+        slo_out.iter().all(|x| x.is_finite())
+    );
+    println!(
+        "Memory Man: RMS={:.6}, Peak={:.6}, finite={}",
+        rms(&mm_out),
+        peak(&mm_out),
+        mm_out.iter().all(|x| x.is_finite())
+    );
 
     // Both should handle complex content
     assert!(slo_out.iter().all(|x| x.is_finite()), "Slo stress: NaN/inf");

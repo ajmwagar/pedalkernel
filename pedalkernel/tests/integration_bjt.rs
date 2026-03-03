@@ -17,8 +17,7 @@ macro_rules! bjt_produces_output {
         #[test]
         fn $test_name() {
             let input = sine(440.0, 0.5, SAMPLE_RATE);
-            let output =
-                compile_test_pedal_and_process($pedal_file, &input, SAMPLE_RATE, &[]);
+            let output = compile_test_pedal_and_process($pedal_file, &input, SAMPLE_RATE, &[]);
             assert_healthy(&output, $label, 50.0);
         }
     };
@@ -129,8 +128,7 @@ fn bjt_thd_increases_with_level() {
 
     for &amp in &levels {
         let input = sine_at(440.0, amp, 0.5, SAMPLE_RATE);
-        let output =
-            compile_test_pedal_and_process("bjt_2n5088.pedal", &input, SAMPLE_RATE, &[]);
+        let output = compile_test_pedal_and_process("bjt_2n5088.pedal", &input, SAMPLE_RATE, &[]);
         let t = thd(&output, SAMPLE_RATE, 440.0);
         thd_values.push((amp, t));
     }
@@ -148,8 +146,7 @@ fn bjt_thd_increases_with_level() {
 fn bjt_has_even_harmonics() {
     // Single-transistor common-emitter has asymmetric transfer curve
     let input = sine_at(440.0, 0.4, 0.5, SAMPLE_RATE);
-    let output =
-        compile_test_pedal_and_process("bjt_2n5088.pedal", &input, SAMPLE_RATE, &[]);
+    let output = compile_test_pedal_and_process("bjt_2n5088.pedal", &input, SAMPLE_RATE, &[]);
 
     let h2 = goertzel_power(&output, SAMPLE_RATE, 880.0);
 
@@ -177,9 +174,7 @@ fn germanium_vs_silicon_both_produce_output() {
     let ge_thd = thd(&germanium, SAMPLE_RATE, 440.0);
     let corr = correlation(&silicon, &germanium).abs();
 
-    eprintln!(
-        "  [diag] Si vs Ge: si_thd={si_thd:.6}, ge_thd={ge_thd:.6}, corr={corr:.6}"
-    );
+    eprintln!("  [diag] Si vs Ge: si_thd={si_thd:.6}, ge_thd={ge_thd:.6}, corr={corr:.6}");
 }
 
 // ===========================================================================
@@ -306,6 +301,12 @@ fn big_muff_sustain_control_affects_output() {
     eprintln!(
         "  [diag] Sustain control: low_thd={low_thd:.4}, high_thd={high_thd:.4}, corr={corr:.6}"
     );
-    assert!(peak(&low_sustain) > 1e-4, "Low sustain should produce output");
-    assert!(peak(&high_sustain) > 1e-4, "High sustain should produce output");
+    assert!(
+        peak(&low_sustain) > 1e-4,
+        "Low sustain should produce output"
+    );
+    assert!(
+        peak(&high_sustain) > 1e-4,
+        "High sustain should produce output"
+    );
 }

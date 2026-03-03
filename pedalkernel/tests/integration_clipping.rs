@@ -73,14 +73,8 @@ fn germanium_and_silicon_both_clip() {
     let ge_thd = thd(&ge_out, SAMPLE_RATE, 440.0);
 
     // Both should produce measurable distortion
-    assert!(
-        si_thd > 0.01,
-        "Si should clip at 0.4: thd={si_thd:.4}"
-    );
-    assert!(
-        ge_thd > 0.01,
-        "Ge should clip at 0.4: thd={ge_thd:.4}"
-    );
+    assert!(si_thd > 0.01, "Si should clip at 0.4: thd={si_thd:.4}");
+    assert!(ge_thd > 0.01, "Ge should clip at 0.4: thd={ge_thd:.4}");
 
     // They should produce different amounts of distortion (different Vf)
     assert!(
@@ -144,8 +138,7 @@ fn symmetric_pair_favors_odd_harmonics() {
 fn asymmetric_diode_has_even_harmonics() {
     // Single diode (half-wave) produces significant even harmonics
     let input = sine_at(440.0, 0.6, 0.5, SAMPLE_RATE);
-    let output =
-        compile_test_pedal_and_process("clip_asymmetric.pedal", &input, SAMPLE_RATE, &[]);
+    let output = compile_test_pedal_and_process("clip_asymmetric.pedal", &input, SAMPLE_RATE, &[]);
     assert_healthy(&output, "asymmetric_clip", 10.0);
 
     let h2 = goertzel_power(&output, SAMPLE_RATE, 880.0);

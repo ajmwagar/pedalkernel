@@ -15,8 +15,7 @@ use audio_analysis::*;
 #[test]
 fn ota_ca3080_produces_output() {
     let input = sine(440.0, 0.5, SAMPLE_RATE);
-    let output =
-        compile_test_pedal_and_process("ota_ca3080.pedal", &input, SAMPLE_RATE, &[]);
+    let output = compile_test_pedal_and_process("ota_ca3080.pedal", &input, SAMPLE_RATE, &[]);
     assert_healthy(&output, "CA3080 OTA", 50.0);
 }
 
@@ -35,8 +34,7 @@ fn photocoupler_vtl5c3_produces_output() {
 #[test]
 fn photocoupler_t4b_produces_output() {
     let input = sine(440.0, 0.5, SAMPLE_RATE);
-    let output =
-        compile_test_pedal_and_process("photocoupler_t4b.pedal", &input, SAMPLE_RATE, &[]);
+    let output = compile_test_pedal_and_process("photocoupler_t4b.pedal", &input, SAMPLE_RATE, &[]);
     assert_healthy(&output, "T4B photocoupler", 50.0);
 }
 

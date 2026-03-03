@@ -38,10 +38,7 @@ fn opamp_buffer_low_thd() {
     let output = compile_test_pedal_and_process("opamp_buffer.pedal", &input, SAMPLE_RATE, &[]);
 
     let t = thd(&output, SAMPLE_RATE, 440.0);
-    assert!(
-        t < 0.15,
-        "Buffer THD should be low: got {t:.4}"
-    );
+    assert!(t < 0.15, "Buffer THD should be low: got {t:.4}");
 }
 
 #[test]
@@ -153,10 +150,7 @@ fn jfet_allpass_passes_signal() {
 fn jfet_switch_produces_output() {
     let input = sine(440.0, 0.2, SAMPLE_RATE);
     let output = compile_test_pedal_and_process("jfet_switch.pedal", &input, SAMPLE_RATE, &[]);
-    assert!(
-        output.iter().all(|x| x.is_finite()),
-        "JFET switch: NaN/inf"
-    );
+    assert!(output.iter().all(|x| x.is_finite()), "JFET switch: NaN/inf");
 }
 
 // ---------------------------------------------------------------------------
