@@ -375,7 +375,7 @@ pub fn compile_pedal_with_options(
     let oversampling = options.oversampling;
     let tolerance = options.tolerance;
     let enable_thermal = options.thermal;
-    let collapse_nl = options.collapse_nl;
+    let _collapse_nl = options.collapse_nl;
 
     // ══ Pass 0: Graph construction ════════════════════════════════════
     let mut graph = CircuitGraph::from_pedal(pedal);
@@ -422,7 +422,7 @@ pub fn compile_pedal_with_options(
 
     // ══ Pass 3: Stage planning ════════════════════════════════════════
     let (stage_plans, push_pull_plans, coupled_bjt_plans, multi_nl_plans, pp_transformer_edges) =
-        super::plan::plan_stages(&classified, &graph, sample_rate, collapse_nl);
+        super::plan::plan_stages(&classified, &graph, sample_rate);
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
     // Build nonlinear WDF stages from plans.
