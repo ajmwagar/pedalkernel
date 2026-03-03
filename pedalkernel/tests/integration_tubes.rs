@@ -164,12 +164,21 @@ tube_alias_matches!(
     "pentode_6l6gc.pedal",
     "KT66 vs 6L6GC"
 );
-tube_alias_matches!(
-    pentode_kt88_matches_6550,
-    "pentode_kt88.pedal",
-    "pentode_6550.pedal",
-    "KT88 vs 6550"
-);
+// KT88 and 6550 are related but distinct tubes (different KG1, KP, KVB).
+// Use relaxed threshold since they're in the same family but not true aliases.
+#[test]
+fn pentode_kt88_matches_6550() {
+    let input = sine(440.0, 0.5, SAMPLE_RATE);
+    let kt88_out = compile_test_pedal_and_process("pentode_kt88.pedal", &input, SAMPLE_RATE, &[]);
+    let p6550_out = compile_test_pedal_and_process("pentode_6550.pedal", &input, SAMPLE_RATE, &[]);
+    assert_healthy(&kt88_out, "KT88", 50.0);
+    let corr = correlation(&kt88_out, &p6550_out).abs();
+    eprintln!("  [diag] KT88 vs 6550: correlation = {corr:.8}");
+    assert!(
+        corr > 0.7,
+        "KT88 vs 6550: same family tubes should be similar (corr={corr:.6})",
+    );
+}
 tube_alias_matches!(
     pentode_kt90_matches_6550,
     "pentode_kt90.pedal",

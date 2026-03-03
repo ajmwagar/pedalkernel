@@ -357,6 +357,29 @@ pub(super) fn build_stages(
             &plan.passive_idxs, graph, pp_transformer_edges, sample_rate,
         );
 
+        // Pentode + inductive load (transformer) → skip SP, go straight to MNA.
+        // High plate impedance (40kΩ+) interacting with transformer reflected
+        // load creates a stiff system that causes SP wave reflections to diverge.
+        // Pentodes without transformers may still SP-reduce successfully.
+        let pentode_with_transformer = matches!(&elem.kind, NonlinearKind::Pentode { .. })
+            && plan.passive_idxs.iter().any(|&idx| {
+                matches!(graph.components[graph.edges[idx].comp_idx].kind, ComponentKind::Transformer(_))
+            });
+        if pentode_with_transformer {
+            if let Some(mut multi_nl) = build_triode_mna_fallback(
+                plan, elem, classified, graph, sample_rate, oversampling,
+            ) {
+                multi_nl.transformer_gain = compute_transformer_gain(
+                    &plan.passive_idxs, graph, &transformer_subtrees,
+                );
+                // Use element's BFS distance for ordering (injection node may
+                // default to in_node when plate/cathode passives lack dist_from_in).
+                multi_nl.signal_flow_distance = elem.distance;
+                fallback_multi_nl.push(multi_nl);
+            }
+            continue;
+        }
+
         let stage = if plan.skip_vs {
             build_source_follower_stage(plan, elem, graph, sample_rate, oversampling)
         } else {
@@ -385,10 +408,10 @@ pub(super) fn build_stages(
                 &plan.passive_idxs, graph, &transformer_subtrees,
             );
             stages.push(stage);
-        } else if matches!(&elem.kind, NonlinearKind::Triode { .. }) {
-            // SP reduction failed for this triode — try building as a single-NL
-            // MNA stage. Uses plate+cathode adjacency to collect passives,
-            // which handles non-SP topologies (inter-stage coupling,
+        } else if matches!(&elem.kind, NonlinearKind::Triode { .. } | NonlinearKind::Pentode { .. }) {
+            // SP reduction failed for this triode/pentode — try building as a
+            // single-NL MNA stage. Uses plate+cathode adjacency to collect
+            // passives, which handles non-SP topologies (inter-stage coupling,
             // Miller feedback, dangling nodes).
             if let Some(mut multi_nl) = build_triode_mna_fallback(
                 plan, elem, classified, graph, sample_rate, oversampling,
@@ -427,12 +450,13 @@ pub(super) fn build_stages(
     (stages, fallback_multi_nl)
 }
 
-/// Build a single-NL MNA stage for a triode that failed SP reduction.
+/// Build a single-NL MNA stage for a triode/pentode that failed SP reduction.
 ///
 /// Uses BFS from plate and cathode to collect only the passives that are
-/// topologically connected to the triode's circuit, avoiding output_passives
+/// topologically connected to the tube's circuit, avoiding output_passives
 /// from other stages that contaminate the plan. MNA handles arbitrary
-/// topologies (dangling nodes, non-SP branches) that SP reduction can't.
+/// topologies (dangling nodes, non-SP branches, transformer dead-ends)
+/// that SP reduction can't.
 fn build_triode_mna_fallback(
     plan: &StagePlan,
     elem: &super::classify::NonlinearElement,
@@ -445,7 +469,7 @@ fn build_triode_mna_fallback(
 
     // Collect passives directly adjacent to plate and cathode junctions,
     // plus supply-adjacent edges. This is the "core" passive set for this
-    // triode — no output_passives from other stages.
+    // tube — no output_passives from other stages.
     let mut passive_edges = graph.elements_at_junction(
         plate_node,
         &classified.all_nonlinear_edge_indices,
@@ -463,6 +487,23 @@ fn build_triode_mna_fallback(
         }
     }
 
+    // Discover transformers connected through plate passives (1 hop away).
+    // Pentode sidechain topology: plate → R_plate → transformer.primary.
+    let mut xfmr_edges = Vec::new();
+    for &eidx in &passive_edges {
+        let e = &graph.edges[eidx];
+        let far_node = if e.node_a == plate_node { e.node_b } else { e.node_a };
+        for (idx, edge) in graph.edges.iter().enumerate() {
+            if edge.node_a != far_node && edge.node_b != far_node { continue; }
+            if matches!(graph.components[edge.comp_idx].kind, ComponentKind::Transformer(_)) {
+                if !passive_edges.contains(&idx) && !xfmr_edges.contains(&idx) {
+                    xfmr_edges.push(idx);
+                }
+            }
+        }
+    }
+    passive_edges.extend(xfmr_edges);
+
     // Cathode passives (skip for grounded-cathode tubes).
     if cathode_node != graph.gnd_node {
         let cathode_edges = graph.elements_at_junction(
@@ -474,6 +515,21 @@ fn build_triode_mna_fallback(
             if !passive_edges.contains(&idx) {
                 passive_edges.push(idx);
             }
+        }
+    }
+
+    #[cfg(feature = "debug-trace")]
+    {
+        let kind = match &elem.kind {
+            NonlinearKind::Pentode { .. } => "Pentode",
+            NonlinearKind::Triode { .. } => "Triode",
+            _ => "Other",
+        };
+        eprintln!("[MNA-fallback] {kind} plate={plate_node} cathode={cathode_node} passive_edges={passive_edges:?}");
+        for &eidx in &passive_edges {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            eprintln!("  edge[{eidx}]: {} ({:?}) nodes=({}, {})", comp.id, std::mem::discriminant(&comp.kind), e.node_a, e.node_b);
         }
     }
 
@@ -890,6 +946,25 @@ fn try_build_multi_nl_stage(
                     }
                 }
             }
+            ComponentKind::Transformer(cfg) => {
+                // Transformer primary acts as magnetizing inductance.
+                // The secondary load (e.g., bridge rectifier) is a separate stage;
+                // from the primary side we only see the magnetizing inductance.
+                let l = cfg.primary_inductance;
+                if l > 0.0 && l.is_finite() {
+                    let rp = 2.0 * sample_rate * l;
+                    let dyn_node = DynNode::Inductor {
+                        inductance: l,
+                        rp,
+                        state: 0.0,
+                    };
+                    reactive_edges.push((eidx, dyn_node));
+                }
+                // Also stamp primary DCR if non-zero
+                if cfg.primary_dcr > 0.0 {
+                    mna.stamp_resistor(n1, n2, cfg.primary_dcr);
+                }
+            }
             _ => {
                 // Skip unknown edge types
             }
@@ -1189,7 +1264,11 @@ fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
             let model = diode_model(*dt);
             Some(NlDeviceKind::Diode(DiodeRoot::new(model)))
         }
-        _ => None, // DiodePair, Jfet, Mosfet, Zener, Ota, Pentode not yet supported in multi-NL
+        NonlinearKind::Pentode { model_name } => {
+            let model = pentode_model(model_name);
+            Some(NlDeviceKind::Pentode(PentodeRoot::new(model)))
+        }
+        _ => None, // DiodePair, Jfet, Mosfet, Zener, Ota not yet supported in multi-NL
     }
 }
 

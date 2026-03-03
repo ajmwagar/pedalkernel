@@ -63,8 +63,8 @@ pub(super) struct NonlinearElement {
     /// What kind of nonlinear element this is.
     pub(super) kind: NonlinearKind,
     /// Junction node(s) where passive elements connect.
-    /// - 1 node for simple elements (diode, JFET, pentode, MOSFET, zener, OTA)
-    /// - 2 nodes for 3-terminal elements (BJT: collector+emitter, triode: plate+cathode)
+    /// - 1 node for simple elements (diode, JFET, MOSFET, zener, OTA)
+    /// - 2 nodes for 3-terminal elements (BJT: collector+emitter, triode/pentode: plate+cathode)
     pub(super) junction_nodes: Vec<NodeId>,
     /// BFS distance from input (for ordering).
     pub(super) distance: usize,
@@ -243,13 +243,14 @@ pub(super) fn classify_circuit(
             }
 
             // ── Pentodes ───────────────────────────────────────────
+            // 2-junction [plate, cathode] — same convention as triodes.
+            // node_a = plate, node_b = cathode (from graph.rs pin mapping).
             ComponentKind::Pentode(name) => {
-                let junction = nondiode_junction(e.node_a, e.node_b);
                 Some((
                     NonlinearKind::Pentode {
                         model_name: name.clone(),
                     },
-                    vec![junction],
+                    vec![e.node_a, e.node_b], // plate, cathode
                 ))
             }
 

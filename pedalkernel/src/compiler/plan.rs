@@ -752,7 +752,7 @@ pub(super) fn plan_stages(
             continue;
         }
 
-        if let Some(plan) = plan_single_stage(
+        let plan_result = plan_single_stage(
             elem,
             elem_idx,
             classified,
@@ -760,7 +760,19 @@ pub(super) fn plan_stages(
             &all_bjt_base_nodes,
             source_node_offset,
             sample_rate,
-        ) {
+        );
+        #[cfg(feature = "debug-trace")]
+        {
+            let kind_name = match &elem.kind {
+                NonlinearKind::Pentode { .. } => "Pentode",
+                NonlinearKind::Triode { .. } => "Triode",
+                _ => "Other",
+            };
+            eprintln!("[plan] elem[{elem_idx}] {kind_name} edge={} junctions={:?} -> {}",
+                elem.edge_idx, elem.junction_nodes,
+                if plan_result.is_some() { "OK" } else { "None" });
+        }
+        if let Some(plan) = plan_result {
             plans.push(plan);
         }
 
@@ -937,9 +949,14 @@ fn plan_single_stage(
     match &elem.kind {
         // ── Simple 1-junction elements ─────────────────────────────────
         NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_) |
-        NonlinearKind::Pentode { .. } | NonlinearKind::Mosfet { .. } |
+        NonlinearKind::Mosfet { .. } |
         NonlinearKind::Zener { .. } | NonlinearKind::Ota => {
             plan_simple_stage(elem, elem_idx, classified, graph, source_node_offset)
+        }
+
+        // ── Pentode (2-junction, triode-style planning) ────────────────
+        NonlinearKind::Pentode { .. } => {
+            plan_triode_stage(elem, elem_idx, classified, graph, source_node_offset, sample_rate)
         }
 
         // ── JFET (source follower detection) ───────────────────────────
@@ -1275,11 +1292,21 @@ fn plan_triode_stage(
         .map(|(idx, _)| idx)
         .collect();
 
-    let output_passives = graph.elements_at_junction(
-        graph.out_node,
-        &classified.all_nonlinear_edge_indices,
-        &graph.active_edge_indices,
-    );
+    let is_pentode = matches!(&elem.kind, NonlinearKind::Pentode { .. });
+
+    // For pentodes: only collect output passives if the tube connects to
+    // out_node. Without a plate_to_output edge, the output load belongs to a
+    // different stage (e.g., bridge rectifier) and contaminates the passive set.
+    // For triodes: always collect output passives (original behavior).
+    let output_passives = if is_pentode && plate_to_output.is_empty() {
+        Vec::new()
+    } else {
+        graph.elements_at_junction(
+            graph.out_node,
+            &classified.all_nonlinear_edge_indices,
+            &graph.active_edge_indices,
+        )
+    };
 
     let mut passive_idxs: Vec<usize> = plate_passives.clone();
     extend_dedup(&mut passive_idxs, &plate_supply_edges);
@@ -1287,27 +1314,63 @@ fn plan_triode_stage(
     extend_dedup(&mut passive_idxs, &plate_to_output);
     extend_dedup(&mut passive_idxs, &output_passives);
 
+    // Detect transformers reachable from plate passives (1 extra hop).
+    // For push-pull pentodes: plate → R_plate → transformer.primary.
+    let xfmr_inject = find_plate_transformers(
+        &plate_passives, plate_node, graph,
+    );
+    extend_dedup(&mut passive_idxs, &xfmr_inject);
+
+    // If we found plate-side transformers, also check for secondary-side edges.
+    if !xfmr_inject.is_empty() {
+        let sec_inject = find_secondary_side_transformers(
+            &passive_idxs, graph, &HashSet::new(),
+        );
+        extend_dedup(&mut passive_idxs, &sec_inject);
+    }
+
     if passive_idxs.is_empty() {
         return None;
     }
 
-    // Find injection node (prefer plate-side).
+    // Find injection node.
+    // Pentodes: check both plate and cathode passives, exclude transformer
+    // nodes (they create parallel VS/transformer topologies that cause
+    // numerical issues).
+    // Triodes: original behavior — prefer plate-side, then cathode-side.
     let mut injection_node = graph.in_node;
     let mut best_dist = usize::MAX;
 
-    for &eidx in &plate_passives {
-        let e = &graph.edges[eidx];
-        let other = if e.node_a == plate_node { e.node_b } else { e.node_a };
-        if let Some(&d) = classified.dist_from_in.get(&other) {
-            if d < best_dist { best_dist = d; injection_node = other; }
-        }
-    }
-    if best_dist == usize::MAX {
-        for &eidx in &cathode_passives {
+    if is_pentode {
+        let is_transformer_node = |node: NodeId| -> bool {
+            graph.transformer_info.contains_key(&node)
+        };
+        for &eidx in plate_passives.iter().chain(cathode_passives.iter()) {
             let e = &graph.edges[eidx];
-            let other = if e.node_a == cathode_node { e.node_b } else { e.node_a };
+            for node in [e.node_a, e.node_b] {
+                if node == plate_node || node == cathode_node { continue; }
+                if is_transformer_node(node) { continue; }
+                if let Some(&d) = classified.dist_from_in.get(&node) {
+                    if d < best_dist { best_dist = d; injection_node = node; }
+                }
+            }
+        }
+    } else {
+        // Original triode injection node search: plate-side first.
+        for &eidx in &plate_passives {
+            let e = &graph.edges[eidx];
+            let other = if e.node_a == plate_node { e.node_b } else { e.node_a };
             if let Some(&d) = classified.dist_from_in.get(&other) {
                 if d < best_dist { best_dist = d; injection_node = other; }
+            }
+        }
+        if best_dist == usize::MAX {
+            for &eidx in &cathode_passives {
+                let e = &graph.edges[eidx];
+                let other = if e.node_a == cathode_node { e.node_b } else { e.node_a };
+                if let Some(&d) = classified.dist_from_in.get(&other) {
+                    if d < best_dist { best_dist = d; injection_node = other; }
+                }
             }
         }
     }
@@ -1355,13 +1418,18 @@ fn plan_triode_stage(
         }
     };
 
-    // Compensation and plate resistance from triode model.
-    let (compensation, rp) = if let NonlinearKind::Triode { model_name, is_vari_mu, .. } = &elem.kind {
-        let model = super::helpers::triode_model(model_name);
-        let comp = if *is_vari_mu { 0.35 } else { 1.0 };
-        (comp, model.rp)
-    } else {
-        (1.0, 62500.0)
+    // Compensation and plate resistance from triode/pentode model.
+    let (compensation, rp) = match &elem.kind {
+        NonlinearKind::Triode { model_name, is_vari_mu, .. } => {
+            let model = super::helpers::triode_model(model_name);
+            let comp = if *is_vari_mu { 0.35 } else { 1.0 };
+            (comp, model.rp)
+        }
+        NonlinearKind::Pentode { model_name } => {
+            let model = super::helpers::pentode_model(model_name);
+            (1.0, model.rp)
+        }
+        _ => (1.0, 62500.0),
     };
 
     let source_node = graph.edges.len() + source_node_offset;
@@ -1469,6 +1537,36 @@ fn find_injection_node(
         injection_node = graph.gnd_node;
     }
     injection_node
+}
+
+/// Find transformer edges within 1 extra hop from plate passives.
+///
+/// For push-pull pentodes, the plate load path is:
+///   plate → R_plate → transformer.primary
+/// `elements_at_junction` only collects direct adjacencies (R_plate), so the
+/// transformer edge is missed. This helper walks far nodes of plate passives
+/// and picks up any adjacent transformer edges.
+fn find_plate_transformers(
+    plate_passives: &[usize],
+    plate_node: NodeId,
+    graph: &CircuitGraph,
+) -> Vec<usize> {
+    let mut result = Vec::new();
+    for &eidx in plate_passives {
+        let e = &graph.edges[eidx];
+        let far_node = if e.node_a == plate_node { e.node_b } else { e.node_a };
+        for (idx, edge) in graph.edges.iter().enumerate() {
+            if edge.node_a != far_node && edge.node_b != far_node {
+                continue;
+            }
+            if matches!(graph.components[edge.comp_idx].kind, ComponentKind::Transformer(_)) {
+                if !plate_passives.contains(&idx) && !result.contains(&idx) {
+                    result.push(idx);
+                }
+            }
+        }
+    }
+    result
 }
 
 /// Detect transformer secondary nodes in a stage's passive set and inject

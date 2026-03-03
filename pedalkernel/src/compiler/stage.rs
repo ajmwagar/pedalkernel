@@ -973,6 +973,7 @@ pub(super) enum NlDeviceKind {
     BjtPnp(BjtPnpRoot),
     Triode(TriodeRoot),
     VariMu(VariMuTriodeRoot),
+    Pentode(PentodeRoot),
     Diode(DiodeRoot),
 }
 
@@ -996,6 +997,10 @@ impl NlDeviceKind {
                 const TRIODE_GRID_BIAS: f64 = -2.0;
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
             }
+            NlDeviceKind::Pentode(p) => {
+                const PENTODE_GRID_BIAS: f64 = -8.0;
+                p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
+            }
             NlDeviceKind::Diode(_) => {
                 // Diodes don't have a control voltage
             }
@@ -1009,6 +1014,7 @@ impl NlDeviceKind {
             NlDeviceKind::BjtPnp(bjt) => bjt,
             NlDeviceKind::Triode(t) => t,
             NlDeviceKind::VariMu(t) => t,
+            NlDeviceKind::Pentode(p) => p,
             NlDeviceKind::Diode(d) => d,
         }
     }
@@ -1019,6 +1025,7 @@ impl NlDeviceKind {
             NlDeviceKind::BjtPnp(_) => "BjtPnp",
             NlDeviceKind::Triode(_) => "Triode",
             NlDeviceKind::VariMu(_) => "VariMu",
+            NlDeviceKind::Pentode(_) => "Pentode",
             NlDeviceKind::Diode(_) => "Diode",
         }
     }

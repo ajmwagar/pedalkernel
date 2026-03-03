@@ -261,6 +261,21 @@ impl PentodeRoot {
     }
 }
 
+impl super::solver::NlDeviceIv for PentodeRoot {
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        (self.plate_current(v), self.plate_current_derivative(v))
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        // Minimum 1V: pentode plate_current(0) = 0 with zero derivative,
+        // which traps the NR solver at v=0. Physical pentode plate voltage
+        // is always positive in normal operation.
+        (1.0, self.v_max)
+    }
+}
+
 impl WdfRoot for PentodeRoot {
     /// Pentode plate-cathode path: `i = Ip(Vpk, Vg1k, Vg2k)`
     #[inline]
