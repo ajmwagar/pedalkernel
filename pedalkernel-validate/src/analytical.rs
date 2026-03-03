@@ -47,7 +47,7 @@ pub fn rc_lowpass_impulse_response(
 
     for i in 0..n_samples {
         let x = if i == 0 { 1.0 } else { 0.0 };
-        let y = b0 * x + b1 * x_prev + a1 * y_prev;
+        let y = b0 * x + b1 * x_prev - a1 * y_prev;
         output.push(y);
         x_prev = x;
         y_prev = y;
@@ -96,7 +96,7 @@ pub fn rc_lowpass_filter(
     let mut y_prev = 0.0;
 
     for &x in signal {
-        let y = b0 * x + b1 * x_prev + a1 * y_prev;
+        let y = b0 * x + b1 * x_prev - a1 * y_prev;
         output.push(y);
         x_prev = x;
         y_prev = y;
@@ -145,7 +145,7 @@ pub fn rl_lowpass_filter(
     let mut y_prev = 0.0;
 
     for &x in signal {
-        let y = b0 * x + b1 * x_prev + a1 * y_prev;
+        let y = b0 * x + b1 * x_prev - a1 * y_prev;
         output.push(y);
         x_prev = x;
         y_prev = y;

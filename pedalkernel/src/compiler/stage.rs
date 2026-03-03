@@ -19,6 +19,14 @@ static TRACE_COUNT_PP: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "debug-trace")]
 const MAX_TRACE_PP: u64 = 10;
 
+/// Count of traced multi-NL stage samples. Only active with `debug-trace` feature.
+#[cfg(feature = "debug-trace")]
+static TRACE_COUNT_MNL: AtomicU64 = AtomicU64::new(0);
+
+/// Max multi-NL stage samples to trace.
+#[cfg(feature = "debug-trace")]
+const MAX_TRACE_MNL: u64 = 20;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // WDF clipping stage
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1019,7 +1027,7 @@ impl NlDeviceKind {
         }
     }
 
-    fn debug_name(&self) -> &'static str {
+    pub(super) fn debug_name(&self) -> &'static str {
         match self {
             NlDeviceKind::BjtNpn(_) => "BjtNpn",
             NlDeviceKind::BjtPnp(_) => "BjtPnp",
@@ -1038,24 +1046,29 @@ impl NlDeviceKind {
 pub(super) enum NlDeviceGroupKind {
     /// 3-port variable-mu triode (grid-cathode + plate-cathode).
     VariMuThreePort(VariMuThreePort),
+    /// 3-port Koren triode (grid-cathode + plate-cathode) for MNA fallback.
+    TriodeThreePort(TriodeThreePort),
 }
 
 impl NlDeviceGroupKind {
     fn as_group_iv(&self) -> &dyn NlDeviceGroupIv {
         match self {
             NlDeviceGroupKind::VariMuThreePort(t) => t,
+            NlDeviceGroupKind::TriodeThreePort(t) => t,
         }
     }
 
-    fn debug_name(&self) -> &'static str {
+    pub(super) fn debug_name(&self) -> &'static str {
         match self {
             NlDeviceGroupKind::VariMuThreePort(_) => "VariMuThreePort",
+            NlDeviceGroupKind::TriodeThreePort(_) => "TriodeThreePort",
         }
     }
 
     fn n_ports(&self) -> usize {
         match self {
             NlDeviceGroupKind::VariMuThreePort(_) => 2,
+            NlDeviceGroupKind::TriodeThreePort(_) => 2,
         }
     }
 }
@@ -1133,6 +1146,12 @@ pub(super) struct MultiNlStage {
     /// When the stage's injection node is on a transformer secondary,
     /// this is 1/turns_ratio (e.g., 17.0 for a 1:17 step-up).
     pub(super) transformer_gain: f64,
+    /// Circuit graph node ID where this stage's adapted port injects signal.
+    /// Used for node-based routing in parallel-path topologies (e.g., 670 sidechain).
+    pub(super) injection_node_id: usize,
+    /// Circuit graph node ID where this stage's output port extracts signal.
+    /// Used for node-based routing in parallel-path topologies.
+    pub(super) output_node_id: usize,
 }
 
 impl MultiNlStage {
@@ -1163,7 +1182,7 @@ impl MultiNlStage {
             }
         }
 
-        self.oversampler.process(input, |sample| {
+        let output = self.oversampler.process(input, |sample| {
             // 1. Scatter-up passive children
             let mut b_passive = Vec::with_capacity(n_passive);
             for child in &mut self.passive_children {
@@ -1240,7 +1259,45 @@ impl MultiNlStage {
                 b_passive[output_port - n_nl]
             };
             (a_out + b_out) / 2.0
-        })
+        });
+
+        #[cfg(feature = "debug-trace")]
+        if input.abs() > 1e-10 {
+            let n = TRACE_COUNT_MNL.fetch_add(1, Ordering::Relaxed);
+            if n < MAX_TRACE_MNL {
+                let stage_id = if let Some(ref dg) = self.device_groups {
+                    dg.groups.iter().map(|g| g.debug_name()).collect::<Vec<_>>().join(", ")
+                } else {
+                    self.nl_devices.iter().map(|d| d.debug_name()).collect::<Vec<_>>().join(", ")
+                };
+                let gain_db = if output.abs() > 1e-30 && input.abs() > 1e-30 {
+                    20.0 * (output / input).abs().log10()
+                } else {
+                    -999.0
+                };
+                eprintln!(
+                    "[MNL n={n}] [{stage_id}] n_nl={} out_port={} comp={:.4} xfmr={:.2}",
+                    self.n_nl, self.output_port, self.compensation, self.transformer_gain
+                );
+                eprintln!(
+                    "  in={input:.6e} out={output:.6e} gain={gain_db:.1}dB"
+                );
+                eprintln!(
+                    "  s_nl_adapted={:.6?}", &self.s_nl_adapted
+                );
+                // s_nl diagonal (self-coupling) and off-diagonal
+                let mut s_diag = Vec::with_capacity(self.n_nl);
+                for i in 0..self.n_nl {
+                    s_diag.push(self.s_nl[i * self.n_nl + i]);
+                }
+                eprintln!("  s_nl_diag={:.6?}", s_diag);
+                eprintln!(
+                    "  v_prev={:.4?} Rp={:.1?}", &self.v_prev, &self.nl_port_resistances
+                );
+            }
+        }
+
+        output
     }
 
     /// Reset all internal state.

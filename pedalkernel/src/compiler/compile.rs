@@ -684,6 +684,7 @@ pub fn compile_pedal_with_options(
         },
         base_grid_bias,
         stage_order,
+        node_signals: Vec::new(),
     };
 
     let initial_voltage = match &compiled.power_supply {

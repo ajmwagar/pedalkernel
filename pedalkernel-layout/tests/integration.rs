@@ -128,6 +128,7 @@ fn tube_screamer_pedal() -> PedalDef {
         trims: vec![],
         monitors: vec![],
         sidechains: vec![],
+        mirrors: std::collections::HashMap::new(),
     }
 }
 
@@ -197,6 +198,7 @@ fn triode_gain_stage() -> PedalDef {
         trims: vec![],
         monitors: vec![],
         sidechains: vec![],
+        mirrors: std::collections::HashMap::new(),
     }
 }
 
@@ -406,6 +408,7 @@ fn empty_pedal_produces_empty_layout() {
         trims: vec![],
         monitors: vec![],
         sidechains: vec![],
+        mirrors: std::collections::HashMap::new(),
     };
 
     let layout = generate_layout(&pedal, 1024.0, 512.0);

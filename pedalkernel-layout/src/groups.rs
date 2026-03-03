@@ -559,6 +559,7 @@ mod tests {
             trims: vec![],
             monitors: vec![],
             sidechains: vec![],
+            mirrors: std::collections::HashMap::new(),
         };
 
         let graph = LayoutGraph::from_pedal(&pedal);

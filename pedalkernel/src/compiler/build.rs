@@ -597,12 +597,24 @@ fn build_triode_mna_fallback(
         }
     }
 
+    // For triodes with a grid node, use 2 NL terminal pairs:
+    // port 0 = grid-cathode, port 1 = plate-cathode.
+    // This creates a TriodeThreePort device group where the NR solver
+    // handles grid-plate cross-coupling through transconductance (dIa/dVgk).
+    // Without this, the grid-side and plate-side passive networks are
+    // disconnected in the MNA, giving s_nl_adapted = 0 for the plate port.
+    let nl_terminals = if let Some(gn) = grid_node {
+        vec![(gn, cathode_node), (plate_node, cathode_node)]
+    } else {
+        vec![(plate_node, cathode_node)]
+    };
+
     let multi_nl_plan = MultiNlPlan {
         nl_element_indices: vec![plan.element_idx],
         output_element_idx: plan.element_idx,
         passive_edge_indices: passive_edges,
         injection_node,
-        nl_terminals: vec![(plate_node, cathode_node)],
+        nl_terminals,
         compensation: plan.compensation,
         output_node: None,
     };
@@ -1044,6 +1056,18 @@ fn try_build_multi_nl_stage(
         }
     }
 
+    // ── GMIN regularization ──────────────────────────────────────────
+    // Standard SPICE technique: add a minimum conductance (GMIN) from every
+    // MNA node to ground. This prevents singular matrices when nodes are
+    // connected to the rest of the circuit only through NL elements (e.g.
+    // transformer secondary nodes in a bridge rectifier). Without GMIN,
+    // those nodes have zero passive conductance and the scattering matrix
+    // shows zero coupling from the adapted port (s_nl_adapted = 0).
+    const GMIN_RESISTANCE: f64 = 1e9; // 1 GΩ → 1 nS conductance
+    for i in 0..num_mna_nodes {
+        mna.stamp_resistor(Some(i), None, GMIN_RESISTANCE);
+    }
+
     // ── Step 3: Build WDF ports ─────────────────────────────────────
     // Port ordering: [NL_0..NL_{n-1}, reactive_0..reactive_{m-1}, adapted]
     // The "adapted" port is the voltage source injection port.
@@ -1144,14 +1168,21 @@ fn try_build_multi_nl_stage(
     }
 
     // ── Step 6: Create NL device roots ──────────────────────────────
-    // Detect 3-port VariMu triode: single element with 2 NL terminal pairs.
-    // In this case, create a VariMuThreePort device group instead of
-    // individual NlDeviceKind devices.
+    // Detect 3-port triodes: single element with 2 NL terminal pairs
+    // (grid-cathode + plate-cathode). Create a grouped device for the
+    // multi-port NR solver with cross-coupled Jacobian.
     let is_three_port_vari_mu = plan.nl_element_indices.len() == 1
         && n_nl == 2
         && matches!(
             &classified.nonlinear_elements[plan.nl_element_indices[0]].kind,
             NonlinearKind::Triode { is_vari_mu: true, .. }
+        );
+
+    let is_three_port_triode = plan.nl_element_indices.len() == 1
+        && n_nl == 2
+        && matches!(
+            &classified.nonlinear_elements[plan.nl_element_indices[0]].kind,
+            NonlinearKind::Triode { is_vari_mu: false, .. }
         );
 
     let (nl_devices, device_groups) = if is_three_port_vari_mu {
@@ -1161,7 +1192,20 @@ fn try_build_multi_nl_stage(
             let three_port = VariMuThreePort::new(model).with_parallel_count(*parallel_count);
             let groups = MultiNlDeviceGroups {
                 groups: vec![NlDeviceGroupKind::VariMuThreePort(three_port)],
-                offsets: vec![0], // Single group starting at port 0
+                offsets: vec![0],
+            };
+            (Vec::new(), Some(groups))
+        } else {
+            unreachable!()
+        }
+    } else if is_three_port_triode {
+        let elem = &classified.nonlinear_elements[plan.nl_element_indices[0]];
+        if let NonlinearKind::Triode { model_name, parallel_count, .. } = &elem.kind {
+            let model = TriodeModel::by_name(model_name);
+            let three_port = TriodeThreePort::new(model).with_parallel_count(*parallel_count);
+            let groups = MultiNlDeviceGroups {
+                groups: vec![NlDeviceGroupKind::TriodeThreePort(three_port)],
+                offsets: vec![0],
             };
             (Vec::new(), Some(groups))
         } else {
@@ -1259,8 +1303,8 @@ fn try_build_multi_nl_stage(
                     .unwrap_or(0)
             }
         }
-    } else if is_three_port_vari_mu {
-        1 // plate-cathode port
+    } else if is_three_port_vari_mu || is_three_port_triode {
+        1 // plate-cathode port (port 0 = grid-cathode, port 1 = plate-cathode)
     } else {
         plan.nl_element_indices
             .iter()
@@ -1289,6 +1333,19 @@ fn try_build_multi_nl_stage(
         .copied()
         .unwrap_or(usize::MAX);
 
+    // Determine the circuit graph node IDs for node-based routing.
+    let injection_node_id = plan.injection_node;
+    let output_node_id = if let Some(out_node) = plan.output_node {
+        // Passive-port output (e.g., bridge rectifier RC output)
+        out_node
+    } else if output_port < n_nl {
+        // NL port output: use positive terminal (plate/collector)
+        plan.nl_terminals[output_port].0
+    } else {
+        // Passive port output (fallback): use injection node
+        plan.injection_node
+    };
+
     Some(MultiNlStage {
         adaptor,
         nl_devices,
@@ -1306,6 +1363,8 @@ fn try_build_multi_nl_stage(
         recompute_data,
         signal_flow_distance,
         transformer_gain: 1.0, // set by caller if needed
+        injection_node_id,
+        output_node_id,
     })
 }
 

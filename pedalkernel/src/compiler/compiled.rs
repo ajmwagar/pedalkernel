@@ -9,7 +9,7 @@ use crate::PedalProcessor;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::stage::{CoupledBjtStage, MultiNlStage, NlDeviceKind, PushPullStage, RootKind, SidechainProcessor, WdfStage};
+use super::stage::{CoupledBjtStage, MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind, SidechainProcessor, WdfStage};
 
 /// Reference to a stage by type and index, for topological ordering.
 #[derive(Clone, Copy)]
@@ -28,7 +28,7 @@ static TRACE_COUNT_PIPELINE: AtomicU64 = AtomicU64::new(0);
 
 /// Max pipeline samples to trace (non-zero only).
 #[cfg(feature = "debug-trace")]
-const MAX_TRACE_PIPELINE: u64 = 10;
+const MAX_TRACE_PIPELINE: u64 = 5;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Compiled pedal
@@ -456,6 +456,11 @@ pub struct CompiledPedal {
     /// Stages are sorted by signal_flow_distance so earlier stages in the
     /// signal path process first, regardless of stage type.
     pub(super) stage_order: Vec<StageRef>,
+    /// Node-based signal routing buffer for parallel-path topologies.
+    /// Maps circuit graph node IDs to signal values. When non-empty, multi-NL
+    /// stages read from their injection_node_id and write to their output_node_id,
+    /// enabling correct parallel channel processing (e.g., 670 sidechain).
+    pub(super) node_signals: Vec<(usize, f64)>,
 }
 
 /// Gain-like control labels.
@@ -571,6 +576,15 @@ impl CompiledPedal {
                     NlDeviceKind::BjtNpn(b) => b.set_v_max(bjt_v_max),
                     NlDeviceKind::BjtPnp(b) => b.set_v_max(bjt_v_max),
                     NlDeviceKind::Diode(_) => {}
+                }
+            }
+            // Propagate to grouped devices (TriodeThreePort, VariMuThreePort)
+            if let Some(ref mut dg) = stage.device_groups {
+                for group in &mut dg.groups {
+                    match group {
+                        NlDeviceGroupKind::VariMuThreePort(t) => t.set_v_max(tube_v_max),
+                        NlDeviceGroupKind::TriodeThreePort(t) => t.set_v_max(tube_v_max),
+                    }
                 }
             }
         }
@@ -1367,10 +1381,19 @@ impl PedalProcessor for CompiledPedal {
         // WDF, multi-NL, and coupled BJT stages are interleaved by their
         // signal_flow_distance so earlier stages process first regardless of type.
         // WDF clipping stages get inter-stage re-amplification.
+        //
+        // Multi-NL stages use node-based routing: each stage reads from its
+        // injection_node_id and writes to its output_node_id. This correctly
+        // handles parallel-path topologies (e.g., 670 dual-channel sidechain)
+        // where two stages at the same level should receive the same input,
+        // not chain serially.
         let mut prev_was_clipping = false;
         let num_stages = self.stages.len();
         let mut stage_levels = [0.0f64; crate::metering::MAX_STAGES];
         let mut wdf_stage_counter = 0usize;
+
+        // Node routing: reuse the pre-allocated buffer to avoid allocation.
+        self.node_signals.clear();
 
         for sr in &self.stage_order {
             match sr {
@@ -1410,16 +1433,41 @@ impl PedalProcessor for CompiledPedal {
                 }
                 StageRef::MultiNl(i) => {
                     prev_was_clipping = false;
+
+                    // Node-based routing: look up the stage's injection node
+                    // in previously written outputs. If found, use that signal
+                    // instead of the serial chain value. This enables parallel
+                    // channels to each receive their correct predecessor's output.
+                    let mnl = &mut self.multi_nl_stages[*i];
+                    let mnl_input = self.node_signals.iter().rev()
+                        .find(|(nid, _)| *nid == mnl.injection_node_id)
+                        .map(|(_, v)| *v)
+                        .unwrap_or(signal);
+
                     #[cfg(feature = "debug-trace")]
-                    let pre = signal;
-                    signal = self.multi_nl_stages[*i].process(signal);
+                    let pre = mnl_input;
+                    let mnl_output = mnl.process(mnl_input);
+
+                    // Store output at the stage's output node for downstream routing.
+                    self.node_signals.push((mnl.output_node_id, mnl_output));
+                    signal = mnl_output;
+
                     #[cfg(feature = "debug-trace")]
                     if trace_on {
+                        let mnl = &self.multi_nl_stages[*i];
+                        let devices: String = if let Some(ref dg) = mnl.device_groups {
+                            dg.groups.iter().map(|g| g.debug_name()).collect::<Vec<_>>().join(",")
+                        } else {
+                            mnl.nl_devices.iter().map(|d| d.debug_name()).collect::<Vec<_>>().join(",")
+                        };
                         eprintln!(
-                            "  [MNL {i}] in={pre:.6e} out={signal:.6e} n_nl={} n_passive={} out_port={}",
-                            self.multi_nl_stages[*i].n_nl,
-                            self.multi_nl_stages[*i].passive_children.len(),
-                            self.multi_nl_stages[*i].output_port,
+                            "  [MNL {i}] [{devices}] in={pre:.6e} out={signal:.6e} n_nl={} out_port={} xfmr={:.2} inj={} out={}",
+                            mnl.n_nl, mnl.output_port, mnl.transformer_gain,
+                            mnl.injection_node_id, mnl.output_node_id,
+                        );
+                        eprintln!(
+                            "    s_nl_adapted={:.6?} v_prev={:.4?}",
+                            &mnl.s_nl_adapted, &mnl.v_prev,
                         );
                     }
                 }

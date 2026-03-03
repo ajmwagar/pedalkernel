@@ -3,7 +3,7 @@
 //! Models preamp tubes (12AX7, 12AT7, 12AU7) using the Koren equation.
 //! Parameters are loaded from the embedded `triodes.model` file.
 
-use super::solver::{softplus, newton_raphson_solve, NlDeviceIv, LEAKAGE_CONDUCTANCE};
+use super::solver::{softplus, newton_raphson_solve, NlDeviceIv, NlDeviceGroupIv, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
 use crate::models::{SpiceTriodeModel, triode_by_name};
 
@@ -271,6 +271,187 @@ impl NlDeviceIv for TriodeRoot {
 }
 
 // ---------------------------------------------------------------------------
+// TriodeThreePort — 3-port (grid + plate) for R-type adaptor MNA fallback
+// ---------------------------------------------------------------------------
+
+/// 3-port Koren triode for use with the grouped multi-port NR solver.
+///
+/// Presents 2 WDF ports to the R-type adaptor:
+/// - Port 0: grid-to-cathode (grid conduction diode)
+/// - Port 1: plate-to-cathode (Koren plate current, depends on Vgk)
+///
+/// Unlike `TriodeRoot` where the grid voltage is an external parameter set
+/// via `set_vgk()`, here the grid voltage comes from the grid port of the
+/// R-type adaptor. This allows the scattering matrix to couple the input
+/// signal to the grid, and the NR solver handles the grid-plate interaction
+/// through the transconductance cross-derivative ∂Ia/∂Vgk.
+///
+/// This is necessary for MNA fallback triode stages where the grid-side
+/// passive network (bias resistors, threshold pots) is disconnected from
+/// the plate-side network in the MNA. Without a grid NL port, the adapted
+/// port (input) has `s_nl_adapted = 0` for the plate port, and the triode
+/// produces zero output.
+///
+/// Grid current model: `i_g = I_gs × (exp(Vgk / Vt_g) - 1)`
+/// Plate current: Koren equation `Ip = (Vpk/Kp × ln(1 + exp(E1)))^Ex / KG1`
+/// Transconductance: `∂Ia/∂Vgk = Ex × base^(Ex-1) / KG1 × Vpk × σ(E1) / √(Kvb + Vpk²)`
+#[derive(Debug, Clone, Copy)]
+pub struct TriodeThreePort {
+    pub model: TriodeModel,
+    /// Maximum plate voltage (B+ supply rail).
+    v_max: f64,
+    /// Number of parallel tubes.
+    parallel_count: usize,
+    /// Grid emission current (saturation current for grid diode).
+    grid_is: f64,
+    /// Grid thermal voltage.
+    grid_vt: f64,
+}
+
+impl TriodeThreePort {
+    pub fn new(model: TriodeModel) -> Self {
+        Self {
+            model,
+            v_max: 500.0,
+            parallel_count: 1,
+            grid_is: 1e-9,
+            grid_vt: 0.025,
+        }
+    }
+
+    pub fn new_with_v_max(model: TriodeModel, v_max: f64) -> Self {
+        Self {
+            v_max: v_max.max(1.0),
+            ..Self::new(model)
+        }
+    }
+
+    pub fn with_parallel_count(mut self, count: usize) -> Self {
+        self.parallel_count = count.max(1);
+        self
+    }
+
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0);
+    }
+
+    pub fn v_max(&self) -> f64 {
+        self.v_max
+    }
+
+    pub fn parallel_count(&self) -> usize {
+        self.parallel_count
+    }
+
+    /// Grid current (diode model): i_g = I_gs × (exp(Vgk/Vt) - 1).
+    /// Returns (current, di_g/dv_gk).
+    #[inline]
+    fn grid_iv(&self, vgk: f64) -> (f64, f64) {
+        let x = (vgk / self.grid_vt).clamp(-500.0, 500.0);
+        let ev = x.exp();
+        let ig = self.grid_is * (ev - 1.0) * self.parallel_count as f64;
+        let dig = self.grid_is * ev / self.grid_vt * self.parallel_count as f64;
+        (ig, dig)
+    }
+
+    /// Plate current using the Koren equation, with explicit Vgk and Vpk.
+    /// Returns (Ia, ∂Ia/∂Vpk, ∂Ia/∂Vgk).
+    #[inline]
+    fn plate_iv(&self, vgk: f64, vpk: f64) -> (f64, f64, f64) {
+        let m = &self.model;
+        let pc = self.parallel_count as f64;
+
+        if vpk <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
+        }
+
+        let vpk_sq = vpk * vpk;
+        let sqrt_term = (m.kvb + vpk_sq).sqrt();
+
+        // E1 = Kp * (1/mu + Vgk / sqrt(Kvb + Vpk^2))
+        let e1 = m.kp * (1.0 / m.mu + vgk / sqrt_term);
+
+        let ln_term = softplus(e1);
+        if ln_term <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
+        }
+
+        let base = (vpk / m.kp) * ln_term;
+        if base <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
+        }
+
+        // Ip = base^Ex / KG1
+        let ia = (base.powf(m.ex) / m.kg1) * pc;
+        if ia <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
+        }
+
+        // Sigmoid(E1) = exp(E1) / (1 + exp(E1)), numerically stable
+        let sigmoid_e1 = if e1 > 50.0 {
+            1.0
+        } else if e1 < -50.0 {
+            0.0
+        } else {
+            let exp_e1 = e1.exp();
+            exp_e1 / (1.0 + exp_e1)
+        };
+
+        // Common factor: Ex * base^(Ex-1) / KG1
+        let ex_base_factor = m.ex * base.powf(m.ex - 1.0) / m.kg1 * pc;
+
+        // ∂Ia/∂Vpk:
+        // dE1/dVpk = -Kp * Vgk * Vpk / (Kvb + Vpk^2)^(3/2)
+        let de1_dvpk = -m.kp * vgk * vpk / (sqrt_term * sqrt_term * sqrt_term);
+        let dln_dvpk = sigmoid_e1 * de1_dvpk;
+        let dbase_dvpk = ln_term / m.kp + (vpk / m.kp) * dln_dvpk;
+        let dia_dvpk = (ex_base_factor * dbase_dvpk).max(LEAKAGE_CONDUCTANCE * pc);
+
+        // ∂Ia/∂Vgk (transconductance):
+        // dE1/dVgk = Kp / sqrt(Kvb + Vpk^2)
+        // dbase/dVgk = (Vpk/Kp) * sigmoid(E1) * Kp / sqrt_term
+        //            = Vpk * sigmoid(E1) / sqrt_term
+        let dbase_dvgk = vpk * sigmoid_e1 / sqrt_term;
+        let dia_dvgk = ex_base_factor * dbase_dvgk;
+
+        (ia, dia_dvpk, dia_dvgk)
+    }
+}
+
+impl NlDeviceGroupIv for TriodeThreePort {
+    fn n_ports(&self) -> usize { 2 }
+
+    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+        let vgk = v[0]; // Port 0: grid-cathode (actual voltage, no shift needed)
+
+        // Port 1: plate-cathode. In the R-type adaptor, the supply node (B+)
+        // is grounded in the MNA, so the WDF voltage v[1] represents
+        // V_plate - V_supply. Shift by +v_max to recover the actual Vpk
+        // for the Koren model. The Jacobian is unaffected (constant shift).
+        let vpk = v[1] + self.v_max;
+
+        // Grid current (diode model)
+        let (ig, dig_dvgk) = self.grid_iv(vgk);
+        currents[0] = ig;
+        jacobian[0] = dig_dvgk;   // ∂ig/∂vgk
+        jacobian[1] = 0.0;        // ∂ig/∂vpk (grid current independent of plate voltage)
+
+        // Plate current (Koren model with cross-coupling)
+        let (ip, dip_dvpk, dip_dvgk) = self.plate_iv(vgk, vpk);
+        currents[1] = ip;
+        jacobian[2] = dip_dvgk;   // ∂ip/∂vgk (transconductance — cross-coupling)
+        jacobian[3] = dip_dvpk;   // ∂ip/∂vpk
+    }
+
+    fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+        match port {
+            0 => (-50.0, 10.0),          // Grid: well below cutoff to slight forward bias
+            _ => (-self.v_max, 10.0),    // Plate: WDF range [-V_supply, ~0] (maps to actual [0, V_supply])
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -303,5 +484,108 @@ mod tests {
             error < 0.01,
             "12AX7 Ip should match SPICE reference within 1%: got {ip:.6e}, expected {expected:.6e}, error={error:.4}"
         );
+    }
+
+    /// TriodeThreePort plate current must match TriodeRoot plate current.
+    #[test]
+    fn three_port_matches_single_port() {
+        let model = TriodeModel::by_name("12AX7");
+        let mut root = TriodeRoot::new(model);
+        let tp = TriodeThreePort::new(model);
+
+        for &vgk in &[-3.0, -2.0, -1.0, 0.0] {
+            for &vpk in &[50.0, 100.0, 200.0, 300.0] {
+                root.set_vgk(vgk);
+                let ip_root = root.plate_current(vpk);
+                let (ip_tp, _, _) = tp.plate_iv(vgk, vpk);
+
+                let diff = (ip_root - ip_tp).abs();
+                assert!(
+                    diff < 1e-12,
+                    "Plate current mismatch at Vgk={vgk}, Vpk={vpk}: root={ip_root:.6e}, tp={ip_tp:.6e}"
+                );
+            }
+        }
+    }
+
+    /// TriodeThreePort derivative w.r.t Vpk must match TriodeRoot derivative
+    /// in the conducting region (both above leakage floor).
+    #[test]
+    fn three_port_derivative_matches_single_port() {
+        let model = TriodeModel::by_name("12AX7");
+        let mut root = TriodeRoot::new(model);
+        let tp = TriodeThreePort::new(model);
+
+        for &vgk in &[-1.5, -1.0, 0.0] {
+            for &vpk in &[100.0, 200.0, 300.0] {
+                root.set_vgk(vgk);
+                let dip_root = root.plate_current_derivative(vpk);
+                let (_, dip_tp, _) = tp.plate_iv(vgk, vpk);
+
+                // Skip near-zero regime where leakage floor differs
+                if dip_root < 1e-10 && dip_tp < 1e-10 {
+                    continue;
+                }
+                let rel_err = (dip_root - dip_tp).abs() / dip_root.abs().max(1e-15);
+                assert!(
+                    rel_err < 0.01,
+                    "dIp/dVpk mismatch at Vgk={vgk}, Vpk={vpk}: root={dip_root:.6e}, tp={dip_tp:.6e}"
+                );
+            }
+        }
+    }
+
+    /// Transconductance (dIp/dVgk) is positive and finite.
+    #[test]
+    fn three_port_transconductance_positive() {
+        let tp = TriodeThreePort::new(TriodeModel::by_name("12AX7"));
+
+        for &vpk in &[100.0, 200.0] {
+            for &vgk in &[-2.0, -1.0, 0.0] {
+                let (ia, _, gm) = tp.plate_iv(vgk, vpk);
+                assert!(gm >= 0.0, "gm should be non-negative at Vgk={vgk}, Vpk={vpk}: got {gm:.6e}");
+                assert!(gm.is_finite(), "gm should be finite at Vgk={vgk}, Vpk={vpk}");
+                if ia > 1e-10 {
+                    assert!(gm > 1e-10, "gm should be significantly positive when conducting: ia={ia:.6e}, gm={gm:.6e}");
+                }
+            }
+        }
+    }
+
+    /// TriodeThreePort in grouped solver produces finite, physical results.
+    /// With VCC grounding shift: v[1] in WDF is V_plate - V_CC, so the
+    /// operating point has negative v[1] (actual plate below V_CC).
+    #[test]
+    fn three_port_in_grouped_solver() {
+        use crate::elements::nonlinear::solver::multi_port_nr_solve_grouped;
+
+        let v_cc = 300.0;
+        let tp = TriodeThreePort::new_with_v_max(TriodeModel::by_name("12AX7"), v_cc);
+        let groups: [&dyn NlDeviceGroupIv; 1] = [&tp];
+        let offsets = [0];
+
+        // Scattering: grid self-coupling small, plate self-coupling moderate negative.
+        // s_nl[1][0] = 0: no passive coupling between grid and plate (grounded cathode).
+        let s_nl = [-0.1, 0.0, 0.0, -0.5];
+        // Grid biased negative; plate has no external excitation (typical for grounded VCC).
+        let known_a = [-2.0, 0.0];
+        let port_resistances = [500_000.0, 50_000.0];
+        // Start at v[1]=0, which with the shift means vpk = V_CC (tube at full supply).
+        let mut v_guess = [-2.0, 0.0];
+
+        let b = multi_port_nr_solve_grouped(
+            2, &s_nl, &known_a, &port_resistances, &groups, &offsets,
+            &mut v_guess, 50, 1e-8,
+        );
+
+        assert!(b[0].is_finite(), "Grid reflected wave should be finite");
+        assert!(b[1].is_finite(), "Plate reflected wave should be finite");
+        // WDF plate voltage should be negative (V_plate < V_CC)
+        assert!(v_guess[1] < 0.0,
+            "Plate WDF voltage should be negative (below V_CC): got {}", v_guess[1]);
+        // Actual plate voltage should be positive (tube conducting, plate above 0)
+        let v_plate_actual = v_guess[1] + v_cc;
+        assert!(v_plate_actual > 0.0,
+            "Actual plate voltage should be positive: got {}", v_plate_actual);
     }
 }
