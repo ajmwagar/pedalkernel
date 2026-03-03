@@ -99,6 +99,13 @@ pub(super) enum ControlTarget {
         parallel_fixed_r: Option<f64>,
         is_inverting: bool,
     },
+    /// Pot controlling BJT feedback coupling + DC bias offset.
+    /// NOT in the WDF tree; position maps to feedback_scale + VEB offset.
+    /// Used for pots bridging emitter nodes of coupled BJTs (e.g., Fuzz Face).
+    BjtBias {
+        max_pot_r: f64,
+        taper: crate::dsl::PotTaper,
+    },
 }
 
 /// Modulation target for LFOs and envelope followers.
@@ -1034,6 +1041,16 @@ impl CompiledPedal {
                         stage.set_opamp_gain(gain);
                     }
                 }
+                ControlTarget::BjtBias { max_pot_r, taper } => {
+                    let tapered = taper.apply(value);
+                    let max_pot_r = *max_pot_r;
+                    for stage in &mut self.coupled_bjt_stages {
+                        stage.set_feedback_from_pot(tapered, max_pot_r);
+                    }
+                    for stage in &mut self.multi_nl_stages {
+                        stage.set_feedback_from_pot(tapered, max_pot_r);
+                    }
+                }
             }
         }
 
@@ -1115,6 +1132,16 @@ impl CompiledPedal {
                             if max_r < 5_000.0 {
                                 stage.flush_recompute();
                             }
+                        }
+                    }
+                    ControlTarget::BjtBias { max_pot_r, taper } => {
+                        let tapered = taper.apply(value);
+                        let max_pot_r = *max_pot_r;
+                        for stage in &mut self.coupled_bjt_stages {
+                            stage.set_feedback_from_pot(tapered, max_pot_r);
+                        }
+                        for stage in &mut self.multi_nl_stages {
+                            stage.set_feedback_from_pot(tapered, max_pot_r);
                         }
                     }
                     _ => {}

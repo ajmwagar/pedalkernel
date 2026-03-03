@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
 
+use super::bjt_bias_analysis::{self, BjtBiasAnalysis};
 use super::classify::{ClassifiedCircuit, NonlinearElement, NonlinearKind};
 use super::graph::{CircuitGraph, NodeId};
 
@@ -133,6 +134,7 @@ pub(super) fn plan_stages(
     Vec<CoupledBjtPlan>,
     Vec<MultiNlPlan>,
     HashSet<usize>,
+    BjtBiasAnalysis,
 ) {
     // ── Push-pull detection for triodes ────────────────────────────────
     // Collect triode elements indices to detect push-pull pairs.
@@ -295,6 +297,17 @@ pub(super) fn plan_stages(
     let mut multi_nl_plans: Vec<MultiNlPlan> = Vec::new();
     let mut coupled_bjt_elem_indices: HashSet<usize> = HashSet::new();
 
+    // Collect cluster info for bias pot detection.
+    // Each entry: (ordered members, elem_indices, output_idx, all_passive_edges)
+    struct ClusterInfo {
+        ordered: Vec<usize>,
+        elem_indices: Vec<usize>,
+        output_idx: usize,
+    }
+    let mut cluster_infos: Vec<ClusterInfo> = Vec::new();
+    let mut cluster_passive_edge_sets: Vec<Vec<usize>> = Vec::new();
+    let mut cluster_member_sets: Vec<Vec<usize>> = Vec::new();
+
     for (_root, members) in &clusters {
         if members.len() < 2 {
             continue;
@@ -335,7 +348,6 @@ pub(super) fn plan_stages(
             output_bjt_idx: bjt_infos[output_idx].elem_idx,
         });
 
-        // Also build a MultiNlPlan for the R-type adaptor approach.
         // Collect all passive edges from all junction nodes of all members.
         let mut all_passive_edges: Vec<usize> = Vec::new();
         let mut all_junction_nodes: HashSet<NodeId> = HashSet::new();
@@ -369,6 +381,34 @@ pub(super) fn plan_stages(
             }
         }
 
+        cluster_member_sets.push(ordered.clone());
+        cluster_passive_edge_sets.push(all_passive_edges);
+        cluster_infos.push(ClusterInfo {
+            ordered,
+            elem_indices,
+            output_idx,
+        });
+    }
+
+    // ── BJT bias pot detection ────────────────────────────────────────
+    // Detect pots bridging emitter nodes of coupled BJTs (e.g., Fuzz Face
+    // "Fuzz" pot between Q2.emitter and Q1.emitter). These are excluded
+    // from the passive WDF network and bound as parametric controls instead.
+    let bjt_emitter_nodes: Vec<NodeId> = bjt_infos.iter().map(|info| info.emitter_node).collect();
+    let bjt_bias_analysis = bjt_bias_analysis::detect_bias_pots(
+        graph,
+        &cluster_member_sets,
+        &bjt_emitter_nodes,
+        &cluster_passive_edge_sets,
+    );
+
+    // Build MultiNlPlans, filtering out bias pot edges.
+    for (ci, info) in cluster_infos.iter().enumerate() {
+        let mut all_passive_edges = cluster_passive_edge_sets[ci].clone();
+
+        // Remove bias pot edges from the passive set.
+        all_passive_edges.retain(|eidx| !bjt_bias_analysis.bias_pot_edge_indices.contains(eidx));
+
         // Find injection node (BFS-closest to input among passive edge endpoints).
         let mut injection_node = graph.in_node;
         let mut best_dist = usize::MAX;
@@ -385,17 +425,18 @@ pub(super) fn plan_stages(
         }
 
         // NL terminals: (collector, emitter) for each BJT
-        let nl_terminals: Vec<(NodeId, NodeId)> = ordered
+        let nl_terminals: Vec<(NodeId, NodeId)> = info
+            .ordered
             .iter()
             .map(|&m| {
-                let info = &bjt_infos[m];
-                (info.collector_node, info.emitter_node)
+                let binfo = &bjt_infos[m];
+                (binfo.collector_node, binfo.emitter_node)
             })
             .collect();
 
         multi_nl_plans.push(MultiNlPlan {
-            nl_element_indices: elem_indices,
-            output_element_idx: bjt_infos[output_idx].elem_idx,
+            nl_element_indices: info.elem_indices.clone(),
+            output_element_idx: bjt_infos[info.output_idx].elem_idx,
             passive_edge_indices: all_passive_edges,
             injection_node,
             nl_terminals,
@@ -805,6 +846,7 @@ pub(super) fn plan_stages(
         coupled_bjt_plans,
         multi_nl_plans,
         pp_transformer_edges,
+        bjt_bias_analysis,
     )
 }
 

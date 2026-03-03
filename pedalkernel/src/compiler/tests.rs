@@ -2860,123 +2860,59 @@ fn multi_nl_fuzz_face_sample_rates() {
 
 #[test]
 fn multi_nl_fuzz_face_pot_recomputes_scattering() {
-    use crate::tree::WdfPort;
-
-    // Uses fuzz_face_v2 which has the correct topology:
-    // Fuzz pot bridges Q1.emitter ↔ Q2.emitter (feedback control).
+    // The Fuzz pot bridges Q1.emitter ↔ Q2.emitter (feedback control).
+    // It is now detected as a BJT bias pot and excluded from the passive WDF
+    // network. Instead it controls feedback_scale + veb_bias_offset parametrically.
+    // This test verifies:
+    // 1. The Fuzz pot is bound as BjtBias (not PotInMultiNlStage)
+    // 2. The multi-NL stage still exists and compiles
+    // 3. Changing the pot affects feedback_scale on the stage
     let pedal = parse("fuzz_face.pedal");
-    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
 
-    assert!(
-        !proc.multi_nl_stages.is_empty(),
-        "Should have multi-NL stage(s)"
-    );
-    let stage = &proc.multi_nl_stages[0];
-    assert!(
-        stage.recompute_data.is_some(),
-        "Stage should have recompute_data"
-    );
+    // Stage should still exist (either multi-NL or coupled BJT).
+    let has_stage = !proc.multi_nl_stages.is_empty() || !proc.coupled_bjt_stages.is_empty();
+    assert!(has_stage, "Should have multi-NL or coupled-BJT stage(s)");
 
-    let recompute = stage.recompute_data.as_ref().unwrap();
-    let n_nl = stage.n_nl;
-    let n_passive = stage.passive_children.len();
-    let n_total = n_nl + n_passive + 1;
-
-    // Find the pot child
-    let pot_idx = stage
-        .passive_children
+    // The Fuzz control should be bound as BjtBias, not PotInMultiNlStage.
+    let fuzz_ctrl = proc
+        .controls
         .iter()
-        .position(|c| matches!(c, super::dyn_node::DynNode::Pot { .. }))
-        .expect("should have a pot child");
+        .find(|c| c.label.eq_ignore_ascii_case("Fuzz"));
+    assert!(fuzz_ctrl.is_some(), "Should have a Fuzz control");
+    let fuzz_target = &fuzz_ctrl.unwrap().target;
+    assert!(
+        matches!(fuzz_target, super::compiled::ControlTarget::BjtBias { .. }),
+        "Fuzz pot should be bound as BjtBias, got: {:?}",
+        fuzz_target
+    );
 
-    let build_ports = |pot_resistance: f64| -> Vec<WdfPort> {
-        let mut ports = Vec::with_capacity(n_total);
-        for i in 0..n_nl {
-            let (pos, neg) = recompute.port_node_pairs[i];
-            ports.push(WdfPort {
-                node_pos: pos,
-                node_neg: neg,
-                resistance: stage.nl_port_resistances[i],
-            });
-        }
-        for k in 0..n_passive {
-            let (pos, neg) = recompute.port_node_pairs[n_nl + k];
-            let rp = if k == pot_idx {
-                pot_resistance
-            } else {
-                stage.passive_children[k].port_resistance()
-            };
-            ports.push(WdfPort {
-                node_pos: pos,
-                node_neg: neg,
-                resistance: rp,
-            });
-        }
-        let (pos, neg) = recompute.port_node_pairs[n_nl + n_passive];
-        ports.push(WdfPort {
-            node_pos: pos,
-            node_neg: neg,
-            resistance: recompute.adapted_resistance,
-        });
-        ports
+    // Verify changing the pot affects the stage's feedback parameters.
+    // At Fuzz = 0 (max feedback), feedback_scale should be high.
+    proc.set_control("Fuzz", 0.0);
+    let fs_lo = if !proc.multi_nl_stages.is_empty() {
+        proc.multi_nl_stages[0].feedback_scale
+    } else {
+        proc.coupled_bjt_stages[0].feedback_scale
     };
 
-    let s_lo = recompute
-        .mna
-        .derive_scattering_matrix_general(&build_ports(1.0));
-    let s_hi = recompute
-        .mna
-        .derive_scattering_matrix_general(&build_ports(1000.0));
+    // At Fuzz = 1 (min feedback), feedback_scale should be lower.
+    proc.set_control("Fuzz", 1.0);
+    let fs_hi = if !proc.multi_nl_stages.is_empty() {
+        proc.multi_nl_stages[0].feedback_scale
+    } else {
+        proc.coupled_bjt_stages[0].feedback_scale
+    };
 
-    let full_max_diff = s_lo
-        .iter()
-        .zip(s_hi.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f64, f64::max);
-
-    let mut s_nl_max_diff = 0.0f64;
-    for i in 0..n_nl {
-        for j in 0..n_nl {
-            let d = (s_lo[i * n_total + j] - s_hi[i * n_total + j]).abs();
-            s_nl_max_diff = s_nl_max_diff.max(d);
-        }
-    }
-
-    // Frobenius norm of the full scattering delta
-    let frobenius: f64 = s_lo
-        .iter()
-        .zip(s_hi.iter())
-        .map(|(a, b)| (a - b).powi(2))
-        .sum::<f64>()
-        .sqrt();
-
-    // Print NL port resistances for context
-    eprintln!("  n_nl={n_nl}, n_passive={n_passive}, n_total={n_total}");
-    for i in 0..n_nl {
-        eprintln!("  NL port {i} Rp = {:.1} Ω", stage.nl_port_resistances[i]);
-    }
-    for k in 0..n_passive {
-        eprintln!(
-            "  Passive port {k} Rp = {:.1} Ω{}",
-            stage.passive_children[k].port_resistance(),
-            if k == pot_idx { " (POT)" } else { "" }
-        );
-    }
-    eprintln!("  Adapted port Rp = {:.1} Ω", recompute.adapted_resistance);
-    eprintln!();
-    eprintln!("  Pot sweep 1Ω → 1000Ω:");
-    eprintln!("    full_max_diff     = {full_max_diff:.6e}");
-    eprintln!("    s_nl_max_diff     = {s_nl_max_diff:.6e}");
-    eprintln!("    frobenius_norm    = {frobenius:.6e}");
-    eprintln!("    matrix size       = {n_total}×{n_total} ({} entries)", n_total * n_total);
-
+    eprintln!("  feedback_scale @ Fuzz=0: {fs_lo:.4}");
+    eprintln!("  feedback_scale @ Fuzz=1: {fs_hi:.4}");
     assert!(
-        full_max_diff > 1e-3,
-        "Full scattering should change with pot (max_diff={full_max_diff:.6e})"
+        fs_lo > fs_hi,
+        "Fuzz=0 should have higher feedback_scale than Fuzz=1 ({fs_lo:.4} vs {fs_hi:.4})"
     );
     assert!(
-        s_nl_max_diff > 1e-6,
-        "NL-to-NL scattering should change with pot (max_diff={s_nl_max_diff:.6e})"
+        (fs_lo - fs_hi).abs() > 0.1,
+        "feedback_scale range should be substantial ({fs_lo:.4} vs {fs_hi:.4})"
     );
 }
 

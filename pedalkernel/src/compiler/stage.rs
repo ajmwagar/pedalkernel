@@ -941,6 +941,10 @@ pub(super) struct CoupledBjtStage {
     pub(super) feedback_state: f64,
     /// Coupling strength (how much feedback is applied).
     pub(super) feedback_scale: f64,
+    /// VEB bias offset from feedback pot position.
+    /// When a bias pot bridges emitter nodes, its position shifts the DC
+    /// operating point. Positive values increase forward bias.
+    pub(super) veb_bias_offset: f64,
     /// BFS distance from input of the injection node (for topological ordering).
     pub(super) signal_flow_distance: usize,
 }
@@ -961,11 +965,11 @@ impl CoupledBjtStage {
             match root {
                 RootKind::BjtNpn(ref mut bjt) => {
                     const BJT_VBE_BIAS: f64 = 0.6;
-                    bjt.set_vbe(BJT_VBE_BIAS + signal * comp * 0.15);
+                    bjt.set_vbe(BJT_VBE_BIAS + self.veb_bias_offset + signal * comp * 0.15);
                 }
                 RootKind::BjtPnp(ref mut bjt) => {
                     const PNP_VEB_BIAS: f64 = 0.15;
-                    bjt.set_veb(PNP_VEB_BIAS + signal * comp * 0.3);
+                    bjt.set_veb(PNP_VEB_BIAS + self.veb_bias_offset + signal * comp * 0.3);
                 }
                 _ => {}
             }
@@ -989,6 +993,26 @@ impl CoupledBjtStage {
         self.feedback_state = signal;
 
         flush_denormal(signal)
+    }
+
+    /// Set feedback coupling from a bias pot position.
+    ///
+    /// The pot bridges emitter nodes of two coupled BJTs (e.g., Fuzz Face).
+    /// Position 0 → max feedback (pot shorted, clean tone).
+    /// Position 1 → min feedback (full pot resistance, max fuzz).
+    ///
+    /// `position` is the tapered pot value (0.0–1.0 after taper curve).
+    /// `max_pot_r` is the pot's maximum resistance in ohms.
+    pub fn set_feedback_from_pot(&mut self, position: f64, max_pot_r: f64) {
+        let pot_r = position * max_pot_r;
+        // Q2 emitter resistor (typical Fuzz Face value).
+        // The feedback scale is the voltage divider between the emitter
+        // resistor and the pot: feedback = R_emitter / (R_emitter + R_pot).
+        let emitter_r = 470.0;
+        self.feedback_scale = emitter_r / (emitter_r + pot_r);
+        // Bias shift: more feedback → more forward bias on Q1.
+        // At max feedback (pot=0), ~100mV additional VEB bias.
+        self.veb_bias_offset = self.feedback_scale * 0.1;
     }
 
     /// Adjust reactive element port resistances for oversampling.
@@ -1064,15 +1088,18 @@ pub(super) enum NlDeviceKind {
 
 impl NlDeviceKind {
     /// Set the control voltage for this NL device from the input signal.
-    pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64) {
+    ///
+    /// `bias_offset` is an additional bias voltage from external controls
+    /// (e.g., BJT bias pots). Zero for non-BJT devices.
+    pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
         match self {
             NlDeviceKind::BjtNpn(bjt) => {
                 const BJT_VBE_BIAS: f64 = 0.6;
-                bjt.set_vbe(BJT_VBE_BIAS + input * compensation * 0.15);
+                bjt.set_vbe(BJT_VBE_BIAS + bias_offset + input * compensation * 0.15);
             }
             NlDeviceKind::BjtPnp(bjt) => {
                 const PNP_VEB_BIAS: f64 = 0.15;
-                bjt.set_veb(PNP_VEB_BIAS + input * compensation * 0.3);
+                bjt.set_veb(PNP_VEB_BIAS + bias_offset + input * compensation * 0.3);
             }
             NlDeviceKind::Triode(t) => {
                 const TRIODE_GRID_BIAS: f64 = -2.0;
@@ -1261,6 +1288,10 @@ pub(super) struct MultiNlStage {
     /// Flag: pot changed since last scattering recompute.
     /// Set by `set_pot()`, cleared by `flush_recompute()`.
     pub(super) recompute_pending: bool,
+    /// VEB bias offset from a feedback pot (mirrors CoupledBjtStage behavior).
+    pub(super) veb_bias_offset: f64,
+    /// Feedback scale for coupled BJT stages (mirrors CoupledBjtStage).
+    pub(super) feedback_scale: f64,
 }
 
 impl MultiNlStage {
@@ -1286,8 +1317,9 @@ impl MultiNlStage {
         // Set control voltages on each NL device (only for independent devices;
         // grouped devices get their grid voltage from the WDF port).
         if self.device_groups.is_none() {
+            let bias_offset = self.veb_bias_offset;
             for device in &mut self.nl_devices {
-                device.set_control_voltage(input, compensation);
+                device.set_control_voltage(input, compensation, bias_offset);
             }
         }
 
@@ -1545,6 +1577,17 @@ impl MultiNlStage {
             self.recompute_pending = false;
             self.recompute_scattering();
         }
+    }
+
+    /// Set feedback coupling from a bias pot position (same as CoupledBjtStage).
+    ///
+    /// Updates `feedback_scale` and `veb_bias_offset` which are applied during
+    /// `set_control_voltage()` on BJT NL devices.
+    pub fn set_feedback_from_pot(&mut self, position: f64, max_pot_r: f64) {
+        let pot_r = position * max_pot_r;
+        let emitter_r = 470.0;
+        self.feedback_scale = emitter_r / (emitter_r + pot_r);
+        self.veb_bias_offset = self.feedback_scale * 0.1;
     }
 
     /// Recompute the scattering matrix from stored MNA data after a pot change.

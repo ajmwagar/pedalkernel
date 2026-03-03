@@ -995,6 +995,7 @@ pub(super) fn build_coupled_bjt_stages(
                 compensations,
                 feedback_state: 0.0,
                 feedback_scale: 0.1,
+                veb_bias_offset: 0.0,
                 signal_flow_distance: sfd,
             });
         } else {
@@ -1845,6 +1846,8 @@ fn try_build_multi_nl_stage(
         injection_node_id,
         output_node_id,
         recompute_pending: false,
+        veb_bias_offset: 0.0,
+        feedback_scale: 0.1,
     })
 }
 

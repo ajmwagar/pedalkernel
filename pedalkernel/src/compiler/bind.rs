@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::dsl::*;
 use crate::elements::*;
 
+use super::bjt_bias_analysis::BjtBiasPotInfo;
 use super::compiled::*;
 use super::graph::CircuitGraph;
 use super::helpers::has_pot;
@@ -24,6 +25,7 @@ pub(super) fn build_controls(
     coupled_bjt_stages: &[CoupledBjtStage],
     multi_nl_stages: &[MultiNlStage],
     opamp_pot_map: &HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)>,
+    bjt_bias_pot_map: &HashMap<String, BjtBiasPotInfo>,
     lfo_ids: &[String],
     delay_id_to_idx: &HashMap<String, usize>,
     delay_lines_empty: bool,
@@ -78,6 +80,12 @@ pub(super) fn build_controls(
                 max_pot_r,
                 parallel_fixed_r,
                 is_inverting,
+            }
+        } else if let Some(info) = bjt_bias_pot_map.get(&ctrl.component) {
+            // ── Step 2.5: BJT bias pot (emitter-bridging feedback pot) ───
+            ControlTarget::BjtBias {
+                max_pot_r: info.max_pot_r,
+                taper: info.taper,
             }
         } else {
             // ── Step 3: search stage trees for the physical pot ──────────

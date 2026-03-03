@@ -8,6 +8,7 @@
 //! 5. Chaining everything into a cascaded `PedalProcessor`
 
 mod bind;
+mod bjt_bias_analysis;
 mod build;
 mod classify;
 mod compile;
