@@ -78,6 +78,33 @@ pub(crate) trait NlDeviceGroupIv {
 }
 
 // ---------------------------------------------------------------------------
+// Single-port group adapter (wraps NlDeviceIv as 1-port NlDeviceGroupIv)
+// ---------------------------------------------------------------------------
+
+/// Adapts a single-port `NlDeviceIv` into a 1-port `NlDeviceGroupIv`.
+#[allow(dead_code)]
+///
+/// This allows mixing independent NL devices (diodes, pentodes) with
+/// cross-coupled device groups (triodes) in the same grouped NR solver.
+/// The adapter wraps the single-port I-V into the grouped interface with
+/// a trivial 1×1 Jacobian.
+pub(crate) struct SinglePortGroupAdapter<'a>(pub &'a dyn NlDeviceIv);
+
+impl NlDeviceGroupIv for SinglePortGroupAdapter<'_> {
+    fn n_ports(&self) -> usize { 1 }
+
+    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+        let (i, di) = self.0.iv(v[0]);
+        currents[0] = i;
+        jacobian[0] = di;
+    }
+
+    fn v_clamp_port(&self, _port: usize) -> (f64, f64) {
+        self.0.v_clamp()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Small linear system solver
 // ---------------------------------------------------------------------------
 

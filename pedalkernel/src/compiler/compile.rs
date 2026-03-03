@@ -291,6 +291,11 @@ pub struct CompileOptions {
     pub oversampling: OversamplingFactor,
     pub tolerance: ToleranceEngine,
     pub thermal: bool,
+    /// When true, collapse ALL nonlinear elements into a single MultiNlStage
+    /// instead of planning them as individual stages. Used for sidechain
+    /// sub-circuits where the entire NL network should be solved as one
+    /// multi-junction system (shared MNA + scattering matrix).
+    pub collapse_nl: bool,
 }
 
 impl Default for CompileOptions {
@@ -299,6 +304,7 @@ impl Default for CompileOptions {
             oversampling: OversamplingFactor::X1,
             tolerance: ToleranceEngine::ideal(),
             thermal: false,
+            collapse_nl: false,
         }
     }
 }
@@ -329,6 +335,7 @@ pub fn compile_pedal_with_options(
     let oversampling = options.oversampling;
     let tolerance = options.tolerance;
     let enable_thermal = options.thermal;
+    let collapse_nl = options.collapse_nl;
 
     // ══ Pass 0: Graph construction ════════════════════════════════════
     let mut graph = CircuitGraph::from_pedal(pedal);
@@ -369,7 +376,7 @@ pub fn compile_pedal_with_options(
 
     // ══ Pass 3: Stage planning ════════════════════════════════════════
     let (stage_plans, push_pull_plans, coupled_bjt_plans, multi_nl_plans, pp_transformer_edges) =
-        super::plan::plan_stages(&classified, &graph, sample_rate);
+        super::plan::plan_stages(&classified, &graph, sample_rate, collapse_nl);
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
     // Build nonlinear WDF stages from plans.

@@ -388,7 +388,14 @@ pub(super) fn build_sidechains(
         eprintln!("[sidechain] sub-def: {} comps, {} nets, {} controls, {} trims",
             sc_def.components.len(), sc_def.nets.len(), sc_def.controls.len(), sc_def.trims.len());
 
-        match super::compile::compile_pedal(&sc_def, sample_rate) {
+        // Compile the sidechain with collapse_nl=true to merge all NL elements
+        // into a single MultiNlStage. This eliminates parallel-path routing issues
+        // and produces a physically accurate multi-junction solve.
+        let sc_options = super::compile::CompileOptions {
+            collapse_nl: true,
+            ..Default::default()
+        };
+        match super::compile::compile_pedal_with_options(&sc_def, sample_rate, sc_options) {
             Ok(compiled) => {
                 eprintln!("[sidechain] compiled OK: {} stages, {} push-pull, {} multi-nl, {} coupled-bjt",
                     compiled.debug_stage_count(), compiled.debug_push_pull_count(),

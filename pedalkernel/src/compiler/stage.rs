@@ -1046,15 +1046,37 @@ impl NlDeviceKind {
     }
 }
 
+/// Implement NlDeviceGroupIv for NlDeviceKind, treating each as a 1-port group.
+/// This allows SinglePort(NlDeviceKind) in NlDeviceGroupKind to delegate
+/// through as_group_iv() in mixed-device collapsed stages.
+impl NlDeviceGroupIv for NlDeviceKind {
+    fn n_ports(&self) -> usize { 1 }
+
+    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+        let (i, di) = self.as_nl_device_iv().iv(v[0]);
+        currents[0] = i;
+        jacobian[0] = di;
+    }
+
+    fn v_clamp_port(&self, _port: usize) -> (f64, f64) {
+        self.as_nl_device_iv().v_clamp()
+    }
+}
+
 /// Device group kind for multi-port NL devices with cross-coupled I-V.
 ///
 /// Each variant wraps a concrete device with multiple coupled ports
-/// (e.g., a 3-port triode with grid and plate ports).
+/// (e.g., a 3-port triode with grid and plate ports), or a single-port
+/// device adapted to the grouped interface for mixed-device solves.
 pub(super) enum NlDeviceGroupKind {
     /// 3-port variable-mu triode (grid-cathode + plate-cathode).
     VariMuThreePort(VariMuThreePort),
     /// 3-port Koren triode (grid-cathode + plate-cathode) for MNA fallback.
     TriodeThreePort(TriodeThreePort),
+    /// Single-port NL device adapted as a 1-port device group.
+    /// Used for mixed-device collapsed stages (e.g., sidechain with
+    /// triodes + pentodes + diodes in one MultiNlStage).
+    SinglePort(NlDeviceKind),
 }
 
 impl NlDeviceGroupKind {
@@ -1062,6 +1084,7 @@ impl NlDeviceGroupKind {
         match self {
             NlDeviceGroupKind::VariMuThreePort(t) => t,
             NlDeviceGroupKind::TriodeThreePort(t) => t,
+            NlDeviceGroupKind::SinglePort(d) => d,
         }
     }
 
@@ -1069,13 +1092,15 @@ impl NlDeviceGroupKind {
         match self {
             NlDeviceGroupKind::VariMuThreePort(_) => "VariMuThreePort",
             NlDeviceGroupKind::TriodeThreePort(_) => "TriodeThreePort",
+            NlDeviceGroupKind::SinglePort(d) => d.debug_name(),
         }
     }
 
-    fn n_ports(&self) -> usize {
+    pub(super) fn n_ports(&self) -> usize {
         match self {
             NlDeviceGroupKind::VariMuThreePort(_) => 2,
             NlDeviceGroupKind::TriodeThreePort(_) => 2,
+            NlDeviceGroupKind::SinglePort(_) => 1,
         }
     }
 }
@@ -1183,6 +1208,27 @@ impl MultiNlStage {
         let n_nl = self.n_nl;
         let n_passive = self.passive_children.len();
         let output_port = self.output_port;
+
+        // Temporary diagnostic: print s_nl_adapted once
+        static MNL_DIAG_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if n_nl >= 10 && !MNL_DIAG_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("[MNL-DIAG] n_nl={} n_passive={} output_port={} comp={}", n_nl, n_passive, output_port, compensation);
+            eprintln!("[MNL-DIAG] s_nl_adapted = {:?}", &self.s_nl_adapted);
+            // Check scattering matrix: does VS port reach output port?
+            let n_total = n_nl + n_passive + 1;
+            let s = &self.adaptor;
+            let mut b_test = vec![0.0; n_total];
+            b_test[n_total - 1] = 1.0; // VS port = 1.0
+            let a_test = s.scatter_all(&b_test);
+            eprintln!("[MNL-DIAG] scatter VS→all: a[out={}]={:.6e}", output_port, a_test[output_port]);
+            eprintln!("[MNL-DIAG] first 5 NL a-values: {:?}", &a_test[..n_nl.min(5)]);
+            // Check NL port resistances
+            eprintln!("[MNL-DIAG] nl_port_resistances = {:?}", &self.nl_port_resistances);
+            // Check recompute data
+            if let Some(ref rc) = self.recompute_data {
+                eprintln!("[MNL-DIAG] recompute port_node_pairs = {:?}", &rc.port_node_pairs);
+            }
+        }
 
         // Set control voltages on each NL device (only for independent devices;
         // grouped devices get their grid voltage from the WDF port).

@@ -929,6 +929,70 @@ fn try_build_multi_nl_stage(
     // Injection node (voltage source input)
     add_node(plan.injection_node);
 
+    // ── Pre-scan for coupled transformers ────────────────────────────
+    // When a transformer's primary edge is in the passive set AND its
+    // secondary nodes appear in other edges, the MNA needs ideal-transformer
+    // coupling stamps (2 voltage sources per transformer). Without this,
+    // the primary and secondary sides are isolated in the MNA.
+    struct CoupledTransformer {
+        comp_idx: usize,
+        primary_edge_idx: usize,
+        sec_node_a: NodeId,
+        sec_node_b: NodeId,
+        turns_ratio: f64,
+    }
+    let mut coupled_transformers: Vec<CoupledTransformer> = Vec::new();
+    {
+        let mut seen_comp: HashSet<usize> = HashSet::new();
+        for &eidx in &plan.passive_edge_indices {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            if let ComponentKind::Transformer(cfg) = &comp.kind {
+                if seen_comp.contains(&e.comp_idx) {
+                    continue;
+                }
+                seen_comp.insert(e.comp_idx);
+                // Find secondary nodes via transformer_info
+                let mut sec_nodes: Vec<(NodeId, bool)> = Vec::new();
+                for (&node, info) in &graph.transformer_info {
+                    if info.comp_idx == e.comp_idx && info.is_secondary {
+                        sec_nodes.push((node, true));
+                    }
+                }
+                // Check if secondary nodes appear in the MNA (via other edges or NL terminals)
+                let sec_in_circuit = sec_nodes.iter().any(|&(sn, _)| {
+                    // Check passive edges (other than this transformer)
+                    plan.passive_edge_indices.iter().any(|&ei| {
+                        let pe = &graph.edges[ei];
+                        ei != eidx && (pe.node_a == sn || pe.node_b == sn)
+                    })
+                    // Also check NL terminals
+                    || plan.nl_terminals.iter().any(|&(p, n)| p == sn || n == sn)
+                });
+                if sec_in_circuit && sec_nodes.len() >= 2 {
+                    // Add secondary nodes to node_set
+                    for &(sn, _) in &sec_nodes {
+                        add_node(sn);
+                    }
+                    coupled_transformers.push(CoupledTransformer {
+                        comp_idx: e.comp_idx,
+                        primary_edge_idx: eidx,
+                        sec_node_a: sec_nodes[0].0,
+                        sec_node_b: sec_nodes[1].0,
+                        turns_ratio: cfg.turns_ratio,
+                    });
+                }
+            }
+        }
+    }
+    let coupled_comp_indices: HashSet<usize> = coupled_transformers.iter()
+        .map(|ct| ct.comp_idx)
+        .collect();
+    let coupled_edge_indices: HashSet<usize> = coupled_transformers.iter()
+        .map(|ct| ct.primary_edge_idx)
+        .collect();
+    let num_vsources = coupled_transformers.len() * 2;
+
     let num_mna_nodes = node_set.len();
     if num_mna_nodes == 0 {
         return None;
@@ -945,12 +1009,75 @@ fn try_build_multi_nl_stage(
         }
     };
 
+    // Debug: print coupled transformer node mappings
+    if !coupled_transformers.is_empty() {
+        eprintln!("[MNA-XFMR] {} coupled transformers, {} vsources, {} MNA nodes",
+            coupled_transformers.len(), num_vsources, num_mna_nodes);
+        for ct in &coupled_transformers {
+            let e = &graph.edges[ct.primary_edge_idx];
+            let pp = node_to_mna(e.node_a);
+            let pn = node_to_mna(e.node_b);
+            let sp = node_to_mna(ct.sec_node_a);
+            let sn = node_to_mna(ct.sec_node_b);
+            eprintln!("[MNA-XFMR] comp={} pri=({},{})→mna({:?},{:?}) sec=({},{})→mna({:?},{:?}) n={}",
+                ct.comp_idx, e.node_a, e.node_b, pp, pn,
+                ct.sec_node_a, ct.sec_node_b, sp, sn, ct.turns_ratio);
+        }
+        let inj_mna = node_to_mna(plan.injection_node);
+        eprintln!("[MNA-XFMR] injection_node={}→mna({:?})", plan.injection_node, inj_mna);
+    }
+
     // ── Step 2: Classify passive edges ──────────────────────────────
     // Resistors → stamp directly into MNA (no WDF port needed)
     // Capacitors, inductors, pots → WDF port + DynNode child
     let mut reactive_edges: Vec<(usize, DynNode)> = Vec::new(); // (edge_idx, dyn_node)
 
-    let mut mna = MnaSystem::new(num_mna_nodes, 0);
+    let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
+
+    // Stamp coupled transformer constraints using correct ideal transformer
+    // formulation in augmented MNA:
+    //   Voltage constraint: V(p+) - V(p-) - n*(V(s+) - V(s-)) = 0
+    //   Current constraint: n*I_p + I_s = 0
+    //   KCL: I_p enters p+/exits p-, I_s enters s+/exits s-
+    for (ti, ct) in coupled_transformers.iter().enumerate() {
+        let e = &graph.edges[ct.primary_edge_idx];
+        let p_pos = node_to_mna(e.node_a);
+        let p_neg = node_to_mna(e.node_b);
+        let s_pos = node_to_mna(ct.sec_node_a);
+        let s_neg = node_to_mna(ct.sec_node_b);
+        let vsrc_p = ti * 2;     // primary branch current slot
+        let vsrc_s = ti * 2 + 1; // secondary branch current slot
+        let n = ct.turns_ratio;
+
+        // B matrix: KCL stamps for branch currents
+        // I_p enters at p+, exits at p-
+        mna.stamp_voltage_source(p_pos, p_neg, vsrc_p);
+        // I_s enters at s+, exits at s-
+        mna.stamp_voltage_source(s_pos, s_neg, vsrc_s);
+
+        // C matrix row vsrc_p (voltage constraint): V(p+) - V(p-) - n*(V(s+) - V(s-)) = 0
+        // stamp_voltage_source already set C[vsrc_p][p+]=1, C[vsrc_p][p-]=-1
+        // Now add the secondary voltage coupling: -n at s+, +n at s-
+        if let Some(sp) = s_pos {
+            mna.c_matrix[vsrc_p * num_mna_nodes + sp] += -n;
+        }
+        if let Some(sn) = s_neg {
+            mna.c_matrix[vsrc_p * num_mna_nodes + sn] += n;
+        }
+
+        // C matrix row vsrc_s: current constraint n*I_p + I_s = 0
+        // stamp_voltage_source set C[vsrc_s][s+]=1, C[vsrc_s][s-]=-1 — clear these
+        if let Some(sp) = s_pos {
+            mna.c_matrix[vsrc_s * num_mna_nodes + sp] = 0.0;
+        }
+        if let Some(sn) = s_neg {
+            mna.c_matrix[vsrc_s * num_mna_nodes + sn] = 0.0;
+        }
+
+        // D matrix row vsrc_s: n*I_p + I_s = 0
+        mna.d_matrix[vsrc_s * num_vsources + vsrc_p] = n;
+        mna.d_matrix[vsrc_s * num_vsources + vsrc_s] = 1.0;
+    }
 
     for &eidx in &plan.passive_edge_indices {
         let e = &graph.edges[eidx];
@@ -1034,22 +1161,30 @@ fn try_build_multi_nl_stage(
                 }
             }
             ComponentKind::Transformer(cfg) => {
-                // Transformer primary acts as magnetizing inductance.
-                // The secondary load (e.g., bridge rectifier) is a separate stage;
-                // from the primary side we only see the magnetizing inductance.
-                let l = cfg.primary_inductance;
-                if l > 0.0 && l.is_finite() {
-                    let rp = 2.0 * sample_rate * l;
-                    let dyn_node = DynNode::Inductor {
-                        inductance: l,
-                        rp,
-                        state: 0.0,
-                    };
-                    reactive_edges.push((eidx, dyn_node));
-                }
-                // Also stamp primary DCR if non-zero
-                if cfg.primary_dcr > 0.0 {
-                    mna.stamp_resistor(n1, n2, cfg.primary_dcr);
+                if coupled_edge_indices.contains(&eidx) {
+                    // Coupled transformer: primary↔secondary coupling handled
+                    // by voltage source constraints in the augmented MNA.
+                    // Do NOT create an inductor port (conflicts with VS constraint).
+                    // Only stamp DCR as a resistor.
+                    if cfg.primary_dcr > 0.0 {
+                        mna.stamp_resistor(n1, n2, cfg.primary_dcr);
+                    }
+                } else {
+                    // Uncoupled transformer: primary acts as magnetizing inductance.
+                    // The secondary load is in a separate stage.
+                    let l = cfg.primary_inductance;
+                    if l > 0.0 && l.is_finite() {
+                        let rp = 2.0 * sample_rate * l;
+                        let dyn_node = DynNode::Inductor {
+                            inductance: l,
+                            rp,
+                            state: 0.0,
+                        };
+                        reactive_edges.push((eidx, dyn_node));
+                    }
+                    if cfg.primary_dcr > 0.0 {
+                        mna.stamp_resistor(n1, n2, cfg.primary_dcr);
+                    }
                 }
             }
             _ => {
@@ -1131,6 +1266,55 @@ fn try_build_multi_nl_stage(
     port_node_pairs.push((injection_mna, None));
 
     // ── Step 4: Derive scattering matrix ────────────────────────────
+    // Debug: check MNA connectivity for injection node
+    if n_nl >= 10 {
+        if let Some(inj_idx) = injection_mna {
+            // Print G matrix row for injection node
+            let mut g_connections = Vec::new();
+            for j in 0..num_mna_nodes {
+                let g = mna.g_matrix[inj_idx * num_mna_nodes + j];
+                if g.abs() > 1e-15 {
+                    g_connections.push(format!("G[{},{}]={:.4e}", inj_idx, j, g));
+                }
+            }
+            eprintln!("[MNA-DIAG] injection MNA={} G-row connections: {:?}", inj_idx, g_connections);
+            // Print B matrix row for injection node (vsource currents)
+            for vs in 0..num_vsources {
+                let b = mna.b_matrix[inj_idx * num_vsources + vs];
+                if b.abs() > 1e-15 {
+                    eprintln!("[MNA-DIAG] B[inj={},vs={}]={:.4e}", inj_idx, vs, b);
+                }
+            }
+            // Print NL port 0 G connections
+            if let Some(nl0_pos) = ports[0].node_pos {
+                let mut nl_connections = Vec::new();
+                for j in 0..num_mna_nodes {
+                    let g = mna.g_matrix[nl0_pos * num_mna_nodes + j];
+                    if g.abs() > 1e-15 {
+                        nl_connections.push(format!("G[{},{}]={:.4e}", nl0_pos, j, g));
+                    }
+                }
+                eprintln!("[MNA-DIAG] NL_port0_pos MNA={} G-row: {:?}", nl0_pos, nl_connections);
+            }
+            // Print transformer secondary node G connections
+            for ct in &coupled_transformers {
+                let sa = node_to_mna(ct.sec_node_a);
+                let sb = node_to_mna(ct.sec_node_b);
+                for mna_idx in [sa, sb].iter().flatten() {
+                    let mut sec_conns = Vec::new();
+                    for j in 0..num_mna_nodes {
+                        let g = mna.g_matrix[*mna_idx * num_mna_nodes + j];
+                        if g.abs() > 1e-15 {
+                            sec_conns.push(format!("G[{},{}]={:.4e}", mna_idx, j, g));
+                        }
+                    }
+                    eprintln!("[MNA-DIAG] xfmr_sec MNA={} G-row: {:?}", mna_idx, sec_conns);
+                }
+            }
+            // Print node_set mapping for first 40 entries
+            eprintln!("[MNA-DIAG] node_set (first 40): {:?}", &node_set[..node_set.len().min(40)]);
+        }
+    }
     let scattering = mna.derive_scattering_matrix_general(&ports);
 
     // Validate scattering matrix: check for NaN/inf
@@ -1213,6 +1397,41 @@ fn try_build_multi_nl_stage(
         } else {
             unreachable!()
         }
+    } else if plan.nl_element_indices.len() > 1 && has_mixed_device_types(plan, classified) {
+        // Mixed-device collapsed plan (e.g., sidechain with triodes + pentodes + diodes).
+        // Create device groups for each element:
+        // - Triodes with grid_node → VariMuThreePort or TriodeThreePort (2 ports)
+        // - Everything else → SinglePort wrapper (1 port)
+        let mut groups: Vec<NlDeviceGroupKind> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut offset = 0usize;
+
+        for &elem_idx in &plan.nl_element_indices {
+            let elem = &classified.nonlinear_elements[elem_idx];
+            offsets.push(offset);
+
+            match &elem.kind {
+                NonlinearKind::Triode { model_name, parallel_count, is_vari_mu: true, grid_node: Some(_), .. } => {
+                    let model = vari_mu_model(model_name);
+                    let tp = VariMuThreePort::new(model).with_parallel_count(*parallel_count);
+                    groups.push(NlDeviceGroupKind::VariMuThreePort(tp));
+                    offset += 2;
+                }
+                NonlinearKind::Triode { model_name, parallel_count, is_vari_mu: false, grid_node: Some(_), .. } => {
+                    let model = TriodeModel::by_name(model_name);
+                    let tp = TriodeThreePort::new(model).with_parallel_count(*parallel_count);
+                    groups.push(NlDeviceGroupKind::TriodeThreePort(tp));
+                    offset += 2;
+                }
+                _ => {
+                    let device = create_nl_device(&elem.kind)?;
+                    groups.push(NlDeviceGroupKind::SinglePort(device));
+                    offset += 1;
+                }
+            }
+        }
+
+        (Vec::new(), Some(MultiNlDeviceGroups { groups, offsets }))
     } else {
         // Standard case: one NlDeviceKind per element.
         let mut devices = Vec::with_capacity(n_nl);
@@ -1344,8 +1563,20 @@ fn try_build_multi_nl_stage(
         // NL port output: use positive terminal (plate/collector)
         plan.nl_terminals[output_port].0
     } else {
-        // Passive port output (fallback): use injection node
-        plan.injection_node
+        // Passive port output (fallback): use the reactive edge's node.
+        // The output_port indexes into [NL..., passive...], so the passive
+        // index is output_port - n_nl. Use the edge endpoint that is NOT
+        // the injection node to avoid a self-loop.
+        let passive_idx = output_port - n_nl;
+        if passive_idx < reactive_edge_indices.len() {
+            let e = &graph.edges[reactive_edge_indices[passive_idx]];
+            if e.node_a != plan.injection_node { e.node_a } else { e.node_b }
+        } else if !plan.nl_terminals.is_empty() {
+            // Last resort: use the last NL terminal's positive node
+            plan.nl_terminals.last().unwrap().0
+        } else {
+            plan.injection_node
+        }
     };
 
     Some(MultiNlStage {
@@ -1369,6 +1600,28 @@ fn try_build_multi_nl_stage(
         output_node_id,
         recompute_pending: false,
     })
+}
+
+/// Check if a multi-element plan has mixed device types that require
+/// the grouped solver (some elements have cross-coupled ports, others don't).
+fn has_mixed_device_types(
+    plan: &MultiNlPlan,
+    classified: &ClassifiedCircuit,
+) -> bool {
+    let mut has_multi_port = false;
+    let mut has_single_port = false;
+    for &elem_idx in &plan.nl_element_indices {
+        let elem = &classified.nonlinear_elements[elem_idx];
+        match &elem.kind {
+            NonlinearKind::Triode { grid_node: Some(_), .. } => {
+                has_multi_port = true;
+            }
+            _ => {
+                has_single_port = true;
+            }
+        }
+    }
+    has_multi_port && has_single_port
 }
 
 /// Create an NlDeviceKind from a NonlinearKind classification.

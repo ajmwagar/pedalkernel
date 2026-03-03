@@ -588,6 +588,16 @@ impl CompiledPedal {
                     match group {
                         NlDeviceGroupKind::VariMuThreePort(t) => t.set_v_max(tube_v_max),
                         NlDeviceGroupKind::TriodeThreePort(t) => t.set_v_max(tube_v_max),
+                        NlDeviceGroupKind::SinglePort(d) => {
+                            match d {
+                                NlDeviceKind::Triode(t) => t.set_v_max(tube_v_max),
+                                NlDeviceKind::VariMu(t) => t.set_v_max(tube_v_max),
+                                NlDeviceKind::Pentode(p) => p.set_v_max(tube_v_max),
+                                NlDeviceKind::BjtNpn(b) => b.set_v_max(bjt_v_max),
+                                NlDeviceKind::BjtPnp(b) => b.set_v_max(bjt_v_max),
+                                NlDeviceKind::Diode(_) => {}
+                            }
+                        }
                     }
                 }
             }
@@ -871,19 +881,24 @@ impl CompiledPedal {
                 }
                 ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
                     if let Some(smoother) = self.pot_smoothers.iter_mut().find(|s| s.control_idx == i) {
+                        eprintln!("[DEBUG] set_control '{}' = {} -> PotInMultiNlStage({}, {}) via SMOOTHER", label, value, stage_idx, _child_idx);
                         smoother.set_target(value);
                     } else {
                         let stage_idx = *stage_idx;
                         let comp_id = self.controls[i].component_id.clone();
                         if let Some(stage) = self.multi_nl_stages.get_mut(stage_idx) {
-                            stage.set_pot(&comp_id, value);
+                            let found = stage.set_pot(&comp_id, value);
+                            eprintln!("[DEBUG] set_control '{}' = {} -> PotInMultiNlStage({}, {}) DIRECT, comp='{}', found={}", label, value, stage_idx, _child_idx, comp_id, found);
                         }
                     }
                 }
                 ControlTarget::SidechainControl(sc_idx) => {
                     let sc_idx = *sc_idx;
+                    eprintln!("[DEBUG] set_control '{}' = {} -> SidechainControl({}), have {} sidechains", label, value, sc_idx, self.sidechains.len());
                     if let Some(sc) = self.sidechains.get_mut(sc_idx) {
                         sc.set_control(label, value);
+                    } else {
+                        eprintln!("[DEBUG] sidechain {} not found!", sc_idx);
                     }
                 }
                 ControlTarget::LfoRate(lfo_idx) => {
@@ -1417,23 +1432,54 @@ impl PedalProcessor for CompiledPedal {
         // Node routing: reuse the pre-allocated buffer to avoid allocation.
         self.node_signals.clear();
 
+        // Level-based signal snapshot: parallel stages at the same
+        // signal_flow_distance all read the same input (level_signal),
+        // not the output of a sibling at the same distance. When
+        // distance changes, snapshot the current serial signal.
+        let mut prev_distance: Option<usize> = None;
+        let mut level_signal = signal;
+
         for sr in &self.stage_order {
             match sr {
                 StageRef::Wdf(i) => {
                     let stage = &mut self.stages[*i];
+
+                    // Update level snapshot when distance changes.
+                    let this_dist = stage.signal_flow_distance;
+                    if prev_distance.map_or(true, |d| d != this_dist) {
+                        level_signal = signal;
+                        prev_distance = Some(this_dist);
+                    }
+
                     // Re-amplify only after the *previous* stage clipped.
                     if prev_was_clipping {
                         signal *= self.pre_gain;
                     }
                     prev_was_clipping = stage.root.is_clipping_stage();
 
+                    // Node-based routing: look up injection node in previous outputs.
+                    // Falls back to level_signal so parallel siblings read the same input.
+                    let wdf_input = if stage.injection_node_id != usize::MAX {
+                        self.node_signals.iter().rev()
+                            .find(|(nid, _)| *nid == stage.injection_node_id)
+                            .map(|(_, v)| *v)
+                            .unwrap_or(level_signal)
+                    } else {
+                        signal
+                    };
+
                     if stage.has_paired_opamp() {
-                        stage.set_paired_opamp_vp(signal);
+                        stage.set_paired_opamp_vp(wdf_input);
                     }
 
                     #[cfg(feature = "debug-trace")]
-                    let pre_stage = signal;
-                    signal = stage.process(signal);
+                    let pre_stage = wdf_input;
+                    signal = stage.process(wdf_input);
+
+                    // Write output to node_signals for downstream routing.
+                    if stage.output_node_id != usize::MAX {
+                        self.node_signals.push((stage.output_node_id, signal));
+                    }
 
                     #[cfg(feature = "debug-trace")]
                     if trace_on {
@@ -1456,15 +1502,23 @@ impl PedalProcessor for CompiledPedal {
                 StageRef::MultiNl(i) => {
                     prev_was_clipping = false;
 
+                    // Update level snapshot when distance changes.
+                    let mnl = &mut self.multi_nl_stages[*i];
+                    let this_dist = mnl.signal_flow_distance;
+                    if prev_distance.map_or(true, |d| d != this_dist) {
+                        level_signal = signal;
+                        prev_distance = Some(this_dist);
+                    }
+
                     // Node-based routing: look up the stage's injection node
                     // in previously written outputs. If found, use that signal
-                    // instead of the serial chain value. This enables parallel
-                    // channels to each receive their correct predecessor's output.
-                    let mnl = &mut self.multi_nl_stages[*i];
+                    // instead of the serial chain value. Falls back to
+                    // level_signal so parallel siblings at the same distance
+                    // read the same input, not each other's output.
                     let mnl_input = self.node_signals.iter().rev()
                         .find(|(nid, _)| *nid == mnl.injection_node_id)
                         .map(|(_, v)| *v)
-                        .unwrap_or(signal);
+                        .unwrap_or(level_signal);
 
                     #[cfg(feature = "debug-trace")]
                     let pre = mnl_input;
@@ -1495,6 +1549,11 @@ impl PedalProcessor for CompiledPedal {
                 }
                 StageRef::CoupledBjt(i) => {
                     prev_was_clipping = false;
+                    let this_dist = self.coupled_bjt_stages[*i].signal_flow_distance;
+                    if prev_distance.map_or(true, |d| d != this_dist) {
+                        level_signal = signal;
+                        prev_distance = Some(this_dist);
+                    }
                     signal = self.coupled_bjt_stages[*i].process(signal);
                 }
             }
@@ -1552,6 +1611,14 @@ impl PedalProcessor for CompiledPedal {
             #[cfg(feature = "debug-trace")]
             if trace_on {
                 eprintln!("  [SC {i}] tap={signal:.6e} cv_out={cv:.6e} cv_prev={:.6e}", sc.cv_delayed);
+            }
+            // Temporary debug: print CV every 1000 samples
+            if self.multi_nl_recompute_counter == 0 && i == 0 {
+                static DEBUG_SC_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let c = DEBUG_SC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if c < 25 || c % 1000 == 0 {
+                    eprintln!("[DEBUG-SC] sample={} tap={:.6e} cv={:.6e} cv_delayed={:.6e}", c, signal, cv, sc.cv_delayed);
+                }
             }
             let _ = i;
             sc.cv_delayed = cv;
