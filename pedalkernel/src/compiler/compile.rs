@@ -563,13 +563,9 @@ pub fn compile_pedal_with_options(
         .filter_map(|c| if matches!(c.kind, ComponentKind::Lfo(..)) { Some(c.id.clone()) } else { None })
         .collect();
 
-    // Collect sidechain component IDs so controls in the sidechain are NOT
-    // bound to PreGain fallback. Instead they fall through to sidechain forwarding.
-    let sidechain_comp_ids: HashSet<String> = classified
-        .sidechain_edge_set
-        .iter()
-        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
-        .collect();
+    // Sidechain construction — must happen before build_controls so we have
+    // the component → sidechain index mapping for control routing.
+    let (sidechains, sidechain_comp_ids) = super::bind::build_sidechains(pedal, &graph, sample_rate);
 
     let controls = super::bind::build_controls(
         pedal,
@@ -615,9 +611,6 @@ pub fn compile_pedal_with_options(
                 s.rectifier, sample_rate,
             )
         });
-
-    // Sidechain construction.
-    let sidechains = super::bind::build_sidechains(pedal, &graph, sample_rate);
 
     let base_grid_bias = push_pull_stages.first().map_or(-2.0, |pp| pp.grid_bias);
 

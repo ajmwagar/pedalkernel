@@ -27,7 +27,7 @@ pub(super) fn build_controls(
     lfo_ids: &[String],
     delay_id_to_idx: &HashMap<String, usize>,
     delay_lines_empty: bool,
-    sidechain_comp_ids: &HashSet<String>,
+    sidechain_comp_ids: &HashMap<String, usize>,
 ) -> Vec<ControlBinding> {
     let mut controls = Vec::new();
 
@@ -151,15 +151,14 @@ pub(super) fn build_controls(
                         // Pots may be decomposed into __aw/__wb variants during
                         // graph construction (Baxandall decomposition), so check both
                         // the original name and its decomposed forms.
-                        let in_sidechain = sidechain_comp_ids.contains(&ctrl.component)
-                            || sidechain_comp_ids.contains(&format!("{}__aw", ctrl.component))
-                            || sidechain_comp_ids.contains(&format!("{}__wb", ctrl.component));
-                        if in_sidechain {
-                            // Don't bind to PreGain — let it fall through to
-                            // sidechain forwarding in set_control().
-                            continue;
+                        let sc_idx = sidechain_comp_ids.get(&ctrl.component)
+                            .or_else(|| sidechain_comp_ids.get(&format!("{}__aw", ctrl.component)))
+                            .or_else(|| sidechain_comp_ids.get(&format!("{}__wb", ctrl.component)));
+                        if let Some(&idx) = sc_idx {
+                            ControlTarget::SidechainControl(idx)
+                        } else {
+                            ControlTarget::PreGain
                         }
-                        ControlTarget::PreGain
                     }
                 }
             }
@@ -326,8 +325,9 @@ pub(super) fn build_sidechains(
     pedal: &PedalDef,
     graph: &CircuitGraph,
     sample_rate: f64,
-) -> Vec<SidechainProcessor> {
+) -> (Vec<SidechainProcessor>, HashMap<String, usize>) {
     let mut processors = Vec::new();
+    let mut comp_to_sc: HashMap<String, usize> = HashMap::new();
 
     eprintln!("[sidechain] {} sidechain definitions", pedal.sidechains.len());
     for sc_info in &pedal.sidechains {
@@ -345,10 +345,21 @@ pub(super) fn build_sidechains(
             None => { eprintln!("[sidechain] partition returned None for tap={} cv={}", sc_info.tap_node, sc_info.cv_node); continue; },
         };
 
+        let sc_idx = processors.len(); // Index this sidechain will have if it compiles OK
         let mut sc_component_ids: HashSet<String> = HashSet::new();
         for &edge_idx in &partition.sidechain_edge_indices {
             let comp = &graph.components[graph.edges[edge_idx].comp_idx];
-            sc_component_ids.insert(comp.id.clone());
+            let id = comp.id.clone();
+            sc_component_ids.insert(id.clone());
+            comp_to_sc.insert(id.clone(), sc_idx);
+            // Also insert the base pot name for Baxandall-decomposed pots.
+            // Graph construction decomposes pots into __aw/__wb edges, but the
+            // PedalDef still uses the original name. Both must be present so
+            // extract_sidechain_def can match components AND nets.
+            if let Some(base) = id.strip_suffix("__aw").or_else(|| id.strip_suffix("__wb")) {
+                sc_component_ids.insert(base.to_string());
+                comp_to_sc.insert(base.to_string(), sc_idx);
+            }
         }
 
         eprintln!("[sidechain] tap={} cv={}", sc_info.tap_node, sc_info.cv_node);
@@ -384,7 +395,7 @@ pub(super) fn build_sidechains(
         }
     }
 
-    processors
+    (processors, comp_to_sc)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -593,10 +604,18 @@ fn extract_sidechain_def(
     tap_node: &str,
     cv_node: &str,
 ) -> PedalDef {
+    // Match components whose ID is in the sidechain, OR whose Baxandall-
+    // decomposed variants (__aw/__wb) are. Graph construction decomposes
+    // pots into __aw/__wb edges, so component_ids contains decomposed names
+    // while pedal.components has the original pot name.
     let components: Vec<ComponentDef> = pedal
         .components
         .iter()
-        .filter(|c| component_ids.contains(&c.id))
+        .filter(|c| {
+            component_ids.contains(&c.id)
+                || component_ids.contains(&format!("{}__aw", c.id))
+                || component_ids.contains(&format!("{}__wb", c.id))
+        })
         .cloned()
         .collect();
 

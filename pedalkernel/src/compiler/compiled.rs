@@ -9,7 +9,7 @@ use crate::PedalProcessor;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::stage::{CoupledBjtStage, MultiNlStage, PushPullStage, RootKind, SidechainProcessor, WdfStage};
+use super::stage::{CoupledBjtStage, MultiNlStage, NlDeviceKind, PushPullStage, RootKind, SidechainProcessor, WdfStage};
 
 /// Reference to a stage by type and index, for topological ordering.
 #[derive(Clone, Copy)]
@@ -57,6 +57,10 @@ pub(super) enum ControlTarget {
     /// Modify a pot inside a multi-NL stage (R-type adaptor approach).
     /// (multi_nl_stage_idx, passive_child_idx)
     PotInMultiNlStage(usize, usize),
+    /// Forward a control change to a sidechain sub-circuit.
+    /// The sidechain's own CompiledPedal handles the pot lookup and
+    /// scattering matrix recomputation internally.
+    SidechainControl(usize),
     /// Modify an LFO's rate (index into lfos vector).
     LfoRate(usize),
     /// Modify an LFO's depth/amplitude (index into lfos vector).
@@ -556,6 +560,20 @@ impl CompiledPedal {
             pp.push_root.set_v_max(tube_v_max);
             pp.pull_root.set_v_max(tube_v_max);
         }
+
+        // Propagate v_max to multi-NL stage NL devices
+        for stage in &mut self.multi_nl_stages {
+            for device in &mut stage.nl_devices {
+                match device {
+                    NlDeviceKind::Triode(t) => t.set_v_max(tube_v_max),
+                    NlDeviceKind::Pentode(p) => p.set_v_max(tube_v_max),
+                    NlDeviceKind::VariMu(t) => t.set_v_max(tube_v_max),
+                    NlDeviceKind::BjtNpn(b) => b.set_v_max(bjt_v_max),
+                    NlDeviceKind::BjtPnp(b) => b.set_v_max(bjt_v_max),
+                    NlDeviceKind::Diode(_) => {}
+                }
+            }
+        }
     }
 
     /// Get the tolerance seed for this pedal unit (for diagnostics/UI).
@@ -842,6 +860,12 @@ impl CompiledPedal {
                         if let Some(stage) = self.multi_nl_stages.get_mut(stage_idx) {
                             stage.set_pot(&comp_id, value);
                         }
+                    }
+                }
+                ControlTarget::SidechainControl(sc_idx) => {
+                    let sc_idx = *sc_idx;
+                    if let Some(sc) = self.sidechains.get_mut(sc_idx) {
+                        sc.set_control(label, value);
                     }
                 }
                 ControlTarget::LfoRate(lfo_idx) => {

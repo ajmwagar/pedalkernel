@@ -467,6 +467,13 @@ fn build_triode_mna_fallback(
 ) -> Option<MultiNlStage> {
     let (plate_node, cathode_node) = (elem.junction_nodes[0], elem.junction_nodes[1]);
 
+    // Extract grid_node if this is a triode (pentodes don't expose grid).
+    let grid_node = if let NonlinearKind::Triode { grid_node: Some(gn), .. } = &elem.kind {
+        Some(*gn)
+    } else {
+        None
+    };
+
     // Collect passives directly adjacent to plate and cathode junctions,
     // plus supply-adjacent edges. This is the "core" passive set for this
     // tube — no output_passives from other stages.
@@ -518,6 +525,31 @@ fn build_triode_mna_fallback(
         }
     }
 
+    // Grid passives — BFS from the grid node to collect the full grid-side
+    // passive network (bias resistors, threshold pots, input transformers, etc.).
+    // Without these, the grid is isolated in the scattering matrix and the
+    // triode produces zero output when supply nodes are properly grounded.
+    // 1-hop collection is insufficient: pots like AC_Threshold are multiple hops
+    // away through bias resistors (grid → R_bias → node → DC_Threshold → node → AC_Threshold).
+    if let Some(gn) = grid_node {
+        if gn != graph.gnd_node {
+            let empty_pp = std::collections::HashSet::new();
+            let grid_edges = graph.bfs_passive_edges(
+                gn,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true,   // include supply-adjacent
+                false,  // don't skip out_node
+                &empty_pp,
+            );
+            for idx in grid_edges {
+                if !passive_edges.contains(&idx) {
+                    passive_edges.push(idx);
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "debug-trace")]
     {
         let kind = match &elem.kind {
@@ -525,7 +557,7 @@ fn build_triode_mna_fallback(
             NonlinearKind::Triode { .. } => "Triode",
             _ => "Other",
         };
-        eprintln!("[MNA-fallback] {kind} plate={plate_node} cathode={cathode_node} passive_edges={passive_edges:?}");
+        eprintln!("[MNA-fallback] {kind} plate={plate_node} cathode={cathode_node} grid={grid_node:?} passive_edges={passive_edges:?}");
         for &eidx in &passive_edges {
             let e = &graph.edges[eidx];
             let comp = &graph.components[e.comp_idx];
@@ -537,11 +569,39 @@ fn build_triode_mna_fallback(
         return None;
     }
 
+    // Recalculate injection_node from ALL passive edge endpoints (plate +
+    // cathode + grid), preferring nodes closest to input. Exclude the tube's
+    // own junction nodes (they are NL device terminals, not injection points).
+    let mut injection_node = plan.injection_node;
+    let mut best_dist = classified.dist_from_in.get(&injection_node).copied().unwrap_or(usize::MAX);
+    for &eidx in &passive_edges {
+        let e = &graph.edges[eidx];
+        for candidate in [e.node_a, e.node_b] {
+            if candidate == plate_node || candidate == cathode_node {
+                continue;
+            }
+            if let Some(gn) = grid_node {
+                if candidate == gn { continue; }
+            }
+            if candidate == graph.gnd_node || candidate == graph.vcc_node
+                || graph.supply_nodes.contains(&candidate)
+            {
+                continue;
+            }
+            if let Some(&d) = classified.dist_from_in.get(&candidate) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = candidate;
+                }
+            }
+        }
+    }
+
     let multi_nl_plan = MultiNlPlan {
         nl_element_indices: vec![plan.element_idx],
         output_element_idx: plan.element_idx,
         passive_edge_indices: passive_edges,
-        injection_node: plan.injection_node,
+        injection_node,
         nl_terminals: vec![(plate_node, cathode_node)],
         compensation: plan.compensation,
         output_node: None,
@@ -821,10 +881,20 @@ fn try_build_multi_nl_stage(
     }
 
     // ── Step 1: Collect unique circuit nodes and map to MNA indices ────
-    // Ground is excluded from MNA (implicit reference).
+    // Ground and supply nodes are excluded from MNA (implicit AC ground).
+    // Supply nodes (VCC, B+, bias rails) are zero-impedance voltage sources,
+    // so they are AC ground — same treatment as gnd_node. This ensures plate
+    // load resistors (plate → VCC) stamp as plate → ground, properly loading
+    // the tube's NL port.
     let mut node_set: Vec<NodeId> = Vec::new();
     let mut add_node = |node: NodeId| {
-        if node != graph.gnd_node && !node_set.contains(&node) {
+        if node == graph.gnd_node
+            || node == graph.vcc_node
+            || graph.supply_nodes.contains(&node)
+        {
+            return;
+        }
+        if !node_set.contains(&node) {
             node_set.push(node);
         }
     };
@@ -851,8 +921,11 @@ fn try_build_multi_nl_stage(
     }
 
     let node_to_mna = |node: NodeId| -> Option<usize> {
-        if node == graph.gnd_node {
-            None
+        if node == graph.gnd_node
+            || node == graph.vcc_node
+            || graph.supply_nodes.contains(&node)
+        {
+            None // AC ground reference
         } else {
             node_set.iter().position(|&n| n == node)
         }
