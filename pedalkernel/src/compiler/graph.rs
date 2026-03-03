@@ -788,6 +788,29 @@ impl CircuitGraph {
             });
         }
 
+        // Alias .in↔.input and .out↔.output for component types that use
+        // these pins, so pedal authors can use either spelling interchangeably.
+        for comp in &pedal.components {
+            let aliases: &[(&str, &str)] = match &comp.kind {
+                ComponentKind::OpAmp(_) => &[("in", "input"), ("out", "output")],
+                ComponentKind::EnvelopeFollower(..) => &[("in", "input"), ("out", "output")],
+                ComponentKind::Bbd(_) => &[("in", "input"), ("out", "output")],
+                ComponentKind::DelayLine(..) => &[("in", "input"), ("out", "output")],
+                ComponentKind::Tap(..) => &[("out", "output")],
+                ComponentKind::Lfo(..) => &[("out", "output")],
+                ComponentKind::Vco(_) => &[("out", "output")],
+                ComponentKind::Vcf(_) => &[("in", "input"), ("out", "output")],
+                ComponentKind::Vca(_) => &[("in", "input"), ("out", "output")],
+                ComponentKind::Comparator(_) => &[("out", "output")],
+                _ => continue,
+            };
+            for &(short, long) in aliases {
+                let id_short = get_id(&format!("{}.{}", comp.id, short), &mut uf);
+                let id_long = get_id(&format!("{}.{}", comp.id, long), &mut uf);
+                uf.union(id_short, id_long);
+            }
+        }
+
         // Create virtual bridge edges for active elements (OpAmp, Npn, Pnp).
         // This ensures BFS can traverse through them for distance computation
         // and voltage source injection picks a proper connected node.

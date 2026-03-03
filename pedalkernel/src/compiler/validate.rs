@@ -397,7 +397,7 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
         ],
 
         // Op-amp
-        ComponentKind::OpAmp(_) => &["pos", "neg", "out", "vp", "in"],
+        ComponentKind::OpAmp(_) => &["pos", "neg", "out", "output", "vp", "in", "input"],
 
         // JFET
         ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => &["gate", "drain", "source", "vgs"],
@@ -418,18 +418,20 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
         ComponentKind::Pentode(_) => &["plate", "cathode", "g1", "g2", "grid", "screen", "vg1k"],
 
         // LFO: output + rate control
-        ComponentKind::Lfo(..) => &["out", "rate"],
+        ComponentKind::Lfo(..) => &["out", "output", "rate"],
 
         // Envelope follower: output + input
-        ComponentKind::EnvelopeFollower(..) => &["out", "in"],
+        ComponentKind::EnvelopeFollower(..) => &["out", "output", "in", "input"],
 
         // BBD delay
-        ComponentKind::Bbd(_) => &["in", "out", "clock"],
+        ComponentKind::Bbd(_) => &["in", "input", "out", "output", "clock"],
 
         // Delay line
         ComponentKind::DelayLine(..) => &[
             "input",
+            "in",
             "output",
+            "out",
             "rate",
             "speed_mod",
             "delay_time",
@@ -437,7 +439,7 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
         ],
 
         // Tap
-        ComponentKind::Tap(..) => &["output"],
+        ComponentKind::Tap(..) => &["output", "out"],
 
         // Transformer: primary (a, b) + secondary (c, d) + tertiary (e, f) + center taps
         // Also supports hierarchical names: primary.a, secondary.a, tertiary.a
@@ -452,13 +454,13 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
         }
 
         // Synth ICs
-        ComponentKind::Vco(_) => &["cv", "saw", "tri", "pulse", "pw", "sync", "out"],
-        ComponentKind::Vcf(_) => &["in", "out", "cv", "res"],
+        ComponentKind::Vco(_) => &["cv", "saw", "tri", "pulse", "pw", "sync", "out", "output"],
+        ComponentKind::Vcf(_) => &["in", "input", "out", "output", "cv", "res"],
         ComponentKind::Vca(_) => &[
-            "in", "out", "cv", // Quad VCA (SSM2164/V2164) numbered channel pins
+            "in", "input", "out", "output", "cv", // Quad VCA (SSM2164/V2164) numbered channel pins
             "in1", "out1", "cv1", "in2", "out2", "cv2", "in3", "out3", "cv3", "in4", "out4", "cv4",
         ],
-        ComponentKind::Comparator(_) => &["pos", "neg", "out"],
+        ComponentKind::Comparator(_) => &["pos", "neg", "out", "output"],
         ComponentKind::AnalogSwitch(_) => &[
             "in1", "out1", "ctrl1", "in2", "out2", "ctrl2", "in3", "out3", "ctrl3", "in4", "out4",
             "ctrl4",
@@ -674,15 +676,37 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
             }
             ComponentKind::Bbd(_) => {
                 let ki = format!("{}.in", comp.id);
+                let ki_alias = format!("{}.input", comp.id);
                 let ko = format!("{}.out", comp.id);
-                adj.entry(ki.clone()).or_default().insert(ko.clone());
-                adj.entry(ko).or_default().insert(ki);
+                let ko_alias = format!("{}.output", comp.id);
+                // Connect both pin spellings to both output spellings
+                for i in [&ki, &ki_alias] {
+                    for o in [&ko, &ko_alias] {
+                        adj.entry(i.clone()).or_default().insert(o.clone());
+                        adj.entry(o.clone()).or_default().insert(i.clone());
+                    }
+                }
+                // Also alias the two input spellings and two output spellings together
+                adj.entry(ki.clone()).or_default().insert(ki_alias.clone());
+                adj.entry(ki_alias).or_default().insert(ki);
+                adj.entry(ko.clone()).or_default().insert(ko_alias.clone());
+                adj.entry(ko_alias).or_default().insert(ko);
             }
             ComponentKind::DelayLine(..) => {
                 let ki = format!("{}.input", comp.id);
+                let ki_alias = format!("{}.in", comp.id);
                 let ko = format!("{}.output", comp.id);
-                adj.entry(ki.clone()).or_default().insert(ko.clone());
-                adj.entry(ko).or_default().insert(ki);
+                let ko_alias = format!("{}.out", comp.id);
+                for i in [&ki, &ki_alias] {
+                    for o in [&ko, &ko_alias] {
+                        adj.entry(i.clone()).or_default().insert(o.clone());
+                        adj.entry(o.clone()).or_default().insert(i.clone());
+                    }
+                }
+                adj.entry(ki.clone()).or_default().insert(ki_alias.clone());
+                adj.entry(ki_alias).or_default().insert(ki);
+                adj.entry(ko.clone()).or_default().insert(ko_alias.clone());
+                adj.entry(ko_alias).or_default().insert(ko);
             }
             ComponentKind::Transformer(cfg) => {
                 // Primary and secondary are magnetically coupled
