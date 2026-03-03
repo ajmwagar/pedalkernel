@@ -3,8 +3,9 @@
 mod audio_analysis;
 
 use audio_analysis::*;
-use pedalkernel::compiler::compile_pedal;
+use pedalkernel::compiler::{compile_pedal, CompileOptions};
 use pedalkernel::dsl::parse_pedal_file;
+use pedalkernel::oversampling::OversamplingFactor;
 use pedalkernel::PedalProcessor;
 use std::path::Path;
 
@@ -40,8 +41,17 @@ fn triode_stage_is_sample_rate_consistent() {
     let input48 = sine_at(523.25, 0.25, duration, 48_000.0);
     let input96 = sine_at(523.25, 0.25, duration, 96_000.0);
 
-    let out48 = compile_test_pedal_and_process("triode_clean.pedal", &input48, 48_000.0, &[]);
-    let out96 = compile_test_pedal_and_process("triode_clean.pedal", &input96, 96_000.0, &[]);
+    // Use X1 oversampling so we compare raw sample rates, not oversampled rates
+    let opts_48 = CompileOptions {
+        oversampling: OversamplingFactor::X1,
+        ..CompileOptions::default()
+    };
+    let opts_96 = CompileOptions {
+        oversampling: OversamplingFactor::X1,
+        ..CompileOptions::default()
+    };
+    let out48 = compile_test_pedal_with_options("triode_clean.pedal", &input48, 48_000.0, &[], opts_48);
+    let out96 = compile_test_pedal_with_options("triode_clean.pedal", &input96, 96_000.0, &[], opts_96);
     let out96_down = decimate(&out96, 2);
 
     assert_eq!(out48.len(), out96_down.len());

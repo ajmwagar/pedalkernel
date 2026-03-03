@@ -6,7 +6,7 @@
 //! - [`dsl`] — nom-based parser for `.pedal` circuit definition files
 //! - [`elements`] — WDF one-port elements (R, C, L) and nonlinear roots (diodes)
 //! - [`tree`] — WDF adaptors (series, parallel) and processing engine
-//! - [`pedals`] — ready-to-use pedal implementations (Overdrive, Fuzz, Delay)
+//! - [`pedals`] — legacy pedal module (all pedals now use `.pedal` DSL files)
 //! - [`kicad`] — KiCad netlist export from the parsed AST
 //! - [`wav`] — WAV file I/O for offline rendering and testing
 //! - [`oversampling`] — antialiasing via oversampling at nonlinear stages
@@ -596,38 +596,20 @@ pedal "Test Pedal" {
     }
 
     #[test]
-    fn wdf_overdrive_pipeline() {
-        use pedals::Overdrive;
+    fn compiled_pedal_pipeline() {
+        // Compile a .pedal file and verify it produces output
+        let pedal = dsl::parse_pedal_file(
+            include_str!("../examples/pedals/distortion/proco_rat.pedal"),
+        )
+        .expect("should parse RAT pedal");
+        let mut compiled = compiler::compile_pedal(&pedal, 48000.0)
+            .expect("should compile RAT pedal");
 
-        let mut od = Overdrive::new(48000.0);
-        od.set_gain(0.7);
-
-        // Process a short burst
         let input = wav::sine_wave(440.0, 0.1, 48000);
-        let output: Vec<f64> = input.iter().map(|&s| od.process(s)).collect();
+        let output: Vec<f64> = input.iter().map(|&s| compiled.process(s)).collect();
 
-        // Should have nonzero output
         let max_out = output.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
-        assert!(max_out > 0.001);
-
-        // Should be clipped relative to input
-        let max_in = input.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
-        // At high gain the output peak may be less than input peak (clipping)
-        // or at least the waveform is modified
-        assert!(max_out < max_in * 5.0, "output shouldn't blow up");
-    }
-
-    #[test]
-    fn wdf_fuzz_pipeline() {
-        use pedals::FuzzFace;
-
-        let mut ff = FuzzFace::new(48000.0);
-        ff.set_fuzz(0.8);
-
-        let input = wav::sine_wave(196.0, 0.1, 48000);
-        let output: Vec<f64> = input.iter().map(|&s| ff.process(s)).collect();
-        let max_out = output.iter().copied().fold(0.0_f64, |a, b| a.max(b.abs()));
-        assert!(max_out > 0.0001, "fuzz should produce output");
+        assert!(max_out > 0.001, "compiled pedal should produce output");
     }
 
     // -----------------------------------------------------------------------

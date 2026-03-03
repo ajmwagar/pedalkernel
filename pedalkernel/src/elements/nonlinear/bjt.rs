@@ -104,6 +104,8 @@ pub struct BjtNpnRoot {
     max_iter: usize,
     /// Convergence tolerance.
     tolerance: f64,
+    /// Previous sample's Vce for warm-starting Newton-Raphson.
+    prev_v: f64,
 }
 
 impl BjtNpnRoot {
@@ -112,9 +114,10 @@ impl BjtNpnRoot {
             model,
             vbe: 0.0,
             ic: 0.0,
-            v_max: 100.0, // Default for typical transistor circuits (will be set by supply)
+            v_max: 100.0,
             max_iter: 16,
             tolerance: 1e-6,
+            prev_v: 0.0,
         }
     }
 
@@ -129,6 +132,7 @@ impl BjtNpnRoot {
             v_max: v_max.max(1.0),
             max_iter: 16,
             tolerance: 1e-6,
+            prev_v: 0.0,
         }
     }
 
@@ -243,15 +247,20 @@ impl BjtNpnRoot {
 }
 
 impl WdfRoot for BjtNpnRoot {
-    /// NPN BJT collector-emitter path: `i = Ic(Vce, Vbe)`
+    /// NPN BJT collector-emitter path with warm-starting.
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
         let v_max = self.v_max;
-        let v0 = if self.vbe > 0.3 {
+        let cold = if self.vbe > 0.3 {
             (a * 0.5).max(0.1)
         } else {
             a * 0.5
+        };
+        let v0 = if self.prev_v != 0.0 && (self.prev_v - cold).abs() < v_max && self.prev_v.abs() < v_max {
+            self.prev_v
+        } else {
+            cold
         };
         let b = newton_raphson_solve(
             a,
@@ -268,9 +277,9 @@ impl WdfRoot for BjtNpnRoot {
                 )
             },
         );
-        // Store collector current for external use
         let v = (a + b) / 2.0;
         self.ic = self.collector_current_at(v);
+        self.prev_v = v;
         b
     }
 }
@@ -311,6 +320,8 @@ pub struct BjtPnpRoot {
     v_max: f64,
     max_iter: usize,
     tolerance: f64,
+    /// Previous sample's Vec for warm-starting Newton-Raphson.
+    prev_v: f64,
 }
 
 impl BjtPnpRoot {
@@ -319,15 +330,14 @@ impl BjtPnpRoot {
             model,
             veb: 0.0,
             ic: 0.0,
-            v_max: 100.0, // Default for typical transistor circuits (will be set by supply)
+            v_max: 100.0,
             max_iter: 16,
             tolerance: 1e-6,
+            prev_v: 0.0,
         }
     }
 
     /// Create a BJT PNP root with a specific supply voltage.
-    ///
-    /// Use this when the supply voltage is known at construction time.
     pub fn new_with_v_max(model: BjtModel, v_max: f64) -> Self {
         Self {
             model,
@@ -336,6 +346,7 @@ impl BjtPnpRoot {
             v_max: v_max.max(1.0),
             max_iter: 16,
             tolerance: 1e-6,
+            prev_v: 0.0,
         }
     }
 
@@ -418,15 +429,20 @@ impl BjtPnpRoot {
 }
 
 impl WdfRoot for BjtPnpRoot {
-    /// PNP BJT emitter-collector path: `i = Ic(Vec, Veb)`
+    /// PNP BJT emitter-collector path with warm-starting.
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
         let v_max = self.v_max;
-        let v0 = if self.veb > 0.2 {
+        let cold = if self.veb > 0.2 {
             (a * 0.5).max(0.1)
         } else {
             a * 0.5
+        };
+        let v0 = if self.prev_v != 0.0 && (self.prev_v - cold).abs() < v_max && self.prev_v.abs() < v_max {
+            self.prev_v
+        } else {
+            cold
         };
         let b = newton_raphson_solve(
             a,
@@ -443,7 +459,9 @@ impl WdfRoot for BjtPnpRoot {
                 )
             },
         );
-        self.ic = self.collector_current_at((a + b) / 2.0);
+        let v = (a + b) / 2.0;
+        self.ic = self.collector_current_at(v);
+        self.prev_v = v;
         b
     }
 }

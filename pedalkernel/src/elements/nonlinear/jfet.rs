@@ -135,6 +135,8 @@ pub struct JfetRoot {
     vgs: f64,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
+    /// Previous sample's drain voltage for warm-starting Newton-Raphson.
+    prev_v: f64,
 }
 
 impl JfetRoot {
@@ -143,6 +145,7 @@ impl JfetRoot {
             model,
             vgs: 0.0,
             max_iter: 16,
+            prev_v: 0.0,
         }
     }
 
@@ -287,29 +290,34 @@ impl JfetRoot {
 }
 
 impl WdfRoot for JfetRoot {
-    /// JFET drain-source path: `i = Ids(v, Vgs)`
+    /// JFET drain-source path with warm-starting.
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
+
         let sign = if self.model.is_n_channel { 1.0 } else { -1.0 };
         let vgs_int = sign * self.vgs;
         let vov = vgs_int - self.model.vto;
-
-        // Approximate conductance for initial guess
         let gds_approx = if vov > 0.0 {
             2.0 * self.model.beta * vov
         } else {
             LEAKAGE_CONDUCTANCE
         };
-
-        let v0 = if gds_approx > LEAKAGE_CONDUCTANCE {
+        let cold = if gds_approx > LEAKAGE_CONDUCTANCE {
             a / (2.0 + 2.0 * rp * gds_approx)
         } else {
             a * 0.5
         };
+        let v0 = if self.prev_v != 0.0 && (self.prev_v - cold).abs() < 50.0 && self.prev_v.abs() < 100.0 {
+            self.prev_v
+        } else {
+            cold
+        };
 
-        newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+        let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
             (root.drain_current(v), root.drain_current_derivative(v))
-        })
+        });
+        self.prev_v = (a + b) * 0.5;
+        b
     }
 }

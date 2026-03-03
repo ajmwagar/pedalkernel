@@ -521,6 +521,15 @@ pub(super) fn build_stages(
         stage.balance_vs_impedance();
     }
 
+    // Adjust reactive element port resistances for oversampling.
+    // Must be done AFTER balance_vs_impedance (which calls recompute).
+    for stage in &mut stages {
+        stage.apply_oversampling_rate(sample_rate);
+    }
+    for stage in &mut fallback_multi_nl {
+        stage.apply_oversampling_rate(sample_rate);
+    }
+
     (stages, fallback_multi_nl)
 }
 
@@ -897,6 +906,11 @@ pub(super) fn build_push_pull_stages(
         }
     }
 
+    // Adjust reactive element port resistances for oversampling.
+    for stage in &mut stages {
+        stage.apply_oversampling_rate(sample_rate);
+    }
+
     stages
 }
 
@@ -1016,6 +1030,11 @@ pub(super) fn build_coupled_bjt_stages(
         }
     }
 
+    // Adjust reactive element port resistances for oversampling.
+    for stage in &mut coupled_stages {
+        stage.apply_oversampling_rate(sample_rate);
+    }
+
     (coupled_stages, fallback_stages)
 }
 
@@ -1074,6 +1093,11 @@ pub(super) fn build_multi_nl_stages(
             oversampling,
         );
         return (Vec::new(), coupled, fallback);
+    }
+
+    // Adjust reactive element port resistances for oversampling.
+    for stage in &mut multi_nl_stages {
+        stage.apply_oversampling_rate(sample_rate);
     }
 
     // All multi-NL stages built successfully. No coupled BJT fallback needed.

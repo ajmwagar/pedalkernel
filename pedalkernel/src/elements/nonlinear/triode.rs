@@ -94,6 +94,8 @@ pub struct TriodeRoot {
     max_iter: usize,
     /// Number of parallel tubes (default 1). Plate current is scaled by N.
     parallel_count: usize,
+    /// Previous sample's plate voltage for warm-starting Newton-Raphson.
+    prev_v: f64,
 }
 
 impl TriodeRoot {
@@ -101,9 +103,10 @@ impl TriodeRoot {
         Self {
             model,
             vgk: 0.0,
-            v_max: 500.0, // Default to high-voltage tube amp (will be set by supply)
+            v_max: 500.0,
             max_iter: 16,
             parallel_count: 1,
+            prev_v: 0.0,
         }
     }
 
@@ -115,6 +118,7 @@ impl TriodeRoot {
             v_max: v_max.max(1.0),
             max_iter: 16,
             parallel_count: 1,
+            prev_v: 0.0,
         }
     }
 
@@ -251,21 +255,29 @@ impl TriodeRoot {
 }
 
 impl WdfRoot for TriodeRoot {
-    /// Triode plate-cathode path: `i = Ip(Vpk, Vgk)`
+    /// Triode plate-cathode path with warm-starting.
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
         let v_max = self.v_max;
-        newton_raphson_solve(
+        let cold = a * 0.5;
+        let v0 = if self.prev_v != 0.0 && (self.prev_v - cold).abs() < v_max && self.prev_v.abs() < v_max {
+            self.prev_v
+        } else {
+            cold
+        };
+        let b = newton_raphson_solve(
             a,
             rp,
-            a * 0.5,
+            v0,
             self.max_iter,
             1e-6,
             Some((-50.0, v_max)),
             None,
             |v| (root.plate_current(v), root.plate_current_derivative(v)),
-        )
+        );
+        self.prev_v = (a + b) * 0.5;
+        b
     }
 }
 

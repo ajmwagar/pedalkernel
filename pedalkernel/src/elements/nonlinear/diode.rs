@@ -237,6 +237,7 @@ impl ZenerModel {
 pub struct ZenerRoot {
     pub model: ZenerModel,
     max_iter: usize,
+    prev_v: f64,
 }
 
 impl ZenerRoot {
@@ -244,6 +245,7 @@ impl ZenerRoot {
         Self {
             model,
             max_iter: 16,
+            prev_v: 0.0,
         }
     }
 
@@ -289,23 +291,28 @@ impl ZenerRoot {
 }
 
 impl WdfRoot for ZenerRoot {
-    /// Solve for reflected wave using Newton-Raphson.
-    ///
-    /// `f(v) = a - 2*v - 2*Rp*i(v) = 0`
+    /// Solve for reflected wave using Newton-Raphson with warm-starting.
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
-        // Initial guess based on operating region
-        let v0 = if a > 0.0 {
+        let cold = if a > 0.0 {
             (a * 0.5).min(0.7)
         } else if a < -2.0 * self.model.vz {
             -self.model.vz - 0.1
         } else {
             a * 0.5
         };
-        newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+        // Warm-start only if prev_v is on the same side and bounded
+        let v0 = if self.prev_v != 0.0 && self.prev_v * a > 0.0 && self.prev_v.abs() < 10.0 {
+            self.prev_v
+        } else {
+            cold
+        };
+        let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
             (root.current(v), root.current_derivative(v))
-        })
+        });
+        self.prev_v = (a + b) * 0.5;
+        b
     }
 }
 
@@ -324,6 +331,11 @@ impl WdfRoot for ZenerRoot {
 pub struct DiodePairRoot {
     pub model: DiodeModel,
     max_iter: usize,
+    /// Previous sample's junction voltage for warm-starting Newton-Raphson.
+    /// Consecutive samples have very similar solutions, so reusing the
+    /// previous voltage as initial guess typically converges in 2-3 iterations
+    /// instead of 10-15.
+    prev_v: f64,
 }
 
 impl DiodePairRoot {
@@ -331,6 +343,7 @@ impl DiodePairRoot {
         Self {
             model,
             max_iter: 16,
+            prev_v: 0.0,
         }
     }
 }
@@ -351,15 +364,33 @@ impl WdfRoot for DiodePairRoot {
         let nvt = self.model.n_vt;
         let rs = self.model.rs;
 
-        // If no series resistance, use original fast path
-        if rs < 1e-9 {
-            let v0 = if a.abs() > 10.0 * nvt {
+        // Analytic initial guess based on incident wave.
+        let cold_guess = |a: f64, rp: f64| -> f64 {
+            if a.abs() > 10.0 * nvt {
                 let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
                 nvt * log_arg.ln() * a.signum()
             } else {
                 a * 0.5
-            };
-            return newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+            }
+        };
+
+        // Warm-start helper: use prev_v only when it's on the same side as
+        // the incident wave AND within a reasonable voltage range. This avoids
+        // solver divergence at zero-crossings and operating-point jumps while
+        // still giving fast convergence for audio-rate signals.
+        let warm_guess = |prev_v: f64, a: f64, rp: f64| -> f64 {
+            let cg = cold_guess(a, rp);
+            if prev_v != 0.0 && prev_v * a > 0.0 && prev_v.abs() < 10.0 {
+                prev_v
+            } else {
+                cg
+            }
+        };
+
+        // If no series resistance, use original fast path
+        if rs < 1e-9 {
+            let v0 = warm_guess(self.prev_v, a, rp);
+            let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
                 let x = (v / nvt).clamp(-500.0, 500.0);
                 let ev_pos = x.exp();
                 let ev_neg = (-x).exp();
@@ -367,17 +398,14 @@ impl WdfRoot for DiodePairRoot {
                 let di = is * (ev_pos + ev_neg) / nvt;
                 (i, di)
             });
+            self.prev_v = (a + b) * 0.5;
+            return b;
         }
 
         // Effective port resistance including series resistance
         let rp_eff = rp + rs;
 
-        let v0 = if a.abs() > 10.0 * nvt {
-            let log_arg = (a.abs() / (2.0 * rp_eff * is)).max(1.0);
-            nvt * log_arg.ln() * a.signum()
-        } else {
-            a * 0.5
-        };
+        let v0 = warm_guess(self.prev_v, a, rp_eff);
 
         // Solve for junction voltage with effective port resistance
         // Solver returns b_eff = 2*v_junction - a
@@ -392,6 +420,7 @@ impl WdfRoot for DiodePairRoot {
 
         // Recover junction voltage from b_eff: v_junction = (a + b_eff) / 2
         let v_junction = (a + b_eff) * 0.5;
+        self.prev_v = v_junction;
 
         // Compute current at junction voltage
         let x = (v_junction / nvt).clamp(-500.0, 500.0);
@@ -414,6 +443,7 @@ impl WdfRoot for DiodePairRoot {
 pub struct DiodeRoot {
     pub model: DiodeModel,
     max_iter: usize,
+    prev_v: f64,
 }
 
 impl DiodeRoot {
@@ -421,56 +451,58 @@ impl DiodeRoot {
         Self {
             model,
             max_iter: 16,
+            prev_v: 0.0,
         }
     }
 }
 
 impl WdfRoot for DiodeRoot {
-    /// Single diode with series resistance:
-    /// - Junction current: `i(v_j) = Is*(exp(v_j/nVt) - 1)`
-    /// - Total voltage: `v = v_j + i*Rs`
-    ///
-    /// We solve for junction voltage v_j using effective port resistance (Rp + Rs).
+    /// Single diode with series resistance and warm-starting.
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let rs = self.model.rs;
 
-        // If no series resistance, use original fast path
-        if rs < 1e-9 {
-            let v0 = if a > 10.0 * nvt {
+        let cold_guess = |a: f64, rp: f64| -> f64 {
+            if a > 10.0 * nvt {
                 let log_arg = (a / (2.0 * rp * is)).max(1.0);
                 nvt * log_arg.ln()
-            } else if a < -10.0 * nvt {
-                a * 0.5
             } else {
                 a * 0.5
-            };
-            return newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+            }
+        };
+
+        // Warm-start: use prev_v only when reasonable (same sign, bounded magnitude).
+        let warm_guess = |prev_v: f64, a: f64, rp: f64| -> f64 {
+            let cg = cold_guess(a, rp);
+            if prev_v != 0.0 && prev_v * a > 0.0 && prev_v.abs() < 10.0 {
+                prev_v
+            } else {
+                cg
+            }
+        };
+
+        // If no series resistance, use original fast path
+        if rs < 1e-9 {
+            let v0 = warm_guess(self.prev_v, a, rp);
+            let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
                 let x = (v / nvt).clamp(-500.0, 500.0);
                 let ev = x.exp();
                 let i = is * (ev - 1.0);
                 let di = is * ev / nvt;
                 (i, di)
             });
+            self.prev_v = (a + b) * 0.5;
+            return b;
         }
 
         // Effective port resistance including series resistance
         let rp_eff = rp + rs;
 
-        // Initial guess depends on bias direction:
-        let v0 = if a > 10.0 * nvt {
-            let log_arg = (a / (2.0 * rp_eff * is)).max(1.0);
-            nvt * log_arg.ln()
-        } else if a < -10.0 * nvt {
-            a * 0.5
-        } else {
-            a * 0.5
-        };
+        let v0 = warm_guess(self.prev_v, a, rp_eff);
 
         // Solve for junction voltage with effective port resistance
-        // Solver returns b_eff = 2*v_junction - a
         let b_eff = newton_raphson_solve(a, rp_eff, v0, self.max_iter, 1e-6, None, None, |v_j| {
             let x = (v_j / nvt).clamp(-500.0, 500.0);
             let ev = x.exp();
@@ -479,15 +511,12 @@ impl WdfRoot for DiodeRoot {
             (i, di)
         });
 
-        // Recover junction voltage from b_eff: v_junction = (a + b_eff) / 2
         let v_junction = (a + b_eff) * 0.5;
+        self.prev_v = v_junction;
 
-        // Compute current at junction voltage
         let x = (v_junction / nvt).clamp(-500.0, 500.0);
         let i = is * (x.exp() - 1.0);
 
-        // Correct reflected wave for series resistance
-        // b = 2*v_total - a = 2*(v_junction + i*Rs) - a = b_eff + 2*i*Rs
         b_eff + 2.0 * i * rs
     }
 }

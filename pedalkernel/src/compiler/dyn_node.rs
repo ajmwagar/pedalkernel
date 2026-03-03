@@ -448,6 +448,49 @@ impl DynNode {
         }
     }
 
+    /// Update sample rate for all reactive elements (capacitors/inductors).
+    ///
+    /// Bilinear-transform port resistance depends on sample rate:
+    ///   - Capacitor: Rp = 1 / (2 * fs * C)
+    ///   - Inductor:  Rp = 2 * fs * L
+    ///
+    /// When oversampling is active, the WDF cycle runs at `fs * ratio`,
+    /// so reactive elements must use the oversampled rate for correct
+    /// frequency response. Call this with `base_rate * oversampling_ratio`,
+    /// then call `recompute()` to propagate updated Rp through adaptors.
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        match self {
+            Self::Capacitor {
+                capacitance, rp, ..
+            } => {
+                *rp = 1.0 / (2.0 * sample_rate * *capacitance);
+            }
+            Self::LeakyCapacitor {
+                capacitance, rp, ..
+            } => {
+                *rp = 1.0 / (2.0 * sample_rate * *capacitance);
+            }
+            Self::Inductor {
+                inductance, rp, ..
+            } => {
+                *rp = 2.0 * sample_rate * *inductance;
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                left.set_sample_rate(sample_rate);
+                right.set_sample_rate(sample_rate);
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.set_sample_rate(sample_rate);
+            }
+            Self::RType { children, .. } => {
+                for child in children.iter_mut() {
+                    child.set_sample_rate(sample_rate);
+                }
+            }
+            _ => {} // Resistors, pots, voltage sources: no fs dependence
+        }
+    }
+
     /// Reset all state (capacitor/inductor memory + adaptor caches).
     pub fn reset(&mut self) {
         match self {

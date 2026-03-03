@@ -341,7 +341,7 @@ pub struct CompileOptions {
 impl Default for CompileOptions {
     fn default() -> Self {
         Self {
-            oversampling: OversamplingFactor::X1,
+            oversampling: OversamplingFactor::X2,
             tolerance: ToleranceEngine::ideal(),
             thermal: false,
             collapse_nl: false,

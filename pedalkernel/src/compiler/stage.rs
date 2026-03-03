@@ -8,6 +8,17 @@ use crate::PedalProcessor;
 use super::dyn_node::DynNode;
 use super::helpers::balance_parallel_vs;
 
+/// Flush denormals to zero. Subnormal floats are 100x slower to process
+/// on x86 and serve no useful purpose in audio signals.
+#[inline(always)]
+fn flush_denormal(x: f64) -> f64 {
+    if x.is_subnormal() {
+        0.0
+    } else {
+        x
+    }
+}
+
 #[cfg(feature = "debug-trace")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -396,7 +407,7 @@ impl WdfStage {
             // (by the process loop in compiled.rs).
             let a = 2.0 * wdf_out;
             let b = opamp.process(a, tree.port_resistance());
-            return (a + b) / 2.0;
+            return flush_denormal((a + b) / 2.0);
         }
 
         // Update source follower state (for next sample's Vgs calculation)
@@ -412,11 +423,42 @@ impl WdfStage {
             let x = wdf_out;
             let y = b0 * (x - *x_prev) + a1 * *y_prev;
             *x_prev = x;
-            *y_prev = y;
-            return y;
+            *y_prev = flush_denormal(y);
+            return *y_prev;
         }
 
-        wdf_out
+        flush_denormal(wdf_out)
+    }
+
+    /// Adjust reactive element port resistances for oversampling.
+    ///
+    /// When oversampling is active, the WDF cycle runs at `base_rate * ratio`.
+    /// Reactive elements (C/L) must use this effective rate for correct
+    /// bilinear-transform discretization. Must be called after construction
+    /// when the oversampling factor > 1.
+    pub fn apply_oversampling_rate(&mut self, base_rate: f64) {
+        let ratio = self.oversampler.ratio();
+        if ratio <= 1 {
+            return;
+        }
+        let effective_rate = base_rate * ratio as f64;
+        self.tree.set_sample_rate(effective_rate);
+        self.tree.recompute();
+
+        // Also update CapacitorRoot / InductorRoot port resistances
+        match &mut self.root {
+            RootKind::CapacitorRoot {
+                capacitance, rp, ..
+            } => {
+                *rp = 1.0 / (2.0 * effective_rate * *capacitance);
+            }
+            RootKind::InductorRoot {
+                inductance, rp, ..
+            } => {
+                *rp = 2.0 * effective_rate * *inductance;
+            }
+            _ => {}
+        }
     }
 
     pub fn reset(&mut self) {
@@ -846,7 +888,7 @@ impl PushPullStage {
             }
         }
 
-        output
+        flush_denormal(output)
     }
 
     pub fn debug_dump(&self) -> String {
@@ -862,6 +904,24 @@ impl PushPullStage {
             self.pull_tree.port_resistance(),
             self.pull_tree.node_count(),
         )
+    }
+}
+
+impl PushPullStage {
+    /// Adjust reactive element port resistances for oversampling.
+    pub fn apply_oversampling_rate(&mut self, base_rate: f64) {
+        let push_ratio = self.push_oversampler.ratio();
+        if push_ratio > 1 {
+            let effective_rate = base_rate * push_ratio as f64;
+            self.push_tree.set_sample_rate(effective_rate);
+            self.push_tree.recompute();
+        }
+        let pull_ratio = self.pull_oversampler.ratio();
+        if pull_ratio > 1 {
+            let effective_rate = base_rate * pull_ratio as f64;
+            self.pull_tree.set_sample_rate(effective_rate);
+            self.pull_tree.recompute();
+        }
     }
 }
 
@@ -931,7 +991,19 @@ impl CoupledBjtStage {
         // Store output for 1-sample delay feedback.
         self.feedback_state = signal;
 
-        signal
+        flush_denormal(signal)
+    }
+
+    /// Adjust reactive element port resistances for oversampling.
+    pub fn apply_oversampling_rate(&mut self, base_rate: f64) {
+        for (tree, _, oversampler) in &mut self.bjt_stages {
+            let ratio = oversampler.ratio();
+            if ratio > 1 {
+                let effective_rate = base_rate * ratio as f64;
+                tree.set_sample_rate(effective_rate);
+                tree.recompute();
+            }
+        }
     }
 
     /// Reset all internal state.
@@ -1346,7 +1418,25 @@ impl MultiNlStage {
             }
         }
 
-        output
+        flush_denormal(output)
+    }
+
+    /// Adjust reactive element port resistances for oversampling.
+    ///
+    /// MultiNlStage passive children (caps/inductors) need their port
+    /// resistances updated to the oversampled rate for correct frequency
+    /// response. Note: the scattering matrix is NOT recomputed here because
+    /// the MNA-derived matrix uses port resistance ratios that are scale-
+    /// invariant — the relative impedances stay correct.
+    pub fn apply_oversampling_rate(&mut self, base_rate: f64) {
+        let ratio = self.oversampler.ratio();
+        if ratio <= 1 {
+            return;
+        }
+        let effective_rate = base_rate * ratio as f64;
+        for child in &mut self.passive_children {
+            child.set_sample_rate(effective_rate);
+        }
     }
 
     /// Reset all internal state.
