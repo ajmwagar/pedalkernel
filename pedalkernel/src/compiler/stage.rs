@@ -349,26 +349,23 @@ impl WdfStage {
                     // Fallback: V at grounded port is 0 (short circuit)
                     0.0
                 }
-                // VoltageSourceDriver: inject input as incident wave
-                // Tree contains reactive elements WITHOUT embedded VS.
-                // a_root = 2 * V_in (wave representation of voltage)
+                // VoltageSourceDriver: ideal voltage source at root port.
                 //
-                // For series filters (RL lowpass, LC filters), the output is at
-                // the junction between elements, not at the root. We need to
-                // extract the junction voltage using series_junction_voltage().
+                // Correct WDF scattering for ideal VS: a_root = 2*V - b_tree.
+                // This ensures V_port = (a+b)/2 = V regardless of b_tree,
+                // giving the exact bilinear-transform pole (k-1)/(k+1).
+                //
+                // Output at series junction is negated (WDF sign convention:
+                // V_root = -(V_left + V_right) in Fettweis series adaptor).
                 RootKind::VoltageSourceDriver => {
-                    // Inject input signal as incident wave (wave = 2 * voltage)
-                    let a_root = sample * compensation * 2.0;
-                    // Update tree with incident wave from root
+                    let v_in = sample * compensation;
+                    let a_root = 2.0 * v_in - b_tree;
                     tree.set_incident(a_root);
 
-                    // For series filters, output is at the junction, not root
                     if let Some(v_junction) = tree.series_junction_voltage(a_root) {
-                        v_junction
-                    } else {
-                        // Fallback: output at root = (a + b) / 2
-                        (a_root + b_tree) / 2.0
+                        return -v_junction;
                     }
+                    return (a_root + b_tree) / 2.0;
                 }
                 // Capacitor root: b = state (reflects stored incident)
                 // This gives correct RC lowpass transfer function.

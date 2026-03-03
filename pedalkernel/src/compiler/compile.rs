@@ -123,7 +123,6 @@ fn build_passive_wdf_stage(
         &passive_edges,
         sample_rate,
         oversampling,
-        vs_comp_idx,
     ) {
         return Some(stage);
     }
@@ -171,17 +170,17 @@ fn build_passive_wdf_stage(
     Some(stage)
 }
 
-/// Build an output-rooted WDF stage for simple 2-element passive circuits.
+/// Build a WDF stage for simple 2-element passive circuits (RC, RL, resistor divider).
 ///
-/// The load element (connected out→gnd) is placed at the root. The source
-/// element + VS form the tree. VS impedance is set to the load's port
-/// resistance to maintain correct circuit time constants.
+/// Uses VoltageSourceDriver at root with Series(source, load) tree.
+/// The corrected VS scattering `a_root = 2·V_in - b_tree` gives the exact
+/// bilinear-transform pole, and the output is extracted (negated) at the
+/// series junction (right child = load element).
 fn build_output_rooted_stage(
     graph: &CircuitGraph,
     passive_edges: &[usize],
     sample_rate: f64,
     oversampling: OversamplingFactor,
-    vs_comp_idx: usize,
 ) -> Option<WdfStage> {
     if passive_edges.len() != 2 {
         return None;
@@ -212,92 +211,44 @@ fn build_output_rooted_stage(
         return None;
     }
 
-    let load_comp = &graph.components[graph.edges[load_eidx].comp_idx];
+    let load_edge = &graph.edges[load_eidx];
     let source_comp = &graph.components[source_edge.comp_idx];
+    let load_comp = &graph.components[load_edge.comp_idx];
 
-    // Determine root kind based on load element type.
-    let (root, load_rp) = match &load_comp.kind {
-        ComponentKind::Resistor(r) => (RootKind::ResistiveTermination, *r),
-        ComponentKind::Capacitor(cfg) => {
-            let rp = 1.0 / (2.0 * sample_rate * cfg.value);
-            (
-                RootKind::CapacitorRoot {
-                    capacitance: cfg.value,
-                    rp,
-                    state: 0.0,
-                },
-                rp,
-            )
-        }
-        ComponentKind::Inductor(l) => {
-            let rp = 2.0 * sample_rate * *l;
-            (
-                RootKind::InductorRoot {
-                    inductance: *l,
-                    rp,
-                    state: 0.0,
-                },
-                rp,
-            )
-        }
+    // Verify this is a supported 2-element passive topology.
+    let _supported = match (&source_comp.kind, &load_comp.kind) {
+        (ComponentKind::Resistor(_), ComponentKind::Capacitor(_))
+        | (ComponentKind::Capacitor(_), ComponentKind::Resistor(_))
+        | (ComponentKind::Inductor(_), ComponentKind::Resistor(_))
+        | (ComponentKind::Resistor(_), ComponentKind::Inductor(_))
+        | (ComponentKind::Resistor(_), ComponentKind::Resistor(_)) => true,
         _ => return None,
     };
 
-    // Build tree: Series(VS, source_element), with VS rp set to load_rp.
-    // This ensures the tree's port resistance ≈ 2 * load_rp, giving correct
-    // scattering and time constants.
-    let source_node = graph.edges.len() + 1000;
-    let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-    sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
-    sp_edges.push((
-        source_edge.node_a,
-        source_edge.node_b,
-        SpTree::Leaf(source_edge.comp_idx),
-    ));
-    let terminals = vec![source_node, graph.out_node];
-    let sp_tree = sp_reduce(sp_edges, &terminals).ok()?;
-
-    // Build component list with VS having load-matched impedance.
-    let mut all_components = graph.components.clone();
-    while all_components.len() <= vs_comp_idx {
-        all_components.push(ComponentDef {
-            id: "__vs__".to_string(),
-            kind: ComponentKind::Resistor(load_rp.max(1.0)),
-        });
-    }
-
-    let mut tree = sp_to_dyn_with_vs(
-        &sp_tree,
-        &all_components,
-        &graph.fork_paths,
-        sample_rate,
-        vs_comp_idx,
-    );
-
-    // Set VS impedance to half the load impedance for correct time constants.
-    // In WDF, the root port termination implicitly contributes impedance equal
-    // to the tree's port resistance. Total effective R = VS_rp + tree_rp ≈ 2*VS_rp.
-    // Setting VS_rp = load_rp/2 gives total ≈ load_rp, matching the actual circuit.
-    let vs_rp = (load_rp / 2.0).max(1.0);
-    set_vs_impedance(&mut tree, vs_rp);
-    tree.recompute();
-
-    // Verify source element is in the tree (not just VS).
-    let has_source = match &source_comp.kind {
-        ComponentKind::Capacitor(_) | ComponentKind::Inductor(_) | ComponentKind::Resistor(_) => {
-            true
-        }
-        _ => false,
+    // Build WDF tree: Series(source, load).
+    // Source element (in→out) on left, load element (out→gnd) on right.
+    // Output is extracted at right child (load port) via series_junction_voltage.
+    let source_dyn = make_leaf(source_edge.comp_idx, source_comp, None, sample_rate);
+    let load_dyn = make_leaf(load_edge.comp_idx, load_comp, None, sample_rate);
+    let r1 = source_dyn.port_resistance();
+    let r2 = load_dyn.port_resistance();
+    let rp = r1 + r2;
+    let tree = DynNode::Series {
+        left: Box::new(source_dyn),
+        right: Box::new(load_dyn),
+        rp,
+        gamma: r1 / rp,
+        b1: 0.0,
+        b2: 0.0,
     };
-    if !has_source {
-        return None;
-    }
 
     Some(WdfStage {
         tree,
-        root,
+        root: RootKind::VoltageSourceDriver,
         compensation: 1.0,
-        oversampler: Oversampler::new(oversampling),
+        // Linear passive stage — no nonlinearity means no aliasing,
+        // so X1 avoids double-counting the oversampling the runner already applied.
+        oversampler: Oversampler::new(OversamplingFactor::X1),
         base_diode_model: None,
         paired_opamp: None,
         dc_block: None,
@@ -308,18 +259,6 @@ fn build_output_rooted_stage(
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
     })
-}
-
-/// Set the voltage source impedance within a tree.
-fn set_vs_impedance(node: &mut DynNode, target_rp: f64) {
-    match node {
-        DynNode::VoltageSource { rp, .. } => *rp = target_rp,
-        DynNode::Series { left, right, .. } | DynNode::Parallel { left, right, .. } => {
-            set_vs_impedance(left, target_rp);
-            set_vs_impedance(right, target_rp);
-        }
-        _ => {}
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
