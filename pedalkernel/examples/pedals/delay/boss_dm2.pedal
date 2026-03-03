@@ -1,0 +1,80 @@
+# Boss DM-2 Analog Delay
+# MN3005 BBD-based warm analog delay
+# The DM-2 uses a 4096-stage BBD for long delay times
+# Anti-alias and reconstruction filters tame clock noise
+# Feedback loop with coupling cap for repeats
+
+pedal "Boss DM-2 Delay" {
+  components {
+    # Input stage
+    C1: cap(100n)           # Input coupling
+    R1: resistor(10k)       # Input impedance
+
+    # Anti-aliasing low-pass filter (2-pole)
+    C2: cap(6.8n)           # First pole
+    R2: resistor(10k)
+    C3: cap(3.3n)           # Second pole
+    R3: resistor(22k)
+
+    # BBD delay line — 4096 stages for long delay times
+    BBD1: bbd(mn3005)
+
+    # Delay time control (drives BBD clock directly)
+    Time: pot(500k)         # Delay time
+
+    # Feedback path
+    Repeats: pot(100k)      # Feedback / repeats control
+    R4: resistor(47k)       # Feedback limiting resistor
+    C4: cap(100n)           # Feedback coupling cap
+
+    # Reconstruction low-pass filter
+    C5: cap(6.8n)           # Reconstruction filter
+    R5: resistor(10k)
+
+    # Output dry/wet mix
+    R6: resistor(10k)       # Dry path resistor
+    Mix: pot(100k)          # Dry/wet blend
+    C6: cap(100n)           # Output coupling
+  }
+
+  nets {
+    # Input stage
+    in -> C1.a
+    C1.b -> R1.a
+
+    # Anti-aliasing LPF
+    R1.b -> C2.a, R2.a
+    C2.b -> gnd
+    R2.b -> C3.a, R3.a
+    C3.b -> gnd
+    R3.b -> BBD1.in
+
+    # BBD clock driven directly by Time pot
+    Time.wiper -> BBD1.clock
+
+    # Feedback loop: BBD output -> Repeats pot -> back to BBD input
+    BBD1.out -> Repeats.a
+    Repeats.b -> R4.a
+    R4.b -> C4.a
+    C4.b -> BBD1.in
+
+    # Reconstruction LPF on wet signal
+    BBD1.out -> C5.a, R5.a
+    C5.b -> gnd
+    R5.b -> Mix.a
+
+    # Dry signal to mix
+    C1.b -> R6.a
+    R6.b -> Mix.a
+
+    # Output
+    Mix.b -> C6.a
+    C6.b -> out
+  }
+
+  controls {
+    Time.position -> "Time" [0.0, 1.0] = 0.4
+    Repeats.position -> "Repeats" [0.0, 1.0] = 0.35
+    Mix.position -> "Mix" [0.0, 1.0] = 0.4
+  }
+}

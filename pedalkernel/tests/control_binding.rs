@@ -244,8 +244,7 @@ fn bbd_out_to_pot_detects_feedback() {
     let compiled = compile_src(src);
     let d = dump(&compiled);
     assert!(
-        d.contains("Repeats -> BbdFeedback(0)")
-            || d.contains("Repeats -> PotInStage("),
+        d.contains("Repeats -> BbdFeedback(0)") || d.contains("Repeats -> PotInStage("),
         "BBD.out -> Pot.a should bind to BbdFeedback or PotInStage, not PreGain; controls:\n{d}"
     );
     // Must NOT fall through to PreGain
@@ -1008,11 +1007,7 @@ fn assert_control_affects_output(
     let out_low = compile_and_process(&src, &input, SAMPLE_RATE, &[(control_name, low_val)]);
     let out_high = compile_and_process(&src, &input, SAMPLE_RATE, &[(control_name, high_val)]);
 
-    assert_healthy(
-        &out_low,
-        &format!("{pedal_file}_{control_name}_low"),
-        10.0,
-    );
+    assert_healthy(&out_low, &format!("{pedal_file}_{control_name}_low"), 10.0);
     assert_healthy(
         &out_high,
         &format!("{pedal_file}_{control_name}_high"),

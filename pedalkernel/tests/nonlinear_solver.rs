@@ -44,7 +44,7 @@ fn single_diode_current_follows_input_polarity() {
             if a > 1e-6 {
                 assert!(
                     i >= -1e-9,
-                "Forward bias should yield positive current: a={a}, i={i}"
+                    "Forward bias should yield positive current: a={a}, i={i}"
                 );
             } else if a < -1e-6 {
                 assert!(

@@ -13,6 +13,7 @@ use pedalkernel::compiler::{compile_pedal, compile_pedal_with_options, CompileOp
 use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::wav::{read_wav_mono, write_wav};
 use pedalkernel::PedalProcessor;
+use std::cmp::Ordering;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -241,6 +242,128 @@ pub fn spectral_centroid(buf: &[f64], sample_rate: f64) -> f64 {
         return 0.0;
     }
     weighted_sum / total_power
+}
+
+/// Summary of alias energy in the upper band.
+#[derive(Debug, Clone)]
+pub struct AliasSummary {
+    pub alias_ratio: f64,
+    pub top_bins: Vec<(f64, f64)>,
+}
+
+/// Estimate aliasing by measuring energy between 45% of Nyquist and Nyquist.
+/// Excludes bins near harmonics of `fundamental_hz`.
+pub fn alias_energy_summary(
+    buf: &[f64],
+    sample_rate: f64,
+    fundamental_hz: f64,
+    guard_hz: f64,
+) -> AliasSummary {
+    let total_energy: f64 = buf.iter().map(|x| x * x).sum();
+    if total_energy < 1e-30 {
+        return AliasSummary {
+            alias_ratio: 0.0,
+            top_bins: Vec::new(),
+        };
+    }
+    let nyquist = sample_rate / 2.0;
+    let alias_start = nyquist * 0.45;
+    let mut freq = alias_start;
+    let mut alias_energy = 0.0;
+    let mut bins: Vec<(f64, f64)> = Vec::new();
+
+    let mut harmonics = Vec::new();
+    let mut n = 1.0;
+    while fundamental_hz * n <= nyquist + guard_hz {
+        harmonics.push(fundamental_hz * n);
+        n += 1.0;
+    }
+
+    while freq <= nyquist {
+        if harmonics.iter().any(|&h| (h - freq).abs() < guard_hz) {
+            freq += 200.0;
+            continue;
+        }
+        let power = goertzel_power(buf, sample_rate, freq);
+        alias_energy += power;
+        bins.push((freq, power));
+        freq += 200.0;
+    }
+
+    bins.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or_else(|| Ordering::Equal));
+    bins.truncate(3);
+
+    AliasSummary {
+        alias_ratio: alias_energy / total_energy,
+        top_bins: bins,
+    }
+}
+
+/// Count subnormal (denormalized) floating point values in buffer.
+pub fn count_subnormals(buf: &[f64]) -> usize {
+    buf.iter().filter(|x| x.is_subnormal()).count()
+}
+
+/// Downsample by 2 with a simple 3-tap lowpass prefilter.
+pub fn downsample_by_2(buf: &[f64]) -> Vec<f64> {
+    if buf.len() < 2 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(buf.len() / 2 + 1);
+    let mut i = 0;
+    while i + 1 < buf.len() {
+        let x0 = buf[i];
+        let x1 = buf[i + 1];
+        let x2 = if i + 2 < buf.len() { buf[i + 2] } else { x1 };
+        out.push((x0 + 2.0 * x1 + x2) * 0.25);
+        i += 2;
+    }
+    out
+}
+
+/// Resample buffer from `src_rate` to `dst_rate` using linear interpolation.
+pub fn resample_linear(buf: &[f64], src_rate: f64, dst_rate: f64) -> Vec<f64> {
+    if buf.is_empty() {
+        return Vec::new();
+    }
+    let duration = buf.len() as f64 / src_rate;
+    let dst_len = (duration * dst_rate).round() as usize;
+    if dst_len == 0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(dst_len);
+    for n in 0..dst_len {
+        let t = n as f64 / dst_rate;
+        let src_pos = t * src_rate;
+        let idx = src_pos.floor() as usize;
+        let frac = src_pos - idx as f64;
+        let a = buf.get(idx).copied().unwrap_or(*buf.last().unwrap());
+        let b = buf.get(idx + 1).copied().unwrap_or(a);
+        out.push(a + (b - a) * frac);
+    }
+    out
+}
+
+/// Spectral log-magnitude distance between two buffers.
+pub fn spectral_distance(a: &[f64], b: &[f64], sample_rate: f64, step_hz: f64) -> f64 {
+    let nyquist = sample_rate / 2.0;
+    let mut freq = step_hz;
+    let mut accum = 0.0;
+    let mut bins = 0.0;
+    while freq < nyquist {
+        let pa = goertzel_power(a, sample_rate, freq).max(1e-18);
+        let pb = goertzel_power(b, sample_rate, freq).max(1e-18);
+        let diff = (pa.log10() - pb.log10()).abs();
+        accum += diff;
+        bins += 1.0;
+        freq += step_hz;
+    }
+    if bins < 1.0 {
+        0.0
+    } else {
+        accum / bins
+    }
 }
 
 // ---------------------------------------------------------------------------

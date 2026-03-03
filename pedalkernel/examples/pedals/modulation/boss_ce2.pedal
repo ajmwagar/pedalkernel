@@ -31,7 +31,7 @@ pedal "Boss CE-2" {
     U1.out -> C2.a, R5.a
     C2.b -> R3.a
     R3.b -> BBD1.in
-    Rate.b -> LFO1.rate
+    Rate.wiper -> LFO1.rate
     LFO1.out -> Depth.a
     Depth.b -> R7.a
     R7.b -> BBD1.clock

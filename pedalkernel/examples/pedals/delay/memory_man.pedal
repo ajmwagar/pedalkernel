@@ -1,0 +1,82 @@
+# EHX Deluxe Memory Man
+# Warm analog delay using MN3005 4096-stage BBD
+# The Memory Man's dark, tape-like repeats come from the long BBD
+# delay line and the anti-alias / reconstruction low-pass filters
+# that progressively roll off highs on each repeat.
+
+pedal "EHX Memory Man" {
+  components {
+    # Input stage
+    C1: cap(100n)           # Input coupling
+    R1: resistor(10k)       # Input impedance
+
+    # Anti-aliasing low-pass filter (2-pole)
+    C2: cap(6.8n)           # First pole
+    R2: resistor(10k)
+    C3: cap(3.3n)           # Second pole
+    R3: resistor(22k)
+
+    # BBD delay line — 4096 stages for long delay times
+    BBD1: bbd(mn3005)
+
+    # LFO for subtle modulation (very slow — adds warmth)
+    LFO1: lfo(triangle, 470k, 100n)
+    Delay: pot(500k)        # Delay time control
+
+    # Feedback path
+    Feedback: pot(100k)     # Feedback / repeats control
+    R4: resistor(47k)       # Feedback limiting resistor
+    C4: cap(100n)           # Feedback coupling cap
+
+    # Reconstruction low-pass filter
+    C5: cap(6.8n)           # Reconstruction filter
+    R5: resistor(10k)
+
+    # Output dry/wet mix
+    Blend: pot(100k)        # Dry/wet blend
+    R6: resistor(10k)       # Dry path resistor
+    C6: cap(100n)           # Output coupling
+  }
+
+  nets {
+    # Input stage
+    in -> C1.a
+    C1.b -> R1.a
+
+    # Anti-aliasing LPF
+    R1.b -> C2.a, R2.a
+    C2.b -> gnd
+    R2.b -> C3.a, R3.a
+    C3.b -> gnd
+    R3.b -> BBD1.in
+
+    # BBD clock driven by LFO through Delay pot
+    Delay.wiper -> LFO1.rate
+    LFO1.out -> BBD1.clock
+
+    # Feedback loop: BBD output -> Feedback pot -> back to BBD input
+    BBD1.out -> Feedback.a
+    Feedback.b -> R4.a
+    R4.b -> C4.a
+    C4.b -> BBD1.in
+
+    # Reconstruction LPF on wet signal
+    BBD1.out -> C5.a, R5.a
+    C5.b -> gnd
+    R5.b -> Blend.a
+
+    # Dry signal to mix
+    C1.b -> R6.a
+    R6.b -> Blend.a
+
+    # Output
+    Blend.b -> C6.a
+    C6.b -> out
+  }
+
+  controls {
+    Delay.position -> "Delay" [0.0, 1.0] = 0.4
+    Feedback.position -> "Feedback" [0.0, 1.0] = 0.4
+    Blend.position -> "Blend" [0.0, 1.0] = 0.5
+  }
+}

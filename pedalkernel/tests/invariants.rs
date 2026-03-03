@@ -156,5 +156,4 @@ fn fx_split_matches_monolithic_engine() {
         corr > 0.999,
         "FX split output should match monolithic: corr={corr:.6}"
     );
-
 }

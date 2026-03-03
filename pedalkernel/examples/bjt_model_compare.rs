@@ -13,7 +13,10 @@ fn main() {
     let vbe_points = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75];
 
     println!("2N3904 NPN - Collector Current vs Vbe");
-    println!("{:>6} | {:>12} | {:>12} | {:>8}", "Vbe", "Ebers-Moll", "Gummel-Poon", "Ratio");
+    println!(
+        "{:>6} | {:>12} | {:>12} | {:>8}",
+        "Vbe", "Ebers-Moll", "Gummel-Poon", "Ratio"
+    );
     println!("{:-<6}-+-{:-<12}-+-{:-<12}-+-{:-<8}", "", "", "", "");
 
     for vbe in vbe_points {
@@ -37,7 +40,11 @@ fn main() {
         let _ = gp_bjt.process(a, rp);
         let ic_gp = gp_bjt.collector_current();
 
-        let ratio = if ic_em.abs() > 1e-15 { ic_gp / ic_em } else { 0.0 };
+        let ratio = if ic_em.abs() > 1e-15 {
+            ic_gp / ic_em
+        } else {
+            0.0
+        };
         println!(
             "{:>6.2} | {:>12.6} | {:>12.6} | {:>8.3}",
             vbe,
