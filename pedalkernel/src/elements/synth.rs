@@ -404,10 +404,10 @@ impl AdsrEnvelope {
         let mut env = Self {
             stage: EnvelopeStage::Idle,
             value: 0.0,
-            attack: 0.01,  // 10ms
-            decay: 0.1,    // 100ms
+            attack: 0.01, // 10ms
+            decay: 0.1,   // 100ms
             sustain: 0.7,
-            release: 0.3,  // 300ms
+            release: 0.3, // 300ms
             sample_rate,
             gate: false,
             attack_coef: 0.0,
@@ -713,7 +713,8 @@ impl SynthProcessor {
         // Process filter envelope
         let filter_env_val = self.filter_env.tick();
         // Modulate filter cutoff: base_cutoff * 2^(env * amount)
-        let cutoff = self.filter_base_cutoff * (2.0_f64).powf(filter_env_val * self.filter_env_amount);
+        let cutoff =
+            self.filter_base_cutoff * (2.0_f64).powf(filter_env_val * self.filter_env_amount);
         self.vcf.set_cutoff(cutoff);
 
         // Filter the oscillator
@@ -735,7 +736,8 @@ impl SynthProcessor {
     pub fn process_audio(&mut self, input: f64) -> f64 {
         // For audio input mode, just apply filter and envelope
         let filter_env_val = self.filter_env.tick();
-        let cutoff = self.filter_base_cutoff * (2.0_f64).powf(filter_env_val * self.filter_env_amount);
+        let cutoff =
+            self.filter_base_cutoff * (2.0_f64).powf(filter_env_val * self.filter_env_amount);
         self.vcf.set_cutoff(cutoff);
 
         let filtered = self.vcf.process(input);
@@ -878,7 +880,10 @@ mod tests {
         }
 
         // Should be significantly attenuated
-        assert!(output_sum < 500.0, "High frequency not attenuated: {output_sum}");
+        assert!(
+            output_sum < 500.0,
+            "High frequency not attenuated: {output_sum}"
+        );
     }
 
     #[test]
@@ -915,7 +920,11 @@ mod tests {
         for _ in 0..1500 {
             env.tick();
         }
-        assert!(env.value() > 0.9, "Attack didn't reach peak: {}", env.value());
+        assert!(
+            env.value() > 0.9,
+            "Attack didn't reach peak: {}",
+            env.value()
+        );
 
         // Run decay to sustain (~7 time constants for 10ms decay = 3360 samples)
         for _ in 0..3500 {

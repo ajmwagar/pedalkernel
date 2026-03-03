@@ -119,11 +119,11 @@ impl Phaser {
 
         Self {
             stages,
-            mix: 0.5,           // 50/50 mix for classic phaser
-            feedback: 0.0,      // No feedback for script logo Phase 90
+            mix: 0.5,      // 50/50 mix for classic phaser
+            feedback: 0.0, // No feedback for script logo Phase 90
             feedback_state: 0.0,
             base_freq,
-            mod_depth: 4.0,     // Sweep from base_freq/4 to base_freq*4
+            mod_depth: 4.0, // Sweep from base_freq/4 to base_freq*4
             sample_rate,
         }
     }

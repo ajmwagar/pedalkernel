@@ -9,28 +9,30 @@
 
 pub(crate) mod solver;
 
-mod bjt;
 mod bbd;
+mod bjt;
 mod delay;
 mod diode;
 mod jfet;
 mod mosfet;
-mod ota;
 mod opamp;
+mod ota;
 mod pentode;
 mod slew;
 mod triode;
 mod vari_mu;
 
-pub use bjt::*;
 pub use bbd::*;
+pub use bjt::*;
 pub use delay::*;
 pub use diode::*;
 pub use jfet::*;
 pub use mosfet::*;
-pub use ota::*;
 pub use opamp::*;
+pub use ota::*;
 pub use pentode::*;
 pub use slew::*;
 pub use triode::*;
 pub use vari_mu::*;
+
+pub use solver::{reset_solver_stats, solver_stats_snapshot, SolverStatsSnapshot};

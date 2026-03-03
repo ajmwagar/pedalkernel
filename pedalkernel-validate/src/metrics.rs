@@ -135,12 +135,7 @@ pub fn thd_db(signal: &[f64], fundamental_hz: f64, sample_rate: f64, n_harmonics
 }
 
 /// Compute THD error between WDF and reference in dB.
-pub fn thd_error_db(
-    wdf: &[f64],
-    reference: &[f64],
-    fundamental_hz: f64,
-    sample_rate: f64,
-) -> f64 {
+pub fn thd_error_db(wdf: &[f64], reference: &[f64], fundamental_hz: f64, sample_rate: f64) -> f64 {
     let thd_wdf = thd_db(wdf, fundamental_hz, sample_rate, 10);
     let thd_ref = thd_db(reference, fundamental_hz, sample_rate, 10);
     (thd_wdf - thd_ref).abs()
@@ -150,7 +145,12 @@ pub fn thd_error_db(
 ///
 /// For push-pull amplifiers, even harmonics should be suppressed.
 /// A good push-pull stage has ratio < -40 dB.
-pub fn even_odd_ratio_db(signal: &[f64], fundamental_hz: f64, sample_rate: f64, n_harmonics: usize) -> f64 {
+pub fn even_odd_ratio_db(
+    signal: &[f64],
+    fundamental_hz: f64,
+    sample_rate: f64,
+    n_harmonics: usize,
+) -> f64 {
     let spectrum = compute_spectrum(signal);
     let bin_hz = sample_rate / signal.len() as f64;
 
@@ -288,7 +288,8 @@ pub struct ComparisonResult {
 impl ComparisonResult {
     /// Check if all metrics pass the given criteria.
     pub fn passes(&self, criteria: &crate::config::PassCriteria) -> bool {
-        if self.normalized_rms_error_db > criteria.normalized_rms_error_db.unwrap_or(f64::INFINITY) {
+        if self.normalized_rms_error_db > criteria.normalized_rms_error_db.unwrap_or(f64::INFINITY)
+        {
             return false;
         }
         if self.peak_error_db > criteria.peak_error_db.unwrap_or(f64::INFINITY) {

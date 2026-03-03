@@ -149,7 +149,10 @@ fn expand_forks(
 
         for dest in &net.to {
             match dest {
-                Pin::Fork { switch, destinations } => {
+                Pin::Fork {
+                    switch,
+                    destinations,
+                } => {
                     // Create a synthetic fork path component for each destination
                     let num_paths = destinations.len();
                     for (path_idx, dest_pin) in destinations.iter().enumerate() {
@@ -210,8 +213,7 @@ fn expand_forks(
 impl CircuitGraph {
     pub(super) fn from_pedal(pedal: &PedalDef) -> Self {
         // Expand fork() constructs into synthetic fork path components
-        let (expanded_nets, fork_components) =
-            expand_forks(&pedal.nets, pedal.components.len());
+        let (expanded_nets, fork_components) = expand_forks(&pedal.nets, pedal.components.len());
 
         // Build combined component list: original + fork paths
         let mut all_components: Vec<ComponentDef> = pedal.components.clone();
@@ -382,7 +384,11 @@ impl CircuitGraph {
                     });
                     // Tube coupling: grid↔plate↔cathode for sidechain BFS traversal
                     for &n in &[node_p, node_k, node_g] {
-                        let others: Vec<_> = [node_p, node_k, node_g].iter().copied().filter(|&x| x != n).collect();
+                        let others: Vec<_> = [node_p, node_k, node_g]
+                            .iter()
+                            .copied()
+                            .filter(|&x| x != n)
+                            .collect();
                         coupled_nodes.entry(n).or_default().extend(others);
                     }
                 }
@@ -408,7 +414,11 @@ impl CircuitGraph {
                     });
                     // Tube coupling: all pins for sidechain BFS traversal
                     for &n in &[node_p, node_k, node_g, node_s] {
-                        let others: Vec<_> = [node_p, node_k, node_g, node_s].iter().copied().filter(|&x| x != n).collect();
+                        let others: Vec<_> = [node_p, node_k, node_g, node_s]
+                            .iter()
+                            .copied()
+                            .filter(|&x| x != n)
+                            .collect();
                         coupled_nodes.entry(n).or_default().extend(others);
                     }
                 }
@@ -431,7 +441,11 @@ impl CircuitGraph {
                     });
                     // Tube coupling: grid↔plate↔cathode for sidechain BFS traversal
                     for &n in &[node_p, node_k, node_g] {
-                        let others: Vec<_> = [node_p, node_k, node_g].iter().copied().filter(|&x| x != n).collect();
+                        let others: Vec<_> = [node_p, node_k, node_g]
+                            .iter()
+                            .copied()
+                            .filter(|&x| x != n)
+                            .collect();
                         coupled_nodes.entry(n).or_default().extend(others);
                     }
                 }
@@ -648,7 +662,10 @@ impl CircuitGraph {
                         all_winding_nodes.push(uf.find(ter_e));
                         all_winding_nodes.push(uf.find(ter_f));
                     }
-                    if matches!(cfg.primary_type, WindingType::CenterTap | WindingType::PushPull) {
+                    if matches!(
+                        cfg.primary_type,
+                        WindingType::CenterTap | WindingType::PushPull
+                    ) {
                         let ct_key = format!("{}.primary.ct", comp.id);
                         let ct_id = get_id(&ct_key, &mut uf);
                         all_winding_nodes.push(uf.find(ct_id));
@@ -656,25 +673,35 @@ impl CircuitGraph {
                     all_winding_nodes.sort();
                     all_winding_nodes.dedup();
                     for &n in &all_winding_nodes {
-                        let others: Vec<NodeId> = all_winding_nodes.iter().copied().filter(|&x| x != n).collect();
+                        let others: Vec<NodeId> = all_winding_nodes
+                            .iter()
+                            .copied()
+                            .filter(|&x| x != n)
+                            .collect();
                         coupled_nodes.entry(n).or_default().extend(others);
                     }
 
                     // Record transformer winding info for inter-stage voltage gain.
                     let n = cfg.turns_ratio;
                     for node in [node_a, node_b] {
-                        transformer_info.insert(node, TransformerNodeInfo {
-                            comp_idx: idx,
-                            is_secondary: false,
-                            turns_ratio: n,
-                        });
+                        transformer_info.insert(
+                            node,
+                            TransformerNodeInfo {
+                                comp_idx: idx,
+                                is_secondary: false,
+                                turns_ratio: n,
+                            },
+                        );
                     }
                     for node in [node_c, node_d] {
-                        transformer_info.insert(node, TransformerNodeInfo {
-                            comp_idx: idx,
-                            is_secondary: true,
-                            turns_ratio: n,
-                        });
+                        transformer_info.insert(
+                            node,
+                            TransformerNodeInfo {
+                                comp_idx: idx,
+                                is_secondary: true,
+                                turns_ratio: n,
+                            },
+                        );
                     }
                 }
                 ComponentKind::RotarySwitch(_) => {
@@ -941,14 +968,22 @@ impl CircuitGraph {
         // cv_node or any hard boundary. Supply/gnd nodes are reachable but not
         // traversed. Transformer windings allow crossing magnetic isolation.
         let reachable_from_tap = Self::bfs_reachable(
-            tap_node, cv_node, &boundary, &supply_boundary,
-            &filtered_coupled, &adj,
+            tap_node,
+            cv_node,
+            &boundary,
+            &supply_boundary,
+            &filtered_coupled,
+            &adj,
         );
 
         // BFS from cv_node: same rules, opposite direction.
         let reachable_from_cv = Self::bfs_reachable(
-            cv_node, tap_node, &boundary, &supply_boundary,
-            &filtered_coupled, &adj,
+            cv_node,
+            tap_node,
+            &boundary,
+            &supply_boundary,
+            &filtered_coupled,
+            &adj,
         );
 
         // Sidechain nodes = intersection of both reachable sets.
@@ -1009,19 +1044,20 @@ impl CircuitGraph {
         visited.insert(start);
 
         // Helper: try to enqueue a node (returns true if newly visited)
-        let try_enqueue = |node: NodeId,
-                               visited: &mut HashSet<NodeId>,
-                               queue: &mut std::collections::VecDeque<NodeId>| {
-            if node == start || node == opposite || boundary.contains(&node) {
-                return;
-            }
-            if visited.insert(node) {
-                // Supply/gnd nodes are reachable but not traversed
-                if !supply_boundary.contains(&node) {
-                    queue.push_back(node);
+        let try_enqueue =
+            |node: NodeId,
+             visited: &mut HashSet<NodeId>,
+             queue: &mut std::collections::VecDeque<NodeId>| {
+                if node == start || node == opposite || boundary.contains(&node) {
+                    return;
                 }
-            }
-        };
+                if visited.insert(node) {
+                    // Supply/gnd nodes are reachable but not traversed
+                    if !supply_boundary.contains(&node) {
+                        queue.push_back(node);
+                    }
+                }
+            };
 
         // Seed: follow all edges from start
         if let Some(neighbors) = adj.get(&start) {
@@ -1147,7 +1183,10 @@ impl CircuitGraph {
         // modeled as a single tube with scaled plate current.
         let mut groups: HashMap<(NodeId, NodeId), Vec<(usize, String, bool)>> = HashMap::new();
         for (edge_idx, name, plate, cathode, is_vm) in &raw_triodes {
-            groups.entry((*plate, *cathode)).or_default().push((*edge_idx, name.clone(), *is_vm));
+            groups
+                .entry((*plate, *cathode))
+                .or_default()
+                .push((*edge_idx, name.clone(), *is_vm));
         }
 
         let mut triodes: Vec<(usize, TriodeInfo)> = Vec::new();
@@ -1169,12 +1208,16 @@ impl CircuitGraph {
         }
 
         // Collect all triode edge indices (including parallel duplicates).
-        let all_triode_edges: Vec<usize> = raw_triodes.iter().map(|(idx, _, _, _, _)| *idx).collect();
+        let all_triode_edges: Vec<usize> =
+            raw_triodes.iter().map(|(idx, _, _, _, _)| *idx).collect();
 
         // Sort by distance of junction node from input, with edge_idx as tiebreaker
         // for deterministic ordering when distances are equal.
         triodes.sort_by_key(|(edge_idx, info)| {
-            (dist.get(&info.junction_node).copied().unwrap_or(usize::MAX), *edge_idx)
+            (
+                dist.get(&info.junction_node).copied().unwrap_or(usize::MAX),
+                *edge_idx,
+            )
         });
         (triodes, all_triode_edges)
     }
@@ -1195,7 +1238,10 @@ impl CircuitGraph {
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
             if let ComponentKind::Transformer(cfg) = &comp.kind {
-                if matches!(cfg.primary_type, WindingType::CenterTap | WindingType::PushPull) {
+                if matches!(
+                    cfg.primary_type,
+                    WindingType::CenterTap | WindingType::PushPull
+                ) {
                     ct_transformers.push((edge_idx, cfg));
                 }
             }
@@ -1216,16 +1262,10 @@ impl CircuitGraph {
             let mut exclude: Vec<usize> = nonlinear_edge_indices.to_vec();
             exclude.push(*xfmr_edge_idx);
 
-            let nodes_near_a = self.bfs_through_passives(
-                primary_a_node,
-                &exclude,
-                &self.active_edge_indices,
-            );
-            let nodes_near_b = self.bfs_through_passives(
-                primary_b_node,
-                &exclude,
-                &self.active_edge_indices,
-            );
+            let nodes_near_a =
+                self.bfs_through_passives(primary_a_node, &exclude, &self.active_edge_indices);
+            let nodes_near_b =
+                self.bfs_through_passives(primary_b_node, &exclude, &self.active_edge_indices);
 
             // Find triode groups whose plate is reachable from either transformer end.
             // In the 670, both transformer ends reach both triode plates through a
@@ -1286,7 +1326,10 @@ impl CircuitGraph {
         }
 
         // Find Standard-type transformer edges.
-        let standard_xfmr_edges: Vec<usize> = self.edges.iter().enumerate()
+        let standard_xfmr_edges: Vec<usize> = self
+            .edges
+            .iter()
+            .enumerate()
             .filter(|(_, e)| {
                 if let ComponentKind::Transformer(cfg) = &self.components[e.comp_idx].kind {
                     matches!(cfg.primary_type, WindingType::Standard)
@@ -1307,12 +1350,10 @@ impl CircuitGraph {
                 let mut exclude: Vec<usize> = nonlinear_edge_indices.to_vec();
                 exclude.push(xfmr_idx);
 
-                let push_reachable = self.bfs_through_passives(
-                    push_plate, &exclude, &self.active_edge_indices,
-                );
-                let pull_reachable = self.bfs_through_passives(
-                    pull_plate, &exclude, &self.active_edge_indices,
-                );
+                let push_reachable =
+                    self.bfs_through_passives(push_plate, &exclude, &self.active_edge_indices);
+                let pull_reachable =
+                    self.bfs_through_passives(pull_plate, &exclude, &self.active_edge_indices);
 
                 // If both push and pull plates can reach a transformer primary node,
                 // this transformer is functionally push-pull.
@@ -1405,7 +1446,10 @@ impl CircuitGraph {
                 let Some(n) = neighbor else { continue };
                 // Skip push-pull transformer edges (magnetic isolation boundary).
                 // Non-PP transformers are kept so they can be built into WDF subtrees.
-                if matches!(self.components[e.comp_idx].kind, ComponentKind::Transformer(_)) {
+                if matches!(
+                    self.components[e.comp_idx].kind,
+                    ComponentKind::Transformer(_)
+                ) {
                     if pp_transformer_edges.contains(&idx) {
                         continue;
                     }
@@ -1451,10 +1495,7 @@ impl CircuitGraph {
     ///
     /// Returns a list of `OpAmpFeedbackInfo` ordered by topological distance
     /// from the input node.
-    pub(super) fn find_opamp_feedback_loops(
-        &self,
-        pedal: &PedalDef,
-    ) -> Vec<OpAmpFeedbackInfo> {
+    pub(super) fn find_opamp_feedback_loops(&self, pedal: &PedalDef) -> Vec<OpAmpFeedbackInfo> {
         // Build a pin → resolved node map from the netlist.
         // We need to re-resolve pins because CircuitGraph doesn't store the
         // full pin_ids map (only edges and resolved nodes).
@@ -1517,7 +1558,9 @@ impl CircuitGraph {
             if let Some(r) = resistance {
                 let pin_a_key = format!("{}.a", comp.id);
                 let pin_b_key = format!("{}.b", comp.id);
-                if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pin_a_key), pin_ids.get(&pin_b_key)) {
+                if let (Some(&a_id), Some(&b_id)) =
+                    (pin_ids.get(&pin_a_key), pin_ids.get(&pin_b_key))
+                {
                     let a_node = uf.find(a_id);
                     let b_node = uf.find(b_id);
                     resistor_nodes.push(ResistorInfo {
@@ -1534,170 +1577,193 @@ impl CircuitGraph {
 
         // Helper: find the input resistor connected to neg_node
         // For cascaded op-amps, Ri may connect to a previous stage's output, not the global input
-        let find_input_resistor = |neg_node: usize, out_node: usize, gnd_node: usize| -> Option<f64> {
-            for info in &resistor_nodes {
-                // Skip the feedback resistor (connects neg to out)
-                if (info.node_a == neg_node && info.node_b == out_node) || (info.node_a == out_node && info.node_b == neg_node) {
-                    continue;
+        let find_input_resistor =
+            |neg_node: usize, out_node: usize, gnd_node: usize| -> Option<f64> {
+                for info in &resistor_nodes {
+                    // Skip the feedback resistor (connects neg to out)
+                    if (info.node_a == neg_node && info.node_b == out_node)
+                        || (info.node_a == out_node && info.node_b == neg_node)
+                    {
+                        continue;
+                    }
+                    // Skip resistors to ground (those are Ri for non-inverting topology)
+                    if (info.node_a == neg_node && info.node_b == gnd_node)
+                        || (info.node_a == gnd_node && info.node_b == neg_node)
+                    {
+                        continue;
+                    }
+                    // Find any other resistor connected to neg_node - this is Ri
+                    if info.node_a == neg_node || info.node_b == neg_node {
+                        return Some(info.resistance);
+                    }
                 }
-                // Skip resistors to ground (those are Ri for non-inverting topology)
-                if (info.node_a == neg_node && info.node_b == gnd_node) || (info.node_a == gnd_node && info.node_b == neg_node) {
-                    continue;
-                }
-                // Find any other resistor connected to neg_node - this is Ri
-                if info.node_a == neg_node || info.node_b == neg_node {
-                    return Some(info.resistance);
-                }
-            }
-            None
-        };
+                None
+            };
 
         // Helper: find resistive path between two nodes
         // Handles series resistances (sum) and parallel paths (1/R = 1/R1 + 1/R2)
         // Returns (effective_resistance, component_ids, pot_info)
         // pot_info: Option<(pot_comp_id, pot_max_r, fixed_series_r, parallel_fixed_r)>
         // The return type includes parallel_fixed_r for pots in parallel with fixed resistors
-        let find_resistive_path = |start: usize, end: usize| -> Option<(f64, Vec<String>, Option<(String, f64, f64, Option<f64>)>)> {
-            if start == end {
-                return None; // Same node, no resistance
-            }
-
-            // Build adjacency for resistor-only edges
-            // Store (next_node, resistance, comp_id, is_pot, max_r)
-            let mut resistor_adj: HashMap<usize, Vec<(usize, f64, String, bool, f64)>> = HashMap::new();
-            for info in &resistor_nodes {
-                resistor_adj.entry(info.node_a).or_default().push((info.node_b, info.resistance, info.id.clone(), info.is_pot, info.max_r));
-                resistor_adj.entry(info.node_b).or_default().push((info.node_a, info.resistance, info.id.clone(), info.is_pot, info.max_r));
-            }
-
-            // Find all simple paths from start to end using DFS
-            // Track: (resistance, comp_ids, pot_info: Option<(id, max_r, fixed_series_r)>)
-            // Note: pot_info here is 3 elements; we add parallel_fixed_r at the end
-            #[derive(Clone)]
-            struct PathState {
-                node: usize,
-                path_r: f64,
-                path_comps: Vec<String>,
-                pot_info: Option<(String, f64)>, // (pot_id, pot_max_r)
-                fixed_r: f64, // Sum of non-pot resistors in path
-                visited: HashSet<usize>,
-            }
-
-            // Intermediate paths have 3-element pot_info (without parallel_fixed_r)
-            let mut all_paths: Vec<(f64, Vec<String>, Option<(String, f64, f64)>)> = Vec::new();
-            let mut stack: Vec<PathState> = Vec::new();
-            let mut visited_start = HashSet::new();
-            visited_start.insert(start);
-            stack.push(PathState {
-                node: start,
-                path_r: 0.0,
-                path_comps: Vec::new(),
-                pot_info: None,
-                fixed_r: 0.0,
-                visited: visited_start,
-            });
-
-            while let Some(state) = stack.pop() {
-                if state.node == end {
-                    let pot_info = state.pot_info.map(|(id, max_r)| (id, max_r, state.fixed_r));
-                    all_paths.push((state.path_r, state.path_comps, pot_info));
-                    continue;
+        let find_resistive_path =
+            |start: usize,
+             end: usize|
+             -> Option<(f64, Vec<String>, Option<(String, f64, f64, Option<f64>)>)> {
+                if start == end {
+                    return None; // Same node, no resistance
                 }
 
-                if let Some(neighbors) = resistor_adj.get(&state.node) {
-                    for (next_node, r, comp_id, is_pot, max_r) in neighbors {
-                        if !state.visited.contains(next_node) {
-                            let mut new_visited = state.visited.clone();
-                            new_visited.insert(*next_node);
-                            let mut new_comps = state.path_comps.clone();
-                            new_comps.push(comp_id.clone());
+                // Build adjacency for resistor-only edges
+                // Store (next_node, resistance, comp_id, is_pot, max_r)
+                let mut resistor_adj: HashMap<usize, Vec<(usize, f64, String, bool, f64)>> =
+                    HashMap::new();
+                for info in &resistor_nodes {
+                    resistor_adj.entry(info.node_a).or_default().push((
+                        info.node_b,
+                        info.resistance,
+                        info.id.clone(),
+                        info.is_pot,
+                        info.max_r,
+                    ));
+                    resistor_adj.entry(info.node_b).or_default().push((
+                        info.node_a,
+                        info.resistance,
+                        info.id.clone(),
+                        info.is_pot,
+                        info.max_r,
+                    ));
+                }
 
-                            // Track pot info and fixed series resistance
-                            let (new_pot_info, new_fixed_r) = if *is_pot {
-                                // This is a pot - record it (only track first pot in path)
-                                let pot_info = state.pot_info.clone().or(Some((comp_id.clone(), *max_r)));
-                                (pot_info, state.fixed_r)
-                            } else {
-                                // Fixed resistor - add to fixed_r
-                                (state.pot_info.clone(), state.fixed_r + r)
-                            };
+                // Find all simple paths from start to end using DFS
+                // Track: (resistance, comp_ids, pot_info: Option<(id, max_r, fixed_series_r)>)
+                // Note: pot_info here is 3 elements; we add parallel_fixed_r at the end
+                #[derive(Clone)]
+                struct PathState {
+                    node: usize,
+                    path_r: f64,
+                    path_comps: Vec<String>,
+                    pot_info: Option<(String, f64)>, // (pot_id, pot_max_r)
+                    fixed_r: f64,                    // Sum of non-pot resistors in path
+                    visited: HashSet<usize>,
+                }
 
-                            // Series: add resistances
-                            stack.push(PathState {
-                                node: *next_node,
-                                path_r: state.path_r + r,
-                                path_comps: new_comps,
-                                pot_info: new_pot_info,
-                                fixed_r: new_fixed_r,
-                                visited: new_visited,
-                            });
+                // Intermediate paths have 3-element pot_info (without parallel_fixed_r)
+                let mut all_paths: Vec<(f64, Vec<String>, Option<(String, f64, f64)>)> = Vec::new();
+                let mut stack: Vec<PathState> = Vec::new();
+                let mut visited_start = HashSet::new();
+                visited_start.insert(start);
+                stack.push(PathState {
+                    node: start,
+                    path_r: 0.0,
+                    path_comps: Vec::new(),
+                    pot_info: None,
+                    fixed_r: 0.0,
+                    visited: visited_start,
+                });
+
+                while let Some(state) = stack.pop() {
+                    if state.node == end {
+                        let pot_info = state.pot_info.map(|(id, max_r)| (id, max_r, state.fixed_r));
+                        all_paths.push((state.path_r, state.path_comps, pot_info));
+                        continue;
+                    }
+
+                    if let Some(neighbors) = resistor_adj.get(&state.node) {
+                        for (next_node, r, comp_id, is_pot, max_r) in neighbors {
+                            if !state.visited.contains(next_node) {
+                                let mut new_visited = state.visited.clone();
+                                new_visited.insert(*next_node);
+                                let mut new_comps = state.path_comps.clone();
+                                new_comps.push(comp_id.clone());
+
+                                // Track pot info and fixed series resistance
+                                let (new_pot_info, new_fixed_r) = if *is_pot {
+                                    // This is a pot - record it (only track first pot in path)
+                                    let pot_info =
+                                        state.pot_info.clone().or(Some((comp_id.clone(), *max_r)));
+                                    (pot_info, state.fixed_r)
+                                } else {
+                                    // Fixed resistor - add to fixed_r
+                                    (state.pot_info.clone(), state.fixed_r + r)
+                                };
+
+                                // Series: add resistances
+                                stack.push(PathState {
+                                    node: *next_node,
+                                    path_r: state.path_r + r,
+                                    path_comps: new_comps,
+                                    pot_info: new_pot_info,
+                                    fixed_r: new_fixed_r,
+                                    visited: new_visited,
+                                });
+                            }
                         }
                     }
                 }
-            }
 
-            if all_paths.is_empty() {
-                return None;
-            }
+                if all_paths.is_empty() {
+                    return None;
+                }
 
-            // If single path, use it directly (no parallel fixed resistance)
-            if all_paths.len() == 1 {
-                let (r, comps, pot_info) = all_paths.into_iter().next().unwrap();
-                // Convert pot_info to 4-element tuple with None for parallel_fixed_r
-                let pot_info_4 = pot_info.map(|(id, max_r, fixed_series)| (id, max_r, fixed_series, None));
-                return Some((r, comps, pot_info_4));
-            }
+                // If single path, use it directly (no parallel fixed resistance)
+                if all_paths.len() == 1 {
+                    let (r, comps, pot_info) = all_paths.into_iter().next().unwrap();
+                    // Convert pot_info to 4-element tuple with None for parallel_fixed_r
+                    let pot_info_4 =
+                        pot_info.map(|(id, max_r, fixed_series)| (id, max_r, fixed_series, None));
+                    return Some((r, comps, pot_info_4));
+                }
 
-            // Parallel paths: 1/R_total = 1/R1 + 1/R2 + ...
-            // For pots in parallel paths, track pot info AND the parallel fixed resistance
-            // (the resistance of paths that don't include the pot)
-            let mut conductance_sum = 0.0;
-            let mut all_comps: Vec<String> = Vec::new();
-            let mut first_pot_info: Option<(String, f64, f64)> = None;
-            let mut fixed_paths_conductance = 0.0; // Conductance of paths without the pot
+                // Parallel paths: 1/R_total = 1/R1 + 1/R2 + ...
+                // For pots in parallel paths, track pot info AND the parallel fixed resistance
+                // (the resistance of paths that don't include the pot)
+                let mut conductance_sum = 0.0;
+                let mut all_comps: Vec<String> = Vec::new();
+                let mut first_pot_info: Option<(String, f64, f64)> = None;
+                let mut fixed_paths_conductance = 0.0; // Conductance of paths without the pot
 
-            for (r, comps, pot_info) in &all_paths {
-                if *r > 0.0 {
-                    conductance_sum += 1.0 / r;
+                for (r, comps, pot_info) in &all_paths {
+                    if *r > 0.0 {
+                        conductance_sum += 1.0 / r;
 
-                    if pot_info.is_some() {
-                        // This path has a pot
-                        if first_pot_info.is_none() {
-                            first_pot_info = pot_info.clone();
+                        if pot_info.is_some() {
+                            // This path has a pot
+                            if first_pot_info.is_none() {
+                                first_pot_info = pot_info.clone();
+                            }
+                        } else {
+                            // This is a fixed path (no pot) - track its conductance
+                            fixed_paths_conductance += 1.0 / r;
                         }
+                    }
+                    for c in comps {
+                        if !all_comps.contains(c) {
+                            all_comps.push(c.clone());
+                        }
+                    }
+                }
+
+                // If there's a pot AND fixed parallel paths, include the parallel fixed R
+                // in the pot info as a 4th element (parallel_fixed_r)
+                let final_pot_info = if let Some((id, max_r, fixed_series)) = first_pot_info {
+                    if fixed_paths_conductance > 0.0 {
+                        // There are fixed paths in parallel with the pot
+                        // parallel_fixed_r = 1 / fixed_paths_conductance
+                        let parallel_fixed_r = 1.0 / fixed_paths_conductance;
+                        Some((id, max_r, fixed_series, Some(parallel_fixed_r)))
                     } else {
-                        // This is a fixed path (no pot) - track its conductance
-                        fixed_paths_conductance += 1.0 / r;
+                        Some((id, max_r, fixed_series, None))
                     }
-                }
-                for c in comps {
-                    if !all_comps.contains(c) {
-                        all_comps.push(c.clone());
-                    }
-                }
-            }
-
-            // If there's a pot AND fixed parallel paths, include the parallel fixed R
-            // in the pot info as a 4th element (parallel_fixed_r)
-            let final_pot_info = if let Some((id, max_r, fixed_series)) = first_pot_info {
-                if fixed_paths_conductance > 0.0 {
-                    // There are fixed paths in parallel with the pot
-                    // parallel_fixed_r = 1 / fixed_paths_conductance
-                    let parallel_fixed_r = 1.0 / fixed_paths_conductance;
-                    Some((id, max_r, fixed_series, Some(parallel_fixed_r)))
                 } else {
-                    Some((id, max_r, fixed_series, None))
-                }
-            } else {
-                None
-            };
+                    None
+                };
 
-            if conductance_sum > 0.0 {
-                Some((1.0 / conductance_sum, all_comps, final_pot_info))
-            } else {
-                None
-            }
-        };
+                if conductance_sum > 0.0 {
+                    Some((1.0 / conductance_sum, all_comps, final_pot_info))
+                } else {
+                    None
+                }
+            };
 
         // Build a map of diodes: (node_a, node_b) -> DiodeType
         // Use the SAME UnionFind and pin_ids we just built to compute node IDs.
@@ -1789,7 +1855,8 @@ impl CircuitGraph {
                     if pos_node == gnd_node_resolved {
                         // Inverting: look for Ri connected to neg (from any input source)
                         // For cascaded op-amps, Ri may connect to a previous stage's output
-                        if let Some(ri) = find_input_resistor(neg_node, out_node, gnd_node_resolved) {
+                        if let Some(ri) = find_input_resistor(neg_node, out_node, gnd_node_resolved)
+                        {
                             // Check for feedback diodes (Tube Screamer style soft clipping)
                             let feedback_diode = find_feedback_diode(neg_node, out_node);
                             results.push(OpAmpFeedbackInfo {
@@ -1810,7 +1877,9 @@ impl CircuitGraph {
 
                     // Check for non-inverting topology: pos connected to input (or signal path)
                     // Non-inverting: look for Ri path from neg to ground
-                    if let Some((ri, _ri_comps, _ri_pot)) = find_resistive_path(neg_node, gnd_node_resolved) {
+                    if let Some((ri, _ri_comps, _ri_pot)) =
+                        find_resistive_path(neg_node, gnd_node_resolved)
+                    {
                         results.push(OpAmpFeedbackInfo {
                             comp_id: comp.id.clone(),
                             opamp_type,
@@ -1829,13 +1898,10 @@ impl CircuitGraph {
 
         // Sort by topological distance from input (using pos_node as reference
         // since that's where the signal enters the op-amp).
-        results.sort_by_key(|info| {
-            dist.get(&info.pos_node).copied().unwrap_or(usize::MAX)
-        });
+        results.sort_by_key(|info| dist.get(&info.pos_node).copied().unwrap_or(usize::MAX));
 
         results
     }
-
 }
 
 /// Push-pull pair detected via center-tapped transformer.
@@ -2120,14 +2186,20 @@ pub(super) fn make_leaf(
             r_active: FORK_R_ACTIVE,
             r_inactive: FORK_R_INACTIVE,
             position: 0,
-            rp: if is_active { FORK_R_ACTIVE } else { FORK_R_INACTIVE },
+            rp: if is_active {
+                FORK_R_ACTIVE
+            } else {
+                FORK_R_INACTIVE
+            },
         };
     }
 
     // Regular component handling
     match &comp.kind {
         // Handle inf (infinite) resistor as very high resistance (open circuit)
-        ComponentKind::Resistor(r) if r.is_infinite() => DynNode::Resistor { rp: FORK_R_INACTIVE },
+        ComponentKind::Resistor(r) if r.is_infinite() => DynNode::Resistor {
+            rp: FORK_R_INACTIVE,
+        },
         ComponentKind::Resistor(r) => DynNode::Resistor { rp: *r },
         ComponentKind::Capacitor(cfg) => {
             // Use LeakyCapacitor if leakage or DA is specified

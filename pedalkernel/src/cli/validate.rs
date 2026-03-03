@@ -27,7 +27,11 @@ pub fn run(paths: &[String], fix: bool) {
         let src = match std::fs::read_to_string(file) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("\x1b[31merror\x1b[0m: cannot read {}: {}", file.display(), e);
+                eprintln!(
+                    "\x1b[31merror\x1b[0m: cannot read {}: {}",
+                    file.display(),
+                    e
+                );
                 total_err += 1;
                 continue;
             }
@@ -36,14 +40,8 @@ pub fn run(paths: &[String], fix: bool) {
         let pedal = match parse_pedal_file(&src) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!(
-                    "\n\x1b[1m{}\x1b[0m",
-                    file.display()
-                );
-                eprintln!(
-                    "  \x1b[31merror\x1b[0m[parse-error]: {}",
-                    e
-                );
+                eprintln!("\n\x1b[1m{}\x1b[0m", file.display());
+                eprintln!("  \x1b[31merror\x1b[0m[parse-error]: {}", e);
                 total_err += 1;
                 continue;
             }
@@ -63,10 +61,7 @@ pub fn run(paths: &[String], fix: bool) {
                 Severity::Warning => ("\x1b[33m", "warning"),
                 Severity::Error => ("\x1b[31m", "error"),
             };
-            eprintln!(
-                "  {color}{tag}\x1b[0m[{}]: {}",
-                w.code, w.message
-            );
+            eprintln!("  {color}{tag}\x1b[0m[{}]: {}", w.code, w.message);
             match w.severity {
                 Severity::Info => total_info += 1,
                 Severity::Warning => total_warn += 1,
@@ -84,7 +79,11 @@ pub fn run(paths: &[String], fix: bool) {
                             files_fixed += 1;
                         }
                         Err(e) => {
-                            eprintln!("  \x1b[31merror\x1b[0m: cannot write {}: {}", file.display(), e);
+                            eprintln!(
+                                "  \x1b[31merror\x1b[0m: cannot write {}: {}",
+                                file.display(),
+                                e
+                            );
                         }
                     }
                 }
@@ -110,14 +109,26 @@ pub fn run(paths: &[String], fix: bool) {
             files_with_issues,
         );
         if total_err > 0 {
-            eprint!("  \x1b[31m{} error{}\x1b[0m", total_err, if total_err == 1 { "" } else { "s" });
+            eprint!(
+                "  \x1b[31m{} error{}\x1b[0m",
+                total_err,
+                if total_err == 1 { "" } else { "s" }
+            );
         }
         if total_warn > 0 {
-            if total_err > 0 { eprint!(", "); }
-            eprint!("\x1b[33m{} warning{}\x1b[0m", total_warn, if total_warn == 1 { "" } else { "s" });
+            if total_err > 0 {
+                eprint!(", ");
+            }
+            eprint!(
+                "\x1b[33m{} warning{}\x1b[0m",
+                total_warn,
+                if total_warn == 1 { "" } else { "s" }
+            );
         }
         if total_info > 0 {
-            if total_err > 0 || total_warn > 0 { eprint!(", "); }
+            if total_err > 0 || total_warn > 0 {
+                eprint!(", ");
+            }
             eprint!("\x1b[36m{} info\x1b[0m", total_info);
         }
         eprintln!();
@@ -196,7 +207,10 @@ fn glob_pedal_files(pattern: &str) -> Result<Vec<PathBuf>, String> {
         } else {
             Path::new(parts[0].trim_end_matches('/'))
         };
-        let file_pattern = parts.get(1).map(|s| s.trim_start_matches('/')).unwrap_or("*.pedal");
+        let file_pattern = parts
+            .get(1)
+            .map(|s| s.trim_start_matches('/'))
+            .unwrap_or("*.pedal");
 
         fn walk_glob(dir: &Path, pattern: &str, files: &mut Vec<PathBuf>) {
             if let Ok(entries) = std::fs::read_dir(dir) {
@@ -217,9 +231,7 @@ fn glob_pedal_files(pattern: &str) -> Result<Vec<PathBuf>, String> {
         walk_glob(base_dir, file_pattern, &mut files);
     } else {
         // Simple glob in a single directory
-        let dir = Path::new(pattern)
-            .parent()
-            .unwrap_or(Path::new("."));
+        let dir = Path::new(pattern).parent().unwrap_or(Path::new("."));
         let file_pattern = Path::new(pattern)
             .file_name()
             .and_then(|f| f.to_str())
@@ -259,12 +271,10 @@ fn matches_simple_glob(name: &str, pattern: &str) -> bool {
                     pattern.next();
                     // Try matching zero or more chars
                     let remaining_pattern: String = pattern.collect();
-                    let remaining_name: String = std::iter::once(
-                        name.peek().copied()
-                    )
-                    .flatten()
-                    .chain(name.clone())
-                    .collect();
+                    let remaining_name: String = std::iter::once(name.peek().copied())
+                        .flatten()
+                        .chain(name.clone())
+                        .collect();
 
                     // Try every suffix of name against remaining pattern
                     for i in 0..=remaining_name.len() {
@@ -318,7 +328,11 @@ fn try_autofix(src: &str, warnings: &[PedalWarning]) -> Option<String> {
         }
     }
 
-    if changed { Some(result) } else { None }
+    if changed {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 struct PinFix {

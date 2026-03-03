@@ -166,19 +166,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_validation(cli: &Cli, suite: &str, test: Option<String>) -> anyhow::Result<()> {
-    println!(
-        "{} Loading configuration...",
-        "▶".blue()
-    );
+    println!("{} Loading configuration...", "▶".blue());
 
     // Load or create default config
     let validation_config = if cli.config.exists() {
         ValidationConfig::load(&cli.config)?
     } else {
-        println!(
-            "  {} Config not found, using defaults",
-            "⚠".yellow()
-        );
+        println!("  {} Config not found, using defaults", "⚠".yellow());
         ValidationConfig::default_config()
     };
 
@@ -211,10 +205,9 @@ fn run_validation(cli: &Cli, suite: &str, test: Option<String>) -> anyhow::Resul
 
         // If specific test requested, filter to just that test
         let suite_to_run = if let Some(ref test_name) = test {
-            let test_case = suite_config
-                .tests
-                .get(test_name)
-                .ok_or_else(|| anyhow::anyhow!("Test '{}' not found in suite '{}'", test_name, suite))?;
+            let test_case = suite_config.tests.get(test_name).ok_or_else(|| {
+                anyhow::anyhow!("Test '{}' not found in suite '{}'", test_name, suite)
+            })?;
 
             let mut filtered = suite_config.clone();
             filtered.tests.clear();
@@ -263,7 +256,11 @@ fn list_tests(cli: &Cli) -> anyhow::Result<()> {
     println!("{}", "─".repeat(50));
 
     for (suite_name, suite) in &config.suites {
-        println!("\n{} - {}", suite_name.bold().blue(), suite.description.dimmed());
+        println!(
+            "\n{} - {}",
+            suite_name.bold().blue(),
+            suite.description.dimmed()
+        );
 
         for (test_name, test) in &suite.tests {
             println!("  • {} - {}", test_name.green(), test.description.dimmed());
@@ -289,7 +286,11 @@ fn init_config(cli: &Cli) -> anyhow::Result<()> {
     let path = &cli.config;
     std::fs::write(path, &yaml)?;
 
-    println!("{} Created default config at: {}", "✓".green(), path.display());
+    println!(
+        "{} Created default config at: {}",
+        "✓".green(),
+        path.display()
+    );
     println!("\nEdit this file to add your own test suites and criteria.");
 
     // Create directory structure
@@ -305,21 +306,24 @@ fn init_config(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn quick_validate(cli: &Cli, circuit: &PathBuf, golden: Option<&std::path::Path>) -> anyhow::Result<()> {
+fn quick_validate(
+    cli: &Cli,
+    circuit: &PathBuf,
+    golden: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     use pedalkernel_validate::runner::quick_validate as qv;
 
-    println!(
-        "{} Quick validation of: {}",
-        "▶".blue(),
-        circuit.display()
-    );
+    println!("{} Quick validation of: {}", "▶".blue(), circuit.display());
 
     let sample_rate = (cli.sample_rate * cli.oversample) as f64;
     let result = qv(circuit, golden, sample_rate)?;
 
     println!("\n{}", "Results".bold());
     println!("{}", "─".repeat(40));
-    println!("Normalized RMS Error: {:.2} dB", result.normalized_rms_error_db);
+    println!(
+        "Normalized RMS Error: {:.2} dB",
+        result.normalized_rms_error_db
+    );
     println!("Peak Error:           {:.2} dB", result.peak_error_db);
     println!("Spectral Error:       {:.2} dB", result.spectral_error_db);
 
@@ -347,7 +351,10 @@ fn quick_validate(cli: &Cli, circuit: &PathBuf, golden: Option<&std::path::Path>
 fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
     use pedalkernel_validate::npy;
 
-    println!("{} Bootstrapping golden references from WDF output...", "▶".blue());
+    println!(
+        "{} Bootstrapping golden references from WDF output...",
+        "▶".blue()
+    );
 
     let validation_config = if cli.config.exists() {
         ValidationConfig::load(&cli.config)?
@@ -380,7 +387,11 @@ fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
 
             let circuit_path = cli.circuits.join(&test_case.circuit);
             if !circuit_path.exists() {
-                println!("    {} Circuit not found: {}", "⚠".yellow(), circuit_path.display());
+                println!(
+                    "    {} Circuit not found: {}",
+                    "⚠".yellow(),
+                    circuit_path.display()
+                );
                 continue;
             }
 
@@ -402,7 +413,8 @@ fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
                 let output: Vec<f64> = input.iter().map(|&s| pedal.process(s)).collect();
 
                 // Save as golden
-                let golden_path = cli.golden
+                let golden_path = cli
+                    .golden
                     .join(suite_name)
                     .join(test_name)
                     .join(format!("{}.npy", label));
@@ -413,7 +425,12 @@ fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
         }
     }
 
-    println!("\n{}", "Done! Golden references bootstrapped from WDF.".green().bold());
+    println!(
+        "\n{}",
+        "Done! Golden references bootstrapped from WDF."
+            .green()
+            .bold()
+    );
     println!("These can be used for regression testing future WDF changes.");
 
     Ok(())
@@ -446,7 +463,11 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
 
     let impulse_path = cli.golden.join("linear/rc_lowpass/impulse.npy");
     npy::write_f64(&impulse_path, &impulse_golden)?;
-    println!("  {} Wrote impulse response: {}", "✓".green(), impulse_path.display());
+    println!(
+        "  {} Wrote impulse response: {}",
+        "✓".green(),
+        impulse_path.display()
+    );
 
     // Generate sine response (for THD sanity check - linear circuit should have ~0 THD)
     let sine_input = signals::sine(sample_rate, 1000.0, 0.1, 1.0);
@@ -454,7 +475,11 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
 
     let sine_path = cli.golden.join("linear/rc_lowpass/sine.npy");
     npy::write_f64(&sine_path, &sine_golden)?;
-    println!("  {} Wrote sine response: {}", "✓".green(), sine_path.display());
+    println!(
+        "  {} Wrote sine response: {}",
+        "✓".green(),
+        sine_path.display()
+    );
 
     // Generate sweep response
     let sweep_input = signals::exp_sweep(sample_rate, 20.0, 20000.0, 1.0, 1.0);
@@ -462,10 +487,14 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
 
     let sweep_path = cli.golden.join("linear/rc_lowpass/sweep.npy");
     npy::write_f64(&sweep_path, &sweep_golden)?;
-    println!("  {} Wrote sweep response: {}", "✓".green(), sweep_path.display());
+    println!(
+        "  {} Wrote sweep response: {}",
+        "✓".green(),
+        sweep_path.display()
+    );
 
     // RL Lowpass: L=100mH, R=1k
-    let l = 0.1;      // 100mH
+    let l = 0.1; // 100mH
     let r_rl = 1000.0; // 1k
     let fc_rl = r_rl / (2.0 * std::f64::consts::PI * l);
 
@@ -484,7 +513,11 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
 
     let sine_path_rl = cli.golden.join("linear/rl_lowpass/sine.npy");
     npy::write_f64(&sine_path_rl, &sine_golden_rl)?;
-    println!("  {} Wrote sine response: {}", "✓".green(), sine_path_rl.display());
+    println!(
+        "  {} Wrote sine response: {}",
+        "✓".green(),
+        sine_path_rl.display()
+    );
 
     println!("\n{}", "Done! Golden references generated.".green().bold());
     println!("Run 'pedalkernel-validate run --suite linear' to validate.");
@@ -513,9 +546,13 @@ fn check_spice() -> anyhow::Result<()> {
     }
 }
 
-fn generate_spice_golden(cli: &Cli, suite: &str, spice_dir: &std::path::Path) -> anyhow::Result<()> {
-    use pedalkernel_validate::spice::{SpiceConfig, SpiceRunner};
+fn generate_spice_golden(
+    cli: &Cli,
+    suite: &str,
+    spice_dir: &std::path::Path,
+) -> anyhow::Result<()> {
     use pedalkernel_validate::npy;
+    use pedalkernel_validate::spice::{SpiceConfig, SpiceRunner};
 
     println!("{} Generating SPICE golden references...", "▶".blue());
 
@@ -534,8 +571,12 @@ fn generate_spice_golden(cli: &Cli, suite: &str, spice_dir: &std::path::Path) ->
     };
     let runner = SpiceRunner::new(config.clone());
 
-    println!("  Sample rate: {} Hz × {}x = {} Hz internal",
-        cli.sample_rate, cli.oversample, config.internal_rate());
+    println!(
+        "  Sample rate: {} Hz × {}x = {} Hz internal",
+        cli.sample_rate,
+        cli.oversample,
+        config.internal_rate()
+    );
 
     // Load validation config
     let validation_config = if cli.config.exists() {
@@ -546,7 +587,9 @@ fn generate_spice_golden(cli: &Cli, suite: &str, spice_dir: &std::path::Path) ->
 
     // Build list of suites to process
     let suites_to_process: Vec<(String, pedalkernel_validate::TestSuite)> = if suite == "all" {
-        validation_config.suites.iter()
+        validation_config
+            .suites
+            .iter()
             .map(|(n, s)| (n.clone(), s.clone()))
             .collect()
     } else {
@@ -569,8 +612,12 @@ fn generate_spice_golden(cli: &Cli, suite: &str, spice_dir: &std::path::Path) ->
             let spice_path = spice_dir.join(&test_case.circuit.replace(".pedal", ".spice"));
 
             if !spice_path.exists() {
-                println!("  {} {} - SPICE file not found: {}",
-                    "⚠".yellow(), test_name, spice_path.display());
+                println!(
+                    "  {} {} - SPICE file not found: {}",
+                    "⚠".yellow(),
+                    test_name,
+                    spice_path.display()
+                );
                 total_skipped += 1;
                 continue;
             }
@@ -588,7 +635,8 @@ fn generate_spice_golden(cli: &Cli, suite: &str, spice_dir: &std::path::Path) ->
                 match runner.simulate(&spice_path, &input, "v_out") {
                     Ok(output) => {
                         // Save as golden reference
-                        let golden_path = cli.golden
+                        let golden_path = cli
+                            .golden
                             .join(&suite_name)
                             .join(test_name)
                             .join(format!("{}.npy", label));
@@ -607,7 +655,8 @@ fn generate_spice_golden(cli: &Cli, suite: &str, spice_dir: &std::path::Path) ->
     }
 
     println!("\n{}", "─".repeat(50));
-    println!("Generated: {} | Skipped: {} | Failed: {}",
+    println!(
+        "Generated: {} | Skipped: {} | Failed: {}",
         total_generated.to_string().green(),
         total_skipped.to_string().yellow(),
         total_failed.to_string().red()

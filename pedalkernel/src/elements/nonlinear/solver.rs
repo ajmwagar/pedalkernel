@@ -1,5 +1,86 @@
 //! Shared Newton-Raphson solver and numerical utilities for nonlinear WDF roots.
 
+use std::cell::RefCell;
+
+const SOLVER_STATS_ENABLED: bool = true;
+
+thread_local! {
+    static SOLVER_STATS: RefCell<SolverStatsAggregate> = RefCell::new(SolverStatsAggregate::default());
+}
+
+#[derive(Default, Clone, Debug)]
+struct SolverStatsAggregate {
+    solves: u64,
+    total_iterations: u64,
+    max_iterations: u32,
+    max_residual: f64,
+    clamp_hits: u64,
+    step_limited: u64,
+}
+
+impl SolverStatsAggregate {
+    fn record(&mut self, entry: SolverStatsEntry) {
+        self.solves += 1;
+        self.total_iterations += entry.iterations as u64;
+        self.max_iterations = self.max_iterations.max(entry.iterations);
+        self.max_residual = self.max_residual.max(entry.residual);
+        if entry.clamp_hit {
+            self.clamp_hits += 1;
+        }
+        if entry.step_limited {
+            self.step_limited += 1;
+        }
+    }
+}
+
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct SolverStatsSnapshot {
+    pub solves: u64,
+    pub total_iterations: u64,
+    pub max_iterations: u32,
+    pub max_residual: f64,
+    pub clamp_hits: u64,
+    pub step_limited: u64,
+}
+
+#[derive(Default, Clone, Copy)]
+struct SolverStatsEntry {
+    iterations: u32,
+    residual: f64,
+    clamp_hit: bool,
+    step_limited: bool,
+}
+
+fn record_solver_stats(entry: SolverStatsEntry) {
+    if SOLVER_STATS_ENABLED {
+        SOLVER_STATS.with(|stats| stats.borrow_mut().record(entry));
+    }
+}
+
+pub fn reset_solver_stats() {
+    if SOLVER_STATS_ENABLED {
+        SOLVER_STATS.with(|stats| *stats.borrow_mut() = SolverStatsAggregate::default());
+    }
+}
+
+pub fn solver_stats_snapshot() -> SolverStatsSnapshot {
+    if SOLVER_STATS_ENABLED {
+        SOLVER_STATS.with(|stats| {
+            let agg = stats.borrow();
+            SolverStatsSnapshot {
+                solves: agg.solves,
+                total_iterations: agg.total_iterations,
+                max_iterations: agg.max_iterations,
+                max_residual: agg.max_residual,
+                clamp_hits: agg.clamp_hits,
+                step_limited: agg.step_limited,
+            }
+        })
+    } else {
+        SolverStatsSnapshot::default()
+    }
+}
+
 /// Numerically stable softplus: `ln(1 + exp(x))`.
 ///
 /// For |x| > 50, uses asymptotic approximation:
@@ -91,7 +172,9 @@ pub(crate) trait NlDeviceGroupIv {
 pub(crate) struct SinglePortGroupAdapter<'a>(pub &'a dyn NlDeviceIv);
 
 impl NlDeviceGroupIv for SinglePortGroupAdapter<'_> {
-    fn n_ports(&self) -> usize { 1 }
+    fn n_ports(&self) -> usize {
+        1
+    }
 
     fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
         let (i, di) = self.0.iv(v[0]);
@@ -247,12 +330,27 @@ pub(crate) fn multi_port_nr_solve(
     let mut jacobian = vec![0.0; n_nl * n_nl];
     let mut currents = vec![0.0; n_nl];
     let mut derivatives = vec![0.0; n_nl];
+    let mut stats_entry = if SOLVER_STATS_ENABLED {
+        Some(SolverStatsEntry::default())
+    } else {
+        None
+    };
+    let mut clamp_hit = false;
+    let mut step_limited = false;
+    let mut last_residual = 0.0;
 
-    for _iter in 0..max_iter {
+    for iter in 0..max_iter {
+        if let Some(entry) = stats_entry.as_mut() {
+            entry.iterations = iter as u32 + 1;
+        }
         // Evaluate I-V for each device
         for i in 0..n_nl {
             let (clamp_lo, clamp_hi) = devices[i].v_clamp();
-            v_guess[i] = v_guess[i].clamp(clamp_lo, clamp_hi);
+            let clamped = v_guess[i].clamp(clamp_lo, clamp_hi);
+            if clamped != v_guess[i] {
+                clamp_hit = true;
+            }
+            v_guess[i] = clamped;
             let (current, deriv) = devices[i].iv(v_guess[i]);
             currents[i] = current;
             derivatives[i] = deriv;
@@ -298,12 +396,12 @@ pub(crate) fn multi_port_nr_solve(
         for i in 0..n_nl {
             let mut fi = known_a[i] - v_guess[i] - port_resistances[i] * currents[i];
             for j in 0..n_nl {
-                fi += s_nl[i * n_nl + j]
-                    * (v_guess[j] - port_resistances[j] * currents[j]);
+                fi += s_nl[i * n_nl + j] * (v_guess[j] - port_resistances[j] * currents[j]);
             }
             f_vec[i] = fi;
             max_f = max_f.max(fi.abs());
         }
+        last_residual = max_f;
 
         // Check convergence on residual
         if max_f < tolerance {
@@ -328,8 +426,7 @@ pub(crate) fn multi_port_nr_solve(
                 let sij = s_nl[i * n_nl + j];
                 let term = sij * (1.0 - port_resistances[j] * derivatives[j]);
                 if i == j {
-                    jacobian[i * n_nl + j] =
-                        term - 1.0 - port_resistances[i] * derivatives[i];
+                    jacobian[i * n_nl + j] = term - 1.0 - port_resistances[i] * derivatives[i];
                 } else {
                     jacobian[i * n_nl + j] = term;
                 }
@@ -366,11 +463,16 @@ pub(crate) fn multi_port_nr_solve(
             // Adaptive damping: halve large steps
             if dv.abs() > 5.0 {
                 dv *= 0.5;
+                step_limited = true;
             }
             v_guess[i] -= dv;
             // Clamp to physical bounds
             let (lo, hi) = devices[i].v_clamp();
-            v_guess[i] = v_guess[i].clamp(lo, hi);
+            let clamped = v_guess[i].clamp(lo, hi);
+            if clamped != v_guess[i] {
+                clamp_hit = true;
+            }
+            v_guess[i] = clamped;
             max_dv = max_dv.max(dv.abs());
         }
 
@@ -385,6 +487,12 @@ pub(crate) fn multi_port_nr_solve(
     for i in 0..n_nl {
         let (current, _) = devices[i].iv(v_guess[i]);
         b_nl[i] = v_guess[i] - port_resistances[i] * current;
+    }
+    if let Some(mut entry) = stats_entry {
+        entry.residual = last_residual;
+        entry.clamp_hit = clamp_hit;
+        entry.step_limited = step_limited;
+        record_solver_stats(entry);
     }
     b_nl
 }
@@ -425,12 +533,12 @@ pub(crate) fn multi_port_nr_solve(
 /// ```
 pub(crate) fn multi_port_nr_solve_grouped(
     n_nl: usize,
-    s_nl: &[f64],                       // n_nl × n_nl scattering sub-block
-    known_a: &[f64],                     // n_nl
-    port_resistances: &[f64],            // n_nl
+    s_nl: &[f64],             // n_nl × n_nl scattering sub-block
+    known_a: &[f64],          // n_nl
+    port_resistances: &[f64], // n_nl
     device_groups: &[&dyn NlDeviceGroupIv],
-    group_port_offsets: &[usize],        // start index of each group's ports
-    v_guess: &mut [f64],                 // n_nl (warm-start, mutated)
+    group_port_offsets: &[usize], // start index of each group's ports
+    v_guess: &mut [f64],          // n_nl (warm-start, mutated)
     max_iter: usize,
     tolerance: f64,
 ) -> Vec<f64> {
@@ -462,13 +570,28 @@ pub(crate) fn multi_port_nr_solve_grouped(
     let mut dev_jacobian = vec![0.0; max_group_ports * max_group_ports];
     // Full n_nl × n_nl device Jacobian (sparse: only same-group entries non-zero)
     let mut full_dev_jac = vec![0.0; n_nl * n_nl];
+    let mut stats_entry = if SOLVER_STATS_ENABLED {
+        Some(SolverStatsEntry::default())
+    } else {
+        None
+    };
+    let mut clamp_hit = false;
+    let mut step_limited = false;
+    let mut last_residual = 0.0;
 
-    for _iter in 0..max_iter {
+    for iter in 0..max_iter {
+        if let Some(entry) = stats_entry.as_mut() {
+            entry.iterations = iter as u32 + 1;
+        }
         // Clamp voltages
         for i in 0..n_nl {
             let (g, lp) = port_group[i];
             let (lo, hi) = device_groups[g].v_clamp_port(lp);
-            v_guess[i] = v_guess[i].clamp(lo, hi);
+            let clamped = v_guess[i].clamp(lo, hi);
+            if clamped != v_guess[i] {
+                clamp_hit = true;
+            }
+            v_guess[i] = clamped;
         }
 
         // Evaluate all device groups
@@ -479,7 +602,11 @@ pub(crate) fn multi_port_nr_solve_grouped(
 
             // Extract voltages for this group
             let v_group = &v_guess[offset..offset + np];
-            device_groups[g].eval(v_group, &mut dev_currents[..np], &mut dev_jacobian[..np * np]);
+            device_groups[g].eval(
+                v_group,
+                &mut dev_currents[..np],
+                &mut dev_jacobian[..np * np],
+            );
 
             // Copy to global arrays
             for lp in 0..np {
@@ -500,6 +627,7 @@ pub(crate) fn multi_port_nr_solve_grouped(
             f_vec[i] = fi;
             max_f = max_f.max(fi.abs());
         }
+        last_residual = max_f;
 
         if max_f < tolerance {
             break;
@@ -554,11 +682,16 @@ pub(crate) fn multi_port_nr_solve_grouped(
             let mut dv = rhs[i];
             if dv.abs() > 5.0 {
                 dv *= 0.5;
+                step_limited = true;
             }
             v_guess[i] -= dv;
             let (g, lp) = port_group[i];
             let (lo, hi) = device_groups[g].v_clamp_port(lp);
-            v_guess[i] = v_guess[i].clamp(lo, hi);
+            let clamped = v_guess[i].clamp(lo, hi);
+            if clamped != v_guess[i] {
+                clamp_hit = true;
+            }
+            v_guess[i] = clamped;
             max_dv = max_dv.max(dv.abs());
         }
 
@@ -573,7 +706,11 @@ pub(crate) fn multi_port_nr_solve_grouped(
         let np = device_groups[g].n_ports();
         let offset = group_port_offsets[g];
         let v_group = &v_guess[offset..offset + np];
-        device_groups[g].eval(v_group, &mut dev_currents[..np], &mut dev_jacobian[..np * np]);
+        device_groups[g].eval(
+            v_group,
+            &mut dev_currents[..np],
+            &mut dev_jacobian[..np * np],
+        );
         for lp in 0..np {
             currents[offset + lp] = dev_currents[lp];
         }
@@ -582,6 +719,12 @@ pub(crate) fn multi_port_nr_solve_grouped(
     let mut b_nl = vec![0.0; n_nl];
     for i in 0..n_nl {
         b_nl[i] = v_guess[i] - port_resistances[i] * currents[i];
+    }
+    if let Some(mut entry) = stats_entry {
+        entry.residual = last_residual;
+        entry.clamp_hit = clamp_hit;
+        entry.step_limited = step_limited;
+        record_solver_stats(entry);
     }
     b_nl
 }
@@ -628,7 +771,16 @@ pub(crate) fn newton_raphson_solve<F>(
 where
     F: FnMut(f64) -> (f64, f64),
 {
+    let mut stats_entry = if SOLVER_STATS_ENABLED {
+        Some(SolverStatsEntry::default())
+    } else {
+        None
+    };
+
     for _ in 0..max_iter {
+        if let Some(entry) = stats_entry.as_mut() {
+            entry.iterations += 1;
+        }
         let (i, di_dv) = device_iv(v);
 
         let f = a - 2.0 * v - 2.0 * rp * i;
@@ -644,13 +796,26 @@ where
         if let Some(limit) = step_limit {
             if dv.abs() > limit {
                 dv *= 0.5;
+                if let Some(entry) = stats_entry.as_mut() {
+                    entry.step_limited = true;
+                }
             }
         }
 
         v -= dv;
 
         if let Some((lo, hi)) = v_clamp {
-            v = v.clamp(lo, hi);
+            let clamped = v.clamp(lo, hi);
+            if clamped != v {
+                if let Some(entry) = stats_entry.as_mut() {
+                    entry.clamp_hit = true;
+                }
+            }
+            v = clamped;
+        }
+
+        if let Some(entry) = stats_entry.as_mut() {
+            entry.residual = f.abs();
         }
 
         if dv.abs() < tolerance {
@@ -658,7 +823,13 @@ where
         }
     }
 
-    2.0 * v - a
+    let result = 2.0 * v - a;
+
+    if let Some(entry) = stats_entry {
+        record_solver_stats(entry);
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -796,9 +967,7 @@ mod tests {
             );
 
             // Verify scattering: a_i = known_a_i + Σ_j S[i][j] * b_j
-            let a_from_scatter = known_a[i]
-                + s_nl[i * 2] * b[0]
-                + s_nl[i * 2 + 1] * b[1];
+            let a_from_scatter = known_a[i] + s_nl[i * 2] * b[0] + s_nl[i * 2 + 1] * b[1];
             assert!(
                 (a_i - a_from_scatter).abs() < 1e-8,
                 "Scattering inconsistency at port {i}: a={a_i}, scatter={a_from_scatter}",
@@ -1031,8 +1200,7 @@ mod tests {
             let (current, _) = devices[i].iv(v);
             let a_i = v + port_resistances[i] * current;
             let b_i = v - port_resistances[i] * current;
-            let a_from_scatter =
-                known_a[i] + s_nl[i * 2] * b[0] + s_nl[i * 2 + 1] * b[1];
+            let a_from_scatter = known_a[i] + s_nl[i * 2] * b[0] + s_nl[i * 2 + 1] * b[1];
             assert!(
                 (a_i - a_from_scatter).abs() < 1e-4,
                 "Scattering residual at port {i}: a={a_i}, scatter={a_from_scatter}",
@@ -1062,7 +1230,9 @@ mod tests {
     }
 
     impl NlDeviceGroupIv for MockTriodeGroup {
-        fn n_ports(&self) -> usize { 2 }
+        fn n_ports(&self) -> usize {
+            2
+        }
 
         fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
             let vg = v[0];
@@ -1092,7 +1262,7 @@ mod tests {
 
         fn v_clamp_port(&self, port: usize) -> (f64, f64) {
             match port {
-                0 => (-50.0, 10.0),   // grid
+                0 => (-50.0, 10.0),       // grid
                 _ => (-50.0, self.v_max), // plate
             }
         }
@@ -1102,7 +1272,9 @@ mod tests {
     struct SinglePortGroup<'a>(&'a dyn NlDeviceIv);
 
     impl<'a> NlDeviceGroupIv for SinglePortGroup<'a> {
-        fn n_ports(&self) -> usize { 1 }
+        fn n_ports(&self) -> usize {
+            1
+        }
         fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
             let (i, di) = self.0.iv(v[0]);
             currents[0] = i;
@@ -1117,8 +1289,14 @@ mod tests {
     fn test_grouped_matches_ungrouped_for_independent_devices() {
         // Two independent diodes: grouped solver should give same results
         // as the existing ungrouped solver.
-        let diode0 = SimpleExponentialDiode { is: 1e-12, vt: 0.02585 };
-        let diode1 = SimpleExponentialDiode { is: 1e-12, vt: 0.02585 };
+        let diode0 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let diode1 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
 
         let s_nl = [0.2, 0.3, 0.3, 0.2];
         let known_a = [0.8, -0.3];
@@ -1128,8 +1306,14 @@ mod tests {
         let devices: [&dyn NlDeviceIv; 2] = [&diode0, &diode1];
         let mut v_ug = [0.0, 0.0];
         let b_ug = multi_port_nr_solve(
-            2, &s_nl, &known_a, &port_resistances, &devices,
-            &mut v_ug, 50, 1e-10,
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &devices,
+            &mut v_ug,
+            50,
+            1e-10,
         );
 
         // Grouped solver (each diode wrapped as 1-port group)
@@ -1139,18 +1323,29 @@ mod tests {
         let offsets = [0, 1];
         let mut v_g = [0.0, 0.0];
         let b_g = multi_port_nr_solve_grouped(
-            2, &s_nl, &known_a, &port_resistances, &groups, &offsets,
-            &mut v_g, 50, 1e-10,
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_g,
+            50,
+            1e-10,
         );
 
         for i in 0..2 {
             assert!(
                 (b_ug[i] - b_g[i]).abs() < 1e-8,
-                "Grouped vs ungrouped b[{i}]: {} vs {}", b_ug[i], b_g[i]
+                "Grouped vs ungrouped b[{i}]: {} vs {}",
+                b_ug[i],
+                b_g[i]
             );
             assert!(
                 (v_ug[i] - v_g[i]).abs() < 1e-8,
-                "Grouped vs ungrouped v[{i}]: {} vs {}", v_ug[i], v_g[i]
+                "Grouped vs ungrouped v[{i}]: {} vs {}",
+                v_ug[i],
+                v_g[i]
             );
         }
     }
@@ -1161,7 +1356,7 @@ mod tests {
         let triode = MockTriodeGroup {
             grid_is: 1e-9,
             grid_vt: 0.025,
-            gm: 0.002,  // 2 mA/V
+            gm: 0.002, // 2 mA/V
             rp: 50_000.0,
             v_max: 300.0,
         };
@@ -1176,8 +1371,15 @@ mod tests {
         let mut v_guess = [-2.0, 100.0]; // Start near operating point
 
         let b = multi_port_nr_solve_grouped(
-            2, &s_nl, &known_a, &port_resistances, &groups, &offsets,
-            &mut v_guess, 50, 1e-8,
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess,
+            50,
+            1e-8,
         );
 
         // Should converge to finite values
@@ -1188,12 +1390,13 @@ mod tests {
 
         // Verify scattering consistency
         for i in 0..2 {
-            let a_i = v_guess[i] + port_resistances[i] * {
-                let mut c = [0.0; 2];
-                let mut j = [0.0; 4];
-                triode.eval(&v_guess, &mut c, &mut j);
-                c[i]
-            };
+            let a_i = v_guess[i]
+                + port_resistances[i] * {
+                    let mut c = [0.0; 2];
+                    let mut j = [0.0; 4];
+                    triode.eval(&v_guess, &mut c, &mut j);
+                    c[i]
+                };
             let a_from_scatter = known_a[i] + s_nl[i * 2] * b[0] + s_nl[i * 2 + 1] * b[1];
             assert!(
                 (a_i - a_from_scatter).abs() < 1e-4,
@@ -1208,14 +1411,18 @@ mod tests {
         // Compare a triode with gm=0 (no cross-coupling) vs gm=0.002.
 
         let triode_no_cross = MockTriodeGroup {
-            grid_is: 1e-9, grid_vt: 0.025,
-            gm: 0.0,  // No cross-coupling
-            rp: 50_000.0, v_max: 300.0,
+            grid_is: 1e-9,
+            grid_vt: 0.025,
+            gm: 0.0, // No cross-coupling
+            rp: 50_000.0,
+            v_max: 300.0,
         };
         let triode_with_cross = MockTriodeGroup {
-            grid_is: 1e-9, grid_vt: 0.025,
-            gm: 0.002,  // 2 mA/V cross-coupling
-            rp: 50_000.0, v_max: 300.0,
+            grid_is: 1e-9,
+            grid_vt: 0.025,
+            gm: 0.002, // 2 mA/V cross-coupling
+            rp: 50_000.0,
+            v_max: 300.0,
         };
 
         let s_nl = [0.15, 0.25, 0.25, 0.15];
@@ -1228,21 +1435,36 @@ mod tests {
 
         let mut v_no = [-1.0, 100.0];
         let b_no = multi_port_nr_solve_grouped(
-            2, &s_nl, &known_a, &port_resistances, &groups_no, &offsets,
-            &mut v_no, 50, 1e-10,
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups_no,
+            &offsets,
+            &mut v_no,
+            50,
+            1e-10,
         );
 
         let mut v_yes = [-1.0, 100.0];
         let b_yes = multi_port_nr_solve_grouped(
-            2, &s_nl, &known_a, &port_resistances, &groups_yes, &offsets,
-            &mut v_yes, 50, 1e-10,
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups_yes,
+            &offsets,
+            &mut v_yes,
+            50,
+            1e-10,
         );
 
         // Plate voltage should differ due to transconductance
         assert!(
             (v_no[1] - v_yes[1]).abs() > 0.01,
             "Cross-coupling should affect plate voltage: v_no={:.4}, v_yes={:.4}",
-            v_no[1], v_yes[1]
+            v_no[1],
+            v_yes[1]
         );
 
         // Both should be finite
@@ -1255,10 +1477,16 @@ mod tests {
     #[test]
     fn test_grouped_mixed_single_and_multi_port() {
         // Mix of a 1-port diode and a 2-port triode in the same system.
-        let diode = SimpleExponentialDiode { is: 1e-12, vt: 0.02585 };
+        let diode = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
         let triode = MockTriodeGroup {
-            grid_is: 1e-9, grid_vt: 0.025,
-            gm: 0.001, rp: 80_000.0, v_max: 300.0,
+            grid_is: 1e-9,
+            grid_vt: 0.025,
+            gm: 0.001,
+            rp: 80_000.0,
+            v_max: 300.0,
         };
 
         let g0 = SinglePortGroup(&diode as &dyn NlDeviceIv);
@@ -1266,18 +1494,21 @@ mod tests {
         let offsets = [0, 1]; // diode at port 0, triode at ports 1,2
 
         // 3×3 scattering
-        let s_nl = [
-            0.1, 0.2, 0.1,
-            0.2, 0.15, 0.15,
-            0.1, 0.15, 0.2,
-        ];
+        let s_nl = [0.1, 0.2, 0.1, 0.2, 0.15, 0.15, 0.1, 0.15, 0.2];
         let known_a = [0.3, 0.5, 60.0];
         let port_resistances = [1000.0, 100_000.0, 80_000.0];
         let mut v_guess = [0.0, -2.0, 100.0];
 
         let b = multi_port_nr_solve_grouped(
-            3, &s_nl, &known_a, &port_resistances, &groups, &offsets,
-            &mut v_guess, 50, 1e-8,
+            3,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess,
+            50,
+            1e-8,
         );
 
         for i in 0..3 {

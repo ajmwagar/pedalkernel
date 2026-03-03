@@ -61,7 +61,7 @@ impl ThermalCoefficients {
     /// Vacuum tube — cathode emission changes with filament temperature.
     pub fn vacuum_tube() -> Self {
         Self {
-            beta_tempco: 0.002, // mu is relatively temperature-stable
+            beta_tempco: 0.002,     // mu is relatively temperature-stable
             is_doubling_temp: 15.0, // Plate current drift is gradual
         }
     }
@@ -205,7 +205,9 @@ impl ThermalModel {
     /// smooth and fat.
     pub fn germanium_fuzz(sample_rate: f64) -> Self {
         Self::with_coefficients(
-            15.0, 40.0, 600.0,
+            15.0,
+            40.0,
+            600.0,
             ThermalCoefficients::germanium_bjt(),
             sample_rate,
         )
@@ -217,7 +219,9 @@ impl ThermalModel {
     /// Starts at room temp, warms slightly from power dissipation.
     pub fn silicon_standard(sample_rate: f64) -> Self {
         Self::with_coefficients(
-            25.0, 35.0, 300.0,
+            25.0,
+            35.0,
+            300.0,
             ThermalCoefficients::silicon_bjt(),
             sample_rate,
         )
@@ -230,7 +234,9 @@ impl ThermalModel {
     /// cathode emission shifts gradually.
     pub fn tube_amp(sample_rate: f64) -> Self {
         Self::with_coefficients(
-            25.0, 60.0, 900.0,
+            25.0,
+            60.0,
+            900.0,
             ThermalCoefficients::vacuum_tube(),
             sample_rate,
         )
@@ -250,8 +256,7 @@ impl ThermalModel {
 
             // First-order thermal response
             let alpha = 1.0 - (-self.elapsed / self.thermal_tau).exp();
-            let temp =
-                self.ambient_temp + (self.steady_state_temp - self.ambient_temp) * alpha;
+            let temp = self.ambient_temp + (self.steady_state_temp - self.ambient_temp) * alpha;
 
             self.state = ThermalState::at_temperature_with_coeffs(temp, &self.coefficients);
         }
@@ -272,17 +277,15 @@ impl ThermalModel {
     pub fn reset(&mut self) {
         self.elapsed = 0.0;
         self.samples_since_update = 0;
-        self.state = ThermalState::at_temperature_with_coeffs(
-            self.ambient_temp, &self.coefficients,
-        );
+        self.state =
+            ThermalState::at_temperature_with_coeffs(self.ambient_temp, &self.coefficients);
     }
 
     /// Jump to fully warmed up state.
     pub fn warm_up(&mut self) {
         self.elapsed = self.thermal_tau * 10.0; // Well past steady state
-        self.state = ThermalState::at_temperature_with_coeffs(
-            self.steady_state_temp, &self.coefficients,
-        );
+        self.state =
+            ThermalState::at_temperature_with_coeffs(self.steady_state_temp, &self.coefficients);
     }
 
     /// Set sample rate.

@@ -54,16 +54,28 @@ pub fn route_wires(layout: &mut Layout, graph: &LayoutGraph) {
             if is_supply_net && positions.len() == 1 {
                 let (name, x, y) = &positions[0];
                 let rail_y = if ng.name.as_deref() == Some("vcc") {
-                    layout.supply_rails.iter().find(|r| r.name == "vcc").map(|r| r.y).unwrap_or(0.0)
+                    layout
+                        .supply_rails
+                        .iter()
+                        .find(|r| r.name == "vcc")
+                        .map(|r| r.y)
+                        .unwrap_or(0.0)
                 } else {
-                    layout.supply_rails.iter().find(|r| r.name == "gnd").map(|r| r.y).unwrap_or(layout.bounds.height)
+                    layout
+                        .supply_rails
+                        .iter()
+                        .find(|r| r.name == "gnd")
+                        .map(|r| r.y)
+                        .unwrap_or(layout.bounds.height)
                 };
 
                 wires.push(Wire {
                     net: net_name,
                     points: vec![[*x, *y], [*x, rail_y]],
                     signal_path: false,
-                    monitor_index_start: comp_indices.get(name.as_str()).and_then(|&i| layout.components[i].monitor_index),
+                    monitor_index_start: comp_indices
+                        .get(name.as_str())
+                        .and_then(|&i| layout.components[i].monitor_index),
                     monitor_index_end: None,
                 });
             }
@@ -78,10 +90,7 @@ pub fn route_wires(layout: &mut Layout, graph: &LayoutGraph) {
             let (name_a, x_a, y_a) = &window[0];
             let (name_b, x_b, y_b) = &window[1];
 
-            let points = route_wire(
-                Point::new(*x_a, *y_a),
-                Point::new(*x_b, *y_b),
-            );
+            let points = route_wire(Point::new(*x_a, *y_a), Point::new(*x_b, *y_b));
 
             let is_signal = !is_supply_net
                 && ng.name.as_deref() != Some("vcc")

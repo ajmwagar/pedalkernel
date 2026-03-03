@@ -297,10 +297,7 @@ fn compile_bassman_5f6a() {
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     assert_finite(&output, "Bassman 5F6-A");
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    assert!(
-        peak > 0.01,
-        "Bassman should produce output: peak={peak}"
-    );
+    assert!(peak > 0.01, "Bassman should produce output: peak={peak}");
 }
 
 #[test]
@@ -317,10 +314,7 @@ fn compile_marshall_jtm45() {
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     assert_finite(&output, "Marshall JTM45");
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    assert!(
-        peak > 0.01,
-        "JTM45 should produce output: peak={peak}"
-    );
+    assert!(peak > 0.01, "JTM45 should produce output: peak={peak}");
 }
 
 // -----------------------------------------------------------------------
@@ -441,7 +435,13 @@ fn all_seven_pedals_unique() {
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
         let out_rms = rms(&output);
         let input_corr = correlation(&input, &output).abs();
-        eprintln!("{}: RMS={:.6}, gain={:.2}x, input_corr={:.4}", f, out_rms, out_rms / input_rms, input_corr);
+        eprintln!(
+            "{}: RMS={:.6}, gain={:.2}x, input_corr={:.4}",
+            f,
+            out_rms,
+            out_rms / input_rms,
+            input_corr
+        );
         input_corrs.push(input_corr);
         outputs.push(output);
     }
@@ -649,10 +649,7 @@ fn dyna_comp_has_ota_stage() {
         .iter()
         .filter(|s| matches!(s.root, RootKind::Ota(_)))
         .collect();
-    assert!(
-        !ota_stages.is_empty(),
-        "Dyna Comp should have an OTA stage"
-    );
+    assert!(!ota_stages.is_empty(), "Dyna Comp should have an OTA stage");
 }
 
 #[test]
@@ -672,9 +669,7 @@ fn slew_rate_affects_rat_character() {
         output_with_slew.iter().all(|x| x.is_finite()),
         "RAT with slew limiting: output should be finite"
     );
-    let peak = output_with_slew
-        .iter()
-        .fold(0.0f64, |m, x| m.max(x.abs()));
+    let peak = output_with_slew.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     assert!(peak > 0.01, "RAT should produce output: peak={peak}");
 }
 
@@ -1014,7 +1009,10 @@ fn voltage_check_all_pedals_9v_no_danger() {
 #[test]
 fn tweed_deluxe_has_fx_loop() {
     let pedal = parse("tweed_deluxe_5e3.pedal");
-    assert!(pedal.has_fx_loop(), "Tweed Deluxe should have fx_send/fx_return");
+    assert!(
+        pedal.has_fx_loop(),
+        "Tweed Deluxe should have fx_send/fx_return"
+    );
 }
 
 #[test]
@@ -1032,11 +1030,20 @@ fn split_tweed_deluxe_produces_two_halves() {
         post.name
     );
     // Both halves should have some components
-    assert!(!pre.components.is_empty(), "Pre half should have components");
-    assert!(!post.components.is_empty(), "Post half should have components");
+    assert!(
+        !pre.components.is_empty(),
+        "Pre half should have components"
+    );
+    assert!(
+        !post.components.is_empty(),
+        "Post half should have components"
+    );
     // Neither half should still have fx_send/fx_return
     assert!(!pre.has_fx_loop(), "Pre half should not have fx loop nodes");
-    assert!(!post.has_fx_loop(), "Post half should not have fx loop nodes");
+    assert!(
+        !post.has_fx_loop(),
+        "Post half should not have fx loop nodes"
+    );
 }
 
 #[test]
@@ -1051,7 +1058,10 @@ fn compile_split_tweed_deluxe() {
     let output: Vec<f64> = input.iter().map(|&s| split.process(s)).collect();
     assert_finite(&output, "Split Tweed (direct)");
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    assert!(peak > 0.001, "Split Tweed should produce output: peak={peak}");
+    assert!(
+        peak > 0.001,
+        "Split Tweed should produce output: peak={peak}"
+    );
 }
 
 #[test]
@@ -1179,9 +1189,29 @@ fn supply_sag_amp_circuits_produce_output() {
     // Amp circuits with explicit sag parameters should still produce audio.
     // The sag model should reduce voltage under load but not kill signal.
     let files = [
-        ("tweed_deluxe_5e3.pedal", &[("Volume", 0.7), ("Tone", 0.5)] as &[(&str, f64)]),
-        ("bassman_5f6a.pedal", &[("Volume", 0.6), ("Treble", 0.6), ("Mid", 0.5), ("Bass", 0.5)]),
-        ("marshall_jtm45.pedal", &[("Volume", 0.6), ("Treble", 0.6), ("Mid", 0.5), ("Bass", 0.5), ("Presence", 0.5)]),
+        (
+            "tweed_deluxe_5e3.pedal",
+            &[("Volume", 0.7), ("Tone", 0.5)] as &[(&str, f64)],
+        ),
+        (
+            "bassman_5f6a.pedal",
+            &[
+                ("Volume", 0.6),
+                ("Treble", 0.6),
+                ("Mid", 0.5),
+                ("Bass", 0.5),
+            ],
+        ),
+        (
+            "marshall_jtm45.pedal",
+            &[
+                ("Volume", 0.6),
+                ("Treble", 0.6),
+                ("Mid", 0.5),
+                ("Bass", 0.5),
+                ("Presence", 0.5),
+            ],
+        ),
     ];
     let input = sine(48000);
 
@@ -1216,8 +1246,8 @@ fn power_supply_starts_at_steady_state() {
     // The first audio sample should see the same supply voltage that the PSU
     // produces at idle (nominal minus rectifier static drop).  If the PSU cap
     // started uncharged, the first samples would see near-zero voltage.
-    use crate::elements::PowerSupply;
     use crate::dsl::RectifierType;
+    use crate::elements::PowerSupply;
 
     // Tube rectifier: steady state = nominal - 10V
     let psu = PowerSupply::new(350.0, 180.0, 16e-6, RectifierType::Tube, 48000.0);
@@ -1362,8 +1392,14 @@ pedal "Leaky Cap Test" {
     }
 
     // Both should produce output
-    assert!(ideal_decay.iter().all(|x| x.is_finite()), "Ideal cap output should be finite");
-    assert!(leaky_decay.iter().all(|x| x.is_finite()), "Leaky cap output should be finite");
+    assert!(
+        ideal_decay.iter().all(|x| x.is_finite()),
+        "Ideal cap output should be finite"
+    );
+    assert!(
+        leaky_decay.iter().all(|x| x.is_finite()),
+        "Leaky cap output should be finite"
+    );
 
     // The leaky cap should decay faster (lower energy remaining)
     let ideal_energy: f64 = ideal_decay.iter().map(|x| x * x).sum();
@@ -1456,12 +1492,19 @@ pedal "Simple Cap" {
 
     let pedal = parse_pedal_file(simple_src).unwrap();
     let result = compile_pedal(&pedal, 48000.0);
-    assert!(result.is_ok(), "Simple cap syntax should compile: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Simple cap syntax should compile: {:?}",
+        result.err()
+    );
 
     let mut proc = result.unwrap();
     let input = sine(4800);
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
-    assert!(output.iter().all(|x| x.is_finite()), "Output should be finite");
+    assert!(
+        output.iter().all(|x| x.is_finite()),
+        "Output should be finite"
+    );
 }
 
 /// Test all capacitor type variants compile correctly.
@@ -1493,12 +1536,19 @@ pedal "All Cap Types" {
 
     let pedal = parse_pedal_file(src).unwrap();
     let result = compile_pedal(&pedal, 48000.0);
-    assert!(result.is_ok(), "All cap types should compile: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "All cap types should compile: {:?}",
+        result.err()
+    );
 
     let mut proc = result.unwrap();
     let input = sine(4800);
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
-    assert!(output.iter().all(|x| x.is_finite()), "Output should be finite");
+    assert!(
+        output.iter().all(|x| x.is_finite()),
+        "Output should be finite"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1530,9 +1580,10 @@ pedal "Fork Test" {
     let pedal = parse_pedal_file(src).unwrap();
 
     // Verify we have the fork in the nets
-    let has_fork = pedal.nets.iter().any(|net| {
-        net.to.iter().any(|pin| matches!(pin, Pin::Fork { .. }))
-    });
+    let has_fork = pedal
+        .nets
+        .iter()
+        .any(|net| net.to.iter().any(|pin| matches!(pin, Pin::Fork { .. })));
     assert!(has_fork, "Should have a fork() in nets");
 }
 
@@ -1564,7 +1615,11 @@ pedal "Fork Compile Test" {
     let result = compile_pedal(&pedal, 48000.0);
 
     // Should compile successfully
-    assert!(result.is_ok(), "Fork circuit should compile: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Fork circuit should compile: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -1613,8 +1668,10 @@ pedal "Switch Control Test" {
     let rms_1 = rms(&output_pos1);
 
     // Both should produce some output
-    assert!(rms_0 > 1e-6 || rms_1 > 1e-6,
-        "At least one fork path should produce output: rms_0={rms_0}, rms_1={rms_1}");
+    assert!(
+        rms_0 > 1e-6 || rms_1 > 1e-6,
+        "At least one fork path should produce output: rms_0={rms_0}, rms_1={rms_1}"
+    );
 }
 
 #[test]
@@ -1649,7 +1706,10 @@ pedal "Infinite Resistance Test" {
         if let ComponentKind::ResistorSwitched(values) = &comp.kind {
             assert_eq!(values.len(), 3, "Should have 3 positions");
             assert_eq!(values[0], 10_000.0, "First position should be 10k");
-            assert!(values[1].is_infinite(), "Second position should be infinite");
+            assert!(
+                values[1].is_infinite(),
+                "Second position should be infinite"
+            );
             assert_eq!(values[2], 47_000.0, "Third position should be 47k");
         } else {
             panic!("R_sw should be ResistorSwitched");
@@ -1927,7 +1987,8 @@ pedal "RC Highpass" {
 
     // Highpass: DC should be blocked, but transients should pass
     let dc_portion = &output[1000..2000]; // After initial transient, during DC
-    let dc_rms: f64 = (dc_portion.iter().map(|x| x * x).sum::<f64>() / dc_portion.len() as f64).sqrt();
+    let dc_rms: f64 =
+        (dc_portion.iter().map(|x| x * x).sum::<f64>() / dc_portion.len() as f64).sqrt();
 
     // DC should be heavily attenuated (RC time constant = 10ms)
     assert!(
@@ -1986,9 +2047,11 @@ equipment "Stereo Triode Test" {
     let proc = compile_pedal(&pedal, 48000.0).unwrap();
 
     // Should create at least one triode stage (not zero because in was isolated)
-    let triode_count = proc.stages.iter().filter(|s| {
-        matches!(s.root, RootKind::Triode(_))
-    }).count();
+    let triode_count = proc
+        .stages
+        .iter()
+        .filter(|s| matches!(s.root, RootKind::Triode(_)))
+        .count();
     assert!(
         triode_count >= 1,
         "Equipment circuit with in_L/out_L should compile triode stages, got {triode_count}"
@@ -2033,9 +2096,11 @@ pedal "Standard Triode" {
     let pedal = parse_pedal_file(src).unwrap();
     let proc = compile_pedal(&pedal, 48000.0).unwrap();
 
-    let triode_count = proc.stages.iter().filter(|s| {
-        matches!(s.root, RootKind::Triode(_))
-    }).count();
+    let triode_count = proc
+        .stages
+        .iter()
+        .filter(|s| matches!(s.root, RootKind::Triode(_)))
+        .count();
     assert!(
         triode_count >= 1,
         "Standard pedal with in/out should still compile triode stages, got {triode_count}"
@@ -2087,9 +2152,11 @@ equipment "Supply Rail Test" {
     let proc = compile_pedal(&pedal, 48000.0).unwrap();
 
     // The triode stage should be created despite the supply rail edge
-    let triode_count = proc.stages.iter().filter(|s| {
-        matches!(s.root, RootKind::Triode(_))
-    }).count();
+    let triode_count = proc
+        .stages
+        .iter()
+        .filter(|s| matches!(s.root, RootKind::Triode(_)))
+        .count();
     assert!(
         triode_count >= 1,
         "Supply rail edges should be filtered — triode stage should still compile, got {triode_count}"
@@ -2351,8 +2418,14 @@ equipment "Push-Pull Test" {
     );
 
     let pair = &pairs[0];
-    assert!(pair.push_triode_idx != pair.pull_triode_idx, "Push and pull should be different");
-    assert!((pair.turns_ratio - 9.0).abs() < 0.1, "Turns ratio should be 9:1");
+    assert!(
+        pair.push_triode_idx != pair.pull_triode_idx,
+        "Push and pull should be different"
+    );
+    assert!(
+        (pair.turns_ratio - 9.0).abs() < 0.1,
+        "Turns ratio should be 9:1"
+    );
 }
 
 /// Push-pull pairs should produce PushPullStage in compiled output.
@@ -2411,9 +2484,11 @@ equipment "Push-Pull Compile" {
     );
 
     // Should NOT have regular triode stages for the paired tubes
-    let regular_triode_count = proc.stages.iter().filter(|s| {
-        matches!(s.root, RootKind::Triode(_))
-    }).count();
+    let regular_triode_count = proc
+        .stages
+        .iter()
+        .filter(|s| matches!(s.root, RootKind::Triode(_)))
+        .count();
     assert_eq!(
         regular_triode_count, 0,
         "Paired triodes should not appear as regular stages, got {regular_triode_count}"
@@ -2426,7 +2501,10 @@ equipment "Push-Pull Compile" {
         .collect();
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
 
-    assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf in push-pull output");
+    assert!(
+        output.iter().all(|x| x.is_finite()),
+        "No NaN/inf in push-pull output"
+    );
 
     // Verify port resistance is reasonable (not 1Ω degenerate).
     // With R_plate=33kΩ, R_cathode=470Ω, and virtual_Rp=62.5kΩ, port resistance
@@ -2510,7 +2588,9 @@ equipment "Push-Pull Named Supply" {
 
     // Process signal and verify non-zero output.
     let n = 4800;
-    for _ in 0..2400 { proc.process(0.0); } // warmup
+    for _ in 0..2400 {
+        proc.process(0.0);
+    } // warmup
     let mut sum_sq = 0.0;
     for i in 0..n {
         let t = i as f64 / 48000.0;
@@ -2574,7 +2654,8 @@ equipment "Triode Named Supply" {
         wdf + mnl >= 1,
         "Triode with named supply should compile to at least 1 stage, \
          got {} WDF + {} multi-NL",
-        wdf, mnl
+        wdf,
+        mnl
     );
 }
 
@@ -2605,9 +2686,17 @@ pedal "Transformer Pin Test" {
 
     // The transformer edge should connect properly to the nodes
     // used by the netlist (primary.a/primary.b)
-    let xfmr_edges: Vec<_> = graph.edges.iter().enumerate().filter(|(_, e)| {
-        matches!(graph.components[e.comp_idx].kind, ComponentKind::Transformer(_))
-    }).collect();
+    let xfmr_edges: Vec<_> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(
+                graph.components[e.comp_idx].kind,
+                ComponentKind::Transformer(_)
+            )
+        })
+        .collect();
 
     assert_eq!(xfmr_edges.len(), 1, "Should have 1 transformer edge");
     let (_, xfmr) = &xfmr_edges[0];
@@ -2640,8 +2729,15 @@ fn multi_nl_fuzz_face_compiles() {
 
     // Verify the multi-NL path is being taken (not just the fallback).
     assert!(has_multi_nl, "Fuzz Face should use the multi-NL path");
-    assert_eq!(compiled.multi_nl_stages.len(), 1, "Should produce exactly 1 multi-NL stage");
-    assert_eq!(compiled.multi_nl_stages[0].n_nl, 2, "Should have 2 NL ports (Q1, Q2)");
+    assert_eq!(
+        compiled.multi_nl_stages.len(),
+        1,
+        "Should produce exactly 1 multi-NL stage"
+    );
+    assert_eq!(
+        compiled.multi_nl_stages[0].n_nl, 2,
+        "Should have 2 NL ports (Q1, Q2)"
+    );
 }
 
 #[test]
@@ -2706,7 +2802,10 @@ fn multi_nl_fuzz_face_extreme_fuzz() {
         .collect();
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
 
-    assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf at max fuzz");
+    assert!(
+        output.iter().all(|x| x.is_finite()),
+        "No NaN/inf at max fuzz"
+    );
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     assert!(peak < 20.0, "Output bounded at max fuzz: peak={peak}");
 }
@@ -2725,7 +2824,10 @@ fn multi_nl_fuzz_face_clean() {
         .collect();
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
 
-    assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf at min settings");
+    assert!(
+        output.iter().all(|x| x.is_finite()),
+        "No NaN/inf at min settings"
+    );
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     // With Volume=0, output should be very quiet
     assert!(peak < 1.0, "Should be quiet at Volume=0: peak={peak}");
@@ -2747,10 +2849,7 @@ fn multi_nl_fuzz_face_sample_rates() {
             .collect();
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
 
-        assert!(
-            output.iter().all(|x| x.is_finite()),
-            "No NaN/inf at {sr}Hz"
-        );
+        assert!(output.iter().all(|x| x.is_finite()), "No NaN/inf at {sr}Hz");
         let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
         assert!(
             peak > 0.001 && peak < 10.0,
@@ -2768,9 +2867,15 @@ fn multi_nl_fuzz_face_pot_recomputes_scattering() {
     let pedal = parse("fuzz_face.pedal");
     let proc = compile_pedal(&pedal, 48000.0).unwrap();
 
-    assert!(!proc.multi_nl_stages.is_empty(), "Should have multi-NL stage(s)");
+    assert!(
+        !proc.multi_nl_stages.is_empty(),
+        "Should have multi-NL stage(s)"
+    );
     let stage = &proc.multi_nl_stages[0];
-    assert!(stage.recompute_data.is_some(), "Stage should have recompute_data");
+    assert!(
+        stage.recompute_data.is_some(),
+        "Stage should have recompute_data"
+    );
 
     let recompute = stage.recompute_data.as_ref().unwrap();
     let n_nl = stage.n_nl;
@@ -2778,30 +2883,54 @@ fn multi_nl_fuzz_face_pot_recomputes_scattering() {
     let n_total = n_nl + n_passive + 1;
 
     // Find the pot child
-    let pot_idx = stage.passive_children.iter().position(|c| {
-        matches!(c, super::dyn_node::DynNode::Pot { .. })
-    }).expect("should have a pot child");
+    let pot_idx = stage
+        .passive_children
+        .iter()
+        .position(|c| matches!(c, super::dyn_node::DynNode::Pot { .. }))
+        .expect("should have a pot child");
 
     let build_ports = |pot_resistance: f64| -> Vec<WdfPort> {
         let mut ports = Vec::with_capacity(n_total);
         for i in 0..n_nl {
             let (pos, neg) = recompute.port_node_pairs[i];
-            ports.push(WdfPort { node_pos: pos, node_neg: neg, resistance: stage.nl_port_resistances[i] });
+            ports.push(WdfPort {
+                node_pos: pos,
+                node_neg: neg,
+                resistance: stage.nl_port_resistances[i],
+            });
         }
         for k in 0..n_passive {
             let (pos, neg) = recompute.port_node_pairs[n_nl + k];
-            let rp = if k == pot_idx { pot_resistance } else { stage.passive_children[k].port_resistance() };
-            ports.push(WdfPort { node_pos: pos, node_neg: neg, resistance: rp });
+            let rp = if k == pot_idx {
+                pot_resistance
+            } else {
+                stage.passive_children[k].port_resistance()
+            };
+            ports.push(WdfPort {
+                node_pos: pos,
+                node_neg: neg,
+                resistance: rp,
+            });
         }
         let (pos, neg) = recompute.port_node_pairs[n_nl + n_passive];
-        ports.push(WdfPort { node_pos: pos, node_neg: neg, resistance: recompute.adapted_resistance });
+        ports.push(WdfPort {
+            node_pos: pos,
+            node_neg: neg,
+            resistance: recompute.adapted_resistance,
+        });
         ports
     };
 
-    let s_lo = recompute.mna.derive_scattering_matrix_general(&build_ports(1.0));
-    let s_hi = recompute.mna.derive_scattering_matrix_general(&build_ports(1000.0));
+    let s_lo = recompute
+        .mna
+        .derive_scattering_matrix_general(&build_ports(1.0));
+    let s_hi = recompute
+        .mna
+        .derive_scattering_matrix_general(&build_ports(1000.0));
 
-    let full_max_diff = s_lo.iter().zip(s_hi.iter())
+    let full_max_diff = s_lo
+        .iter()
+        .zip(s_hi.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
 
@@ -2822,4 +2951,3 @@ fn multi_nl_fuzz_face_pot_recomputes_scattering() {
         "NL-to-NL scattering should change with pot (max_diff={s_nl_max_diff:.6e})"
     );
 }
-

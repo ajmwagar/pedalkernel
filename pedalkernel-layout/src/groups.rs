@@ -275,7 +275,10 @@ fn detect_push_pull(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Funct
         .iter()
         .filter(|n| {
             !assigned.contains(&n.id)
-                && matches!(n.comp.as_ref().map(|c| &c.kind), Some(ComponentKind::Transformer(_)))
+                && matches!(
+                    n.comp.as_ref().map(|c| &c.kind),
+                    Some(ComponentKind::Transformer(_))
+                )
         })
         .map(|n| n.id)
         .collect();
@@ -289,10 +292,7 @@ fn detect_push_pull(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Funct
             .iter()
             .filter(|&&nid| {
                 !assigned.contains(&nid)
-                    && matches!(
-                        graph.node_kind(nid),
-                        Some(ComponentKind::Pentode(_))
-                    )
+                    && matches!(graph.node_kind(nid), Some(ComponentKind::Pentode(_)))
             })
             .copied()
             .collect();
@@ -337,7 +337,10 @@ fn detect_tone_stacks(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
         .iter()
         .filter(|n| {
             !assigned.contains(&n.id)
-                && matches!(n.comp.as_ref().map(|c| &c.kind), Some(ComponentKind::Potentiometer(..)))
+                && matches!(
+                    n.comp.as_ref().map(|c| &c.kind),
+                    Some(ComponentKind::Potentiometer(..))
+                )
         })
         .map(|n| n.id)
         .collect();
@@ -358,7 +361,11 @@ fn detect_tone_stacks(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
             // Check if this pot shares a neighbor with any pot in the cluster
             for &existing_pot in cluster.iter() {
                 let existing_neighbors = graph.neighbors(existing_pot);
-                if pot_neighbors.intersection(&existing_neighbors).next().is_some() {
+                if pot_neighbors
+                    .intersection(&existing_neighbors)
+                    .next()
+                    .is_some()
+                {
                     matching_cluster = Some(ci);
                     break;
                 }
@@ -442,14 +449,14 @@ fn assign_remaining(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Funct
         }
 
         // Check if this component connects to input or output
-        let connects_to_in = graph
-            .edges
-            .iter()
-            .any(|e| (e.from == graph.in_node && e.to == node.id) || (e.from == node.id && e.to == graph.in_node));
-        let connects_to_out = graph
-            .edges
-            .iter()
-            .any(|e| (e.from == graph.out_node && e.to == node.id) || (e.from == node.id && e.to == graph.out_node));
+        let connects_to_in = graph.edges.iter().any(|e| {
+            (e.from == graph.in_node && e.to == node.id)
+                || (e.from == node.id && e.to == graph.in_node)
+        });
+        let connects_to_out = graph.edges.iter().any(|e| {
+            (e.from == graph.out_node && e.to == node.id)
+                || (e.from == node.id && e.to == graph.out_node)
+        });
 
         if connects_to_in {
             input_members.push(node.id);
@@ -504,54 +511,114 @@ mod tests {
             name: "Test".into(),
             supplies: vec![],
             components: vec![
-                ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(CapConfig::new(100e-9)) },
-                ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(1e6) },
-                ComponentDef { id: "V1".into(), kind: ComponentKind::Triode("12AX7".into()) },
-                ComponentDef { id: "R2".into(), kind: ComponentKind::Resistor(100e3) },
-                ComponentDef { id: "R3".into(), kind: ComponentKind::Resistor(1500.0) },
-                ComponentDef { id: "C2".into(), kind: ComponentKind::Capacitor(CapConfig::new(25e-6)) },
+                ComponentDef {
+                    id: "C1".into(),
+                    kind: ComponentKind::Capacitor(CapConfig::new(100e-9)),
+                },
+                ComponentDef {
+                    id: "R1".into(),
+                    kind: ComponentKind::Resistor(1e6),
+                },
+                ComponentDef {
+                    id: "V1".into(),
+                    kind: ComponentKind::Triode("12AX7".into()),
+                },
+                ComponentDef {
+                    id: "R2".into(),
+                    kind: ComponentKind::Resistor(100e3),
+                },
+                ComponentDef {
+                    id: "R3".into(),
+                    kind: ComponentKind::Resistor(1500.0),
+                },
+                ComponentDef {
+                    id: "C2".into(),
+                    kind: ComponentKind::Capacitor(CapConfig::new(25e-6)),
+                },
             ],
             nets: vec![
                 NetDef {
                     from: Pin::Reserved("in".into()),
-                    to: vec![Pin::ComponentPin { component: "C1".into(), pin: "a".into() }],
+                    to: vec![Pin::ComponentPin {
+                        component: "C1".into(),
+                        pin: "a".into(),
+                    }],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "C1".into(), pin: "b".into() },
+                    from: Pin::ComponentPin {
+                        component: "C1".into(),
+                        pin: "b".into(),
+                    },
                     to: vec![
-                        Pin::ComponentPin { component: "R1".into(), pin: "a".into() },
-                        Pin::ComponentPin { component: "V1".into(), pin: "grid".into() },
+                        Pin::ComponentPin {
+                            component: "R1".into(),
+                            pin: "a".into(),
+                        },
+                        Pin::ComponentPin {
+                            component: "V1".into(),
+                            pin: "grid".into(),
+                        },
                     ],
                 },
                 NetDef {
                     from: Pin::Reserved("vcc".into()),
-                    to: vec![Pin::ComponentPin { component: "R2".into(), pin: "a".into() }],
+                    to: vec![Pin::ComponentPin {
+                        component: "R2".into(),
+                        pin: "a".into(),
+                    }],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "R2".into(), pin: "b".into() },
-                    to: vec![Pin::ComponentPin { component: "V1".into(), pin: "plate".into() }],
+                    from: Pin::ComponentPin {
+                        component: "R2".into(),
+                        pin: "b".into(),
+                    },
+                    to: vec![Pin::ComponentPin {
+                        component: "V1".into(),
+                        pin: "plate".into(),
+                    }],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "V1".into(), pin: "cathode".into() },
+                    from: Pin::ComponentPin {
+                        component: "V1".into(),
+                        pin: "cathode".into(),
+                    },
                     to: vec![
-                        Pin::ComponentPin { component: "R3".into(), pin: "a".into() },
-                        Pin::ComponentPin { component: "C2".into(), pin: "a".into() },
+                        Pin::ComponentPin {
+                            component: "R3".into(),
+                            pin: "a".into(),
+                        },
+                        Pin::ComponentPin {
+                            component: "C2".into(),
+                            pin: "a".into(),
+                        },
                     ],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "R3".into(), pin: "b".into() },
+                    from: Pin::ComponentPin {
+                        component: "R3".into(),
+                        pin: "b".into(),
+                    },
                     to: vec![Pin::Reserved("gnd".into())],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "C2".into(), pin: "b".into() },
+                    from: Pin::ComponentPin {
+                        component: "C2".into(),
+                        pin: "b".into(),
+                    },
                     to: vec![Pin::Reserved("gnd".into())],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "R1".into(), pin: "b".into() },
+                    from: Pin::ComponentPin {
+                        component: "R1".into(),
+                        pin: "b".into(),
+                    },
                     to: vec![Pin::Reserved("gnd".into())],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "V1".into(), pin: "plate".into() },
+                    from: Pin::ComponentPin {
+                        component: "V1".into(),
+                        pin: "plate".into(),
+                    },
                     to: vec![Pin::Reserved("out".into())],
                 },
             ],
@@ -566,7 +633,10 @@ mod tests {
         let groups = detect_groups(&graph);
 
         // Should detect at least one gain stage
-        let gain_stages: Vec<_> = groups.iter().filter(|g| g.kind == GroupKind::GainStage).collect();
+        let gain_stages: Vec<_> = groups
+            .iter()
+            .filter(|g| g.kind == GroupKind::GainStage)
+            .collect();
         assert!(!gain_stages.is_empty(), "Should detect a gain stage");
 
         // The gain stage should contain the triode

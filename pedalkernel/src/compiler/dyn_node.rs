@@ -216,8 +216,9 @@ impl DynNode {
                 }
             }
             Self::Inductor { state, .. } => -*state,
-            Self::VoltageSource { voltage, .. }
-            | Self::CathodeBiasSource { voltage, .. } => 2.0 * *voltage,
+            Self::VoltageSource { voltage, .. } | Self::CathodeBiasSource { voltage, .. } => {
+                2.0 * *voltage
+            }
             Self::UnitDelay { partner_state, .. } => *partner_state,
             Self::Series {
                 left,
@@ -387,9 +388,7 @@ impl DynNode {
                 left.set_pot(target_id, pos) || right.set_pot(target_id, pos)
             }
             Self::Transformer { secondary, .. } => secondary.set_pot(target_id, pos),
-            Self::RType { children, .. } => {
-                children.iter_mut().any(|c| c.set_pot(target_id, pos))
-            }
+            Self::RType { children, .. } => children.iter_mut().any(|c| c.set_pot(target_id, pos)),
             _ => false,
         }
     }
@@ -457,7 +456,11 @@ impl DynNode {
                 *last_b = 0.0;
             }
             Self::Inductor { state, .. } => *state = 0.0,
-            Self::UnitDelay { state, partner_state, .. } => {
+            Self::UnitDelay {
+                state,
+                partner_state,
+                ..
+            } => {
                 *state = 0.0;
                 *partner_state = 0.0;
             }
@@ -536,9 +539,7 @@ impl DynNode {
                 left.reactive_voltage().or_else(|| right.reactive_voltage())
             }
             Self::Transformer { secondary, .. } => secondary.reactive_voltage(),
-            Self::RType { children, .. } => {
-                children.iter().find_map(|c| c.reactive_voltage())
-            }
+            Self::RType { children, .. } => children.iter().find_map(|c| c.reactive_voltage()),
             _ => None,
         }
     }
@@ -558,19 +559,15 @@ impl DynNode {
         match self {
             // For parallel adaptor with resistor (load to ground) as one child,
             // the output voltage is b_tree / 2 (resistive termination)
-            Self::Parallel { left, .. } => {
-                match left.as_ref() {
-                    Self::Resistor { .. } | Self::Pot { .. } => Some(b_tree / 2.0),
-                    _ => None,
-                }
-            }
+            Self::Parallel { left, .. } => match left.as_ref() {
+                Self::Resistor { .. } | Self::Pot { .. } => Some(b_tree / 2.0),
+                _ => None,
+            },
             // For series adaptor with resistor as one child
-            Self::Series { left, .. } => {
-                match left.as_ref() {
-                    Self::Resistor { .. } | Self::Pot { .. } => Some(b_tree / 2.0),
-                    _ => None,
-                }
-            }
+            Self::Series { left, .. } => match left.as_ref() {
+                Self::Resistor { .. } | Self::Pot { .. } => Some(b_tree / 2.0),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -592,7 +589,13 @@ impl DynNode {
     /// Returns None if this is not a series filter topology.
     pub fn series_junction_voltage(&self, a_root: f64) -> Option<f64> {
         match self {
-            Self::Series { gamma, b1, b2, right, .. } => {
+            Self::Series {
+                gamma,
+                b1,
+                b2,
+                right,
+                ..
+            } => {
                 // Check if right child is a simple element (R, C, or L)
                 // The junction voltage is the voltage at the right child's port
                 match right.as_ref() {
@@ -627,7 +630,14 @@ impl DynNode {
     /// at the load resistor R.
     pub fn short_circuit_junction_voltage(&self, a_root: f64) -> Option<f64> {
         match self {
-            Self::Series { gamma, b1, b2, left, right, .. } => {
+            Self::Series {
+                gamma,
+                b1,
+                b2,
+                left,
+                right,
+                ..
+            } => {
                 // Check if this is Series(VS, inner) where inner contains the filter
                 match (left.as_ref(), right.as_ref()) {
                     // VS on left, filter network on right
@@ -677,11 +687,16 @@ impl DynNode {
         match self {
             // Direct load element - voltage = (a + b) / 2
             // For resistor: b = 0, so V = a / 2
-            Self::Resistor { .. } | Self::Pot { .. } => {
-                Some(a_parent / 2.0)
-            }
+            Self::Resistor { .. } | Self::Pot { .. } => Some(a_parent / 2.0),
             // Series(L, R) or Series(C, R) - extract R's voltage
-            Self::Series { gamma, b1, b2, left, right, .. } => {
+            Self::Series {
+                gamma,
+                b1,
+                b2,
+                left,
+                right,
+                ..
+            } => {
                 // Try right child first (common case: Series(L, R))
                 if right.is_load_element() {
                     let sum = *b1 + *b2 + a_parent;
@@ -707,7 +722,14 @@ impl DynNode {
                 }
             }
             // Parallel - try to find load in children
-            Self::Parallel { gamma, b1, b2, left, right, .. } => {
+            Self::Parallel {
+                gamma,
+                b1,
+                b2,
+                left,
+                right,
+                ..
+            } => {
                 if right.is_load_element() {
                     let sum = *b1 + *b2 + a_parent;
                     let a2 = *b2 - (1.0 - *gamma) * sum;
@@ -733,16 +755,12 @@ impl DynNode {
     #[allow(dead_code)]
     pub fn has_reactive_elements(&self) -> bool {
         match self {
-            Self::Capacitor { .. }
-            | Self::LeakyCapacitor { .. }
-            | Self::Inductor { .. } => true,
+            Self::Capacitor { .. } | Self::LeakyCapacitor { .. } | Self::Inductor { .. } => true,
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.has_reactive_elements() || right.has_reactive_elements()
             }
             Self::Transformer { secondary, .. } => secondary.has_reactive_elements(),
-            Self::RType { children, .. } => {
-                children.iter().any(|c| c.has_reactive_elements())
-            }
+            Self::RType { children, .. } => children.iter().any(|c| c.has_reactive_elements()),
             _ => false,
         }
     }
@@ -824,9 +842,9 @@ impl DynNode {
                 left.set_photocoupler_led(target_id, led_drive)
                     || right.set_photocoupler_led(target_id, led_drive)
             }
-            Self::RType { children, .. } => {
-                children.iter_mut().any(|c| c.set_photocoupler_led(target_id, led_drive))
-            }
+            Self::RType { children, .. } => children
+                .iter_mut()
+                .any(|c| c.set_photocoupler_led(target_id, led_drive)),
             _ => false,
         }
     }
@@ -861,9 +879,10 @@ impl DynNode {
             Self::Transformer { secondary, .. } => {
                 secondary.set_switch_position(target_switch, new_position)
             }
-            Self::RType { children, .. } => {
-                children.iter_mut().map(|c| c.set_switch_position(target_switch, new_position)).sum()
-            }
+            Self::RType { children, .. } => children
+                .iter_mut()
+                .map(|c| c.set_switch_position(target_switch, new_position))
+                .sum(),
             _ => 0,
         }
     }
@@ -876,13 +895,28 @@ impl DynNode {
             Self::Resistor { rp } => {
                 format!("{pad}Resistor(Rp={rp:.1}Ω)")
             }
-            Self::Capacitor { capacitance, rp, state, .. } => {
+            Self::Capacitor {
+                capacitance,
+                rp,
+                state,
+                ..
+            } => {
                 format!("{pad}Capacitor(C={capacitance:.3e}F, Rp={rp:.1}Ω, state={state:.6})")
             }
-            Self::LeakyCapacitor { capacitance, rp, state, leakage_decay, .. } => {
+            Self::LeakyCapacitor {
+                capacitance,
+                rp,
+                state,
+                leakage_decay,
+                ..
+            } => {
                 format!("{pad}LeakyCapacitor(C={capacitance:.3e}F, Rp={rp:.1}Ω, state={state:.6}, decay={leakage_decay:.6})")
             }
-            Self::Inductor { inductance, rp, state } => {
+            Self::Inductor {
+                inductance,
+                rp,
+                state,
+            } => {
                 format!("{pad}Inductor(L={inductance:.3e}H, Rp={rp:.1}Ω, state={state:.6})")
             }
             Self::VoltageSource { voltage, rp } => {
@@ -891,39 +925,82 @@ impl DynNode {
             Self::CathodeBiasSource { voltage, rp } => {
                 format!("{pad}CathodeBiasSource(V={voltage:.3}V, Rp={rp:.1}Ω)")
             }
-            Self::UnitDelay { rp, state, partner_state } => {
+            Self::UnitDelay {
+                rp,
+                state,
+                partner_state,
+            } => {
                 format!("{pad}UnitDelay(Rp={rp:.1}Ω, state={state:.6}, partner={partner_state:.6})")
             }
-            Self::Pot { comp_id, max_resistance, position, taper, rp } => {
+            Self::Pot {
+                comp_id,
+                max_resistance,
+                position,
+                taper,
+                rp,
+            } => {
                 format!("{pad}Pot(id=\"{comp_id}\", max={max_resistance:.1}Ω, pos={position:.3}, taper={taper:?}, Rp={rp:.1}Ω)")
             }
             Self::Photocoupler { comp_id, inner } => {
-                format!("{pad}Photocoupler(id=\"{comp_id}\", Rp={:.1}Ω)", inner.port_resistance())
+                format!(
+                    "{pad}Photocoupler(id=\"{comp_id}\", Rp={:.1}Ω)",
+                    inner.port_resistance()
+                )
             }
-            Self::SwitchedResistor { switch_id, path_index, position, rp, .. } => {
+            Self::SwitchedResistor {
+                switch_id,
+                path_index,
+                position,
+                rp,
+                ..
+            } => {
                 format!("{pad}SwitchedResistor(switch=\"{switch_id}\", path={path_index}, pos={position}, Rp={rp:.1}Ω)")
             }
-            Self::Series { left, right, rp, gamma, b1, b2 } => {
-                let mut s = format!("{pad}Series(Rp={rp:.1}Ω, γ={gamma:.6}, b1={b1:.6}, b2={b2:.6})\n");
+            Self::Series {
+                left,
+                right,
+                rp,
+                gamma,
+                b1,
+                b2,
+            } => {
+                let mut s =
+                    format!("{pad}Series(Rp={rp:.1}Ω, γ={gamma:.6}, b1={b1:.6}, b2={b2:.6})\n");
                 s.push_str(&left.debug_dump(indent + 1));
                 s.push('\n');
                 s.push_str(&right.debug_dump(indent + 1));
                 s
             }
-            Self::Parallel { left, right, rp, gamma, b1, b2 } => {
-                let mut s = format!("{pad}Parallel(Rp={rp:.1}Ω, γ={gamma:.6}, b1={b1:.6}, b2={b2:.6})\n");
+            Self::Parallel {
+                left,
+                right,
+                rp,
+                gamma,
+                b1,
+                b2,
+            } => {
+                let mut s =
+                    format!("{pad}Parallel(Rp={rp:.1}Ω, γ={gamma:.6}, b1={b1:.6}, b2={b2:.6})\n");
                 s.push_str(&left.debug_dump(indent + 1));
                 s.push('\n');
                 s.push_str(&right.debug_dump(indent + 1));
                 s
             }
-            Self::Transformer { secondary, turns_ratio, rp, .. } => {
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                rp,
+                ..
+            } => {
                 let mut s = format!("{pad}Transformer(n={turns_ratio:.3}, Rp={rp:.1}Ω)\n");
                 s.push_str(&secondary.debug_dump(indent + 1));
                 s
             }
             Self::RType { adaptor, children } => {
-                let mut s = format!("{pad}RType(ports={}, Rp={:.1}Ω)\n", adaptor.num_ports, adaptor.port_resistance);
+                let mut s = format!(
+                    "{pad}RType(ports={}, Rp={:.1}Ω)\n",
+                    adaptor.num_ports, adaptor.port_resistance
+                );
                 for (i, child) in children.iter().enumerate() {
                     s.push_str(&format!("{pad}  [port {i}]:\n"));
                     s.push_str(&child.debug_dump(indent + 2));
@@ -941,15 +1018,24 @@ impl DynNode {
             Self::UnitDelay { state, .. } => *state,
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 let l = left.get_unit_delay_state();
-                if l != 0.0 { l } else { right.get_unit_delay_state() }
+                if l != 0.0 {
+                    l
+                } else {
+                    right.get_unit_delay_state()
+                }
             }
             Self::Transformer { secondary, .. } => secondary.get_unit_delay_state(),
-            Self::RType { children, .. } => {
-                children.iter().find_map(|c| {
+            Self::RType { children, .. } => children
+                .iter()
+                .find_map(|c| {
                     let v = c.get_unit_delay_state();
-                    if v != 0.0 { Some(v) } else { None }
-                }).unwrap_or(0.0)
-            }
+                    if v != 0.0 {
+                        Some(v)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0.0),
             _ => 0.0,
         }
     }
@@ -987,4 +1073,3 @@ impl DynNode {
         }
     }
 }
-

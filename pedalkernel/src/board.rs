@@ -268,7 +268,9 @@ pub fn parse_board_file(src: &str) -> Result<BoardDef, String> {
 // ---------------------------------------------------------------------------
 
 /// Parse a `start { ... }` or `end { ... }` section inside a global block.
-fn global_section<'a>(keyword: &'static str) -> impl FnMut(&'a str) -> IResult<&'a str, Vec<BoardPedalEntry>> {
+fn global_section<'a>(
+    keyword: &'static str,
+) -> impl FnMut(&'a str) -> IResult<&'a str, Vec<BoardPedalEntry>> {
     move |input: &'a str| {
         let (input, _) = ws_comments(input)?;
         let (input, _) = tag(keyword)(input)?;

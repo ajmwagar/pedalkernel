@@ -195,7 +195,11 @@ fn build_half(
     let monitors: Vec<MonitorDef> = pedal
         .monitors
         .iter()
-        .filter(|m| component_ids.contains(&m.component) || m.component == "input" || m.component == "output")
+        .filter(|m| {
+            component_ids.contains(&m.component)
+                || m.component == "input"
+                || m.component == "output"
+        })
         .cloned()
         .collect();
 
@@ -293,4 +297,3 @@ pub fn compile_split_pedal(
 
     Ok(SplitCompiledPedal { pre, post })
 }
-

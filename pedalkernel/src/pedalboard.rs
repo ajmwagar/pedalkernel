@@ -118,8 +118,12 @@ impl PedalboardProcessor {
         for entry in &board.entries {
             match entry {
                 BoardEntry::Pedal(pedal_entry) => {
-                    let slot =
-                        Self::compile_pedal_entry(pedal_entry, board_dir, sample_rate, &mut warnings);
+                    let slot = Self::compile_pedal_entry(
+                        pedal_entry,
+                        board_dir,
+                        sample_rate,
+                        &mut warnings,
+                    );
                     chain.push(ChainSlot::Pedal(slot));
                 }
                 BoardEntry::FxLoop(group) => {
@@ -154,17 +158,15 @@ impl PedalboardProcessor {
                                 }
                             };
                             (|| {
-                                let source =
-                                    std::fs::read_to_string(&pedal_path).map_err(|e| {
-                                        format!(
-                                            "Error reading amp '{}' at {}: {e}",
-                                            entry.id,
-                                            pedal_path.display()
-                                        )
-                                    })?;
-                                let pedal_def = parse_pedal_file(&source).map_err(|e| {
-                                    format!("Parse error in '{}': {e}", entry.id)
+                                let source = std::fs::read_to_string(&pedal_path).map_err(|e| {
+                                    format!(
+                                        "Error reading amp '{}' at {}: {e}",
+                                        entry.id,
+                                        pedal_path.display()
+                                    )
                                 })?;
+                                let pedal_def = parse_pedal_file(&source)
+                                    .map_err(|e| format!("Parse error in '{}': {e}", entry.id))?;
 
                                 if !pedal_def.has_fx_loop() {
                                     return Err(format!(
@@ -220,10 +222,8 @@ impl PedalboardProcessor {
                             }));
                         }
                         Err(msg) => {
-                            warnings.push(format!(
-                                "FX loop for '{}' failed: {msg}",
-                                group.target_id
-                            ));
+                            warnings
+                                .push(format!("FX loop for '{}' failed: {msg}", group.target_id));
                             // Fall back: just add the FX loop effects as regular pedals
                             for pedal_entry in &group.pedals {
                                 let slot = Self::compile_pedal_entry(
@@ -331,9 +331,8 @@ impl PedalboardProcessor {
         warnings: &mut Vec<String>,
     ) -> PedalSlot {
         let result: Result<(String, CompiledPedal), String> = (|| {
-            let source = resolver(&entry.path).ok_or_else(|| {
-                format!("Pedal '{}' not found: {}", entry.id, entry.path)
-            })?;
+            let source = resolver(&entry.path)
+                .ok_or_else(|| format!("Pedal '{}' not found: {}", entry.id, entry.path))?;
             let pedal_def = parse_pedal_file(&source)
                 .map_err(|e| format!("Parse error in '{}' ({}): {e}", entry.id, entry.path))?;
             let mut proc = compile_pedal(&pedal_def, sample_rate).map_err(|e| {
@@ -442,9 +441,7 @@ impl PedalboardProcessor {
 
     /// Search subdirectories of `base` for a file matching `filename`.
     fn find_in_subdirs(base: &Path, filename: &str) -> Option<std::path::PathBuf> {
-        let target = Path::new(filename)
-            .file_name()?
-            .to_str()?;
+        let target = Path::new(filename).file_name()?.to_str()?;
         Self::walk_for_file(base, target)
     }
 
@@ -512,16 +509,12 @@ impl PedalboardProcessor {
 
     /// Check if a pedal is bypassed.
     pub fn is_pedal_bypassed(&self, index: usize) -> bool {
-        self.flat_pedals()
-            .get(index)
-            .is_some_and(|s| s.bypassed)
+        self.flat_pedals().get(index).is_some_and(|s| s.bypassed)
     }
 
     /// Check if a pedal slot failed to compile (dry passthrough).
     pub fn is_pedal_failed(&self, index: usize) -> bool {
-        self.flat_pedals()
-            .get(index)
-            .is_some_and(|s| s.failed)
+        self.flat_pedals().get(index).is_some_and(|s| s.failed)
     }
 
     /// Configure the impedance loading between two adjacent pedals.
@@ -543,8 +536,7 @@ impl PedalboardProcessor {
         sample_rate: f64,
     ) {
         if junction_index < self.loading.len() {
-            self.loading[junction_index] =
-                InterstageLoading::new(source, load, sample_rate);
+            self.loading[junction_index] = InterstageLoading::new(source, load, sample_rate);
         }
     }
 
@@ -1071,9 +1063,18 @@ board "Bad" {
     #[test]
     fn global_board_prepends_and_appends() {
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-        let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
-        let comp_path = examples.join("pedals/compressor/dyna_comp.pedal").canonicalize().unwrap();
-        let bd_path = examples.join("pedals/overdrive/blues_driver.pedal").canonicalize().unwrap();
+        let ts_path = examples
+            .join("pedals/overdrive/tube_screamer.pedal")
+            .canonicalize()
+            .unwrap();
+        let comp_path = examples
+            .join("pedals/compressor/dyna_comp.pedal")
+            .canonicalize()
+            .unwrap();
+        let bd_path = examples
+            .join("pedals/overdrive/blues_driver.pedal")
+            .canonicalize()
+            .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
 
@@ -1093,8 +1094,7 @@ board "Bad" {
         std::fs::write(sub.join("test.board"), &board_content).unwrap();
 
         let board = parse_board_file(&board_content).unwrap();
-        let (pb, warnings) =
-            PedalboardProcessor::from_board_with_warnings(&board, &sub, 48000.0);
+        let (pb, warnings) = PedalboardProcessor::from_board_with_warnings(&board, &sub, 48000.0);
 
         assert_eq!(pb.len(), 3, "warnings: {warnings:?}");
         assert_eq!(pb.pedal_name(0), Some("MXR Dyna Comp"));
@@ -1105,8 +1105,14 @@ board "Bad" {
     #[test]
     fn global_board_start_only() {
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-        let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
-        let comp_path = examples.join("pedals/compressor/dyna_comp.pedal").canonicalize().unwrap();
+        let ts_path = examples
+            .join("pedals/overdrive/tube_screamer.pedal")
+            .canonicalize()
+            .unwrap();
+        let comp_path = examples
+            .join("pedals/compressor/dyna_comp.pedal")
+            .canonicalize()
+            .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
 
@@ -1116,14 +1122,10 @@ board "Bad" {
         );
         std::fs::write(tmp.path().join(".global.board"), &global_content).unwrap();
 
-        let board_content = format!(
-            "board \"Test\" {{\n  ts: \"{}\"\n}}",
-            ts_path.display(),
-        );
+        let board_content = format!("board \"Test\" {{\n  ts: \"{}\"\n}}", ts_path.display(),);
 
         let board = parse_board_file(&board_content).unwrap();
-        let (pb, _) =
-            PedalboardProcessor::from_board_with_warnings(&board, tmp.path(), 48000.0);
+        let (pb, _) = PedalboardProcessor::from_board_with_warnings(&board, tmp.path(), 48000.0);
 
         assert_eq!(pb.len(), 2);
         assert_eq!(pb.pedal_name(0), Some("MXR Dyna Comp"));
@@ -1133,9 +1135,18 @@ board "Bad" {
     #[test]
     fn global_board_signal_chain_order() {
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-        let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
-        let comp_path = examples.join("pedals/compressor/dyna_comp.pedal").canonicalize().unwrap();
-        let bd_path = examples.join("pedals/overdrive/blues_driver.pedal").canonicalize().unwrap();
+        let ts_path = examples
+            .join("pedals/overdrive/tube_screamer.pedal")
+            .canonicalize()
+            .unwrap();
+        let comp_path = examples
+            .join("pedals/compressor/dyna_comp.pedal")
+            .canonicalize()
+            .unwrap();
+        let bd_path = examples
+            .join("pedals/overdrive/blues_driver.pedal")
+            .canonicalize()
+            .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
 
@@ -1152,8 +1163,7 @@ board "Bad" {
         );
 
         let board = parse_board_file(&board_content).unwrap();
-        let (pb, _) =
-            PedalboardProcessor::from_board_with_warnings(&board, tmp.path(), 48000.0);
+        let (pb, _) = PedalboardProcessor::from_board_with_warnings(&board, tmp.path(), 48000.0);
 
         assert_eq!(pb.len(), 3);
 
@@ -1165,19 +1175,22 @@ board "Bad" {
             assert!(output.is_finite());
             max_out = max_out.max(output.abs());
         }
-        assert!(max_out > 0.0001, "pedalboard with global should produce output");
+        assert!(
+            max_out > 0.0001,
+            "pedalboard with global should produce output"
+        );
     }
 
     #[test]
     fn no_global_board_unchanged() {
         let tmp = tempfile::tempdir().unwrap();
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-        let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
+        let ts_path = examples
+            .join("pedals/overdrive/tube_screamer.pedal")
+            .canonicalize()
+            .unwrap();
 
-        let board_content = format!(
-            "board \"Solo\" {{\n  ts: \"{}\"\n}}",
-            ts_path.display(),
-        );
+        let board_content = format!("board \"Solo\" {{\n  ts: \"{}\"\n}}", ts_path.display(),);
 
         let board = parse_board_file(&board_content).unwrap();
         let (pb, warnings) =
@@ -1191,8 +1204,14 @@ board "Bad" {
     #[test]
     fn global_board_control_routing_flat_index() {
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-        let ts_path = examples.join("pedals/overdrive/tube_screamer.pedal").canonicalize().unwrap();
-        let comp_path = examples.join("pedals/compressor/dyna_comp.pedal").canonicalize().unwrap();
+        let ts_path = examples
+            .join("pedals/overdrive/tube_screamer.pedal")
+            .canonicalize()
+            .unwrap();
+        let comp_path = examples
+            .join("pedals/compressor/dyna_comp.pedal")
+            .canonicalize()
+            .unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
 
@@ -1202,10 +1221,7 @@ board "Bad" {
         );
         std::fs::write(tmp.path().join(".global.board"), &global_content).unwrap();
 
-        let board_content = format!(
-            "board \"Test\" {{\n  ts: \"{}\"\n}}",
-            ts_path.display(),
-        );
+        let board_content = format!("board \"Test\" {{\n  ts: \"{}\"\n}}", ts_path.display(),);
 
         let board = parse_board_file(&board_content).unwrap();
         let (mut pb, _) =
@@ -1324,11 +1340,13 @@ board "Resolver Test" {
         ];
 
         let board = parse_board_file(board_src).unwrap();
-        let (pb, warnings) = PedalboardProcessor::from_board_with_resolver(
-            &board,
-            48000.0,
-            |path| sources.iter().find(|(p, _)| *p == path).map(|(_, s)| s.clone()),
-        );
+        let (pb, warnings) =
+            PedalboardProcessor::from_board_with_resolver(&board, 48000.0, |path| {
+                sources
+                    .iter()
+                    .find(|(p, _)| *p == path)
+                    .map(|(_, s)| s.clone())
+            });
 
         assert!(warnings.is_empty(), "Unexpected warnings: {warnings:?}");
         assert_eq!(pb.len(), 2);
@@ -1351,11 +1369,8 @@ board "Missing Test" {
 }
 "#;
         let board = parse_board_file(board_src).unwrap();
-        let (pb, warnings) = PedalboardProcessor::from_board_with_resolver(
-            &board,
-            48000.0,
-            |_| None,
-        );
+        let (pb, warnings) =
+            PedalboardProcessor::from_board_with_resolver(&board, 48000.0, |_| None);
 
         assert_eq!(pb.len(), 1);
         assert!(pb.is_pedal_failed(0));

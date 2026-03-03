@@ -653,9 +653,7 @@ pub fn run_file_picker(
                     }
                     KeyCode::Enter => {
                         if let Some(&idx) = state.filtered.get(state.cursor) {
-                            return Ok(FilePickerResult::Selected(
-                                state.all_files[idx].clone(),
-                            ));
+                            return Ok(FilePickerResult::Selected(state.all_files[idx].clone()));
                         }
                     }
                     KeyCode::Backspace => {
@@ -677,10 +675,7 @@ fn draw_file_picker(frame: &mut Frame, state: &FilePickerState) {
     let area = frame.area();
 
     let title_text = if state.filter.is_empty() {
-        format!(
-            "  Select File ({} found)  ",
-            state.all_files.len()
-        )
+        format!("  Select File ({} found)  ", state.all_files.len())
     } else {
         format!(
             "  Select File — filter: \"{}\" ({}/{})  ",

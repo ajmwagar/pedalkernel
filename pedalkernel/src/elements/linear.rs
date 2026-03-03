@@ -407,8 +407,7 @@ mod tests {
     #[test]
     fn power_supply_tube_more_sag_than_solid_state() {
         let mut psu_tube = PowerSupply::new(480.0, 150.0, 40e-6, RectifierType::Tube, 48000.0);
-        let mut psu_ss =
-            PowerSupply::new(480.0, 5.0, 220e-6, RectifierType::SolidState, 48000.0);
+        let mut psu_ss = PowerSupply::new(480.0, 5.0, 220e-6, RectifierType::SolidState, 48000.0);
 
         // Apply a step load of 100mA
         for _ in 0..5000 {
@@ -466,8 +465,7 @@ mod tests {
     #[test]
     fn power_supply_solid_state_minimal_drop() {
         // Solid-state rectifier with low impedance should barely sag.
-        let mut psu =
-            PowerSupply::new(480.0, 5.0, 220e-6, RectifierType::SolidState, 48000.0);
+        let mut psu = PowerSupply::new(480.0, 5.0, 220e-6, RectifierType::SolidState, 48000.0);
 
         // Stabilize
         for _ in 0..5000 {
@@ -483,10 +481,7 @@ mod tests {
 
         // With 5Ω and 50mA, drop should be only ~0.25V
         let drop = v_no_load - v_loaded;
-        assert!(
-            drop < 1.0,
-            "solid-state sag should be minimal: {drop}V"
-        );
+        assert!(drop < 1.0, "solid-state sag should be minimal: {drop}V");
     }
 
     #[test]

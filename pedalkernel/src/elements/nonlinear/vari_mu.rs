@@ -10,7 +10,7 @@
 //! Ia = p1 × Vak^p2 / ((p3 - p4×Vgk)^p5 × (p6 + exp(p7×Vak - p8×Vgk)))
 //! ```
 
-use super::solver::{newton_raphson_solve, NlDeviceIv, NlDeviceGroupIv, LEAKAGE_CONDUCTANCE};
+use super::solver::{newton_raphson_solve, NlDeviceGroupIv, NlDeviceIv, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
 
 // ---------------------------------------------------------------------------
@@ -439,7 +439,9 @@ impl VariMuThreePort {
 }
 
 impl NlDeviceGroupIv for VariMuThreePort {
-    fn n_ports(&self) -> usize { 2 }
+    fn n_ports(&self) -> usize {
+        2
+    }
 
     fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
         let vgk = v[0]; // Port 0: grid-cathode
@@ -448,20 +450,20 @@ impl NlDeviceGroupIv for VariMuThreePort {
         // Grid current
         let (ig, dig_dvgk) = self.grid_iv(vgk);
         currents[0] = ig;
-        jacobian[0] = dig_dvgk;   // ∂ig/∂vgk
-        jacobian[1] = 0.0;        // ∂ig/∂vak (grid current independent of plate voltage)
+        jacobian[0] = dig_dvgk; // ∂ig/∂vgk
+        jacobian[1] = 0.0; // ∂ig/∂vak (grid current independent of plate voltage)
 
         // Plate current
         let (ip, dip_dvak, dip_dvgk) = self.plate_iv(vgk, vak);
         currents[1] = ip;
-        jacobian[2] = dip_dvgk;   // ∂ip/∂vgk (transconductance — the cross-coupling!)
-        jacobian[3] = dip_dvak;   // ∂ip/∂vak
+        jacobian[2] = dip_dvgk; // ∂ip/∂vgk (transconductance — the cross-coupling!)
+        jacobian[3] = dip_dvak; // ∂ip/∂vak
     }
 
     fn v_clamp_port(&self, port: usize) -> (f64, f64) {
         match port {
-            0 => (-50.0, 10.0),        // Grid: well below cutoff to slight forward bias
-            _ => (-50.0, self.v_max),   // Plate: 0 to B+
+            0 => (-50.0, 10.0),       // Grid: well below cutoff to slight forward bias
+            _ => (-50.0, self.v_max), // Plate: 0 to B+
         }
     }
 }
@@ -677,7 +679,10 @@ mod tests {
         let (ig_0, _) = tp.grid_iv(0.0);
         let (ig_1, _) = tp.grid_iv(1.0);
         assert!(ig_1 > ig_0, "Grid current should increase for positive Vgk");
-        assert!(ig_1 > 1e-6, "Grid current should be measurable at Vgk=1V: {ig_1:.6e}");
+        assert!(
+            ig_1 > 1e-6,
+            "Grid current should be measurable at Vgk=1V: {ig_1:.6e}"
+        );
     }
 
     /// Transconductance (∂Ia/∂Vgk) should be positive at operating point.
@@ -685,7 +690,10 @@ mod tests {
     fn three_port_transconductance_positive() {
         let tp = VariMuThreePort::new(VariMuModel::ge_6386());
         let (_, _, gm) = tp.plate_iv(-2.0, 200.0);
-        assert!(gm > 0.0, "Transconductance should be positive, got {gm:.6e}");
+        assert!(
+            gm > 0.0,
+            "Transconductance should be positive, got {gm:.6e}"
+        );
         assert!(gm.is_finite(), "Transconductance must be finite");
     }
 
@@ -817,16 +825,31 @@ mod tests {
         let mut v_guess = [-3.0, 150.0];
 
         let b = multi_port_nr_solve_grouped(
-            2, &s_nl, &known_a, &port_resistances, &groups, &offsets,
-            &mut v_guess, 50, 1e-8,
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess,
+            50,
+            1e-8,
         );
 
         assert!(b[0].is_finite(), "Grid b not finite: {}", b[0]);
         assert!(b[1].is_finite(), "Plate b not finite: {}", b[1]);
 
         // Grid should settle near negative bias
-        assert!(v_guess[0] < 0.0, "Grid voltage should be negative: {}", v_guess[0]);
+        assert!(
+            v_guess[0] < 0.0,
+            "Grid voltage should be negative: {}",
+            v_guess[0]
+        );
         // Plate should be positive
-        assert!(v_guess[1] > 0.0, "Plate voltage should be positive: {}", v_guess[1]);
+        assert!(
+            v_guess[1] > 0.0,
+            "Plate voltage should be positive: {}",
+            v_guess[1]
+        );
     }
 }

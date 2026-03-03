@@ -355,7 +355,10 @@ fn bench_flops_estimation(c: &mut Criterion) {
 
         // After benchmark, print FLOPS estimate
         eprintln!();
-        eprintln!("  WDF Clipper estimated FLOPs/sample: {}", estimated_flops_per_sample);
+        eprintln!(
+            "  WDF Clipper estimated FLOPs/sample: {}",
+            estimated_flops_per_sample
+        );
         eprintln!(
             "  At 48kHz: {} required",
             format_flops(estimated_flops_per_sample as f64 * SAMPLE_RATE)
@@ -413,7 +416,10 @@ fn bench_throughput_report(c: &mut Criterion) {
         "  {:20} {:>12} {:>14} {:>10} {:>12}",
         "Pedal", "Time (ms)", "Samples/sec", "CPU %", "Est. MFLOPS"
     );
-    eprintln!("  {:-<20} {:-^12} {:-^14} {:-^10} {:-^12}", "", "", "", "", "");
+    eprintln!(
+        "  {:-<20} {:-^12} {:-^14} {:-^10} {:-^12}",
+        "", "", "", "", ""
+    );
 
     for (name, estimated_stages) in pedals {
         let mut proc = compile_example(name);

@@ -507,10 +507,34 @@ fn transformer_path() -> Vec<PathCmd> {
     vec![
         // Primary (left)
         PathCmd::MoveTo(-8.0, -15.0),
-        PathCmd::ArcTo(-8.0, -10.0, 3.0, std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2),
-        PathCmd::ArcTo(-8.0, -5.0, 3.0, std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2),
-        PathCmd::ArcTo(-8.0, 0.0, 3.0, std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2),
-        PathCmd::ArcTo(-8.0, 5.0, 3.0, std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2),
+        PathCmd::ArcTo(
+            -8.0,
+            -10.0,
+            3.0,
+            std::f32::consts::FRAC_PI_2,
+            -std::f32::consts::FRAC_PI_2,
+        ),
+        PathCmd::ArcTo(
+            -8.0,
+            -5.0,
+            3.0,
+            std::f32::consts::FRAC_PI_2,
+            -std::f32::consts::FRAC_PI_2,
+        ),
+        PathCmd::ArcTo(
+            -8.0,
+            0.0,
+            3.0,
+            std::f32::consts::FRAC_PI_2,
+            -std::f32::consts::FRAC_PI_2,
+        ),
+        PathCmd::ArcTo(
+            -8.0,
+            5.0,
+            3.0,
+            std::f32::consts::FRAC_PI_2,
+            -std::f32::consts::FRAC_PI_2,
+        ),
         PathCmd::LineTo(-8.0, 15.0),
         // Core lines
         PathCmd::MoveTo(-2.0, -15.0),
@@ -519,10 +543,34 @@ fn transformer_path() -> Vec<PathCmd> {
         PathCmd::LineTo(2.0, 15.0),
         // Secondary (right)
         PathCmd::MoveTo(8.0, -15.0),
-        PathCmd::ArcTo(8.0, -10.0, 3.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2),
-        PathCmd::ArcTo(8.0, -5.0, 3.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2),
-        PathCmd::ArcTo(8.0, 0.0, 3.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2),
-        PathCmd::ArcTo(8.0, 5.0, 3.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2),
+        PathCmd::ArcTo(
+            8.0,
+            -10.0,
+            3.0,
+            -std::f32::consts::FRAC_PI_2,
+            std::f32::consts::FRAC_PI_2,
+        ),
+        PathCmd::ArcTo(
+            8.0,
+            -5.0,
+            3.0,
+            -std::f32::consts::FRAC_PI_2,
+            std::f32::consts::FRAC_PI_2,
+        ),
+        PathCmd::ArcTo(
+            8.0,
+            0.0,
+            3.0,
+            -std::f32::consts::FRAC_PI_2,
+            std::f32::consts::FRAC_PI_2,
+        ),
+        PathCmd::ArcTo(
+            8.0,
+            5.0,
+            3.0,
+            -std::f32::consts::FRAC_PI_2,
+            std::f32::consts::FRAC_PI_2,
+        ),
         PathCmd::LineTo(8.0, 15.0),
     ]
 }

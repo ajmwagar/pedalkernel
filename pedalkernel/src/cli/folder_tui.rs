@@ -163,7 +163,13 @@ fn draw_folder_overview(
     ])
     .split(inner);
 
-    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
+    render_io_bar(
+        frame,
+        v_chunks[0],
+        &state.input_port,
+        &state.output_port,
+        state.voltage,
+    );
 
     let n = board.pedals.len();
     if n > 0 {
@@ -218,7 +224,13 @@ fn draw_folder_detail(
     ])
     .split(inner);
 
-    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
+    render_io_bar(
+        frame,
+        v_chunks[0],
+        &state.input_port,
+        &state.output_port,
+        state.voltage,
+    );
     render_chain_bar(frame, v_chunks[2], &board.pedals, board.focused_pedal);
     render_status_row(frame, v_chunks[3], &board.pedals);
 
@@ -598,7 +610,9 @@ fn run_folder_control(
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
     if let Some(pair) = super::stereo_pair(connect_to) {
-        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+        let _ = async_client
+            .as_client()
+            .connect_ports_by_name(&our_out, &pair);
     }
 
     let mut state = FolderControlState {
@@ -651,7 +665,9 @@ fn run_folder_control_wav(
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
     if let Some(pair) = super::stereo_pair(connect_to) {
-        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+        let _ = async_client
+            .as_client()
+            .connect_ports_by_name(&our_out, &pair);
     }
 
     let mut state = FolderControlState {

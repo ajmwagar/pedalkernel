@@ -97,9 +97,9 @@ pub fn infer_pin_direction(kind: &ComponentKind, pin_name: &str) -> PinDirection
             }
         }
         // Two-terminal passives: direction from context
-        ComponentKind::Resistor(_)
-        | ComponentKind::Capacitor(_)
-        | ComponentKind::Inductor(_) => PinDirection::Bidirectional,
+        ComponentKind::Resistor(_) | ComponentKind::Capacitor(_) | ComponentKind::Inductor(_) => {
+            PinDirection::Bidirectional
+        }
         // Everything else: bidirectional
         _ => PinDirection::Bidirectional,
     }
@@ -254,16 +254,18 @@ impl LayoutGraph {
 
     /// Check if a node connects to vcc (directly or through supply components).
     pub fn connects_to_vcc(&self, node_id: usize) -> bool {
-        self.edges
-            .iter()
-            .any(|e| (e.from == node_id && e.to == self.vcc_node) || (e.to == node_id && e.from == self.vcc_node))
+        self.edges.iter().any(|e| {
+            (e.from == node_id && e.to == self.vcc_node)
+                || (e.to == node_id && e.from == self.vcc_node)
+        })
     }
 
     /// Check if a node connects to gnd (directly or through ground components).
     pub fn connects_to_gnd(&self, node_id: usize) -> bool {
-        self.edges
-            .iter()
-            .any(|e| (e.from == node_id && e.to == self.gnd_node) || (e.to == node_id && e.from == self.gnd_node))
+        self.edges.iter().any(|e| {
+            (e.from == node_id && e.to == self.gnd_node)
+                || (e.to == node_id && e.from == self.gnd_node)
+        })
     }
 
     /// Get the component kind for a node, if it has one.
@@ -370,7 +372,8 @@ fn build_net_groups(nets: &[NetDef]) -> Vec<NetGroup> {
                     None
                 }
             });
-            let mut comp_ids: Vec<String> = pins.iter().filter_map(|p| pin_component_id(p)).collect();
+            let mut comp_ids: Vec<String> =
+                pins.iter().filter_map(|p| pin_component_id(p)).collect();
             comp_ids.sort();
             comp_ids.dedup();
             NetGroup {
@@ -415,9 +418,7 @@ fn build_edges(
                 }
 
                 // Determine direction from pin roles
-                let direction = infer_edge_direction(
-                    from_id, to_id, ng, nodes, pedal,
-                );
+                let direction = infer_edge_direction(from_id, to_id, ng, nodes, pedal);
 
                 match direction {
                     EdgeDir::Forward => {
@@ -508,7 +509,7 @@ fn get_pin_direction_in_net(node: &LayoutNode, ng: &NetGroup) -> PinDirection {
     if node.is_anchor {
         return match node.comp_id.as_str() {
             "__in" => PinDirection::Output, // 'in' anchor sends signal out
-            "__out" => PinDirection::Input,  // 'out' anchor receives signal
+            "__out" => PinDirection::Input, // 'out' anchor receives signal
             "__vcc" => PinDirection::Up,
             "__gnd" => PinDirection::Down,
             _ => PinDirection::Bidirectional,
@@ -522,7 +523,11 @@ fn get_pin_direction_in_net(node: &LayoutNode, ng: &NetGroup) -> PinDirection {
 
     // Find which pin of this component appears in the net
     for pin in &ng.pins {
-        if let Pin::ComponentPin { component, pin: pin_name } = pin {
+        if let Pin::ComponentPin {
+            component,
+            pin: pin_name,
+        } = pin
+        {
             if *component == node.comp_id {
                 return infer_pin_direction(&comp.kind, pin_name);
             }
@@ -583,20 +588,38 @@ mod tests {
             name: "Test".into(),
             supplies: vec![],
             components: vec![
-                ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(4700.0) },
-                ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(CapConfig::new(100e-9)) },
+                ComponentDef {
+                    id: "R1".into(),
+                    kind: ComponentKind::Resistor(4700.0),
+                },
+                ComponentDef {
+                    id: "C1".into(),
+                    kind: ComponentKind::Capacitor(CapConfig::new(100e-9)),
+                },
             ],
             nets: vec![
                 NetDef {
                     from: Pin::Reserved("in".into()),
-                    to: vec![Pin::ComponentPin { component: "C1".into(), pin: "a".into() }],
+                    to: vec![Pin::ComponentPin {
+                        component: "C1".into(),
+                        pin: "a".into(),
+                    }],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "C1".into(), pin: "b".into() },
-                    to: vec![Pin::ComponentPin { component: "R1".into(), pin: "a".into() }],
+                    from: Pin::ComponentPin {
+                        component: "C1".into(),
+                        pin: "b".into(),
+                    },
+                    to: vec![Pin::ComponentPin {
+                        component: "R1".into(),
+                        pin: "a".into(),
+                    }],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "R1".into(), pin: "b".into() },
+                    from: Pin::ComponentPin {
+                        component: "R1".into(),
+                        pin: "b".into(),
+                    },
                     to: vec![Pin::Reserved("out".into())],
                 },
             ],

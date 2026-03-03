@@ -22,6 +22,8 @@ pub use modulation::*;
 pub use nonlinear::*;
 pub use synth::*;
 
+pub use nonlinear::{reset_solver_stats, solver_stats_snapshot, SolverStatsSnapshot};
+
 // ---------------------------------------------------------------------------
 // Traits
 // ---------------------------------------------------------------------------
@@ -351,7 +353,11 @@ mod tests {
             let b_pair_neg = pair.process(-a, rp);
             let b_single_neg = single.process(-a, rp);
             assert!(b_pair_neg.is_finite(), "Pair should converge for a={}", -a);
-            assert!(b_single_neg.is_finite(), "Single should converge for a={}", -a);
+            assert!(
+                b_single_neg.is_finite(),
+                "Single should converge for a={}",
+                -a
+            );
         }
     }
 
@@ -383,7 +389,8 @@ mod tests {
         assert!(
             (d914.is - d4148.is).abs() < 5e-9,
             "1N914 and 1N4148 should be similar: Is_914={}, Is_4148={}",
-            d914.is, d4148.is
+            d914.is,
+            d4148.is
         );
     }
 
@@ -394,10 +401,7 @@ mod tests {
 
         for &rp in &[1.0, 10.0, 100.0] {
             let b = diode.process(5.0, rp);
-            assert!(
-                b.is_finite(),
-                "Should converge with small Rp={rp}: b={b}"
-            );
+            assert!(b.is_finite(), "Should converge with small Rp={rp}: b={b}");
             let v = (5.0 + b) / 2.0;
             assert!(
                 v > 0.0 && v < 2.0,
@@ -692,7 +696,10 @@ mod tests {
     #[test]
     fn triode_12au7_low_gain() {
         let model = TriodeModel::by_name("12AU7");
-        assert!((model.mu - 21.5).abs() < 0.01, "12AU7 should have mu=21.5 (Koren)");
+        assert!(
+            (model.mu - 21.5).abs() < 0.01,
+            "12AU7 should have mu=21.5 (Koren)"
+        );
     }
 
     #[test]
@@ -1011,7 +1018,10 @@ mod tests {
         let mut root = MosfetRoot::new(model);
         root.set_vgs(0.0); // well below Vth=2.1V
         let ids = root.drain_current(5.0);
-        assert!(ids.abs() < 1e-12, "MOSFET should be off below Vth: ids={ids}");
+        assert!(
+            ids.abs() < 1e-12,
+            "MOSFET should be off below Vth: ids={ids}"
+        );
     }
 
     #[test]
@@ -1023,7 +1033,10 @@ mod tests {
         let ids = root.drain_current(5.0);
         assert!(ids > 0.0, "MOSFET should conduct above Vth: ids={ids}");
         // Expected: Kp * (Vgs-Vth)^2 * (1 + lambda*Vds) = 0.1 * 3.61 * 1.2 = 0.433 A
-        assert!((ids - 0.433).abs() < 0.05, "saturation current ~0.43A: ids={ids}");
+        assert!(
+            (ids - 0.433).abs() < 0.05,
+            "saturation current ~0.43A: ids={ids}"
+        );
     }
 
     #[test]
@@ -1090,7 +1103,10 @@ mod tests {
         // Reverse bias well past Vz: should conduct heavily
         // At -5.5V (0.4V past breakdown), the exponential model gives large current
         let i = root.current(-5.5);
-        assert!(i < -1.0, "Zener should conduct heavily past breakdown: i={i}");
+        assert!(
+            i < -1.0,
+            "Zener should conduct heavily past breakdown: i={i}"
+        );
     }
 
     #[test]
@@ -1120,7 +1136,10 @@ mod tests {
         let b_large = root.process(20.0, rp);
         let v_large = (20.0 + b_large) / 2.0;
 
-        assert!(v_large < 20.0, "large signal should be clipped: v={v_large}");
+        assert!(
+            v_large < 20.0,
+            "large signal should be clipped: v={v_large}"
+        );
         assert!(v_small.abs() < v_large.abs(), "small signal < large signal");
     }
 
@@ -1167,7 +1186,8 @@ mod tests {
         let out2 = slew.process(100.0);
         assert!(
             (out2 - 2.0 * max_dv).abs() < 0.01,
-            "Second sample should ramp: out={out2}, expected={}", 2.0 * max_dv
+            "Second sample should ramp: out={out2}, expected={}",
+            2.0 * max_dv
         );
 
         // After many samples, should converge to the target
@@ -1193,10 +1213,7 @@ mod tests {
         let output: Vec<f64> = input.iter().map(|&x| slew.process(x)).collect();
 
         let corr = correlation_f64(&input[10..], &output[10..]);
-        assert!(
-            corr > 0.9999,
-            "TL072 should be transparent: corr={corr:.6}"
-        );
+        assert!(corr > 0.9999, "TL072 should be transparent: corr={corr:.6}");
     }
 
     #[test]
@@ -1222,10 +1239,7 @@ mod tests {
         );
         // LM308: 5 * 6.25 = 31.25V
         // TL072: 5 * 270.8 = min(1354, 100) = 100V
-        assert!(
-            out_lm308 < 50.0,
-            "LM308 should be slow: {out_lm308:.2}"
-        );
+        assert!(out_lm308 < 50.0, "LM308 should be slow: {out_lm308:.2}");
         assert!(
             out_tl072 > 99.0,
             "TL072 should reach target quickly: {out_tl072:.2}"
@@ -1282,7 +1296,8 @@ mod tests {
         let i_large = root.output_current(1.0);
         assert!(
             (i_large - root.iabc()).abs() < root.iabc() * 0.01,
-            "Large signal should saturate at Iabc: i={i_large}, iabc={}", root.iabc()
+            "Large signal should saturate at Iabc: i={i_large}, iabc={}",
+            root.iabc()
         );
 
         // Negative large signal: should saturate at -Iabc
@@ -1321,7 +1336,8 @@ mod tests {
         // Half gain should give approximately half the current for small signals
         assert!(
             (i_half / i_full - 0.5).abs() < 0.05,
-            "Half gain ≈ half current: ratio={}", i_half / i_full
+            "Half gain ≈ half current: ratio={}",
+            i_half / i_full
         );
     }
 
@@ -1540,10 +1556,7 @@ mod tests {
         // Process loud input for a long time
         for _ in 0..48000 {
             let out = bbd.process(1.0);
-            assert!(
-                out.abs() < 10.0,
-                "BBD output should be bounded: {out}"
-            );
+            assert!(out.abs() < 10.0, "BBD output should be bounded: {out}");
             assert!(out.is_finite(), "BBD output should be finite");
         }
     }
@@ -1581,10 +1594,7 @@ mod tests {
             root.set_vp(vp);
             let b = root.process(0.0, rp);
             let v = b / 2.0;
-            assert!(
-                (v - vp).abs() < 0.2,
-                "Should track Vp={vp}: got v={v}"
-            );
+            assert!((v - vp).abs() < 0.2, "Should track Vp={vp}: got v={v}");
         }
     }
 
@@ -1787,10 +1797,7 @@ mod tests {
         let ic = root.collector_current();
 
         // Collector current should be negligible
-        assert!(
-            ic < 1e-10,
-            "In cutoff, Ic should be very small: ic={ic}"
-        );
+        assert!(ic < 1e-10, "In cutoff, Ic should be very small: ic={ic}");
     }
 
     #[test]
@@ -1854,7 +1861,7 @@ mod tests {
     fn bjt_beta_affects_base_current() {
         // Higher beta = less base current for same Ic
         let high_beta = BjtModel::by_name("2N5089"); // beta ~700
-        let low_beta = BjtModel::by_name("2N3904");  // beta ~150
+        let low_beta = BjtModel::by_name("2N3904"); // beta ~150
 
         let mut root_high = BjtNpnRoot::new(high_beta);
         let mut root_low = BjtNpnRoot::new(low_beta);
@@ -1908,9 +1915,12 @@ mod tests {
     fn bjt_model_presets() {
         // Verify all model presets have reasonable values
         let models: Vec<(&str, BjtModel)> = [
-            "2N3904", "2N2222", "BC108", "BC109", "2N5088",
-            "2N5089", "2N3906", "AC128", "OC44", "NKT275",
-        ].iter().map(|name| (*name, BjtModel::by_name(name))).collect();
+            "2N3904", "2N2222", "BC108", "BC109", "2N5088", "2N5089", "2N3906", "AC128", "OC44",
+            "NKT275",
+        ]
+        .iter()
+        .map(|name| (*name, BjtModel::by_name(name)))
+        .collect();
 
         for (name, model) in models {
             // Is should be positive
@@ -1947,10 +1957,7 @@ mod tests {
         let ic = root.collector_current();
 
         // Collector current should be negligible (but germanium has higher leakage)
-        assert!(
-            ic < 1e-4,
-            "In cutoff, PNP Ic should be small: ic={ic}"
-        );
+        assert!(ic < 1e-4, "In cutoff, PNP Ic should be small: ic={ic}");
     }
 
     #[test]

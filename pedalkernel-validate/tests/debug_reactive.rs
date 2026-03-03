@@ -117,7 +117,7 @@ fn debug_transformer_stepup() {
 
     // Test with 1kHz sine
     let freq = 1000.0;
-    let amplitude = 0.25;  // Lower amplitude to avoid clipping
+    let amplitude = 0.25; // Lower amplitude to avoid clipping
 
     let samples_per_cycle = (sample_rate / freq) as usize;
     let mut max_out = 0.0f64;
@@ -162,7 +162,7 @@ fn debug_delay_simple() {
     let mut proc = compiled;
 
     // Test with impulse - find delay time
-    let delay_samples = (0.01 * sample_rate) as usize;  // 10ms = 480 samples at 48kHz
+    let delay_samples = (0.01 * sample_rate) as usize; // 10ms = 480 samples at 48kHz
 
     // Send impulse
     let first_out = proc.process(1.0);
@@ -184,8 +184,12 @@ fn debug_delay_simple() {
         }
     }
 
-    println!("\nMax output: {:.4} at sample {} ({:.2}ms)",
-             max_output, max_sample, max_sample as f64 / sample_rate * 1000.0);
+    println!(
+        "\nMax output: {:.4} at sample {} ({:.2}ms)",
+        max_output,
+        max_sample,
+        max_sample as f64 / sample_rate * 1000.0
+    );
     println!("Expected delay: {} samples ({:.2}ms)", delay_samples, 10.0);
 
     if found_delay == 0 {

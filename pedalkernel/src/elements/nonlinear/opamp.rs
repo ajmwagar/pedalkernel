@@ -50,9 +50,9 @@ impl OpAmpModel {
     pub fn tl072() -> Self {
         Self {
             open_loop_gain: 200_000.0, // 106 dB
-            gbw: 3e6,                   // 3 MHz
-            slew_rate: 13.0,            // 13 V/µs
-            v_max: 12.0,                // ±12V swing at ±15V supply
+            gbw: 3e6,                  // 3 MHz
+            slew_rate: 13.0,           // 13 V/µs
+            v_max: 12.0,               // ±12V swing at ±15V supply
         }
     }
 
@@ -63,7 +63,7 @@ impl OpAmpModel {
     pub fn tl082() -> Self {
         Self {
             open_loop_gain: 200_000.0,
-            gbw: 4e6,                   // 4 MHz (slightly faster)
+            gbw: 4e6, // 4 MHz (slightly faster)
             slew_rate: 13.0,
             v_max: 12.0,
         }
@@ -77,8 +77,8 @@ impl OpAmpModel {
     pub fn lm308() -> Self {
         Self {
             open_loop_gain: 300_000.0, // 110 dB
-            gbw: 1e6,                   // 1 MHz
-            slew_rate: 0.3,             // 0.3 V/µs — THE key to RAT tone
+            gbw: 1e6,                  // 1 MHz
+            slew_rate: 0.3,            // 0.3 V/µs — THE key to RAT tone
             v_max: 12.0,
         }
     }
@@ -91,7 +91,7 @@ impl OpAmpModel {
         Self {
             open_loop_gain: 200_000.0,
             gbw: 1e6,
-            slew_rate: 0.5,             // Slow
+            slew_rate: 0.5, // Slow
             v_max: 12.0,
         }
     }
@@ -104,8 +104,8 @@ impl OpAmpModel {
     pub fn jrc4558() -> Self {
         Self {
             open_loop_gain: 100_000.0, // 100 dB
-            gbw: 3e6,                   // 3 MHz
-            slew_rate: 1.7,             // Moderate
+            gbw: 3e6,                  // 3 MHz
+            slew_rate: 1.7,            // Moderate
             v_max: 12.0,
         }
     }
@@ -130,8 +130,8 @@ impl OpAmpModel {
     pub fn ne5532() -> Self {
         Self {
             open_loop_gain: 100_000.0,
-            gbw: 10e6,                  // 10 MHz
-            slew_rate: 9.0,             // Fast
+            gbw: 10e6,      // 10 MHz
+            slew_rate: 9.0, // Fast
             v_max: 12.0,
         }
     }
@@ -143,8 +143,8 @@ impl OpAmpModel {
     pub fn op07() -> Self {
         Self {
             open_loop_gain: 400_000.0, // 112 dB
-            gbw: 0.6e6,                 // 600 kHz
-            slew_rate: 0.3,             // Slow
+            gbw: 0.6e6,                // 600 kHz
+            slew_rate: 0.3,            // Slow
             v_max: 12.0,
         }
     }
@@ -427,4 +427,3 @@ impl WdfRoot for OpAmpRoot {
         2.0 * v_out - a
     }
 }
-

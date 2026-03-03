@@ -375,9 +375,7 @@ impl WdfStage {
                 }
                 // Resistive termination: resistor absorbs all energy (b = 0).
                 // Output at root port = (0 + b_tree) / 2 = b_tree / 2.
-                RootKind::ResistiveTermination => {
-                    0.0
-                }
+                RootKind::ResistiveTermination => 0.0,
             };
             tree.set_incident(a_root);
             (a_root + b_tree) / 2.0
@@ -975,7 +973,9 @@ impl CoupledBjtStage {
 // Multi-NL coupled stage (R-type adaptor + multi-port NR solver)
 // ═══════════════════════════════════════════════════════════════════════════
 
-use crate::elements::nonlinear::solver::{multi_port_nr_solve, multi_port_nr_solve_grouped, NlDeviceIv, NlDeviceGroupIv};
+use crate::elements::nonlinear::solver::{
+    multi_port_nr_solve, multi_port_nr_solve_grouped, NlDeviceGroupIv, NlDeviceIv,
+};
 use crate::elements::nonlinear::VariMuThreePort;
 
 /// Nonlinear device kind for the multi-NL solver.
@@ -990,6 +990,7 @@ pub(super) enum NlDeviceKind {
     VariMu(VariMuTriodeRoot),
     Pentode(PentodeRoot),
     Diode(DiodeRoot),
+    DiodePair(DiodePairRoot),
 }
 
 impl NlDeviceKind {
@@ -1016,7 +1017,7 @@ impl NlDeviceKind {
                 const PENTODE_GRID_BIAS: f64 = -8.0;
                 p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
             }
-            NlDeviceKind::Diode(_) => {
+            NlDeviceKind::Diode(_) | NlDeviceKind::DiodePair(_) => {
                 // Diodes don't have a control voltage
             }
         }
@@ -1031,6 +1032,7 @@ impl NlDeviceKind {
             NlDeviceKind::VariMu(t) => t,
             NlDeviceKind::Pentode(p) => p,
             NlDeviceKind::Diode(d) => d,
+            NlDeviceKind::DiodePair(d) => d,
         }
     }
 
@@ -1042,6 +1044,7 @@ impl NlDeviceKind {
             NlDeviceKind::VariMu(_) => "VariMu",
             NlDeviceKind::Pentode(_) => "Pentode",
             NlDeviceKind::Diode(_) => "Diode",
+            NlDeviceKind::DiodePair(_) => "DiodePair",
         }
     }
 }
@@ -1050,7 +1053,9 @@ impl NlDeviceKind {
 /// This allows SinglePort(NlDeviceKind) in NlDeviceGroupKind to delegate
 /// through as_group_iv() in mixed-device collapsed stages.
 impl NlDeviceGroupIv for NlDeviceKind {
-    fn n_ports(&self) -> usize { 1 }
+    fn n_ports(&self) -> usize {
+        1
+    }
 
     fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
         let (i, di) = self.as_nl_device_iv().iv(v[0]);
@@ -1210,9 +1215,13 @@ impl MultiNlStage {
         let output_port = self.output_port;
 
         // Temporary diagnostic: print s_nl_adapted once
-        static MNL_DIAG_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static MNL_DIAG_DONE: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         if n_nl >= 10 && !MNL_DIAG_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("[MNL-DIAG] n_nl={} n_passive={} output_port={} comp={}", n_nl, n_passive, output_port, compensation);
+            eprintln!(
+                "[MNL-DIAG] n_nl={} n_passive={} output_port={} comp={}",
+                n_nl, n_passive, output_port, compensation
+            );
             eprintln!("[MNL-DIAG] s_nl_adapted = {:?}", &self.s_nl_adapted);
             // Check scattering matrix: does VS port reach output port?
             let n_total = n_nl + n_passive + 1;
@@ -1220,13 +1229,25 @@ impl MultiNlStage {
             let mut b_test = vec![0.0; n_total];
             b_test[n_total - 1] = 1.0; // VS port = 1.0
             let a_test = s.scatter_all(&b_test);
-            eprintln!("[MNL-DIAG] scatter VS→all: a[out={}]={:.6e}", output_port, a_test[output_port]);
-            eprintln!("[MNL-DIAG] first 5 NL a-values: {:?}", &a_test[..n_nl.min(5)]);
+            eprintln!(
+                "[MNL-DIAG] scatter VS→all: a[out={}]={:.6e}",
+                output_port, a_test[output_port]
+            );
+            eprintln!(
+                "[MNL-DIAG] first 5 NL a-values: {:?}",
+                &a_test[..n_nl.min(5)]
+            );
             // Check NL port resistances
-            eprintln!("[MNL-DIAG] nl_port_resistances = {:?}", &self.nl_port_resistances);
+            eprintln!(
+                "[MNL-DIAG] nl_port_resistances = {:?}",
+                &self.nl_port_resistances
+            );
             // Check recompute data
             if let Some(ref rc) = self.recompute_data {
-                eprintln!("[MNL-DIAG] recompute port_node_pairs = {:?}", &rc.port_node_pairs);
+                eprintln!(
+                    "[MNL-DIAG] recompute port_node_pairs = {:?}",
+                    &rc.port_node_pairs
+                );
             }
         }
 
@@ -1277,8 +1298,11 @@ impl MultiNlStage {
                 )
             } else {
                 // Independent solver: each device has its own I-V
-                let devices: Vec<&dyn NlDeviceIv> =
-                    self.nl_devices.iter().map(|d| d.as_nl_device_iv()).collect();
+                let devices: Vec<&dyn NlDeviceIv> = self
+                    .nl_devices
+                    .iter()
+                    .map(|d| d.as_nl_device_iv())
+                    .collect();
                 multi_port_nr_solve(
                     n_nl,
                     &self.s_nl,
@@ -1322,9 +1346,17 @@ impl MultiNlStage {
             let n = TRACE_COUNT_MNL.fetch_add(1, Ordering::Relaxed);
             if n < MAX_TRACE_MNL {
                 let stage_id = if let Some(ref dg) = self.device_groups {
-                    dg.groups.iter().map(|g| g.debug_name()).collect::<Vec<_>>().join(", ")
+                    dg.groups
+                        .iter()
+                        .map(|g| g.debug_name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 } else {
-                    self.nl_devices.iter().map(|d| d.debug_name()).collect::<Vec<_>>().join(", ")
+                    self.nl_devices
+                        .iter()
+                        .map(|d| d.debug_name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 };
                 let gain_db = if output.abs() > 1e-30 && input.abs() > 1e-30 {
                     20.0 * (output / input).abs().log10()
@@ -1335,12 +1367,8 @@ impl MultiNlStage {
                     "[MNL n={n}] [{stage_id}] n_nl={} out_port={} comp={:.4} xfmr={:.2}",
                     self.n_nl, self.output_port, self.compensation, self.transformer_gain
                 );
-                eprintln!(
-                    "  in={input:.6e} out={output:.6e} gain={gain_db:.1}dB"
-                );
-                eprintln!(
-                    "  s_nl_adapted={:.6?}", &self.s_nl_adapted
-                );
+                eprintln!("  in={input:.6e} out={output:.6e} gain={gain_db:.1}dB");
+                eprintln!("  s_nl_adapted={:.6?}", &self.s_nl_adapted);
                 // s_nl diagonal (self-coupling) and off-diagonal
                 let mut s_diag = Vec::with_capacity(self.n_nl);
                 for i in 0..self.n_nl {
@@ -1348,7 +1376,8 @@ impl MultiNlStage {
                 }
                 eprintln!("  s_nl_diag={:.6?}", s_diag);
                 eprintln!(
-                    "  v_prev={:.4?} Rp={:.1?}", &self.v_prev, &self.nl_port_resistances
+                    "  v_prev={:.4?} Rp={:.1?}",
+                    &self.v_prev, &self.nl_port_resistances
                 );
             }
         }
@@ -1371,7 +1400,11 @@ impl MultiNlStage {
     pub fn debug_dump(&self) -> String {
         let n_passive = self.passive_children.len();
         let n_total = self.n_nl + n_passive + 1;
-        let solver_type = if self.device_groups.is_some() { "grouped" } else { "independent" };
+        let solver_type = if self.device_groups.is_some() {
+            "grouped"
+        } else {
+            "independent"
+        };
         let mut s = format!(
             "MultiNlStage(n_nl={}, n_passive={}, n_total={}, output_port={}, comp={:.6}, solver={})\n",
             self.n_nl, n_passive, n_total, self.output_port, self.compensation, solver_type
@@ -1380,7 +1413,10 @@ impl MultiNlStage {
             for (g, group) in dg.groups.iter().enumerate() {
                 s.push_str(&format!(
                     "  Group[{}]: {} ({} ports, offset={})\n",
-                    g, group.debug_name(), group.n_ports(), dg.offsets[g]
+                    g,
+                    group.debug_name(),
+                    group.n_ports(),
+                    dg.offsets[g]
                 ));
             }
         } else {
@@ -1536,7 +1572,6 @@ impl MultiNlStage {
         let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
         self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
     }
-
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

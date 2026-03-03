@@ -176,7 +176,10 @@ impl PedalDef {
     /// Get the primary supply voltage (first supply, or default 9V).
     /// For backwards compatibility with single-supply code.
     pub fn primary_supply_voltage(&self) -> f64 {
-        self.supplies.first().map(|s| s.config.voltage).unwrap_or(9.0)
+        self.supplies
+            .first()
+            .map(|s| s.config.voltage)
+            .unwrap_or(9.0)
     }
 
     /// Get a supply by name.
@@ -283,7 +286,12 @@ pub enum ComponentKind {
     /// Parameters: min_delay, max_delay, interpolation mode, medium model.
     /// Splits the WDF tree into write and read subtrees coupled by an
     /// implicit one-sample delay — the standard technique for feedback loops.
-    DelayLine(f64, f64, crate::elements::Interpolation, crate::elements::Medium),
+    DelayLine(
+        f64,
+        f64,
+        crate::elements::Interpolation,
+        crate::elements::Medium,
+    ),
     /// Read-only tap into a named delay line at a ratio of the base delay.
     /// Parameters: parent delay line component ID, ratio (e.g., 2.0 = 2× base).
     Tap(String, f64),
@@ -592,9 +600,9 @@ impl NeonType {
     /// Typical operating current in Amps
     pub fn typical_current(&self) -> f64 {
         match self {
-            NeonType::Ne2 => 0.5e-3,   // 0.5mA
-            NeonType::Ne51 => 1.0e-3,  // 1mA
-            NeonType::Ne83 => 0.3e-3,  // 0.3mA
+            NeonType::Ne2 => 0.5e-3,  // 0.5mA
+            NeonType::Ne51 => 1.0e-3, // 1mA
+            NeonType::Ne83 => 0.3e-3, // 0.3mA
         }
     }
 
@@ -789,7 +797,10 @@ pub struct NetDef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Pin {
     Reserved(String),
-    ComponentPin { component: String, pin: String },
+    ComponentPin {
+        component: String,
+        pin: String,
+    },
     /// Dynamic routing controlled by a switch component.
     /// `fork(SW_time, [B8.a, B9.a])` routes signal to one of the destinations
     /// based on the switch position.
@@ -980,10 +991,7 @@ fn parse_cap(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = ws_comments(input)?;
 
     // Optional cap type (electrolytic, film, ceramic, tantalum)
-    let (input, ctype) = opt(preceded(
-        tuple((char(','), ws_comments)),
-        cap_type,
-    ))(input)?;
+    let (input, ctype) = opt(preceded(tuple((char(','), ws_comments)), cap_type))(input)?;
 
     let (input, _) = ws_comments(input)?;
 
@@ -1120,7 +1128,10 @@ fn parse_npn(input: &str) -> IResult<&str, ComponentKind> {
     let (input, name) = opt(model_name_str)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Npn(name.unwrap_or_else(|| DEFAULT_NPN_MODEL.to_string()))))
+    Ok((
+        input,
+        ComponentKind::Npn(name.unwrap_or_else(|| DEFAULT_NPN_MODEL.to_string())),
+    ))
 }
 
 fn parse_pnp(input: &str) -> IResult<&str, ComponentKind> {
@@ -1130,7 +1141,10 @@ fn parse_pnp(input: &str) -> IResult<&str, ComponentKind> {
     let (input, name) = opt(model_name_str)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Pnp(name.unwrap_or_else(|| DEFAULT_PNP_MODEL.to_string()))))
+    Ok((
+        input,
+        ComponentKind::Pnp(name.unwrap_or_else(|| DEFAULT_PNP_MODEL.to_string())),
+    ))
 }
 
 fn opamp_type(input: &str) -> IResult<&str, OpAmpType> {
@@ -1154,7 +1168,10 @@ fn parse_opamp(input: &str) -> IResult<&str, ComponentKind> {
     let (input, ot) = opt(opamp_type)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::OpAmp(ot.unwrap_or(OpAmpType::Generic))))
+    Ok((
+        input,
+        ComponentKind::OpAmp(ot.unwrap_or(OpAmpType::Generic)),
+    ))
 }
 
 fn parse_njfet(input: &str) -> IResult<&str, ComponentKind> {
@@ -1281,7 +1298,10 @@ fn medium_type(input: &str) -> IResult<&str, crate::elements::Medium> {
         value(crate::elements::Medium::None, tag("none")),
         value(crate::elements::Medium::TapeOxide, tag("tape_oxide")),
         value(crate::elements::Medium::BbdLeakage, tag("bbd_leakage")),
-        value(crate::elements::Medium::DigitalQuantize, tag("digital_quantize")),
+        value(
+            crate::elements::Medium::DigitalQuantize,
+            tag("digital_quantize"),
+        ),
     ))(input)
 }
 
@@ -1303,10 +1323,7 @@ fn parse_delay_line(input: &str) -> IResult<&str, ComponentKind> {
     let (input, max_delay) = eng_value(input)?;
     let (input, _) = ws_comments(input)?;
     // Optional interpolation mode
-    let (input, interp) = opt(preceded(
-        pair(char(','), ws_comments),
-        interpolation_mode,
-    ))(input)?;
+    let (input, interp) = opt(preceded(pair(char(','), ws_comments), interpolation_mode))(input)?;
     let (input, _) = ws_comments(input)?;
     // Optional medium: keyword
     let (input, medium) = opt(preceded(
@@ -1317,7 +1334,10 @@ fn parse_delay_line(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = char(')')(input)?;
     let interp = interp.unwrap_or(crate::elements::Interpolation::Allpass);
     let medium = medium.unwrap_or(crate::elements::Medium::None);
-    Ok((input, ComponentKind::DelayLine(min_delay, max_delay, interp, medium)))
+    Ok((
+        input,
+        ComponentKind::DelayLine(min_delay, max_delay, interp, medium),
+    ))
 }
 
 /// `tap(DL1, 2.0)` — Read-only tap into a named delay line.
@@ -1339,9 +1359,18 @@ fn parse_tap(input: &str) -> IResult<&str, ComponentKind> {
 
 fn neon_type(input: &str) -> IResult<&str, NeonType> {
     alt((
-        value(NeonType::Ne2, alt((tag("ne2"), tag("ne-2"), tag("NE2"), tag("NE-2")))),
-        value(NeonType::Ne51, alt((tag("ne51"), tag("ne-51"), tag("NE51"), tag("NE-51")))),
-        value(NeonType::Ne83, alt((tag("ne83"), tag("ne-83"), tag("NE83"), tag("NE-83")))),
+        value(
+            NeonType::Ne2,
+            alt((tag("ne2"), tag("ne-2"), tag("NE2"), tag("NE-2"))),
+        ),
+        value(
+            NeonType::Ne51,
+            alt((tag("ne51"), tag("ne-51"), tag("NE51"), tag("NE-51"))),
+        ),
+        value(
+            NeonType::Ne83,
+            alt((tag("ne83"), tag("ne-83"), tag("NE83"), tag("NE-83"))),
+        ),
     ))(input)
 }
 
@@ -1548,7 +1577,12 @@ fn parse_transformer(input: &str) -> IResult<&str, ComponentKind> {
     let mut remaining = input;
     loop {
         // Check for comma
-        if let Ok((input, _)) = tuple((ws_comments, char::<&str, nom::error::Error<&str>>(','), ws_comments))(remaining) {
+        if let Ok((input, _)) = tuple((
+            ws_comments,
+            char::<&str, nom::error::Error<&str>>(','),
+            ws_comments,
+        ))(remaining)
+        {
             remaining = input;
 
             // Try ct_primary first (must come before ct to match longer tag)
@@ -1588,10 +1622,9 @@ fn parse_transformer(input: &str) -> IResult<&str, ComponentKind> {
                 continue;
             }
 
-            if let Ok((input, _)) = alt((
-                tag::<&str, &str, nom::error::Error<&str>>("Cp"),
-                tag("cp"),
-            ))(remaining) {
+            if let Ok((input, _)) =
+                alt((tag::<&str, &str, nom::error::Error<&str>>("Cp"), tag("cp")))(remaining)
+            {
                 let (input, _) = ws_comments(input)?;
                 let (input, _) = char('=')(input)?;
                 let (input, _) = ws_comments(input)?;
@@ -1612,17 +1645,20 @@ fn parse_transformer(input: &str) -> IResult<&str, ComponentKind> {
             }
 
             // tertiary=N:M — adds a third winding with its own turns ratio
-            if let Ok((input, _)) = tag::<&str, &str, nom::error::Error<&str>>("tertiary")(remaining) {
+            if let Ok((input, _)) =
+                tag::<&str, &str, nom::error::Error<&str>>("tertiary")(remaining)
+            {
                 let (input, _) = ws_comments(input)?;
                 let (input, _) = char('=')(input)?;
                 let (input, _) = ws_comments(input)?;
                 let (input, t_num) = double(input)?;
-                let (input, t_ratio) = if let Ok((input, _)) = char::<&str, nom::error::Error<&str>>(':')(input) {
-                    let (input, denom) = double(input)?;
-                    (input, t_num / denom)
-                } else {
-                    (input, t_num)
-                };
+                let (input, t_ratio) =
+                    if let Ok((input, _)) = char::<&str, nom::error::Error<&str>>(':')(input) {
+                        let (input, denom) = double(input)?;
+                        (input, t_num / denom)
+                    } else {
+                        (input, t_num)
+                    };
                 config.tertiary_turns_ratio = Some(t_ratio);
                 remaining = input;
                 continue;
@@ -1674,10 +1710,8 @@ fn parse_cap_switched(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = ws_comments(input)?;
 
     // Parse comma-separated values
-    let (input, values) = separated_list1(
-        tuple((ws_comments, char(','), ws_comments)),
-        eng_value,
-    )(input)?;
+    let (input, values) =
+        separated_list1(tuple((ws_comments, char(','), ws_comments)), eng_value)(input)?;
 
     let (input, _) = ws_comments(input)?;
 
@@ -1707,10 +1741,8 @@ fn parse_inductor_switched(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = ws_comments(input)?;
 
     // Parse comma-separated values
-    let (input, values) = separated_list1(
-        tuple((ws_comments, char(','), ws_comments)),
-        eng_value,
-    )(input)?;
+    let (input, values) =
+        separated_list1(tuple((ws_comments, char(','), ws_comments)), eng_value)(input)?;
 
     let (input, _) = ws_comments(input)?;
 
@@ -1740,10 +1772,8 @@ fn parse_resistor_switched(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = ws_comments(input)?;
 
     // Parse comma-separated values
-    let (input, values) = separated_list1(
-        tuple((ws_comments, char(','), ws_comments)),
-        eng_value,
-    )(input)?;
+    let (input, values) =
+        separated_list1(tuple((ws_comments, char(','), ws_comments)), eng_value)(input)?;
 
     let (input, _) = ws_comments(input)?;
 
@@ -1866,10 +1896,13 @@ fn component_def(input: &str) -> IResult<&str, (ComponentDef, Option<String>)> {
     let mirrors = mirrors_target.map(|(_, _, _, target)| target.to_string());
     Ok((
         input,
-        (ComponentDef {
-            id: id.to_string(),
-            kind,
-        }, mirrors),
+        (
+            ComponentDef {
+                id: id.to_string(),
+                kind,
+            },
+            mirrors,
+        ),
     ))
 }
 
@@ -1878,12 +1911,17 @@ fn component_def(input: &str) -> IResult<&str, (ComponentDef, Option<String>)> {
 // ---------------------------------------------------------------------------
 
 const RESERVED_NODES: &[&str] = &[
-    "in", "out", "gnd", "vcc", "fx_send", "fx_return",
+    "in",
+    "out",
+    "gnd",
+    "vcc",
+    "fx_send",
+    "fx_return",
     // Synth-specific CV/Gate nodes
-    "gate",       // Note on/off (0V / +5V)
-    "cv_pitch",   // Pitch CV (1V/Oct standard)
-    "cv_mod",     // Modulation CV (mod wheel, aftertouch)
-    "cv_filter",  // Filter cutoff CV
+    "gate",      // Note on/off (0V / +5V)
+    "cv_pitch",  // Pitch CV (1V/Oct standard)
+    "cv_mod",    // Modulation CV (mod wheel, aftertouch)
+    "cv_filter", // Filter cutoff CV
 ];
 
 /// Parse an identifier or supply rail name (V+, V-, B+, etc.)
@@ -1891,10 +1929,7 @@ const RESERVED_NODES: &[&str] = &[
 fn identifier_or_supply_rail(input: &str) -> IResult<&str, &str> {
     alt((
         // Special rail names with + or - (e.g., "V+", "V-", "B+")
-        recognize(pair(
-            alpha1,
-            alt((char('+'), char('-'))),
-        )),
+        recognize(pair(alpha1, alt((char('+'), char('-'))))),
         // Regular identifier
         identifier,
     ))(input)
@@ -2131,7 +2166,10 @@ fn control_or_skip(input: &str) -> IResult<&str, Option<ControlDef>> {
 
     // Check if we're at closing brace
     if input.starts_with('}') {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Char,
+        )));
     }
 
     // Try to parse a control_def
@@ -2186,7 +2224,10 @@ fn meter_type(input: &str) -> IResult<&str, MeterType> {
         value(MeterType::Vu, alt((tag("vu"), tag("VU")))),
         value(MeterType::Ppm, alt((tag("ppm"), tag("PPM")))),
         value(MeterType::Peak, alt((tag("peak"), tag("PEAK")))),
-        value(MeterType::GainReduction, alt((tag("gr"), tag("GR"), tag("gain_reduction")))),
+        value(
+            MeterType::GainReduction,
+            alt((tag("gr"), tag("GR"), tag("gain_reduction"))),
+        ),
         value(MeterType::TubeGlow, alt((tag("glow"), tag("tube_glow")))),
         value(MeterType::SupplySag, alt((tag("sag"), tag("supply_sag")))),
     ))(input)
@@ -2236,7 +2277,10 @@ fn monitor_or_skip(input: &str) -> IResult<&str, Option<MonitorDef>> {
 
     // Check if we're at closing brace
     if input.starts_with('}') {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Char,
+        )));
     }
 
     // Try to parse a monitor_def
@@ -2361,10 +2405,7 @@ fn supply_section(input: &str) -> IResult<&str, SupplyConfig> {
     let (input, _) = ws_comments(input)?;
     // Parse the voltage value - can be like "9V", "9.0V", "250V", etc.
     // Also support "9v" lowercase
-    let (input, voltage) = recognize(pair(
-        double,
-        opt(alt((char('V'), char('v')))),
-    ))(input)?;
+    let (input, voltage) = recognize(pair(double, opt(alt((char('V'), char('v'))))))(input)?;
     // Extract just the numeric part
     let num_str = voltage.trim_end_matches(|c| c == 'V' || c == 'v');
     let volts = num_str.parse::<f64>().unwrap_or(9.0);
@@ -2387,9 +2428,7 @@ fn supply_section(input: &str) -> IResult<&str, SupplyConfig> {
 }
 
 /// Parse the body of a supply block: `{ impedance: 150, filter_cap: 40u, rectifier: tube }`
-fn supply_block(
-    input: &str,
-) -> IResult<&str, (Option<f64>, Option<f64>, Option<RectifierType>)> {
+fn supply_block(input: &str) -> IResult<&str, (Option<f64>, Option<f64>, Option<RectifierType>)> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('{')(input)?;
 
@@ -2489,10 +2528,7 @@ fn named_supply(input: &str) -> IResult<&str, NamedSupply> {
     let (input, is_negative) = opt(char('-'))(input)?;
 
     // Parse the voltage value
-    let (input, voltage_str) = recognize(pair(
-        double,
-        opt(alt((char('V'), char('v')))),
-    ))(input)?;
+    let (input, voltage_str) = recognize(pair(double, opt(alt((char('V'), char('v'))))))(input)?;
     let num_str = voltage_str.trim_end_matches(|c| c == 'V' || c == 'v');
     let mut volts = num_str.parse::<f64>().unwrap_or(9.0);
     if is_negative.is_some() {
@@ -2513,10 +2549,13 @@ fn named_supply(input: &str) -> IResult<&str, NamedSupply> {
         SupplyConfig::voltage_only(volts)
     };
 
-    Ok((input, NamedSupply {
-        name: name.to_string(),
-        config,
-    }))
+    Ok((
+        input,
+        NamedSupply {
+            name: name.to_string(),
+            config,
+        },
+    ))
 }
 
 /// Parse a `supplies { }` block with multiple named supply rails.
@@ -2716,7 +2755,8 @@ mod tests {
 
     #[test]
     fn parse_component_cap_with_da() {
-        let (_, (c, _)) = component_def("C1: cap(22u, electrolytic, leakage: 10k, da: 0.05)").unwrap();
+        let (_, (c, _)) =
+            component_def("C1: cap(22u, electrolytic, leakage: 10k, da: 0.05)").unwrap();
         if let ComponentKind::Capacitor(cfg) = c.kind {
             assert!((cfg.value - 22e-6).abs() < 1e-15);
             assert_eq!(cfg.cap_type, CapType::Electrolytic);
@@ -2755,7 +2795,10 @@ mod tests {
 
         // Legacy names
         let (_, (c, _)) = component_def("P1: pot(1M, log)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Potentiometer(1_000_000.0, PotTaper::A));
+        assert_eq!(
+            c.kind,
+            ComponentKind::Potentiometer(1_000_000.0, PotTaper::A)
+        );
 
         let (_, (c, _)) = component_def("P2: pot(25k, linear)").unwrap();
         assert_eq!(c.kind, ComponentKind::Potentiometer(25_000.0, PotTaper::B));
@@ -2821,7 +2864,10 @@ mod tests {
         // A and C should be symmetric around 0.5
         let a_25 = PotTaper::A.apply(0.25);
         let c_75 = PotTaper::C.apply(0.75);
-        assert!((a_25 - (1.0 - c_75)).abs() < 0.01, "A and C should be symmetric");
+        assert!(
+            (a_25 - (1.0 - c_75)).abs() < 0.01,
+            "A and C should be symmetric"
+        );
     }
 
     #[test]
@@ -3045,7 +3091,10 @@ pedal "Tremolo" {
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "Tremolo");
         assert_eq!(def.components.len(), 3);
-        assert_eq!(def.components[1].kind, ComponentKind::NJfet("J201".to_string()));
+        assert_eq!(
+            def.components[1].kind,
+            ComponentKind::NJfet("J201".to_string())
+        );
     }
 
     #[test]
@@ -3403,7 +3452,10 @@ pedal "MOSFET Drive" {
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "MOSFET Drive");
         assert_eq!(def.components.len(), 4);
-        assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::Nmos(MosfetType::N2n7000))));
+        assert!(def
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::Nmos(MosfetType::N2n7000))));
     }
 
     #[test]
@@ -3426,7 +3478,10 @@ pedal "Zener Clipper" {
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "Zener Clipper");
         assert_eq!(def.components.len(), 3);
-        assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::Zener(v) if (v - 5.1).abs() < 1e-6)));
+        assert!(def
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::Zener(v) if (v - 5.1).abs() < 1e-6)));
     }
 
     // ── BBD parser tests ──────────────────────────────────────────────────
@@ -3751,7 +3806,10 @@ synth "Test Synth" {
     fn parse_analog_switch_cd4066() {
         let (_, (c, _)) = component_def("SW1: switch(cd4066)").unwrap();
         assert_eq!(c.id, "SW1");
-        assert_eq!(c.kind, ComponentKind::AnalogSwitch(AnalogSwitchType::Cd4066));
+        assert_eq!(
+            c.kind,
+            ComponentKind::AnalogSwitch(AnalogSwitchType::Cd4066)
+        );
     }
 
     #[test]
@@ -3764,19 +3822,28 @@ synth "Test Synth" {
     fn parse_matched_npn_ssm2210() {
         let (_, (c, _)) = component_def("QM1: matched_npn(ssm2210)").unwrap();
         assert_eq!(c.id, "QM1");
-        assert_eq!(c.kind, ComponentKind::MatchedNpn(MatchedTransistorType::Ssm2210));
+        assert_eq!(
+            c.kind,
+            ComponentKind::MatchedNpn(MatchedTransistorType::Ssm2210)
+        );
     }
 
     #[test]
     fn parse_matched_npn_ca3046() {
         let (_, (c, _)) = component_def("QM1: matched_npn(ca3046)").unwrap();
-        assert_eq!(c.kind, ComponentKind::MatchedNpn(MatchedTransistorType::Ca3046));
+        assert_eq!(
+            c.kind,
+            ComponentKind::MatchedNpn(MatchedTransistorType::Ca3046)
+        );
     }
 
     #[test]
     fn parse_matched_pnp_lm394() {
         let (_, (c, _)) = component_def("QM1: matched_pnp(lm394)").unwrap();
-        assert_eq!(c.kind, ComponentKind::MatchedPnp(MatchedTransistorType::Lm394));
+        assert_eq!(
+            c.kind,
+            ComponentKind::MatchedPnp(MatchedTransistorType::Lm394)
+        );
     }
 
     #[test]
@@ -3819,7 +3886,9 @@ synth "CV Test" {
         let has_reserved = |name: &str| {
             def.nets.iter().any(|n| {
                 matches!(&n.from, Pin::Reserved(s) if s == name)
-                    || n.to.iter().any(|p| matches!(p, Pin::Reserved(s) if s == name))
+                    || n.to
+                        .iter()
+                        .any(|p| matches!(p, Pin::Reserved(s) if s == name))
             })
         };
         assert!(has_reserved("cv_pitch"));
@@ -3873,7 +3942,8 @@ synth "CV Test" {
 
     #[test]
     fn parse_transformer_with_tertiary() {
-        let (_, (c, _)) = component_def("T_sc: transformer(4:1, 5.7H, 10, 10p, tertiary=9.5:1)").unwrap();
+        let (_, (c, _)) =
+            component_def("T_sc: transformer(4:1, 5.7H, 10, 10p, tertiary=9.5:1)").unwrap();
         if let ComponentKind::Transformer(cfg) = c.kind {
             assert!((cfg.turns_ratio - 4.0).abs() < 1e-6);
             assert!((cfg.primary_inductance - 5.7).abs() < 1e-6);
@@ -3913,7 +3983,8 @@ synth "CV Test" {
 
     #[test]
     fn parse_inductor_switched() {
-        let (_, (c, _)) = component_def("L_hf: inductor_switched(27m, 33m, 47m, 68m, 82m, 150m)").unwrap();
+        let (_, (c, _)) =
+            component_def("L_hf: inductor_switched(27m, 33m, 47m, 68m, 82m, 150m)").unwrap();
         assert_eq!(c.id, "L_hf");
         if let ComponentKind::InductorSwitched(values) = c.kind {
             assert_eq!(values.len(), 6);
@@ -3960,10 +4031,22 @@ equipment "Test EQ" {
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "Test EQ");
         assert_eq!(def.components.len(), 5);
-        assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::Transformer(_))));
-        assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::CapSwitched(_))));
-        assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::InductorSwitched(_))));
-        assert!(def.components.iter().any(|c| matches!(c.kind, ComponentKind::RotarySwitch(_))));
+        assert!(def
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::Transformer(_))));
+        assert!(def
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::CapSwitched(_))));
+        assert!(def
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::InductorSwitched(_))));
+        assert!(def
+            .components
+            .iter()
+            .any(|c| matches!(c.kind, ComponentKind::RotarySwitch(_))));
     }
 
     // ── Supply voltage parser tests ───────────────────────────────────────

@@ -1,8 +1,8 @@
 //! CLI subcommand for listing and searching available component models.
 
 use pedalkernel::models::{
-    bjt_by_name, jfet_by_name, triode_by_name, pentode_by_name,
-    BJT_MODELS, JFET_MODELS, TRIODE_MODELS, PENTODE_MODELS,
+    bjt_by_name, jfet_by_name, pentode_by_name, triode_by_name, BJT_MODELS, JFET_MODELS,
+    PENTODE_MODELS, TRIODE_MODELS,
 };
 
 /// Run the `models` subcommand.
@@ -198,12 +198,28 @@ pub fn show(name: &str) {
         println!("  BR   = {:.4}      (reverse beta)", m.br);
         println!("  NF   = {:.3}       (forward ideality)", m.nf);
         println!("  NR   = {:.3}       (reverse ideality)", m.nr);
-        let vaf = if m.vaf.is_infinite() { "inf".to_string() } else { format!("{:.2}", m.vaf) };
-        let var = if m.var.is_infinite() { "inf".to_string() } else { format!("{:.2}", m.var) };
+        let vaf = if m.vaf.is_infinite() {
+            "inf".to_string()
+        } else {
+            format!("{:.2}", m.vaf)
+        };
+        let var = if m.var.is_infinite() {
+            "inf".to_string()
+        } else {
+            format!("{:.2}", m.var)
+        };
         println!("  VAF  = {} V     (forward Early voltage)", vaf);
         println!("  VAR  = {} V     (reverse Early voltage)", var);
-        let ikf = if m.ikf.is_infinite() { "inf".to_string() } else { format!("{:.4e}", m.ikf) };
-        let ikr = if m.ikr.is_infinite() { "inf".to_string() } else { format!("{:.4e}", m.ikr) };
+        let ikf = if m.ikf.is_infinite() {
+            "inf".to_string()
+        } else {
+            format!("{:.4e}", m.ikf)
+        };
+        let ikr = if m.ikr.is_infinite() {
+            "inf".to_string()
+        } else {
+            format!("{:.4e}", m.ikr)
+        };
         println!("  IKF  = {} A  (high-injection knee)", ikf);
         println!("  IKR  = {} A  (reverse knee)", ikr);
         println!("  RB   = {:.2} Ohm    (base resistance)", m.rb);
@@ -220,13 +236,20 @@ pub fn show(name: &str) {
         println!(
             "JFET: {} ({})",
             m.name,
-            if m.is_n_channel { "N-channel" } else { "P-channel" }
+            if m.is_n_channel {
+                "N-channel"
+            } else {
+                "P-channel"
+            }
         );
         println!("{:-<50}", "");
         println!("  VTO    = {:.3} V      (threshold voltage)", m.vto);
         println!("  BETA   = {:.4e} A/V^2 (transconductance coeff)", m.beta);
         println!("  LAMBDA = {:.4e} 1/V   (channel-length mod)", m.lambda);
-        println!("  Idss   = {:.4e} A     (= BETA * VTO^2)", m.beta * m.vto * m.vto);
+        println!(
+            "  Idss   = {:.4e} A     (= BETA * VTO^2)",
+            m.beta * m.vto * m.vto
+        );
         println!("  IS     = {:.4e} A     (gate junction sat current)", m.is);
         println!("  N      = {:.3}        (gate ideality factor)", m.n);
         println!("  RD     = {:.2} Ohm    (drain resistance)", m.rd);
@@ -257,7 +280,10 @@ pub fn show(name: &str) {
         println!("  KP   = {:.0}       (plate resistance factor)", m.kp);
         println!("  KVB  = {:.0}       (knee voltage)", m.kvb);
         println!("  KVB2 = {:.0}       (plate saturation knee)", m.kvb2);
-        println!("  VG2  = {:.0} V     (default screen voltage)", m.vg2_default);
+        println!(
+            "  VG2  = {:.0} V     (default screen voltage)",
+            m.vg2_default
+        );
         return;
     }
 

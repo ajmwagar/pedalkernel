@@ -28,6 +28,7 @@ pub(super) fn build_controls(
     delay_id_to_idx: &HashMap<String, usize>,
     delay_lines_empty: bool,
     sidechain_comp_ids: &HashMap<String, usize>,
+    bbd_id_to_idx: &HashMap<String, usize>,
 ) -> Vec<ControlBinding> {
     let mut controls = Vec::new();
 
@@ -57,8 +58,19 @@ pub(super) fn build_controls(
         // pots like "Gain" or "Volume" are bound to their actual WDF tree node
         // rather than being silently routed to PreGain/OutputGain.
         let target = if let Some((switch_id, num_positions)) = switch_info {
-            ControlTarget::SwitchPosition { switch_id, num_positions }
-        } else if let Some(&(stage_idx, ri, fixed_series_r, max_pot_r, parallel_fixed_r, is_inverting)) = opamp_pot_map.get(&ctrl.component) {
+            ControlTarget::SwitchPosition {
+                switch_id,
+                num_positions,
+            }
+        } else if let Some(&(
+            stage_idx,
+            ri,
+            fixed_series_r,
+            max_pot_r,
+            parallel_fixed_r,
+            is_inverting,
+        )) = opamp_pot_map.get(&ctrl.component)
+        {
             ControlTarget::OpAmpGain {
                 stage_idx,
                 ri,
@@ -101,17 +113,21 @@ pub(super) fn build_controls(
                 target
             } else {
                 // ── Step 4: sidechain pots ───────────────────────────────
-                let sc_idx = sidechain_comp_ids.get(&ctrl.component)
+                let sc_idx = sidechain_comp_ids
+                    .get(&ctrl.component)
                     .or_else(|| sidechain_comp_ids.get(&format!("{}__aw", ctrl.component)))
                     .or_else(|| sidechain_comp_ids.get(&format!("{}__wb", ctrl.component)));
                 if let Some(&idx) = sc_idx {
                     ControlTarget::SidechainControl(idx)
                 } else {
-                    // ── Step 5: LFO / delay net connections ──────────────
+                    // ── Step 5: LFO / delay / BBD net connections ─────────
+                    // Check all pot pins (a, b, wiper) — DSL files may wire
+                    // any pin to modulation targets (e.g., Delay.b -> LFO1.rate).
+                    let pot_pins = ["wiper", "b", "a"];
                     let mut lfo_target = None;
-                    for net in &pedal.nets {
+                    'net_scan: for net in &pedal.nets {
                         if let Pin::ComponentPin { component, pin } = &net.from {
-                            if component == &ctrl.component && pin == "wiper" {
+                            if component == &ctrl.component && pot_pins.contains(&pin.as_str()) {
                                 for to_pin in &net.to {
                                     if let Pin::ComponentPin {
                                         component: target_comp,
@@ -119,21 +135,59 @@ pub(super) fn build_controls(
                                     } = to_pin
                                     {
                                         if target_pin == "rate" {
-                                            if let Some(idx) = lfo_ids.iter().position(|id| id == target_comp) {
+                                            if let Some(idx) =
+                                                lfo_ids.iter().position(|id| id == target_comp)
+                                            {
                                                 lfo_target = Some(ControlTarget::LfoRate(idx));
-                                                break;
+                                                break 'net_scan;
+                                            }
+                                        }
+                                        if target_pin == "clock" {
+                                            if let Some(&idx) =
+                                                bbd_id_to_idx.get(target_comp.as_str())
+                                            {
+                                                lfo_target = Some(ControlTarget::BbdClockRate(idx));
+                                                break 'net_scan;
                                             }
                                         }
                                         if target_pin == "delay_time" {
-                                            if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
+                                            if let Some(&idx) =
+                                                delay_id_to_idx.get(target_comp.as_str())
+                                            {
                                                 lfo_target = Some(ControlTarget::DelayTime(idx));
-                                                break;
+                                                break 'net_scan;
                                             }
                                         }
                                         if target_pin == "feedback" {
-                                            if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
-                                                lfo_target = Some(ControlTarget::DelayFeedback(idx));
-                                                break;
+                                            if let Some(&idx) =
+                                                delay_id_to_idx.get(target_comp.as_str())
+                                            {
+                                                lfo_target =
+                                                    Some(ControlTarget::DelayFeedback(idx));
+                                                break 'net_scan;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Also check reverse direction: target component may be
+                        // in net.from with pot in net.to.
+                        for to_pin in &net.to {
+                            if let Pin::ComponentPin { component, pin } = to_pin {
+                                if component == &ctrl.component && pot_pins.contains(&pin.as_str())
+                                {
+                                    if let Pin::ComponentPin {
+                                        component: src_comp,
+                                        pin: src_pin,
+                                    } = &net.from
+                                    {
+                                        if src_pin == "out" {
+                                            // BBD.out -> Pot.a = feedback path
+                                            if let Some(&idx) = bbd_id_to_idx.get(src_comp.as_str())
+                                            {
+                                                lfo_target = Some(ControlTarget::BbdFeedback(idx));
+                                                break 'net_scan;
                                             }
                                         }
                                     }
@@ -146,6 +200,7 @@ pub(super) fn build_controls(
                         target
                     } else {
                         // ── Step 6: label-based heuristic fallback ───────
+                        let has_bbds = !bbd_id_to_idx.is_empty();
                         if is_gain_label(&ctrl.label) {
                             ControlTarget::PreGain
                         } else if is_level_label(&ctrl.label) {
@@ -162,10 +217,24 @@ pub(super) fn build_controls(
                             } else {
                                 ControlTarget::PreGain
                             }
-                        } else if is_delay_time_label(&ctrl.label) && !delay_lines_empty {
-                            ControlTarget::DelayTime(0)
-                        } else if is_delay_feedback_label(&ctrl.label) && !delay_lines_empty {
-                            ControlTarget::DelayFeedback(0)
+                        } else if is_delay_time_label(&ctrl.label) {
+                            if !delay_lines_empty {
+                                ControlTarget::DelayTime(0)
+                            } else if has_bbds {
+                                ControlTarget::BbdClockRate(0)
+                            } else {
+                                ControlTarget::PreGain
+                            }
+                        } else if is_delay_feedback_label(&ctrl.label) {
+                            if !delay_lines_empty {
+                                ControlTarget::DelayFeedback(0)
+                            } else if has_bbds {
+                                ControlTarget::BbdFeedback(0)
+                            } else {
+                                ControlTarget::PreGain
+                            }
+                        } else if is_mix_label(&ctrl.label) && (has_bbds || !delay_lines_empty) {
+                            ControlTarget::BbdMix
                         } else {
                             ControlTarget::PreGain
                         }
@@ -236,16 +305,26 @@ pub(super) fn build_lfo_bindings(
                             {
                                 // Direct resolution first.
                                 let target = resolve_modulation_target(
-                                    target_prop, target_comp, stages, delay_id_to_idx,
+                                    target_prop,
+                                    target_comp,
+                                    stages,
+                                    delay_id_to_idx,
                                     &mut created_all_jfet_binding,
-                                ).or_else(|| {
+                                )
+                                .or_else(|| {
                                     // Trace through resistive path for indirect connections.
                                     let mut visited = HashSet::new();
                                     let (final_comp, final_pin) = trace_through_resistive_path(
-                                        target_comp, target_prop, pedal, &mut visited,
+                                        target_comp,
+                                        target_prop,
+                                        pedal,
+                                        &mut visited,
                                     )?;
                                     resolve_modulation_target(
-                                        &final_pin, &final_comp, stages, delay_id_to_idx,
+                                        &final_pin,
+                                        &final_comp,
+                                        stages,
+                                        delay_id_to_idx,
                                         &mut created_all_jfet_binding,
                                     )
                                 });
@@ -286,9 +365,21 @@ pub(super) fn build_envelope_bindings(
     let mut envelopes = Vec::new();
 
     for comp in &pedal.components {
-        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sensitivity_r) = &comp.kind {
+        if let ComponentKind::EnvelopeFollower(
+            attack_r,
+            attack_c,
+            release_r,
+            release_c,
+            sensitivity_r,
+        ) = &comp.kind
+        {
             let envelope = crate::elements::EnvelopeFollower::from_rc(
-                *attack_r, *attack_c, *release_r, *release_c, *sensitivity_r, sample_rate,
+                *attack_r,
+                *attack_c,
+                *release_r,
+                *release_c,
+                *sensitivity_r,
+                sample_rate,
             );
 
             let mut unused_flag = false;
@@ -303,7 +394,10 @@ pub(super) fn build_envelope_bindings(
                             } = target_pin
                             {
                                 if let Some(target) = resolve_modulation_target(
-                                    target_prop, target_comp, stages, delay_id_to_idx,
+                                    target_prop,
+                                    target_comp,
+                                    stages,
+                                    delay_id_to_idx,
                                     &mut unused_flag,
                                 ) {
                                     let (bias, range) = modulation_bias_range(&target);
@@ -339,20 +433,35 @@ pub(super) fn build_sidechains(
     let mut processors = Vec::new();
     let mut comp_to_sc: HashMap<String, usize> = HashMap::new();
 
-    eprintln!("[sidechain] {} sidechain definitions", pedal.sidechains.len());
+    eprintln!(
+        "[sidechain] {} sidechain definitions",
+        pedal.sidechains.len()
+    );
     for sc_info in &pedal.sidechains {
         let tap = match graph.node_names.get(&sc_info.tap_node) {
             Some(&n) => n,
-            None => { eprintln!("[sidechain] tap node '{}' not found", sc_info.tap_node); continue; },
+            None => {
+                eprintln!("[sidechain] tap node '{}' not found", sc_info.tap_node);
+                continue;
+            }
         };
         let cv = match graph.node_names.get(&sc_info.cv_node) {
             Some(&n) => n,
-            None => { eprintln!("[sidechain] cv node '{}' not found", sc_info.cv_node); continue; },
+            None => {
+                eprintln!("[sidechain] cv node '{}' not found", sc_info.cv_node);
+                continue;
+            }
         };
 
         let partition = match graph.partition_sidechain(tap, cv) {
             Some(p) => p,
-            None => { eprintln!("[sidechain] partition returned None for tap={} cv={}", sc_info.tap_node, sc_info.cv_node); continue; },
+            None => {
+                eprintln!(
+                    "[sidechain] partition returned None for tap={} cv={}",
+                    sc_info.tap_node, sc_info.cv_node
+                );
+                continue;
+            }
         };
 
         let sc_idx = processors.len(); // Index this sidechain will have if it compiles OK
@@ -372,8 +481,15 @@ pub(super) fn build_sidechains(
             }
         }
 
-        eprintln!("[sidechain] tap={} cv={}", sc_info.tap_node, sc_info.cv_node);
-        eprintln!("[sidechain] {} edges, {} components", partition.sidechain_edge_indices.len(), sc_component_ids.len());
+        eprintln!(
+            "[sidechain] tap={} cv={}",
+            sc_info.tap_node, sc_info.cv_node
+        );
+        eprintln!(
+            "[sidechain] {} edges, {} components",
+            partition.sidechain_edge_indices.len(),
+            sc_component_ids.len()
+        );
         let mut sorted: Vec<_> = sc_component_ids.iter().cloned().collect();
         sorted.sort();
         eprintln!("[sidechain] {}", sorted.join(", "));
@@ -385,8 +501,13 @@ pub(super) fn build_sidechains(
             &sc_info.cv_node,
         );
 
-        eprintln!("[sidechain] sub-def: {} comps, {} nets, {} controls, {} trims",
-            sc_def.components.len(), sc_def.nets.len(), sc_def.controls.len(), sc_def.trims.len());
+        eprintln!(
+            "[sidechain] sub-def: {} comps, {} nets, {} controls, {} trims",
+            sc_def.components.len(),
+            sc_def.nets.len(),
+            sc_def.controls.len(),
+            sc_def.trims.len()
+        );
 
         // Compile the sidechain with collapse_nl=true to merge all NL elements
         // into a single MultiNlStage. This eliminates parallel-path routing issues
@@ -397,9 +518,13 @@ pub(super) fn build_sidechains(
         };
         match super::compile::compile_pedal_with_options(&sc_def, sample_rate, sc_options) {
             Ok(compiled) => {
-                eprintln!("[sidechain] compiled OK: {} stages, {} push-pull, {} multi-nl, {} coupled-bjt",
-                    compiled.debug_stage_count(), compiled.debug_push_pull_count(),
-                    compiled.debug_multi_nl_count(), compiled.debug_coupled_bjt_count());
+                eprintln!(
+                    "[sidechain] compiled OK: {} stages, {} push-pull, {} multi-nl, {} coupled-bjt",
+                    compiled.debug_stage_count(),
+                    compiled.debug_push_pull_count(),
+                    compiled.debug_multi_nl_count(),
+                    compiled.debug_coupled_bjt_count()
+                );
                 eprintln!("[sidechain] debug_dump:\n{}", compiled.debug_dump());
                 processors.push(SidechainProcessor {
                     circuit: compiled,
@@ -437,7 +562,9 @@ fn resolve_modulation_target(
                 .filter(|s| matches!(&s.root, RootKind::Jfet(_)))
                 .count();
             if jfet_count > 1 {
-                if *created_all_jfet_binding { return None; }
+                if *created_all_jfet_binding {
+                    return None;
+                }
                 *created_all_jfet_binding = true;
                 Some(ModulationTarget::AllJfetVgs)
             } else if let Some(stage_idx) = stages
@@ -488,17 +615,11 @@ fn resolve_modulation_target(
         }
         "clock" => Some(ModulationTarget::BbdClock { bbd_idx: 0 }),
         "speed_mod" => {
-            let delay_idx = delay_id_to_idx
-                .get(target_comp)
-                .copied()
-                .unwrap_or(0);
+            let delay_idx = delay_id_to_idx.get(target_comp).copied().unwrap_or(0);
             Some(ModulationTarget::DelaySpeed { delay_idx })
         }
         "delay_time" => {
-            let delay_idx = delay_id_to_idx
-                .get(target_comp)
-                .copied()
-                .unwrap_or(0);
+            let delay_idx = delay_id_to_idx.get(target_comp).copied().unwrap_or(0);
             Some(ModulationTarget::DelayTime { delay_idx })
         }
         _ => None,
@@ -547,7 +668,17 @@ fn trace_through_resistive_path<'a>(
         Some(ComponentKind::Potentiometer(_, _)) | Some(ComponentKind::Resistor(_))
     );
     if !is_resistive {
-        let recognized_targets = ["clock", "vgs", "gate", "led", "vgk", "vg1k", "iabc", "speed_mod", "delay_time"];
+        let recognized_targets = [
+            "clock",
+            "vgs",
+            "gate",
+            "led",
+            "vgk",
+            "vg1k",
+            "iabc",
+            "speed_mod",
+            "delay_time",
+        ];
         if recognized_targets.contains(&start_pin) {
             return Some((start_comp.to_string(), start_pin.to_string()));
         }
@@ -555,20 +686,16 @@ fn trace_through_resistive_path<'a>(
     }
 
     let other_pins: Vec<&str> = match comp_kind {
-        Some(ComponentKind::Potentiometer(_, _)) => {
-            match start_pin {
-                "a" => vec!["b", "wiper"],
-                "b" | "wiper" => vec!["a"],
-                _ => vec![],
-            }
-        }
-        Some(ComponentKind::Resistor(_)) => {
-            match start_pin {
-                "a" => vec!["b"],
-                "b" => vec!["a"],
-                _ => vec![],
-            }
-        }
+        Some(ComponentKind::Potentiometer(_, _)) => match start_pin {
+            "a" => vec!["b", "wiper"],
+            "b" | "wiper" => vec!["a"],
+            _ => vec![],
+        },
+        Some(ComponentKind::Resistor(_)) => match start_pin {
+            "a" => vec!["b"],
+            "b" => vec!["a"],
+            _ => vec![],
+        },
         _ => vec![],
     };
 
@@ -659,8 +786,13 @@ fn extract_sidechain_def(
                 for p in &all_pins {
                     if let Pin::Reserved(n) = p {
                         // Don't include standard pins or supply rails — only internal nodes.
-                        if n != tap_node && n != cv_node && n != "gnd" && n != "vcc"
-                            && n != "in" && n != "out" && !pedal.is_supply_rail(n)
+                        if n != tap_node
+                            && n != cv_node
+                            && n != "gnd"
+                            && n != "vcc"
+                            && n != "in"
+                            && n != "out"
+                            && !pedal.is_supply_rail(n)
                         {
                             nodes.insert(n.clone());
                         }

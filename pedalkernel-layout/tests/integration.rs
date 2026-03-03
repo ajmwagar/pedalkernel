@@ -11,94 +11,229 @@ fn tube_screamer_pedal() -> PedalDef {
         name: "Tube Screamer".into(),
         supplies: vec![],
         components: vec![
-            ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(CapConfig::new(100e-9)) },
-            ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(510e3) },
-            ComponentDef { id: "U1".into(), kind: ComponentKind::OpAmp(OpAmpType::Jrc4558) },
-            ComponentDef { id: "R3".into(), kind: ComponentKind::Resistor(4700.0) },
-            ComponentDef { id: "U2".into(), kind: ComponentKind::OpAmp(OpAmpType::Jrc4558) },
-            ComponentDef { id: "R4".into(), kind: ComponentKind::Resistor(51e3) },
-            ComponentDef { id: "Drive".into(), kind: ComponentKind::Potentiometer(500e3, PotTaper::B) },
-            ComponentDef { id: "D1".into(), kind: ComponentKind::Diode(DiodeType::Silicon) },
-            ComponentDef { id: "D2".into(), kind: ComponentKind::Diode(DiodeType::Silicon) },
-            ComponentDef { id: "Tone".into(), kind: ComponentKind::Potentiometer(20e3, PotTaper::B) },
-            ComponentDef { id: "C4".into(), kind: ComponentKind::Capacitor(CapConfig::new(220e-9)) },
-            ComponentDef { id: "Level".into(), kind: ComponentKind::Potentiometer(100e3, PotTaper::B) },
-            ComponentDef { id: "R7".into(), kind: ComponentKind::Resistor(10e3) },
+            ComponentDef {
+                id: "C1".into(),
+                kind: ComponentKind::Capacitor(CapConfig::new(100e-9)),
+            },
+            ComponentDef {
+                id: "R1".into(),
+                kind: ComponentKind::Resistor(510e3),
+            },
+            ComponentDef {
+                id: "U1".into(),
+                kind: ComponentKind::OpAmp(OpAmpType::Jrc4558),
+            },
+            ComponentDef {
+                id: "R3".into(),
+                kind: ComponentKind::Resistor(4700.0),
+            },
+            ComponentDef {
+                id: "U2".into(),
+                kind: ComponentKind::OpAmp(OpAmpType::Jrc4558),
+            },
+            ComponentDef {
+                id: "R4".into(),
+                kind: ComponentKind::Resistor(51e3),
+            },
+            ComponentDef {
+                id: "Drive".into(),
+                kind: ComponentKind::Potentiometer(500e3, PotTaper::B),
+            },
+            ComponentDef {
+                id: "D1".into(),
+                kind: ComponentKind::Diode(DiodeType::Silicon),
+            },
+            ComponentDef {
+                id: "D2".into(),
+                kind: ComponentKind::Diode(DiodeType::Silicon),
+            },
+            ComponentDef {
+                id: "Tone".into(),
+                kind: ComponentKind::Potentiometer(20e3, PotTaper::B),
+            },
+            ComponentDef {
+                id: "C4".into(),
+                kind: ComponentKind::Capacitor(CapConfig::new(220e-9)),
+            },
+            ComponentDef {
+                id: "Level".into(),
+                kind: ComponentKind::Potentiometer(100e3, PotTaper::B),
+            },
+            ComponentDef {
+                id: "R7".into(),
+                kind: ComponentKind::Resistor(10e3),
+            },
         ],
         nets: vec![
             NetDef {
                 from: Pin::Reserved("in".into()),
-                to: vec![Pin::ComponentPin { component: "C1".into(), pin: "a".into() }],
+                to: vec![Pin::ComponentPin {
+                    component: "C1".into(),
+                    pin: "a".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "C1".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "C1".into(),
+                    pin: "b".into(),
+                },
                 to: vec![
-                    Pin::ComponentPin { component: "R1".into(), pin: "a".into() },
-                    Pin::ComponentPin { component: "U1".into(), pin: "pos".into() },
+                    Pin::ComponentPin {
+                        component: "R1".into(),
+                        pin: "a".into(),
+                    },
+                    Pin::ComponentPin {
+                        component: "U1".into(),
+                        pin: "pos".into(),
+                    },
                 ],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "R1".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "R1".into(),
+                    pin: "b".into(),
+                },
                 to: vec![Pin::Reserved("gnd".into())],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "U1".into(), pin: "out".into() },
-                to: vec![Pin::ComponentPin { component: "R3".into(), pin: "a".into() }],
+                from: Pin::ComponentPin {
+                    component: "U1".into(),
+                    pin: "out".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "R3".into(),
+                    pin: "a".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "R3".into(), pin: "b".into() },
-                to: vec![Pin::ComponentPin { component: "U2".into(), pin: "neg".into() }],
+                from: Pin::ComponentPin {
+                    component: "R3".into(),
+                    pin: "b".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "U2".into(),
+                    pin: "neg".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "U2".into(), pin: "neg".into() },
+                from: Pin::ComponentPin {
+                    component: "U2".into(),
+                    pin: "neg".into(),
+                },
                 to: vec![
-                    Pin::ComponentPin { component: "R4".into(), pin: "a".into() },
-                    Pin::ComponentPin { component: "Drive".into(), pin: "a".into() },
-                    Pin::ComponentPin { component: "D1".into(), pin: "a".into() },
-                    Pin::ComponentPin { component: "D2".into(), pin: "b".into() },
+                    Pin::ComponentPin {
+                        component: "R4".into(),
+                        pin: "a".into(),
+                    },
+                    Pin::ComponentPin {
+                        component: "Drive".into(),
+                        pin: "a".into(),
+                    },
+                    Pin::ComponentPin {
+                        component: "D1".into(),
+                        pin: "a".into(),
+                    },
+                    Pin::ComponentPin {
+                        component: "D2".into(),
+                        pin: "b".into(),
+                    },
                 ],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "R4".into(), pin: "b".into() },
-                to: vec![Pin::ComponentPin { component: "U2".into(), pin: "out".into() }],
+                from: Pin::ComponentPin {
+                    component: "R4".into(),
+                    pin: "b".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "U2".into(),
+                    pin: "out".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "Drive".into(), pin: "b".into() },
-                to: vec![Pin::ComponentPin { component: "U2".into(), pin: "out".into() }],
+                from: Pin::ComponentPin {
+                    component: "Drive".into(),
+                    pin: "b".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "U2".into(),
+                    pin: "out".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "D1".into(), pin: "b".into() },
-                to: vec![Pin::ComponentPin { component: "U2".into(), pin: "out".into() }],
+                from: Pin::ComponentPin {
+                    component: "D1".into(),
+                    pin: "b".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "U2".into(),
+                    pin: "out".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "D2".into(), pin: "a".into() },
-                to: vec![Pin::ComponentPin { component: "U2".into(), pin: "out".into() }],
+                from: Pin::ComponentPin {
+                    component: "D2".into(),
+                    pin: "a".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "U2".into(),
+                    pin: "out".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "U2".into(), pin: "out".into() },
-                to: vec![Pin::ComponentPin { component: "Tone".into(), pin: "a".into() }],
+                from: Pin::ComponentPin {
+                    component: "U2".into(),
+                    pin: "out".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "Tone".into(),
+                    pin: "a".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "Tone".into(), pin: "b".into() },
-                to: vec![Pin::ComponentPin { component: "C4".into(), pin: "a".into() }],
+                from: Pin::ComponentPin {
+                    component: "Tone".into(),
+                    pin: "b".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "C4".into(),
+                    pin: "a".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "C4".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "C4".into(),
+                    pin: "b".into(),
+                },
                 to: vec![Pin::Reserved("gnd".into())],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "Tone".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "Tone".into(),
+                    pin: "b".into(),
+                },
                 to: vec![
-                    Pin::ComponentPin { component: "Level".into(), pin: "a".into() },
-                    Pin::ComponentPin { component: "R7".into(), pin: "a".into() },
+                    Pin::ComponentPin {
+                        component: "Level".into(),
+                        pin: "a".into(),
+                    },
+                    Pin::ComponentPin {
+                        component: "R7".into(),
+                        pin: "a".into(),
+                    },
                 ],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "R7".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "R7".into(),
+                    pin: "b".into(),
+                },
                 to: vec![Pin::Reserved("gnd".into())],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "Level".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "Level".into(),
+                    pin: "b".into(),
+                },
                 to: vec![Pin::Reserved("out".into())],
             },
         ],
@@ -138,59 +273,128 @@ fn triode_gain_stage() -> PedalDef {
         name: "Triode Stage".into(),
         supplies: vec![NamedSupply::new("vcc", 350.0)],
         components: vec![
-            ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(CapConfig::new(20e-9)) },
-            ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(1e6) },
-            ComponentDef { id: "V1".into(), kind: ComponentKind::Triode("12AX7".into()) },
-            ComponentDef { id: "R2".into(), kind: ComponentKind::Resistor(100e3) },
-            ComponentDef { id: "R3".into(), kind: ComponentKind::Resistor(1500.0) },
-            ComponentDef { id: "C2".into(), kind: ComponentKind::Capacitor(CapConfig::new(25e-6)) },
-            ComponentDef { id: "C3".into(), kind: ComponentKind::Capacitor(CapConfig::new(22e-9)) },
+            ComponentDef {
+                id: "C1".into(),
+                kind: ComponentKind::Capacitor(CapConfig::new(20e-9)),
+            },
+            ComponentDef {
+                id: "R1".into(),
+                kind: ComponentKind::Resistor(1e6),
+            },
+            ComponentDef {
+                id: "V1".into(),
+                kind: ComponentKind::Triode("12AX7".into()),
+            },
+            ComponentDef {
+                id: "R2".into(),
+                kind: ComponentKind::Resistor(100e3),
+            },
+            ComponentDef {
+                id: "R3".into(),
+                kind: ComponentKind::Resistor(1500.0),
+            },
+            ComponentDef {
+                id: "C2".into(),
+                kind: ComponentKind::Capacitor(CapConfig::new(25e-6)),
+            },
+            ComponentDef {
+                id: "C3".into(),
+                kind: ComponentKind::Capacitor(CapConfig::new(22e-9)),
+            },
         ],
         nets: vec![
             NetDef {
                 from: Pin::Reserved("in".into()),
-                to: vec![Pin::ComponentPin { component: "C1".into(), pin: "a".into() }],
+                to: vec![Pin::ComponentPin {
+                    component: "C1".into(),
+                    pin: "a".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "C1".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "C1".into(),
+                    pin: "b".into(),
+                },
                 to: vec![
-                    Pin::ComponentPin { component: "R1".into(), pin: "a".into() },
-                    Pin::ComponentPin { component: "V1".into(), pin: "grid".into() },
+                    Pin::ComponentPin {
+                        component: "R1".into(),
+                        pin: "a".into(),
+                    },
+                    Pin::ComponentPin {
+                        component: "V1".into(),
+                        pin: "grid".into(),
+                    },
                 ],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "R1".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "R1".into(),
+                    pin: "b".into(),
+                },
                 to: vec![Pin::Reserved("gnd".into())],
             },
             NetDef {
                 from: Pin::Reserved("vcc".into()),
-                to: vec![Pin::ComponentPin { component: "R2".into(), pin: "a".into() }],
+                to: vec![Pin::ComponentPin {
+                    component: "R2".into(),
+                    pin: "a".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "R2".into(), pin: "b".into() },
-                to: vec![Pin::ComponentPin { component: "V1".into(), pin: "plate".into() }],
+                from: Pin::ComponentPin {
+                    component: "R2".into(),
+                    pin: "b".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "V1".into(),
+                    pin: "plate".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "V1".into(), pin: "cathode".into() },
+                from: Pin::ComponentPin {
+                    component: "V1".into(),
+                    pin: "cathode".into(),
+                },
                 to: vec![
-                    Pin::ComponentPin { component: "R3".into(), pin: "a".into() },
-                    Pin::ComponentPin { component: "C2".into(), pin: "a".into() },
+                    Pin::ComponentPin {
+                        component: "R3".into(),
+                        pin: "a".into(),
+                    },
+                    Pin::ComponentPin {
+                        component: "C2".into(),
+                        pin: "a".into(),
+                    },
                 ],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "R3".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "R3".into(),
+                    pin: "b".into(),
+                },
                 to: vec![Pin::Reserved("gnd".into())],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "C2".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "C2".into(),
+                    pin: "b".into(),
+                },
                 to: vec![Pin::Reserved("gnd".into())],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "V1".into(), pin: "plate".into() },
-                to: vec![Pin::ComponentPin { component: "C3".into(), pin: "a".into() }],
+                from: Pin::ComponentPin {
+                    component: "V1".into(),
+                    pin: "plate".into(),
+                },
+                to: vec![Pin::ComponentPin {
+                    component: "C3".into(),
+                    pin: "a".into(),
+                }],
             },
             NetDef {
-                from: Pin::ComponentPin { component: "C3".into(), pin: "b".into() },
+                from: Pin::ComponentPin {
+                    component: "C3".into(),
+                    pin: "b".into(),
+                },
                 to: vec![Pin::Reserved("out".into())],
             },
         ],
@@ -329,7 +533,10 @@ fn json_components_have_required_fields() {
         assert!(comp["kind"].is_string(), "component missing kind");
         assert!(comp["x"].is_number(), "component missing x");
         assert!(comp["y"].is_number(), "component missing y");
-        assert!(comp["orientation"].is_number(), "component missing orientation");
+        assert!(
+            comp["orientation"].is_number(),
+            "component missing orientation"
+        );
         assert!(comp["symbol"].is_string(), "component missing symbol");
         assert!(comp["group"].is_string(), "component missing group");
     }
@@ -343,9 +550,15 @@ fn kicad_export_produces_valid_schematic() {
     let layout = generate_layout(&pedal, 2048.0, 1024.0);
     let kicad = to_kicad_schematic(&layout, &pedal);
 
-    assert!(kicad.starts_with("(kicad_sch"), "Should start with kicad_sch header");
+    assert!(
+        kicad.starts_with("(kicad_sch"),
+        "Should start with kicad_sch header"
+    );
     assert!(kicad.contains("(version 20230121)"), "Should have version");
-    assert!(kicad.contains("(generator pedalkernel-layout)"), "Should credit generator");
+    assert!(
+        kicad.contains("(generator pedalkernel-layout)"),
+        "Should credit generator"
+    );
     assert!(kicad.contains("(wire"), "Should have wire definitions");
     assert!(kicad.contains("(symbol"), "Should have symbol definitions");
 }
@@ -394,7 +607,11 @@ fn layout_score_is_finite() {
     let layout = generate_layout(&pedal, 2048.0, 1024.0);
     let score = pedalkernel_layout::optimize::layout_score(&layout);
 
-    assert!(score.is_finite(), "Layout score should be finite, got {}", score);
+    assert!(
+        score.is_finite(),
+        "Layout score should be finite, got {}",
+        score
+    );
 }
 
 #[test]
@@ -456,6 +673,10 @@ fn all_symbol_types_have_paths() {
 
     for sym in types {
         let paths = symbol_paths(sym);
-        assert!(!paths.is_empty(), "Symbol {:?} should have path commands", sym);
+        assert!(
+            !paths.is_empty(),
+            "Symbol {:?} should have path commands",
+            sym
+        );
     }
 }

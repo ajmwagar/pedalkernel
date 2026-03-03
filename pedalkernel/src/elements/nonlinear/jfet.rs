@@ -50,8 +50,7 @@ impl JfetModel {
     ///
     /// Panics if the model name is not found.
     pub fn by_name(name: &str) -> Self {
-        Self::try_by_name(name)
-            .unwrap_or_else(|| panic!("Unknown JFET model: '{name}'"))
+        Self::try_by_name(name).unwrap_or_else(|| panic!("Unknown JFET model: '{name}'"))
     }
 
     /// Try to look up a JFET model by name. Returns `None` if not found.
@@ -187,10 +186,7 @@ impl JfetRoot {
         } else {
             // Saturation region:
             // Ids = Beta × vov² × (1 + lambda×|Vds|)
-            self.model.beta
-                * vov
-                * vov
-                * (1.0 + self.model.lambda * vds_int.abs())
+            self.model.beta * vov * vov * (1.0 + self.model.lambda * vds_int.abs())
         };
 
         // Convert back to external sign convention
@@ -277,7 +273,16 @@ impl JfetRoot {
         // Initial guess: source follows gate minus typical Vgs bias
         let v0 = (vgate + model.vto.abs() * 0.5).max(0.0);
 
-        newton_raphson_solve(a, rp, v0, max_iter, 1e-6, None, None, source_follower_current)
+        newton_raphson_solve(
+            a,
+            rp,
+            v0,
+            max_iter,
+            1e-6,
+            None,
+            None,
+            source_follower_current,
+        )
     }
 }
 

@@ -276,37 +276,76 @@ mod tests {
             name: "Test".into(),
             supplies: vec![],
             components: vec![
-                ComponentDef { id: "C1".into(), kind: ComponentKind::Capacitor(CapConfig::new(100e-9)) },
-                ComponentDef { id: "R1".into(), kind: ComponentKind::Resistor(1e6) },
-                ComponentDef { id: "V1".into(), kind: ComponentKind::Triode("12AX7".into()) },
-                ComponentDef { id: "R2".into(), kind: ComponentKind::Resistor(100e3) },
+                ComponentDef {
+                    id: "C1".into(),
+                    kind: ComponentKind::Capacitor(CapConfig::new(100e-9)),
+                },
+                ComponentDef {
+                    id: "R1".into(),
+                    kind: ComponentKind::Resistor(1e6),
+                },
+                ComponentDef {
+                    id: "V1".into(),
+                    kind: ComponentKind::Triode("12AX7".into()),
+                },
+                ComponentDef {
+                    id: "R2".into(),
+                    kind: ComponentKind::Resistor(100e3),
+                },
             ],
             nets: vec![
                 NetDef {
                     from: Pin::Reserved("in".into()),
-                    to: vec![Pin::ComponentPin { component: "C1".into(), pin: "a".into() }],
+                    to: vec![Pin::ComponentPin {
+                        component: "C1".into(),
+                        pin: "a".into(),
+                    }],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "C1".into(), pin: "b".into() },
+                    from: Pin::ComponentPin {
+                        component: "C1".into(),
+                        pin: "b".into(),
+                    },
                     to: vec![
-                        Pin::ComponentPin { component: "R1".into(), pin: "a".into() },
-                        Pin::ComponentPin { component: "V1".into(), pin: "grid".into() },
+                        Pin::ComponentPin {
+                            component: "R1".into(),
+                            pin: "a".into(),
+                        },
+                        Pin::ComponentPin {
+                            component: "V1".into(),
+                            pin: "grid".into(),
+                        },
                     ],
                 },
                 NetDef {
                     from: Pin::Reserved("vcc".into()),
-                    to: vec![Pin::ComponentPin { component: "R2".into(), pin: "a".into() }],
+                    to: vec![Pin::ComponentPin {
+                        component: "R2".into(),
+                        pin: "a".into(),
+                    }],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "R2".into(), pin: "b".into() },
-                    to: vec![Pin::ComponentPin { component: "V1".into(), pin: "plate".into() }],
+                    from: Pin::ComponentPin {
+                        component: "R2".into(),
+                        pin: "b".into(),
+                    },
+                    to: vec![Pin::ComponentPin {
+                        component: "V1".into(),
+                        pin: "plate".into(),
+                    }],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "R1".into(), pin: "b".into() },
+                    from: Pin::ComponentPin {
+                        component: "R1".into(),
+                        pin: "b".into(),
+                    },
                     to: vec![Pin::Reserved("gnd".into())],
                 },
                 NetDef {
-                    from: Pin::ComponentPin { component: "V1".into(), pin: "plate".into() },
+                    from: Pin::ComponentPin {
+                        component: "V1".into(),
+                        pin: "plate".into(),
+                    },
                     to: vec![Pin::Reserved("out".into())],
                 },
             ],

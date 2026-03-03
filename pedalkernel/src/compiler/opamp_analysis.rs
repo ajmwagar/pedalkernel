@@ -32,10 +32,7 @@ pub(super) struct OpAmpAnalysis {
 }
 
 /// Run op-amp feedback analysis on the circuit.
-pub(super) fn analyze_opamps(
-    graph: &CircuitGraph,
-    pedal: &PedalDef,
-) -> OpAmpAnalysis {
+pub(super) fn analyze_opamps(graph: &CircuitGraph, pedal: &PedalDef) -> OpAmpAnalysis {
     let feedback_loops = graph.find_opamp_feedback_loops(pedal);
 
     let feedback_opamp_ids: HashSet<String> = feedback_loops
@@ -88,7 +85,14 @@ pub(super) fn build_opamp_feedback_stages(
                 if let Some((pot_id, max_pot_r, fixed_series_r, parallel_fixed_r)) = rf_pot {
                     analysis.pot_map.insert(
                         pot_id.clone(),
-                        (stage_idx, *ri, *fixed_series_r, *max_pot_r, *parallel_fixed_r, true),
+                        (
+                            stage_idx,
+                            *ri,
+                            *fixed_series_r,
+                            *max_pot_r,
+                            *parallel_fixed_r,
+                            true,
+                        ),
                     );
                 }
 
@@ -136,7 +140,14 @@ pub(super) fn build_opamp_feedback_stages(
                 if let Some((pot_id, max_pot_r, fixed_series_r, parallel_fixed_r)) = rf_pot {
                     analysis.pot_map.insert(
                         pot_id.clone(),
-                        (stage_idx, *ri, *fixed_series_r, *max_pot_r, *parallel_fixed_r, false),
+                        (
+                            stage_idx,
+                            *ri,
+                            *fixed_series_r,
+                            *max_pot_r,
+                            *parallel_fixed_r,
+                            false,
+                        ),
                     );
                 }
 
@@ -177,10 +188,7 @@ pub(super) fn build_opamp_feedback_stages(
 }
 
 /// Build a queue of unity-gain op-amp roots for pairing with JFET stages.
-pub(super) fn build_unity_gain_queue(
-    analysis: &OpAmpAnalysis,
-    sample_rate: f64,
-) -> Vec<OpAmpRoot> {
+pub(super) fn build_unity_gain_queue(analysis: &OpAmpAnalysis, sample_rate: f64) -> Vec<OpAmpRoot> {
     analysis
         .feedback_loops
         .iter()

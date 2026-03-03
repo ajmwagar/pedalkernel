@@ -76,12 +76,7 @@ pub fn rc_lowpass_phase(r_ohms: f64, c_farads: f64, freq_hz: f64) -> f64 {
 /// Process a signal through an ideal first-order RC lowpass.
 ///
 /// Uses bilinear transform for exact discrete-time response.
-pub fn rc_lowpass_filter(
-    signal: &[f64],
-    r_ohms: f64,
-    c_farads: f64,
-    sample_rate: f64,
-) -> Vec<f64> {
+pub fn rc_lowpass_filter(signal: &[f64], r_ohms: f64, c_farads: f64, sample_rate: f64) -> Vec<f64> {
     let tau = r_ohms * c_farads;
     let dt = 1.0 / sample_rate;
 
@@ -122,12 +117,7 @@ pub fn rl_lowpass_magnitude(l_henrys: f64, r_ohms: f64, freq_hz: f64) -> f64 {
 /// Time constant τ = L/R (same form as RC lowpass with τ = RC)
 ///
 /// This gives fc = R / (2*pi*L)
-pub fn rl_lowpass_filter(
-    signal: &[f64],
-    l_henrys: f64,
-    r_ohms: f64,
-    sample_rate: f64,
-) -> Vec<f64> {
+pub fn rl_lowpass_filter(signal: &[f64], l_henrys: f64, r_ohms: f64, sample_rate: f64) -> Vec<f64> {
     // Time constant τ = L/R
     let tau = l_henrys / r_ohms;
     let dt = 1.0 / sample_rate;
@@ -161,7 +151,7 @@ mod tests {
     #[test]
     fn rc_lowpass_impulse_decays() {
         let r = 10_000.0; // 10k
-        let c = 10e-9;    // 10nF
+        let c = 10e-9; // 10nF
         let sr = 96000.0;
         let ir = rc_lowpass_impulse_response(r, c, sr, 1000);
 
@@ -169,20 +159,26 @@ mod tests {
         assert!(ir[0] > 0.0);
 
         // Find peak (bilinear transform may have peak after first sample)
-        let peak_idx = ir.iter()
+        let peak_idx = ir
+            .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map(|(i, _)| i)
             .unwrap();
 
         // Peak should be early (within first 10 samples)
-        assert!(peak_idx < 10, "Peak should be near the start, got idx {}", peak_idx);
+        assert!(
+            peak_idx < 10,
+            "Peak should be near the start, got idx {}",
+            peak_idx
+        );
 
         // After peak, should decay monotonically
         for i in (peak_idx + 1)..ir.len() {
             assert!(
                 ir[i] <= ir[i - 1] + 1e-10, // Allow tiny numerical tolerance
-                "Impulse response should decay after peak at sample {}", i
+                "Impulse response should decay after peak at sample {}",
+                i
             );
         }
 

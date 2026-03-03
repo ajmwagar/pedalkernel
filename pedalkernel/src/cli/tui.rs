@@ -151,7 +151,9 @@ fn run_pedal_control(
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
     if let Some(pair) = super::stereo_pair(connect_to) {
-        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+        let _ = async_client
+            .as_client()
+            .connect_ports_by_name(&our_out, &pair);
     }
 
     let knobs = pedal
@@ -247,7 +249,13 @@ fn draw_pedal_control(frame: &mut Frame, state: &PedalControlState) {
     .split(inner);
 
     // I/O info bar
-    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
+    render_io_bar(
+        frame,
+        v_chunks[0],
+        &state.input_port,
+        &state.output_port,
+        state.voltage,
+    );
 
     // Knob row (delegated to shared widget)
     render_knob_row(
@@ -387,7 +395,9 @@ pub fn run(
             .as_client()
             .connect_ports_by_name(&our_out, &selected_out)?;
         if let Some(pair) = super::stereo_pair(&selected_out) {
-            let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+            let _ = async_client
+                .as_client()
+                .connect_ports_by_name(&our_out, &pair);
         }
 
         let knobs = pedal

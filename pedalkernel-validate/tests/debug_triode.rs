@@ -167,7 +167,8 @@ fn all_triode_types_have_unity_pregain() {
                     println!("  PASS {}: Pre-Gain: 1.0", file);
                 } else {
                     // Extract pre-gain value from dump
-                    let pre_gain_line = dump.lines()
+                    let pre_gain_line = dump
+                        .lines()
                         .find(|l| l.contains("Pre-Gain:"))
                         .unwrap_or("Pre-Gain: unknown");
                     println!("  FAIL {}: {}", file, pre_gain_line);
@@ -238,7 +239,8 @@ fn all_pentode_types_have_unity_pregain() {
                     println!("  PASS {}: Pre-Gain: 1.0", file);
                 } else {
                     // Extract pre-gain value from dump
-                    let pre_gain_line = dump.lines()
+                    let pre_gain_line = dump
+                        .lines()
                         .find(|l| l.contains("Pre-Gain:"))
                         .unwrap_or("Pre-Gain: unknown");
                     println!("  FAIL {}: {}", file, pre_gain_line);

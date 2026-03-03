@@ -101,7 +101,11 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                         severity,
                         message: format!(
                             "Op-amp {} ({:?}) at {:.0}V — max total supply {:.0}V (±{:.0}V split)",
-                            comp.id, ot, voltage, max_supply, max_supply / 2.0
+                            comp.id,
+                            ot,
+                            voltage,
+                            max_supply,
+                            max_supply / 2.0
                         ),
                     });
                 }
@@ -200,4 +204,3 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
 
     warnings
 }
-

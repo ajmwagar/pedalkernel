@@ -4,9 +4,9 @@
 //! using the Koren equation. Parameters are loaded from the embedded
 //! `pentodes.model` file.
 
-use super::solver::{softplus, newton_raphson_solve, LEAKAGE_CONDUCTANCE};
+use super::solver::{newton_raphson_solve, softplus, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
-use crate::models::{SpicePentodeModel, pentode_by_name};
+use crate::models::{pentode_by_name, SpicePentodeModel};
 
 // ---------------------------------------------------------------------------
 // Pentode (Vacuum Tube) Models
@@ -62,7 +62,10 @@ impl PentodeModel {
     /// Panics if the name is not found.
     pub fn by_name(name: &str) -> Self {
         Self::try_by_name(name).unwrap_or_else(|| {
-            panic!("Unknown pentode model: '{}'. Use pentode_model_names() to list available models.", name)
+            panic!(
+                "Unknown pentode model: '{}'. Use pentode_model_names() to list available models.",
+                name
+            )
         })
     }
 
@@ -282,8 +285,14 @@ impl WdfRoot for PentodeRoot {
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
         let v_max = self.v_max;
-        newton_raphson_solve(a, rp, a * 0.5, self.max_iter, 1e-6,
-            Some((-50.0, v_max)), None,
+        newton_raphson_solve(
+            a,
+            rp,
+            a * 0.5,
+            self.max_iter,
+            1e-6,
+            Some((-50.0, v_max)),
+            None,
             |v| (root.plate_current(v), root.plate_current_derivative(v)),
         )
     }
@@ -311,7 +320,10 @@ mod tests {
     fn p_6l6gc_positive_current_at_operating_point() {
         // At typical Fender Twin operating point: Vg1=-45V, Vg2=450V, Vp=460V
         let ip = plate_current_at(PentodeModel::by_name("6L6GC"), -45.0, 450.0, 460.0);
-        assert!(ip > 0.0, "6L6GC should conduct at operating point, got {ip}");
+        assert!(
+            ip > 0.0,
+            "6L6GC should conduct at operating point, got {ip}"
+        );
         assert!(ip.is_finite(), "6L6GC plate current must be finite");
     }
 
@@ -375,7 +387,10 @@ mod tests {
         let ip_6l6gc = plate_current_at(PentodeModel::by_name("6L6GC"), -45.0, 450.0, 460.0);
         // Both must be positive and finite at their respective operating points
         assert!(ip_el34 > 0.0 && ip_el34.is_finite(), "EL34 Ip={ip_el34}");
-        assert!(ip_6l6gc > 0.0 && ip_6l6gc.is_finite(), "6L6GC Ip={ip_6l6gc}");
+        assert!(
+            ip_6l6gc > 0.0 && ip_6l6gc.is_finite(),
+            "6L6GC Ip={ip_6l6gc}"
+        );
         // The models should produce distinctly different currents
         assert!(
             (ip_el34 - ip_6l6gc).abs() / ip_el34.max(ip_6l6gc) > 0.01,
@@ -409,7 +424,10 @@ mod tests {
     fn p_6aq5a_positive_current_at_operating_point() {
         // Typical 6AQ5A operating point: Vg1=-12.5V, Vg2=180V, Vp=180V
         let ip = plate_current_at(PentodeModel::by_name("6AQ5A"), -12.5, 180.0, 180.0);
-        assert!(ip > 0.0, "6AQ5A should conduct at operating point, got {ip}");
+        assert!(
+            ip > 0.0,
+            "6AQ5A should conduct at operating point, got {ip}"
+        );
         assert!(ip.is_finite(), "6AQ5A plate current must be finite");
     }
 

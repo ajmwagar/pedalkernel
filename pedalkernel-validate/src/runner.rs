@@ -56,7 +56,7 @@
 use crate::config::{PassCriteria, SignalConfig, TestCase, TestSuite, ValidationConfig};
 use crate::metrics::{self, ComparisonResult};
 use crate::npy;
-use crate::report::{SignalResult, TestResult, SuiteResult};
+use crate::report::{SignalResult, SuiteResult, TestResult};
 use pedalkernel::compiler::CompiledPedal;
 use pedalkernel::PedalProcessor;
 use std::collections::BTreeMap;
@@ -135,7 +135,11 @@ impl ValidationRunner {
     }
 
     /// Run a specific suite by name.
-    pub fn run_suite(&self, suite_name: &str, suite: &TestSuite) -> Result<SuiteResult, RunnerError> {
+    pub fn run_suite(
+        &self,
+        suite_name: &str,
+        suite: &TestSuite,
+    ) -> Result<SuiteResult, RunnerError> {
         let mut test_results = BTreeMap::new();
         let mut passed = 0;
         let mut failed = 0;
@@ -234,7 +238,9 @@ impl ValidationRunner {
 
         // Save WDF output if configured
         if self.config.save_output {
-            let output_path = self.config.output_dir
+            let output_path = self
+                .config
+                .output_dir
                 .join(suite_name)
                 .join(test_name)
                 .join(format!("{}.npy", signal_label));
@@ -242,7 +248,9 @@ impl ValidationRunner {
         }
 
         // Load golden reference
-        let golden_path = self.config.golden_dir
+        let golden_path = self
+            .config
+            .golden_dir
             .join(suite_name)
             .join(test_name)
             .join(format!("{}.npy", signal_label));
@@ -340,10 +348,20 @@ pub fn quick_validate(
     // Compare to golden if provided
     if let Some(gp) = golden_path {
         let golden = npy::read_f64(gp)?;
-        Ok(metrics::compare(&output, &golden, sample_rate, Some(1000.0)))
+        Ok(metrics::compare(
+            &output,
+            &golden,
+            sample_rate,
+            Some(1000.0),
+        ))
     } else {
         // Self-comparison (useful for sanity check)
-        Ok(metrics::compare(&output, &output, sample_rate, Some(1000.0)))
+        Ok(metrics::compare(
+            &output,
+            &output,
+            sample_rate,
+            Some(1000.0),
+        ))
     }
 }
 

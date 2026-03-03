@@ -53,13 +53,7 @@ pub fn sine(sample_rate: f64, frequency: f64, duration: f64, amplitude: f64) -> 
 }
 
 /// Generate a two-tone signal for IMD (intermodulation distortion) testing.
-pub fn two_tone(
-    sample_rate: f64,
-    f1: f64,
-    f2: f64,
-    duration: f64,
-    amplitude: f64,
-) -> Vec<f64> {
+pub fn two_tone(sample_rate: f64, f1: f64, f2: f64, duration: f64, amplitude: f64) -> Vec<f64> {
     let n_samples = (duration * sample_rate) as usize;
     (0..n_samples)
         .map(|i| {
@@ -166,13 +160,41 @@ pub fn level_sweep(
 /// Signal specification from config.
 #[derive(Debug, Clone)]
 pub enum SignalSpec {
-    Impulse { amplitude: f64 },
-    Sine { frequency: f64, amplitude: f64, duration: f64 },
-    TwoTone { f1: f64, f2: f64, amplitude: f64, duration: f64 },
-    ExpSweep { f_start: f64, f_end: f64, amplitude: f64, duration: f64 },
-    Silence { duration: f64 },
-    ToneBurst { frequency: f64, amplitude: f64, on_ms: f64, off_ms: f64, repetitions: usize },
-    LevelSweep { frequency: f64, levels_dbvu: Vec<f64>, duration_per_level: f64 },
+    Impulse {
+        amplitude: f64,
+    },
+    Sine {
+        frequency: f64,
+        amplitude: f64,
+        duration: f64,
+    },
+    TwoTone {
+        f1: f64,
+        f2: f64,
+        amplitude: f64,
+        duration: f64,
+    },
+    ExpSweep {
+        f_start: f64,
+        f_end: f64,
+        amplitude: f64,
+        duration: f64,
+    },
+    Silence {
+        duration: f64,
+    },
+    ToneBurst {
+        frequency: f64,
+        amplitude: f64,
+        on_ms: f64,
+        off_ms: f64,
+        repetitions: usize,
+    },
+    LevelSweep {
+        frequency: f64,
+        levels_dbvu: Vec<f64>,
+        duration_per_level: f64,
+    },
 }
 
 impl SignalSpec {
@@ -182,24 +204,43 @@ impl SignalSpec {
             SignalSpec::Impulse { amplitude } => {
                 impulse((sample_rate * 0.1) as usize, *amplitude) // 100ms default
             }
-            SignalSpec::Sine { frequency, amplitude, duration } => {
-                sine(sample_rate, *frequency, *duration, *amplitude)
-            }
-            SignalSpec::TwoTone { f1, f2, amplitude, duration } => {
-                two_tone(sample_rate, *f1, *f2, *duration, *amplitude)
-            }
-            SignalSpec::ExpSweep { f_start, f_end, amplitude, duration } => {
-                exp_sweep(sample_rate, *f_start, *f_end, *duration, *amplitude)
-            }
-            SignalSpec::Silence { duration } => {
-                silence((duration * sample_rate) as usize)
-            }
-            SignalSpec::ToneBurst { frequency, amplitude, on_ms, off_ms, repetitions } => {
-                tone_burst(sample_rate, *frequency, *amplitude, *on_ms, *off_ms, *repetitions)
-            }
-            SignalSpec::LevelSweep { frequency, levels_dbvu, duration_per_level } => {
-                level_sweep(sample_rate, *frequency, levels_dbvu, *duration_per_level)
-            }
+            SignalSpec::Sine {
+                frequency,
+                amplitude,
+                duration,
+            } => sine(sample_rate, *frequency, *duration, *amplitude),
+            SignalSpec::TwoTone {
+                f1,
+                f2,
+                amplitude,
+                duration,
+            } => two_tone(sample_rate, *f1, *f2, *duration, *amplitude),
+            SignalSpec::ExpSweep {
+                f_start,
+                f_end,
+                amplitude,
+                duration,
+            } => exp_sweep(sample_rate, *f_start, *f_end, *duration, *amplitude),
+            SignalSpec::Silence { duration } => silence((duration * sample_rate) as usize),
+            SignalSpec::ToneBurst {
+                frequency,
+                amplitude,
+                on_ms,
+                off_ms,
+                repetitions,
+            } => tone_burst(
+                sample_rate,
+                *frequency,
+                *amplitude,
+                *on_ms,
+                *off_ms,
+                *repetitions,
+            ),
+            SignalSpec::LevelSweep {
+                frequency,
+                levels_dbvu,
+                duration_per_level,
+            } => level_sweep(sample_rate, *frequency, levels_dbvu, *duration_per_level),
         }
     }
 }
@@ -223,9 +264,7 @@ mod tests {
         let sig = sine(sr, freq, 0.01, 1.0);
 
         // Should have ~10 cycles in 10ms at 1kHz
-        let zero_crossings: usize = sig.windows(2)
-            .filter(|w| w[0] * w[1] < 0.0)
-            .count();
+        let zero_crossings: usize = sig.windows(2).filter(|w| w[0] * w[1] < 0.0).count();
         // Each cycle has 2 zero crossings, 10 cycles = ~20 crossings
         assert!(zero_crossings >= 18 && zero_crossings <= 22);
     }

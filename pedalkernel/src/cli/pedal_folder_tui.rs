@@ -58,8 +58,7 @@ impl PedalFolderState {
             for knob in &pedal.knobs {
                 self.controls.set_control(&knob.label, knob.value);
             }
-            self.controls
-                .set_bypassed(pedal.bypassed);
+            self.controls.set_bypassed(pedal.bypassed);
         }
     }
 }
@@ -69,7 +68,11 @@ impl PedalFolderState {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Handle input for the pedal folder TUI. Returns false when the user wants to quit.
-fn handle_folder_input(state: &mut PedalFolderState, code: KeyCode, modifiers: KeyModifiers) -> bool {
+fn handle_folder_input(
+    state: &mut PedalFolderState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> bool {
     // Pedal switching: { and }
     match code {
         KeyCode::Char('{') => {
@@ -223,7 +226,13 @@ fn draw_pedal_content(
     .split(inner);
 
     // I/O info bar
-    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
+    render_io_bar(
+        frame,
+        v_chunks[0],
+        &state.input_port,
+        &state.output_port,
+        state.voltage,
+    );
 
     // Knob row
     if pedal.knobs.is_empty() {
@@ -424,7 +433,9 @@ fn run_pedal_folder_control(
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
     if let Some(pair) = super::stereo_pair(connect_to) {
-        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+        let _ = async_client
+            .as_client()
+            .connect_ports_by_name(&our_out, &pair);
     }
 
     let mut state = PedalFolderState {
@@ -475,7 +486,9 @@ fn run_pedal_folder_control_wav(
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
     if let Some(pair) = super::stereo_pair(connect_to) {
-        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+        let _ = async_client
+            .as_client()
+            .connect_ports_by_name(&our_out, &pair);
     }
 
     let mut state = PedalFolderState {

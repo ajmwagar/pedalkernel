@@ -657,8 +657,7 @@ pedal "Test Pedal" {
             }
             None
         }
-        walk("examples", filename)
-            .unwrap_or_else(|| panic!("example file not found: {filename}"))
+        walk("examples", filename).unwrap_or_else(|| panic!("example file not found: {filename}"))
     }
 
     #[test]
@@ -792,7 +791,10 @@ pedal "Test Pedal" {
             .iter()
             .filter(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon))
             .count();
-        assert_eq!(diode_count, 3, "Blues Driver uses 3 asymmetric clipping diodes");
+        assert_eq!(
+            diode_count, 3,
+            "Blues Driver uses 3 asymmetric clipping diodes"
+        );
     }
 
     #[test]
@@ -812,13 +814,19 @@ pedal "Test Pedal" {
             .iter()
             .filter(|c| matches!(c.kind, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072)))
             .count();
-        assert_eq!(opamp_count, 3, "Klon uses 3 opamps (2 gain + 1 output buffer)");
+        assert_eq!(
+            opamp_count, 3,
+            "Klon uses 3 opamps (2 gain + 1 output buffer)"
+        );
         let ge_diode_count = p
             .components
             .iter()
             .filter(|c| c.kind == dsl::ComponentKind::Diode(dsl::DiodeType::Germanium))
             .count();
-        assert_eq!(ge_diode_count, 2, "Klon uses 2 germanium clipping diodes in feedback");
+        assert_eq!(
+            ge_diode_count, 2,
+            "Klon uses 2 germanium clipping diodes in feedback"
+        );
     }
 
     #[test]
@@ -909,12 +917,16 @@ pedal "Test Pedal" {
     fn schematic_ts808_component_types() {
         let p = parse_example("tube_screamer.pedal");
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Jrc4558))),
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::OpAmp(dsl::OpAmpType::Jrc4558)
+            )),
             2,
             "TS808: 2x JRC4558D (dual op-amp package used as 2 separate amps)"
         );
         assert_eq!(
-            count_kind(&p, |k| *k == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)),
+            count_kind(&p, |k| *k
+                == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)),
             2,
             "TS808: 2x 1N914 silicon diodes in anti-parallel in feedback loop"
         );
@@ -924,9 +936,21 @@ pedal "Test Pedal" {
             "TS808: 3 pots (Drive, Tone, Level)"
         );
         // Verify NO MOSFETs, NO transistors, NO JFETs — pure op-amp circuit
-        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Npn(_) | dsl::ComponentKind::Pnp(_))), 0);
-        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::NJfet(_))), 0);
-        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Nmos(_))), 0);
+        assert_eq!(
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::Npn(_) | dsl::ComponentKind::Pnp(_)
+            )),
+            0
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::NJfet(_))),
+            0
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Nmos(_))),
+            0
+        );
     }
 
     /// Fuzz Face: real schematic has 2 PNP germanium transistors,
@@ -945,8 +969,17 @@ pedal "Test Pedal" {
             "Fuzz Face: 2 pots (Fuzz, Volume)"
         );
         // No op-amps or diodes in a Fuzz Face
-        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(_))), 0);
-        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Diode(_) | dsl::ComponentKind::DiodePair(_))), 0);
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(_))),
+            0
+        );
+        assert_eq!(
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::Diode(_) | dsl::ComponentKind::DiodePair(_)
+            )),
+            0
+        );
     }
 
     /// Big Muff: 4 NPN transistor gain stages + 2 diode pairs for clipping.
@@ -969,7 +1002,10 @@ pedal "Test Pedal" {
             "Big Muff: 3 pots (Sustain, Tone, Volume)"
         );
         // No op-amps in a Big Muff — all discrete
-        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(_))), 0);
+        assert_eq!(
+            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(_))),
+            0
+        );
     }
 
     /// ProCo RAT: LM308 op-amp (unique slow slew rate), 2 silicon diodes
@@ -978,12 +1014,16 @@ pedal "Test Pedal" {
     fn schematic_rat_component_types() {
         let p = parse_example("proco_rat.pedal");
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Lm308))),
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::OpAmp(dsl::OpAmpType::Lm308)
+            )),
             1,
             "RAT: 1x LM308 op-amp (the slow slew rate shapes the RAT's tone)"
         );
         assert_eq!(
-            count_kind(&p, |k| *k == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)),
+            count_kind(&p, |k| *k
+                == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)),
             2,
             "RAT: 2x 1N914 diodes to ground (hard clipping — NOT in feedback)"
         );
@@ -1004,12 +1044,16 @@ pedal "Test Pedal" {
             "BD-2: 1x 2N5457 N-JFET input buffer"
         );
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072))),
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072)
+            )),
             2,
             "BD-2: 2x TL072 op-amp gain stages"
         );
         assert_eq!(
-            count_kind(&p, |k| *k == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)),
+            count_kind(&p, |k| *k
+                == dsl::ComponentKind::Diode(dsl::DiodeType::Silicon)),
             3,
             "BD-2: 3x asymmetric clipping diodes (2+1 for asymmetry)"
         );
@@ -1020,12 +1064,16 @@ pedal "Test Pedal" {
     fn schematic_klon_component_types() {
         let p = parse_example("klon_centaur.pedal");
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072))),
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072)
+            )),
             3,
             "Klon: 3x TL072 (input buffer + clipping amp + output buffer)"
         );
         assert_eq!(
-            count_kind(&p, |k| *k == dsl::ComponentKind::Diode(dsl::DiodeType::Germanium)),
+            count_kind(&p, |k| *k
+                == dsl::ComponentKind::Diode(dsl::DiodeType::Germanium)),
             2,
             "Klon: 2x germanium diodes (MA856) in anti-parallel in feedback"
         );
@@ -1035,7 +1083,13 @@ pedal "Test Pedal" {
             "Klon: 3 pots (Gain, Treble, Output)"
         );
         // No transistors — pure op-amp design
-        assert_eq!(count_kind(&p, |k| matches!(k, dsl::ComponentKind::Npn(_) | dsl::ComponentKind::Pnp(_))), 0);
+        assert_eq!(
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::Npn(_) | dsl::ComponentKind::Pnp(_)
+            )),
+            0
+        );
     }
 
     /// OCD: 2 NMOS MOSFETs (2N7000) + 1 TL072 op-amp — NO silicon diodes.
@@ -1048,7 +1102,10 @@ pedal "Test Pedal" {
             "OCD: 2x 2N7000 NMOS MOSFETs for clipping (the OCD's signature)"
         );
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072))),
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072)
+            )),
             1,
             "OCD: 1x TL072 op-amp gain stage"
         );
@@ -1065,7 +1122,10 @@ pedal "Test Pedal" {
     fn schematic_dyna_comp_component_types() {
         let p = parse_example("dyna_comp.pedal");
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Ca3080))),
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::OpAmp(dsl::OpAmpType::Ca3080)
+            )),
             1,
             "Dyna Comp: 1x CA3080 OTA for current-controlled gain"
         );
@@ -1081,12 +1141,18 @@ pedal "Test Pedal" {
     fn schematic_ce2_component_types() {
         let p = parse_example("boss_ce2.pedal");
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::Bbd(dsl::BbdType::Mn3207))),
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::Bbd(dsl::BbdType::Mn3207)
+            )),
             1,
             "CE-2: 1x MN3207 BBD (1024 stages for chorus delay)"
         );
         assert_eq!(
-            count_kind(&p, |k| matches!(k, dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072))),
+            count_kind(&p, |k| matches!(
+                k,
+                dsl::ComponentKind::OpAmp(dsl::OpAmpType::Tl072)
+            )),
             1,
             "CE-2: 1x TL072 input buffer"
         );

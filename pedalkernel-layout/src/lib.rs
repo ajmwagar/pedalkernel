@@ -21,13 +21,13 @@
 
 pub mod graph;
 pub mod groups;
+pub mod kicad;
 pub mod layering;
+pub mod optimize;
 pub mod placement;
 pub mod routing;
-pub mod optimize;
 pub mod symbols;
 pub mod types;
-pub mod kicad;
 
 use pedalkernel::dsl::PedalDef;
 use types::Layout;

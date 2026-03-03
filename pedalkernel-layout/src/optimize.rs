@@ -93,10 +93,7 @@ fn minimize_crossings(layout: &mut Layout) {
     let mut group_members: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
     for (i, comp) in layout.components.iter().enumerate() {
-        group_members
-            .entry(comp.group.clone())
-            .or_default()
-            .push(i);
+        group_members.entry(comp.group.clone()).or_default().push(i);
     }
 
     // For each group, sort members by their connected wire positions
@@ -115,14 +112,21 @@ fn minimize_crossings(layout: &mut Layout) {
                     .wires
                     .iter()
                     .filter(|w| {
-                        w.points.first().map(|p| {
-                            (p[0] - layout.components[idx].x).abs() < COMPONENT_HALF_SIZE
-                                && (p[1] - layout.components[idx].y).abs() < COMPONENT_HALF_SIZE
-                        }).unwrap_or(false)
-                            || w.points.last().map(|p| {
+                        w.points
+                            .first()
+                            .map(|p| {
                                 (p[0] - layout.components[idx].x).abs() < COMPONENT_HALF_SIZE
                                     && (p[1] - layout.components[idx].y).abs() < COMPONENT_HALF_SIZE
-                            }).unwrap_or(false)
+                            })
+                            .unwrap_or(false)
+                            || w.points
+                                .last()
+                                .map(|p| {
+                                    (p[0] - layout.components[idx].x).abs() < COMPONENT_HALF_SIZE
+                                        && (p[1] - layout.components[idx].y).abs()
+                                            < COMPONENT_HALF_SIZE
+                                })
+                                .unwrap_or(false)
                     })
                     .flat_map(|w| w.points.iter().map(|p| p[1]))
                     .collect();
@@ -141,7 +145,10 @@ fn minimize_crossings(layout: &mut Layout) {
         barycenters.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Reorder y-positions to match barycenter order
-        let mut y_positions: Vec<f32> = barycenters.iter().map(|&(idx, _)| layout.components[idx].y).collect();
+        let mut y_positions: Vec<f32> = barycenters
+            .iter()
+            .map(|&(idx, _)| layout.components[idx].y)
+            .collect();
         y_positions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         for (rank, &(idx, _)) in barycenters.iter().enumerate() {
@@ -168,10 +175,22 @@ fn center_groups(layout: &mut Layout) {
             continue;
         }
 
-        let min_x = members.iter().map(|&i| layout.components[i].x).fold(f32::INFINITY, f32::min);
-        let max_x = members.iter().map(|&i| layout.components[i].x).fold(f32::NEG_INFINITY, f32::max);
-        let min_y = members.iter().map(|&i| layout.components[i].y).fold(f32::INFINITY, f32::min);
-        let max_y = members.iter().map(|&i| layout.components[i].y).fold(f32::NEG_INFINITY, f32::max);
+        let min_x = members
+            .iter()
+            .map(|&i| layout.components[i].x)
+            .fold(f32::INFINITY, f32::min);
+        let max_x = members
+            .iter()
+            .map(|&i| layout.components[i].x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = members
+            .iter()
+            .map(|&i| layout.components[i].y)
+            .fold(f32::INFINITY, f32::min);
+        let max_y = members
+            .iter()
+            .map(|&i| layout.components[i].y)
+            .fold(f32::NEG_INFINITY, f32::max);
 
         let padding = COMPONENT_HALF_SIZE;
         group.bounds = GroupBounds {
@@ -192,7 +211,11 @@ pub fn layout_score(layout: &Layout) -> f32 {
     let overlap_penalty = count_overlaps(layout) as f32 * -100.0;
     let symmetry_bonus = measure_vertical_symmetry(layout) * 5.0;
     let wire_length_penalty = total_wire_length(layout) * -0.01;
-    let signal_flow_bonus = if signal_flows_left_to_right(layout) { 50.0 } else { 0.0 };
+    let signal_flow_bonus = if signal_flows_left_to_right(layout) {
+        50.0
+    } else {
+        0.0
+    };
 
     crossing_penalty
         + alignment_bonus
@@ -231,7 +254,11 @@ fn segments_cross(a1: [f32; 2], a2: [f32; 2], b1: [f32; 2], b2: [f32; 2]) -> boo
         return false; // Parallel segments don't cross (for Manhattan routing)
     }
 
-    let (h, v) = if a_horiz { ((a1, a2), (b1, b2)) } else { ((b1, b2), (a1, a2)) };
+    let (h, v) = if a_horiz {
+        ((a1, a2), (b1, b2))
+    } else {
+        ((b1, b2), (a1, a2))
+    };
 
     let (h_min_x, h_max_x) = minmax(h.0[0], h.1[0]);
     let h_y = h.0[1];
@@ -242,16 +269,18 @@ fn segments_cross(a1: [f32; 2], a2: [f32; 2], b1: [f32; 2], b2: [f32; 2]) -> boo
 }
 
 fn minmax(a: f32, b: f32) -> (f32, f32) {
-    if a <= b { (a, b) } else { (b, a) }
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 fn count_grid_aligned(layout: &Layout) -> usize {
     layout
         .components
         .iter()
-        .filter(|c| {
-            (c.x % GRID_SIZE).abs() < 0.5 && (c.y % GRID_SIZE).abs() < 0.5
-        })
+        .filter(|c| (c.x % GRID_SIZE).abs() < 0.5 && (c.y % GRID_SIZE).abs() < 0.5)
         .count()
 }
 
@@ -331,18 +360,33 @@ mod tests {
     #[test]
     fn segments_cross_perpendicular() {
         // Horizontal (0,5)-(10,5) crossing vertical (5,0)-(5,10)
-        assert!(segments_cross([0.0, 5.0], [10.0, 5.0], [5.0, 0.0], [5.0, 10.0]));
+        assert!(segments_cross(
+            [0.0, 5.0],
+            [10.0, 5.0],
+            [5.0, 0.0],
+            [5.0, 10.0]
+        ));
     }
 
     #[test]
     fn segments_no_cross_parallel() {
         // Two horizontal segments
-        assert!(!segments_cross([0.0, 5.0], [10.0, 5.0], [0.0, 7.0], [10.0, 7.0]));
+        assert!(!segments_cross(
+            [0.0, 5.0],
+            [10.0, 5.0],
+            [0.0, 7.0],
+            [10.0, 7.0]
+        ));
     }
 
     #[test]
     fn segments_no_cross_miss() {
         // Horizontal and vertical that don't intersect
-        assert!(!segments_cross([0.0, 5.0], [3.0, 5.0], [5.0, 0.0], [5.0, 10.0]));
+        assert!(!segments_cross(
+            [0.0, 5.0],
+            [3.0, 5.0],
+            [5.0, 0.0],
+            [5.0, 10.0]
+        ));
     }
 }

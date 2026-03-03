@@ -639,8 +639,7 @@ impl MnaSystem {
                 } else {
                     0.0
                 };
-                scattering[i * n_ports + j] =
-                    2.0 * x_inv_ij / port_resistances[j] - delta;
+                scattering[i * n_ports + j] = 2.0 * x_inv_ij / port_resistances[j] - delta;
             }
         }
 
@@ -732,8 +731,7 @@ impl MnaSystem {
                     ports[j].node_pos,
                     ports[j].node_neg,
                 );
-                scattering[i * n_ports + j] =
-                    2.0 * entry / ports[j].resistance - delta;
+                scattering[i * n_ports + j] = 2.0 * entry / ports[j].resistance - delta;
             }
         }
 
@@ -1242,7 +1240,10 @@ mod tests {
 
         let b_children = [0.5, 0.3];
         let b_parent = r.scatter_up(&b_children);
-        assert!(b_parent.is_finite(), "scatter_up should produce finite output");
+        assert!(
+            b_parent.is_finite(),
+            "scatter_up should produce finite output"
+        );
 
         let a_children = r.scatter_down(0.2);
         assert_eq!(a_children.len(), 2, "scatter_down should produce 2 outputs");
@@ -1315,6 +1316,38 @@ mod tests {
         // Equal resistances => gamma = 0.5 => b_up = (b1+b2)/2
         let b3 = p.scatter_up(1.0, -1.0);
         assert!((b3 - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn series_adaptor_scatter_down_matches_formula() {
+        let mut s = SeriesAdaptor::new(1500.0, 3300.0);
+        let b1 = 0.4;
+        let b2 = -0.2;
+        let a3 = 0.5;
+        let sum = b1 + b2 + a3;
+        let gamma = 1500.0 / (1500.0 + 3300.0);
+        let expected_a1 = b1 - gamma * sum;
+        let expected_a2 = b2 - (1.0 - gamma) * sum;
+        let (_, _) = (s.scatter_up(b1, b2), ()); // cache b1/b2 in adaptor
+        let (a1, a2) = s.scatter_down(a3);
+        assert!((a1 - expected_a1).abs() < 1e-12);
+        assert!((a2 - expected_a2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn parallel_adaptor_scatter_down_matches_formula() {
+        let mut p = ParallelAdaptor::new(2200.0, 4700.0);
+        let b1 = -0.1;
+        let b2 = 0.3;
+        let a3 = -0.25;
+        let diff = b2 - b1;
+        let gamma = 4700.0 / (2200.0 + 4700.0);
+        let (_, _) = (p.scatter_up(b1, b2), ());
+        let (a1, a2) = p.scatter_down(a3);
+        let expected_a1 = a3 + (1.0 - gamma) * diff;
+        let expected_a2 = a3 - gamma * diff;
+        assert!((a1 - expected_a1).abs() < 1e-12);
+        assert!((a2 - expected_a2).abs() < 1e-12);
     }
 
     #[test]
@@ -1410,8 +1443,16 @@ mod tests {
 
         // General method with node-to-ground ports
         let ports = vec![
-            WdfPort { node_pos: Some(0), node_neg: None, resistance: 500.0 },
-            WdfPort { node_pos: Some(1), node_neg: None, resistance: 500.0 },
+            WdfPort {
+                node_pos: Some(0),
+                node_neg: None,
+                resistance: 500.0,
+            },
+            WdfPort {
+                node_pos: Some(1),
+                node_neg: None,
+                resistance: 500.0,
+            },
         ];
         let s_new = mna.derive_scattering_matrix_general(&ports);
 
@@ -1419,7 +1460,10 @@ mod tests {
             assert!(
                 (s_old[i] - s_new[i]).abs() < 1e-10,
                 "S[{}][{}] mismatch: old={}, new={}",
-                i / 2, i % 2, s_old[i], s_new[i]
+                i / 2,
+                i % 2,
+                s_old[i],
+                s_new[i]
             );
         }
     }
@@ -1441,9 +1485,11 @@ mod tests {
         mna.stamp_resistor(Some(0), Some(1), r);
         mna.stamp_resistor(Some(1), None, rg); // ground reference
 
-        let ports = vec![
-            WdfPort { node_pos: Some(0), node_neg: Some(1), resistance: rp },
-        ];
+        let ports = vec![WdfPort {
+            node_pos: Some(0),
+            node_neg: Some(1),
+            resistance: rp,
+        }];
         let s = mna.derive_scattering_matrix_general(&ports);
 
         let expected = (r - rp) / (r + rp); // = -1/3
@@ -1468,8 +1514,16 @@ mod tests {
         mna.stamp_resistor(Some(1), None, r2);
 
         let ports = vec![
-            WdfPort { node_pos: Some(0), node_neg: None, resistance: rp0 },
-            WdfPort { node_pos: Some(1), node_neg: None, resistance: rp1 },
+            WdfPort {
+                node_pos: Some(0),
+                node_neg: None,
+                resistance: rp0,
+            },
+            WdfPort {
+                node_pos: Some(1),
+                node_neg: None,
+                resistance: rp1,
+            },
         ];
         let s = mna.derive_scattering_matrix_general(&ports);
 
@@ -1484,7 +1538,8 @@ mod tests {
             assert!(
                 row_norm_sq <= 1.0 + 1e-10,
                 "Row {} norm² = {} exceeds 1 (not passive)",
-                i, row_norm_sq
+                i,
+                row_norm_sq
             );
         }
     }
@@ -1506,8 +1561,16 @@ mod tests {
         mna.stamp_resistor(Some(1), None, r3);
 
         let ports = vec![
-            WdfPort { node_pos: Some(0), node_neg: None, resistance: rp0 },
-            WdfPort { node_pos: Some(2), node_neg: None, resistance: rp1 },
+            WdfPort {
+                node_pos: Some(0),
+                node_neg: None,
+                resistance: rp0,
+            },
+            WdfPort {
+                node_pos: Some(2),
+                node_neg: None,
+                resistance: rp1,
+            },
         ];
         let s = mna.derive_scattering_matrix_general(&ports);
 
@@ -1515,7 +1578,8 @@ mod tests {
         assert!(
             (s[1] - s[2]).abs() < 1e-10,
             "Symmetric network should have S[0][1] = S[1][0]: {} vs {}",
-            s[1], s[2]
+            s[1],
+            s[2]
         );
 
         // Verify passivity
@@ -1524,7 +1588,8 @@ mod tests {
             assert!(
                 row_norm_sq <= 1.0 + 1e-10,
                 "Row {} norm² = {} exceeds 1",
-                i, row_norm_sq
+                i,
+                row_norm_sq
             );
         }
     }
@@ -1551,8 +1616,16 @@ mod tests {
         mna.stamp_resistor(Some(0), Some(1), r);
 
         let ports = vec![
-            WdfPort { node_pos: Some(0), node_neg: None, resistance: rp },
-            WdfPort { node_pos: Some(1), node_neg: None, resistance: rp },
+            WdfPort {
+                node_pos: Some(0),
+                node_neg: None,
+                resistance: rp,
+            },
+            WdfPort {
+                node_pos: Some(1),
+                node_neg: None,
+                resistance: rp,
+            },
         ];
         let s = mna.derive_scattering_matrix_general(&ports);
 
@@ -1566,7 +1639,10 @@ mod tests {
             assert!(
                 (s[i] - expected[i]).abs() < 1e-10,
                 "S[{}][{}]: expected {}, got {}",
-                i / 2, i % 2, expected[i], s[i]
+                i / 2,
+                i % 2,
+                expected[i],
+                s[i]
             );
         }
 
@@ -1577,7 +1653,8 @@ mod tests {
             assert!(
                 row_norm_sq <= 1.0 + 1e-10,
                 "Row {} norm² = {} exceeds 1 (not passive)",
-                i, row_norm_sq
+                i,
+                row_norm_sq
             );
         }
     }
@@ -1603,15 +1680,24 @@ mod tests {
         mna.stamp_resistor(Some(1), None, r2);
 
         let ports = vec![
-            WdfPort { node_pos: Some(0), node_neg: None, resistance: rp0 },
-            WdfPort { node_pos: Some(1), node_neg: None, resistance: rp1 },
+            WdfPort {
+                node_pos: Some(0),
+                node_neg: None,
+                resistance: rp0,
+            },
+            WdfPort {
+                node_pos: Some(1),
+                node_neg: None,
+                resistance: rp1,
+            },
         ];
         let s = mna.derive_scattering_matrix_general(&ports);
 
         assert!(
             s[3].abs() < 1e-8,
             "S[1][1] should be ≈ 0 for adapted port, got {} (Rp1={})",
-            s[3], rp1
+            s[3],
+            rp1
         );
     }
 
@@ -1642,9 +1728,21 @@ mod tests {
         mna.stamp_resistor(Some(1), None, r_bg);
 
         let ports = vec![
-            WdfPort { node_pos: Some(0), node_neg: None, resistance: r0 },
-            WdfPort { node_pos: Some(2), node_neg: None, resistance: r1 },
-            WdfPort { node_pos: Some(1), node_neg: None, resistance: r2 },
+            WdfPort {
+                node_pos: Some(0),
+                node_neg: None,
+                resistance: r0,
+            },
+            WdfPort {
+                node_pos: Some(2),
+                node_neg: None,
+                resistance: r1,
+            },
+            WdfPort {
+                node_pos: Some(1),
+                node_neg: None,
+                resistance: r2,
+            },
         ];
         let s_matrix = mna.derive_scattering_matrix_general(&ports);
 
@@ -1680,7 +1778,8 @@ mod tests {
         assert!(
             (a_all[2] - b_parent).abs() < 1e-8,
             "scatter_all parent port should match scatter_up: {} vs {}",
-            a_all[2], b_parent
+            a_all[2],
+            b_parent
         );
 
         // For child ports: a_all[i] = Σ_j S[i][j]·b_all[j] should match a_children[i]
@@ -1688,7 +1787,9 @@ mod tests {
             assert!(
                 (a_all[i] - a_children[i]).abs() < 1e-8,
                 "scatter_all child {} should match scatter_down: {} vs {}",
-                i, a_all[i], a_children[i]
+                i,
+                a_all[i],
+                a_children[i]
             );
         }
     }
@@ -1710,21 +1811,47 @@ mod tests {
 
         // Pot at minimum (1Ω)
         let ports_lo = vec![
-            WdfPort { node_pos: Some(0), node_neg: Some(1), resistance: 10_000.0 },
-            WdfPort { node_pos: Some(0), node_neg: Some(1), resistance: 1.0 },
-            WdfPort { node_pos: Some(1), node_neg: None, resistance: 1000.0 },
+            WdfPort {
+                node_pos: Some(0),
+                node_neg: Some(1),
+                resistance: 10_000.0,
+            },
+            WdfPort {
+                node_pos: Some(0),
+                node_neg: Some(1),
+                resistance: 1.0,
+            },
+            WdfPort {
+                node_pos: Some(1),
+                node_neg: None,
+                resistance: 1000.0,
+            },
         ];
         // Pot at maximum (1kΩ)
         let ports_hi = vec![
-            WdfPort { node_pos: Some(0), node_neg: Some(1), resistance: 10_000.0 },
-            WdfPort { node_pos: Some(0), node_neg: Some(1), resistance: 1000.0 },
-            WdfPort { node_pos: Some(1), node_neg: None, resistance: 1000.0 },
+            WdfPort {
+                node_pos: Some(0),
+                node_neg: Some(1),
+                resistance: 10_000.0,
+            },
+            WdfPort {
+                node_pos: Some(0),
+                node_neg: Some(1),
+                resistance: 1000.0,
+            },
+            WdfPort {
+                node_pos: Some(1),
+                node_neg: None,
+                resistance: 1000.0,
+            },
         ];
 
         let s_lo = mna.derive_scattering_matrix_general(&ports_lo);
         let s_hi = mna.derive_scattering_matrix_general(&ports_hi);
 
-        let max_diff = s_lo.iter().zip(s_hi.iter())
+        let max_diff = s_lo
+            .iter()
+            .zip(s_hi.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f64, f64::max);
 

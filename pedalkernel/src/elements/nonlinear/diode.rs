@@ -509,3 +509,23 @@ impl NlDeviceIv for DiodeRoot {
         (-5.0, 5.0)
     }
 }
+
+impl NlDeviceIv for DiodePairRoot {
+    /// Anti-parallel diode pair I-V: I = Is*(e^(V/nVt) - e^(-V/nVt)) = 2*Is*sinh(V/nVt)
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        let is = self.model.is;
+        let nvt = self.model.n_vt;
+        let x = (v / nvt).clamp(-500.0, 500.0);
+        let ev_pos = x.exp();
+        let ev_neg = (-x).exp();
+        let i = is * (ev_pos - ev_neg);
+        let di = is * (ev_pos + ev_neg) / nvt;
+        (i, di)
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-5.0, 5.0)
+    }
+}

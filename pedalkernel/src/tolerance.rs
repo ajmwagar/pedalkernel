@@ -128,7 +128,10 @@ impl ToleranceEngine {
     /// good distribution across different seeds and indices.
     fn deterministic_random(&self, component_index: usize) -> f64 {
         // Combine seed and index
-        let mut z = self.seed.wrapping_add(component_index as u64).wrapping_mul(0x9E3779B97F4A7C15);
+        let mut z = self
+            .seed
+            .wrapping_add(component_index as u64)
+            .wrapping_mul(0x9E3779B97F4A7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
         z ^= z >> 31;
@@ -216,8 +219,7 @@ mod tests {
         let values: Vec<f64> = (0..100).map(|i| tol.apply_resistor(nominal, i)).collect();
 
         // Not all values should be the same
-        let unique: std::collections::HashSet<u64> =
-            values.iter().map(|&v| v.to_bits()).collect();
+        let unique: std::collections::HashSet<u64> = values.iter().map(|&v| v.to_bits()).collect();
         assert!(
             unique.len() > 50,
             "Should have good variety across components: {} unique values",
@@ -251,8 +253,8 @@ mod tests {
     fn separate_resistor_capacitor_grades() {
         let tol = ToleranceEngine::with_grades(
             42,
-            ToleranceGrade::Standard,  // ±5% for resistors
-            ToleranceGrade::Wide,      // ±20% for caps
+            ToleranceGrade::Standard, // ±5% for resistors
+            ToleranceGrade::Wide,     // ±20% for caps
         );
         let nominal = 1000.0;
 

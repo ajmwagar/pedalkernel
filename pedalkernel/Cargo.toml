@@ -21,6 +21,7 @@ gummel-poon = []
 # Enable detailed signal-level tracing for debugging WDF pipeline.
 # Zero-cost when disabled (tracing macros are no-ops without a subscriber).
 debug-trace = []
+solver-stats = []
 
 [dependencies]
 # DSL parser
@@ -44,6 +45,7 @@ tracing = "0.1"
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3"
+rand = "0.8"
 
 [[bench]]
 name = "wdf_bench"

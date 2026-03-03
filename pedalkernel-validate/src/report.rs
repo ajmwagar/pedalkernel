@@ -122,11 +122,7 @@ impl From<ComparisonResult> for ComparisonMetrics {
 
 impl ValidationReport {
     /// Create a new report from suite results.
-    pub fn new(
-        suites: BTreeMap<String, SuiteResult>,
-        sample_rate: u32,
-        oversample: u32,
-    ) -> Self {
+    pub fn new(suites: BTreeMap<String, SuiteResult>, sample_rate: u32, oversample: u32) -> Self {
         let mut total = 0;
         let mut passed = 0;
         let mut failed = 0;
@@ -294,7 +290,12 @@ impl ValidationReport {
                             format!("{:.1}", c.spectral_error_db),
                         )
                     } else {
-                        ("-".to_string(), "-".to_string(), "-".to_string(), "-".to_string())
+                        (
+                            "-".to_string(),
+                            "-".to_string(),
+                            "-".to_string(),
+                            "-".to_string(),
+                        )
                     };
 
                     rows.push(MetricRow {
@@ -339,7 +340,9 @@ fn get_git_commit() -> Option<String> {
         .ok()
         .and_then(|o| {
             if o.status.success() {
-                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
             } else {
                 None
             }
@@ -348,11 +351,7 @@ fn get_git_commit() -> Option<String> {
 
 /// Wrapper to make SignalResult from comparison.
 impl SignalResult {
-    pub fn from_comparison(
-        label: String,
-        comparison: ComparisonResult,
-        passed: bool,
-    ) -> Self {
+    pub fn from_comparison(label: String, comparison: ComparisonResult, passed: bool) -> Self {
         Self {
             label,
             passed,

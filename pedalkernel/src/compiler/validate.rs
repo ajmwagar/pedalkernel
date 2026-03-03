@@ -128,7 +128,8 @@ fn check_component_values(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                         code: "suspicious-value",
                         message: format!(
                             "Resistor '{}' is {:.1} MΩ — unusually high",
-                            comp.id, r / 1e6
+                            comp.id,
+                            r / 1e6
                         ),
                     });
                 }
@@ -270,13 +271,21 @@ fn check_component_values(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 fn check_net_references(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     let comp_ids: HashSet<&str> = pedal.components.iter().map(|c| c.id.as_str()).collect();
     let reserved: HashSet<&str> = [
-        "in", "out", "gnd", "vcc", "fx_send", "fx_return",
+        "in",
+        "out",
+        "gnd",
+        "vcc",
+        "fx_send",
+        "fx_return",
         // Synth-specific CV/Gate nodes (from dsl.rs RESERVED_NODES)
-        "gate", "cv_pitch", "cv_mod", "cv_filter",
+        "gate",
+        "cv_pitch",
+        "cv_mod",
+        "cv_filter",
     ]
-        .iter()
-        .copied()
-        .collect();
+    .iter()
+    .copied()
+    .collect();
     let supply_names: HashSet<&str> = pedal.supplies.iter().map(|s| s.name.as_str()).collect();
     let supply_list: Vec<&str> = pedal.supply_names();
 
@@ -318,7 +327,10 @@ fn check_net_references(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                     });
                 }
             }
-            Pin::Fork { switch, destinations } => {
+            Pin::Fork {
+                switch,
+                destinations,
+            } => {
                 if !comp_ids.contains(switch.as_str()) {
                     w.push(PedalWarning {
                         severity: Severity::Error,
@@ -337,7 +349,14 @@ fn check_net_references(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     }
 
     for net in &pedal.nets {
-        check_pin_ref(&net.from, &comp_ids, &reserved, &supply_names, &supply_list, w);
+        check_pin_ref(
+            &net.from,
+            &comp_ids,
+            &reserved,
+            &supply_names,
+            &supply_list,
+            w,
+        );
         for to_pin in &net.to {
             check_pin_ref(to_pin, &comp_ids, &reserved, &supply_names, &supply_list, w);
         }
@@ -364,25 +383,27 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
         ComponentKind::Potentiometer(_, _) => &["a", "b", "w", "wiper", "position"],
 
         // BJT
-        ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
-            &["base", "collector", "emitter"]
-        }
-        ComponentKind::MatchedNpn(_) | ComponentKind::MatchedPnp(_) => {
-            &["base", "collector", "emitter", "base1", "base2", "collector1", "collector2", "emitter1", "emitter2"]
-        }
+        ComponentKind::Npn(_) | ComponentKind::Pnp(_) => &["base", "collector", "emitter"],
+        ComponentKind::MatchedNpn(_) | ComponentKind::MatchedPnp(_) => &[
+            "base",
+            "collector",
+            "emitter",
+            "base1",
+            "base2",
+            "collector1",
+            "collector2",
+            "emitter1",
+            "emitter2",
+        ],
 
         // Op-amp
         ComponentKind::OpAmp(_) => &["pos", "neg", "out", "vp", "in"],
 
         // JFET
-        ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => {
-            &["gate", "drain", "source", "vgs"]
-        }
+        ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => &["gate", "drain", "source", "vgs"],
 
         // MOSFET
-        ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => {
-            &["gate", "drain", "source", "vgs"]
-        }
+        ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => &["gate", "drain", "source", "vgs"],
 
         // Photocoupler: LDR (a, b) + LED drive
         ComponentKind::Photocoupler(_) => &["a", "b", "led"],
@@ -406,35 +427,56 @@ fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
         ComponentKind::Bbd(_) => &["in", "out", "clock"],
 
         // Delay line
-        ComponentKind::DelayLine(..) => &["input", "output", "rate", "speed_mod", "delay_time", "feedback"],
+        ComponentKind::DelayLine(..) => &[
+            "input",
+            "output",
+            "rate",
+            "speed_mod",
+            "delay_time",
+            "feedback",
+        ],
 
         // Tap
         ComponentKind::Tap(..) => &["output"],
 
         // Transformer: primary (a, b) + secondary (c, d) + tertiary (e, f) + center taps
         // Also supports hierarchical names: primary.a, secondary.a, tertiary.a
-        ComponentKind::Transformer(_) => {
-            &["a", "b", "c", "d", "e", "f",
-              "primary.a", "primary.b", "secondary.a", "secondary.b",
-              "tertiary.a", "tertiary.b",
-              "pri_a", "pri_b", "sec_a", "sec_b", "ter_a", "ter_b",
-              "pri_ct", "sec_ct", "ct"]
-        }
+        ComponentKind::Transformer(_) => &[
+            "a",
+            "b",
+            "c",
+            "d",
+            "e",
+            "f",
+            "primary.a",
+            "primary.b",
+            "secondary.a",
+            "secondary.b",
+            "tertiary.a",
+            "tertiary.b",
+            "pri_a",
+            "pri_b",
+            "sec_a",
+            "sec_b",
+            "ter_a",
+            "ter_b",
+            "pri_ct",
+            "sec_ct",
+            "ct",
+        ],
 
         // Synth ICs
         ComponentKind::Vco(_) => &["cv", "saw", "tri", "pulse", "pw", "sync", "out"],
         ComponentKind::Vcf(_) => &["in", "out", "cv", "res"],
         ComponentKind::Vca(_) => &[
-            "in", "out", "cv",
-            // Quad VCA (SSM2164/V2164) numbered channel pins
-            "in1", "out1", "cv1", "in2", "out2", "cv2",
-            "in3", "out3", "cv3", "in4", "out4", "cv4",
+            "in", "out", "cv", // Quad VCA (SSM2164/V2164) numbered channel pins
+            "in1", "out1", "cv1", "in2", "out2", "cv2", "in3", "out3", "cv3", "in4", "out4", "cv4",
         ],
         ComponentKind::Comparator(_) => &["pos", "neg", "out"],
-        ComponentKind::AnalogSwitch(_) => {
-            &["in1", "out1", "ctrl1", "in2", "out2", "ctrl2",
-              "in3", "out3", "ctrl3", "in4", "out4", "ctrl4"]
-        }
+        ComponentKind::AnalogSwitch(_) => &[
+            "in1", "out1", "ctrl1", "in2", "out2", "ctrl2", "in3", "out3", "ctrl3", "in4", "out4",
+            "ctrl4",
+        ],
 
         // Switches are control elements, not circuit elements with pins
         ComponentKind::RotarySwitch(_) | ComponentKind::Switch(_) => &[],
@@ -489,7 +531,10 @@ fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
             Pin::ComponentPin { component, .. } => {
                 refs.insert(component.clone());
             }
-            Pin::Fork { switch, destinations } => {
+            Pin::Fork {
+                switch,
+                destinations,
+            } => {
                 refs.insert(switch.clone());
                 for d in destinations {
                     if let Pin::ComponentPin { component, .. } = d {
@@ -541,7 +586,10 @@ fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     // Synths (circuits with VCOs) generate their own signal — they don't need
     // an in → out path since audio originates from the oscillator.
-    let is_synth = pedal.components.iter().any(|c| matches!(&c.kind, ComponentKind::Vco(_)));
+    let is_synth = pedal
+        .components
+        .iter()
+        .any(|c| matches!(&c.kind, ComponentKind::Vco(_)));
     if is_synth {
         return;
     }
@@ -592,8 +640,10 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 adj.entry(kb.clone()).or_default().insert(kw2.clone());
                 adj.entry(kw2).or_default().insert(kb);
             }
-            ComponentKind::NJfet(_) | ComponentKind::PJfet(_)
-            | ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => {
+            ComponentKind::NJfet(_)
+            | ComponentKind::PJfet(_)
+            | ComponentKind::Nmos(_)
+            | ComponentKind::Pmos(_) => {
                 let kd = format!("{}.drain", comp.id);
                 let ks = format!("{}.source", comp.id);
                 adj.entry(kd.clone()).or_default().insert(ks.clone());
@@ -751,7 +801,9 @@ fn check_controls(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 code: "unusual-control-target",
                 message: format!(
                     "{} entry '{}' targets '{}' which is a {:?} — expected a pot or switch",
-                    section, ctrl.label, ctrl.component,
+                    section,
+                    ctrl.label,
+                    ctrl.component,
                     component_type_name(kind)
                 ),
             });
@@ -814,20 +866,28 @@ fn check_modulation_targets(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
         .collect();
 
     // Valid modulation target pins that the compiler recognizes
-    let valid_mod_targets: HashSet<&str> =
-        ["vgs", "gate", "led", "vgk", "vg1k", "iabc", "clock", "speed_mod", "delay_time"]
-            .iter()
-            .copied()
-            .collect();
+    let valid_mod_targets: HashSet<&str> = [
+        "vgs",
+        "gate",
+        "led",
+        "vgk",
+        "vg1k",
+        "iabc",
+        "clock",
+        "speed_mod",
+        "delay_time",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
     // Pins that are "destination" pins on passive components — these are valid net
     // connections but NOT modulation targets. When an LFO connects to, e.g., Depth.a,
     // the signal flows through the passive network but doesn't create a modulation binding.
-    let passive_connection_pins: HashSet<&str> =
-        ["a", "b", "w", "wiper", "in", "out", "rate"]
-            .iter()
-            .copied()
-            .collect();
+    let passive_connection_pins: HashSet<&str> = ["a", "b", "w", "wiper", "in", "out", "rate"]
+        .iter()
+        .copied()
+        .collect();
 
     // Check each modulation source's output connections
     for comp in &pedal.components {
@@ -867,22 +927,29 @@ fn check_modulation_targets(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                             if valid_mod_targets.contains(target_prop.as_str()) {
                                 // Verify the target component type makes sense for this pin
                                 check_mod_target_compatibility(
-                                    source_type, &comp.id, target_comp, target_prop,
-                                    target_kind, w,
+                                    source_type,
+                                    &comp.id,
+                                    target_comp,
+                                    target_prop,
+                                    target_kind,
+                                    w,
                                 );
                             } else if passive_connection_pins.contains(target_prop.as_str()) {
                                 // This is a valid passive connection (e.g., LFO1.out -> Depth.a)
                                 // but it won't create a modulation binding. Check if the user
                                 // probably intended a modulation binding.
-                                let target_is_pot = matches!(target_kind, ComponentKind::Potentiometer(_, _));
+                                let target_is_pot =
+                                    matches!(target_kind, ComponentKind::Potentiometer(_, _));
                                 let target_is_passive = matches!(
                                     target_kind,
                                     ComponentKind::Resistor(_)
                                         | ComponentKind::Capacitor(_)
                                         | ComponentKind::Inductor(_)
                                 );
-                                if !target_is_pot && !target_is_passive
-                                    && !matches!(target_kind, ComponentKind::Lfo(..)) {
+                                if !target_is_pot
+                                    && !target_is_passive
+                                    && !matches!(target_kind, ComponentKind::Lfo(..))
+                                {
                                     // Connecting a modulation source to a non-passive, non-pot
                                     // component's generic pin is suspicious
                                     w.push(PedalWarning {
@@ -931,11 +998,16 @@ fn check_mod_target_compatibility(
     let mismatch = match target_pin {
         "vgs" | "gate" => !matches!(
             target_kind,
-            ComponentKind::NJfet(_) | ComponentKind::PJfet(_)
-                | ComponentKind::Nmos(_) | ComponentKind::Pmos(_)
+            ComponentKind::NJfet(_)
+                | ComponentKind::PJfet(_)
+                | ComponentKind::Nmos(_)
+                | ComponentKind::Pmos(_)
         ),
         "led" => !matches!(target_kind, ComponentKind::Photocoupler(_)),
-        "vgk" => !matches!(target_kind, ComponentKind::Triode(_) | ComponentKind::VariMu(_)),
+        "vgk" => !matches!(
+            target_kind,
+            ComponentKind::Triode(_) | ComponentKind::VariMu(_)
+        ),
         "vg1k" => !matches!(target_kind, ComponentKind::Pentode(_)),
         "iabc" => !matches!(target_kind, ComponentKind::OpAmp(OpAmpType::Ca3080)),
         "clock" => !matches!(target_kind, ComponentKind::Bbd(_)),
@@ -950,9 +1022,14 @@ fn check_mod_target_compatibility(
             message: format!(
                 "{} '{}'.out -> '{}.{}': pin '{}' is typically used with {} components, \
                  but '{}' is a {}",
-                source_type, source_id, target_comp, target_pin, target_pin,
+                source_type,
+                source_id,
+                target_comp,
+                target_pin,
+                target_pin,
                 expected_component_for_pin(target_pin),
-                target_comp, component_type_name(target_kind)
+                target_comp,
+                component_type_name(target_kind)
             ),
         });
     }
@@ -1061,7 +1138,10 @@ fn check_supply_config(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
             w.push(PedalWarning {
                 severity: Severity::Error,
                 code: "duplicate-supply-name",
-                message: format!("Supply rail name '{}' is declared more than once", supply.name),
+                message: format!(
+                    "Supply rail name '{}' is declared more than once",
+                    supply.name
+                ),
             });
         }
     }
@@ -1123,7 +1203,9 @@ fn check_mirrors(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 code: "mirror-target-not-pot",
                 message: format!(
                     "Mirrored pot '{}' references '{}' which is a {}, not a potentiometer",
-                    mirrored_id, source_id, component_type_name(source_kind)
+                    mirrored_id,
+                    source_id,
+                    component_type_name(source_kind)
                 ),
             });
             continue;
@@ -1137,7 +1219,8 @@ fn check_mirrors(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                     code: "mirror-not-pot",
                     message: format!(
                         "'{}' uses `mirrors` but is a {}, not a potentiometer",
-                        mirrored_id, component_type_name(mirrored_kind)
+                        mirrored_id,
+                        component_type_name(mirrored_kind)
                     ),
                 });
             }
@@ -1171,9 +1254,13 @@ fn check_mirrors(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
         }
 
         // 6. Warn if resistances differ
-        if let (Some(ComponentKind::Potentiometer(r_mirrored, _)), Some(ComponentKind::Potentiometer(r_source, _))) =
-            (comp_map.get(mirrored_id.as_str()), comp_map.get(source_id.as_str()))
-        {
+        if let (
+            Some(ComponentKind::Potentiometer(r_mirrored, _)),
+            Some(ComponentKind::Potentiometer(r_source, _)),
+        ) = (
+            comp_map.get(mirrored_id.as_str()),
+            comp_map.get(source_id.as_str()),
+        ) {
             if (r_mirrored - r_source).abs() > f64::EPSILON {
                 w.push(PedalWarning {
                     severity: Severity::Warning,
@@ -1240,7 +1327,11 @@ fn check_model_names(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 code: "unknown-model",
                 message: format!(
                     "Component '{}' references unknown {} model '{}'{} ({} models available)",
-                    comp.id, kind_label, name, suggestion_text, available.len()
+                    comp.id,
+                    kind_label,
+                    name,
+                    suggestion_text,
+                    available.len()
                 ),
             });
         }
@@ -1326,8 +1417,8 @@ pub fn validate_pedal_files(paths: &[&str]) {
 
     for path in paths {
         println!("cargo:rerun-if-changed={path}");
-        let src = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("Cannot read {path}: {e}"));
+        let src =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("Cannot read {path}: {e}"));
         let pedal = crate::dsl::parse_pedal_file(&src)
             .unwrap_or_else(|e| panic!("{path}: parse error: {e}"));
         let warnings = validate_pedal(&pedal);
@@ -1369,12 +1460,10 @@ mod tests {
         PedalDef {
             name: "Test".to_string(),
             supplies: vec![],
-            components: vec![
-                ComponentDef {
-                    id: "R1".to_string(),
-                    kind: ComponentKind::Resistor(10_000.0),
-                },
-            ],
+            components: vec![ComponentDef {
+                id: "R1".to_string(),
+                kind: ComponentKind::Resistor(10_000.0),
+            }],
             nets: vec![
                 NetDef {
                     from: Pin::Reserved("in".to_string()),
@@ -1507,12 +1596,10 @@ mod tests {
         let pedal = PedalDef {
             name: "Broken".to_string(),
             supplies: vec![],
-            components: vec![
-                ComponentDef {
-                    id: "R1".to_string(),
-                    kind: ComponentKind::Resistor(10_000.0),
-                },
-            ],
+            components: vec![ComponentDef {
+                id: "R1".to_string(),
+                kind: ComponentKind::Resistor(10_000.0),
+            }],
             nets: vec![
                 // in -> R1.a but R1.b -> gnd (not out)
                 NetDef {
@@ -1826,10 +1913,7 @@ mod tests {
                         if let Ok(pedal) = parse_pedal_file(&src) {
                             let warnings = validate_pedal(&pedal);
                             if !warnings.is_empty() {
-                                results.push((
-                                    path.display().to_string(),
-                                    warnings,
-                                ));
+                                results.push((path.display().to_string(), warnings));
                             }
                         }
                     }
@@ -1857,7 +1941,11 @@ mod tests {
                     total += 1;
                 }
             }
-            eprintln!("\n=== {} warnings across {} files ===\n", total, results.len());
+            eprintln!(
+                "\n=== {} warnings across {} files ===\n",
+                total,
+                results.len()
+            );
         }
     }
 
@@ -2073,7 +2161,9 @@ mod tests {
             },
             to: vec![Pin::Reserved("gnd".to_string())],
         });
-        pedal.mirrors.insert("Gain_B".to_string(), "Gain_A".to_string());
+        pedal
+            .mirrors
+            .insert("Gain_B".to_string(), "Gain_A".to_string());
         pedal
     }
 
@@ -2094,7 +2184,9 @@ mod tests {
     #[test]
     fn mirror_target_missing() {
         let mut pedal = minimal_pedal();
-        pedal.mirrors.insert("Gain_B".to_string(), "NONEXISTENT".to_string());
+        pedal
+            .mirrors
+            .insert("Gain_B".to_string(), "NONEXISTENT".to_string());
         pedal.components.push(ComponentDef {
             id: "Gain_B".to_string(),
             kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
@@ -2145,7 +2237,9 @@ mod tests {
             },
             to: vec![Pin::Reserved("gnd".to_string())],
         });
-        pedal.mirrors.insert("Gain_C".to_string(), "Gain_B".to_string());
+        pedal
+            .mirrors
+            .insert("Gain_C".to_string(), "Gain_B".to_string());
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "mirror-chain"));
     }

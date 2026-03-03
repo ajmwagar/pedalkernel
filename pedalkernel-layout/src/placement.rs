@@ -14,7 +14,6 @@ use crate::symbols::symbol_for_kind;
 use crate::types::*;
 use pedalkernel::dsl::ComponentKind;
 
-
 /// Vertical position constants (as fraction of total height).
 const VCC_RAIL_Y: f32 = 0.05;
 const SUPPLY_COMPONENT_Y: f32 = 0.20;
@@ -153,7 +152,11 @@ fn place_gain_stage(
         } else if graph.connects_to_vcc(member_id) {
             // Supply component above
             supply_offset += MIN_COMPONENT_SPACING;
-            (center_x, supply_y + supply_offset - MIN_COMPONENT_SPACING, 90)
+            (
+                center_x,
+                supply_y + supply_offset - MIN_COMPONENT_SPACING,
+                90,
+            )
         } else if graph.connects_to_gnd(member_id) {
             // Bias component below
             bias_offset += MIN_COMPONENT_SPACING;
@@ -163,10 +166,7 @@ fn place_gain_stage(
             (center_x - MIN_COMPONENT_SPACING, signal_y, 0)
         };
 
-        let monitor_index = graph
-            .monitor_ids
-            .iter()
-            .position(|id| *id == node.comp_id);
+        let monitor_index = graph.monitor_ids.iter().position(|id| *id == node.comp_id);
 
         placed.push(PlacedComponent {
             name: node.comp_id.clone(),
@@ -206,19 +206,23 @@ fn place_opamp_stage(
         let (x, y, orientation) = if Some(member_id) == group.primary_device {
             // Op-amp at center
             (center_x, signal_y, 0)
-        } else if matches!(&comp.kind, ComponentKind::Diode(_) | ComponentKind::DiodePair(_)) {
+        } else if matches!(
+            &comp.kind,
+            ComponentKind::Diode(_) | ComponentKind::DiodePair(_)
+        ) {
             // Clipping diodes above signal path
             (center_x, signal_y - MIN_COMPONENT_SPACING, 0)
         } else {
             // Feedback components arranged around the op-amp
             offset_x += MIN_COMPONENT_SPACING;
-            (center_x + offset_x, signal_y - MIN_COMPONENT_SPACING * 0.5, 0)
+            (
+                center_x + offset_x,
+                signal_y - MIN_COMPONENT_SPACING * 0.5,
+                0,
+            )
         };
 
-        let monitor_index = graph
-            .monitor_ids
-            .iter()
-            .position(|id| *id == node.comp_id);
+        let monitor_index = graph.monitor_ids.iter().position(|id| *id == node.comp_id);
 
         placed.push(PlacedComponent {
             name: node.comp_id.clone(),
@@ -266,10 +270,7 @@ fn place_tone_stack(
             signal_y - MIN_COMPONENT_SPACING * 0.5
         };
 
-        let monitor_index = graph
-            .monitor_ids
-            .iter()
-            .position(|id| *id == node.comp_id);
+        let monitor_index = graph.monitor_ids.iter().position(|id| *id == node.comp_id);
 
         placed.push(PlacedComponent {
             name: node.comp_id.clone(),
@@ -327,10 +328,7 @@ fn place_push_pull(
             (center_x, y, 90)
         };
 
-        let monitor_index = graph
-            .monitor_ids
-            .iter()
-            .position(|id| *id == node.comp_id);
+        let monitor_index = graph.monitor_ids.iter().position(|id| *id == node.comp_id);
 
         placed.push(PlacedComponent {
             name: node.comp_id.clone(),
@@ -387,10 +385,7 @@ fn place_generic(
             signal_y
         };
 
-        let monitor_index = graph
-            .monitor_ids
-            .iter()
-            .position(|id| *id == node.comp_id);
+        let monitor_index = graph.monitor_ids.iter().position(|id| *id == node.comp_id);
 
         placed.push(PlacedComponent {
             name: node.comp_id.clone(),
@@ -428,9 +423,15 @@ fn compute_group_bounds(
     }
 
     let min_x = components.iter().map(|c| c.x).fold(f32::INFINITY, f32::min);
-    let max_x = components.iter().map(|c| c.x).fold(f32::NEG_INFINITY, f32::max);
+    let max_x = components
+        .iter()
+        .map(|c| c.x)
+        .fold(f32::NEG_INFINITY, f32::max);
     let min_y = components.iter().map(|c| c.y).fold(f32::INFINITY, f32::min);
-    let max_y = components.iter().map(|c| c.y).fold(f32::NEG_INFINITY, f32::max);
+    let max_y = components
+        .iter()
+        .map(|c| c.y)
+        .fold(f32::NEG_INFINITY, f32::max);
 
     let padding = MIN_COMPONENT_SPACING * 0.5;
     GroupBounds {
@@ -444,7 +445,12 @@ fn compute_group_bounds(
 fn compute_signal_path_order(placed: &[PlacedComponent], _graph: &LayoutGraph) -> Vec<usize> {
     // Sort by x position (left to right = signal flow)
     let mut indices: Vec<usize> = (0..placed.len()).collect();
-    indices.sort_by(|&a, &b| placed[a].x.partial_cmp(&placed[b].x).unwrap_or(std::cmp::Ordering::Equal));
+    indices.sort_by(|&a, &b| {
+        placed[a]
+            .x
+            .partial_cmp(&placed[b].x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     indices
 }
 

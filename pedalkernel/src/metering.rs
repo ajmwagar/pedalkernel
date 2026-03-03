@@ -39,7 +39,6 @@ pub struct UiMetrics {
     // ═══════════════════════════════════════════════════════════════════════════
     // Level meters — for VU meters, LED bars, clip indicators
     // ═══════════════════════════════════════════════════════════════════════════
-
     /// Input RMS level (dB, typically -60 to +6).
     pub input_rms_db: f32,
     /// Output RMS level (dB).
@@ -52,7 +51,6 @@ pub struct UiMetrics {
     // ═══════════════════════════════════════════════════════════════════════════
     // Compressor/limiter meters — for LA-2A, 1176, Fairchild GR display
     // ═══════════════════════════════════════════════════════════════════════════
-
     /// Gain reduction in dB (0 = no reduction, negative = compression).
     /// For VCA compressors (1176, dbx), this is derived from control voltage.
     /// For variable-mu (Fairchild), derived from tube operating point shift.
@@ -61,7 +59,6 @@ pub struct UiMetrics {
     // ═══════════════════════════════════════════════════════════════════════════
     // Tube state — for glow shaders
     // ═══════════════════════════════════════════════════════════════════════════
-
     /// Per-tube plate current (mA). Higher current = brighter glow.
     /// The shader maps this to color temperature (amber → orange → cherry red).
     pub tube_plate_current: [f32; MAX_TUBES],
@@ -76,7 +73,6 @@ pub struct UiMetrics {
     // ═══════════════════════════════════════════════════════════════════════════
     // Transformer state — for saturation visualization
     // ═══════════════════════════════════════════════════════════════════════════
-
     /// Core flux as fraction of saturation (0.0 = idle, 1.0 = saturating).
     /// Shader can show core glow or winding heat based on this.
     pub transformer_flux: [f32; MAX_TRANSFORMERS],
@@ -87,7 +83,6 @@ pub struct UiMetrics {
     // ═══════════════════════════════════════════════════════════════════════════
     // Signal envelope — for waveform displays
     // ═══════════════════════════════════════════════════════════════════════════
-
     /// Minimum sample value in this block (for envelope display).
     pub signal_min: f32,
     /// Maximum sample value in this block (for envelope display).
@@ -96,14 +91,12 @@ pub struct UiMetrics {
     // ═══════════════════════════════════════════════════════════════════════════
     // Control signals — for LFO/tremolo indicators
     // ═══════════════════════════════════════════════════════════════════════════
-
     /// LFO phase (0.0–1.0) for tremolo/vibrato pulse indicator.
     pub lfo_phase: f32,
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Power supply — for sag visualization
     // ═══════════════════════════════════════════════════════════════════════════
-
     /// Current B+ voltage. Drops under load (tube sag).
     /// Nominal is `supply_voltage`, this shows instantaneous value.
     pub supply_voltage: f32,
@@ -114,7 +107,6 @@ pub struct UiMetrics {
     // ═══════════════════════════════════════════════════════════════════════════
     // Per-stage metrics — for signal flow visualization
     // ═══════════════════════════════════════════════════════════════════════════
-
     /// RMS level at each circuit stage (normalized 0–1 for shader).
     pub stage_levels: [f32; MAX_STAGES],
 
@@ -124,7 +116,6 @@ pub struct UiMetrics {
     // ═══════════════════════════════════════════════════════════════════════════
     // Timing
     // ═══════════════════════════════════════════════════════════════════════════
-
     /// Block counter (monotonic, wraps at u32::MAX).
     pub block_counter: u32,
 }

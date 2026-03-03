@@ -6,7 +6,7 @@ use crate::dsl::*;
 use crate::elements::*;
 
 use super::dyn_node::DynNode;
-use super::graph::{ForkPathInfo, SpTree, make_leaf};
+use super::graph::{make_leaf, ForkPathInfo, SpTree};
 
 /// Convert SP tree to DynNode, inserting a VoltageSource for the virtual leaf.
 pub(super) fn sp_to_dyn_with_vs(
@@ -77,15 +77,26 @@ pub(super) fn sp_to_dyn_with_vs_and_supplies(
             let voltage = supply_leaf_voltages[idx];
             // Use a small port resistance (1Ω) — the cathode bias is a stiff
             // source modeled as near-ideal.
-            DynNode::CathodeBiasSource {
-                voltage,
-                rp: 1.0,
-            }
+            DynNode::CathodeBiasSource { voltage, rp: 1.0 }
         }
         SpTree::Leaf(idx) => make_leaf(*idx, &components[*idx], fork_paths.get(idx), sample_rate),
         SpTree::Series(left, right) => {
-            let l = sp_to_dyn_with_vs_and_supplies(left, components, fork_paths, sample_rate, vs_idx, supply_leaf_voltages);
-            let r = sp_to_dyn_with_vs_and_supplies(right, components, fork_paths, sample_rate, vs_idx, supply_leaf_voltages);
+            let l = sp_to_dyn_with_vs_and_supplies(
+                left,
+                components,
+                fork_paths,
+                sample_rate,
+                vs_idx,
+                supply_leaf_voltages,
+            );
+            let r = sp_to_dyn_with_vs_and_supplies(
+                right,
+                components,
+                fork_paths,
+                sample_rate,
+                vs_idx,
+                supply_leaf_voltages,
+            );
             let r1 = l.port_resistance();
             let r2 = r.port_resistance();
             let rp = r1 + r2;
@@ -99,8 +110,22 @@ pub(super) fn sp_to_dyn_with_vs_and_supplies(
             }
         }
         SpTree::Parallel(left, right) => {
-            let l = sp_to_dyn_with_vs_and_supplies(left, components, fork_paths, sample_rate, vs_idx, supply_leaf_voltages);
-            let r = sp_to_dyn_with_vs_and_supplies(right, components, fork_paths, sample_rate, vs_idx, supply_leaf_voltages);
+            let l = sp_to_dyn_with_vs_and_supplies(
+                left,
+                components,
+                fork_paths,
+                sample_rate,
+                vs_idx,
+                supply_leaf_voltages,
+            );
+            let r = sp_to_dyn_with_vs_and_supplies(
+                right,
+                components,
+                fork_paths,
+                sample_rate,
+                vs_idx,
+                supply_leaf_voltages,
+            );
             let r1 = l.port_resistance();
             let r2 = r.port_resistance();
             let rp = r1 * r2 / (r1 + r2);
@@ -269,4 +294,3 @@ pub(super) fn has_pot(node: &DynNode, comp_id: &str) -> bool {
         _ => false,
     }
 }
-

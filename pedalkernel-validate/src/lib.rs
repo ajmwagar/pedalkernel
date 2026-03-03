@@ -208,13 +208,7 @@ pub mod spice;
 
 // Config types
 pub use config::{
-    ConfigError,
-    GlobalConfig,
-    MetricConfig,
-    PassCriteria,
-    SignalConfig,
-    TestCase,
-    TestSuite,
+    ConfigError, GlobalConfig, MetricConfig, PassCriteria, SignalConfig, TestCase, TestSuite,
     ValidationConfig,
 };
 
@@ -226,12 +220,7 @@ pub use runner::{RunnerConfig, RunnerError, ValidationRunner};
 
 // Report types
 pub use report::{
-    ComparisonMetrics,
-    ReportSummary,
-    SignalResult,
-    SuiteResult,
-    TestResult,
-    ValidationReport,
+    ComparisonMetrics, ReportSummary, SignalResult, SuiteResult, TestResult, ValidationReport,
 };
 
 // Signal types

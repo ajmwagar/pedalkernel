@@ -228,10 +228,7 @@ mod tests {
         for _ in 0..1000 {
             out = os.process(1.0, |x| x);
         }
-        assert!(
-            (out - 1.0).abs() < 0.05,
-            "X2 should preserve DC: out={out}"
-        );
+        assert!((out - 1.0).abs() < 0.05, "X2 should preserve DC: out={out}");
     }
 
     #[test]
@@ -241,10 +238,7 @@ mod tests {
         for _ in 0..2000 {
             out = os.process(1.0, |x| x);
         }
-        assert!(
-            (out - 1.0).abs() < 0.05,
-            "X4 should preserve DC: out={out}"
-        );
+        assert!((out - 1.0).abs() < 0.05, "X4 should preserve DC: out={out}");
     }
 
     #[test]

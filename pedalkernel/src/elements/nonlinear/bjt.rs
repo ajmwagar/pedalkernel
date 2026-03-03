@@ -48,15 +48,13 @@ impl BjtModel {
     /// # Panics
     /// Panics if the model name is not found. Use `try_by_name` for fallible lookup.
     pub fn by_name(name: &str) -> Self {
-        Self::try_by_name(name)
-            .unwrap_or_else(|| panic!("Unknown BJT model: '{name}'"))
+        Self::try_by_name(name).unwrap_or_else(|| panic!("Unknown BJT model: '{name}'"))
     }
 
     /// Try to look up a BJT model by name. Returns `None` if not found.
     pub fn try_by_name(name: &str) -> Option<Self> {
         bjt_by_name(name).map(Self::from)
     }
-
 }
 
 impl From<&SpiceBjtModel> for BjtModel {
@@ -65,7 +63,11 @@ impl From<&SpiceBjtModel> for BjtModel {
             is: spice.is,
             bf: spice.bf,
             vt: 0.02585, // kT/q at 25°C — always computed from temperature
-            va: if spice.vaf.is_finite() { spice.vaf } else { 1e6 },
+            va: if spice.vaf.is_finite() {
+                spice.vaf
+            } else {
+                1e6
+            },
             is_pnp: spice.is_pnp,
         }
     }
@@ -561,8 +563,7 @@ impl GummelPoonModel {
     /// # Panics
     /// Panics if the model name is not found. Use `try_by_name` for fallible lookup.
     pub fn by_name(name: &str) -> Self {
-        Self::try_by_name(name)
-            .unwrap_or_else(|| panic!("Unknown BJT model: '{name}'"))
+        Self::try_by_name(name).unwrap_or_else(|| panic!("Unknown BJT model: '{name}'"))
     }
 
     /// Try to look up a Gummel-Poon model by name. Returns `None` if not found.

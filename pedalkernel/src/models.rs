@@ -28,44 +28,36 @@ static ZENER_MODELS_SRC: &str = include_str!("../models/zeners.model");
 // ---------------------------------------------------------------------------
 
 /// All BJT models parsed from the embedded transistors.model file.
-pub static BJT_MODELS: LazyLock<HashMap<String, SpiceBjtModel>> = LazyLock::new(|| {
-    parse_bjt_models(TRANSISTOR_MODELS_SRC)
-});
+pub static BJT_MODELS: LazyLock<HashMap<String, SpiceBjtModel>> =
+    LazyLock::new(|| parse_bjt_models(TRANSISTOR_MODELS_SRC));
 
 /// All JFET models parsed from the embedded jfets.model file.
-pub static JFET_MODELS: LazyLock<HashMap<String, SpiceJfetModel>> = LazyLock::new(|| {
-    parse_jfet_models(JFET_MODELS_SRC)
-});
+pub static JFET_MODELS: LazyLock<HashMap<String, SpiceJfetModel>> =
+    LazyLock::new(|| parse_jfet_models(JFET_MODELS_SRC));
 
 /// All triode models parsed from the embedded triodes.model file.
-pub static TRIODE_MODELS: LazyLock<HashMap<String, SpiceTriodeModel>> = LazyLock::new(|| {
-    parse_triode_models(TRIODE_MODELS_SRC)
-});
+pub static TRIODE_MODELS: LazyLock<HashMap<String, SpiceTriodeModel>> =
+    LazyLock::new(|| parse_triode_models(TRIODE_MODELS_SRC));
 
 /// All pentode models parsed from the embedded pentodes.model file.
-pub static PENTODE_MODELS: LazyLock<HashMap<String, SpicePentodeModel>> = LazyLock::new(|| {
-    parse_pentode_models(PENTODE_MODELS_SRC)
-});
+pub static PENTODE_MODELS: LazyLock<HashMap<String, SpicePentodeModel>> =
+    LazyLock::new(|| parse_pentode_models(PENTODE_MODELS_SRC));
 
 /// All diode models parsed from the embedded diodes.model file.
-pub static DIODE_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> = LazyLock::new(|| {
-    parse_diode_models(DIODE_MODELS_SRC)
-});
+pub static DIODE_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> =
+    LazyLock::new(|| parse_diode_models(DIODE_MODELS_SRC));
 
 /// All LED models parsed from the embedded leds.model file.
-pub static LED_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> = LazyLock::new(|| {
-    parse_diode_models(LED_MODELS_SRC)
-});
+pub static LED_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> =
+    LazyLock::new(|| parse_diode_models(LED_MODELS_SRC));
 
 /// All Schottky diode models parsed from the embedded schottky.model file.
-pub static SCHOTTKY_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> = LazyLock::new(|| {
-    parse_diode_models(SCHOTTKY_MODELS_SRC)
-});
+pub static SCHOTTKY_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> =
+    LazyLock::new(|| parse_diode_models(SCHOTTKY_MODELS_SRC));
 
 /// All Zener diode models parsed from the embedded zeners.model file.
-pub static ZENER_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> = LazyLock::new(|| {
-    parse_diode_models(ZENER_MODELS_SRC)
-});
+pub static ZENER_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> =
+    LazyLock::new(|| parse_diode_models(ZENER_MODELS_SRC));
 
 // ---------------------------------------------------------------------------
 // Parsed SPICE BJT model
@@ -525,7 +517,11 @@ fn parse_jfet_model_line(line: &str) -> Option<SpiceJfetModel> {
         // Split on first whitespace after type
         let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
         let type_str = &rest[..type_end];
-        let params = if type_end < rest.len() { &rest[type_end..] } else { "" };
+        let params = if type_end < rest.len() {
+            &rest[type_end..]
+        } else {
+            ""
+        };
         (type_str.trim(), params)
     };
 
@@ -897,7 +893,8 @@ pub fn zener_model_names() -> Vec<&'static str> {
 /// Use the specific `*_by_name()` functions when the category is known.
 pub fn any_diode_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
     let upper = name.to_uppercase();
-    DIODE_MODELS.get(&upper)
+    DIODE_MODELS
+        .get(&upper)
         .or_else(|| LED_MODELS.get(&upper))
         .or_else(|| SCHOTTKY_MODELS.get(&upper))
         .or_else(|| ZENER_MODELS.get(&upper))
@@ -914,7 +911,11 @@ mod tests {
     fn assert_close(a: Option<f64>, b: Option<f64>) {
         match (a, b) {
             (Some(a), Some(b)) => {
-                let rel = if b.abs() > 1e-30 { ((a - b) / b).abs() } else { (a - b).abs() };
+                let rel = if b.abs() > 1e-30 {
+                    ((a - b) / b).abs()
+                } else {
+                    (a - b).abs()
+                };
                 assert!(rel < 1e-10, "expected {b}, got {a}");
             }
             _ => assert_eq!(a, b),
@@ -971,8 +972,18 @@ mod tests {
     fn embedded_models_load() {
         // Verify all expected models are present
         let names = [
-            "2N3904", "2N2222", "BC108", "BC109", "2N5088", "2N5089",
-            "2N3906", "AC128", "OC44", "NKT275", "GENERIC_NPN", "GENERIC_PNP",
+            "2N3904",
+            "2N2222",
+            "BC108",
+            "BC109",
+            "2N5088",
+            "2N5089",
+            "2N3906",
+            "AC128",
+            "OC44",
+            "NKT275",
+            "GENERIC_NPN",
+            "GENERIC_PNP",
         ];
         for name in &names {
             assert!(
@@ -1057,7 +1068,16 @@ mod tests {
 
     #[test]
     fn jfet_embedded_models_load() {
-        let names = ["J201", "2N5457", "2N5460", "2N5952", "2SK30A", "2SK30A-GR", "2SK30A-Y", "2SK30A-BL"];
+        let names = [
+            "J201",
+            "2N5457",
+            "2N5460",
+            "2N5952",
+            "2SK30A",
+            "2SK30A-GR",
+            "2SK30A-Y",
+            "2SK30A-BL",
+        ];
         for name in &names {
             assert!(
                 jfet_by_name(name).is_some(),
@@ -1106,9 +1126,8 @@ mod tests {
     #[test]
     fn triode_embedded_models_load() {
         let names = [
-            "12AX7", "12AT7", "12AU7", "12AY7", "12BH7", "6386",
-            "6DJ8", "2A3", "300B", "6C33C", "6AN8T",
-            "ECC83", "ECC81", "ECC82", "6072",
+            "12AX7", "12AT7", "12AU7", "12AY7", "12BH7", "6386", "6DJ8", "2A3", "300B", "6C33C",
+            "6AN8T", "ECC83", "ECC81", "ECC82", "6072",
         ];
         for name in &names {
             assert!(
@@ -1173,10 +1192,8 @@ mod tests {
     #[test]
     fn pentode_embedded_models_load() {
         let names = [
-            "6550", "EL34", "6L6GC", "KT88", "6AN8P",
-            "EF86", "EL84", "6AQ5A", "6973",
-            "6CA7", "KT77", "5881", "KT66", "KT90", "6L6",
-            "6BQ5", "6267", "6AQ5",
+            "6550", "EL34", "6L6GC", "KT88", "6AN8P", "EF86", "EL84", "6AQ5A", "6973", "6CA7",
+            "KT77", "5881", "KT66", "KT90", "6L6", "6BQ5", "6267", "6AQ5",
         ];
         for name in &names {
             assert!(
@@ -1241,8 +1258,8 @@ mod tests {
     #[test]
     fn diode_embedded_models_load() {
         let names = [
-            "1N34", "1N914", "1N4001", "1N4002", "1N4003", "1N4004",
-            "1N4005", "1N4006", "1N4007", "1N4148", "1N5400",
+            "1N34", "1N914", "1N4001", "1N4002", "1N4003", "1N4004", "1N4005", "1N4006", "1N4007",
+            "1N4148", "1N5400",
         ];
         for name in &names {
             assert!(
@@ -1265,7 +1282,12 @@ mod tests {
         let ge = diode_by_name("1N34").unwrap();
         let si = diode_by_name("1N914").unwrap();
         // Germanium has much higher IS (typ ~200pA vs ~7nA but GE N is higher)
-        assert!(ge.n > si.n, "Ge diode should have higher N: Ge={} Si={}", ge.n, si.n);
+        assert!(
+            ge.n > si.n,
+            "Ge diode should have higher N: Ge={} Si={}",
+            ge.n,
+            si.n
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1274,7 +1296,16 @@ mod tests {
 
     #[test]
     fn led_embedded_models_load() {
-        let names = ["DLED0", "DLED1", "DLED2", "DLED3", "LED_IR", "LED_RED", "LED_GREEN", "LED_BLUE"];
+        let names = [
+            "DLED0",
+            "DLED1",
+            "DLED2",
+            "DLED3",
+            "LED_IR",
+            "LED_RED",
+            "LED_GREEN",
+            "LED_BLUE",
+        ];
         for name in &names {
             assert!(
                 led_by_name(name).is_some(),
@@ -1289,7 +1320,12 @@ mod tests {
         let red = led_by_name("LED_RED").unwrap();
         let blue = led_by_name("LED_BLUE").unwrap();
         // Blue LED has higher Vf → higher N
-        assert!(blue.n > red.n, "Blue LED should have higher N (Vf): {} vs {}", blue.n, red.n);
+        assert!(
+            blue.n > red.n,
+            "Blue LED should have higher N (Vf): {} vs {}",
+            blue.n,
+            red.n
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1311,8 +1347,16 @@ mod tests {
     #[test]
     fn schottky_has_low_bandgap() {
         let s = schottky_by_name("11DQ03").unwrap();
-        assert!((s.eg - 0.69).abs() < 0.01, "Schottky EG should be ~0.69: {}", s.eg);
-        assert!((s.xti - 2.0).abs() < 0.1, "Schottky XTI should be ~2: {}", s.xti);
+        assert!(
+            (s.eg - 0.69).abs() < 0.01,
+            "Schottky EG should be ~0.69: {}",
+            s.eg
+        );
+        assert!(
+            (s.xti - 2.0).abs() < 0.1,
+            "Schottky XTI should be ~2: {}",
+            s.xti
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1322,8 +1366,7 @@ mod tests {
     #[test]
     fn zener_embedded_models_load() {
         let names = [
-            "1N746", "1N750", "1N753", "1N758", "1N759",
-            "1N4728", "1N4733", "1N4742", "1N4751",
+            "1N746", "1N750", "1N753", "1N758", "1N759", "1N4728", "1N4733", "1N4742", "1N4751",
         ];
         for name in &names {
             assert!(
@@ -1338,11 +1381,19 @@ mod tests {
     fn zener_voltage_from_bv() {
         let z4v7 = zener_by_name("1N750").unwrap();
         // 1N750 is a 4.7V zener
-        assert!(z4v7.bv > 4.0 && z4v7.bv < 5.0, "1N750 BV should be ~4.7V: {}", z4v7.bv);
+        assert!(
+            z4v7.bv > 4.0 && z4v7.bv < 5.0,
+            "1N750 BV should be ~4.7V: {}",
+            z4v7.bv
+        );
 
         let z12v = zener_by_name("1N759").unwrap();
         // 1N759 is a 12V zener
-        assert!(z12v.bv > 11.0 && z12v.bv < 13.0, "1N759 BV should be ~12V: {}", z12v.bv);
+        assert!(
+            z12v.bv > 11.0 && z12v.bv < 13.0,
+            "1N759 BV should be ~12V: {}",
+            z12v.bv
+        );
     }
 
     #[test]

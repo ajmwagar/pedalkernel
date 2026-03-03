@@ -40,7 +40,7 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::Lfo(..) => ("", "LFO"), // Expands to timing R + C
         ComponentKind::Triode(_) | ComponentKind::Pentode(_) | ComponentKind::VariMu(_) => {
             ("Valve:Triode", "V")
-        },
+        }
         ComponentKind::EnvelopeFollower(..) => ("", "ENV"), // Expands to RC timing components
         ComponentKind::Nmos(_) => ("Device:Q_NMOS_DGS", "Q"),
         ComponentKind::Pmos(_) => ("Device:Q_PMOS_DGS", "Q"),
@@ -91,9 +91,15 @@ fn footprint_ref(kind: &ComponentKind) -> (&str, &str) {
         ComponentKind::Transformer(cfg) => {
             // Select transformer symbol based on configuration
             match (cfg.primary_type, cfg.secondary_type) {
-                (WindingType::PushPull, WindingType::Standard) => ("Transformer:Transformer_1P_1S", "T"),
-                (WindingType::Standard, WindingType::CenterTap) => ("Transformer:Transformer_1P_1S_CT", "T"),
-                (WindingType::PushPull, WindingType::CenterTap) => ("Transformer:Transformer_1P_CT_1S_CT", "T"),
+                (WindingType::PushPull, WindingType::Standard) => {
+                    ("Transformer:Transformer_1P_1S", "T")
+                }
+                (WindingType::Standard, WindingType::CenterTap) => {
+                    ("Transformer:Transformer_1P_1S_CT", "T")
+                }
+                (WindingType::PushPull, WindingType::CenterTap) => {
+                    ("Transformer:Transformer_1P_CT_1S_CT", "T")
+                }
                 _ => ("Transformer:Transformer_1P_1S", "T"),
             }
         }
@@ -194,7 +200,13 @@ fn value_str(kind: &ComponentKind) -> String {
         ComponentKind::Pmos(mt) => format!("P-MOS_{mt:?}"),
         ComponentKind::Bbd(bt) => format!("BBD_{bt:?}"),
         ComponentKind::DelayLine(min, max, interp, medium) => {
-            format!("DelayLine_{}-{}_{:?}_{:?}", format_eng(*min, "s"), format_eng(*max, "s"), interp, medium)
+            format!(
+                "DelayLine_{}-{}_{:?}_{:?}",
+                format_eng(*min, "s"),
+                format_eng(*max, "s"),
+                interp,
+                medium
+            )
         }
         ComponentKind::Tap(parent, ratio) => format!("Tap_{}_{:.1}x", parent, ratio),
         ComponentKind::Neon(nt) => match nt {
@@ -210,11 +222,9 @@ fn value_str(kind: &ComponentKind) -> String {
         ComponentKind::AnalogSwitch(st) => format!("Switch_{st:?}"),
         ComponentKind::MatchedNpn(mt) => format!("Matched_NPN_{mt:?}"),
         ComponentKind::MatchedPnp(mt) => format!("Matched_PNP_{mt:?}"),
-        ComponentKind::Tempco(r, ppm) => format!(
-            "{}_Tempco_{:.0}ppm",
-            format_eng(*r, "\u{2126}"),
-            ppm
-        ),
+        ComponentKind::Tempco(r, ppm) => {
+            format!("{}_Tempco_{:.0}ppm", format_eng(*r, "\u{2126}"), ppm)
+        }
         // ── Studio Equipment Components ──────────────────────────────
         ComponentKind::Transformer(cfg) => {
             let pri = match cfg.primary_type {
@@ -242,8 +252,20 @@ fn value_str(kind: &ComponentKind) -> String {
             } else {
                 format!(
                     "C_switched_{}-{}",
-                    format_eng(*values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "F"),
-                    format_eng(*values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "F")
+                    format_eng(
+                        *values
+                            .iter()
+                            .min_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap(),
+                        "F"
+                    ),
+                    format_eng(
+                        *values
+                            .iter()
+                            .max_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap(),
+                        "F"
+                    )
                 )
             }
         }
@@ -254,8 +276,20 @@ fn value_str(kind: &ComponentKind) -> String {
             } else {
                 format!(
                     "L_switched_{}-{}",
-                    format_eng(*values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "H"),
-                    format_eng(*values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "H")
+                    format_eng(
+                        *values
+                            .iter()
+                            .min_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap(),
+                        "H"
+                    ),
+                    format_eng(
+                        *values
+                            .iter()
+                            .max_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap(),
+                        "H"
+                    )
                 )
             }
         }
@@ -269,8 +303,20 @@ fn value_str(kind: &ComponentKind) -> String {
             } else {
                 format!(
                     "R_switched_{}-{}",
-                    format_eng(*values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "Ω"),
-                    format_eng(*values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(), "Ω")
+                    format_eng(
+                        *values
+                            .iter()
+                            .min_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap(),
+                        "Ω"
+                    ),
+                    format_eng(
+                        *values
+                            .iter()
+                            .max_by(|a, b| a.partial_cmp(b).unwrap())
+                            .unwrap(),
+                        "Ω"
+                    )
                 )
             }
         }
@@ -362,7 +408,10 @@ fn pin_to_string(pin: &Pin) -> String {
     match pin {
         Pin::Reserved(n) => n.clone(),
         Pin::ComponentPin { component, pin } => format!("{component}.{pin}"),
-        Pin::Fork { switch, destinations } => {
+        Pin::Fork {
+            switch,
+            destinations,
+        } => {
             let dests: Vec<_> = destinations.iter().map(pin_to_string).collect();
             format!("fork({}, [{}])", switch, dests.join(", "))
         }

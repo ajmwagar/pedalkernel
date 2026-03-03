@@ -280,7 +280,13 @@ pub(crate) fn draw_board_overview(frame: &mut Frame, state: &BoardControlState, 
     .split(inner);
 
     // I/O info bar
-    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
+    render_io_bar(
+        frame,
+        v_chunks[0],
+        &state.input_port,
+        &state.output_port,
+        state.voltage,
+    );
 
     // Pedal cards — split horizontally
     let n = state.pedals.len();
@@ -461,7 +467,13 @@ pub(crate) fn draw_board_detail(frame: &mut Frame, state: &BoardControlState, in
     .split(inner);
 
     // I/O info bar
-    render_io_bar(frame, v_chunks[0], &state.input_port, &state.output_port, state.voltage);
+    render_io_bar(
+        frame,
+        v_chunks[0],
+        &state.input_port,
+        &state.output_port,
+        state.voltage,
+    );
 
     // Chain bar
     render_chain_bar(frame, v_chunks[2], &state.pedals, state.focused_pedal);
@@ -613,7 +625,9 @@ fn run_board_control(
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
     if let Some(pair) = super::stereo_pair(connect_to) {
-        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+        let _ = async_client
+            .as_client()
+            .connect_ports_by_name(&our_out, &pair);
     }
 
     let mut state = BoardControlState {
@@ -674,7 +688,9 @@ fn run_board_control_wav(
         .as_client()
         .connect_ports_by_name(&our_out, connect_to)?;
     if let Some(pair) = super::stereo_pair(connect_to) {
-        let _ = async_client.as_client().connect_ports_by_name(&our_out, &pair);
+        let _ = async_client
+            .as_client()
+            .connect_ports_by_name(&our_out, &pair);
     }
 
     let mut state = BoardControlState {

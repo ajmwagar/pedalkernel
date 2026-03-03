@@ -142,7 +142,8 @@ impl SpiceRunner {
 
         // Generate complete netlist with inline PWL
         let duration = input.len() as f64 / self.config.internal_rate();
-        let netlist = self.generate_netlist(circuit_path, input, duration, output_node, &output_path)?;
+        let netlist =
+            self.generate_netlist(circuit_path, input, duration, output_node, &output_path)?;
 
         std::fs::write(&netlist_path, &netlist)?;
 
@@ -268,12 +269,12 @@ VIN v_in 0 PWL({pwl_data})
 
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
-                let t: f64 = parts[0].parse().map_err(|e| {
-                    SpiceError::ParseError(format!("Invalid time value: {}", e))
-                })?;
-                let v: f64 = parts[1].parse().map_err(|e| {
-                    SpiceError::ParseError(format!("Invalid voltage value: {}", e))
-                })?;
+                let t: f64 = parts[0]
+                    .parse()
+                    .map_err(|e| SpiceError::ParseError(format!("Invalid time value: {}", e)))?;
+                let v: f64 = parts[1]
+                    .parse()
+                    .map_err(|e| SpiceError::ParseError(format!("Invalid voltage value: {}", e)))?;
                 data.push((t, v));
             }
         }
@@ -371,11 +372,12 @@ pub fn generate_golden(
         let output = runner.simulate(&circuit_path, input, "v_out")?;
 
         let output_path = output_dir.join(format!("{}.npy", label));
-        crate::npy::write_f64(&output_path, &output)
-            .map_err(|e| SpiceError::IoError(std::io::Error::new(
+        crate::npy::write_f64(&output_path, &output).map_err(|e| {
+            SpiceError::IoError(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 e.to_string(),
-            )))?;
+            ))
+        })?;
     }
 
     Ok(())

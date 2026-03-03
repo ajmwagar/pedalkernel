@@ -8,7 +8,7 @@
 //! - Pass 4: Tree building (build.rs)
 //! - Pass 5: Binding & assembly (bind.rs)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::dsl::*;
 use crate::elements::*;
@@ -73,7 +73,6 @@ fn find_resistance_between(graph: &CircuitGraph, from: NodeId, to: NodeId) -> Op
     None
 }
 
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Passive WDF stage builder
 // ═══════════════════════════════════════════════════════════════════════════
@@ -98,12 +97,19 @@ fn build_passive_wdf_stage(
     oversampling: OversamplingFactor,
 ) -> Option<WdfStage> {
     let vs_comp_idx = graph.components.len();
-    let passive_edges: Vec<usize> = graph.edges.iter().enumerate()
-        .filter(|(_, e)| matches!(
-            graph.components[e.comp_idx].kind,
-            ComponentKind::Resistor(_) | ComponentKind::Capacitor(_)
-                | ComponentKind::Inductor(_) | ComponentKind::Potentiometer(_, _)
-        ))
+    let passive_edges: Vec<usize> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(
+                graph.components[e.comp_idx].kind,
+                ComponentKind::Resistor(_)
+                    | ComponentKind::Capacitor(_)
+                    | ComponentKind::Inductor(_)
+                    | ComponentKind::Potentiometer(_, _)
+            )
+        })
         .map(|(i, _)| i)
         .collect();
 
@@ -112,7 +118,13 @@ fn build_passive_wdf_stage(
     }
 
     // Try output-rooted decomposition for simple 2-element circuits.
-    if let Some(stage) = build_output_rooted_stage(graph, &passive_edges, sample_rate, oversampling, vs_comp_idx) {
+    if let Some(stage) = build_output_rooted_stage(
+        graph,
+        &passive_edges,
+        sample_rate,
+        oversampling,
+        vs_comp_idx,
+    ) {
         return Some(stage);
     }
 
@@ -133,16 +145,27 @@ fn build_passive_wdf_stage(
             kind: ComponentKind::Resistor(1.0),
         });
     }
-    let tree = sp_to_dyn_with_vs(&sp_tree, &all_components, &graph.fork_paths, sample_rate, vs_comp_idx);
+    let tree = sp_to_dyn_with_vs(
+        &sp_tree,
+        &all_components,
+        &graph.fork_paths,
+        sample_rate,
+        vs_comp_idx,
+    );
     let mut stage = WdfStage {
         tree,
         root: RootKind::ShortCircuit,
         compensation: 1.0,
         oversampler: Oversampler::new(oversampling),
-        base_diode_model: None, paired_opamp: None, dc_block: None,
-        is_source_follower: false, prev_source_voltage: 0.0,
-        signal_flow_distance: 0, transformer_gain: 1.0,
-        injection_node_id: usize::MAX, output_node_id: usize::MAX,
+        base_diode_model: None,
+        paired_opamp: None,
+        dc_block: None,
+        is_source_follower: false,
+        prev_source_voltage: 0.0,
+        signal_flow_distance: 0,
+        transformer_gain: 1.0,
+        injection_node_id: usize::MAX,
+        output_node_id: usize::MAX,
     };
     stage.balance_vs_impedance();
     Some(stage)
@@ -182,7 +205,8 @@ fn build_output_rooted_stage(
 
     // Verify source edge connects in→out (through the circuit).
     let source_edge = &graph.edges[source_eidx];
-    let connects_in_out = (source_edge.node_a == graph.in_node && source_edge.node_b == graph.out_node)
+    let connects_in_out = (source_edge.node_a == graph.in_node
+        && source_edge.node_b == graph.out_node)
         || (source_edge.node_a == graph.out_node && source_edge.node_b == graph.in_node);
     if !connects_in_out {
         return None;
@@ -225,7 +249,11 @@ fn build_output_rooted_stage(
     let source_node = graph.edges.len() + 1000;
     let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
     sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
-    sp_edges.push((source_edge.node_a, source_edge.node_b, SpTree::Leaf(source_edge.comp_idx)));
+    sp_edges.push((
+        source_edge.node_a,
+        source_edge.node_b,
+        SpTree::Leaf(source_edge.comp_idx),
+    ));
     let terminals = vec![source_node, graph.out_node];
     let sp_tree = sp_reduce(sp_edges, &terminals).ok()?;
 
@@ -238,7 +266,13 @@ fn build_output_rooted_stage(
         });
     }
 
-    let mut tree = sp_to_dyn_with_vs(&sp_tree, &all_components, &graph.fork_paths, sample_rate, vs_comp_idx);
+    let mut tree = sp_to_dyn_with_vs(
+        &sp_tree,
+        &all_components,
+        &graph.fork_paths,
+        sample_rate,
+        vs_comp_idx,
+    );
 
     // Set VS impedance to half the load impedance for correct time constants.
     // In WDF, the root port termination implicitly contributes impedance equal
@@ -250,7 +284,9 @@ fn build_output_rooted_stage(
 
     // Verify source element is in the tree (not just VS).
     let has_source = match &source_comp.kind {
-        ComponentKind::Capacitor(_) | ComponentKind::Inductor(_) | ComponentKind::Resistor(_) => true,
+        ComponentKind::Capacitor(_) | ComponentKind::Inductor(_) | ComponentKind::Resistor(_) => {
+            true
+        }
         _ => false,
     };
     if !has_source {
@@ -262,9 +298,13 @@ fn build_output_rooted_stage(
         root,
         compensation: 1.0,
         oversampler: Oversampler::new(oversampling),
-        base_diode_model: None, paired_opamp: None, dc_block: None,
-        is_source_follower: false, prev_source_voltage: 0.0,
-        signal_flow_distance: 0, transformer_gain: 1.0,
+        base_diode_model: None,
+        paired_opamp: None,
+        dc_block: None,
+        is_source_follower: false,
+        prev_source_voltage: 0.0,
+        signal_flow_distance: 0,
+        transformer_gain: 1.0,
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
     })
@@ -343,9 +383,15 @@ pub fn compile_pedal_with_options(
     // Apply component tolerance.
     for (i, comp) in graph.components.iter_mut().enumerate() {
         match &mut comp.kind {
-            ComponentKind::Resistor(r) => { *r = tolerance.apply_resistor(*r, i); }
-            ComponentKind::Capacitor(cfg) => { cfg.value = tolerance.apply_capacitor(cfg.value, i); }
-            ComponentKind::Potentiometer(max_r, _) => { *max_r = tolerance.apply_resistor(*max_r, i); }
+            ComponentKind::Resistor(r) => {
+                *r = tolerance.apply_resistor(*r, i);
+            }
+            ComponentKind::Capacitor(cfg) => {
+                cfg.value = tolerance.apply_capacitor(cfg.value, i);
+            }
+            ComponentKind::Potentiometer(max_r, _) => {
+                *max_r = tolerance.apply_resistor(*max_r, i);
+            }
             _ => {}
         }
     }
@@ -424,7 +470,10 @@ pub fn compile_pedal_with_options(
 
     if stages.is_empty() && coupled_bjt_stages.is_empty() && multi_nl_stages.is_empty() {
         let has_reactive = pedal.components.iter().any(|c| {
-            matches!(c.kind, ComponentKind::Capacitor(_) | ComponentKind::Inductor(_))
+            matches!(
+                c.kind,
+                ComponentKind::Capacitor(_) | ComponentKind::Inductor(_)
+            )
         });
 
         if has_reactive {
@@ -443,18 +492,29 @@ pub fn compile_pedal_with_options(
             let pin_matches = |p: &Pin, comp_id: &str, pin_name: &str| -> bool {
                 matches!(p, Pin::ComponentPin { component, pin } if component == comp_id && pin == pin_name)
             };
-            let is_input_pin = |p: &Pin| -> bool { matches!(p, Pin::Reserved(name) if name == "in") };
-            let is_output_pin = |p: &Pin| -> bool { matches!(p, Pin::Reserved(name) if name == "out") };
+            let is_input_pin =
+                |p: &Pin| -> bool { matches!(p, Pin::Reserved(name) if name == "in") };
+            let is_output_pin =
+                |p: &Pin| -> bool { matches!(p, Pin::Reserved(name) if name == "out") };
 
             let output_from_secondary = pedal.nets.iter().any(|net| {
-                let has_secondary = pin_matches(&net.from, &comp.id, "c") || pin_matches(&net.from, &comp.id, "d");
-                let has_secondary_to = net.to.iter().any(|p| pin_matches(p, &comp.id, "c") || pin_matches(p, &comp.id, "d"));
-                let has_output = is_output_pin(&net.from) || net.to.iter().any(|p| is_output_pin(p));
+                let has_secondary =
+                    pin_matches(&net.from, &comp.id, "c") || pin_matches(&net.from, &comp.id, "d");
+                let has_secondary_to = net
+                    .to
+                    .iter()
+                    .any(|p| pin_matches(p, &comp.id, "c") || pin_matches(p, &comp.id, "d"));
+                let has_output =
+                    is_output_pin(&net.from) || net.to.iter().any(|p| is_output_pin(p));
                 (has_secondary || has_secondary_to) && has_output
             });
             let input_to_primary = pedal.nets.iter().any(|net| {
-                let has_primary = pin_matches(&net.from, &comp.id, "a") || pin_matches(&net.from, &comp.id, "b");
-                let has_primary_to = net.to.iter().any(|p| pin_matches(p, &comp.id, "a") || pin_matches(p, &comp.id, "b"));
+                let has_primary =
+                    pin_matches(&net.from, &comp.id, "a") || pin_matches(&net.from, &comp.id, "b");
+                let has_primary_to = net
+                    .to
+                    .iter()
+                    .any(|p| pin_matches(p, &comp.id, "a") || pin_matches(p, &comp.id, "b"));
                 let has_input = is_input_pin(&net.from) || net.to.iter().any(|p| is_input_pin(p));
                 (has_primary || has_primary_to) && has_input
             });
@@ -477,8 +537,11 @@ pub fn compile_pedal_with_options(
 
     // ══ BBD delay lines ═══════════════════════════════════════════════
     let mut bbds = Vec::new();
+    let mut bbd_id_to_idx: HashMap<String, usize> = HashMap::new();
     for comp in &pedal.components {
         if let ComponentKind::Bbd(bt) = &comp.kind {
+            let idx = bbds.len();
+            bbd_id_to_idx.insert(comp.id.clone(), idx);
             let model = match bt {
                 BbdType::Mn3207 => BbdModel::mn3207(),
                 BbdType::Mn3007 => BbdModel::mn3007(),
@@ -496,7 +559,8 @@ pub fn compile_pedal_with_options(
         if let ComponentKind::DelayLine(min_delay, max_delay, interp, medium) = &comp.kind {
             let idx = delay_lines.len();
             delay_id_to_idx.insert(comp.id.clone(), idx);
-            let mut dl = crate::elements::DelayLine::new(*min_delay, *max_delay, sample_rate, *interp);
+            let mut dl =
+                crate::elements::DelayLine::new(*min_delay, *max_delay, sample_rate, *interp);
             dl.set_medium(*medium);
             delay_lines.push(DelayLineBinding {
                 delay_line: dl,
@@ -541,15 +605,29 @@ pub fn compile_pedal_with_options(
                         _ => 0.85,
                     };
                 }
-                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => { has_bjt = true; }
-                ComponentKind::NJfet(_) | ComponentKind::PJfet(_)
-                | ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => { has_fet = true; }
+                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
+                    has_bjt = true;
+                }
+                ComponentKind::NJfet(_)
+                | ComponentKind::PJfet(_)
+                | ComponentKind::Nmos(_)
+                | ComponentKind::Pmos(_) => {
+                    has_fet = true;
+                }
                 ComponentKind::Triode(name) => {
                     has_tube = true;
-                    tube_mu = TriodeModel::try_by_name(name).map(|m| m.mu).unwrap_or(100.0);
+                    tube_mu = TriodeModel::try_by_name(name)
+                        .map(|m| m.mu)
+                        .unwrap_or(100.0);
                 }
-                ComponentKind::VariMu(_) => { has_tube = true; tube_mu = 35.0; }
-                ComponentKind::Pentode(_) => { has_tube = true; tube_mu = 200.0; }
+                ComponentKind::VariMu(_) => {
+                    has_tube = true;
+                    tube_mu = 35.0;
+                }
+                ComponentKind::Pentode(_) => {
+                    has_tube = true;
+                    tube_mu = 200.0;
+                }
                 _ => {}
             }
         }
@@ -562,20 +640,31 @@ pub fn compile_pedal_with_options(
         } else if has_fet && !has_source_follower {
             RailSaturation::Fet
         } else if has_opamp {
-            RailSaturation::OpAmp { output_swing_ratio: opamp_swing }
+            RailSaturation::OpAmp {
+                output_swing_ratio: opamp_swing,
+            }
         } else {
             RailSaturation::None
         }
     };
 
     // ══ Pass 5: Binding & assembly ════════════════════════════════════
-    let lfo_ids: Vec<String> = pedal.components.iter()
-        .filter_map(|c| if matches!(c.kind, ComponentKind::Lfo(..)) { Some(c.id.clone()) } else { None })
+    let lfo_ids: Vec<String> = pedal
+        .components
+        .iter()
+        .filter_map(|c| {
+            if matches!(c.kind, ComponentKind::Lfo(..)) {
+                Some(c.id.clone())
+            } else {
+                None
+            }
+        })
         .collect();
 
     // Sidechain construction — must happen before build_controls so we have
     // the component → sidechain index mapping for control routing.
-    let (sidechains, sidechain_comp_ids) = super::bind::build_sidechains(pedal, &graph, sample_rate);
+    let (sidechains, sidechain_comp_ids) =
+        super::bind::build_sidechains(pedal, &graph, sample_rate);
 
     let controls = super::bind::build_controls(
         pedal,
@@ -587,9 +676,12 @@ pub fn compile_pedal_with_options(
         &delay_id_to_idx,
         delay_lines.is_empty(),
         &sidechain_comp_ids,
+        &bbd_id_to_idx,
     );
 
-    let level_default = pedal.controls.iter()
+    let level_default = pedal
+        .controls
+        .iter()
         .find(|c| is_level_label(&c.label))
         .map(|c| c.default)
         .unwrap_or(1.0);
@@ -603,7 +695,8 @@ pub fn compile_pedal_with_options(
     let (pre_gain, output_gain) = (physical_gain, level_default);
 
     let lfos = super::bind::build_lfo_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);
-    let envelopes = super::bind::build_envelope_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);
+    let envelopes =
+        super::bind::build_envelope_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);
 
     // Thermal model.
     let thermal = if enable_thermal && classified.has_germanium {
@@ -618,21 +711,29 @@ pub fn compile_pedal_with_options(
     let primary_supply = pedal.supplies.first().map(|s| &s.config);
     let supply_voltage = primary_supply.map_or(9.0, |s| s.voltage);
 
-    let power_supply = primary_supply
-        .filter(|s| s.has_sag())
-        .map(|s| {
-            crate::elements::PowerSupply::new(
-                s.voltage, s.impedance.unwrap_or(0.0), s.filter_cap.unwrap_or(100e-6),
-                s.rectifier, sample_rate,
-            )
-        });
+    let power_supply = primary_supply.filter(|s| s.has_sag()).map(|s| {
+        crate::elements::PowerSupply::new(
+            s.voltage,
+            s.impedance.unwrap_or(0.0),
+            s.filter_cap.unwrap_or(100e-6),
+            s.rectifier,
+            sample_rate,
+        )
+    });
 
     let base_grid_bias = push_pull_stages.first().map_or(-2.0, |pp| pp.grid_bias);
 
     // Build pot smoothers.
-    let pot_smoothers: Vec<SmoothedParam> = controls.iter().enumerate()
+    let pot_smoothers: Vec<SmoothedParam> = controls
+        .iter()
+        .enumerate()
         .filter_map(|(i, ctrl)| {
-            if matches!(ctrl.target, ControlTarget::PotInStage(_) | ControlTarget::PotInCoupledBjtStage(_, _) | ControlTarget::PotInMultiNlStage(_, _)) {
+            if matches!(
+                ctrl.target,
+                ControlTarget::PotInStage(_)
+                    | ControlTarget::PotInCoupledBjtStage(_, _)
+                    | ControlTarget::PotInMultiNlStage(_, _)
+            ) {
                 Some(SmoothedParam::new(0.5, i, sample_rate))
             } else {
                 None
@@ -691,7 +792,8 @@ pub fn compile_pedal_with_options(
         pot_smoothers,
         pot_mirrors: {
             // Build reverse mapping: source_id → [mirrored_ids]
-            let mut m: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            let mut m: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
             for (mirrored, source) in &pedal.mirrors {
                 m.entry(source.clone()).or_default().push(mirrored.clone());
             }
@@ -701,6 +803,7 @@ pub fn compile_pedal_with_options(
         multi_nl_recompute_counter: 0,
         stage_order,
         node_signals: Vec::new(),
+        bbd_wet_mix: 0.5,
     };
 
     let initial_voltage = match &compiled.power_supply {

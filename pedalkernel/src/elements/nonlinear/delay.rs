@@ -482,11 +482,7 @@ impl DelayLine {
     /// * `tap_ratios` — tap positions as ratios of base delay (e.g., [1.0, 2.0, 4.0])
     /// * `coefficients` — optional per-zone LP coefficients; if `None`, uses
     ///   defaults based on medium type and tap count
-    pub fn configure_zones_from_taps(
-        &mut self,
-        tap_ratios: &[f64],
-        coefficients: Option<&[f64]>,
-    ) {
+    pub fn configure_zones_from_taps(&mut self, tap_ratios: &[f64], coefficients: Option<&[f64]>) {
         self.zones.clear();
 
         if self.medium == Medium::None || self.medium == Medium::DigitalQuantize {
@@ -545,9 +541,8 @@ impl DelayLine {
                 let buf_len = self.buffer.len();
                 for zone in &mut self.zones {
                     // Current boundary position (relative to write head)
-                    let boundary_pos = (self.write_pos + buf_len
-                        - zone.distance_samples as usize)
-                        % buf_len;
+                    let boundary_pos =
+                        (self.write_pos + buf_len - zone.distance_samples as usize) % buf_len;
 
                     // How many samples have crossed this boundary since last tick
                     let samples_crossed = if boundary_pos >= zone.last_processed_pos {
@@ -563,8 +558,8 @@ impl DelayLine {
                         let idx = (zone.last_processed_pos + j + 1) % buf_len;
                         // One-pole LP: y += coeff * (x - y)
                         // This removes HF — short wavelength domains cancel more
-                        zone.filter_state += zone.coefficient
-                            * (self.buffer[idx] - zone.filter_state);
+                        zone.filter_state +=
+                            zone.coefficient * (self.buffer[idx] - zone.filter_state);
                         self.buffer[idx] = zone.filter_state;
                     }
 
@@ -575,9 +570,8 @@ impl DelayLine {
             Medium::BbdLeakage => {
                 let buf_len = self.buffer.len();
                 for zone in &mut self.zones {
-                    let boundary_pos = (self.write_pos + buf_len
-                        - zone.distance_samples as usize)
-                        % buf_len;
+                    let boundary_pos =
+                        (self.write_pos + buf_len - zone.distance_samples as usize) % buf_len;
 
                     let samples_crossed = if boundary_pos >= zone.last_processed_pos {
                         boundary_pos - zone.last_processed_pos
@@ -634,8 +628,8 @@ pub struct Tap {
 
 #[cfg(test)]
 mod delay_tests {
-    use super::*;
     use super::super::bbd::{BbdDelayLine, BbdModel};
+    use super::*;
 
     const SR: f64 = 48000.0;
 
@@ -700,7 +694,10 @@ mod delay_tests {
         // norm=0 → min delay (1ms)
         dl.set_delay_normalized(0.0);
         let t0 = dl.delay_time();
-        assert!((t0 - 0.001).abs() < 0.0001, "norm=0 should be ~1ms, got {t0}");
+        assert!(
+            (t0 - 0.001).abs() < 0.0001,
+            "norm=0 should be ~1ms, got {t0}"
+        );
 
         // norm=1 → max delay (1s)
         dl.set_delay_normalized(1.0);
@@ -727,7 +724,10 @@ mod delay_tests {
         }
 
         // With feedback=0.8, the impulse should recirculate
-        assert!(max_out > 0.1, "Feedback should cause recirculation, max={max_out}");
+        assert!(
+            max_out > 0.1,
+            "Feedback should cause recirculation, max={max_out}"
+        );
     }
 
     #[test]
@@ -753,7 +753,10 @@ mod delay_tests {
 
         // Verify it's not NaN
         let out = dl.read();
-        assert!(out.is_finite(), "Output with speed mod should be finite, got {normal_out} / {out}");
+        assert!(
+            out.is_finite(),
+            "Output with speed mod should be finite, got {normal_out} / {out}"
+        );
     }
 
     // ── Tap reads at correct ratio ───────────────────────────────────
@@ -796,7 +799,10 @@ mod delay_tests {
             let input = (2.0 * std::f64::consts::PI * 440.0 * t).sin();
             dl.write(input);
             let out = dl.read();
-            assert!(out.is_finite(), "Cubic output should be finite at sample {i}");
+            assert!(
+                out.is_finite(),
+                "Cubic output should be finite at sample {i}"
+            );
         }
     }
 
@@ -810,7 +816,10 @@ mod delay_tests {
             let input = (2.0 * std::f64::consts::PI * 440.0 * t).sin();
             dl.write(input);
             let out = dl.read();
-            assert!(out.is_finite(), "Allpass output should be finite at sample {i}");
+            assert!(
+                out.is_finite(),
+                "Allpass output should be finite at sample {i}"
+            );
         }
     }
 
@@ -955,7 +964,10 @@ mod delay_tests {
             let t = i as f64 / SR;
             let input = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 0.5;
             let out = bbd.process(input);
-            assert!(out.is_finite(), "BBD output should be finite at sample {i}, got {out}");
+            assert!(
+                out.is_finite(),
+                "BBD output should be finite at sample {i}, got {out}"
+            );
         }
     }
 
@@ -974,8 +986,14 @@ mod delay_tests {
         bbd.set_delay_normalized(1.0);
         let t_max = bbd.delay_time();
 
-        assert!(t_min < t_mid, "Min delay should be less than mid: {t_min} < {t_mid}");
-        assert!(t_max > t_mid, "Max delay should be greater than mid: {t_max} > {t_mid}");
+        assert!(
+            t_min < t_mid,
+            "Min delay should be less than mid: {t_min} < {t_mid}"
+        );
+        assert!(
+            t_max > t_mid,
+            "Max delay should be greater than mid: {t_max} > {t_mid}"
+        );
     }
 
     #[test]
@@ -1091,7 +1109,10 @@ mod delay_tests {
         let coeff = MediumPreset::Re201.zone_coefficients();
         assert_eq!(coeff.len(), 3);
         // RE-201 is tape — increasing LP coefficients with distance
-        assert!(coeff[0] < coeff[2], "Later zones should have stronger filtering");
+        assert!(
+            coeff[0] < coeff[2],
+            "Later zones should have stronger filtering"
+        );
 
         let coeff_lofi = MediumPreset::LoFi.zone_coefficients();
         assert_eq!(coeff_lofi.len(), 3);

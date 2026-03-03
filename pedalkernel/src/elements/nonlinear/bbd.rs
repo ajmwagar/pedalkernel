@@ -291,7 +291,8 @@ impl BbdDelayLine {
     /// Modulating this with an LFO creates chorus/flanger effects.
     pub fn set_clock(&mut self, clock_hz: f64) {
         self.clock_freq = clock_hz.clamp(self.model.clock_min, self.model.clock_max);
-        self.inner.set_delay_seconds(self.model.delay_at_clock(self.clock_freq));
+        self.inner
+            .set_delay_seconds(self.model.delay_at_clock(self.clock_freq));
 
         let sample_rate = self.sample_rate;
 
@@ -304,8 +305,7 @@ impl BbdDelayLine {
             Self::compute_leakage_coef(&self.model, self.clock_freq, sample_rate);
 
         // Update clock feedthrough frequency
-        self.clock_phase_inc =
-            2.0 * std::f64::consts::PI * self.clock_freq / sample_rate;
+        self.clock_phase_inc = 2.0 * std::f64::consts::PI * self.clock_freq / sample_rate;
 
         // Update envelope delay to match audio delay
         let delay_secs = self.model.delay_at_clock(self.clock_freq);
@@ -359,8 +359,7 @@ impl BbdDelayLine {
         } else {
             self.compander_release
         };
-        self.compander_env_in =
-            coef_in * self.compander_env_in + (1.0 - coef_in) * abs_in;
+        self.compander_env_in = coef_in * self.compander_env_in + (1.0 - coef_in) * abs_in;
 
         // Model analog noise floor - prevents expansion from true zero which causes pops.
         // Real NE571 companders have finite noise that prevents infinite expansion gain.
@@ -408,8 +407,8 @@ impl BbdDelayLine {
             + (1.0 - self.leakage_lpf_coef) * out_raw;
 
         // Anti-alias LPF (BBD Nyquist bandwidth limit)
-        self.lpf_state = self.lpf_coef * self.lpf_state
-            + (1.0 - self.lpf_coef) * self.leakage_lpf_state;
+        self.lpf_state =
+            self.lpf_coef * self.lpf_state + (1.0 - self.lpf_coef) * self.leakage_lpf_state;
 
         // Clock feedthrough
         self.clock_phase += self.clock_phase_inc;
@@ -454,8 +453,8 @@ impl BbdDelayLine {
         } else {
             self.compander_release / error_scale
         };
-        self.compander_env_out = coef_out.min(0.9999) * self.compander_env_out
-            + (1.0 - coef_out.min(0.9999)) * abs_out;
+        self.compander_env_out =
+            coef_out.min(0.9999) * self.compander_env_out + (1.0 - coef_out.min(0.9999)) * abs_out;
 
         // Compute tracking error as gain modulation.
         // Error is larger when:
@@ -485,14 +484,14 @@ impl BbdDelayLine {
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
         self.inner.set_sample_rate(sample_rate);
-        self.inner.set_delay_seconds(self.model.delay_at_clock(self.clock_freq));
+        self.inner
+            .set_delay_seconds(self.model.delay_at_clock(self.clock_freq));
 
         let lpf_cutoff = self.model.bandwidth_ratio * self.clock_freq;
         self.lpf_coef = (-2.0 * std::f64::consts::PI * lpf_cutoff / sample_rate).exp();
         self.leakage_lpf_coef =
             Self::compute_leakage_coef(&self.model, self.clock_freq, sample_rate);
-        self.clock_phase_inc =
-            2.0 * std::f64::consts::PI * self.clock_freq / sample_rate;
+        self.clock_phase_inc = 2.0 * std::f64::consts::PI * self.clock_freq / sample_rate;
         self.compander_attack = (-1.0 / (0.005 * sample_rate)).exp();
         self.compander_release = (-1.0 / (0.050 * sample_rate)).exp();
 
@@ -501,9 +500,9 @@ impl BbdDelayLine {
         let max_env_delay_samples = (max_delay * sample_rate) as usize + 16;
         self.env_delay_buffer.resize(max_env_delay_samples, 0.0);
         self.env_delay_write_pos = 0;
-        self.env_delay_samples =
-            (self.model.delay_at_clock(self.clock_freq) * sample_rate) as usize
-                % self.env_delay_buffer.len();
+        self.env_delay_samples = (self.model.delay_at_clock(self.clock_freq) * sample_rate)
+            as usize
+            % self.env_delay_buffer.len();
     }
 
     /// Reset all state.
@@ -755,7 +754,7 @@ mod tests {
         let mut input = Vec::new();
         // Silence
         input.extend(vec![0.0; 4800]); // 100ms silence
-        // Sudden attack
+                                       // Sudden attack
         for i in 0..24000 {
             // 500ms of signal
             let t = i as f64 / SAMPLE_RATE;
@@ -794,7 +793,10 @@ mod tests {
                 max_ratio = max_ratio.max(ratio);
                 min_ratio = min_ratio.min(ratio);
                 if i < 20 || i > input_env.len() - 10 {
-                    println!("Chunk {}: in={:.4}, out={:.4}, ratio={:.3}", i, inp, out, ratio);
+                    println!(
+                        "Chunk {}: in={:.4}, out={:.4}, ratio={:.3}",
+                        i, inp, out, ratio
+                    );
                 }
             }
         }
@@ -841,7 +843,11 @@ mod tests {
             println!("{:.1}\t{:.2}%", level, output_thd * 100.0);
 
             // CHARACTERIZATION: Record current THD behavior
-            assert!(output_thd < 0.5, "THD should be reasonable: {:.1}%", output_thd * 100.0);
+            assert!(
+                output_thd < 0.5,
+                "THD should be reasonable: {:.1}%",
+                output_thd * 100.0
+            );
         }
     }
 
@@ -904,7 +910,11 @@ mod tests {
 
         println!("\n=== CASCADED BBD TEST ===");
         println!("Input RMS: {:.4}", input_rms);
-        println!("Single BBD: RMS={:.4}, THD={:.2}%", single_rms, single_thd * 100.0);
+        println!(
+            "Single BBD: RMS={:.4}, THD={:.2}%",
+            single_rms,
+            single_thd * 100.0
+        );
         println!(
             "Cascaded:   RMS={:.4}, THD={:.2}%",
             cascade_rms,
@@ -923,10 +933,7 @@ mod tests {
         }
 
         // Record for regression - will tighten after fix
-        assert!(
-            cascade_rms > 0.0,
-            "Cascade should produce output"
-        );
+        assert!(cascade_rms > 0.0, "Cascade should produce output");
     }
 
     #[test]
@@ -971,12 +978,18 @@ mod tests {
         let min_gain = gains.iter().cloned().fold(f64::MAX, f64::min);
         let gain_variation = max_gain / min_gain.max(0.001);
 
-        println!("Gain variation: {:.2}x (max={:.3}, min={:.3})", gain_variation, max_gain, min_gain);
+        println!(
+            "Gain variation: {:.2}x (max={:.3}, min={:.3})",
+            gain_variation, max_gain, min_gain
+        );
 
         // CHARACTERIZATION: Gain should be relatively stable
         // Large variation indicates compander state issues
         if gain_variation > 3.0 {
-            println!("WARNING: Gain varies {:.1}x between bursts - state issue", gain_variation);
+            println!(
+                "WARNING: Gain varies {:.1}x between bursts - state issue",
+                gain_variation
+            );
         }
     }
 
@@ -1005,7 +1018,11 @@ mod tests {
             );
 
             // Test at different clock frequencies
-            for &clock in &[model.clock_min, (model.clock_min + model.clock_max) / 2.0, model.clock_max] {
+            for &clock in &[
+                model.clock_min,
+                (model.clock_min + model.clock_max) / 2.0,
+                model.clock_max,
+            ] {
                 let coef = BbdDelayLine::compute_leakage_coef(&model, clock, SAMPLE_RATE);
                 let delay_ms = model.delay_at_clock(clock) * 1000.0;
 
@@ -1125,7 +1142,13 @@ mod tests {
             // Measure decay rate between repeats
             for i in 0..peaks.len().min(5) {
                 let (pos, amp) = peaks[i];
-                println!("Peak {}: pos={} ({:.1}ms), amp={:.4}", i, pos, pos as f64 / SAMPLE_RATE * 1000.0, amp);
+                println!(
+                    "Peak {}: pos={} ({:.1}ms), amp={:.4}",
+                    i,
+                    pos,
+                    pos as f64 / SAMPLE_RATE * 1000.0,
+                    amp
+                );
             }
 
             // Check if decay is smooth (each repeat should be ~feedback × previous)
@@ -1135,13 +1158,21 @@ mod tests {
             for i in 1..peaks.len().min(5) {
                 let ratio = peaks[i].1.abs() / peaks[i - 1].1.abs().max(0.001);
                 decay_ratios.push(ratio);
-                println!("Decay {}->{}: {:.3} (expected ~{:.2})", i - 1, i, ratio, expected_decay);
+                println!(
+                    "Decay {}->{}: {:.3} (expected ~{:.2})",
+                    i - 1,
+                    i,
+                    ratio,
+                    expected_decay
+                );
             }
 
             // CHARACTERIZATION: Decay should be close to feedback setting
             // If it varies wildly, the feedback path has issues
             if let Some(&max_ratio) = decay_ratios.iter().max_by(|a, b| a.partial_cmp(b).unwrap()) {
-                if let Some(&min_ratio) = decay_ratios.iter().min_by(|a, b| a.partial_cmp(b).unwrap()) {
+                if let Some(&min_ratio) =
+                    decay_ratios.iter().min_by(|a, b| a.partial_cmp(b).unwrap())
+                {
                     let variation = max_ratio / min_ratio.max(0.001);
                     println!("Decay variation: {:.2}x", variation);
 
@@ -1256,7 +1287,13 @@ mod tests {
             let out_thd = thd(&output, SAMPLE_RATE, 440.0);
             let out_peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
 
-            println!("{}\t{:.4}\t{:.2}%\t{:.4}", name, out_rms, out_thd * 100.0, out_peak);
+            println!(
+                "{}\t{:.4}\t{:.2}%\t{:.4}",
+                name,
+                out_rms,
+                out_thd * 100.0,
+                out_peak
+            );
         }
     }
 }

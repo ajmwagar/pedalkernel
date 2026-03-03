@@ -29,7 +29,11 @@ fn write_header(out: &mut String, layout: &Layout) {
     let w = layout.bounds.width * SCALE;
     let h = layout.bounds.height * SCALE;
 
-    writeln!(out, "(kicad_sch (version 20230121) (generator pedalkernel-layout)").unwrap();
+    writeln!(
+        out,
+        "(kicad_sch (version 20230121) (generator pedalkernel-layout)"
+    )
+    .unwrap();
     writeln!(out).unwrap();
     writeln!(out, "  (uuid \"00000000-0000-0000-0000-000000000001\")").unwrap();
     writeln!(out, "  (paper \"A3\")").unwrap();
@@ -61,8 +65,18 @@ fn write_components(out: &mut String, layout: &Layout, pedal: &PedalDef) {
         let y = placed.y * SCALE;
         let angle = placed.orientation as f32;
 
-        writeln!(out, "  (symbol (lib_id \"{lib_symbol}\") (at {x:.1} {y:.1} {angle:.0})").unwrap();
-        writeln!(out, "    (uuid \"{:08x}-0000-0000-0000-{:012x}\")", idx + 1, idx + 1).unwrap();
+        writeln!(
+            out,
+            "  (symbol (lib_id \"{lib_symbol}\") (at {x:.1} {y:.1} {angle:.0})"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "    (uuid \"{:08x}-0000-0000-0000-{:012x}\")",
+            idx + 1,
+            idx + 1
+        )
+        .unwrap();
         writeln!(
             out,
             "    (property \"Reference\" \"{ref_prefix}{name}\" (at {x:.1} {y_ref:.1} 0)",
@@ -97,7 +111,11 @@ fn write_wires(out: &mut String, layout: &Layout) {
             let x2 = seg[1][0] * SCALE;
             let y2 = seg[1][1] * SCALE;
 
-            writeln!(out, "  (wire (pts (xy {x1:.1} {y1:.1}) (xy {x2:.1} {y2:.1})))").unwrap();
+            writeln!(
+                out,
+                "  (wire (pts (xy {x1:.1} {y1:.1}) (xy {x2:.1} {y2:.1})))"
+            )
+            .unwrap();
         }
     }
     writeln!(out).unwrap();
@@ -106,7 +124,11 @@ fn write_wires(out: &mut String, layout: &Layout) {
 fn write_power_symbols(out: &mut String, layout: &Layout) {
     for rail in &layout.supply_rails {
         let y = rail.y * SCALE;
-        let symbol = if rail.name == "vcc" { "power:VCC" } else { "power:GND" };
+        let symbol = if rail.name == "vcc" {
+            "power:VCC"
+        } else {
+            "power:GND"
+        };
         let label = rail.name.to_uppercase();
 
         writeln!(out, "  (symbol (lib_id \"{symbol}\") (at 50.0 {y:.1} 0)").unwrap();

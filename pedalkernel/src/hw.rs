@@ -301,9 +301,14 @@ fn check_spec_voltage(
 
     // IC supply max (op-amps, synth ICs, comparators, analog switches)
     if let Some(supply_max) = spec.supply_max {
-        let is_ic = matches!(kind,
-            ComponentKind::OpAmp(_) | ComponentKind::Vco(_) | ComponentKind::Vcf(_) |
-            ComponentKind::Vca(_) | ComponentKind::Comparator(_) | ComponentKind::AnalogSwitch(_)
+        let is_ic = matches!(
+            kind,
+            ComponentKind::OpAmp(_)
+                | ComponentKind::Vco(_)
+                | ComponentKind::Vcf(_)
+                | ComponentKind::Vca(_)
+                | ComponentKind::Comparator(_)
+                | ComponentKind::AnalogSwitch(_)
         );
         if is_ic {
             if voltage > supply_max {
@@ -960,33 +965,51 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     } else {
                         // Use type-specific Mouser part numbers
                         match ot {
-                            crate::dsl::OpAmpType::Generic | crate::dsl::OpAmpType::Tl072 => {
-                                (Some("595-TL072CP".to_string()), "TL072 Dual Op-Amp".to_string(), "TL072".to_string())
-                            }
-                            crate::dsl::OpAmpType::Tl082 => {
-                                (Some("595-TL082CP".to_string()), "TL082 Dual Op-Amp".to_string(), "TL082".to_string())
-                            }
-                            crate::dsl::OpAmpType::Jrc4558 => {
-                                (Some("513-NJM4558DD".to_string()), "JRC4558D Dual Op-Amp".to_string(), "JRC4558D".to_string())
-                            }
-                            crate::dsl::OpAmpType::Rc4558 => {
-                                (Some("595-RC4558P".to_string()), "RC4558 Dual Op-Amp".to_string(), "RC4558".to_string())
-                            }
-                            crate::dsl::OpAmpType::Lm308 => {
-                                (Some("926-LM308N/NOPB".to_string()), "LM308N Op-Amp".to_string(), "LM308N".to_string())
-                            }
-                            crate::dsl::OpAmpType::Lm741 => {
-                                (Some("595-LM741CN/NOPB".to_string()), "LM741 Op-Amp".to_string(), "LM741".to_string())
-                            }
-                            crate::dsl::OpAmpType::Ne5532 => {
-                                (Some("595-NE5532P".to_string()), "NE5532 Dual Op-Amp".to_string(), "NE5532".to_string())
-                            }
-                            crate::dsl::OpAmpType::Ca3080 => {
-                                (Some("595-CA3080EZ".to_string()), "CA3080 OTA".to_string(), "CA3080".to_string())
-                            }
-                            crate::dsl::OpAmpType::Op07 => {
-                                (Some("595-OP07CP".to_string()), "OP07 Precision Op-Amp".to_string(), "OP07".to_string())
-                            }
+                            crate::dsl::OpAmpType::Generic | crate::dsl::OpAmpType::Tl072 => (
+                                Some("595-TL072CP".to_string()),
+                                "TL072 Dual Op-Amp".to_string(),
+                                "TL072".to_string(),
+                            ),
+                            crate::dsl::OpAmpType::Tl082 => (
+                                Some("595-TL082CP".to_string()),
+                                "TL082 Dual Op-Amp".to_string(),
+                                "TL082".to_string(),
+                            ),
+                            crate::dsl::OpAmpType::Jrc4558 => (
+                                Some("513-NJM4558DD".to_string()),
+                                "JRC4558D Dual Op-Amp".to_string(),
+                                "JRC4558D".to_string(),
+                            ),
+                            crate::dsl::OpAmpType::Rc4558 => (
+                                Some("595-RC4558P".to_string()),
+                                "RC4558 Dual Op-Amp".to_string(),
+                                "RC4558".to_string(),
+                            ),
+                            crate::dsl::OpAmpType::Lm308 => (
+                                Some("926-LM308N/NOPB".to_string()),
+                                "LM308N Op-Amp".to_string(),
+                                "LM308N".to_string(),
+                            ),
+                            crate::dsl::OpAmpType::Lm741 => (
+                                Some("595-LM741CN/NOPB".to_string()),
+                                "LM741 Op-Amp".to_string(),
+                                "LM741".to_string(),
+                            ),
+                            crate::dsl::OpAmpType::Ne5532 => (
+                                Some("595-NE5532P".to_string()),
+                                "NE5532 Dual Op-Amp".to_string(),
+                                "NE5532".to_string(),
+                            ),
+                            crate::dsl::OpAmpType::Ca3080 => (
+                                Some("595-CA3080EZ".to_string()),
+                                "CA3080 OTA".to_string(),
+                                "CA3080".to_string(),
+                            ),
+                            crate::dsl::OpAmpType::Op07 => (
+                                Some("595-OP07CP".to_string()),
+                                "OP07 Precision Op-Amp".to_string(),
+                                "OP07".to_string(),
+                            ),
                         }
                     };
                     vec![BomEntry {
@@ -1042,9 +1065,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                             crate::dsl::PhotocouplerType::Nsl32 => {
                                 (Some("NSL-32".to_string()), "NSL-32 Optocoupler".to_string())
                             }
-                            crate::dsl::PhotocouplerType::T4b => {
-                                (Some("T4B".to_string()), "T4B EL Panel + LDR (LA-2A style)".to_string())
-                            }
+                            crate::dsl::PhotocouplerType::T4b => (
+                                Some("T4B".to_string()),
+                                "T4B EL Panel + LDR (LA-2A style)".to_string(),
+                            ),
                         }
                     };
                     vec![BomEntry {
@@ -1139,12 +1163,14 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         (None, part_name.to_string())
                     } else {
                         match mt {
-                            crate::dsl::MosfetType::N2n7000 => {
-                                (Some("512-2N7000".to_string()), "2N7000 N-MOSFET".to_string())
-                            }
-                            crate::dsl::MosfetType::Irf520 => {
-                                (Some("942-IRF520NPBF".to_string()), "IRF520 N-MOSFET".to_string())
-                            }
+                            crate::dsl::MosfetType::N2n7000 => (
+                                Some("512-2N7000".to_string()),
+                                "2N7000 N-MOSFET".to_string(),
+                            ),
+                            crate::dsl::MosfetType::Irf520 => (
+                                Some("942-IRF520NPBF".to_string()),
+                                "IRF520 N-MOSFET".to_string(),
+                            ),
                             _ => (None, format!("N-MOSFET ({mt:?})")),
                         }
                     };
@@ -1165,9 +1191,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                             crate::dsl::MosfetType::Bs250 => {
                                 (Some("512-BS250".to_string()), "BS250 P-MOSFET".to_string())
                             }
-                            crate::dsl::MosfetType::Irf9520 => {
-                                (Some("942-IRF9520NPBF".to_string()), "IRF9520 P-MOSFET".to_string())
-                            }
+                            crate::dsl::MosfetType::Irf9520 => (
+                                Some("942-IRF9520NPBF".to_string()),
+                                "IRF9520 P-MOSFET".to_string(),
+                            ),
                             _ => (None, format!("P-MOSFET ({mt:?})")),
                         }
                     };
@@ -1189,14 +1216,12 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                                 None, // NOS sourcing
                                 "MN3207 1024-stage BBD".to_string(),
                             ),
-                            crate::dsl::BbdType::Mn3007 => (
-                                None,
-                                "MN3007 1024-stage BBD (low-noise)".to_string(),
-                            ),
-                            crate::dsl::BbdType::Mn3005 => (
-                                None,
-                                "MN3005 4096-stage BBD (long delay)".to_string(),
-                            ),
+                            crate::dsl::BbdType::Mn3007 => {
+                                (None, "MN3007 1024-stage BBD (low-noise)".to_string())
+                            }
+                            crate::dsl::BbdType::Mn3005 => {
+                                (None, "MN3005 4096-stage BBD (long delay)".to_string())
+                            }
                         }
                     };
                     vec![BomEntry {
@@ -1525,10 +1550,18 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                 // ── Studio Equipment Components ──────────────────────────────
                 ComponentKind::Transformer(cfg) => {
                     let winding_desc = match (cfg.primary_type, cfg.secondary_type) {
-                        (crate::dsl::WindingType::PushPull, crate::dsl::WindingType::CenterTap) => "PP/CT",
-                        (crate::dsl::WindingType::Standard, crate::dsl::WindingType::CenterTap) => "CT Secondary",
-                        (crate::dsl::WindingType::CenterTap, crate::dsl::WindingType::Standard) => "CT Primary",
-                        (crate::dsl::WindingType::PushPull, crate::dsl::WindingType::Standard) => "Push-Pull",
+                        (crate::dsl::WindingType::PushPull, crate::dsl::WindingType::CenterTap) => {
+                            "PP/CT"
+                        }
+                        (crate::dsl::WindingType::Standard, crate::dsl::WindingType::CenterTap) => {
+                            "CT Secondary"
+                        }
+                        (crate::dsl::WindingType::CenterTap, crate::dsl::WindingType::Standard) => {
+                            "CT Primary"
+                        }
+                        (crate::dsl::WindingType::PushPull, crate::dsl::WindingType::Standard) => {
+                            "Push-Pull"
+                        }
                         _ => "Standard",
                     };
                     vec![BomEntry {
@@ -1606,26 +1639,32 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         display: "Rotary Switch".into(),
                         value: format!("{}-position", positions.len()),
                         mouser_pn: None, // Depends on deck count, application
-                        description: format!(
-                            "{}-position rotary switch",
-                            positions.len()
-                        ),
+                        description: format!("{}-position rotary switch", positions.len()),
                         qty_per_unit: 1,
                     }]
                 }
                 ComponentKind::ResistorSwitched(values) => {
                     // Generate entries for all resistor values in the switch
-                    values.iter().enumerate().map(|(i, v)| {
-                        let (_, suffix, scaled) = super::kicad::format_eng_components(*v);
-                        BomEntry {
-                            reference: format!("{}_{}", comp.id, i + 1),
-                            display: "Resistor".into(),
-                            value: format!("{}{}", scaled, suffix),
-                            mouser_pn: super::hw::mouser_resistor(*v),
-                            description: format!("Resistor {:.2}{} (switched position {})", scaled, suffix, i + 1),
-                            qty_per_unit: 1,
-                        }
-                    }).collect()
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let (_, suffix, scaled) = super::kicad::format_eng_components(*v);
+                            BomEntry {
+                                reference: format!("{}_{}", comp.id, i + 1),
+                                display: "Resistor".into(),
+                                value: format!("{}{}", scaled, suffix),
+                                mouser_pn: super::hw::mouser_resistor(*v),
+                                description: format!(
+                                    "Resistor {:.2}{} (switched position {})",
+                                    scaled,
+                                    suffix,
+                                    i + 1
+                                ),
+                                qty_per_unit: 1,
+                            }
+                        })
+                        .collect()
                 }
                 ComponentKind::Switch(positions) => {
                     vec![BomEntry {
@@ -1633,10 +1672,7 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         display: "Switch".into(),
                         value: format!("{}-position", positions),
                         mouser_pn: None, // Depends on specific switch type
-                        description: format!(
-                            "{}-position mechanical switch",
-                            positions
-                        ),
+                        description: format!("{}-position mechanical switch", positions),
                         qty_per_unit: 1,
                     }]
                 }
@@ -1985,7 +2021,10 @@ pedal "Test" {
         // All curated components should have a Mouser P/N.
         // Op-amps and well-known passives are all in the DB.
         let matched = bom.iter().filter(|e| e.mouser_pn.is_some()).count();
-        assert!(matched >= 4, "At least Drive pot, C1, D1, Level pot should have Mouser P/Ns");
+        assert!(
+            matched >= 4,
+            "At least Drive pot, C1, D1, Level pot should have Mouser P/Ns"
+        );
     }
 
     #[test]

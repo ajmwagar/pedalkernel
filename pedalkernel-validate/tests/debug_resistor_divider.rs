@@ -43,7 +43,11 @@ fn debug_resistor_divider_structure() {
     println!("\n=== Signal Flow Debug ===");
     println!("Input:  {:.6}V", input);
     println!("Output: {:.6}V", output);
-    println!("Gain:   {:.6} ({:.2} dB)", output / input, 20.0 * (output / input).log10());
+    println!(
+        "Gain:   {:.6} ({:.2} dB)",
+        output / input,
+        20.0 * (output / input).log10()
+    );
     println!("Expected: 0.5 (-6.02 dB)");
     println!("Error: {:.2} dB", 20.0 * ((output / input) / 0.5).log10());
 
@@ -89,8 +93,16 @@ fn debug_rc_lowpass_structure() {
     println!("\n=== RC Lowpass @ 1kHz ===");
     println!("Cutoff: {:.1} Hz", fc);
     println!("Test freq: {:.0} Hz", freq);
-    println!("Expected gain: {:.4} ({:.2} dB)", expected_gain, 20.0 * expected_gain.log10());
-    println!("Actual gain:   {:.4} ({:.2} dB)", max_out, 20.0 * max_out.log10());
+    println!(
+        "Expected gain: {:.4} ({:.2} dB)",
+        expected_gain,
+        20.0 * expected_gain.log10()
+    );
+    println!(
+        "Actual gain:   {:.4} ({:.2} dB)",
+        max_out,
+        20.0 * max_out.log10()
+    );
     println!("Error: {:.2} dB", 20.0 * (max_out / expected_gain).log10());
 }
 

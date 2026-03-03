@@ -171,8 +171,7 @@ impl InterstageLoading {
 
         if self.lpf_coef > 0.0 {
             // One-pole LPF for RC loading
-            self.lpf_state =
-                self.lpf_coef * self.lpf_state + (1.0 - self.lpf_coef) * attenuated;
+            self.lpf_state = self.lpf_coef * self.lpf_state + (1.0 - self.lpf_coef) * attenuated;
             self.lpf_state
         } else {
             attenuated
@@ -277,8 +276,7 @@ impl CableModel {
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
         if self.lpf_coef > 0.0 {
-            self.lpf_state =
-                self.lpf_coef * self.lpf_state + (1.0 - self.lpf_coef) * input;
+            self.lpf_state = self.lpf_coef * self.lpf_state + (1.0 - self.lpf_coef) * input;
             self.lpf_state
         } else {
             input
@@ -449,10 +447,7 @@ mod tests {
         for _ in 0..5000 {
             out = cable.process(1.0);
         }
-        assert!(
-            (out - 1.0).abs() < 0.01,
-            "Cable should pass DC: {out}"
-        );
+        assert!((out - 1.0).abs() < 0.01, "Cable should pass DC: {out}");
     }
 
     #[test]

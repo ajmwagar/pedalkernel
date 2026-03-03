@@ -3,9 +3,11 @@
 //! Models preamp tubes (12AX7, 12AT7, 12AU7) using the Koren equation.
 //! Parameters are loaded from the embedded `triodes.model` file.
 
-use super::solver::{softplus, newton_raphson_solve, NlDeviceIv, NlDeviceGroupIv, LEAKAGE_CONDUCTANCE};
+use super::solver::{
+    newton_raphson_solve, softplus, NlDeviceGroupIv, NlDeviceIv, LEAKAGE_CONDUCTANCE,
+};
 use crate::elements::WdfRoot;
-use crate::models::{SpiceTriodeModel, triode_by_name};
+use crate::models::{triode_by_name, SpiceTriodeModel};
 
 // ---------------------------------------------------------------------------
 // Triode (Vacuum Tube) Models
@@ -42,7 +44,10 @@ impl TriodeModel {
     /// Panics if the name is not found.
     pub fn by_name(name: &str) -> Self {
         Self::try_by_name(name).unwrap_or_else(|| {
-            panic!("Unknown triode model: '{}'. Use triode_model_names() to list available models.", name)
+            panic!(
+                "Unknown triode model: '{}'. Use triode_model_names() to list available models.",
+                name
+            )
         })
     }
 
@@ -251,8 +256,14 @@ impl WdfRoot for TriodeRoot {
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
         let v_max = self.v_max;
-        newton_raphson_solve(a, rp, a * 0.5, self.max_iter, 1e-6,
-            Some((-50.0, v_max)), None,
+        newton_raphson_solve(
+            a,
+            rp,
+            a * 0.5,
+            self.max_iter,
+            1e-6,
+            Some((-50.0, v_max)),
+            None,
             |v| (root.plate_current(v), root.plate_current_derivative(v)),
         )
     }
@@ -419,7 +430,9 @@ impl TriodeThreePort {
 }
 
 impl NlDeviceGroupIv for TriodeThreePort {
-    fn n_ports(&self) -> usize { 2 }
+    fn n_ports(&self) -> usize {
+        2
+    }
 
     fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
         let vgk = v[0]; // Port 0: grid-cathode (actual voltage, no shift needed)
@@ -433,20 +446,20 @@ impl NlDeviceGroupIv for TriodeThreePort {
         // Grid current (diode model)
         let (ig, dig_dvgk) = self.grid_iv(vgk);
         currents[0] = ig;
-        jacobian[0] = dig_dvgk;   // ∂ig/∂vgk
-        jacobian[1] = 0.0;        // ∂ig/∂vpk (grid current independent of plate voltage)
+        jacobian[0] = dig_dvgk; // ∂ig/∂vgk
+        jacobian[1] = 0.0; // ∂ig/∂vpk (grid current independent of plate voltage)
 
         // Plate current (Koren model with cross-coupling)
         let (ip, dip_dvpk, dip_dvgk) = self.plate_iv(vgk, vpk);
         currents[1] = ip;
-        jacobian[2] = dip_dvgk;   // ∂ip/∂vgk (transconductance — cross-coupling)
-        jacobian[3] = dip_dvpk;   // ∂ip/∂vpk
+        jacobian[2] = dip_dvgk; // ∂ip/∂vgk (transconductance — cross-coupling)
+        jacobian[3] = dip_dvpk; // ∂ip/∂vpk
     }
 
     fn v_clamp_port(&self, port: usize) -> (f64, f64) {
         match port {
-            0 => (-50.0, 10.0),          // Grid: well below cutoff to slight forward bias
-            _ => (-self.v_max, 10.0),    // Plate: WDF range [-V_supply, ~0] (maps to actual [0, V_supply])
+            0 => (-50.0, 10.0),       // Grid: well below cutoff to slight forward bias
+            _ => (-self.v_max, 10.0), // Plate: WDF range [-V_supply, ~0] (maps to actual [0, V_supply])
         }
     }
 }
@@ -543,8 +556,14 @@ mod tests {
         for &vpk in &[100.0, 200.0] {
             for &vgk in &[-2.0, -1.0, 0.0] {
                 let (ia, _, gm) = tp.plate_iv(vgk, vpk);
-                assert!(gm >= 0.0, "gm should be non-negative at Vgk={vgk}, Vpk={vpk}: got {gm:.6e}");
-                assert!(gm.is_finite(), "gm should be finite at Vgk={vgk}, Vpk={vpk}");
+                assert!(
+                    gm >= 0.0,
+                    "gm should be non-negative at Vgk={vgk}, Vpk={vpk}: got {gm:.6e}"
+                );
+                assert!(
+                    gm.is_finite(),
+                    "gm should be finite at Vgk={vgk}, Vpk={vpk}"
+                );
                 if ia > 1e-10 {
                     assert!(gm > 1e-10, "gm should be significantly positive when conducting: ia={ia:.6e}, gm={gm:.6e}");
                 }
@@ -574,18 +593,31 @@ mod tests {
         let mut v_guess = [-2.0, 0.0];
 
         let b = multi_port_nr_solve_grouped(
-            2, &s_nl, &known_a, &port_resistances, &groups, &offsets,
-            &mut v_guess, 50, 1e-8,
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess,
+            50,
+            1e-8,
         );
 
         assert!(b[0].is_finite(), "Grid reflected wave should be finite");
         assert!(b[1].is_finite(), "Plate reflected wave should be finite");
         // WDF plate voltage should be negative (V_plate < V_CC)
-        assert!(v_guess[1] < 0.0,
-            "Plate WDF voltage should be negative (below V_CC): got {}", v_guess[1]);
+        assert!(
+            v_guess[1] < 0.0,
+            "Plate WDF voltage should be negative (below V_CC): got {}",
+            v_guess[1]
+        );
         // Actual plate voltage should be positive (tube conducting, plate above 0)
         let v_plate_actual = v_guess[1] + v_cc;
-        assert!(v_plate_actual > 0.0,
-            "Actual plate voltage should be positive: got {}", v_plate_actual);
+        assert!(
+            v_plate_actual > 0.0,
+            "Actual plate voltage should be positive: got {}",
+            v_plate_actual
+        );
     }
 }
