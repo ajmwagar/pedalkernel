@@ -286,7 +286,10 @@ VIN v_in 0 PWL({pwl_data})
         Ok(data)
     }
 
-    /// Resample SPICE output to uniform grid and decimate.
+    /// Resample SPICE output to uniform grid at internal rate.
+    ///
+    /// Returns samples at the full internal rate (sample_rate × oversample)
+    /// to match the WDF runner's output rate for sample-by-sample comparison.
     fn resample_and_decimate(&self, raw_data: &[(f64, f64)], duration: f64) -> Vec<f64> {
         let internal_rate = self.config.internal_rate();
         let n_internal = (duration * internal_rate) as usize;
@@ -300,12 +303,7 @@ VIN v_in 0 PWL({pwl_data})
             uniform_output.push(v);
         }
 
-        // Decimate to output sample rate
-        if self.config.oversample > 1 {
-            self.decimate(&uniform_output, self.config.oversample as usize)
-        } else {
-            uniform_output
-        }
+        uniform_output
     }
 
     /// Linear interpolation at time t.
@@ -337,14 +335,6 @@ VIN v_in 0 PWL({pwl_data})
         let (t1, v1) = data[hi];
         let alpha = (t - t0) / (t1 - t0);
         v0 + alpha * (v1 - v0)
-    }
-
-    /// Simple decimation by averaging.
-    fn decimate(&self, signal: &[f64], factor: usize) -> Vec<f64> {
-        signal
-            .chunks(factor)
-            .map(|chunk| chunk.iter().sum::<f64>() / chunk.len() as f64)
-            .collect()
     }
 
     /// Get the configuration.
@@ -404,14 +394,4 @@ mod tests {
         assert!((runner.interpolate(&data, 1.5) - 15.0).abs() < 1e-10);
     }
 
-    #[test]
-    fn decimation_works() {
-        let runner = SpiceRunner::new(SpiceConfig::default());
-        let signal = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-        let decimated = runner.decimate(&signal, 4);
-
-        assert_eq!(decimated.len(), 2);
-        assert!((decimated[0] - 2.5).abs() < 1e-10); // (1+2+3+4)/4
-        assert!((decimated[1] - 6.5).abs() < 1e-10); // (5+6+7+8)/4
-    }
 }

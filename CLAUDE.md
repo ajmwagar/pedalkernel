@@ -107,13 +107,129 @@ fn phase90_speed_controls_sweep_rate() {
 }
 ```
 
+### Running Tests
+
+#### Library Unit Tests (685 tests)
+```bash
+cargo test -p pedalkernel --lib
+```
+Core compiler, WDF tree, element models, NR solver, DSL parser.
+
+#### Integration Tests
+
+```bash
+# Control binding pipeline — verifies 6-step bind produces correct pot/switch mappings
+cargo test --test control_binding          # 34 tests
+
+# Stage structure — checks compiled stage counts, types, control bindings
+cargo test --test stage_investigation      # 5 tests
+
+# Scattering sanity — property-style adaptor KCL/KVL validation
+cargo test --test scattering_sanity        # 2 tests
+
+# Pedal diagnostics — aliasing, sample-rate scaling, solver convergence
+cargo test --test pedal_diagnostics        # 7 tests
+
+# Golden regression — deterministic output locked to golden .npy snapshots
+cargo test --test golden_regression        # 1 test (+ 1 ignored regenerate helper)
+
+# BJT circuits (Fuzz Face multi-NL)
+cargo test --test integration_bjt          # 21 tests
+
+# Tube circuits (triodes, pentodes, push-pull)
+cargo test --test integration_tubes        # 48 tests
+
+# Full pedal compile-and-process
+cargo test --test integration_pedals       # 15 tests
+
+# Other integration suites
+cargo test --test integration_engine       # Engine processing tests
+cargo test --test integration_clipping     # Diode clipping circuits
+cargo test --test integration_opamp_jfet   # Op-amp and JFET circuits
+cargo test --test integration_compressor   # Compressor circuits
+cargo test --test integration_lfo          # LFO and modulation
+cargo test --test integration_bbd          # Bucket Brigade Device (requires bbd feature)
+cargo test --test nonlinear_solver         # NR solver convergence tests
+cargo test --test invariants               # Compiler invariant checks
+```
+
+#### SPICE Golden Reference Validation (36 tests)
+
+The `pedalkernel-validate` binary compares WDF output against SPICE golden references with dB/RMS/spectral metrics. **Must be run from the `pedalkernel-validate/` directory** (circuits and golden .npy files are relative to CWD).
+
+```bash
+cd pedalkernel-validate
+
+# Run all 7 suites with detailed metrics table (RMS dB, Peak dB, THD, Spectral)
+cargo run --release --bin pedalkernel-validate -- --detailed run --suite all
+
+# Run a specific suite
+cargo run --release --bin pedalkernel-validate -- --detailed run --suite nonlinear
+cargo run --release --bin pedalkernel-validate -- --detailed run --suite pedals
+
+# Run a single test within a suite
+cargo run --release --bin pedalkernel-validate -- --detailed run --suite active --test fuzz_face_pnp
+
+# List all available suites and tests
+cargo run --release --bin pedalkernel-validate -- list
+
+# Generate JSON report
+cargo run --release --bin pedalkernel-validate -- --report report.json run --suite all
+```
+
+**Validation suites:**
+| Suite | Tests | Description |
+|-------|-------|-------------|
+| `linear` | 4 | RC/RL filter transfer functions |
+| `nonlinear` | 5 | Diode clipper, cathode 12AX7, zener |
+| `opamp` | 6 | Unity buffer, inverting/noninverting gain, integrator |
+| `active` | 10 | BJT, JFET, MOSFET, OTA, triode, push-pull |
+| `pedals` | 4 | Fuzz core, RAT clipper, Big Muff, TS808 |
+| `reactive` | 4 | Delay, LC resonant, transformer step-up/down |
+| `stress` | 1 | DC stability |
+
+**Metrics reported:**
+- **RMS Error (dB)** — `20*log10(rms(wdf-ref)/rms(ref))`
+- **Peak Error (dB)** — `20*log10(max|wdf-ref|/max|ref|)`
+- **THD Error (dB)** — Total Harmonic Distortion difference
+- **Spectral Error (dB)** — Frequency-domain magnitude difference (bins >-80dB of peak)
+
+**Golden reference management:**
+```bash
+# Bootstrap golden refs from current WDF output (for regression locking)
+cargo run --release --bin pedalkernel-validate -- bootstrap --suite all
+
+# Generate analytical refs for linear circuits (no external deps)
+cargo run --release --bin pedalkernel-validate -- generate-linear
+
+# Generate from ngspice (requires `brew install ngspice`)
+cargo run --release --bin pedalkernel-validate -- generate-spice --suite all --spice-dir spice-circuits
+
+# Check ngspice availability
+cargo run --release --bin pedalkernel-validate -- check-spice
+```
+
+**Data locations:**
+- Circuit definitions: `pedalkernel-validate/circuits/{suite}/{test}.pedal`
+- Golden references: `pedalkernel-validate/golden/{suite}/{test}/{signal}.npy`
+- SPICE netlists: `pedalkernel-validate/spice-circuits/{suite}/{test}.spice`
+
+#### pedalkernel-pro Tests (run from pedalkernel-pro/)
+```bash
+# Fairchild 670 compression tests
+cargo test -p fairchild-670
+
+# Full workspace tests (may fail if resvg dep is broken)
+cargo test --workspace
+```
+
 ### A/B Testing Against Reference
 
 For critical pedals, record reference audio from:
 - SPICE simulation of the exact circuit
 - Actual hardware (if available)
 
-Compare PedalKernel output using:
+Compare PedalKernel output using the `pedalkernel-validate` binary (see above) or manually:
 - Frequency spectrum analysis
 - THD measurements at various input levels
 - Transient response comparison
