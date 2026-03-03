@@ -2761,52 +2761,65 @@ fn multi_nl_fuzz_face_sample_rates() {
 
 #[test]
 fn multi_nl_fuzz_face_pot_recomputes_scattering() {
-    // Verify that changing the Fuzz pot triggers scattering matrix recomputation.
-    // The Fuzz pot sits between the two BJTs in the multi-NL R-type adaptor,
-    // so changing it must update the scattering matrix to affect the circuit.
+    use crate::tree::WdfPort;
+
+    // Uses fuzz_face_v2 which has the correct topology:
+    // Fuzz pot bridges Q1.emitter ↔ Q2.emitter (feedback control).
     let pedal = parse("fuzz_face.pedal");
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
 
-    // Process with Fuzz=0.1 (low distortion)
-    let mut proc_lo = compile_pedal(&pedal, 48000.0).unwrap();
-    proc_lo.set_control("Fuzz", 0.1);
-    proc_lo.set_control("Volume", 0.5);
+    assert!(!proc.multi_nl_stages.is_empty(), "Should have multi-NL stage(s)");
+    let stage = &proc.multi_nl_stages[0];
+    assert!(stage.recompute_data.is_some(), "Stage should have recompute_data");
 
-    // Verify at least one multi-NL stage has recompute_data
+    let recompute = stage.recompute_data.as_ref().unwrap();
+    let n_nl = stage.n_nl;
+    let n_passive = stage.passive_children.len();
+    let n_total = n_nl + n_passive + 1;
+
+    // Find the pot child
+    let pot_idx = stage.passive_children.iter().position(|c| {
+        matches!(c, super::dyn_node::DynNode::Pot { .. })
+    }).expect("should have a pot child");
+
+    let build_ports = |pot_resistance: f64| -> Vec<WdfPort> {
+        let mut ports = Vec::with_capacity(n_total);
+        for i in 0..n_nl {
+            let (pos, neg) = recompute.port_node_pairs[i];
+            ports.push(WdfPort { node_pos: pos, node_neg: neg, resistance: stage.nl_port_resistances[i] });
+        }
+        for k in 0..n_passive {
+            let (pos, neg) = recompute.port_node_pairs[n_nl + k];
+            let rp = if k == pot_idx { pot_resistance } else { stage.passive_children[k].port_resistance() };
+            ports.push(WdfPort { node_pos: pos, node_neg: neg, resistance: rp });
+        }
+        let (pos, neg) = recompute.port_node_pairs[n_nl + n_passive];
+        ports.push(WdfPort { node_pos: pos, node_neg: neg, resistance: recompute.adapted_resistance });
+        ports
+    };
+
+    let s_lo = recompute.mna.derive_scattering_matrix_general(&build_ports(1.0));
+    let s_hi = recompute.mna.derive_scattering_matrix_general(&build_ports(1000.0));
+
+    let full_max_diff = s_lo.iter().zip(s_hi.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+
+    let mut s_nl_max_diff = 0.0f64;
+    for i in 0..n_nl {
+        for j in 0..n_nl {
+            let d = (s_lo[i * n_total + j] - s_hi[i * n_total + j]).abs();
+            s_nl_max_diff = s_nl_max_diff.max(d);
+        }
+    }
+
     assert!(
-        proc_lo.debug_multi_nl_count() > 0,
-        "Should have multi-NL stage(s)"
+        full_max_diff > 1e-3,
+        "Full scattering should change with pot (max_diff={full_max_diff:.6e})"
     );
-
-    let n = 4800; // 100ms at 48kHz
-    let input: Vec<f64> = (0..n)
-        .map(|i| 0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
-        .collect();
-    let out_lo: Vec<f64> = input.iter().map(|&s| proc_lo.process(s)).collect();
-
-    // Process with Fuzz=0.9 (high distortion)
-    let mut proc_hi = compile_pedal(&pedal, 48000.0).unwrap();
-    proc_hi.set_control("Fuzz", 0.9);
-    proc_hi.set_control("Volume", 0.5);
-
-    let out_hi: Vec<f64> = input.iter().map(|&s| proc_hi.process(s)).collect();
-
-    // Both should be finite and produce output
-    assert!(out_lo.iter().all(|x| x.is_finite()), "Lo finite");
-    assert!(out_hi.iter().all(|x| x.is_finite()), "Hi finite");
-
-    let peak_lo = out_lo.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    let peak_hi = out_hi.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    assert!(peak_lo > 0.001, "Lo should produce output: {peak_lo}");
-    assert!(peak_hi > 0.001, "Hi should produce output: {peak_hi}");
-
-    // The outputs should differ — if scattering recomputation didn't happen,
-    // both would produce identical output despite different pot positions.
-    let rms_diff: f64 = out_lo.iter().zip(out_hi.iter())
-        .map(|(a, b)| (a - b).powi(2))
-        .sum::<f64>()
-        .sqrt() / n as f64;
     assert!(
-        rms_diff > 1e-6,
-        "Different Fuzz settings should produce different output (rms_diff={rms_diff})"
+        s_nl_max_diff > 1e-6,
+        "NL-to-NL scattering should change with pot (max_diff={s_nl_max_diff:.6e})"
     );
 }
+

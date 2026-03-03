@@ -14,26 +14,19 @@ Q1: vce_max(32) part("AC128")
 Q2: vce_max(32) part("AC128")
 
 # Input coupling - non-polarized or bipolar electrolytic
-C1: voltage_rating(25) part("2.2uF Film")
+C1: voltage_rating(25) part("2.2uF Electrolytic")
 
 # Emitter bypass - enhances gain
-C2: voltage_rating(25) part("22uF Electrolytic")
-
-# Power bypass
-C3: voltage_rating(25) part("100nF Ceramic")
+C2: voltage_rating(25) part("20uF Electrolytic")
 
 # Output coupling
-C4: voltage_rating(25) part("10uF Electrolytic")
+C3: voltage_rating(25) part("10nF Film")
 
 # Standard 1/4W resistors
 R1: power_rating(0.25)
 R2: power_rating(0.25)
 R3: power_rating(0.25)
 R4: power_rating(0.25)
-R5: power_rating(0.25)
-R6: power_rating(0.25)
-R7: power_rating(0.25)
-R8: power_rating(0.25)
 
 # Pots
 Fuzz: part("1k Linear")

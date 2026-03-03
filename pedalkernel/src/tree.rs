@@ -1692,4 +1692,47 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn scattering_changes_when_port_resistance_changes() {
+        // Minimal 2-node circuit: verify derive_scattering_matrix_general
+        // produces different scattering when a port resistance changes.
+        //
+        // Topology: node 0 --[R1=1kΩ]--> GND
+        //           node 0 --[NL port]--> node 1
+        //           node 0 --[pot port]--> node 1
+        //           node 1 --[adapted]---> GND
+        let mut mna = MnaSystem::new(2, 0);
+        mna.stamp_resistor(Some(0), None, 1000.0);
+        // GMIN
+        mna.stamp_resistor(Some(0), None, 1e9);
+        mna.stamp_resistor(Some(1), None, 1e9);
+
+        // Pot at minimum (1Ω)
+        let ports_lo = vec![
+            WdfPort { node_pos: Some(0), node_neg: Some(1), resistance: 10_000.0 },
+            WdfPort { node_pos: Some(0), node_neg: Some(1), resistance: 1.0 },
+            WdfPort { node_pos: Some(1), node_neg: None, resistance: 1000.0 },
+        ];
+        // Pot at maximum (1kΩ)
+        let ports_hi = vec![
+            WdfPort { node_pos: Some(0), node_neg: Some(1), resistance: 10_000.0 },
+            WdfPort { node_pos: Some(0), node_neg: Some(1), resistance: 1000.0 },
+            WdfPort { node_pos: Some(1), node_neg: None, resistance: 1000.0 },
+        ];
+
+        let s_lo = mna.derive_scattering_matrix_general(&ports_lo);
+        let s_hi = mna.derive_scattering_matrix_general(&ports_hi);
+
+        let max_diff = s_lo.iter().zip(s_hi.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+
+        assert!(
+            max_diff > 0.01,
+            "Scattering should change with port resistance (max_diff={max_diff:.6e})\n\
+             s_lo={s_lo:.6?}\n\
+             s_hi={s_hi:.6?}"
+        );
+    }
 }

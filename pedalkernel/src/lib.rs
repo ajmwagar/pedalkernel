@@ -689,8 +689,8 @@ pedal "Test Pedal" {
     fn pedal_fuzz_face() {
         let p = parse_example("fuzz_face.pedal");
         assert_eq!(p.name, "Fuzz Face");
-        assert_eq!(p.components.len(), 16);
-        assert_eq!(p.nets.len(), 22);
+        assert_eq!(p.components.len(), 11);
+        assert_eq!(p.nets.len(), 17);
         assert_eq!(p.controls.len(), 2);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Fuzz"));

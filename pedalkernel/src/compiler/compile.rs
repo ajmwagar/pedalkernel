@@ -585,7 +585,12 @@ pub fn compile_pedal_with_options(
         .unwrap_or(1.0);
 
     let physical_gain = opamp_feedback_gain * passive_attenuation * transformer_gain;
-    let (pre_gain, output_gain, gain_range_final) = (physical_gain, level_default, (1.0, 1.0));
+    // Gain range for PreGain controls ("Gain", "Drive", "Fuzz", etc.).
+    // Maps the 0–1 control value to a useful input-level sweep:
+    //   value=0 → near-unity (clean), value=1 → 10× drive (+20 dB).
+    // This is a fallback for pots not found in any WDF stage tree.
+    let gain_range_final = (physical_gain.max(0.1), physical_gain.max(0.1) * 10.0);
+    let (pre_gain, output_gain) = (physical_gain, level_default);
 
     let lfos = super::bind::build_lfo_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);
     let envelopes = super::bind::build_envelope_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);

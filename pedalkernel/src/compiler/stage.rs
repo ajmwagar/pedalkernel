@@ -1350,16 +1350,40 @@ impl MultiNlStage {
 
     /// Set a pot value, searching through passive children.
     ///
+    /// Handles Baxandall-decomposed pots: a 3-terminal pot is split into
+    /// `{id}__aw` (wiper-to-a, tracks `value`) and `{id}__wb` (wiper-to-b,
+    /// tracks `1 - value`).  Both halves are updated so the scattering
+    /// matrix sees the correct resistance on each side of the wiper.
+    ///
     /// When a pot is found and updated, recomputes the scattering matrix
     /// from the stored MNA data with updated port resistances.
     pub fn set_pot(&mut self, target_id: &str, value: f64) -> bool {
         let mut found = false;
+
+        // Try base name (2-terminal pot)
         for child in &mut self.passive_children {
             if child.set_pot(target_id, value) {
                 found = true;
                 break;
             }
         }
+
+        // Try Baxandall-decomposed halves (3-terminal pot)
+        let aw = format!("{target_id}__aw");
+        for child in &mut self.passive_children {
+            if child.set_pot(&aw, value) {
+                found = true;
+                break;
+            }
+        }
+        let wb = format!("{target_id}__wb");
+        for child in &mut self.passive_children {
+            if child.set_pot(&wb, 1.0 - value) {
+                found = true;
+                break;
+            }
+        }
+
         if found {
             self.recompute_scattering();
         }
@@ -1374,7 +1398,9 @@ impl MultiNlStage {
     fn recompute_scattering(&mut self) {
         let recompute = match &self.recompute_data {
             Some(r) => r,
-            None => return, // No pots — nothing to recompute
+            None => {
+                return;
+            }
         };
 
         let n_nl = self.n_nl;
@@ -1397,10 +1423,11 @@ impl MultiNlStage {
         // Passive ports (resistances may have changed from pots)
         for k in 0..n_passive {
             let (pos, neg) = recompute.port_node_pairs[n_nl + k];
+            let rp = self.passive_children[k].port_resistance();
             ports.push(WdfPort {
                 node_pos: pos,
                 node_neg: neg,
-                resistance: self.passive_children[k].port_resistance(),
+                resistance: rp,
             });
         }
 

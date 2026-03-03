@@ -1,79 +1,89 @@
-# Dallas Arbiter Fuzz Face (Germanium, ~1966)
-# Two-stage PNP germanium transistor fuzz
-# Q1 = input buffer/driver, Q2 = gain/clipping stage
-# Note: PNP circuit - positive ground design (vcc is actually negative)
+# Dallas Arbiter Fuzz Face (1966)
+# Two-stage PNP germanium transistor fuzz with global DC-coupled feedback
+# Q1 = common emitter driver (biased for asymmetric clip), Q2 = gain/fuzz stage
+# PNP positive-ground design — vcc is the "ground" reference in the real circuit
 #
-# Classic components: AC128, NKT275, or similar germanium PNP transistors
+# Corrected from ElectroSmash analysis + R.G. Keen "Technology of the Fuzz Face":
+#   - No Q1 emitter resistor (original has none — kills asymmetry)
+#   - Fuzz pot as feedback control (Q2 emitter → Q1 emitter)
+#   - Output coupling 10nF (tight bass rolloff)
+#   - No input bias resistor (original has none)
+#
+# Real BOM: C1=2.2µF, C2=20µF, C3=10nF, R1=33k, R2=470Ω, R3=8.2k, R4=100k
+# Q1: AC128 (β≈70-85), Q2: AC128 (β≈110-130)
+# Ideal bias: Q1 Vc = -0.5 to -0.7V, Q2 Vc = -4.5V
 
 pedal "Fuzz Face" {
   components {
-    # Input stage
-    C1: cap(2.2u)           # Input coupling (2.2µF electrolytic)
-    R1: resistor(33k)       # Q1 collector load / Q2 bias
+    # Input coupling
+    C1: cap(2.2u, electrolytic)   # Input DC blocking (2.2µF electrolytic)
 
-    # Q1 - Input buffer / driver stage
-    Q1: pnp(ac128)          # AC128 germanium PNP
-    R2: resistor(330)       # Q1 emitter stabilization (some versions)
+    # Q1 — Input driver stage (common emitter, no emitter degeneration)
+    # Biased off-center: Vc ≈ -0.5 to -0.7V for asymmetric clipping
+    Q1: pnp(ac128)                # AC128 germanium PNP (β≈70-85)
+    R1: resistor(33k)             # Q1 collector load — sets bias + gain
 
-    # Interstage coupling
-    R3: resistor(8.2k)      # Q1 collector to Q2 base bias
+    # Interstage DC coupling
+    R3: resistor(8.2k)            # Q1 collector → Q2 base bias network
 
-    # Q2 - Main gain / clipping stage
-    Q2: pnp(ac128)          # AC128 germanium PNP
-    R4: resistor(470)       # Q2 emitter resistor
-    C2: cap(22u)            # Q2 emitter bypass (more gain)
-    R5: resistor(100k)      # Q2 collector load
+    # Q2 — Main gain / fuzz stage (common emitter with variable degeneration)
+    Q2: pnp(ac128)                # AC128 germanium PNP (β≈110-130)
+    R2: resistor(470)             # Q2 emitter resistor (sets local gain ceiling)
+    C2: cap(20u, electrolytic)    # Q2 emitter bypass — AC-shorts R2 for more gain
+    R4: resistor(100k)            # Q2 collector load
 
-    # Feedback / Fuzz control
-    Fuzz: pot(1k, b)        # Fuzz amount (linear taper)
-    R6: resistor(100)       # Minimum fuzz resistance
-
-    # Bias stabilization
-    R7: resistor(100k)      # Input bias resistor
-    C3: cap(100n)           # Power supply bypass
-
-    # Output stage
-    C4: cap(10u)            # Output coupling (blocks DC)
-    Volume: pot(500k, a)    # Output volume (audio taper)
-    R8: resistor(10k)       # Output load
-  }
-  nets {
-    # Power supply bypass
-    vcc -> C3.a
-    C3.b -> gnd
-
-    # Input stage
-    in -> C1.a
-    C1.b -> R7.a, Q1.base
-    R7.b -> gnd
-
-    # Q1 configuration (common emitter)
-    vcc -> R1.a
-    R1.b -> Q1.collector, R3.a
-    Q1.emitter -> R2.a, Fuzz.a
-    R2.b -> gnd
-    Fuzz.b -> R6.a
-    R6.b -> gnd
-
-    # Interstage bias
-    R3.b -> Q2.base
-
-    # Q2 configuration (common emitter)
-    Q2.emitter -> R4.a, C2.a
-    R4.b -> vcc
-    C2.b -> vcc
-    Q2.collector -> R5.a
-    R5.b -> gnd
-
-    # Feedback from Q2 collector to Q1 base
-    Q2.collector -> Q1.base
+    # Fuzz control — global negative feedback (Q2 emitter → Q1 emitter)
+    # Min position (0Ω): max feedback → clean, low gain
+    # Max position (1kΩ): feedback attenuated → full fuzz
+    Fuzz: pot(1k, b)              # Fuzz amount (linear taper)
 
     # Output
-    Q2.collector -> C4.a
-    C4.b -> Volume.a, R8.a
-    R8.b -> gnd
-    Volume.b -> out
+    C3: cap(10n)                  # Output coupling — 10nF is tight, rolls off lows
+                                  # fc = 1/(2π × 500k × 10nF) ≈ 31Hz at full volume
+    Volume: pot(500k, a)          # Output volume (audio taper)
   }
+
+  nets {
+    # --- Input stage ---
+    in -> C1.a
+    C1.b -> Q1.base              # Signal directly to Q1 base (no bias resistor!)
+
+    # --- Q1 common emitter (PNP: collector load to vcc) ---
+    vcc -> R1.a
+    R1.b -> Q1.collector, R3.a   # Collector node: load + interstage coupling
+
+    # Q1 emitter connects to feedback network (no emitter resistor!)
+    Q1.emitter -> Fuzz.a         # Fuzz pot terminal A
+
+    # --- Interstage: Q1 collector drives Q2 base via R3 ---
+    R3.b -> Q2.base
+
+    # --- Q2 common emitter (PNP) ---
+    Q2.emitter -> R2.a, C2.a     # Emitter: R2 to vcc + C2 bypass
+    R2.b -> vcc                   # R2 (470Ω) to supply
+    C2.b -> vcc                   # C2 (20µF) bypasses R2 at audio freqs
+    Q2.collector -> R4.a          # Collector through R4 load
+    R4.b -> gnd                   # R4 (100k) to ground
+
+    # --- Global feedback network (the soul of the Fuzz Face) ---
+    # Fuzz pot bridges Q2 emitter to Q1 emitter
+    # This creates negative feedback that controls gain + stability
+    Q2.emitter -> Fuzz.b          # Fuzz pot terminal B
+    # When Fuzz = 0: Q2 emitter shorted to Q1 emitter → max feedback → clean
+    # When Fuzz = 1: 1kΩ between emitters → reduced feedback → full fuzz
+
+    # --- DC feedback: Q2 collector to Q1 base ---
+    # This DC path (through R4, Q2, R3) stabilizes the bias of both stages
+    # and is what makes the circuit self-biasing (and temperature sensitive)
+    Q2.collector -> Q1.base       # DC feedback for bias stabilization
+
+    # --- Output stage ---
+    Q2.collector -> C3.a          # Output coupling (10nF — tight bass rolloff)
+    C3.b -> Volume.a              # To volume pot
+    Volume.w -> out               # Wiper to output
+    Volume.b -> gnd               # Pot end to ground (voltage divider)
+  }
+
   controls {
     Fuzz.position -> "Fuzz" [0.0, 1.0] = 0.7
     Volume.position -> "Volume" [0.0, 1.0] = 0.6

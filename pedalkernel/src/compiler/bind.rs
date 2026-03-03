@@ -45,6 +45,17 @@ pub(super) fn build_controls(
             }
         });
 
+        // Resolve the control target.  Priority:
+        //  1. Switch / rotary switch
+        //  2. Op-amp feedback pot (detected during opamp analysis)
+        //  3. Pot physically present in a WDF / coupled-BJT / multi-NL stage tree
+        //  4. Sidechain pot
+        //  5. LFO / delay net connection
+        //  6. Label-based heuristics (gain, level, rate, depth, delay, feedback)
+        //
+        // Searching stage trees (step 3) before label heuristics ensures that
+        // pots like "Gain" or "Volume" are bound to their actual WDF tree node
+        // rather than being silently routed to PreGain/OutputGain.
         let target = if let Some((switch_id, num_positions)) = switch_info {
             ControlTarget::SwitchPosition { switch_id, num_positions }
         } else if let Some(&(stage_idx, ri, fixed_series_r, max_pot_r, parallel_fixed_r, is_inverting)) = opamp_pot_map.get(&ctrl.component) {
@@ -56,106 +67,105 @@ pub(super) fn build_controls(
                 parallel_fixed_r,
                 is_inverting,
             }
-        } else if is_gain_label(&ctrl.label) {
-            ControlTarget::PreGain
-        } else if is_level_label(&ctrl.label) {
-            ControlTarget::OutputGain
-        } else if is_rate_label(&ctrl.label) {
-            if !lfo_ids.is_empty() {
-                ControlTarget::LfoRate(0)
-            } else {
-                ControlTarget::PreGain
-            }
-        } else if is_depth_label(&ctrl.label) {
-            if !lfo_ids.is_empty() {
-                ControlTarget::LfoDepth(0)
-            } else {
-                ControlTarget::PreGain
-            }
-        } else if is_delay_time_label(&ctrl.label) && !delay_lines_empty {
-            ControlTarget::DelayTime(0)
-        } else if is_delay_feedback_label(&ctrl.label) && !delay_lines_empty {
-            ControlTarget::DelayFeedback(0)
         } else {
-            // Check if this pot connects to an LFO.rate via nets.
-            let mut lfo_target = None;
-            for net in &pedal.nets {
-                if let Pin::ComponentPin { component, pin } = &net.from {
-                    if component == &ctrl.component && pin == "wiper" {
-                        for to_pin in &net.to {
-                            if let Pin::ComponentPin {
-                                component: target_comp,
-                                pin: target_pin,
-                            } = to_pin
-                            {
-                                if target_pin == "rate" {
-                                    if let Some(idx) = lfo_ids.iter().position(|id| id == target_comp) {
-                                        lfo_target = Some(ControlTarget::LfoRate(idx));
-                                        break;
-                                    }
-                                }
-                                if target_pin == "delay_time" {
-                                    if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
-                                        lfo_target = Some(ControlTarget::DelayTime(idx));
-                                        break;
-                                    }
-                                }
-                                if target_pin == "feedback" {
-                                    if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
-                                        lfo_target = Some(ControlTarget::DelayFeedback(idx));
-                                        break;
-                                    }
-                                }
-                            }
+            // ── Step 3: search stage trees for the physical pot ──────────
+            let mut found_stage = None;
+            for (si, stage) in stages.iter().enumerate() {
+                if has_pot(&stage.tree, &ctrl.component) {
+                    found_stage = Some(ControlTarget::PotInStage(si));
+                    break;
+                }
+            }
+            if found_stage.is_none() {
+                'outer: for (ci, coupled) in coupled_bjt_stages.iter().enumerate() {
+                    for (bi, (tree, _, _)) in coupled.bjt_stages.iter().enumerate() {
+                        if has_pot(tree, &ctrl.component) {
+                            found_stage = Some(ControlTarget::PotInCoupledBjtStage(ci, bi));
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            if found_stage.is_none() {
+                'outer_mnl: for (mi, mnl) in multi_nl_stages.iter().enumerate() {
+                    for (pi, child) in mnl.passive_children.iter().enumerate() {
+                        if has_pot(child, &ctrl.component) {
+                            found_stage = Some(ControlTarget::PotInMultiNlStage(mi, pi));
+                            break 'outer_mnl;
                         }
                     }
                 }
             }
 
-            if let Some(target) = lfo_target {
+            if let Some(target) = found_stage {
                 target
             } else {
-                let mut found_stage = None;
-                for (si, stage) in stages.iter().enumerate() {
-                    if has_pot(&stage.tree, &ctrl.component) {
-                        found_stage = Some(ControlTarget::PotInStage(si));
-                        break;
-                    }
-                }
-                // Also search coupled BJT stages for the pot.
-                if found_stage.is_none() {
-                    'outer: for (ci, coupled) in coupled_bjt_stages.iter().enumerate() {
-                        for (bi, (tree, _, _)) in coupled.bjt_stages.iter().enumerate() {
-                            if has_pot(tree, &ctrl.component) {
-                                found_stage = Some(ControlTarget::PotInCoupledBjtStage(ci, bi));
-                                break 'outer;
+                // ── Step 4: sidechain pots ───────────────────────────────
+                let sc_idx = sidechain_comp_ids.get(&ctrl.component)
+                    .or_else(|| sidechain_comp_ids.get(&format!("{}__aw", ctrl.component)))
+                    .or_else(|| sidechain_comp_ids.get(&format!("{}__wb", ctrl.component)));
+                if let Some(&idx) = sc_idx {
+                    ControlTarget::SidechainControl(idx)
+                } else {
+                    // ── Step 5: LFO / delay net connections ──────────────
+                    let mut lfo_target = None;
+                    for net in &pedal.nets {
+                        if let Pin::ComponentPin { component, pin } = &net.from {
+                            if component == &ctrl.component && pin == "wiper" {
+                                for to_pin in &net.to {
+                                    if let Pin::ComponentPin {
+                                        component: target_comp,
+                                        pin: target_pin,
+                                    } = to_pin
+                                    {
+                                        if target_pin == "rate" {
+                                            if let Some(idx) = lfo_ids.iter().position(|id| id == target_comp) {
+                                                lfo_target = Some(ControlTarget::LfoRate(idx));
+                                                break;
+                                            }
+                                        }
+                                        if target_pin == "delay_time" {
+                                            if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
+                                                lfo_target = Some(ControlTarget::DelayTime(idx));
+                                                break;
+                                            }
+                                        }
+                                        if target_pin == "feedback" {
+                                            if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
+                                                lfo_target = Some(ControlTarget::DelayFeedback(idx));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                }
-                // Also search multi-NL stages for the pot.
-                if found_stage.is_none() {
-                    'outer_mnl: for (mi, mnl) in multi_nl_stages.iter().enumerate() {
-                        for (pi, child) in mnl.passive_children.iter().enumerate() {
-                            if has_pot(child, &ctrl.component) {
-                                found_stage = Some(ControlTarget::PotInMultiNlStage(mi, pi));
-                                break 'outer_mnl;
+
+                    if let Some(target) = lfo_target {
+                        target
+                    } else {
+                        // ── Step 6: label-based heuristic fallback ───────
+                        if is_gain_label(&ctrl.label) {
+                            ControlTarget::PreGain
+                        } else if is_level_label(&ctrl.label) {
+                            ControlTarget::OutputGain
+                        } else if is_rate_label(&ctrl.label) {
+                            if !lfo_ids.is_empty() {
+                                ControlTarget::LfoRate(0)
+                            } else {
+                                ControlTarget::PreGain
                             }
-                        }
-                    }
-                }
-                match found_stage {
-                    Some(target) => target,
-                    None => {
-                        // Check if this pot is in a sidechain sub-circuit.
-                        // Pots may be decomposed into __aw/__wb variants during
-                        // graph construction (Baxandall decomposition), so check both
-                        // the original name and its decomposed forms.
-                        let sc_idx = sidechain_comp_ids.get(&ctrl.component)
-                            .or_else(|| sidechain_comp_ids.get(&format!("{}__aw", ctrl.component)))
-                            .or_else(|| sidechain_comp_ids.get(&format!("{}__wb", ctrl.component)));
-                        if let Some(&idx) = sc_idx {
-                            ControlTarget::SidechainControl(idx)
+                        } else if is_depth_label(&ctrl.label) {
+                            if !lfo_ids.is_empty() {
+                                ControlTarget::LfoDepth(0)
+                            } else {
+                                ControlTarget::PreGain
+                            }
+                        } else if is_delay_time_label(&ctrl.label) && !delay_lines_empty {
+                            ControlTarget::DelayTime(0)
+                        } else if is_delay_feedback_label(&ctrl.label) && !delay_lines_empty {
+                            ControlTarget::DelayFeedback(0)
                         } else {
                             ControlTarget::PreGain
                         }
