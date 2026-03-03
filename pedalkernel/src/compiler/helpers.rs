@@ -291,6 +291,8 @@ pub(super) fn has_pot(node: &DynNode, comp_id: &str) -> bool {
         DynNode::Series { left, right, .. } | DynNode::Parallel { left, right, .. } => {
             has_pot(left, comp_id) || has_pot(right, comp_id)
         }
+        DynNode::Transformer { secondary, .. } => has_pot(secondary, comp_id),
+        DynNode::RType { children, .. } => children.iter().any(|c| has_pot(c, comp_id)),
         _ => false,
     }
 }

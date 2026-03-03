@@ -485,7 +485,7 @@ fn check_pin_validity(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 // (switches, etc.) since they're not circuit elements
                 if !valid.is_empty() && !valid.contains(&pin.as_str()) {
                     w.push(PedalWarning {
-                        severity: Severity::Warning,
+                        severity: Severity::Error,
                         code: "unknown-pin",
                         message: format!(
                             "Pin '{}.{}' is not a recognized pin — expected one of: {}",

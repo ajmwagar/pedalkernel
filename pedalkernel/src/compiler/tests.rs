@@ -2942,6 +2942,34 @@ fn multi_nl_fuzz_face_pot_recomputes_scattering() {
         }
     }
 
+    // Frobenius norm of the full scattering delta
+    let frobenius: f64 = s_lo
+        .iter()
+        .zip(s_hi.iter())
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt();
+
+    // Print NL port resistances for context
+    eprintln!("  n_nl={n_nl}, n_passive={n_passive}, n_total={n_total}");
+    for i in 0..n_nl {
+        eprintln!("  NL port {i} Rp = {:.1} Ω", stage.nl_port_resistances[i]);
+    }
+    for k in 0..n_passive {
+        eprintln!(
+            "  Passive port {k} Rp = {:.1} Ω{}",
+            stage.passive_children[k].port_resistance(),
+            if k == pot_idx { " (POT)" } else { "" }
+        );
+    }
+    eprintln!("  Adapted port Rp = {:.1} Ω", recompute.adapted_resistance);
+    eprintln!();
+    eprintln!("  Pot sweep 1Ω → 1000Ω:");
+    eprintln!("    full_max_diff     = {full_max_diff:.6e}");
+    eprintln!("    s_nl_max_diff     = {s_nl_max_diff:.6e}");
+    eprintln!("    frobenius_norm    = {frobenius:.6e}");
+    eprintln!("    matrix size       = {n_total}×{n_total} ({} entries)", n_total * n_total);
+
     assert!(
         full_max_diff > 1e-3,
         "Full scattering should change with pot (max_diff={full_max_diff:.6e})"
@@ -2950,4 +2978,50 @@ fn multi_nl_fuzz_face_pot_recomputes_scattering() {
         s_nl_max_diff > 1e-6,
         "NL-to-NL scattering should change with pot (max_diff={s_nl_max_diff:.6e})"
     );
+}
+
+#[test]
+fn multi_nl_fuzz_face_pot_audio_impact() {
+    // Measures whether the Fuzz pot scattering change produces an audible
+    // audio difference. This is the end-to-end test for Issue #2.
+    let pedal = parse("fuzz_face.pedal");
+    let sr = 48000.0;
+    let warmup = 24000;
+    let measure = 4800;
+
+    let sine = |n: usize, amp: f64| -> Vec<f64> {
+        (0..n)
+            .map(|i| amp * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect()
+    };
+    let rms = |s: &[f64]| -> f64 {
+        (s.iter().map(|x| x * x).sum::<f64>() / s.len() as f64).sqrt()
+    };
+
+    let capture = |knob_val: f64, amp: f64| -> Vec<f64> {
+        let mut p = compile_pedal(&pedal, sr).unwrap();
+        p.set_control("Fuzz", knob_val);
+        p.set_control("Volume", 0.5);
+        for &s in &sine(warmup, amp) {
+            p.process(s);
+        }
+        sine(measure, amp).iter().map(|&s| p.process(s)).collect()
+    };
+
+    for amp in [0.05, 0.1, 0.3, 0.5] {
+        let lo = capture(0.0, amp);
+        let hi = capture(1.0, amp);
+        let diff: Vec<f64> = lo.iter().zip(hi.iter()).map(|(a, b)| a - b).collect();
+        let diff_rms = rms(&diff);
+        let lo_rms = rms(&lo);
+        let hi_rms = rms(&hi);
+        let ratio = if hi_rms > 1e-20 {
+            diff_rms / hi_rms
+        } else {
+            0.0
+        };
+        eprintln!(
+            "  amp={amp:.2}  Fuzz 0→1: diff_rms={diff_rms:.6e}  lo={lo_rms:.6e}  hi={hi_rms:.6e}  ratio={ratio:.4e}"
+        );
+    }
 }

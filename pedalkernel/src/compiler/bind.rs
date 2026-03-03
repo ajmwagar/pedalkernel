@@ -258,6 +258,7 @@ pub(super) fn build_controls(
             target,
             component_id: ctrl.component.clone(),
             max_resistance: max_r,
+            range: ctrl.range,
         });
     }
 

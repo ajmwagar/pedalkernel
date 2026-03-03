@@ -316,6 +316,22 @@ pub fn compile_pedal_with_options(
     let enable_thermal = options.thermal;
     let _collapse_nl = options.collapse_nl;
 
+    // ══ Pass 0.5: Validation ═══════════════════════════════════════════
+    // Run validation to catch pin errors early. Only hard-fail on
+    // unknown-pin errors — other Error-severity warnings (e.g. no-signal-path)
+    // may have false positives for sub-circuits and complex topologies.
+    let warnings = super::validate::validate_pedal(pedal);
+    for w in &warnings {
+        if w.severity == super::validate::Severity::Error && w.code == "unknown-pin" {
+            return Err(w.message.clone());
+        }
+    }
+    for w in &warnings {
+        if w.severity == super::validate::Severity::Warning {
+            eprintln!("[pedalkernel] {}", w);
+        }
+    }
+
     // ══ Pass 0: Graph construction ════════════════════════════════════
     let mut graph = CircuitGraph::from_pedal(pedal);
 

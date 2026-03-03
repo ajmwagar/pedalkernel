@@ -44,6 +44,9 @@ pub(super) struct ControlBinding {
     pub(super) component_id: String,
     #[allow(dead_code)]
     pub(super) max_resistance: f64,
+    /// Range mapping: (min, max).  Input 0→min, 1→max.
+    /// Default (0.0, 1.0) is identity; (1.0, 0.0) inverts.
+    pub(super) range: (f64, f64),
 }
 
 #[derive(Debug)]
@@ -838,10 +841,15 @@ impl CompiledPedal {
     /// Set a control by its label (e.g., "Drive", "Level", "Rate").
     pub fn set_control(&mut self, label: &str, value: f64) {
         let value = value.clamp(0.0, 1.0);
+        let mut found = false;
         for i in 0..self.controls.len() {
             if !self.controls[i].label.eq_ignore_ascii_case(label) {
                 continue;
             }
+            found = true;
+            // Map through range: (0,1)→identity, (1,0)→invert (dual-gang).
+            let (r0, r1) = self.controls[i].range;
+            let value = (r0 + value * (r1 - r0)).clamp(0.0, 1.0);
             match &self.controls[i].target {
                 ControlTarget::PreGain => {
                     let (lo, hi) = self.gain_range;
@@ -1027,14 +1035,15 @@ impl CompiledPedal {
                     }
                 }
             }
-            return;
         }
 
-        // Forward unmatched controls to sidechain sub-circuits.
-        // Sidechain controls (e.g., "Lat Time Constant") are compiled into
-        // the sidechain's own CompiledPedal and handled there.
-        for sc in &mut self.sidechains {
-            sc.set_control(label, value);
+        if !found {
+            // Forward unmatched controls to sidechain sub-circuits.
+            // Sidechain controls (e.g., "Lat Time Constant") are compiled into
+            // the sidechain's own CompiledPedal and handled there.
+            for sc in &mut self.sidechains {
+                sc.set_control(label, value);
+            }
         }
     }
 
@@ -1095,10 +1104,17 @@ impl CompiledPedal {
                     }
                     ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
                         let stage_idx = *stage_idx;
+                        let max_r = self.controls[ctrl_idx].max_resistance;
                         if let Some(stage) = self.multi_nl_stages.get_mut(stage_idx) {
                             // set_pot updates DynNode resistance per-sample but
                             // defers the O(n³) scattering recompute (sets flag).
                             stage.set_pot(&comp_id, value);
+                            // Small-value pots (< 5kΩ) produce tiny scattering
+                            // perturbations — flush immediately so the matrix
+                            // tracks the pot change without 32-sample lag.
+                            if max_r < 5_000.0 {
+                                stage.flush_recompute();
+                            }
                         }
                     }
                     _ => {}
