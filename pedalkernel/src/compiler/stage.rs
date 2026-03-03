@@ -165,6 +165,13 @@ pub(super) struct WdfStage {
     /// When the stage's injection node is on a transformer secondary,
     /// this is 1/turns_ratio (e.g., 17.0 for a 1:17 step-up).
     pub(super) transformer_gain: f64,
+    /// Circuit graph node ID where this stage's voltage source injects signal.
+    /// Used for node-based routing in parallel-path topologies.
+    pub(super) injection_node_id: usize,
+    /// Circuit graph node ID where this stage's output is extracted.
+    /// Typically the plate (triode), collector (BJT), or drain (JFET) node.
+    /// Used for node-based routing in parallel-path topologies.
+    pub(super) output_node_id: usize,
 }
 
 impl WdfStage {
@@ -1152,6 +1159,9 @@ pub(super) struct MultiNlStage {
     /// Circuit graph node ID where this stage's output port extracts signal.
     /// Used for node-based routing in parallel-path topologies.
     pub(super) output_node_id: usize,
+    /// Flag: pot changed since last scattering recompute.
+    /// Set by `set_pot()`, cleared by `flush_recompute()`.
+    pub(super) recompute_pending: bool,
 }
 
 impl MultiNlStage {
@@ -1385,9 +1395,23 @@ impl MultiNlStage {
         }
 
         if found {
-            self.recompute_scattering();
+            self.recompute_pending = true;
         }
         found
+    }
+
+    /// Flush a pending scattering recompute.
+    ///
+    /// Called by the throttle in `advance_smoothers()` every N samples
+    /// (typically 32) instead of on every pot change.  This reduces the
+    /// O(n³) matrix inversion cost by ~32× during knob sweeps while
+    /// keeping the pot resistance itself updated per-sample in the DynNode.
+    #[inline]
+    pub fn flush_recompute(&mut self) {
+        if self.recompute_pending {
+            self.recompute_pending = false;
+            self.recompute_scattering();
+        }
     }
 
     /// Recompute the scattering matrix from stored MNA data after a pot change.

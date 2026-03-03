@@ -142,6 +142,7 @@ fn build_passive_wdf_stage(
         base_diode_model: None, paired_opamp: None, dc_block: None,
         is_source_follower: false, prev_source_voltage: 0.0,
         signal_flow_distance: 0, transformer_gain: 1.0,
+        injection_node_id: usize::MAX, output_node_id: usize::MAX,
     };
     stage.balance_vs_impedance();
     Some(stage)
@@ -264,6 +265,8 @@ fn build_output_rooted_stage(
         base_diode_model: None, paired_opamp: None, dc_block: None,
         is_source_follower: false, prev_source_voltage: 0.0,
         signal_flow_distance: 0, transformer_gain: 1.0,
+        injection_node_id: usize::MAX,
+        output_node_id: usize::MAX,
     })
 }
 
@@ -688,6 +691,7 @@ pub fn compile_pedal_with_options(
             m
         },
         base_grid_bias,
+        multi_nl_recompute_counter: 0,
         stage_order,
         node_signals: Vec::new(),
     };

@@ -452,6 +452,10 @@ pub struct CompiledPedal {
     /// Base (unmodulated) grid bias for push-pull stages.
     /// Stored so sidechain CV can be subtracted without accumulation.
     pub(super) base_grid_bias: f64,
+    /// Sample counter for throttling multi-NL scattering recomputes.
+    /// When a pot inside a multi-NL R-type adaptor changes, the O(n³) matrix
+    /// inversion is deferred and flushed every 32 samples (~0.7 ms at 48 kHz).
+    pub(super) multi_nl_recompute_counter: u32,
     /// Topological ordering of WDF, multi-NL, and coupled BJT stages.
     /// Stages are sorted by signal_flow_distance so earlier stages in the
     /// signal path process first, regardless of stage type.
@@ -987,6 +991,11 @@ impl CompiledPedal {
     /// Call this once per sample (or per block for efficiency) to smoothly
     /// interpolate pot values toward their targets. This eliminates zipper
     /// noise and clicks when knobs are turned.
+    ///
+    /// Multi-NL scattering recomputes are throttled to every 32 samples
+    /// (~0.7 ms at 48 kHz) to avoid the O(n³) matrix inversion cost on
+    /// every sample.  The pot resistance in the DynNode is still updated
+    /// per-sample so the passive port impedance tracks smoothly.
     #[inline]
     fn advance_smoothers(&mut self) {
         for smoother in &mut self.pot_smoothers {
@@ -1035,11 +1044,24 @@ impl CompiledPedal {
                     ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
                         let stage_idx = *stage_idx;
                         if let Some(stage) = self.multi_nl_stages.get_mut(stage_idx) {
+                            // set_pot updates DynNode resistance per-sample but
+                            // defers the O(n³) scattering recompute (sets flag).
                             stage.set_pot(&comp_id, value);
                         }
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Throttle multi-NL scattering recomputes to every 32 samples.
+        // The pot resistance in the DynNode is updated per-sample above,
+        // but the expensive matrix re-derivation is batched here.
+        self.multi_nl_recompute_counter += 1;
+        if self.multi_nl_recompute_counter >= 32 {
+            self.multi_nl_recompute_counter = 0;
+            for stage in &mut self.multi_nl_stages {
+                stage.flush_recompute();
             }
         }
     }

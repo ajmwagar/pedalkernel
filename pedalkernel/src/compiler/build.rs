@@ -439,6 +439,8 @@ pub(super) fn build_stages(
             prev_source_voltage: 0.0,
             signal_flow_distance: usize::MAX, // op-amp buffer — runs last
             transformer_gain: 1.0,
+            injection_node_id: usize::MAX,
+            output_node_id: usize::MAX,
         });
     }
 
@@ -1365,6 +1367,7 @@ fn try_build_multi_nl_stage(
         transformer_gain: 1.0, // set by caller if needed
         injection_node_id,
         output_node_id,
+        recompute_pending: false,
     })
 }
 
@@ -1533,6 +1536,8 @@ fn build_vs_stage(
         prev_source_voltage: 0.0,
         signal_flow_distance: 0, // set by caller
         transformer_gain: 1.0, // set by caller
+        injection_node_id: plan.injection_node,
+        output_node_id: elem.junction_nodes.first().copied().unwrap_or(plan.injection_node),
     })
 }
 
@@ -1561,6 +1566,8 @@ fn build_source_follower_stage(
         prev_source_voltage: 0.0,
         signal_flow_distance: 0, // set by caller
         transformer_gain: 1.0, // set by caller
+        injection_node_id: plan.injection_node,
+        output_node_id: elem.junction_nodes.first().copied().unwrap_or(plan.injection_node),
     })
 }
 

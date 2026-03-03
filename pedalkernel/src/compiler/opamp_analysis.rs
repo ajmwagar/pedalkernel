@@ -127,6 +127,8 @@ pub(super) fn build_opamp_feedback_stages(
                     prev_source_voltage: 0.0,
                     signal_flow_distance: 0,
                     transformer_gain: 1.0,
+                    injection_node_id: usize::MAX,
+                    output_node_id: usize::MAX,
                 });
             }
             OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot } => {
@@ -164,6 +166,8 @@ pub(super) fn build_opamp_feedback_stages(
                     prev_source_voltage: 0.0,
                     signal_flow_distance: 0,
                     transformer_gain: 1.0,
+                    injection_node_id: usize::MAX,
+                    output_node_id: usize::MAX,
                 });
             }
         }
