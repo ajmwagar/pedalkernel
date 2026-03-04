@@ -16,6 +16,7 @@ struct SolverStatsAggregate {
     max_residual: f64,
     clamp_hits: u64,
     step_limited: u64,
+    iter_cap_hits: u64,
 }
 
 impl SolverStatsAggregate {
@@ -30,6 +31,9 @@ impl SolverStatsAggregate {
         if entry.step_limited {
             self.step_limited += 1;
         }
+        if entry.iter_cap_hit {
+            self.iter_cap_hits += 1;
+        }
     }
 }
 
@@ -41,6 +45,7 @@ pub struct SolverStatsSnapshot {
     pub max_residual: f64,
     pub clamp_hits: u64,
     pub step_limited: u64,
+    pub iter_cap_hits: u64,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -49,6 +54,7 @@ struct SolverStatsEntry {
     residual: f64,
     clamp_hit: bool,
     step_limited: bool,
+    iter_cap_hit: bool,
 }
 
 fn record_solver_stats(entry: SolverStatsEntry) {
@@ -74,6 +80,7 @@ pub fn solver_stats_snapshot() -> SolverStatsSnapshot {
                 max_residual: agg.max_residual,
                 clamp_hits: agg.clamp_hits,
                 step_limited: agg.step_limited,
+                iter_cap_hits: agg.iter_cap_hits,
             }
         })
     } else {
@@ -324,6 +331,11 @@ pub(crate) fn multi_port_nr_solve(
     debug_assert_eq!(port_resistances.len(), n_nl);
     debug_assert_eq!(devices.len(), n_nl);
     debug_assert_eq!(v_guess.len(), n_nl);
+    debug_assert!(
+        port_resistances.iter().all(|&r| r > 0.0),
+        "All port resistances must be positive, got: {:?}",
+        port_resistances
+    );
 
     // Working arrays
     let mut f_vec = vec![0.0; n_nl];
@@ -482,6 +494,9 @@ pub(crate) fn multi_port_nr_solve(
         }
     }
 
+    // Track iteration cap hits (solver ran all iterations without converging)
+    let iter_cap_hit = last_residual >= tolerance;
+
     // Ensure v_guess is clean after solver exits
     for i in 0..n_nl {
         if !v_guess[i].is_finite() {
@@ -500,10 +515,36 @@ pub(crate) fn multi_port_nr_solve(
         // compile with adapted NL port resistances from build.rs.
         b_nl[i] = b.clamp(-1000.0, 1000.0);
     }
+
+    #[cfg(feature = "debug-trace")]
+    {
+        let r_max = port_resistances.iter().copied().fold(0.0_f64, f64::max);
+        let r_min = port_resistances
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let cond = r_max / r_min;
+        for i in 0..n_nl {
+            let (current, _) = devices[i].iv(v_guess[i]);
+            let a_i = v_guess[i] + port_resistances[i] * current;
+            let a_scatter: f64 = known_a[i]
+                + (0..n_nl)
+                    .map(|j| s_nl[i * n_nl + j] * b_nl[j])
+                    .sum::<f64>();
+            let embed_err = (a_i - a_scatter).abs();
+            if embed_err > 1e-4 || cond > 1e6 {
+                eprintln!(
+                    "[NR] port R cond={cond:.1e} embed_err[{i}]={embed_err:.2e} residual={last_residual:.2e}"
+                );
+            }
+        }
+    }
+
     if let Some(mut entry) = stats_entry {
         entry.residual = last_residual;
         entry.clamp_hit = clamp_hit;
         entry.step_limited = step_limited;
+        entry.iter_cap_hit = iter_cap_hit;
         record_solver_stats(entry);
     }
     b_nl
@@ -558,6 +599,11 @@ pub(crate) fn multi_port_nr_solve_grouped(
     debug_assert_eq!(known_a.len(), n_nl);
     debug_assert_eq!(port_resistances.len(), n_nl);
     debug_assert_eq!(v_guess.len(), n_nl);
+    debug_assert!(
+        port_resistances.iter().all(|&r| r > 0.0),
+        "All port resistances must be positive, got: {:?}",
+        port_resistances
+    );
 
     // Build port-to-group mapping
     let n_groups = device_groups.len();
@@ -717,6 +763,9 @@ pub(crate) fn multi_port_nr_solve_grouped(
         }
     }
 
+    // Track iteration cap hits
+    let iter_cap_hit = last_residual >= tolerance;
+
     // Ensure v_guess is clean: if NaN leaked through, reset to midpoint of clamp range
     for i in 0..n_nl {
         if !v_guess[i].is_finite() {
@@ -753,10 +802,35 @@ pub(crate) fn multi_port_nr_solve_grouped(
         // with adapted NL port resistances.
         b_nl[i] = b.clamp(-1000.0, 1000.0);
     }
+
+    #[cfg(feature = "debug-trace")]
+    {
+        let r_max = port_resistances.iter().copied().fold(0.0_f64, f64::max);
+        let r_min = port_resistances
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let cond = r_max / r_min;
+        for i in 0..n_nl {
+            let a_i = v_guess[i] + port_resistances[i] * currents[i];
+            let a_scatter: f64 = known_a[i]
+                + (0..n_nl)
+                    .map(|j| s_nl[i * n_nl + j] * b_nl[j])
+                    .sum::<f64>();
+            let embed_err = (a_i - a_scatter).abs();
+            if embed_err > 1e-4 || cond > 1e6 {
+                eprintln!(
+                    "[NR-grouped] port R cond={cond:.1e} embed_err[{i}]={embed_err:.2e} residual={last_residual:.2e}"
+                );
+            }
+        }
+    }
+
     if let Some(mut entry) = stats_entry {
         entry.residual = last_residual;
         entry.clamp_hit = clamp_hit;
         entry.step_limited = step_limited;
+        entry.iter_cap_hit = iter_cap_hit;
         record_solver_stats(entry);
     }
     b_nl
@@ -858,7 +932,11 @@ where
 
     let result = 2.0 * v - a;
 
-    if let Some(entry) = stats_entry {
+    if let Some(mut entry) = stats_entry {
+        // Check if we hit the iteration cap without converging
+        if entry.iterations as usize == max_iter && entry.residual >= tolerance {
+            entry.iter_cap_hit = true;
+        }
         record_solver_stats(entry);
     }
 
@@ -1546,6 +1624,687 @@ mod tests {
 
         for i in 0..3 {
             assert!(b[i].is_finite(), "b[{i}] not finite: {}", b[i]);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Verification helpers
+    // -----------------------------------------------------------------------
+
+    /// Verify the WDF embedding constraint: a_i = v_i + R_i * i_i(v_i)
+    /// must equal the scattering relation: a_i = known_a_i + Σ_j S[i][j] * b_j.
+    fn verify_embedding_constraint(
+        n_nl: usize,
+        s_nl: &[f64],
+        known_a: &[f64],
+        port_resistances: &[f64],
+        v: &[f64],
+        b: &[f64],
+        devices: &[&dyn NlDeviceIv],
+        tolerance: f64,
+    ) {
+        for i in 0..n_nl {
+            let (current, _) = devices[i].iv(v[i]);
+            let a_device = v[i] + port_resistances[i] * current;
+            let a_scatter: f64 = known_a[i]
+                + (0..n_nl)
+                    .map(|j| s_nl[i * n_nl + j] * b[j])
+                    .sum::<f64>();
+            let err = (a_device - a_scatter).abs();
+            assert!(
+                err < tolerance,
+                "Embedding constraint violated at port {i}: a_device={a_device:.6e}, \
+                 a_scatter={a_scatter:.6e}, err={err:.2e}, tol={tolerance:.2e}"
+            );
+        }
+    }
+
+    /// Verify the system residual F_i is near zero at the converged solution.
+    /// F_i = known_a_i + Σ_j S[i][j]*(v_j - R_j*i_j) - v_i - R_i*i_i
+    fn verify_device_residuals(
+        n_nl: usize,
+        s_nl: &[f64],
+        known_a: &[f64],
+        port_resistances: &[f64],
+        v: &[f64],
+        devices: &[&dyn NlDeviceIv],
+        tolerance: f64,
+    ) {
+        for i in 0..n_nl {
+            let (i_i, _) = devices[i].iv(v[i]);
+            let mut fi = known_a[i] - v[i] - port_resistances[i] * i_i;
+            for j in 0..n_nl {
+                let (i_j, _) = devices[j].iv(v[j]);
+                fi += s_nl[i * n_nl + j] * (v[j] - port_resistances[j] * i_j);
+            }
+            assert!(
+                fi.abs() < tolerance,
+                "Device residual F[{i}]={fi:.2e} exceeds tolerance {tolerance:.2e}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Retrofit verification into existing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_embedding_constraint_two_linear() {
+        let dev0 = LinearDevice {
+            conductance: 1.0 / 1000.0,
+            v_max: 100.0,
+        };
+        let dev1 = LinearDevice {
+            conductance: 1.0 / 2000.0,
+            v_max: 100.0,
+        };
+        let s_nl = [0.3, 0.2, 0.2, 0.3];
+        let known_a = [1.0, 0.5];
+        let port_resistances = [500.0, 800.0];
+        let devices: [&dyn NlDeviceIv; 2] = [&dev0, &dev1];
+        let mut v_guess = [0.0, 0.0];
+
+        let b = multi_port_nr_solve(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &devices,
+            &mut v_guess,
+            50,
+            1e-10,
+        );
+
+        verify_embedding_constraint(2, &s_nl, &known_a, &port_resistances, &v_guess, &b, &devices, 1e-8);
+        verify_device_residuals(2, &s_nl, &known_a, &port_resistances, &v_guess, &devices, 1e-8);
+    }
+
+    #[test]
+    fn test_embedding_constraint_two_diodes() {
+        let diode0 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let diode1 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let s_nl = [0.2, 0.3, 0.3, 0.2];
+        let known_a = [0.5, 0.5];
+        let port_resistances = [1000.0, 1000.0];
+        let devices: [&dyn NlDeviceIv; 2] = [&diode0, &diode1];
+        let mut v_guess = [0.25, 0.25];
+
+        let b = multi_port_nr_solve(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &devices,
+            &mut v_guess,
+            50,
+            1e-10,
+        );
+
+        verify_embedding_constraint(2, &s_nl, &known_a, &port_resistances, &v_guess, &b, &devices, 1e-8);
+        verify_device_residuals(2, &s_nl, &known_a, &port_resistances, &v_guess, &devices, 1e-8);
+    }
+
+    #[test]
+    fn test_embedding_constraint_damped() {
+        let diode0 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let diode1 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let s_nl = [0.1, 0.3, 0.3, 0.1];
+        let known_a = [2.0, 1.0];
+        let port_resistances = [100.0, 100.0];
+        let devices: [&dyn NlDeviceIv; 2] = [&diode0, &diode1];
+        let mut v_guess = [1.5, 1.5];
+
+        let b = multi_port_nr_solve(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &devices,
+            &mut v_guess,
+            100,
+            1e-10,
+        );
+
+        verify_embedding_constraint(2, &s_nl, &known_a, &port_resistances, &v_guess, &b, &devices, 1e-4);
+        verify_device_residuals(2, &s_nl, &known_a, &port_resistances, &v_guess, &devices, 1e-4);
+    }
+
+    #[test]
+    fn test_embedding_constraint_grouped_triode() {
+        let triode = MockTriodeGroup {
+            grid_is: 1e-9,
+            grid_vt: 0.025,
+            gm: 0.002,
+            rp: 50_000.0,
+            v_max: 300.0,
+        };
+        let groups: [&dyn NlDeviceGroupIv; 1] = [&triode];
+        let offsets = [0];
+        let s_nl = [0.1, 0.3, 0.3, 0.1];
+        let known_a = [0.5, 50.0];
+        let port_resistances = [100_000.0, 50_000.0];
+        let mut v_guess = [-2.0, 100.0];
+
+        let b = multi_port_nr_solve_grouped(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess,
+            50,
+            1e-8,
+        );
+
+        // Verify embedding using grouped eval
+        for i in 0..2 {
+            let mut c = [0.0; 2];
+            let mut j = [0.0; 4];
+            triode.eval(&v_guess, &mut c, &mut j);
+            let a_device = v_guess[i] + port_resistances[i] * c[i];
+            let a_scatter = known_a[i] + s_nl[i * 2] * b[0] + s_nl[i * 2 + 1] * b[1];
+            assert!(
+                (a_device - a_scatter).abs() < 1e-4,
+                "Grouped embedding port {i}: a_dev={a_device:.6}, a_scat={a_scatter:.6}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Jacobian finite-difference tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_jacobian_finite_difference_ungrouped() {
+        // Test the Jacobian formula for the ungrouped NR solver:
+        // J[i][j] = S[i][j]*(1 - R_j*di_j/dv_j) + δ_ij*(-1 - R_i*di_i/dv_i)
+        let diode0 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let diode1 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let devices: [&dyn NlDeviceIv; 2] = [&diode0, &diode1];
+
+        let s_nl = [0.2, 0.3, 0.3, 0.2];
+        let known_a = [0.8, 0.4];
+        let port_resistances = [500.0, 800.0];
+
+        // Realistic operating point (forward-biased diodes)
+        let v = [0.3, 0.25];
+        let n_nl = 2;
+
+        // Compute analytic Jacobian
+        let mut jac_analytic = [0.0_f64; 4];
+        let mut currents = [0.0; 2];
+        let mut derivatives = [0.0; 2];
+        for i in 0..n_nl {
+            let (c, d) = devices[i].iv(v[i]);
+            currents[i] = c;
+            derivatives[i] = d;
+        }
+        for i in 0..n_nl {
+            for j in 0..n_nl {
+                let sij = s_nl[i * n_nl + j];
+                let term = sij * (1.0 - port_resistances[j] * derivatives[j]);
+                if i == j {
+                    jac_analytic[i * n_nl + j] = term - 1.0 - port_resistances[i] * derivatives[i];
+                } else {
+                    jac_analytic[i * n_nl + j] = term;
+                }
+            }
+        }
+
+        // Compute F_i at operating point
+        let compute_f = |v_test: &[f64]| -> [f64; 2] {
+            let mut f = [0.0; 2];
+            for i in 0..n_nl {
+                let (i_i, _) = devices[i].iv(v_test[i]);
+                let mut fi = known_a[i] - v_test[i] - port_resistances[i] * i_i;
+                for j in 0..n_nl {
+                    let (i_j, _) = devices[j].iv(v_test[j]);
+                    fi += s_nl[i * n_nl + j] * (v_test[j] - port_resistances[j] * i_j);
+                }
+                f[i] = fi;
+            }
+            f
+        };
+
+        // Finite-difference Jacobian
+        let eps = 1e-7;
+        let f0 = compute_f(&v);
+        for j in 0..n_nl {
+            let mut v_plus = v;
+            let mut v_minus = v;
+            v_plus[j] += eps;
+            v_minus[j] -= eps;
+            let f_plus = compute_f(&v_plus);
+            let f_minus = compute_f(&v_minus);
+            for i in 0..n_nl {
+                let jac_fd = (f_plus[i] - f_minus[i]) / (2.0 * eps);
+                let jac_a = jac_analytic[i * n_nl + j];
+                let rel_err = (jac_a - jac_fd).abs() / jac_a.abs().max(1e-10);
+                assert!(
+                    rel_err < 1e-4,
+                    "Jacobian FD mismatch J[{i}][{j}]: analytic={jac_a:.6e}, fd={jac_fd:.6e}, \
+                     rel_err={rel_err:.2e}, f0={:?}",
+                    f0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_jacobian_finite_difference_grouped() {
+        // Test the grouped solver Jacobian with cross-coupled MockTriode
+        let triode = MockTriodeGroup {
+            grid_is: 1e-9,
+            grid_vt: 0.025,
+            gm: 0.002,
+            rp: 50_000.0,
+            v_max: 300.0,
+        };
+        let groups: [&dyn NlDeviceGroupIv; 1] = [&triode];
+        let offsets = [0usize];
+        let n_nl = 2;
+
+        let s_nl = [0.1, 0.3, 0.3, 0.1];
+        let known_a = [0.5, 50.0];
+        let port_resistances = [100_000.0, 50_000.0];
+
+        // Operating point (grid slightly negative, plate at ~100V)
+        let v = [0.5, 100.0];
+
+        // Compute the system residual F_i for given voltages
+        let compute_f = |v_test: &[f64]| -> [f64; 2] {
+            let mut c = [0.0; 2];
+            let mut j = [0.0; 4];
+            triode.eval(v_test, &mut c, &mut j);
+            let mut f = [0.0; 2];
+            for i in 0..n_nl {
+                let mut fi = known_a[i] - v_test[i] - port_resistances[i] * c[i];
+                for jj in 0..n_nl {
+                    fi += s_nl[i * n_nl + jj] * (v_test[jj] - port_resistances[jj] * c[jj]);
+                }
+                f[i] = fi;
+            }
+            f
+        };
+
+        // Compute analytic system Jacobian using the grouped formula:
+        // ∂F_i/∂v_k = S[i][k] - δ_{ik}
+        //            - R_i · ∂i_i/∂v_k
+        //            - Σ_j S[i][j] · R_j · ∂i_j/∂v_k
+        let mut dev_c = [0.0; 2];
+        let mut dev_j = [0.0; 4]; // 2x2 device Jacobian
+        triode.eval(&v, &mut dev_c, &mut dev_j);
+
+        let mut jac_analytic = [0.0_f64; 4];
+        for i in 0..n_nl {
+            for k in 0..n_nl {
+                let mut val = s_nl[i * n_nl + k];
+                if i == k {
+                    val -= 1.0;
+                }
+                // -R_i * ∂i_i/∂v_k
+                val -= port_resistances[i] * dev_j[i * n_nl + k];
+                // -Σ_j S[i][j] * R_j * ∂i_j/∂v_k
+                for j in 0..n_nl {
+                    val -= s_nl[i * n_nl + j] * port_resistances[j] * dev_j[j * n_nl + k];
+                }
+                jac_analytic[i * n_nl + k] = val;
+            }
+        }
+
+        // Finite-difference Jacobian
+        let eps = 1e-7;
+        for k in 0..n_nl {
+            let mut v_plus = v;
+            let mut v_minus = v;
+            v_plus[k] += eps;
+            v_minus[k] -= eps;
+            let f_plus = compute_f(&v_plus);
+            let f_minus = compute_f(&v_minus);
+            for i in 0..n_nl {
+                let jac_fd = (f_plus[i] - f_minus[i]) / (2.0 * eps);
+                let jac_a = jac_analytic[i * n_nl + k];
+                let rel_err = (jac_a - jac_fd).abs() / jac_a.abs().max(1e-10);
+                assert!(
+                    rel_err < 1e-4,
+                    "Grouped Jacobian FD mismatch J[{i}][{k}]: analytic={jac_a:.6e}, \
+                     fd={jac_fd:.6e}, rel_err={rel_err:.2e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_device_iv_derivative_accuracy() {
+        use super::super::{
+            BjtModel, BjtNpnRoot, BjtPnpRoot, DiodeModel, DiodePairRoot, DiodeRoot, PentodeModel,
+            PentodeRoot, TriodeModel, TriodeRoot,
+        };
+
+        struct TestCase {
+            name: &'static str,
+            device: Box<dyn NlDeviceIv>,
+            test_voltages: Vec<f64>,
+        }
+
+        let cases = vec![
+            TestCase {
+                name: "DiodeRoot(silicon)",
+                device: Box::new(DiodeRoot::new(DiodeModel::silicon())),
+                test_voltages: vec![-1.0, -0.5, 0.0, 0.2, 0.4, 0.6, 0.7],
+            },
+            TestCase {
+                name: "DiodePairRoot(silicon)",
+                device: Box::new(DiodePairRoot::new(DiodeModel::silicon())),
+                test_voltages: vec![-0.7, -0.4, -0.2, 0.0, 0.2, 0.4, 0.7],
+            },
+            TestCase {
+                name: "BjtNpnRoot(2N2222)",
+                device: Box::new(BjtNpnRoot::new(BjtModel::by_name("2N2222"))),
+                test_voltages: vec![-0.5, 0.0, 0.5, 1.0, 5.0, 20.0, 50.0],
+            },
+            TestCase {
+                name: "BjtPnpRoot(2N3906)",
+                device: Box::new(BjtPnpRoot::new(BjtModel::by_name("2N3906"))),
+                test_voltages: vec![-0.5, 0.0, 0.5, 1.0, 5.0, 20.0, 50.0],
+            },
+            TestCase {
+                name: "TriodeRoot(12AX7)",
+                device: Box::new(TriodeRoot::new(TriodeModel::by_name("12AX7"))),
+                test_voltages: vec![1.0, 10.0, 50.0, 100.0, 200.0, 350.0],
+            },
+            TestCase {
+                name: "PentodeRoot(EL34)",
+                device: Box::new(PentodeRoot::new(PentodeModel::by_name("EL34"))),
+                test_voltages: vec![1.0, 10.0, 50.0, 100.0, 200.0, 400.0],
+            },
+        ];
+
+        let eps = 1e-7;
+        for case in &cases {
+            let (v_lo, v_hi) = case.device.v_clamp();
+            for &v in &case.test_voltages {
+                // Skip if outside clamp range
+                if v < v_lo || v > v_hi {
+                    continue;
+                }
+                let (_, di_analytic) = case.device.iv(v);
+                let (i_plus, _) = case.device.iv(v + eps);
+                let (i_minus, _) = case.device.iv(v - eps);
+                let di_fd = (i_plus - i_minus) / (2.0 * eps);
+
+                let abs_err = (di_analytic - di_fd).abs();
+                // Use relative error for significant derivatives, absolute
+                // tolerance for near-zero values (deep cutoff / reverse bias)
+                let ok = if di_analytic.abs() > 1e-10 {
+                    abs_err / di_analytic.abs() < 1e-3
+                } else {
+                    abs_err < 1e-12
+                };
+                assert!(
+                    ok,
+                    "{}: iv derivative mismatch at v={v:.3}: analytic={di_analytic:.6e}, \
+                     fd={di_fd:.6e}, abs_err={abs_err:.2e}",
+                    case.name
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Linear-limit test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_linear_limit_small_signal() {
+        // At the system equilibrium, for small perturbations the diode
+        // behaves linearly. The NR solver with a real diode and a
+        // LinearDevice (with matching conductance) should agree closely.
+
+        struct LinearizedDiode {
+            g: f64,
+            i_offset: f64,
+            v_max: f64,
+        }
+        impl NlDeviceIv for LinearizedDiode {
+            fn iv(&self, v: f64) -> (f64, f64) {
+                (self.g * v + self.i_offset, self.g)
+            }
+            fn v_clamp(&self) -> (f64, f64) {
+                (-self.v_max, self.v_max)
+            }
+        }
+
+        let s_nl = [0.2, 0.3, 0.3, 0.2];
+        let known_a_base = [0.5, 0.3];
+        let port_resistances = [500.0, 800.0];
+
+        // Step 1: Find the actual equilibrium of the NL system
+        let diode_eq0 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let diode_eq1 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let devices_eq: [&dyn NlDeviceIv; 2] = [&diode_eq0, &diode_eq1];
+        let mut v_eq = [0.0, 0.0];
+        let _b_eq = multi_port_nr_solve(
+            2,
+            &s_nl,
+            &known_a_base,
+            &port_resistances,
+            &devices_eq,
+            &mut v_eq,
+            50,
+            1e-12,
+        );
+
+        // Step 2: Linearize at the equilibrium voltages
+        let (i0_0, g0_0) = diode_eq0.iv(v_eq[0]);
+        let (i0_1, g0_1) = diode_eq1.iv(v_eq[1]);
+
+        // Small-signal perturbation: ±1mV around the equilibrium
+        for delta in &[0.001, -0.001] {
+            let known_a = [known_a_base[0] + delta, known_a_base[1]];
+
+            // Solve with real diode
+            let diode0 = SimpleExponentialDiode {
+                is: 1e-12,
+                vt: 0.02585,
+            };
+            let diode1 = SimpleExponentialDiode {
+                is: 1e-12,
+                vt: 0.02585,
+            };
+            let devices_nl: [&dyn NlDeviceIv; 2] = [&diode0, &diode1];
+            let mut v_nl = v_eq;
+            let b_nl = multi_port_nr_solve(
+                2,
+                &s_nl,
+                &known_a,
+                &port_resistances,
+                &devices_nl,
+                &mut v_nl,
+                50,
+                1e-12,
+            );
+
+            // Solve with linearized device
+            let lin0 = LinearizedDiode {
+                g: g0_0,
+                i_offset: i0_0 - g0_0 * v_eq[0],
+                v_max: 5.0,
+            };
+            let lin1 = LinearizedDiode {
+                g: g0_1,
+                i_offset: i0_1 - g0_1 * v_eq[1],
+                v_max: 5.0,
+            };
+            let devices_lin: [&dyn NlDeviceIv; 2] = [&lin0, &lin1];
+            let mut v_lin = v_eq;
+            let b_lin = multi_port_nr_solve(
+                2,
+                &s_nl,
+                &known_a,
+                &port_resistances,
+                &devices_lin,
+                &mut v_lin,
+                50,
+                1e-12,
+            );
+
+            // Small-signal: should match within 1%
+            for i in 0..2 {
+                let rel_err = (b_nl[i] - b_lin[i]).abs() / b_nl[i].abs().max(1e-10);
+                assert!(
+                    rel_err < 0.01,
+                    "Small-signal mismatch (delta={delta}) port {i}: \
+                     nl={:.6e}, lin={:.6e}, rel_err={rel_err:.4}",
+                    b_nl[i],
+                    b_lin[i]
+                );
+            }
+        }
+
+        // Large drive: should diverge (sanity check that NL actually matters)
+        let known_a_large = [5.0, 3.0];
+        let diode0 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let diode1 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let devices_nl: [&dyn NlDeviceIv; 2] = [&diode0, &diode1];
+        let mut v_nl = v_eq;
+        let b_nl = multi_port_nr_solve(
+            2,
+            &s_nl,
+            &known_a_large,
+            &port_resistances,
+            &devices_nl,
+            &mut v_nl,
+            50,
+            1e-12,
+        );
+
+        let lin0 = LinearizedDiode {
+            g: g0_0,
+            i_offset: i0_0 - g0_0 * v_eq[0],
+            v_max: 5.0,
+        };
+        let lin1 = LinearizedDiode {
+            g: g0_1,
+            i_offset: i0_1 - g0_1 * v_eq[1],
+            v_max: 5.0,
+        };
+        let devices_lin: [&dyn NlDeviceIv; 2] = [&lin0, &lin1];
+        let mut v_lin = v_eq;
+        let b_lin = multi_port_nr_solve(
+            2,
+            &s_nl,
+            &known_a_large,
+            &port_resistances,
+            &devices_lin,
+            &mut v_lin,
+            50,
+            1e-12,
+        );
+
+        // Large drive should produce measurably different results
+        let max_diff = (0..2)
+            .map(|i| (b_nl[i] - b_lin[i]).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_diff > 0.01,
+            "Large drive should show NL divergence, but max_diff={max_diff:.6e}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Determinism test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_solve_deterministic() {
+        let diode0 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+        let diode1 = SimpleExponentialDiode {
+            is: 1e-12,
+            vt: 0.02585,
+        };
+
+        let s_nl = [0.2, 0.3, 0.3, 0.2];
+        let known_a = [0.8, -0.3];
+        let port_resistances = [500.0, 800.0];
+        let devices: [&dyn NlDeviceIv; 2] = [&diode0, &diode1];
+
+        // Reference run
+        let mut v_ref = [0.0, 0.0];
+        let b_ref = multi_port_nr_solve(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &devices,
+            &mut v_ref,
+            50,
+            1e-10,
+        );
+
+        // Repeat 100 times — must produce bitwise-identical results
+        for run in 0..100 {
+            let mut v_test = [0.0, 0.0];
+            let b_test = multi_port_nr_solve(
+                2,
+                &s_nl,
+                &known_a,
+                &port_resistances,
+                &devices,
+                &mut v_test,
+                50,
+                1e-10,
+            );
+            for i in 0..2 {
+                assert_eq!(
+                    b_ref[i].to_bits(),
+                    b_test[i].to_bits(),
+                    "Run {run}: b[{i}] differs from reference: {:.17e} vs {:.17e}",
+                    b_ref[i],
+                    b_test[i]
+                );
+                assert_eq!(
+                    v_ref[i].to_bits(),
+                    v_test[i].to_bits(),
+                    "Run {run}: v[{i}] differs from reference: {:.17e} vs {:.17e}",
+                    v_ref[i],
+                    v_test[i]
+                );
+            }
         }
     }
 }
