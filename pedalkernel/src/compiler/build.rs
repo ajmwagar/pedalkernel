@@ -1406,27 +1406,8 @@ fn try_build_multi_nl_stage(
     }
 
     // ── Step 5: Extract sub-blocks of scattering matrix ─────────────
-    // s_nl: n_nl × n_nl (NL-to-NL coupling)
-    let mut s_nl = vec![0.0; n_nl * n_nl];
-    for i in 0..n_nl {
-        for j in 0..n_nl {
-            s_nl[i * n_nl + j] = scattering[i * n_total + j];
-        }
-    }
-
-    // s_nl_passive: n_nl × n_passive (NL-to-passive coupling)
-    let mut s_nl_passive = vec![0.0; n_nl * n_passive];
-    for i in 0..n_nl {
-        for k in 0..n_passive {
-            s_nl_passive[i * n_passive + k] = scattering[i * n_total + (n_nl + k)];
-        }
-    }
-
-    // s_nl_adapted: n_nl (NL-to-adapted column)
-    let mut s_nl_adapted = vec![0.0; n_nl];
-    for i in 0..n_nl {
-        s_nl_adapted[i] = scattering[i * n_total + (n_total - 1)];
-    }
+    let scattering_blocks =
+        super::stage::MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
     // ── Step 6: Create NL device roots ──────────────────────────────
     // Detect 3-port triodes: single element with 2 NL terminal pairs
     // (grid-cathode + plate-cathode). Create a grouped device for the
@@ -1699,9 +1680,7 @@ fn try_build_multi_nl_stage(
         passive_children,
         n_nl,
         v_prev: vec![0.0; n_nl],
-        s_nl,
-        s_nl_passive,
-        s_nl_adapted,
+        scattering: scattering_blocks,
         oversampler: Oversampler::new(oversampling),
         compensation: plan.compensation,
         output_port,

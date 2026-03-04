@@ -1580,7 +1580,7 @@ impl PedalProcessor for CompiledPedal {
                         );
                         eprintln!(
                             "    s_nl_adapted={:.6?} v_prev={:.4?}",
-                            &mnl.s_nl_adapted, &mnl.v_prev,
+                            &mnl.scattering.s_nl_adapted, &mnl.v_prev,
                         );
                     }
                 }

@@ -1180,6 +1180,55 @@ pub(super) struct ScatteringRecomputeData {
     pub(super) adapted_resistance: f64,
 }
 
+/// Scattering matrix sub-blocks for multi-NL solving.
+///
+/// These sub-blocks are extracted from the full R-type adaptor scattering
+/// matrix and are the only parts needed during per-sample NR solving.
+/// They are recomputed together when pot values change.
+pub(super) struct MultiNlScattering {
+    /// NL-to-NL sub-block (n_nl × n_nl, row-major).
+    pub(super) s_nl: Vec<f64>,
+    /// NL-to-passive sub-block (n_nl × n_passive, row-major).
+    pub(super) s_nl_passive: Vec<f64>,
+    /// NL-to-adapted column (n_nl).
+    pub(super) s_nl_adapted: Vec<f64>,
+}
+
+impl MultiNlScattering {
+    /// Extract sub-blocks from a full scattering matrix.
+    ///
+    /// The full matrix is `n_total × n_total` (row-major) with port ordering:
+    /// `[NL_0..NL_{n-1}, passive_0..passive_{m-1}, adapted]`.
+    pub(super) fn from_full_matrix(
+        scattering: &[f64],
+        n_nl: usize,
+        n_passive: usize,
+    ) -> Self {
+        let n_total = n_nl + n_passive + 1;
+        let mut s_nl = vec![0.0; n_nl * n_nl];
+        for i in 0..n_nl {
+            for j in 0..n_nl {
+                s_nl[i * n_nl + j] = scattering[i * n_total + j];
+            }
+        }
+        let mut s_nl_passive = vec![0.0; n_nl * n_passive];
+        for i in 0..n_nl {
+            for k in 0..n_passive {
+                s_nl_passive[i * n_passive + k] = scattering[i * n_total + (n_nl + k)];
+            }
+        }
+        let mut s_nl_adapted = vec![0.0; n_nl];
+        for i in 0..n_nl {
+            s_nl_adapted[i] = scattering[i * n_total + (n_total - 1)];
+        }
+        Self {
+            s_nl,
+            s_nl_passive,
+            s_nl_adapted,
+        }
+    }
+}
+
 /// Coupled nonlinear stage using an R-type adaptor and multi-port NR solver.
 ///
 /// This uses a physically correct formulation:
@@ -1204,12 +1253,8 @@ pub(super) struct MultiNlStage {
     pub(super) n_nl: usize,
     /// Warm-start voltages for NR solver.
     pub(super) v_prev: Vec<f64>,
-    /// NL-to-NL scattering sub-block (n_nl × n_nl, row-major).
-    pub(super) s_nl: Vec<f64>,
-    /// NL-to-passive scattering sub-block (n_nl × n_passive, row-major).
-    pub(super) s_nl_passive: Vec<f64>,
-    /// NL-to-adapted scattering column (n_nl).
-    pub(super) s_nl_adapted: Vec<f64>,
+    /// Scattering matrix sub-blocks for NR solving.
+    pub(super) scattering: MultiNlScattering,
     /// Oversampler for antialiasing.
     pub(super) oversampler: Oversampler,
     /// Passive attenuation compensation factor.
@@ -1225,17 +1270,12 @@ pub(super) struct MultiNlStage {
     /// BFS distance from input of the injection node (for topological ordering).
     pub(super) signal_flow_distance: usize,
     /// Inter-stage voltage gain from a transformer boundary.
-    /// When the stage's injection node is on a transformer secondary,
-    /// this is 1/turns_ratio (e.g., 17.0 for a 1:17 step-up).
     pub(super) transformer_gain: f64,
-    /// Circuit graph node ID where this stage's adapted port injects signal.
-    /// Used for node-based routing in parallel-path topologies (e.g., 670 sidechain).
+    /// Circuit graph node ID (for debug routing).
     pub(super) injection_node_id: usize,
-    /// Circuit graph node ID where this stage's output port extracts signal.
-    /// Used for node-based routing in parallel-path topologies.
+    /// Circuit graph node ID (for debug routing).
     pub(super) output_node_id: usize,
     /// Flag: pot changed since last scattering recompute.
-    /// Set by `set_pot()`, cleared by `flush_recompute()`.
     pub(super) recompute_pending: bool,
     /// VEB bias offset from a feedback pot.
     pub(super) veb_bias_offset: f64,
@@ -1286,9 +1326,9 @@ impl MultiNlStage {
             let b_adapted = sample * compensation;
             let mut known_a = vec![0.0; n_nl];
             for i in 0..n_nl {
-                let mut a_i = self.s_nl_adapted[i] * b_adapted;
+                let mut a_i = self.scattering.s_nl_adapted[i] * b_adapted;
                 for k in 0..n_passive {
-                    a_i += self.s_nl_passive[i * n_passive + k] * b_passive[k];
+                    a_i += self.scattering.s_nl_passive[i * n_passive + k] * b_passive[k];
                 }
                 known_a[i] = a_i;
             }
@@ -1300,7 +1340,7 @@ impl MultiNlStage {
                     dg.groups.iter().map(|g| g.as_group_iv()).collect();
                 let result = multi_port_nr_solve_grouped(
                     n_nl,
-                    &self.s_nl,
+                    &self.scattering.s_nl,
                     &known_a,
                     &self.nl_port_resistances,
                     &groups,
@@ -1319,7 +1359,7 @@ impl MultiNlStage {
                     .collect();
                 multi_port_nr_solve(
                     n_nl,
-                    &self.s_nl,
+                    &self.scattering.s_nl,
                     &known_a,
                     &self.nl_port_resistances,
                     &devices,
@@ -1382,11 +1422,11 @@ impl MultiNlStage {
                     self.n_nl, self.output_port, self.compensation, self.transformer_gain
                 );
                 eprintln!("  in={input:.6e} out={output:.6e} gain={gain_db:.1}dB");
-                eprintln!("  s_nl_adapted={:.6?}", &self.s_nl_adapted);
+                eprintln!("  s_nl_adapted={:.6?}", &self.scattering.s_nl_adapted);
                 // s_nl diagonal (self-coupling) and off-diagonal
                 let mut s_diag = Vec::with_capacity(self.n_nl);
                 for i in 0..self.n_nl {
-                    s_diag.push(self.s_nl[i * self.n_nl + i]);
+                    s_diag.push(self.scattering.s_nl[i * self.n_nl + i]);
                 }
                 eprintln!("  s_nl_diag={:.6?}", s_diag);
                 eprintln!(
@@ -1595,19 +1635,7 @@ impl MultiNlStage {
         }
 
         // Extract sub-blocks.
-        for i in 0..n_nl {
-            for j in 0..n_nl {
-                self.s_nl[i * n_nl + j] = scattering[i * n_total + j];
-            }
-        }
-        for i in 0..n_nl {
-            for k in 0..n_passive {
-                self.s_nl_passive[i * n_passive + k] = scattering[i * n_total + (n_nl + k)];
-            }
-        }
-        for i in 0..n_nl {
-            self.s_nl_adapted[i] = scattering[i * n_total + (n_total - 1)];
-        }
+        self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
 
         // Update the RTypeAdaptor.
         let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
