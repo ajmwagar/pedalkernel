@@ -1,0 +1,15 @@
+* ============================================================================
+* Series RLC Bandpass (Canonical)
+* PedalKernel Validation Circuit — Two reactive elements test
+* ============================================================================
+* R = 100 ohm, L = 10mH, C = 100nF
+* f0 = 1/(2*pi*sqrt(L*C)) = 1/(2*pi*sqrt(0.01*100e-9)) ≈ 5033 Hz
+* Q = (1/R)*sqrt(L/C) ≈ 3.16
+* H(s) = s*R*C / (s^2*L*C + s*R*C + 1) — bandpass topology
+* Output taken across R_load in series with LC
+* ============================================================================
+
+R1 v_in n1 100
+L1 n1 n2 10m
+C1 n2 v_out 100n
+RL v_out 0 10k

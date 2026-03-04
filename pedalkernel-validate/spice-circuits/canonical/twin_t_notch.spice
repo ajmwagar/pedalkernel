@@ -1,0 +1,30 @@
+* ============================================================================
+* Twin-T Notch Filter (Canonical)
+* PedalKernel Validation Circuit — 3+ reactive elements scattering test
+* ============================================================================
+* R = 10k (x2), R/2 = 5k, C = 10nF (x2), 2C = 20nF
+* f_notch = 1/(2*pi*R*C) ≈ 1591 Hz
+* H(s) = (s^2*R^2*C^2 + 1) / (s^2*R^2*C^2 + 4*s*R*C + 1)
+* ============================================================================
+
+* R-C-R path (series R path)
+R1 v_in n_mid 10k
+R2 n_mid n_out 10k
+
+* C-R/2-C path (shunt C path)
+C1 v_in n_c 10n
+C2 n_out n_c 10n
+
+* Bridge resistor and capacitor
+C3 n_mid n_gnd 20n
+R3 n_c n_gnd 5k
+
+* Ground connections
+Rg n_gnd 0 1m
+
+* Output load
+RL n_out 0 100k
+
+* Map output node
+.GLOBAL v_out
+Rout n_out v_out 1m

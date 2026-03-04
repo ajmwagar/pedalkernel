@@ -187,6 +187,7 @@ cargo run --release --bin pedalkernel-validate -- --report report.json run --sui
 | `pedals` | 4 | Fuzz core, RAT clipper, Big Muff, TS808 |
 | `reactive` | 4 | Delay, LC resonant, transformer step-up/down |
 | `stress` | 1 | DC stability |
+| `canonical` | 8 | Systematic WDF failure mode coverage (RC LP/HP, RLC, Twin-T, transformer, diode, op-amp clipper, BJT diff pair) |
 
 **Metrics reported:**
 - **RMS Error (dB)** — `20*log10(rms(wdf-ref)/rms(ref))`

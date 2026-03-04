@@ -249,7 +249,9 @@ pub mod prelude {
 
     // Analytical references
     pub use crate::analytical::{
-        rc_lowpass_filter, rc_lowpass_impulse_response, rc_lowpass_magnitude, rc_lowpass_phase,
+        rc_highpass_filter, rc_highpass_impulse_response, rc_lowpass_filter,
+        rc_lowpass_impulse_response, rc_lowpass_magnitude, rc_lowpass_phase,
+        rlc_bandpass_filter, twin_t_notch_filter,
     };
 
     // Config

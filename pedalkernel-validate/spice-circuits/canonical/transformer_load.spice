@@ -1,0 +1,23 @@
+* ============================================================================
+* Transformer + Resistive Load (Canonical)
+* PedalKernel Validation Circuit — Coupled inductors test
+* ============================================================================
+* Turns ratio n = 1:2
+* Primary inductance Lp = 200mH
+* Secondary inductance Ls = Lp * n^2 = 200mH * 4 = 800mH
+* Coupling coefficient k = 0.99
+* R_load = 1k
+* Expected: Vout ≈ 2 * Vin at audio frequencies
+* ============================================================================
+
+* Primary winding
+L1 v_in 0 200m
+
+* Secondary winding (Ls = Lp * n^2 = 0.2 * 4 = 0.8H)
+L2 v_out 0 800m
+
+* Magnetic coupling
+K1 L1 L2 0.99
+
+* Load resistor
+R_load v_out 0 1k

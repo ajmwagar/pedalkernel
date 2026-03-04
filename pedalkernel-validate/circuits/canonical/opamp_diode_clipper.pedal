@@ -1,0 +1,32 @@
+# Canonical op-amp feedback diode clipper — gain-stage + NR interaction test
+# R_in = 10k, R_fb = 100k, D_pair = silicon, U1 = TL072
+# Gain = -Rfb/Rin = -10 (limited by diode clipping at ~0.6V)
+# Tests op-amp + NR root in feedback loop
+# Oracle: SPICE primary
+
+pedal "Op-Amp Diode Clipper" {
+  supply 9V
+  components {
+    R_in: resistor(10k)
+    R_fb: resistor(100k)
+    D1: diode_pair(silicon)
+    U1: opamp(tl072)
+    R_bias1: resistor(100k)
+    R_bias2: resistor(100k)
+    RL: resistor(10k)
+  }
+  nets {
+    vcc -> R_bias1.a
+    R_bias1.b -> R_bias2.a
+    R_bias2.b -> gnd
+    in -> R_in.a
+    R_in.b -> U1.neg
+    R_fb.a -> U1.neg
+    R_fb.b -> U1.out
+    D1.a -> U1.neg
+    D1.b -> U1.out
+    U1.pos -> R_bias1.b
+    U1.out -> RL.a, out
+    RL.b -> gnd
+  }
+}

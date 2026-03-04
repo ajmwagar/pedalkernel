@@ -1,0 +1,41 @@
+* ============================================================================
+* BJT Differential Pair (Canonical)
+* PedalKernel Validation Circuit — Multi-NL coupled transistor test
+* ============================================================================
+* Q1, Q2 = 2N3904 NPN, R_C = 10k (x2), R_tail = 10k
+* Supply = 12V, input coupling cap = 100nF
+* At 10mV — linear differential amplification
+* At 100mV — soft clipping from transistor saturation
+* ============================================================================
+
+* Supply
+Vcc vcc 0 DC 12
+
+* Input coupling
+C1 v_in n_base1 100n
+
+* Base bias resistors
+R_B1 vcc n_base1 100k
+R_B2 vcc n_base2 100k
+
+* Transistors
+Q1 n_col1 n_base1 n_emit Q2N3904
+Q2 n_col2 n_base2 n_emit Q2N3904
+
+* Collector resistors
+RC1 vcc n_col1 10k
+RC2 vcc n_col2 10k
+
+* Tail current source resistor
+R_tail n_emit 0 10k
+
+* Output coupling (from Q1 collector)
+C_out n_col1 v_out 1u
+RL v_out 0 10k
+
+* 2N3904 NPN transistor model
+.MODEL Q2N3904 NPN(IS=6.734f BF=416.4 NF=1.0 VAF=74.03 IKF=66.78m
++                   ISE=6.734f NE=1.259 BR=0.7389 NR=1.0 VAR=28
++                   IKR=0 ISC=0 NC=2 RB=10 RE=0 RC=1
++                   CJE=3.638p VJE=0.65 MJE=0.3085 CJC=4.493p VJC=0.3523
++                   MJC=0.2593 TF=301.2p TR=239.5n XTB=1.5 EG=1.11)

@@ -1,0 +1,15 @@
+* ============================================================================
+* Single Diode Half-Wave Rectifier (Canonical)
+* PedalKernel Validation Circuit — Basic NR convergence test
+* ============================================================================
+* R_series = 4.7k, D1 = 1N4148 silicon, R_load = 47k
+* At low input (0.5V) — mild clipping
+* At high input (2V) — hard clipping
+* ============================================================================
+
+R1 v_in n1 4.7k
+D1 n1 v_out DMOD
+RL v_out 0 47k
+
+* 1N4148 diode model
+.MODEL DMOD D(IS=2.52e-9 RS=0.568 N=1.752 BV=100 IBV=100u CJO=4p M=0.4 TT=20n)

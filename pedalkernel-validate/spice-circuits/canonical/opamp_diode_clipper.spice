@@ -1,0 +1,32 @@
+* ============================================================================
+* Op-Amp Feedback Diode Clipper (Canonical)
+* PedalKernel Validation Circuit — Op-amp + NR in feedback test
+* ============================================================================
+* R_in = 10k, R_fb = 100k, gain = -10 (limited by diode clipping)
+* D_pair = anti-parallel silicon diodes in feedback
+* At 50mV input — linear region (expect gain ≈ -10)
+* At 500mV input — diode clipping at ≈ ±0.6V
+* ============================================================================
+
+* Bias network (virtual ground at Vcc/2 = 4.5V)
+Vcc vcc 0 DC 9
+R_bias1 vcc v_bias 100k
+R_bias2 v_bias 0 100k
+
+* Input resistor
+R_in v_in v_neg 10k
+
+* Feedback network
+R_fb v_neg v_opamp_out 100k
+
+* Anti-parallel diodes in feedback
+D1 v_neg v_opamp_out D1N4148
+D2 v_opamp_out v_neg D1N4148
+.MODEL D1N4148 D(IS=2.52e-9 RS=0.568 N=1.752 BV=100 IBV=100u CJO=4p M=0.4 TT=20n)
+
+* Ideal op-amp as VCVS (inverting config: v_pos = v_bias)
+Eop v_opamp_out 0 v_bias v_neg 100000
+
+* Output load
+RL v_opamp_out v_out 1m
+Rload v_out 0 10k

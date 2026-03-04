@@ -1,0 +1,18 @@
+# Canonical transformer + resistive load — coupled inductors test
+# 1:2 turns ratio, L_primary = 200mH, R_load = 1k
+# Expected: ~2x voltage gain at audio frequencies
+# Oracle: SPICE primary
+
+pedal "Transformer Load" {
+  components {
+    T1: transformer(1:2, 200m)
+    R_load: resistor(1k)
+  }
+  nets {
+    in -> T1.a
+    T1.b -> gnd
+    T1.c -> out, R_load.a
+    T1.d -> gnd
+    R_load.b -> gnd
+  }
+}

@@ -1,0 +1,36 @@
+# Canonical BJT differential pair — multi-NL coupled transistor test
+# Q1,Q2 = 2N3904, R_C = 10k (x2), R_tail = 10k, supply = 12V
+# Tests CoupledBjtStage or MultiNlStage solver with 2 coupled BJTs
+# Oracle: SPICE primary
+
+pedal "BJT Differential Pair" {
+  supply 12V
+  components {
+    C1: cap(100n)
+    R_B1: resistor(100k)
+    R_B2: resistor(100k)
+    Q1: npn(2n3904)
+    Q2: npn(2n3904)
+    RC1: resistor(10k)
+    RC2: resistor(10k)
+    R_tail: resistor(10k)
+    C_out: cap(1u)
+    RL: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R_B1.a, Q1.base
+    R_B1.b -> vcc
+    R_B2.a -> Q2.base
+    R_B2.b -> vcc
+    Q1.collector -> RC1.a
+    Q2.collector -> RC2.a
+    RC1.b -> vcc
+    RC2.b -> vcc
+    Q1.emitter -> Q2.emitter, R_tail.a
+    R_tail.b -> gnd
+    Q1.collector -> C_out.a
+    C_out.b -> RL.a, out
+    RL.b -> gnd
+  }
+}

@@ -519,8 +519,141 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
         sine_path_rl.display()
     );
 
+    // ===== Canonical suite linear circuits =====
+
+    // Canonical RC Lowpass: R=10k, C=10n (same as linear suite)
+    {
+        let r_can = 10_000.0;
+        let c_can = 10e-9;
+        let fc_can = 1.0 / (2.0 * std::f64::consts::PI * r_can * c_can);
+
+        println!(
+            "\n{} Canonical RC Lowpass (R=10k, C=10n, fc={:.1} Hz)",
+            "•".green(),
+            fc_can
+        );
+
+        let n = (0.1 * sample_rate) as usize;
+        let impulse_golden = analytical::rc_lowpass_impulse_response(r_can, c_can, sample_rate, n);
+        let impulse_path = cli.golden.join("canonical/rc_lowpass/impulse.npy");
+        npy::write_f64(&impulse_path, &impulse_golden)?;
+        println!("  {} impulse → {}", "✓".green(), impulse_path.display());
+
+        let sine_input = signals::sine(sample_rate, 1000.0, 0.1, 1.0);
+        let sine_golden = analytical::rc_lowpass_filter(&sine_input, r_can, c_can, sample_rate);
+        let sine_path = cli.golden.join("canonical/rc_lowpass/sine.npy");
+        npy::write_f64(&sine_path, &sine_golden)?;
+        println!("  {} sine → {}", "✓".green(), sine_path.display());
+
+        let sweep_input = signals::exp_sweep(sample_rate, 20.0, 20000.0, 1.0, 1.0);
+        let sweep_golden = analytical::rc_lowpass_filter(&sweep_input, r_can, c_can, sample_rate);
+        let sweep_path = cli.golden.join("canonical/rc_lowpass/sweep.npy");
+        npy::write_f64(&sweep_path, &sweep_golden)?;
+        println!("  {} sweep → {}", "✓".green(), sweep_path.display());
+    }
+
+    // Canonical RC Highpass: C=22n, R=33k
+    {
+        let r_hp = 33_000.0;
+        let c_hp = 22e-9;
+        let fc_hp = 1.0 / (2.0 * std::f64::consts::PI * r_hp * c_hp);
+
+        println!(
+            "\n{} Canonical RC Highpass (C=22n, R=33k, fc={:.1} Hz)",
+            "•".green(),
+            fc_hp
+        );
+
+        let n = (0.1 * sample_rate) as usize;
+        let impulse_golden = analytical::rc_highpass_impulse_response(r_hp, c_hp, sample_rate, n);
+        let impulse_path = cli.golden.join("canonical/rc_highpass/impulse.npy");
+        npy::write_f64(&impulse_path, &impulse_golden)?;
+        println!("  {} impulse → {}", "✓".green(), impulse_path.display());
+
+        let sine_input = signals::sine(sample_rate, 1000.0, 0.1, 1.0);
+        let sine_golden = analytical::rc_highpass_filter(&sine_input, r_hp, c_hp, sample_rate);
+        let sine_path = cli.golden.join("canonical/rc_highpass/sine.npy");
+        npy::write_f64(&sine_path, &sine_golden)?;
+        println!("  {} sine → {}", "✓".green(), sine_path.display());
+
+        let sweep_input = signals::exp_sweep(sample_rate, 20.0, 20000.0, 1.0, 1.0);
+        let sweep_golden = analytical::rc_highpass_filter(&sweep_input, r_hp, c_hp, sample_rate);
+        let sweep_path = cli.golden.join("canonical/rc_highpass/sweep.npy");
+        npy::write_f64(&sweep_path, &sweep_golden)?;
+        println!("  {} sweep → {}", "✓".green(), sweep_path.display());
+    }
+
+    // Canonical Series RLC Bandpass: R=100, L=10mH, C=100nF, RL=10k
+    {
+        let r_rlc = 100.0_f64;
+        let l_rlc = 10e-3_f64;
+        let c_rlc = 100e-9_f64;
+        let rl_rlc = 10_000.0_f64;
+        let f0 = 1.0 / (2.0 * std::f64::consts::PI * (l_rlc * c_rlc).sqrt());
+
+        println!(
+            "\n{} Canonical Series RLC Bandpass (R=100, L=10mH, C=100nF, f0={:.1} Hz)",
+            "•".green(),
+            f0
+        );
+
+        let n = (0.1 * sample_rate) as usize;
+        let impulse_input: Vec<f64> = (0..n).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        let impulse_golden =
+            analytical::rlc_bandpass_filter(&impulse_input, r_rlc, l_rlc, c_rlc, rl_rlc, sample_rate);
+        let impulse_path = cli.golden.join("canonical/series_rlc/impulse.npy");
+        npy::write_f64(&impulse_path, &impulse_golden)?;
+        println!("  {} impulse → {}", "✓".green(), impulse_path.display());
+
+        let sine_input = signals::sine(sample_rate, 5000.0, 0.1, 1.0);
+        let sine_golden =
+            analytical::rlc_bandpass_filter(&sine_input, r_rlc, l_rlc, c_rlc, rl_rlc, sample_rate);
+        let sine_path = cli.golden.join("canonical/series_rlc/sine.npy");
+        npy::write_f64(&sine_path, &sine_golden)?;
+        println!("  {} sine → {}", "✓".green(), sine_path.display());
+
+        let sweep_input = signals::exp_sweep(sample_rate, 20.0, 20000.0, 1.0, 1.0);
+        let sweep_golden =
+            analytical::rlc_bandpass_filter(&sweep_input, r_rlc, l_rlc, c_rlc, rl_rlc, sample_rate);
+        let sweep_path = cli.golden.join("canonical/series_rlc/sweep.npy");
+        npy::write_f64(&sweep_path, &sweep_golden)?;
+        println!("  {} sweep → {}", "✓".green(), sweep_path.display());
+    }
+
+    // Canonical Twin-T Notch: R=10k, C=10nF
+    {
+        let r_tt = 10_000.0;
+        let c_tt = 10e-9;
+        let f_notch = 1.0 / (2.0 * std::f64::consts::PI * r_tt * c_tt);
+
+        println!(
+            "\n{} Canonical Twin-T Notch (R=10k, C=10nF, f_notch={:.1} Hz)",
+            "•".green(),
+            f_notch
+        );
+
+        let n = (0.1 * sample_rate) as usize;
+        let impulse_input: Vec<f64> = (0..n).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        let impulse_golden = analytical::twin_t_notch_filter(&impulse_input, r_tt, c_tt, sample_rate);
+        let impulse_path = cli.golden.join("canonical/twin_t_notch/impulse.npy");
+        npy::write_f64(&impulse_path, &impulse_golden)?;
+        println!("  {} impulse → {}", "✓".green(), impulse_path.display());
+
+        let sine_input = signals::sine(sample_rate, 1500.0, 0.1, 1.0);
+        let sine_golden = analytical::twin_t_notch_filter(&sine_input, r_tt, c_tt, sample_rate);
+        let sine_path = cli.golden.join("canonical/twin_t_notch/sine.npy");
+        npy::write_f64(&sine_path, &sine_golden)?;
+        println!("  {} sine → {}", "✓".green(), sine_path.display());
+
+        let sweep_input = signals::exp_sweep(sample_rate, 20.0, 20000.0, 1.0, 1.0);
+        let sweep_golden = analytical::twin_t_notch_filter(&sweep_input, r_tt, c_tt, sample_rate);
+        let sweep_path = cli.golden.join("canonical/twin_t_notch/sweep.npy");
+        npy::write_f64(&sweep_path, &sweep_golden)?;
+        println!("  {} sweep → {}", "✓".green(), sweep_path.display());
+    }
+
     println!("\n{}", "Done! Golden references generated.".green().bold());
-    println!("Run 'pedalkernel-validate run --suite linear' to validate.");
+    println!("Run 'pedalkernel-validate run --suite linear' or '--suite canonical' to validate.");
 
     Ok(())
 }

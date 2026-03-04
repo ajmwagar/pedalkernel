@@ -1,0 +1,18 @@
+# Canonical single diode half-wave rectifier — basic NR convergence test
+# R_series = 4.7k, D1 = 1N4148 silicon, R_load = 47k
+# Tests basic Newton-Raphson solver convergence
+# Oracle: SPICE primary
+
+pedal "Single Diode Rectifier" {
+  components {
+    R1: resistor(4.7k)
+    D1: diode(silicon)
+    RL: resistor(47k)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> D1.a
+    D1.b -> RL.a, out
+    RL.b -> gnd
+  }
+}

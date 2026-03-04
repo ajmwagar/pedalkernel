@@ -1,0 +1,22 @@
+# Canonical series RLC bandpass — two reactive elements test
+# R = 100 ohm, L = 10mH, C = 100nF
+# f0 = 1 / (2 * pi * sqrt(L * C)) ≈ 5033 Hz
+# Q = (1/R) * sqrt(L/C) ≈ 3.16
+# Tests series adaptor with inductor + capacitor
+# Oracle: analytical primary + SPICE cross-check
+
+pedal "Series RLC Bandpass" {
+  components {
+    R1: resistor(100)
+    L1: inductor(10m)
+    C1: cap(100n)
+    RL: resistor(10k)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> L1.a
+    L1.b -> C1.a
+    C1.b -> RL.a, out
+    RL.b -> gnd
+  }
+}

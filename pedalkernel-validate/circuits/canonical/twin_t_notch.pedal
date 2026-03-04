@@ -1,0 +1,26 @@
+# Canonical Twin-T notch filter — 3+ reactive elements test
+# R = 10k (x2), R/2 = 5k, C = 10nF (x2), 2C = 20nF
+# f_notch = 1 / (2 * pi * R * C) ≈ 1591 Hz
+# Stresses adaptor scattering accuracy with parallel/series topology
+# Oracle: analytical + SPICE
+
+pedal "Twin-T Notch" {
+  components {
+    R1: resistor(10k)
+    R2: resistor(10k)
+    R3: resistor(5k)
+    C1: cap(10n)
+    C2: cap(10n)
+    C3: cap(20n)
+    RL: resistor(100k)
+  }
+  nets {
+    in -> R1.a, C1.a
+    R1.b -> R2.a, C3.a
+    R2.b -> C2.a
+    C1.b -> C2.b, R3.a
+    C3.b -> R3.b, RL.a, out
+    R3.b -> gnd
+    RL.b -> gnd
+  }
+}
