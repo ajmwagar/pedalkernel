@@ -958,7 +958,6 @@ pub fn compile_pedal_with_options(
     let lfos = super::bind::build_lfo_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);
     let envelopes =
         super::bind::build_envelope_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);
-
     // Thermal model.
     let thermal = if enable_thermal && classified.has_germanium {
         Some(ThermalModel::germanium_fuzz(sample_rate))

@@ -1,23 +1,28 @@
 # Envelope follower test
-# Tests attack/release envelope detection
+# Tests attack/release envelope detection controlling a JFET VCA.
+# Signal path: in -> C1 -> JFET drain/source -> C2 -> out
+# Envelope follower modulates JFET Vgs from the input signal.
 
 pedal "Envelope Follower Test" {
   components {
     C1: cap(100n)
     R1: resistor(100k)
-    EF1: envelope_follower(10k, 1u, 100k, 10u, 10k)
+    J1: njfet(j201)
     R2: resistor(10k)
     C2: cap(100n)
     R3: resistor(100k)
+    EF1: envelope_follower(10k, 1u, 100k, 10u, 10k)
   }
   nets {
     in -> C1.a
-    C1.b -> R1.a, EF1.in
+    C1.b -> R1.a, J1.drain
     R1.b -> gnd
-    EF1.out -> R2.a
-    R2.b -> C2.a
-    C2.b -> R3.a
+    J1.source -> R2.a
+    R2.b -> gnd
+    J1.source -> C2.a
+    C2.b -> R3.a, out
     R3.b -> gnd
-    C2.b -> out
+    EF1.in -> C1.b
+    EF1.out -> J1.gate
   }
 }

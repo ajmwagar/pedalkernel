@@ -2,6 +2,10 @@
 # OTA-based (CA3080) compression with envelope follower
 # Single-knob simplicity: Output level + Sensitivity control
 # Essential for country, funk, and chicken pickin'
+#
+# Signal path: in -> C1 -> R1 -> OTA -> C3 -> Output pot -> out
+# Sidechain: envelope follower tracks input amplitude -> modulates OTA Iabc
+# When input is loud, envelope rises, reducing OTA gain (compression).
 
 pedal "MXR Dyna Comp" {
   components {
@@ -12,6 +16,7 @@ pedal "MXR Dyna Comp" {
     C2: cap(1u)             # Envelope smoothing
     R3: resistor(560k)      # Bias network
     C3: cap(100n)           # Output coupling
+    EF1: envelope_follower(1k, 10u, 100k, 1u, 10k)  # Attack ~10ms, release ~100ms
     Sensitivity: pot(50k, a)  # Compression amount (audio taper)
     Output: pot(500k, a)    # Output level (audio taper)
   }
@@ -27,6 +32,8 @@ pedal "MXR Dyna Comp" {
     U1.out -> C3.a
     C3.b -> Output.a
     Output.b -> out
+    EF1.in -> C1.b
+    EF1.out -> U1.iabc
   }
   controls {
     Sensitivity.position -> "Sensitivity" [0.0, 1.0] = 0.5

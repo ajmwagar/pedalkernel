@@ -479,13 +479,34 @@ fn check_pin_validity(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
         .map(|c| (c.id.as_str(), &c.kind))
         .collect();
 
+    // Modulation target pins are valid on specific component types even though
+    // they're not circuit pins (they're resolved during binding, not graph building).
+    let is_valid_modulation_pin = |kind: &ComponentKind, pin: &str| -> bool {
+        match pin {
+            "iabc" => matches!(kind, ComponentKind::OpAmp(OpAmpType::Ca3080)),
+            "vgs" | "gate" => matches!(
+                kind,
+                ComponentKind::NJfet(_) | ComponentKind::PJfet(_)
+            ),
+            "vgk" => matches!(kind, ComponentKind::Triode(_) | ComponentKind::VariMu(_)),
+            "vg1k" => matches!(kind, ComponentKind::Pentode(_)),
+            "led" => matches!(kind, ComponentKind::Photocoupler(..)),
+            "clock" => matches!(kind, ComponentKind::Bbd(_)),
+            "speed_mod" | "delay_time" => matches!(kind, ComponentKind::DelayLine(..)),
+            _ => false,
+        }
+    };
+
     let check_pin = |pin: &Pin, w: &mut Vec<PedalWarning>| {
         if let Pin::ComponentPin { component, pin } = pin {
             if let Some(kind) = comp_map.get(component.as_str()) {
                 let valid = valid_pins_for(kind);
                 // Don't warn for component types that have no pin list
                 // (switches, etc.) since they're not circuit elements
-                if !valid.is_empty() && !valid.contains(&pin.as_str()) {
+                if !valid.is_empty()
+                    && !valid.contains(&pin.as_str())
+                    && !is_valid_modulation_pin(kind, pin)
+                {
                     w.push(PedalWarning {
                         severity: Severity::Error,
                         code: "unknown-pin",

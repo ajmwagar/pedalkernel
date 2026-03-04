@@ -711,8 +711,8 @@ pedal "Test Pedal" {
     fn pedal_dyna_comp() {
         let p = parse_example("dyna_comp.pedal");
         assert_eq!(p.name, "MXR Dyna Comp");
-        assert_eq!(p.components.len(), 9);
-        assert_eq!(p.nets.len(), 11);
+        assert_eq!(p.components.len(), 10);
+        assert_eq!(p.nets.len(), 13);
         assert_eq!(p.controls.len(), 2);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Sensitivity"));
