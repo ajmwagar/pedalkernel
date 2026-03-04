@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::stage::{
-    CoupledBjtStage, MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind,
-    SidechainProcessor, WdfStage,
+    MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind, SidechainProcessor,
+    WdfStage,
 };
 
 /// Reference to a stage by type and index, for topological ordering.
@@ -19,7 +19,6 @@ use super::stage::{
 pub(super) enum StageRef {
     Wdf(usize),
     MultiNl(usize),
-    CoupledBjt(usize),
 }
 
 #[cfg(feature = "debug-trace")]
@@ -57,9 +56,6 @@ pub(super) enum ControlTarget {
     OutputGain,
     /// Modify a pot in a specific WDF stage.
     PotInStage(usize),
-    /// Modify a pot inside a coupled BJT stage.
-    /// (coupled_stage_idx, bjt_idx_within_stage)
-    PotInCoupledBjtStage(usize, usize),
     /// Modify a pot inside a multi-NL stage (R-type adaptor approach).
     /// (multi_nl_stage_idx, passive_child_idx)
     PotInMultiNlStage(usize, usize),
@@ -404,11 +400,7 @@ pub struct CompiledPedal {
     /// Push-pull differential stages (e.g., Fairchild 670 gain cell).
     /// These are processed after regular WDF stages.
     pub(super) push_pull_stages: Vec<PushPullStage>,
-    /// Coupled BJT stages (e.g., Fuzz Face feedback-coupled pairs).
-    /// Processed between regular WDF stages and push-pull stages.
-    pub(super) coupled_bjt_stages: Vec<CoupledBjtStage>,
     /// Multi-NL stages using R-type adaptor + multi-port NR solver.
-    /// Replaces CoupledBjtStage when MNA construction succeeds.
     pub(super) multi_nl_stages: Vec<MultiNlStage>,
     pub(super) pre_gain: f64,
     pub(super) output_gain: f64,
@@ -897,25 +889,6 @@ impl CompiledPedal {
                         }
                     }
                 }
-                ControlTarget::PotInCoupledBjtStage(coupled_idx, bjt_idx) => {
-                    if let Some(smoother) =
-                        self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
-                    {
-                        smoother.set_target(value);
-                    } else {
-                        let coupled_idx = *coupled_idx;
-                        let bjt_idx = *bjt_idx;
-                        let comp_id = self.controls[i].component_id.clone();
-                        if let Some(coupled) = self.coupled_bjt_stages.get_mut(coupled_idx) {
-                            if let Some((tree, _, _)) = coupled.bjt_stages.get_mut(bjt_idx) {
-                                tree.set_pot(&comp_id, value);
-                                tree.set_pot(&format!("{comp_id}__aw"), value);
-                                tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
-                                tree.recompute();
-                            }
-                        }
-                    }
-                }
                 ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
                     if let Some(smoother) =
                         self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
@@ -1044,9 +1017,6 @@ impl CompiledPedal {
                 ControlTarget::BjtBias { max_pot_r, taper } => {
                     let tapered = taper.apply(value);
                     let max_pot_r = *max_pot_r;
-                    for stage in &mut self.coupled_bjt_stages {
-                        stage.set_feedback_from_pot(tapered, max_pot_r);
-                    }
                     for stage in &mut self.multi_nl_stages {
                         stage.set_feedback_from_pot(tapered, max_pot_r);
                     }
@@ -1107,18 +1077,6 @@ impl CompiledPedal {
                             }
                         }
                     }
-                    ControlTarget::PotInCoupledBjtStage(coupled_idx, bjt_idx) => {
-                        let coupled_idx = *coupled_idx;
-                        let bjt_idx = *bjt_idx;
-                        if let Some(coupled) = self.coupled_bjt_stages.get_mut(coupled_idx) {
-                            if let Some((tree, _, _)) = coupled.bjt_stages.get_mut(bjt_idx) {
-                                tree.set_pot(&comp_id, value);
-                                tree.set_pot(&format!("{comp_id}__aw"), value);
-                                tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
-                                tree.recompute();
-                            }
-                        }
-                    }
                     ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
                         let stage_idx = *stage_idx;
                         let max_r = self.controls[ctrl_idx].max_resistance;
@@ -1137,9 +1095,6 @@ impl CompiledPedal {
                     ControlTarget::BjtBias { max_pot_r, taper } => {
                         let tapered = taper.apply(value);
                         let max_pot_r = *max_pot_r;
-                        for stage in &mut self.coupled_bjt_stages {
-                            stage.set_feedback_from_pot(tapered, max_pot_r);
-                        }
                         for stage in &mut self.multi_nl_stages {
                             stage.set_feedback_from_pot(tapered, max_pot_r);
                         }
@@ -1175,10 +1130,6 @@ impl CompiledPedal {
     pub fn debug_multi_nl_count(&self) -> usize {
         self.multi_nl_stages.len()
     }
-    /// Number of coupled BJT stages (for debug reporting).
-    pub fn debug_coupled_bjt_count(&self) -> usize {
-        self.coupled_bjt_stages.len()
-    }
 
     /// Shows gain structure, all WDF stages with their trees, and control bindings.
     pub fn debug_dump(&self) -> String {
@@ -1213,19 +1164,6 @@ impl CompiledPedal {
             s.push_str(&format!("\n[Stage {}]\n", i));
             s.push_str(&stage.debug_dump());
             s.push('\n');
-        }
-
-        if !self.coupled_bjt_stages.is_empty() {
-            s.push_str(&format!(
-                "\nCoupled BJT Stages: {}\n",
-                self.coupled_bjt_stages.len()
-            ));
-            s.push_str(
-                "───────────────────────────────────────────────────────────────────────────\n",
-            );
-            for (i, coupled) in self.coupled_bjt_stages.iter().enumerate() {
-                s.push_str(&format!("  [{}] {}\n", i, coupled.debug_dump()));
-            }
         }
 
         if !self.multi_nl_stages.is_empty() {
@@ -1646,20 +1584,16 @@ impl PedalProcessor for CompiledPedal {
                         );
                     }
                 }
-                StageRef::CoupledBjt(i) => {
-                    prev_was_clipping = false;
-                    signal = self.coupled_bjt_stages[*i].process(signal);
-                }
             }
         }
 
         #[cfg(feature = "debug-trace")]
         if trace_on {
             eprintln!(
-                "  [PRE-PP] signal={signal:.6e} n_pp={} n_sc={} stage_order={}(wdf={}, mnl={}, cbj={})",
+                "  [PRE-PP] signal={signal:.6e} n_pp={} n_sc={} stage_order={}(wdf={}, mnl={})",
                 self.push_pull_stages.len(), self.sidechains.len(),
                 self.stage_order.len(), self.stages.len(),
-                self.multi_nl_stages.len(), self.coupled_bjt_stages.len()
+                self.multi_nl_stages.len()
             );
         }
 
@@ -1903,9 +1837,6 @@ impl PedalProcessor for CompiledPedal {
     fn reset(&mut self) {
         for stage in &mut self.stages {
             stage.reset();
-        }
-        for coupled in &mut self.coupled_bjt_stages {
-            coupled.reset();
         }
         for mnl in &mut self.multi_nl_stages {
             mnl.reset();

@@ -2705,17 +2705,11 @@ fn multi_nl_fuzz_face_compiles() {
     let pedal = parse("fuzz_face.pedal");
     let compiled = compile_pedal(&pedal, 48000.0).unwrap();
 
-    // The pedal should compile successfully regardless of which path is taken.
-    // Check that it has either multi-NL stages OR coupled BJT stages (fallback).
-    let has_multi_nl = !compiled.multi_nl_stages.is_empty();
-    let has_coupled_bjt = !compiled.coupled_bjt_stages.is_empty();
+    // The pedal should compile successfully with multi-NL stages.
     assert!(
-        has_multi_nl || has_coupled_bjt,
-        "Fuzz Face should produce either multi-NL stages or coupled BJT stages"
+        !compiled.multi_nl_stages.is_empty(),
+        "Fuzz Face should produce multi-NL stages"
     );
-
-    // Verify the multi-NL path is being taken (not just the fallback).
-    assert!(has_multi_nl, "Fuzz Face should use the multi-NL path");
     assert_eq!(
         compiled.multi_nl_stages.len(),
         1,
@@ -2857,9 +2851,8 @@ fn multi_nl_fuzz_face_pot_recomputes_scattering() {
     let pedal = parse("fuzz_face.pedal");
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
 
-    // Stage should still exist (either multi-NL or coupled BJT).
-    let has_stage = !proc.multi_nl_stages.is_empty() || !proc.coupled_bjt_stages.is_empty();
-    assert!(has_stage, "Should have multi-NL or coupled-BJT stage(s)");
+    // Stage should exist as multi-NL.
+    assert!(!proc.multi_nl_stages.is_empty(), "Should have multi-NL stage(s)");
 
     // The Fuzz control should be bound as BjtBias, not PotInMultiNlStage.
     let fuzz_ctrl = proc
@@ -2877,19 +2870,11 @@ fn multi_nl_fuzz_face_pot_recomputes_scattering() {
     // Verify changing the pot affects the stage's feedback parameters.
     // At Fuzz = 0 (max feedback), feedback_scale should be high.
     proc.set_control("Fuzz", 0.0);
-    let fs_lo = if !proc.multi_nl_stages.is_empty() {
-        proc.multi_nl_stages[0].feedback_scale
-    } else {
-        proc.coupled_bjt_stages[0].feedback_scale
-    };
+    let fs_lo = proc.multi_nl_stages[0].feedback_scale;
 
     // At Fuzz = 1 (min feedback), feedback_scale should be lower.
     proc.set_control("Fuzz", 1.0);
-    let fs_hi = if !proc.multi_nl_stages.is_empty() {
-        proc.multi_nl_stages[0].feedback_scale
-    } else {
-        proc.coupled_bjt_stages[0].feedback_scale
-    };
+    let fs_hi = proc.multi_nl_stages[0].feedback_scale;
 
     eprintln!("  feedback_scale @ Fuzz=0: {fs_lo:.4}");
     eprintln!("  feedback_scale @ Fuzz=1: {fs_hi:.4}");

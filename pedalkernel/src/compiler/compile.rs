@@ -666,7 +666,7 @@ pub fn compile_pedal_with_options(
     );
 
     // ══ Pass 3: Stage planning ════════════════════════════════════════
-    let (stage_plans, push_pull_plans, coupled_bjt_plans, multi_nl_plans, pp_transformer_edges, bjt_bias_analysis) =
+    let (stage_plans, push_pull_plans, multi_nl_plans, pp_transformer_edges, bjt_bias_analysis) =
         super::plan::plan_stages(&classified, &graph, sample_rate);
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
@@ -699,18 +699,13 @@ pub fn compile_pedal_with_options(
     );
 
     // Build multi-NL stages (R-type adaptor approach).
-    // Falls back to old coupled BJT stages if MNA construction fails.
-    let (mut multi_nl_stages, mut coupled_bjt_stages, multi_nl_fallback_stages) =
-        super::build::build_multi_nl_stages(
-            &multi_nl_plans,
-            &coupled_bjt_plans,
-            &classified,
-            &graph,
-            &opamp_analysis,
-            sample_rate,
-            oversampling,
-        );
-    stages.extend(multi_nl_fallback_stages);
+    let mut multi_nl_stages = super::build::build_multi_nl_stages(
+        &multi_nl_plans,
+        &classified,
+        &graph,
+        sample_rate,
+        oversampling,
+    );
 
     // Add triode fallback stages (SP-failed triodes built as single-NL MNA).
     multi_nl_stages.extend(triode_fallback_stages);
@@ -718,7 +713,7 @@ pub fn compile_pedal_with_options(
     // ══ Passive-only fallback ═════════════════════════════════════════
     let mut passive_attenuation = 1.0;
 
-    if stages.is_empty() && coupled_bjt_stages.is_empty() && multi_nl_stages.is_empty() {
+    if stages.is_empty() && multi_nl_stages.is_empty() {
         let has_reactive = pedal.components.iter().any(|c| {
             matches!(
                 c.kind,
@@ -919,7 +914,6 @@ pub fn compile_pedal_with_options(
     let controls = super::bind::build_controls(
         pedal,
         &stages,
-        &coupled_bjt_stages,
         &multi_nl_stages,
         &opamp_analysis.pot_map,
         &bjt_bias_analysis.bias_pot_map,
@@ -931,10 +925,9 @@ pub fn compile_pedal_with_options(
     );
 
     // Initialize BJT bias pots from their default positions.
-    // This sets the initial feedback_scale and veb_bias_offset on coupled BJT
-    // and multi-NL stages before any user input arrives.
+    // This sets the initial feedback_scale and veb_bias_offset on
+    // multi-NL stages before any user input arrives.
     for (pot_id, info) in &bjt_bias_analysis.bias_pot_map {
-        // Find the default position from the pedal's control definitions.
         let default_pos = pedal
             .controls
             .iter()
@@ -942,9 +935,6 @@ pub fn compile_pedal_with_options(
             .map(|c| c.default)
             .unwrap_or(0.5);
         let tapered = info.taper.apply(default_pos);
-        for stage in &mut coupled_bjt_stages {
-            stage.set_feedback_from_pot(tapered, info.max_pot_r);
-        }
         for stage in &mut multi_nl_stages {
             stage.set_feedback_from_pot(tapered, info.max_pot_r);
         }
@@ -1002,7 +992,6 @@ pub fn compile_pedal_with_options(
             if matches!(
                 ctrl.target,
                 ControlTarget::PotInStage(_)
-                    | ControlTarget::PotInCoupledBjtStage(_, _)
                     | ControlTarget::PotInMultiNlStage(_, _)
                     | ControlTarget::BjtBias { .. }
             ) {
@@ -1024,9 +1013,6 @@ pub fn compile_pedal_with_options(
         for (i, s) in multi_nl_stages.iter().enumerate() {
             order.push((StageRef::MultiNl(i), s.signal_flow_distance));
         }
-        for (i, s) in coupled_bjt_stages.iter().enumerate() {
-            order.push((StageRef::CoupledBjt(i), s.signal_flow_distance));
-        }
         order.sort_by_key(|(_, dist)| *dist);
         order.into_iter().map(|(sr, _)| sr).collect::<Vec<_>>()
     };
@@ -1035,7 +1021,6 @@ pub fn compile_pedal_with_options(
     let mut compiled = CompiledPedal {
         stages,
         push_pull_stages,
-        coupled_bjt_stages,
         multi_nl_stages,
         pre_gain,
         output_gain,

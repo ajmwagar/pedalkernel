@@ -19,10 +19,10 @@ use super::dyn_node::DynNode;
 use super::graph::{sp_reduce, sp_to_dyn, CircuitGraph, NodeId, SpTree};
 use super::helpers::*;
 use super::opamp_analysis::OpAmpAnalysis;
-use super::plan::{CoupledBjtPlan, MultiNlPlan, PushPullPlan, StagePlan};
+use super::plan::{MultiNlPlan, PushPullPlan, StagePlan};
 use super::stage::{
-    CoupledBjtStage, MultiNlDeviceGroups, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
-    PushPullStage, RootKind, ScatteringRecomputeData, TubeRoot, WdfStage,
+    MultiNlDeviceGroups, MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind,
+    ScatteringRecomputeData, TubeRoot, WdfStage,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -923,133 +923,6 @@ pub(super) fn build_push_pull_stages(
     stages
 }
 
-/// Build coupled BJT stages from plans.
-///
-/// Each CoupledBjtPlan groups 2+ tightly-coupled BJTs. For each plan:
-/// 1. Plan each BJT independently using plan_bjt_stage()
-/// 2. Build each tree with build_vs_stage()
-/// 3. Assemble into a CoupledBjtStage with 1-sample delay feedback
-///
-/// If SP reduction fails for any member (non-SP topology), falls back to
-/// building those BJTs as independent WdfStages instead.
-///
-/// Returns (coupled_stages, fallback_independent_stages).
-pub(super) fn build_coupled_bjt_stages(
-    coupled_plans: &[super::plan::CoupledBjtPlan],
-    classified: &ClassifiedCircuit,
-    graph: &CircuitGraph,
-    opamp_analysis: &OpAmpAnalysis,
-    sample_rate: f64,
-    oversampling: OversamplingFactor,
-) -> (Vec<super::stage::CoupledBjtStage>, Vec<WdfStage>) {
-    use std::collections::HashSet;
-    let vs_comp_idx = graph.components.len();
-    let empty_base_nodes: HashSet<super::graph::NodeId> = HashSet::new();
-    let mut coupled_stages = Vec::new();
-    let mut fallback_stages = Vec::new();
-
-    for coupled_plan in coupled_plans {
-        let mut bjt_stages = Vec::new();
-        let mut compensations = Vec::new();
-        let mut source_node_offset = 8000usize;
-        let mut all_built = true;
-
-        for &elem_idx in &coupled_plan.bjt_element_indices {
-            let elem = &classified.nonlinear_elements[elem_idx];
-
-            // Plan this BJT independently using the simplified planner.
-            let plan = super::plan::plan_bjt_stage(
-                elem,
-                elem_idx,
-                classified,
-                graph,
-                &empty_base_nodes,
-                source_node_offset,
-            );
-
-            if let Some(plan) = plan {
-                // Build the WDF tree for this BJT.
-                let stage =
-                    build_vs_stage(&plan, elem, graph, sample_rate, oversampling, vs_comp_idx, false);
-
-                if let Some(mut wdf_stage) = stage {
-                    wdf_stage.balance_vs_impedance();
-                    compensations.push(plan.compensation);
-                    bjt_stages.push((wdf_stage.tree, wdf_stage.root, wdf_stage.oversampler));
-                } else {
-                    all_built = false;
-                }
-            } else {
-                all_built = false;
-            }
-
-            source_node_offset += 1000;
-        }
-
-        if all_built && bjt_stages.len() >= 2 {
-            // All BJTs built successfully — create coupled stage.
-            // Signal flow distance: use the first BJT's base node distance.
-            let first_elem = &classified.nonlinear_elements[coupled_plan.bjt_element_indices[0]];
-            let sfd = match &first_elem.kind {
-                NonlinearKind::BjtNpn { base_node, .. }
-                | NonlinearKind::BjtPnp { base_node, .. } => classified
-                    .dist_from_in
-                    .get(base_node)
-                    .copied()
-                    .unwrap_or(usize::MAX),
-                _ => usize::MAX,
-            };
-            coupled_stages.push(super::stage::CoupledBjtStage {
-                bjt_stages,
-                compensations,
-                feedback_state: 0.0,
-                feedback_scale: 0.1,
-                veb_bias_offset: 0.0,
-                signal_flow_distance: sfd,
-            });
-        } else {
-            // SP reduction failed for at least one member — fall back to
-            // independent stage planning via the standard build pipeline.
-            let plans: Vec<_> = coupled_plan
-                .bjt_element_indices
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &elem_idx)| {
-                    let elem = &classified.nonlinear_elements[elem_idx];
-                    super::plan::plan_bjt_stage(
-                        elem,
-                        elem_idx,
-                        classified,
-                        graph,
-                        &empty_base_nodes,
-                        9000 + i * 1000,
-                    )
-                })
-                .collect();
-            let empty_pp = HashSet::new();
-            let empty_jfets = HashSet::new();
-            let (indep_stages, _triode_fb) = super::build::build_stages(
-                &plans,
-                classified,
-                graph,
-                opamp_analysis,
-                sample_rate,
-                oversampling,
-                &empty_pp,
-                &empty_jfets,
-            );
-            fallback_stages.extend(indep_stages);
-        }
-    }
-
-    // Adjust reactive element port resistances for oversampling.
-    for stage in &mut coupled_stages {
-        stage.apply_oversampling_rate(sample_rate);
-    }
-
-    (coupled_stages, fallback_stages)
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Multi-NL stage building (R-type adaptor + multi-port NR solver)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1063,20 +936,15 @@ pub(super) fn build_coupled_bjt_stages(
 /// 4. Extract sub-blocks (s_nl, s_nl_passive, s_nl_adapted)
 /// 5. Create NL device roots, package as MultiNlStage
 ///
-/// Falls back to old `build_coupled_bjt_stages()` on failure.
-///
-/// Returns (multi_nl_stages, coupled_bjt_fallback_stages, independent_fallback_stages).
+/// Plans that fail MNA construction are skipped with a warning.
 pub(super) fn build_multi_nl_stages(
     multi_nl_plans: &[MultiNlPlan],
-    coupled_bjt_plans: &[CoupledBjtPlan],
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
-    opamp_analysis: &OpAmpAnalysis,
     sample_rate: f64,
     oversampling: OversamplingFactor,
-) -> (Vec<MultiNlStage>, Vec<CoupledBjtStage>, Vec<WdfStage>) {
+) -> Vec<MultiNlStage> {
     let mut multi_nl_stages = Vec::new();
-    let mut needs_fallback = false;
 
     for plan in multi_nl_plans {
         match try_build_multi_nl_stage(plan, classified, graph, sample_rate, oversampling) {
@@ -1087,24 +955,12 @@ pub(super) fn build_multi_nl_stages(
                 multi_nl_stages.push(stage);
             }
             None => {
-                needs_fallback = true;
+                eprintln!(
+                    "Warning: multi-NL stage build failed for elements {:?}, skipping",
+                    plan.nl_element_indices
+                );
             }
         }
-    }
-
-    // If any multi-NL plan failed, fall back to old coupled BJT approach for ALL plans.
-    // This keeps things simple — either all succeed or we fall back entirely.
-    if needs_fallback {
-        multi_nl_stages.clear();
-        let (coupled, fallback) = build_coupled_bjt_stages(
-            coupled_bjt_plans,
-            classified,
-            graph,
-            opamp_analysis,
-            sample_rate,
-            oversampling,
-        );
-        return (Vec::new(), coupled, fallback);
     }
 
     // Adjust reactive element port resistances for oversampling.
@@ -1112,8 +968,7 @@ pub(super) fn build_multi_nl_stages(
         stage.apply_oversampling_rate(sample_rate);
     }
 
-    // All multi-NL stages built successfully. No coupled BJT fallback needed.
-    (multi_nl_stages, Vec::new(), Vec::new())
+    multi_nl_stages
 }
 
 /// Try to build a single MultiNlStage from a plan.

@@ -69,22 +69,6 @@ pub(super) struct PushPullPlan {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Coupled BJT plan
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Plan for a tightly-coupled BJT pair (e.g., Fuzz Face).
-///
-/// Coupled BJTs share feedback paths (collector→base or shared emitter/collector
-/// nodes via passives). They are processed as a single unit with 1-sample delay
-/// feedback coupling, rather than as independent stages.
-pub(super) struct CoupledBjtPlan {
-    /// Element indices in signal-flow order (first BJT receives input).
-    pub(super) bjt_element_indices: Vec<usize>,
-    /// Index of the BJT that produces the final output.
-    pub(super) output_bjt_idx: usize,
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Multi-NL plan (R-type adaptor approach)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -244,8 +228,8 @@ fn collect_passive_edges_from_nodes(
 /// Plan all WDF stages from classified nonlinear elements.
 ///
 /// Returns a list of stage plans (one per nonlinear element that has passives),
-/// a list of push-pull plans, a list of coupled BJT plans, and a list of
-/// multi-NL plans (for R-type adaptor approach).
+/// a list of push-pull plans, a list of multi-NL plans (for R-type adaptor
+/// approach), push-pull transformer edges, and BJT bias analysis.
 pub(super) fn plan_stages(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
@@ -253,7 +237,6 @@ pub(super) fn plan_stages(
 ) -> (
     Vec<StagePlan>,
     Vec<PushPullPlan>,
-    Vec<CoupledBjtPlan>,
     Vec<MultiNlPlan>,
     HashSet<usize>,
     BjtBiasAnalysis,
@@ -396,8 +379,7 @@ pub(super) fn plan_stages(
     // Group coupled BJTs into clusters.
     let clusters = bjt_uf.clusters();
 
-    // Build CoupledBjtPlan + MultiNlPlan for clusters of 2+ BJTs.
-    let mut coupled_bjt_plans: Vec<CoupledBjtPlan> = Vec::new();
+    // Build MultiNlPlan for clusters of 2+ BJTs.
     let mut multi_nl_plans: Vec<MultiNlPlan> = Vec::new();
     let mut coupled_bjt_elem_indices: HashSet<usize> = HashSet::new();
 
@@ -446,11 +428,6 @@ pub(super) fn plan_stages(
         for &ei in &elem_indices {
             coupled_bjt_elem_indices.insert(ei);
         }
-
-        coupled_bjt_plans.push(CoupledBjtPlan {
-            bjt_element_indices: elem_indices.clone(),
-            output_bjt_idx: bjt_infos[output_idx].elem_idx,
-        });
 
         // Collect all passive edges from all junction nodes of all members.
         let mut all_junction_nodes: HashSet<NodeId> = HashSet::new();
@@ -830,7 +807,7 @@ pub(super) fn plan_stages(
             }
         }
 
-        // Skip coupled BJTs (handled as CoupledBjtStage).
+        // Skip coupled BJTs (handled as MultiNlStage).
         if coupled_bjt_elem_indices.contains(&elem_idx) {
             continue;
         }
@@ -864,7 +841,6 @@ pub(super) fn plan_stages(
     (
         plans,
         push_pull_plans,
-        coupled_bjt_plans,
         multi_nl_plans,
         pp_transformer_edges,
         bjt_bias_analysis,

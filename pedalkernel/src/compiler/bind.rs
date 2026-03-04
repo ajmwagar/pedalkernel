@@ -12,7 +12,7 @@ use super::bjt_bias_analysis::BjtBiasPotInfo;
 use super::compiled::*;
 use super::graph::CircuitGraph;
 use super::helpers::has_pot;
-use super::stage::{CoupledBjtStage, MultiNlStage, RootKind, SidechainProcessor, WdfStage};
+use super::stage::{MultiNlStage, RootKind, SidechainProcessor, WdfStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Control binding
@@ -22,7 +22,6 @@ use super::stage::{CoupledBjtStage, MultiNlStage, RootKind, SidechainProcessor, 
 pub(super) fn build_controls(
     pedal: &PedalDef,
     stages: &[WdfStage],
-    coupled_bjt_stages: &[CoupledBjtStage],
     multi_nl_stages: &[MultiNlStage],
     opamp_pot_map: &HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)>,
     bjt_bias_pot_map: &HashMap<String, BjtBiasPotInfo>,
@@ -94,16 +93,6 @@ pub(super) fn build_controls(
                 if has_pot(&stage.tree, &ctrl.component) {
                     found_stage = Some(ControlTarget::PotInStage(si));
                     break;
-                }
-            }
-            if found_stage.is_none() {
-                'outer: for (ci, coupled) in coupled_bjt_stages.iter().enumerate() {
-                    for (bi, (tree, _, _)) in coupled.bjt_stages.iter().enumerate() {
-                        if has_pot(tree, &ctrl.component) {
-                            found_stage = Some(ControlTarget::PotInCoupledBjtStage(ci, bi));
-                            break 'outer;
-                        }
-                    }
                 }
             }
             if found_stage.is_none() {
@@ -528,11 +517,10 @@ pub(super) fn build_sidechains(
         match super::compile::compile_pedal_with_options(&sc_def, sample_rate, sc_options) {
             Ok(compiled) => {
                 eprintln!(
-                    "[sidechain] compiled OK: {} stages, {} push-pull, {} multi-nl, {} coupled-bjt",
+                    "[sidechain] compiled OK: {} stages, {} push-pull, {} multi-nl",
                     compiled.debug_stage_count(),
                     compiled.debug_push_pull_count(),
                     compiled.debug_multi_nl_count(),
-                    compiled.debug_coupled_bjt_count()
                 );
                 eprintln!("[sidechain] debug_dump:\n{}", compiled.debug_dump());
                 processors.push(SidechainProcessor {

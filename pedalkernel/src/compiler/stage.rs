@@ -1012,146 +1012,6 @@ impl PushPullStage {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Coupled BJT stage — tightly-coupled BJT pairs (e.g., Fuzz Face)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// A coupled BJT stage processes multiple BJTs as a single unit with
-/// inter-stage feedback coupling via 1-sample delay.
-///
-/// This models circuits like the Fuzz Face where Q1's collector feeds Q2's
-/// base and Q2's emitter feeds back to Q1's emitter, creating a tightly
-/// coupled feedback loop.
-pub(super) struct CoupledBjtStage {
-    /// Per-BJT: (WDF tree, root kind, oversampler).
-    pub(super) bjt_stages: Vec<(DynNode, RootKind, Oversampler)>,
-    /// Per-BJT compensation factors.
-    pub(super) compensations: Vec<f64>,
-    /// 1-sample delay feedback state: output of last BJT feeds back to first.
-    pub(super) feedback_state: f64,
-    /// Coupling strength (how much feedback is applied).
-    pub(super) feedback_scale: f64,
-    /// VEB bias offset from feedback pot position.
-    /// When a bias pot bridges emitter nodes, its position shifts the DC
-    /// operating point. Positive values increase forward bias.
-    pub(super) veb_bias_offset: f64,
-    /// BFS distance from input of the injection node (for topological ordering).
-    pub(super) signal_flow_distance: usize,
-}
-
-impl CoupledBjtStage {
-    /// Process one sample through the coupled BJT chain.
-    ///
-    /// 1. Add feedback_state * feedback_scale to input for first BJT
-    /// 2. For each BJT in order: set Vbe from signal, process WDF tree, get output
-    /// 3. Store final output as feedback_state for next sample
-    pub fn process(&mut self, input: f64) -> f64 {
-        let mut signal = input + self.feedback_state * self.feedback_scale;
-
-        for (i, (tree, root, oversampler)) in self.bjt_stages.iter_mut().enumerate() {
-            let comp = self.compensations[i];
-
-            // Set Vbe/Veb from signal (matching WdfStage behavior).
-            match root {
-                RootKind::BjtNpn(ref mut bjt) => {
-                    const BJT_VBE_BIAS: f64 = 0.6;
-                    bjt.set_vbe(BJT_VBE_BIAS + self.veb_bias_offset + signal * comp * 0.15);
-                }
-                RootKind::BjtPnp(ref mut bjt) => {
-                    const PNP_VEB_BIAS: f64 = 0.15;
-                    bjt.set_veb(PNP_VEB_BIAS + self.veb_bias_offset + signal * comp * 0.3);
-                }
-                _ => {}
-            }
-
-            signal = oversampler.process(signal, |sample| {
-                tree.set_voltage(sample * comp);
-                let b_tree = tree.reflected();
-                let rp = tree.port_resistance();
-
-                let a_root = match root {
-                    RootKind::BjtNpn(bjt) => bjt.process(b_tree, rp),
-                    RootKind::BjtPnp(bjt) => bjt.process(b_tree, rp),
-                    _ => b_tree, // Shouldn't happen
-                };
-                tree.set_incident(a_root);
-                (a_root + b_tree) / 2.0
-            });
-        }
-
-        // Store output for 1-sample delay feedback.
-        self.feedback_state = signal;
-
-        flush_denormal(signal)
-    }
-
-    /// Set feedback coupling from a bias pot position.
-    ///
-    /// The pot bridges emitter nodes of two coupled BJTs (e.g., Fuzz Face).
-    /// Position 0 → max feedback (pot shorted, clean tone).
-    /// Position 1 → min feedback (full pot resistance, max fuzz).
-    ///
-    /// `position` is the tapered pot value (0.0–1.0 after taper curve).
-    /// `max_pot_r` is the pot's maximum resistance in ohms.
-    pub fn set_feedback_from_pot(&mut self, position: f64, max_pot_r: f64) {
-        let pot_r = position * max_pot_r;
-        // Q2 emitter resistor (typical Fuzz Face value).
-        // The feedback scale is the voltage divider between the emitter
-        // resistor and the pot: feedback = R_emitter / (R_emitter + R_pot).
-        let emitter_r = 470.0;
-        self.feedback_scale = emitter_r / (emitter_r + pot_r);
-        // Bias shift: more feedback → more forward bias on Q1.
-        // At max feedback (pot=0), ~100mV additional VEB bias.
-        self.veb_bias_offset = self.feedback_scale * 0.1;
-    }
-
-    /// Adjust reactive element port resistances for oversampling.
-    pub fn apply_oversampling_rate(&mut self, base_rate: f64) {
-        for (tree, _, oversampler) in &mut self.bjt_stages {
-            let ratio = oversampler.ratio();
-            if ratio > 1 {
-                let effective_rate = base_rate * ratio as f64;
-                tree.set_sample_rate(effective_rate);
-                tree.recompute();
-            }
-        }
-    }
-
-    /// Reset all internal state.
-    pub fn reset(&mut self) {
-        for (tree, _, oversampler) in &mut self.bjt_stages {
-            tree.reset();
-            oversampler.reset();
-        }
-        self.feedback_state = 0.0;
-    }
-
-    /// Debug dump: print coupled stage structure.
-    pub fn debug_dump(&self) -> String {
-        let n = self.bjt_stages.len();
-        let mut s = format!(
-            "CoupledBjtStage(n_bjts={}, feedback_scale={:.4})\n",
-            n, self.feedback_scale
-        );
-        for (i, (tree, root, _)) in self.bjt_stages.iter().enumerate() {
-            let root_name = match root {
-                RootKind::BjtNpn(_) => "BjtNpn",
-                RootKind::BjtPnp(_) => "BjtPnp",
-                _ => "Unknown",
-            };
-            s.push_str(&format!(
-                "  [{}] root={}, comp={:.6}, tree_rp={:.1}Ω, nodes={}\n",
-                i,
-                root_name,
-                self.compensations[i],
-                tree.port_resistance(),
-                tree.node_count()
-            ));
-        }
-        s
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Multi-NL coupled stage (R-type adaptor + multi-port NR solver)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1322,7 +1182,7 @@ pub(super) struct ScatteringRecomputeData {
 
 /// Coupled nonlinear stage using an R-type adaptor and multi-port NR solver.
 ///
-/// This replaces `CoupledBjtStage` with a physically correct formulation:
+/// This uses a physically correct formulation:
 /// the full passive network between coupled NL elements is captured as an
 /// R-type adaptor scattering matrix, and all NL ports are solved simultaneously
 /// via a multi-port Newton-Raphson solver.
@@ -1377,9 +1237,9 @@ pub(super) struct MultiNlStage {
     /// Flag: pot changed since last scattering recompute.
     /// Set by `set_pot()`, cleared by `flush_recompute()`.
     pub(super) recompute_pending: bool,
-    /// VEB bias offset from a feedback pot (mirrors CoupledBjtStage behavior).
+    /// VEB bias offset from a feedback pot.
     pub(super) veb_bias_offset: f64,
-    /// Feedback scale for coupled BJT stages (mirrors CoupledBjtStage).
+    /// Feedback scale for coupled BJT stages.
     pub(super) feedback_scale: f64,
 }
 
@@ -1668,7 +1528,7 @@ impl MultiNlStage {
         }
     }
 
-    /// Set feedback coupling from a bias pot position (same as CoupledBjtStage).
+    /// Set feedback coupling from a bias pot position.
     ///
     /// Updates `feedback_scale` and `veb_bias_offset` which are applied during
     /// `set_control_voltage()` on BJT NL devices.
