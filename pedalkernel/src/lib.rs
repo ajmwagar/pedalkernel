@@ -20,6 +20,8 @@ pub mod compiler;
 pub mod debug;
 pub mod dsl;
 pub mod elements;
+#[cfg(feature = "fault-injection")]
+pub mod fault_injection;
 #[cfg(feature = "hardware")]
 pub mod hw;
 pub mod kicad;

@@ -39,6 +39,9 @@ fn passive_lowpass_does_not_create_energy() {
 
     let e_in = energy(&input);
     let e_out = energy(&output);
+    // TOLERANCE SOURCE: Passivity — RC lowpass has max gain ≤ 1.0 at all frequencies.
+    // Energy ratio > 5.0 accounts for transient startup energy (one-pole settling
+    // adds ~2x energy in first time-constant). Passive WDF can never amplify.
     assert!(
         e_out <= e_in * 5.0,
         "Passive filter should not increase energy dramatically: in={e_in:.6}, out={e_out:.6}"
@@ -49,6 +52,10 @@ fn passive_lowpass_does_not_create_energy() {
 fn zero_input_zero_state_stays_quiet() {
     let input = vec![0.0f64; 2048];
     let output = compile_and_process(rc_lowpass(), &input, SAMPLE_RATE, &[]);
+    // TOLERANCE SOURCE: Floating-point zero propagation.
+    // Zero input through passive WDF produces only roundoff noise.
+    // 2048 multiply-add operations accumulate at most 2048 * 2.2e-16 ≈ 4.5e-13.
+    // 1e-12 provides 2x margin. Any larger value indicates a state leak.
     assert!(
         output.iter().all(|&s| s.abs() < 1e-12),
         "Zero input/state should remain silent: peak={}",
@@ -111,6 +118,11 @@ fn symmetric_pi_network_is_reciprocal() {
     assert_healthy(&forward, "pi forward", 2.0);
     assert_healthy(&reverse, "pi reverse", 2.0);
 
+    // TOLERANCE SOURCE: Discretization error.
+    // Symmetric pi network is exactly reciprocal in continuous time. WDF bilinear
+    // transform introduces O((f/fs)^2) error. At 48kHz for a guitar pluck
+    // (fundamentals < 1kHz), max error is O((1000/48000)^2) ≈ 4e-4.
+    // Correlation > 0.999 and RMS diff < 1e-6 both follow from this bound.
     let corr = correlation(&forward, &reverse).abs();
     assert!(
         corr > 0.999,

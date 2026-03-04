@@ -337,6 +337,11 @@ pub(crate) fn multi_port_nr_solve(
         port_resistances
     );
 
+    #[cfg(feature = "fault-injection")]
+    if crate::fault_injection::is_active(crate::fault_injection::Fault::BreakSolverWarmStart) {
+        v_guess.iter_mut().for_each(|v| *v = 0.0);
+    }
+
     // Working arrays
     let mut f_vec = vec![0.0; n_nl];
     let mut jacobian = vec![0.0; n_nl * n_nl];
@@ -475,7 +480,11 @@ pub(crate) fn multi_port_nr_solve(
         let mut max_dv = 0.0_f64;
         for i in 0..n_nl {
             let mut dv = rhs[i];
-            if dv.abs() > 5.0 {
+            #[cfg(feature = "fault-injection")]
+            let skip_damp = crate::fault_injection::is_active(crate::fault_injection::Fault::DisableStepDamping);
+            #[cfg(not(feature = "fault-injection"))]
+            let skip_damp = false;
+            if dv.abs() > 5.0 && !skip_damp {
                 dv *= 0.5;
                 step_limited = true;
             }
@@ -878,6 +887,11 @@ pub(crate) fn newton_raphson_solve<F>(
 where
     F: FnMut(f64) -> (f64, f64),
 {
+    #[cfg(feature = "fault-injection")]
+    if crate::fault_injection::is_active(crate::fault_injection::Fault::BreakSolverWarmStart) {
+        v = 0.0;
+    }
+
     let mut stats_entry = if SOLVER_STATS_ENABLED {
         Some(SolverStatsEntry::default())
     } else {
@@ -1899,6 +1913,10 @@ mod tests {
                 let jac_fd = (f_plus[i] - f_minus[i]) / (2.0 * eps);
                 let jac_a = jac_analytic[i * n_nl + j];
                 let rel_err = (jac_a - jac_fd).abs() / jac_a.abs().max(1e-10);
+                // TOLERANCE SOURCE: Central FD with eps=1e-7 has truncation error O(eps²) = 1e-14.
+                // Roundoff is O(machine_eps/eps) = 1e-9. For exponential diode with
+                // Jacobian entries spanning 1e-12 to 1e3, relative error at small values
+                // can reach 1e-3. 1e-4 excludes only gross formula errors.
                 assert!(
                     rel_err < 1e-4,
                     "Jacobian FD mismatch J[{i}][{j}]: analytic={jac_a:.6e}, fd={jac_fd:.6e}, \

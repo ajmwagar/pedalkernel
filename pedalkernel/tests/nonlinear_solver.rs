@@ -12,6 +12,11 @@ fn diode_pair_voltage_is_monotonic() {
         let b = root.process(a, rp);
         let v = 0.5 * (a + b);
         if let Some(prev) = last_v {
+            // TOLERANCE SOURCE: NR solver convergence tolerance is 1e-10 (voltage).
+            // Monotonicity violation > 1e-3 would be audible as ~-60dBFS crackle.
+            // 1e-3 is the perceptual threshold for single-sample discontinuity
+            // at guitar signal levels (0.1–1V peak). Physical diode I-V is strictly
+            // monotonic, so any violation indicates a solver regression.
             assert!(v >= prev - 1e-3, "Diode pair should increase with input");
         }
         last_v = Some(v);
@@ -27,6 +32,10 @@ fn diode_pair_is_odd_symmetric() {
         let b_neg = root.process(-a, rp);
         let v_pos = 0.5 * (a + b_pos);
         let v_neg = 0.5 * (-a + b_neg);
+        // TOLERANCE SOURCE: Anti-parallel diode pair has exact odd symmetry.
+        // Residual asymmetry is bounded by NR tolerance (1e-10) * Jacobian
+        // condition number (~1e3 for Rp=2200Ω silicon). Expected: < 1e-7.
+        // 1e-6 provides 10x margin.
         assert!(
             (v_pos + v_neg).abs() < 1e-6,
             "Odd symmetry violated at a={a}: v+={v_pos}, v-={v_neg}"
@@ -66,6 +75,10 @@ fn diode_pair_response_is_continuous() {
         let v = 0.5 * (a + b);
         if let Some(prev) = last_v {
             let delta = (v - prev).abs();
+            // TOLERANCE SOURCE: Diode I-V is C∞ smooth. For step Δa = 0.01V
+            // through Rp=1000Ω, max Δv ≈ Δa * Rp/(Rp + rd) where rd ≈ 25mV/Is.
+            // At forward bias rd → 25Ω, so max Δv ≈ 0.01 * 1000/1025 ≈ 0.01V.
+            // 0.05V tolerance provides 5x margin for all bias points.
             assert!(
                 delta < 0.05,
                 "Diode pair output jumped: Δv={delta} at a={a}"

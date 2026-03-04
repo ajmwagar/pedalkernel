@@ -67,6 +67,12 @@ impl SeriesAdaptor {
     pub fn scatter_down(&self, a3: f64) -> (f64, f64) {
         let sum = self.b1 + self.b2 + a3;
         let a1 = self.b1 - self.gamma * sum;
+        #[cfg(feature = "fault-injection")]
+        let a1 = if crate::fault_injection::is_active(crate::fault_injection::Fault::CorruptScattering) {
+            a1 + 1e-3
+        } else {
+            a1
+        };
         let a2 = self.b2 - (1.0 - self.gamma) * sum;
         (a1, a2)
     }

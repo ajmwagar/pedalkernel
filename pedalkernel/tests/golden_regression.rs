@@ -16,6 +16,12 @@ struct GoldenCase {
     tolerance: f64,
 }
 
+// TOLERANCE SOURCE: Golden regression detects engine behavior drift.
+// Base drift from f64 non-associativity across compiler versions is
+// ~1e-9 per sample. For 4096 samples, RMS drift ≈ sqrt(4096) * 1e-9
+// ≈ 6.4e-8. Tolerance 3–6e-8 is set at the observed baseline.
+// IMPORTANT: These are change-detectors, not correctness checks.
+// Golden failures should trigger review, not automatic loosening.
 const GOLDEN_CASES: &[GoldenCase] = &[
     GoldenCase {
         name: "clip_silicon",

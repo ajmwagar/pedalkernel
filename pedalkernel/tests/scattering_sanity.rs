@@ -14,6 +14,10 @@ fn series_adaptor_obeys_kcl_kvl() {
         let b2 = rng.gen_range(-5.0..5.0);
         let expected_b3 = -(b1 + b2);
         let b3 = adaptor.scatter_up(b1, b2);
+        // TOLERANCE SOURCE: Floating-point roundoff.
+        // Series adaptor scatter is exact arithmetic (add/multiply).
+        // Max error = 3 operations * f64 eps (2.2e-16) * max_value (~10) ≈ 7e-15.
+        // 1e-9 provides >1e6 safety factor. If this fails, there is a formula bug.
         assert!(
             (b3 - expected_b3).abs() < 1e-9,
             "Series scatter_up mismatch (case {case})"
@@ -24,6 +28,7 @@ fn series_adaptor_obeys_kcl_kvl() {
         let sum = b1 + b2 + a3;
         let expected_a1 = b1 - gamma * sum;
         let expected_a2 = b2 - (1.0 - gamma) * sum;
+        // TOLERANCE SOURCE: Same as scatter_up — exact arithmetic, roundoff only.
         assert!(
             (a1 - expected_a1).abs() < 1e-9,
             "Series scatter_down a1 mismatch (case {case})"
@@ -47,6 +52,7 @@ fn parallel_adaptor_obeys_kcl_kvl() {
         let gamma = r2 / (r1 + r2);
         let expected_b3 = b1 + gamma * (b2 - b1);
         let b3 = adaptor.scatter_up(b1, b2);
+        // TOLERANCE SOURCE: Floating-point roundoff (see series adaptor above).
         assert!(
             (b3 - expected_b3).abs() < 1e-9,
             "Parallel scatter_up mismatch (case {case})"
@@ -56,6 +62,7 @@ fn parallel_adaptor_obeys_kcl_kvl() {
         let diff = b2 - b1;
         let expected_a1 = a3 + (1.0 - gamma) * diff;
         let expected_a2 = a3 - gamma * diff;
+        // TOLERANCE SOURCE: Same as scatter_up — exact arithmetic, roundoff only.
         assert!(
             (a1 - expected_a1).abs() < 1e-9,
             "Parallel scatter_down a1 mismatch (case {case})"

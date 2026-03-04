@@ -12,6 +12,10 @@ use super::helpers::balance_parallel_vs;
 /// on x86 and serve no useful purpose in audio signals.
 #[inline(always)]
 fn flush_denormal(x: f64) -> f64 {
+    #[cfg(feature = "fault-injection")]
+    if crate::fault_injection::is_active(crate::fault_injection::Fault::SkipDenormalFlush) {
+        return x;
+    }
     if x.is_subnormal() {
         0.0
     } else {

@@ -61,6 +61,10 @@ fn rat_aliasing_reduced_by_oversampling() {
             "Aliasing metric too small to compare (amp={amp}): ratio={}",
             aliased.alias_ratio
         );
+        // TOLERANCE SOURCE: Comparative — 4x oversampling should reduce alias
+        // energy. Theory predicts >20dB (100x) reduction for 3rd-order half-band
+        // filter. 0.9x (10% reduction) is conservative; actual is typically 5–50x.
+        // This tests the direction of the effect, not its magnitude.
         assert!(
             oversampled.alias_ratio < aliased.alias_ratio * 0.9,
             "Oversampling should cut aliasing (amp={amp}): no_os={:.6}, os={:.6}, peaks={:?}",
@@ -128,6 +132,10 @@ fn compare_sample_rates(
 #[test]
 fn rat_sample_rate_consistency_clean_setting() {
     let cmp = compare_sample_rates(RAT_PEDAL, RAT_CONTROLS, 0.05, 0.3);
+    // TOLERANCE SOURCE: WDF bilinear transform frequency warping at 1kHz
+    // between 48k and 96k is 0.017 dB. With X2 oversampling, effective
+    // warping is ~4x smaller. 0.5 dB accounts for anti-aliasing filter
+    // ripple + Goertzel measurement noise from short signals (0.3s).
     assert!(
         cmp.0 < 0.5,
         "RAT fundamental drifted across Fs: Δ={:.3} dB",
@@ -174,6 +182,9 @@ pedal "RC Lowpass" {
         let ratio = rms(&output) / rms(&input);
         ratios.push((rate, ratio));
     }
+    // TOLERANCE SOURCE: Bilinear transform warping at fc=1592Hz between 48k
+    // and 96k causes ~0.3% gain difference. 0.05 (5%) provides >10x margin
+    // and covers Goertzel bin resolution effects on short signals.
     let diff = (ratios[0].1 - ratios[1].1).abs();
     assert!(
         diff < 0.05,
