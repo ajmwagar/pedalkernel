@@ -24,8 +24,59 @@ use super::stage::{RootKind, WdfStage};
 use crate::tree::{MnaSystem, WdfPort};
 
 // ═══════════════════════════════════════════════════════════════════════════
-// JFET variable resistance detection
+// Modulation-controlled element detection
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Scan PedalDef nets for OTAs whose `.iabc` pin is driven by an envelope
+/// follower or LFO. These OTAs should be linearized (gm stamped into MNA)
+/// rather than solved with Newton-Raphson at a WDF tree root.
+fn detect_envelope_controlled_otas(pedal: &PedalDef) -> HashSet<String> {
+    let mut result = HashSet::new();
+
+    let modulator_ids: HashSet<&str> = pedal
+        .components
+        .iter()
+        .filter(|c| {
+            matches!(
+                &c.kind,
+                ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..)
+            )
+        })
+        .map(|c| c.id.as_str())
+        .collect();
+
+    if modulator_ids.is_empty() {
+        return result;
+    }
+
+    let ota_ids: HashSet<&str> = pedal
+        .components
+        .iter()
+        .filter(|c| matches!(&c.kind, ComponentKind::OpAmp(ot) if ot.is_ota()))
+        .map(|c| c.id.as_str())
+        .collect();
+
+    for net in &pedal.nets {
+        let from_is_modulator = match &net.from {
+            Pin::ComponentPin { component, pin } => {
+                modulator_ids.contains(component.as_str()) && pin == "out"
+            }
+            _ => false,
+        };
+        if !from_is_modulator {
+            continue;
+        }
+        for to_pin in &net.to {
+            if let Pin::ComponentPin { component, pin } = to_pin {
+                if ota_ids.contains(component.as_str()) && pin == "iabc" {
+                    result.insert(component.clone());
+                }
+            }
+        }
+    }
+
+    result
+}
 
 /// Scan PedalDef nets for JFETs that have LFO or envelope follower connections
 /// to their `.vgs` pin. These JFETs should use the variable resistance model
@@ -672,8 +723,11 @@ pub fn compile_pedal_with_options(
     );
 
     // ══ Pass 3: Stage planning ════════════════════════════════════════
+    // Detect modulation-controlled elements before planning.
+    let envelope_controlled_otas = detect_envelope_controlled_otas(pedal);
+
     let (stage_plans, push_pull_plans, multi_nl_plans, pp_transformer_edges, bjt_bias_analysis) =
-        super::plan::plan_stages(&classified, &graph, sample_rate);
+        super::plan::plan_stages(&classified, &graph, sample_rate, &envelope_controlled_otas);
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
     // Detect JFETs that are LFO-controlled so they use variable-resistance mode
@@ -961,9 +1015,20 @@ pub fn compile_pedal_with_options(
     let gain_range_final = (physical_gain.max(0.1), physical_gain.max(0.1) * 10.0);
     let (pre_gain, output_gain) = (physical_gain, level_default);
 
-    let lfos = super::bind::build_lfo_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);
-    let envelopes =
-        super::bind::build_envelope_bindings(pedal, &stages, &delay_id_to_idx, sample_rate);
+    let lfos = super::bind::build_lfo_bindings(
+        pedal,
+        &stages,
+        &multi_nl_stages,
+        &delay_id_to_idx,
+        sample_rate,
+    );
+    let envelopes = super::bind::build_envelope_bindings(
+        pedal,
+        &stages,
+        &multi_nl_stages,
+        &delay_id_to_idx,
+        sample_rate,
+    );
     // Thermal model.
     let thermal = if enable_thermal && classified.has_germanium {
         Some(ThermalModel::germanium_fuzz(sample_rate))

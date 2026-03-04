@@ -97,6 +97,23 @@ pub(super) struct MultiNlPlan {
     /// rather than from an NL port. Used for bridge rectifier + RC stages where
     /// the output is the smoothed DC voltage across a capacitor.
     pub(super) output_node: Option<NodeId>,
+    /// Linearized OTA VCCS stamps for the MNA.
+    /// Each entry defines a VCCS: I_out = gm * (V(in+) - V(in-)) at out_node.
+    /// When non-empty, n_nl = 0 — the OTA is a linear element in the MNA, not
+    /// an NR port. The scattering matrix encodes the full gain relationship.
+    pub(super) ota_vccs: Vec<OtaVccsInfo>,
+}
+
+/// Info for stamping a linearized OTA as a VCCS in the MNA.
+pub(super) struct OtaVccsInfo {
+    /// Non-inverting input node (signal input).
+    pub(super) in_pos: NodeId,
+    /// Inverting input node (feedback).
+    pub(super) in_neg: NodeId,
+    /// Output current node.
+    pub(super) out_node: NodeId,
+    /// Component index for looking up the OTA model.
+    pub(super) comp_idx: usize,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -234,6 +251,7 @@ pub(super) fn plan_stages(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     sample_rate: f64,
+    envelope_controlled_otas: &HashSet<String>,
 ) -> (
     Vec<StagePlan>,
     Vec<PushPullPlan>,
@@ -498,6 +516,7 @@ pub(super) fn plan_stages(
             nl_terminals,
             compensation: 1.0,
             output_node: None,
+            ota_vccs: Vec::new(),
         });
     }
 
@@ -585,6 +604,7 @@ pub(super) fn plan_stages(
                 nl_terminals,
                 compensation,
                 output_node: None,
+                ota_vccs: Vec::new(),
             });
 
             three_port_triode_indices.insert(elem_idx);
@@ -781,8 +801,101 @@ pub(super) fn plan_stages(
                 nl_terminals,
                 compensation: 1.0,
                 output_node,
+                ota_vccs: Vec::new(),
             });
         }
+    }
+
+    // ── Linearized OTA detection ─────────────────────────────────────
+    // OTAs with envelope/LFO-controlled iabc use linearized gm stamped into
+    // the R-type MNA, not Newton-Raphson at a WDF tree root. This gives the
+    // scattering matrix access to real circuit impedances (150kΩ feedback, etc.)
+    // instead of the tree-determined port resistance (~5Ω).
+    let mut linearized_ota_indices: HashSet<usize> = HashSet::new();
+
+    for (elem_idx, elem) in classified.nonlinear_elements.iter().enumerate() {
+        if !matches!(&elem.kind, NonlinearKind::Ota) {
+            continue;
+        }
+        if classified.sidechain_edge_set.contains(&elem.edge_idx) {
+            continue;
+        }
+
+        // Check if this OTA is envelope/LFO-controlled.
+        let edge = &graph.edges[elem.edge_idx];
+        let comp = &graph.components[edge.comp_idx];
+        if !envelope_controlled_otas.contains(&comp.id) {
+            continue;
+        }
+
+        // Get the OTA's 3 nodes: pos, neg, out.
+        // Resolve all pins from node_names (final UF roots), NOT from edge
+        // terminals — the edge connects pos/neg but edge.node_a/b may have
+        // stale UF roots that don't match the final circuit node IDs.
+        let pos_key = format!("{}.pos", comp.id);
+        let neg_key = format!("{}.neg", comp.id);
+        let out_key = format!("{}.out", comp.id);
+        let pos_node = match graph.node_names.get(&pos_key).copied() {
+            Some(n) => n,
+            None => edge.node_a, // Fallback to edge terminal
+        };
+        let neg_node = match graph.node_names.get(&neg_key).copied() {
+            Some(n) => n,
+            None => edge.node_b, // Fallback to edge terminal
+        };
+        let out_node = match graph.node_names.get(&out_key).copied() {
+            Some(n) => n,
+            None => continue, // Can't find output node — skip linearization
+        };
+
+        // Collect passive edges reachable from all 3 OTA nodes.
+        let mut junction_nodes: HashSet<NodeId> = HashSet::new();
+        junction_nodes.insert(pos_node);
+        junction_nodes.insert(neg_node);
+        junction_nodes.insert(out_node);
+        let all_passive_edges = collect_passive_edges_from_nodes(
+            &junction_nodes,
+            graph,
+            classified,
+            false, // don't skip out_node — output coupling cap is in this network
+            &pp_transformer_edges,
+        );
+
+        if all_passive_edges.is_empty() {
+            continue;
+        }
+
+        // Find injection node (closest to circuit input).
+        let exclude: HashSet<NodeId> = [pos_node, neg_node, out_node].into_iter().collect();
+        let injection_node = find_injection_node_multi_nl(
+            &all_passive_edges,
+            graph,
+            classified,
+            &exclude,
+            graph.in_node,
+        );
+
+        // Output node: follow from the OTA output through passive edges toward
+        // the circuit output. The output coupling cap's far end is the output.
+        let output_node = Some(graph.out_node);
+
+        multi_nl_plans.push(MultiNlPlan {
+            nl_element_indices: Vec::new(), // No NR elements
+            output_element_idx: elem_idx,   // Reference only
+            passive_edge_indices: all_passive_edges,
+            injection_node,
+            nl_terminals: Vec::new(), // No NR ports
+            compensation: 1.0,
+            output_node,
+            ota_vccs: vec![OtaVccsInfo {
+                in_pos: pos_node,
+                in_neg: neg_node,
+                out_node,
+                comp_idx: edge.comp_idx,
+            }],
+        });
+
+        linearized_ota_indices.insert(elem_idx);
     }
 
     // ── Plan each nonlinear element ────────────────────────────────────
@@ -819,6 +932,11 @@ pub(super) fn plan_stages(
 
         // Skip coupled diodes (handled as MultiNlStage bridge rectifier).
         if coupled_diode_indices.contains(&elem_idx) {
+            continue;
+        }
+
+        // Skip linearized OTAs (handled as MultiNlStage with VCCS stamp).
+        if linearized_ota_indices.contains(&elem_idx) {
             continue;
         }
 
@@ -1860,5 +1978,6 @@ fn plan_collapsed_nl(
         nl_terminals,
         compensation: 1.0,
         output_node,
+        ota_vccs: Vec::new(),
     }
 }

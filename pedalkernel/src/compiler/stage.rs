@@ -1187,10 +1187,18 @@ pub(super) struct ScatteringRecomputeData {
     /// MNA system with fixed resistors stamped (no pots).
     pub(super) mna: MnaSystem,
     /// Port node pairs: (pos_mna_idx, neg_mna_idx) for each port.
-    /// Ordering: [NL_0..NL_{n-1}, passive_0..passive_{m-1}, adapted].
+    /// Ordering: [NL_0..NL_{n-1}, passive_0..passive_{m-1}] (VS injection mode)
+    /// Or: [NL_0..NL_{n-1}, passive_0..passive_{m-1}, adapted] (standard mode).
     pub(super) port_node_pairs: Vec<(Option<usize>, Option<usize>)>,
     /// Resistance of the adapted (voltage source) port.
     pub(super) adapted_resistance: f64,
+    /// When Some, the input VS is stamped as an ideal voltage source in MNA B/C
+    /// matrices. The value is the MNA VS branch index. Recompute uses
+    /// `derive_scattering_and_vs_injection()` instead of `derive_scattering_matrix_general()`.
+    pub(super) vs_source_index: Option<usize>,
+    /// Output MNA node pair for direct node-voltage extraction.
+    /// When Some, recompute also updates the extraction coefficients.
+    pub(super) extract_output_nodes: Option<(Option<usize>, Option<usize>)>,
 }
 
 /// Scattering matrix sub-blocks for multi-NL solving.
@@ -1294,6 +1302,78 @@ pub(super) struct MultiNlStage {
     pub(super) veb_bias_offset: f64,
     /// Feedback scale for coupled BJT stages.
     pub(super) feedback_scale: f64,
+    /// Linearized OTA data for gm-based scattering recompute.
+    /// When Some, the OTA's transconductance is stamped into the MNA as a linear
+    /// conductance. When the envelope changes gain, we delta-update the MNA and
+    /// recompute the scattering matrix. No NR iteration needed.
+    pub(super) linearized_ota: Option<LinearizedOtaData>,
+    /// VS injection vector for ideal voltage source input.
+    /// When Some, signal is injected via `a[i] += k[i] * V_in` instead of
+    /// an adapted WDF port. Used for linearized OTA stages where the adapted
+    /// port would share an MNA node with a reactive port.
+    pub(super) vs_injection: Option<Vec<f64>>,
+    /// Node-voltage extraction coefficients for direct output reading.
+    /// When Some, the output is computed as:
+    ///   V_out = Σ_k extract_coeffs[k] * b[k] + extract_vs * V_in
+    /// This bypasses WDF port impedance mismatch by reading the MNA node
+    /// voltage directly from X⁻¹ coefficients.
+    pub(super) extract_coeffs: Option<Vec<f64>>,
+    pub(super) extract_vs: f64,
+    /// State-space model for direct discrete-time simulation.
+    /// When Some, process() uses state-space update (A·x + b·u) instead of
+    /// WDF scattering. Used for linearized OTA stages where cap port
+    /// conductances overwhelm circuit conductances.
+    pub(super) state_space: Option<StateSpaceData>,
+}
+
+/// State-space data for direct discrete-time simulation.
+///
+/// Replaces WDF scattering for linearized OTA stages where cap port
+/// conductances dominate circuit conductances, causing identity S-matrix rows.
+/// Uses bilinear transform on the continuous-time MNA to get node-voltage
+/// dynamics directly, avoiding WDF port-impedance scaling issues.
+pub(super) struct StateSpaceData {
+    /// State vector [V_nodes..., I_vs...] (n_states elements).
+    pub x: Vec<f64>,
+    /// State transition matrix A_d = M⁻¹·N (n_states × n_states, row-major).
+    pub a_matrix: Vec<f64>,
+    /// Input vector b_d = M⁻¹·F (n_states × 1).
+    pub b_vector: Vec<f64>,
+    /// Output extraction vector c_out (1 × n_states).
+    pub c_vector: Vec<f64>,
+    /// Number of state variables (num_nodes + num_vsources).
+    pub n_states: usize,
+    /// Capacitance stamps for rebuilding state-space when G changes.
+    /// Each entry: (node_pos, node_neg, capacitance_farads).
+    pub cap_stamps: Vec<(Option<usize>, Option<usize>, f64)>,
+    /// VS branch index for input.
+    pub vs_idx: usize,
+    /// Output extraction nodes.
+    pub output_pos: Option<usize>,
+    pub output_neg: Option<usize>,
+    /// Sample rate for bilinear transform (2·f_s·C scaling).
+    pub sample_rate: f64,
+    /// Pot stamps for delta-updating G when pots change.
+    /// Each entry: (passive_child_index, node_pos, node_neg, last_conductance).
+    pub pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
+}
+
+/// Data for a linearized OTA whose gm is stamped into the R-type MNA.
+///
+/// The OTA operates as a VCCS: I_out = gm * V_in. Its transconductance gm
+/// is an off-diagonal conductance in the MNA matrix. When the envelope
+/// follower changes the OTA's bias current (Iabc), we recompute gm,
+/// delta-update the stored MNA, and re-derive the scattering matrix.
+pub(super) struct LinearizedOtaData {
+    /// OTA model parameters (iabc_max, vt, r_load).
+    pub model: crate::elements::OtaModel,
+    /// Current normalized gain (0.0 = off, 1.0 = max). Set by envelope.
+    pub gain: f64,
+    /// MNA cell indices for the VCCS stamp: (row, col, sign).
+    /// These are the cells in g_matrix that encode the transconductance.
+    pub stamp_cells: Vec<(usize, usize, f64)>,
+    /// Number of MNA nodes (for indexing into g_matrix).
+    pub num_mna_nodes: usize,
 }
 
 impl MultiNlStage {
@@ -1310,6 +1390,33 @@ impl MultiNlStage {
     pub fn process(&mut self, input: f64) -> f64 {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
+
+        // ── State-space path: direct discrete-time simulation ────────────
+        // Bypasses WDF scattering entirely. Used for linearized OTA stages
+        // where cap port conductances overwhelm circuit conductances.
+        if let Some(ref mut ss) = self.state_space {
+            let output = self.oversampler.process(input, |sample| {
+                let n = ss.n_states;
+                // x[n] = A · x[n-1] + b · u[n]
+                let mut x_new = vec![0.0; n];
+                for i in 0..n {
+                    let mut v = ss.b_vector[i] * sample;
+                    let row_start = i * n;
+                    for j in 0..n {
+                        v += ss.a_matrix[row_start + j] * ss.x[j];
+                    }
+                    x_new[i] = flush_denormal(v);
+                }
+                // y[n] = c · x[n]
+                let mut y = 0.0;
+                for i in 0..n {
+                    y += ss.c_vector[i] * x_new[i];
+                }
+                ss.x = x_new;
+                y
+            });
+            return flush_denormal(output);
+        }
 
         let compensation = self.compensation;
         let n_nl = self.n_nl;
@@ -1346,8 +1453,11 @@ impl MultiNlStage {
                 known_a[i] = a_i;
             }
 
-            // 3. Multi-port NR solve
-            let b_nl = if let Some(ref dg) = self.device_groups {
+            // 3. Multi-port NR solve (skipped when n_nl=0, e.g. linearized OTA)
+            let b_nl = if n_nl == 0 {
+                // No NR ports — signal propagation is fully encoded in S matrix.
+                Vec::new()
+            } else if let Some(ref dg) = self.device_groups {
                 // Grouped solver: cross-coupled device Jacobians
                 let groups: Vec<&dyn NlDeviceGroupIv> =
                     dg.groups.iter().map(|g| g.as_group_iv()).collect();
@@ -1383,29 +1493,61 @@ impl MultiNlStage {
             };
 
             // 4. Build full b-vector for scatter_down:
-            //    [b_nl_0, ..., b_nl_{n-1}, b_passive_0, ..., b_passive_{m-1}, b_adapted]
-            let n_total = n_nl + n_passive + 1;
+            //    With VS injection: [b_nl_0..., b_passive_0...] (no adapted port)
+            //    Without:           [b_nl_0..., b_passive_0..., b_adapted]
+            let use_vs_injection = self.vs_injection.is_some();
+            let n_total = if use_vs_injection {
+                n_nl + n_passive
+            } else {
+                n_nl + n_passive + 1
+            };
             let mut b_all = Vec::with_capacity(n_total);
             b_all.extend_from_slice(&b_nl);
             b_all.extend_from_slice(&b_passive);
-            b_all.push(b_adapted);
+            if !use_vs_injection {
+                b_all.push(b_adapted);
+            }
 
             // Use scatter_all to get incident waves for all ports
-            let a_all = self.adaptor.scatter_all(&b_all);
+            let mut a_all = self.adaptor.scatter_all(&b_all);
+
+            // Add VS injection: a[i] += k[i] * V_in
+            if let Some(ref k) = self.vs_injection {
+                for i in 0..a_all.len() {
+                    if i < k.len() {
+                        a_all[i] += k[i] * b_adapted;
+                    }
+                }
+            }
 
             // 5. Set incident waves on passive children
             for (k, child) in self.passive_children.iter_mut().enumerate() {
                 child.set_incident(a_all[n_nl + k]);
             }
 
-            // 6. Output = (a + b) / 2 at the output port (NL or passive)
-            let a_out = a_all[output_port];
-            let b_out = if output_port < n_nl {
-                b_nl[output_port]
+            // 6. Output extraction
+            if let Some(ref coeffs) = self.extract_coeffs {
+                // Direct node-voltage extraction: V = Σ coeffs[k]*b[k] + vs*V_in
+                // This reads the MNA node voltage directly, bypassing port
+                // impedance mismatch that makes WDF port waves tiny.
+                let mut v_out = self.extract_vs * b_adapted;
+                for k in 0..n_passive {
+                    v_out += coeffs[k] * b_passive[k];
+                }
+                for k in 0..n_nl {
+                    v_out += coeffs[n_passive + k] * b_nl[k];
+                }
+                v_out
             } else {
-                b_passive[output_port - n_nl]
-            };
-            (a_out + b_out) / 2.0
+                // Standard WDF output: (a + b) / 2 at the output port
+                let a_out = a_all[output_port];
+                let b_out = if output_port < n_nl {
+                    b_nl[output_port]
+                } else {
+                    b_passive[output_port - n_nl]
+                };
+                (a_out + b_out) / 2.0
+            }
         });
 
         #[cfg(feature = "debug-trace")]
@@ -1477,6 +1619,11 @@ impl MultiNlStage {
         }
         for v in &mut self.v_prev {
             *v = 0.0;
+        }
+        if let Some(ref mut ss) = self.state_space {
+            for v in &mut ss.x {
+                *v = 0.0;
+            }
         }
         self.oversampler.reset();
     }
@@ -1581,6 +1728,39 @@ impl MultiNlStage {
         }
     }
 
+    /// Set OTA gain for a linearized OTA stage.
+    ///
+    /// Delta-updates the stored MNA's conductance matrix to reflect the new gm,
+    /// then marks the scattering matrix for recompute. The throttled recompute
+    /// in `flush_recompute()` will re-derive the scattering matrix.
+    ///
+    /// gain: 0.0 = off, 1.0 = max transconductance.
+    pub fn set_ota_gain_linear(&mut self, gain: f64) {
+        let gain = gain.clamp(0.0, 1.0);
+        if let Some(ref mut ota) = self.linearized_ota {
+            let old_gm = ota.gain * ota.model.iabc_max / (2.0 * ota.model.vt);
+            ota.gain = gain;
+            let new_gm = gain * ota.model.iabc_max / (2.0 * ota.model.vt);
+            let delta = new_gm - old_gm;
+
+            if delta.abs() > 1e-15 {
+                // Delta-update the stored MNA conductance matrix.
+                if let Some(ref mut recompute) = self.recompute_data {
+                    let n = ota.num_mna_nodes;
+                    for &(row, col, sign) in &ota.stamp_cells {
+                        recompute.mna.g_matrix[row * n + col] += sign * delta;
+                    }
+                }
+                self.recompute_pending = true;
+            }
+        }
+    }
+
+    /// Check if this stage has a linearized OTA (for modulation target binding).
+    pub fn has_linearized_ota(&self) -> bool {
+        self.linearized_ota.is_some()
+    }
+
     /// Set feedback coupling from a bias pot position.
     ///
     /// Updates `feedback_scale` and `veb_bias_offset` which are applied during
@@ -1598,6 +1778,53 @@ impl MultiNlStage {
     /// and passive_children, re-derives the scattering matrix, and updates all
     /// sub-blocks (s_nl, s_nl_passive, s_nl_adapted) and the RTypeAdaptor.
     fn recompute_scattering(&mut self) {
+        // ── State-space recompute ────────────────────────────────────────
+        // When state-space is active, rebuild A_d, b_d from the updated MNA
+        // (G matrix has been delta-updated by set_ota_gain_linear or set_pot).
+        if let Some(ref mut ss) = self.state_space {
+            if let Some(ref mut recompute) = self.recompute_data {
+                // Delta-update pot conductances in the MNA G matrix.
+                let n_mna = recompute.mna.num_nodes;
+                for ps in &mut ss.pot_stamps {
+                    let child_idx = ps.0;
+                    let pos = ps.1;
+                    let neg = ps.2;
+                    let new_r = self.passive_children[child_idx].port_resistance();
+                    let new_g = 1.0 / new_r;
+                    let delta = new_g - ps.3;
+                    if delta.abs() > 1e-15 {
+                        // Delta-update G: remove old conductance, add new.
+                        if let Some(p) = pos {
+                            recompute.mna.g_matrix[p * n_mna + p] += delta;
+                            if let Some(n) = neg {
+                                recompute.mna.g_matrix[p * n_mna + n] -= delta;
+                            }
+                        }
+                        if let Some(n) = neg {
+                            recompute.mna.g_matrix[n * n_mna + n] += delta;
+                            if let Some(p) = pos {
+                                recompute.mna.g_matrix[n * n_mna + p] -= delta;
+                            }
+                        }
+                        ps.3 = new_g;
+                    }
+                }
+                let (a_d, b_d, c_out, _n) = recompute.mna.build_state_space_matrices(
+                    &ss.cap_stamps,
+                    ss.vs_idx,
+                    ss.output_pos,
+                    ss.output_neg,
+                    ss.sample_rate,
+                );
+                if a_d.iter().all(|v| v.is_finite()) && b_d.iter().all(|v| v.is_finite()) {
+                    ss.a_matrix = a_d;
+                    ss.b_vector = b_d;
+                    ss.c_vector = c_out;
+                }
+            }
+            return;
+        }
+
         let recompute = match &self.recompute_data {
             Some(r) => r,
             None => return,
@@ -1605,7 +1832,8 @@ impl MultiNlStage {
 
         let n_nl = self.n_nl;
         let n_passive = self.passive_children.len();
-        let n_total = n_nl + n_passive + 1;
+        let use_vs = recompute.vs_source_index.is_some();
+        let n_total = if use_vs { n_nl + n_passive } else { n_nl + n_passive + 1 };
 
         // Rebuild ports with current resistances.
         let mut ports: Vec<WdfPort> = Vec::with_capacity(n_total);
@@ -1631,28 +1859,47 @@ impl MultiNlStage {
             });
         }
 
-        // Adapted port (voltage source — resistance doesn't change)
-        let (pos, neg) = recompute.port_node_pairs[n_nl + n_passive];
-        ports.push(WdfPort {
-            node_pos: pos,
-            node_neg: neg,
-            resistance: recompute.adapted_resistance,
-        });
+        if use_vs {
+            // VS injection mode: derive scattering + injection vector (no adapted port).
+            let vs_idx = recompute.vs_source_index.unwrap();
+            let (scattering, vs_inj) =
+                recompute.mna.derive_scattering_and_vs_injection(&ports, vs_idx);
 
-        // Re-derive scattering matrix from the frozen MNA.
-        let scattering = recompute.mna.derive_scattering_matrix_general(&ports);
+            if scattering.iter().any(|&s| !s.is_finite()) {
+                return;
+            }
 
-        // Validate — if NaN/inf, keep old matrix.
-        if scattering.iter().any(|&s| !s.is_finite()) {
-            return;
+            self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
+            let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+            self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
+            self.vs_injection = Some(vs_inj);
+
+            // Recompute extraction coefficients if used.
+            if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
+                let (coeffs, vs_coeff) =
+                    recompute.mna.derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
+                self.extract_coeffs = Some(coeffs);
+                self.extract_vs = vs_coeff;
+            }
+        } else {
+            // Standard mode: adapted port included.
+            let (pos, neg) = recompute.port_node_pairs[n_nl + n_passive];
+            ports.push(WdfPort {
+                node_pos: pos,
+                node_neg: neg,
+                resistance: recompute.adapted_resistance,
+            });
+
+            let scattering = recompute.mna.derive_scattering_matrix_general(&ports);
+
+            if scattering.iter().any(|&s| !s.is_finite()) {
+                return;
+            }
+
+            self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
+            let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+            self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
         }
-
-        // Extract sub-blocks.
-        self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
-
-        // Update the RTypeAdaptor.
-        let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
-        self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
     }
 }
 

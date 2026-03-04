@@ -571,6 +571,41 @@ impl MnaSystem {
         // The B and C matrices encode current flow through both windings
     }
 
+    /// Add a VCCS (Voltage-Controlled Current Source) stamp.
+    ///
+    /// Models `I_out = gm * V_in` where:
+    /// - Input voltage: V(in_pos) - V(in_neg)
+    /// - Output current: flows from out_pos to out_neg
+    ///
+    /// MNA stamp: G[out+][in+] += gm, G[out+][in-] -= gm,
+    ///            G[out-][in+] -= gm, G[out-][in-] += gm
+    pub fn stamp_vccs(
+        &mut self,
+        out_pos: Option<usize>,
+        out_neg: Option<usize>,
+        in_pos: Option<usize>,
+        in_neg: Option<usize>,
+        gm: f64,
+    ) {
+        let n = self.num_nodes;
+        if let Some(op) = out_pos {
+            if let Some(ip) = in_pos {
+                self.g_matrix[op * n + ip] += gm;
+            }
+            if let Some(inn) = in_neg {
+                self.g_matrix[op * n + inn] -= gm;
+            }
+        }
+        if let Some(on) = out_neg {
+            if let Some(ip) = in_pos {
+                self.g_matrix[on * n + ip] -= gm;
+            }
+            if let Some(inn) = in_neg {
+                self.g_matrix[on * n + inn] += gm;
+            }
+        }
+    }
+
     /// Derive the scattering matrix for WDF ports.
     ///
     /// Each port corresponds to a Thévenin equivalent at a node pair.
@@ -853,6 +888,246 @@ impl MnaSystem {
         }
 
         (scattering, vs_injection)
+    }
+
+    /// Derive node-voltage extraction coefficients for reading the output
+    /// voltage at a specific MNA node from the WDF port b-waves and VS input.
+    ///
+    /// The output voltage is computed as:
+    /// ```text
+    /// V(node) = Σ_k extract[k] * b[k] + extract_vs * V_in
+    /// ```
+    ///
+    /// This bypasses WDF port impedance mismatch by reading the circuit's
+    /// nodal voltage directly from the X⁻¹ matrix.
+    ///
+    /// * `ports` — WDF ports (same as passed to scattering derivation)
+    /// * `vs_idx` — index of the voltage source branch in the MNA system
+    /// * `output_pos` — positive output MNA node (Some(idx) or None for ground)
+    /// * `output_neg` — negative output MNA node (Some(idx) or None for ground)
+    ///
+    /// Returns `(port_coeffs, vs_coeff)`.
+    pub fn derive_extraction_coeffs(
+        &self,
+        ports: &[WdfPort],
+        vs_idx: usize,
+        output_pos: Option<usize>,
+        output_neg: Option<usize>,
+    ) -> (Vec<f64>, f64) {
+        let n_ports = ports.len();
+
+        // Build the full MNA system matrix X (same as derive_scattering_and_vs_injection)
+        let n_total = self.num_nodes + self.num_vsources;
+        let mut x_matrix = vec![0.0; n_total * n_total];
+
+        // Fill G block
+        for i in 0..self.num_nodes {
+            for j in 0..self.num_nodes {
+                x_matrix[i * n_total + j] = self.g_matrix[i * self.num_nodes + j];
+            }
+        }
+        // Fill B block
+        for i in 0..self.num_nodes {
+            for j in 0..self.num_vsources {
+                x_matrix[i * n_total + self.num_nodes + j] =
+                    self.b_matrix[i * self.num_vsources + j];
+            }
+        }
+        // Fill C block
+        for i in 0..self.num_vsources {
+            for j in 0..self.num_nodes {
+                x_matrix[(self.num_nodes + i) * n_total + j] =
+                    self.c_matrix[i * self.num_nodes + j];
+            }
+        }
+        // Fill D block
+        for i in 0..self.num_vsources {
+            for j in 0..self.num_vsources {
+                x_matrix[(self.num_nodes + i) * n_total + self.num_nodes + j] =
+                    self.d_matrix[i * self.num_vsources + j];
+            }
+        }
+
+        // Add port Thévenin resistances
+        for port in ports.iter() {
+            let g = 1.0 / port.resistance;
+            if let Some(p) = port.node_pos {
+                x_matrix[p * n_total + p] += g;
+                if let Some(n) = port.node_neg {
+                    x_matrix[p * n_total + n] -= g;
+                }
+            }
+            if let Some(n) = port.node_neg {
+                x_matrix[n * n_total + n] += g;
+                if let Some(p) = port.node_pos {
+                    x_matrix[n * n_total + p] -= g;
+                }
+            }
+        }
+
+        // Invert X
+        let x_inv = invert_matrix(&x_matrix, n_total);
+
+        // Extraction: V(out) = Σ_k coeff[k] * b[k] + vs_coeff * V_in
+        // Each port k injects current b[k]/R[k] at its nodes.
+        // V(m) = Σ_k (X⁻¹[m,p_k] - X⁻¹[m,n_k]) / R_k * b_k + X⁻¹[m,vs_col] * V_in
+        // For floating output (pos/neg): V = V(pos) - V(neg)
+        let lookup = |row: Option<usize>, col: usize| -> f64 {
+            match row {
+                Some(r) => x_inv[r * n_total + col],
+                None => 0.0,
+            }
+        };
+
+        let mut port_coeffs = vec![0.0; n_ports];
+        for k in 0..n_ports {
+            let pk = ports[k].node_pos;
+            let nk = ports[k].node_neg;
+            // X⁻¹ entry from port k's source to output node
+            let pos_contrib = match pk {
+                Some(p) => lookup(output_pos, p) - lookup(output_neg, p),
+                None => 0.0,
+            };
+            let neg_contrib = match nk {
+                Some(n) => lookup(output_pos, n) - lookup(output_neg, n),
+                None => 0.0,
+            };
+            port_coeffs[k] = (pos_contrib - neg_contrib) / ports[k].resistance;
+        }
+
+        // VS contribution
+        let vs_col = self.num_nodes + vs_idx;
+        let vs_coeff = lookup(output_pos, vs_col) - lookup(output_neg, vs_col);
+
+        (port_coeffs, vs_coeff)
+    }
+
+    /// Build discrete-time state-space matrices from the continuous-time MNA
+    /// using the bilinear (trapezoidal) transform.
+    ///
+    /// This avoids WDF port-impedance scaling issues by working directly with
+    /// node voltages. Capacitors are treated as continuous-time elements (C matrix)
+    /// rather than WDF ports (port conductance 1/R_p = 2·f_s·C).
+    ///
+    /// The continuous-time augmented system is:
+    /// ```text
+    /// [G   B] [V ]   [C_cap  0] [dV/dt]   [0  ]
+    /// [E   D] [I ] + [0      0] [dI/dt] = [V_s]
+    /// ```
+    ///
+    /// Bilinear transform `s → 2·f_s·(z-1)/(z+1)` gives:
+    /// ```text
+    /// M · x[n] = N · x[n-1] + F · u[n]
+    /// ```
+    /// where `M = [G+2fsC  B; E  D]`, `N = [2fsC-G  -B; 0  0]`,
+    /// and `F = [0...1...]` maps the VS input.
+    ///
+    /// Returns `(A_d, b_d, c_out, n_states)` where:
+    /// - `A_d = M⁻¹·N` (n×n state transition matrix)
+    /// - `b_d = M⁻¹·F` (n×1 input vector)
+    /// - `c_out` (1×n output extraction vector)
+    /// - `n_states` = num_nodes + num_vsources
+    pub fn build_state_space_matrices(
+        &self,
+        cap_stamps: &[(Option<usize>, Option<usize>, f64)],
+        vs_idx: usize,
+        output_pos: Option<usize>,
+        output_neg: Option<usize>,
+        sample_rate: f64,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize) {
+        let n_nodes = self.num_nodes;
+        let n_vs = self.num_vsources;
+        let n_aug = n_nodes + n_vs;
+        let two_fs = 2.0 * sample_rate;
+
+        // Build C_cap matrix (n_nodes × n_nodes) from capacitance stamps.
+        let mut c_cap = vec![0.0; n_nodes * n_nodes];
+        for &(pos, neg, cap) in cap_stamps {
+            if let Some(p) = pos {
+                c_cap[p * n_nodes + p] += cap;
+                if let Some(n) = neg {
+                    c_cap[p * n_nodes + n] -= cap;
+                }
+            }
+            if let Some(n) = neg {
+                c_cap[n * n_nodes + n] += cap;
+                if let Some(p) = pos {
+                    c_cap[n * n_nodes + p] -= cap;
+                }
+            }
+        }
+
+        // Build M = [G + 2·fs·C_cap,  B;  E,  D]
+        let mut m_matrix = vec![0.0; n_aug * n_aug];
+        for i in 0..n_nodes {
+            for j in 0..n_nodes {
+                m_matrix[i * n_aug + j] =
+                    self.g_matrix[i * n_nodes + j] + two_fs * c_cap[i * n_nodes + j];
+            }
+        }
+        for i in 0..n_nodes {
+            for j in 0..n_vs {
+                m_matrix[i * n_aug + n_nodes + j] = self.b_matrix[i * n_vs + j];
+            }
+        }
+        for i in 0..n_vs {
+            for j in 0..n_nodes {
+                m_matrix[(n_nodes + i) * n_aug + j] = self.c_matrix[i * n_nodes + j];
+            }
+        }
+        for i in 0..n_vs {
+            for j in 0..n_vs {
+                m_matrix[(n_nodes + i) * n_aug + n_nodes + j] = self.d_matrix[i * n_vs + j];
+            }
+        }
+
+        // Build N = [2·fs·C_cap - G,  -B;  0,  0]
+        let mut n_matrix = vec![0.0; n_aug * n_aug];
+        for i in 0..n_nodes {
+            for j in 0..n_nodes {
+                n_matrix[i * n_aug + j] =
+                    two_fs * c_cap[i * n_nodes + j] - self.g_matrix[i * n_nodes + j];
+            }
+        }
+        for i in 0..n_nodes {
+            for j in 0..n_vs {
+                n_matrix[i * n_aug + n_nodes + j] = -self.b_matrix[i * n_vs + j];
+            }
+        }
+        // Lower blocks (VS constraint rows) are zero — no history terms.
+
+        // Invert M
+        let m_inv = invert_matrix(&m_matrix, n_aug);
+
+        // A_d = M⁻¹ · N  (state transition matrix)
+        let mut a_d = vec![0.0; n_aug * n_aug];
+        for i in 0..n_aug {
+            for j in 0..n_aug {
+                let mut sum = 0.0;
+                for k in 0..n_aug {
+                    sum += m_inv[i * n_aug + k] * n_matrix[k * n_aug + j];
+                }
+                a_d[i * n_aug + j] = sum;
+            }
+        }
+
+        // b_d = M⁻¹ · F  where F has 1.0 at row (n_nodes + vs_idx)
+        let vs_row = n_nodes + vs_idx;
+        let mut b_d = vec![0.0; n_aug];
+        for i in 0..n_aug {
+            b_d[i] = m_inv[i * n_aug + vs_row];
+        }
+
+        // c_out: extraction vector for output node voltage
+        let mut c_out = vec![0.0; n_aug];
+        if let Some(p) = output_pos {
+            c_out[p] = 1.0;
+        }
+        if let Some(n) = output_neg {
+            c_out[n] -= 1.0;
+        }
+
+        (a_d, b_d, c_out, n_aug)
     }
 }
 

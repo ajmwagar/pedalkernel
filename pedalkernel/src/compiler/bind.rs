@@ -270,6 +270,7 @@ pub(super) fn build_controls(
 pub(super) fn build_lfo_bindings(
     pedal: &PedalDef,
     stages: &[WdfStage],
+    multi_nl_stages: &[MultiNlStage],
     delay_id_to_idx: &HashMap<String, usize>,
     sample_rate: f64,
 ) -> Vec<LfoBinding> {
@@ -306,6 +307,7 @@ pub(super) fn build_lfo_bindings(
                                     target_prop,
                                     target_comp,
                                     stages,
+                                    multi_nl_stages,
                                     delay_id_to_idx,
                                     &mut created_all_jfet_binding,
                                 )
@@ -322,6 +324,7 @@ pub(super) fn build_lfo_bindings(
                                         &final_pin,
                                         &final_comp,
                                         stages,
+                                        multi_nl_stages,
                                         delay_id_to_idx,
                                         &mut created_all_jfet_binding,
                                     )
@@ -357,6 +360,7 @@ pub(super) fn build_lfo_bindings(
 pub(super) fn build_envelope_bindings(
     pedal: &PedalDef,
     stages: &[WdfStage],
+    multi_nl_stages: &[MultiNlStage],
     delay_id_to_idx: &HashMap<String, usize>,
     sample_rate: f64,
 ) -> Vec<EnvelopeBinding> {
@@ -395,6 +399,7 @@ pub(super) fn build_envelope_bindings(
                                     target_prop,
                                     target_comp,
                                     stages,
+                                    multi_nl_stages,
                                     delay_id_to_idx,
                                     &mut unused_flag,
                                 ) {
@@ -549,6 +554,7 @@ fn resolve_modulation_target(
     target_pin: &str,
     target_comp: &str,
     stages: &[WdfStage],
+    multi_nl_stages: &[super::stage::MultiNlStage],
     delay_id_to_idx: &HashMap<String, usize>,
     created_all_jfet_binding: &mut bool,
 ) -> Option<ModulationTarget> {
@@ -604,11 +610,20 @@ fn resolve_modulation_target(
             Some(ModulationTarget::PentodeVg1k { stage_idx })
         }
         "iabc" => {
-            let stage_idx = stages
+            // Check for linearized OTA in multi-NL stages first (R-type path).
+            if let Some(multi_nl_idx) = multi_nl_stages
                 .iter()
-                .position(|s| matches!(&s.root, RootKind::Ota(_)))
-                .unwrap_or(0);
-            Some(ModulationTarget::OtaIabc { stage_idx })
+                .position(|s| s.has_linearized_ota())
+            {
+                Some(ModulationTarget::OtaIabcLinear { multi_nl_idx })
+            } else {
+                // Fall back to WDF tree root OTA.
+                let stage_idx = stages
+                    .iter()
+                    .position(|s| matches!(&s.root, RootKind::Ota(_)))
+                    .unwrap_or(0);
+                Some(ModulationTarget::OtaIabc { stage_idx })
+            }
         }
         "clock" => Some(ModulationTarget::BbdClock { bbd_idx: 0 }),
         "speed_mod" => {
@@ -633,7 +648,7 @@ fn modulation_bias_range(target: &ModulationTarget) -> (f64, f64) {
         ModulationTarget::VariMuVgk { .. } => (-2.0, 2.0),
         ModulationTarget::PentodeVg1k { .. } => (-2.0, 2.0),
         ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
-        ModulationTarget::OtaIabc { .. } => (0.5, 0.5),
+        ModulationTarget::OtaIabc { .. } | ModulationTarget::OtaIabcLinear { .. } => (0.5, 0.5),
         ModulationTarget::BbdClock { .. } => (0.15, 0.10),
         ModulationTarget::OpAmpVp { .. } => (0.0, 1.0),
         ModulationTarget::DelaySpeed { .. } => (0.0, 0.02),

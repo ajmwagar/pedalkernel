@@ -121,8 +121,11 @@ pub(super) enum ModulationTarget {
     VariMuVgk { stage_idx: usize },
     /// Modulate a MOSFET's Vgs.
     MosfetVgs { stage_idx: usize },
-    /// Modulate an OTA's bias current (for VCA/compressor).
+    /// Modulate an OTA's bias current (for VCA/compressor) — WDF tree root.
     OtaIabc { stage_idx: usize },
+    /// Modulate a linearized OTA's gm in the R-type MNA (for VCA/compressor).
+    /// The OTA is stamped as a VCCS in the MNA; gm changes trigger S-matrix recompute.
+    OtaIabcLinear { multi_nl_idx: usize },
     /// Modulate a BBD's clock frequency (for chorus/flanger).
     BbdClock { bbd_idx: usize },
     /// Modulate an op-amp's non-inverting input voltage.
@@ -1290,6 +1293,11 @@ impl PedalProcessor for CompiledPedal {
                         stage.set_ota_gain(modulation.clamp(0.0, 1.0));
                     }
                 }
+                ModulationTarget::OtaIabcLinear { multi_nl_idx } => {
+                    if let Some(stage) = self.multi_nl_stages.get_mut(*multi_nl_idx) {
+                        stage.set_ota_gain_linear(modulation.clamp(0.0, 1.0));
+                    }
+                }
                 ModulationTarget::BbdClock { bbd_idx } => {
                     if let Some(bbd) = self.bbds.get_mut(*bbd_idx) {
                         // LFO modulates delay time: modulation = normalized 0-1
@@ -1372,6 +1380,13 @@ impl PedalProcessor for CompiledPedal {
                         // Invert: high envelope (loud) → low gain (compression)
                         let gain = (1.0 - modulation).clamp(0.0, 1.0);
                         stage.set_ota_gain(gain);
+                    }
+                }
+                ModulationTarget::OtaIabcLinear { multi_nl_idx } => {
+                    if let Some(stage) = self.multi_nl_stages.get_mut(*multi_nl_idx) {
+                        // Envelope controls linearized OTA: louder → lower gm
+                        let gain = (1.0 - modulation).clamp(0.0, 1.0);
+                        stage.set_ota_gain_linear(gain);
                     }
                 }
                 ModulationTarget::BbdClock { bbd_idx } => {

@@ -735,6 +735,7 @@ fn build_triode_mna_fallback(
         nl_terminals,
         compensation: plan.compensation,
         output_node: None,
+        ota_vccs: Vec::new(),
     };
 
     try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling)
@@ -823,6 +824,7 @@ fn build_diode_mna_fallback(
         nl_terminals,
         compensation: plan.compensation,
         output_node: None,
+        ota_vccs: Vec::new(),
     };
 
     try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling)
@@ -1111,7 +1113,8 @@ fn try_build_multi_nl_stage(
     // n_nl = number of NL ports (terminal pairs), which may exceed the number
     // of NL elements (e.g., a 3-port VariMu triode has 1 element but 2 ports).
     let n_nl = plan.nl_terminals.len();
-    if n_nl == 0 || plan.passive_edge_indices.is_empty() {
+    let has_linearized_ota = !plan.ota_vccs.is_empty();
+    if (n_nl == 0 && !has_linearized_ota) || plan.passive_edge_indices.is_empty() {
         return None;
     }
 
@@ -1142,6 +1145,13 @@ fn try_build_multi_nl_stage(
     for &(pos, neg) in &plan.nl_terminals {
         add_node(pos);
         add_node(neg);
+    }
+
+    // Collect nodes from linearized OTA VCCS stamps
+    for ota in &plan.ota_vccs {
+        add_node(ota.in_pos);
+        add_node(ota.in_neg);
+        add_node(ota.out_node);
     }
 
     // Injection node (voltage source input)
@@ -1227,7 +1237,11 @@ fn try_build_multi_nl_stage(
         .iter()
         .map(|ct| ct.primary_edge_idx)
         .collect();
-    let num_vsources = coupled_transformers.len() * 2;
+    let mut num_vsources = coupled_transformers.len() * 2;
+    // Reserve 1 extra VS slot for ideal voltage source injection (linearized OTA).
+    if has_linearized_ota && n_nl == 0 {
+        num_vsources += 1;
+    }
 
     let num_mna_nodes = node_set.len();
     if num_mna_nodes == 0 {
@@ -1294,7 +1308,60 @@ fn try_build_multi_nl_stage(
         mna.d_matrix[vsrc_s * num_vsources + vsrc_s] = 1.0;
     }
 
+    // For state-space mode (linearized OTA, no NL): caps go into cap_stamps,
+    // pots go into G as resistors (not WDF ports). For standard WDF mode,
+    // caps and pots become reactive_edges with WDF ports.
+    let use_state_space = has_linearized_ota && n_nl == 0;
+    let mut cap_stamps: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
+    let mut pot_mna_info: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new(); // for delta-updating G
+
     for &eidx in &plan.passive_edge_indices {
+        if use_state_space {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            let n1 = node_to_mna(e.node_a);
+            let n2 = node_to_mna(e.node_b);
+
+            match &comp.kind {
+                ComponentKind::Capacitor(cfg) => {
+                    // State-space: cap goes into C_cap matrix (raw farads),
+                    // NOT as a WDF port with port conductance 2·fs·C.
+                    cap_stamps.push((n1, n2, cfg.value));
+                    continue;
+                }
+                ComponentKind::CapSwitched(values) => {
+                    if let Some(&c) = values.first() {
+                        if c.is_finite() && c > 0.0 {
+                            cap_stamps.push((n1, n2, c));
+                        }
+                    }
+                    continue;
+                }
+                ComponentKind::Potentiometer(max_r, taper) => {
+                    // State-space: pot goes into G as a resistor.
+                    // Keep DynNode child for set_pot() API.
+                    let initial_pos = 0.5;
+                    let tapered_pos = taper.apply(initial_pos);
+                    let r = (tapered_pos * *max_r).max(1.0);
+                    mna.stamp_resistor(n1, n2, r);
+                    pot_mna_info.push((n1, n2, r));
+                    reactive_edges.push((
+                        eidx,
+                        DynNode::Pot {
+                            comp_id: comp.id.clone(),
+                            max_resistance: *max_r,
+                            position: initial_pos,
+                            taper: *taper,
+                            rp: r,
+                        },
+                    ));
+                    continue;
+                }
+                _ => {
+                    // Resistors, inductors, transformers: standard stamping.
+                }
+            }
+        }
         stamp_passive_edge(
             eidx,
             graph,
@@ -1318,14 +1385,179 @@ fn try_build_multi_nl_stage(
         mna.stamp_resistor(Some(i), None, GMIN_RESISTANCE);
     }
 
-    // ── Step 3: Build WDF ports ─────────────────────────────────────
-    // Port ordering: [NL_0..NL_{n-1}, reactive_0..reactive_{m-1}, adapted]
-    // The "adapted" port is the voltage source injection port.
-    let n_passive = reactive_edges.len();
-    let n_total = n_nl + n_passive + 1; // +1 for adapted (voltage source)
+    // ── Stamp linearized OTA VCCS conductances ──────────────────────
+    // For envelope-controlled OTAs, stamp gm as off-diagonal conductance.
+    // This encodes gain = gm * R_load directly in the scattering matrix.
+    use crate::elements::OtaModel;
+    let mut linearized_ota_data: Option<super::stage::LinearizedOtaData> = None;
+    if has_linearized_ota {
+        let ota_info = &plan.ota_vccs[0]; // Currently support single OTA per stage
+        let model = OtaModel::ca3080();
+        let gm_max = model.iabc_max / (2.0 * model.vt); // Max transconductance
+        // Start at full gm (maximum feedback = minimum compressor gain).
+        // The closed-loop gain is ≈ R2/R1 regardless of gm when loop gain >> 1.
+        // Sidechain modulation (set_ota_gain_linear) will adjust gm at runtime.
+        let initial_gain = 1.0;
 
-    let mut ports: Vec<WdfPort> = Vec::with_capacity(n_total);
-    let mut port_node_pairs: Vec<(Option<usize>, Option<usize>)> = Vec::with_capacity(n_total);
+        let out_mna = node_to_mna(ota_info.out_node);
+        let in_pos_mna = node_to_mna(ota_info.in_pos);
+        let in_neg_mna = node_to_mna(ota_info.in_neg);
+
+        // Collect MNA cell indices for runtime delta updates.
+        let mut stamp_cells: Vec<(usize, usize, f64)> = Vec::new();
+        if let Some(op) = out_mna {
+            if let Some(ip) = in_pos_mna {
+                stamp_cells.push((op, ip, 1.0));
+            }
+            if let Some(inn) = in_neg_mna {
+                stamp_cells.push((op, inn, -1.0));
+            }
+        }
+
+        mna.stamp_vccs(out_mna, None, in_pos_mna, in_neg_mna, gm_max * initial_gain);
+
+        linearized_ota_data = Some(super::stage::LinearizedOtaData {
+            model,
+            gain: initial_gain,
+            stamp_cells,
+            num_mna_nodes,
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // State-space path: direct discrete-time simulation via bilinear
+    // transform. Bypasses WDF scattering entirely for linearized OTA
+    // stages where cap port conductances overwhelm circuit conductances.
+    // ═══════════════════════════════════════════════════════════════════
+    if use_state_space {
+        let vs_idx = num_vsources - 1; // Reserved above
+        let injection_mna = node_to_mna(plan.injection_node);
+        mna.stamp_voltage_source(injection_mna, None, vs_idx);
+
+        // Determine output extraction node.
+        // Prefer the plan's output_node (correct circuit-level output).
+        // Fall back to OTA output node if no explicit output node.
+        let out_circuit = plan
+            .output_node
+            .unwrap_or_else(|| plan.ota_vccs[0].out_node);
+        let out_mna = node_to_mna(out_circuit);
+
+        let (a_d, b_d, c_out, n_states) =
+            mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, sample_rate);
+
+        // Verify matrices are finite.
+        if a_d.iter().any(|v| !v.is_finite()) || b_d.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+
+        // Separate pot DynNodes from reactive_edges (pots are the only
+        // entries in reactive_edges for state-space mode).
+        let reactive_edge_indices: Vec<usize> =
+            reactive_edges.iter().map(|(eidx, _)| *eidx).collect();
+        let passive_children: Vec<DynNode> =
+            reactive_edges.into_iter().map(|(_, dn)| dn).collect();
+        let n_passive = passive_children.len();
+        let has_pots = passive_children
+            .iter()
+            .any(|dn| matches!(dn, DynNode::Pot { .. }));
+
+        // Port node pairs for pot recompute: pot nodes in the MNA.
+        let mut port_node_pairs: Vec<(Option<usize>, Option<usize>)> =
+            Vec::with_capacity(n_passive);
+        for &eidx in &reactive_edge_indices {
+            let e = &graph.edges[eidx];
+            port_node_pairs.push((node_to_mna(e.node_a), node_to_mna(e.node_b)));
+        }
+
+        // Create minimal dummy adaptor and scattering (unused in state-space path).
+        let dummy_s = vec![1.0];
+        let adaptor = RTypeAdaptor::new(dummy_s, &[1000.0]);
+        let scattering_blocks =
+            super::stage::MultiNlScattering::from_full_matrix(&[0.0; 0], 0, 0);
+
+        // Build pot stamp tracking for delta-updating G on pot changes.
+        // Must be done before port_node_pairs is moved into recompute_data.
+        let mut pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)> = Vec::new();
+        for (k, child) in passive_children.iter().enumerate() {
+            if matches!(child, DynNode::Pot { .. }) {
+                let (pos, neg) = port_node_pairs[k];
+                let g = 1.0 / child.port_resistance();
+                pot_stamps.push((k, pos, neg, g));
+            }
+        }
+
+        // Recompute data: stores the MNA for rebuilding state-space when
+        // OTA gm or pot values change.
+        let recompute_data = if has_pots || has_linearized_ota {
+            Some(ScatteringRecomputeData {
+                mna,
+                port_node_pairs,
+                adapted_resistance: 1000.0,
+                vs_source_index: Some(vs_idx),
+                extract_output_nodes: Some((out_mna, None)),
+            })
+        } else {
+            None
+        };
+
+        let signal_flow_distance = classified
+            .dist_from_in
+            .get(&plan.injection_node)
+            .copied()
+            .unwrap_or(usize::MAX);
+
+        let output_node_id = out_circuit;
+
+        let state_space_data = super::stage::StateSpaceData {
+            x: vec![0.0; n_states],
+            a_matrix: a_d,
+            b_vector: b_d,
+            c_vector: c_out,
+            n_states,
+            cap_stamps,
+            vs_idx,
+            output_pos: out_mna,
+            output_neg: None,
+            sample_rate,
+            pot_stamps,
+        };
+
+        return Some(MultiNlStage {
+            adaptor,
+            nl_devices: Vec::new(),
+            nl_port_resistances: Vec::new(),
+            passive_children,
+            n_nl: 0,
+            v_prev: Vec::new(),
+            scattering: scattering_blocks,
+            oversampler: Oversampler::new(oversampling),
+            compensation: plan.compensation,
+            output_port: 0,
+            device_groups: None,
+            recompute_data,
+            signal_flow_distance,
+            transformer_gain: 1.0,
+            injection_node_id: plan.injection_node,
+            output_node_id,
+            recompute_pending: false,
+            veb_bias_offset: 0.0,
+            feedback_scale: 0.1,
+            linearized_ota: linearized_ota_data,
+            vs_injection: None,
+            extract_coeffs: None,
+            extract_vs: 0.0,
+            state_space: Some(state_space_data),
+        });
+    }
+
+    // ── Step 3: Build WDF ports ─────────────────────────────────────
+    // Port ordering: [NL_0..NL_{n-1}, reactive_0..reactive_{m-1}, (adapted)]
+    // The "adapted" port is the VS injection port (omitted for VS injection mode).
+    let n_passive = reactive_edges.len();
+    // n_total will be set after adapted port decision (Step 3b).
+
+    let mut ports: Vec<WdfPort> = Vec::with_capacity(n_nl + n_passive + 1);
+    let mut port_node_pairs: Vec<(Option<usize>, Option<usize>)> = Vec::with_capacity(n_nl + n_passive + 1);
     let mut has_pots = false;
 
     // NL ports: each spans collector-to-emitter (or plate-to-cathode)
@@ -1367,66 +1599,83 @@ fn try_build_multi_nl_stage(
         passive_children.push(dyn_node);
     }
 
-    // Adapted port: voltage source at injection_node to ground.
-    // Port resistance is set to the Thévenin impedance at the injection node
-    // so S[n-1][n-1] ≈ 0 (reflection-free). We do a 2-pass derivation:
-    // pass 1 with a guess, extract Z_th from reflection, pass 2 with R=Z_th.
+    // ── Step 3b: Voltage source injection ──────────────────────────
+    // For linearized OTA stages (n_nl=0), use ideal VS injection via MNA
+    // B/C matrices. This avoids impedance mismatch between the adapted
+    // port and reactive ports sharing the same MNA node.
+    // For standard multi-NL stages, use the adapted WDF port approach.
     let injection_mna = node_to_mna(plan.injection_node);
     let mut r_adapted = 1000.0;
-    ports.push(WdfPort {
-        node_pos: injection_mna,
-        node_neg: None, // ground
-        resistance: r_adapted,
-    });
-    port_node_pairs.push((injection_mna, None));
+    let mut vs_injection_vec: Option<Vec<f64>> = None;
 
-    // ── Step 4: Derive scattering matrix ────────────────────────────
-    // ── Pass 1: Derive scattering with initial R_adapted guess ─────
-    let mut scattering = mna.derive_scattering_matrix_general(&ports);
-
-    // Validate scattering matrix: check for NaN/inf
-    if scattering.iter().any(|&s| !s.is_finite()) {
-        return None;
+    if has_linearized_ota && n_nl == 0 {
+        // Ideal VS: stamp into MNA B/C matrices, no adapted WDF port.
+        // The VS branch index is the last one allocated.
+        let vs_idx = num_vsources - 1; // We reserved +1 above
+        mna.stamp_voltage_source(injection_mna, None, vs_idx);
+    } else {
+        // Standard adapted WDF port approach.
+        ports.push(WdfPort {
+            node_pos: injection_mna,
+            node_neg: None,
+            resistance: r_adapted,
+        });
+        port_node_pairs.push((injection_mna, None));
     }
 
-    // ── Adaptive port resistance ────────────────────────────────────
-    // From WDF theory: S_refl[i] = (Z_th_i - R_i) / (Z_th_i + R_i)
-    // Solving: Z_th_i = R_i * (1 + S_refl[i]) / (1 - S_refl[i])
-    // For reflection-free port, set R = Z_th and recompute scattering.
-    //
-    // We adapt ALL ports (NL + adapted) in a single pass. This prevents
-    // reflected-wave explosions when R_port ≪ Z_thévenin.
-    let mut needs_recompute = false;
+    // ── Step 4: Derive scattering matrix ────────────────────────────
+    let mut scattering = if has_linearized_ota && n_nl == 0 {
+        let vs_idx = num_vsources - 1;
+        let (s, vs_inj) = mna.derive_scattering_and_vs_injection(&ports, vs_idx);
+        if s.iter().any(|&sv| !sv.is_finite()) {
+            return None;
+        }
+        vs_injection_vec = Some(vs_inj);
+        s
+    } else {
+        let s = mna.derive_scattering_matrix_general(&ports);
+        if s.iter().any(|&sv| !sv.is_finite()) {
+            return None;
+        }
+        s
+    };
 
-    // Adapt NL port resistances
-    for i in 0..n_nl {
-        let s_refl = scattering[i * n_total + i];
-        if s_refl.abs() > 0.1 && (1.0 - s_refl.abs()) > 1e-12 {
-            let z_th = nl_port_resistances[i] * (1.0 + s_refl) / (1.0 - s_refl);
-            if z_th.is_finite() && z_th > 1.0 {
-                nl_port_resistances[i] = z_th;
-                ports[i].resistance = z_th;
+    let n_total = ports.len(); // n_passive (VS inj) or n_nl+n_passive+1 (adapted)
+
+    // ── Adaptive port resistance ────────────────────────────────────
+    if vs_injection_vec.is_none() {
+        let mut needs_recompute = false;
+
+        // Adapt NL port resistances
+        for i in 0..n_nl {
+            let s_refl = scattering[i * n_total + i];
+            if s_refl.abs() > 0.1 && (1.0 - s_refl.abs()) > 1e-12 {
+                let z_th = nl_port_resistances[i] * (1.0 + s_refl) / (1.0 - s_refl);
+                if z_th.is_finite() && z_th > 1.0 {
+                    nl_port_resistances[i] = z_th;
+                    ports[i].resistance = z_th;
+                    needs_recompute = true;
+                }
+            }
+        }
+
+        // Adapt the adapted (VS) port resistance
+        let s_adapted_refl = scattering[(n_total - 1) * n_total + (n_total - 1)];
+        if s_adapted_refl.abs() > 0.05 && (1.0 - s_adapted_refl.abs()) > 1e-12 {
+            let z_th = r_adapted * (1.0 + s_adapted_refl) / (1.0 - s_adapted_refl);
+            if z_th.is_finite() && z_th > 0.0 {
+                r_adapted = z_th;
+                ports.last_mut().unwrap().resistance = r_adapted;
                 needs_recompute = true;
             }
         }
-    }
 
-    // Adapt the adapted (VS) port resistance
-    let s_adapted_refl = scattering[(n_total - 1) * n_total + (n_total - 1)];
-    if s_adapted_refl.abs() > 0.05 && (1.0 - s_adapted_refl.abs()) > 1e-12 {
-        let z_th = r_adapted * (1.0 + s_adapted_refl) / (1.0 - s_adapted_refl);
-        if z_th.is_finite() && z_th > 0.0 {
-            r_adapted = z_th;
-            ports.last_mut().unwrap().resistance = r_adapted;
-            needs_recompute = true;
-        }
-    }
-
-    // Recompute scattering with matched impedances
-    if needs_recompute {
-        scattering = mna.derive_scattering_matrix_general(&ports);
-        if scattering.iter().any(|&s| !s.is_finite()) {
-            return None;
+        // Recompute scattering with matched impedances
+        if needs_recompute {
+            scattering = mna.derive_scattering_matrix_general(&ports);
+            if scattering.iter().any(|&s| !s.is_finite()) {
+                return None;
+            }
         }
     }
 
@@ -1652,12 +1901,43 @@ fn try_build_multi_nl_stage(
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
     let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
 
-    // Store recompute data only if there are pots (saves memory otherwise).
-    let recompute_data = if has_pots {
+    // ── Node-voltage extraction for linearized OTA ──────────────────
+    // When VS injection is used, WDF port waves suffer impedance mismatch
+    // (cap port conductances >> circuit conductances). Pots have b=0 in WDF,
+    // so extraction at the output port gives near-zero output.
+    //
+    // Instead, extract at the OTA output node (U1.out). The gm*R2 gain loop
+    // produces the actual signal at this node. C3 coupling and Output pot
+    // attenuation are approximated by the cap b-wave contributions and a
+    // post-extraction pot-position scale.
+    let (extract_coeffs, extract_vs, extract_output_nodes) =
+        if has_linearized_ota && n_nl == 0 && vs_injection_vec.is_some() {
+            let vs_idx = num_vsources - 1;
+            // Extract at OTA output node (U1.out) instead of the Output port.
+            let ota_out_circuit = plan.ota_vccs[0].out_node;
+            let ota_out_mna = node_to_mna(ota_out_circuit);
+            let out_pos = ota_out_mna;
+            let out_neg = None; // ground reference
+            let (coeffs, vs_coeff) =
+                mna.derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
+            (Some(coeffs), vs_coeff, Some((out_pos, out_neg)))
+        } else {
+            (None, 0.0, None)
+        };
+
+    // Store recompute data if pots or linearized OTA (both need S-matrix recompute).
+    let vs_source_index = if has_linearized_ota && n_nl == 0 {
+        Some(num_vsources - 1)
+    } else {
+        None
+    };
+    let recompute_data = if has_pots || has_linearized_ota {
         Some(ScatteringRecomputeData {
             mna,
             port_node_pairs,
             adapted_resistance: r_adapted,
+            vs_source_index,
+            extract_output_nodes,
         })
     } else {
         None
@@ -1718,6 +1998,11 @@ fn try_build_multi_nl_stage(
         recompute_pending: false,
         veb_bias_offset: 0.0,
         feedback_scale: 0.1,
+        linearized_ota: linearized_ota_data,
+        vs_injection: vs_injection_vec,
+        extract_coeffs,
+        extract_vs,
+        state_space: None,
     })
 }
 
