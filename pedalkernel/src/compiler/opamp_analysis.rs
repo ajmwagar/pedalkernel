@@ -133,6 +133,8 @@ pub(super) fn build_opamp_feedback_stages(
                     transformer_gain: 1.0,
                     injection_node_id: usize::MAX,
                     output_node_id: usize::MAX,
+                    sample_counter: 0,
+                    root_comp_id: String::new(),
                 });
             }
             OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot } => {
@@ -179,6 +181,8 @@ pub(super) fn build_opamp_feedback_stages(
                     transformer_gain: 1.0,
                     injection_node_id: usize::MAX,
                     output_node_id: usize::MAX,
+                    sample_counter: 0,
+                    root_comp_id: String::new(),
                 });
             }
         }

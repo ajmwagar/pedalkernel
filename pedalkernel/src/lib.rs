@@ -22,6 +22,8 @@ pub mod dsl;
 pub mod elements;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
+#[cfg(feature = "runtime-warnings")]
+pub mod runtime_warnings;
 #[cfg(feature = "hardware")]
 pub mod hw;
 pub mod kicad;

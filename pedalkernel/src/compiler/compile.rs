@@ -237,6 +237,8 @@ fn build_passive_wdf_stage(
                 transformer_gain: 1.0,
                 injection_node_id: usize::MAX,
                 output_node_id: usize::MAX,
+                sample_counter: 0,
+                root_comp_id: String::new(),
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -456,6 +458,8 @@ fn build_passive_mna_stage(
         transformer_gain: 1.0,
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
+        sample_counter: 0,
+        root_comp_id: String::new(),
     };
     Some(stage)
 }
@@ -548,6 +552,8 @@ fn build_output_rooted_stage(
         transformer_gain: 1.0,
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
+        sample_counter: 0,
+        root_comp_id: String::new(),
     })
 }
 

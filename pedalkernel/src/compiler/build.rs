@@ -522,6 +522,8 @@ pub(super) fn build_stages(
             transformer_gain: 1.0,
             injection_node_id: usize::MAX,
             output_node_id: usize::MAX,
+            sample_counter: 0,
+            root_comp_id: String::new(),
         });
     }
 
@@ -1928,6 +1930,8 @@ fn build_vs_stage(
             .first()
             .copied()
             .unwrap_or(plan.injection_node),
+        sample_counter: 0,
+        root_comp_id: String::new(),
     })
 }
 
@@ -1990,6 +1994,8 @@ fn build_source_follower_stage(
             .first()
             .copied()
             .unwrap_or(plan.injection_node),
+        sample_counter: 0,
+        root_comp_id: String::new(),
     })
 }
 

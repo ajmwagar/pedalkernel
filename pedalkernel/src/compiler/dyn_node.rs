@@ -71,11 +71,17 @@ pub(super) enum DynNode {
     Photocoupler {
         comp_id: String,
         inner: Photocoupler,
+        /// Previous sample's resistance for slew rate checking (runtime-warnings).
+        #[allow(dead_code)]
+        prev_resistance: f64,
     },
     /// JFET variable resistor — Rds controlled by Vgs (phaser applications).
     JfetVr {
         comp_id: String,
         inner: JfetVariableResistor,
+        /// Previous sample's Rds for slew rate checking (runtime-warnings).
+        #[allow(dead_code)]
+        prev_rds: f64,
     },
     /// Switched resistor for fork() routing paths.
     /// When active (switch position matches path_index), uses low resistance.
@@ -910,7 +916,7 @@ impl DynNode {
     /// Set LED drive level for a photocoupler. Returns true if found.
     pub fn set_photocoupler_led(&mut self, target_id: &str, led_drive: f64) -> bool {
         match self {
-            Self::Photocoupler { comp_id, inner } if comp_id == target_id => {
+            Self::Photocoupler { comp_id, inner, .. } if comp_id == target_id => {
                 inner.set_led_drive(led_drive);
                 true
             }
@@ -928,7 +934,7 @@ impl DynNode {
     /// Set Vgs for a JFET variable resistor leaf. Returns true if found.
     pub fn set_jfet_vr_vgs(&mut self, target_id: &str, vgs: f64) -> bool {
         match self {
-            Self::JfetVr { comp_id, inner } if comp_id == target_id => {
+            Self::JfetVr { comp_id, inner, .. } if comp_id == target_id => {
                 inner.set_vgs(vgs);
                 true
             }
@@ -1035,13 +1041,13 @@ impl DynNode {
             } => {
                 format!("{pad}Pot(id=\"{comp_id}\", max={max_resistance:.1}Ω, pos={position:.3}, taper={taper:?}, Rp={rp:.1}Ω)")
             }
-            Self::Photocoupler { comp_id, inner } => {
+            Self::Photocoupler { comp_id, inner, .. } => {
                 format!(
                     "{pad}Photocoupler(id=\"{comp_id}\", Rp={:.1}Ω)",
                     inner.port_resistance()
                 )
             }
-            Self::JfetVr { comp_id, inner } => {
+            Self::JfetVr { comp_id, inner, .. } => {
                 format!(
                     "{pad}JfetVr(id=\"{comp_id}\", Vgs={:.3}V, Rds={:.1}Ω)",
                     inner.vgs(),
@@ -1157,6 +1163,56 @@ impl DynNode {
                 children.iter_mut().any(|c| c.set_unit_delay_partner(val))
             }
             _ => false,
+        }
+    }
+
+    /// Check hybrid linear/nonlinear devices for operating region violations.
+    ///
+    /// Recurses into Series/Parallel/RType/Transformer children, checking
+    /// JfetVr and Photocoupler nodes. Updates prev_rds/prev_resistance for
+    /// slew rate tracking.
+    #[cfg(feature = "runtime-warnings")]
+    pub fn check_hybrid_warnings(&mut self, v_port: f64, sample_index: u64) {
+        match self {
+            Self::JfetVr {
+                comp_id,
+                inner,
+                prev_rds,
+            } => {
+                let prev = if *prev_rds > 0.0 {
+                    Some(*prev_rds)
+                } else {
+                    None
+                };
+                inner.check_operating_region(v_port, prev, comp_id, sample_index);
+                *prev_rds = inner.rds();
+            }
+            Self::Photocoupler {
+                comp_id,
+                inner,
+                prev_resistance,
+            } => {
+                let prev = if *prev_resistance > 0.0 {
+                    Some(*prev_resistance)
+                } else {
+                    None
+                };
+                inner.check_operating_region(prev, comp_id, sample_index);
+                *prev_resistance = inner.port_resistance();
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                left.check_hybrid_warnings(v_port, sample_index);
+                right.check_hybrid_warnings(v_port, sample_index);
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.check_hybrid_warnings(v_port, sample_index);
+            }
+            Self::RType { children, .. } => {
+                for child in children.iter_mut() {
+                    child.check_hybrid_warnings(v_port, sample_index);
+                }
+            }
+            _ => {}
         }
     }
 

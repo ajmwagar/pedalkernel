@@ -248,6 +248,14 @@ pub(super) struct WdfStage {
     /// Typically the plate (triode), collector (BJT), or drain (JFET) node.
     /// Used for node-based routing in parallel-path topologies.
     pub(super) output_node_id: usize,
+    /// Sample counter for runtime warnings rate limiting.
+    /// Only meaningful when `runtime-warnings` feature is enabled.
+    #[allow(dead_code)]
+    pub(super) sample_counter: u64,
+    /// Component ID for the root device (for runtime warning attribution).
+    /// Only meaningful when `runtime-warnings` feature is enabled.
+    #[allow(dead_code)]
+    pub(super) root_comp_id: String,
 }
 
 impl WdfStage {
@@ -489,6 +497,26 @@ impl WdfStage {
             *x_prev = x;
             *y_prev = flush_denormal(y);
             return *y_prev;
+        }
+
+        // Runtime warning checks for hybrid linear/nonlinear devices.
+        // Placed after all tree borrows are dropped to avoid borrow conflicts.
+        #[cfg(feature = "runtime-warnings")]
+        {
+            self.sample_counter += 1;
+            let sc = self.sample_counter;
+            let comp_id = &self.root_comp_id;
+            match &self.root {
+                RootKind::JfetVr(j) => {
+                    j.check_operating_region(wdf_out, None, comp_id, sc);
+                }
+                RootKind::Ota(o) => {
+                    o.check_operating_region(wdf_out, comp_id, sc);
+                }
+                _ => {}
+            }
+            // Check hybrid devices in the tree (JfetVr, Photocoupler leaves).
+            self.tree.check_hybrid_warnings(wdf_out, sc);
         }
 
         flush_denormal(wdf_out)

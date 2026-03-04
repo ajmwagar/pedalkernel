@@ -2323,6 +2323,7 @@ pub(super) fn make_leaf(
             DynNode::Photocoupler {
                 comp_id: comp.id.clone(),
                 inner: Photocoupler::new(model, sample_rate),
+                prev_resistance: 0.0,
             }
         }
         // JFET as variable resistor (when classified as passive).
@@ -2331,6 +2332,7 @@ pub(super) fn make_leaf(
             DynNode::JfetVr {
                 comp_id: comp.id.clone(),
                 inner: JfetVariableResistor::new(model),
+                prev_rds: 0.0,
             }
         }
         // Tempco resistor: modeled as a standard resistor (nominal value).
