@@ -1,0 +1,14 @@
+# Minimal Klon nonlinear block: gain resistor into germanium diode pair
+# Tests germanium diode-pair clipping topology in isolation
+
+pedal "Klon NL Block" {
+  components {
+    R1: resistor(15k)
+    D1: diode_pair(germanium)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> D1.a, out
+    D1.b -> gnd
+  }
+}

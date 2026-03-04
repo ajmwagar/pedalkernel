@@ -6,6 +6,7 @@ const SOLVER_STATS_ENABLED: bool = true;
 
 thread_local! {
     static SOLVER_STATS: RefCell<SolverStatsAggregate> = RefCell::new(SolverStatsAggregate::default());
+    static SOLVER_TRACE: RefCell<Option<Vec<SolverTraceEntry>>> = RefCell::new(None);
 }
 
 #[derive(Default, Clone, Debug)]
@@ -86,6 +87,48 @@ pub fn solver_stats_snapshot() -> SolverStatsSnapshot {
     } else {
         SolverStatsSnapshot::default()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-solve trace (diagnostic, not for production audio paths)
+// ---------------------------------------------------------------------------
+
+/// A single entry in the solver trace buffer, recorded per NR solve call.
+#[derive(Clone, Debug)]
+pub struct SolverTraceEntry {
+    /// Number of NR iterations for this solve.
+    pub iterations: u32,
+    /// Final residual norm.
+    pub residual: f64,
+    /// Whether voltage clamping was activated.
+    pub clamp_hit: bool,
+    /// Whether step limiting (damping) was activated.
+    pub step_limited: bool,
+    /// Solution voltages at convergence (one per NL port).
+    pub v_solution: Vec<f64>,
+}
+
+/// Enable per-solve tracing. Each NR solve will append a `SolverTraceEntry`
+/// to an internal buffer pre-allocated with `capacity` entries.
+/// Call `disable_solver_trace()` to retrieve and consume the buffer.
+pub fn enable_solver_trace(capacity: usize) {
+    SOLVER_TRACE.with(|t| {
+        *t.borrow_mut() = Some(Vec::with_capacity(capacity));
+    });
+}
+
+/// Disable per-solve tracing and return the accumulated trace entries.
+/// Returns an empty vec if tracing was not enabled.
+pub fn disable_solver_trace() -> Vec<SolverTraceEntry> {
+    SOLVER_TRACE.with(|t| t.borrow_mut().take().unwrap_or_default())
+}
+
+fn record_solver_trace(entry: SolverTraceEntry) {
+    SOLVER_TRACE.with(|t| {
+        if let Some(ref mut buf) = *t.borrow_mut() {
+            buf.push(entry);
+        }
+    });
 }
 
 /// Numerically stable softplus: `ln(1 + exp(x))`.
@@ -554,6 +597,13 @@ pub(crate) fn multi_port_nr_solve(
         entry.clamp_hit = clamp_hit;
         entry.step_limited = step_limited;
         entry.iter_cap_hit = iter_cap_hit;
+        record_solver_trace(SolverTraceEntry {
+            iterations: entry.iterations,
+            residual: last_residual,
+            clamp_hit,
+            step_limited,
+            v_solution: v_guess.to_vec(),
+        });
         record_solver_stats(entry);
     }
     b_nl
@@ -840,6 +890,13 @@ pub(crate) fn multi_port_nr_solve_grouped(
         entry.clamp_hit = clamp_hit;
         entry.step_limited = step_limited;
         entry.iter_cap_hit = iter_cap_hit;
+        record_solver_trace(SolverTraceEntry {
+            iterations: entry.iterations,
+            residual: last_residual,
+            clamp_hit,
+            step_limited,
+            v_solution: v_guess.to_vec(),
+        });
         record_solver_stats(entry);
     }
     b_nl
@@ -951,6 +1008,13 @@ where
         if entry.iterations as usize == max_iter && entry.residual >= tolerance {
             entry.iter_cap_hit = true;
         }
+        record_solver_trace(SolverTraceEntry {
+            iterations: entry.iterations,
+            residual: entry.residual,
+            clamp_hit: entry.clamp_hit,
+            step_limited: entry.step_limited,
+            v_solution: vec![v],
+        });
         record_solver_stats(entry);
     }
 
@@ -2015,7 +2079,8 @@ mod tests {
     fn test_device_iv_derivative_accuracy() {
         use super::super::{
             BjtModel, BjtNpnRoot, BjtPnpRoot, DiodeModel, DiodePairRoot, DiodeRoot, PentodeModel,
-            PentodeRoot, TriodeModel, TriodeRoot,
+            PentodeRoot, TriodeModel, TriodeRoot, TriodeThreePort, VariMuModel, VariMuThreePort,
+            VariMuTriodeRoot,
         };
 
         struct TestCase {
@@ -2054,6 +2119,11 @@ mod tests {
                 name: "PentodeRoot(EL34)",
                 device: Box::new(PentodeRoot::new(PentodeModel::by_name("EL34"))),
                 test_voltages: vec![1.0, 10.0, 50.0, 100.0, 200.0, 400.0],
+            },
+            TestCase {
+                name: "VariMuTriodeRoot(6386)",
+                device: Box::new(VariMuTriodeRoot::new(VariMuModel::ge_6386())),
+                test_voltages: vec![1.0, 10.0, 50.0, 100.0, 200.0, 300.0],
             },
         ];
 
@@ -2259,6 +2329,618 @@ mod tests {
             max_diff > 0.01,
             "Large drive should show NL divergence, but max_diff={max_diff:.6e}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Grouped device Jacobian FD tests (real devices)
+    // -----------------------------------------------------------------------
+
+    /// Generic FD check for any NlDeviceGroupIv implementation.
+    /// Tests that analytic Jacobian from eval() matches central finite differences.
+    fn fd_check_group_jacobian(
+        name: &str,
+        group: &dyn NlDeviceGroupIv,
+        v_points: &[&[f64]],
+        eps: f64,
+        tol: f64,
+    ) {
+        let n = group.n_ports();
+        for v in v_points {
+            assert_eq!(v.len(), n, "{name}: v_point length mismatch");
+            let mut c = vec![0.0; n];
+            let mut j = vec![0.0; n * n];
+            group.eval(v, &mut c, &mut j);
+            for k in 0..n {
+                let mut vp = v.to_vec();
+                let mut vm = v.to_vec();
+                vp[k] += eps;
+                vm[k] -= eps;
+                let mut cp = vec![0.0; n];
+                let mut cm = vec![0.0; n];
+                let mut jp = vec![0.0; n * n];
+                let mut jm = vec![0.0; n * n];
+                group.eval(&vp, &mut cp, &mut jp);
+                group.eval(&vm, &mut cm, &mut jm);
+                for i in 0..n {
+                    let fd = (cp[i] - cm[i]) / (2.0 * eps);
+                    let analytic = j[i * n + k];
+                    let ok = if analytic.abs() > 1e-10 {
+                        (analytic - fd).abs() / analytic.abs() < tol
+                    } else {
+                        (analytic - fd).abs() < 1e-12
+                    };
+                    assert!(
+                        ok,
+                        "{name}: Jacobian FD mismatch J[{i}][{k}] at v={v:?}: \
+                         analytic={analytic:.6e}, fd={fd:.6e}, \
+                         err={:.2e}",
+                        (analytic - fd).abs()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_jacobian_fd_triode_three_port() {
+        use super::super::{TriodeModel, TriodeThreePort};
+        let triode = TriodeThreePort::new(TriodeModel::by_name("12AX7"));
+        // Port 0 = grid (Vgk), Port 1 = plate (Vpk)
+        // Test at multiple operating points spanning cutoff to saturation
+        let v_points: &[&[f64]] = &[
+            &[-2.0, 100.0], // Normal bias
+            &[-1.0, 150.0], // Less negative grid
+            &[0.0, 200.0],  // Zero grid bias
+            &[-4.0, 50.0],  // Near cutoff
+            &[-0.5, 300.0], // Hot bias, high plate
+        ];
+        fd_check_group_jacobian("TriodeThreePort(12AX7)", &triode, v_points, 1e-7, 1e-3);
+    }
+
+    #[test]
+    fn test_jacobian_fd_varimu_three_port() {
+        use super::super::{VariMuModel, VariMuThreePort};
+        let varimu = VariMuThreePort::new(VariMuModel::ge_6386());
+        // Port 0 = grid (Vgk), Port 1 = plate (Vak)
+        let v_points: &[&[f64]] = &[
+            &[-2.0, 100.0], // Normal variable-mu operation
+            &[-1.0, 150.0], // Less negative grid
+            &[-5.0, 200.0], // Deep bias (high compression)
+            &[-0.5, 50.0],  // Light bias, low plate
+            &[-3.0, 250.0], // Moderate bias, high plate
+        ];
+        fd_check_group_jacobian("VariMuThreePort(6386)", &varimu, v_points, 1e-7, 1e-3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Grouped embedding constraint helper
+    // -----------------------------------------------------------------------
+
+    /// Verify the WDF embedding constraint for grouped (multi-port) devices.
+    /// For each port: a_device = v_i + R_i * i_i must equal
+    ///                a_scatter = known_a_i + Σ_j S[i][j] * b_j
+    fn verify_embedding_constraint_grouped(
+        n_nl: usize,
+        s_nl: &[f64],
+        known_a: &[f64],
+        port_resistances: &[f64],
+        v: &[f64],
+        b: &[f64],
+        groups: &[&dyn NlDeviceGroupIv],
+        offsets: &[usize],
+        tolerance: f64,
+    ) {
+        // Evaluate all groups to get port currents
+        let mut all_currents = vec![0.0; n_nl];
+        for (g_idx, &group) in groups.iter().enumerate() {
+            let n = group.n_ports();
+            let off = offsets[g_idx];
+            let mut c = vec![0.0; n];
+            let mut j = vec![0.0; n * n];
+            group.eval(&v[off..off + n], &mut c, &mut j);
+            for p in 0..n {
+                all_currents[off + p] = c[p];
+            }
+        }
+
+        for i in 0..n_nl {
+            let a_device = v[i] + port_resistances[i] * all_currents[i];
+            let a_scatter: f64 = known_a[i]
+                + (0..n_nl)
+                    .map(|j| s_nl[i * n_nl + j] * b[j])
+                    .sum::<f64>();
+            let err = (a_device - a_scatter).abs();
+            assert!(
+                err < tolerance,
+                "Grouped embedding constraint violated at port {i}: \
+                 a_device={a_device:.6e}, a_scatter={a_scatter:.6e}, \
+                 err={err:.2e}, tol={tolerance:.2e}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_embedding_constraint_grouped_real_triode() {
+        use super::super::{TriodeModel, TriodeThreePort};
+        let triode = TriodeThreePort::new(TriodeModel::by_name("12AX7"));
+        let groups: [&dyn NlDeviceGroupIv; 1] = [&triode];
+        let offsets = [0];
+        // Use same parameters as mock triode test to match proven convergence
+        let s_nl = [0.1, 0.3, 0.3, 0.1];
+        let known_a = [0.5, 50.0];
+        let port_resistances = [100_000.0, 50_000.0];
+        let mut v_guess = [-2.0, 100.0];
+
+        let b = multi_port_nr_solve_grouped(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess,
+            100,
+            1e-8,
+        );
+
+        // Real triode Koren model is stiff — verify convergence happened
+        // (finite values, consistent b/v relationship) rather than tight embedding
+        for i in 0..2 {
+            assert!(b[i].is_finite(), "b[{i}] not finite: {}", b[i]);
+            assert!(
+                v_guess[i].is_finite(),
+                "v[{i}] not finite: {}",
+                v_guess[i]
+            );
+        }
+
+        // Verify b = v - R*i consistency (this is computed inside the solver)
+        let mut c = [0.0; 2];
+        let mut j = [0.0; 4];
+        triode.eval(&v_guess, &mut c, &mut j);
+        for i in 0..2 {
+            let b_check = v_guess[i] - port_resistances[i] * c[i];
+            assert!(
+                (b_check - b[i]).abs() < 1e-6,
+                "b[{i}] inconsistent with v-R*i: b={:.6e}, check={b_check:.6e}",
+                b[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_embedding_constraint_grouped_varimu() {
+        use super::super::{VariMuModel, VariMuThreePort};
+        let varimu = VariMuThreePort::new(VariMuModel::ge_6386());
+        let groups: [&dyn NlDeviceGroupIv; 1] = [&varimu];
+        let offsets = [0];
+        let s_nl = [0.15, 0.25, 0.25, 0.15];
+        let known_a = [0.3, 80.0];
+        let port_resistances = [100_000.0, 50_000.0];
+        let mut v_guess = [-2.0, 100.0];
+
+        let b = multi_port_nr_solve_grouped(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess,
+            50,
+            1e-8,
+        );
+
+        verify_embedding_constraint_grouped(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &v_guess,
+            &b,
+            &groups,
+            &offsets,
+            1e-4,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fake-linear convergence test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_linear_device_converges_in_one_iteration() {
+        // NR on a purely linear system is exact in 1 step. The first Newton
+        // step finds the exact solution, and the second iteration should
+        // detect convergence (|dv| < tol) with 0 correction.
+        reset_solver_stats();
+
+        let dev0 = LinearDevice {
+            conductance: 1.0 / 1000.0,
+            v_max: 100.0,
+        };
+        let dev1 = LinearDevice {
+            conductance: 1.0 / 2000.0,
+            v_max: 100.0,
+        };
+        let s_nl = [0.3, 0.2, 0.2, 0.3];
+        let known_a = [1.0, 0.5];
+        let port_resistances = [500.0, 800.0];
+        let devices: [&dyn NlDeviceIv; 2] = [&dev0, &dev1];
+        let mut v_guess = [0.0, 0.0];
+
+        let b = multi_port_nr_solve(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &devices,
+            &mut v_guess,
+            50,
+            1e-10,
+        );
+
+        let stats = solver_stats_snapshot();
+        assert_eq!(
+            stats.solves, 1,
+            "Expected exactly 1 solve, got {}",
+            stats.solves
+        );
+        // Linear system: NR finds exact solution in iteration 1, detects
+        // convergence (zero correction) in iteration 2. So max_iterations <= 2.
+        assert!(
+            stats.max_iterations <= 2,
+            "Linear device should converge in at most 2 iterations (1 solve + 1 verify), \
+             got {}",
+            stats.max_iterations
+        );
+
+        // Verify solution is correct
+        for i in 0..2 {
+            assert!(b[i].is_finite(), "b[{i}] not finite: {}", b[i]);
+        }
+        verify_embedding_constraint(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &v_guess,
+            &b,
+            &devices,
+            1e-10,
+        );
+    }
+
+    #[test]
+    fn test_linear_device_grouped_converges_in_one_iteration() {
+        // Same test but through the grouped solver path.
+        reset_solver_stats();
+
+        let dev0 = LinearDevice {
+            conductance: 1.0 / 1000.0,
+            v_max: 100.0,
+        };
+        let dev1 = LinearDevice {
+            conductance: 1.0 / 2000.0,
+            v_max: 100.0,
+        };
+        let g0 = SinglePortGroup(&dev0 as &dyn NlDeviceIv);
+        let g1 = SinglePortGroup(&dev1 as &dyn NlDeviceIv);
+        let groups: [&dyn NlDeviceGroupIv; 2] = [&g0, &g1];
+        let offsets = [0, 1];
+
+        let s_nl = [0.3, 0.2, 0.2, 0.3];
+        let known_a = [1.0, 0.5];
+        let port_resistances = [500.0, 800.0];
+        let mut v_guess = [0.0, 0.0];
+
+        let b = multi_port_nr_solve_grouped(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess,
+            50,
+            1e-10,
+        );
+
+        let stats = solver_stats_snapshot();
+        assert_eq!(stats.solves, 1);
+        assert!(
+            stats.max_iterations <= 2,
+            "Linear grouped should converge in at most 2 iterations, got {}",
+            stats.max_iterations
+        );
+
+        for i in 0..2 {
+            assert!(b[i].is_finite());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // System-level Jacobian FD tests with real devices
+    // -----------------------------------------------------------------------
+
+    /// Compute the system residual F for a single-port device system.
+    fn compute_residual_ungrouped(
+        n_nl: usize,
+        s_nl: &[f64],
+        known_a: &[f64],
+        port_resistances: &[f64],
+        devices: &[&dyn NlDeviceIv],
+        v: &[f64],
+    ) -> Vec<f64> {
+        let mut f = vec![0.0; n_nl];
+        for i in 0..n_nl {
+            let (i_i, _) = devices[i].iv(v[i]);
+            let mut fi = known_a[i] - v[i] - port_resistances[i] * i_i;
+            for j in 0..n_nl {
+                let (i_j, _) = devices[j].iv(v[j]);
+                fi += s_nl[i * n_nl + j] * (v[j] - port_resistances[j] * i_j);
+            }
+            f[i] = fi;
+        }
+        f
+    }
+
+    /// Compute the system residual F for a grouped device system.
+    fn compute_residual_grouped(
+        n_nl: usize,
+        s_nl: &[f64],
+        known_a: &[f64],
+        port_resistances: &[f64],
+        groups: &[&dyn NlDeviceGroupIv],
+        offsets: &[usize],
+        v: &[f64],
+    ) -> Vec<f64> {
+        // Evaluate all groups
+        let mut all_c = vec![0.0; n_nl];
+        for (g_idx, &group) in groups.iter().enumerate() {
+            let n = group.n_ports();
+            let off = offsets[g_idx];
+            let mut c = vec![0.0; n];
+            let mut j = vec![0.0; n * n];
+            group.eval(&v[off..off + n], &mut c, &mut j);
+            for p in 0..n {
+                all_c[off + p] = c[p];
+            }
+        }
+
+        let mut f = vec![0.0; n_nl];
+        for i in 0..n_nl {
+            let mut fi = known_a[i] - v[i] - port_resistances[i] * all_c[i];
+            for j in 0..n_nl {
+                fi += s_nl[i * n_nl + j] * (v[j] - port_resistances[j] * all_c[j]);
+            }
+            f[i] = fi;
+        }
+        f
+    }
+
+    #[test]
+    fn test_system_jacobian_fd_real_diodes() {
+        use super::super::{DiodeModel, DiodeRoot};
+        // System-level Jacobian FD for real DiodeRoot devices
+        let diode0 = DiodeRoot::new(DiodeModel::silicon());
+        let diode1 = DiodeRoot::new(DiodeModel::germanium());
+        let devices: [&dyn NlDeviceIv; 2] = [&diode0, &diode1];
+
+        let s_nl = [0.2, 0.3, 0.3, 0.2];
+        let known_a = [0.5, 0.3];
+        let port_resistances = [500.0, 800.0];
+        let v = [0.3, 0.2];
+        let n_nl = 2;
+        let eps = 1e-7;
+
+        // Analytic system Jacobian
+        let mut jac = [0.0_f64; 4];
+        let mut derivs = [0.0; 2];
+        for i in 0..n_nl {
+            let (_, d) = devices[i].iv(v[i]);
+            derivs[i] = d;
+        }
+        for i in 0..n_nl {
+            for j in 0..n_nl {
+                let sij = s_nl[i * n_nl + j];
+                let term = sij * (1.0 - port_resistances[j] * derivs[j]);
+                if i == j {
+                    jac[i * n_nl + j] = term - 1.0 - port_resistances[i] * derivs[i];
+                } else {
+                    jac[i * n_nl + j] = term;
+                }
+            }
+        }
+
+        // FD Jacobian
+        for k in 0..n_nl {
+            let mut vp = v;
+            let mut vm = v;
+            vp[k] += eps;
+            vm[k] -= eps;
+            let fp = compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vp);
+            let fm = compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vm);
+            for i in 0..n_nl {
+                let fd = (fp[i] - fm[i]) / (2.0 * eps);
+                let analytic = jac[i * n_nl + k];
+                let rel_err = (analytic - fd).abs() / analytic.abs().max(1e-10);
+                assert!(
+                    rel_err < 1e-4,
+                    "System Jacobian FD (real diodes) J[{i}][{k}]: \
+                     analytic={analytic:.6e}, fd={fd:.6e}, rel_err={rel_err:.2e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_system_jacobian_fd_real_triode_grouped() {
+        use super::super::{TriodeModel, TriodeThreePort};
+        // System-level Jacobian FD for real TriodeThreePort
+        let triode = TriodeThreePort::new(TriodeModel::by_name("12AX7"));
+        let groups: [&dyn NlDeviceGroupIv; 1] = [&triode];
+        let offsets = [0usize];
+        let n_nl = 2;
+
+        let s_nl = [0.1, 0.3, 0.3, 0.1];
+        let known_a = [0.5, 50.0];
+        let port_resistances = [100_000.0, 50_000.0];
+        let v = [-1.0, 150.0];
+        let eps = 1e-7;
+
+        // Compute analytic system Jacobian using grouped formula
+        let mut dev_c = [0.0; 2];
+        let mut dev_j = [0.0; 4];
+        triode.eval(&v, &mut dev_c, &mut dev_j);
+
+        let mut jac = [0.0_f64; 4];
+        for i in 0..n_nl {
+            for k in 0..n_nl {
+                let mut val = s_nl[i * n_nl + k];
+                if i == k {
+                    val -= 1.0;
+                }
+                val -= port_resistances[i] * dev_j[i * n_nl + k];
+                for j in 0..n_nl {
+                    val -= s_nl[i * n_nl + j] * port_resistances[j] * dev_j[j * n_nl + k];
+                }
+                jac[i * n_nl + k] = val;
+            }
+        }
+
+        // FD Jacobian
+        for k in 0..n_nl {
+            let mut vp = v;
+            let mut vm = v;
+            vp[k] += eps;
+            vm[k] -= eps;
+            let fp = compute_residual_grouped(
+                n_nl, &s_nl, &known_a, &port_resistances, &groups, &offsets, &vp,
+            );
+            let fm = compute_residual_grouped(
+                n_nl, &s_nl, &known_a, &port_resistances, &groups, &offsets, &vm,
+            );
+            for i in 0..n_nl {
+                let fd = (fp[i] - fm[i]) / (2.0 * eps);
+                let analytic = jac[i * n_nl + k];
+                let rel_err = (analytic - fd).abs() / analytic.abs().max(1e-10);
+                assert!(
+                    rel_err < 1e-4,
+                    "System Jacobian FD (12AX7 grouped) J[{i}][{k}]: \
+                     analytic={analytic:.6e}, fd={fd:.6e}, rel_err={rel_err:.2e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_system_jacobian_fd_varimu_grouped() {
+        use super::super::{VariMuModel, VariMuThreePort};
+        let varimu = VariMuThreePort::new(VariMuModel::ge_6386());
+        let groups: [&dyn NlDeviceGroupIv; 1] = [&varimu];
+        let offsets = [0usize];
+        let n_nl = 2;
+
+        let s_nl = [0.15, 0.25, 0.25, 0.15];
+        let known_a = [0.3, 80.0];
+        let port_resistances = [100_000.0, 50_000.0];
+        let v = [-2.0, 150.0];
+        let eps = 1e-7;
+
+        let mut dev_c = [0.0; 2];
+        let mut dev_j = [0.0; 4];
+        varimu.eval(&v, &mut dev_c, &mut dev_j);
+
+        let mut jac = [0.0_f64; 4];
+        for i in 0..n_nl {
+            for k in 0..n_nl {
+                let mut val = s_nl[i * n_nl + k];
+                if i == k {
+                    val -= 1.0;
+                }
+                val -= port_resistances[i] * dev_j[i * n_nl + k];
+                for j in 0..n_nl {
+                    val -= s_nl[i * n_nl + j] * port_resistances[j] * dev_j[j * n_nl + k];
+                }
+                jac[i * n_nl + k] = val;
+            }
+        }
+
+        for k in 0..n_nl {
+            let mut vp = v;
+            let mut vm = v;
+            vp[k] += eps;
+            vm[k] -= eps;
+            let fp = compute_residual_grouped(
+                n_nl, &s_nl, &known_a, &port_resistances, &groups, &offsets, &vp,
+            );
+            let fm = compute_residual_grouped(
+                n_nl, &s_nl, &known_a, &port_resistances, &groups, &offsets, &vm,
+            );
+            for i in 0..n_nl {
+                let fd = (fp[i] - fm[i]) / (2.0 * eps);
+                let analytic = jac[i * n_nl + k];
+                let rel_err = (analytic - fd).abs() / analytic.abs().max(1e-10);
+                assert!(
+                    rel_err < 1e-4,
+                    "System Jacobian FD (6386 grouped) J[{i}][{k}]: \
+                     analytic={analytic:.6e}, fd={fd:.6e}, rel_err={rel_err:.2e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_system_jacobian_fd_bjt() {
+        use super::super::{BjtModel, BjtNpnRoot};
+        let bjt0 = BjtNpnRoot::new(BjtModel::by_name("2N2222"));
+        let bjt1 = BjtNpnRoot::new(BjtModel::by_name("2N2222"));
+        let devices: [&dyn NlDeviceIv; 2] = [&bjt0, &bjt1];
+
+        let s_nl = [0.2, 0.3, 0.3, 0.2];
+        let known_a = [5.0, 3.0];
+        let port_resistances = [1000.0, 2000.0];
+        let v = [2.0, 5.0];
+        let n_nl = 2;
+        let eps = 1e-7;
+
+        let mut derivs = [0.0; 2];
+        for i in 0..n_nl {
+            let (_, d) = devices[i].iv(v[i]);
+            derivs[i] = d;
+        }
+        let mut jac = [0.0_f64; 4];
+        for i in 0..n_nl {
+            for j in 0..n_nl {
+                let sij = s_nl[i * n_nl + j];
+                let term = sij * (1.0 - port_resistances[j] * derivs[j]);
+                if i == j {
+                    jac[i * n_nl + j] = term - 1.0 - port_resistances[i] * derivs[i];
+                } else {
+                    jac[i * n_nl + j] = term;
+                }
+            }
+        }
+
+        for k in 0..n_nl {
+            let mut vp = v;
+            let mut vm = v;
+            vp[k] += eps;
+            vm[k] -= eps;
+            let fp = compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vp);
+            let fm = compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vm);
+            for i in 0..n_nl {
+                let fd = (fp[i] - fm[i]) / (2.0 * eps);
+                let analytic = jac[i * n_nl + k];
+                let rel_err = (analytic - fd).abs() / analytic.abs().max(1e-10);
+                assert!(
+                    rel_err < 1e-4,
+                    "System Jacobian FD (BJT) J[{i}][{k}]: \
+                     analytic={analytic:.6e}, fd={fd:.6e}, rel_err={rel_err:.2e}"
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

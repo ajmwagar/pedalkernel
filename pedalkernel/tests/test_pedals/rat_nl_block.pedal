@@ -1,0 +1,14 @@
+# Minimal RAT nonlinear block: resistor into anti-parallel diode pair
+# Tests single diode-pair clipping topology in isolation
+
+pedal "RAT NL Block" {
+  components {
+    R1: resistor(47)
+    D1: diode_pair(silicon)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> D1.a, out
+    D1.b -> gnd
+  }
+}

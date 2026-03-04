@@ -22,7 +22,10 @@ pub use modulation::*;
 pub use nonlinear::*;
 pub use synth::*;
 
-pub use nonlinear::{reset_solver_stats, solver_stats_snapshot, SolverStatsSnapshot};
+pub use nonlinear::{
+    disable_solver_trace, enable_solver_trace, reset_solver_stats, solver_stats_snapshot,
+    SolverStatsSnapshot, SolverTraceEntry,
+};
 
 // ---------------------------------------------------------------------------
 // Traits
