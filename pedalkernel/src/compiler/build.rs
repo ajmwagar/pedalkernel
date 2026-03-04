@@ -971,6 +971,131 @@ pub(super) fn build_multi_nl_stages(
     multi_nl_stages
 }
 
+/// Stamp a single passive edge into the MNA system or collect it as a reactive port.
+///
+/// Fixed-resistance components (resistors, tempcos, switched resistors) are stamped
+/// directly into the MNA conductance matrix. Reactive/variable components (capacitors,
+/// inductors, pots, switched caps/inductors) become WDF ports with their own DynNode.
+fn stamp_passive_edge(
+    eidx: usize,
+    graph: &CircuitGraph,
+    mna: &mut MnaSystem,
+    reactive_edges: &mut Vec<(usize, DynNode)>,
+    coupled_edge_indices: &HashSet<usize>,
+    node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
+    sample_rate: f64,
+) {
+    let e = &graph.edges[eidx];
+    let comp = &graph.components[e.comp_idx];
+    let n1 = node_to_mna(e.node_a);
+    let n2 = node_to_mna(e.node_b);
+
+    match &comp.kind {
+        ComponentKind::Resistor(r) => {
+            mna.stamp_resistor(n1, n2, *r);
+        }
+        ComponentKind::Capacitor(cfg) => {
+            let rp = 1.0 / (2.0 * sample_rate * cfg.value);
+            reactive_edges.push((
+                eidx,
+                DynNode::Capacitor {
+                    capacitance: cfg.value,
+                    rp,
+                    state: 0.0,
+                    last_b: 0.0,
+                },
+            ));
+        }
+        ComponentKind::Inductor(l) => {
+            reactive_edges.push((
+                eidx,
+                DynNode::Inductor {
+                    inductance: *l,
+                    rp: 2.0 * sample_rate * *l,
+                    state: 0.0,
+                },
+            ));
+        }
+        ComponentKind::Potentiometer(max_r, taper) => {
+            let initial_pos = 0.5;
+            let tapered_pos = taper.apply(initial_pos);
+            reactive_edges.push((
+                eidx,
+                DynNode::Pot {
+                    comp_id: comp.id.clone(),
+                    max_resistance: *max_r,
+                    position: initial_pos,
+                    taper: *taper,
+                    rp: (tapered_pos * *max_r).max(1.0),
+                },
+            ));
+        }
+        ComponentKind::Tempco(r, _ppm) => {
+            mna.stamp_resistor(n1, n2, *r);
+        }
+        ComponentKind::ResistorSwitched(values) => {
+            if let Some(&r) = values.first() {
+                if r.is_finite() && r > 0.0 {
+                    mna.stamp_resistor(n1, n2, r);
+                }
+            }
+        }
+        ComponentKind::CapSwitched(values) => {
+            if let Some(&c) = values.first() {
+                if c.is_finite() && c > 0.0 {
+                    let rp = 1.0 / (2.0 * sample_rate * c);
+                    reactive_edges.push((
+                        eidx,
+                        DynNode::Capacitor {
+                            capacitance: c,
+                            rp,
+                            state: 0.0,
+                            last_b: 0.0,
+                        },
+                    ));
+                }
+            }
+        }
+        ComponentKind::InductorSwitched(values) => {
+            if let Some(&l) = values.first() {
+                if l.is_finite() && l > 0.0 {
+                    reactive_edges.push((
+                        eidx,
+                        DynNode::Inductor {
+                            inductance: l,
+                            rp: 2.0 * sample_rate * l,
+                            state: 0.0,
+                        },
+                    ));
+                }
+            }
+        }
+        ComponentKind::Transformer(cfg) => {
+            if coupled_edge_indices.contains(&eidx) {
+                if cfg.primary_dcr > 0.0 {
+                    mna.stamp_resistor(n1, n2, cfg.primary_dcr);
+                }
+            } else {
+                let l = cfg.primary_inductance;
+                if l > 0.0 && l.is_finite() {
+                    reactive_edges.push((
+                        eidx,
+                        DynNode::Inductor {
+                            inductance: l,
+                            rp: 2.0 * sample_rate * l,
+                            state: 0.0,
+                        },
+                    ));
+                }
+                if cfg.primary_dcr > 0.0 {
+                    mna.stamp_resistor(n1, n2, cfg.primary_dcr);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Try to build a single MultiNlStage from a plan.
 ///
 /// Returns `None` if MNA construction fails (e.g., singular matrix, no passive edges).
@@ -1168,117 +1293,15 @@ fn try_build_multi_nl_stage(
     }
 
     for &eidx in &plan.passive_edge_indices {
-        let e = &graph.edges[eidx];
-        let comp = &graph.components[e.comp_idx];
-        let n1 = node_to_mna(e.node_a);
-        let n2 = node_to_mna(e.node_b);
-
-        match &comp.kind {
-            ComponentKind::Resistor(r) => {
-                // Stamp resistor directly into MNA conductance matrix
-                mna.stamp_resistor(n1, n2, *r);
-            }
-            ComponentKind::Capacitor(cfg) => {
-                let rp = 1.0 / (2.0 * sample_rate * cfg.value);
-                let dyn_node = DynNode::Capacitor {
-                    capacitance: cfg.value,
-                    rp,
-                    state: 0.0,
-                    last_b: 0.0,
-                };
-                reactive_edges.push((eidx, dyn_node));
-            }
-            ComponentKind::Inductor(l) => {
-                let dyn_node = DynNode::Inductor {
-                    inductance: *l,
-                    rp: 2.0 * sample_rate * *l,
-                    state: 0.0,
-                };
-                reactive_edges.push((eidx, dyn_node));
-            }
-            ComponentKind::Potentiometer(max_r, taper) => {
-                let initial_pos = 0.5;
-                let tapered_pos = taper.apply(initial_pos);
-                let dyn_node = DynNode::Pot {
-                    comp_id: comp.id.clone(),
-                    max_resistance: *max_r,
-                    position: initial_pos,
-                    taper: *taper,
-                    rp: (tapered_pos * *max_r).max(1.0),
-                };
-                reactive_edges.push((eidx, dyn_node));
-            }
-            ComponentKind::Tempco(r, _ppm) => {
-                // Temperature-compensated resistor — treat as fixed resistor in MNA
-                mna.stamp_resistor(n1, n2, *r);
-            }
-            ComponentKind::ResistorSwitched(values) => {
-                // Switched resistor — stamp with the first (default) value
-                if let Some(&r) = values.first() {
-                    if r.is_finite() && r > 0.0 {
-                        mna.stamp_resistor(n1, n2, r);
-                    }
-                }
-            }
-            ComponentKind::CapSwitched(values) => {
-                // Switched capacitor — reactive edge with first (default) value
-                if let Some(&c) = values.first() {
-                    if c.is_finite() && c > 0.0 {
-                        let rp = 1.0 / (2.0 * sample_rate * c);
-                        let dyn_node = DynNode::Capacitor {
-                            capacitance: c,
-                            rp,
-                            state: 0.0,
-                            last_b: 0.0,
-                        };
-                        reactive_edges.push((eidx, dyn_node));
-                    }
-                }
-            }
-            ComponentKind::InductorSwitched(values) => {
-                // Switched inductor — reactive edge with first (default) value
-                if let Some(&l) = values.first() {
-                    if l.is_finite() && l > 0.0 {
-                        let dyn_node = DynNode::Inductor {
-                            inductance: l,
-                            rp: 2.0 * sample_rate * l,
-                            state: 0.0,
-                        };
-                        reactive_edges.push((eidx, dyn_node));
-                    }
-                }
-            }
-            ComponentKind::Transformer(cfg) => {
-                if coupled_edge_indices.contains(&eidx) {
-                    // Coupled transformer: primary↔secondary coupling handled
-                    // by voltage source constraints in the augmented MNA.
-                    // Do NOT create an inductor port (conflicts with VS constraint).
-                    // Only stamp DCR as a resistor.
-                    if cfg.primary_dcr > 0.0 {
-                        mna.stamp_resistor(n1, n2, cfg.primary_dcr);
-                    }
-                } else {
-                    // Uncoupled transformer: primary acts as magnetizing inductance.
-                    // The secondary load is in a separate stage.
-                    let l = cfg.primary_inductance;
-                    if l > 0.0 && l.is_finite() {
-                        let rp = 2.0 * sample_rate * l;
-                        let dyn_node = DynNode::Inductor {
-                            inductance: l,
-                            rp,
-                            state: 0.0,
-                        };
-                        reactive_edges.push((eidx, dyn_node));
-                    }
-                    if cfg.primary_dcr > 0.0 {
-                        mna.stamp_resistor(n1, n2, cfg.primary_dcr);
-                    }
-                }
-            }
-            _ => {
-                // Skip unknown edge types
-            }
-        }
+        stamp_passive_edge(
+            eidx,
+            graph,
+            &mut mna,
+            &mut reactive_edges,
+            &coupled_edge_indices,
+            &node_to_mna,
+            sample_rate,
+        );
     }
 
     // ── GMIN regularization ──────────────────────────────────────────
