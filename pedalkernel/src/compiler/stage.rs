@@ -158,20 +158,50 @@ pub(super) enum RootKind {
     },
 }
 
+// Shared bias constants for NL device control voltage setting.
+// Used by both RootKind (WdfStage) and NlDeviceKind (MultiNlStage).
+const BJT_VBE_BIAS: f64 = 0.6;
+const BJT_VBE_SCALE: f64 = 0.15;
+const PNP_VEB_BIAS: f64 = 0.15;
+const PNP_VEB_SCALE: f64 = 0.3;
+const TRIODE_GRID_BIAS: f64 = -2.0;
+const PENTODE_GRID_BIAS: f64 = -8.0;
+
 impl RootKind {
     /// Returns `true` for roots that clip the signal (diodes, zeners).
-    ///
-    /// Clipping stages reduce the signal to roughly the diode forward voltage
-    /// (~0.3–0.7 V), so cascaded clipping stages need inter-stage gain to
-    /// re-amplify before the next clipper.  Non-clipping roots (JFETs acting
-    /// as variable resistors, op-amp buffers, transistor gain stages) pass
-    /// the signal through at roughly the same amplitude; applying extra gain
-    /// before each one causes exponential level growth.
     pub(super) fn is_clipping_stage(&self) -> bool {
         matches!(
             self,
             RootKind::DiodePair(_) | RootKind::SingleDiode(_) | RootKind::Zener(_)
         )
+    }
+
+    /// Set the control voltage on the nonlinear root from the input signal.
+    ///
+    /// Maps the audio input to the device's control terminal:
+    /// - BJTs: Vbe/Veb from input with bias offset
+    /// - Triodes/VariMu: Vgk from input
+    /// - Pentodes: Vg1k from input
+    /// - Diodes/JFETs/other: no control voltage
+    pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
+        match self {
+            RootKind::BjtNpn(bjt) => {
+                bjt.set_vbe(BJT_VBE_BIAS + bias_offset + input * compensation * BJT_VBE_SCALE);
+            }
+            RootKind::BjtPnp(bjt) => {
+                bjt.set_veb(PNP_VEB_BIAS + bias_offset + input * compensation * PNP_VEB_SCALE);
+            }
+            RootKind::Triode(t) => {
+                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+            }
+            RootKind::VariMu(t) => {
+                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+            }
+            RootKind::Pentode(p) => {
+                p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -243,48 +273,10 @@ impl WdfStage {
         let root = &mut self.root;
         let compensation = self.compensation;
 
-        // For triode stages, the input signal modulates Vgk (grid-cathode voltage).
-        // This is the key to triode amplification: the input controls the grid,
-        // which modulates plate current and creates voltage drop across R_plate.
-        // Vgk = Vbias + Vin (Vbias ~-2V for 12AX7 with typical biasing)
-        match root {
-            RootKind::Triode(ref mut t) => {
-                // Apply input signal to grid. The bias point is typically around -2V
-                // for class A operation with a 12AX7. The input signal swings around this.
-                const TRIODE_GRID_BIAS: f64 = -2.0;
-                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
-            }
-            RootKind::VariMu(ref mut t) => {
-                // Variable-mu triode: same grid drive as standard triode.
-                const TRIODE_GRID_BIAS: f64 = -2.0;
-                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
-            }
-            _ => {}
-        }
-
-        // For BJT stages, the input signal modulates Vbe (base-emitter voltage).
-        // This is the key to BJT amplification: the input controls the base,
-        // which modulates collector current and creates voltage drop across R_collector.
-        //
-        // BJT Vbe sensitivity: Ic ∝ exp(Vbe/Vt) where Vt ≈ 26mV (thermal voltage)
-        // For significant nonlinearity, Vbe swing should be comparable to Vt.
-        // A ±100mV swing (4×Vt) produces strong exponential distortion.
-        //
-        // Fuzz Face operation: Germanium PNPs biased near cutoff, large signal swings
-        // push into saturation/cutoff for asymmetric clipping characteristic.
-        if let RootKind::BjtNpn(ref mut bjt) = root {
-            // Silicon BJT: Vbe_bias ≈ 0.6V at typical operating point
-            // Scale: 0.15 gives ±75mV swing with ±0.5V input (3×Vt)
-            const BJT_VBE_BIAS: f64 = 0.6;
-            bjt.set_vbe(BJT_VBE_BIAS + input * compensation * 0.15);
-        }
-        if let RootKind::BjtPnp(ref mut bjt) = root {
-            // PNP (germanium Fuzz Face): Veb_bias ≈ 0.15V, biased near edge of conduction
-            // Scale: 0.3 gives ±150mV swing with ±0.5V input - strong clipping
-            // Lower bias + higher swing = asymmetric fuzz distortion
-            const PNP_VEB_BIAS: f64 = 0.15;
-            bjt.set_veb(PNP_VEB_BIAS + input * compensation * 0.3);
-        }
+        // Set control voltage for active devices (triodes, BJTs, pentodes).
+        // Maps the input signal to the device's control terminal with appropriate
+        // bias point and scaling. No-op for diodes/JFETs/other passive roots.
+        root.set_control_voltage(input, compensation, 0.0);
 
         // For JFET source followers, compute Vgs from input (gate) and previous output (source).
         // Vgs = Vgate - Vsource, where Vgate ≈ input and Vsource is the WDF output.
@@ -1043,28 +1035,21 @@ impl NlDeviceKind {
     pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
         match self {
             NlDeviceKind::BjtNpn(bjt) => {
-                const BJT_VBE_BIAS: f64 = 0.6;
-                bjt.set_vbe(BJT_VBE_BIAS + bias_offset + input * compensation * 0.15);
+                bjt.set_vbe(BJT_VBE_BIAS + bias_offset + input * compensation * BJT_VBE_SCALE);
             }
             NlDeviceKind::BjtPnp(bjt) => {
-                const PNP_VEB_BIAS: f64 = 0.15;
-                bjt.set_veb(PNP_VEB_BIAS + bias_offset + input * compensation * 0.3);
+                bjt.set_veb(PNP_VEB_BIAS + bias_offset + input * compensation * PNP_VEB_SCALE);
             }
             NlDeviceKind::Triode(t) => {
-                const TRIODE_GRID_BIAS: f64 = -2.0;
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
             }
             NlDeviceKind::VariMu(t) => {
-                const TRIODE_GRID_BIAS: f64 = -2.0;
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
             }
             NlDeviceKind::Pentode(p) => {
-                const PENTODE_GRID_BIAS: f64 = -8.0;
                 p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
             }
-            NlDeviceKind::Diode(_) | NlDeviceKind::DiodePair(_) => {
-                // Diodes don't have a control voltage
-            }
+            NlDeviceKind::Diode(_) | NlDeviceKind::DiodePair(_) => {}
         }
     }
 
