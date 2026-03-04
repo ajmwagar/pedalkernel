@@ -116,6 +116,128 @@ pub(super) struct MultiNlPlan {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Shared planning primitives
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Union-find (disjoint set) for coupling detection.
+struct UnionFind {
+    parent: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+        }
+    }
+
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.parent[x] != x {
+            self.parent[x] = self.parent[self.parent[x]]; // path compression
+            x = self.parent[x];
+        }
+        x
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra != rb {
+            self.parent[rb] = ra;
+        }
+    }
+
+    /// Group elements into clusters. Returns map from root → member indices.
+    fn clusters(&mut self) -> HashMap<usize, Vec<usize>> {
+        let n = self.parent.len();
+        let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+        for i in 0..n {
+            let root = self.find(i);
+            clusters.entry(root).or_default().push(i);
+        }
+        clusters
+    }
+}
+
+/// Find the injection node closest to the circuit input among passive edge endpoints.
+///
+/// Scans all nodes touched by `passive_edges`, excluding nodes in `exclude`,
+/// and returns the node with minimum `dist_from_in`. Falls back to `dist_from_out`
+/// (farthest from output = AC input side) if no node has a `dist_from_in` entry
+/// (e.g., transformer-isolated circuits). Returns `fallback` if nothing found.
+fn find_injection_node_multi_nl(
+    passive_edges: &[usize],
+    graph: &CircuitGraph,
+    classified: &ClassifiedCircuit,
+    exclude: &HashSet<NodeId>,
+    fallback: NodeId,
+) -> NodeId {
+    let mut injection_node = fallback;
+    let mut best_dist = usize::MAX;
+    for &eidx in passive_edges {
+        let e = &graph.edges[eidx];
+        for node in [e.node_a, e.node_b] {
+            if exclude.contains(&node) {
+                continue;
+            }
+            if let Some(&d) = classified.dist_from_in.get(&node) {
+                if d < best_dist {
+                    best_dist = d;
+                    injection_node = node;
+                }
+            }
+        }
+    }
+    // Fallback: transformer barrier — pick farthest from output (= AC input side).
+    if best_dist == usize::MAX {
+        let mut best_out_dist = 0usize;
+        for &eidx in passive_edges {
+            let e = &graph.edges[eidx];
+            for node in [e.node_a, e.node_b] {
+                if exclude.contains(&node) {
+                    continue;
+                }
+                if let Some(&d) = classified.dist_from_out.get(&node) {
+                    if d > best_out_dist {
+                        best_out_dist = d;
+                        injection_node = node;
+                    }
+                }
+            }
+        }
+    }
+    injection_node
+}
+
+/// Collect passive edges via BFS from multiple junction nodes, deduplicating results.
+/// Also injects primary edges for input transformers whose secondary nodes are adjacent.
+fn collect_passive_edges_from_nodes(
+    junction_nodes: &HashSet<NodeId>,
+    graph: &CircuitGraph,
+    classified: &ClassifiedCircuit,
+    skip_out_node: bool,
+    pp_transformer_edges: &HashSet<usize>,
+) -> Vec<usize> {
+    let mut all_passive_edges: Vec<usize> = Vec::new();
+    for &jn in junction_nodes {
+        let edges = graph.bfs_passive_edges(
+            jn,
+            &classified.all_nonlinear_edge_indices,
+            &graph.active_edge_indices,
+            true, // include supply-adjacent
+            skip_out_node,
+            pp_transformer_edges,
+        );
+        extend_dedup(&mut all_passive_edges, &edges);
+    }
+    // Inject primary edges for input transformers whose secondary nodes are adjacent.
+    let xfmr_inject =
+        find_secondary_side_transformers(&all_passive_edges, graph, pp_transformer_edges);
+    extend_dedup(&mut all_passive_edges, &xfmr_inject);
+    all_passive_edges
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Planning
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -246,21 +368,7 @@ pub(super) fn plan_stages(
 
     // Union-find for BJT coupling.
     let n_bjts = bjt_infos.len();
-    let mut parent: Vec<usize> = (0..n_bjts).collect();
-    fn find(parent: &mut Vec<usize>, mut x: usize) -> usize {
-        while parent[x] != x {
-            parent[x] = parent[parent[x]];
-            x = parent[x];
-        }
-        x
-    }
-    fn union(parent: &mut Vec<usize>, a: usize, b: usize) {
-        let ra = find(parent, a);
-        let rb = find(parent, b);
-        if ra != rb {
-            parent[rb] = ra;
-        }
-    }
+    let mut bjt_uf = UnionFind::new(n_bjts);
 
     // Build coupling edges: BJT_i ↔ BJT_j if collector_i == base_j or
     // collector_j == base_i (DC feedback), or they share emitter/collector
@@ -280,17 +388,13 @@ pub(super) fn plan_stages(
                 || bi.collector_node == bj.collector_node;
 
             if dc_coupled || shared_nodes {
-                union(&mut parent, i, j);
+                bjt_uf.union(i, j);
             }
         }
     }
 
     // Group coupled BJTs into clusters.
-    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
-    for i in 0..n_bjts {
-        let root = find(&mut parent, i);
-        clusters.entry(root).or_default().push(i);
-    }
+    let clusters = bjt_uf.clusters();
 
     // Build CoupledBjtPlan + MultiNlPlan for clusters of 2+ BJTs.
     let mut coupled_bjt_plans: Vec<CoupledBjtPlan> = Vec::new();
@@ -349,37 +453,19 @@ pub(super) fn plan_stages(
         });
 
         // Collect all passive edges from all junction nodes of all members.
-        let mut all_passive_edges: Vec<usize> = Vec::new();
         let mut all_junction_nodes: HashSet<NodeId> = HashSet::new();
         for &m in &ordered {
             let info = &bjt_infos[m];
             all_junction_nodes.insert(info.collector_node);
             all_junction_nodes.insert(info.emitter_node);
         }
-        for &jn in &all_junction_nodes {
-            let edges = graph.bfs_passive_edges(
-                jn,
-                &classified.all_nonlinear_edge_indices,
-                &graph.active_edge_indices,
-                true, // include supply-adjacent
-                true, // skip_out_node
-                &pp_transformer_edges,
-            );
-            for eidx in edges {
-                if !all_passive_edges.contains(&eidx) {
-                    all_passive_edges.push(eidx);
-                }
-            }
-        }
-
-        // Case B: inject primary edge for input transformers.
-        let xfmr_inject =
-            find_secondary_side_transformers(&all_passive_edges, graph, &pp_transformer_edges);
-        for eidx in xfmr_inject {
-            if !all_passive_edges.contains(&eidx) {
-                all_passive_edges.push(eidx);
-            }
-        }
+        let all_passive_edges = collect_passive_edges_from_nodes(
+            &all_junction_nodes,
+            graph,
+            classified,
+            true, // skip_out_node
+            &pp_transformer_edges,
+        );
 
         cluster_member_sets.push(ordered.clone());
         cluster_passive_edge_sets.push(all_passive_edges);
@@ -409,20 +495,13 @@ pub(super) fn plan_stages(
         // Remove bias pot edges from the passive set.
         all_passive_edges.retain(|eidx| !bjt_bias_analysis.bias_pot_edge_indices.contains(eidx));
 
-        // Find injection node (BFS-closest to input among passive edge endpoints).
-        let mut injection_node = graph.in_node;
-        let mut best_dist = usize::MAX;
-        for &eidx in &all_passive_edges {
-            let e = &graph.edges[eidx];
-            for node in [e.node_a, e.node_b] {
-                if let Some(&d) = classified.dist_from_in.get(&node) {
-                    if d < best_dist {
-                        best_dist = d;
-                        injection_node = node;
-                    }
-                }
-            }
-        }
+        let injection_node = find_injection_node_multi_nl(
+            &all_passive_edges,
+            graph,
+            classified,
+            &HashSet::new(), // no exclusions for BJTs
+            graph.in_node,
+        );
 
         // NL terminals: (collector, emitter) for each BJT
         let nl_terminals: Vec<(NodeId, NodeId)> = info
@@ -493,53 +572,27 @@ pub(super) fn plan_stages(
                 continue; // No grid-side passives — fall through to 2-port
             }
 
-            // Collect plate + cathode passives too.
-            let plate_passives = graph.bfs_passive_edges(
-                *plate_node,
-                &classified.all_nonlinear_edge_indices,
-                &graph.active_edge_indices,
-                true,
-                true, // skip_out_node
-                &pp_transformer_edges,
-            );
-            let cathode_passives = graph.bfs_passive_edges(
-                *cathode_node,
-                &classified.all_nonlinear_edge_indices,
-                &graph.active_edge_indices,
-                true,
+            // Collect all passive edges from grid + plate + cathode nodes.
+            let junction_nodes: HashSet<NodeId> =
+                [*grid_node, *plate_node, *cathode_node].into_iter().collect();
+            let all_passive_edges = collect_passive_edges_from_nodes(
+                &junction_nodes,
+                graph,
+                classified,
                 true, // skip_out_node
                 &pp_transformer_edges,
             );
 
-            // Merge all passive edges (grid + plate + cathode).
-            let mut all_passive_edges = grid_passives.clone();
-            extend_dedup(&mut all_passive_edges, &plate_passives);
-            extend_dedup(&mut all_passive_edges, &cathode_passives);
-
-            // Case B: inject primary edge for input transformers whose secondary
-            // nodes are adjacent to the passive set.
-            let xfmr_inject =
-                find_secondary_side_transformers(&all_passive_edges, graph, &pp_transformer_edges);
-            extend_dedup(&mut all_passive_edges, &xfmr_inject);
-
-            // Find injection node: BFS-closest to input among all passive edge endpoints,
-            // excluding plate/cathode/grid nodes.
-            let mut injection_node = graph.in_node;
-            let mut best_dist = usize::MAX;
-            for &eidx in &all_passive_edges {
-                let e = &graph.edges[eidx];
-                for node in [e.node_a, e.node_b] {
-                    if node == *plate_node || node == *cathode_node || node == *grid_node {
-                        continue;
-                    }
-                    if let Some(&d) = classified.dist_from_in.get(&node) {
-                        if d < best_dist {
-                            best_dist = d;
-                            injection_node = node;
-                        }
-                    }
-                }
-            }
+            // Find injection node, excluding plate/cathode/grid.
+            let exclude: HashSet<NodeId> =
+                [*plate_node, *cathode_node, *grid_node].into_iter().collect();
+            let injection_node = find_injection_node_multi_nl(
+                &all_passive_edges,
+                graph,
+                classified,
+                &exclude,
+                graph.in_node,
+            );
 
             // NL terminals: port 0 = (grid, cathode), port 1 = (plate, cathode)
             let nl_terminals = vec![(*grid_node, *cathode_node), (*plate_node, *cathode_node)];
@@ -595,21 +648,7 @@ pub(super) fn plan_stages(
     if diode_infos.len() >= 2 {
         // Union-find for diode coupling.
         let n_diodes = diode_infos.len();
-        let mut d_parent: Vec<usize> = (0..n_diodes).collect();
-        fn d_find(parent: &mut Vec<usize>, mut x: usize) -> usize {
-            while parent[x] != x {
-                parent[x] = parent[parent[x]];
-                x = parent[x];
-            }
-            x
-        }
-        fn d_union(parent: &mut Vec<usize>, a: usize, b: usize) {
-            let ra = d_find(parent, a);
-            let rb = d_find(parent, b);
-            if ra != rb {
-                parent[rb] = ra;
-            }
-        }
+        let mut diode_uf = UnionFind::new(n_diodes);
 
         // Diodes sharing a non-global terminal node are coupled.
         // Exclude gnd and vcc — they are global hubs, not coupling points.
@@ -623,17 +662,13 @@ pub(super) fn plan_stages(
                     || (!is_global(di.node_b)
                         && (di.node_b == dj.node_a || di.node_b == dj.node_b));
                 if shared {
-                    d_union(&mut d_parent, i, j);
+                    diode_uf.union(i, j);
                 }
             }
         }
 
         // Group coupled diodes into clusters.
-        let mut d_clusters: HashMap<usize, Vec<usize>> = HashMap::new();
-        for i in 0..n_diodes {
-            let root = d_find(&mut d_parent, i);
-            d_clusters.entry(root).or_default().push(i);
-        }
+        let d_clusters = diode_uf.clusters();
 
         for (_root, members) in &d_clusters {
             if members.len() < 2 {
@@ -667,78 +702,64 @@ pub(super) fn plan_stages(
 
             // BFS passive edges from ALL terminal nodes, with skip_out_node=false
             // so that RC time constant edges touching out_node are collected.
-            let mut all_passive_edges: Vec<usize> = Vec::new();
-            for &dn in &all_diode_nodes {
-                let edges = graph.bfs_passive_edges(
-                    dn,
-                    &classified.all_nonlinear_edge_indices,
-                    &graph.active_edge_indices,
-                    true,  // include supply-adjacent
-                    false, // skip_out_node=false (bridge rectifier needs RC at output)
-                    &pp_transformer_edges,
-                );
-                for eidx in edges {
-                    if !all_passive_edges.contains(&eidx) {
-                        all_passive_edges.push(eidx);
-                    }
-                }
-            }
+            let all_passive_edges = collect_passive_edges_from_nodes(
+                &all_diode_nodes,
+                graph,
+                classified,
+                false, // skip_out_node=false (bridge rectifier needs RC at output)
+                &pp_transformer_edges,
+            );
 
-            // Case B: inject primary edge for input transformers.
-            let xfmr_inject =
-                find_secondary_side_transformers(&all_passive_edges, graph, &pp_transformer_edges);
-            for eidx in xfmr_inject {
-                if !all_passive_edges.contains(&eidx) {
-                    all_passive_edges.push(eidx);
-                }
-            }
-
-            // Find injection node from diode terminal nodes (not passive
-            // endpoints). The bridge's AC-side terminals have the correct
-            // signal flow distance. Passive endpoints might reach back
-            // toward the input through the RC network, giving a misleadingly
-            // low distance.
             // Find injection node from diode terminal nodes. Use dist_from_in
-            // when available; fall back to dist_from_out for nodes on the
-            // disconnected side of transformers (secondary side).
-            let mut injection_node = graph.in_node;
-            let mut best_dist = usize::MAX;
-            for &m in members {
-                let di = &diode_infos[m];
-                for node in [di.node_a, di.node_b] {
-                    if node == graph.out_node || node == graph.gnd_node {
+            // when available; fall back to dist_from_out (farthest from output =
+            // AC input side of the bridge).
+            let diode_terminal_nodes: Vec<usize> = members
+                .iter()
+                .flat_map(|&m| [diode_infos[m].node_a, diode_infos[m].node_b])
+                .collect();
+            let exclude: HashSet<NodeId> =
+                [graph.out_node, graph.gnd_node].into_iter().collect();
+            let injection_node = find_injection_node_multi_nl(
+                // Use diode terminal edges, not passive edges, for injection node
+                // (passive endpoints might reach back through RC network)
+                &all_passive_edges,
+                graph,
+                classified,
+                &exclude,
+                graph.in_node,
+            );
+            // Refine: prefer diode terminal nodes over passive edge endpoints
+            let injection_node = {
+                let mut best = injection_node;
+                let mut best_dist = classified.dist_from_in.get(&injection_node).copied().unwrap_or(usize::MAX);
+                for &node in &diode_terminal_nodes {
+                    if exclude.contains(&node) {
                         continue;
                     }
                     if let Some(&d) = classified.dist_from_in.get(&node) {
                         if d < best_dist {
                             best_dist = d;
-                            injection_node = node;
+                            best = node;
                         }
                     }
                 }
-            }
-            // If no diode terminal is reachable from input (transformer barrier),
-            // pick the terminal FARTHEST from output — this selects the AC
-            // input side of the bridge (transformer secondary), not the DC
-            // output side (RC time constant). Signal should be injected at
-            // the AC side for correct rectification.
-            if best_dist == usize::MAX {
-                let mut best_out_dist = 0usize;
-                for &m in members {
-                    let di = &diode_infos[m];
-                    for node in [di.node_a, di.node_b] {
-                        if node == graph.out_node || node == graph.gnd_node {
+                // Fallback: farthest diode terminal from output (AC input side)
+                if best_dist == usize::MAX {
+                    let mut best_out_dist = 0usize;
+                    for &node in &diode_terminal_nodes {
+                        if exclude.contains(&node) {
                             continue;
                         }
                         if let Some(&d) = classified.dist_from_out.get(&node) {
                             if d > best_out_dist {
                                 best_out_dist = d;
-                                injection_node = node;
+                                best = node;
                             }
                         }
                     }
                 }
-            }
+                best
+            };
 
             // NL terminals: (anode, cathode) for each diode.
             let nl_terminals: Vec<(NodeId, NodeId)> = members
@@ -894,45 +915,19 @@ pub(super) fn plan_push_pull_half(
             return None;
         }
 
-        // Find injection node: scan ALL nodes across ALL collected plate passive
-        // edges (multi-hop), pick the node with minimum dist_from_in, excluding
-        // plate_node and cathode_node.
-        let mut injection_node = graph.gnd_node;
-        let mut best_dist = usize::MAX;
-        for &eidx in &plate_passives {
-            let e = &graph.edges[eidx];
-            for candidate in [e.node_a, e.node_b] {
-                if candidate == *plate_node || candidate == *cathode_node {
-                    continue;
-                }
-                if let Some(&d) = classified.dist_from_in.get(&candidate) {
-                    if d < best_dist {
-                        best_dist = d;
-                        injection_node = candidate;
-                    }
-                }
-            }
-        }
-        // Fallback: try cathode passive edges if plate side yielded nothing.
-        if best_dist == usize::MAX {
-            for &eidx in &cathode_passives {
-                let e = &graph.edges[eidx];
-                for candidate in [e.node_a, e.node_b] {
-                    if candidate == *plate_node || candidate == *cathode_node {
-                        continue;
-                    }
-                    if let Some(&d) = classified.dist_from_in.get(&candidate) {
-                        if d < best_dist {
-                            best_dist = d;
-                            injection_node = candidate;
-                        }
-                    }
-                }
-            }
-        }
+        // Find injection node, excluding plate/cathode.
+        let exclude: HashSet<NodeId> =
+            [*plate_node, *cathode_node].into_iter().collect();
+        let mut injection_node = find_injection_node_multi_nl(
+            &passive_idxs,
+            graph,
+            classified,
+            &exclude,
+            graph.gnd_node,
+        );
         // Last resort: first non-special node from plate passives.
-        if best_dist == usize::MAX {
-            for &eidx in &plate_passives {
+        if injection_node == graph.gnd_node {
+            'outer: for &eidx in &plate_passives {
                 let e = &graph.edges[eidx];
                 for candidate in [e.node_a, e.node_b] {
                     if candidate != graph.gnd_node
@@ -940,11 +935,8 @@ pub(super) fn plan_push_pull_half(
                         && candidate != *plate_node
                     {
                         injection_node = candidate;
-                        break;
+                        break 'outer;
                     }
-                }
-                if injection_node != graph.gnd_node {
-                    break;
                 }
             }
         }
@@ -1854,40 +1846,14 @@ fn plan_collapsed_nl(
     }
 
     // Find injection node (closest to input among passive endpoints).
-    let mut injection_node = graph.in_node;
-    let mut best_dist = usize::MAX;
-    for &eidx in &all_passive_edges {
-        let e = &graph.edges[eidx];
-        for node in [e.node_a, e.node_b] {
-            if node == graph.gnd_node || node == graph.out_node {
-                continue;
-            }
-            if let Some(&d) = classified.dist_from_in.get(&node) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = node;
-                }
-            }
-        }
-    }
-    // Fallback for transformer-isolated circuits: use dist_from_out.
-    if best_dist == usize::MAX {
-        let mut best_out_dist = 0usize;
-        for &eidx in &all_passive_edges {
-            let e = &graph.edges[eidx];
-            for node in [e.node_a, e.node_b] {
-                if node == graph.gnd_node || node == graph.out_node {
-                    continue;
-                }
-                if let Some(&d) = classified.dist_from_out.get(&node) {
-                    if d > best_out_dist {
-                        best_out_dist = d;
-                        injection_node = node;
-                    }
-                }
-            }
-        }
-    }
+    let exclude: HashSet<NodeId> = [graph.gnd_node, graph.out_node].into_iter().collect();
+    let injection_node = find_injection_node_multi_nl(
+        &all_passive_edges,
+        graph,
+        classified,
+        &exclude,
+        graph.in_node,
+    );
 
     let output_node = if all_passive_edges.iter().any(|&eidx| {
         let e = &graph.edges[eidx];
