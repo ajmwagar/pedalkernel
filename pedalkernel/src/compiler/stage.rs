@@ -129,6 +129,33 @@ pub(super) enum RootKind {
     /// Output voltage = (0 + b_tree) / 2 = b_tree / 2.
     /// Used for RC highpass and RL lowpass where R is the grounded load.
     ResistiveTermination,
+    /// Passive R-type adaptor for non-series-parallel topologies.
+    ///
+    /// When `sp_reduce` fails (e.g., Twin-T notch), this MNA-derived
+    /// R-type adaptor handles arbitrary passive topologies. Resistors are
+    /// stamped into the MNA conductance matrix; reactive elements (caps,
+    /// inductors) are WDF children with state. The VS is stamped directly
+    /// into the MNA B/C/D matrices (zero internal impedance), giving an
+    /// ideal voltage source. A high-impedance output probe port extracts
+    /// voltage at the output node.
+    ///
+    /// Processing:
+    /// ```text
+    /// a[i] = Σ_j S[i][j] · b[j] + k[i] · V_in
+    /// output = (a_out + b_out) / 2
+    /// ```
+    PassiveRType {
+        /// Scattering matrix S (n_ports × n_ports, row-major).
+        scattering: Vec<f64>,
+        /// VS injection vector k (n_ports elements).
+        vs_injection: Vec<f64>,
+        /// Number of ports (reactive + output probe).
+        n_ports: usize,
+        /// Passive child nodes (capacitors, inductors, output probe).
+        children: Vec<DynNode>,
+        /// Index into `children` for the output probe port.
+        output_port: usize,
+    },
 }
 
 impl RootKind {
@@ -397,6 +424,41 @@ impl WdfStage {
                 // Resistive termination: resistor absorbs all energy (b = 0).
                 // Output at root port = (0 + b_tree) / 2 = b_tree / 2.
                 RootKind::ResistiveTermination => 0.0,
+                // Passive R-type: self-contained processing bypassing the main tree.
+                // VS is an ideal voltage source (zero impedance) stamped into
+                // the MNA, producing an injection vector separate from the
+                // scattering matrix.
+                RootKind::PassiveRType {
+                    scattering,
+                    vs_injection,
+                    n_ports,
+                    children,
+                    output_port,
+                } => {
+                    let vs_voltage = sample * compensation;
+                    let n = *n_ports;
+                    // 1. Collect reflected waves from children
+                    let b_children: Vec<f64> =
+                        children.iter_mut().map(|c| c.reflected()).collect();
+                    // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
+                    let mut a_children = vec![0.0; n];
+                    for i in 0..n {
+                        let mut a_i = vs_injection[i] * vs_voltage;
+                        for j in 0..n {
+                            a_i += scattering[i * n + j] * b_children[j];
+                        }
+                        a_children[i] = a_i;
+                    }
+                    // 3. Set incident waves on children
+                    for (child, &a_i) in children.iter_mut().zip(a_children.iter())
+                    {
+                        child.set_incident(a_i);
+                    }
+                    // 4. Output voltage at probe port
+                    let a_out = a_children[*output_port];
+                    let b_out = b_children[*output_port];
+                    return (a_out + b_out) / 2.0;
+                }
             };
             tree.set_incident(a_root);
             (a_root + b_tree) / 2.0
@@ -467,6 +529,10 @@ impl WdfStage {
             } => {
                 *rp = 2.0 * effective_rate * *inductance;
             }
+            RootKind::PassiveRType { .. } => {
+                // Children and scattering matrix were derived at the effective
+                // (oversampled) rate during construction. No update needed.
+            }
             _ => {}
         }
     }
@@ -482,6 +548,11 @@ impl WdfStage {
             *x_prev = 0.0;
         }
         self.prev_source_voltage = 0.0;
+        if let RootKind::PassiveRType { children, .. } = &mut self.root {
+            for child in children.iter_mut() {
+                child.reset();
+            }
+        }
     }
 
     /// Apply thermal drift to temperature-sensitive root elements.
@@ -733,6 +804,7 @@ impl WdfStage {
             RootKind::CapacitorRoot { .. } => "CapacitorRoot",
             RootKind::InductorRoot { .. } => "InductorRoot",
             RootKind::ResistiveTermination => "ResistiveTermination",
+            RootKind::PassiveRType { .. } => "PassiveRType",
         };
 
         let mut s = format!(

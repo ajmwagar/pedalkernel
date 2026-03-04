@@ -743,6 +743,117 @@ impl MnaSystem {
 
         scattering
     }
+
+    /// Derive scattering matrix **and** VS injection vector for ports driven
+    /// by an ideal voltage source (zero internal impedance).
+    ///
+    /// Unlike `derive_scattering_matrix_general` where the VS is a WDF port,
+    /// this method stamps the VS directly into the MNA B/C/D matrices so its
+    /// internal impedance is zero. The scattering matrix is derived for the
+    /// remaining (reactive + probe) ports only, and a separate injection
+    /// vector `k` maps the VS voltage to port incident waves:
+    ///
+    /// ```text
+    /// a[i] = Σ_j S[i][j] · b[j] + k[i] · V_in
+    /// ```
+    ///
+    /// * `ports` — WDF ports (reactive elements + output probe; no VS port)
+    /// * `vs_idx` — index of the voltage source branch in the MNA system
+    ///
+    /// Returns `(scattering, vs_injection)`.
+    pub fn derive_scattering_and_vs_injection(
+        &self,
+        ports: &[WdfPort],
+        vs_idx: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let n_ports = ports.len();
+
+        // Build the full MNA system matrix X
+        let n_total = self.num_nodes + self.num_vsources;
+        let mut x_matrix = vec![0.0; n_total * n_total];
+
+        // Fill G block
+        for i in 0..self.num_nodes {
+            for j in 0..self.num_nodes {
+                x_matrix[i * n_total + j] = self.g_matrix[i * self.num_nodes + j];
+            }
+        }
+        // Fill B block
+        for i in 0..self.num_nodes {
+            for j in 0..self.num_vsources {
+                x_matrix[i * n_total + self.num_nodes + j] =
+                    self.b_matrix[i * self.num_vsources + j];
+            }
+        }
+        // Fill C block
+        for i in 0..self.num_vsources {
+            for j in 0..self.num_nodes {
+                x_matrix[(self.num_nodes + i) * n_total + j] =
+                    self.c_matrix[i * self.num_nodes + j];
+            }
+        }
+        // Fill D block
+        for i in 0..self.num_vsources {
+            for j in 0..self.num_vsources {
+                x_matrix[(self.num_nodes + i) * n_total + self.num_nodes + j] =
+                    self.d_matrix[i * self.num_vsources + j];
+            }
+        }
+
+        // Add port Thévenin resistances (same as derive_scattering_matrix_general)
+        for port in ports.iter() {
+            let g = 1.0 / port.resistance;
+            if let Some(p) = port.node_pos {
+                x_matrix[p * n_total + p] += g;
+                if let Some(n) = port.node_neg {
+                    x_matrix[p * n_total + n] -= g;
+                }
+            }
+            if let Some(n) = port.node_neg {
+                x_matrix[n * n_total + n] += g;
+                if let Some(p) = port.node_pos {
+                    x_matrix[n * n_total + p] -= g;
+                }
+            }
+        }
+
+        // Invert X
+        let x_inv = invert_matrix(&x_matrix, n_total);
+
+        // Derive scattering matrix (port-to-port interactions)
+        let mut scattering = vec![0.0; n_ports * n_ports];
+        for i in 0..n_ports {
+            for j in 0..n_ports {
+                let delta = if i == j { 1.0 } else { 0.0 };
+                let entry = x_inv_port_entry(
+                    &x_inv,
+                    n_total,
+                    ports[i].node_pos,
+                    ports[i].node_neg,
+                    ports[j].node_pos,
+                    ports[j].node_neg,
+                );
+                scattering[i * n_ports + j] = 2.0 * entry / ports[j].resistance - delta;
+            }
+        }
+
+        // Derive VS injection vector k[i]:
+        //   k[i] = 2 · (X⁻¹[p_i, vs_col] - X⁻¹[n_i, vs_col])
+        // where vs_col = num_nodes + vs_idx (the VS branch column in X⁻¹).
+        let vs_col = self.num_nodes + vs_idx;
+        let mut vs_injection = vec![0.0; n_ports];
+        for i in 0..n_ports {
+            let lookup = |node: Option<usize>| -> f64 {
+                match node {
+                    Some(r) => x_inv[r * n_total + vs_col],
+                    None => 0.0,
+                }
+            };
+            vs_injection[i] = 2.0 * (lookup(ports[i].node_pos) - lookup(ports[i].node_neg));
+        }
+
+        (scattering, vs_injection)
+    }
 }
 
 /// Simple matrix inversion using Gaussian elimination with partial pivoting.

@@ -21,6 +21,7 @@ use super::dyn_node::DynNode;
 use super::graph::*;
 use super::helpers::*;
 use super::stage::{RootKind, WdfStage};
+use crate::tree::{MnaSystem, WdfPort};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // JFET variable resistance detection
@@ -185,6 +186,18 @@ fn build_passive_wdf_stage(
         return Some(stage);
     }
 
+    // For 3+ element passive circuits, prefer MNA R-type adaptor.
+    // The ShortCircuit root's output extraction is unreliable for complex
+    // multi-element trees where the VS position is non-deterministic.
+    // MNA derives the exact scattering matrix from circuit equations.
+    if passive_edges.len() >= 3 {
+        if let Some(stage) =
+            build_passive_mna_stage(graph, &passive_edges, sample_rate, oversampling)
+        {
+            return Some(stage);
+        }
+    }
+
     // Fallback: full tree with ShortCircuit root (all elements in tree, gnd at root).
     let source_node = graph.edges.len() + 1000;
     let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
@@ -194,26 +207,246 @@ fn build_passive_wdf_stage(
         sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
     }
     let terminals = vec![source_node, graph.gnd_node];
-    let sp_tree = sp_reduce(sp_edges, &terminals).ok()?;
-    let mut all_components = graph.components.clone();
-    while all_components.len() <= vs_comp_idx {
-        all_components.push(ComponentDef {
-            id: "__vs__".to_string(),
-            kind: ComponentKind::Resistor(1.0),
-        });
+    match sp_reduce(sp_edges, &terminals) {
+        Ok(sp_tree) => {
+            let mut all_components = graph.components.clone();
+            while all_components.len() <= vs_comp_idx {
+                all_components.push(ComponentDef {
+                    id: "__vs__".to_string(),
+                    kind: ComponentKind::Resistor(1.0),
+                });
+            }
+            let tree = sp_to_dyn_with_vs(
+                &sp_tree,
+                &all_components,
+                &graph.fork_paths,
+                sample_rate,
+                vs_comp_idx,
+            );
+            let mut stage = WdfStage {
+                tree,
+                root: RootKind::ShortCircuit,
+                compensation: 1.0,
+                oversampler: Oversampler::new(oversampling),
+                base_diode_model: None,
+                paired_opamp: None,
+                dc_block: None,
+                is_source_follower: false,
+                prev_source_voltage: 0.0,
+                signal_flow_distance: 0,
+                transformer_gain: 1.0,
+                injection_node_id: usize::MAX,
+                output_node_id: usize::MAX,
+            };
+            stage.balance_vs_impedance();
+            Some(stage)
+        }
+        Err(_) => {
+            // SP reduction failed (non-series-parallel topology).
+            // Fall back to MNA-derived R-type adaptor.
+            build_passive_mna_stage(graph, &passive_edges, sample_rate, oversampling)
+        }
     }
-    let tree = sp_to_dyn_with_vs(
-        &sp_tree,
-        &all_components,
-        &graph.fork_paths,
-        sample_rate,
-        vs_comp_idx,
-    );
-    let mut stage = WdfStage {
-        tree,
-        root: RootKind::ShortCircuit,
+}
+
+/// Build a WDF stage using MNA-derived R-type adaptor for non-series-parallel
+/// passive topologies (e.g., Twin-T notch filter).
+///
+/// Resistors are stamped directly into the MNA conductance matrix.
+/// Reactive elements (capacitors, inductors) become WDF child ports with state.
+/// An adapted voltage source port injects signal at `in_node`, and a
+/// high-impedance probe port extracts output voltage at `out_node`.
+fn build_passive_mna_stage(
+    graph: &CircuitGraph,
+    passive_edges: &[usize],
+    sample_rate: f64,
+    _oversampling: OversamplingFactor,
+) -> Option<WdfStage> {
+    // Verify that out_node is reachable from in_node through passive edges.
+    // If not, these passive edges don't form an in→out signal path and
+    // shouldn't produce a stage (e.g., input coupling caps that feed into
+    // active stages handled by other builders).
+    {
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for &eidx in passive_edges {
+            let e = &graph.edges[eidx];
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut visited = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        visited.insert(graph.in_node);
+        queue.push_back(graph.in_node);
+        while let Some(node) = queue.pop_front() {
+            if node == graph.out_node {
+                break;
+            }
+            if let Some(neighbors) = adj.get(&node) {
+                for &n in neighbors {
+                    if visited.insert(n) {
+                        queue.push_back(n);
+                    }
+                }
+            }
+        }
+        if !visited.contains(&graph.out_node) {
+            return None;
+        }
+    }
+
+    // ── Step 1: Collect unique circuit nodes, map to MNA indices ─────────
+    // Ground is the reference (not an MNA node).
+    let mut node_set = std::collections::BTreeSet::new();
+    for &eidx in passive_edges {
+        let e = &graph.edges[eidx];
+        if e.node_a != graph.gnd_node {
+            node_set.insert(e.node_a);
+        }
+        if e.node_b != graph.gnd_node {
+            node_set.insert(e.node_b);
+        }
+    }
+    // Ensure in_node and out_node are included
+    if graph.in_node != graph.gnd_node {
+        node_set.insert(graph.in_node);
+    }
+    if graph.out_node != graph.gnd_node {
+        node_set.insert(graph.out_node);
+    }
+
+    let nodes: Vec<NodeId> = node_set.into_iter().collect();
+    let num_mna_nodes = nodes.len();
+    if num_mna_nodes == 0 {
+        return None;
+    }
+    let node_to_idx: HashMap<NodeId, usize> = nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+
+    let to_mna = |node: NodeId| -> Option<usize> {
+        if node == graph.gnd_node {
+            None
+        } else {
+            node_to_idx.get(&node).copied()
+        }
+    };
+
+    // ── Step 2: Create MNA system, stamp components ─────────────────────
+    // Use the base sample rate for reactive port resistances. The PassiveRType
+    // stage uses X1 oversampling (no internal oversampling), matching
+    // build_output_rooted_stage. The caller (validation runner) already passes
+    // the effective sample rate as the base rate.
+    let effective_rate = sample_rate;
+
+    let mut mna = MnaSystem::new(num_mna_nodes, 0);
+    let mut reactive_children: Vec<DynNode> = Vec::new();
+    let mut reactive_ports: Vec<WdfPort> = Vec::new();
+
+    for &eidx in passive_edges {
+        let e = &graph.edges[eidx];
+        let n1 = to_mna(e.node_a);
+        let n2 = to_mna(e.node_b);
+        let comp = &graph.components[e.comp_idx];
+
+        match &comp.kind {
+            ComponentKind::Resistor(r) => {
+                mna.stamp_resistor(n1, n2, *r);
+            }
+            ComponentKind::Capacitor(cfg) => {
+                let rp = 1.0 / (2.0 * effective_rate * cfg.value);
+                reactive_children.push(DynNode::Capacitor {
+                    capacitance: cfg.value,
+                    rp,
+                    state: 0.0,
+                    last_b: 0.0,
+                });
+                reactive_ports.push(WdfPort {
+                    node_pos: n1,
+                    node_neg: n2,
+                    resistance: rp,
+                });
+            }
+            ComponentKind::Inductor(l) => {
+                let rp = 2.0 * effective_rate * l;
+                reactive_children.push(DynNode::Inductor {
+                    inductance: *l,
+                    rp,
+                    state: 0.0,
+                });
+                reactive_ports.push(WdfPort {
+                    node_pos: n1,
+                    node_neg: n2,
+                    resistance: rp,
+                });
+            }
+            ComponentKind::Potentiometer(max_r, _taper) => {
+                // Treat pot at default 50% position as a resistor
+                mna.stamp_resistor(n1, n2, max_r * 0.5);
+            }
+            _ => {
+                // Unsupported passive component type — skip
+            }
+        }
+    }
+
+    // ── Step 3: GMIN regularization ─────────────────────────────────────
+    const GMIN_RESISTANCE: f64 = 1e9; // 1 GΩ → 1 nS conductance
+    for i in 0..num_mna_nodes {
+        mna.stamp_resistor(Some(i), None, GMIN_RESISTANCE);
+    }
+
+    // ── Step 4: Create output probe port ────────────────────────────────
+    // High-impedance resistor at out_node → gnd to measure output voltage.
+    let out_mna = to_mna(graph.out_node);
+    let output_probe_r = 1e9; // 1 GΩ probe (minimal circuit loading)
+    let output_port_idx = reactive_children.len();
+    reactive_children.push(DynNode::Resistor { rp: output_probe_r });
+    reactive_ports.push(WdfPort {
+        node_pos: out_mna,
+        node_neg: None,
+        resistance: output_probe_r,
+    });
+
+    // ── Step 5: Stamp VS as ideal voltage source into MNA B/C/D ────────
+    // Instead of making the VS a WDF port (which adds internal impedance),
+    // stamp it directly into the MNA system as a zero-impedance source.
+    let in_mna = to_mna(graph.in_node);
+    let mna = {
+        // Recreate MNA with 1 voltage source branch
+        let mut mna_vs = MnaSystem::new(num_mna_nodes, 1);
+        // Copy conductance stamps (already includes GMIN from step 3)
+        mna_vs.g_matrix = mna.g_matrix;
+        // Stamp VS: V(in_node) - V(gnd) = E
+        mna_vs.stamp_voltage_source(in_mna, None, 0);
+        mna_vs
+    };
+
+    // ── Step 6: Derive scattering matrix + VS injection vector ──────────
+    let ports: Vec<WdfPort> = reactive_ports;
+    let n_ports = ports.len();
+
+    let (scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&ports, 0);
+    if scattering.iter().any(|&s| !s.is_finite()) {
+        return None;
+    }
+    if vs_injection.iter().any(|&v| !v.is_finite()) {
+        return None;
+    }
+
+    // ── Step 7: Build WdfStage ──────────────────────────────────────────
+    let dummy_tree = DynNode::Resistor { rp: 1000.0 };
+
+    let stage = WdfStage {
+        tree: dummy_tree,
+        root: RootKind::PassiveRType {
+            scattering,
+            vs_injection,
+            n_ports,
+            children: reactive_children,
+            output_port: output_port_idx,
+        },
         compensation: 1.0,
-        oversampler: Oversampler::new(oversampling),
+        // Linear passive stage — no nonlinearity means no aliasing,
+        // so X1 avoids double-counting the oversampling the runner already applied.
+        oversampler: Oversampler::new(OversamplingFactor::X1),
         base_diode_model: None,
         paired_opamp: None,
         dc_block: None,
@@ -224,7 +457,6 @@ fn build_passive_wdf_stage(
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
     };
-    stage.balance_vs_impedance();
     Some(stage)
 }
 
@@ -238,7 +470,7 @@ fn build_output_rooted_stage(
     graph: &CircuitGraph,
     passive_edges: &[usize],
     sample_rate: f64,
-    oversampling: OversamplingFactor,
+    _oversampling: OversamplingFactor,
 ) -> Option<WdfStage> {
     if passive_edges.len() != 2 {
         return None;

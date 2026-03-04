@@ -740,7 +740,14 @@ impl DynNode {
             // Direct load element - voltage = (a + b) / 2
             // For resistor: b = 0, so V = a / 2
             Self::Resistor { .. } | Self::Pot { .. } => Some(a_parent / 2.0),
-            // Series(L, R) or Series(C, R) - extract R's voltage
+            // Series adaptor - find the load resistor.
+            //
+            // For simple cases like Series(L, R) or Series(C, R), the direct
+            // load check suffices. For nested chains like
+            // Series(R1, Series(L, Series(C, RL))), we need to prefer the
+            // deeper load RL over the immediate R1. The key case is when left
+            // is a direct load but right is a subtree that may contain a
+            // deeper (ground-side) load.
             Self::Series {
                 gamma,
                 b1,
@@ -749,23 +756,37 @@ impl DynNode {
                 right,
                 ..
             } => {
-                // Try right child first (common case: Series(L, R))
+                let sum = *b1 + *b2 + a_parent;
+                // 1. Right child is a direct load element (e.g., Series(L, R))
                 if right.is_load_element() {
-                    let sum = *b1 + *b2 + a_parent;
                     let a2 = *b2 - (1.0 - *gamma) * sum;
                     Some((a2 + *b2) / 2.0)
-                } else if left.is_load_element() {
-                    let sum = *b1 + *b2 + a_parent;
+                }
+                // 2. Left is a load, but right is a subtree that may contain
+                //    a deeper load. Prefer the deeper one (ground-side).
+                //    Example: Series(R1, Series(L, Series(C, RL))) — pick RL
+                else if left.is_load_element()
+                    && matches!(right.as_ref(), Self::Series { .. } | Self::Parallel { .. })
+                {
+                    let a2 = *b2 - (1.0 - *gamma) * sum;
+                    right.extract_load_voltage(a2).or_else(|| {
+                        // Fallback: no load in right subtree, use left
+                        let a1 = *b1 - *gamma * sum;
+                        Some((a1 + *b1) / 2.0)
+                    })
+                }
+                // 3. Left is a direct load (right is not a load or subtree)
+                else if left.is_load_element() {
                     let a1 = *b1 - *gamma * sum;
                     Some((a1 + *b1) / 2.0)
-                } else {
-                    // Recurse into nested series
-                    if matches!(right.as_ref(), Self::Series { .. }) {
-                        let sum = *b1 + *b2 + a_parent;
+                }
+                // 4. Neither is a direct load — recurse into subtrees
+                else {
+                    if matches!(right.as_ref(), Self::Series { .. } | Self::Parallel { .. }) {
                         let a2 = *b2 - (1.0 - *gamma) * sum;
                         right.extract_load_voltage(a2)
-                    } else if matches!(left.as_ref(), Self::Series { .. }) {
-                        let sum = *b1 + *b2 + a_parent;
+                    } else if matches!(left.as_ref(), Self::Series { .. } | Self::Parallel { .. })
+                    {
                         let a1 = *b1 - *gamma * sum;
                         left.extract_load_voltage(a1)
                     } else {

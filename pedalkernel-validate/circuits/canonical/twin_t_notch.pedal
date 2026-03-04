@@ -12,15 +12,13 @@ pedal "Twin-T Notch" {
     C1: cap(10n)
     C2: cap(10n)
     C3: cap(20n)
-    RL: resistor(100k)
   }
   nets {
     in -> R1.a, C1.a
     R1.b -> R2.a, C3.a
-    R2.b -> C2.a
+    R2.b -> C2.a, out
     C1.b -> C2.b, R3.a
-    C3.b -> R3.b, RL.a, out
+    C3.b -> gnd
     R3.b -> gnd
-    RL.b -> gnd
   }
 }
