@@ -48,6 +48,10 @@ pub(super) enum RootKind {
     SingleDiode(DiodeRoot),
     Zener(ZenerRoot),
     Jfet(JfetRoot),
+    /// JFET operating as a voltage-controlled variable resistor.
+    /// Used for LFO-modulated JFETs in phaser circuits (e.g., Phase 90).
+    /// Simple resistor reflection instead of Newton-Raphson solving.
+    JfetVr(JfetVariableResistor),
     Triode(TriodeRoot),
     VariMu(VariMuTriodeRoot),
     Pentode(PentodeRoot),
@@ -301,6 +305,11 @@ impl WdfStage {
                         j.process(b_tree, rp)
                     }
                 }
+                RootKind::JfetVr(j) => {
+                    // Variable resistance mode: simple resistor reflection.
+                    // No NR iterations — Rds is pre-computed from Vgs.
+                    j.process_root(b_tree, rp)
+                }
                 RootKind::Triode(t) => t.process(b_tree, rp),
                 RootKind::VariMu(t) => t.process(b_tree, rp),
                 RootKind::Pentode(p) => p.process(b_tree, rp),
@@ -508,8 +517,10 @@ impl WdfStage {
     /// Has no effect if the root is not a JFET.
     #[inline]
     pub fn set_jfet_vgs(&mut self, vgs: f64) {
-        if let RootKind::Jfet(j) = &mut self.root {
-            j.set_vgs(vgs);
+        match &mut self.root {
+            RootKind::Jfet(j) => j.set_vgs(vgs),
+            RootKind::JfetVr(j) => j.set_vgs(vgs),
+            _ => {}
         }
     }
 
@@ -518,6 +529,7 @@ impl WdfStage {
     pub fn jfet_vgs(&self) -> Option<f64> {
         match &self.root {
             RootKind::Jfet(j) => Some(j.vgs()),
+            RootKind::JfetVr(j) => Some(j.vgs()),
             _ => None,
         }
     }
@@ -702,6 +714,7 @@ impl WdfStage {
             RootKind::SingleDiode(_) => "SingleDiode",
             RootKind::Zener(_) => "Zener",
             RootKind::Jfet(_) => "Jfet",
+            RootKind::JfetVr(_) => "JfetVr",
             RootKind::Triode(_) => "Triode",
             RootKind::VariMu(_) => "VariMu",
             RootKind::Pentode(_) => "Pentode",

@@ -1,7 +1,7 @@
 //! Dynamic WDF tree node for runtime-constructed circuits.
 
 use crate::dsl::PotTaper;
-use crate::elements::{Photocoupler, WdfLeaf};
+use crate::elements::{JfetVariableResistor, Photocoupler, WdfLeaf};
 use crate::tree::RTypeAdaptor;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -71,6 +71,11 @@ pub(super) enum DynNode {
     Photocoupler {
         comp_id: String,
         inner: Photocoupler,
+    },
+    /// JFET variable resistor — Rds controlled by Vgs (phaser applications).
+    JfetVr {
+        comp_id: String,
+        inner: JfetVariableResistor,
     },
     /// Switched resistor for fork() routing paths.
     /// When active (switch position matches path_index), uses low resistance.
@@ -187,6 +192,7 @@ impl DynNode {
             | Self::Transformer { rp, .. } => *rp,
             Self::RType { adaptor, .. } => adaptor.port_resistance,
             Self::Photocoupler { inner, .. } => inner.port_resistance(),
+            Self::JfetVr { inner, .. } => inner.port_resistance(),
         }
     }
 
@@ -196,6 +202,7 @@ impl DynNode {
             Self::Resistor { .. }
             | Self::Pot { .. }
             | Self::Photocoupler { .. }
+            | Self::JfetVr { .. }
             | Self::SwitchedResistor { .. } => 0.0,
             Self::Capacitor { state, .. } => *state,
             Self::LeakyCapacitor {
@@ -269,6 +276,7 @@ impl DynNode {
             | Self::VoltageSource { .. }
             | Self::CathodeBiasSource { .. }
             | Self::Photocoupler { .. }
+            | Self::JfetVr { .. }
             | Self::SwitchedResistor { .. } => {}
             Self::UnitDelay { state, .. } => *state = a,
             Self::Capacitor { state, last_b, .. } => {
@@ -514,6 +522,7 @@ impl DynNode {
                 *da_state = 0.0;
             }
             Self::Photocoupler { inner, .. } => inner.reset(),
+            Self::JfetVr { inner, .. } => inner.reset(),
             Self::Series {
                 left,
                 right,
@@ -846,6 +855,9 @@ impl DynNode {
             Self::Photocoupler { inner, .. } => {
                 inner.set_sample_rate(fs);
             }
+            Self::JfetVr { inner, .. } => {
+                inner.set_sample_rate(fs);
+            }
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.update_sample_rate(fs);
                 right.update_sample_rate(fs);
@@ -888,6 +900,24 @@ impl DynNode {
             Self::RType { children, .. } => children
                 .iter_mut()
                 .any(|c| c.set_photocoupler_led(target_id, led_drive)),
+            _ => false,
+        }
+    }
+
+    /// Set Vgs for a JFET variable resistor leaf. Returns true if found.
+    pub fn set_jfet_vr_vgs(&mut self, target_id: &str, vgs: f64) -> bool {
+        match self {
+            Self::JfetVr { comp_id, inner } if comp_id == target_id => {
+                inner.set_vgs(vgs);
+                true
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                left.set_jfet_vr_vgs(target_id, vgs)
+                    || right.set_jfet_vr_vgs(target_id, vgs)
+            }
+            Self::RType { children, .. } => children
+                .iter_mut()
+                .any(|c| c.set_jfet_vr_vgs(target_id, vgs)),
             _ => false,
         }
     }
@@ -988,6 +1018,13 @@ impl DynNode {
                 format!(
                     "{pad}Photocoupler(id=\"{comp_id}\", Rp={:.1}Ω)",
                     inner.port_resistance()
+                )
+            }
+            Self::JfetVr { comp_id, inner } => {
+                format!(
+                    "{pad}JfetVr(id=\"{comp_id}\", Vgs={:.3}V, Rds={:.1}Ω)",
+                    inner.vgs(),
+                    inner.rds()
                 )
             }
             Self::SwitchedResistor {

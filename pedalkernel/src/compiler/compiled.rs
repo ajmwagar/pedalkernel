@@ -1313,7 +1313,7 @@ impl PedalProcessor for CompiledPedal {
                 ModulationTarget::AllJfetVgs => {
                     // Modulate ALL JFET stages with the same value (for phasers)
                     for stage in &mut self.stages {
-                        if matches!(&stage.root, RootKind::Jfet(_)) {
+                        if matches!(&stage.root, RootKind::Jfet(_) | RootKind::JfetVr(_)) {
                             stage.set_jfet_vgs(modulation);
                         }
                     }
@@ -1395,7 +1395,7 @@ impl PedalProcessor for CompiledPedal {
                 ModulationTarget::AllJfetVgs => {
                     // Modulate ALL JFET stages with the same value (for phasers)
                     for stage in &mut self.stages {
-                        if matches!(&stage.root, RootKind::Jfet(_)) {
+                        if matches!(&stage.root, RootKind::Jfet(_) | RootKind::JfetVr(_)) {
                             stage.set_jfet_vgs(modulation);
                         }
                     }

@@ -8,7 +8,7 @@
 //! - Pass 4: Tree building (build.rs)
 //! - Pass 5: Binding & assembly (bind.rs)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
 use crate::elements::*;
@@ -21,6 +21,64 @@ use super::dyn_node::DynNode;
 use super::graph::*;
 use super::helpers::*;
 use super::stage::{RootKind, WdfStage};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// JFET variable resistance detection
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Scan PedalDef nets for JFETs that have LFO or envelope follower connections
+/// to their `.vgs` pin. These JFETs should use the variable resistance model
+/// (simple Rds formula) instead of the full Newton-Raphson JFET solver.
+fn detect_lfo_controlled_jfets(pedal: &PedalDef) -> HashSet<String> {
+    let mut result = HashSet::new();
+
+    // Collect LFO and envelope follower component IDs.
+    let modulator_ids: HashSet<&str> = pedal
+        .components
+        .iter()
+        .filter(|c| {
+            matches!(
+                &c.kind,
+                ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..)
+            )
+        })
+        .map(|c| c.id.as_str())
+        .collect();
+
+    if modulator_ids.is_empty() {
+        return result;
+    }
+
+    // Collect JFET component IDs for cross-reference.
+    let jfet_ids: HashSet<&str> = pedal
+        .components
+        .iter()
+        .filter(|c| matches!(&c.kind, ComponentKind::NJfet(_) | ComponentKind::PJfet(_)))
+        .map(|c| c.id.as_str())
+        .collect();
+
+    // Scan nets for modulator.out -> jfet.vgs connections.
+    for net in &pedal.nets {
+        let from_is_modulator = match &net.from {
+            Pin::ComponentPin { component, pin } => {
+                modulator_ids.contains(component.as_str()) && pin == "out"
+            }
+            _ => false,
+        };
+        if !from_is_modulator {
+            continue;
+        }
+        for to_pin in &net.to {
+            if let Pin::ComponentPin { component, pin } = to_pin {
+                if jfet_ids.contains(component.as_str()) && pin == "vgs" {
+                    result.insert(component.clone());
+                }
+            }
+        }
+    }
+
+    result
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Passive circuit gain helpers
@@ -380,6 +438,10 @@ pub fn compile_pedal_with_options(
         super::plan::plan_stages(&classified, &graph, sample_rate);
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
+    // Detect JFETs that are LFO-controlled so they use variable-resistance mode
+    // instead of full nonlinear NR solving.
+    let lfo_controlled_jfets = detect_lfo_controlled_jfets(pedal);
+
     // Build nonlinear WDF stages from plans.
     // Triode plans that fail SP reduction fall back to single-NL MNA stages.
     let (nonlinear_stages, triode_fallback_stages) = super::build::build_stages(
@@ -390,6 +452,7 @@ pub fn compile_pedal_with_options(
         sample_rate,
         oversampling,
         &pp_transformer_edges,
+        &lfo_controlled_jfets,
     );
     stages.extend(nonlinear_stages);
 

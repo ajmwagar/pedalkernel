@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
-use crate::elements::{Photocoupler, PhotocouplerModel};
+use crate::elements::{JfetVariableResistor, Photocoupler, PhotocouplerModel};
 
 use super::dyn_node::DynNode;
 
@@ -2323,6 +2323,14 @@ pub(super) fn make_leaf(
             DynNode::Photocoupler {
                 comp_id: comp.id.clone(),
                 inner: Photocoupler::new(model, sample_rate),
+            }
+        }
+        // JFET as variable resistor (when classified as passive).
+        ComponentKind::NJfet(name) | ComponentKind::PJfet(name) => {
+            let model = crate::elements::JfetModel::by_name(name);
+            DynNode::JfetVr {
+                comp_id: comp.id.clone(),
+                inner: JfetVariableResistor::new(model),
             }
         }
         // Tempco resistor: modeled as a standard resistor (nominal value).

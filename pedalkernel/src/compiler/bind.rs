@@ -568,7 +568,7 @@ fn resolve_modulation_target(
         "vgs" | "gate" => {
             let jfet_count = stages
                 .iter()
-                .filter(|s| matches!(&s.root, RootKind::Jfet(_)))
+                .filter(|s| matches!(&s.root, RootKind::Jfet(_) | RootKind::JfetVr(_)))
                 .count();
             if jfet_count > 1 {
                 if *created_all_jfet_binding {
@@ -578,7 +578,7 @@ fn resolve_modulation_target(
                 Some(ModulationTarget::AllJfetVgs)
             } else if let Some(stage_idx) = stages
                 .iter()
-                .position(|s| matches!(&s.root, RootKind::Jfet(_)))
+                .position(|s| matches!(&s.root, RootKind::Jfet(_) | RootKind::JfetVr(_)))
             {
                 Some(ModulationTarget::JfetVgs { stage_idx })
             } else if let Some(stage_idx) = stages

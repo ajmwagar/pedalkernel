@@ -383,6 +383,7 @@ pub(super) fn build_stages(
     sample_rate: f64,
     oversampling: OversamplingFactor,
     pp_transformer_edges: &HashSet<usize>,
+    lfo_controlled_jfets: &HashSet<String>,
 ) -> (Vec<WdfStage>, Vec<MultiNlStage>) {
     let vs_comp_idx = graph.components.len();
 
@@ -429,10 +430,18 @@ pub(super) fn build_stages(
             continue;
         }
 
-        let stage = if plan.skip_vs {
-            build_source_follower_stage(plan, elem, graph, sample_rate, oversampling)
+        // Check if this JFET should use variable resistance mode.
+        let use_jfet_vr = if matches!(&elem.kind, NonlinearKind::Jfet { .. }) {
+            let comp_id = &graph.components[graph.edges[elem.edge_idx].comp_idx].id;
+            lfo_controlled_jfets.contains(comp_id)
         } else {
-            build_vs_stage(plan, elem, graph, sample_rate, oversampling, vs_comp_idx)
+            false
+        };
+
+        let stage = if plan.skip_vs {
+            build_source_follower_stage(plan, elem, graph, sample_rate, oversampling, use_jfet_vr)
+        } else {
+            build_vs_stage(plan, elem, graph, sample_rate, oversampling, vs_comp_idx, use_jfet_vr)
         };
 
         if let Some(mut stage) = stage {
@@ -961,7 +970,7 @@ pub(super) fn build_coupled_bjt_stages(
             if let Some(plan) = plan {
                 // Build the WDF tree for this BJT.
                 let stage =
-                    build_vs_stage(&plan, elem, graph, sample_rate, oversampling, vs_comp_idx);
+                    build_vs_stage(&plan, elem, graph, sample_rate, oversampling, vs_comp_idx, false);
 
                 if let Some(mut wdf_stage) = stage {
                     wdf_stage.balance_vs_impedance();
@@ -1018,6 +1027,7 @@ pub(super) fn build_coupled_bjt_stages(
                 })
                 .collect();
             let empty_pp = HashSet::new();
+            let empty_jfets = HashSet::new();
             let (indep_stages, _triode_fb) = super::build::build_stages(
                 &plans,
                 classified,
@@ -1026,6 +1036,7 @@ pub(super) fn build_coupled_bjt_stages(
                 sample_rate,
                 oversampling,
                 &empty_pp,
+                &empty_jfets,
             );
             fallback_stages.extend(indep_stages);
         }
@@ -2022,6 +2033,7 @@ fn build_vs_stage(
     sample_rate: f64,
     oversampling: OversamplingFactor,
     vs_comp_idx: usize,
+    use_jfet_vr: bool,
 ) -> Option<WdfStage> {
     // Use supply remap so triodes with plate loads to named supply rails
     // (vcc_sc, A_bal, etc.) can reduce to valid SP trees.
@@ -2039,7 +2051,7 @@ fn build_vs_stage(
         sample_rate,
         vs_comp_idx,
     );
-    let (root, base_diode_model) = create_root(&elem.kind);
+    let (root, base_diode_model) = create_root(&elem.kind, use_jfet_vr);
 
     Some(WdfStage {
         tree,
@@ -2063,17 +2075,45 @@ fn build_vs_stage(
 }
 
 /// Build a source follower stage (no voltage source in tree).
+///
+/// When `use_jfet_vr` is true, the JFET is a passive variable resistor
+/// that needs signal injected via a voltage source.  We wrap the passive
+/// tree in Series(VS, tree) so `set_voltage` + `reflected` work correctly.
 fn build_source_follower_stage(
     plan: &StagePlan,
     elem: &super::classify::NonlinearElement,
     graph: &CircuitGraph,
     sample_rate: f64,
     oversampling: OversamplingFactor,
+    use_jfet_vr: bool,
 ) -> Option<WdfStage> {
     let (sp_edges, _) = collect_sp_edges(plan, graph, None);
     let sp_tree = sp_reduce(sp_edges, &plan.terminals).ok()?;
-    let tree = sp_to_dyn(&sp_tree, &graph.components, &graph.fork_paths, sample_rate);
-    let (root, _) = create_root(&elem.kind);
+    let passive_tree = sp_to_dyn(&sp_tree, &graph.components, &graph.fork_paths, sample_rate);
+    let (root, _) = create_root(&elem.kind, use_jfet_vr);
+
+    // JfetVr is a passive element — signal must enter via a voltage source.
+    // Wrap the passive tree in Series(VS, passive) to inject signal.
+    let (tree, is_sf) = if use_jfet_vr {
+        let vs = DynNode::VoltageSource {
+            voltage: 0.0,
+            rp: 1.0,
+        };
+        let r_passive = passive_tree.port_resistance();
+        let r_vs = 1.0;
+        let rp = r_vs + r_passive;
+        let tree = DynNode::Series {
+            left: Box::new(vs),
+            right: Box::new(passive_tree),
+            rp,
+            gamma: r_vs / rp,
+            b1: 0.0,
+            b2: 0.0,
+        };
+        (tree, false) // Not a source follower — VS drives signal
+    } else {
+        (passive_tree, true)
+    };
 
     Some(WdfStage {
         tree,
@@ -2083,7 +2123,7 @@ fn build_source_follower_stage(
         base_diode_model: None,
         paired_opamp: None,
         dc_block: None,
-        is_source_follower: true,
+        is_source_follower: is_sf,
         prev_source_voltage: 0.0,
         signal_flow_distance: 0, // set by caller
         transformer_gain: 1.0,   // set by caller
@@ -2299,7 +2339,10 @@ fn wrap_with_transformer_load(
 
 /// Create the RootKind for a nonlinear element.
 /// Returns (root, base_diode_model) — diode stages store their model.
-fn create_root(kind: &NonlinearKind) -> (RootKind, Option<DiodeModel>) {
+///
+/// `use_jfet_vr` overrides JFET creation: when true, builds a
+/// `JfetVr` (variable resistance, no NR) instead of `Jfet` (full NR solver).
+fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<DiodeModel>) {
     match kind {
         NonlinearKind::DiodePair(dt) => {
             let model = diode_model(*dt);
@@ -2314,7 +2357,14 @@ fn create_root(kind: &NonlinearKind) -> (RootKind, Option<DiodeModel>) {
             is_n_channel,
         } => {
             let model = jfet_model(model_name, *is_n_channel);
-            (RootKind::Jfet(JfetRoot::new(model)), None)
+            if use_jfet_vr {
+                (
+                    RootKind::JfetVr(JfetVariableResistor::new(model)),
+                    None,
+                )
+            } else {
+                (RootKind::Jfet(JfetRoot::new(model)), None)
+            }
         }
         NonlinearKind::BjtNpn { model_name, .. } => {
             let model = BjtModel::by_name(model_name);

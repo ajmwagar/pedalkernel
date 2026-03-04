@@ -1,9 +1,10 @@
-//! Controlled resistance elements: Photocoupler (Vactrol).
+//! Controlled resistance elements: Photocoupler (Vactrol), JFET variable resistor.
 //!
 //! These elements have a resistance that varies based on an external
-//! control signal, typically LED drive current.
+//! control signal (LED drive current, gate-source voltage, etc.).
 
 use super::{ControlledResistance, WdfLeaf};
+use super::nonlinear::JfetModel;
 
 // ---------------------------------------------------------------------------
 // Photocoupler Model
@@ -238,5 +239,139 @@ impl ControlledResistance for Photocoupler {
 
     fn effective_control(&self) -> f64 {
         self.effective_light_level()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JFET Variable Resistor
+// ---------------------------------------------------------------------------
+
+/// JFET operating as a voltage-controlled variable resistor.
+///
+/// In phaser circuits, JFETs operate in the triode region with small Vds,
+/// where they act as voltage-controlled resistors. The drain-source resistance
+/// Rds varies with the gate-source voltage Vgs:
+///
+///   `Rds = Rds_on / (1 - Vgs/Vp)²`
+///
+/// where:
+/// - `Rds_on = 1 / (2 × β × |Vp|)` — resistance at Vgs = 0
+/// - `Vp = VTO` — pinch-off voltage (negative for N-channel)
+///
+/// This replaces the full Newton-Raphson JFET solver for LFO-modulated
+/// JFETs that serve as variable resistors (e.g., Phase 90 all-pass stages).
+#[derive(Debug, Clone, Copy)]
+pub struct JfetVariableResistor {
+    pub model: JfetModel,
+    /// Current gate-source voltage (V).
+    vgs: f64,
+    /// Current drain-source resistance (Ω).
+    resistance: f64,
+    /// Resistance at Vgs = 0: 1 / (2 × β × |Vp|).
+    rds_on: f64,
+}
+
+impl JfetVariableResistor {
+    pub fn new(model: JfetModel) -> Self {
+        let rds_on = 1.0 / (2.0 * model.beta * model.vto.abs());
+        Self {
+            model,
+            vgs: 0.0,
+            resistance: rds_on,
+            rds_on,
+        }
+    }
+
+    /// Set the gate-source voltage and update Rds.
+    #[inline]
+    pub fn set_vgs(&mut self, vgs: f64) {
+        self.vgs = vgs;
+        self.resistance = self.compute_rds();
+    }
+
+    /// Current gate-source voltage.
+    #[inline]
+    pub fn vgs(&self) -> f64 {
+        self.vgs
+    }
+
+    /// Current drain-source resistance.
+    #[inline]
+    pub fn rds(&self) -> f64 {
+        self.resistance
+    }
+
+    /// Resistance at Vgs = 0.
+    #[inline]
+    pub fn rds_on(&self) -> f64 {
+        self.rds_on
+    }
+
+    /// Compute Rds from current Vgs using the triode-region formula.
+    ///
+    /// `Rds = Rds_on / (1 - Vgs/Vp)²`
+    ///
+    /// The ratio Vgs/Vp is clamped to [-0.95, 0.95] to avoid singularity
+    /// at pinch-off and unrealistically low resistance beyond zero bias.
+    #[inline]
+    fn compute_rds(&self) -> f64 {
+        let vp = self.model.vto; // Negative for N-channel
+        // Clamp ratio to avoid div-by-zero near pinch-off
+        let ratio = (self.vgs / vp).clamp(-0.95, 0.95);
+        let denom = 1.0 - ratio;
+        (self.rds_on / (denom * denom)).clamp(self.rds_on * 0.5, 10_000_000.0)
+    }
+
+    /// Process as a WDF root: simple resistor reflection.
+    ///
+    /// Returns the reflected wave for a resistive termination with
+    /// resistance Rds at the root port with tree port resistance Rp:
+    ///
+    ///   `b = a × (Rds - Rp) / (Rds + Rp)`
+    #[inline]
+    pub fn process_root(&self, a: f64, rp: f64) -> f64 {
+        let rds = self.resistance;
+        let sum = rds + rp;
+        if sum.abs() < 1e-15 {
+            return 0.0;
+        }
+        a * (rds - rp) / sum
+    }
+}
+
+impl WdfLeaf for JfetVariableResistor {
+    #[inline]
+    fn port_resistance(&self) -> f64 {
+        self.resistance
+    }
+
+    #[inline]
+    fn reflected(&self) -> f64 {
+        0.0 // Pure resistor: no stored energy
+    }
+
+    #[inline]
+    fn set_incident(&mut self, _a: f64) {
+        // Resistor has no reactive state
+    }
+
+    fn set_sample_rate(&mut self, _sample_rate: f64) {
+        // No sample-rate-dependent state
+    }
+
+    fn reset(&mut self) {
+        self.vgs = 0.0;
+        self.resistance = self.rds_on;
+    }
+}
+
+impl ControlledResistance for JfetVariableResistor {
+    #[inline]
+    fn set_control(&mut self, value: f64) {
+        self.set_vgs(value);
+    }
+
+    fn effective_control(&self) -> f64 {
+        self.vgs
     }
 }
