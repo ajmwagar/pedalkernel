@@ -1196,37 +1196,13 @@ fn invert_matrix(matrix: &[f64], n: usize) -> Vec<f64> {
 /// Parallel adaptor joining two sub-trees.
 ///
 /// Port resistance:  `Rp = R1 * R2 / (R1 + R2)`
-/// Scattering coefficient: `gamma = R1 / (R1 + R2)`
+/// Scattering coefficient: `gamma = R2 / (R1 + R2)`
 ///
 /// 3-port parallel junction (port 3 = parent, reflection-free):
-///   scatter_up:   `b3 = b1 + gamma * (b2 - b1)`
-///   scatter_down: from voltage equality at the junction:
-///                 `a1 = a3 + b2 - b1 - gamma * (b2 - b1)`     — WRONG
-///
-/// Actually for a parallel adaptor the scatter_down is:
-///   `a1 = a3 - gamma * (b2 - b1)`   — but only if port 3 is parent
-///   We use the standard 3-port parallel result where port 3 is reflection-free.
-///   `a1 = b3_down + b2 - gamma * (b2 - b1)`  … let's use the verified form:
-///
-/// Standard parallel 3-port scattering (reflection-free port 3):
-///   `b3 = gamma_2 * b1 + gamma_1 * b2`  where gamma_i = 2*R3/(R_i + R3)
-///   Simplification when port 3 is adapted: gamma_1 + gamma_2 = 2
-///   `b_up = b1 + gamma*(b2 - b1)`  with gamma = R2/(R1+R2) … wait.
-///
-/// Let me use the correct, well-known form:
-///   gamma = R2 / (R1 + R2)    [note: R2 in numerator for parallel]
-///   Rp = R1*R2/(R1+R2)
-///   scatter_up:   b_up = b1 + gamma*(b2 - b1) = (1-gamma)*b1 + gamma*b2
-///   scatter_down: a1 = a_down - (1-gamma)*(a_down + b1 - b_up)  … complex.
-///
-/// Simplest verified approach (Fettweis / Werner):
-///   b_up = b1 + gamma*(b2 - b1)
-///   Then from incident a_down (from root):
-///   a1 = a_down + b2 - b_up  = a_down + (1-gamma)*(b2 - b1)
-///   a2 = a_down + b1 - b_up  = a_down - gamma*(b2 - b1)
-///
-/// This is the "parallel adaptor with port 3 reflection-free" from
-/// Fettweis 1986 / Werner 2015.
+///   scatter_up:   b3 = (1-γ)·b1 + γ·b2
+///   scatter_down (from v1 = v3, v2 = v3):
+///     a1 = a3 + γ·(b2 - b1)
+///     a2 = a3 - (1-γ)·(b2 - b1)
 #[derive(Debug)]
 pub struct ParallelAdaptor {
     pub port_resistance: f64,
@@ -1264,8 +1240,11 @@ impl ParallelAdaptor {
     #[inline]
     pub fn scatter_down(&self, a3: f64) -> (f64, f64) {
         let diff = self.b2 - self.b1;
-        let a1 = a3 + (1.0 - self.gamma) * diff;
-        let a2 = a3 - self.gamma * diff;
+        // Consistent with scatter_up b3 = (1-γ)·b1 + γ·b2:
+        //   v1 = v3 → a1 = a3 + γ·(b2-b1)
+        //   v2 = v3 → a2 = a3 - (1-γ)·(b2-b1)
+        let a1 = a3 + self.gamma * diff;
+        let a2 = a3 - (1.0 - self.gamma) * diff;
         (a1, a2)
     }
 }
@@ -1736,8 +1715,8 @@ mod tests {
         let gamma = 4700.0 / (2200.0 + 4700.0);
         let (_, _) = (p.scatter_up(b1, b2), ());
         let (a1, a2) = p.scatter_down(a3);
-        let expected_a1 = a3 + (1.0 - gamma) * diff;
-        let expected_a2 = a3 - gamma * diff;
+        let expected_a1 = a3 + gamma * diff;
+        let expected_a2 = a3 - (1.0 - gamma) * diff;
         assert!((a1 - expected_a1).abs() < 1e-12);
         assert!((a2 - expected_a2).abs() < 1e-12);
     }

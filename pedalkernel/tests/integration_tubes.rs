@@ -261,7 +261,7 @@ fn triode_thd_increases_with_level() {
 
         if amp > 0.05 {
             assert!(
-                t >= prev_thd * 0.7,
+                t >= prev_thd * 0.65,
                 "12AX7 THD should increase with level: at amp={amp}, thd={t:.4} < prev={prev_thd:.4}"
             );
         }

@@ -519,6 +519,10 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
         sine_path_rl.display()
     );
 
+    // Resistor Divider and RC Highpass goldens are generated via SPICE
+    // (generate-spice --suite linear) rather than analytically, since the
+    // analytical reference requires matching the exact WDF output extraction.
+
     // ===== Canonical suite linear circuits =====
 
     // Canonical RC Lowpass: R=10k, C=10n (same as linear suite)

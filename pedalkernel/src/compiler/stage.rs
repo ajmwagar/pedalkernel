@@ -318,6 +318,15 @@ impl WdfStage {
             } else {
                 sample * compensation
             };
+            // Negate for non-inverting root kinds (series adaptor convention:
+            // b = -(b1+b2) negates the VS contribution, which phase-inverting
+            // devices like triodes/BJTs cancel naturally, but diodes/zeners don't)
+            let vs_voltage = match root {
+                RootKind::DiodePair(_) | RootKind::SingleDiode(_) | RootKind::Zener(_) => {
+                    -vs_voltage
+                }
+                _ => vs_voltage,
+            };
             tree.set_voltage(vs_voltage);
             let b_tree = tree.reflected();
             let rp = tree.port_resistance();

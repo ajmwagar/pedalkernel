@@ -334,8 +334,11 @@ impl DynNode {
                 ..
             } => {
                 let diff = *b2 - *b1;
-                let a1 = a + (1.0 - *gamma) * diff;
-                let a2 = a - *gamma * diff;
+                // Consistent with scatter_up b3 = (1-γ)·b1 + γ·b2:
+                //   v1 = v3 → a1 = a3 + γ·(b2-b1)
+                //   v2 = v3 → a2 = a3 - (1-γ)·(b2-b1)
+                let a1 = a + *gamma * diff;
+                let a2 = a - (1.0 - *gamma) * diff;
                 left.set_incident(a1);
                 right.set_incident(a2);
             }
