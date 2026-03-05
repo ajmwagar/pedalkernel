@@ -869,9 +869,7 @@ mod pro_pedals {
         eprintln!("\n  === {pots_changed}/{pots_total} pots affect output ===");
         if pots_total > 0 {
             let ratio = pots_changed as f64 / pots_total as f64;
-            // BUG: Many pots don't affect output — pot routing or MNA update issues.
-            // At least 70% of pots should produce a measurable spectral change.
-            assert!(ratio > 0.7,
+            assert!(ratio > 0.99,
                 "Only {pots_changed}/{pots_total} pots affect output ({:.0}%)", ratio * 100.0);
         }
     }

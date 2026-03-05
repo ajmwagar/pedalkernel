@@ -186,6 +186,13 @@ pub(super) fn build_controls(
                                                 lfo_target = Some(ControlTarget::BbdFeedback(idx));
                                                 break 'net_scan;
                                             }
+                                            // LFO.out -> Pot.a = depth control
+                                            if let Some(idx) =
+                                                lfo_ids.iter().position(|id| id == src_comp)
+                                            {
+                                                lfo_target = Some(ControlTarget::LfoDepth(idx));
+                                                break 'net_scan;
+                                            }
                                         }
                                     }
                                 }
@@ -193,66 +200,35 @@ pub(super) fn build_controls(
                         }
                     }
 
+                    if lfo_target.is_none() && !bbd_id_to_idx.is_empty() {
+                        // ── Step 5a: BBD mix detection via topology ─────────
+                        // If the pot reaches a BBD output through passive elements
+                        // (resistors, caps), it's a wet/dry mix control.
+                        if pot_reaches_bbd_output(
+                            &ctrl.component,
+                            pedal,
+                            bbd_id_to_idx,
+                        ) {
+                            lfo_target = Some(ControlTarget::BbdMix);
+                        }
+                    }
+
                     if let Some(target) = lfo_target {
                         target
                     } else {
-                        // ── Step 6: label-based heuristic ──────────────────
-                        let has_bbds = !bbd_id_to_idx.is_empty();
-                        let label_target = if is_gain_label(&ctrl.label) {
-                            Some(ControlTarget::PreGain)
-                        } else if is_level_label(&ctrl.label) {
-                            Some(ControlTarget::OutputGain)
-                        } else if is_rate_label(&ctrl.label) {
-                            if !lfo_ids.is_empty() {
-                                Some(ControlTarget::LfoRate(0))
-                            } else {
-                                None
-                            }
-                        } else if is_depth_label(&ctrl.label) {
-                            if !lfo_ids.is_empty() {
-                                Some(ControlTarget::LfoDepth(0))
-                            } else {
-                                None
-                            }
-                        } else if is_delay_time_label(&ctrl.label) {
-                            if !delay_lines_empty {
-                                Some(ControlTarget::DelayTime(0))
-                            } else if has_bbds {
-                                Some(ControlTarget::BbdClockRate(0))
-                            } else {
-                                None
-                            }
-                        } else if is_delay_feedback_label(&ctrl.label) {
-                            if !delay_lines_empty {
-                                Some(ControlTarget::DelayFeedback(0))
-                            } else if has_bbds {
-                                Some(ControlTarget::BbdFeedback(0))
-                            } else {
-                                None
-                            }
-                        } else if is_mix_label(&ctrl.label) && (has_bbds || !delay_lines_empty) {
-                            Some(ControlTarget::BbdMix)
-                        } else {
-                            None
-                        };
-
-                        if let Some(target) = label_target {
-                            target
-                        } else {
-                            // ── Step 6b: PassiveRType children (2-terminal pots in MNA)
-                            // Only checked when label heuristic doesn't match a
-                            // specific target, so BBD/LFO/delay pots bind correctly.
-                            let mut passive_rtype_found = None;
-                            for (si, stage) in stages.iter().enumerate() {
-                                if let RootKind::PassiveRType { children, .. } = &stage.root {
-                                    if children.iter().any(|c| has_pot(c, &ctrl.component)) {
-                                        passive_rtype_found = Some(ControlTarget::PotInStage(si));
-                                        break;
-                                    }
+                        // ── Step 5b: PassiveRType children (2-terminal pots in MNA)
+                        // If the pot physically exists in a passive stage, bind it
+                        // there — the MNA scattering recompute handles the rest.
+                        let mut passive_rtype_found = None;
+                        for (si, stage) in stages.iter().enumerate() {
+                            if let RootKind::PassiveRType { children, .. } = &stage.root {
+                                if children.iter().any(|c| has_pot(c, &ctrl.component)) {
+                                    passive_rtype_found = Some(ControlTarget::PotInStage(si));
+                                    break;
                                 }
                             }
-                            passive_rtype_found.unwrap_or(ControlTarget::PreGain)
                         }
+                        passive_rtype_found.unwrap_or(ControlTarget::PreGain)
                     }
                 }
             }
@@ -902,6 +878,97 @@ fn extract_sidechain_def(
         sidechains: vec![],
         mirrors: std::collections::HashMap::new(),
     }
+}
+
+/// Check whether a pot reaches a BBD output through passive elements (resistors, caps).
+/// Used to detect wet/dry mix pots that aren't directly wired to the BBD.
+fn pot_reaches_bbd_output(
+    pot_id: &str,
+    pedal: &PedalDef,
+    bbd_ids: &HashMap<String, usize>,
+) -> bool {
+    let mut visited: HashSet<String> = HashSet::new();
+    let pot_pins = ["a", "b", "wiper"];
+
+    // Mark pot's own pins as visited to prevent looping back.
+    for pp in &pot_pins {
+        visited.insert(format!("{pot_id}:{pp}"));
+    }
+
+    // Seed BFS with all component pins directly connected to the pot's terminals.
+    let mut queue: Vec<(String, String)> = Vec::new();
+    for net in &pedal.nets {
+        let all: Vec<&Pin> = std::iter::once(&net.from).chain(net.to.iter()).collect();
+        let pot_in_net = all.iter().any(|p| {
+            matches!(p, Pin::ComponentPin { component, pin }
+                if component == pot_id && pot_pins.contains(&pin.as_str()))
+        });
+        if pot_in_net {
+            for p in &all {
+                if let Pin::ComponentPin { component, pin } = p {
+                    if component.as_str() != pot_id {
+                        let key = format!("{component}:{pin}");
+                        if visited.insert(key) {
+                            queue.push((component.clone(), pin.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // BFS through passive 2-terminal elements.
+    while let Some((comp_id, pin)) = queue.pop() {
+        // Found BBD output?
+        if pin == "out" && bbd_ids.contains_key(comp_id.as_str()) {
+            return true;
+        }
+
+        // Only trace through resistors and capacitors.
+        let comp = pedal.components.iter().find(|c| c.id == comp_id);
+        let other_pin = match comp.map(|c| &c.kind) {
+            Some(ComponentKind::Resistor(_)) | Some(ComponentKind::Capacitor(_)) => {
+                match pin.as_str() {
+                    "a" => "b",
+                    "b" => "a",
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+
+        let other_key = format!("{comp_id}:{other_pin}");
+        if !visited.insert(other_key) {
+            continue;
+        }
+
+        // Find net neighbors of comp_id.other_pin.
+        for net in &pedal.nets {
+            let all: Vec<&Pin> = std::iter::once(&net.from).chain(net.to.iter()).collect();
+            let has_pin = all.iter().any(|p| {
+                matches!(p, Pin::ComponentPin { component, pin: p }
+                    if component == &comp_id && p == other_pin)
+            });
+            if has_pin {
+                for p in &all {
+                    if let Pin::ComponentPin {
+                        component: next,
+                        pin: next_pin,
+                    } = p
+                    {
+                        if next.as_str() != comp_id.as_str() {
+                            let key = format!("{next}:{next_pin}");
+                            if visited.insert(key) {
+                                queue.push((next.clone(), next_pin.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 // Label classification helpers are imported from compiled.rs via `use super::compiled::*`.

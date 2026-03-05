@@ -319,9 +319,10 @@ fn pot_to_delay_feedback() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn label_gain_heuristic() {
+fn label_gain_pot_in_circuit() {
+    // Pot physically in signal path → PotInStage (no label heuristic)
     let src = r#"
-        pedal "Gain Heuristic" {
+        pedal "Gain In Circuit" {
             components {
                 R1: resistor(10k)
                 Drive: pot(500k)
@@ -339,15 +340,16 @@ fn label_gain_heuristic() {
     let compiled = compile_src(src);
     let d = dump(&compiled);
     assert!(
-        d.contains("Drive -> PreGain"),
-        "Label 'Drive' with no net/stage match should bind to PreGain; controls:\n{d}"
+        d.contains("Drive -> PotInStage(0)"),
+        "Pot physically in circuit should bind to PotInStage; controls:\n{d}"
     );
 }
 
 #[test]
-fn label_level_heuristic() {
+fn label_volume_pot_in_circuit() {
+    // Pot physically in signal path → PotInStage (not OutputGain)
     let src = r#"
-        pedal "Level Heuristic" {
+        pedal "Volume In Circuit" {
             components {
                 R1: resistor(10k)
                 Volume: pot(500k)
@@ -365,67 +367,16 @@ fn label_level_heuristic() {
     let compiled = compile_src(src);
     let d = dump(&compiled);
     assert!(
-        d.contains("Volume -> OutputGain"),
-        "Label 'Volume' with no net/stage match should bind to OutputGain; controls:\n{d}"
+        d.contains("Volume -> PotInStage(0)"),
+        "Pot physically in circuit should bind to PotInStage; controls:\n{d}"
     );
 }
 
 #[test]
-fn label_rate_with_lfo() {
+fn disconnected_pot_falls_to_pregain() {
+    // Pot NOT in signal path and no net connection → PreGain fallback
     let src = r#"
-        pedal "Rate Label + LFO" {
-            components {
-                R1: resistor(10k)
-                LFO1: lfo(sine, 100k, 220n)
-                Rate: pot(500k)
-            }
-            nets {
-                in -> R1.a
-                R1.b -> out
-            }
-            controls {
-                Rate.position -> "Rate" [0.0, 1.0] = 0.5
-            }
-        }
-    "#;
-    let compiled = compile_src(src);
-    let d = dump(&compiled);
-    assert!(
-        d.contains("Rate -> LfoRate(0)"),
-        "Label 'Rate' with LFO present should bind to LfoRate(0); controls:\n{d}"
-    );
-}
-
-#[test]
-fn label_depth_with_lfo() {
-    let src = r#"
-        pedal "Depth Label + LFO" {
-            components {
-                R1: resistor(10k)
-                LFO1: lfo(sine, 100k, 220n)
-                Depth: pot(50k)
-            }
-            nets {
-                in -> R1.a
-                R1.b -> out
-            }
-            controls {
-                Depth.position -> "Depth" [0.0, 1.0] = 0.5
-            }
-        }
-    "#;
-    let compiled = compile_src(src);
-    let d = dump(&compiled);
-    assert!(
-        d.contains("Depth -> LfoDepth(0)"),
-        "Label 'Depth' with LFO present should bind to LfoDepth(0); controls:\n{d}"
-    );
-}
-
-#[test]
-fn label_delay_with_bbd() {
-    let src = r#"
-        pedal "Delay Label + BBD" {
+        pedal "Disconnected Pot" {
             components {
                 R1: resistor(10k)
                 BBD1: bbd(mn3005)
@@ -445,20 +396,22 @@ fn label_delay_with_bbd() {
     "#;
     let compiled = compile_src(src);
     let d = dump(&compiled);
+    // Pot not wired to BBD.clock via nets → no binding → PreGain
     assert!(
-        d.contains("Delay -> BbdClockRate(0)"),
-        "Label 'Delay' with BBD present (no DelayLine) should bind to BbdClockRate(0); controls:\n{d}"
+        d.contains("Delay -> PreGain"),
+        "Disconnected pot should fall through to PreGain; controls:\n{d}"
     );
 }
 
 #[test]
-fn label_feedback_with_bbd() {
+fn bbd_clock_net_binding() {
+    // Pot wired to BBD.clock via net → BbdClockRate
     let src = r#"
-        pedal "Feedback Label + BBD" {
+        pedal "BBD Clock Net" {
             components {
                 R1: resistor(10k)
                 BBD1: bbd(mn3005)
-                Feedback: pot(100k)
+                Time: pot(500k)
                 C1: cap(100n)
             }
             nets {
@@ -466,53 +419,26 @@ fn label_feedback_with_bbd() {
                 R1.b -> BBD1.in
                 BBD1.out -> C1.a
                 C1.b -> out
+                Time.wiper -> BBD1.clock
             }
             controls {
-                Feedback.position -> "Feedback" [0.0, 1.0] = 0.3
+                Time.position -> "Time" [0.0, 1.0] = 0.5
             }
         }
     "#;
     let compiled = compile_src(src);
     let d = dump(&compiled);
     assert!(
-        d.contains("Feedback -> BbdFeedback(0)"),
-        "Label 'Feedback' with BBD present should bind to BbdFeedback(0); controls:\n{d}"
+        d.contains("Time -> BbdClockRate(0)"),
+        "Pot wired to BBD.clock should bind to BbdClockRate(0); controls:\n{d}"
     );
 }
 
 #[test]
-fn label_mix_with_bbd() {
+fn delay_line_time_net_binding() {
+    // Pot wired to DelayLine.delay_time via net → DelayTime
     let src = r#"
-        pedal "Mix Label + BBD" {
-            components {
-                R1: resistor(10k)
-                BBD1: bbd(mn3005)
-                Blend: pot(100k)
-                C1: cap(100n)
-            }
-            nets {
-                in -> R1.a
-                R1.b -> BBD1.in
-                BBD1.out -> C1.a
-                C1.b -> out
-            }
-            controls {
-                Blend.position -> "Blend" [0.0, 1.0] = 0.5
-            }
-        }
-    "#;
-    let compiled = compile_src(src);
-    let d = dump(&compiled);
-    assert!(
-        d.contains("Blend -> BbdMix"),
-        "Label 'Blend' with BBD present should bind to BbdMix; controls:\n{d}"
-    );
-}
-
-#[test]
-fn label_delay_with_delay_line() {
-    let src = r#"
-        pedal "Time Label + DelayLine" {
+        pedal "DelayLine Time Net" {
             components {
                 R1: resistor(10k)
                 DL1: delay_line(1ms, 1200ms)
@@ -524,6 +450,7 @@ fn label_delay_with_delay_line() {
                 DL1.output -> C1.a
                 C1.b -> R1.a
                 R1.b -> out
+                Time.wiper -> DL1.delay_time
             }
             controls {
                 Time.position -> "Time" [0.0, 1.0] = 0.5
@@ -534,14 +461,15 @@ fn label_delay_with_delay_line() {
     let d = dump(&compiled);
     assert!(
         d.contains("Time -> DelayTime(0)"),
-        "Label 'Time' with DelayLine present should bind to DelayTime(0); controls:\n{d}"
+        "Pot wired to DL.delay_time should bind to DelayTime(0); controls:\n{d}"
     );
 }
 
 #[test]
-fn label_feedback_with_delay_line() {
+fn delay_line_feedback_net_binding() {
+    // Pot wired to DelayLine.feedback via net → DelayFeedback
     let src = r#"
-        pedal "Feedback Label + DelayLine" {
+        pedal "DelayLine Feedback Net" {
             components {
                 R1: resistor(10k)
                 DL1: delay_line(1ms, 1200ms)
@@ -553,6 +481,7 @@ fn label_feedback_with_delay_line() {
                 DL1.output -> C1.a
                 C1.b -> R1.a
                 R1.b -> out
+                Fbk.wiper -> DL1.feedback
             }
             controls {
                 Fbk.position -> "Feedback" [0.0, 1.0] = 0.3
@@ -563,7 +492,7 @@ fn label_feedback_with_delay_line() {
     let d = dump(&compiled);
     assert!(
         d.contains("Feedback -> DelayFeedback(0)"),
-        "Label 'Feedback' with DelayLine present should bind to DelayFeedback(0); controls:\n{d}"
+        "Pot wired to DL.feedback should bind to DelayFeedback(0); controls:\n{d}"
     );
 }
 
@@ -891,7 +820,7 @@ fn memory_man_all_controls_bound() {
         d.contains("Feedback -> BbdFeedback(0)"),
         "Memory Man: Feedback should bind to BbdFeedback(0); controls:\n{d}"
     );
-    // Blend pot -> BBD wet/dry mix
+    // Blend pot reaches BBD output through passives → BbdMix
     assert!(
         d.contains("Blend -> BbdMix"),
         "Memory Man: Blend should bind to BbdMix; controls:\n{d}"
@@ -913,7 +842,7 @@ fn dm2_all_controls_bound() {
         d.contains("Repeats -> BbdFeedback(0)"),
         "DM-2: Repeats should bind to BbdFeedback(0); controls:\n{d}"
     );
-    // Mix pot -> BBD wet/dry
+    // Mix pot reaches BBD output through passives → BbdMix
     assert!(
         d.contains("Mix -> BbdMix"),
         "DM-2: Mix should bind to BbdMix; controls:\n{d}"
@@ -968,7 +897,7 @@ fn klon_controls_bound() {
     let compiled = compile_example("klon_centaur.pedal");
     let d = dump(&compiled);
 
-    // Gain: blends clean/dirty, should be PotInStage or OpAmpGain
+    // Gain: should be PotInStage, OpAmpGain, or PreGain
     assert!(
         d.contains("Gain -> PotInStage(")
             || d.contains("Gain -> PotInMultiNlStage(")
@@ -976,17 +905,18 @@ fn klon_controls_bound() {
             || d.contains("Gain -> PreGain"),
         "Klon: Gain should bind to a stage or gain target; controls:\n{d}"
     );
-    // Treble: should be PotInStage (active treble control)
+    // Treble: should be PotInStage or PreGain
     assert!(
         d.contains("Treble -> PotInStage(")
             || d.contains("Treble -> PotInMultiNlStage(")
             || d.contains("Treble -> PreGain"),
         "Klon: Treble should bind to a stage target; controls:\n{d}"
     );
-    // Output: should be OutputGain or PotInStage
+    // Output: should be PotInStage or PreGain
     assert!(
-        d.contains("Output -> OutputGain") || d.contains("Output -> PotInStage("),
-        "Klon: Output should bind to OutputGain or PotInStage; controls:\n{d}"
+        d.contains("Output -> PotInStage(")
+            || d.contains("Output -> PreGain"),
+        "Klon: Output should bind to PotInStage or PreGain; controls:\n{d}"
     );
 }
 

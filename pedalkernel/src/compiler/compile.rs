@@ -817,7 +817,9 @@ pub fn compile_pedal_with_options(
         let has_reactive = pedal.components.iter().any(|c| {
             matches!(
                 c.kind,
-                ComponentKind::Capacitor(_) | ComponentKind::Inductor(_)
+                ComponentKind::Capacitor(_)
+                    | ComponentKind::Inductor(_)
+                    | ComponentKind::Potentiometer(_, _)
             )
         });
 
