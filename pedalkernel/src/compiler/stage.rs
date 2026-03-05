@@ -23,6 +23,26 @@ fn flush_denormal(x: f64) -> f64 {
     }
 }
 
+/// Stamp (or unstamp) a conductance value into an MNA G matrix.
+///
+/// Adds `g` to the diagonal entries and subtracts from off-diagonal.
+/// Use negative `g` to unstamp (remove) a previous stamp.
+#[inline]
+fn stamp_g(g_matrix: &mut [f64], n: usize, n1: Option<usize>, n2: Option<usize>, g: f64) {
+    if let Some(i) = n1 {
+        g_matrix[i * n + i] += g;
+        if let Some(j) = n2 {
+            g_matrix[i * n + j] -= g;
+        }
+    }
+    if let Some(j) = n2 {
+        g_matrix[j * n + j] += g;
+        if let Some(i) = n1 {
+            g_matrix[j * n + i] -= g;
+        }
+    }
+}
+
 #[cfg(feature = "debug-trace")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -151,10 +171,21 @@ pub(super) enum RootKind {
         vs_injection: Vec<f64>,
         /// Number of ports (reactive + output probe).
         n_ports: usize,
-        /// Passive child nodes (capacitors, inductors, output probe).
+        /// Passive child nodes (capacitors, inductors, output probe, and pots).
+        /// Pots are stored here for control binding but are NOT WDF ports —
+        /// they live in the MNA G matrix as conductance entries.
         children: Vec<DynNode>,
         /// Index into `children` for the output probe port.
         output_port: usize,
+        /// Stored MNA system for pot recomputation (None if no pots).
+        recompute_mna: Option<MnaSystem>,
+        /// WDF port definitions (reactive ports only, not pots).
+        recompute_ports: Option<Vec<WdfPort>>,
+        /// Pot conductance stamps in the MNA G matrix: (child_index, node_pos, node_neg, current_g).
+        /// Used to unstamp old conductance and re-stamp new conductance on pot change.
+        pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
+        /// Dirty flag: set when a pot changes, cleared after S re-derivation.
+        needs_recompute: bool,
     },
 }
 
@@ -465,6 +496,7 @@ impl WdfStage {
                     n_ports,
                     children,
                     output_port,
+                    ..
                 } => {
                     let vs_voltage = sample * compensation;
                     let n = *n_ports;
@@ -608,6 +640,66 @@ impl WdfStage {
         if let RootKind::PassiveRType { children, .. } = &mut self.root {
             for child in children.iter_mut() {
                 child.reset();
+            }
+        }
+    }
+
+    /// Set a pot value in the PassiveRType children and mark for recompute.
+    ///
+    /// Returns `true` if the pot was found and updated.
+    pub(super) fn set_passive_rtype_pot(&mut self, comp_id: &str, value: f64) -> bool {
+        if let RootKind::PassiveRType {
+            children,
+            needs_recompute,
+            ..
+        } = &mut self.root
+        {
+            for child in children.iter_mut() {
+                if child.set_pot(comp_id, value) {
+                    *needs_recompute = true;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Re-derive scattering matrix from stored MNA after pot changes.
+    ///
+    /// Unstamps old pot conductances from the G matrix, stamps new ones based
+    /// on current DynNode::Pot resistance, then re-derives S and k vectors.
+    pub(super) fn flush_passive_rtype_recompute(&mut self) {
+        if let RootKind::PassiveRType {
+            scattering,
+            vs_injection,
+            needs_recompute,
+            recompute_mna,
+            recompute_ports,
+            pot_stamps,
+            children,
+            ..
+        } = &mut self.root
+        {
+            if !*needs_recompute {
+                return;
+            }
+            if let (Some(mna), Some(ports)) = (recompute_mna.as_mut(), recompute_ports.as_ref()) {
+                let n = mna.num_nodes;
+                // Update G matrix: unstamp old conductance, stamp new
+                for (child_idx, n1, n2, old_g) in pot_stamps.iter_mut() {
+                    let new_r = children[*child_idx].port_resistance();
+                    let new_g = 1.0 / new_r;
+                    // Unstamp old conductance
+                    stamp_g(&mut mna.g_matrix, n, *n1, *n2, -*old_g);
+                    // Stamp new conductance
+                    stamp_g(&mut mna.g_matrix, n, *n1, *n2, new_g);
+                    *old_g = new_g;
+                }
+                // Re-derive scattering matrix and VS injection vector
+                let (new_s, new_k) = mna.derive_scattering_and_vs_injection(ports, 0);
+                *scattering = new_s;
+                *vs_injection = new_k;
+                *needs_recompute = false;
             }
         }
     }

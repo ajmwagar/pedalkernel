@@ -873,20 +873,27 @@ impl CompiledPedal {
                         let stage_idx = *_stage_idx;
                         let comp_id = self.controls[i].component_id.clone();
                         if let Some(stage) = self.stages.get_mut(stage_idx) {
-                            stage.tree.set_pot(&comp_id, value);
+                            // Try WDF tree first, then PassiveRType children
+                            if !stage.tree.set_pot(&comp_id, value) {
+                                stage.set_passive_rtype_pot(&comp_id, value);
+                            }
                             stage.tree.set_pot(&format!("{comp_id}__aw"), value);
                             stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
                             stage.tree.recompute();
+                            stage.flush_passive_rtype_recompute();
                         }
                         // Update mirrored pots (position = 1.0 - source)
                         if let Some(mirror_ids) = self.pot_mirrors.get(&comp_id) {
                             let inv = 1.0 - value;
                             for mirror_id in mirror_ids.clone() {
                                 for stage in &mut self.stages {
-                                    stage.tree.set_pot(&mirror_id, inv);
+                                    if !stage.tree.set_pot(&mirror_id, inv) {
+                                        stage.set_passive_rtype_pot(&mirror_id, inv);
+                                    }
                                     stage.tree.set_pot(&format!("{mirror_id}__aw"), inv);
                                     stage.tree.set_pot(&format!("{mirror_id}__wb"), 1.0 - inv);
                                     stage.tree.recompute();
+                                    stage.flush_passive_rtype_recompute();
                                 }
                             }
                         }
@@ -1062,17 +1069,23 @@ impl CompiledPedal {
                     ControlTarget::PotInStage(stage_idx) => {
                         let stage_idx = *stage_idx;
                         if let Some(stage) = self.stages.get_mut(stage_idx) {
-                            stage.tree.set_pot(&comp_id, value);
+                            // Try WDF tree first, then PassiveRType children
+                            if !stage.tree.set_pot(&comp_id, value) {
+                                stage.set_passive_rtype_pot(&comp_id, value);
+                            }
                             stage.tree.set_pot(&format!("{comp_id}__aw"), value);
                             stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
                             stage.tree.recompute();
+                            // PassiveRType recompute is throttled (see bottom of fn)
                         }
                         // Update mirrored pots (position = 1.0 - source)
                         if let Some(mirror_ids) = self.pot_mirrors.get(&comp_id) {
                             let inv = 1.0 - value;
                             for mirror_id in mirror_ids.clone() {
                                 for stage in &mut self.stages {
-                                    stage.tree.set_pot(&mirror_id, inv);
+                                    if !stage.tree.set_pot(&mirror_id, inv) {
+                                        stage.set_passive_rtype_pot(&mirror_id, inv);
+                                    }
                                     stage.tree.set_pot(&format!("{mirror_id}__aw"), inv);
                                     stage.tree.set_pot(&format!("{mirror_id}__wb"), 1.0 - inv);
                                     stage.tree.recompute();
@@ -1107,7 +1120,7 @@ impl CompiledPedal {
             }
         }
 
-        // Throttle multi-NL scattering recomputes to every 32 samples.
+        // Throttle scattering recomputes to every 32 samples.
         // The pot resistance in the DynNode is updated per-sample above,
         // but the expensive matrix re-derivation is batched here.
         self.multi_nl_recompute_counter += 1;
@@ -1115,6 +1128,10 @@ impl CompiledPedal {
             self.multi_nl_recompute_counter = 0;
             for stage in &mut self.multi_nl_stages {
                 stage.flush_recompute();
+            }
+            // Also flush PassiveRType stages with dirty pot changes
+            for stage in &mut self.stages {
+                stage.flush_passive_rtype_recompute();
             }
         }
     }

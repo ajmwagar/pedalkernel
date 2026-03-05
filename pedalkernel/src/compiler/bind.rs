@@ -196,44 +196,62 @@ pub(super) fn build_controls(
                     if let Some(target) = lfo_target {
                         target
                     } else {
-                        // ── Step 6: label-based heuristic fallback ───────
+                        // ── Step 6: label-based heuristic ──────────────────
                         let has_bbds = !bbd_id_to_idx.is_empty();
-                        if is_gain_label(&ctrl.label) {
-                            ControlTarget::PreGain
+                        let label_target = if is_gain_label(&ctrl.label) {
+                            Some(ControlTarget::PreGain)
                         } else if is_level_label(&ctrl.label) {
-                            ControlTarget::OutputGain
+                            Some(ControlTarget::OutputGain)
                         } else if is_rate_label(&ctrl.label) {
                             if !lfo_ids.is_empty() {
-                                ControlTarget::LfoRate(0)
+                                Some(ControlTarget::LfoRate(0))
                             } else {
-                                ControlTarget::PreGain
+                                None
                             }
                         } else if is_depth_label(&ctrl.label) {
                             if !lfo_ids.is_empty() {
-                                ControlTarget::LfoDepth(0)
+                                Some(ControlTarget::LfoDepth(0))
                             } else {
-                                ControlTarget::PreGain
+                                None
                             }
                         } else if is_delay_time_label(&ctrl.label) {
                             if !delay_lines_empty {
-                                ControlTarget::DelayTime(0)
+                                Some(ControlTarget::DelayTime(0))
                             } else if has_bbds {
-                                ControlTarget::BbdClockRate(0)
+                                Some(ControlTarget::BbdClockRate(0))
                             } else {
-                                ControlTarget::PreGain
+                                None
                             }
                         } else if is_delay_feedback_label(&ctrl.label) {
                             if !delay_lines_empty {
-                                ControlTarget::DelayFeedback(0)
+                                Some(ControlTarget::DelayFeedback(0))
                             } else if has_bbds {
-                                ControlTarget::BbdFeedback(0)
+                                Some(ControlTarget::BbdFeedback(0))
                             } else {
-                                ControlTarget::PreGain
+                                None
                             }
                         } else if is_mix_label(&ctrl.label) && (has_bbds || !delay_lines_empty) {
-                            ControlTarget::BbdMix
+                            Some(ControlTarget::BbdMix)
                         } else {
-                            ControlTarget::PreGain
+                            None
+                        };
+
+                        if let Some(target) = label_target {
+                            target
+                        } else {
+                            // ── Step 6b: PassiveRType children (2-terminal pots in MNA)
+                            // Only checked when label heuristic doesn't match a
+                            // specific target, so BBD/LFO/delay pots bind correctly.
+                            let mut passive_rtype_found = None;
+                            for (si, stage) in stages.iter().enumerate() {
+                                if let RootKind::PassiveRType { children, .. } = &stage.root {
+                                    if children.iter().any(|c| has_pot(c, &ctrl.component)) {
+                                        passive_rtype_found = Some(ControlTarget::PotInStage(si));
+                                        break;
+                                    }
+                                }
+                            }
+                            passive_rtype_found.unwrap_or(ControlTarget::PreGain)
                         }
                     }
                 }

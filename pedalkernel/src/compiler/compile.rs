@@ -393,6 +393,10 @@ fn build_passive_mna_stage(
     let mut mna = MnaSystem::new(num_mna_nodes, 0);
     let mut reactive_children: Vec<DynNode> = Vec::new();
     let mut reactive_ports: Vec<WdfPort> = Vec::new();
+    // Pot DynNodes are deferred — they go at the END of children (after ports)
+    // so they don't interfere with the scattering matrix port indexing.
+    let mut pot_children_pending: Vec<DynNode> = Vec::new();
+    let mut pot_stamp_nodes: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
 
     for &eidx in passive_edges {
         let e = &graph.edges[eidx];
@@ -431,9 +435,21 @@ fn build_passive_mna_stage(
                     resistance: rp,
                 });
             }
-            ComponentKind::Potentiometer(max_r, _taper) => {
-                // Treat pot at default 50% position as a resistor
-                mna.stamp_resistor(n1, n2, max_r * 0.5);
+            ComponentKind::Potentiometer(max_r, taper) => {
+                // Pot stays in G matrix as conductance (NOT a WDF port).
+                // DynNode::Pot is stored in children for control binding + position tracking.
+                let initial_pos = 0.5;
+                let tapered_pos = taper.apply(initial_pos);
+                let r = (tapered_pos * *max_r).max(1.0);
+                mna.stamp_resistor(n1, n2, r);
+                pot_children_pending.push(DynNode::Pot {
+                    comp_id: comp.id.clone(),
+                    max_resistance: *max_r,
+                    position: initial_pos,
+                    taper: *taper,
+                    rp: r,
+                });
+                pot_stamp_nodes.push((n1, n2, 1.0 / r));
             }
             _ => {
                 // Unsupported passive component type — skip
@@ -458,6 +474,19 @@ fn build_passive_mna_stage(
         node_neg: None,
         resistance: output_probe_r,
     });
+
+    // ── Step 4b: Append pot children AFTER all ports ─────────────────────
+    // Pot DynNodes go at children[n_ports..] so they don't affect scattering
+    // matrix indexing. They're only here for control binding + position tracking.
+    let pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)> = pot_stamp_nodes
+        .into_iter()
+        .enumerate()
+        .map(|(i, (n1, n2, g))| {
+            let child_idx = reactive_children.len() + i;
+            (child_idx, n1, n2, g)
+        })
+        .collect();
+    reactive_children.extend(pot_children_pending);
 
     // ── Step 5: Stamp VS as ideal voltage source into MNA B/C/D ────────
     // Instead of making the VS a WDF port (which adds internal impedance),
@@ -488,6 +517,10 @@ fn build_passive_mna_stage(
     // ── Step 7: Build WdfStage ──────────────────────────────────────────
     let dummy_tree = DynNode::Resistor { rp: 1000.0 };
 
+    let has_pots = !pot_stamps.is_empty();
+    let recompute_mna = if has_pots { Some(mna.clone()) } else { None };
+    let recompute_ports = if has_pots { Some(ports.clone()) } else { None };
+
     let stage = WdfStage {
         tree: dummy_tree,
         root: RootKind::PassiveRType {
@@ -496,6 +529,10 @@ fn build_passive_mna_stage(
             n_ports,
             children: reactive_children,
             output_port: output_port_idx,
+            recompute_mna,
+            recompute_ports,
+            pot_stamps,
+            needs_recompute: false,
         },
         compensation: 1.0,
         // Linear passive stage — no nonlinearity means no aliasing,
