@@ -2,7 +2,7 @@
 # Variable attenuator using light-dependent resistor (LDR)
 #
 # The VTL5C3 is a Vactrol (LED + LDR in one package):
-# - LED current controls light output
+# - LED current controls light output (handled by modulation target)
 # - LDR resistance varies with light (~1M dark, ~1k lit)
 # - Creates smooth, "organic" volume control
 #
@@ -11,8 +11,8 @@
 # - Tremolo (LFO controls LED)
 # - Uni-Vibe (LFO + phase network)
 #
-# This test uses a fixed LED current to verify LDR behavior.
-# For dynamic tests, sidechain modulation would control the LED.
+# This test wires the LDR (pins a, b) as a voltage divider.
+# LED drive is controlled via the modulation system, not circuit nodes.
 
 pedal "Optical Attenuator" {
   supply 9V
@@ -20,40 +20,26 @@ pedal "Optical Attenuator" {
     # Input coupling
     C_in: cap(100n)
 
-    # Photocoupler
+    # Photocoupler (LDR + LED in one package)
     OC1: photocoupler(vtl5c3)
 
-    # LED drive circuit
-    R_led: resistor(1k)       # LED current limiter
-
-    # LDR voltage divider
-    # OC1.ldr forms bottom of divider
-    R_top: resistor(10k)      # Top of divider
+    # LDR voltage divider: R_top in series with OC1 LDR
+    R_top: resistor(10k)
 
     # Output buffer
     C_out: cap(100n)
     R_out: resistor(10k)
-
-    # Control voltage for LED (simulates sidechain)
-    R_ctrl: resistor(100k)
   }
   nets {
     # Input through coupling cap
     in -> C_in.a
     C_in.b -> R_top.a
 
-    # Voltage divider: R_top in series with LDR
-    R_top.b -> OC1.ldr_a, C_out.a
+    # Voltage divider: R_top in series with LDR to ground
+    R_top.b -> OC1.a, C_out.a
 
     # LDR to ground
-    OC1.ldr_b -> gnd
-
-    # LED drive (fixed current for this test)
-    # In real compressor, this would be sidechain-controlled
-    vcc -> R_led.a
-    R_led.b -> OC1.led_a
-    OC1.led_b -> R_ctrl.a
-    R_ctrl.b -> gnd
+    OC1.b -> gnd
 
     # Output
     C_out.b -> R_out.a, out
