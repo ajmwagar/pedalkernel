@@ -136,7 +136,8 @@ synth "MiniSynth" {
     # ── VCA → Output ───────────────────────────────────────────────────
     VCA1.out1 -> R_vca_out.a
     R_vca_out.b -> Volume.a
-    Volume.b -> out
+    Volume.w -> out
+    Volume.b -> gnd
 
     # ── Power Decoupling ────────────────────────────────────────────────
     C_dec1.a -> vcc

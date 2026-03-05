@@ -84,7 +84,8 @@ pedal "ProCo RAT" {
     # Output stage
     C5.b -> R7.a, Volume.a
     R7.b -> gnd
-    Volume.b -> R8.a
+    Volume.w -> R8.a
+    Volume.b -> gnd
     R8.b -> out
   }
   controls {

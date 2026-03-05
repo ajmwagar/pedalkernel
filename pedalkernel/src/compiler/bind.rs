@@ -19,6 +19,10 @@ use super::stage::{MultiNlStage, RootKind, SidechainProcessor, WdfStage};
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Build control bindings for all user controls.
+///
+/// Returns `(controls, pot_effects)` where `pot_effects` maps component IDs
+/// to behavioral side-effects (op-amp gain formula, BBD mix) that are applied
+/// alongside the physical PotInStage update.
 pub(super) fn build_controls(
     pedal: &PedalDef,
     stages: &[WdfStage],
@@ -27,11 +31,12 @@ pub(super) fn build_controls(
     bjt_bias_pot_map: &HashMap<String, BjtBiasPotInfo>,
     lfo_ids: &[String],
     delay_id_to_idx: &HashMap<String, usize>,
-    delay_lines_empty: bool,
+    _delay_lines_empty: bool,
     sidechain_comp_ids: &HashMap<String, usize>,
     bbd_id_to_idx: &HashMap<String, usize>,
-) -> Vec<ControlBinding> {
+) -> (Vec<ControlBinding>, HashMap<String, Vec<PotEffect>>) {
     let mut controls = Vec::new();
+    let mut pot_effects: HashMap<String, Vec<PotEffect>> = HashMap::new();
 
     for ctrl in &pedal.controls {
         // Check for Switch/RotarySwitch component.
@@ -57,7 +62,7 @@ pub(super) fn build_controls(
         //
         // Searching stage trees (step 3) before label heuristics ensures that
         // pots like "Gain" or "Volume" are bound to their actual WDF tree node
-        // rather than being silently routed to PreGain/OutputGain.
+        // rather than falling through to a harmless no-op.
         let target = if let Some((switch_id, num_positions)) = switch_info {
             ControlTarget::SwitchPosition {
                 switch_id,
@@ -72,14 +77,20 @@ pub(super) fn build_controls(
             is_inverting,
         )) = opamp_pot_map.get(&ctrl.component)
         {
-            ControlTarget::OpAmpGain {
-                stage_idx,
-                ri,
-                fixed_series_r,
-                max_pot_r,
-                parallel_fixed_r,
-                is_inverting,
-            }
+            // Bind as PotInStage — the pot is "in" the op-amp stage.
+            // Record side-effect for gain formula recomputation.
+            pot_effects
+                .entry(ctrl.component.clone())
+                .or_default()
+                .push(PotEffect::OpAmpGain {
+                    stage_idx,
+                    ri,
+                    fixed_series_r,
+                    max_pot_r,
+                    parallel_fixed_r,
+                    is_inverting,
+                });
+            ControlTarget::PotInStage(stage_idx)
         } else if let Some(info) = bjt_bias_pot_map.get(&ctrl.component) {
             // ── Step 2.5: BJT bias pot (emitter-bridging feedback pot) ───
             ControlTarget::BjtBias {
@@ -204,12 +215,31 @@ pub(super) fn build_controls(
                         // ── Step 5a: BBD mix detection via topology ─────────
                         // If the pot reaches a BBD output through passive elements
                         // (resistors, caps), it's a wet/dry mix control.
+                        // Bind as PotInStage (PassiveRType) + BbdMix side-effect.
                         if pot_reaches_bbd_output(
                             &ctrl.component,
                             pedal,
                             bbd_id_to_idx,
                         ) {
-                            lfo_target = Some(ControlTarget::BbdMix);
+                            pot_effects
+                                .entry(ctrl.component.clone())
+                                .or_default()
+                                .push(PotEffect::BbdMix);
+                            // Find the PassiveRType stage containing this mix pot
+                            let mut mix_stage = None;
+                            for (si, stage) in stages.iter().enumerate() {
+                                if let RootKind::PassiveRType { children, .. } = &stage.root {
+                                    if children.iter().any(|c| has_pot(c, &ctrl.component)) {
+                                        mix_stage = Some(ControlTarget::PotInStage(si));
+                                        break;
+                                    }
+                                }
+                                if has_pot(&stage.tree, &ctrl.component) {
+                                    mix_stage = Some(ControlTarget::PotInStage(si));
+                                    break;
+                                }
+                            }
+                            lfo_target = Some(mix_stage.unwrap_or(ControlTarget::PotInStage(0)));
                         }
                     }
 
@@ -228,7 +258,16 @@ pub(super) fn build_controls(
                                 }
                             }
                         }
-                        passive_rtype_found.unwrap_or(ControlTarget::PreGain)
+                        match passive_rtype_found {
+                            Some(target) => target,
+                            None => {
+                                eprintln!(
+                                    "[bind] WARNING: pot '{}' ({}) not in any circuit stage — no effect",
+                                    ctrl.component, ctrl.label
+                                );
+                                ControlTarget::PotInStage(0)
+                            }
+                        }
                     }
                 }
             }
@@ -253,7 +292,7 @@ pub(super) fn build_controls(
         });
     }
 
-    controls
+    (controls, pot_effects)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

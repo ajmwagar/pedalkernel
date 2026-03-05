@@ -20,7 +20,8 @@ pedal "Tube Screamer" {
     C1.b -> R1.a, D1.a
     D1.b -> gnd
     R1.b -> Gain.a
-    Gain.b -> out
+    Gain.w -> out
+    Gain.b -> gnd
   }
   controls {
     Gain.position -> "Drive" [0.0, 1.0] = 0.5

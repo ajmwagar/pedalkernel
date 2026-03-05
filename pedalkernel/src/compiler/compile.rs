@@ -554,6 +554,446 @@ fn build_passive_mna_stage(
     Some(stage)
 }
 
+/// Build a PassiveRType MNA stage for orphan output networks.
+///
+/// Like `build_passive_mna_stage`, but with configurable VS injection node,
+/// probe node, and probe resistance. Used for output networks where the
+/// VS is NOT at `in_node` and the probe needs a realistic load impedance
+/// (e.g. 100 kΩ instead of 1 GΩ) so series-resistance pots create a
+/// meaningful voltage divider.
+fn build_orphan_output_mna_stage(
+    graph: &CircuitGraph,
+    passive_edges: &[usize],
+    vs_node: NodeId,
+    probe_node: NodeId,
+    probe_resistance: f64,
+    sample_rate: f64,
+) -> Option<WdfStage> {
+    // Verify that probe_node is reachable from vs_node through passive edges.
+    {
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for &eidx in passive_edges {
+            let e = &graph.edges[eidx];
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
+        let mut visited = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        visited.insert(vs_node);
+        queue.push_back(vs_node);
+        while let Some(node) = queue.pop_front() {
+            if node == probe_node {
+                break;
+            }
+            if let Some(neighbors) = adj.get(&node) {
+                for &n in neighbors {
+                    if visited.insert(n) {
+                        queue.push_back(n);
+                    }
+                }
+            }
+        }
+        if !visited.contains(&probe_node) {
+            return None;
+        }
+    }
+
+    let mut node_set = std::collections::BTreeSet::new();
+    for &eidx in passive_edges {
+        let e = &graph.edges[eidx];
+        if e.node_a != graph.gnd_node {
+            node_set.insert(e.node_a);
+        }
+        if e.node_b != graph.gnd_node {
+            node_set.insert(e.node_b);
+        }
+    }
+    if vs_node != graph.gnd_node {
+        node_set.insert(vs_node);
+    }
+    if probe_node != graph.gnd_node {
+        node_set.insert(probe_node);
+    }
+
+    let nodes: Vec<NodeId> = node_set.into_iter().collect();
+    let num_mna_nodes = nodes.len();
+    if num_mna_nodes == 0 {
+        return None;
+    }
+    let node_to_idx: HashMap<NodeId, usize> =
+        nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+
+    let to_mna = |node: NodeId| -> Option<usize> {
+        if node == graph.gnd_node {
+            None
+        } else {
+            node_to_idx.get(&node).copied()
+        }
+    };
+
+    let effective_rate = sample_rate;
+    let mut mna = MnaSystem::new(num_mna_nodes, 0);
+    let mut reactive_children: Vec<DynNode> = Vec::new();
+    let mut reactive_ports: Vec<WdfPort> = Vec::new();
+    let mut pot_children_pending: Vec<DynNode> = Vec::new();
+    let mut pot_stamp_nodes: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
+
+    for &eidx in passive_edges {
+        let e = &graph.edges[eidx];
+        let n1 = to_mna(e.node_a);
+        let n2 = to_mna(e.node_b);
+        let comp = &graph.components[e.comp_idx];
+
+        match &comp.kind {
+            ComponentKind::Resistor(r) => {
+                mna.stamp_resistor(n1, n2, *r);
+            }
+            ComponentKind::Capacitor(cfg) => {
+                let rp = 1.0 / (2.0 * effective_rate * cfg.value);
+                reactive_children.push(DynNode::Capacitor {
+                    capacitance: cfg.value,
+                    rp,
+                    state: 0.0,
+                    last_b: 0.0,
+                });
+                reactive_ports.push(WdfPort {
+                    node_pos: n1,
+                    node_neg: n2,
+                    resistance: rp,
+                });
+            }
+            ComponentKind::Inductor(l) => {
+                let rp = 2.0 * effective_rate * l;
+                reactive_children.push(DynNode::Inductor {
+                    inductance: *l,
+                    rp,
+                    state: 0.0,
+                });
+                reactive_ports.push(WdfPort {
+                    node_pos: n1,
+                    node_neg: n2,
+                    resistance: rp,
+                });
+            }
+            ComponentKind::Potentiometer(max_r, taper) => {
+                let initial_pos = 0.5;
+                let tapered_pos = taper.apply(initial_pos);
+                let r = (tapered_pos * *max_r).max(1.0);
+                mna.stamp_resistor(n1, n2, r);
+                pot_children_pending.push(DynNode::Pot {
+                    comp_id: comp.id.clone(),
+                    max_resistance: *max_r,
+                    position: initial_pos,
+                    taper: *taper,
+                    rp: r,
+                });
+                pot_stamp_nodes.push((n1, n2, 1.0 / r));
+            }
+            _ => {}
+        }
+    }
+
+    // GMIN regularization
+    const GMIN_RESISTANCE: f64 = 1e9;
+    for i in 0..num_mna_nodes {
+        mna.stamp_resistor(Some(i), None, GMIN_RESISTANCE);
+    }
+
+    // Output probe port
+    let out_mna = to_mna(probe_node);
+    let output_port_idx = reactive_children.len();
+    reactive_children.push(DynNode::Resistor { rp: probe_resistance });
+    reactive_ports.push(WdfPort {
+        node_pos: out_mna,
+        node_neg: None,
+        resistance: probe_resistance,
+    });
+
+    // Pot children after ports
+    let pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)> = pot_stamp_nodes
+        .into_iter()
+        .enumerate()
+        .map(|(i, (n1, n2, g))| {
+            let child_idx = reactive_children.len() + i;
+            (child_idx, n1, n2, g)
+        })
+        .collect();
+    reactive_children.extend(pot_children_pending);
+
+    // VS as ideal voltage source
+    let in_mna = to_mna(vs_node);
+    let mna = {
+        let mut mna_vs = MnaSystem::new(num_mna_nodes, 1);
+        mna_vs.g_matrix = mna.g_matrix;
+        mna_vs.stamp_voltage_source(in_mna, None, 0);
+        mna_vs
+    };
+
+    let ports: Vec<WdfPort> = reactive_ports;
+    let n_ports = ports.len();
+    let (scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&ports, 0);
+    if scattering.iter().any(|&s| !s.is_finite()) {
+        return None;
+    }
+    if vs_injection.iter().any(|&v| !v.is_finite()) {
+        return None;
+    }
+
+    let dummy_tree = DynNode::Resistor { rp: 1000.0 };
+    let has_pots = !pot_stamps.is_empty();
+    let recompute_mna = if has_pots { Some(mna.clone()) } else { None };
+    let recompute_ports = if has_pots { Some(ports.clone()) } else { None };
+
+    Some(WdfStage {
+        tree: dummy_tree,
+        root: super::stage::RootKind::PassiveRType {
+            scattering,
+            vs_injection,
+            n_ports,
+            children: reactive_children,
+            output_port: output_port_idx,
+            recompute_mna,
+            recompute_ports,
+            pot_stamps,
+            needs_recompute: false,
+        },
+        compensation: 1.0,
+        oversampler: Oversampler::new(OversamplingFactor::X1),
+        base_diode_model: None,
+        paired_opamp: None,
+        allpass_feedback: None,
+        dc_block: None,
+        is_source_follower: false,
+        prev_source_voltage: 0.0,
+        signal_flow_distance: 0,
+        transformer_gain: 1.0,
+        injection_node_id: usize::MAX,
+        output_node_id: usize::MAX,
+        sample_counter: 0,
+        root_comp_id: String::new(),
+    })
+}
+
+/// Rescue orphan output pots that sit between the last processing stage and
+/// `out_node`. These are skipped by `elements_at_junction()` and
+/// `bfs_passive_edges()` because those functions don't traverse through
+/// `out_node`. Build a PassiveRType stage so `PotInStage` can find them.
+fn rescue_orphan_output_pots(
+    graph: &CircuitGraph,
+    classified: &super::classify::ClassifiedCircuit,
+    stages: &[WdfStage],
+    multi_nl_stages: &[super::stage::MultiNlStage],
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+) -> Vec<WdfStage> {
+    use super::stage::RootKind;
+
+    // ── Step 1: Find all pot component IDs ────────────────────────────────
+    let all_pot_ids: Vec<String> = graph
+        .components
+        .iter()
+        .filter(|c| matches!(c.kind, ComponentKind::Potentiometer(_, _)))
+        .map(|c| c.id.clone())
+        .collect();
+    eprintln!("[orphan-rescue] all pot IDs: {:?}", all_pot_ids);
+    if all_pot_ids.is_empty() {
+        return Vec::new();
+    }
+
+    eprintln!("[orphan-rescue] {} WDF stages, {} multi-NL stages", stages.len(), multi_nl_stages.len());
+    for (i, stage) in stages.iter().enumerate() {
+        eprintln!("  WDF stage {}: dist={}, root={:?}", i, stage.signal_flow_distance,
+            match &stage.root { RootKind::PassiveRType { children, .. } => format!("PassiveRType({} children)", children.len()), _ => "other".to_string() });
+    }
+    // ── Step 2: Find orphan pots (not in any WDF or multi-NL stage) ──────
+    let orphan_pot_ids: Vec<&str> = all_pot_ids
+        .iter()
+        .filter(|id| {
+            // Check WDF stages: tree + PassiveRType children
+            for stage in stages {
+                if has_pot(&stage.tree, id) {
+                    return false;
+                }
+                if let RootKind::PassiveRType { children, .. } = &stage.root {
+                    if children.iter().any(|c| has_pot(c, id)) {
+                        return false;
+                    }
+                }
+            }
+            // Check multi-NL stages
+            for mnl in multi_nl_stages {
+                for child in &mnl.pot_children {
+                    if has_pot(child, id) {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .map(|s| s.as_str())
+        .collect();
+    eprintln!("[orphan-rescue] orphan pot IDs: {:?}", orphan_pot_ids);
+    if orphan_pot_ids.is_empty() {
+        return Vec::new();
+    }
+
+    // ── Step 3: BFS from out_node to collect the output passive network ──
+    // Walk through passive edges (R/C/L/Pot). Stop at NL junction nodes,
+    // gnd_node, vcc_node, in_node (collect edge but don't continue).
+    let nl_edge_set: HashSet<usize> = classified.all_nonlinear_edge_indices.iter().copied().collect();
+    let active_edge_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
+
+    // Build adjacency: node → [(edge_idx, neighbor_node)]
+    let mut adj: HashMap<NodeId, Vec<(usize, NodeId)>> = HashMap::new();
+    for (eidx, e) in graph.edges.iter().enumerate() {
+        if nl_edge_set.contains(&eidx) || active_edge_set.contains(&eidx) {
+            continue;
+        }
+        // Skip transformer edges and non-passive components
+        let comp = &graph.components[e.comp_idx];
+        let is_passive = matches!(
+            comp.kind,
+            ComponentKind::Resistor(_)
+                | ComponentKind::Capacitor(_)
+                | ComponentKind::Inductor(_)
+                | ComponentKind::Potentiometer(_, _)
+        );
+        if !is_passive {
+            continue;
+        }
+        // Skip supply-node edges (except gnd — gnd is a valid termination)
+        if graph.supply_nodes.contains(&e.node_a) && e.node_a != graph.gnd_node {
+            continue;
+        }
+        if graph.supply_nodes.contains(&e.node_b) && e.node_b != graph.gnd_node {
+            continue;
+        }
+        adj.entry(e.node_a).or_default().push((eidx, e.node_b));
+        adj.entry(e.node_b).or_default().push((eidx, e.node_a));
+    }
+
+    // Nodes that have nonlinear edges (NL junction nodes)
+    let mut nl_junction_nodes: HashSet<NodeId> = HashSet::new();
+    for &eidx in &classified.all_nonlinear_edge_indices {
+        let e = &graph.edges[eidx];
+        nl_junction_nodes.insert(e.node_a);
+        nl_junction_nodes.insert(e.node_b);
+    }
+    // Also treat active bridge edges as NL boundaries
+    for &eidx in &graph.active_edge_indices {
+        let e = &graph.edges[eidx];
+        nl_junction_nodes.insert(e.node_a);
+        nl_junction_nodes.insert(e.node_b);
+    }
+
+    let boundary_nodes: HashSet<NodeId> = [graph.gnd_node, graph.vcc_node, graph.in_node]
+        .iter()
+        .copied()
+        .collect();
+
+    let mut visited_nodes: HashSet<NodeId> = HashSet::new();
+    let mut output_edges: Vec<usize> = Vec::new();
+    let mut queue = std::collections::VecDeque::new();
+    visited_nodes.insert(graph.out_node);
+    queue.push_back(graph.out_node);
+
+    while let Some(node) = queue.pop_front() {
+        if let Some(neighbors) = adj.get(&node) {
+            for &(eidx, neighbor) in neighbors {
+                if output_edges.contains(&eidx) {
+                    continue;
+                }
+                output_edges.push(eidx);
+                if visited_nodes.contains(&neighbor) {
+                    continue;
+                }
+                visited_nodes.insert(neighbor);
+                // Stop BFS at boundary/NL nodes (edge collected, don't continue)
+                if boundary_nodes.contains(&neighbor) || nl_junction_nodes.contains(&neighbor) {
+                    continue;
+                }
+                queue.push_back(neighbor);
+            }
+        }
+    }
+
+    eprintln!("[orphan-rescue] output_edges: {} edges, visited: {} nodes", output_edges.len(), visited_nodes.len());
+    for &eidx in &output_edges {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        eprintln!("  edge {}: {} ({:?}) between {:?} and {:?}", eidx, comp.id, comp.kind, e.node_a, e.node_b);
+    }
+    if output_edges.is_empty() {
+        return Vec::new();
+    }
+
+    // ── Step 4: Check if any orphan pot is in the output network ──────────
+    let output_comp_ids: HashSet<usize> = output_edges
+        .iter()
+        .map(|&eidx| graph.edges[eidx].comp_idx)
+        .collect();
+    let has_orphan_in_output = orphan_pot_ids.iter().any(|id| {
+        graph
+            .components
+            .iter()
+            .enumerate()
+            .any(|(ci, c)| c.id == *id && output_comp_ids.contains(&ci))
+    });
+    eprintln!("[orphan-rescue] has_orphan_in_output={}", has_orphan_in_output);
+    if !has_orphan_in_output {
+        return Vec::new();
+    }
+
+    // ── Step 5: Find VS injection node ────────────────────────────────────
+    // The interior node (not out_node, gnd, vcc) with smallest dist_from_in.
+    // This is where signal enters the output network from the processing chain.
+    let exclude: HashSet<NodeId> = [graph.out_node, graph.gnd_node, graph.vcc_node]
+        .iter()
+        .copied()
+        .collect();
+    let vs_node = {
+        let mut best_node = None;
+        let mut best_dist = usize::MAX;
+        for &node in &visited_nodes {
+            if exclude.contains(&node) {
+                continue;
+            }
+            if let Some(&d) = classified.dist_from_in.get(&node) {
+                if d < best_dist {
+                    best_dist = d;
+                    best_node = Some(node);
+                }
+            }
+        }
+        match best_node {
+            Some(n) => n,
+            None => return Vec::new(),
+        }
+    };
+
+    eprintln!("[orphan-rescue] vs_node={:?}, out_node={:?}", vs_node, graph.out_node);
+
+    // ── Step 6: Build PassiveRType stage ──────────────────────────────────
+    // Standard 1 GΩ probe — 3-terminal divider pots work at any load
+    // impedance because the voltage division is internal to the pot.
+    if let Some(mut stage) = build_orphan_output_mna_stage(
+        graph,
+        &output_edges,
+        vs_node,
+        graph.out_node,
+        1e9, // standard high-Z probe
+        sample_rate,
+    ) {
+        // Process last — after all NL stages, before the output probe.
+        stage.signal_flow_distance = usize::MAX - 1;
+        eprintln!("[orphan-rescue] stage BUILT successfully");
+        vec![stage]
+    } else {
+        eprintln!("[orphan-rescue] build_orphan_output_mna_stage returned None");
+        Vec::new()
+    }
+}
+
 /// Build a WDF stage for simple 2-element passive circuits (RC, RL, resistor divider).
 ///
 /// Uses VoltageSourceDriver at root with Series(source, load) tree.
@@ -667,7 +1107,7 @@ pub struct CompileOptions {
 impl Default for CompileOptions {
     fn default() -> Self {
         Self {
-            oversampling: OversamplingFactor::X2,
+            oversampling: OversamplingFactor::X4,
             tolerance: ToleranceEngine::ideal(),
             thermal: false,
             collapse_nl: false,
@@ -809,6 +1249,18 @@ pub fn compile_pedal_with_options(
 
     // Add triode fallback stages (SP-failed triodes built as single-NL MNA).
     multi_nl_stages.extend(triode_fallback_stages);
+
+    // ══ Orphan output pot rescue ═════════════════════════════════════
+    // Pots between the last processing stage and out_node are skipped
+    // by elements_at_junction/bfs_passive_edges. Build a PassiveRType
+    // stage so PotInStage can find and control them.
+    if !stages.is_empty() || !multi_nl_stages.is_empty() {
+        let orphan_stages = rescue_orphan_output_pots(
+            &graph, &classified, &stages, &multi_nl_stages,
+            sample_rate, oversampling,
+        );
+        stages.extend(orphan_stages);
+    }
 
     // ══ Passive-only fallback ═════════════════════════════════════════
     let mut passive_attenuation = 1.0;
@@ -1013,7 +1465,7 @@ pub fn compile_pedal_with_options(
     let (sidechains, sidechain_comp_ids) =
         super::bind::build_sidechains(pedal, &graph, sample_rate);
 
-    let controls = super::bind::build_controls(
+    let (controls, pot_effects) = super::bind::build_controls(
         pedal,
         &stages,
         &multi_nl_stages,
@@ -1050,10 +1502,8 @@ pub fn compile_pedal_with_options(
         .unwrap_or(1.0);
 
     let physical_gain = opamp_feedback_gain * passive_attenuation * transformer_gain;
-    // Gain range for PreGain controls ("Gain", "Drive", "Fuzz", etc.).
-    // Maps the 0–1 control value to a useful input-level sweep:
-    //   value=0 → near-unity (clean), value=1 → 10× drive (+20 dB).
-    // This is a fallback for pots not found in any WDF stage tree.
+    // Gain range for initial pre-gain computation.
+    // Maps the physical gain to a useful input-level sweep.
     let gain_range_final = (physical_gain.max(0.1), physical_gain.max(0.1) * 10.0);
     let (pre_gain, output_gain) = (physical_gain, level_default);
 
@@ -1173,6 +1623,7 @@ pub fn compile_pedal_with_options(
         stage_order,
         node_signals: Vec::new(),
         bbd_wet_mix: 0.5,
+        pot_effects,
     };
 
     let initial_voltage = match &compiled.power_supply {

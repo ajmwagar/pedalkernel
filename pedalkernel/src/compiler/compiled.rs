@@ -50,10 +50,6 @@ pub(super) struct ControlBinding {
 
 #[derive(Debug)]
 pub(super) enum ControlTarget {
-    /// Modify the pre-gain multiplier (gain/drive/fuzz/distortion/sustain).
-    PreGain,
-    /// Modify output attenuation (level/volume/output).
-    OutputGain,
     /// Modify a pot in a specific WDF stage.
     PotInStage(usize),
     /// Modify a pot inside a multi-NL stage (R-type adaptor approach).
@@ -75,25 +71,11 @@ pub(super) enum ControlTarget {
     BbdClockRate(usize),
     /// Modify a BBD delay line's feedback amount (0–1).
     BbdFeedback(usize),
-    /// Modify the BBD wet/dry mix (0 = fully dry, 1 = fully wet).
-    BbdMix,
     /// Modify a switch position for fork() routing.
     /// Contains: (switch_id, num_positions)
     SwitchPosition {
         switch_id: String,
         num_positions: usize,
-    },
-    /// Modify op-amp feedback gain (pot in Rf path).
-    /// For series topology: Rf = fixed_series_r + pot_r
-    /// For parallel topology: Rf = parallel_fixed_r || (fixed_series_r + pot_r)
-    OpAmpGain {
-        stage_idx: usize,
-        ri: f64,
-        fixed_series_r: f64,
-        max_pot_r: f64,
-        /// If Some, pot is in parallel with a fixed resistance path
-        parallel_fixed_r: Option<f64>,
-        is_inverting: bool,
     },
     /// Pot controlling BJT feedback coupling + DC bias offset.
     /// NOT in the WDF tree; position maps to feedback_scale + VEB offset.
@@ -102,6 +84,22 @@ pub(super) enum ControlTarget {
         max_pot_r: f64,
         taper: crate::dsl::PotTaper,
     },
+}
+
+/// Behavioral side-effects applied alongside PotInStage physical updates.
+#[derive(Debug, Clone)]
+pub(super) enum PotEffect {
+    /// Recompute op-amp gain from pot position (pot in Rf path).
+    OpAmpGain {
+        stage_idx: usize,
+        ri: f64,
+        fixed_series_r: f64,
+        max_pot_r: f64,
+        parallel_fixed_r: Option<f64>,
+        is_inverting: bool,
+    },
+    /// Update BBD wet/dry mix from pot position.
+    BbdMix,
 }
 
 /// Modulation target for LFOs and envelope followers.
@@ -485,9 +483,13 @@ pub struct CompiledPedal {
     /// BBD wet/dry mix (0.0 = fully dry, 1.0 = fully wet).
     /// Controlled by "Blend"/"Mix" knobs on BBD delay pedals.
     pub(super) bbd_wet_mix: f64,
+    /// Behavioral side-effects for pot controls.
+    /// Keyed by component ID; applied alongside PotInStage physical updates.
+    pub(super) pot_effects: HashMap<String, Vec<PotEffect>>,
 }
 
 /// Gain-like control labels.
+#[allow(dead_code)]
 pub(super) fn is_gain_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
@@ -504,6 +506,7 @@ pub(super) fn is_level_label(label: &str) -> bool {
 }
 
 /// Rate-like control labels (for LFO).
+#[allow(dead_code)]
 pub(super) fn is_rate_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
@@ -512,11 +515,13 @@ pub(super) fn is_rate_label(label: &str) -> bool {
 }
 
 /// Depth-like control labels (for LFO modulation amount).
+#[allow(dead_code)]
 pub(super) fn is_depth_label(label: &str) -> bool {
     matches!(label.to_ascii_lowercase().as_str(), "depth" | "width")
 }
 
 /// Delay time control labels.
+#[allow(dead_code)]
 pub(super) fn is_delay_time_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
@@ -525,6 +530,7 @@ pub(super) fn is_delay_time_label(label: &str) -> bool {
 }
 
 /// Delay feedback/intensity control labels.
+#[allow(dead_code)]
 pub(super) fn is_delay_feedback_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
@@ -853,13 +859,6 @@ impl CompiledPedal {
             let (r0, r1) = self.controls[i].range;
             let value = (r0 + value * (r1 - r0)).clamp(0.0, 1.0);
             match &self.controls[i].target {
-                ControlTarget::PreGain => {
-                    let (lo, hi) = self.gain_range;
-                    self.pre_gain = lo * (hi / lo).powf(value);
-                }
-                ControlTarget::OutputGain => {
-                    self.output_gain = value;
-                }
                 ControlTarget::PotInStage(_stage_idx) => {
                     // Use smoothing for pot changes to avoid zipper noise / clicks.
                     // Find the smoother for this control and set the target.
@@ -877,11 +876,19 @@ impl CompiledPedal {
                             if !stage.tree.set_pot(&comp_id, value) {
                                 stage.set_passive_rtype_pot(&comp_id, value);
                             }
-                            stage.tree.set_pot(&format!("{comp_id}__aw"), value);
-                            stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
+                            let aw = format!("{comp_id}__aw");
+                            let wb = format!("{comp_id}__wb");
+                            if !stage.tree.set_pot(&aw, value) {
+                                stage.set_passive_rtype_pot(&aw, value);
+                            }
+                            if !stage.tree.set_pot(&wb, 1.0 - value) {
+                                stage.set_passive_rtype_pot(&wb, 1.0 - value);
+                            }
                             stage.tree.recompute();
                             stage.flush_passive_rtype_recompute();
                         }
+                        // Apply behavioral side-effects (op-amp gain, BBD mix, etc.)
+                        self.apply_pot_effects(&comp_id, value);
                         // Update mirrored pots (position = 1.0 - source)
                         if let Some(mirror_ids) = self.pot_mirrors.get(&comp_id) {
                             let inv = 1.0 - value;
@@ -890,8 +897,14 @@ impl CompiledPedal {
                                     if !stage.tree.set_pot(&mirror_id, inv) {
                                         stage.set_passive_rtype_pot(&mirror_id, inv);
                                     }
-                                    stage.tree.set_pot(&format!("{mirror_id}__aw"), inv);
-                                    stage.tree.set_pot(&format!("{mirror_id}__wb"), 1.0 - inv);
+                                    let m_aw = format!("{mirror_id}__aw");
+                                    let m_wb = format!("{mirror_id}__wb");
+                                    if !stage.tree.set_pot(&m_aw, inv) {
+                                        stage.set_passive_rtype_pot(&m_aw, inv);
+                                    }
+                                    if !stage.tree.set_pot(&m_wb, 1.0 - inv) {
+                                        stage.set_passive_rtype_pot(&m_wb, 1.0 - inv);
+                                    }
                                     stage.tree.recompute();
                                     stage.flush_passive_rtype_recompute();
                                 }
@@ -958,9 +971,6 @@ impl CompiledPedal {
                         bbd.set_feedback(value * 0.95);
                     }
                 }
-                ControlTarget::BbdMix => {
-                    self.bbd_wet_mix = value;
-                }
                 ControlTarget::SwitchPosition {
                     switch_id,
                     num_positions,
@@ -977,51 +987,6 @@ impl CompiledPedal {
                     for stage in &mut self.stages {
                         stage.tree.set_switch_position(switch_id, position);
                         stage.tree.recompute();
-                    }
-                }
-                ControlTarget::OpAmpGain {
-                    stage_idx,
-                    ri,
-                    fixed_series_r,
-                    max_pot_r,
-                    parallel_fixed_r,
-                    is_inverting,
-                } => {
-                    // Calculate pot resistance from position
-                    let pot_r = value * *max_pot_r;
-                    // Calculate pot path resistance (series with any fixed resistors in that path)
-                    let pot_path_r = *fixed_series_r + pot_r;
-
-                    // Real pots have minimum wiper-to-end resistance of ~100-1000 ohms
-                    // even at the "0" position, due to contact resistance and track design.
-                    // Use 500 ohms as typical minimum for audio pots.
-                    let min_pot_r = 500.0;
-                    let effective_pot_path_r = pot_path_r.max(min_pot_r);
-
-                    // Calculate effective Rf based on topology
-                    let rf = if let Some(parallel_r) = parallel_fixed_r {
-                        // Parallel topology: Rf = parallel_fixed_r || pot_path_r
-                        // Formula: 1/Rf = 1/R1 + 1/R2, so Rf = (R1*R2)/(R1+R2)
-                        // When pot_path_r → min, Rf → parallel_r || min
-                        // When pot_path_r → ∞, Rf → parallel_r
-                        (parallel_r * effective_pot_path_r) / (parallel_r + effective_pot_path_r)
-                    } else {
-                        // Series topology: Rf = fixed_series_r + pot_r
-                        effective_pot_path_r
-                    };
-
-                    // Calculate gain based on op-amp configuration
-                    // - Inverting: gain = Rf/Ri
-                    // - Non-inverting: gain = 1 + Rf/Ri
-                    let gain = if *is_inverting {
-                        rf / *ri
-                    } else {
-                        1.0 + (rf / *ri)
-                    };
-
-                    let stage_idx = *stage_idx;
-                    if let Some(stage) = self.stages.get_mut(stage_idx) {
-                        stage.set_opamp_gain(gain);
                     }
                 }
                 ControlTarget::BjtBias { max_pot_r, taper } => {
@@ -1044,6 +1009,42 @@ impl CompiledPedal {
         }
     }
 
+    /// Apply behavioral side-effects for a pot control (op-amp gain, BBD mix, etc.).
+    fn apply_pot_effects(&mut self, comp_id: &str, value: f64) {
+        if let Some(effects) = self.pot_effects.get(comp_id).cloned() {
+            for effect in &effects {
+                match effect {
+                    PotEffect::OpAmpGain {
+                        stage_idx,
+                        ri,
+                        fixed_series_r,
+                        max_pot_r,
+                        parallel_fixed_r,
+                        is_inverting,
+                    } => {
+                        let pot_r = value * max_pot_r;
+                        let eff_r = (fixed_series_r + pot_r).max(500.0);
+                        let rf = match parallel_fixed_r {
+                            Some(pr) => (pr * eff_r) / (pr + eff_r),
+                            None => eff_r,
+                        };
+                        let gain = if *is_inverting {
+                            rf / ri
+                        } else {
+                            1.0 + rf / ri
+                        };
+                        if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                            stage.set_opamp_gain(gain);
+                        }
+                    }
+                    PotEffect::BbdMix => {
+                        self.bbd_wet_mix = value;
+                    }
+                }
+            }
+        }
+    }
+
     /// Advance all pot smoothers and update WDF trees where values have changed.
     ///
     /// Call this once per sample (or per block for efficiency) to smoothly
@@ -1056,14 +1057,14 @@ impl CompiledPedal {
     /// per-sample so the passive port impedance tracks smoothly.
     #[inline]
     fn advance_smoothers(&mut self) {
-        for smoother in &mut self.pot_smoothers {
-            if smoother.is_settled() {
+        for si in 0..self.pot_smoothers.len() {
+            if self.pot_smoothers[si].is_settled() {
                 continue;
             }
-            if smoother.advance() {
+            if self.pot_smoothers[si].advance() {
                 // Value changed, update the actual pot
-                let ctrl_idx = smoother.control_idx;
-                let value = smoother.current;
+                let ctrl_idx = self.pot_smoothers[si].control_idx;
+                let value = self.pot_smoothers[si].current;
                 let comp_id = self.controls[ctrl_idx].component_id.clone();
                 match &self.controls[ctrl_idx].target {
                     ControlTarget::PotInStage(stage_idx) => {
@@ -1073,11 +1074,20 @@ impl CompiledPedal {
                             if !stage.tree.set_pot(&comp_id, value) {
                                 stage.set_passive_rtype_pot(&comp_id, value);
                             }
-                            stage.tree.set_pot(&format!("{comp_id}__aw"), value);
-                            stage.tree.set_pot(&format!("{comp_id}__wb"), 1.0 - value);
+                            // 3-terminal pot halves: update both tree and PassiveRType
+                            let aw = format!("{comp_id}__aw");
+                            let wb = format!("{comp_id}__wb");
+                            if !stage.tree.set_pot(&aw, value) {
+                                stage.set_passive_rtype_pot(&aw, value);
+                            }
+                            if !stage.tree.set_pot(&wb, 1.0 - value) {
+                                stage.set_passive_rtype_pot(&wb, 1.0 - value);
+                            }
                             stage.tree.recompute();
                             // PassiveRType recompute is throttled (see bottom of fn)
                         }
+                        // Apply behavioral side-effects (op-amp gain, BBD mix, etc.)
+                        self.apply_pot_effects(&comp_id, value);
                         // Update mirrored pots (position = 1.0 - source)
                         if let Some(mirror_ids) = self.pot_mirrors.get(&comp_id) {
                             let inv = 1.0 - value;
@@ -1086,8 +1096,14 @@ impl CompiledPedal {
                                     if !stage.tree.set_pot(&mirror_id, inv) {
                                         stage.set_passive_rtype_pot(&mirror_id, inv);
                                     }
-                                    stage.tree.set_pot(&format!("{mirror_id}__aw"), inv);
-                                    stage.tree.set_pot(&format!("{mirror_id}__wb"), 1.0 - inv);
+                                    let m_aw = format!("{mirror_id}__aw");
+                                    let m_wb = format!("{mirror_id}__wb");
+                                    if !stage.tree.set_pot(&m_aw, inv) {
+                                        stage.set_passive_rtype_pot(&m_aw, inv);
+                                    }
+                                    if !stage.tree.set_pot(&m_wb, 1.0 - inv) {
+                                        stage.set_passive_rtype_pot(&m_wb, 1.0 - inv);
+                                    }
                                     stage.tree.recompute();
                                 }
                             }

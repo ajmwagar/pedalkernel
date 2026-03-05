@@ -106,7 +106,8 @@ pedal "Klon Centaur" {
     U3.out -> R11.a
     R11.b -> Output.a, R12.a
     R12.b -> gnd
-    Output.b -> out
+    Output.w -> out
+    Output.b -> gnd
   }
   controls {
     Gain.position -> "Gain" [0.0, 1.0] = 0.5

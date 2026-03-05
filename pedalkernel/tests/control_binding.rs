@@ -215,7 +215,7 @@ fn pot_b_to_bbd_clock() {
 fn bbd_out_to_pot_detects_feedback() {
     // When a pot is wired from BBD.out, it may end up in a WDF stage tree
     // (step 3 priority) or detected as BBD feedback (step 5). Either is
-    // valid — the important thing is it doesn't fall through to PreGain.
+    // valid — the important thing is it binds to a meaningful target.
     let src = r#"
         pedal "BBD Feedback" {
             components {
@@ -247,10 +247,10 @@ fn bbd_out_to_pot_detects_feedback() {
         d.contains("Repeats -> BbdFeedback(0)") || d.contains("Repeats -> PotInStage("),
         "BBD.out -> Pot.a should bind to BbdFeedback or PotInStage, not PreGain; controls:\n{d}"
     );
-    // Must NOT fall through to PreGain
+    // Should bind to a specific target, not a generic fallback
     assert!(
-        !d.contains("Repeats -> PreGain"),
-        "BBD feedback pot should not fall through to PreGain; controls:\n{d}"
+        d.contains("Repeats -> BbdFeedback(0)") || d.contains("Repeats -> PotInStage("),
+        "BBD feedback pot should bind to BbdFeedback or PotInStage; controls:\n{d}"
     );
 }
 
@@ -373,8 +373,8 @@ fn label_volume_pot_in_circuit() {
 }
 
 #[test]
-fn disconnected_pot_falls_to_pregain() {
-    // Pot NOT in signal path and no net connection → PreGain fallback
+fn disconnected_pot_falls_to_pot_in_stage() {
+    // Pot NOT in signal path and no net connection → PotInStage(0) fallback with warning
     let src = r#"
         pedal "Disconnected Pot" {
             components {
@@ -396,10 +396,10 @@ fn disconnected_pot_falls_to_pregain() {
     "#;
     let compiled = compile_src(src);
     let d = dump(&compiled);
-    // Pot not wired to BBD.clock via nets → no binding → PreGain
+    // Pot not wired to BBD.clock via nets → no binding → PotInStage(0) harmless fallback
     assert!(
-        d.contains("Delay -> PreGain"),
-        "Disconnected pot should fall through to PreGain; controls:\n{d}"
+        d.contains("Delay -> PotInStage(0)"),
+        "Disconnected pot should fall through to PotInStage(0); controls:\n{d}"
     );
 }
 
@@ -546,11 +546,6 @@ fn pot_in_wdf_stage() {
         d.contains("Tone -> PotInStage(") || d.contains("Tone -> PotInMultiNlStage("),
         "Pot in diode clipping stage should bind to PotInStage or PotInMultiNlStage; controls:\n{d}"
     );
-    // Must NOT fall through to PreGain
-    assert!(
-        !d.contains("Tone -> PreGain"),
-        "Pot in stage tree should not fall through to PreGain; controls:\n{d}"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -559,7 +554,7 @@ fn pot_in_wdf_stage() {
 
 #[test]
 fn pot_in_opamp_feedback() {
-    // Pot in op-amp Rf path should bind to OpAmpGain { ... }
+    // Pot in op-amp Rf path should bind to PotInStage (with OpAmpGain side-effect)
     let src = r#"
         pedal "OpAmp Gain" {
             components {
@@ -587,8 +582,8 @@ fn pot_in_opamp_feedback() {
     let compiled = compile_src(src);
     let d = dump(&compiled);
     assert!(
-        d.contains("OpAmpGain {"),
-        "Pot in opamp Rf path should bind to OpAmpGain {{ ... }}; controls:\n{d}"
+        d.contains("Gain -> PotInStage("),
+        "Pot in opamp Rf path should bind to PotInStage (with OpAmpGain side-effect); controls:\n{d}"
     );
 }
 
@@ -820,10 +815,10 @@ fn memory_man_all_controls_bound() {
         d.contains("Feedback -> BbdFeedback(0)"),
         "Memory Man: Feedback should bind to BbdFeedback(0); controls:\n{d}"
     );
-    // Blend pot reaches BBD output through passives → BbdMix
+    // Blend pot reaches BBD output through passives → PotInStage (with BbdMix side-effect)
     assert!(
-        d.contains("Blend -> BbdMix"),
-        "Memory Man: Blend should bind to BbdMix; controls:\n{d}"
+        d.contains("Blend -> PotInStage("),
+        "Memory Man: Blend should bind to PotInStage (with BbdMix side-effect); controls:\n{d}"
     );
 }
 
@@ -842,10 +837,10 @@ fn dm2_all_controls_bound() {
         d.contains("Repeats -> BbdFeedback(0)"),
         "DM-2: Repeats should bind to BbdFeedback(0); controls:\n{d}"
     );
-    // Mix pot reaches BBD output through passives → BbdMix
+    // Mix pot reaches BBD output through passives → PotInStage (with BbdMix side-effect)
     assert!(
-        d.contains("Mix -> BbdMix"),
-        "DM-2: Mix should bind to BbdMix; controls:\n{d}"
+        d.contains("Mix -> PotInStage("),
+        "DM-2: Mix should bind to PotInStage (with BbdMix side-effect); controls:\n{d}"
     );
 }
 
@@ -871,10 +866,10 @@ fn rat_controls_bound() {
     let compiled = compile_example("proco_rat.pedal");
     let d = dump(&compiled);
 
-    // Distortion: should be OpAmpGain (in Rf path) or PotInStage
+    // Distortion: should be PotInStage (with OpAmpGain side-effect)
     assert!(
-        d.contains("Distortion -> OpAmpGain {") || d.contains("Distortion -> PotInStage("),
-        "RAT: Distortion should bind to OpAmpGain or PotInStage; controls:\n{d}"
+        d.contains("Distortion -> PotInStage("),
+        "RAT: Distortion should bind to PotInStage; controls:\n{d}"
     );
     // Filter: should be PotInStage (tone control in passive filter stage)
     assert!(
@@ -883,12 +878,11 @@ fn rat_controls_bound() {
             || d.contains("Filter -> OpAmpGain {"),
         "RAT: Filter should bind to a stage target; controls:\n{d}"
     );
-    // Volume: should be OutputGain, PotInStage, or PotInMultiNlStage
+    // Volume: should be PotInStage or PotInMultiNlStage
     assert!(
-        d.contains("Volume -> OutputGain")
-            || d.contains("Volume -> PotInStage(")
+        d.contains("Volume -> PotInStage(")
             || d.contains("Volume -> PotInMultiNlStage("),
-        "RAT: Volume should bind to OutputGain or a stage target; controls:\n{d}"
+        "RAT: Volume should bind to a stage target; controls:\n{d}"
     );
 }
 
@@ -897,26 +891,22 @@ fn klon_controls_bound() {
     let compiled = compile_example("klon_centaur.pedal");
     let d = dump(&compiled);
 
-    // Gain: should be PotInStage, OpAmpGain, or PreGain
+    // Gain: should be PotInStage (with OpAmpGain side-effect if in Rf path)
     assert!(
         d.contains("Gain -> PotInStage(")
-            || d.contains("Gain -> PotInMultiNlStage(")
-            || d.contains("Gain -> OpAmpGain {")
-            || d.contains("Gain -> PreGain"),
-        "Klon: Gain should bind to a stage or gain target; controls:\n{d}"
+            || d.contains("Gain -> PotInMultiNlStage("),
+        "Klon: Gain should bind to a stage target; controls:\n{d}"
     );
-    // Treble: should be PotInStage or PreGain
+    // Treble: should be PotInStage
     assert!(
         d.contains("Treble -> PotInStage(")
-            || d.contains("Treble -> PotInMultiNlStage(")
-            || d.contains("Treble -> PreGain"),
+            || d.contains("Treble -> PotInMultiNlStage("),
         "Klon: Treble should bind to a stage target; controls:\n{d}"
     );
-    // Output: should be PotInStage or PreGain
+    // Output: should be PotInStage
     assert!(
-        d.contains("Output -> PotInStage(")
-            || d.contains("Output -> PreGain"),
-        "Klon: Output should bind to PotInStage or PreGain; controls:\n{d}"
+        d.contains("Output -> PotInStage("),
+        "Klon: Output should bind to PotInStage; controls:\n{d}"
     );
 }
 

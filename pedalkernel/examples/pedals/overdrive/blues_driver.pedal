@@ -106,7 +106,8 @@ pedal "Boss Blues Driver" {
     # Output
     C9.b -> R13.a, Level.a
     R13.b -> gnd
-    Level.b -> R14.a
+    Level.w -> R14.a
+    Level.b -> gnd
     R14.b -> out
   }
   controls {

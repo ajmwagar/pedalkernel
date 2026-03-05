@@ -72,7 +72,8 @@ pedal "Tube Screamer" {
     # Output
     C6.b -> Level.a, R7.a
     R7.b -> gnd
-    Level.b -> out
+    Level.w -> out
+    Level.b -> gnd
   }
   controls {
     Drive.position -> "Drive" [0.0, 1.0] = 0.5

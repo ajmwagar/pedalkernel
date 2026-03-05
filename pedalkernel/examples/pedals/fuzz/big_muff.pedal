@@ -124,7 +124,8 @@ pedal "Big Muff" {
     # Output
     C10.b -> Volume.a, R16.a
     R16.b -> gnd
-    Volume.b -> out
+    Volume.w -> out
+    Volume.b -> gnd
   }
   controls {
     Sustain.position -> "Sustain" [0.0, 1.0] = 0.7

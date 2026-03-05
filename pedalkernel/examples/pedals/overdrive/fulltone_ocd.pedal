@@ -72,7 +72,8 @@ pedal "Fulltone OCD" {
     # Output
     C5.b -> Volume.a, R7.a
     R7.b -> gnd
-    Volume.b -> out
+    Volume.w -> out
+    Volume.b -> gnd
   }
   controls {
     Drive.position -> "Drive" [0.0, 1.0] = 0.5

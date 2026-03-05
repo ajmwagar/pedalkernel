@@ -31,7 +31,8 @@ pedal "MXR Dyna Comp" {
     Sensitivity.b -> gnd
     U1.out -> C3.a
     C3.b -> Output.a
-    Output.b -> out
+    Output.w -> out
+    Output.b -> gnd
     EF1.in -> C1.b
     EF1.out -> U1.iabc
   }

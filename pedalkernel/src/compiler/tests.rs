@@ -334,19 +334,20 @@ fn level_control_affects_volume() {
     let pedal = parse("tube_screamer.pedal");
     let input = sine(48000);
 
-    let mut quiet = compile_pedal(&pedal, 48000.0).unwrap();
-    quiet.set_control("Level", 0.1);
-    let out_quiet: Vec<f64> = input.iter().map(|&s| quiet.process(s)).collect();
-    let peak_quiet = out_quiet.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    let mut low = compile_pedal(&pedal, 48000.0).unwrap();
+    low.set_control("Level", 0.1);
+    let out_low: Vec<f64> = input.iter().map(|&s| low.process(s)).collect();
+    let peak_low = out_low.iter().fold(0.0f64, |m, x| m.max(x.abs()));
 
-    let mut loud = compile_pedal(&pedal, 48000.0).unwrap();
-    loud.set_control("Level", 0.9);
-    let out_loud: Vec<f64> = input.iter().map(|&s| loud.process(s)).collect();
-    let peak_loud = out_loud.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    let mut high = compile_pedal(&pedal, 48000.0).unwrap();
+    high.set_control("Level", 0.9);
+    let out_high: Vec<f64> = input.iter().map(|&s| high.process(s)).collect();
+    let peak_high = out_high.iter().fold(0.0f64, |m, x| m.max(x.abs()));
 
+    // 3-terminal divider: position 0.9 = wiper near .a = more signal = louder
     assert!(
-        peak_loud > peak_quiet,
-        "Higher Level should be louder: quiet={peak_quiet:.4} loud={peak_loud:.4}"
+        peak_high > peak_low * 1.05,
+        "Higher Level should produce louder output: pos=0.1 peak={peak_low:.4}, pos=0.9 peak={peak_high:.4}"
     );
 }
 
