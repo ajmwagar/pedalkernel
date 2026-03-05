@@ -236,10 +236,8 @@ fn compile_dyna_comp() {
 #[test]
 fn compile_phase90() {
     // Phase 90 (Aurora) compiles with op-amp stages and produces phasing effect.
-    // The Aurora topology uses JFETs in series in the all-pass path (drain → op-amp
-    // neg) with feedback resistors, which is the correct Phase 90 Script Logo
-    // topology. Output level is low through WDF (~-96dB) because the op-amp
-    // gain loop isn't fully captured, but the modulation effect is correct.
+    // AllpassJfet feedback models the inverting all-pass topology correctly,
+    // producing audible-level output with phase modulation.
     let pedal = parse("phase90.pedal");
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
     proc.set_control("Speed", 0.5);
@@ -249,13 +247,10 @@ fn compile_phase90() {
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     assert_finite(&output, "Phase 90");
 
-    // Verify non-silent output. The Aurora all-pass topology produces low
-    // absolute level through WDF (op-amp gain loop attenuation), but the
-    // phasing modulation effect is correct (verified by speed_changes_rate).
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     assert!(
-        peak > 1e-7,
-        "Phase 90 should produce non-silent output: peak={peak}"
+        peak > 1e-3,
+        "Phase 90 should produce audible output: peak={peak}"
     );
 }
 

@@ -205,6 +205,24 @@ impl RootKind {
     }
 }
 
+/// Feedback impedance IIR for JFET→opamp-neg all-pass stages (Phase 90 topology).
+///
+/// Models the inverting all-pass where JFET drain connects to opamp neg
+/// with Rf||Cf feedback to output. Transfer function: V_out = -(Z_fb/Z_in) * V_in
+/// where Z_fb(s) = Rf/(1 + s·Rf·Cf) via bilinear transform.
+pub(super) struct AllpassFeedback {
+    /// Input resistance (R_ap) in the signal path before the JFET.
+    pub(super) r_ap: f64,
+    /// IIR numerator coefficient: Rf / (1 + K) where K = 2·fs·Rf·Cf.
+    pub(super) b0: f64,
+    /// IIR denominator coefficient: (K - 1) / (K + 1).
+    pub(super) a1: f64,
+    /// Previous input current sample for IIR.
+    pub(super) x_prev: f64,
+    /// Previous output voltage for IIR.
+    pub(super) y_prev: f64,
+}
+
 pub(super) struct WdfStage {
     pub(super) tree: DynNode,
     pub(super) root: RootKind,
@@ -224,6 +242,10 @@ pub(super) struct WdfStage {
     /// modeling the all-pass behavior where the op-amp buffers the signal
     /// at unity gain while the R/C/JFET network shifts phase.
     pub(super) paired_opamp: Option<OpAmpRoot>,
+    /// Inverting all-pass feedback (Phase 90 topology).
+    /// When present, bypasses the WDF output and computes V_out = -(Z_fb/Z_in) * V_in
+    /// where Z_in includes the JFET variable resistance.
+    pub(super) allpass_feedback: Option<AllpassFeedback>,
     /// DC-blocking highpass filter for triode stages.
     /// Models the output coupling capacitor's DC blocking behavior.
     /// Format: (a1, b0, y_prev, x_prev) for IIR highpass.
@@ -473,22 +495,28 @@ impl WdfStage {
             (a_root + b_tree) / 2.0
         });
 
-        // If a paired op-amp buffer is present, it models the all-pass
-        // output reconstruction.  The op-amp receives the stage input as
-        // Vp (non-inverting input) and uses the WDF junction voltage to
-        // compute: V_allpass = 2 * V_junction - V_in.
-        //
-        // This is the standard all-pass output formula derived from the
-        // bridged-T topology: the op-amp with gain 2 applied to the
-        // voltage divider output produces H(s) = (Z-R)/(Z+R), which
-        // has |H| = 1 (unity magnitude, phase shift only).
-        if let Some(ref mut opamp) = self.paired_opamp {
-            // Feed the WDF junction voltage through the op-amp.
-            // The op-amp's Vp was set to the stage input externally
-            // (by the process loop in compiled.rs).
-            let a = 2.0 * wdf_out;
-            let b = opamp.process(a, tree.port_resistance());
-            return flush_denormal((a + b) / 2.0);
+        // Inverting all-pass feedback (Phase 90 topology).
+        // Bypasses WDF output: V_out = -(Z_fb/Z_in) * V_in where Z_fb = Rf||Cf (IIR)
+        // and Z_in = R_ap + R_jfet (variable from LFO modulation).
+        if let Some(ref mut fb) = self.allpass_feedback {
+            let r_jfet = match &self.root {
+                RootKind::JfetVr(jvr) => jvr.rds(),
+                _ => fb.r_ap,
+            };
+            let z_in = fb.r_ap + r_jfet;
+            let i_in = (input * self.compensation) / z_in;
+            let v_fb = fb.b0 * (i_in + fb.x_prev) + fb.a1 * fb.y_prev;
+            fb.x_prev = i_in;
+            fb.y_prev = flush_denormal(v_fb);
+            return -fb.y_prev;
+        }
+
+        // Bridged-T all-pass with unity-gain op-amp buffer:
+        // V_allpass = 2 * V_junction - V_in.
+        // The WDF tree models the RC network phase shift; the op-amp
+        // reconstructs the all-pass output at unity magnitude.
+        if self.paired_opamp.is_some() {
+            return flush_denormal(2.0 * wdf_out - input);
         }
 
         // Update source follower state (for next sample's Vgs calculation)

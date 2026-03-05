@@ -126,6 +126,7 @@ pub(super) fn build_opamp_feedback_stages(
                     oversampler: crate::oversampling::Oversampler::new(oversampling),
                     base_diode_model: None,
                     paired_opamp: None,
+                    allpass_feedback: None,
                     dc_block: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
@@ -174,6 +175,7 @@ pub(super) fn build_opamp_feedback_stages(
                     oversampler: crate::oversampling::Oversampler::new(oversampling),
                     base_diode_model: None,
                     paired_opamp: None,
+                    allpass_feedback: None,
                     dc_block: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
@@ -184,6 +186,9 @@ pub(super) fn build_opamp_feedback_stages(
                     sample_counter: 0,
                     root_comp_id: String::new(),
                 });
+            }
+            OpAmpFeedbackKind::AllpassJfet { .. } => {
+                // Handled during JFET stage building in build_stages().
             }
         }
     }
@@ -204,6 +209,22 @@ pub(super) fn build_unity_gain_queue(analysis: &OpAmpAnalysis, sample_rate: f64)
             opamp
         })
         .collect()
+}
+
+/// Build a map from JFET component ID → (rf, cf) for AllpassJfet feedback topologies.
+pub(super) fn build_allpass_jfet_map(analysis: &OpAmpAnalysis) -> HashMap<String, (f64, f64)> {
+    let mut map = HashMap::new();
+    for info in &analysis.feedback_loops {
+        if let OpAmpFeedbackKind::AllpassJfet {
+            rf,
+            cf,
+            ref jfet_id,
+        } = info.feedback_kind
+        {
+            map.insert(jfet_id.clone(), (rf, cf));
+        }
+    }
+    map
 }
 
 /// Build standalone op-amp stages (no feedback detected).

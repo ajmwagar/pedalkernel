@@ -1942,6 +1942,53 @@ impl CircuitGraph {
                         continue;
                     }
 
+                    // Check for AllpassJfet: JFET drain at neg with R||C feedback (Phase 90).
+                    let mut cf_val = None;
+                    for c in &pedal.components {
+                        if let ComponentKind::Capacitor(cfg) = &c.kind {
+                            let pa = format!("{}.a", c.id);
+                            let pb = format!("{}.b", c.id);
+                            if let (Some(&a), Some(&b)) =
+                                (pin_ids.get(&pa), pin_ids.get(&pb))
+                            {
+                                let an = uf.find(a);
+                                let bn = uf.find(b);
+                                if (an == neg_node && bn == out_node)
+                                    || (an == out_node && bn == neg_node)
+                                {
+                                    cf_val = Some(cfg.value);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    let mut jfet_comp_id = None;
+                    for c in &pedal.components {
+                        if matches!(&c.kind, ComponentKind::NJfet(_) | ComponentKind::PJfet(_)) {
+                            let dk = format!("{}.drain", c.id);
+                            if let Some(&did) = pin_ids.get(&dk) {
+                                if uf.find(did) == neg_node {
+                                    jfet_comp_id = Some(c.id.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if let (Some(cf), Some(jfet_id)) = (cf_val, jfet_comp_id) {
+                        results.push(OpAmpFeedbackInfo {
+                            comp_id: comp.id.clone(),
+                            opamp_type,
+                            feedback_kind: OpAmpFeedbackKind::AllpassJfet {
+                                rf,
+                                cf,
+                                jfet_id,
+                            },
+                            neg_node,
+                            pos_node,
+                        });
+                        continue;
+                    }
+
                     // Rf found but no Ri - could be unity-gain buffer through resistor
                     // or more complex topology. Skip for now.
                 }
@@ -2036,6 +2083,16 @@ pub(super) enum OpAmpFeedbackKind {
         /// Potentiometer info for runtime gain modulation.
         /// (comp_id, max_resistance, fixed_series_resistance, parallel_fixed_resistance)
         rf_pot: Option<(String, f64, f64, Option<f64>)>,
+    },
+    /// JFET drain at neg with R||C feedback to out (Phase 90 inverting all-pass).
+    /// Gain = -Z_fb/Z_in where Z_in = R_ap + R_jfet and Z_fb = Rf || Cf.
+    AllpassJfet {
+        /// Feedback resistor value (neg to out)
+        rf: f64,
+        /// Feedback capacitor value (neg to out)
+        cf: f64,
+        /// Component ID of the JFET whose drain connects to neg
+        jfet_id: String,
     },
 }
 

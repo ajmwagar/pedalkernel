@@ -391,6 +391,9 @@ pub(super) fn build_stages(
     let mut feedback_opamp_queue =
         super::opamp_analysis::build_unity_gain_queue(opamp_analysis, sample_rate);
 
+    // Build AllpassJfet map: JFET comp_id → (rf, cf) for inverting all-pass stages.
+    let allpass_jfet_map = super::opamp_analysis::build_allpass_jfet_map(opamp_analysis);
+
     let mut stages: Vec<WdfStage> = Vec::new();
     let mut fallback_multi_nl: Vec<MultiNlStage> = Vec::new();
 
@@ -454,9 +457,32 @@ pub(super) fn build_stages(
                 );
             }
 
-            // Pair JFET stages with feedback op-amps (for all-pass filters).
+            // Pair JFET stages with all-pass feedback or unity-gain op-amp buffers.
             if matches!(&elem.kind, NonlinearKind::Jfet { .. }) {
-                if !feedback_opamp_queue.is_empty() {
+                let comp_id = &graph.components[graph.edges[elem.edge_idx].comp_idx].id;
+                if let Some(&(rf, cf)) = allpass_jfet_map.get(comp_id) {
+                    // Phase 90 inverting all-pass: build AllpassFeedback IIR.
+                    let r_ap = plan
+                        .passive_idxs
+                        .iter()
+                        .filter_map(|&idx| {
+                            match &graph.components[graph.edges[idx].comp_idx].kind {
+                                ComponentKind::Resistor(r) => Some(*r),
+                                _ => None,
+                            }
+                        })
+                        .next()
+                        .unwrap_or(22_000.0);
+                    let k = 2.0 * sample_rate * rf * cf;
+                    stage.allpass_feedback =
+                        Some(super::stage::AllpassFeedback {
+                            r_ap,
+                            b0: rf / (1.0 + k),
+                            a1: (k - 1.0) / (k + 1.0),
+                            x_prev: 0.0,
+                            y_prev: 0.0,
+                        });
+                } else if !feedback_opamp_queue.is_empty() {
                     stage.paired_opamp = Some(feedback_opamp_queue.remove(0));
                 }
             }
@@ -515,6 +541,7 @@ pub(super) fn build_stages(
             oversampler: Oversampler::new(oversampling),
             base_diode_model: None,
             paired_opamp: None,
+            allpass_feedback: None,
             dc_block: None,
             is_source_follower: false,
             prev_source_voltage: 0.0,
@@ -2204,6 +2231,7 @@ fn build_vs_stage(
         oversampler: Oversampler::new(oversampling),
         base_diode_model,
         paired_opamp: None,
+        allpass_feedback: None,
         dc_block: plan.dc_block,
         is_source_follower: false,
         prev_source_voltage: 0.0,
@@ -2268,6 +2296,7 @@ fn build_source_follower_stage(
         oversampler: Oversampler::new(oversampling),
         base_diode_model: None,
         paired_opamp: None,
+        allpass_feedback: None,
         dc_block: None,
         is_source_follower: is_sf,
         prev_source_voltage: 0.0,

@@ -29,6 +29,9 @@ fault-injection = []
 # Detects when devices leave their valid linear operating region.
 # Zero-cost when disabled — all checks are behind #[cfg(feature)].
 runtime-warnings = []
+# Tests that reference .pedal files from the private pedalkernel-pro repo.
+# Disabled by default so open-source consumers can still run all other tests.
+pro-pedals = []
 
 [dependencies]
 # DSL parser
