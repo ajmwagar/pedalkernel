@@ -1099,6 +1099,9 @@ pub fn compile_pedal_with_options(
     // ══ Pass 0: Graph construction ════════════════════════════════════
     let mut graph = CircuitGraph::from_pedal(pedal);
 
+    // Post-construction: resolve context-dependent edge kinds (JFET Vr, OTA linear).
+    super::graph::resolve_components(&mut graph, pedal);
+
     // Apply component tolerance.
     for (i, comp) in graph.components.iter_mut().enumerate() {
         match &mut comp.kind {

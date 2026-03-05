@@ -3075,3 +3075,70 @@ fn component_stamp_diode_skips() {
     assert!(matches!(result, StampResult::Skip));
     assert_eq!(mna.g_matrix[0], 0.0);
 }
+
+#[test]
+fn resolve_components_jfet_with_lfo() {
+    use super::component::EdgeKind;
+    use super::graph::CircuitGraph;
+    let src = r#"
+pedal "test_jfet_resolve" {
+  components {
+R1: resistor(10k)
+J1: njfet(2n5457)
+LFO1: lfo(triangle, 100k, 1u)
+  }
+  nets {
+in -> R1.a
+R1.b -> J1.drain
+J1.source -> out
+LFO1.out -> J1.vgs
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut graph = CircuitGraph::from_pedal(&pedal);
+    // Before resolution: JFET edge is Nonlinear by default
+    let jfet_edge_idx = graph
+        .edges
+        .iter()
+        .position(|e| graph.components[e.comp_idx].id == "J1")
+        .expect("JFET should have a graph edge");
+    assert_eq!(graph.effective_edge_kind(jfet_edge_idx), EdgeKind::Nonlinear);
+
+    // Resolve
+    super::graph::resolve_components(&mut graph, &pedal);
+
+    // After resolution: JFET edge should be Linear (variable resistor)
+    assert_eq!(graph.effective_edge_kind(jfet_edge_idx), EdgeKind::Linear);
+    assert!(graph.resolved_edge_kinds.contains_key(&jfet_edge_idx));
+}
+
+#[test]
+fn resolve_components_jfet_without_lfo_stays_nonlinear() {
+    use super::component::EdgeKind;
+    use super::graph::CircuitGraph;
+    let src = r#"
+pedal "test_jfet_no_resolve" {
+  components {
+R1: resistor(10k)
+J1: njfet(2n5457)
+  }
+  nets {
+in -> R1.a
+R1.b -> J1.drain
+J1.source -> out
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut graph = CircuitGraph::from_pedal(&pedal);
+    super::graph::resolve_components(&mut graph, &pedal);
+    // No LFO → no resolution → stays Nonlinear
+    assert!(graph.resolved_edge_kinds.is_empty());
+    let jfet_edge_idx = graph
+        .edges
+        .iter()
+        .position(|e| graph.components[e.comp_idx].id == "J1")
+        .expect("JFET should have a graph edge");
+    assert_eq!(graph.effective_edge_kind(jfet_edge_idx), EdgeKind::Nonlinear);
+}

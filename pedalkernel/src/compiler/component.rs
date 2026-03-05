@@ -45,6 +45,47 @@ pub(super) struct PinConfig {
     pub aliases: &'static [(&'static str, &'static str)],
 }
 
+/// Classification of a circuit edge by electrical behavior.
+///
+/// The planner uses edge kinds to group components into stages:
+/// - Linear + Reactive = passive WDF tree
+/// - Nonlinear seeds NR solver stages
+/// - Vccs needs MNA off-diagonal stamps
+/// - Behavioral breaks the graph (separate stages on each side)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EdgeKind {
+    /// Purely resistive: R, pot sub-R, tempco, switched-R, photocoupler LDR, JFET Vr.
+    Linear,
+    /// Has state, must be a WDF port: C, L, switched-C, switched-L.
+    Reactive,
+    /// Needs Newton-Raphson solver: diode, BJT, JFET amplifier, triode, MOSFET, OTA.
+    Nonlinear,
+    /// Voltage-controlled current source: OTA in linear mode (future).
+    Vccs,
+    /// Handled outside WDF/MNA: BBD, delay line.
+    Behavioral,
+}
+
+/// A single edge declared by a component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ComponentEdge {
+    pub pin_a: &'static str,
+    pub pin_b: &'static str,
+    pub kind: EdgeKind,
+    /// For multi-port NL grouping (e.g., triode grid+plate ports).
+    pub port_group: Option<usize>,
+}
+
+/// Context provided to `resolve_edges()` so a component can decide its role
+/// based on how it's wired in the circuit.
+pub(super) struct ResolveContext {
+    /// True if the component's control/modulation pin is driven by an LFO,
+    /// envelope follower, or DC bias (not in the audio signal path).
+    pub control_pin_is_modulated: bool,
+    /// True if the component's wiper pin (pots) appears in the netlist.
+    pub wiper_connected: bool,
+}
+
 /// How a component participates in circuit graph construction.
 pub(super) enum GraphRole {
     /// Creates one edge between two named pins.
@@ -116,6 +157,10 @@ pub(super) trait Component: std::fmt::Debug {
     /// Whether this component is a control-only element (no circuit pins).
     fn is_control_only(&self) -> bool { false }
 
+    /// Whether this component's edge impedance changes at runtime.
+    /// Stages containing variable edges need scattering matrix recomputation.
+    fn is_variable(&self) -> bool { false }
+
     // ── Pin Interface ─────────────────────────────────────────────────────
 
     /// Valid pins and aliases for this component type.
@@ -128,6 +173,25 @@ pub(super) trait Component: std::fmt::Debug {
 
     /// How this component participates in circuit graph construction.
     fn graph_role(&self) -> GraphRole;
+
+    /// Declare this component's circuit edges with their electrical classification.
+    ///
+    /// Returns empty for Virtual/ActiveIc components (no WDF topology participation).
+    /// The planner uses these edges to group components into stages by EdgeKind.
+    fn edges(&self) -> Vec<ComponentEdge> { vec![] }
+
+    /// Context-dependent resolution: if this component's behavior depends on
+    /// how it's wired, return a new edge list reflecting the resolved role.
+    ///
+    /// Called after graph construction with neighbor connectivity info.
+    /// Default: no resolution needed (return None to keep current edges).
+    ///
+    /// Examples:
+    /// - JFET gate → LFO/pot → resolve drain-source as Linear (variable resistor)
+    /// - OTA Iabc → envelope → resolve as Vccs (linear mode)
+    fn resolve_edges(&self, _neighbors: &ResolveContext) -> Option<Vec<ComponentEdge>> {
+        None
+    }
 
     // ── MNA Stamping ──────────────────────────────────────────────────────
 
@@ -305,6 +369,42 @@ impl Component for ComponentKind {
             self,
             ComponentKind::RotarySwitch(_) | ComponentKind::Switch(_)
         )
+    }
+
+    fn is_variable(&self) -> bool {
+        matches!(
+            self,
+            ComponentKind::Potentiometer(_, _)
+                | ComponentKind::NJfet(_)
+                | ComponentKind::PJfet(_)
+                | ComponentKind::Photocoupler(_)
+        )
+    }
+
+    fn resolve_edges(&self, ctx: &ResolveContext) -> Option<Vec<ComponentEdge>> {
+        match self {
+            // JFET with gate modulated → variable resistor (Linear)
+            ComponentKind::NJfet(_) | ComponentKind::PJfet(_)
+                if ctx.control_pin_is_modulated =>
+            {
+                Some(vec![ComponentEdge {
+                    pin_a: "drain",
+                    pin_b: "source",
+                    kind: EdgeKind::Linear,
+                    port_group: None,
+                }])
+            }
+            // OTA with Iabc modulated → linear VCCS
+            ComponentKind::OpAmp(ot) if ot.is_ota() && ctx.control_pin_is_modulated => {
+                Some(vec![ComponentEdge {
+                    pin_a: "pos",
+                    pin_b: "neg",
+                    kind: EdgeKind::Vccs,
+                    port_group: None,
+                }])
+            }
+            _ => None,
+        }
     }
 
     // ── Pin Interface ─────────────────────────────────────────────────────
@@ -560,6 +660,93 @@ impl Component for ComponentKind {
             | ComponentKind::AnalogSwitch(_)
             | ComponentKind::MatchedNpn(_)
             | ComponentKind::MatchedPnp(_) => GraphRole::ActiveIc,
+        }
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        match self {
+            // ── Linear edges ─────────────────────────────────────────────
+            ComponentKind::Resistor(_)
+            | ComponentKind::Tempco(_, _)
+            | ComponentKind::ResistorSwitched(_) => vec![ComponentEdge {
+                pin_a: "a", pin_b: "b", kind: EdgeKind::Linear, port_group: None,
+            }],
+
+            // Photocoupler LDR acts as variable resistor (linear)
+            ComponentKind::Photocoupler(_) => vec![ComponentEdge {
+                pin_a: "a", pin_b: "b", kind: EdgeKind::Linear, port_group: None,
+            }],
+
+            // Pot: linear edge (2-terminal default; 3-term resolved in 2C-3)
+            ComponentKind::Potentiometer(_, _) => vec![ComponentEdge {
+                pin_a: "a", pin_b: "b", kind: EdgeKind::Linear, port_group: None,
+            }],
+
+            // ── Reactive edges ───────────────────────────────────────────
+            ComponentKind::Capacitor(_)
+            | ComponentKind::CapSwitched(_) => vec![ComponentEdge {
+                pin_a: "a", pin_b: "b", kind: EdgeKind::Reactive, port_group: None,
+            }],
+
+            ComponentKind::Inductor(_)
+            | ComponentKind::InductorSwitched(_) => vec![ComponentEdge {
+                pin_a: "a", pin_b: "b", kind: EdgeKind::Reactive, port_group: None,
+            }],
+
+            // ── Nonlinear edges ──────────────────────────────────────────
+            ComponentKind::Diode(_)
+            | ComponentKind::DiodePair(_)
+            | ComponentKind::Zener(_)
+            | ComponentKind::Neon(_) => vec![ComponentEdge {
+                pin_a: "a", pin_b: "b", kind: EdgeKind::Nonlinear, port_group: None,
+            }],
+
+            // BJT: collector-emitter is the NL edge
+            ComponentKind::Npn(_) | ComponentKind::Pnp(_) => vec![ComponentEdge {
+                pin_a: "collector", pin_b: "emitter", kind: EdgeKind::Nonlinear, port_group: None,
+            }],
+
+            // JFET: drain-source NL edge (default; resolved to Linear when used as Vr)
+            ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => vec![ComponentEdge {
+                pin_a: "drain", pin_b: "source", kind: EdgeKind::Nonlinear, port_group: None,
+            }],
+
+            // MOSFET: drain-source NL edge
+            ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => vec![ComponentEdge {
+                pin_a: "drain", pin_b: "source", kind: EdgeKind::Nonlinear, port_group: None,
+            }],
+
+            // OTA: pos-neg NL edge
+            ComponentKind::OpAmp(ot) if ot.is_ota() => vec![ComponentEdge {
+                pin_a: "pos", pin_b: "neg", kind: EdgeKind::Nonlinear, port_group: None,
+            }],
+
+            // Triode/VariMu: plate-cathode NL edge
+            ComponentKind::Triode(_) | ComponentKind::VariMu(_) => vec![ComponentEdge {
+                pin_a: "plate", pin_b: "cathode", kind: EdgeKind::Nonlinear, port_group: None,
+            }],
+
+            // Pentode: plate-cathode NL edge
+            ComponentKind::Pentode(_) => vec![ComponentEdge {
+                pin_a: "plate", pin_b: "cathode", kind: EdgeKind::Nonlinear, port_group: None,
+            }],
+
+            // ── Behavioral edges ─────────────────────────────────────────
+            ComponentKind::Bbd(_) => vec![ComponentEdge {
+                pin_a: "input", pin_b: "output", kind: EdgeKind::Behavioral, port_group: None,
+            }],
+            ComponentKind::DelayLine(..) => vec![ComponentEdge {
+                pin_a: "input", pin_b: "output", kind: EdgeKind::Behavioral, port_group: None,
+            }],
+
+            // ── Transformer: reactive (primary inductance) ───────────────
+            ComponentKind::Transformer(_) => vec![ComponentEdge {
+                pin_a: "a", pin_b: "b", kind: EdgeKind::Reactive, port_group: None,
+            }],
+
+            // ── No edges ─────────────────────────────────────────────────
+            // Virtual (LFO, Envelope, Tap, switches) and ActiveIc (OpAmp, synth ICs)
+            _ => vec![],
         }
     }
 
@@ -1148,5 +1335,119 @@ mod tests {
         assert!(leaf_kind.is_some());
         assert!(leaf_struct.is_some());
         let _ = components::Resistor { value: 1.0 }; // suppress unused warning
+    }
+
+    #[test]
+    fn edges_linear_resistor() {
+        let r = ComponentKind::Resistor(1000.0);
+        let edges = r.edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, EdgeKind::Linear);
+        assert_eq!(edges[0].pin_a, "a");
+        assert_eq!(edges[0].pin_b, "b");
+    }
+
+    #[test]
+    fn edges_reactive_capacitor() {
+        let c = ComponentKind::Capacitor(CapConfig::new(100e-9));
+        let edges = c.edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, EdgeKind::Reactive);
+    }
+
+    #[test]
+    fn edges_nonlinear_diode() {
+        let d = ComponentKind::Diode(crate::dsl::DiodeType::Silicon);
+        let edges = d.edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, EdgeKind::Nonlinear);
+    }
+
+    #[test]
+    fn edges_nonlinear_bjt() {
+        let q = ComponentKind::Npn("2N3904".into());
+        let edges = q.edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, EdgeKind::Nonlinear);
+        assert_eq!(edges[0].pin_a, "collector");
+        assert_eq!(edges[0].pin_b, "emitter");
+    }
+
+    #[test]
+    fn edges_nonlinear_triode() {
+        let v = ComponentKind::Triode("12AX7".into());
+        let edges = v.edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, EdgeKind::Nonlinear);
+        assert_eq!(edges[0].pin_a, "plate");
+    }
+
+    #[test]
+    fn edges_behavioral_bbd() {
+        let b = ComponentKind::Bbd(crate::dsl::BbdType::Mn3207);
+        let edges = b.edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, EdgeKind::Behavioral);
+    }
+
+    #[test]
+    fn edges_virtual_lfo_empty() {
+        let l = ComponentKind::Lfo(crate::dsl::LfoWaveformDsl::Triangle, 100_000.0, 1e-6);
+        assert!(l.edges().is_empty());
+    }
+
+    #[test]
+    fn edges_active_ic_opamp_empty() {
+        let o = ComponentKind::OpAmp(crate::dsl::OpAmpType::Tl072);
+        assert!(o.edges().is_empty());
+    }
+
+    #[test]
+    fn edges_ota_nonlinear() {
+        let ota = ComponentKind::OpAmp(crate::dsl::OpAmpType::Ca3080);
+        let edges = ota.edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, EdgeKind::Nonlinear);
+        assert_eq!(edges[0].pin_a, "pos");
+    }
+
+    #[test]
+    fn resolve_jfet_to_linear_when_modulated() {
+        let j = ComponentKind::NJfet("2N5457".into());
+        // Default: nonlinear
+        assert_eq!(j.edges()[0].kind, EdgeKind::Nonlinear);
+        // Modulated gate: resolves to linear (variable resistor)
+        let ctx = ResolveContext { control_pin_is_modulated: true, wiper_connected: false };
+        let resolved = j.resolve_edges(&ctx).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].kind, EdgeKind::Linear);
+        assert_eq!(resolved[0].pin_a, "drain");
+    }
+
+    #[test]
+    fn resolve_jfet_no_change_without_modulation() {
+        let j = ComponentKind::PJfet("2N5460".into());
+        let ctx = ResolveContext { control_pin_is_modulated: false, wiper_connected: false };
+        assert!(j.resolve_edges(&ctx).is_none());
+    }
+
+    #[test]
+    fn resolve_ota_to_vccs_when_modulated() {
+        let ota = ComponentKind::OpAmp(crate::dsl::OpAmpType::Ca3080);
+        // Default: nonlinear
+        assert_eq!(ota.edges()[0].kind, EdgeKind::Nonlinear);
+        // Modulated Iabc: resolves to VCCS
+        let ctx = ResolveContext { control_pin_is_modulated: true, wiper_connected: false };
+        let resolved = ota.resolve_edges(&ctx).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].kind, EdgeKind::Vccs);
+    }
+
+    #[test]
+    fn resolve_regular_opamp_unchanged() {
+        let op = ComponentKind::OpAmp(crate::dsl::OpAmpType::Tl072);
+        let ctx = ResolveContext { control_pin_is_modulated: true, wiper_connected: false };
+        // Regular opamps don't resolve (no modulation pins)
+        assert!(op.resolve_edges(&ctx).is_none());
     }
 }

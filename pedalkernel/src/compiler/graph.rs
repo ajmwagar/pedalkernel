@@ -58,6 +58,10 @@ pub(super) struct CircuitGraph {
     /// component index, whether they are secondary-side, and the turns ratio.
     /// Used by build.rs to apply inter-stage voltage gain across transformers.
     pub(super) transformer_info: HashMap<NodeId, TransformerNodeInfo>,
+    /// Post-resolution edge classifications. Maps edge index → resolved EdgeKind.
+    /// Only populated for edges whose kind changed during resolution.
+    /// If an edge index is absent, use the component's default edges().
+    pub(super) resolved_edge_kinds: HashMap<usize, super::component::EdgeKind>,
 }
 
 /// Identifies which transformer winding a node belongs to.
@@ -697,7 +701,23 @@ impl CircuitGraph {
             node_names,
             coupled_nodes,
             transformer_info,
+            resolved_edge_kinds: HashMap::new(),
         }
+    }
+
+    /// Get the effective edge kind for a given edge index.
+    ///
+    /// Returns the resolved kind if the edge was resolved during wiring resolution,
+    /// otherwise falls back to the component's default edges().
+    pub(super) fn effective_edge_kind(&self, edge_idx: usize) -> super::component::EdgeKind {
+        use super::component::Component;
+        if let Some(&kind) = self.resolved_edge_kinds.get(&edge_idx) {
+            return kind;
+        }
+        let comp = &self.components[self.edges[edge_idx].comp_idx];
+        let edges = comp.kind.edges();
+        // Most components have exactly one edge; return its kind.
+        edges.first().map(|e| e.kind).unwrap_or(super::component::EdgeKind::Linear)
     }
 
     /// Partition edges into sidechain and audio paths.
@@ -2081,4 +2101,88 @@ pub(super) fn make_leaf(
     comp.kind
         .make_leaf(&comp.id, sample_rate)
         .unwrap_or(DynNode::Resistor { rp: 1000.0 })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Post-construction wiring resolution
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Resolve context-dependent component edge kinds based on wiring.
+///
+/// Scans the pedal's nets for modulation connections (LFO/envelope → control pins)
+/// and calls `resolve_edges()` on each modulated component. Results are stored in
+/// `graph.resolved_edge_kinds` which maps edge index → resolved EdgeKind.
+///
+/// This generalizes `detect_lfo_controlled_jfets()` and
+/// `detect_envelope_controlled_otas()` in compile.rs.
+pub(super) fn resolve_components(graph: &mut CircuitGraph, pedal: &PedalDef) {
+    use super::component::{Component, ResolveContext};
+
+    // Collect modulator component IDs (LFO, EnvelopeFollower).
+    let modulator_ids: HashSet<&str> = pedal
+        .components
+        .iter()
+        .filter(|c| {
+            matches!(
+                &c.kind,
+                ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..)
+            )
+        })
+        .map(|c| c.id.as_str())
+        .collect();
+
+    if modulator_ids.is_empty() {
+        return;
+    }
+
+    // Scan nets to find which components have modulated control pins.
+    let mut modulated_components: HashSet<String> = HashSet::new();
+
+    for net in &pedal.nets {
+        let from_is_modulator = match &net.from {
+            Pin::ComponentPin { component, pin } => {
+                modulator_ids.contains(component.as_str()) && pin == "out"
+            }
+            _ => false,
+        };
+        if !from_is_modulator {
+            continue;
+        }
+        for to_pin in &net.to {
+            if let Pin::ComponentPin { component, pin } = to_pin {
+                let comp_def = pedal.components.iter().find(|c| c.id == *component);
+                if let Some(comp_def) = comp_def {
+                    if comp_def.kind.modulation_pins().contains(&pin.as_str()) {
+                        modulated_components.insert(component.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if modulated_components.is_empty() {
+        return;
+    }
+
+    // For each graph edge whose component is modulated, resolve its edge kind.
+    for (edge_idx, edge) in graph.edges.iter().enumerate() {
+        let comp = &graph.components[edge.comp_idx];
+
+        if !modulated_components.contains(&comp.id) {
+            continue;
+        }
+
+        let ctx = ResolveContext {
+            control_pin_is_modulated: true,
+            wiper_connected: false,
+        };
+
+        if let Some(resolved_edges) = comp.kind.resolve_edges(&ctx) {
+            // Apply the first resolved edge's kind to this graph edge.
+            // Works because JFET/OTA each produce a single circuit edge.
+            if let Some(first) = resolved_edges.first() {
+                graph.resolved_edge_kinds.insert(edge_idx, first.kind);
+            }
+        }
+    }
 }
