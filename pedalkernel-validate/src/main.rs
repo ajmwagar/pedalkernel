@@ -519,9 +519,48 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
         sine_path_rl.display()
     );
 
-    // Resistor Divider and RC Highpass goldens are generated via SPICE
-    // (generate-spice --suite linear) rather than analytically, since the
-    // analytical reference requires matching the exact WDF output extraction.
+    // Resistor Divider: 10k/10k = 0.5 gain (frequency-independent)
+    {
+        println!(
+            "\n{} Resistor Divider (10k/10k, gain=0.5)",
+            "•".green(),
+        );
+
+        std::fs::create_dir_all(cli.golden.join("linear/resistor_divider"))?;
+
+        let sine_input = signals::sine(sample_rate, 1000.0, 0.1, 1.0);
+        let sine_golden: Vec<f64> = sine_input.iter().map(|&x| x * 0.5).collect();
+        let sine_path = cli.golden.join("linear/resistor_divider/sine.npy");
+        npy::write_f64(&sine_path, &sine_golden)?;
+        println!("  {} sine → {}", "✓".green(), sine_path.display());
+    }
+
+    // RC Highpass: C=100n, R=10k, fc≈159Hz
+    {
+        let r_hp = 10_000.0;
+        let c_hp = 100e-9;
+        let fc_hp = 1.0 / (2.0 * std::f64::consts::PI * r_hp * c_hp);
+
+        println!(
+            "\n{} RC Highpass (C=100n, R=10k, fc={:.1} Hz)",
+            "•".green(),
+            fc_hp
+        );
+
+        std::fs::create_dir_all(cli.golden.join("linear/rc_highpass"))?;
+
+        let sine_input = signals::sine(sample_rate, 1000.0, 0.1, 1.0);
+        let sine_golden = analytical::rc_highpass_filter(&sine_input, r_hp, c_hp, sample_rate);
+        let sine_path = cli.golden.join("linear/rc_highpass/sine.npy");
+        npy::write_f64(&sine_path, &sine_golden)?;
+        println!("  {} sine → {}", "✓".green(), sine_path.display());
+
+        let sweep_input = signals::exp_sweep(sample_rate, 20.0, 20000.0, 1.0, 1.0);
+        let sweep_golden = analytical::rc_highpass_filter(&sweep_input, r_hp, c_hp, sample_rate);
+        let sweep_path = cli.golden.join("linear/rc_highpass/sweep.npy");
+        npy::write_f64(&sweep_path, &sweep_golden)?;
+        println!("  {} sweep → {}", "✓".green(), sweep_path.display());
+    }
 
     // ===== Canonical suite linear circuits =====
 

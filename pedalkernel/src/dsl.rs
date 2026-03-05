@@ -139,6 +139,8 @@ pub struct SidechainInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PedalDef {
     pub name: String,
+    /// Optional subtitle for UI display (e.g., "Klon Centaur — transparent overdrive")
+    pub subtitle: Option<String>,
     /// Power supply rails.
     /// Multiple named supplies are supported (e.g., V+, V-, B+).
     /// If empty, defaults to a single 9V "vcc" rail in the compiler.
@@ -2582,6 +2584,14 @@ fn supplies_section(input: &str) -> IResult<&str, Vec<NamedSupply>> {
     Ok((input, supplies))
 }
 
+fn parse_subtitle(input: &str) -> IResult<&str, String> {
+    let (input, _) = tag("subtitle")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, s) = quoted_string(input)?;
+    let (input, _) = ws_comments(input)?;
+    Ok((input, s.to_string()))
+}
+
 /// Parse a complete `.pedal` or `.synth` file.
 /// Both `pedal "Name" { ... }` and `synth "Name" { ... }` produce the same AST.
 pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
@@ -2591,6 +2601,11 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, _) = ws_comments(input)?;
     let (input, name) = quoted_string(input)?;
     let (input, _) = ws_comments(input)?;
+
+    // Optional subtitle before the opening brace:
+    //   pedal "GOLDENROD" subtitle "Klon Centaur — transparent overdrive" {
+    let (input, subtitle) = opt(parse_subtitle)(input)?;
+
     let (input, _) = char('{')(input)?;
 
     // Try multi-supply block first: `supplies { V+: 15V, V-: -15V }`
@@ -2620,6 +2635,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
         input,
         PedalDef {
             name: name.to_string(),
+            subtitle,
             supplies,
             components,
             nets,

@@ -543,6 +543,7 @@ mod tests {
     fn export_tube_screamer() {
         let pedal = PedalDef {
             name: "Tube Screamer".into(),
+            subtitle: None,
             components: vec![
                 ComponentDef {
                     id: "R1".into(),

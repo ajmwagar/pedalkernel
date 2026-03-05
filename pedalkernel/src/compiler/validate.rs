@@ -1490,6 +1490,7 @@ mod tests {
     fn minimal_pedal() -> PedalDef {
         PedalDef {
             name: "Test".to_string(),
+            subtitle: None,
             supplies: vec![],
             components: vec![ComponentDef {
                 id: "R1".to_string(),
@@ -1626,6 +1627,7 @@ mod tests {
     fn no_signal_path() {
         let pedal = PedalDef {
             name: "Broken".to_string(),
+            subtitle: None,
             supplies: vec![],
             components: vec![ComponentDef {
                 id: "R1".to_string(),

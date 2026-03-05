@@ -874,6 +874,7 @@ fn extract_sidechain_def(
 
     PedalDef {
         name: format!("{} (sidechain)", pedal.name),
+        subtitle: None,
         supplies: pedal.supplies.clone(),
         components,
         nets,

@@ -213,6 +213,7 @@ fn build_half(
 
     PedalDef {
         name: format!("{} ({})", pedal.name, suffix),
+        subtitle: None,
         supplies: pedal.supplies.clone(),
         components,
         nets,
