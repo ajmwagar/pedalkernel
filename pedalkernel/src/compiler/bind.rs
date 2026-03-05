@@ -277,9 +277,9 @@ pub(super) fn build_controls(
             .components
             .iter()
             .find(|c| c.id == ctrl.component)
-            .and_then(|c| match &c.kind {
-                ComponentKind::Potentiometer(r, _) => Some(*r),
-                _ => None,
+            .and_then(|c| {
+                use super::component::Component;
+                c.kind.resistance()
             })
             .unwrap_or(100_000.0);
 

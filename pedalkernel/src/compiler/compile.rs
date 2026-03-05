@@ -149,6 +149,7 @@ fn compute_resistor_divider_gain(graph: &CircuitGraph) -> f64 {
 
 /// Find total resistance between two nodes via BFS through resistive elements.
 fn find_resistance_between(graph: &CircuitGraph, from: NodeId, to: NodeId) -> Option<f64> {
+    use super::component::Component;
     if from == to {
         return Some(0.0);
     }
@@ -170,7 +171,7 @@ fn find_resistance_between(graph: &CircuitGraph, from: NodeId, to: NodeId) -> Op
                 continue;
             }
 
-            if let ComponentKind::Resistor(r) = &graph.components[e.comp_idx].kind {
+            if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
                 if other == to {
                     return Some(r_so_far + r);
                 }
@@ -404,56 +405,25 @@ fn build_passive_mna_stage(
         let n2 = to_mna(e.node_b);
         let comp = &graph.components[e.comp_idx];
 
-        match &comp.kind {
-            ComponentKind::Resistor(r) => {
-                mna.stamp_resistor(n1, n2, *r);
-            }
-            ComponentKind::Capacitor(cfg) => {
-                let rp = 1.0 / (2.0 * effective_rate * cfg.value);
-                reactive_children.push(DynNode::Capacitor {
-                    capacitance: cfg.value,
-                    rp,
-                    state: 0.0,
-                    last_b: 0.0,
-                });
+        use super::component::{Component, StampResult};
+        match comp.kind.stamp_mna(&comp.id, n1, n2, &mut mna, effective_rate) {
+            StampResult::Stamped => {}
+            StampResult::Reactive { dyn_node, rp } => {
+                reactive_children.push(dyn_node);
                 reactive_ports.push(WdfPort {
                     node_pos: n1,
                     node_neg: n2,
                     resistance: rp,
                 });
             }
-            ComponentKind::Inductor(l) => {
-                let rp = 2.0 * effective_rate * l;
-                reactive_children.push(DynNode::Inductor {
-                    inductance: *l,
-                    rp,
-                    state: 0.0,
-                });
-                reactive_ports.push(WdfPort {
-                    node_pos: n1,
-                    node_neg: n2,
-                    resistance: rp,
-                });
+            StampResult::Pot {
+                dyn_node,
+                initial_conductance,
+            } => {
+                pot_children_pending.push(dyn_node);
+                pot_stamp_nodes.push((n1, n2, initial_conductance));
             }
-            ComponentKind::Potentiometer(max_r, taper) => {
-                // Pot stays in G matrix as conductance (NOT a WDF port).
-                // DynNode::Pot is stored in children for control binding + position tracking.
-                let initial_pos = 0.5;
-                let tapered_pos = taper.apply(initial_pos);
-                let r = (tapered_pos * *max_r).max(1.0);
-                mna.stamp_resistor(n1, n2, r);
-                pot_children_pending.push(DynNode::Pot {
-                    comp_id: comp.id.clone(),
-                    max_resistance: *max_r,
-                    position: initial_pos,
-                    taper: *taper,
-                    rp: r,
-                });
-                pot_stamp_nodes.push((n1, n2, 1.0 / r));
-            }
-            _ => {
-                // Unsupported passive component type — skip
-            }
+            StampResult::Skip => {}
         }
     }
 
@@ -644,52 +614,25 @@ fn build_orphan_output_mna_stage(
         let n2 = to_mna(e.node_b);
         let comp = &graph.components[e.comp_idx];
 
-        match &comp.kind {
-            ComponentKind::Resistor(r) => {
-                mna.stamp_resistor(n1, n2, *r);
-            }
-            ComponentKind::Capacitor(cfg) => {
-                let rp = 1.0 / (2.0 * effective_rate * cfg.value);
-                reactive_children.push(DynNode::Capacitor {
-                    capacitance: cfg.value,
-                    rp,
-                    state: 0.0,
-                    last_b: 0.0,
-                });
+        use super::component::{Component, StampResult};
+        match comp.kind.stamp_mna(&comp.id, n1, n2, &mut mna, effective_rate) {
+            StampResult::Stamped => {}
+            StampResult::Reactive { dyn_node, rp } => {
+                reactive_children.push(dyn_node);
                 reactive_ports.push(WdfPort {
                     node_pos: n1,
                     node_neg: n2,
                     resistance: rp,
                 });
             }
-            ComponentKind::Inductor(l) => {
-                let rp = 2.0 * effective_rate * l;
-                reactive_children.push(DynNode::Inductor {
-                    inductance: *l,
-                    rp,
-                    state: 0.0,
-                });
-                reactive_ports.push(WdfPort {
-                    node_pos: n1,
-                    node_neg: n2,
-                    resistance: rp,
-                });
+            StampResult::Pot {
+                dyn_node,
+                initial_conductance,
+            } => {
+                pot_children_pending.push(dyn_node);
+                pot_stamp_nodes.push((n1, n2, initial_conductance));
             }
-            ComponentKind::Potentiometer(max_r, taper) => {
-                let initial_pos = 0.5;
-                let tapered_pos = taper.apply(initial_pos);
-                let r = (tapered_pos * *max_r).max(1.0);
-                mna.stamp_resistor(n1, n2, r);
-                pot_children_pending.push(DynNode::Pot {
-                    comp_id: comp.id.clone(),
-                    max_resistance: *max_r,
-                    position: initial_pos,
-                    taper: *taper,
-                    rp: r,
-                });
-                pot_stamp_nodes.push((n1, n2, 1.0 / r));
-            }
-            _ => {}
+            StampResult::Skip => {}
         }
     }
 
@@ -851,14 +794,8 @@ fn rescue_orphan_output_pots(
         }
         // Skip transformer edges and non-passive components
         let comp = &graph.components[e.comp_idx];
-        let is_passive = matches!(
-            comp.kind,
-            ComponentKind::Resistor(_)
-                | ComponentKind::Capacitor(_)
-                | ComponentKind::Inductor(_)
-                | ComponentKind::Potentiometer(_, _)
-        );
-        if !is_passive {
+        use super::component::Component;
+        if !comp.kind.is_passive() || matches!(comp.kind, ComponentKind::Transformer(_)) {
             continue;
         }
         // Skip supply-node edges (except gnd — gnd is a valid termination)

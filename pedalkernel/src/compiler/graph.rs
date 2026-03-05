@@ -3,8 +3,6 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
-use crate::elements::{JfetVariableResistor, Photocoupler, PhotocouplerModel};
-
 use super::dyn_node::DynNode;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -310,13 +308,82 @@ impl CircuitGraph {
         let mut transformer_info: HashMap<NodeId, TransformerNodeInfo> = HashMap::new();
 
         for (idx, comp) in all_components.iter().enumerate() {
-            match &comp.kind {
-                ComponentKind::Potentiometer(_, _) => {
+            use super::component::{Component, GraphRole};
+            match comp.kind.graph_role() {
+                GraphRole::Edge { pin_a, pin_b } => {
+                    let key_a = format!("{}.{}", comp.id, pin_a);
+                    let key_b = format!("{}.{}", comp.id, pin_b);
+                    let id_a = get_id(&key_a, &mut uf);
+                    let id_b = get_id(&key_b, &mut uf);
+                    let node_a = uf.find(id_a);
+                    let node_b = uf.find(id_b);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
+                    });
+                }
+                GraphRole::ActiveEdge { pin_a, pin_b } => {
+                    let key_a = format!("{}.{}", comp.id, pin_a);
+                    let key_b = format!("{}.{}", comp.id, pin_b);
+                    let id_a = get_id(&key_a, &mut uf);
+                    let id_b = get_id(&key_b, &mut uf);
+                    let node_a = uf.find(id_a);
+                    let node_b = uf.find(id_b);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
+                    });
+                    num_active += 1;
+                }
+                GraphRole::CoupledEdge {
+                    edge_pin_a,
+                    edge_pin_b,
+                    coupled_pins,
+                } => {
+                    // Resolve all coupled pins through union-find.
+                    let coupled_node_ids: Vec<NodeId> = coupled_pins
+                        .iter()
+                        .map(|pin| {
+                            let key = format!("{}.{}", comp.id, pin);
+                            let id = get_id(&key, &mut uf);
+                            uf.find(id)
+                        })
+                        .collect();
+
+                    // Find edge pin nodes from the resolved set.
+                    let edge_a_pos = coupled_pins
+                        .iter()
+                        .position(|&p| p == edge_pin_a)
+                        .unwrap();
+                    let edge_b_pos = coupled_pins
+                        .iter()
+                        .position(|&p| p == edge_pin_b)
+                        .unwrap();
+                    let node_a = coupled_node_ids[edge_a_pos];
+                    let node_b = coupled_node_ids[edge_b_pos];
+
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a,
+                        node_b,
+                    });
+
+                    // Record coupling for sidechain BFS traversal.
+                    for &n in &coupled_node_ids {
+                        let others: Vec<_> = coupled_node_ids
+                            .iter()
+                            .copied()
+                            .filter(|&x| x != n)
+                            .collect();
+                        coupled_nodes.entry(n).or_default().extend(others);
+                    }
+                }
+                GraphRole::Pot => {
                     if pots_with_wiper.contains(&comp.id) {
-                        // 3-terminal pot — defer to after loop
                         deferred_3term.push((idx, comp.id.clone()));
                     } else {
-                        // 2-terminal pot — existing behavior
                         let key_a = format!("{}.a", comp.id);
                         let key_b = format!("{}.b", comp.id);
                         let id_a = get_id(&key_a, &mut uf);
@@ -330,296 +397,29 @@ impl CircuitGraph {
                         });
                     }
                 }
-                ComponentKind::Resistor(_)
-                | ComponentKind::Capacitor(_)
-                | ComponentKind::Inductor(_)
-                | ComponentKind::DiodePair(_)
-                | ComponentKind::Diode(_)
-                | ComponentKind::Zener(_)
-                | ComponentKind::Photocoupler(_)
-                | ComponentKind::Neon(_) => {
-                    let key_a = format!("{}.a", comp.id);
-                    let key_b = format!("{}.b", comp.id);
-                    let id_a = get_id(&key_a, &mut uf);
-                    let id_b = get_id(&key_b, &mut uf);
-                    let node_a = uf.find(id_a);
-                    let node_b = uf.find(id_b);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a,
-                        node_b,
-                    });
-                }
-                ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => {
-                    // JFET: drain-source path is the WDF edge (like a diode).
-                    // Gate is external control, not part of WDF tree.
-                    let key_d = format!("{}.drain", comp.id);
-                    let key_s = format!("{}.source", comp.id);
-                    let id_d = get_id(&key_d, &mut uf);
-                    let id_s = get_id(&key_s, &mut uf);
-                    let node_d = uf.find(id_d);
-                    let node_s = uf.find(id_s);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a: node_d,
-                        node_b: node_s,
-                    });
-                }
-                ComponentKind::Triode(_) => {
-                    // Triode: plate-cathode path is the WDF edge (like JFET drain-source).
-                    // Grid is external control, not part of WDF tree.
-                    let key_p = format!("{}.plate", comp.id);
-                    let key_k = format!("{}.cathode", comp.id);
-                    let key_g = format!("{}.grid", comp.id);
-                    let id_p = get_id(&key_p, &mut uf);
-                    let id_k = get_id(&key_k, &mut uf);
-                    let id_g = get_id(&key_g, &mut uf);
-                    let node_p = uf.find(id_p);
-                    let node_k = uf.find(id_k);
-                    let node_g = uf.find(id_g);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a: node_p,
-                        node_b: node_k,
-                    });
-                    // Tube coupling: grid↔plate↔cathode for sidechain BFS traversal
-                    for &n in &[node_p, node_k, node_g] {
-                        let others: Vec<_> = [node_p, node_k, node_g]
-                            .iter()
-                            .copied()
-                            .filter(|&x| x != n)
-                            .collect();
-                        coupled_nodes.entry(n).or_default().extend(others);
-                    }
-                }
-                ComponentKind::Pentode(_) => {
-                    // Pentode: plate-cathode path is the WDF edge.
-                    // Control grid (g1) and screen grid (g2) are external control.
-                    let key_p = format!("{}.plate", comp.id);
-                    let key_k = format!("{}.cathode", comp.id);
-                    let key_g = format!("{}.grid", comp.id);
-                    let key_s = format!("{}.screen", comp.id);
-                    let id_p = get_id(&key_p, &mut uf);
-                    let id_k = get_id(&key_k, &mut uf);
-                    let id_g = get_id(&key_g, &mut uf);
-                    let id_s = get_id(&key_s, &mut uf);
-                    let node_p = uf.find(id_p);
-                    let node_k = uf.find(id_k);
-                    let node_g = uf.find(id_g);
-                    let node_s = uf.find(id_s);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a: node_p,
-                        node_b: node_k,
-                    });
-                    // Tube coupling: all pins for sidechain BFS traversal
-                    for &n in &[node_p, node_k, node_g, node_s] {
-                        let others: Vec<_> = [node_p, node_k, node_g, node_s]
-                            .iter()
-                            .copied()
-                            .filter(|&x| x != n)
-                            .collect();
-                        coupled_nodes.entry(n).or_default().extend(others);
-                    }
-                }
-                ComponentKind::VariMu(_) => {
-                    // Variable-mu triode: plate-cathode path is the WDF edge.
-                    // Grid is external control, same topology as standard triode.
-                    let key_p = format!("{}.plate", comp.id);
-                    let key_k = format!("{}.cathode", comp.id);
-                    let key_g = format!("{}.grid", comp.id);
-                    let id_p = get_id(&key_p, &mut uf);
-                    let id_k = get_id(&key_k, &mut uf);
-                    let id_g = get_id(&key_g, &mut uf);
-                    let node_p = uf.find(id_p);
-                    let node_k = uf.find(id_k);
-                    let node_g = uf.find(id_g);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a: node_p,
-                        node_b: node_k,
-                    });
-                    // Tube coupling: grid↔plate↔cathode for sidechain BFS traversal
-                    for &n in &[node_p, node_k, node_g] {
-                        let others: Vec<_> = [node_p, node_k, node_g]
-                            .iter()
-                            .copied()
-                            .filter(|&x| x != n)
-                            .collect();
-                        coupled_nodes.entry(n).or_default().extend(others);
-                    }
-                }
-                ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => {
-                    // MOSFET: drain-source path is the WDF edge (like a JFET).
-                    // Gate is external control, not part of WDF tree.
-                    let key_d = format!("{}.drain", comp.id);
-                    let key_s = format!("{}.source", comp.id);
-                    let id_d = get_id(&key_d, &mut uf);
-                    let id_s = get_id(&key_s, &mut uf);
-                    let node_d = uf.find(id_d);
-                    let node_s = uf.find(id_s);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a: node_d,
-                        node_b: node_s,
-                    });
-                }
-                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
-                    // BJT: collector-emitter path is the WDF edge (like JFET drain-source).
-                    // Base is external control, not part of WDF tree.
-                    let key_c = format!("{}.collector", comp.id);
-                    let key_e = format!("{}.emitter", comp.id);
-                    let id_c = get_id(&key_c, &mut uf);
-                    let id_e = get_id(&key_e, &mut uf);
-                    let node_c = uf.find(id_c);
-                    let node_e = uf.find(id_e);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a: node_c,
-                        node_b: node_e,
-                    });
-                    num_active += 1;
-                }
-                ComponentKind::OpAmp(ot) if ot.is_ota() => {
-                    // OTAs are nonlinear elements (current-controlled gain).
-                    // Their pos/neg pins define the WDF edge (like a diode).
-                    // Use pos/neg if available, otherwise fall back to generic 2-terminal.
-                    let key_a = format!("{}.pos", comp.id);
-                    let key_b = format!("{}.neg", comp.id);
-                    let id_a = get_id(&key_a, &mut uf);
-                    let id_b = get_id(&key_b, &mut uf);
-                    let node_a = uf.find(id_a);
-                    let node_b = uf.find(id_b);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a,
-                        node_b,
-                    });
-                }
-                ComponentKind::OpAmp(_) => {
-                    num_active += 1;
-                }
-                ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..) => {
-                    // LFO and EnvelopeFollower are virtual modulation sources, not physical
-                    // circuit elements. They connect via .out pin to modulation targets.
-                }
-                ComponentKind::Bbd(_) => {
-                    // BBDs are handled as delay line processors, not WDF elements.
-                    // They connect via .in/.out pins but are processed separately.
-                }
-                ComponentKind::DelayLine(..) => {
-                    // Delay lines split the WDF tree into write/read subtrees.
-                    // The compiler processes them separately as ring buffer processors.
-                    // Connect via .input/.output pins; taps provide additional read ports.
-                }
-                ComponentKind::Tap(..) => {
-                    // Taps are read-only ports into a parent delay line.
-                    // They don't have WDF edges — they provide output from the delay buffer.
-                }
-                // ── Synth ICs ──────────────────────────────────────────
-                // These are complex ICs with internal behavior. They are NOT
-                // part of the WDF tree — they generate/process signals
-                // independently and connect via their pin nodes.
-                ComponentKind::Vco(_) => {
-                    // VCO generates audio internally. Not a WDF element.
-                    // Connects via .saw/.tri/.pulse output pins and .cv input.
-                    num_active += 1;
-                }
-                ComponentKind::Vcf(_) => {
-                    // VCF processes audio through internal OTA stages.
-                    // .in/.out are signal path; .cv/.res are control.
-                    num_active += 1;
-                }
-                ComponentKind::Vca(_) => {
-                    // VCA is a gain-control element (exponential CV).
-                    // .in/.out are signal path; .cv is control.
-                    num_active += 1;
-                }
-                ComponentKind::Comparator(_) => {
-                    // Binary output element. Not a WDF nonlinear root.
-                    // .pos/.neg are inputs; .out is open-collector output.
-                    num_active += 1;
-                }
-                ComponentKind::AnalogSwitch(_) => {
-                    // Bilateral switch: low-R path when ctrl is high.
-                    // Each channel: .in1/.out1/.ctrl1 through .in4/.out4/.ctrl4.
-                    num_active += 1;
-                }
-                ComponentKind::MatchedNpn(_) | ComponentKind::MatchedPnp(_) => {
-                    // Matched pairs: same as regular BJTs but with tighter Vbe matching.
-                    num_active += 1;
-                }
-                ComponentKind::Tempco(_, _) => {
-                    // Temperature-compensating resistor (2-terminal, like regular R).
-                    let key_a = format!("{}.a", comp.id);
-                    let key_b = format!("{}.b", comp.id);
-                    let id_a = get_id(&key_a, &mut uf);
-                    let id_b = get_id(&key_b, &mut uf);
-                    let node_a = uf.find(id_a);
-                    let node_b = uf.find(id_b);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a,
-                        node_b,
-                    });
-                }
-                // ── Studio Equipment: Switched Components ────────────────
-                // These represent physically switched component values (rotary selectors).
-                // At compile time, we select a specific value based on control state.
-                // For WDF, they behave as their base type (C or L).
-                ComponentKind::CapSwitched(_values) => {
-                    // Use first value as default; control system will select correct value
-                    // during pre-compilation of WDF trees for each switch combination.
-                    let key_a = format!("{}.a", comp.id);
-                    let key_b = format!("{}.b", comp.id);
-                    let id_a = get_id(&key_a, &mut uf);
-                    let id_b = get_id(&key_b, &mut uf);
-                    let node_a = uf.find(id_a);
-                    let node_b = uf.find(id_b);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a,
-                        node_b,
-                    });
-                }
-                ComponentKind::InductorSwitched(_values) => {
-                    // Same as CapSwitched — 2-terminal element with selectable value.
-                    let key_a = format!("{}.a", comp.id);
-                    let key_b = format!("{}.b", comp.id);
-                    let id_a = get_id(&key_a, &mut uf);
-                    let id_b = get_id(&key_b, &mut uf);
-                    let node_a = uf.find(id_a);
-                    let node_b = uf.find(id_b);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a,
-                        node_b,
-                    });
-                }
-                ComponentKind::Transformer(cfg) => {
-                    // Transformer: primary winding is a-b, secondary is c-d.
-                    // For WDF, we model the ideal transformer as a 2-port adaptor
-                    // with the turns ratio. The primary side is the WDF edge.
-                    //
-                    // Pin naming: the DSL supports both shorthand (.a/.b) and
-                    // explicit winding names (.primary.a/.primary.b). Union both
-                    // so that either convention works in netlists.
-                    // Transformer winding pin aliases: each winding has a canonical
-                    // shorthand (.a/.b, .c/.d, .e/.f), an explicit form (.primary.a,
-                    // .secondary.a, .tertiary.a), and an abbreviated form (.pri.a,
-                    // .sec.a, .ter.a). Union all forms so any convention works.
-                    //
-                    // Table: (shorthand_a, shorthand_b, &[(alias_prefix)])
+                GraphRole::Transformer => {
+                    // Complex multi-winding handling: aliases, coupling, center taps.
+                    let cfg = match &comp.kind {
+                        ComponentKind::Transformer(cfg) => cfg,
+                        _ => unreachable!(),
+                    };
+
+                    // Winding pin aliases: union shorthand (.a/.b) with explicit
+                    // (.primary.a/.primary.b) and abbreviated (.pri.a/.pri.b).
                     let windings: &[(&str, &str, &[&str])] = &[
                         ("a", "b", &["primary", "pri"]),
                         ("c", "d", &["secondary", "sec"]),
                     ];
                     for &(short_a, short_b, prefixes) in windings {
-                        let id_short_a = get_id(&format!("{}.{}", comp.id, short_a), &mut uf);
-                        let id_short_b = get_id(&format!("{}.{}", comp.id, short_b), &mut uf);
+                        let id_short_a =
+                            get_id(&format!("{}.{}", comp.id, short_a), &mut uf);
+                        let id_short_b =
+                            get_id(&format!("{}.{}", comp.id, short_b), &mut uf);
                         for prefix in prefixes {
-                            let alias_a = get_id(&format!("{}.{}.a", comp.id, prefix), &mut uf);
-                            let alias_b = get_id(&format!("{}.{}.b", comp.id, prefix), &mut uf);
+                            let alias_a =
+                                get_id(&format!("{}.{}.a", comp.id, prefix), &mut uf);
+                            let alias_b =
+                                get_id(&format!("{}.{}.b", comp.id, prefix), &mut uf);
                             uf.union(id_short_a, alias_a);
                             uf.union(id_short_b, alias_b);
                         }
@@ -630,8 +430,10 @@ impl CircuitGraph {
                         let id_e = get_id(&format!("{}.e", comp.id), &mut uf);
                         let id_f = get_id(&format!("{}.f", comp.id), &mut uf);
                         for prefix in &["tertiary", "ter"] {
-                            let alias_a = get_id(&format!("{}.{}.a", comp.id, prefix), &mut uf);
-                            let alias_b = get_id(&format!("{}.{}.b", comp.id, prefix), &mut uf);
+                            let alias_a =
+                                get_id(&format!("{}.{}.a", comp.id, prefix), &mut uf);
+                            let alias_b =
+                                get_id(&format!("{}.{}.b", comp.id, prefix), &mut uf);
                             uf.union(id_e, alias_a);
                             uf.union(id_f, alias_b);
                         }
@@ -651,8 +453,6 @@ impl CircuitGraph {
                     });
 
                     // Record transformer winding coupling for sidechain BFS.
-                    // All winding pin nodes are magnetically coupled and should
-                    // be traversable during sidechain partition discovery.
                     let node_c = uf.find(id_c);
                     let node_d = uf.find(id_d);
                     let mut all_winding_nodes = vec![node_a, node_b, node_c, node_d];
@@ -666,9 +466,12 @@ impl CircuitGraph {
                         cfg.primary_type,
                         WindingType::CenterTap | WindingType::PushPull
                     ) {
-                        let ct_id = get_id(&format!("{}.primary.ct", comp.id), &mut uf);
-                        let ct_abbr = get_id(&format!("{}.pri.ct", comp.id), &mut uf);
-                        let ct_short = get_id(&format!("{}.ct", comp.id), &mut uf);
+                        let ct_id =
+                            get_id(&format!("{}.primary.ct", comp.id), &mut uf);
+                        let ct_abbr =
+                            get_id(&format!("{}.pri.ct", comp.id), &mut uf);
+                        let ct_short =
+                            get_id(&format!("{}.ct", comp.id), &mut uf);
                         uf.union(ct_id, ct_abbr);
                         uf.union(ct_id, ct_short);
                         all_winding_nodes.push(uf.find(ct_id));
@@ -707,30 +510,9 @@ impl CircuitGraph {
                         );
                     }
                 }
-                ComponentKind::RotarySwitch(_) => {
-                    // Rotary switch is a control element, not a circuit element.
-                    // It determines which value to use for switched components.
-                    // No WDF edge — it's handled by the control system.
-                }
-                ComponentKind::ResistorSwitched(_values) => {
-                    // Same as CapSwitched — 2-terminal element with selectable value.
-                    // Used for ratio selection networks (1176), feedback networks, etc.
-                    let key_a = format!("{}.a", comp.id);
-                    let key_b = format!("{}.b", comp.id);
-                    let id_a = get_id(&key_a, &mut uf);
-                    let id_b = get_id(&key_b, &mut uf);
-                    let node_a = uf.find(id_a);
-                    let node_b = uf.find(id_b);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a,
-                        node_b,
-                    });
-                }
-                ComponentKind::Switch(_) => {
-                    // Simple mechanical switch is a control element.
-                    // It's used to select circuit topology (e.g., limit/compress mode).
-                    // No WDF edge — handled by the control system.
+                GraphRole::Virtual => {}
+                GraphRole::ActiveIc => {
+                    num_active += 1;
                 }
             }
         }
@@ -788,26 +570,16 @@ impl CircuitGraph {
             });
         }
 
-        // Alias .in↔.input and .out↔.output for component types that use
-        // these pins, so pedal authors can use either spelling interchangeably.
-        for comp in &pedal.components {
-            let aliases: &[(&str, &str)] = match &comp.kind {
-                ComponentKind::OpAmp(_) => &[("in", "input"), ("out", "output")],
-                ComponentKind::EnvelopeFollower(..) => &[("in", "input"), ("out", "output")],
-                ComponentKind::Bbd(_) => &[("in", "input"), ("out", "output")],
-                ComponentKind::DelayLine(..) => &[("in", "input"), ("out", "output")],
-                ComponentKind::Tap(..) => &[("out", "output")],
-                ComponentKind::Lfo(..) => &[("out", "output")],
-                ComponentKind::Vco(_) => &[("out", "output")],
-                ComponentKind::Vcf(_) => &[("in", "input"), ("out", "output")],
-                ComponentKind::Vca(_) => &[("in", "input"), ("out", "output")],
-                ComponentKind::Comparator(_) => &[("out", "output")],
-                _ => continue,
-            };
-            for &(short, long) in aliases {
-                let id_short = get_id(&format!("{}.{}", comp.id, short), &mut uf);
-                let id_long = get_id(&format!("{}.{}", comp.id, long), &mut uf);
-                uf.union(id_short, id_long);
+        // Union pin aliases (e.g. .in↔.input, .out↔.output) so pedal
+        // authors can use either spelling interchangeably.
+        {
+            use super::component::Component;
+            for comp in &pedal.components {
+                for &(short, long) in comp.kind.pin_config().aliases {
+                    let id_short = get_id(&format!("{}.{}", comp.id, short), &mut uf);
+                    let id_long = get_id(&format!("{}.{}", comp.id, long), &mut uf);
+                    uf.union(id_short, id_long);
+                }
             }
         }
 
@@ -2283,6 +2055,8 @@ pub(super) fn make_leaf(
     fork_info: Option<&ForkPathInfo>,
     sample_rate: f64,
 ) -> DynNode {
+    use super::component::Component;
+
     // Check if this is a fork path component
     if let Some(info) = fork_info {
         // Fork path: create a SwitchedResistor
@@ -2303,156 +2077,8 @@ pub(super) fn make_leaf(
         };
     }
 
-    // Regular component handling
-    match &comp.kind {
-        // Handle inf (infinite) resistor as very high resistance (open circuit)
-        ComponentKind::Resistor(r) if r.is_infinite() => DynNode::Resistor {
-            rp: FORK_R_INACTIVE,
-        },
-        ComponentKind::Resistor(r) => DynNode::Resistor { rp: *r },
-        ComponentKind::Capacitor(cfg) => {
-            // Use LeakyCapacitor if leakage or DA is specified
-            if cfg.leakage.is_some() || cfg.da.is_some() {
-                let rp = 1.0 / (2.0 * sample_rate * cfg.value);
-
-                // Calculate leakage decay factor per sample
-                // decay = exp(-dt / tau) where tau = R_leak * C and dt = 1/fs
-                // decay = exp(-1 / (fs * R_leak * C))
-                let leakage_decay = if let Some(r_leak) = cfg.leakage {
-                    let tau = r_leak * cfg.value; // RC time constant in seconds
-                    let dt = 1.0 / sample_rate;
-                    (-dt / tau).exp()
-                } else {
-                    1.0 // No decay
-                };
-
-                // Calculate DA rate (time constant ~0.5s)
-                const DA_TIME_CONSTANT: f64 = 0.5;
-                let da_rate = if cfg.da.is_some() {
-                    1.0 / (sample_rate * DA_TIME_CONSTANT)
-                } else {
-                    0.0
-                };
-
-                DynNode::LeakyCapacitor {
-                    capacitance: cfg.value,
-                    rp,
-                    state: 0.0,
-                    leakage_decay,
-                    da_coef: cfg.da,
-                    da_state: 0.0,
-                    da_rate,
-                }
-            } else {
-                // Use simple Capacitor for ideal caps (faster hot path)
-                DynNode::Capacitor {
-                    capacitance: cfg.value,
-                    rp: 1.0 / (2.0 * sample_rate * cfg.value),
-                    state: 0.0,
-                    last_b: 0.0,
-                }
-            }
-        }
-        ComponentKind::Inductor(l) => DynNode::Inductor {
-            inductance: *l,
-            rp: 2.0 * sample_rate * *l,
-            state: 0.0,
-        },
-        ComponentKind::Potentiometer(max_r, taper) => {
-            // Apply taper for initial position (0.5)
-            let initial_pos = 0.5;
-            let tapered_pos = taper.apply(initial_pos);
-            DynNode::Pot {
-                comp_id: comp.id.clone(),
-                max_resistance: *max_r,
-                position: initial_pos,
-                taper: *taper,
-                rp: (tapered_pos * *max_r).max(1.0),
-            }
-        }
-        ComponentKind::Photocoupler(pt) => {
-            let model = match pt {
-                PhotocouplerType::Vtl5c3 => PhotocouplerModel::vtl5c3(),
-                PhotocouplerType::Vtl5c1 => PhotocouplerModel::vtl5c1(),
-                PhotocouplerType::Nsl32 => PhotocouplerModel::nsl32(),
-                PhotocouplerType::T4b => PhotocouplerModel::t4b(),
-            };
-            DynNode::Photocoupler {
-                comp_id: comp.id.clone(),
-                inner: Photocoupler::new(model, sample_rate),
-                prev_resistance: 0.0,
-            }
-        }
-        // JFET as variable resistor (when classified as passive).
-        ComponentKind::NJfet(name) | ComponentKind::PJfet(name) => {
-            let model = crate::elements::JfetModel::by_name(name);
-            DynNode::JfetVr {
-                comp_id: comp.id.clone(),
-                inner: JfetVariableResistor::new(model),
-                prev_rds: 0.0,
-            }
-        }
-        // Tempco resistor: modeled as a standard resistor (nominal value).
-        // Temperature compensation handled by the thermal model separately.
-        ComponentKind::Tempco(r, _ppm) => DynNode::Resistor { rp: *r },
-        // Transformer: create a transformer adaptor with secondary load stub.
-        //
-        // The transformer connects primary and secondary windings.
-        // For now, we model the secondary as a simple resistive load (the output impedance).
-        // Full transformer modeling requires building the secondary subtree separately.
-        //
-        // The turns ratio determines voltage/current transformation:
-        // - V_primary / V_secondary = turns_ratio
-        // - I_secondary / I_primary = turns_ratio (power conservation)
-        // - Z_primary = turns_ratio² × Z_secondary
-        ComponentKind::Transformer(cfg) => {
-            let l_primary = cfg.primary_inductance;
-            let n = cfg.turns_ratio; // Primary:Secondary ratio
-
-            // Secondary inductance scales by 1/n²
-            let l_secondary = l_primary / (n * n);
-
-            // Secondary stub (inductor representing magnetizing inductance)
-            let secondary = Box::new(DynNode::Inductor {
-                inductance: l_secondary,
-                rp: 2.0 * sample_rate * l_secondary,
-                state: 0.0,
-            });
-
-            if let Some(n_tertiary) = cfg.tertiary_turns_ratio {
-                // 3-winding transformer → R-type adaptor
-                // Ports: 0=secondary, 1=tertiary, 2=primary (adapted, reflection-free)
-                let l_tertiary = l_primary / (n_tertiary * n_tertiary);
-                let tertiary = Box::new(DynNode::Inductor {
-                    inductance: l_tertiary,
-                    rp: 2.0 * sample_rate * l_tertiary,
-                    state: 0.0,
-                });
-
-                let r_sec = secondary.port_resistance();
-                let r_ter = tertiary.port_resistance();
-                let adaptor = crate::tree::RTypeAdaptor::three_winding_transformer(
-                    n, n_tertiary, r_sec, r_ter,
-                );
-
-                DynNode::RType {
-                    adaptor,
-                    children: vec![secondary, tertiary],
-                }
-            } else {
-                // Standard 2-winding transformer
-                let rp_sec = secondary.port_resistance();
-                let rp_prim = n * n * rp_sec;
-
-                DynNode::Transformer {
-                    secondary,
-                    turns_ratio: n,
-                    rp: rp_prim,
-                    b_sec: 0.0,
-                }
-            }
-        }
-        // Diodes shouldn't appear as leaves (they're roots), but handle gracefully.
-        _ => DynNode::Resistor { rp: 1000.0 },
-    }
+    // Delegate to Component trait; fallback for non-leaf types (diodes, etc.)
+    comp.kind
+        .make_leaf(&comp.id, sample_rate)
+        .unwrap_or(DynNode::Resistor { rp: 1000.0 })
 }

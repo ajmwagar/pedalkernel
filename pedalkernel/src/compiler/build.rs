@@ -385,6 +385,7 @@ pub(super) fn build_stages(
     pp_transformer_edges: &HashSet<usize>,
     lfo_controlled_jfets: &HashSet<String>,
 ) -> (Vec<WdfStage>, Vec<MultiNlStage>) {
+    use super::component::Component;
     let vs_comp_idx = graph.components.len();
 
     // Build unity-gain feedback op-amp queue for JFET pairing.
@@ -466,10 +467,7 @@ pub(super) fn build_stages(
                         .passive_idxs
                         .iter()
                         .filter_map(|&idx| {
-                            match &graph.components[graph.edges[idx].comp_idx].kind {
-                                ComponentKind::Resistor(r) => Some(*r),
-                                _ => None,
-                            }
+                            graph.components[graph.edges[idx].comp_idx].kind.resistance()
                         })
                         .next()
                         .unwrap_or(22_000.0);
@@ -1024,114 +1022,45 @@ fn stamp_passive_edge(
     let n1 = node_to_mna(e.node_a);
     let n2 = node_to_mna(e.node_b);
 
-    match &comp.kind {
-        ComponentKind::Resistor(r) => {
-            mna.stamp_resistor(n1, n2, *r);
-        }
-        ComponentKind::Capacitor(cfg) => {
-            let rp = 1.0 / (2.0 * sample_rate * cfg.value);
-            reactive_edges.push((
-                eidx,
-                DynNode::Capacitor {
-                    capacitance: cfg.value,
-                    rp,
-                    state: 0.0,
-                    last_b: 0.0,
-                },
-            ));
-        }
-        ComponentKind::Inductor(l) => {
-            reactive_edges.push((
-                eidx,
-                DynNode::Inductor {
-                    inductance: *l,
-                    rp: 2.0 * sample_rate * *l,
-                    state: 0.0,
-                },
-            ));
-        }
-        ComponentKind::Potentiometer(max_r, taper) => {
-            let initial_pos = 0.5;
-            let tapered_pos = taper.apply(initial_pos);
-            let r = (tapered_pos * *max_r).max(1.0);
-            mna.stamp_resistor(n1, n2, r);
-            pot_entries.push((
-                eidx,
-                DynNode::Pot {
-                    comp_id: comp.id.clone(),
-                    max_resistance: *max_r,
-                    position: initial_pos,
-                    taper: *taper,
-                    rp: r,
-                },
-                n1,
-                n2,
-                1.0 / r,
-            ));
-        }
-        ComponentKind::Tempco(r, _ppm) => {
-            mna.stamp_resistor(n1, n2, *r);
-        }
-        ComponentKind::ResistorSwitched(values) => {
-            if let Some(&r) = values.first() {
-                if r.is_finite() && r > 0.0 {
-                    mna.stamp_resistor(n1, n2, r);
-                }
+    // Transformer needs coupled_edge_indices context — handle specially.
+    if let ComponentKind::Transformer(cfg) = &comp.kind {
+        if coupled_edge_indices.contains(&eidx) {
+            if cfg.primary_dcr > 0.0 {
+                mna.stamp_resistor(n1, n2, cfg.primary_dcr);
+            }
+        } else {
+            let l = cfg.primary_inductance;
+            if l > 0.0 && l.is_finite() {
+                reactive_edges.push((
+                    eidx,
+                    DynNode::Inductor {
+                        inductance: l,
+                        rp: 2.0 * sample_rate * l,
+                        state: 0.0,
+                    },
+                ));
+            }
+            if cfg.primary_dcr > 0.0 {
+                mna.stamp_resistor(n1, n2, cfg.primary_dcr);
             }
         }
-        ComponentKind::CapSwitched(values) => {
-            if let Some(&c) = values.first() {
-                if c.is_finite() && c > 0.0 {
-                    let rp = 1.0 / (2.0 * sample_rate * c);
-                    reactive_edges.push((
-                        eidx,
-                        DynNode::Capacitor {
-                            capacitance: c,
-                            rp,
-                            state: 0.0,
-                            last_b: 0.0,
-                        },
-                    ));
-                }
-            }
+        return;
+    }
+
+    // All other passives: delegate to Component trait.
+    use super::component::{Component, StampResult};
+    match comp.kind.stamp_mna(&comp.id, n1, n2, mna, sample_rate) {
+        StampResult::Stamped => {}
+        StampResult::Reactive { dyn_node, .. } => {
+            reactive_edges.push((eidx, dyn_node));
         }
-        ComponentKind::InductorSwitched(values) => {
-            if let Some(&l) = values.first() {
-                if l.is_finite() && l > 0.0 {
-                    reactive_edges.push((
-                        eidx,
-                        DynNode::Inductor {
-                            inductance: l,
-                            rp: 2.0 * sample_rate * l,
-                            state: 0.0,
-                        },
-                    ));
-                }
-            }
+        StampResult::Pot {
+            dyn_node,
+            initial_conductance,
+        } => {
+            pot_entries.push((eidx, dyn_node, n1, n2, initial_conductance));
         }
-        ComponentKind::Transformer(cfg) => {
-            if coupled_edge_indices.contains(&eidx) {
-                if cfg.primary_dcr > 0.0 {
-                    mna.stamp_resistor(n1, n2, cfg.primary_dcr);
-                }
-            } else {
-                let l = cfg.primary_inductance;
-                if l > 0.0 && l.is_finite() {
-                    reactive_edges.push((
-                        eidx,
-                        DynNode::Inductor {
-                            inductance: l,
-                            rp: 2.0 * sample_rate * l,
-                            state: 0.0,
-                        },
-                    ));
-                }
-                if cfg.primary_dcr > 0.0 {
-                    mna.stamp_resistor(n1, n2, cfg.primary_dcr);
-                }
-            }
-        }
-        _ => {}
+        StampResult::Skip => {}
     }
 }
 
@@ -2408,6 +2337,7 @@ fn build_push_pull_roots(
 /// and searches for a resistor edge between them. Falls back to 600Ω
 /// (standard line-level termination) if not found.
 fn find_secondary_load_resistance(graph: &CircuitGraph, xfmr_comp_idx: usize) -> f64 {
+    use super::component::Component;
     let comp = &graph.components[xfmr_comp_idx];
     let sec_a_key = format!("{}.c", comp.id);
     let sec_b_key = format!("{}.d", comp.id);
@@ -2420,8 +2350,8 @@ fn find_secondary_load_resistance(graph: &CircuitGraph, xfmr_comp_idx: usize) ->
             if (edge.node_a == node_a && edge.node_b == node_b)
                 || (edge.node_a == node_b && edge.node_b == node_a)
             {
-                if let ComponentKind::Resistor(r) = &graph.components[edge.comp_idx].kind {
-                    return *r;
+                if let Some(r) = graph.components[edge.comp_idx].kind.resistance() {
+                    return r;
                 }
             }
         }

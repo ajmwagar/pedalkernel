@@ -101,168 +101,19 @@ fn check_duplicate_component_ids(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
 /// Suspicious component values.
 fn check_component_values(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
+    use super::component::Component;
     for comp in &pedal.components {
-        match &comp.kind {
-            ComponentKind::Resistor(r) => {
-                if *r <= 0.0 {
-                    w.push(PedalWarning {
-                        severity: Severity::Error,
-                        code: "invalid-value",
-                        message: format!(
-                            "Resistor '{}' has non-positive value {:.2} Ω",
-                            comp.id, r
-                        ),
-                    });
-                } else if *r < 1.0 {
-                    w.push(PedalWarning {
-                        severity: Severity::Info,
-                        code: "suspicious-value",
-                        message: format!(
-                            "Resistor '{}' is {:.2} Ω — extremely low, did you mean {}k?",
-                            comp.id, r, r
-                        ),
-                    });
-                } else if *r > 100e6 {
-                    w.push(PedalWarning {
-                        severity: Severity::Info,
-                        code: "suspicious-value",
-                        message: format!(
-                            "Resistor '{}' is {:.1} MΩ — unusually high",
-                            comp.id,
-                            r / 1e6
-                        ),
-                    });
-                }
-            }
-            ComponentKind::Capacitor(cfg) => {
-                if cfg.value <= 0.0 {
-                    w.push(PedalWarning {
-                        severity: Severity::Error,
-                        code: "invalid-value",
-                        message: format!(
-                            "Capacitor '{}' has non-positive value {:.2e} F",
-                            comp.id, cfg.value
-                        ),
-                    });
-                } else if cfg.value > 1.0 {
-                    w.push(PedalWarning {
-                        severity: Severity::Warning,
-                        code: "suspicious-value",
-                        message: format!(
-                            "Capacitor '{}' is {:.2} F — over 1 farad, did you forget a unit suffix (n, u, p)?",
-                            comp.id, cfg.value
-                        ),
-                    });
-                }
-                if let Some(leak) = cfg.leakage {
-                    if leak <= 0.0 {
-                        w.push(PedalWarning {
-                            severity: Severity::Error,
-                            code: "invalid-value",
-                            message: format!(
-                                "Capacitor '{}' has non-positive leakage resistance {:.2} Ω",
-                                comp.id, leak
-                            ),
-                        });
-                    }
-                }
-                if let Some(da) = cfg.da {
-                    if !(0.0..=1.0).contains(&da) {
-                        w.push(PedalWarning {
-                            severity: Severity::Warning,
-                            code: "invalid-value",
-                            message: format!(
-                                "Capacitor '{}' has dielectric absorption {:.3} — should be 0.0 to 1.0",
-                                comp.id, da
-                            ),
-                        });
-                    }
-                }
-            }
-            ComponentKind::Inductor(l) => {
-                if *l <= 0.0 {
-                    w.push(PedalWarning {
-                        severity: Severity::Error,
-                        code: "invalid-value",
-                        message: format!(
-                            "Inductor '{}' has non-positive value {:.2e} H",
-                            comp.id, l
-                        ),
-                    });
-                }
-            }
-            ComponentKind::Potentiometer(r, _) => {
-                if *r <= 0.0 {
-                    w.push(PedalWarning {
-                        severity: Severity::Error,
-                        code: "invalid-value",
-                        message: format!(
-                            "Potentiometer '{}' has non-positive max resistance {:.2} Ω",
-                            comp.id, r
-                        ),
-                    });
-                }
-            }
-            ComponentKind::Zener(v) => {
-                if *v <= 0.0 {
-                    w.push(PedalWarning {
-                        severity: Severity::Error,
-                        code: "invalid-value",
-                        message: format!(
-                            "Zener '{}' has non-positive breakdown voltage {:.2} V",
-                            comp.id, v
-                        ),
-                    });
-                }
-            }
-            ComponentKind::Lfo(_, timing_r, timing_c) => {
-                if *timing_r <= 0.0 || *timing_c <= 0.0 {
-                    w.push(PedalWarning {
-                        severity: Severity::Error,
-                        code: "invalid-value",
-                        message: format!(
-                            "LFO '{}' has non-positive timing values (R={:.2}, C={:.2e})",
-                            comp.id, timing_r, timing_c
-                        ),
-                    });
-                }
-                let freq = 1.0 / (2.0 * std::f64::consts::PI * timing_r * timing_c);
-                if freq > 100.0 {
-                    w.push(PedalWarning {
-                        severity: Severity::Warning,
-                        code: "suspicious-value",
-                        message: format!(
-                            "LFO '{}' base frequency is {:.1} Hz — unusually fast for modulation",
-                            comp.id, freq
-                        ),
-                    });
-                }
-            }
-            ComponentKind::EnvelopeFollower(ar, ac, rr, rc, sr) => {
-                if *ar <= 0.0 || *ac <= 0.0 || *rr <= 0.0 || *rc <= 0.0 || *sr <= 0.0 {
-                    w.push(PedalWarning {
-                        severity: Severity::Error,
-                        code: "invalid-value",
-                        message: format!(
-                            "EnvelopeFollower '{}' has non-positive parameter value(s)",
-                            comp.id
-                        ),
-                    });
-                }
-            }
-            ComponentKind::Switch(n) => {
-                if *n < 2 {
-                    w.push(PedalWarning {
-                        severity: Severity::Warning,
-                        code: "suspicious-value",
-                        message: format!(
-                            "Switch '{}' has {} position(s) — a switch needs at least 2",
-                            comp.id, n
-                        ),
-                    });
-                }
-            }
-            _ => {}
+        let issues = comp.kind.validate_values(&comp.id);
+        for (severity, message) in issues {
+            let code = match severity {
+                Severity::Error => "invalid-value",
+                Severity::Warning | Severity::Info => "suspicious-value",
+            };
+            w.push(PedalWarning {
+                severity,
+                code,
+                message,
+            });
         }
     }
 }
@@ -363,112 +214,10 @@ fn check_net_references(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     }
 }
 
-/// Valid pin names for each component type.
+/// Valid pin names for a component type (delegates to Component trait).
 fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
-    match kind {
-        // 2-terminal passive elements
-        ComponentKind::Resistor(_)
-        | ComponentKind::Capacitor(_)
-        | ComponentKind::Inductor(_)
-        | ComponentKind::DiodePair(_)
-        | ComponentKind::Diode(_)
-        | ComponentKind::Zener(_)
-        | ComponentKind::Neon(_)
-        | ComponentKind::Tempco(_, _)
-        | ComponentKind::CapSwitched(_)
-        | ComponentKind::InductorSwitched(_)
-        | ComponentKind::ResistorSwitched(_) => &["a", "b"],
-
-        // Potentiometer: 2-terminal (a, b) or 3-terminal (a, wiper/w, b)
-        ComponentKind::Potentiometer(_, _) => &["a", "b", "w", "wiper", "position"],
-
-        // BJT
-        ComponentKind::Npn(_) | ComponentKind::Pnp(_) => &["base", "collector", "emitter"],
-        ComponentKind::MatchedNpn(_) | ComponentKind::MatchedPnp(_) => &[
-            "base",
-            "collector",
-            "emitter",
-            "base1",
-            "base2",
-            "collector1",
-            "collector2",
-            "emitter1",
-            "emitter2",
-        ],
-
-        // Op-amp
-        ComponentKind::OpAmp(_) => &["pos", "neg", "out", "output", "vp", "in", "input"],
-
-        // JFET
-        ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => &["gate", "drain", "source", "vgs"],
-
-        // MOSFET
-        ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => &["gate", "drain", "source", "vgs"],
-
-        // Photocoupler: LDR (a, b) + LED drive
-        ComponentKind::Photocoupler(_) => &["a", "b", "led"],
-
-        // Triode tube
-        ComponentKind::Triode(_) => &["plate", "cathode", "grid", "vgk"],
-
-        // Variable-mu triode (Raffensperger model)
-        ComponentKind::VariMu(_) => &["plate", "cathode", "grid", "vgk"],
-
-        // Pentode tube
-        ComponentKind::Pentode(_) => &["plate", "cathode", "g1", "g2", "grid", "screen", "vg1k"],
-
-        // LFO: output + rate control
-        ComponentKind::Lfo(..) => &["out", "output", "rate"],
-
-        // Envelope follower: output + input
-        ComponentKind::EnvelopeFollower(..) => &["out", "output", "in", "input"],
-
-        // BBD delay
-        ComponentKind::Bbd(_) => &["in", "input", "out", "output", "clock"],
-
-        // Delay line
-        ComponentKind::DelayLine(..) => &[
-            "input",
-            "in",
-            "output",
-            "out",
-            "rate",
-            "speed_mod",
-            "delay_time",
-            "feedback",
-        ],
-
-        // Tap
-        ComponentKind::Tap(..) => &["output", "out"],
-
-        // Transformer: primary (a, b) + secondary (c, d) + tertiary (e, f) + center taps
-        // Also supports hierarchical names: primary.a, secondary.a, tertiary.a
-        ComponentKind::Transformer(_) => {
-            &["a", "b", "c", "d", "e", "f",
-              "primary.a", "primary.b", "secondary.a", "secondary.b",
-              "tertiary.a", "tertiary.b",
-              "pri.a", "pri.b", "sec.a", "sec.b", "ter.a", "ter.b",
-              "pri_a", "pri_b", "sec_a", "sec_b", "ter_a", "ter_b",
-              "pri_ct", "pri.ct", "sec_ct", "sec.ct", "ct",
-              "primary.ct", "secondary.ct"]
-        }
-
-        // Synth ICs
-        ComponentKind::Vco(_) => &["cv", "saw", "tri", "pulse", "pw", "sync", "out", "output"],
-        ComponentKind::Vcf(_) => &["in", "input", "out", "output", "cv", "res"],
-        ComponentKind::Vca(_) => &[
-            "in", "input", "out", "output", "cv", // Quad VCA (SSM2164/V2164) numbered channel pins
-            "in1", "out1", "cv1", "in2", "out2", "cv2", "in3", "out3", "cv3", "in4", "out4", "cv4",
-        ],
-        ComponentKind::Comparator(_) => &["pos", "neg", "out", "output"],
-        ComponentKind::AnalogSwitch(_) => &[
-            "in1", "out1", "ctrl1", "in2", "out2", "ctrl2", "in3", "out3", "ctrl3", "in4", "out4",
-            "ctrl4",
-        ],
-
-        // Switches are control elements, not circuit elements with pins
-        ComponentKind::RotarySwitch(_) | ComponentKind::Switch(_) => &[],
-    }
+    use super::component::Component;
+    kind.pin_config().valid_pins
 }
 
 /// Check that pin names used in nets are valid for their component type.
@@ -479,22 +228,12 @@ fn check_pin_validity(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
         .map(|c| (c.id.as_str(), &c.kind))
         .collect();
 
+    use super::component::Component;
+
     // Modulation target pins are valid on specific component types even though
     // they're not circuit pins (they're resolved during binding, not graph building).
     let is_valid_modulation_pin = |kind: &ComponentKind, pin: &str| -> bool {
-        match pin {
-            "iabc" => matches!(kind, ComponentKind::OpAmp(OpAmpType::Ca3080)),
-            "vgs" | "gate" => matches!(
-                kind,
-                ComponentKind::NJfet(_) | ComponentKind::PJfet(_)
-            ),
-            "vgk" => matches!(kind, ComponentKind::Triode(_) | ComponentKind::VariMu(_)),
-            "vg1k" => matches!(kind, ComponentKind::Pentode(_)),
-            "led" => matches!(kind, ComponentKind::Photocoupler(..)),
-            "clock" => matches!(kind, ComponentKind::Bbd(_)),
-            "speed_mod" | "delay_time" => matches!(kind, ComponentKind::DelayLine(..)),
-            _ => false,
-        }
+        kind.modulation_pins().contains(&pin)
     };
 
     let check_pin = |pin: &Pin, w: &mut Vec<PedalWarning>| {
@@ -533,6 +272,7 @@ fn check_pin_validity(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
 /// Components declared but never referenced in any net.
 fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
+    use super::component::Component;
     let mut referenced: HashSet<String> = HashSet::new();
 
     fn collect_refs(pin: &Pin, refs: &mut HashSet<String>) {
@@ -572,10 +312,7 @@ fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
     for comp in &pedal.components {
         // Skip internal/virtual types that don't need net connections
-        if matches!(
-            &comp.kind,
-            ComponentKind::RotarySwitch(_) | ComponentKind::Switch(_)
-        ) {
+        if comp.kind.is_control_only() {
             continue;
         }
         if !referenced.contains(&comp.id) {
@@ -595,10 +332,11 @@ fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     // Synths (circuits with VCOs) generate their own signal — they don't need
     // an in → out path since audio originates from the oscillator.
+    use super::component::Component;
     let is_synth = pedal
         .components
         .iter()
-        .any(|c| matches!(&c.kind, ComponentKind::Vco(_)));
+        .any(|c| c.kind.type_tag() == "VCO");
     if is_synth {
         return;
     }
@@ -799,6 +537,8 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
 /// Check control definitions reference valid components and properties.
 fn check_controls(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
+    use super::component::Component;
+
     let comp_map: HashMap<&str, &ComponentKind> = pedal
         .components
         .iter()
@@ -821,12 +561,8 @@ fn check_controls(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
         let kind = comp_map[ctrl.component.as_str()];
         // Controls typically target potentiometers or switches
-        if !matches!(
-            kind,
-            ComponentKind::Potentiometer(_, _)
-                | ComponentKind::Switch(_)
-                | ComponentKind::RotarySwitch(_)
-        ) {
+        let tag = kind.type_tag();
+        if !matches!(tag, "potentiometer" | "switch" | "rotary switch") {
             w.push(PedalWarning {
                 severity: Severity::Warning,
                 code: "unusual-control-target",
@@ -835,7 +571,7 @@ fn check_controls(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                     section,
                     ctrl.label,
                     ctrl.component,
-                    component_type_name(kind)
+                    tag
                 ),
             });
         }
@@ -920,20 +656,14 @@ fn check_modulation_targets(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
         .copied()
         .collect();
 
+    use super::component::Component;
+
     // Check each modulation source's output connections
     for comp in &pedal.components {
-        let is_mod_source = matches!(
-            &comp.kind,
-            ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..)
-        );
-        if !is_mod_source {
-            continue;
-        }
-
-        let source_type = if matches!(&comp.kind, ComponentKind::Lfo(..)) {
-            "LFO"
-        } else {
-            "EnvelopeFollower"
+        let source_type = match comp.kind.type_tag() {
+            "LFO" => "LFO",
+            "envelope follower" => "EnvelopeFollower",
+            _ => continue,
         };
 
         for net in &pedal.nets {
@@ -969,17 +699,12 @@ fn check_modulation_targets(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                                 // This is a valid passive connection (e.g., LFO1.out -> Depth.a)
                                 // but it won't create a modulation binding. Check if the user
                                 // probably intended a modulation binding.
-                                let target_is_pot =
-                                    matches!(target_kind, ComponentKind::Potentiometer(_, _));
-                                let target_is_passive = matches!(
-                                    target_kind,
-                                    ComponentKind::Resistor(_)
-                                        | ComponentKind::Capacitor(_)
-                                        | ComponentKind::Inductor(_)
-                                );
+                                let tag = target_kind.type_tag();
+                                let target_is_pot = tag == "potentiometer";
+                                let target_is_passive = matches!(tag, "resistor" | "capacitor" | "inductor");
                                 if !target_is_pot
                                     && !target_is_passive
-                                    && !matches!(target_kind, ComponentKind::Lfo(..))
+                                    && tag != "LFO"
                                 {
                                     // Connecting a modulation source to a non-passive, non-pot
                                     // component's generic pin is suspicious
@@ -1026,25 +751,10 @@ fn check_mod_target_compatibility(
     target_kind: &ComponentKind,
     w: &mut Vec<PedalWarning>,
 ) {
-    let mismatch = match target_pin {
-        "vgs" | "gate" => !matches!(
-            target_kind,
-            ComponentKind::NJfet(_)
-                | ComponentKind::PJfet(_)
-                | ComponentKind::Nmos(_)
-                | ComponentKind::Pmos(_)
-        ),
-        "led" => !matches!(target_kind, ComponentKind::Photocoupler(_)),
-        "vgk" => !matches!(
-            target_kind,
-            ComponentKind::Triode(_) | ComponentKind::VariMu(_)
-        ),
-        "vg1k" => !matches!(target_kind, ComponentKind::Pentode(_)),
-        "iabc" => !matches!(target_kind, ComponentKind::OpAmp(OpAmpType::Ca3080)),
-        "clock" => !matches!(target_kind, ComponentKind::Bbd(_)),
-        "speed_mod" | "delay_time" => !matches!(target_kind, ComponentKind::DelayLine(..)),
-        _ => false,
-    };
+    use super::component::Component;
+
+    // The pin is a mismatch if this component doesn't list it as a modulation pin.
+    let mismatch = !target_kind.modulation_pins().contains(&target_pin);
 
     if mismatch {
         w.push(PedalWarning {
@@ -1060,7 +770,7 @@ fn check_mod_target_compatibility(
                 target_pin,
                 expected_component_for_pin(target_pin),
                 target_comp,
-                component_type_name(target_kind)
+                target_kind.type_tag()
             ),
         });
     }
@@ -1080,47 +790,8 @@ fn expected_component_for_pin(pin: &str) -> &'static str {
 }
 
 fn component_type_name(kind: &ComponentKind) -> &'static str {
-    match kind {
-        ComponentKind::Resistor(_) => "resistor",
-        ComponentKind::Capacitor(_) => "capacitor",
-        ComponentKind::Inductor(_) => "inductor",
-        ComponentKind::DiodePair(_) => "diode pair",
-        ComponentKind::Diode(_) => "diode",
-        ComponentKind::Zener(_) => "zener diode",
-        ComponentKind::Potentiometer(_, _) => "potentiometer",
-        ComponentKind::Npn(_) => "NPN transistor",
-        ComponentKind::Pnp(_) => "PNP transistor",
-        ComponentKind::OpAmp(ot) if ot.is_ota() => "OTA",
-        ComponentKind::OpAmp(_) => "op-amp",
-        ComponentKind::NJfet(_) => "N-channel JFET",
-        ComponentKind::PJfet(_) => "P-channel JFET",
-        ComponentKind::Nmos(_) => "N-channel MOSFET",
-        ComponentKind::Pmos(_) => "P-channel MOSFET",
-        ComponentKind::Photocoupler(_) => "photocoupler",
-        ComponentKind::Triode(_) => "triode",
-        ComponentKind::VariMu(_) => "variable-mu triode",
-        ComponentKind::Pentode(_) => "pentode",
-        ComponentKind::Lfo(..) => "LFO",
-        ComponentKind::EnvelopeFollower(..) => "envelope follower",
-        ComponentKind::Bbd(_) => "BBD delay",
-        ComponentKind::DelayLine(..) => "delay line",
-        ComponentKind::Tap(..) => "tap",
-        ComponentKind::Neon(_) => "neon bulb",
-        ComponentKind::Vco(_) => "VCO",
-        ComponentKind::Vcf(_) => "VCF",
-        ComponentKind::Vca(_) => "VCA",
-        ComponentKind::Comparator(_) => "comparator",
-        ComponentKind::AnalogSwitch(_) => "analog switch",
-        ComponentKind::MatchedNpn(_) => "matched NPN pair",
-        ComponentKind::MatchedPnp(_) => "matched PNP pair",
-        ComponentKind::Tempco(_, _) => "tempco resistor",
-        ComponentKind::Transformer(_) => "transformer",
-        ComponentKind::CapSwitched(_) => "switched capacitor",
-        ComponentKind::InductorSwitched(_) => "switched inductor",
-        ComponentKind::ResistorSwitched(_) => "switched resistor",
-        ComponentKind::RotarySwitch(_) => "rotary switch",
-        ComponentKind::Switch(_) => "switch",
-    }
+    use super::component::Component;
+    kind.type_tag()
 }
 
 /// Check supply configuration.

@@ -1,0 +1,425 @@
+//! Active IC component structs: OpAmp, Vco, Vcf, Vca, Comparator, AnalogSwitch,
+//! MatchedNpn, MatchedPnp.
+
+use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult};
+use crate::dsl::{
+    AnalogSwitchType, ComparatorType, MatchedTransistorType, OpAmpType, VcaType, VcfType, VcoType,
+};
+use crate::tree::MnaSystem;
+
+use super::impl_component_dyn;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// OpAmp
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpAmp {
+    pub op_type: OpAmpType,
+}
+
+impl Component for OpAmp {
+    impl_component_dyn!();
+
+    fn type_tag(&self) -> &'static str {
+        if self.op_type.is_ota() { "OTA" } else { "op-amp" }
+    }
+
+    fn is_passive(&self) -> bool { false }
+
+    fn is_nonlinear(&self) -> bool {
+        self.op_type.is_ota()
+    }
+
+    fn is_active_ic(&self) -> bool {
+        !self.op_type.is_ota()
+    }
+
+    fn pin_config(&self) -> PinConfig {
+        PinConfig {
+            valid_pins: &["pos", "neg", "out", "output", "vp", "in", "input"],
+            aliases: &[("in", "input"), ("out", "output")],
+        }
+    }
+
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        if self.op_type == OpAmpType::Ca3080 { &["iabc"] } else { &[] }
+    }
+
+    fn graph_role(&self) -> GraphRole {
+        if self.op_type.is_ota() {
+            GraphRole::Edge { pin_a: "pos", pin_b: "neg" }
+        } else {
+            GraphRole::ActiveIc
+        }
+    }
+
+    fn stamp_mna(
+        &self,
+        _comp_id: &str,
+        _n1: Option<usize>,
+        _n2: Option<usize>,
+        _mna: &mut MnaSystem,
+        _sample_rate: f64,
+    ) -> StampResult {
+        StampResult::Skip
+    }
+
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        let lib = match self.op_type {
+            OpAmpType::Generic => "Amplifier_Operational:TL072",
+            OpAmpType::Tl072 => "Amplifier_Operational:TL072",
+            OpAmpType::Tl082 => "Amplifier_Operational:TL082",
+            OpAmpType::Jrc4558 => "Amplifier_Operational:JRC4558",
+            OpAmpType::Rc4558 => "Amplifier_Operational:RC4558",
+            OpAmpType::Lm308 => "Amplifier_Operational:LM308",
+            OpAmpType::Lm741 => "Amplifier_Operational:LM741",
+            OpAmpType::Ne5532 => "Amplifier_Operational:NE5532",
+            OpAmpType::Ca3080 => "Amplifier_Operational:CA3080",
+            OpAmpType::Op07 => "Amplifier_Operational:OP07",
+        };
+        (lib, "U")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Vco
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vco {
+    pub vco_type: VcoType,
+}
+
+impl Component for Vco {
+    impl_component_dyn!();
+
+    fn type_tag(&self) -> &'static str { "VCO" }
+
+    fn is_passive(&self) -> bool { false }
+
+    fn is_active_ic(&self) -> bool { true }
+
+    fn pin_config(&self) -> PinConfig {
+        PinConfig {
+            valid_pins: &["cv", "saw", "tri", "pulse", "pw", "sync", "out", "output"],
+            aliases: &[("out", "output")],
+        }
+    }
+
+    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+
+    fn stamp_mna(
+        &self,
+        _comp_id: &str,
+        _n1: Option<usize>,
+        _n2: Option<usize>,
+        _mna: &mut MnaSystem,
+        _sample_rate: f64,
+    ) -> StampResult {
+        StampResult::Skip
+    }
+
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        match self.vco_type {
+            VcoType::Cem3340 => ("Oscillator:CEM3340", "U"),
+            VcoType::As3340 => ("Oscillator:AS3340", "U"),
+            VcoType::V3340 => ("Oscillator:V3340", "U"),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Vcf
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vcf {
+    pub vcf_type: VcfType,
+}
+
+impl Component for Vcf {
+    impl_component_dyn!();
+
+    fn type_tag(&self) -> &'static str { "VCF" }
+
+    fn is_passive(&self) -> bool { false }
+
+    fn is_active_ic(&self) -> bool { true }
+
+    fn pin_config(&self) -> PinConfig {
+        PinConfig {
+            valid_pins: &["in", "input", "out", "output", "cv", "res"],
+            aliases: &[("in", "input"), ("out", "output")],
+        }
+    }
+
+    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+
+    fn stamp_mna(
+        &self,
+        _comp_id: &str,
+        _n1: Option<usize>,
+        _n2: Option<usize>,
+        _mna: &mut MnaSystem,
+        _sample_rate: f64,
+    ) -> StampResult {
+        StampResult::Skip
+    }
+
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        match self.vcf_type {
+            VcfType::Cem3320 => ("Analog:CEM3320", "U"),
+            VcfType::As3320 => ("Analog:AS3320", "U"),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Vca
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Vca {
+    pub vca_type: VcaType,
+}
+
+impl Component for Vca {
+    impl_component_dyn!();
+
+    fn type_tag(&self) -> &'static str { "VCA" }
+
+    fn is_passive(&self) -> bool { false }
+
+    fn is_active_ic(&self) -> bool { true }
+
+    fn pin_config(&self) -> PinConfig {
+        PinConfig {
+            valid_pins: &[
+                "in", "input", "out", "output", "cv",
+                "in1", "out1", "cv1", "in2", "out2", "cv2",
+                "in3", "out3", "cv3", "in4", "out4", "cv4",
+            ],
+            aliases: &[("in", "input"), ("out", "output")],
+        }
+    }
+
+    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+
+    fn stamp_mna(
+        &self,
+        _comp_id: &str,
+        _n1: Option<usize>,
+        _n2: Option<usize>,
+        _mna: &mut MnaSystem,
+        _sample_rate: f64,
+    ) -> StampResult {
+        StampResult::Skip
+    }
+
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        match self.vca_type {
+            VcaType::Ssm2164 => ("Analog:SSM2164", "U"),
+            VcaType::V2164 => ("Analog:V2164", "U"),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Comparator
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comparator {
+    pub comp_type: ComparatorType,
+}
+
+impl Component for Comparator {
+    impl_component_dyn!();
+
+    fn type_tag(&self) -> &'static str { "comparator" }
+
+    fn is_passive(&self) -> bool { false }
+
+    fn is_active_ic(&self) -> bool { true }
+
+    fn pin_config(&self) -> PinConfig {
+        PinConfig {
+            valid_pins: &["pos", "neg", "out", "output"],
+            aliases: &[("out", "output")],
+        }
+    }
+
+    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+
+    fn stamp_mna(
+        &self,
+        _comp_id: &str,
+        _n1: Option<usize>,
+        _n2: Option<usize>,
+        _mna: &mut MnaSystem,
+        _sample_rate: f64,
+    ) -> StampResult {
+        StampResult::Skip
+    }
+
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        match self.comp_type {
+            ComparatorType::Lm311 => ("Comparator:LM311", "U"),
+            ComparatorType::Lm393 => ("Comparator:LM393", "U"),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AnalogSwitch
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnalogSwitch {
+    pub switch_type: AnalogSwitchType,
+}
+
+impl Component for AnalogSwitch {
+    impl_component_dyn!();
+
+    fn type_tag(&self) -> &'static str { "analog switch" }
+
+    fn is_passive(&self) -> bool { false }
+
+    fn is_active_ic(&self) -> bool { true }
+
+    fn pin_config(&self) -> PinConfig {
+        PinConfig {
+            valid_pins: &[
+                "in1", "out1", "ctrl1", "in2", "out2", "ctrl2",
+                "in3", "out3", "ctrl3", "in4", "out4", "ctrl4",
+            ],
+            aliases: &[],
+        }
+    }
+
+    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+
+    fn stamp_mna(
+        &self,
+        _comp_id: &str,
+        _n1: Option<usize>,
+        _n2: Option<usize>,
+        _mna: &mut MnaSystem,
+        _sample_rate: f64,
+    ) -> StampResult {
+        StampResult::Skip
+    }
+
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        match self.switch_type {
+            AnalogSwitchType::Cd4066 => ("Analog_Switch:CD4066", "U"),
+            AnalogSwitchType::Dg411 => ("Analog_Switch:DG411", "U"),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MatchedNpn
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchedNpn {
+    pub matched_type: MatchedTransistorType,
+}
+
+impl Component for MatchedNpn {
+    impl_component_dyn!();
+
+    fn type_tag(&self) -> &'static str { "matched NPN pair" }
+
+    fn is_passive(&self) -> bool { false }
+
+    fn is_active_ic(&self) -> bool { true }
+
+    fn pin_config(&self) -> PinConfig {
+        PinConfig {
+            valid_pins: &[
+                "base", "collector", "emitter",
+                "base1", "base2", "collector1", "collector2",
+                "emitter1", "emitter2",
+            ],
+            aliases: &[],
+        }
+    }
+
+    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+
+    fn stamp_mna(
+        &self,
+        _comp_id: &str,
+        _n1: Option<usize>,
+        _n2: Option<usize>,
+        _mna: &mut MnaSystem,
+        _sample_rate: f64,
+    ) -> StampResult {
+        StampResult::Skip
+    }
+
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        match self.matched_type {
+            MatchedTransistorType::Ssm2210 => ("Transistor_BJT:SSM2210", "Q"),
+            MatchedTransistorType::Ca3046 => ("Transistor_Array:CA3046", "Q"),
+            MatchedTransistorType::Lm394 => ("Transistor_BJT:LM394", "Q"),
+            MatchedTransistorType::That340 => ("Transistor_BJT:THAT340", "Q"),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MatchedPnp
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchedPnp {
+    pub matched_type: MatchedTransistorType,
+}
+
+impl Component for MatchedPnp {
+    impl_component_dyn!();
+
+    fn type_tag(&self) -> &'static str { "matched PNP pair" }
+
+    fn is_passive(&self) -> bool { false }
+
+    fn is_active_ic(&self) -> bool { true }
+
+    fn pin_config(&self) -> PinConfig {
+        PinConfig {
+            valid_pins: &[
+                "base", "collector", "emitter",
+                "base1", "base2", "collector1", "collector2",
+                "emitter1", "emitter2",
+            ],
+            aliases: &[],
+        }
+    }
+
+    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+
+    fn stamp_mna(
+        &self,
+        _comp_id: &str,
+        _n1: Option<usize>,
+        _n2: Option<usize>,
+        _mna: &mut MnaSystem,
+        _sample_rate: f64,
+    ) -> StampResult {
+        StampResult::Skip
+    }
+
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        match self.matched_type {
+            MatchedTransistorType::Ssm2210 => ("Transistor_BJT:SSM2210", "Q"),
+            MatchedTransistorType::Ca3046 => ("Transistor_Array:CA3046", "Q"),
+            MatchedTransistorType::Lm394 => ("Transistor_BJT:LM394", "Q"),
+            MatchedTransistorType::That340 => ("Transistor_BJT:THAT340", "Q"),
+        }
+    }
+}

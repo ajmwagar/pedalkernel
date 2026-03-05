@@ -1622,19 +1622,12 @@ fn plan_triode_stage(
 
     // DC-block detection (coupling cap + load resistor).
     let dc_block = {
+        use super::component::Component;
         let c_out = plate_to_output.iter().find_map(|&idx| {
-            let e = &graph.edges[idx];
-            match &graph.components[e.comp_idx].kind {
-                ComponentKind::Capacitor(cap_cfg) => Some(cap_cfg.value),
-                _ => None,
-            }
+            graph.components[graph.edges[idx].comp_idx].kind.capacitance()
         });
         let r_load = output_passives.iter().find_map(|&idx| {
-            let e = &graph.edges[idx];
-            match &graph.components[e.comp_idx].kind {
-                ComponentKind::Resistor(r) => Some(*r),
-                _ => None,
-            }
+            graph.components[graph.edges[idx].comp_idx].kind.resistance()
         });
         match (c_out, r_load) {
             (Some(c), Some(r)) => {

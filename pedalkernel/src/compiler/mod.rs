@@ -13,6 +13,8 @@ mod build;
 mod classify;
 mod compile;
 mod compiled;
+mod component;
+pub(crate) mod components;
 mod dyn_node;
 mod graph;
 mod helpers;
@@ -28,6 +30,12 @@ pub use compiled::CompiledPedal;
 pub use split::{compile_split_pedal, SplitCompiledPedal};
 pub use validate::{validate_pedal, validate_pedal_files, PedalWarning, Severity};
 pub use warnings::{check_voltage_compatibility, VoltageWarning, WarningSeverity};
+
+/// KiCad footprint reference for a component kind — delegates to Component trait.
+pub(crate) fn footprint_ref(kind: &crate::dsl::ComponentKind) -> (&'static str, &'static str) {
+    use component::Component;
+    kind.footprint_ref()
+}
 
 #[cfg(test)]
 mod tests;

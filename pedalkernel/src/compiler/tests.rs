@@ -3,10 +3,12 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 use super::compile::*;
+use super::component::{Component, StampResult};
 use super::split::*;
 use super::stage::*;
 use super::warnings::*;
 use crate::dsl::*;
+use crate::tree::MnaSystem;
 use crate::PedalProcessor;
 
 fn parse(filename: &str) -> PedalDef {
@@ -2935,4 +2937,141 @@ fn multi_nl_fuzz_face_pot_audio_impact() {
             "  amp={amp:.2}  Fuzz 0→1: diff_rms={diff_rms:.6e}  lo={lo_rms:.6e}  hi={hi_rms:.6e}  ratio={ratio:.4e}"
         );
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Component trait tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn component_is_passive() {
+    // Passive components
+    assert!(ComponentKind::Resistor(10_000.0).is_passive());
+    assert!(ComponentKind::Capacitor(CapConfig::new(100e-9)).is_passive());
+    assert!(ComponentKind::Inductor(47e-3).is_passive());
+    assert!(ComponentKind::Potentiometer(100_000.0, PotTaper::B).is_passive());
+    assert!(ComponentKind::Tempco(10_000.0, 100.0).is_passive());
+    assert!(ComponentKind::ResistorSwitched(vec![1000.0, 2000.0]).is_passive());
+    assert!(ComponentKind::CapSwitched(vec![100e-9, 200e-9]).is_passive());
+    assert!(ComponentKind::InductorSwitched(vec![47e-3, 100e-3]).is_passive());
+    assert!(ComponentKind::Transformer(TransformerConfig::default()).is_passive());
+
+    // Non-passive components
+    assert!(!ComponentKind::Diode(DiodeType::Silicon).is_passive());
+    assert!(!ComponentKind::DiodePair(DiodeType::Silicon).is_passive());
+    assert!(!ComponentKind::OpAmp(OpAmpType::Generic).is_passive());
+    assert!(!ComponentKind::Npn("2N3904".to_string()).is_passive());
+    assert!(!ComponentKind::Pnp("AC128".to_string()).is_passive());
+    assert!(!ComponentKind::NJfet("2N5457".to_string()).is_passive());
+    assert!(!ComponentKind::Triode("12AX7".to_string()).is_passive());
+    assert!(!ComponentKind::VariMu("6386".to_string()).is_passive());
+}
+
+#[test]
+fn component_stamp_resistor() {
+    let mut mna = MnaSystem::new(2, 0);
+    let result =
+        ComponentKind::Resistor(10_000.0).stamp_mna("R1", Some(0), Some(1), &mut mna, 48_000.0);
+    assert!(matches!(result, StampResult::Stamped));
+    // G matrix diagonal should have 1/R = 1e-4
+    let g = 1.0 / 10_000.0;
+    assert!((mna.g_matrix[0] - g).abs() < 1e-12);
+    assert!((mna.g_matrix[3] - g).abs() < 1e-12);
+    // Off-diagonal should have -1/R
+    assert!((mna.g_matrix[1] + g).abs() < 1e-12);
+    assert!((mna.g_matrix[2] + g).abs() < 1e-12);
+}
+
+#[test]
+fn component_stamp_capacitor() {
+    let mut mna = MnaSystem::new(2, 0);
+    let cfg = CapConfig::new(100e-9);
+    let result =
+        ComponentKind::Capacitor(cfg).stamp_mna("C1", Some(0), Some(1), &mut mna, 48_000.0);
+    match result {
+        StampResult::Reactive { rp, .. } => {
+            let expected_rp = 1.0 / (2.0 * 48_000.0 * 100e-9);
+            assert!((rp - expected_rp).abs() < 1e-6);
+        }
+        _ => panic!("expected Reactive"),
+    }
+    // G matrix should be unchanged (caps are WDF ports, not stamped)
+    assert_eq!(mna.g_matrix[0], 0.0);
+}
+
+#[test]
+fn component_stamp_inductor() {
+    let mut mna = MnaSystem::new(2, 0);
+    let result =
+        ComponentKind::Inductor(47e-3).stamp_mna("L1", Some(0), Some(1), &mut mna, 48_000.0);
+    match result {
+        StampResult::Reactive { rp, .. } => {
+            let expected_rp = 2.0 * 48_000.0 * 47e-3;
+            assert!((rp - expected_rp).abs() < 1e-6);
+        }
+        _ => panic!("expected Reactive"),
+    }
+    assert_eq!(mna.g_matrix[0], 0.0);
+}
+
+#[test]
+fn component_stamp_pot() {
+    let mut mna = MnaSystem::new(2, 0);
+    let result = ComponentKind::Potentiometer(100_000.0, PotTaper::B).stamp_mna(
+        "Vol",
+        Some(0),
+        Some(1),
+        &mut mna,
+        48_000.0,
+    );
+    match result {
+        StampResult::Pot {
+            initial_conductance, ..
+        } => {
+            // Linear taper at 0.5 → 50kΩ → conductance = 1/50000 = 2e-5
+            let expected_g = 1.0 / 50_000.0;
+            assert!((initial_conductance - expected_g).abs() < 1e-12);
+        }
+        _ => panic!("expected Pot"),
+    }
+    // Pot stamps into G matrix at initial position
+    assert!(mna.g_matrix[0] > 0.0);
+}
+
+#[test]
+fn component_stamp_tempco() {
+    let mut mna = MnaSystem::new(2, 0);
+    let result =
+        ComponentKind::Tempco(4700.0, 3500.0).stamp_mna("RT1", Some(0), Some(1), &mut mna, 48_000.0);
+    assert!(matches!(result, StampResult::Stamped));
+    let g = 1.0 / 4700.0;
+    assert!((mna.g_matrix[0] - g).abs() < 1e-12);
+}
+
+#[test]
+fn component_stamp_transformer_skips() {
+    let mut mna = MnaSystem::new(2, 0);
+    let result = ComponentKind::Transformer(TransformerConfig::default()).stamp_mna(
+        "T1",
+        Some(0),
+        Some(1),
+        &mut mna,
+        48_000.0,
+    );
+    assert!(matches!(result, StampResult::Skip));
+    assert_eq!(mna.g_matrix[0], 0.0);
+}
+
+#[test]
+fn component_stamp_diode_skips() {
+    let mut mna = MnaSystem::new(2, 0);
+    let result = ComponentKind::Diode(DiodeType::Silicon).stamp_mna(
+        "D1",
+        Some(0),
+        Some(1),
+        &mut mna,
+        48_000.0,
+    );
+    assert!(matches!(result, StampResult::Skip));
+    assert_eq!(mna.g_matrix[0], 0.0);
 }
