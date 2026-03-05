@@ -1005,13 +1005,16 @@ pub(super) fn build_multi_nl_stages(
 /// Stamp a single passive edge into the MNA system or collect it as a reactive port.
 ///
 /// Fixed-resistance components (resistors, tempcos, switched resistors) are stamped
-/// directly into the MNA conductance matrix. Reactive/variable components (capacitors,
-/// inductors, pots, switched caps/inductors) become WDF ports with their own DynNode.
+/// directly into the MNA conductance matrix. Reactive components (capacitors,
+/// inductors, switched caps/inductors) become WDF ports with their own DynNode.
+/// Potentiometers are stamped into the G matrix as conductances (not WDF ports)
+/// and tracked in `pot_entries` for the `set_pot()` API.
 fn stamp_passive_edge(
     eidx: usize,
     graph: &CircuitGraph,
     mna: &mut MnaSystem,
     reactive_edges: &mut Vec<(usize, DynNode)>,
+    pot_entries: &mut Vec<(usize, DynNode, Option<usize>, Option<usize>, f64)>,
     coupled_edge_indices: &HashSet<usize>,
     node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
     sample_rate: f64,
@@ -1050,15 +1053,20 @@ fn stamp_passive_edge(
         ComponentKind::Potentiometer(max_r, taper) => {
             let initial_pos = 0.5;
             let tapered_pos = taper.apply(initial_pos);
-            reactive_edges.push((
+            let r = (tapered_pos * *max_r).max(1.0);
+            mna.stamp_resistor(n1, n2, r);
+            pot_entries.push((
                 eidx,
                 DynNode::Pot {
                     comp_id: comp.id.clone(),
                     max_resistance: *max_r,
                     position: initial_pos,
                     taper: *taper,
-                    rp: (tapered_pos * *max_r).max(1.0),
+                    rp: r,
                 },
+                n1,
+                n2,
+                1.0 / r,
             ));
         }
         ComponentKind::Tempco(r, _ppm) => {
@@ -1335,12 +1343,12 @@ fn try_build_multi_nl_stage(
         mna.d_matrix[vsrc_s * num_vsources + vsrc_s] = 1.0;
     }
 
-    // For state-space mode (linearized OTA, no NL): caps go into cap_stamps,
-    // pots go into G as resistors (not WDF ports). For standard WDF mode,
-    // caps and pots become reactive_edges with WDF ports.
+    // For state-space mode (linearized OTA, no NL): caps go into cap_stamps.
+    // Pots are always stamped into G as resistors (not WDF ports), in both
+    // state-space and standard WDF modes. pot_entries collects DynNode + MNA info.
     let use_state_space = has_linearized_ota && n_nl == 0;
     let mut cap_stamps: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
-    let mut pot_mna_info: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new(); // for delta-updating G
+    let mut pot_entries: Vec<(usize, DynNode, Option<usize>, Option<usize>, f64)> = Vec::new();
 
     for &eidx in &plan.passive_edge_indices {
         if use_state_space {
@@ -1366,13 +1374,12 @@ fn try_build_multi_nl_stage(
                 }
                 ComponentKind::Potentiometer(max_r, taper) => {
                     // State-space: pot goes into G as a resistor.
-                    // Keep DynNode child for set_pot() API.
+                    // Keep DynNode child for set_pot() API via pot_entries.
                     let initial_pos = 0.5;
                     let tapered_pos = taper.apply(initial_pos);
                     let r = (tapered_pos * *max_r).max(1.0);
                     mna.stamp_resistor(n1, n2, r);
-                    pot_mna_info.push((n1, n2, r));
-                    reactive_edges.push((
+                    pot_entries.push((
                         eidx,
                         DynNode::Pot {
                             comp_id: comp.id.clone(),
@@ -1381,6 +1388,9 @@ fn try_build_multi_nl_stage(
                             taper: *taper,
                             rp: r,
                         },
+                        n1,
+                        n2,
+                        1.0 / r,
                     ));
                     continue;
                 }
@@ -1394,6 +1404,7 @@ fn try_build_multi_nl_stage(
             graph,
             &mut mna,
             &mut reactive_edges,
+            &mut pot_entries,
             &coupled_edge_indices,
             &node_to_mna,
             sample_rate,
@@ -1477,24 +1488,21 @@ fn try_build_multi_nl_stage(
             return None;
         }
 
-        // Separate pot DynNodes from reactive_edges (pots are the only
-        // entries in reactive_edges for state-space mode).
-        let reactive_edge_indices: Vec<usize> =
-            reactive_edges.iter().map(|(eidx, _)| *eidx).collect();
-        let passive_children: Vec<DynNode> =
-            reactive_edges.into_iter().map(|(_, dn)| dn).collect();
-        let n_passive = passive_children.len();
-        let has_pots = passive_children
-            .iter()
-            .any(|dn| matches!(dn, DynNode::Pot { .. }));
-
-        // Port node pairs for pot recompute: pot nodes in the MNA.
-        let mut port_node_pairs: Vec<(Option<usize>, Option<usize>)> =
-            Vec::with_capacity(n_passive);
-        for &eidx in &reactive_edge_indices {
-            let e = &graph.edges[eidx];
-            port_node_pairs.push((node_to_mna(e.node_a), node_to_mna(e.node_b)));
+        // Build pot_children and pot_mna_stamps from pot_entries.
+        let has_pots = !pot_entries.is_empty();
+        let mut pot_children: Vec<DynNode> = Vec::with_capacity(pot_entries.len());
+        let mut pot_mna_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)> =
+            Vec::with_capacity(pot_entries.len());
+        for (i, (_eidx, dyn_node, n1, n2, g)) in pot_entries.into_iter().enumerate() {
+            pot_children.push(dyn_node);
+            pot_mna_stamps.push((i, n1, n2, g));
         }
+
+        // State-space: no reactive WDF ports (caps in cap_stamps, pots in G).
+        let passive_children: Vec<DynNode> = Vec::new();
+
+        // Port node pairs: empty (no WDF ports in state-space mode).
+        let port_node_pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
 
         // Create minimal dummy adaptor and scattering (unused in state-space path).
         let dummy_s = vec![1.0];
@@ -1502,16 +1510,9 @@ fn try_build_multi_nl_stage(
         let scattering_blocks =
             super::stage::MultiNlScattering::from_full_matrix(&[0.0; 0], 0, 0);
 
-        // Build pot stamp tracking for delta-updating G on pot changes.
-        // Must be done before port_node_pairs is moved into recompute_data.
-        let mut pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)> = Vec::new();
-        for (k, child) in passive_children.iter().enumerate() {
-            if matches!(child, DynNode::Pot { .. }) {
-                let (pos, neg) = port_node_pairs[k];
-                let g = 1.0 / child.port_resistance();
-                pot_stamps.push((k, pos, neg, g));
-            }
-        }
+        // Build pot_stamps for StateSpaceData (indexes into pot_children).
+        let pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)> =
+            pot_mna_stamps.clone();
 
         // Recompute data: stores the MNA for rebuilding state-space when
         // OTA gm or pot values change.
@@ -1554,6 +1555,8 @@ fn try_build_multi_nl_stage(
             nl_devices: Vec::new(),
             nl_port_resistances: Vec::new(),
             passive_children,
+            pot_children,
+            pot_mna_stamps,
             n_nl: 0,
             v_prev: Vec::new(),
             scattering: scattering_blocks,
@@ -1585,7 +1588,7 @@ fn try_build_multi_nl_stage(
 
     let mut ports: Vec<WdfPort> = Vec::with_capacity(n_nl + n_passive + 1);
     let mut port_node_pairs: Vec<(Option<usize>, Option<usize>)> = Vec::with_capacity(n_nl + n_passive + 1);
-    let mut has_pots = false;
+    let has_pots = !pot_entries.is_empty();
 
     // NL ports: each spans collector-to-emitter (or plate-to-cathode)
     let mut nl_port_resistances = Vec::with_capacity(n_nl);
@@ -1605,7 +1608,7 @@ fn try_build_multi_nl_stage(
         nl_port_resistances.push(r_nl);
     }
 
-    // Reactive ports: each spans the edge's two nodes
+    // Reactive ports: caps and inductors only (pots are in G matrix, not WDF ports).
     let reactive_edge_indices: Vec<usize> = reactive_edges.iter().map(|(eidx, _)| *eidx).collect();
     let mut passive_children: Vec<DynNode> = Vec::with_capacity(n_passive);
     for (eidx, dyn_node) in reactive_edges {
@@ -1613,10 +1616,6 @@ fn try_build_multi_nl_stage(
         let pos = node_to_mna(e.node_a);
         let neg = node_to_mna(e.node_b);
         let rp = dyn_node.port_resistance();
-        let is_pot = matches!(&dyn_node, DynNode::Pot { .. });
-        if is_pot {
-            has_pots = true;
-        }
         ports.push(WdfPort {
             node_pos: pos,
             node_neg: neg,
@@ -1624,6 +1623,15 @@ fn try_build_multi_nl_stage(
         });
         port_node_pairs.push((pos, neg));
         passive_children.push(dyn_node);
+    }
+
+    // Build pot_children and pot_mna_stamps from pot_entries.
+    let mut pot_children: Vec<DynNode> = Vec::with_capacity(pot_entries.len());
+    let mut pot_mna_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)> =
+        Vec::with_capacity(pot_entries.len());
+    for (i, (_eidx, dyn_node, n1, n2, g)) in pot_entries.into_iter().enumerate() {
+        pot_children.push(dyn_node);
+        pot_mna_stamps.push((i, n1, n2, g));
     }
 
     // ── Step 3b: Voltage source injection ──────────────────────────
@@ -2010,6 +2018,8 @@ fn try_build_multi_nl_stage(
         nl_devices,
         nl_port_resistances,
         passive_children,
+        pot_children,
+        pot_mna_stamps,
         n_nl,
         v_prev: vec![0.0; n_nl],
         scattering: scattering_blocks,

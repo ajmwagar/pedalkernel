@@ -1397,8 +1397,13 @@ pub(super) struct MultiNlStage {
     pub(super) nl_devices: Vec<NlDeviceKind>,
     /// Port resistances for the NL ports.
     pub(super) nl_port_resistances: Vec<f64>,
-    /// Passive child nodes (capacitors, inductors, pots) needing state updates.
+    /// Passive child nodes (capacitors, inductors) needing WDF state updates.
     pub(super) passive_children: Vec<DynNode>,
+    /// Pot DynNodes stored separately — pots are G-matrix conductances, not WDF ports.
+    pub(super) pot_children: Vec<DynNode>,
+    /// MNA stamp tracking for pots: (pot_child_idx, node_pos, node_neg, last_conductance).
+    /// Used for delta-updating the G matrix when pot values change.
+    pub(super) pot_mna_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
     /// Number of nonlinear ports.
     pub(super) n_nl: usize,
     /// Warm-start voltages for NR solver.
@@ -1798,6 +1803,13 @@ impl MultiNlStage {
                 child.node_count()
             ));
         }
+        for (k, child) in self.pot_children.iter().enumerate() {
+            s.push_str(&format!(
+                "  Pot[{}]: Rp={:.1}Ω (in G matrix)\n",
+                k,
+                child.port_resistance(),
+            ));
+        }
         s
     }
 
@@ -1814,7 +1826,7 @@ impl MultiNlStage {
         let mut found = false;
 
         // Try base name (2-terminal pot)
-        for child in &mut self.passive_children {
+        for child in &mut self.pot_children {
             if child.set_pot(target_id, value) {
                 found = true;
                 break;
@@ -1823,14 +1835,14 @@ impl MultiNlStage {
 
         // Try Baxandall-decomposed halves (3-terminal pot)
         let aw = format!("{target_id}__aw");
-        for child in &mut self.passive_children {
+        for child in &mut self.pot_children {
             if child.set_pot(&aw, value) {
                 found = true;
                 break;
             }
         }
         let wb = format!("{target_id}__wb");
-        for child in &mut self.passive_children {
+        for child in &mut self.pot_children {
             if child.set_pot(&wb, 1.0 - value) {
                 found = true;
                 break;
@@ -1918,7 +1930,7 @@ impl MultiNlStage {
                     let child_idx = ps.0;
                     let pos = ps.1;
                     let neg = ps.2;
-                    let new_r = self.passive_children[child_idx].port_resistance();
+                    let new_r = self.pot_children[child_idx].port_resistance();
                     let new_g = 1.0 / new_r;
                     let delta = new_g - ps.3;
                     if delta.abs() > 1e-15 {
@@ -1954,17 +1966,45 @@ impl MultiNlStage {
             return;
         }
 
-        let recompute = match &self.recompute_data {
+        let recompute = match &mut self.recompute_data {
             Some(r) => r,
             None => return,
         };
+
+        // Delta-update pot conductances in the MNA G matrix.
+        // Pots are stamped into G (not as WDF ports), so when pot values change
+        // we update G before re-deriving the scattering matrix.
+        let n_mna = recompute.mna.num_nodes;
+        for ps in &mut self.pot_mna_stamps {
+            let child_idx = ps.0;
+            let pos = ps.1;
+            let neg = ps.2;
+            let new_r = self.pot_children[child_idx].port_resistance();
+            let new_g = 1.0 / new_r;
+            let delta = new_g - ps.3;
+            if delta.abs() > 1e-15 {
+                if let Some(p) = pos {
+                    recompute.mna.g_matrix[p * n_mna + p] += delta;
+                    if let Some(n) = neg {
+                        recompute.mna.g_matrix[p * n_mna + n] -= delta;
+                    }
+                }
+                if let Some(n) = neg {
+                    recompute.mna.g_matrix[n * n_mna + n] += delta;
+                    if let Some(p) = pos {
+                        recompute.mna.g_matrix[n * n_mna + p] -= delta;
+                    }
+                }
+                ps.3 = new_g;
+            }
+        }
 
         let n_nl = self.n_nl;
         let n_passive = self.passive_children.len();
         let use_vs = recompute.vs_source_index.is_some();
         let n_total = if use_vs { n_nl + n_passive } else { n_nl + n_passive + 1 };
 
-        // Rebuild ports with current resistances.
+        // Rebuild ports with current resistances (reactive elements only, no pots).
         let mut ports: Vec<WdfPort> = Vec::with_capacity(n_total);
 
         // NL ports (resistances don't change)
@@ -1977,7 +2017,7 @@ impl MultiNlStage {
             });
         }
 
-        // Passive ports (resistances may have changed from pots)
+        // Passive ports (caps/inductors — resistances are fixed for a given sample rate)
         for k in 0..n_passive {
             let (pos, neg) = recompute.port_node_pairs[n_nl + k];
             let rp = self.passive_children[k].port_resistance();

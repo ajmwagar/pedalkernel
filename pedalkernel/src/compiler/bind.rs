@@ -97,7 +97,7 @@ pub(super) fn build_controls(
             }
             if found_stage.is_none() {
                 'outer_mnl: for (mi, mnl) in multi_nl_stages.iter().enumerate() {
-                    for (pi, child) in mnl.passive_children.iter().enumerate() {
+                    for (pi, child) in mnl.pot_children.iter().enumerate() {
                         if has_pot(child, &ctrl.component) {
                             found_stage = Some(ControlTarget::PotInMultiNlStage(mi, pi));
                             break 'outer_mnl;
