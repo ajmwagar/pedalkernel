@@ -80,6 +80,64 @@ pub(super) struct ComponentEdge {
     pub port_group: Option<usize>,
 }
 
+// ── Control & modulation declarations ─────────────────────────────────────
+
+/// A controllable parameter declared by a component.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ControlParam {
+    /// Parameter name, must match `ControlDef.property` from the DSL.
+    pub name: &'static str,
+    /// What kind of control target this maps to.
+    pub kind: ControlParamKind,
+}
+
+/// Classification of a component's controllable parameter.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum ControlParamKind {
+    /// Potentiometer position (0–1) — resolved to PotInStage/PotInMultiNlStage/etc.
+    PotPosition,
+    /// LFO rate (0–1 normalized).
+    LfoRate,
+    /// LFO depth/amplitude (0–1 normalized).
+    LfoDepth,
+    /// BBD clock rate (0–1 → delay time).
+    BbdClockRate,
+    /// BBD feedback amount (0–1).
+    BbdFeedback,
+    /// Delay line time (0–1 normalized).
+    DelayTime,
+    /// Delay line feedback (0–1).
+    DelayFeedback,
+    /// Switch position selector.
+    SwitchPosition { num_positions: usize },
+}
+
+/// Modulation sink: how a component receives LFO/envelope control signals.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ModulationSink {
+    /// Which kind of modulation target this maps to.
+    pub target_kind: ModulationSinkKind,
+    /// Center/offset voltage for the modulation.
+    pub bias: f64,
+    /// Modulation amplitude (half-swing from bias).
+    pub range: f64,
+}
+
+/// Classification of a modulation sink by target type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModulationSinkKind {
+    JfetVgs,
+    PhotocouplerLed,
+    TriodeVgk,
+    VariMuVgk,
+    PentodeVg1k,
+    MosfetVgs,
+    OtaIabc,
+    BbdClock,
+    DelaySpeed,
+    DelayTime,
+}
+
 /// Context provided to `resolve_edges()` so a component can decide its role
 /// based on how it's wired in the circuit.
 pub(super) struct ResolveContext {
@@ -250,6 +308,20 @@ pub(super) trait Component: std::fmt::Debug {
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
         None
     }
+
+    // ── Control Declarations ────────────────────────────────────────────
+
+    /// Declare controllable parameters for this component.
+    ///
+    /// The compiler matches `ControlDef.property` against each param's `name`
+    /// to determine the control target without heuristic net scanning.
+    fn controls(&self) -> Vec<ControlParam> { vec![] }
+
+    /// If this component can be a modulation sink (LFO/envelope target),
+    /// return the sink description for the given pin.
+    ///
+    /// Called during LFO/envelope binding to determine bias and range.
+    fn modulation_sink(&self, _pin: &str) -> Option<ModulationSink> { None }
 
     // ── Hardware ──────────────────────────────────────────────────────────
 
@@ -1310,6 +1382,118 @@ impl Component for ComponentKind {
             ComponentKind::OpAmp(ot) if ot.is_ota() => {
                 Some((NonlinearKind::Ota, vec![other_jn]))
             }
+            _ => None,
+        }
+    }
+
+    // ── Control Declarations ────────────────────────────────────────────
+
+    fn controls(&self) -> Vec<ControlParam> {
+        match self {
+            ComponentKind::Potentiometer(_, _) => vec![
+                ControlParam { name: "position", kind: ControlParamKind::PotPosition },
+            ],
+            ComponentKind::Lfo(..) => vec![
+                ControlParam { name: "rate", kind: ControlParamKind::LfoRate },
+                ControlParam { name: "depth", kind: ControlParamKind::LfoDepth },
+            ],
+            ComponentKind::Bbd(_) => vec![
+                ControlParam { name: "clock", kind: ControlParamKind::BbdClockRate },
+                ControlParam { name: "feedback", kind: ControlParamKind::BbdFeedback },
+            ],
+            ComponentKind::DelayLine(..) => vec![
+                ControlParam { name: "delay_time", kind: ControlParamKind::DelayTime },
+                ControlParam { name: "feedback", kind: ControlParamKind::DelayFeedback },
+            ],
+            ComponentKind::Switch(n) => vec![
+                ControlParam { name: "position", kind: ControlParamKind::SwitchPosition { num_positions: *n } },
+            ],
+            ComponentKind::RotarySwitch(labels) => vec![
+                ControlParam { name: "position", kind: ControlParamKind::SwitchPosition { num_positions: labels.len() } },
+            ],
+            _ => vec![],
+        }
+    }
+
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        match self {
+            ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => match pin {
+                "vgs" | "gate" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::JfetVgs,
+                    bias: -0.45,
+                    range: 0.25,
+                }),
+                _ => None,
+            },
+            ComponentKind::Photocoupler(_) => match pin {
+                "led" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::PhotocouplerLed,
+                    bias: 0.5,
+                    range: 0.5,
+                }),
+                _ => None,
+            },
+            ComponentKind::Triode(_) => match pin {
+                "vgk" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::TriodeVgk,
+                    bias: -2.0,
+                    range: 2.0,
+                }),
+                _ => None,
+            },
+            ComponentKind::VariMu(_) => match pin {
+                "vgk" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::VariMuVgk,
+                    bias: -2.0,
+                    range: 2.0,
+                }),
+                _ => None,
+            },
+            ComponentKind::Pentode(_) => match pin {
+                "vg1k" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::PentodeVg1k,
+                    bias: -2.0,
+                    range: 2.0,
+                }),
+                _ => None,
+            },
+            ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => match pin {
+                "vgs" | "gate" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::MosfetVgs,
+                    bias: 3.0,
+                    range: 2.0,
+                }),
+                _ => None,
+            },
+            ComponentKind::OpAmp(ot) if ot.is_ota() => match pin {
+                "iabc" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::OtaIabc,
+                    bias: 0.5,
+                    range: 0.5,
+                }),
+                _ => None,
+            },
+            ComponentKind::Bbd(_) => match pin {
+                "clock" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::BbdClock,
+                    bias: 0.15,
+                    range: 0.10,
+                }),
+                _ => None,
+            },
+            ComponentKind::DelayLine(..) => match pin {
+                "speed_mod" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::DelaySpeed,
+                    bias: 0.0,
+                    range: 0.02,
+                }),
+                "delay_time" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::DelayTime,
+                    bias: 0.5,
+                    range: 0.5,
+                }),
+                _ => None,
+            },
             _ => None,
         }
     }

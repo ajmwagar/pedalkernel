@@ -10,6 +10,7 @@ use crate::elements::*;
 
 use super::bjt_bias_analysis::BjtBiasPotInfo;
 use super::compiled::*;
+use super::component::{Component, ControlParamKind};
 use super::graph::CircuitGraph;
 use super::helpers::has_pot;
 use super::stage::{MultiNlStage, RootKind, SidechainProcessor, WdfStage};
@@ -39,248 +40,74 @@ pub(super) fn build_controls(
     let mut pot_effects: HashMap<String, Vec<PotEffect>> = HashMap::new();
 
     for ctrl in &pedal.controls {
-        // Check for Switch/RotarySwitch component.
-        let switch_info = pedal.components.iter().find_map(|c| {
-            if c.id == ctrl.component {
-                match &c.kind {
-                    ComponentKind::Switch(positions) => Some((c.id.clone(), *positions)),
-                    ComponentKind::RotarySwitch(labels) => Some((c.id.clone(), labels.len())),
-                    _ => None,
-                }
-            } else {
-                None
-            }
+        // Look up the component and find the declared control parameter matching
+        // the DSL property name (e.g., "position", "rate", "clock").
+        let comp = pedal.components.iter().find(|c| c.id == ctrl.component);
+        let param_kind = comp.and_then(|c| {
+            c.kind
+                .controls()
+                .into_iter()
+                .find(|p| p.name == ctrl.property)
+                .map(|p| p.kind)
         });
 
-        // Resolve the control target.  Priority:
-        //  1. Switch / rotary switch
-        //  2. Op-amp feedback pot (detected during opamp analysis)
-        //  3. Pot physically present in a WDF / coupled-BJT / multi-NL stage tree
-        //  4. Sidechain pot
-        //  5. LFO / delay net connection
-        //  6. Label-based heuristics (gain, level, rate, depth, delay, feedback)
-        //
-        // Searching stage trees (step 3) before label heuristics ensures that
-        // pots like "Gain" or "Volume" are bound to their actual WDF tree node
-        // rather than falling through to a harmless no-op.
-        let target = if let Some((switch_id, num_positions)) = switch_info {
-            ControlTarget::SwitchPosition {
-                switch_id,
-                num_positions,
-            }
-        } else if let Some(&(
-            stage_idx,
-            ri,
-            fixed_series_r,
-            max_pot_r,
-            parallel_fixed_r,
-            is_inverting,
-        )) = opamp_pot_map.get(&ctrl.component)
-        {
-            // Bind as PotInStage — the pot is "in" the op-amp stage.
-            // Record side-effect for gain formula recomputation.
-            pot_effects
-                .entry(ctrl.component.clone())
-                .or_default()
-                .push(PotEffect::OpAmpGain {
-                    stage_idx,
-                    ri,
-                    fixed_series_r,
-                    max_pot_r,
-                    parallel_fixed_r,
-                    is_inverting,
-                });
-            ControlTarget::PotInStage(stage_idx)
-        } else if let Some(info) = bjt_bias_pot_map.get(&ctrl.component) {
-            // ── Step 2.5: BJT bias pot (emitter-bridging feedback pot) ───
-            ControlTarget::BjtBias {
-                max_pot_r: info.max_pot_r,
-                taper: info.taper,
-            }
-        } else {
-            // ── Step 3: search stage trees for the physical pot ──────────
-            let mut found_stage = None;
-            for (si, stage) in stages.iter().enumerate() {
-                if has_pot(&stage.tree, &ctrl.component) {
-                    found_stage = Some(ControlTarget::PotInStage(si));
-                    break;
+        let target = match param_kind {
+            Some(ControlParamKind::SwitchPosition { num_positions }) => {
+                ControlTarget::SwitchPosition {
+                    switch_id: ctrl.component.clone(),
+                    num_positions,
                 }
             }
-            if found_stage.is_none() {
-                'outer_mnl: for (mi, mnl) in multi_nl_stages.iter().enumerate() {
-                    for (pi, child) in mnl.pot_children.iter().enumerate() {
-                        if has_pot(child, &ctrl.component) {
-                            found_stage = Some(ControlTarget::PotInMultiNlStage(mi, pi));
-                            break 'outer_mnl;
-                        }
-                    }
-                }
+            Some(ControlParamKind::LfoRate) => {
+                let idx = lfo_ids.iter().position(|id| id == &ctrl.component).unwrap_or(0);
+                ControlTarget::LfoRate(idx)
             }
-
-            if let Some(target) = found_stage {
-                target
-            } else {
-                // ── Step 4: sidechain pots ───────────────────────────────
-                let sc_idx = sidechain_comp_ids
-                    .get(&ctrl.component)
-                    .or_else(|| sidechain_comp_ids.get(&format!("{}__aw", ctrl.component)))
-                    .or_else(|| sidechain_comp_ids.get(&format!("{}__wb", ctrl.component)));
-                if let Some(&idx) = sc_idx {
-                    ControlTarget::SidechainControl(idx)
-                } else {
-                    // ── Step 5: LFO / delay / BBD net connections ─────────
-                    // Check all pot pins (a, b, wiper) — DSL files may wire
-                    // any pin to modulation targets (e.g., Delay.b -> LFO1.rate).
-                    let pot_pins = ["wiper", "b", "a"];
-                    let mut lfo_target = None;
-                    'net_scan: for net in &pedal.nets {
-                        if let Pin::ComponentPin { component, pin } = &net.from {
-                            if component == &ctrl.component && pot_pins.contains(&pin.as_str()) {
-                                for to_pin in &net.to {
-                                    if let Pin::ComponentPin {
-                                        component: target_comp,
-                                        pin: target_pin,
-                                    } = to_pin
-                                    {
-                                        if target_pin == "rate" {
-                                            if let Some(idx) =
-                                                lfo_ids.iter().position(|id| id == target_comp)
-                                            {
-                                                lfo_target = Some(ControlTarget::LfoRate(idx));
-                                                break 'net_scan;
-                                            }
-                                        }
-                                        if target_pin == "clock" {
-                                            if let Some(&idx) =
-                                                bbd_id_to_idx.get(target_comp.as_str())
-                                            {
-                                                lfo_target = Some(ControlTarget::BbdClockRate(idx));
-                                                break 'net_scan;
-                                            }
-                                        }
-                                        if target_pin == "delay_time" {
-                                            if let Some(&idx) =
-                                                delay_id_to_idx.get(target_comp.as_str())
-                                            {
-                                                lfo_target = Some(ControlTarget::DelayTime(idx));
-                                                break 'net_scan;
-                                            }
-                                        }
-                                        if target_pin == "feedback" {
-                                            if let Some(&idx) =
-                                                delay_id_to_idx.get(target_comp.as_str())
-                                            {
-                                                lfo_target =
-                                                    Some(ControlTarget::DelayFeedback(idx));
-                                                break 'net_scan;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // Also check reverse direction: target component may be
-                        // in net.from with pot in net.to.
-                        for to_pin in &net.to {
-                            if let Pin::ComponentPin { component, pin } = to_pin {
-                                if component == &ctrl.component && pot_pins.contains(&pin.as_str())
-                                {
-                                    if let Pin::ComponentPin {
-                                        component: src_comp,
-                                        pin: src_pin,
-                                    } = &net.from
-                                    {
-                                        if src_pin == "out" {
-                                            // BBD.out -> Pot.a = feedback path
-                                            if let Some(&idx) = bbd_id_to_idx.get(src_comp.as_str())
-                                            {
-                                                lfo_target = Some(ControlTarget::BbdFeedback(idx));
-                                                break 'net_scan;
-                                            }
-                                            // LFO.out -> Pot.a = depth control
-                                            if let Some(idx) =
-                                                lfo_ids.iter().position(|id| id == src_comp)
-                                            {
-                                                lfo_target = Some(ControlTarget::LfoDepth(idx));
-                                                break 'net_scan;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if lfo_target.is_none() && !bbd_id_to_idx.is_empty() {
-                        // ── Step 5a: BBD mix detection via topology ─────────
-                        // If the pot reaches a BBD output through passive elements
-                        // (resistors, caps), it's a wet/dry mix control.
-                        // Bind as PotInStage (PassiveRType) + BbdMix side-effect.
-                        if pot_reaches_bbd_output(
-                            &ctrl.component,
-                            pedal,
-                            bbd_id_to_idx,
-                        ) {
-                            pot_effects
-                                .entry(ctrl.component.clone())
-                                .or_default()
-                                .push(PotEffect::BbdMix);
-                            // Find the PassiveRType stage containing this mix pot
-                            let mut mix_stage = None;
-                            for (si, stage) in stages.iter().enumerate() {
-                                if let RootKind::PassiveRType { children, .. } = &stage.root {
-                                    if children.iter().any(|c| has_pot(c, &ctrl.component)) {
-                                        mix_stage = Some(ControlTarget::PotInStage(si));
-                                        break;
-                                    }
-                                }
-                                if has_pot(&stage.tree, &ctrl.component) {
-                                    mix_stage = Some(ControlTarget::PotInStage(si));
-                                    break;
-                                }
-                            }
-                            lfo_target = Some(mix_stage.unwrap_or(ControlTarget::PotInStage(0)));
-                        }
-                    }
-
-                    if let Some(target) = lfo_target {
-                        target
-                    } else {
-                        // ── Step 5b: PassiveRType children (2-terminal pots in MNA)
-                        // If the pot physically exists in a passive stage, bind it
-                        // there — the MNA scattering recompute handles the rest.
-                        let mut passive_rtype_found = None;
-                        for (si, stage) in stages.iter().enumerate() {
-                            if let RootKind::PassiveRType { children, .. } = &stage.root {
-                                if children.iter().any(|c| has_pot(c, &ctrl.component)) {
-                                    passive_rtype_found = Some(ControlTarget::PotInStage(si));
-                                    break;
-                                }
-                            }
-                        }
-                        match passive_rtype_found {
-                            Some(target) => target,
-                            None => {
-                                eprintln!(
-                                    "[bind] WARNING: pot '{}' ({}) not in any circuit stage — no effect",
-                                    ctrl.component, ctrl.label
-                                );
-                                ControlTarget::PotInStage(0)
-                            }
-                        }
-                    }
-                }
+            Some(ControlParamKind::LfoDepth) => {
+                let idx = lfo_ids.iter().position(|id| id == &ctrl.component).unwrap_or(0);
+                ControlTarget::LfoDepth(idx)
+            }
+            Some(ControlParamKind::BbdClockRate) => {
+                let idx = bbd_id_to_idx.get(&ctrl.component).copied().unwrap_or(0);
+                ControlTarget::BbdClockRate(idx)
+            }
+            Some(ControlParamKind::BbdFeedback) => {
+                let idx = bbd_id_to_idx.get(&ctrl.component).copied().unwrap_or(0);
+                ControlTarget::BbdFeedback(idx)
+            }
+            Some(ControlParamKind::DelayTime) => {
+                let idx = delay_id_to_idx.get(&ctrl.component).copied().unwrap_or(0);
+                ControlTarget::DelayTime(idx)
+            }
+            Some(ControlParamKind::DelayFeedback) => {
+                let idx = delay_id_to_idx.get(&ctrl.component).copied().unwrap_or(0);
+                ControlTarget::DelayFeedback(idx)
+            }
+            Some(ControlParamKind::PotPosition) => {
+                resolve_pot_target(
+                    &ctrl.component,
+                    pedal,
+                    stages,
+                    multi_nl_stages,
+                    opamp_pot_map,
+                    bjt_bias_pot_map,
+                    sidechain_comp_ids,
+                    lfo_ids,
+                    bbd_id_to_idx,
+                    delay_id_to_idx,
+                    &mut pot_effects,
+                )
+            }
+            None => {
+                eprintln!(
+                    "WARNING: no declared control '{}' on component '{}' ({}) — falling back",
+                    ctrl.property, ctrl.component, ctrl.label
+                );
+                ControlTarget::PotInStage(0)
             }
         };
 
-        let max_r = pedal
-            .components
-            .iter()
-            .find(|c| c.id == ctrl.component)
-            .and_then(|c| {
-                use super::component::Component;
-                c.kind.resistance()
-            })
+        let max_r = comp
+            .and_then(|c| c.kind.resistance())
             .unwrap_or(100_000.0);
 
         controls.push(ControlBinding {
@@ -293,6 +120,194 @@ pub(super) fn build_controls(
     }
 
     (controls, pot_effects)
+}
+
+/// Resolve a pot-position control to its target.
+///
+/// Priority:
+///  1. Op-amp feedback pot
+///  2. BJT bias pot
+///  3. Pot in WDF stage tree
+///  4. Pot in multi-NL stage
+///  5. Sidechain pot
+///  6. Net scan: pot wired to LFO/BBD/delay
+///  7. BBD mix detection (BFS through passives)
+///  8. PassiveRType children
+///  9. Fallback warning
+fn resolve_pot_target(
+    pot_id: &str,
+    pedal: &PedalDef,
+    stages: &[WdfStage],
+    multi_nl_stages: &[MultiNlStage],
+    opamp_pot_map: &HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)>,
+    bjt_bias_pot_map: &HashMap<String, BjtBiasPotInfo>,
+    sidechain_comp_ids: &HashMap<String, usize>,
+    lfo_ids: &[String],
+    bbd_id_to_idx: &HashMap<String, usize>,
+    delay_id_to_idx: &HashMap<String, usize>,
+    pot_effects: &mut HashMap<String, Vec<PotEffect>>,
+) -> ControlTarget {
+    // 1. Op-amp feedback pot
+    if let Some(&(stage_idx, ri, fixed_series_r, max_pot_r, parallel_fixed_r, is_inverting)) =
+        opamp_pot_map.get(pot_id)
+    {
+        pot_effects
+            .entry(pot_id.to_string())
+            .or_default()
+            .push(PotEffect::OpAmpGain {
+                stage_idx,
+                ri,
+                fixed_series_r,
+                max_pot_r,
+                parallel_fixed_r,
+                is_inverting,
+            });
+        return ControlTarget::PotInStage(stage_idx);
+    }
+
+    // 2. BJT bias pot
+    if let Some(info) = bjt_bias_pot_map.get(pot_id) {
+        return ControlTarget::BjtBias {
+            max_pot_r: info.max_pot_r,
+            taper: info.taper,
+        };
+    }
+
+    // 3. Pot in WDF stage tree
+    for (si, stage) in stages.iter().enumerate() {
+        if has_pot(&stage.tree, pot_id) {
+            return ControlTarget::PotInStage(si);
+        }
+    }
+
+    // 4. Pot in multi-NL stage
+    for (mi, mnl) in multi_nl_stages.iter().enumerate() {
+        for (pi, child) in mnl.pot_children.iter().enumerate() {
+            if has_pot(child, pot_id) {
+                return ControlTarget::PotInMultiNlStage(mi, pi);
+            }
+        }
+    }
+
+    // 5. Sidechain pot
+    let sc_idx = sidechain_comp_ids
+        .get(pot_id)
+        .or_else(|| sidechain_comp_ids.get(&format!("{pot_id}__aw")))
+        .or_else(|| sidechain_comp_ids.get(&format!("{pot_id}__wb")));
+    if let Some(&idx) = sc_idx {
+        return ControlTarget::SidechainControl(idx);
+    }
+
+    // 6. Net scan: pot wired to LFO/BBD/delay targets
+    if let Some(target) = scan_pot_nets(pot_id, pedal, lfo_ids, bbd_id_to_idx, delay_id_to_idx) {
+        return target;
+    }
+
+    // 7. BBD mix detection via topology
+    if !bbd_id_to_idx.is_empty() && pot_reaches_bbd_output(pot_id, pedal, bbd_id_to_idx) {
+        pot_effects
+            .entry(pot_id.to_string())
+            .or_default()
+            .push(PotEffect::BbdMix);
+        // Find the stage containing this mix pot
+        for (si, stage) in stages.iter().enumerate() {
+            if let RootKind::PassiveRType { children, .. } = &stage.root {
+                if children.iter().any(|c| has_pot(c, pot_id)) {
+                    return ControlTarget::PotInStage(si);
+                }
+            }
+            if has_pot(&stage.tree, pot_id) {
+                return ControlTarget::PotInStage(si);
+            }
+        }
+        return ControlTarget::PotInStage(0);
+    }
+
+    // 8. PassiveRType children (2-terminal pots in MNA)
+    for (si, stage) in stages.iter().enumerate() {
+        if let RootKind::PassiveRType { children, .. } = &stage.root {
+            if children.iter().any(|c| has_pot(c, pot_id)) {
+                return ControlTarget::PotInStage(si);
+            }
+        }
+    }
+
+    // 9. Fallback
+    eprintln!(
+        "WARNING: pot '{pot_id}' not bound to any audio stage — control will have no effect"
+    );
+    ControlTarget::PotInStage(0)
+}
+
+/// Scan nets for pot pins wired to LFO/BBD/delay modulation targets.
+///
+/// Handles both forward (Pot.wiper -> LFO.rate) and reverse (BBD.out -> Pot.a)
+/// net directions.
+fn scan_pot_nets(
+    pot_id: &str,
+    pedal: &PedalDef,
+    lfo_ids: &[String],
+    bbd_id_to_idx: &HashMap<String, usize>,
+    delay_id_to_idx: &HashMap<String, usize>,
+) -> Option<ControlTarget> {
+    let pot_pins = ["wiper", "b", "a"];
+    for net in &pedal.nets {
+        // Forward: Pot.pin -> Target.modpin
+        if let Pin::ComponentPin { component, pin } = &net.from {
+            if component == pot_id && pot_pins.contains(&pin.as_str()) {
+                for to_pin in &net.to {
+                    if let Pin::ComponentPin {
+                        component: target_comp,
+                        pin: target_pin,
+                    } = to_pin
+                    {
+                        if target_pin == "rate" {
+                            if let Some(idx) = lfo_ids.iter().position(|id| id == target_comp) {
+                                return Some(ControlTarget::LfoRate(idx));
+                            }
+                        }
+                        if target_pin == "clock" {
+                            if let Some(&idx) = bbd_id_to_idx.get(target_comp.as_str()) {
+                                return Some(ControlTarget::BbdClockRate(idx));
+                            }
+                        }
+                        if target_pin == "delay_time" {
+                            if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
+                                return Some(ControlTarget::DelayTime(idx));
+                            }
+                        }
+                        if target_pin == "feedback" {
+                            if let Some(&idx) = delay_id_to_idx.get(target_comp.as_str()) {
+                                return Some(ControlTarget::DelayFeedback(idx));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Reverse: Target.out -> Pot.pin
+        for to_pin in &net.to {
+            if let Pin::ComponentPin { component, pin } = to_pin {
+                if component == pot_id && pot_pins.contains(&pin.as_str()) {
+                    if let Pin::ComponentPin {
+                        component: src_comp,
+                        pin: src_pin,
+                    } = &net.from
+                    {
+                        if src_pin == "out" {
+                            if let Some(&idx) = bbd_id_to_idx.get(src_comp.as_str()) {
+                                return Some(ControlTarget::BbdFeedback(idx));
+                            }
+                            if let Some(idx) = lfo_ids.iter().position(|id| id == src_comp) {
+                                return Some(ControlTarget::LfoDepth(idx));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -336,9 +351,10 @@ pub(super) fn build_lfo_bindings(
                             } = target_pin
                             {
                                 // Direct resolution first.
-                                let target = resolve_modulation_target(
+                                let resolved = resolve_modulation_target(
                                     target_prop,
                                     target_comp,
+                                    pedal,
                                     stages,
                                     multi_nl_stages,
                                     delay_id_to_idx,
@@ -356,6 +372,7 @@ pub(super) fn build_lfo_bindings(
                                     resolve_modulation_target(
                                         &final_pin,
                                         &final_comp,
+                                        pedal,
                                         stages,
                                         multi_nl_stages,
                                         delay_id_to_idx,
@@ -363,8 +380,7 @@ pub(super) fn build_lfo_bindings(
                                     )
                                 });
 
-                                if let Some(target) = target {
-                                    let (bias, range) = modulation_bias_range(&target);
+                                if let Some((target, bias, range)) = resolved {
                                     lfos.push(LfoBinding {
                                         lfo: lfo.clone(),
                                         target,
@@ -428,15 +444,15 @@ pub(super) fn build_envelope_bindings(
                                 pin: target_prop,
                             } = target_pin
                             {
-                                if let Some(target) = resolve_modulation_target(
+                                if let Some((target, bias, range)) = resolve_modulation_target(
                                     target_prop,
                                     target_comp,
+                                    pedal,
                                     stages,
                                     multi_nl_stages,
                                     delay_id_to_idx,
                                     &mut unused_flag,
                                 ) {
-                                    let (bias, range) = modulation_bias_range(&target);
                                     envelopes.push(EnvelopeBinding {
                                         envelope: envelope.clone(),
                                         target,
@@ -579,169 +595,153 @@ pub(super) fn build_sidechains(
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Resolve a target pin name and component to a ModulationTarget.
+/// Resolve a target pin and component to a `(ModulationTarget, bias, range)`.
 ///
-/// Shared by both LFO and envelope follower binding.
-/// `created_all_jfet_binding` is only used by LFO (pass `&mut false` for envelopes).
+/// Uses the component's `modulation_sink()` for target kind + bias/range,
+/// then resolves stage indices from the compiled stage list.
+///
+/// `created_all_jfet_binding` guards multi-JFET AllJfetVgs (LFO only).
 fn resolve_modulation_target(
     target_pin: &str,
     target_comp: &str,
+    pedal: &PedalDef,
     stages: &[WdfStage],
     multi_nl_stages: &[super::stage::MultiNlStage],
     delay_id_to_idx: &HashMap<String, usize>,
     created_all_jfet_binding: &mut bool,
-) -> Option<ModulationTarget> {
-    match target_pin {
-        "vgs" | "gate" => {
+) -> Option<(ModulationTarget, f64, f64)> {
+    use super::component::ModulationSinkKind;
+
+    // Look up the component and ask for its modulation sink.
+    let comp_kind = pedal.components.iter().find(|c| c.id == target_comp).map(|c| &c.kind);
+    let sink = comp_kind?.modulation_sink(target_pin)?;
+
+    let target = match sink.target_kind {
+        ModulationSinkKind::JfetVgs => {
             let jfet_count = stages
                 .iter()
                 .filter(|s| matches!(&s.root, RootKind::Jfet(_) | RootKind::JfetVr(_)))
                 .count();
             if jfet_count > 1 {
-                if *created_all_jfet_binding {
-                    return None;
-                }
+                if *created_all_jfet_binding { return None; }
                 *created_all_jfet_binding = true;
-                Some(ModulationTarget::AllJfetVgs)
+                ModulationTarget::AllJfetVgs
             } else if let Some(stage_idx) = stages
                 .iter()
                 .position(|s| matches!(&s.root, RootKind::Jfet(_) | RootKind::JfetVr(_)))
             {
-                Some(ModulationTarget::JfetVgs { stage_idx })
+                ModulationTarget::JfetVgs { stage_idx }
             } else if let Some(stage_idx) = stages
                 .iter()
                 .position(|s| matches!(&s.root, RootKind::Mosfet(_)))
             {
-                Some(ModulationTarget::MosfetVgs { stage_idx })
+                ModulationTarget::MosfetVgs { stage_idx }
             } else {
-                Some(ModulationTarget::JfetVgs { stage_idx: 0 })
+                ModulationTarget::JfetVgs { stage_idx: 0 }
             }
         }
-        "led" => Some(ModulationTarget::PhotocouplerLed {
+        ModulationSinkKind::PhotocouplerLed => ModulationTarget::PhotocouplerLed {
             stage_idx: 0,
             comp_id: target_comp.to_string(),
-        }),
-        "vgk" => {
+        },
+        ModulationSinkKind::TriodeVgk => {
+            let stage_idx = stages
+                .iter()
+                .position(|s| matches!(&s.root, RootKind::Triode(_)))
+                .unwrap_or(0);
+            ModulationTarget::TriodeVgk { stage_idx }
+        }
+        ModulationSinkKind::VariMuVgk => {
             if let Some(stage_idx) = stages
                 .iter()
                 .position(|s| matches!(&s.root, RootKind::VariMu(_)))
             {
-                Some(ModulationTarget::VariMuVgk { stage_idx })
+                ModulationTarget::VariMuVgk { stage_idx }
             } else {
                 let stage_idx = stages
                     .iter()
                     .position(|s| matches!(&s.root, RootKind::Triode(_)))
                     .unwrap_or(0);
-                Some(ModulationTarget::TriodeVgk { stage_idx })
+                ModulationTarget::TriodeVgk { stage_idx }
             }
         }
-        "vg1k" => {
+        ModulationSinkKind::PentodeVg1k => {
             let stage_idx = stages
                 .iter()
                 .position(|s| matches!(&s.root, RootKind::Pentode(_)))
                 .unwrap_or(0);
-            Some(ModulationTarget::PentodeVg1k { stage_idx })
+            ModulationTarget::PentodeVg1k { stage_idx }
         }
-        "iabc" => {
-            // Check for linearized OTA in multi-NL stages first (R-type path).
+        ModulationSinkKind::MosfetVgs => {
+            let stage_idx = stages
+                .iter()
+                .position(|s| matches!(&s.root, RootKind::Mosfet(_)))
+                .unwrap_or(0);
+            ModulationTarget::MosfetVgs { stage_idx }
+        }
+        ModulationSinkKind::OtaIabc => {
             if let Some(multi_nl_idx) = multi_nl_stages
                 .iter()
                 .position(|s| s.has_linearized_ota())
             {
-                Some(ModulationTarget::OtaIabcLinear { multi_nl_idx })
+                ModulationTarget::OtaIabcLinear { multi_nl_idx }
             } else {
-                // Fall back to WDF tree root OTA.
                 let stage_idx = stages
                     .iter()
                     .position(|s| matches!(&s.root, RootKind::Ota(_)))
                     .unwrap_or(0);
-                Some(ModulationTarget::OtaIabc { stage_idx })
+                ModulationTarget::OtaIabc { stage_idx }
             }
         }
-        "clock" => Some(ModulationTarget::BbdClock { bbd_idx: 0 }),
-        "speed_mod" => {
+        ModulationSinkKind::BbdClock => ModulationTarget::BbdClock { bbd_idx: 0 },
+        ModulationSinkKind::DelaySpeed => {
             let delay_idx = delay_id_to_idx.get(target_comp).copied().unwrap_or(0);
-            Some(ModulationTarget::DelaySpeed { delay_idx })
+            ModulationTarget::DelaySpeed { delay_idx }
         }
-        "delay_time" => {
+        ModulationSinkKind::DelayTime => {
             let delay_idx = delay_id_to_idx.get(target_comp).copied().unwrap_or(0);
-            Some(ModulationTarget::DelayTime { delay_idx })
+            ModulationTarget::DelayTime { delay_idx }
         }
-        _ => None,
-    }
-}
+    };
 
-/// Return (bias, range) for a modulation target.
-fn modulation_bias_range(target: &ModulationTarget) -> (f64, f64) {
-    match target {
-        ModulationTarget::JfetVgs { .. } => (-0.45, 0.25),
-        ModulationTarget::AllJfetVgs => (-0.45, 0.25),
-        ModulationTarget::PhotocouplerLed { .. } => (0.5, 0.5),
-        ModulationTarget::TriodeVgk { .. } => (-2.0, 2.0),
-        ModulationTarget::VariMuVgk { .. } => (-2.0, 2.0),
-        ModulationTarget::PentodeVg1k { .. } => (-2.0, 2.0),
-        ModulationTarget::MosfetVgs { .. } => (3.0, 2.0),
-        ModulationTarget::OtaIabc { .. } | ModulationTarget::OtaIabcLinear { .. } => (0.5, 0.5),
-        ModulationTarget::BbdClock { .. } => (0.15, 0.10),
-        ModulationTarget::OpAmpVp { .. } => (0.0, 1.0),
-        ModulationTarget::DelaySpeed { .. } => (0.0, 0.02),
-        ModulationTarget::DelayTime { .. } => (0.5, 0.5),
-    }
+    Some((target, sink.bias, sink.range))
 }
 
 /// Trace through resistive paths (pots, resistors) to find modulation targets.
-fn trace_through_resistive_path<'a>(
+///
+/// Uses `modulation_sink()` to recognize target pins instead of a hardcoded list.
+fn trace_through_resistive_path(
     start_comp: &str,
     start_pin: &str,
-    pedal: &'a PedalDef,
+    pedal: &PedalDef,
     visited: &mut HashSet<String>,
 ) -> Option<(String, String)> {
-    let key = format!("{}:{}", start_comp, start_pin);
+    let key = format!("{start_comp}:{start_pin}");
     if visited.contains(&key) {
         return None;
     }
     visited.insert(key);
 
-    let comp_kind = pedal
-        .components
-        .iter()
-        .find(|c| c.id == start_comp)
-        .map(|c| &c.kind);
+    let comp = pedal.components.iter().find(|c| c.id == start_comp)?;
 
-    let is_resistive = matches!(
-        comp_kind,
-        Some(ComponentKind::Potentiometer(_, _)) | Some(ComponentKind::Resistor(_))
-    );
-    if !is_resistive {
-        let recognized_targets = [
-            "clock",
-            "vgs",
-            "gate",
-            "led",
-            "vgk",
-            "vg1k",
-            "iabc",
-            "speed_mod",
-            "delay_time",
-        ];
-        if recognized_targets.contains(&start_pin) {
-            return Some((start_comp.to_string(), start_pin.to_string()));
-        }
-        return None;
+    // If this component has a modulation sink on this pin, we found our target.
+    if comp.kind.modulation_sink(start_pin).is_some() {
+        return Some((start_comp.to_string(), start_pin.to_string()));
     }
 
-    let other_pins: Vec<&str> = match comp_kind {
-        Some(ComponentKind::Potentiometer(_, _)) => match start_pin {
+    // Only trace through resistive elements (pots, resistors).
+    let other_pins: Vec<&str> = match &comp.kind {
+        ComponentKind::Potentiometer(_, _) => match start_pin {
             "a" => vec!["b", "wiper"],
             "b" | "wiper" => vec!["a"],
-            _ => vec![],
+            _ => return None,
         },
-        Some(ComponentKind::Resistor(_)) => match start_pin {
+        ComponentKind::Resistor(_) => match start_pin {
             "a" => vec!["b"],
             "b" => vec!["a"],
-            _ => vec![],
+            _ => return None,
         },
-        _ => vec![],
+        _ => return None,
     };
 
     for other_pin in other_pins {
