@@ -5,11 +5,15 @@
 //! classify.rs, compile.rs, build.rs, and kicad.rs can delegate instead
 //! of duplicating match blocks.
 
+use std::collections::HashMap;
+
 use crate::dsl::*;
 use crate::elements::{JfetVariableResistor, Photocoupler, PhotocouplerModel};
 use crate::tree::MnaSystem;
 
+use super::classify::NonlinearKind;
 use super::dyn_node::DynNode;
+use super::graph::NodeId;
 use super::validate::Severity;
 
 /// Resistance used to model open circuits (infinite R, inactive fork paths).
@@ -225,6 +229,27 @@ pub(super) trait Component: std::fmt::Debug {
 
     /// Check for suspicious or invalid component values.
     fn validate_values(&self, _comp_id: &str) -> Vec<(Severity, String)> { vec![] }
+
+    // ── Classification (detailed) ────────────────────────────────────────
+
+    /// Classify this component as a nonlinear element for the circuit solver.
+    ///
+    /// Returns `Some((kind, junction_nodes))` if this is a nonlinear element,
+    /// where `junction_nodes` are the circuit nodes where passive elements connect.
+    /// Returns `None` for passive, virtual, and active-IC components.
+    ///
+    /// - 1 junction node: diodes, JFETs, MOSFETs, zeners, OTAs
+    /// - 2 junction nodes: BJTs (collector, emitter), triodes/pentodes (plate, cathode)
+    fn classify_nonlinear(
+        &self,
+        _comp_id: &str,
+        _node_a: NodeId,
+        _node_b: NodeId,
+        _gnd_node: NodeId,
+        _node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        None
+    }
 
     // ── Hardware ──────────────────────────────────────────────────────────
 
@@ -1155,6 +1180,138 @@ impl Component for ComponentKind {
             _ => {}
         }
         w
+    }
+
+    // ── Classification (detailed) ────────────────────────────────────────
+
+    fn classify_nonlinear(
+        &self,
+        comp_id: &str,
+        node_a: NodeId,
+        node_b: NodeId,
+        gnd_node: NodeId,
+        node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let a_is_gnd = node_a == gnd_node;
+        let b_is_gnd = node_b == gnd_node;
+        // Diodes: junction = non-ground node (fallback to node_a for feedback diodes)
+        let diode_jn = if b_is_gnd {
+            node_a
+        } else if a_is_gnd {
+            node_b
+        } else {
+            node_a
+        };
+        // Non-diode single-junction: junction = node_b unless at ground
+        let other_jn = if b_is_gnd { node_a } else { node_b };
+
+        match self {
+            ComponentKind::DiodePair(dt) => {
+                Some((NonlinearKind::DiodePair(*dt), vec![diode_jn]))
+            }
+            ComponentKind::Diode(dt) => {
+                Some((NonlinearKind::SingleDiode(*dt), vec![diode_jn]))
+            }
+            ComponentKind::NJfet(name) => Some((
+                NonlinearKind::Jfet {
+                    model_name: name.clone(),
+                    is_n_channel: true,
+                },
+                vec![other_jn],
+            )),
+            ComponentKind::PJfet(name) => Some((
+                NonlinearKind::Jfet {
+                    model_name: name.clone(),
+                    is_n_channel: false,
+                },
+                vec![other_jn],
+            )),
+            ComponentKind::Npn(name) => {
+                let base_node = node_names
+                    .get(&format!("{}.base", comp_id))
+                    .copied()
+                    .unwrap_or(node_a);
+                Some((
+                    NonlinearKind::BjtNpn {
+                        model_name: name.clone(),
+                        base_node,
+                    },
+                    vec![node_a, node_b],
+                ))
+            }
+            ComponentKind::Pnp(name) => {
+                let base_node = node_names
+                    .get(&format!("{}.base", comp_id))
+                    .copied()
+                    .unwrap_or(node_a);
+                Some((
+                    NonlinearKind::BjtPnp {
+                        model_name: name.clone(),
+                        base_node,
+                    },
+                    vec![node_a, node_b],
+                ))
+            }
+            ComponentKind::Triode(name) => {
+                let grid_node = node_names
+                    .get(&format!("{}.grid", comp_id))
+                    .copied();
+                Some((
+                    NonlinearKind::Triode {
+                        model_name: name.clone(),
+                        plate_node: node_a,
+                        cathode_node: node_b,
+                        grid_node,
+                        parallel_count: 1,
+                        is_vari_mu: false,
+                    },
+                    vec![node_a, node_b],
+                ))
+            }
+            ComponentKind::VariMu(name) => {
+                let grid_node = node_names
+                    .get(&format!("{}.grid", comp_id))
+                    .copied();
+                Some((
+                    NonlinearKind::Triode {
+                        model_name: name.clone(),
+                        plate_node: node_a,
+                        cathode_node: node_b,
+                        grid_node,
+                        parallel_count: 1,
+                        is_vari_mu: true,
+                    },
+                    vec![node_a, node_b],
+                ))
+            }
+            ComponentKind::Pentode(name) => Some((
+                NonlinearKind::Pentode {
+                    model_name: name.clone(),
+                },
+                vec![node_a, node_b],
+            )),
+            ComponentKind::Nmos(mt) => Some((
+                NonlinearKind::Mosfet {
+                    mosfet_type: *mt,
+                    is_n_channel: true,
+                },
+                vec![other_jn],
+            )),
+            ComponentKind::Pmos(mt) => Some((
+                NonlinearKind::Mosfet {
+                    mosfet_type: *mt,
+                    is_n_channel: false,
+                },
+                vec![other_jn],
+            )),
+            ComponentKind::Zener(vz) => {
+                Some((NonlinearKind::Zener { voltage: *vz }, vec![other_jn]))
+            }
+            ComponentKind::OpAmp(ot) if ot.is_ota() => {
+                Some((NonlinearKind::Ota, vec![other_jn]))
+            }
+            _ => None,
+        }
     }
 
     // ── Hardware ──────────────────────────────────────────────────────────

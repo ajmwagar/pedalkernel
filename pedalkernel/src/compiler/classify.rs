@@ -1,14 +1,15 @@
 //! Pass 1: Unified element classification.
 //!
 //! Single pass over all edges classifies each as passive or nonlinear.
-//! Replaces the per-type `find_diodes()`, `find_jfets()`, `find_bjts()`,
-//! `find_triodes()`, `find_pentodes()`, `find_mosfets()`, `find_zeners()`,
-//! `find_otas()` methods that each independently performed BFS.
+//! Per-component classification is delegated to the `Component::classify_nonlinear()`
+//! trait method. Cross-component concerns (parallel triode merging, anti-parallel
+//! diode synthesis) are handled as post-passes here.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
 
+use super::component::Component;
 use super::graph::{CircuitGraph, NodeId};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -92,9 +93,10 @@ pub(super) struct ClassifiedCircuit {
 
 /// Perform unified classification of all circuit elements.
 ///
-/// Single pass over all edges. For nonlinear elements, records:
-/// - Edge index, element kind, junction node(s)
-/// - Sorts by BFS distance from input (for cascaded stage ordering)
+/// Delegates per-component classification to `Component::classify_nonlinear()`.
+/// Then applies cross-component merging passes:
+/// 1. Parallel triode merging (same plate+cathode → single element with parallel_count)
+/// 2. Anti-parallel diode synthesis (two opposite single diodes → one DiodePair)
 pub(super) fn classify_circuit(graph: &CircuitGraph, pedal: &PedalDef) -> ClassifiedCircuit {
     // ── Sidechain partitioning ─────────────────────────────────────────
     let sidechain_edge_set: HashSet<usize> = {
@@ -112,196 +114,39 @@ pub(super) fn classify_circuit(graph: &CircuitGraph, pedal: &PedalDef) -> Classi
         set
     };
 
-    // ── BFS from in_node ───────────────────────────────────────────────
+    // ── BFS from in_node / out_node ─────────────────────────────────────
     let dist_from_in = bfs_distances(graph, graph.in_node);
     let dist_from_out = bfs_distances(graph, graph.out_node);
 
-    // ── Collect raw triodes for parallel merging ───────────────────────
-    let mut raw_triodes: Vec<(usize, String, NodeId, NodeId, bool)> = Vec::new();
-    for (edge_idx, e) in graph.edges.iter().enumerate() {
-        let comp = &graph.components[e.comp_idx];
-        match &comp.kind {
-            ComponentKind::Triode(name) => {
-                raw_triodes.push((edge_idx, name.clone(), e.node_a, e.node_b, false));
-            }
-            ComponentKind::VariMu(name) => {
-                raw_triodes.push((edge_idx, name.clone(), e.node_a, e.node_b, true));
-            }
-            _ => {}
-        }
-    }
-
-    // Group triodes by (plate, cathode) to detect parallel tubes.
-    let mut triode_groups: HashMap<(NodeId, NodeId), Vec<(usize, String, bool)>> = HashMap::new();
-    for (edge_idx, name, plate, cathode, is_vm) in &raw_triodes {
-        triode_groups.entry((*plate, *cathode)).or_default().push((
-            *edge_idx,
-            name.clone(),
-            *is_vm,
-        ));
-    }
-
-    // All raw triode edge indices (including parallel duplicates).
-    let all_triode_edges: HashSet<usize> =
-        raw_triodes.iter().map(|(idx, _, _, _, _)| *idx).collect();
-
-    // ── Single pass: classify all edges ────────────────────────────────
+    // ── Classify all edges via Component trait ──────────────────────────
     let mut elements: Vec<NonlinearElement> = Vec::new();
     let mut all_nonlinear_edge_indices: Vec<usize> = Vec::new();
     let mut has_germanium = false;
 
-    // Track which triode groups we've already added (by representative plate+cathode).
-    let mut processed_triode_groups: HashSet<(NodeId, NodeId)> = HashSet::new();
-
     for (edge_idx, e) in graph.edges.iter().enumerate() {
         let comp = &graph.components[e.comp_idx];
-
-        let a_is_gnd = e.node_a == graph.gnd_node;
-        let b_is_gnd = e.node_b == graph.gnd_node;
-
-        // Diodes: feedback diodes (neither node at gnd) use node_a as junction.
-        let diode_junction = |node_a: NodeId, node_b: NodeId| -> NodeId {
-            if b_is_gnd {
-                node_a
-            } else if a_is_gnd {
-                node_b
-            } else {
-                node_a
-            }
-        };
-        // JFETs, pentodes, MOSFETs, zeners, OTAs: use node_b unless node_b is gnd.
-        let nondiode_junction = |node_a: NodeId, node_b: NodeId| -> NodeId {
-            if b_is_gnd {
-                node_a
-            } else {
-                node_b
-            }
-        };
-
-        let classified = match &comp.kind {
-            // ── Diodes ─────────────────────────────────────────────
-            ComponentKind::DiodePair(dt) | ComponentKind::Diode(dt) => {
-                if *dt == DiodeType::Germanium {
-                    has_germanium = true;
-                }
-                let is_pair = matches!(&comp.kind, ComponentKind::DiodePair(_));
-                let junction = diode_junction(e.node_a, e.node_b);
-                let kind = if is_pair {
-                    NonlinearKind::DiodePair(*dt)
-                } else {
-                    NonlinearKind::SingleDiode(*dt)
-                };
-                Some((kind, vec![junction]))
-            }
-
-            // ── JFETs ──────────────────────────────────────────────
-            ComponentKind::NJfet(name) | ComponentKind::PJfet(name) => {
-                let is_n = matches!(&comp.kind, ComponentKind::NJfet(_));
-                let junction = nondiode_junction(e.node_a, e.node_b);
-                Some((
-                    NonlinearKind::Jfet {
-                        model_name: name.clone(),
-                        is_n_channel: is_n,
-                    },
-                    vec![junction],
-                ))
-            }
-
-            // ── BJTs ───────────────────────────────────────────────
-            ComponentKind::Npn(name) | ComponentKind::Pnp(name) => {
-                let is_npn = matches!(&comp.kind, ComponentKind::Npn(_));
-                let base_node = graph
-                    .node_names
-                    .get(&format!("{}.base", comp.id))
-                    .copied()
-                    .unwrap_or(e.node_a);
-                let kind = if is_npn {
-                    NonlinearKind::BjtNpn {
-                        model_name: name.clone(),
-                        base_node,
-                    }
-                } else {
-                    NonlinearKind::BjtPnp {
-                        model_name: name.clone(),
-                        base_node,
-                    }
-                };
-                Some((kind, vec![e.node_a, e.node_b])) // collector, emitter
-            }
-
-            // ── Triodes (merged parallel) ──────────────────────────
-            ComponentKind::Triode(_) | ComponentKind::VariMu(_) => {
-                let key = (e.node_a, e.node_b);
-                if processed_triode_groups.contains(&key) {
-                    // Already processed this group — just record edge index.
-                    all_nonlinear_edge_indices.push(edge_idx);
-                    None
-                } else if let Some(group) = triode_groups.get(&key) {
-                    processed_triode_groups.insert(key);
-                    let (_, ref rep_name, rep_is_vari_mu) = group[0];
-                    // Look up grid node from node_names using the component ID.
-                    let grid_node = graph.node_names.get(&format!("{}.grid", comp.id)).copied();
-                    Some((
-                        NonlinearKind::Triode {
-                            model_name: rep_name.clone(),
-                            plate_node: e.node_a,
-                            cathode_node: e.node_b,
-                            grid_node,
-                            parallel_count: group.len(),
-                            is_vari_mu: rep_is_vari_mu,
-                        },
-                        vec![e.node_a, e.node_b], // plate, cathode
-                    ))
-                } else {
-                    None
-                }
-            }
-
-            // ── Pentodes ───────────────────────────────────────────
-            // 2-junction [plate, cathode] — same convention as triodes.
-            // node_a = plate, node_b = cathode (from graph.rs pin mapping).
-            ComponentKind::Pentode(name) => {
-                Some((
-                    NonlinearKind::Pentode {
-                        model_name: name.clone(),
-                    },
-                    vec![e.node_a, e.node_b], // plate, cathode
-                ))
-            }
-
-            // ── MOSFETs ────────────────────────────────────────────
-            ComponentKind::Nmos(mt) | ComponentKind::Pmos(mt) => {
-                let is_n = matches!(&comp.kind, ComponentKind::Nmos(_));
-                let junction = nondiode_junction(e.node_a, e.node_b);
-                Some((
-                    NonlinearKind::Mosfet {
-                        mosfet_type: *mt,
-                        is_n_channel: is_n,
-                    },
-                    vec![junction],
-                ))
-            }
-
-            // ── Zeners ─────────────────────────────────────────────
-            ComponentKind::Zener(vz) => {
-                let junction = nondiode_junction(e.node_a, e.node_b);
-                Some((NonlinearKind::Zener { voltage: *vz }, vec![junction]))
-            }
-
-            // ── OTAs (CA3080 etc.) ─────────────────────────────────
-            ComponentKind::OpAmp(ot) if ot.is_ota() => {
-                let junction = nondiode_junction(e.node_a, e.node_b);
-                Some((NonlinearKind::Ota, vec![junction]))
-            }
-
-            _ => None,
-        };
+        let classified = comp.kind.classify_nonlinear(
+            &comp.id,
+            e.node_a,
+            e.node_b,
+            graph.gnd_node,
+            &graph.node_names,
+        );
 
         if let Some((kind, junction_nodes)) = classified {
             all_nonlinear_edge_indices.push(edge_idx);
 
-            // Sort key: use base_node distance for BJTs (cascade ordering),
-            // junction_node distance for others.
+            // Track germanium diodes
+            match &kind {
+                NonlinearKind::SingleDiode(dt) | NonlinearKind::DiodePair(dt) => {
+                    if *dt == DiodeType::Germanium {
+                        has_germanium = true;
+                    }
+                }
+                _ => {}
+            }
+
+            // Sort key: base_node for BJTs, cathode for triodes, first junction otherwise
             let sort_node = match &kind {
                 NonlinearKind::BjtNpn { base_node, .. }
                 | NonlinearKind::BjtPnp { base_node, .. } => *base_node,
@@ -316,20 +161,53 @@ pub(super) fn classify_circuit(graph: &CircuitGraph, pedal: &PedalDef) -> Classi
                 junction_nodes,
                 distance,
             });
-        } else if all_triode_edges.contains(&edge_idx)
-            && !all_nonlinear_edge_indices.contains(&edge_idx)
-        {
-            // Parallel triode duplicate edge — already counted above in the
-            // `processed_triode_groups` branch, but make sure it's in the index list.
-            all_nonlinear_edge_indices.push(edge_idx);
         }
     }
 
-    // ── Anti-parallel diode pair synthesis ─────────────────────────────
-    // When two SingleDiode elements share the same two edge nodes (in opposite
-    // orientation), they form an anti-parallel clipping pair. Merge them into
-    // a single DiodePair element so the compiler treats them as one stage with
-    // symmetric clipping (e.g., Klon Centaur's MA856 pair, RAT's 1N914 pair).
+    // ── Post-pass 1: Merge parallel triodes ─────────────────────────────
+    // Group triodes by (plate, cathode). Keep one representative with
+    // parallel_count = group size, remove duplicates.
+    {
+        let mut triode_groups: HashMap<(NodeId, NodeId), Vec<usize>> = HashMap::new();
+        for (i, elem) in elements.iter().enumerate() {
+            if let NonlinearKind::Triode {
+                plate_node,
+                cathode_node,
+                ..
+            } = &elem.kind
+            {
+                triode_groups
+                    .entry((*plate_node, *cathode_node))
+                    .or_default()
+                    .push(i);
+            }
+        }
+        let mut to_remove: HashSet<usize> = HashSet::new();
+        for group in triode_groups.values() {
+            if group.len() > 1 {
+                let rep = group[0];
+                if let NonlinearKind::Triode {
+                    ref mut parallel_count,
+                    ..
+                } = elements[rep].kind
+                {
+                    *parallel_count = group.len();
+                }
+                for &idx in &group[1..] {
+                    to_remove.insert(idx);
+                }
+            }
+        }
+        let mut remove_vec: Vec<usize> = to_remove.into_iter().collect();
+        remove_vec.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in remove_vec {
+            elements.remove(idx);
+        }
+    }
+
+    // ── Post-pass 2: Anti-parallel diode pair synthesis ─────────────────
+    // Two SingleDiode elements sharing the same two edge nodes (opposite
+    // orientation) → merge into one DiodePair (e.g. Klon's MA856 pair).
     {
         let mut merged_indices: HashSet<usize> = HashSet::new();
         let mut i = 0;
@@ -356,22 +234,19 @@ pub(super) fn classify_circuit(graph: &CircuitGraph, pedal: &PedalDef) -> Classi
                     NonlinearKind::SingleDiode(dt) => *dt,
                     _ => continue,
                 };
-                // Must be same diode type (both silicon, both germanium, etc.)
                 if dt_i != dt_j {
                     continue;
                 }
                 let ej = &graph.edges[elements[j].edge_idx];
                 let nodes_j = (ej.node_a.min(ej.node_b), ej.node_a.max(ej.node_b));
                 if nodes_i == nodes_j {
-                    // Merge: upgrade element i to DiodePair, mark j for removal.
                     elements[i].kind = NonlinearKind::DiodePair(dt_i);
                     merged_indices.insert(j);
-                    break; // Only merge one pair per base element
+                    break;
                 }
             }
             i += 1;
         }
-        // Remove merged duplicates (iterate in reverse to preserve indices).
         let mut to_remove: Vec<usize> = merged_indices.into_iter().collect();
         to_remove.sort_unstable_by(|a, b| b.cmp(a));
         for idx in to_remove {
