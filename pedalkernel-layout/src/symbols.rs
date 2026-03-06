@@ -49,6 +49,7 @@ pub fn symbol_for_kind(kind: &ComponentKind) -> String {
         ComponentKind::ResistorSwitched(_) => "resistor".into(),
         ComponentKind::RotarySwitch(_) => "switch".into(),
         ComponentKind::Switch(_) => "switch".into(),
+        ComponentKind::TriggerInput => "switch".into(),
     }
 }
 

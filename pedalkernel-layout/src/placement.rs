@@ -494,6 +494,7 @@ fn kind_to_string(kind: &ComponentKind) -> String {
         ComponentKind::ResistorSwitched(_) => "resistor_switched".into(),
         ComponentKind::RotarySwitch(_) => "rotary_switch".into(),
         ComponentKind::Switch(_) => "switch".into(),
+        ComponentKind::TriggerInput => "trigger_input".into(),
     }
 }
 

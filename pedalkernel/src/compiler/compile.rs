@@ -1400,6 +1400,20 @@ pub fn compile_pedal_with_options(
         })
         .collect();
 
+    // Collect trigger inputs.
+    let mut trigger_id_to_idx: HashMap<String, usize> = HashMap::new();
+    let triggers: Vec<super::compiled::TriggerState> = pedal
+        .components
+        .iter()
+        .filter(|c| matches!(c.kind, ComponentKind::TriggerInput))
+        .enumerate()
+        .map(|(idx, c)| {
+            trigger_id_to_idx.insert(c.id.clone(), idx);
+            let amplitude = pedal.supplies.first().map(|s| s.config.voltage).unwrap_or(9.0);
+            super::compiled::TriggerState::new(amplitude)
+        })
+        .collect();
+
     // Sidechain construction — must happen before build_controls so we have
     // the component → sidechain index mapping for control routing.
     let (sidechains, sidechain_comp_ids) =
@@ -1416,6 +1430,7 @@ pub fn compile_pedal_with_options(
         delay_lines.is_empty(),
         &sidechain_comp_ids,
         &bbd_id_to_idx,
+        &trigger_id_to_idx,
     );
 
     // Initialize BJT bias pots from their default positions.
@@ -1564,6 +1579,7 @@ pub fn compile_pedal_with_options(
         node_signals: Vec::new(),
         bbd_wet_mix: 0.5,
         pot_effects,
+        triggers,
     };
 
     let initial_voltage = match &compiled.power_supply {

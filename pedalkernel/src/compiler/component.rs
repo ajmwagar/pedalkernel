@@ -110,6 +110,8 @@ pub(super) enum ControlParamKind {
     DelayFeedback,
     /// Switch position selector.
     SwitchPosition { num_positions: usize },
+    /// Fire a single-sample impulse (drum trigger).
+    Trigger,
 }
 
 /// Modulation sink: how a component receives LFO/envelope control signals.
@@ -408,6 +410,7 @@ impl Component for ComponentKind {
             ComponentKind::ResistorSwitched(_) => "switched resistor",
             ComponentKind::RotarySwitch(_) => "rotary switch",
             ComponentKind::Switch(_) => "switch",
+            ComponentKind::TriggerInput => "trigger_input",
         }
     }
 
@@ -464,7 +467,7 @@ impl Component for ComponentKind {
     fn is_control_only(&self) -> bool {
         matches!(
             self,
-            ComponentKind::RotarySwitch(_) | ComponentKind::Switch(_)
+            ComponentKind::RotarySwitch(_) | ComponentKind::Switch(_) | ComponentKind::TriggerInput
         )
     }
 
@@ -658,6 +661,12 @@ impl Component for ComponentKind {
                 valid_pins: &[],
                 aliases: &[],
             },
+
+            // Trigger input: single output pin (unions with `in` node)
+            ComponentKind::TriggerInput => PinConfig {
+                valid_pins: &["out"],
+                aliases: &[],
+            },
         }
     }
 
@@ -747,7 +756,8 @@ impl Component for ComponentKind {
             | ComponentKind::DelayLine(..)
             | ComponentKind::Tap(..)
             | ComponentKind::RotarySwitch(_)
-            | ComponentKind::Switch(_) => GraphRole::Virtual,
+            | ComponentKind::Switch(_)
+            | ComponentKind::TriggerInput => GraphRole::Virtual,
 
             // Active ICs: no edge, count as active
             ComponentKind::Vco(_)
@@ -1411,6 +1421,9 @@ impl Component for ComponentKind {
             ComponentKind::RotarySwitch(labels) => vec![
                 ControlParam { name: "position", kind: ControlParamKind::SwitchPosition { num_positions: labels.len() } },
             ],
+            ComponentKind::TriggerInput => vec![
+                ControlParam { name: "trigger", kind: ControlParamKind::Trigger },
+            ],
             _ => vec![],
         }
     }
@@ -1607,6 +1620,7 @@ impl Component for ComponentKind {
                 3 => ("Switch:SW_Rotary4", "SW"),
                 _ => ("Switch:SW_Rotary4", "SW"),
             },
+            ComponentKind::TriggerInput => ("Connector:TestPoint", "TP"),
         }
     }
 }

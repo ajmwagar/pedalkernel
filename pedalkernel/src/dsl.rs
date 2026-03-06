@@ -345,6 +345,10 @@ pub enum ComponentKind {
     /// Unlike AnalogSwitch (CD4066, etc.), this is a passive mechanical element.
     /// Parameter is number of positions (2 = SPDT, 3+ = rotary).
     Switch(usize),
+    /// Single-sample impulse source for drum/percussion circuits (TR-808 style).
+    /// No audio input — the circuit is excited by a voltage impulse that rings
+    /// through passive LC networks.
+    TriggerInput,
 }
 
 /// Op-amp types with different characteristics.
@@ -1796,6 +1800,11 @@ fn parse_resistor_switched(input: &str) -> IResult<&str, ComponentKind> {
 /// `switch(2)` — simple n-position mechanical switch
 /// Unlike AnalogSwitch (CD4066), this is a passive mechanical element.
 /// Used for mode selection, bypass, etc.
+fn parse_trigger_input(input: &str) -> IResult<&str, ComponentKind> {
+    let (rest, _) = tag("trigger_input()")(input)?;
+    Ok((rest, ComponentKind::TriggerInput))
+}
+
 fn parse_switch(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("switch")(input)?;
     let (input, _) = char('(')(input)?;
@@ -1876,6 +1885,7 @@ fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
             parse_transformer,
             parse_rotary_switch,
             parse_switch, // simple n-position switch
+            parse_trigger_input,
         )),
     ))(input)
 }

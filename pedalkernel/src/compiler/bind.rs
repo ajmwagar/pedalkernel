@@ -35,6 +35,7 @@ pub(super) fn build_controls(
     _delay_lines_empty: bool,
     sidechain_comp_ids: &HashMap<String, usize>,
     bbd_id_to_idx: &HashMap<String, usize>,
+    trigger_id_to_idx: &HashMap<String, usize>,
 ) -> (Vec<ControlBinding>, HashMap<String, Vec<PotEffect>>) {
     let mut controls = Vec::new();
     let mut pot_effects: HashMap<String, Vec<PotEffect>> = HashMap::new();
@@ -81,6 +82,10 @@ pub(super) fn build_controls(
             Some(ControlParamKind::DelayFeedback) => {
                 let idx = delay_id_to_idx.get(&ctrl.component).copied().unwrap_or(0);
                 ControlTarget::DelayFeedback(idx)
+            }
+            Some(ControlParamKind::Trigger) => {
+                let idx = trigger_id_to_idx.get(&ctrl.component).copied().unwrap_or(0);
+                ControlTarget::Trigger(idx)
             }
             Some(ControlParamKind::PotPosition) => {
                 resolve_pot_target(

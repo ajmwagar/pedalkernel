@@ -1,4 +1,4 @@
-//! Switch component structs: Switch, RotarySwitch.
+//! Switch component structs: Switch, RotarySwitch, TriggerInputComp.
 
 use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult};
 use crate::compiler::validate::Severity;
@@ -117,5 +117,48 @@ impl Component for RotarySwitch {
             7..=8 => ("Switch:SW_Rotary8", "SW"),
             _ => ("Switch:SW_Rotary12", "SW"),
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TriggerInput
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriggerInputComp;
+
+impl Component for TriggerInputComp {
+    impl_component_dyn!();
+
+    fn type_tag(&self) -> &'static str { "trigger_input" }
+
+    fn is_passive(&self) -> bool { false }
+
+    fn is_control_only(&self) -> bool { true }
+
+    fn pin_config(&self) -> PinConfig {
+        PinConfig {
+            valid_pins: &["out"],
+            aliases: &[],
+        }
+    }
+
+    fn graph_role(&self) -> GraphRole {
+        GraphRole::Virtual
+    }
+
+    fn stamp_mna(
+        &self,
+        _comp_id: &str,
+        _n1: Option<usize>,
+        _n2: Option<usize>,
+        _mna: &mut MnaSystem,
+        _sample_rate: f64,
+    ) -> StampResult {
+        StampResult::Skip
+    }
+
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        ("Connector:TestPoint", "TP")
     }
 }

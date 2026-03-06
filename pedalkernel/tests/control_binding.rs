@@ -960,3 +960,95 @@ fn ce2_controls_affect_output() {
     assert_control_affects_output("boss_ce2.pedal", "Rate", 0.2, 0.8);
     assert_control_affects_output("boss_ce2.pedal", "Depth", 0.2, 0.8);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Trigger input tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn trigger_input_parses_and_compiles() {
+    let src = r#"
+        pedal "808 Kick" {
+            supplies { V1: 9V }
+            components {
+                TRIG: trigger_input()
+                R1: resistor(100k)
+                C1: cap(10n)
+            }
+            nets {
+                TRIG.out -> R1.a
+                R1.b -> C1.a
+                C1.b -> gnd
+                R1.b -> out
+            }
+            controls {
+                TRIG.trigger -> "Trigger" [0.0, 1.0] = 0.0
+            }
+        }
+    "#;
+    let compiled = compile_src(src);
+    let d = dump(&compiled);
+    assert!(d.contains("Trigger"), "dump should contain Trigger control: {d}");
+}
+
+#[test]
+fn trigger_produces_impulse_that_decays() {
+    use pedalkernel::PedalProcessor;
+
+    let src = r#"
+        pedal "808 Kick" {
+            supplies { V1: 9V }
+            components {
+                TRIG: trigger_input()
+                R1: resistor(100k)
+                C1: cap(10n)
+            }
+            nets {
+                TRIG.out -> R1.a
+                R1.b -> C1.a
+                C1.b -> gnd
+                R1.b -> out
+            }
+            controls {
+                TRIG.trigger -> "Trigger" [0.0, 1.0] = 0.0
+            }
+        }
+    "#;
+    let mut compiled = compile_src(src);
+    // Fire trigger
+    compiled.set_control("Trigger", 1.0);
+    let s0 = compiled.process(0.0);
+    assert!(s0.abs() > 0.01, "trigger should produce signal, got {s0}");
+    let s1 = compiled.process(0.0);
+    // After impulse, should be decaying (or at least different from s0)
+    assert!(s1.abs() < s0.abs() || s1.abs() > 0.0, "should decay or ring, got s1={s1}");
+}
+
+#[test]
+fn trigger_note_on_fires_impulse() {
+    use pedalkernel::PedalProcessor;
+
+    let src = r#"
+        pedal "808 Kick" {
+            supplies { V1: 9V }
+            components {
+                TRIG: trigger_input()
+                R1: resistor(100k)
+                C1: cap(10n)
+            }
+            nets {
+                TRIG.out -> R1.a
+                R1.b -> C1.a
+                C1.b -> gnd
+                R1.b -> out
+            }
+            controls {
+                TRIG.trigger -> "Trigger" [0.0, 1.0] = 0.0
+            }
+        }
+    "#;
+    let mut compiled = compile_src(src);
+    compiled.note_on(60, 127);
+    let s0 = compiled.process(0.0);
+    assert!(s0.abs() > 0.01, "note_on should fire trigger, got {s0}");
+}

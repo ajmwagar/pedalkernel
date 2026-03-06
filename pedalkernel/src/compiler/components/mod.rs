@@ -96,6 +96,7 @@ impl From<ComponentKind> for Box<dyn Component> {
             ComponentKind::Transformer(cfg) => Box::new(TransformerComp { config: cfg }),
             ComponentKind::RotarySwitch(ids) => Box::new(RotarySwitch { linked_ids: ids }),
             ComponentKind::Switch(n) => Box::new(Switch { positions: n }),
+            ComponentKind::TriggerInput => Box::new(TriggerInputComp),
         }
     }
 }

@@ -84,6 +84,33 @@ pub(super) enum ControlTarget {
         max_pot_r: f64,
         taper: crate::dsl::PotTaper,
     },
+    /// Fire a trigger impulse (index into triggers vec).
+    Trigger(usize),
+}
+
+/// Runtime state for a single-sample impulse source (drum trigger).
+#[derive(Debug, Clone)]
+pub(super) struct TriggerState {
+    pub(super) amplitude: f64,
+    pub(super) countdown: u32,
+}
+
+impl TriggerState {
+    pub(super) fn new(amplitude: f64) -> Self {
+        Self { amplitude, countdown: 0 }
+    }
+    pub(super) fn fire(&mut self) {
+        self.countdown = 1;
+    }
+    /// Returns the impulse value for this sample (amplitude or 0.0).
+    pub(super) fn tick(&mut self) -> f64 {
+        if self.countdown > 0 {
+            self.countdown -= 1;
+            self.amplitude
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Behavioral side-effects applied alongside PotInStage physical updates.
@@ -486,6 +513,8 @@ pub struct CompiledPedal {
     /// Behavioral side-effects for pot controls.
     /// Keyed by component ID; applied alongside PotInStage physical updates.
     pub(super) pot_effects: HashMap<String, Vec<PotEffect>>,
+    /// Trigger impulse sources for drum/percussion circuits.
+    pub(super) triggers: Vec<TriggerState>,
 }
 
 /// Gain-like control labels.
@@ -996,6 +1025,13 @@ impl CompiledPedal {
                         stage.set_feedback_from_pot(tapered, max_pot_r);
                     }
                 }
+                ControlTarget::Trigger(idx) => {
+                    if value > 0.5 {
+                        if let Some(trig) = self.triggers.get_mut(*idx) {
+                            trig.fire();
+                        }
+                    }
+                }
             }
         }
 
@@ -1006,6 +1042,13 @@ impl CompiledPedal {
             for sc in &mut self.sidechains {
                 sc.set_control(label, value);
             }
+        }
+    }
+
+    /// Handle MIDI note-on by firing all trigger inputs.
+    pub fn note_on(&mut self, _note: u8, _velocity: u8) {
+        for trig in &mut self.triggers {
+            trig.fire();
         }
     }
 
@@ -1259,6 +1302,10 @@ impl CompiledPedal {
 
 impl PedalProcessor for CompiledPedal {
     fn process(&mut self, input: f64) -> f64 {
+        // Fire any pending triggers — replace input with impulse.
+        let trigger_impulse: f64 = self.triggers.iter_mut().map(|t| t.tick()).sum();
+        let input = if trigger_impulse != 0.0 { trigger_impulse } else { input };
+
         // Advance pot smoothers — smoothly interpolate pot values toward targets.
         // This eliminates zipper noise and clicks when knobs are turned.
         self.advance_smoothers();

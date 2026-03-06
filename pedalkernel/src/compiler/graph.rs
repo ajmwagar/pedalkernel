@@ -304,6 +304,26 @@ impl CircuitGraph {
             }
         }
 
+        // Auto-union trigger_input out pin with in_node when `in` has no explicit nets.
+        // This makes the trigger's output become the circuit input so the impulse
+        // flows through the existing VS injection infrastructure.
+        {
+            let in_has_nets = expanded_nets.iter().any(|net| {
+                let check = |p: &Pin| matches!(p, Pin::Reserved(s) if s == "in");
+                check(&net.from) || net.to.iter().any(check)
+            });
+            if !in_has_nets {
+                for comp in &all_components {
+                    if matches!(comp.kind, ComponentKind::TriggerInput) {
+                        let trigger_out = format!("{}.out", comp.id);
+                        let trig_id = get_id(&trigger_out, &mut uf);
+                        let in_id = get_id("in", &mut uf);
+                        uf.union(trig_id, in_id);
+                    }
+                }
+            }
+        }
+
         // Build edges for two-terminal components.
         let mut edges = Vec::new();
         let mut num_active = 0usize;

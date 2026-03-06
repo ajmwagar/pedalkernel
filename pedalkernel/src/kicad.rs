@@ -188,6 +188,7 @@ fn value_str(kind: &ComponentKind) -> String {
         ComponentKind::Switch(positions) => {
             format!("Switch_{}pos", positions)
         }
+        ComponentKind::TriggerInput => "TriggerInput".into(),
     }
 }
 
