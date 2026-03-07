@@ -26,13 +26,13 @@ use crate::elements::WdfRoot;
 /// - Finite open-loop gain
 /// - Output voltage saturation
 /// - Slew rate limiting (optional, applied post-convergence)
-/// - Gain-bandwidth product (for future frequency-dependent modeling)
+/// - Gain-bandwidth product (closed-loop bandwidth rolloff)
 #[derive(Debug, Clone, Copy)]
 pub struct OpAmpModel {
     /// Open-loop DC gain. TL072 ≈ 200k (106dB), LM308 ≈ 300k.
     pub open_loop_gain: f64,
     /// Gain-bandwidth product (Hz). TL072 ≈ 3MHz, LM308 ≈ 1MHz.
-    /// Used for frequency-dependent modeling (future).
+    /// Determines closed-loop bandwidth: f_cl = GBW / closed_loop_gain.
     pub gbw: f64,
     /// Slew rate (V/µs). TL072 ≈ 13, LM308 ≈ 0.3.
     pub slew_rate: f64,
@@ -226,6 +226,7 @@ pub enum OpAmpMode {
 /// The "third mode" doesn't exist - it's the same circuit with Rf=0, Ri=∞.
 ///
 /// Non-idealities:
+/// - GBW-limited closed-loop bandwidth (single-pole rolloff at `f_cl = GBW / gain`)
 /// - Slew rate limiting (LM308's slow slew = RAT's character)
 /// - Output saturation at supply rails
 /// - Soft clipping via feedback diodes (optional)
@@ -238,19 +239,44 @@ pub struct OpAmpRoot {
     vp: f64,
     /// Previous output voltage (for slew rate limiting).
     prev_out: f64,
-    /// Sample rate (needed for slew rate limiting).
+    /// Sample rate (needed for slew rate limiting and GBW filter).
     sample_rate: f64,
     /// Soft clipping limit from feedback diodes.
     /// If set, uses tanh-based soft clipping instead of hard clipping.
     soft_clip_v: Option<f64>,
+    /// GBW rolloff filter state (single-pole LPF on closed-loop output).
+    /// Models the dominant-pole frequency response: f_cl = GBW / closed_loop_gain.
+    gbw_state: f64,
+    /// GBW rolloff filter coefficient: g = 1 - exp(-2π·f_cl/fs).
+    /// Recomputed when gain or sample rate changes.
+    gbw_coeff: f64,
 }
 
 impl OpAmpRoot {
+    /// Compute GBW rolloff coefficient for the single-pole closed-loop filter.
+    ///
+    /// The closed-loop bandwidth of an opamp with gain G is approximately:
+    ///   f_cl = GBW / G
+    ///
+    /// We model this as a single-pole LPF: g = 1 - exp(-2π·f_cl / fs).
+    /// When f_cl >= fs/2 (Nyquist), the filter is transparent (g = 1.0).
+    #[inline]
+    fn compute_gbw_coeff(gbw: f64, gain: f64, sample_rate: f64) -> f64 {
+        let g = gain.max(1.0);
+        let f_cl = gbw / g;
+        if f_cl >= sample_rate * 0.5 {
+            1.0 // Bandwidth exceeds Nyquist — no filtering needed
+        } else {
+            1.0 - (-std::f64::consts::TAU * f_cl / sample_rate).exp()
+        }
+    }
+
     /// Create a unity-gain buffer (voltage follower).
     ///
     /// This is a non-inverting amplifier with gain=1 (Rf=0, Ri=∞).
     /// Input via `set_vp()`, output tracks Vp exactly.
     pub fn new(model: OpAmpModel) -> Self {
+        let gbw_coeff = Self::compute_gbw_coeff(model.gbw, 1.0, 48000.0);
         Self {
             model,
             mode: OpAmpMode::NonInverting { gain: 1.0 },
@@ -258,6 +284,8 @@ impl OpAmpRoot {
             prev_out: 0.0,
             sample_rate: 48000.0,
             soft_clip_v: None,
+            gbw_state: 0.0,
+            gbw_coeff,
         }
     }
 
@@ -268,25 +296,33 @@ impl OpAmpRoot {
 
     /// Create an inverting op-amp: Vout = -gain * Vin.
     pub fn new_inverting(model: OpAmpModel, gain: f64) -> Self {
+        let g = gain.abs();
+        let gbw_coeff = Self::compute_gbw_coeff(model.gbw, g, 48000.0);
         Self {
             model,
-            mode: OpAmpMode::Inverting { gain: gain.abs() },
+            mode: OpAmpMode::Inverting { gain: g },
             vp: 0.0,
             prev_out: 0.0,
             sample_rate: 48000.0,
             soft_clip_v: None,
+            gbw_state: 0.0,
+            gbw_coeff,
         }
     }
 
     /// Create a non-inverting op-amp: Vout = gain * Vin.
     pub fn new_non_inverting(model: OpAmpModel, gain: f64) -> Self {
+        let g = gain.abs();
+        let gbw_coeff = Self::compute_gbw_coeff(model.gbw, g, 48000.0);
         Self {
             model,
-            mode: OpAmpMode::NonInverting { gain: gain.abs() },
+            mode: OpAmpMode::NonInverting { gain: g },
             vp: 0.0,
             prev_out: 0.0,
             sample_rate: 48000.0,
             soft_clip_v: None,
+            gbw_state: 0.0,
+            gbw_coeff,
         }
     }
 
@@ -305,13 +341,15 @@ impl OpAmpRoot {
         self.vp
     }
 
-    /// Set the closed-loop gain.
+    /// Set the closed-loop gain. Recomputes GBW rolloff coefficient.
     #[inline]
     pub fn set_gain(&mut self, gain: f64) {
+        let g = gain.abs();
         match &mut self.mode {
-            OpAmpMode::Inverting { gain: g } => *g = gain.abs(),
-            OpAmpMode::NonInverting { gain: g } => *g = gain.abs(),
+            OpAmpMode::Inverting { gain: gv } => *gv = g,
+            OpAmpMode::NonInverting { gain: gv } => *gv = g,
         }
+        self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, g, self.sample_rate);
     }
 
     /// Get the current gain.
@@ -344,10 +382,11 @@ impl OpAmpRoot {
         self.soft_clip_v = None;
     }
 
-    /// Set the sample rate (for slew rate limiting).
+    /// Set the sample rate (for slew rate limiting and GBW filter).
     #[inline]
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
+        self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, self.gain(), sample_rate);
     }
 
     /// Set the maximum output voltage (supply rails).
@@ -389,6 +428,7 @@ impl OpAmpRoot {
     pub fn reset(&mut self) {
         self.prev_out = 0.0;
         self.vp = 0.0;
+        self.gbw_state = 0.0;
     }
 }
 
@@ -411,6 +451,12 @@ impl WdfRoot for OpAmpRoot {
                 gain * self.vp
             }
         };
+
+        // Apply GBW-limited bandwidth: single-pole LPF at f_cl = GBW / gain.
+        // This models the dominant-pole rolloff that makes LM308 (1MHz) darker
+        // than TL072 (3MHz) at high gain settings.
+        v_out = self.gbw_coeff * v_out + (1.0 - self.gbw_coeff) * self.gbw_state;
+        self.gbw_state = v_out;
 
         // Apply soft clipping if feedback diodes present
         if let Some(vd) = self.soft_clip_v {
