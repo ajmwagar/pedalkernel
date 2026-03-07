@@ -14,6 +14,11 @@ use nom::{
     IResult,
 };
 
+use crate::compiler::components::*;
+
+/// Type alias for boxed component trait objects returned by parser functions.
+type BoxComp = Box<dyn crate::compiler::Component>;
+
 // ---------------------------------------------------------------------------
 // AST
 // ---------------------------------------------------------------------------
@@ -253,114 +258,6 @@ impl PotTaper {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ComponentKind {
-    Resistor(f64),
-    /// Capacitor with optional parasitics (leakage, dielectric absorption).
-    Capacitor(CapConfig),
-    Inductor(f64),
-    DiodePair(DiodeType),
-    Diode(DiodeType),
-    /// Zener diode with breakdown voltage (V). Common: 3.3, 4.7, 5.1, 6.2, 9.1, 12
-    Zener(f64),
-    /// Potentiometer with max resistance and taper type
-    Potentiometer(f64, PotTaper),
-    /// NPN BJT — model name looked up from transistors.model (e.g. "2N3904")
-    Npn(String),
-    /// PNP BJT — model name looked up from transistors.model (e.g. "AC128")
-    Pnp(String),
-    OpAmp(OpAmpType),
-    /// N-channel JFET — model name looked up from jfets.model (e.g. "2N5457")
-    NJfet(String),
-    /// P-channel JFET — model name looked up from jfets.model (e.g. "2N5460")
-    PJfet(String),
-    Photocoupler(PhotocouplerType),
-    /// LFO: waveform, timing_r (Ω), timing_c (F) -> f = 1/(2πRC)
-    Lfo(LfoWaveformDsl, f64, f64),
-    /// Triode vacuum tube — model name looked up from triodes.model (e.g. "12AX7")
-    Triode(String),
-    /// Pentode vacuum tube — model name looked up from pentodes.model (e.g. "EL34")
-    Pentode(String),
-    /// Variable-mu (remote-cutoff) triode — Raffensperger model (e.g. "6386")
-    VariMu(String),
-    /// Envelope follower: attack_r (Ω), attack_c (F), release_r (Ω), release_c (F), sensitivity_r (Ω)
-    /// Attack τ = attack_r × attack_c, Release τ = release_r × release_c
-    /// Sensitivity = sensitivity_r / 10kΩ
-    EnvelopeFollower(f64, f64, f64, f64, f64),
-    /// N-channel enhancement-mode MOSFET
-    Nmos(MosfetType),
-    /// P-channel enhancement-mode MOSFET
-    Pmos(MosfetType),
-    /// BBD (Bucket-Brigade Device) delay line
-    Bbd(BbdType),
-    /// Generic delay line backed by a ring buffer.
-    /// Parameters: min_delay, max_delay, interpolation mode, medium model.
-    /// Splits the WDF tree into write and read subtrees coupled by an
-    /// implicit one-sample delay — the standard technique for feedback loops.
-    DelayLine(
-        f64,
-        f64,
-        crate::elements::Interpolation,
-        crate::elements::Medium,
-    ),
-    /// Read-only tap into a named delay line at a ratio of the base delay.
-    /// Parameters: parent delay line component ID, ratio (e.g., 2.0 = 2× base).
-    Tap(String, f64),
-    /// Neon bulb (NE-2, etc.) - used in relaxation oscillators and optocouplers.
-    /// Exhibits negative resistance: conducts when striking voltage reached,
-    /// extinguishes when voltage drops below maintaining voltage.
-    Neon(NeonType),
-    // ── Synth-specific component types ──────────────────────────────────
-    /// Voltage-Controlled Oscillator IC (CEM3340/AS3340/V3340).
-    /// Generates sawtooth, triangle, and pulse waveforms with 1V/Oct tracking.
-    /// Parameters: IC type, base frequency (Hz), default waveform output.
-    Vco(VcoType, f64, VcoWaveformDsl),
-    /// Voltage-Controlled Filter IC (CEM3320/AS3320).
-    /// 4-pole lowpass with voltage-controlled cutoff and resonance.
-    Vcf(VcfType),
-    /// Voltage-Controlled Amplifier IC (SSM2164/V2164).
-    /// Exponential-control quad VCA.
-    Vca(VcaType),
-    /// Comparator IC (LM311, LM393). Open-collector output.
-    /// Used in VCO reset circuits, Schmitt triggers, ADSR level detection.
-    Comparator(ComparatorType),
-    /// Quad bilateral analog switch (CD4066, DG411).
-    /// Used for sample-and-hold, gate routing, ADSR switching.
-    AnalogSwitch(AnalogSwitchType),
-    /// Matched NPN transistor pair/array for exponential converters.
-    MatchedNpn(MatchedTransistorType),
-    /// Matched PNP transistor pair for exponential converters.
-    MatchedPnp(MatchedTransistorType),
-    /// Temperature-compensating resistor for exponential converters.
-    /// Parameters: nominal resistance (Ω), tempco (ppm/°C).
-    Tempco(f64, f64),
-    // ── Studio equipment component types ─────────────────────────────────
-    /// Audio transformer with turns ratio and primary inductance.
-    /// Used for impedance matching, isolation, and push-pull drive.
-    /// Terminals: pri_a, pri_b, sec_a, sec_b, (optional: pri_ct, sec_ct)
-    Transformer(TransformerConfig),
-    /// Capacitor with switchable values (for rotary switch frequency selection).
-    /// Values are selected by a linked RotarySwitch component.
-    CapSwitched(Vec<f64>),
-    /// Inductor with switchable values (for multi-tap inductors).
-    /// Values are selected by a linked RotarySwitch component.
-    InductorSwitched(Vec<f64>),
-    /// Resistor with switchable values (for ratio selection networks).
-    /// Values are selected by a linked RotarySwitch component.
-    ResistorSwitched(Vec<f64>),
-    /// Rotary switch that controls one or more switched components.
-    /// Links to component IDs that have switchable values.
-    RotarySwitch(Vec<String>),
-    /// Simple mechanical switch (SPST, SPDT, or n-position rotary).
-    /// Unlike AnalogSwitch (CD4066, etc.), this is a passive mechanical element.
-    /// Parameter is number of positions (2 = SPDT, 3+ = rotary).
-    Switch(usize),
-    /// Single-sample impulse source for drum/percussion circuits (TR-808 style).
-    /// No audio input — the circuit is excited by a voltage impulse that rings
-    /// through passive LC networks.
-    TriggerInput,
-}
-
 /// Op-amp types with different characteristics.
 /// Each type has distinct slew rate, gain-bandwidth product, and input impedance
 /// that affect the tone and response of the circuit.
@@ -557,7 +454,6 @@ pub enum VcoWaveformDsl {
 
 // Triode and Pentode types use String model names, looked up from the
 // embedded model files (triodes.model, pentodes.model) at compile time.
-// See `ComponentKind::Triode(String)` and `ComponentKind::Pentode(String)`.
 
 /// MOSFET types for enhancement-mode devices used in guitar pedals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -983,7 +879,7 @@ fn quoted_string(input: &str) -> IResult<&str, &str> {
 // Component parsers
 // ---------------------------------------------------------------------------
 
-fn parse_resistor(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_resistor(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("resistor")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1000,7 +896,7 @@ fn parse_resistor(input: &str) -> IResult<&str, ComponentKind> {
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Resistor(val)))
+    Ok((input, Box::new(Resistor { value: val })))
 }
 
 /// Parse capacitor type keyword.
@@ -1040,7 +936,7 @@ fn cap_field_da(input: &str) -> IResult<&str, f64> {
 /// - `cap(22u, electrolytic)` - electrolytic, no explicit parasitics
 /// - `cap(22u, electrolytic, leakage: 100k)` - with leakage resistance
 /// - `cap(22u, electrolytic, leakage: 10k, da: 0.05)` - with leakage and DA
-fn parse_cap(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_cap(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("cap")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1084,21 +980,21 @@ fn parse_cap(input: &str) -> IResult<&str, ComponentKind> {
 
     Ok((
         input,
-        ComponentKind::Capacitor(CapConfig {
+        Box::new(Capacitor { config: CapConfig {
             value: val,
             cap_type: ctype.unwrap_or(CapType::Film),
             leakage,
             da,
-        }),
+        } }),
     ))
 }
 
-fn parse_inductor(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_inductor(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("inductor")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, val) = eng_value(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Inductor(val)))
+    Ok((input, Box::new(Inductor { value: val })))
 }
 
 fn diode_type(input: &str) -> IResult<&str, DiodeType> {
@@ -1109,27 +1005,27 @@ fn diode_type(input: &str) -> IResult<&str, DiodeType> {
     ))(input)
 }
 
-fn parse_diode_pair(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_diode_pair(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("diode_pair")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, dt) = diode_type(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::DiodePair(dt)))
+    Ok((input, Box::new(DiodePair { diode_type: dt })))
 }
 
-fn parse_diode(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_diode(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("diode")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, dt) = diode_type(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Diode(dt)))
+    Ok((input, Box::new(Diode { diode_type: dt })))
 }
 
 /// Parse zener diode: `zener(5.1)` or `zener(5.1v)`
 ///
 /// The voltage parameter specifies the breakdown voltage in volts.
 /// Common values: 3.3, 4.7, 5.1, 5.6, 6.2, 9.1, 12
-fn parse_zener(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_zener(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("zener")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1138,10 +1034,10 @@ fn parse_zener(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = opt(tag("v"))(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Zener(voltage)))
+    Ok((input, Box::new(Zener { breakdown_voltage: voltage })))
 }
 
-fn parse_pot(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_pot(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("pot")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1169,7 +1065,7 @@ fn parse_pot(input: &str) -> IResult<&str, ComponentKind> {
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Potentiometer(val, taper)))
+    Ok((input, Box::new(Potentiometer { max_r: val, taper })))
 }
 
 /// Parse a SPICE model name: alphanumeric, hyphens, underscores → uppercase.
@@ -1178,7 +1074,7 @@ fn model_name_str(input: &str) -> IResult<&str, String> {
     Ok((input, name.to_uppercase()))
 }
 
-fn parse_npn(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_npn(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("npn")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1187,11 +1083,11 @@ fn parse_npn(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = char(')')(input)?;
     Ok((
         input,
-        ComponentKind::Npn(name.unwrap_or_else(|| DEFAULT_NPN_MODEL.to_string())),
+        Box::new(Npn { model: name.unwrap_or_else(|| DEFAULT_NPN_MODEL.to_string()) }),
     ))
 }
 
-fn parse_pnp(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_pnp(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("pnp")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1200,7 +1096,7 @@ fn parse_pnp(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = char(')')(input)?;
     Ok((
         input,
-        ComponentKind::Pnp(name.unwrap_or_else(|| DEFAULT_PNP_MODEL.to_string())),
+        Box::new(Pnp { model: name.unwrap_or_else(|| DEFAULT_PNP_MODEL.to_string()) }),
     ))
 }
 
@@ -1218,7 +1114,7 @@ fn opamp_type(input: &str) -> IResult<&str, OpAmpType> {
     ))(input)
 }
 
-fn parse_opamp(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_opamp(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("opamp")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1227,28 +1123,28 @@ fn parse_opamp(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = char(')')(input)?;
     Ok((
         input,
-        ComponentKind::OpAmp(ot.unwrap_or(OpAmpType::Generic)),
+        Box::new(OpAmp { op_type: ot.unwrap_or(OpAmpType::Generic) }),
     ))
 }
 
-fn parse_njfet(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_njfet(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("njfet")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, name) = model_name_str(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::NJfet(name)))
+    Ok((input, Box::new(NJfet { model: name })))
 }
 
-fn parse_pjfet(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_pjfet(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("pjfet")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, name) = model_name_str(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::PJfet(name)))
+    Ok((input, Box::new(PJfet { model: name })))
 }
 
 fn photocoupler_type(input: &str) -> IResult<&str, PhotocouplerType> {
@@ -1260,42 +1156,42 @@ fn photocoupler_type(input: &str) -> IResult<&str, PhotocouplerType> {
     ))(input)
 }
 
-fn parse_photocoupler(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_photocoupler(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("photocoupler")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, pt) = photocoupler_type(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Photocoupler(pt)))
+    Ok((input, Box::new(PhotocouplerComp { coupler_type: pt })))
 }
 
-fn parse_triode(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_triode(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("triode")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, name) = model_name_str(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Triode(name)))
+    Ok((input, Box::new(Triode { model: name })))
 }
 
-fn parse_pentode(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_pentode(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("pentode")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, name) = model_name_str(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Pentode(name)))
+    Ok((input, Box::new(Pentode { model: name })))
 }
 
-fn parse_vari_mu(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_vari_mu(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("vari_mu")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, name) = model_name_str(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::VariMu(name)))
+    Ok((input, Box::new(VariMu { model: name })))
 }
 
 fn mosfet_type(input: &str) -> IResult<&str, MosfetType> {
@@ -1307,20 +1203,20 @@ fn mosfet_type(input: &str) -> IResult<&str, MosfetType> {
     ))(input)
 }
 
-fn parse_nmos(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_nmos(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("nmos")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, mt) = mosfet_type(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Nmos(mt)))
+    Ok((input, Box::new(Nmos { mosfet_type: mt })))
 }
 
-fn parse_pmos(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_pmos(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("pmos")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, mt) = mosfet_type(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Pmos(mt)))
+    Ok((input, Box::new(Pmos { mosfet_type: mt })))
 }
 
 fn bbd_type(input: &str) -> IResult<&str, BbdType> {
@@ -1332,12 +1228,12 @@ fn bbd_type(input: &str) -> IResult<&str, BbdType> {
 }
 
 /// `bbd(mn3207)` — Bucket-brigade device delay line.
-fn parse_bbd(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_bbd(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("bbd")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, bt) = bbd_type(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Bbd(bt)))
+    Ok((input, Box::new(Bbd { bbd_type: bt })))
 }
 
 /// Parse interpolation mode keyword.
@@ -1369,7 +1265,7 @@ fn medium_type(input: &str) -> IResult<&str, crate::elements::Medium> {
 /// - `delay_line(1ms, 1200ms, allpass)` — explicit interpolation
 /// - `delay_line(1ms, 1200ms, medium: tape_oxide)` — with medium
 /// - `delay_line(1ms, 1200ms, allpass, medium: tape_oxide)` — both
-fn parse_delay_line(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_delay_line(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("delay_line")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1393,14 +1289,16 @@ fn parse_delay_line(input: &str) -> IResult<&str, ComponentKind> {
     let medium = medium.unwrap_or(crate::elements::Medium::None);
     Ok((
         input,
-        ComponentKind::DelayLine(min_delay, max_delay, interp, medium),
+        Box::new(DelayLineComp {
+            min_delay, max_delay, interpolation: interp, medium,
+        }),
     ))
 }
 
 /// `tap(DL1, 2.0)` — Read-only tap into a named delay line.
 ///
 /// Parameters: parent delay line component ID, ratio relative to base delay.
-fn parse_tap(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_tap(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("tap")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1411,7 +1309,7 @@ fn parse_tap(input: &str) -> IResult<&str, ComponentKind> {
     let (input, ratio) = double(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Tap(parent_id.to_string(), ratio)))
+    Ok((input, Box::new(Tap { parent_id: parent_id.to_string(), ratio })))
 }
 
 fn neon_type(input: &str) -> IResult<&str, NeonType> {
@@ -1433,7 +1331,7 @@ fn neon_type(input: &str) -> IResult<&str, NeonType> {
 
 /// `neon()` or `neon(ne2)` — Neon bulb for relaxation oscillators.
 /// Used in vintage tremolo circuits (Fender Vibrato, Wurlitzer) paired with LDRs.
-fn parse_neon(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_neon(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("neon")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1441,7 +1339,7 @@ fn parse_neon(input: &str) -> IResult<&str, ComponentKind> {
     let (input, nt) = opt(neon_type)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Neon(nt.unwrap_or_default())))
+    Ok((input, Box::new(Neon { neon_type: nt.unwrap_or_default() })))
 }
 
 // ── Synth component parsers ─────────────────────────────────────────────
@@ -1462,7 +1360,7 @@ fn vco_waveform(input: &str) -> IResult<&str, VcoWaveformDsl> {
     ))(input)
 }
 
-fn parse_vco(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_vco(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("vco")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1481,7 +1379,7 @@ fn parse_vco(input: &str) -> IResult<&str, ComponentKind> {
     ))(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Vco(vt, freq.unwrap_or(440.0), wf.unwrap_or(VcoWaveformDsl::Saw))))
+    Ok((input, Box::new(Vco { vco_type: vt, base_freq: freq.unwrap_or(440.0), waveform: wf.unwrap_or(VcoWaveformDsl::Saw) })))
 }
 
 fn vcf_type(input: &str) -> IResult<&str, VcfType> {
@@ -1491,14 +1389,14 @@ fn vcf_type(input: &str) -> IResult<&str, VcfType> {
     ))(input)
 }
 
-fn parse_vcf(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_vcf(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("vcf")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, vt) = vcf_type(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Vcf(vt)))
+    Ok((input, Box::new(Vcf { vcf_type: vt })))
 }
 
 fn vca_type(input: &str) -> IResult<&str, VcaType> {
@@ -1508,14 +1406,14 @@ fn vca_type(input: &str) -> IResult<&str, VcaType> {
     ))(input)
 }
 
-fn parse_vca(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_vca(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("vca")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, vt) = vca_type(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Vca(vt)))
+    Ok((input, Box::new(Vca { vca_type: vt })))
 }
 
 fn comparator_type(input: &str) -> IResult<&str, ComparatorType> {
@@ -1525,14 +1423,14 @@ fn comparator_type(input: &str) -> IResult<&str, ComparatorType> {
     ))(input)
 }
 
-fn parse_comparator(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_comparator(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("comparator")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, ct) = comparator_type(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Comparator(ct)))
+    Ok((input, Box::new(Comparator { comp_type: ct })))
 }
 
 fn analog_switch_type(input: &str) -> IResult<&str, AnalogSwitchType> {
@@ -1542,14 +1440,14 @@ fn analog_switch_type(input: &str) -> IResult<&str, AnalogSwitchType> {
     ))(input)
 }
 
-fn parse_analog_switch(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_analog_switch(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("switch")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, st) = analog_switch_type(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::AnalogSwitch(st)))
+    Ok((input, Box::new(AnalogSwitch { switch_type: st })))
 }
 
 fn matched_transistor_type(input: &str) -> IResult<&str, MatchedTransistorType> {
@@ -1561,28 +1459,28 @@ fn matched_transistor_type(input: &str) -> IResult<&str, MatchedTransistorType> 
     ))(input)
 }
 
-fn parse_matched_npn(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_matched_npn(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("matched_npn")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, mt) = matched_transistor_type(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::MatchedNpn(mt)))
+    Ok((input, Box::new(MatchedNpn { matched_type: mt })))
 }
 
-fn parse_matched_pnp(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_matched_pnp(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("matched_pnp")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, mt) = matched_transistor_type(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::MatchedPnp(mt)))
+    Ok((input, Box::new(MatchedPnp { matched_type: mt })))
 }
 
 /// `tempco(2k, 3500)` — tempco resistor: nominal_r, ppm/°C
-fn parse_tempco(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_tempco(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("tempco")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1593,7 +1491,7 @@ fn parse_tempco(input: &str) -> IResult<&str, ComponentKind> {
     let (input, ppm) = double(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Tempco(resistance, ppm)))
+    Ok((input, Box::new(Tempco { resistance, ppm })))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1624,7 +1522,7 @@ fn winding_modifier_primary(input: &str) -> IResult<&str, WindingType> {
 ///
 /// Positional syntax: transformer(ratio, inductance [, dcr] [, cap] [, winding_mod])
 /// Named syntax: transformer(ratio, inductance [, dcr=val] [, Cp=val] [, k=val])
-fn parse_transformer(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("transformer")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1773,11 +1671,11 @@ fn parse_transformer(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = ws_comments(remaining)?;
     let (input, _) = char(')')(input)?;
 
-    Ok((input, ComponentKind::Transformer(config)))
+    Ok((input, Box::new(TransformerComp { config })))
 }
 
 /// `cap_switched([1.5u, 220n, 68n, 27n])` — capacitor with switchable values
-fn parse_cap_switched(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_cap_switched(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("cap_switched")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1803,12 +1701,12 @@ fn parse_cap_switched(input: &str) -> IResult<&str, ComponentKind> {
 
     let (input, _) = char(')')(input)?;
 
-    Ok((input, ComponentKind::CapSwitched(values)))
+    Ok((input, Box::new(CapSwitched { values })))
 }
 
 /// `inductor_switched(27m, 47m, 82m, 150m)` — inductor with switchable values (multi-tap)
 /// `inductor_switched([27m, 47m, 82m])` — with optional brackets
-fn parse_inductor_switched(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_inductor_switched(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("inductor_switched")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1834,12 +1732,12 @@ fn parse_inductor_switched(input: &str) -> IResult<&str, ComponentKind> {
 
     let (input, _) = char(')')(input)?;
 
-    Ok((input, ComponentKind::InductorSwitched(values)))
+    Ok((input, Box::new(InductorSwitched { values })))
 }
 
 /// `resistor_switched([12k, 6.8k, 3.9k, 1.5k])` — resistor with switchable values
 /// Used for ratio selection networks (1176), feedback networks, etc.
-fn parse_resistor_switched(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_resistor_switched(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("resistor_switched")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1865,18 +1763,18 @@ fn parse_resistor_switched(input: &str) -> IResult<&str, ComponentKind> {
 
     let (input, _) = char(')')(input)?;
 
-    Ok((input, ComponentKind::ResistorSwitched(values)))
+    Ok((input, Box::new(ResistorSwitched { values })))
 }
 
 /// `switch(2)` — simple n-position mechanical switch
 /// Unlike AnalogSwitch (CD4066), this is a passive mechanical element.
 /// Used for mode selection, bypass, etc.
-fn parse_trigger_input(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_trigger_input(input: &str) -> IResult<&str, BoxComp> {
     let (rest, _) = tag("trigger_input()")(input)?;
-    Ok((rest, ComponentKind::TriggerInput))
+    Ok((rest, Box::new(TriggerInputComp)))
 }
 
-fn parse_switch(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_switch(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("switch")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1884,12 +1782,12 @@ fn parse_switch(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
 
-    Ok((input, ComponentKind::Switch(positions as usize)))
+    Ok((input, Box::new(Switch { positions: positions as usize })))
 }
 
 /// `rotary("20Hz", "30Hz", "60Hz", "100Hz")` — rotary switch with position labels
 /// `rotary(pos1, pos2, pos3)` — rotary switch with identifier position labels
-fn parse_rotary_switch(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_rotary_switch(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("rotary")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -1906,10 +1804,10 @@ fn parse_rotary_switch(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
 
-    Ok((input, ComponentKind::RotarySwitch(labels)))
+    Ok((input, Box::new(RotarySwitch { linked_ids: labels })))
 }
 
-fn component_kind(input: &str) -> IResult<&str, ComponentKind> {
+fn component_kind(input: &str) -> IResult<&str, BoxComp> {
     alt((
         alt((
             parse_resistor_switched, // must come before parse_resistor
@@ -1968,7 +1866,7 @@ fn component_def(input: &str) -> IResult<&str, (ComponentDef, Option<String>)> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(':')(input)?;
     let (input, _) = ws_comments(input)?;
-    let (input, kind_enum) = component_kind(input)?;
+    let (input, kind) = component_kind(input)?;
     // Optional `mirrors <ident>` suffix for dual-gang pots
     let (input, mirrors_target) = opt(tuple((
         ws_comments,
@@ -1977,7 +1875,6 @@ fn component_def(input: &str) -> IResult<&str, (ComponentDef, Option<String>)> {
         identifier,
     )))(input)?;
     let mirrors = mirrors_target.map(|(_, _, _, target)| target.to_string());
-    let kind: Box<dyn crate::compiler::Component> = kind_enum.into();
     Ok((
         input,
         (
@@ -2149,7 +2046,7 @@ fn lfo_waveform(input: &str) -> IResult<&str, LfoWaveformDsl> {
 /// `envelope_follower(1k, 4.7u, 100k, 1u, 20k)` - attack_r, attack_c, release_r, release_c, sensitivity_r
 /// Attack τ = R_attack × C_attack, Release τ = R_release × C_release
 /// Sensitivity gain = R_sensitivity / 10kΩ
-fn parse_envelope_follower(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_envelope_follower(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("envelope_follower")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -2174,13 +2071,13 @@ fn parse_envelope_follower(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = char(')')(input)?;
     Ok((
         input,
-        ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sensitivity_r),
+        Box::new(EnvelopeFollower { attack_r, attack_c, release_r, release_c, sensitivity_r }),
     ))
 }
 
 /// `lfo(triangle, 100k, 220n)` - waveform, timing_r, timing_c
 /// Frequency is computed as f = 1/(2πRC)
-fn parse_lfo(input: &str) -> IResult<&str, ComponentKind> {
+fn parse_lfo(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("lfo")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
@@ -2195,7 +2092,7 @@ fn parse_lfo(input: &str) -> IResult<&str, ComponentKind> {
     let (input, timing_c) = eng_value(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Lfo(waveform, timing_r, timing_c)))
+    Ok((input, Box::new(Lfo { waveform, timing_r, timing_c })))
 }
 
 // ---------------------------------------------------------------------------
