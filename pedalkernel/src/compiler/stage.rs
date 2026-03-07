@@ -2,7 +2,7 @@
 
 use crate::elements::*;
 use crate::oversampling::Oversampler;
-use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
+use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort};
 use crate::PedalProcessor;
 
 use super::dyn_node::DynNode;
@@ -186,6 +186,9 @@ pub(super) enum RootKind {
         pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
         /// Dirty flag: set when a pot changes, cleared after S re-derivation.
         needs_recompute: bool,
+        /// Precomputed interpolation table for single-pot stages.
+        /// When Some, pot changes use table lookup instead of MNA re-inversion.
+        interp_table: Option<ScatteringInterpolationTable>,
     },
 }
 
@@ -685,12 +688,27 @@ impl WdfStage {
             recompute_ports,
             pot_stamps,
             children,
+            interp_table,
             ..
         } = &mut self.root
         {
             if !*needs_recompute {
                 return;
             }
+
+            // Fast path: interpolation table lookup for single-pot stages
+            if let Some(table) = interp_table.as_ref() {
+                if pot_stamps.len() == 1 {
+                    let pot_r = children[pot_stamps[0].0].port_resistance();
+                    let (new_s, new_k) = table.lookup(pot_r);
+                    *scattering = new_s;
+                    *vs_injection = new_k;
+                    *needs_recompute = false;
+                    return;
+                }
+            }
+
+            // Slow path: full MNA re-derivation
             if let (Some(mna), Some(ports)) = (recompute_mna.as_mut(), recompute_ports.as_ref()) {
                 let n = mna.num_nodes;
                 // Update G matrix: unstamp old conductance, stamp new
@@ -709,6 +727,15 @@ impl WdfStage {
                 *vs_injection = new_k;
                 *needs_recompute = false;
             }
+        }
+    }
+
+    /// Returns true if this stage has an interpolation table for fast pot recompute.
+    pub(super) fn has_interp_table(&self) -> bool {
+        if let RootKind::PassiveRType { interp_table, .. } = &self.root {
+            interp_table.is_some()
+        } else {
+            false
         }
     }
 
@@ -1549,6 +1576,9 @@ pub(super) struct MultiNlStage {
     /// WDF scattering. Used for linearized OTA stages where cap port
     /// conductances overwhelm circuit conductances.
     pub(super) state_space: Option<StateSpaceData>,
+    /// Precomputed interpolation table for single-pot stages.
+    /// When Some, pot changes use table lookup instead of MNA re-inversion.
+    pub(super) interp_table: Option<ScatteringInterpolationTable>,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -2135,6 +2165,51 @@ impl MultiNlStage {
                 }
             }
             return;
+        }
+
+        // Fast path: interpolation table lookup for single-pot stages
+        if let Some(ref table) = self.interp_table {
+            if self.pot_mna_stamps.len() == 1 {
+                let pot_r = self.pot_children[self.pot_mna_stamps[0].0].port_resistance();
+                let (new_scat, new_vs) = table.lookup(pot_r);
+
+                if new_scat.iter().all(|&s| s.is_finite()) {
+                    let n_nl = self.n_nl;
+                    let n_passive = self.passive_children.len();
+                    self.scattering =
+                        MultiNlScattering::from_full_matrix(&new_scat, n_nl, n_passive);
+
+                    // Rebuild port_resistances for RTypeAdaptor
+                    let mut port_resistances = self.nl_port_resistances.clone();
+                    for child in &self.passive_children {
+                        port_resistances.push(child.port_resistance());
+                    }
+                    // Add adapted port resistance if not VS mode
+                    if self.vs_injection.is_none() {
+                        if let Some(ref recompute) = self.recompute_data {
+                            port_resistances.push(recompute.adapted_resistance);
+                        }
+                    }
+                    self.adaptor = RTypeAdaptor::new(new_scat.clone(), &port_resistances);
+
+                    if self.vs_injection.is_some() {
+                        self.vs_injection = Some(new_vs);
+                    }
+
+                    // Recompute extraction coefficients from table if needed
+                    if let Some(ref recompute) = self.recompute_data {
+                        if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
+                            // For table mode, extraction coeffs aren't precomputed;
+                            // fall through to MNA path only if extraction is needed.
+                            // For now, extraction stages with tables still work since
+                            // extract_coeffs are only used for linearized OTA stages
+                            // which are excluded from tables.
+                            let _ = (out_pos, out_neg);
+                        }
+                    }
+                }
+                return;
+            }
         }
 
         let recompute = match &mut self.recompute_data {

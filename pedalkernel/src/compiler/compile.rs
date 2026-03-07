@@ -28,7 +28,7 @@ use super::dyn_node::DynNode;
 use super::graph::*;
 use super::helpers::*;
 use super::stage::{RootKind, WdfStage};
-use crate::tree::{MnaSystem, WdfPort};
+use crate::tree::{MnaSystem, ScatteringInterpolationTable, WdfPort};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Modulation-controlled element detection
@@ -566,6 +566,34 @@ fn build_passive_rtype_from_decomposed(
     let recompute_mna = if has_pots { Some(mna.clone()) } else { None };
     let recompute_ports = if has_pots { Some(ports.clone()) } else { None };
 
+    // Build interpolation table for single-pot stages
+    let interp_table = if pot_stamps.len() == 1 {
+        // Find the pot's max_resistance from the DynNode
+        let pot_child_idx = pot_stamps[0].0;
+        let max_r = match &reactive_children[pot_child_idx] {
+            DynNode::Pot { max_resistance, .. } => *max_resistance,
+            _ => 0.0,
+        };
+        if max_r > 1.0 {
+            let (_, n1, n2, initial_g) = pot_stamps[0];
+            Some(ScatteringInterpolationTable::build(
+                &mna,
+                n1,
+                n2,
+                initial_g,
+                1.0,     // r_min: minimum pot resistance (clamped at 1Ω)
+                max_r,   // r_max: full pot resistance
+                &ports,
+                Some(0), // VS injection mode (VS index 0)
+                32,      // 32 log-spaced entries
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Some(WdfStage {
         tree: dummy_tree,
         root: super::stage::RootKind::PassiveRType {
@@ -578,6 +606,7 @@ fn build_passive_rtype_from_decomposed(
             recompute_ports,
             pot_stamps,
             needs_recompute: false,
+            interp_table,
         },
         compensation: 1.0,
         oversampler: Oversampler::new(OversamplingFactor::X1),

@@ -658,8 +658,8 @@ impl MnaSystem {
             }
         }
 
-        // Invert X matrix (simple Gaussian elimination for small matrices)
-        let x_inv = invert_matrix(&x_matrix, n_total);
+        // Invert X matrix with equilibration for numerical conditioning
+        let x_inv = invert_matrix_equilibrated(&x_matrix, n_total);
 
         // Derive scattering matrix from the MNA inverse.
         //
@@ -756,8 +756,8 @@ impl MnaSystem {
             }
         }
 
-        // Invert X matrix
-        let x_inv = invert_matrix(&x_matrix, n_total);
+        // Invert X matrix with equilibration for numerical conditioning
+        let x_inv = invert_matrix_equilibrated(&x_matrix, n_total);
 
         // Derive scattering using generalized Werner formula
         let mut scattering = vec![0.0; n_ports * n_ports];
@@ -852,8 +852,8 @@ impl MnaSystem {
             }
         }
 
-        // Invert X
-        let x_inv = invert_matrix(&x_matrix, n_total);
+        // Invert X with equilibration for numerical conditioning
+        let x_inv = invert_matrix_equilibrated(&x_matrix, n_total);
 
         // Derive scattering matrix (port-to-port interactions)
         let mut scattering = vec![0.0; n_ports * n_ports];
@@ -965,8 +965,8 @@ impl MnaSystem {
             }
         }
 
-        // Invert X
-        let x_inv = invert_matrix(&x_matrix, n_total);
+        // Invert X with equilibration for numerical conditioning
+        let x_inv = invert_matrix_equilibrated(&x_matrix, n_total);
 
         // Extraction: V(out) = Σ_k coeff[k] * b[k] + vs_coeff * V_in
         // Each port k injects current b[k]/R[k] at its nodes.
@@ -1096,8 +1096,8 @@ impl MnaSystem {
         }
         // Lower blocks (VS constraint rows) are zero — no history terms.
 
-        // Invert M
-        let m_inv = invert_matrix(&m_matrix, n_aug);
+        // Invert M with equilibration for numerical conditioning
+        let m_inv = invert_matrix_equilibrated(&m_matrix, n_aug);
 
         // A_d = M⁻¹ · N  (state transition matrix)
         let mut a_d = vec![0.0; n_aug * n_aug];
@@ -1187,6 +1187,185 @@ fn invert_matrix(matrix: &[f64], n: usize) -> Vec<f64> {
     }
 
     inv
+}
+
+/// Matrix inversion with symmetric diagonal equilibration for numerical conditioning.
+///
+/// When port impedances span orders of magnitude (e.g. 2Ω DCR to 10MΩ probe),
+/// the raw X matrix is ill-conditioned. Symmetric scaling D·X·D normalizes all
+/// entries to O(1) before Gauss-Jordan, then unscales: X⁻¹ = D · (D·X·D)⁻¹ · D.
+fn invert_matrix_equilibrated(matrix: &[f64], n: usize) -> Vec<f64> {
+    // Compute scale factors: d[i] = 1 / sqrt(max_j |X[i][j]|)
+    let mut d = vec![1.0; n];
+    for i in 0..n {
+        let mut row_max = 0.0f64;
+        for j in 0..n {
+            row_max = row_max.max(matrix[i * n + j].abs());
+        }
+        if row_max > 1e-30 {
+            d[i] = 1.0 / row_max.sqrt();
+        }
+    }
+
+    // Build scaled matrix: X_scaled = D · X · D
+    let mut scaled = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            scaled[i * n + j] = d[i] * matrix[i * n + j] * d[j];
+        }
+    }
+
+    // Invert the well-conditioned scaled matrix
+    let scaled_inv = invert_matrix(&scaled, n);
+
+    // Unscale: X⁻¹ = D · X_scaled⁻¹ · D
+    let mut result = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            result[i * n + j] = d[i] * scaled_inv[i * n + j] * d[j];
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Scattering interpolation table for single-pot R-type stages
+// ---------------------------------------------------------------------------
+
+/// Precomputed scattering matrices at log-spaced pot positions.
+///
+/// At compile time, sweeps the pot through K positions and computes full-precision
+/// scattering matrices. At runtime, binary search + linear interpolation replaces
+/// O(n³) matrix inversion with O(n²) lerp.
+pub struct ScatteringInterpolationTable {
+    /// K log-spaced resistance values (ascending).
+    resistances: Vec<f64>,
+    /// K scattering matrices, each n_ports² entries (row-major).
+    scattering_matrices: Vec<Vec<f64>>,
+    /// K VS injection vectors, each n_ports entries.
+    vs_injection_vectors: Vec<Vec<f64>>,
+    /// Number of WDF ports.
+    n_ports: usize,
+}
+
+impl ScatteringInterpolationTable {
+    /// Build a table by sweeping the pot through K log-spaced positions.
+    ///
+    /// - `mna`: base MNA system (pot already stamped at initial_g)
+    /// - `pot_node_pos`, `pot_node_neg`: MNA node indices for the pot
+    /// - `initial_g`: current pot conductance stamped in the MNA G matrix
+    /// - `r_min`, `r_max`: pot resistance range (typically 1.0 to max_resistance)
+    /// - `ports`: WDF port definitions (reactive ports, no pot port)
+    /// - `vs_idx`: voltage source index for VS injection (None for standard mode)
+    /// - `k`: number of table entries
+    pub fn build(
+        mna: &MnaSystem,
+        pot_node_pos: Option<usize>,
+        pot_node_neg: Option<usize>,
+        initial_g: f64,
+        r_min: f64,
+        r_max: f64,
+        ports: &[WdfPort],
+        vs_idx: Option<usize>,
+        k: usize,
+    ) -> Self {
+        let n_ports = ports.len();
+        let n_mna = mna.num_nodes;
+        let log_min = r_min.ln();
+        let log_max = r_max.ln();
+
+        let mut resistances = Vec::with_capacity(k);
+        let mut scattering_matrices = Vec::with_capacity(k);
+        let mut vs_injection_vectors = Vec::with_capacity(k);
+
+        // Clone MNA once and delta-update through the sweep
+        let mut sweep_mna = mna.clone();
+
+        // Unstamp the initial pot conductance so we start clean
+        let mut prev_g = initial_g;
+
+        for i in 0..k {
+            let t = if k > 1 { i as f64 / (k - 1) as f64 } else { 0.5 };
+            let r = (log_min + t * (log_max - log_min)).exp();
+            let g = 1.0 / r;
+
+            // Delta-update: remove previous conductance, add new
+            let delta = g - prev_g;
+            if delta.abs() > 1e-30 {
+                if let Some(p) = pot_node_pos {
+                    sweep_mna.g_matrix[p * n_mna + p] += delta;
+                    if let Some(n) = pot_node_neg {
+                        sweep_mna.g_matrix[p * n_mna + n] -= delta;
+                    }
+                }
+                if let Some(n) = pot_node_neg {
+                    sweep_mna.g_matrix[n * n_mna + n] += delta;
+                    if let Some(p) = pot_node_pos {
+                        sweep_mna.g_matrix[n * n_mna + p] -= delta;
+                    }
+                }
+            }
+            prev_g = g;
+
+            let (scat, vs_inj) = if let Some(vs) = vs_idx {
+                sweep_mna.derive_scattering_and_vs_injection(ports, vs)
+            } else {
+                let scat = sweep_mna.derive_scattering_matrix_general(ports);
+                (scat, vec![0.0; n_ports])
+            };
+
+            resistances.push(r);
+            scattering_matrices.push(scat);
+            vs_injection_vectors.push(vs_inj);
+        }
+
+        Self {
+            resistances,
+            scattering_matrices,
+            vs_injection_vectors,
+            n_ports,
+        }
+    }
+
+    /// Look up scattering matrix and VS injection vector by interpolating
+    /// in log-resistance space. Returns (scattering, vs_injection).
+    pub fn lookup(&self, pot_resistance: f64) -> (Vec<f64>, Vec<f64>) {
+        let k = self.resistances.len();
+        let log_r = pot_resistance.ln();
+        let log_min = self.resistances[0].ln();
+        let log_max = self.resistances[k - 1].ln();
+
+        // Normalized position in [0, 1]
+        let t = if log_max > log_min {
+            (log_r - log_min) / (log_max - log_min)
+        } else {
+            0.5
+        };
+
+        // Map to table index
+        let idx_f = t * (k - 1) as f64;
+        let lo = (idx_f.floor() as usize).min(k - 2);
+        let hi = lo + 1;
+        let frac = idx_f - lo as f64;
+
+        // Linear interpolation of scattering matrix entries
+        let n2 = self.n_ports * self.n_ports;
+        let mut scat = vec![0.0; n2];
+        for i in 0..n2 {
+            scat[i] = self.scattering_matrices[lo][i]
+                + frac * (self.scattering_matrices[hi][i] - self.scattering_matrices[lo][i]);
+        }
+
+        // Linear interpolation of VS injection vector
+        let mut vs = vec![0.0; self.n_ports];
+        for i in 0..self.n_ports {
+            vs[i] = self.vs_injection_vectors[lo][i]
+                + frac * (self.vs_injection_vectors[hi][i] - self.vs_injection_vectors[lo][i]);
+        }
+
+        (scat, vs)
+    }
 }
 
 // ---------------------------------------------------------------------------

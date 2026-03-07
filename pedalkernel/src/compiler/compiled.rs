@@ -1214,13 +1214,21 @@ impl CompiledPedal {
                         if let Some(stage) = self.multi_nl_stages.get_mut(stage_idx) {
                             stage.set_pot(&comp_id, value);
                             stage.update_bias_from_pot();
-                            if max_r < 5_000.0 {
+                            // Table lookup is cheap enough for per-sample recompute
+                            if max_r < 5_000.0 || stage.interp_table.is_some() {
                                 stage.flush_recompute();
                             }
                         }
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Immediately flush table-based PassiveRType stages (lookup is cheap).
+        for stage in &mut self.stages {
+            if stage.has_interp_table() {
+                stage.flush_passive_rtype_recompute();
             }
         }
 
@@ -1233,7 +1241,7 @@ impl CompiledPedal {
             for stage in &mut self.multi_nl_stages {
                 stage.flush_recompute();
             }
-            // Also flush PassiveRType stages with dirty pot changes
+            // Also flush PassiveRType stages with dirty pot changes (non-table stages)
             for stage in &mut self.stages {
                 stage.flush_passive_rtype_recompute();
             }

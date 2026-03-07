@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use crate::dsl::*;
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
-use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
+use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort};
 
 use super::classify::{ClassifiedCircuit, NonlinearKind};
 use super::component::StampResult;
@@ -1443,6 +1443,7 @@ fn build_rtype_stage(
             state_space: Some(state_space_data),
             bias_pot_id: None,
             bias_emitter_r: 470.0,
+            interp_table: None, // state-space stages excluded from tables
         });
     }
 
@@ -1903,6 +1904,40 @@ fn build_rtype_stage(
         }
     };
 
+    // Build interpolation table for single-pot stages (no OTA, no state-space).
+    let interp_table = if pot_mna_stamps.len() == 1
+        && linearized_ota_data.is_none()
+    {
+        // Find the pot's max_resistance from the DynNode
+        let max_r = match &pot_children[0] {
+            DynNode::Pot { max_resistance, .. } => *max_resistance,
+            _ => 0.0,
+        };
+        if max_r > 1.0 {
+            if let Some(ref rd) = recompute_data {
+                let (_, n1, n2, initial_g) = pot_mna_stamps[0];
+                let vs_idx = rd.vs_source_index;
+                Some(ScatteringInterpolationTable::build(
+                    &rd.mna,
+                    n1,
+                    n2,
+                    initial_g,
+                    1.0,     // r_min: minimum pot resistance (clamped at 1Ω)
+                    max_r,   // r_max: full pot resistance
+                    &ports,
+                    vs_idx,
+                    32,      // 32 log-spaced entries
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Some(MultiNlStage {
         adaptor,
         nl_devices,
@@ -1932,6 +1967,7 @@ fn build_rtype_stage(
         state_space: None,
         bias_pot_id: None,
         bias_emitter_r: 470.0,
+        interp_table,
     })
 }
 
