@@ -1176,6 +1176,20 @@ impl CompiledPedal {
                             }
                             stage.tree.recompute();
                         }
+                        // Also update the same pot in other WDF stages where it
+                        // may appear (e.g., opamp feedback pot also in diode stage).
+                        for (oi, stage) in self.stages.iter_mut().enumerate() {
+                            if oi == stage_idx {
+                                continue;
+                            }
+                            let mut changed = false;
+                            changed |= stage.tree.set_pot(&comp_id, value);
+                            changed |= stage.tree.set_pot(&comp_id_aw, value);
+                            changed |= stage.tree.set_pot(&comp_id_wb, 1.0 - value);
+                            if changed {
+                                stage.tree.recompute();
+                            }
+                        }
                         // Component-driven updates: OpAmpRoot gain, BBD mix
                         self.notify_stage_pot_changed(stage_idx);
                         if self.bbd_mix_pot_id.as_deref() == Some(&comp_id) {

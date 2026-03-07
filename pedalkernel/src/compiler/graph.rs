@@ -1730,6 +1730,7 @@ impl CircuitGraph {
                         feedback_kind: OpAmpFeedbackKind::UnityGain,
                         neg_node,
                         pos_node,
+                        feedback_comp_ids: Vec::new(),
                     });
                     continue;
                 }
@@ -1737,7 +1738,7 @@ impl CircuitGraph {
                 // Look for feedback resistor path (Rf: neg to out)
                 // Use resistive path finding to handle series/parallel combinations
                 // Returns (rf_value, component_ids, pot_info)
-                if let Some((rf, _rf_comps, rf_pot)) = find_resistive_path(neg_node, out_node) {
+                if let Some((rf, rf_comps, rf_pot)) = find_resistive_path(neg_node, out_node) {
                     // Check for inverting topology: pos connected to ground
                     if pos_node == gnd_node_resolved {
                         // Inverting: look for Ri connected to neg (from any input source)
@@ -1757,6 +1758,7 @@ impl CircuitGraph {
                                 },
                                 neg_node,
                                 pos_node,
+                                feedback_comp_ids: rf_comps.clone(),
                             });
                             continue;
                         }
@@ -1764,15 +1766,22 @@ impl CircuitGraph {
 
                     // Check for non-inverting topology: pos connected to input (or signal path)
                     // Non-inverting: look for Ri path from neg to ground
-                    if let Some((ri, _ri_comps, ri_pot)) =
+                    if let Some((ri, ri_comps, ri_pot)) =
                         find_resistive_path(neg_node, gnd_node_resolved)
                     {
+                        let mut fb_comps = rf_comps.clone();
+                        for c in &ri_comps {
+                            if !fb_comps.contains(c) {
+                                fb_comps.push(c.clone());
+                            }
+                        }
                         results.push(OpAmpFeedbackInfo {
                             comp_id: comp.id.clone(),
                             opamp_type,
                             feedback_kind: OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot, ri_pot },
                             neg_node,
                             pos_node,
+                            feedback_comp_ids: fb_comps,
                         });
                         continue;
                     }
@@ -1820,6 +1829,7 @@ impl CircuitGraph {
                             },
                             neg_node,
                             pos_node,
+                            feedback_comp_ids: rf_comps.clone(),
                         });
                         continue;
                     }
@@ -1885,6 +1895,9 @@ pub(super) struct OpAmpFeedbackInfo {
     pub(super) neg_node: NodeId,
     /// Non-inverting input node (signal reference or bias).
     pub(super) pos_node: NodeId,
+    /// Component IDs of resistors/pots in the feedback path (Rf and Ri).
+    /// Used to exclude these edges from MultiNl passive BFS.
+    pub(super) feedback_comp_ids: Vec<String>,
 }
 
 /// The feedback topology of an op-amp.

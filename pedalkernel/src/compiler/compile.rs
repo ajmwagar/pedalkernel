@@ -1268,8 +1268,24 @@ pub fn compile_pedal_with_options(
     // Detect modulation-controlled elements before planning.
     let envelope_controlled_otas = detect_envelope_controlled_otas(pedal);
 
+    // Collect edge indices for opamp feedback path components so the
+    // multi-NL planner won't BFS through them (prevents pot duplication).
+    let opamp_feedback_edges: HashSet<usize> = {
+        let mut comp_ids: HashSet<String> = HashSet::new();
+        for info in &opamp_analysis.feedback_loops {
+            comp_ids.extend(info.feedback_comp_ids.iter().cloned());
+        }
+        graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| comp_ids.contains(&graph.components[e.comp_idx].id))
+            .map(|(idx, _)| idx)
+            .collect()
+    };
+
     let (stage_plans, push_pull_plans, multi_nl_plans, pp_transformer_edges, bjt_bias_analysis) =
-        super::plan::plan_stages(&classified, &graph, sample_rate, &envelope_controlled_otas);
+        super::plan::plan_stages(&classified, &graph, sample_rate, &envelope_controlled_otas, &opamp_feedback_edges);
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
     // Detect JFETs that are LFO-controlled so they use variable-resistance mode

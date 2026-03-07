@@ -709,6 +709,7 @@ pub(super) fn plan_stages(
     graph: &CircuitGraph,
     sample_rate: f64,
     envelope_controlled_otas: &HashSet<String>,
+    opamp_feedback_edges: &HashSet<usize>,
 ) -> (
     Vec<StagePlan>,
     Vec<PushPullPlan>,
@@ -855,6 +856,7 @@ pub(super) fn plan_stages(
                 true, // skip_out_node
                 &pp_transformer_edges,
                 &HashSet::new(),
+                opamp_feedback_edges,
             );
 
             // Convert bjt_members to indices into bjt_terminals for bias detection.
@@ -953,6 +955,7 @@ pub(super) fn plan_stages(
                 &pp_transformer_edges,
                 &bjt_bias_analysis,
                 &boundary_edges,
+                opamp_feedback_edges,
             ) {
                 multi_nl_plans.push(plan);
             }
@@ -1527,6 +1530,7 @@ fn plan_multi_nl_group(
     pp_transformer_edges: &HashSet<usize>,
     bjt_bias_analysis: &BjtBiasAnalysis,
     boundary_edges: &HashSet<usize>,
+    opamp_feedback_edges: &HashSet<usize>,
 ) -> Option<MultiNlPlan> {
     if elem_indices.is_empty() {
         return None;
@@ -1580,7 +1584,14 @@ fn plan_multi_nl_group(
         true, // skip_out_node
         pp_transformer_edges,
         boundary_edges,
+        opamp_feedback_edges,
     );
+
+    // Absorb output tail (coupling cap + volume pot, etc.) into this stage.
+    let output_tail = collect_output_passive_tail(&all_passive_edges, graph, classified);
+    if !output_tail.is_empty() {
+        extend_dedup(&mut all_passive_edges, &output_tail);
+    }
 
     // BJT bias pots are now regular passive ports in the R-type adaptor.
     // They self-manage bias via update_bias_from_pot() on MultiNlStage.
@@ -1709,7 +1720,7 @@ fn plan_multi_nl_group(
         injection_node,
         nl_terminals,
         compensation: 1.0,
-        output_node: None,
+        output_node: if !output_tail.is_empty() { Some(graph.out_node) } else { None },
         ota_vccs: Vec::new(),
 
         signal_chain_depth: None,
@@ -1770,6 +1781,7 @@ fn try_varimu_3port(
         classified,
         true,
         pp_transformer_edges,
+        &HashSet::new(),
         &HashSet::new(),
     );
 
@@ -1850,6 +1862,7 @@ fn try_linearized_ota(
         false, // don't skip out_node — output coupling cap is in this network
         pp_transformer_edges,
         &HashSet::new(),
+        &HashSet::new(),
     );
 
     if all_passive_edges.is_empty() {
@@ -1914,6 +1927,7 @@ fn plan_diode_bridge(
         classified,
         false, // skip_out_node=false (bridge rectifier needs RC at output)
         pp_transformer_edges,
+        &HashSet::new(),
         &HashSet::new(),
     );
 
@@ -2236,15 +2250,20 @@ fn collect_passive_edges_from_nodes(
     skip_out_node: bool,
     pp_transformer_edges: &HashSet<usize>,
     boundary_edges: &HashSet<usize>,
+    opamp_feedback_edges: &HashSet<usize>,
 ) -> Vec<usize> {
-    // Merge boundary edges into the NL exclusion set so BFS won't cross them.
-    let excluded: Vec<usize> = if boundary_edges.is_empty() {
-        classified.all_nonlinear_edge_indices.clone()
-    } else {
+    // Merge boundary edges and opamp feedback edges into the NL exclusion set
+    // so BFS won't cross them.
+    let excluded: Vec<usize> = {
         let mut excl = classified.all_nonlinear_edge_indices.clone();
         for &be in boundary_edges {
             if !excl.contains(&be) {
                 excl.push(be);
+            }
+        }
+        for &fe in opamp_feedback_edges {
+            if !excl.contains(&fe) {
+                excl.push(fe);
             }
         }
         excl
@@ -2266,6 +2285,95 @@ fn collect_passive_edges_from_nodes(
         find_secondary_side_transformers(&all_passive_edges, graph, pp_transformer_edges);
     extend_dedup(&mut all_passive_edges, &xfmr_inject);
     all_passive_edges
+}
+
+/// BFS from `out_node` through passive edges to find the output tail
+/// (coupling cap + volume pot + load, etc.). If the tail connects back to
+/// any node in the existing stage's passive set, return the new tail edges
+/// for absorption. Otherwise return empty — the output network is
+/// disconnected from this stage and will be handled by orphan rescue.
+fn collect_output_passive_tail(
+    existing_passive_edges: &[usize],
+    graph: &CircuitGraph,
+    classified: &ClassifiedCircuit,
+) -> Vec<usize> {
+    if existing_passive_edges.is_empty() {
+        return Vec::new();
+    }
+
+    // Nodes touched by existing passive edges.
+    let existing_nodes: HashSet<NodeId> = existing_passive_edges
+        .iter()
+        .flat_map(|&eidx| {
+            let e = &graph.edges[eidx];
+            [e.node_a, e.node_b]
+        })
+        .collect();
+
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    let mut collected: Vec<usize> = Vec::new();
+    let mut connects = false;
+
+    visited.insert(graph.out_node);
+    queue.push_back(graph.out_node);
+
+    while let Some(node) = queue.pop_front() {
+        for (idx, e) in graph.edges.iter().enumerate() {
+            // Skip NL, active, sidechain edges.
+            if classified.all_nonlinear_edge_indices.contains(&idx)
+                || graph.active_edge_indices.contains(&idx)
+                || classified.sidechain_edge_set.contains(&idx)
+            {
+                continue;
+            }
+            // Skip edges already in the existing stage.
+            if existing_passive_edges.contains(&idx) {
+                continue;
+            }
+
+            let neighbor = if e.node_a == node {
+                Some(e.node_b)
+            } else if e.node_b == node {
+                Some(e.node_a)
+            } else {
+                None
+            };
+            let Some(n) = neighbor else { continue };
+
+            // Don't traverse to in_node.
+            if n == graph.in_node {
+                continue;
+            }
+
+            // gnd/vcc/supply: collect edge but don't BFS further.
+            if n == graph.gnd_node || n == graph.vcc_node || graph.supply_nodes.contains(&n) {
+                if !collected.contains(&idx) {
+                    collected.push(idx);
+                }
+                continue;
+            }
+
+            // Existing stage node: collect connecting edge, mark connection,
+            // but don't BFS into the existing stage's interior.
+            if existing_nodes.contains(&n) {
+                if !collected.contains(&idx) {
+                    collected.push(idx);
+                }
+                connects = true;
+                continue;
+            }
+
+            if visited.insert(n) {
+                if !collected.contains(&idx) {
+                    collected.push(idx);
+                }
+                queue.push_back(n);
+            }
+        }
+    }
+
+    if connects { collected } else { Vec::new() }
 }
 
 /// Find transformer edges within 1 extra hop from plate passives.

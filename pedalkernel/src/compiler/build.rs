@@ -1966,6 +1966,13 @@ fn try_build_multi_nl_stage(
     if !junction_nodes.contains(&plan.injection_node) {
         junction_nodes.push(plan.injection_node);
     }
+    // Add output node as junction so output tail edges stay in MNA residual
+    // (not SP-reduced into WDF subtrees, which would hide pots from pot_children).
+    if let Some(out_node) = plan.output_node {
+        if !junction_nodes.contains(&out_node) {
+            junction_nodes.push(out_node);
+        }
+    }
     // Also add OTA nodes as junctions.
     for ota in &plan.ota_vccs {
         for &n in &[ota.in_pos, ota.in_neg, ota.out_node] {
