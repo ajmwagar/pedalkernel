@@ -481,7 +481,7 @@ fn kind_to_string(kind: &ComponentKind) -> String {
         ComponentKind::DelayLine(..) => "delay".into(),
         ComponentKind::Tap(..) => "tap".into(),
         ComponentKind::Neon(_) => "neon".into(),
-        ComponentKind::Vco(_) => "vco".into(),
+        ComponentKind::Vco(..) => "vco".into(),
         ComponentKind::Vcf(_) => "vcf".into(),
         ComponentKind::Vca(_) => "vca".into(),
         ComponentKind::Comparator(_) => "comparator".into(),

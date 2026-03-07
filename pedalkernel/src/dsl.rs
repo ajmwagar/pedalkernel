@@ -307,7 +307,8 @@ pub enum ComponentKind {
     // ── Synth-specific component types ──────────────────────────────────
     /// Voltage-Controlled Oscillator IC (CEM3340/AS3340/V3340).
     /// Generates sawtooth, triangle, and pulse waveforms with 1V/Oct tracking.
-    Vco(VcoType),
+    /// Parameters: IC type, base frequency (Hz), default waveform output.
+    Vco(VcoType, f64, VcoWaveformDsl),
     /// Voltage-Controlled Filter IC (CEM3320/AS3320).
     /// 4-pole lowpass with voltage-controlled cutoff and resonance.
     Vcf(VcfType),
@@ -538,6 +539,14 @@ pub enum LfoWaveformDsl {
     SawUp,
     SawDown,
     SampleAndHold,
+}
+
+/// VCO waveform selection for DSL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VcoWaveformDsl {
+    Saw,
+    Triangle,
+    Pulse,
 }
 
 // Triode and Pentode types use String model names, looked up from the
@@ -1419,14 +1428,34 @@ fn vco_type(input: &str) -> IResult<&str, VcoType> {
     ))(input)
 }
 
+fn vco_waveform(input: &str) -> IResult<&str, VcoWaveformDsl> {
+    alt((
+        value(VcoWaveformDsl::Saw, tag("saw")),
+        value(VcoWaveformDsl::Triangle, alt((tag("triangle"), tag("tri")))),
+        value(VcoWaveformDsl::Pulse, alt((tag("pulse"), tag("square")))),
+    ))(input)
+}
+
 fn parse_vco(input: &str) -> IResult<&str, ComponentKind> {
     let (input, _) = tag("vco")(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, vt) = vco_type(input)?;
     let (input, _) = ws_comments(input)?;
+    // Optional frequency (default 440 Hz)
+    let (input, freq) = opt(preceded(
+        tuple((char(','), ws_comments)),
+        eng_value,
+    ))(input)?;
+    let (input, _) = ws_comments(input)?;
+    // Optional waveform (default saw)
+    let (input, wf) = opt(preceded(
+        tuple((char(','), ws_comments)),
+        vco_waveform,
+    ))(input)?;
+    let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
-    Ok((input, ComponentKind::Vco(vt)))
+    Ok((input, ComponentKind::Vco(vt, freq.unwrap_or(440.0), wf.unwrap_or(VcoWaveformDsl::Saw))))
 }
 
 fn vcf_type(input: &str) -> IResult<&str, VcfType> {
@@ -3842,19 +3871,31 @@ synth "Test Synth" {
     fn parse_vco_cem3340() {
         let (_, (c, _)) = component_def("VCO1: vco(cem3340)").unwrap();
         assert_eq!(c.id, "VCO1");
-        assert_eq!(c.kind, ComponentKind::Vco(VcoType::Cem3340));
+        assert_eq!(c.kind, ComponentKind::Vco(VcoType::Cem3340, 440.0, VcoWaveformDsl::Saw));
     }
 
     #[test]
     fn parse_vco_as3340() {
         let (_, (c, _)) = component_def("VCO1: vco(as3340)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Vco(VcoType::As3340));
+        assert_eq!(c.kind, ComponentKind::Vco(VcoType::As3340, 440.0, VcoWaveformDsl::Saw));
     }
 
     #[test]
     fn parse_vco_v3340() {
         let (_, (c, _)) = component_def("VCO1: vco(v3340)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Vco(VcoType::V3340));
+        assert_eq!(c.kind, ComponentKind::Vco(VcoType::V3340, 440.0, VcoWaveformDsl::Saw));
+    }
+
+    #[test]
+    fn parse_vco_with_freq() {
+        let (_, (c, _)) = component_def("VCO1: vco(cem3340, 540)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Vco(VcoType::Cem3340, 540.0, VcoWaveformDsl::Saw));
+    }
+
+    #[test]
+    fn parse_vco_with_freq_and_waveform() {
+        let (_, (c, _)) = component_def("VCO1: vco(cem3340, 540, pulse)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Vco(VcoType::Cem3340, 540.0, VcoWaveformDsl::Pulse));
     }
 
     #[test]

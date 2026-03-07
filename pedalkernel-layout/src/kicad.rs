@@ -172,7 +172,7 @@ fn kicad_symbol_ref(kind: &ComponentKind) -> (&'static str, &'static str) {
         ComponentKind::Photocoupler(_) => ("Isolator:PC817", "OC"),
         ComponentKind::Bbd(_) => ("Analog_Delay:MN3207", "IC"),
         ComponentKind::Neon(_) => ("Device:Lamp_Neon", "NE"),
-        ComponentKind::Vco(_) => ("Oscillator:CEM3340", "U"),
+        ComponentKind::Vco(..) => ("Oscillator:CEM3340", "U"),
         ComponentKind::Vcf(_) => ("Analog:CEM3320", "U"),
         ComponentKind::Vca(_) => ("Analog:SSM2164", "U"),
         ComponentKind::Comparator(_) => ("Comparator:LM311", "U"),

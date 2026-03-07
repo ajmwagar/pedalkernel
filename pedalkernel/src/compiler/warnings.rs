@@ -171,7 +171,7 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                 }
             }
             // Synth ICs: CEM/AS/V series typically run ±5V to ±9V (10-18V total)
-            ComponentKind::Vco(_) | ComponentKind::Vcf(_) => {
+            ComponentKind::Vco(..) | ComponentKind::Vcf(_) => {
                 if voltage > 18.0 {
                     warnings.push(VoltageWarning {
                         component_id: comp.id.clone(),

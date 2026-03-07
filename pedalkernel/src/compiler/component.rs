@@ -396,7 +396,7 @@ impl Component for ComponentKind {
             ComponentKind::DelayLine(..) => "delay line",
             ComponentKind::Tap(..) => "tap",
             ComponentKind::Neon(_) => "neon bulb",
-            ComponentKind::Vco(_) => "VCO",
+            ComponentKind::Vco(..) => "VCO",
             ComponentKind::Vcf(_) => "VCF",
             ComponentKind::Vca(_) => "VCA",
             ComponentKind::Comparator(_) => "comparator",
@@ -453,13 +453,13 @@ impl Component for ComponentKind {
     fn is_active_ic(&self) -> bool {
         match self {
             ComponentKind::OpAmp(ot) => !ot.is_ota(),
-            ComponentKind::Vco(_)
-            | ComponentKind::Vcf(_)
-            | ComponentKind::Vca(_)
+            ComponentKind::Vcf(_)
             | ComponentKind::Comparator(_)
             | ComponentKind::AnalogSwitch(_)
             | ComponentKind::MatchedNpn(_)
             | ComponentKind::MatchedPnp(_) => true,
+            // VCO and VCA are Virtual — they inject/process audio at circuit nodes
+            ComponentKind::Vco(..) | ComponentKind::Vca(_) => false,
             _ => false,
         }
     }
@@ -628,7 +628,7 @@ impl Component for ComponentKind {
             },
 
             // Synth ICs
-            ComponentKind::Vco(_) => PinConfig {
+            ComponentKind::Vco(..) => PinConfig {
                 valid_pins: &["cv", "saw", "tri", "pulse", "pw", "sync", "out", "output"],
                 aliases: &[("out", "output")],
             },
@@ -757,12 +757,12 @@ impl Component for ComponentKind {
             | ComponentKind::Tap(..)
             | ComponentKind::RotarySwitch(_)
             | ComponentKind::Switch(_)
-            | ComponentKind::TriggerInput => GraphRole::Virtual,
+            | ComponentKind::TriggerInput
+            | ComponentKind::Vco(..)
+            | ComponentKind::Vca(_) => GraphRole::Virtual,
 
             // Active ICs: no edge, count as active
-            ComponentKind::Vco(_)
-            | ComponentKind::Vcf(_)
-            | ComponentKind::Vca(_)
+            ComponentKind::Vcf(_)
             | ComponentKind::Comparator(_)
             | ComponentKind::AnalogSwitch(_)
             | ComponentKind::MatchedNpn(_)
@@ -1561,7 +1561,7 @@ impl Component for ComponentKind {
                 NeonType::Ne51 => ("Device:Lamp_Neon", "NE"),
                 NeonType::Ne83 => ("Device:Lamp_Neon", "NE"),
             },
-            ComponentKind::Vco(vt) => match vt {
+            ComponentKind::Vco(vt, ..) => match vt {
                 VcoType::Cem3340 => ("Oscillator:CEM3340", "U"),
                 VcoType::As3340 => ("Oscillator:AS3340", "U"),
                 VcoType::V3340 => ("Oscillator:V3340", "U"),

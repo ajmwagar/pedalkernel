@@ -304,7 +304,7 @@ fn check_spec_voltage(
         let is_ic = matches!(
             kind,
             ComponentKind::OpAmp(_)
-                | ComponentKind::Vco(_)
+                | ComponentKind::Vco(..)
                 | ComponentKind::Vcf(_)
                 | ComponentKind::Vca(_)
                 | ComponentKind::Comparator(_)
@@ -741,7 +741,7 @@ pub fn auto_populate_specs(pedal: &PedalDef, limits: &mut HardwareLimits) {
                 }
             }
             // Synth ICs: populate supply max from known datasheets
-            ComponentKind::Vco(_) => {
+            ComponentKind::Vco(..) => {
                 if spec.supply_max.is_none() {
                     spec.supply_max = Some(18.0); // CEM3340/AS3340/V3340: ±5V to ±9V (18V total)
                 }
@@ -1353,7 +1353,7 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     entries
                 }
                 // ── Synth ICs ──────────────────────────────────────────
-                ComponentKind::Vco(vt) => {
+                ComponentKind::Vco(vt, ..) => {
                     let (pn, desc, label) = if let Some(part_name) = hw_part {
                         (None, part_name.to_string(), format!("{vt:?}"))
                     } else {

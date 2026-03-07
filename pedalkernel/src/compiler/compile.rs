@@ -1057,6 +1057,239 @@ impl Default for CompileOptions {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// VCO / VCA binding builders
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build VCO runtime bindings from the pedal definition.
+///
+/// For each VCO component, creates a `VcoBinding` with:
+/// - An audio-rate oscillator set to the base frequency
+/// - The default waveform output
+/// - The output node resolved from net connections (Option A: use target's node)
+fn build_vco_bindings(
+    pedal: &PedalDef,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Vec<VcoBinding> {
+    let mut vcos = Vec::new();
+
+    for comp in &pedal.components {
+        if let ComponentKind::Vco(_vco_type, base_freq, waveform_dsl) = &comp.kind {
+            let mut vco = crate::elements::Vco::new(sample_rate);
+            vco.set_base_freq(*base_freq);
+
+            // Map DSL waveform to runtime waveform
+            let waveform = match waveform_dsl {
+                crate::dsl::VcoWaveformDsl::Saw => crate::elements::VcoWaveform::Saw,
+                crate::dsl::VcoWaveformDsl::Triangle => crate::elements::VcoWaveform::Triangle,
+                crate::dsl::VcoWaveformDsl::Pulse => crate::elements::VcoWaveform::Pulse,
+            };
+
+            // Resolve output node: find where {vco_id}.out (or .saw/.tri/.pulse) connects.
+            // Use Option A: resolve to the *other* component's graph node ID.
+            let mut output_node_id = usize::MAX;
+            let mut resolved_waveform = waveform;
+
+            for net in &pedal.nets {
+                if let Pin::ComponentPin { component, pin } = &net.from {
+                    if component == &comp.id {
+                        // Check if the pin specifies a specific waveform
+                        match pin.as_str() {
+                            "saw" => resolved_waveform = crate::elements::VcoWaveform::Saw,
+                            "tri" => resolved_waveform = crate::elements::VcoWaveform::Triangle,
+                            "pulse" => resolved_waveform = crate::elements::VcoWaveform::Pulse,
+                            "out" | "output" => {} // use default waveform
+                            _ => continue,
+                        }
+                        // Resolve to the target's graph node
+                        for to_pin in &net.to {
+                            if let Pin::ComponentPin { component: target_comp, pin: target_pin } = to_pin {
+                                if let Some(node) = resolve_pin_to_node(target_comp, target_pin, pedal, graph) {
+                                    output_node_id = node;
+                                    break;
+                                }
+                            }
+                            if let Pin::Reserved(node_name) = to_pin {
+                                if node_name == "out" || node_name == "output" {
+                                    output_node_id = graph.out_node;
+                                } else if node_name == "in" || node_name == "input" {
+                                    output_node_id = graph.in_node;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Also check if VCO is a target (reverse direction)
+                for to_pin in &net.to {
+                    if let Pin::ComponentPin { component, pin } = to_pin {
+                        if component == &comp.id {
+                            match pin.as_str() {
+                                "saw" => resolved_waveform = crate::elements::VcoWaveform::Saw,
+                                "tri" => resolved_waveform = crate::elements::VcoWaveform::Triangle,
+                                "pulse" => resolved_waveform = crate::elements::VcoWaveform::Pulse,
+                                "out" | "output" => {
+                                    // Resolve the source end
+                                    if let Pin::ComponentPin { component: src_comp, pin: src_pin } = &net.from {
+                                        if let Some(node) = resolve_pin_to_node(src_comp, src_pin, pedal, graph) {
+                                            output_node_id = node;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If no output node found, default to circuit output node
+            if output_node_id == usize::MAX {
+                output_node_id = graph.out_node;
+            }
+
+            vcos.push(VcoBinding {
+                vco,
+                waveform: resolved_waveform,
+                output_node_id,
+                comp_id: comp.id.clone(),
+            });
+        }
+    }
+
+    vcos
+}
+
+/// Build VCA runtime bindings from the pedal definition.
+///
+/// For each VCA component, creates a `VcaBinding` with:
+/// - A VCA gain element
+/// - An ADSR envelope for gating
+/// - Input/output nodes resolved from net connections
+/// - Trigger index if CV is connected to a trigger_input
+fn build_vca_bindings(
+    pedal: &PedalDef,
+    graph: &CircuitGraph,
+    trigger_id_to_idx: &HashMap<String, usize>,
+    sample_rate: f64,
+) -> Vec<VcaBinding> {
+    let mut vcas = Vec::new();
+
+    for comp in &pedal.components {
+        if let ComponentKind::Vca(_vca_type) = &comp.kind {
+            let vca = crate::elements::Vca::new();
+            let envelope = crate::elements::AdsrEnvelope::new(sample_rate);
+
+            let mut input_node_id = usize::MAX;
+            let mut output_node_id = usize::MAX;
+            let mut trigger_idx = None;
+
+            // Scan nets for VCA pin connections
+            for net in &pedal.nets {
+                // Check if VCA is the source
+                if let Pin::ComponentPin { component, pin } = &net.from {
+                    if component == &comp.id {
+                        match pin.as_str() {
+                            "out" | "output" => {
+                                for to_pin in &net.to {
+                                    if let Pin::ComponentPin { component: target_comp, pin: target_pin } = to_pin {
+                                        if let Some(node) = resolve_pin_to_node(target_comp, target_pin, pedal, graph) {
+                                            output_node_id = node;
+                                            break;
+                                        }
+                                    }
+                                    if let Pin::Reserved(node_name) = to_pin {
+                                        if node_name == "out" || node_name == "output" {
+                                            output_node_id = graph.out_node;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Check if VCA is a target
+                for to_pin in &net.to {
+                    if let Pin::ComponentPin { component, pin } = to_pin {
+                        if component == &comp.id {
+                            match pin.as_str() {
+                                "in" | "input" => {
+                                    if let Pin::ComponentPin { component: src_comp, pin: src_pin } = &net.from {
+                                        if let Some(node) = resolve_pin_to_node(src_comp, src_pin, pedal, graph) {
+                                            input_node_id = node;
+                                        }
+                                    }
+                                }
+                                "out" | "output" => {
+                                    if let Pin::ComponentPin { component: src_comp, pin: src_pin } = &net.from {
+                                        if let Some(node) = resolve_pin_to_node(src_comp, src_pin, pedal, graph) {
+                                            output_node_id = node;
+                                        }
+                                    }
+                                }
+                                "cv" => {
+                                    // Check if CV is connected to a trigger_input
+                                    if let Pin::ComponentPin { component: src_comp, .. } = &net.from {
+                                        if let Some(&idx) = trigger_id_to_idx.get(src_comp.as_str()) {
+                                            trigger_idx = Some(idx);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Default: if no output found, use circuit output
+            if output_node_id == usize::MAX {
+                output_node_id = graph.out_node;
+            }
+
+            vcas.push(VcaBinding {
+                vca,
+                envelope,
+                trigger_idx,
+                input_node_id,
+                output_node_id,
+                comp_id: comp.id.clone(),
+            });
+        }
+    }
+
+    vcas
+}
+
+/// Resolve a component pin to a circuit graph node ID.
+/// Returns None if the component or pin can't be found in the graph.
+fn resolve_pin_to_node(
+    comp_id: &str,
+    _pin: &str,
+    _pedal: &PedalDef,
+    graph: &CircuitGraph,
+) -> Option<usize> {
+    // Find edges in the graph that involve this component
+    for edge in &graph.edges {
+        if graph.components[edge.comp_idx].id == comp_id {
+            // Return node_a as a reasonable default
+            // (for Virtual components there won't be edges, but for components
+            // connected to the VCO/VCA via nets, there will be)
+            return Some(edge.node_a);
+        }
+    }
+    // Check if the component is at a known node (in/out/gnd)
+    // This handles cases where the target is a circuit terminal
+    if comp_id == "in" || comp_id == "input" {
+        return Some(graph.in_node);
+    }
+    if comp_id == "out" || comp_id == "output" {
+        return Some(graph.out_node);
+    }
+    None
+}
+
 // Main compilation pipeline
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1540,6 +1773,8 @@ pub fn compile_pedal_with_options(
         &delay_id_to_idx,
         sample_rate,
     );
+    let vcos = build_vco_bindings(pedal, &graph, sample_rate);
+    let vcas = build_vca_bindings(pedal, &graph, &trigger_id_to_idx, sample_rate);
     // Thermal model.
     let thermal = if enable_thermal && classified.has_germanium {
         Some(ThermalModel::germanium_fuzz(sample_rate))
@@ -1615,6 +1850,8 @@ pub fn compile_pedal_with_options(
         slew_limiters,
         bbds,
         delay_lines,
+        vcos,
+        vcas,
         thermal,
         tolerance_seed: tolerance.seed(),
         oversampling,

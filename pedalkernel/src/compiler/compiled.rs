@@ -194,6 +194,34 @@ pub(super) struct DelayLineBinding {
     pub(super) comp_id: String,
 }
 
+/// VCO runtime binding — generates audio-rate waveforms at a circuit node.
+pub(super) struct VcoBinding {
+    pub(super) vco: crate::elements::Vco,
+    /// Which waveform output to use (saw/tri/pulse).
+    pub(super) waveform: crate::elements::VcoWaveform,
+    /// Circuit node where VCO output is injected.
+    pub(super) output_node_id: usize,
+    /// Component ID for debugging.
+    #[allow(dead_code)]
+    pub(super) comp_id: String,
+}
+
+/// VCA runtime binding — amplitude modulation controlled by trigger envelope.
+pub(super) struct VcaBinding {
+    pub(super) vca: crate::elements::Vca,
+    /// ADSR envelope that gates the VCA.
+    pub(super) envelope: crate::elements::AdsrEnvelope,
+    /// Index into triggers vec (which trigger gates this VCA).
+    pub(super) trigger_idx: Option<usize>,
+    /// Circuit node to read audio input from.
+    pub(super) input_node_id: usize,
+    /// Circuit node to write amplitude-modulated output to.
+    pub(super) output_node_id: usize,
+    /// Component ID for debugging.
+    #[allow(dead_code)]
+    pub(super) comp_id: String,
+}
+
 /// Op-amp stage for unity-gain buffers and gain stages.
 ///
 /// Models the op-amp as a voltage-controlled voltage source (VCVS).
@@ -464,6 +492,10 @@ pub struct CompiledPedal {
     pub(super) bbds: Vec<BbdDelayLine>,
     /// Generic delay lines (tape echo, digital delay, Karplus-Strong, etc.).
     pub(super) delay_lines: Vec<DelayLineBinding>,
+    /// VCO audio-rate oscillator bindings (inject audio at circuit nodes).
+    pub(super) vcos: Vec<VcoBinding>,
+    /// VCA amplitude modulation bindings (scale audio by envelope).
+    pub(super) vcas: Vec<VcaBinding>,
     /// Thermal model for temperature-dependent behavior.
     /// When present, modulates diode Is and BJT gain over time.
     pub(super) thermal: Option<ThermalModel>,
@@ -1336,6 +1368,36 @@ impl CompiledPedal {
             }
         }
 
+        if !self.vcos.is_empty() {
+            s.push_str(&format!("\nVCO Bindings: {}\n", self.vcos.len()));
+            s.push_str(
+                "───────────────────────────────────────────────────────────────────────────\n",
+            );
+            for (i, vco) in self.vcos.iter().enumerate() {
+                s.push_str(&format!(
+                    "  [{}] {} - freq={:.1}Hz, waveform={:?}, out_node={}\n",
+                    i, vco.comp_id, vco.vco.frequency(), vco.waveform, vco.output_node_id
+                ));
+            }
+        }
+
+        if !self.vcas.is_empty() {
+            s.push_str(&format!("\nVCA Bindings: {}\n", self.vcas.len()));
+            s.push_str(
+                "───────────────────────────────────────────────────────────────────────────\n",
+            );
+            for (i, vca) in self.vcas.iter().enumerate() {
+                let trig = match vca.trigger_idx {
+                    Some(idx) => format!("trigger {idx}"),
+                    None => "none".to_string(),
+                };
+                s.push_str(&format!(
+                    "  [{}] {} - in_node={}, out_node={}, trigger={}\n",
+                    i, vca.comp_id, vca.input_node_id, vca.output_node_id, trig
+                ));
+            }
+        }
+
         if !self.triggers.is_empty() {
             s.push_str(&format!("\nTriggers: {}\n", self.triggers.len()));
             s.push_str(
@@ -1571,6 +1633,18 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
+        // Tick VCOs — generate audio-rate waveforms and inject into node_signals.
+        // This happens before WDF stages so the VCO audio is available as input.
+        for vco_binding in &mut self.vcos {
+            let (saw, tri, pulse) = vco_binding.vco.tick();
+            let sample = match vco_binding.waveform {
+                crate::elements::VcoWaveform::Saw => saw,
+                crate::elements::VcoWaveform::Triangle => tri,
+                crate::elements::VcoWaveform::Pulse => pulse,
+            };
+            self.node_signals.push((vco_binding.output_node_id, sample));
+        }
+
         // Record input for debug stats
         #[cfg(debug_assertions)]
         if let Some(ref stats) = self.debug_stats {
@@ -1803,6 +1877,37 @@ impl PedalProcessor for CompiledPedal {
                 self.stage_order.len(), self.stages.len(),
                 self.multi_nl_stages.len()
             );
+        }
+
+        // Tick VCAs — apply envelope-gated amplitude modulation after WDF stages.
+        for vca_binding in &mut self.vcas {
+            // Gate envelope from trigger
+            if let Some(trig_idx) = vca_binding.trigger_idx {
+                if let Some(trig) = self.triggers.get(trig_idx) {
+                    vca_binding.envelope.set_gate(trig.countdown > 0);
+                }
+            }
+            let env_val = vca_binding.envelope.tick();
+            vca_binding.vca.set_gain(env_val);
+
+            // Read audio from input node (sum all signals at that node)
+            let vca_input = self.node_signals.iter().rev()
+                .filter(|(nid, _)| *nid == vca_binding.input_node_id)
+                .map(|(_, v)| *v)
+                .sum::<f64>();
+
+            // If no node signal found, use the serial chain signal
+            let vca_input = if vca_input == 0.0 && vca_binding.input_node_id == usize::MAX {
+                signal
+            } else {
+                vca_input
+            };
+
+            let output = vca_binding.vca.process(vca_input);
+            self.node_signals.push((vca_binding.output_node_id, output));
+
+            // Feed VCA output into the serial signal chain
+            signal = output;
         }
 
         // Process through push-pull stages (differential tube amplifiers).

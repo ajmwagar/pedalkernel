@@ -76,7 +76,7 @@ impl From<ComponentKind> for Box<dyn Component> {
             ComponentKind::Pentode(m) => Box::new(Pentode { model: m }),
             ComponentKind::VariMu(m) => Box::new(VariMu { model: m }),
             ComponentKind::OpAmp(ot) => Box::new(OpAmp { op_type: ot }),
-            ComponentKind::Vco(vt) => Box::new(Vco { vco_type: vt }),
+            ComponentKind::Vco(vt, freq, wf) => Box::new(Vco { vco_type: vt, base_freq: freq, waveform: wf }),
             ComponentKind::Vcf(vt) => Box::new(Vcf { vcf_type: vt }),
             ComponentKind::Vca(vt) => Box::new(Vca { vca_type: vt }),
             ComponentKind::Comparator(ct) => Box::new(Comparator { comp_type: ct }),

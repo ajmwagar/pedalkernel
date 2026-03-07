@@ -80,7 +80,7 @@ fn value_str(kind: &ComponentKind) -> String {
             NeonType::Ne83 => "NE-83".into(),
         },
         // ── Synth ICs ──────────────────────────────────────────────────
-        ComponentKind::Vco(vt) => format!("VCO_{vt:?}"),
+        ComponentKind::Vco(vt, ..) => format!("VCO_{vt:?}"),
         ComponentKind::Vcf(vt) => format!("VCF_{vt:?}"),
         ComponentKind::Vca(vt) => format!("VCA_{vt:?}"),
         ComponentKind::Comparator(ct) => format!("Comparator_{ct:?}"),

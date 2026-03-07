@@ -36,7 +36,7 @@ pub fn symbol_for_kind(kind: &ComponentKind) -> String {
         ComponentKind::DelayLine(..) => "delay".into(),
         ComponentKind::Tap(..) => "tap".into(),
         ComponentKind::Neon(_) => "neon".into(),
-        ComponentKind::Vco(_) => "ic_chip".into(),
+        ComponentKind::Vco(..) => "ic_chip".into(),
         ComponentKind::Vcf(_) => "ic_chip".into(),
         ComponentKind::Vca(_) => "ic_chip".into(),
         ComponentKind::Comparator(_) => "ic_chip".into(),

@@ -3,7 +3,8 @@
 
 use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult};
 use crate::dsl::{
-    AnalogSwitchType, ComparatorType, MatchedTransistorType, OpAmpType, VcaType, VcfType, VcoType,
+    AnalogSwitchType, ComparatorType, MatchedTransistorType, OpAmpType, VcaType, VcfType,
+    VcoType, VcoWaveformDsl,
 };
 use crate::tree::MnaSystem;
 
@@ -89,6 +90,10 @@ impl Component for OpAmp {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Vco {
     pub vco_type: VcoType,
+    /// Base frequency in Hz (default 440.0).
+    pub base_freq: f64,
+    /// Default waveform output.
+    pub waveform: VcoWaveformDsl,
 }
 
 impl Component for Vco {
@@ -98,7 +103,7 @@ impl Component for Vco {
 
     fn is_passive(&self) -> bool { false }
 
-    fn is_active_ic(&self) -> bool { true }
+    fn is_active_ic(&self) -> bool { false }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -107,7 +112,7 @@ impl Component for Vco {
         }
     }
 
-    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+    fn graph_role(&self) -> GraphRole { GraphRole::Virtual }
 
     fn stamp_mna(
         &self,
@@ -191,7 +196,7 @@ impl Component for Vca {
 
     fn is_passive(&self) -> bool { false }
 
-    fn is_active_ic(&self) -> bool { true }
+    fn is_active_ic(&self) -> bool { false }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -204,7 +209,7 @@ impl Component for Vca {
         }
     }
 
-    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+    fn graph_role(&self) -> GraphRole { GraphRole::Virtual }
 
     fn stamp_mna(
         &self,
