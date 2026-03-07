@@ -569,6 +569,8 @@ fn build_passive_rtype_from_decomposed(
     Some(WdfStage {
         tree: dummy_tree,
         root: super::stage::RootKind::PassiveRType {
+            scratch_b: vec![0.0; reactive_children.len()],
+            scratch_a: vec![0.0; reactive_children.len()],
             scattering,
             vs_injection,
             n_ports,
@@ -1811,6 +1813,8 @@ pub fn compile_pedal_with_options(
     };
 
     // ══ Assembly ══════════════════════════════════════════════════════
+    // Pre-compute node_signals capacity so process() never allocates.
+    let node_signals_cap = triggers.len() + vcos.len() + stage_order.len() + vcas.len();
     let mut compiled = CompiledPedal {
         stages,
         push_pull_stages,
@@ -1843,18 +1847,22 @@ pub fn compile_pedal_with_options(
         sidechains,
         pot_smoothers,
         pot_mirrors: {
-            // Build reverse mapping: source_id → [mirrored_ids]
-            let mut m: std::collections::HashMap<String, Vec<String>> =
+            // Build reverse mapping: source_id → [MirrorPot] with pre-computed suffixes
+            let mut m: std::collections::HashMap<String, Vec<super::compiled::MirrorPot>> =
                 std::collections::HashMap::new();
             for (mirrored, source) in &pedal.mirrors {
-                m.entry(source.clone()).or_default().push(mirrored.clone());
+                m.entry(source.clone()).or_default().push(super::compiled::MirrorPot {
+                    id_aw: format!("{mirrored}__aw"),
+                    id_wb: format!("{mirrored}__wb"),
+                    id: mirrored.clone(),
+                });
             }
             m
         },
         base_grid_bias,
         multi_nl_recompute_counter: 0,
         stage_order,
-        node_signals: Vec::new(),
+        node_signals: Vec::with_capacity(node_signals_cap),
         bbd_wet_mix: 0.5,
         pot_effects,
         triggers,

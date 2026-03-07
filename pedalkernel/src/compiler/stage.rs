@@ -186,6 +186,10 @@ pub(super) enum RootKind {
         pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
         /// Dirty flag: set when a pot changes, cleared after S re-derivation.
         needs_recompute: bool,
+        /// Pre-allocated scratch buffer for reflected waves (avoids RT allocation).
+        scratch_b: Vec<f64>,
+        /// Pre-allocated scratch buffer for incident waves (avoids RT allocation).
+        scratch_a: Vec<f64>,
     },
 }
 
@@ -512,30 +516,32 @@ impl WdfStage {
                     n_ports,
                     children,
                     output_port,
+                    scratch_b,
+                    scratch_a,
                     ..
                 } => {
                     let vs_voltage = sample * compensation;
                     let n = *n_ports;
-                    // 1. Collect reflected waves from children
-                    let b_children: Vec<f64> =
-                        children.iter_mut().map(|c| c.reflected()).collect();
+                    // 1. Collect reflected waves from children (into pre-allocated buffer)
+                    for (i, c) in children.iter_mut().enumerate() {
+                        scratch_b[i] = c.reflected();
+                    }
                     // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
-                    let mut a_children = vec![0.0; n];
                     for i in 0..n {
                         let mut a_i = vs_injection[i] * vs_voltage;
                         for j in 0..n {
-                            a_i += scattering[i * n + j] * b_children[j];
+                            a_i += scattering[i * n + j] * scratch_b[j];
                         }
-                        a_children[i] = a_i;
+                        scratch_a[i] = a_i;
                     }
                     // 3. Set incident waves on children
-                    for (child, &a_i) in children.iter_mut().zip(a_children.iter())
+                    for (child, &a_i) in children.iter_mut().zip(scratch_a.iter())
                     {
                         child.set_incident(a_i);
                     }
                     // 4. Output voltage at probe port
-                    let a_out = a_children[*output_port];
-                    let b_out = b_children[*output_port];
+                    let a_out = scratch_a[*output_port];
+                    let b_out = scratch_b[*output_port];
                     return (a_out + b_out) / 2.0;
                 }
             };

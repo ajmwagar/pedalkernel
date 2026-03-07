@@ -124,10 +124,15 @@ pub(super) fn build_controls(
             .and_then(|c| c.kind.resistance())
             .unwrap_or(100_000.0);
 
+        let comp_id = ctrl.component.clone();
+        let comp_id_aw = format!("{comp_id}__aw");
+        let comp_id_wb = format!("{comp_id}__wb");
         controls.push(ControlBinding {
             label: ctrl.label.clone(),
             target,
-            component_id: ctrl.component.clone(),
+            component_id: comp_id,
+            component_id_aw: comp_id_aw,
+            component_id_wb: comp_id_wb,
             max_resistance: max_r,
             range: ctrl.range,
         });
