@@ -186,10 +186,6 @@ pub(super) enum RootKind {
         pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
         /// Dirty flag: set when a pot changes, cleared after S re-derivation.
         needs_recompute: bool,
-        /// Pre-allocated scratch buffer for reflected waves (avoids RT allocation).
-        scratch_b: Vec<f64>,
-        /// Pre-allocated scratch buffer for incident waves (avoids RT allocation).
-        scratch_a: Vec<f64>,
     },
 }
 
@@ -321,6 +317,10 @@ pub(super) struct WdfStage {
     /// of the input signal. Used for boundary-split BJTs where the base
     /// coupling cap was removed and signal enters via set_control_voltage().
     pub(super) is_supply_driven: bool,
+    /// When set, identifies a pot in the WDF tree whose resistance drives
+    /// OpAmpRoot gain recalculation. After pot update + recompute, the stage
+    /// reads the pot's resistance and calls `OpAmpRoot::set_feedback_pot_r()`.
+    pub(super) feedback_pot_id: Option<String>,
 }
 
 impl WdfStage {
@@ -516,32 +516,30 @@ impl WdfStage {
                     n_ports,
                     children,
                     output_port,
-                    scratch_b,
-                    scratch_a,
                     ..
                 } => {
                     let vs_voltage = sample * compensation;
                     let n = *n_ports;
-                    // 1. Collect reflected waves from children (into pre-allocated buffer)
-                    for (i, c) in children.iter_mut().enumerate() {
-                        scratch_b[i] = c.reflected();
-                    }
+                    // 1. Collect reflected waves from children
+                    let b_children: Vec<f64> =
+                        children.iter_mut().map(|c| c.reflected()).collect();
                     // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
+                    let mut a_children = vec![0.0; n];
                     for i in 0..n {
                         let mut a_i = vs_injection[i] * vs_voltage;
                         for j in 0..n {
-                            a_i += scattering[i * n + j] * scratch_b[j];
+                            a_i += scattering[i * n + j] * b_children[j];
                         }
-                        scratch_a[i] = a_i;
+                        a_children[i] = a_i;
                     }
                     // 3. Set incident waves on children
-                    for (child, &a_i) in children.iter_mut().zip(scratch_a.iter())
+                    for (child, &a_i) in children.iter_mut().zip(a_children.iter())
                     {
                         child.set_incident(a_i);
                     }
                     // 4. Output voltage at probe port
-                    let a_out = scratch_a[*output_port];
-                    let b_out = scratch_b[*output_port];
+                    let a_out = a_children[*output_port];
+                    let b_out = b_children[*output_port];
                     return (a_out + b_out) / 2.0;
                 }
             };
@@ -919,6 +917,20 @@ impl WdfStage {
     pub fn set_paired_opamp_vp(&mut self, vp: f64) {
         if let Some(ref mut opamp) = self.paired_opamp {
             opamp.set_vp(vp);
+        }
+    }
+
+    /// Notify that a pot in this stage changed.
+    ///
+    /// If this stage has a `feedback_pot_id`, reads the pot's current resistance
+    /// from the tree and calls `OpAmpRoot::set_feedback_pot_r()` to recompute gain.
+    pub(super) fn notify_pot_changed(&mut self) {
+        if let Some(ref pot_id) = self.feedback_pot_id {
+            if let Some(pot_r) = self.tree.get_pot_resistance(pot_id) {
+                if let RootKind::OpAmp(ref mut oa) = self.root {
+                    oa.set_feedback_pot_r(pot_r);
+                }
+            }
         }
     }
 
@@ -1532,6 +1544,11 @@ pub(super) struct MultiNlStage {
     /// voltage directly from X⁻¹ coefficients.
     pub(super) extract_coeffs: Option<Vec<f64>>,
     pub(super) extract_vs: f64,
+    /// When set, identifies a pot in pot_children whose resistance drives
+    /// BJT bias recalculation (feedback_scale + veb_bias_offset).
+    pub(super) bias_pot_id: Option<String>,
+    /// Emitter resistance for bias pot computation (default 470Ω).
+    pub(super) bias_emitter_r: f64,
     /// State-space model for direct discrete-time simulation.
     /// When Some, process() uses state-space update (A·x + b·u) instead of
     /// WDF scattering. Used for linearized OTA stages where cap port
@@ -2058,9 +2075,34 @@ impl MultiNlStage {
     /// `set_control_voltage()` on BJT NL devices.
     pub fn set_feedback_from_pot(&mut self, position: f64, max_pot_r: f64) {
         let pot_r = position * max_pot_r;
-        let emitter_r = 470.0;
+        let emitter_r = self.bias_emitter_r;
         self.feedback_scale = emitter_r / (emitter_r + pot_r);
         self.veb_bias_offset = self.feedback_scale * 0.1;
+    }
+
+    /// Update bias from pot by reading pot resistance from pot_children.
+    ///
+    /// Called after a pot change + recompute when `bias_pot_id` is set.
+    /// Reads the pot's current rp from pot_children and updates
+    /// feedback_scale + veb_bias_offset.
+    pub fn update_bias_from_pot(&mut self) {
+        if let Some(ref pot_id) = self.bias_pot_id {
+            if let Some(pot_r) = self.get_pot_child_resistance(pot_id) {
+                let emitter_r = self.bias_emitter_r;
+                self.feedback_scale = emitter_r / (emitter_r + pot_r);
+                self.veb_bias_offset = self.feedback_scale * 0.1;
+            }
+        }
+    }
+
+    /// Get the current resistance of a pot in pot_children by component ID.
+    fn get_pot_child_resistance(&self, pot_id: &str) -> Option<f64> {
+        for child in &self.pot_children {
+            if let Some(r) = child.get_pot_resistance(pot_id) {
+                return Some(r);
+            }
+        }
+        None
     }
 
     /// Recompute the scattering matrix from stored MNA data after a pot change.

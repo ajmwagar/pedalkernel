@@ -284,6 +284,7 @@ fn build_passive_wdf_stage(
                 sample_counter: 0,
                 root_comp_id: String::new(),
                 is_supply_driven: false,
+                feedback_pot_id: None,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -569,8 +570,6 @@ fn build_passive_rtype_from_decomposed(
     Some(WdfStage {
         tree: dummy_tree,
         root: super::stage::RootKind::PassiveRType {
-            scratch_b: vec![0.0; reactive_children.len()],
-            scratch_a: vec![0.0; reactive_children.len()],
             scattering,
             vs_injection,
             n_ports,
@@ -597,6 +596,7 @@ fn build_passive_rtype_from_decomposed(
         sample_counter: 0,
         root_comp_id: String::new(),
         is_supply_driven: false,
+        feedback_pot_id: None,
     })
 }
 
@@ -911,6 +911,7 @@ fn build_output_rooted_stage(
         sample_counter: 0,
         root_comp_id: String::new(),
         is_supply_driven: false,
+        feedback_pot_id: None,
     })
 }
 
@@ -1245,13 +1246,14 @@ pub fn compile_pedal_with_options(
     let classified = super::classify::classify_circuit(&graph, pedal);
 
     // ══ Pass 2: Op-amp analysis ═══════════════════════════════════════
-    let mut opamp_analysis = super::opamp_analysis::analyze_opamps(&graph, pedal);
+    let opamp_analysis = super::opamp_analysis::analyze_opamps(&graph, pedal);
     let opamp_feedback_gain = 1.0_f64;
 
     // Build op-amp feedback stages (inverting, non-inverting).
     let mut stages: Vec<WdfStage> = Vec::new();
     let opamp_feedback_stages = super::opamp_analysis::build_opamp_feedback_stages(
-        &mut opamp_analysis,
+        &opamp_analysis,
+        pedal,
         stages.len(),
         sample_rate,
         oversampling,
@@ -1694,12 +1696,10 @@ pub fn compile_pedal_with_options(
     let (sidechains, sidechain_comp_ids) =
         super::bind::build_sidechains(pedal, &graph, sample_rate);
 
-    let (controls, pot_effects) = super::bind::build_controls(
+    let (controls, bbd_mix_pot_id) = super::bind::build_controls(
         pedal,
         &stages,
         &multi_nl_stages,
-        &opamp_analysis.pot_map,
-        &bjt_bias_analysis.bias_pot_map,
         &lfo_ids,
         &delay_id_to_idx,
         delay_lines.is_empty(),
@@ -1708,34 +1708,11 @@ pub fn compile_pedal_with_options(
         &trigger_id_to_idx,
     );
 
-    // Initialize BJT bias pots from their default positions.
-    // This sets the initial feedback_scale and veb_bias_offset on
-    // multi-NL stages before any user input arrives.
-    for (pot_id, info) in &bjt_bias_analysis.bias_pot_map {
-        let default_pos = pedal
-            .controls
-            .iter()
-            .find(|c| c.component == *pot_id)
-            .map(|c| c.default)
-            .unwrap_or(0.5);
-        let tapered = info.taper.apply(default_pos);
-        for stage in &mut multi_nl_stages {
-            stage.set_feedback_from_pot(tapered, info.max_pot_r);
-        }
-    }
-
-    let level_default = pedal
-        .controls
-        .iter()
-        .find(|c| is_level_label(&c.label))
-        .map(|c| c.default)
-        .unwrap_or(1.0);
-
     let physical_gain = opamp_feedback_gain * passive_attenuation * transformer_gain;
     // Gain range for initial pre-gain computation.
     // Maps the physical gain to a useful input-level sweep.
     let gain_range_final = (physical_gain.max(0.1), physical_gain.max(0.1) * 10.0);
-    let (pre_gain, output_gain) = (physical_gain, level_default);
+    let pre_gain = physical_gain;
 
     let lfos = super::bind::build_lfo_bindings(
         pedal,
@@ -1787,7 +1764,6 @@ pub fn compile_pedal_with_options(
                 ctrl.target,
                 ControlTarget::PotInStage(_)
                     | ControlTarget::PotInMultiNlStage(_, _)
-                    | ControlTarget::BjtBias { .. }
             ) {
                 Some(SmoothedParam::new(0.5, i, sample_rate))
             } else {
@@ -1813,14 +1789,11 @@ pub fn compile_pedal_with_options(
     };
 
     // ══ Assembly ══════════════════════════════════════════════════════
-    // Pre-compute node_signals capacity so process() never allocates.
-    let node_signals_cap = triggers.len() + vcos.len() + stage_order.len() + vcas.len();
     let mut compiled = CompiledPedal {
         stages,
         push_pull_stages,
         multi_nl_stages,
         pre_gain,
-        output_gain,
         rail_saturation,
         sample_rate,
         controls,
@@ -1847,14 +1820,14 @@ pub fn compile_pedal_with_options(
         sidechains,
         pot_smoothers,
         pot_mirrors: {
-            // Build reverse mapping: source_id → [MirrorPot] with pre-computed suffixes
+            // Build reverse mapping: source_id → [mirrored_ids]
             let mut m: std::collections::HashMap<String, Vec<super::compiled::MirrorPot>> =
                 std::collections::HashMap::new();
             for (mirrored, source) in &pedal.mirrors {
                 m.entry(source.clone()).or_default().push(super::compiled::MirrorPot {
-                    id_aw: format!("{mirrored}__aw"),
-                    id_wb: format!("{mirrored}__wb"),
                     id: mirrored.clone(),
+                    id_aw: format!("{}__aw", mirrored),
+                    id_wb: format!("{}__wb", mirrored),
                 });
             }
             m
@@ -1862,9 +1835,9 @@ pub fn compile_pedal_with_options(
         base_grid_bias,
         multi_nl_recompute_counter: 0,
         stage_order,
-        node_signals: Vec::with_capacity(node_signals_cap),
+        node_signals: Vec::new(),
         bbd_wet_mix: 0.5,
-        pot_effects,
+        bbd_mix_pot_id,
         triggers,
         midi_trigger_map,
     };

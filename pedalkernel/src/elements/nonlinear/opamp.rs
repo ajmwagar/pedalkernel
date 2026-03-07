@@ -184,6 +184,26 @@ impl OpAmpModel {
 // Op-Amp Root (VCVS WDF Element)
 // ---------------------------------------------------------------------------
 
+/// Configuration for a feedback pot in an op-amp gain stage.
+///
+/// Stores topology info so the op-amp can recompute its gain from the
+/// pot's current resistance, without relying on external side-effect systems.
+#[derive(Debug, Clone)]
+pub struct FeedbackConfig {
+    /// Component ID of the pot controlling gain.
+    pub pot_comp_id: String,
+    /// Resistance of the other leg (Ri when pot is Rf, Rf when pot is Ri).
+    pub other_leg_r: f64,
+    /// Fixed resistance in series with the pot.
+    pub fixed_series_r: f64,
+    /// Fixed resistance in parallel across (pot + series R). None if no parallel R.
+    pub parallel_r: Option<f64>,
+    /// True = pot is in the feedback (Rf) leg; false = pot is in the input (Ri) leg.
+    pub pot_is_feedback: bool,
+    /// True = inverting topology; false = non-inverting.
+    pub is_inverting: bool,
+}
+
 /// Op-amp nonlinear root for WDF trees.
 ///
 /// Models the op-amp as a voltage-controlled voltage source:
@@ -230,7 +250,7 @@ pub enum OpAmpMode {
 /// - Slew rate limiting (LM308's slow slew = RAT's character)
 /// - Output saturation at supply rails
 /// - Soft clipping via feedback diodes (optional)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct OpAmpRoot {
     pub model: OpAmpModel,
     /// Operating mode (inverting/non-inverting).
@@ -250,6 +270,9 @@ pub struct OpAmpRoot {
     /// GBW rolloff filter coefficient: g = 1 - exp(-2π·f_cl/fs).
     /// Recomputed when gain or sample rate changes.
     gbw_coeff: f64,
+    /// Feedback pot configuration. When set, the op-amp recomputes its own
+    /// gain from the pot's resistance via `set_feedback_pot_r()`.
+    feedback_config: Option<FeedbackConfig>,
 }
 
 impl OpAmpRoot {
@@ -286,6 +309,7 @@ impl OpAmpRoot {
             soft_clip_v: None,
             gbw_state: 0.0,
             gbw_coeff,
+            feedback_config: None,
         }
     }
 
@@ -307,6 +331,7 @@ impl OpAmpRoot {
             soft_clip_v: None,
             gbw_state: 0.0,
             gbw_coeff,
+            feedback_config: None,
         }
     }
 
@@ -323,6 +348,7 @@ impl OpAmpRoot {
             soft_clip_v: None,
             gbw_state: 0.0,
             gbw_coeff,
+            feedback_config: None,
         }
     }
 
@@ -399,6 +425,51 @@ impl OpAmpRoot {
     #[inline]
     pub fn v_max(&self) -> f64 {
         self.model.v_max
+    }
+
+    /// Set feedback configuration for pot-driven gain control.
+    ///
+    /// After this is set, `set_feedback_pot_r()` can be called to recompute
+    /// the gain from the pot's current resistance.
+    pub fn set_feedback_config(&mut self, cfg: FeedbackConfig) {
+        self.feedback_config = Some(cfg);
+    }
+
+    /// Get the feedback pot component ID, if configured.
+    pub fn feedback_pot_id(&self) -> Option<&str> {
+        self.feedback_config.as_ref().map(|c| c.pot_comp_id.as_str())
+    }
+
+    /// Recompute gain from the feedback pot's current resistance.
+    ///
+    /// Called by the stage when it detects the feedback pot changed.
+    /// The gain formula depends on the topology:
+    /// - Pot in Rf, inverting:      gain = effective_rf / ri
+    /// - Pot in Rf, non-inverting:  gain = 1 + effective_rf / ri
+    /// - Pot in Ri, non-inverting:  gain = 1 + rf / effective_ri
+    pub fn set_feedback_pot_r(&mut self, pot_r: f64) {
+        let cfg = match &self.feedback_config {
+            Some(c) => c,
+            None => return,
+        };
+        let gain = if cfg.pot_is_feedback {
+            // Pot is in Rf leg
+            let eff_r = (cfg.fixed_series_r + pot_r).max(500.0);
+            let rf = match cfg.parallel_r {
+                Some(pr) => (pr * eff_r) / (pr + eff_r),
+                None => eff_r,
+            };
+            if cfg.is_inverting {
+                rf / cfg.other_leg_r
+            } else {
+                1.0 + rf / cfg.other_leg_r
+            }
+        } else {
+            // Pot is in Ri leg
+            let ri = (cfg.fixed_series_r + pot_r).max(100.0);
+            1.0 + cfg.other_leg_r / ri
+        };
+        self.set_gain(gain);
     }
 
     /// Configure feedback topology (for advanced use).

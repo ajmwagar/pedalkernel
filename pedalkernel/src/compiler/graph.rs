@@ -1764,13 +1764,13 @@ impl CircuitGraph {
 
                     // Check for non-inverting topology: pos connected to input (or signal path)
                     // Non-inverting: look for Ri path from neg to ground
-                    if let Some((ri, _ri_comps, _ri_pot)) =
+                    if let Some((ri, _ri_comps, ri_pot)) =
                         find_resistive_path(neg_node, gnd_node_resolved)
                     {
                         results.push(OpAmpFeedbackInfo {
                             comp_id: comp.id.clone(),
                             opamp_type,
-                            feedback_kind: OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot },
+                            feedback_kind: OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot, ri_pot },
                             neg_node,
                             pos_node,
                         });
@@ -1915,9 +1915,12 @@ pub(super) enum OpAmpFeedbackKind {
         rf: f64,
         /// Ground resistor value (neg to gnd)
         ri: f64,
-        /// Potentiometer info for runtime gain modulation.
+        /// Potentiometer info for Rf path (runtime gain modulation).
         /// (comp_id, max_resistance, fixed_series_resistance, parallel_fixed_resistance)
         rf_pot: Option<(String, f64, f64, Option<f64>)>,
+        /// Potentiometer info for Ri path (ground leg, e.g. Tumnus Gain).
+        /// (comp_id, max_resistance, fixed_series_resistance, parallel_fixed_resistance)
+        ri_pot: Option<(String, f64, f64, Option<f64>)>,
     },
     /// JFET drain at neg with R||C feedback to out (Phase 90 inverting all-pass).
     /// Gain = -Z_fb/Z_in where Z_in = R_ap + R_jfet and Z_fb = Rf || Cf.

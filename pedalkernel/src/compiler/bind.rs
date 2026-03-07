@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use crate::dsl::*;
 use crate::elements::*;
 
-use super::bjt_bias_analysis::BjtBiasPotInfo;
 use super::compiled::*;
 use super::component::{Component, ControlParamKind};
 use super::graph::CircuitGraph;
@@ -21,24 +20,21 @@ use super::stage::{MultiNlStage, RootKind, SidechainProcessor, WdfStage};
 
 /// Build control bindings for all user controls.
 ///
-/// Returns `(controls, pot_effects)` where `pot_effects` maps component IDs
-/// to behavioral side-effects (op-amp gain formula, BBD mix) that are applied
-/// alongside the physical PotInStage update.
+/// Returns `(controls, bbd_mix_pot_id)` where `bbd_mix_pot_id` is the component
+/// ID of a pot controlling BBD wet/dry mix (if detected from topology).
 pub(super) fn build_controls(
     pedal: &PedalDef,
     stages: &[WdfStage],
     multi_nl_stages: &[MultiNlStage],
-    opamp_pot_map: &HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)>,
-    bjt_bias_pot_map: &HashMap<String, BjtBiasPotInfo>,
     lfo_ids: &[String],
     delay_id_to_idx: &HashMap<String, usize>,
     _delay_lines_empty: bool,
     sidechain_comp_ids: &HashMap<String, usize>,
     bbd_id_to_idx: &HashMap<String, usize>,
     trigger_id_to_idx: &HashMap<String, usize>,
-) -> (Vec<ControlBinding>, HashMap<String, Vec<PotEffect>>) {
+) -> (Vec<ControlBinding>, Option<String>) {
     let mut controls = Vec::new();
-    let mut pot_effects: HashMap<String, Vec<PotEffect>> = HashMap::new();
+    let mut bbd_mix_pot_id: Option<String> = None;
 
     for ctrl in &pedal.controls {
         // Look up the component and find the declared control parameter matching
@@ -88,28 +84,20 @@ pub(super) fn build_controls(
                 ControlTarget::Trigger(idx)
             }
             Some(ControlParamKind::PotPosition) => {
-                // Temporary diagnostic trace
-                trace_pot_binding(
+                let (target, is_bbd_mix) = resolve_pot_target(
                     &ctrl.component,
                     pedal,
                     stages,
                     multi_nl_stages,
-                    opamp_pot_map,
-                    bjt_bias_pot_map,
-                );
-                resolve_pot_target(
-                    &ctrl.component,
-                    pedal,
-                    stages,
-                    multi_nl_stages,
-                    opamp_pot_map,
-                    bjt_bias_pot_map,
                     sidechain_comp_ids,
                     lfo_ids,
                     bbd_id_to_idx,
                     delay_id_to_idx,
-                    &mut pot_effects,
-                )
+                );
+                if is_bbd_mix {
+                    bbd_mix_pot_id = Some(ctrl.component.clone());
+                }
+                target
             }
             None => {
                 eprintln!(
@@ -124,187 +112,132 @@ pub(super) fn build_controls(
             .and_then(|c| c.kind.resistance())
             .unwrap_or(100_000.0);
 
-        let comp_id = ctrl.component.clone();
-        let comp_id_aw = format!("{comp_id}__aw");
-        let comp_id_wb = format!("{comp_id}__wb");
         controls.push(ControlBinding {
             label: ctrl.label.clone(),
             target,
-            component_id: comp_id,
-            component_id_aw: comp_id_aw,
-            component_id_wb: comp_id_wb,
+            component_id: ctrl.component.clone(),
+            component_id_aw: format!("{}__aw", ctrl.component),
+            component_id_wb: format!("{}__wb", ctrl.component),
             max_resistance: max_r,
             range: ctrl.range,
         });
     }
 
-    (controls, pot_effects)
+    (controls, bbd_mix_pot_id)
 }
 
 /// Resolve a pot-position control to its target.
 ///
+/// Returns `(target, is_bbd_mix)` where `is_bbd_mix` is true if this pot
+/// controls BBD wet/dry mix.
+///
 /// Priority:
-///  1. Op-amp feedback pot
-///  2. BJT bias pot
-///  3. Pot in WDF stage tree
-///  4. Pot in multi-NL stage
-///  5. Sidechain pot
-///  6. Net scan: pot wired to LFO/BBD/delay
-///  7. BBD mix detection (BFS through passives)
-///  8. PassiveRType children
-///  9. Fallback warning
+///  1.  Net scan: pot wired to LFO/BBD/delay (modulation routing wins over physical placement)
+///  2.  Pot in WDF stage tree (op-amp feedback pots found here naturally)
+///  3.  Pot in multi-NL stage (BJT bias pots found here naturally)
+///  4.  Sidechain pot
+///  5.  BBD mix detection (BFS through passives)
+///  6.  PassiveRType children
+///  7.  Fallback: NotInAudioPath warning
 fn resolve_pot_target(
     pot_id: &str,
     pedal: &PedalDef,
     stages: &[WdfStage],
     multi_nl_stages: &[MultiNlStage],
-    opamp_pot_map: &HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)>,
-    bjt_bias_pot_map: &HashMap<String, BjtBiasPotInfo>,
     sidechain_comp_ids: &HashMap<String, usize>,
     lfo_ids: &[String],
     bbd_id_to_idx: &HashMap<String, usize>,
     delay_id_to_idx: &HashMap<String, usize>,
-    pot_effects: &mut HashMap<String, Vec<PotEffect>>,
-) -> ControlTarget {
-    // 1. Op-amp feedback pot
-    if let Some(&(stage_idx, ri, fixed_series_r, max_pot_r, parallel_fixed_r, is_inverting)) =
-        opamp_pot_map.get(pot_id)
-    {
-        pot_effects
-            .entry(pot_id.to_string())
-            .or_default()
-            .push(PotEffect::OpAmpGain {
-                stage_idx,
-                ri,
-                fixed_series_r,
-                max_pot_r,
-                parallel_fixed_r,
-                is_inverting,
-            });
-        return ControlTarget::PotInStage(stage_idx);
+) -> (ControlTarget, bool) {
+    // 1. Net scan: pot wired to LFO/BBD/delay targets.
+    // This runs early because pots with modulation routing (e.g. Speed.wiper -> LFO1.rate)
+    // may also be stamped into WDF stages via their other lugs (Speed.a -> vcc, etc.).
+    // The explicit modulation connection takes priority over physical placement.
+    if let Some(target) = scan_pot_nets(pot_id, pedal, lfo_ids, bbd_id_to_idx, delay_id_to_idx) {
+        return (target, false);
     }
 
-    // 2. BJT bias pot
-    if let Some(info) = bjt_bias_pot_map.get(pot_id) {
-        return ControlTarget::BjtBias {
-            max_pot_r: info.max_pot_r,
-            taper: info.taper,
-        };
-    }
-
-    // 3. Pot in WDF stage tree
+    // 2. Pot in WDF stage tree (includes op-amp feedback pots)
     for (si, stage) in stages.iter().enumerate() {
         if has_pot(&stage.tree, pot_id) {
-            return ControlTarget::PotInStage(si);
+            return (ControlTarget::PotInStage(si), false);
         }
     }
 
-    // 3b. Output volume pot (wiper → out path, lug B → gnd).
-    // These pots sit in the passive chain after the last active stage and act
-    // as simple voltage dividers.  The multi-NL stage they'd otherwise land in
-    // extracts output from the NL junction, making the pot position invisible.
-    // Handle them as direct output_gain scaling instead.
-    if is_output_volume_pot(pot_id, pedal) {
-        return ControlTarget::OutputVolume;
-    }
-
-    // 4. Pot in multi-NL stage
+    // 3. Pot in multi-NL stage (includes BJT bias pots, output volume pots)
     for (mi, mnl) in multi_nl_stages.iter().enumerate() {
         for (pi, child) in mnl.pot_children.iter().enumerate() {
             if has_pot(child, pot_id) {
-                return ControlTarget::PotInMultiNlStage(mi, pi);
+                return (ControlTarget::PotInMultiNlStage(mi, pi), false);
             }
         }
     }
 
-    // 5. Sidechain pot
+    // 4. Sidechain pot
     let sc_idx = sidechain_comp_ids
         .get(pot_id)
         .or_else(|| sidechain_comp_ids.get(&format!("{pot_id}__aw")))
         .or_else(|| sidechain_comp_ids.get(&format!("{pot_id}__wb")));
     if let Some(&idx) = sc_idx {
-        return ControlTarget::SidechainControl(idx);
+        return (ControlTarget::SidechainControl(idx), false);
     }
 
-    // 6. Net scan: pot wired to LFO/BBD/delay targets
-    if let Some(target) = scan_pot_nets(pot_id, pedal, lfo_ids, bbd_id_to_idx, delay_id_to_idx) {
-        return target;
-    }
-
-    // 7. BBD mix detection via topology
+    // 5. BBD mix detection via topology (pot reaches BBD output through passives)
     if !bbd_id_to_idx.is_empty() && pot_reaches_bbd_output(pot_id, pedal, bbd_id_to_idx) {
-        pot_effects
-            .entry(pot_id.to_string())
-            .or_default()
-            .push(PotEffect::BbdMix);
         // Find the stage containing this mix pot
         for (si, stage) in stages.iter().enumerate() {
             if let RootKind::PassiveRType { children, .. } = &stage.root {
                 if children.iter().any(|c| has_pot(c, pot_id)) {
-                    return ControlTarget::PotInStage(si);
+                    return (ControlTarget::PotInStage(si), true);
                 }
             }
             if has_pot(&stage.tree, pot_id) {
-                return ControlTarget::PotInStage(si);
+                return (ControlTarget::PotInStage(si), true);
             }
         }
-        return ControlTarget::PotInStage(0);
+        return (ControlTarget::PotInStage(0), true);
     }
 
-    // 8. PassiveRType children (2-terminal pots in MNA)
+    // 6. PassiveRType children (2-terminal pots in orphan MNA stages)
     for (si, stage) in stages.iter().enumerate() {
         if let RootKind::PassiveRType { children, .. } = &stage.root {
             if children.iter().any(|c| has_pot(c, pot_id)) {
-                return ControlTarget::PotInStage(si);
+                return (ControlTarget::PotInStage(si), false);
             }
         }
     }
 
-    // 9. Fallback
+    // 7. Fallback
     eprintln!(
         "WARNING: pot '{pot_id}' not bound to any audio stage — control will have no effect"
     );
-    ControlTarget::PotInStage(0)
+    (ControlTarget::PotInStage(0), false)
 }
 
 /// Temporary diagnostic: trace resolve_pot_target for a specific pedal.
 #[allow(dead_code)]
 fn trace_pot_binding(
     pot_id: &str,
-    pedal: &PedalDef,
+    _pedal: &PedalDef,
     stages: &[WdfStage],
     multi_nl_stages: &[MultiNlStage],
-    opamp_pot_map: &HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)>,
-    bjt_bias_pot_map: &HashMap<String, BjtBiasPotInfo>,
 ) {
-    eprintln!("[bind-trace] pot '{pot_id}' in pedal '{}':", pedal.name);
-    if opamp_pot_map.contains_key(pot_id) {
-        eprintln!("  -> step 1: opamp feedback pot");
-        return;
-    }
-    if bjt_bias_pot_map.contains_key(pot_id) {
-        eprintln!("  -> step 2: BJT bias pot");
-        return;
-    }
+    eprintln!("[bind-trace] pot '{pot_id}' in pedal '{}':", _pedal.name);
     for (si, stage) in stages.iter().enumerate() {
         if has_pot(&stage.tree, pot_id) {
-            eprintln!("  -> step 3: PotInStage({si})");
+            eprintln!("  -> step 2: PotInStage({si})");
             return;
         }
-    }
-    if is_output_volume_pot(pot_id, pedal) {
-        eprintln!("  -> step 3b: OutputVolume");
-        return;
     }
     for (mi, mnl) in multi_nl_stages.iter().enumerate() {
         for (pi, child) in mnl.pot_children.iter().enumerate() {
             if has_pot(child, pot_id) {
-                eprintln!("  -> step 4: PotInMultiNlStage({mi}, {pi})");
+                eprintln!("  -> step 3: PotInMultiNlStage({mi}, {pi})");
                 return;
             }
         }
     }
-    eprintln!("  -> steps 5-9: later fallback");
+    eprintln!("  -> steps 4+: later fallback");
 }
 
 /// Detect output volume pots: 3-terminal pot with wiper reaching `out` and
@@ -312,6 +245,7 @@ fn trace_pot_binding(
 ///
 /// Handles both direct (pot.w → out) and 1-hop (pot.w → R.a, R.b → out)
 /// wiring patterns.
+#[allow(dead_code)]
 fn is_output_volume_pot(pot_id: &str, pedal: &PedalDef) -> bool {
     let wiper_pins: &[&str] = &["w", "wiper"];
     let out_names: &[&str] = &["out", "output"];
@@ -417,7 +351,7 @@ fn scan_pot_nets(
     bbd_id_to_idx: &HashMap<String, usize>,
     delay_id_to_idx: &HashMap<String, usize>,
 ) -> Option<ControlTarget> {
-    let pot_pins = ["wiper", "b", "a"];
+    let pot_pins = ["wiper", "w", "b", "a"];
     for net in &pedal.nets {
         // Forward: Pot.pin -> Target.modpin
         if let Pin::ComponentPin { component, pin } = &net.from {

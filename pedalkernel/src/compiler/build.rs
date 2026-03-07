@@ -547,6 +547,7 @@ pub(super) fn build_stages(
             sample_counter: 0,
             root_comp_id: String::new(),
             is_supply_driven: false,
+            feedback_pot_id: None,
         });
     }
 
@@ -1444,6 +1445,8 @@ fn build_rtype_stage(
             extract_vs: 0.0,
             state_space: Some(state_space_data),
             output_dc_block: plan.output_dc_block,
+            bias_pot_id: None,
+            bias_emitter_r: 470.0,
         });
     }
 
@@ -1894,6 +1897,8 @@ fn build_rtype_stage(
         extract_vs,
         state_space: None,
         output_dc_block: plan.output_dc_block,
+        bias_pot_id: None,
+        bias_emitter_r: 470.0,
     })
 }
 
@@ -2196,6 +2201,7 @@ fn build_vs_stage(
         sample_counter: 0,
         root_comp_id: String::new(),
         is_supply_driven: plan.supply_driven,
+        feedback_pot_id: None,
     })
 }
 
@@ -2263,6 +2269,7 @@ fn build_source_follower_stage(
         sample_counter: 0,
         root_comp_id: String::new(),
         is_supply_driven: false,
+        feedback_pot_id: None,
     })
 }
 

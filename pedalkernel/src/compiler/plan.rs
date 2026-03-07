@@ -1702,9 +1702,8 @@ fn plan_multi_nl_group(
         boundary_edges,
     );
 
-    // Remove BJT bias pot edges.
-    all_passive_edges
-        .retain(|eidx| !bjt_bias_analysis.bias_pot_edge_indices.contains(eidx));
+    // BJT bias pots are now regular passive ports in the R-type adaptor.
+    // They self-manage bias via update_bias_from_pot() on MultiNlStage.
 
     // Debug: show junction nodes and passive edges for boundary-split stages.
     if !boundary_edges.is_empty() {

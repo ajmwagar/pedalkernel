@@ -88,20 +88,8 @@ pub(super) enum ControlTarget {
         switch_id: String,
         num_positions: usize,
     },
-    /// Pot controlling BJT feedback coupling + DC bias offset.
-    /// NOT in the WDF tree; position maps to feedback_scale + VEB offset.
-    /// Used for pots bridging emitter nodes of coupled BJTs (e.g., Fuzz Face).
-    BjtBias {
-        max_pot_r: f64,
-        taper: crate::dsl::PotTaper,
-    },
     /// Fire a trigger impulse (index into triggers vec).
     Trigger(usize),
-    /// Output volume pot — directly scales output_gain.
-    /// Used for 3-terminal pots wired as voltage dividers to the output node
-    /// (wiper → out, lug B → gnd) that would otherwise be trapped inside a
-    /// multi-NL stage where the output is extracted from the NL junction.
-    OutputVolume,
 }
 
 /// Runtime state for a single-sample impulse source (drum trigger).
@@ -147,21 +135,9 @@ impl TriggerState {
     }
 }
 
-/// Behavioral side-effects applied alongside PotInStage physical updates.
-#[derive(Debug, Clone)]
-pub(super) enum PotEffect {
-    /// Recompute op-amp gain from pot position (pot in Rf path).
-    OpAmpGain {
-        stage_idx: usize,
-        ri: f64,
-        fixed_series_r: f64,
-        max_pot_r: f64,
-        parallel_fixed_r: Option<f64>,
-        is_inverting: bool,
-    },
-    /// Update BBD wet/dry mix from pot position.
-    BbdMix,
-}
+// PotEffect enum removed — all pot effects are now handled by component-driven
+// updates: OpAmpRoot::set_feedback_pot_r(), MultiNlStage::update_bias_from_pot(),
+// and bbd_mix_pot_id on CompiledPedal.
 
 /// Modulation target for LFOs and envelope followers.
 #[derive(Debug, Clone)]
@@ -493,7 +469,6 @@ pub struct CompiledPedal {
     /// Multi-NL stages using R-type adaptor + multi-port NR solver.
     pub(super) multi_nl_stages: Vec<MultiNlStage>,
     pub(super) pre_gain: f64,
-    pub(super) output_gain: f64,
     pub(super) rail_saturation: RailSaturation,
     pub(super) sample_rate: f64,
     pub(super) controls: Vec<ControlBinding>,
@@ -576,9 +551,9 @@ pub struct CompiledPedal {
     /// BBD wet/dry mix (0.0 = fully dry, 1.0 = fully wet).
     /// Controlled by "Blend"/"Mix" knobs on BBD delay pedals.
     pub(super) bbd_wet_mix: f64,
-    /// Behavioral side-effects for pot controls.
-    /// Keyed by component ID; applied alongside PotInStage physical updates.
-    pub(super) pot_effects: HashMap<String, Vec<PotEffect>>,
+    /// Component ID of the pot controlling BBD wet/dry mix.
+    /// When set, the pot position is read directly after pot updates.
+    pub(super) bbd_mix_pot_id: Option<String>,
     /// Trigger impulse sources for drum/percussion circuits.
     pub(super) triggers: Vec<TriggerState>,
     /// MIDI note → trigger index mapping for per-note dispatch.
@@ -597,6 +572,7 @@ pub(super) fn is_gain_label(label: &str) -> bool {
 }
 
 /// Level-like control labels.
+#[allow(dead_code)]
 pub(super) fn is_level_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
@@ -968,69 +944,28 @@ impl CompiledPedal {
                         smoother.set_target(value);
                     } else {
                         // Fallback: no smoother (shouldn't happen), update immediately.
-                        // Split borrows: read control info by ref, mutate stages separately.
                         let stage_idx = *_stage_idx;
-                        let ctrl = &self.controls[i];
-                        let comp_id = &ctrl.component_id;
-                        let comp_id_aw = &ctrl.component_id_aw;
-                        let comp_id_wb = &ctrl.component_id_wb;
+                        let comp_id = self.controls[i].component_id.clone();
+                        let comp_id_aw = self.controls[i].component_id_aw.clone();
+                        let comp_id_wb = self.controls[i].component_id_wb.clone();
                         if let Some(stage) = self.stages.get_mut(stage_idx) {
-                            if !stage.tree.set_pot(comp_id, value) {
-                                stage.set_passive_rtype_pot(comp_id, value);
+                            if !stage.tree.set_pot(&comp_id, value) {
+                                stage.set_passive_rtype_pot(&comp_id, value);
                             }
-                            if !stage.tree.set_pot(comp_id_aw, value) {
-                                stage.set_passive_rtype_pot(comp_id_aw, value);
+                            if !stage.tree.set_pot(&comp_id_aw, value) {
+                                stage.set_passive_rtype_pot(&comp_id_aw, value);
                             }
-                            if !stage.tree.set_pot(comp_id_wb, 1.0 - value) {
-                                stage.set_passive_rtype_pot(comp_id_wb, 1.0 - value);
+                            if !stage.tree.set_pot(&comp_id_wb, 1.0 - value) {
+                                stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - value);
                             }
                             stage.tree.recompute();
                             stage.flush_passive_rtype_recompute();
                         }
-                        // Apply behavioral side-effects (op-amp gain, BBD mix, etc.)
-                        if let Some(effects) = self.pot_effects.get(comp_id.as_str()) {
-                            for effect in effects {
-                                match effect {
-                                    PotEffect::OpAmpGain {
-                                        stage_idx, ri, fixed_series_r, max_pot_r,
-                                        parallel_fixed_r, is_inverting,
-                                    } => {
-                                        let pot_r = value * max_pot_r;
-                                        let eff_r = (fixed_series_r + pot_r).max(500.0);
-                                        let rf = match parallel_fixed_r {
-                                            Some(pr) => (pr * eff_r) / (pr + eff_r),
-                                            None => eff_r,
-                                        };
-                                        let gain = if *is_inverting { rf / ri } else { 1.0 + rf / ri };
-                                        if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                                            stage.set_opamp_gain(gain);
-                                        }
-                                    }
-                                    PotEffect::BbdMix => {
-                                        self.bbd_wet_mix = value;
-                                    }
-                                }
-                            }
+                        self.notify_stage_pot_changed(stage_idx);
+                        if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
+                            self.bbd_wet_mix = value;
                         }
-                        // Update mirrored pots (position = 1.0 - source)
-                        if let Some(mirrors) = self.pot_mirrors.get(comp_id.as_str()) {
-                            let inv = 1.0 - value;
-                            for mp in mirrors {
-                                for stage in &mut self.stages {
-                                    if !stage.tree.set_pot(&mp.id, inv) {
-                                        stage.set_passive_rtype_pot(&mp.id, inv);
-                                    }
-                                    if !stage.tree.set_pot(&mp.id_aw, inv) {
-                                        stage.set_passive_rtype_pot(&mp.id_aw, inv);
-                                    }
-                                    if !stage.tree.set_pot(&mp.id_wb, 1.0 - inv) {
-                                        stage.set_passive_rtype_pot(&mp.id_wb, 1.0 - inv);
-                                    }
-                                    stage.tree.recompute();
-                                    stage.flush_passive_rtype_recompute();
-                                }
-                            }
-                        }
+                        self.apply_pot_mirrors(&comp_id, value);
                     }
                 }
                 ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
@@ -1045,9 +980,6 @@ impl CompiledPedal {
                             stage.set_pot(comp_id, value);
                         }
                     }
-                }
-                ControlTarget::OutputVolume => {
-                    self.output_gain = value;
                 }
                 ControlTarget::SidechainControl(sc_idx) => {
                     let sc_idx = *sc_idx;
@@ -1113,13 +1045,6 @@ impl CompiledPedal {
                         stage.tree.recompute();
                     }
                 }
-                ControlTarget::BjtBias { max_pot_r, taper } => {
-                    let tapered = taper.apply(value);
-                    let max_pot_r = *max_pot_r;
-                    for stage in &mut self.multi_nl_stages {
-                        stage.set_feedback_from_pot(tapered, max_pot_r);
-                    }
-                }
                 ControlTarget::Trigger(idx) => {
                     if value > 0.5 {
                         if let Some(trig) = self.triggers.get_mut(*idx) {
@@ -1162,37 +1087,49 @@ impl CompiledPedal {
         }
     }
 
-    /// Apply behavioral side-effects for a pot control (op-amp gain, BBD mix, etc.).
-    fn apply_pot_effects(&mut self, comp_id: &str, value: f64) {
-        if let Some(effects) = self.pot_effects.get(comp_id).cloned() {
-            for effect in &effects {
-                match effect {
-                    PotEffect::OpAmpGain {
-                        stage_idx,
-                        ri,
-                        fixed_series_r,
-                        max_pot_r,
-                        parallel_fixed_r,
-                        is_inverting,
-                    } => {
-                        let pot_r = value * max_pot_r;
-                        let eff_r = (fixed_series_r + pot_r).max(500.0);
-                        let rf = match parallel_fixed_r {
-                            Some(pr) => (pr * eff_r) / (pr + eff_r),
-                            None => eff_r,
-                        };
-                        let gain = if *is_inverting {
-                            rf / ri
-                        } else {
-                            1.0 + rf / ri
-                        };
-                        if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                            stage.set_opamp_gain(gain);
-                        }
+    /// Notify a WDF stage that a pot changed and it should update
+    /// component-owned behaviors (e.g., OpAmpRoot gain from feedback pot).
+    fn notify_stage_pot_changed(&mut self, stage_idx: usize) {
+        if let Some(stage) = self.stages.get_mut(stage_idx) {
+            stage.notify_pot_changed();
+        }
+    }
+
+    /// Notify multi-NL stages that a pot changed and they should update
+    /// bias from their bias_pot_id if it matches.
+    fn notify_multi_nl_pot_changed(&mut self, comp_id: &str) {
+        for stage in &mut self.multi_nl_stages {
+            if stage.bias_pot_id.as_deref() == Some(comp_id) {
+                stage.update_bias_from_pot();
+            }
+        }
+    }
+
+    /// Update mirrored pots (position = 1.0 - source) across all stages.
+    fn apply_pot_mirrors(&mut self, comp_id: &str, value: f64) {
+        // Collect mirror info to avoid borrow conflict with self.stages.
+        let mirror_info: Option<Vec<(String, String, String)>> =
+            self.pot_mirrors.get(comp_id).map(|mirrors| {
+                mirrors
+                    .iter()
+                    .map(|mp| (mp.id.clone(), mp.id_aw.clone(), mp.id_wb.clone()))
+                    .collect()
+            });
+        if let Some(mirrors) = mirror_info {
+            let inv = 1.0 - value;
+            for (id, id_aw, id_wb) in &mirrors {
+                for stage in &mut self.stages {
+                    if !stage.tree.set_pot(id, inv) {
+                        stage.set_passive_rtype_pot(id, inv);
                     }
-                    PotEffect::BbdMix => {
-                        self.bbd_wet_mix = value;
+                    if !stage.tree.set_pot(id_aw, inv) {
+                        stage.set_passive_rtype_pot(id_aw, inv);
                     }
+                    if !stage.tree.set_pot(id_wb, 1.0 - inv) {
+                        stage.set_passive_rtype_pot(id_wb, 1.0 - inv);
+                    }
+                    stage.tree.recompute();
+                    stage.flush_passive_rtype_recompute();
                 }
             }
         }
@@ -1216,90 +1153,43 @@ impl CompiledPedal {
             }
             if self.pot_smoothers[si].advance() {
                 // Value changed, update the actual pot.
-                // Split borrows: read control info by ref, mutate stages separately.
+                // Clone control info to avoid borrow conflict with &mut self methods.
                 let ctrl_idx = self.pot_smoothers[si].control_idx;
                 let value = self.pot_smoothers[si].current;
-                let ctrl = &self.controls[ctrl_idx];
-                let comp_id = &ctrl.component_id;
-                let comp_id_aw = &ctrl.component_id_aw;
-                let comp_id_wb = &ctrl.component_id_wb;
-                match &ctrl.target {
+                let comp_id = self.controls[ctrl_idx].component_id.clone();
+                let comp_id_aw = self.controls[ctrl_idx].component_id_aw.clone();
+                let comp_id_wb = self.controls[ctrl_idx].component_id_wb.clone();
+                let max_r = self.controls[ctrl_idx].max_resistance;
+                match &self.controls[ctrl_idx].target {
                     ControlTarget::PotInStage(stage_idx) => {
                         let stage_idx = *stage_idx;
                         if let Some(stage) = self.stages.get_mut(stage_idx) {
-                            if !stage.tree.set_pot(comp_id, value) {
-                                stage.set_passive_rtype_pot(comp_id, value);
+                            if !stage.tree.set_pot(&comp_id, value) {
+                                stage.set_passive_rtype_pot(&comp_id, value);
                             }
-                            if !stage.tree.set_pot(comp_id_aw, value) {
-                                stage.set_passive_rtype_pot(comp_id_aw, value);
+                            if !stage.tree.set_pot(&comp_id_aw, value) {
+                                stage.set_passive_rtype_pot(&comp_id_aw, value);
                             }
-                            if !stage.tree.set_pot(comp_id_wb, 1.0 - value) {
-                                stage.set_passive_rtype_pot(comp_id_wb, 1.0 - value);
+                            if !stage.tree.set_pot(&comp_id_wb, 1.0 - value) {
+                                stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - value);
                             }
                             stage.tree.recompute();
                         }
-                        // Apply behavioral side-effects (op-amp gain, BBD mix, etc.)
-                        if let Some(effects) = self.pot_effects.get(comp_id.as_str()) {
-                            for effect in effects {
-                                match effect {
-                                    PotEffect::OpAmpGain {
-                                        stage_idx, ri, fixed_series_r, max_pot_r,
-                                        parallel_fixed_r, is_inverting,
-                                    } => {
-                                        let pot_r = value * max_pot_r;
-                                        let eff_r = (fixed_series_r + pot_r).max(500.0);
-                                        let rf = match parallel_fixed_r {
-                                            Some(pr) => (pr * eff_r) / (pr + eff_r),
-                                            None => eff_r,
-                                        };
-                                        let gain = if *is_inverting { rf / ri } else { 1.0 + rf / ri };
-                                        if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                                            stage.set_opamp_gain(gain);
-                                        }
-                                    }
-                                    PotEffect::BbdMix => {
-                                        self.bbd_wet_mix = value;
-                                    }
-                                }
-                            }
+                        // Component-driven updates: OpAmpRoot gain, BBD mix
+                        self.notify_stage_pot_changed(stage_idx);
+                        if self.bbd_mix_pot_id.as_deref() == Some(&comp_id) {
+                            self.bbd_wet_mix = value;
                         }
-                        // Update mirrored pots (position = 1.0 - source)
-                        if let Some(mirrors) = self.pot_mirrors.get(comp_id.as_str()) {
-                            let inv = 1.0 - value;
-                            for mp in mirrors {
-                                for stage in &mut self.stages {
-                                    if !stage.tree.set_pot(&mp.id, inv) {
-                                        stage.set_passive_rtype_pot(&mp.id, inv);
-                                    }
-                                    if !stage.tree.set_pot(&mp.id_aw, inv) {
-                                        stage.set_passive_rtype_pot(&mp.id_aw, inv);
-                                    }
-                                    if !stage.tree.set_pot(&mp.id_wb, 1.0 - inv) {
-                                        stage.set_passive_rtype_pot(&mp.id_wb, 1.0 - inv);
-                                    }
-                                    stage.tree.recompute();
-                                }
-                            }
-                        }
+                        self.apply_pot_mirrors(&comp_id, value);
                     }
                     ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
                         let stage_idx = *stage_idx;
-                        let max_r = ctrl.max_resistance;
                         if let Some(stage) = self.multi_nl_stages.get_mut(stage_idx) {
-                            stage.set_pot(comp_id, value);
+                            stage.set_pot(&comp_id, value);
+                            stage.update_bias_from_pot();
                             if max_r < 5_000.0 {
                                 stage.flush_recompute();
                             }
-                        }
-                    }
-                    ControlTarget::OutputVolume => {
-                        self.output_gain = value;
-                    }
-                    ControlTarget::BjtBias { max_pot_r, taper } => {
-                        let tapered = taper.apply(value);
-                        let max_pot_r = *max_pot_r;
-                        for stage in &mut self.multi_nl_stages {
-                            stage.set_feedback_from_pot(tapered, max_pot_r);
                         }
                     }
                     _ => {}
@@ -1353,11 +1243,6 @@ impl CompiledPedal {
             "Pre-Gain: {:.6} ({:.2} dB)\n",
             self.pre_gain,
             20.0 * self.pre_gain.log10()
-        ));
-        s.push_str(&format!(
-            "Output Gain: {:.6} ({:.2} dB)\n",
-            self.output_gain,
-            20.0 * self.output_gain.log10()
         ));
         s.push_str(&format!(
             "Gain Range: ({:.6}, {:.6})\n",
@@ -2105,14 +1990,11 @@ impl PedalProcessor for CompiledPedal {
             signal = loading.process(signal);
         }
 
-        let output = signal * self.output_gain;
+        let output = signal;
 
         #[cfg(feature = "debug-trace")]
         if trace_on {
-            eprintln!(
-                "  [OUT] pre_out={signal:.6e} output_gain={:.6} output={output:.6e}",
-                self.output_gain
-            );
+            eprintln!("  [OUT] output={output:.6e}");
         }
 
         // Record output for debug stats
