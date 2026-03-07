@@ -4,53 +4,13 @@
 //! commands (move_to, line_to, arc_to, close). These render at any resolution
 //! with zero texture memory when drawn with Lyon or a similar path rasterizer.
 
-use pedalkernel::dsl::ComponentKind;
+use pedalkernel::compiler::Component;
 use serde::{Deserialize, Serialize};
 
 /// A symbol identifier string used in the layout JSON.
 /// At runtime, the shader/renderer maps this to the actual path commands.
-pub fn symbol_for_kind(kind: &ComponentKind) -> String {
-    match kind {
-        ComponentKind::Resistor(_) => "resistor".into(),
-        ComponentKind::Capacitor(_) => "capacitor".into(),
-        ComponentKind::Inductor(_) => "inductor".into(),
-        ComponentKind::DiodePair(_) => "diode".into(),
-        ComponentKind::Diode(_) => "diode".into(),
-        ComponentKind::Zener(_) => "zener".into(),
-        ComponentKind::Potentiometer(..) => "pot".into(),
-        ComponentKind::Npn(_) => "npn_bjt".into(),
-        ComponentKind::Pnp(_) => "pnp_bjt".into(),
-        ComponentKind::OpAmp(_) => "opamp".into(),
-        ComponentKind::NJfet(_) => "njfet".into(),
-        ComponentKind::PJfet(_) => "pjfet".into(),
-        ComponentKind::Triode(_) => "triode".into(),
-        ComponentKind::VariMu(_) => "triode".into(),
-        ComponentKind::Pentode(_) => "pentode".into(),
-        ComponentKind::Nmos(_) => "nmos".into(),
-        ComponentKind::Pmos(_) => "pmos".into(),
-        ComponentKind::Transformer(_) => "transformer".into(),
-        ComponentKind::Photocoupler(_) => "photocoupler".into(),
-        ComponentKind::Lfo(..) => "lfo".into(),
-        ComponentKind::EnvelopeFollower(..) => "envelope".into(),
-        ComponentKind::Bbd(_) => "ic_chip".into(),
-        ComponentKind::DelayLine(..) => "delay".into(),
-        ComponentKind::Tap(..) => "tap".into(),
-        ComponentKind::Neon(_) => "neon".into(),
-        ComponentKind::Vco(..) => "ic_chip".into(),
-        ComponentKind::Vcf(_) => "ic_chip".into(),
-        ComponentKind::Vca(_) => "ic_chip".into(),
-        ComponentKind::Comparator(_) => "ic_chip".into(),
-        ComponentKind::AnalogSwitch(_) => "ic_chip".into(),
-        ComponentKind::MatchedNpn(_) => "npn_bjt".into(),
-        ComponentKind::MatchedPnp(_) => "pnp_bjt".into(),
-        ComponentKind::Tempco(..) => "resistor".into(),
-        ComponentKind::CapSwitched(_) => "capacitor".into(),
-        ComponentKind::InductorSwitched(_) => "inductor".into(),
-        ComponentKind::ResistorSwitched(_) => "resistor".into(),
-        ComponentKind::RotarySwitch(_) => "switch".into(),
-        ComponentKind::Switch(_) => "switch".into(),
-        ComponentKind::TriggerInput => "switch".into(),
-    }
+pub fn symbol_for_kind(kind: &dyn Component) -> String {
+    kind.symbol_name().to_string()
 }
 
 /// Enumeration of all symbol types used in the layout.

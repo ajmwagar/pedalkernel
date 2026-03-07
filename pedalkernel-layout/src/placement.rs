@@ -12,7 +12,7 @@ use crate::groups::{FunctionalGroup, GroupKind};
 use crate::layering::ColumnAssignment;
 use crate::symbols::symbol_for_kind;
 use crate::types::*;
-use pedalkernel::dsl::ComponentKind;
+use pedalkernel::compiler::Component;
 
 /// Vertical position constants (as fraction of total height).
 const VCC_RAIL_Y: f32 = 0.05;
@@ -170,13 +170,13 @@ fn place_gain_stage(
 
         placed.push(PlacedComponent {
             name: node.comp_id.clone(),
-            kind: kind_to_string(&comp.kind),
+            kind: kind_to_string(comp.kind.as_ref()),
             x,
             y,
             orientation,
-            symbol: symbol_for_kind(&comp.kind),
+            symbol: symbol_for_kind(comp.kind.as_ref()),
             group: group.name.clone(),
-            label: value_label(&comp.kind),
+            label: value_label(comp.kind.as_ref()),
             monitor_index,
         });
     }
@@ -206,10 +206,7 @@ fn place_opamp_stage(
         let (x, y, orientation) = if Some(member_id) == group.primary_device {
             // Op-amp at center
             (center_x, signal_y, 0)
-        } else if matches!(
-            &comp.kind,
-            ComponentKind::Diode(_) | ComponentKind::DiodePair(_)
-        ) {
+        } else if comp.kind.is_diode_family() {
             // Clipping diodes above signal path
             (center_x, signal_y - MIN_COMPONENT_SPACING, 0)
         } else {
@@ -226,13 +223,13 @@ fn place_opamp_stage(
 
         placed.push(PlacedComponent {
             name: node.comp_id.clone(),
-            kind: kind_to_string(&comp.kind),
+            kind: kind_to_string(comp.kind.as_ref()),
             x,
             y,
             orientation,
-            symbol: symbol_for_kind(&comp.kind),
+            symbol: symbol_for_kind(comp.kind.as_ref()),
             group: group.name.clone(),
-            label: value_label(&comp.kind),
+            label: value_label(comp.kind.as_ref()),
             monitor_index,
         });
     }
@@ -260,7 +257,7 @@ fn place_tone_stack(
             None => continue,
         };
 
-        let is_pot = matches!(comp.kind, ComponentKind::Potentiometer(..));
+        let is_pot = comp.kind.is_pot();
         let x = center_x + (i as f32 - count / 2.0) * spacing;
         let y = if is_pot {
             signal_y
@@ -274,13 +271,13 @@ fn place_tone_stack(
 
         placed.push(PlacedComponent {
             name: node.comp_id.clone(),
-            kind: kind_to_string(&comp.kind),
+            kind: kind_to_string(comp.kind.as_ref()),
             x,
             y,
             orientation: if is_pot { 0 } else { 90 },
-            symbol: symbol_for_kind(&comp.kind),
+            symbol: symbol_for_kind(comp.kind.as_ref()),
             group: group.name.clone(),
-            label: value_label(&comp.kind),
+            label: value_label(comp.kind.as_ref()),
             monitor_index,
         });
     }
@@ -309,14 +306,14 @@ fn place_push_pull(
             None => continue,
         };
 
-        let (x, y, orientation) = if matches!(comp.kind, ComponentKind::Pentode(_)) {
+        let (x, y, orientation) = if comp.kind.layout_class() == "pentode" {
             pentode_count += 1;
             if pentode_count % 2 == 1 {
                 (center_x, push_y, 0)
             } else {
                 (center_x, pull_y, 0)
             }
-        } else if matches!(comp.kind, ComponentKind::Transformer(_)) {
+        } else if comp.kind.is_transformer() {
             (center_x + MIN_COMPONENT_SPACING * 2.0, signal_y, 0)
         } else {
             // Bias components
@@ -332,13 +329,13 @@ fn place_push_pull(
 
         placed.push(PlacedComponent {
             name: node.comp_id.clone(),
-            kind: kind_to_string(&comp.kind),
+            kind: kind_to_string(comp.kind.as_ref()),
             x,
             y,
             orientation,
-            symbol: symbol_for_kind(&comp.kind),
+            symbol: symbol_for_kind(comp.kind.as_ref()),
             group: group.name.clone(),
-            label: value_label(&comp.kind),
+            label: value_label(comp.kind.as_ref()),
             monitor_index,
         });
     }
@@ -389,13 +386,13 @@ fn place_generic(
 
         placed.push(PlacedComponent {
             name: node.comp_id.clone(),
-            kind: kind_to_string(&comp.kind),
+            kind: kind_to_string(comp.kind.as_ref()),
             x,
             y,
             orientation: 0,
-            symbol: symbol_for_kind(&comp.kind),
+            symbol: symbol_for_kind(comp.kind.as_ref()),
             group: group.name.clone(),
-            label: value_label(&comp.kind),
+            label: value_label(comp.kind.as_ref()),
             monitor_index,
         });
     }
@@ -454,58 +451,10 @@ fn compute_signal_path_order(placed: &[PlacedComponent], _graph: &LayoutGraph) -
     indices
 }
 
-fn kind_to_string(kind: &ComponentKind) -> String {
-    match kind {
-        ComponentKind::Resistor(_) => "resistor".into(),
-        ComponentKind::Capacitor(_) => "capacitor".into(),
-        ComponentKind::Inductor(_) => "inductor".into(),
-        ComponentKind::DiodePair(_) => "diode_pair".into(),
-        ComponentKind::Diode(_) => "diode".into(),
-        ComponentKind::Zener(_) => "zener".into(),
-        ComponentKind::Potentiometer(..) => "pot".into(),
-        ComponentKind::Npn(_) => "npn".into(),
-        ComponentKind::Pnp(_) => "pnp".into(),
-        ComponentKind::OpAmp(_) => "opamp".into(),
-        ComponentKind::NJfet(_) => "njfet".into(),
-        ComponentKind::PJfet(_) => "pjfet".into(),
-        ComponentKind::Triode(_) => "triode".into(),
-        ComponentKind::VariMu(_) => "vari_mu".into(),
-        ComponentKind::Pentode(_) => "pentode".into(),
-        ComponentKind::Nmos(_) => "nmos".into(),
-        ComponentKind::Pmos(_) => "pmos".into(),
-        ComponentKind::Transformer(_) => "transformer".into(),
-        ComponentKind::Photocoupler(_) => "photocoupler".into(),
-        ComponentKind::Lfo(..) => "lfo".into(),
-        ComponentKind::EnvelopeFollower(..) => "envelope".into(),
-        ComponentKind::Bbd(_) => "bbd".into(),
-        ComponentKind::DelayLine(..) => "delay".into(),
-        ComponentKind::Tap(..) => "tap".into(),
-        ComponentKind::Neon(_) => "neon".into(),
-        ComponentKind::Vco(..) => "vco".into(),
-        ComponentKind::Vcf(_) => "vcf".into(),
-        ComponentKind::Vca(_) => "vca".into(),
-        ComponentKind::Comparator(_) => "comparator".into(),
-        ComponentKind::AnalogSwitch(_) => "analog_switch".into(),
-        ComponentKind::MatchedNpn(_) => "matched_npn".into(),
-        ComponentKind::MatchedPnp(_) => "matched_pnp".into(),
-        ComponentKind::Tempco(..) => "tempco".into(),
-        ComponentKind::CapSwitched(_) => "cap_switched".into(),
-        ComponentKind::InductorSwitched(_) => "inductor_switched".into(),
-        ComponentKind::ResistorSwitched(_) => "resistor_switched".into(),
-        ComponentKind::RotarySwitch(_) => "rotary_switch".into(),
-        ComponentKind::Switch(_) => "switch".into(),
-        ComponentKind::TriggerInput => "trigger_input".into(),
-    }
+fn kind_to_string(kind: &dyn Component) -> String {
+    kind.layout_class().to_string()
 }
 
-fn value_label(kind: &ComponentKind) -> Option<String> {
-    use pedalkernel::kicad::format_eng;
-    match kind {
-        ComponentKind::Resistor(v) => Some(format_eng(*v, "Ω")),
-        ComponentKind::Capacitor(v) => Some(format_eng(v.value, "F")),
-        ComponentKind::Inductor(v) => Some(format_eng(*v, "H")),
-        ComponentKind::Potentiometer(v, _) => Some(format_eng(*v, "Ω")),
-        ComponentKind::Zener(v) => Some(format!("{v}V")),
-        _ => None,
-    }
+fn value_label(kind: &dyn Component) -> Option<String> {
+    kind.display_value()
 }

@@ -5,7 +5,6 @@
 //! phase inverters, and generic groups for unmatched components.
 
 use crate::graph::LayoutGraph;
-use pedalkernel::dsl::ComponentKind;
 use std::collections::HashSet;
 
 /// The type of functional group detected.
@@ -113,19 +112,10 @@ fn detect_gain_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
             continue;
         }
 
-        let is_gain_device = matches!(
-            node.comp.as_ref().map(|c| &c.kind),
-            Some(
-                ComponentKind::Triode(_)
-                    | ComponentKind::Pentode(_)
-                    | ComponentKind::Npn(_)
-                    | ComponentKind::Pnp(_)
-                    | ComponentKind::NJfet(_)
-                    | ComponentKind::PJfet(_)
-                    | ComponentKind::Nmos(_)
-                    | ComponentKind::Pmos(_)
-            )
-        );
+        let is_gain_device = node.comp.as_ref().map_or(false, |c| {
+            let k = c.kind.as_ref();
+            k.is_tube() || k.is_bjt() || k.is_jfet() || k.is_mosfet()
+        });
 
         if !is_gain_device {
             continue;
@@ -176,14 +166,23 @@ fn detect_gain_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
         }
 
         let device_name = &node.comp_id;
-        let kind_name = match node.comp.as_ref().map(|c| &c.kind) {
-            Some(ComponentKind::Triode(_)) => "Triode",
-            Some(ComponentKind::Pentode(_)) => "Pentode",
-            Some(ComponentKind::Npn(_) | ComponentKind::Pnp(_)) => "BJT",
-            Some(ComponentKind::NJfet(_) | ComponentKind::PJfet(_)) => "JFET",
-            Some(ComponentKind::Nmos(_) | ComponentKind::Pmos(_)) => "MOSFET",
-            _ => "Gain",
-        };
+        let kind_name = node.comp.as_ref().map_or("Gain", |c| {
+            let k = c.kind.as_ref();
+            let lc = k.layout_class();
+            if lc == "triode" || lc == "vari_mu" {
+                "Triode"
+            } else if lc == "pentode" {
+                "Pentode"
+            } else if k.is_bjt() {
+                "BJT"
+            } else if k.is_jfet() {
+                "JFET"
+            } else if k.is_mosfet() {
+                "MOSFET"
+            } else {
+                "Gain"
+            }
+        });
 
         groups.push(FunctionalGroup {
             name: format!("gain_stage_{stage_num}"),
@@ -211,10 +210,9 @@ fn detect_opamp_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fu
             continue;
         }
 
-        let is_opamp = matches!(
-            node.comp.as_ref().map(|c| &c.kind),
-            Some(ComponentKind::OpAmp(_))
-        );
+        let is_opamp = node.comp.as_ref().map_or(false, |c| {
+            c.kind.op_amp_type().is_some()
+        });
 
         if !is_opamp {
             continue;
@@ -230,16 +228,9 @@ fn detect_opamp_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fu
                 continue;
             }
             // Include passives and diodes in the feedback network
-            let is_feedback_component = matches!(
-                graph.node_kind(nid),
-                Some(
-                    ComponentKind::Resistor(_)
-                        | ComponentKind::Capacitor(_)
-                        | ComponentKind::Diode(_)
-                        | ComponentKind::DiodePair(_)
-                        | ComponentKind::Potentiometer(..)
-                )
-            );
+            let is_feedback_component = graph.node_kind(nid).map_or(false, |k| {
+                (k.is_passive() && !k.is_transformer()) || k.is_diode_family() || k.is_pot()
+            });
             if is_feedback_component {
                 members.push(nid);
             }
@@ -275,10 +266,7 @@ fn detect_push_pull(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Funct
         .iter()
         .filter(|n| {
             !assigned.contains(&n.id)
-                && matches!(
-                    n.comp.as_ref().map(|c| &c.kind),
-                    Some(ComponentKind::Transformer(_))
-                )
+                && n.comp.as_ref().map_or(false, |c| c.kind.is_transformer())
         })
         .map(|n| n.id)
         .collect();
@@ -292,7 +280,7 @@ fn detect_push_pull(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Funct
             .iter()
             .filter(|&&nid| {
                 !assigned.contains(&nid)
-                    && matches!(graph.node_kind(nid), Some(ComponentKind::Pentode(_)))
+                    && graph.node_kind(nid).map_or(false, |k| k.layout_class() == "pentode")
             })
             .copied()
             .collect();
@@ -337,10 +325,7 @@ fn detect_tone_stacks(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
         .iter()
         .filter(|n| {
             !assigned.contains(&n.id)
-                && matches!(
-                    n.comp.as_ref().map(|c| &c.kind),
-                    Some(ComponentKind::Potentiometer(..))
-                )
+                && n.comp.as_ref().map_or(false, |c| c.kind.is_pot())
         })
         .map(|n| n.id)
         .collect();
@@ -407,7 +392,7 @@ fn detect_tone_stacks(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
         let pot_names: Vec<&str> = members
             .iter()
             .filter_map(|&m| {
-                if matches!(graph.node_kind(m), Some(ComponentKind::Potentiometer(..))) {
+                if graph.node_kind(m).map_or(false, |k| k.is_pot()) {
                     Some(graph.nodes[m].comp_id.as_str())
                 } else {
                     None
@@ -503,6 +488,7 @@ fn assign_remaining(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Funct
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pedalkernel::compiler::components::*;
     use pedalkernel::dsl::*;
 
     #[test]
@@ -513,27 +499,27 @@ mod tests {
             components: vec![
                 ComponentDef {
                     id: "C1".into(),
-                    kind: ComponentKind::Capacitor(CapConfig::new(100e-9)),
+                    kind: Box::new(Capacitor { config: CapConfig::new(100e-9) }),
                 },
                 ComponentDef {
                     id: "R1".into(),
-                    kind: ComponentKind::Resistor(1e6),
+                    kind: Box::new(Resistor { value: 1e6 }),
                 },
                 ComponentDef {
                     id: "V1".into(),
-                    kind: ComponentKind::Triode("12AX7".into()),
+                    kind: Box::new(Triode { model: "12AX7".into() }),
                 },
                 ComponentDef {
                     id: "R2".into(),
-                    kind: ComponentKind::Resistor(100e3),
+                    kind: Box::new(Resistor { value: 100e3 }),
                 },
                 ComponentDef {
                     id: "R3".into(),
-                    kind: ComponentKind::Resistor(1500.0),
+                    kind: Box::new(Resistor { value: 1500.0 }),
                 },
                 ComponentDef {
                     id: "C2".into(),
-                    kind: ComponentKind::Capacitor(CapConfig::new(25e-6)),
+                    kind: Box::new(Capacitor { config: CapConfig::new(25e-6) }),
                 },
             ],
             nets: vec![
@@ -627,6 +613,8 @@ mod tests {
             monitors: vec![],
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
+            subtitle: None,
+            midi_bindings: vec![],
         };
 
         let graph = LayoutGraph::from_pedal(&pedal);

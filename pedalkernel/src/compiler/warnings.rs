@@ -48,18 +48,20 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
     let mut warnings = Vec::new();
 
     for comp in &pedal.components {
-        match &comp.kind {
-            ComponentKind::Npn(name) | ComponentKind::Pnp(name) => {
+        let tag = comp.kind.type_tag();
+
+        if comp.kind.is_bjt() {
+            if let Some(name) = comp.kind.model_name() {
                 let is_ge = crate::models::bjt_is_germanium(name);
                 if is_ge {
-                    // Germanium PNPs: typical Vce(max) = 15–32V
+                    // Germanium PNPs: typical Vce(max) = 15-32V
                     if voltage > 18.0 {
                         warnings.push(VoltageWarning {
                             component_id: comp.id.clone(),
                             severity: WarningSeverity::Danger,
                             message: format!(
                                 "Germanium transistor {} likely exceeds Vce(max) at {:.0}V \
-                                 (typical Ge PNP rated 15–32V)",
+                                 (typical Ge PNP rated 15-32V)",
                                 comp.id, voltage
                             ),
                         });
@@ -86,61 +88,59 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                     });
                 }
             }
-            ComponentKind::OpAmp(ot) => {
-                // Use the op-amp type's known supply_max for accurate warnings
-                let max_supply = ot.supply_max();
-                if voltage > max_supply * 0.5 {
-                    // Operating above half the max total supply (typical single-supply limit)
-                    let severity = if voltage > max_supply {
-                        WarningSeverity::Danger
-                    } else {
-                        WarningSeverity::Caution
-                    };
+        } else if let Some(ot) = comp.kind.op_amp_type() {
+            // Use the op-amp type's known supply_max for accurate warnings
+            let max_supply = ot.supply_max();
+            if voltage > max_supply * 0.5 {
+                // Operating above half the max total supply (typical single-supply limit)
+                let severity = if voltage > max_supply {
+                    WarningSeverity::Danger
+                } else {
+                    WarningSeverity::Caution
+                };
+                warnings.push(VoltageWarning {
+                    component_id: comp.id.clone(),
+                    severity,
+                    message: format!(
+                        "Op-amp {} ({:?}) at {:.0}V — max total supply {:.0}V (±{:.0}V split)",
+                        comp.id,
+                        ot,
+                        voltage,
+                        max_supply,
+                        max_supply / 2.0
+                    ),
+                });
+            }
+        } else if let Some(farads) = comp.kind.capacitance() {
+            // Electrolytics (>= 1uF) often have low voltage ratings.
+            // 10uF caps commonly rated 10V or 16V.
+            if farads >= 1e-6 {
+                if voltage > 16.0 {
                     warnings.push(VoltageWarning {
                         component_id: comp.id.clone(),
-                        severity,
+                        severity: WarningSeverity::Danger,
                         message: format!(
-                            "Op-amp {} ({:?}) at {:.0}V — max total supply {:.0}V (±{:.0}V split)",
+                            "Electrolytic cap {} ({:.0}uF) may exceed voltage rating at {:.0}V \
+                             — common ratings are 10V, 16V, 25V",
+                            comp.id, farads * 1e6, voltage
+                        ),
+                    });
+                } else if voltage > 12.0 {
+                    warnings.push(VoltageWarning {
+                        component_id: comp.id.clone(),
+                        severity: WarningSeverity::Caution,
+                        message: format!(
+                            "Electrolytic cap {} ({:.0}uF) — ensure voltage rating >= {:.0}V",
                             comp.id,
-                            ot,
-                            voltage,
-                            max_supply,
-                            max_supply / 2.0
+                            farads * 1e6,
+                            voltage
                         ),
                     });
                 }
             }
-            ComponentKind::Capacitor(cfg) => {
-                let farads = cfg.value;
-                // Electrolytics (≥ 1µF) often have low voltage ratings.
-                // 10µF caps commonly rated 10V or 16V.
-                if farads >= 1e-6 {
-                    if voltage > 16.0 {
-                        warnings.push(VoltageWarning {
-                            component_id: comp.id.clone(),
-                            severity: WarningSeverity::Danger,
-                            message: format!(
-                                "Electrolytic cap {} ({:.0}µF) may exceed voltage rating at {:.0}V \
-                                 — common ratings are 10V, 16V, 25V",
-                                comp.id, farads * 1e6, voltage
-                            ),
-                        });
-                    } else if voltage > 12.0 {
-                        warnings.push(VoltageWarning {
-                            component_id: comp.id.clone(),
-                            severity: WarningSeverity::Caution,
-                            message: format!(
-                                "Electrolytic cap {} ({:.0}µF) — ensure voltage rating ≥ {:.0}V",
-                                comp.id,
-                                farads * 1e6,
-                                voltage
-                            ),
-                        });
-                    }
-                }
-            }
-            ComponentKind::DiodePair(DiodeType::Germanium)
-            | ComponentKind::Diode(DiodeType::Germanium) => {
+        } else if comp.kind.is_diode_family() {
+            // Check for germanium diodes
+            if comp.kind.diode_type() == Some(DiodeType::Germanium) {
                 // Ge diode forward behaviour is voltage-independent in the WDF,
                 // but reverse breakdown is lower (~50V vs 100V+ Si).
                 // Also: more temperature-sensitive at higher power dissipation.
@@ -156,50 +156,46 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                     });
                 }
             }
-            ComponentKind::Bbd(_) => {
-                // BBDs are typically rated 10-15V. They're sensitive to
-                // over-voltage which causes excess clock noise and distortion.
-                if voltage > 15.0 {
-                    warnings.push(VoltageWarning {
-                        component_id: comp.id.clone(),
-                        severity: WarningSeverity::Danger,
-                        message: format!(
-                            "BBD {} may exceed max supply at {:.0}V — typical rating 10-15V",
-                            comp.id, voltage
-                        ),
-                    });
-                }
+        } else if tag == "BBD delay" {
+            // BBDs are typically rated 10-15V. They're sensitive to
+            // over-voltage which causes excess clock noise and distortion.
+            if voltage > 15.0 {
+                warnings.push(VoltageWarning {
+                    component_id: comp.id.clone(),
+                    severity: WarningSeverity::Danger,
+                    message: format!(
+                        "BBD {} may exceed max supply at {:.0}V — typical rating 10-15V",
+                        comp.id, voltage
+                    ),
+                });
             }
-            // Synth ICs: CEM/AS/V series typically run ±5V to ±9V (10-18V total)
-            ComponentKind::Vco(..) | ComponentKind::Vcf(_) => {
-                if voltage > 18.0 {
-                    warnings.push(VoltageWarning {
-                        component_id: comp.id.clone(),
-                        severity: WarningSeverity::Danger,
-                        message: format!(
-                            "Synth IC {} exceeds max supply at {:.0}V — CEM/AS/V series rated ±9V (18V max)",
-                            comp.id, voltage
-                        ),
-                    });
-                }
+        } else if tag == "VCO" || tag == "VCF" {
+            // Synth ICs: CEM/AS/V series typically run +/-5V to +/-9V (10-18V total)
+            if voltage > 18.0 {
+                warnings.push(VoltageWarning {
+                    component_id: comp.id.clone(),
+                    severity: WarningSeverity::Danger,
+                    message: format!(
+                        "Synth IC {} exceeds max supply at {:.0}V — CEM/AS/V series rated ±9V (18V max)",
+                        comp.id, voltage
+                    ),
+                });
             }
-            ComponentKind::AnalogSwitch(_) => {
-                if voltage > 20.0 {
-                    warnings.push(VoltageWarning {
-                        component_id: comp.id.clone(),
-                        severity: WarningSeverity::Danger,
-                        message: format!(
-                            "Analog switch {} exceeds max supply at {:.0}V — CD4066/DG411 rated 20V max",
-                            comp.id, voltage
-                        ),
-                    });
-                }
+        } else if tag == "analog switch" {
+            if voltage > 20.0 {
+                warnings.push(VoltageWarning {
+                    component_id: comp.id.clone(),
+                    severity: WarningSeverity::Danger,
+                    message: format!(
+                        "Analog switch {} exceeds max supply at {:.0}V — CD4066/DG411 rated 20V max",
+                        comp.id, voltage
+                    ),
+                });
             }
-            // Resistors, inductors, Si/LED diodes, pots, VCA, comparator, matched
-            // transistors, tempco: no voltage concerns within the 5–24V range
-            // (or handled by supply_max spec if provided).
-            _ => {}
         }
+        // Resistors, inductors, Si/LED diodes, pots, VCA, comparator, matched
+        // transistors, tempco: no voltage concerns within the 5-24V range
+        // (or handled by supply_max spec if provided).
     }
 
     warnings

@@ -34,6 +34,9 @@ macro_rules! impl_component_dyn {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
         fn dyn_eq(&self, other: &dyn crate::compiler::component::Component) -> bool {
             other
                 .as_any()

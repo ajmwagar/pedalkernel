@@ -4,6 +4,7 @@
 
 use super::compile::*;
 use super::component::{Component, StampResult};
+use super::components::*;
 use super::split::*;
 use super::stage::*;
 use super::warnings::*;
@@ -1695,14 +1696,14 @@ pedal "Infinite Resistance Test" {
     assert!(switched_resistor.is_some(), "Should have R_sw component");
 
     if let Some(comp) = switched_resistor {
-        if let ComponentKind::ResistorSwitched(values) = &comp.kind {
-            assert_eq!(values.len(), 3, "Should have 3 positions");
-            assert_eq!(values[0], 10_000.0, "First position should be 10k");
+        if let Some(rs) = comp.kind.as_any().downcast_ref::<ResistorSwitched>() {
+            assert_eq!(rs.values.len(), 3, "Should have 3 positions");
+            assert_eq!(rs.values[0], 10_000.0, "First position should be 10k");
             assert!(
-                values[1].is_infinite(),
+                rs.values[1].is_infinite(),
                 "Second position should be infinite"
             );
-            assert_eq!(values[2], 47_000.0, "Third position should be 47k");
+            assert_eq!(rs.values[2], 47_000.0, "Third position should be 47k");
         } else {
             panic!("R_sw should be ResistorSwitched");
         }
@@ -2683,10 +2684,7 @@ pedal "Transformer Pin Test" {
         .iter()
         .enumerate()
         .filter(|(_, e)| {
-            matches!(
-                graph.components[e.comp_idx].kind,
-                ComponentKind::Transformer(_)
-            )
+            graph.components[e.comp_idx].kind.is_transformer()
         })
         .collect();
 
@@ -2946,32 +2944,32 @@ fn multi_nl_fuzz_face_pot_audio_impact() {
 #[test]
 fn component_is_passive() {
     // Passive components
-    assert!(ComponentKind::Resistor(10_000.0).is_passive());
-    assert!(ComponentKind::Capacitor(CapConfig::new(100e-9)).is_passive());
-    assert!(ComponentKind::Inductor(47e-3).is_passive());
-    assert!(ComponentKind::Potentiometer(100_000.0, PotTaper::B).is_passive());
-    assert!(ComponentKind::Tempco(10_000.0, 100.0).is_passive());
-    assert!(ComponentKind::ResistorSwitched(vec![1000.0, 2000.0]).is_passive());
-    assert!(ComponentKind::CapSwitched(vec![100e-9, 200e-9]).is_passive());
-    assert!(ComponentKind::InductorSwitched(vec![47e-3, 100e-3]).is_passive());
-    assert!(ComponentKind::Transformer(TransformerConfig::default()).is_passive());
+    assert!(Resistor { value: 10_000.0 }.is_passive());
+    assert!(Capacitor { config: CapConfig::new(100e-9) }.is_passive());
+    assert!(Inductor { value: 47e-3 }.is_passive());
+    assert!(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }.is_passive());
+    assert!(Tempco { resistance: 10_000.0, ppm: 100.0 }.is_passive());
+    assert!(ResistorSwitched { values: vec![1000.0, 2000.0] }.is_passive());
+    assert!(CapSwitched { values: vec![100e-9, 200e-9] }.is_passive());
+    assert!(InductorSwitched { values: vec![47e-3, 100e-3] }.is_passive());
+    assert!(TransformerComp { config: TransformerConfig::default() }.is_passive());
 
     // Non-passive components
-    assert!(!ComponentKind::Diode(DiodeType::Silicon).is_passive());
-    assert!(!ComponentKind::DiodePair(DiodeType::Silicon).is_passive());
-    assert!(!ComponentKind::OpAmp(OpAmpType::Generic).is_passive());
-    assert!(!ComponentKind::Npn("2N3904".to_string()).is_passive());
-    assert!(!ComponentKind::Pnp("AC128".to_string()).is_passive());
-    assert!(!ComponentKind::NJfet("2N5457".to_string()).is_passive());
-    assert!(!ComponentKind::Triode("12AX7".to_string()).is_passive());
-    assert!(!ComponentKind::VariMu("6386".to_string()).is_passive());
+    assert!(!Diode { diode_type: DiodeType::Silicon }.is_passive());
+    assert!(!DiodePair { diode_type: DiodeType::Silicon }.is_passive());
+    assert!(!OpAmp { op_type: OpAmpType::Generic }.is_passive());
+    assert!(!Npn { model: "2N3904".to_string() }.is_passive());
+    assert!(!Pnp { model: "AC128".to_string() }.is_passive());
+    assert!(!NJfet { model: "2N5457".to_string() }.is_passive());
+    assert!(!Triode { model: "12AX7".to_string() }.is_passive());
+    assert!(!VariMu { model: "6386".to_string() }.is_passive());
 }
 
 #[test]
 fn component_stamp_resistor() {
     let mut mna = MnaSystem::new(2, 0);
     let result =
-        ComponentKind::Resistor(10_000.0).stamp_mna("R1", Some(0), Some(1), &mut mna, 48_000.0);
+        Resistor { value: 10_000.0 }.stamp_mna("R1", Some(0), Some(1), &mut mna, 48_000.0);
     assert!(matches!(result, StampResult::Stamped));
     // G matrix diagonal should have 1/R = 1e-4
     let g = 1.0 / 10_000.0;
@@ -2987,7 +2985,7 @@ fn component_stamp_capacitor() {
     let mut mna = MnaSystem::new(2, 0);
     let cfg = CapConfig::new(100e-9);
     let result =
-        ComponentKind::Capacitor(cfg).stamp_mna("C1", Some(0), Some(1), &mut mna, 48_000.0);
+        Capacitor { config: cfg }.stamp_mna("C1", Some(0), Some(1), &mut mna, 48_000.0);
     match result {
         StampResult::Reactive { rp, .. } => {
             let expected_rp = 1.0 / (2.0 * 48_000.0 * 100e-9);
@@ -3003,7 +3001,7 @@ fn component_stamp_capacitor() {
 fn component_stamp_inductor() {
     let mut mna = MnaSystem::new(2, 0);
     let result =
-        ComponentKind::Inductor(47e-3).stamp_mna("L1", Some(0), Some(1), &mut mna, 48_000.0);
+        Inductor { value: 47e-3 }.stamp_mna("L1", Some(0), Some(1), &mut mna, 48_000.0);
     match result {
         StampResult::Reactive { rp, .. } => {
             let expected_rp = 2.0 * 48_000.0 * 47e-3;
@@ -3017,7 +3015,7 @@ fn component_stamp_inductor() {
 #[test]
 fn component_stamp_pot() {
     let mut mna = MnaSystem::new(2, 0);
-    let result = ComponentKind::Potentiometer(100_000.0, PotTaper::B).stamp_mna(
+    let result = Potentiometer { max_r: 100_000.0, taper: PotTaper::B }.stamp_mna(
         "Vol",
         Some(0),
         Some(1),
@@ -3042,7 +3040,7 @@ fn component_stamp_pot() {
 fn component_stamp_tempco() {
     let mut mna = MnaSystem::new(2, 0);
     let result =
-        ComponentKind::Tempco(4700.0, 3500.0).stamp_mna("RT1", Some(0), Some(1), &mut mna, 48_000.0);
+        Tempco { resistance: 4700.0, ppm: 3500.0 }.stamp_mna("RT1", Some(0), Some(1), &mut mna, 48_000.0);
     assert!(matches!(result, StampResult::Stamped));
     let g = 1.0 / 4700.0;
     assert!((mna.g_matrix[0] - g).abs() < 1e-12);
@@ -3051,7 +3049,7 @@ fn component_stamp_tempco() {
 #[test]
 fn component_stamp_transformer_skips() {
     let mut mna = MnaSystem::new(2, 0);
-    let result = ComponentKind::Transformer(TransformerConfig::default()).stamp_mna(
+    let result = TransformerComp { config: TransformerConfig::default() }.stamp_mna(
         "T1",
         Some(0),
         Some(1),
@@ -3065,7 +3063,7 @@ fn component_stamp_transformer_skips() {
 #[test]
 fn component_stamp_diode_skips() {
     let mut mna = MnaSystem::new(2, 0);
-    let result = ComponentKind::Diode(DiodeType::Silicon).stamp_mna(
+    let result = Diode { diode_type: DiodeType::Silicon }.stamp_mna(
         "D1",
         Some(0),
         Some(1),

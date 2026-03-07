@@ -15,6 +15,11 @@ use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
 
 use super::classify::{ClassifiedCircuit, NonlinearKind};
+use super::component::StampResult;
+use super::components::{
+    CapSwitched, Capacitor as CapacitorComp, Potentiometer as PotComp,
+    Resistor as ResistorComp,
+};
 use super::dyn_node::DynNode;
 use super::graph::{sp_reduce, sp_to_dyn, CircuitGraph, NodeId, SpTree};
 use super::helpers::*;
@@ -65,9 +70,9 @@ pub(super) fn build_transformer_subtrees(
     for &eidx in passive_idxs {
         let edge = &graph.edges[eidx];
         let comp = &graph.components[edge.comp_idx];
-        let cfg = match &comp.kind {
-            ComponentKind::Transformer(cfg) => cfg,
-            _ => continue,
+        let cfg = match comp.kind.transformer_config() {
+            Some(cfg) => cfg,
+            None => continue,
         };
 
         // Skip push-pull transformers (handled separately).
@@ -152,12 +157,7 @@ fn build_other_side_subtree(
         .edges
         .iter()
         .enumerate()
-        .filter(|(_, e)| {
-            matches!(
-                graph.components[e.comp_idx].kind,
-                ComponentKind::Transformer(_)
-            )
-        })
+        .filter(|(_, e)| graph.components[e.comp_idx].kind.is_transformer())
         .map(|(idx, _)| idx)
         .collect();
 
@@ -192,13 +192,11 @@ fn build_other_side_subtree(
             let Some(n) = neighbor else { continue };
 
             // Skip NL component edges (by checking component kind).
-            match &graph.components[e.comp_idx].kind {
-                ComponentKind::Resistor(_)
-                | ComponentKind::Capacitor(_)
-                | ComponentKind::Inductor(_)
-                | ComponentKind::Potentiometer(_, _)
-                | ComponentKind::Tempco(_, _) => {}
-                _ => continue,
+            // Only traverse through passive, non-transformer components.
+            if !graph.components[e.comp_idx].kind.is_passive()
+                || graph.components[e.comp_idx].kind.is_transformer()
+            {
+                continue;
             }
 
             // Skip supply nodes (boundary).
@@ -385,7 +383,6 @@ pub(super) fn build_stages(
     pp_transformer_edges: &HashSet<usize>,
     lfo_controlled_jfets: &HashSet<String>,
 ) -> (Vec<WdfStage>, Vec<MultiNlStage>) {
-    use super::component::Component;
     let vs_comp_idx = graph.components.len();
 
     // Build unity-gain feedback op-amp queue for JFET pairing.
@@ -415,10 +412,7 @@ pub(super) fn build_stages(
         // Pentodes without transformers may still SP-reduce successfully.
         let pentode_with_transformer = matches!(&elem.kind, NonlinearKind::Pentode { .. })
             && plan.passive_idxs.iter().any(|&idx| {
-                matches!(
-                    graph.components[graph.edges[idx].comp_idx].kind,
-                    ComponentKind::Transformer(_)
-                )
+                graph.components[graph.edges[idx].comp_idx].kind.is_transformer()
             });
         if pentode_with_transformer {
             if let Some(mut multi_nl) =
@@ -642,10 +636,7 @@ fn build_triode_mna_fallback(
             if edge.node_a != far_node && edge.node_b != far_node {
                 continue;
             }
-            if matches!(
-                graph.components[edge.comp_idx].kind,
-                ComponentKind::Transformer(_)
-            ) {
+            if graph.components[edge.comp_idx].kind.is_transformer() {
                 if !passive_edges.contains(&idx) && !xfmr_edges.contains(&idx) {
                     xfmr_edges.push(idx);
                 }
@@ -884,9 +875,9 @@ pub(super) fn build_push_pull_stages(
             if let (Some((push_tree, push_comp)), Some((pull_tree, _))) = (push_half, pull_half) {
                 // Look up transformer config and wrap each half with reflected load.
                 let xfmr_edge = &graph.edges[pp_plan.transformer_edge_idx];
-                let xfmr_cfg = match &graph.components[xfmr_edge.comp_idx].kind {
-                    ComponentKind::Transformer(cfg) => cfg,
-                    _ => {
+                let xfmr_cfg = match graph.components[xfmr_edge.comp_idx].kind.transformer_config() {
+                    Some(cfg) => cfg,
+                    None => {
                         // Shouldn't happen — plan already validated transformer.
                         continue;
                     }
@@ -1024,7 +1015,7 @@ fn stamp_passive_edge(
     let n2 = node_to_mna(e.node_b);
 
     // Transformer needs coupled_edge_indices context — handle specially.
-    if let ComponentKind::Transformer(cfg) = &comp.kind {
+    if let Some(cfg) = comp.kind.transformer_config() {
         if coupled_edge_indices.contains(&eidx) {
             if cfg.primary_dcr > 0.0 {
                 mna.stamp_resistor(n1, n2, cfg.primary_dcr);
@@ -1049,7 +1040,6 @@ fn stamp_passive_edge(
     }
 
     // All other passives: delegate to Component trait.
-    use super::component::{Component, StampResult};
     match comp.kind.stamp_mna(&comp.id, n1, n2, mna, sample_rate) {
         StampResult::Stamped => {}
         StampResult::Reactive { dyn_node, .. } => {
@@ -1140,7 +1130,7 @@ fn try_build_multi_nl_stage(
         for &eidx in &plan.passive_edge_indices {
             let e = &graph.edges[eidx];
             let comp = &graph.components[e.comp_idx];
-            if let ComponentKind::Transformer(cfg) = &comp.kind {
+            if let Some(cfg) = comp.kind.transformer_config() {
                 if seen_comp.contains(&e.comp_idx) {
                     continue;
                 }
@@ -1287,47 +1277,41 @@ fn try_build_multi_nl_stage(
             let n1 = node_to_mna(e.node_a);
             let n2 = node_to_mna(e.node_b);
 
-            match &comp.kind {
-                ComponentKind::Capacitor(cfg) => {
-                    // State-space: cap goes into C_cap matrix (raw farads),
-                    // NOT as a WDF port with port conductance 2·fs·C.
-                    cap_stamps.push((n1, n2, cfg.value));
-                    continue;
-                }
-                ComponentKind::CapSwitched(values) => {
-                    if let Some(&c) = values.first() {
-                        if c.is_finite() && c > 0.0 {
-                            cap_stamps.push((n1, n2, c));
-                        }
+            if let Some(cap) = comp.kind.as_any().downcast_ref::<CapacitorComp>() {
+                // State-space: cap goes into C_cap matrix (raw farads),
+                // NOT as a WDF port with port conductance 2·fs·C.
+                cap_stamps.push((n1, n2, cap.config.value));
+                continue;
+            } else if let Some(cs) = comp.kind.as_any().downcast_ref::<CapSwitched>() {
+                if let Some(&c) = cs.values.first() {
+                    if c.is_finite() && c > 0.0 {
+                        cap_stamps.push((n1, n2, c));
                     }
-                    continue;
                 }
-                ComponentKind::Potentiometer(max_r, taper) => {
-                    // State-space: pot goes into G as a resistor.
-                    // Keep DynNode child for set_pot() API via pot_entries.
-                    let initial_pos = 0.5;
-                    let tapered_pos = taper.apply(initial_pos);
-                    let r = (tapered_pos * *max_r).max(1.0);
-                    mna.stamp_resistor(n1, n2, r);
-                    pot_entries.push((
-                        eidx,
-                        DynNode::Pot {
-                            comp_id: comp.id.clone(),
-                            max_resistance: *max_r,
-                            position: initial_pos,
-                            taper: *taper,
-                            rp: r,
-                        },
-                        n1,
-                        n2,
-                        1.0 / r,
-                    ));
-                    continue;
-                }
-                _ => {
-                    // Resistors, inductors, transformers: standard stamping.
-                }
+                continue;
+            } else if let Some(pot) = comp.kind.as_any().downcast_ref::<PotComp>() {
+                // State-space: pot goes into G as a resistor.
+                // Keep DynNode child for set_pot() API via pot_entries.
+                let initial_pos = 0.5;
+                let tapered_pos = pot.taper.apply(initial_pos);
+                let r = (tapered_pos * pot.max_r).max(1.0);
+                mna.stamp_resistor(n1, n2, r);
+                pot_entries.push((
+                    eidx,
+                    DynNode::Pot {
+                        comp_id: comp.id.clone(),
+                        max_resistance: pot.max_r,
+                        position: initial_pos,
+                        taper: pot.taper,
+                        rp: r,
+                    },
+                    n1,
+                    n2,
+                    1.0 / r,
+                ));
+                continue;
             }
+            // Resistors, inductors, transformers: standard stamping.
         }
         stamp_passive_edge(
             eidx,
@@ -1818,12 +1802,7 @@ fn try_build_multi_nl_stage(
                         if visited.insert(n) {
                             // Only follow through resistor edges (not reactive ones).
                             let comp = &graph.components[e.comp_idx];
-                            if matches!(
-                                &comp.kind,
-                                ComponentKind::Resistor(_)
-                                    | ComponentKind::ResistorSwitched(_)
-                                    | ComponentKind::Tempco(_, _)
-                            ) {
+                            if comp.kind.resistance().is_some() {
                                 queue.push_back(n);
                             }
                         }
@@ -2124,13 +2103,13 @@ fn build_components_with_virtuals(
     while components.len() <= max_idx {
         components.push(ComponentDef {
             id: "__vs__".to_string(),
-            kind: ComponentKind::Resistor(1.0),
+            kind: Box::new(ResistorComp { value: 1.0 }),
         });
     }
     if let Some((ve, ve_idx)) = virtual_edge {
         components[ve_idx] = ComponentDef {
             id: ve.name.to_string(),
-            kind: ComponentKind::Resistor(ve.resistance),
+            kind: Box::new(ResistorComp { value: ve.resistance }),
         };
     }
     components
@@ -2340,7 +2319,6 @@ fn build_push_pull_roots(
 /// and searches for a resistor edge between them. Falls back to 600Ω
 /// (standard line-level termination) if not found.
 fn find_secondary_load_resistance(graph: &CircuitGraph, xfmr_comp_idx: usize) -> f64 {
-    use super::component::Component;
     let comp = &graph.components[xfmr_comp_idx];
     let sec_a_key = format!("{}.c", comp.id);
     let sec_b_key = format!("{}.d", comp.id);

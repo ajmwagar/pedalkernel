@@ -94,6 +94,10 @@ impl Component for Resistor {
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Device:R", "R") }
+
+    fn symbol_name(&self) -> &'static str { "resistor" }
+    fn layout_class(&self) -> &'static str { "resistor" }
+    fn display_value(&self) -> Option<String> { Some(crate::kicad::format_eng(self.value, "Ω")) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -229,6 +233,10 @@ impl Component for Capacitor {
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Device:C", "C") }
+
+    fn symbol_name(&self) -> &'static str { "capacitor" }
+    fn layout_class(&self) -> &'static str { "capacitor" }
+    fn display_value(&self) -> Option<String> { Some(crate::kicad::format_eng(self.config.value, "F")) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -306,6 +314,10 @@ impl Component for Inductor {
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Device:L", "L") }
+
+    fn symbol_name(&self) -> &'static str { "inductor" }
+    fn layout_class(&self) -> &'static str { "inductor" }
+    fn display_value(&self) -> Option<String> { Some(crate::kicad::format_eng(self.value, "H")) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -399,6 +411,13 @@ impl Component for Potentiometer {
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Device:R_Potentiometer", "RV") }
+
+    fn symbol_name(&self) -> &'static str { "pot" }
+    fn layout_class(&self) -> &'static str { "pot" }
+    fn display_value(&self) -> Option<String> { Some(crate::kicad::format_eng(self.max_r, "\u{2126}")) }
+
+    fn is_pot(&self) -> bool { true }
+    fn pot_taper(&self) -> Option<crate::dsl::PotTaper> { Some(self.taper) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -452,6 +471,10 @@ impl Component for Tempco {
     fn resistance(&self) -> Option<f64> { Some(self.resistance) }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Device:R", "RT") }
+
+    fn symbol_name(&self) -> &'static str { "resistor" }
+    fn layout_class(&self) -> &'static str { "tempco" }
+    fn display_value(&self) -> Option<String> { None }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -513,6 +536,9 @@ impl Component for CapSwitched {
     fn capacitance(&self) -> Option<f64> { self.values.first().copied() }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Device:C", "C") }
+
+    fn symbol_name(&self) -> &'static str { "capacitor" }
+    fn layout_class(&self) -> &'static str { "cap_switched" }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -573,6 +599,9 @@ impl Component for InductorSwitched {
     fn inductance(&self) -> Option<f64> { self.values.first().copied() }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Device:L", "L") }
+
+    fn symbol_name(&self) -> &'static str { "inductor" }
+    fn layout_class(&self) -> &'static str { "inductor_switched" }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -625,4 +654,7 @@ impl Component for ResistorSwitched {
     fn resistance(&self) -> Option<f64> { self.values.first().copied() }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Device:R", "R") }
+
+    fn symbol_name(&self) -> &'static str { "resistor" }
+    fn layout_class(&self) -> &'static str { "resistor_switched" }
 }

@@ -45,8 +45,10 @@ use nom::{
     IResult,
 };
 
+use crate::compiler::component::Component;
+use crate::compiler::components::*;
 use crate::compiler::{VoltageWarning, WarningSeverity};
-use crate::dsl::{ComponentKind, PedalDef};
+use crate::dsl::PedalDef;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Data model
@@ -223,10 +225,10 @@ pub fn check_voltage_with_specs(
     for comp in &pedal.components {
         if let Some(spec) = limits.specs.get(&comp.id) {
             // ── Explicit spec: use real values ────────────────────────
-            check_spec_voltage(&comp.id, &comp.kind, spec, voltage, &mut warnings);
+            check_spec_voltage(&comp.id, comp.kind.as_ref(), spec, voltage, &mut warnings);
         } else {
             // ── No spec: fall back to heuristic for this component ───
-            check_heuristic_voltage(pedal, &comp.id, &comp.kind, voltage, &mut warnings);
+            check_heuristic_voltage(pedal, &comp.id, comp.kind.as_ref(), voltage, &mut warnings);
         }
     }
 
@@ -236,7 +238,7 @@ pub fn check_voltage_with_specs(
 /// Check a single component against its explicit hardware spec.
 fn check_spec_voltage(
     id: &str,
-    kind: &ComponentKind,
+    kind: &dyn Component,
     spec: &HardwareSpec,
     voltage: f64,
     warnings: &mut Vec<VoltageWarning>,
@@ -249,35 +251,32 @@ fn check_spec_voltage(
 
     // Transistor Vce(max)
     if let Some(vce_max) = spec.vce_max {
-        match kind {
-            ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
-                if voltage > vce_max {
-                    warnings.push(VoltageWarning {
-                        component_id: id.to_string(),
-                        severity: WarningSeverity::Danger,
-                        message: format!(
-                            "Transistor {id}{part_label} exceeds Vce(max) {vce_max:.0}V \
-                             at {voltage:.0}V supply",
-                        ),
-                    });
-                } else if voltage > vce_max * 0.8 {
-                    warnings.push(VoltageWarning {
-                        component_id: id.to_string(),
-                        severity: WarningSeverity::Caution,
-                        message: format!(
-                            "Transistor {id}{part_label} at {voltage:.0}V is within 20% \
-                             of Vce(max) {vce_max:.0}V",
-                        ),
-                    });
-                }
+        if kind.is_bjt() {
+            if voltage > vce_max {
+                warnings.push(VoltageWarning {
+                    component_id: id.to_string(),
+                    severity: WarningSeverity::Danger,
+                    message: format!(
+                        "Transistor {id}{part_label} exceeds Vce(max) {vce_max:.0}V \
+                         at {voltage:.0}V supply",
+                    ),
+                });
+            } else if voltage > vce_max * 0.8 {
+                warnings.push(VoltageWarning {
+                    component_id: id.to_string(),
+                    severity: WarningSeverity::Caution,
+                    message: format!(
+                        "Transistor {id}{part_label} at {voltage:.0}V is within 20% \
+                         of Vce(max) {vce_max:.0}V",
+                    ),
+                });
             }
-            _ => {}
         }
     }
 
     // Capacitor voltage rating
     if let Some(rating) = spec.voltage_rating {
-        if let ComponentKind::Capacitor(_) = kind {
+        if kind.as_any().downcast_ref::<Capacitor>().is_some() {
             if voltage > rating {
                 warnings.push(VoltageWarning {
                     component_id: id.to_string(),
@@ -301,15 +300,12 @@ fn check_spec_voltage(
 
     // IC supply max (op-amps, synth ICs, comparators, analog switches)
     if let Some(supply_max) = spec.supply_max {
-        let is_ic = matches!(
-            kind,
-            ComponentKind::OpAmp(_)
-                | ComponentKind::Vco(..)
-                | ComponentKind::Vcf(_)
-                | ComponentKind::Vca(_)
-                | ComponentKind::Comparator(_)
-                | ComponentKind::AnalogSwitch(_)
-        );
+        let is_ic = kind.op_amp_type().is_some()
+            || kind.as_any().downcast_ref::<Vco>().is_some()
+            || kind.as_any().downcast_ref::<Vcf>().is_some()
+            || kind.as_any().downcast_ref::<Vca>().is_some()
+            || kind.as_any().downcast_ref::<Comparator>().is_some()
+            || kind.as_any().downcast_ref::<AnalogSwitch>().is_some();
         if is_ic {
             if voltage > supply_max {
                 warnings.push(VoltageWarning {
@@ -335,26 +331,23 @@ fn check_spec_voltage(
 
     // Diode reverse breakdown
     if let Some(breakdown) = spec.breakdown {
-        match kind {
-            ComponentKind::Diode(_) | ComponentKind::DiodePair(_) => {
-                if voltage > breakdown {
-                    warnings.push(VoltageWarning {
-                        component_id: id.to_string(),
-                        severity: WarningSeverity::Danger,
-                        message: format!(
-                            "Diode {id}{part_label} reverse breakdown {breakdown:.0}V — \
-                             may fail at {voltage:.0}V",
-                        ),
-                    });
-                }
+        if kind.is_diode_family() {
+            if voltage > breakdown {
+                warnings.push(VoltageWarning {
+                    component_id: id.to_string(),
+                    severity: WarningSeverity::Danger,
+                    message: format!(
+                        "Diode {id}{part_label} reverse breakdown {breakdown:.0}V — \
+                         may fail at {voltage:.0}V",
+                    ),
+                });
             }
-            _ => {}
         }
     }
 
     // Resistor power
     if let Some(power_max) = spec.power_rating {
-        if let ComponentKind::Resistor(r) = kind {
+        if let Some(r) = kind.resistance() {
             // P = V²/R (worst case: full supply across the resistor)
             let worst_case_power = voltage * voltage / r;
             if worst_case_power > power_max {
@@ -373,7 +366,7 @@ fn check_spec_voltage(
     // Triode plate voltage — tubes expect much higher voltages than transistors.
     // The WDF model simulates tube behavior at any voltage, but a real build
     // needs a plate supply of 150-400V (via a step-up transformer or charge pump).
-    if let ComponentKind::Triode(_) = kind {
+    if kind.as_any().downcast_ref::<Triode>().is_some() {
         if voltage < 100.0 {
             warnings.push(VoltageWarning {
                 component_id: id.to_string(),
@@ -394,113 +387,105 @@ fn check_spec_voltage(
 fn check_heuristic_voltage(
     pedal: &PedalDef,
     id: &str,
-    kind: &ComponentKind,
+    kind: &dyn Component,
     voltage: f64,
     warnings: &mut Vec<VoltageWarning>,
 ) {
-    match kind {
-        ComponentKind::Pnp(_) | ComponentKind::Npn(_) => {
-            let likely_ge = matches!(kind, ComponentKind::Pnp(_))
-                && pedal
-                    .controls
-                    .iter()
-                    .any(|c| c.label.eq_ignore_ascii_case("fuzz"));
-            if likely_ge {
-                if voltage > 18.0 {
-                    warnings.push(VoltageWarning {
-                        component_id: id.to_string(),
-                        severity: WarningSeverity::Danger,
-                        message: format!(
-                            "Germanium transistor {id} likely exceeds Vce(max) at {voltage:.0}V \
-                             (typical Ge PNP rated 15–32V) — add a .pedalhw file to specify exact limits",
-                        ),
-                    });
-                } else if voltage > 12.0 {
-                    warnings.push(VoltageWarning {
-                        component_id: id.to_string(),
-                        severity: WarningSeverity::Caution,
-                        message: format!(
-                            "Germanium transistor {id} may run hot at {voltage:.0}V \
-                             — add a .pedalhw file to specify exact Vce(max)",
-                        ),
-                    });
-                }
-            } else if voltage > 24.0 {
-                warnings.push(VoltageWarning {
-                    component_id: id.to_string(),
-                    severity: WarningSeverity::Caution,
-                    message: format!(
-                        "Transistor {id} at {voltage:.0}V — add a .pedalhw file to verify Vce(max)",
-                    ),
-                });
-            }
-        }
-        ComponentKind::OpAmp(ot) => {
-            // Use the op-amp type's supply_max for accurate warning threshold
-            let max_supply = ot.supply_max();
-            if voltage > max_supply * 0.5 {
-                warnings.push(VoltageWarning {
-                    component_id: id.to_string(),
-                    severity: WarningSeverity::Caution,
-                    message: format!(
-                        "Op-amp {id} ({ot:?}) at {voltage:.0}V — max supply {max_supply:.0}V",
-                    ),
-                });
-            }
-        }
-        ComponentKind::Capacitor(cfg) => {
-            let farads = cfg.value;
-            if farads >= 1e-6 {
-                if voltage > 16.0 {
-                    warnings.push(VoltageWarning {
-                        component_id: id.to_string(),
-                        severity: WarningSeverity::Danger,
-                        message: format!(
-                            "Electrolytic cap {id} ({:.0}µF) may exceed voltage rating at {voltage:.0}V \
-                             — add a .pedalhw file to specify voltage_rating",
-                            farads * 1e6,
-                        ),
-                    });
-                } else if voltage > 12.0 {
-                    warnings.push(VoltageWarning {
-                        component_id: id.to_string(),
-                        severity: WarningSeverity::Caution,
-                        message: format!(
-                            "Electrolytic cap {id} ({:.0}µF) — add a .pedalhw file to confirm \
-                             voltage_rating ≥ {voltage:.0}V",
-                            farads * 1e6,
-                        ),
-                    });
-                }
-            }
-        }
-        ComponentKind::DiodePair(crate::dsl::DiodeType::Germanium)
-        | ComponentKind::Diode(crate::dsl::DiodeType::Germanium) => {
+    if kind.is_bjt() {
+        let likely_ge = kind.as_any().downcast_ref::<Pnp>().is_some()
+            && pedal
+                .controls
+                .iter()
+                .any(|c| c.label.eq_ignore_ascii_case("fuzz"));
+        if likely_ge {
             if voltage > 18.0 {
                 warnings.push(VoltageWarning {
                     component_id: id.to_string(),
-                    severity: WarningSeverity::Info,
+                    severity: WarningSeverity::Danger,
                     message: format!(
-                        "Germanium diode {id} — higher power dissipation at {voltage:.0}V \
-                         may shift forward voltage",
+                        "Germanium transistor {id} likely exceeds Vce(max) at {voltage:.0}V \
+                         (typical Ge PNP rated 15–32V) — add a .pedalhw file to specify exact limits",
                     ),
                 });
-            }
-        }
-        ComponentKind::Triode(_) => {
-            if voltage < 100.0 {
+            } else if voltage > 12.0 {
                 warnings.push(VoltageWarning {
                     component_id: id.to_string(),
-                    severity: WarningSeverity::Info,
+                    severity: WarningSeverity::Caution,
                     message: format!(
-                        "Tube {id} needs 150-400V plate supply; at {voltage:.0}V the WDF \
-                         model runs fine but a physical build needs a B+ supply \
-                         — add a .pedalhw file to specify plate voltage",
+                        "Germanium transistor {id} may run hot at {voltage:.0}V \
+                         — add a .pedalhw file to specify exact Vce(max)",
+                    ),
+                });
+            }
+        } else if voltage > 24.0 {
+            warnings.push(VoltageWarning {
+                component_id: id.to_string(),
+                severity: WarningSeverity::Caution,
+                message: format!(
+                    "Transistor {id} at {voltage:.0}V — add a .pedalhw file to verify Vce(max)",
+                ),
+            });
+        }
+    } else if let Some(ot) = kind.op_amp_type() {
+        // Use the op-amp type's supply_max for accurate warning threshold
+        let max_supply = ot.supply_max();
+        if voltage > max_supply * 0.5 {
+            warnings.push(VoltageWarning {
+                component_id: id.to_string(),
+                severity: WarningSeverity::Caution,
+                message: format!(
+                    "Op-amp {id} ({ot:?}) at {voltage:.0}V — max supply {max_supply:.0}V",
+                ),
+            });
+        }
+    } else if let Some(cap) = kind.as_any().downcast_ref::<Capacitor>() {
+        let farads = cap.config.value;
+        if farads >= 1e-6 {
+            if voltage > 16.0 {
+                warnings.push(VoltageWarning {
+                    component_id: id.to_string(),
+                    severity: WarningSeverity::Danger,
+                    message: format!(
+                        "Electrolytic cap {id} ({:.0}µF) may exceed voltage rating at {voltage:.0}V \
+                         — add a .pedalhw file to specify voltage_rating",
+                        farads * 1e6,
+                    ),
+                });
+            } else if voltage > 12.0 {
+                warnings.push(VoltageWarning {
+                    component_id: id.to_string(),
+                    severity: WarningSeverity::Caution,
+                    message: format!(
+                        "Electrolytic cap {id} ({:.0}µF) — add a .pedalhw file to confirm \
+                         voltage_rating ≥ {voltage:.0}V",
+                        farads * 1e6,
                     ),
                 });
             }
         }
-        _ => {}
+    } else if kind.is_diode_family() && kind.diode_type() == Some(crate::dsl::DiodeType::Germanium) {
+        if voltage > 18.0 {
+            warnings.push(VoltageWarning {
+                component_id: id.to_string(),
+                severity: WarningSeverity::Info,
+                message: format!(
+                    "Germanium diode {id} — higher power dissipation at {voltage:.0}V \
+                     may shift forward voltage",
+                ),
+            });
+        }
+    } else if kind.as_any().downcast_ref::<Triode>().is_some() {
+        if voltage < 100.0 {
+            warnings.push(VoltageWarning {
+                component_id: id.to_string(),
+                severity: WarningSeverity::Info,
+                message: format!(
+                    "Tube {id} needs 150-400V plate supply; at {voltage:.0}V the WDF \
+                     model runs fine but a physical build needs a B+ supply \
+                     — add a .pedalhw file to specify plate voltage",
+                ),
+            });
+        }
     }
 }
 
@@ -702,36 +687,33 @@ fn find_closest_cap(target: f64) -> Option<(&'static str, &'static str, f64)> {
 pub fn auto_populate_specs(pedal: &PedalDef, limits: &mut HardwareLimits) {
     for comp in &pedal.components {
         let spec = limits.specs.entry(comp.id.clone()).or_default();
-        match &comp.kind {
-            ComponentKind::Resistor(_) => {
-                if spec.power_rating.is_none() {
-                    spec.power_rating = Some(0.25); // 1/4W default
+        let kind = comp.kind.as_ref();
+
+        if kind.resistance().is_some() && kind.as_any().downcast_ref::<Resistor>().is_some() {
+            if spec.power_rating.is_none() {
+                spec.power_rating = Some(0.25); // 1/4W default
+            }
+        } else if let Some(cap) = kind.as_any().downcast_ref::<Capacitor>() {
+            if spec.voltage_rating.is_none() {
+                if let Some((_, _, vr)) = find_closest_cap(cap.config.value) {
+                    spec.voltage_rating = Some(vr);
                 }
             }
-            ComponentKind::Capacitor(cfg) => {
-                if spec.voltage_rating.is_none() {
-                    if let Some((_, _, vr)) = find_closest_cap(cfg.value) {
-                        spec.voltage_rating = Some(vr);
-                    }
-                }
+        } else if kind.as_any().downcast_ref::<Npn>().is_some() {
+            if spec.vce_max.is_none() {
+                spec.vce_max = Some(NPN_DEFAULT.vce_max);
             }
-            ComponentKind::Npn(_) => {
-                if spec.vce_max.is_none() {
-                    spec.vce_max = Some(NPN_DEFAULT.vce_max);
-                }
+        } else if kind.as_any().downcast_ref::<Pnp>().is_some() {
+            if spec.vce_max.is_none() {
+                spec.vce_max = Some(PNP_DEFAULT.vce_max);
             }
-            ComponentKind::Pnp(_) => {
-                if spec.vce_max.is_none() {
-                    spec.vce_max = Some(PNP_DEFAULT.vce_max);
-                }
+        } else if let Some(ot) = kind.op_amp_type() {
+            if spec.supply_max.is_none() {
+                spec.supply_max = Some(ot.supply_max());
             }
-            ComponentKind::OpAmp(ot) => {
-                if spec.supply_max.is_none() {
-                    spec.supply_max = Some(ot.supply_max());
-                }
-            }
-            ComponentKind::Diode(dt) | ComponentKind::DiodePair(dt) => {
-                if spec.breakdown.is_none() {
+        } else if kind.is_diode_family() {
+            if spec.breakdown.is_none() {
+                if let Some(dt) = kind.diode_type() {
                     let dp = match dt {
                         crate::dsl::DiodeType::Silicon => &SILICON_DIODE,
                         crate::dsl::DiodeType::Germanium => &GERMANIUM_DIODE,
@@ -740,36 +722,30 @@ pub fn auto_populate_specs(pedal: &PedalDef, limits: &mut HardwareLimits) {
                     spec.breakdown = Some(dp.breakdown);
                 }
             }
+        } else if kind.as_any().downcast_ref::<Vco>().is_some() {
             // Synth ICs: populate supply max from known datasheets
-            ComponentKind::Vco(..) => {
-                if spec.supply_max.is_none() {
-                    spec.supply_max = Some(18.0); // CEM3340/AS3340/V3340: ±5V to ±9V (18V total)
-                }
+            if spec.supply_max.is_none() {
+                spec.supply_max = Some(18.0); // CEM3340/AS3340/V3340: ±5V to ±9V (18V total)
             }
-            ComponentKind::Vcf(_) => {
-                if spec.supply_max.is_none() {
-                    spec.supply_max = Some(18.0); // CEM3320/AS3320: ±9V max
-                }
+        } else if kind.as_any().downcast_ref::<Vcf>().is_some() {
+            if spec.supply_max.is_none() {
+                spec.supply_max = Some(18.0); // CEM3320/AS3320: ±9V max
             }
-            ComponentKind::Vca(_) => {
-                if spec.supply_max.is_none() {
-                    spec.supply_max = Some(36.0); // SSM2164/V2164: ±18V max
-                }
+        } else if kind.as_any().downcast_ref::<Vca>().is_some() {
+            if spec.supply_max.is_none() {
+                spec.supply_max = Some(36.0); // SSM2164/V2164: ±18V max
             }
-            ComponentKind::Comparator(ct) => {
-                if spec.supply_max.is_none() {
-                    spec.supply_max = Some(match ct {
-                        crate::dsl::ComparatorType::Lm311 => 36.0,
-                        crate::dsl::ComparatorType::Lm393 => 36.0,
-                    });
-                }
+        } else if let Some(comp) = kind.as_any().downcast_ref::<Comparator>() {
+            if spec.supply_max.is_none() {
+                spec.supply_max = Some(match comp.comp_type {
+                    crate::dsl::ComparatorType::Lm311 => 36.0,
+                    crate::dsl::ComparatorType::Lm393 => 36.0,
+                });
             }
-            ComponentKind::AnalogSwitch(_) => {
-                if spec.supply_max.is_none() {
-                    spec.supply_max = Some(20.0); // CD4066/DG411: 20V max
-                }
+        } else if kind.as_any().downcast_ref::<AnalogSwitch>().is_some() {
+            if spec.supply_max.is_none() {
+                spec.supply_max = Some(20.0); // CD4066/DG411: 20V max
             }
-            _ => {}
         }
     }
 }
@@ -809,885 +785,910 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
             let hw_part = limits
                 .and_then(|l| l.specs.get(&comp.id))
                 .and_then(|s| s.part.as_deref());
+            let kind = comp.kind.as_ref();
 
-            match &comp.kind {
-                ComponentKind::Resistor(val) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else if let Some((pn, desc)) = find_closest(RESISTORS, *val) {
-                        (Some(pn.to_string()), desc.to_string())
-                    } else {
-                        (
-                            None,
-                            format!("{} Resistor", crate::kicad::format_eng(*val, "\u{2126}")),
-                        )
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Resistor".into(),
-                        value: crate::kicad::format_eng(*val, "\u{2126}"),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Capacitor(cfg) => {
-                    let val = cfg.value;
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else if let Some((cpn, cdesc, _)) = find_closest_cap(val) {
-                        (Some(cpn.to_string()), cdesc.to_string())
-                    } else {
-                        (
-                            None,
-                            format!("{} Capacitor", crate::kicad::format_eng(val, "F")),
-                        )
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Capacitor".into(),
-                        value: crate::kicad::format_eng(val, "F"),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Inductor(val) => vec![BomEntry {
+            if let Some(r) = kind.as_any().downcast_ref::<Resistor>() {
+                let val = r.value;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else if let Some((pn, desc)) = find_closest(RESISTORS, val) {
+                    (Some(pn.to_string()), desc.to_string())
+                } else {
+                    (
+                        None,
+                        format!("{} Resistor", crate::kicad::format_eng(val, "\u{2126}")),
+                    )
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Resistor".into(),
+                    value: crate::kicad::format_eng(val, "\u{2126}"),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(cap) = kind.as_any().downcast_ref::<Capacitor>() {
+                let val = cap.config.value;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else if let Some((cpn, cdesc, _)) = find_closest_cap(val) {
+                    (Some(cpn.to_string()), cdesc.to_string())
+                } else {
+                    (
+                        None,
+                        format!("{} Capacitor", crate::kicad::format_eng(val, "F")),
+                    )
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Capacitor".into(),
+                    value: crate::kicad::format_eng(val, "F"),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(ind) = kind.as_any().downcast_ref::<Inductor>() {
+                vec![BomEntry {
                     reference: comp.id.clone(),
                     display: "Inductor".into(),
-                    value: crate::kicad::format_eng(*val, "H"),
+                    value: crate::kicad::format_eng(ind.value, "H"),
                     mouser_pn: None,
-                    description: format!("{} Inductor", crate::kicad::format_eng(*val, "H")),
+                    description: format!("{} Inductor", crate::kicad::format_eng(ind.value, "H")),
                     qty_per_unit: 1,
-                }],
-                ComponentKind::Potentiometer(val, _) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else if let Some((ppn, pdesc)) = find_closest(POTS, *val) {
-                        (Some(ppn.to_string()), pdesc.to_string())
-                    } else {
-                        (
+                }]
+            } else if let Some(pot) = kind.as_any().downcast_ref::<Potentiometer>() {
+                let val = pot.max_r;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else if let Some((ppn, pdesc)) = find_closest(POTS, val) {
+                    (Some(ppn.to_string()), pdesc.to_string())
+                } else {
+                    (
+                        None,
+                        format!(
+                            "{} Potentiometer",
+                            crate::kicad::format_eng(val, "\u{2126}")
+                        ),
+                    )
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Potentiometer".into(),
+                    value: crate::kicad::format_eng(val, "\u{2126}"),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(d) = kind.as_any().downcast_ref::<Diode>() {
+                let dt = d.diode_type;
+                let dp = match dt {
+                    DiodeType::Silicon => &SILICON_DIODE,
+                    DiodeType::Germanium => &GERMANIUM_DIODE,
+                    DiodeType::Led => &LED_DIODE,
+                };
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    (Some(dp.mouser_pn.to_string()), dp.description.to_string())
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("Diode ({dt:?})"),
+                    value: format!("{dt:?}"),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(dp_comp) = kind.as_any().downcast_ref::<DiodePair>() {
+                let dt = dp_comp.diode_type;
+                let dp = match dt {
+                    DiodeType::Silicon => &SILICON_DIODE,
+                    DiodeType::Germanium => &GERMANIUM_DIODE,
+                    DiodeType::Led => &LED_DIODE,
+                };
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    (Some(dp.mouser_pn.to_string()), dp.description.to_string())
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("Diode Pair ({dt:?})"),
+                    value: format!("{dt:?} x2"),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 2,
+                }]
+            } else if kind.as_any().downcast_ref::<Npn>().is_some() {
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    (
+                        Some(NPN_DEFAULT.mouser_pn.to_string()),
+                        NPN_DEFAULT.description.to_string(),
+                    )
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "NPN Transistor".into(),
+                    value: "\u{2014}".into(),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if kind.as_any().downcast_ref::<Pnp>().is_some() {
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    (
+                        Some(PNP_DEFAULT.mouser_pn.to_string()),
+                        PNP_DEFAULT.description.to_string(),
+                    )
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "PNP Transistor".into(),
+                    value: "\u{2014}".into(),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(op) = kind.as_any().downcast_ref::<OpAmp>() {
+                let ot = op.op_type;
+                let (pn, desc, label) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string(), format!("{ot:?}"))
+                } else {
+                    // Use type-specific Mouser part numbers
+                    match ot {
+                        crate::dsl::OpAmpType::Generic | crate::dsl::OpAmpType::Tl072 => (
+                            Some("595-TL072CP".to_string()),
+                            "TL072 Dual Op-Amp".to_string(),
+                            "TL072".to_string(),
+                        ),
+                        crate::dsl::OpAmpType::Tl082 => (
+                            Some("595-TL082CP".to_string()),
+                            "TL082 Dual Op-Amp".to_string(),
+                            "TL082".to_string(),
+                        ),
+                        crate::dsl::OpAmpType::Jrc4558 => (
+                            Some("513-NJM4558DD".to_string()),
+                            "JRC4558D Dual Op-Amp".to_string(),
+                            "JRC4558D".to_string(),
+                        ),
+                        crate::dsl::OpAmpType::Rc4558 => (
+                            Some("595-RC4558P".to_string()),
+                            "RC4558 Dual Op-Amp".to_string(),
+                            "RC4558".to_string(),
+                        ),
+                        crate::dsl::OpAmpType::Lm308 => (
+                            Some("926-LM308N/NOPB".to_string()),
+                            "LM308N Op-Amp".to_string(),
+                            "LM308N".to_string(),
+                        ),
+                        crate::dsl::OpAmpType::Lm741 => (
+                            Some("595-LM741CN/NOPB".to_string()),
+                            "LM741 Op-Amp".to_string(),
+                            "LM741".to_string(),
+                        ),
+                        crate::dsl::OpAmpType::Ne5532 => (
+                            Some("595-NE5532P".to_string()),
+                            "NE5532 Dual Op-Amp".to_string(),
+                            "NE5532".to_string(),
+                        ),
+                        crate::dsl::OpAmpType::Ca3080 => (
+                            Some("595-CA3080EZ".to_string()),
+                            "CA3080 OTA".to_string(),
+                            "CA3080".to_string(),
+                        ),
+                        crate::dsl::OpAmpType::Op07 => (
+                            Some("595-OP07CP".to_string()),
+                            "OP07 Precision Op-Amp".to_string(),
+                            "OP07".to_string(),
+                        ),
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Op-Amp".into(),
+                    value: label,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(nj) = kind.as_any().downcast_ref::<NJfet>() {
+                let name = &nj.model;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    (None, format!("{name} N-JFET"))
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("N-JFET ({name})"),
+                    value: name.clone(),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(pj) = kind.as_any().downcast_ref::<PJfet>() {
+                let name = &pj.model;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    (None, format!("{name} P-JFET"))
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("P-JFET ({name})"),
+                    value: name.clone(),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(pc) = kind.as_any().downcast_ref::<PhotocouplerComp>() {
+                let pt = pc.coupler_type;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    match pt {
+                        crate::dsl::PhotocouplerType::Vtl5c3 => {
+                            (Some("VTL5C3".to_string()), "VTL5C3 Vactrol".to_string())
+                        }
+                        crate::dsl::PhotocouplerType::Vtl5c1 => {
+                            (Some("VTL5C1".to_string()), "VTL5C1 Vactrol".to_string())
+                        }
+                        crate::dsl::PhotocouplerType::Nsl32 => {
+                            (Some("NSL-32".to_string()), "NSL-32 Optocoupler".to_string())
+                        }
+                        crate::dsl::PhotocouplerType::T4b => (
+                            Some("T4B".to_string()),
+                            "T4B EL Panel + LDR (LA-2A style)".to_string(),
+                        ),
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("Vactrol ({pt:?})"),
+                    value: format!("{pt:?}"),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(lfo) = kind.as_any().downcast_ref::<Lfo>() {
+                let mut entries = Vec::new();
+
+                // Timing resistor
+                let r_val = crate::kicad::format_eng(lfo.timing_r, "\u{2126}");
+                let (r_pn, r_desc) = find_closest(RESISTORS, lfo.timing_r)
+                    .map(|(pn, desc)| (Some(pn.to_string()), desc.to_string()))
+                    .unwrap_or((None, format!("{r_val} LFO Timing Resistor")));
+                entries.push(BomEntry {
+                    reference: format!("R_{}", comp.id),
+                    display: "LFO Timing R".into(),
+                    value: r_val,
+                    mouser_pn: r_pn,
+                    description: r_desc,
+                    qty_per_unit: 1,
+                });
+
+                // Timing capacitor
+                let c_val = crate::kicad::format_eng(lfo.timing_c, "F");
+                let (c_pn, c_desc) = find_closest_cap(lfo.timing_c)
+                    .map(|(pn, desc, _)| (Some(pn.to_string()), desc.to_string()))
+                    .unwrap_or((None, format!("{c_val} LFO Timing Capacitor")));
+                entries.push(BomEntry {
+                    reference: format!("C_{}", comp.id),
+                    display: "LFO Timing C".into(),
+                    value: c_val,
+                    mouser_pn: c_pn,
+                    description: c_desc,
+                    qty_per_unit: 1,
+                });
+
+                entries
+            } else if let Some(tri) = kind.as_any().downcast_ref::<Triode>() {
+                let name = &tri.model;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    (None, format!("{} Triode Vacuum Tube", name))
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("Triode ({})", name),
+                    value: name.clone(),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(z) = kind.as_any().downcast_ref::<Zener>() {
+                let vz = z.breakdown_voltage;
+                let desc = if let Some(part_name) = hw_part {
+                    part_name.to_string()
+                } else {
+                    format!("{:.1}V Zener Diode", vz)
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Zener Diode".into(),
+                    value: format!("{:.1}V", vz),
+                    mouser_pn: None, // Zener voltage-specific P/N varies
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(pent) = kind.as_any().downcast_ref::<Pentode>() {
+                let name = &pent.model;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    (None, format!("{} Pentode Vacuum Tube", name))
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("Pentode ({})", name),
+                    value: name.clone(),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(nmos) = kind.as_any().downcast_ref::<Nmos>() {
+                let mt = nmos.mosfet_type;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    match mt {
+                        crate::dsl::MosfetType::N2n7000 => (
+                            Some("512-2N7000".to_string()),
+                            "2N7000 N-MOSFET".to_string(),
+                        ),
+                        crate::dsl::MosfetType::Irf520 => (
+                            Some("942-IRF520NPBF".to_string()),
+                            "IRF520 N-MOSFET".to_string(),
+                        ),
+                        _ => (None, format!("N-MOSFET ({mt:?})")),
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("N-MOSFET ({mt:?})"),
+                    value: format!("{mt:?}"),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(pmos) = kind.as_any().downcast_ref::<Pmos>() {
+                let mt = pmos.mosfet_type;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    match mt {
+                        crate::dsl::MosfetType::Bs250 => {
+                            (Some("512-BS250".to_string()), "BS250 P-MOSFET".to_string())
+                        }
+                        crate::dsl::MosfetType::Irf9520 => (
+                            Some("942-IRF9520NPBF".to_string()),
+                            "IRF9520 P-MOSFET".to_string(),
+                        ),
+                        _ => (None, format!("P-MOSFET ({mt:?})")),
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("P-MOSFET ({mt:?})"),
+                    value: format!("{mt:?}"),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(bbd) = kind.as_any().downcast_ref::<Bbd>() {
+                let bt = bbd.bbd_type;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    match bt {
+                        crate::dsl::BbdType::Mn3207 => (
+                            None, // NOS sourcing
+                            "MN3207 1024-stage BBD".to_string(),
+                        ),
+                        crate::dsl::BbdType::Mn3007 => {
+                            (None, "MN3007 1024-stage BBD (low-noise)".to_string())
+                        }
+                        crate::dsl::BbdType::Mn3005 => {
+                            (None, "MN3005 4096-stage BBD (long delay)".to_string())
+                        }
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("BBD ({bt:?})"),
+                    value: format!("{bt:?}"),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(neon) = kind.as_any().downcast_ref::<Neon>() {
+                let nt = neon.neon_type;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    match nt {
+                        crate::dsl::NeonType::Ne2 => (
+                            Some("606-A1A-NE2".to_string()),
+                            "NE-2 Neon Lamp (90V strike, 60V maintain)".to_string(),
+                        ),
+                        crate::dsl::NeonType::Ne51 => (
+                            Some("606-A1B-NE51".to_string()),
+                            "NE-51 Neon Lamp (95V strike, 65V maintain)".to_string(),
+                        ),
+                        crate::dsl::NeonType::Ne83 => (
                             None,
-                            format!(
-                                "{} Potentiometer",
-                                crate::kicad::format_eng(*val, "\u{2126}")
-                            ),
-                        )
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Potentiometer".into(),
-                        value: crate::kicad::format_eng(*val, "\u{2126}"),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Diode(dt) => {
-                    let dp = match dt {
-                        DiodeType::Silicon => &SILICON_DIODE,
-                        DiodeType::Germanium => &GERMANIUM_DIODE,
-                        DiodeType::Led => &LED_DIODE,
-                    };
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        (Some(dp.mouser_pn.to_string()), dp.description.to_string())
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("Diode ({dt:?})"),
-                        value: format!("{dt:?}"),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::DiodePair(dt) => {
-                    let dp = match dt {
-                        DiodeType::Silicon => &SILICON_DIODE,
-                        DiodeType::Germanium => &GERMANIUM_DIODE,
-                        DiodeType::Led => &LED_DIODE,
-                    };
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        (Some(dp.mouser_pn.to_string()), dp.description.to_string())
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("Diode Pair ({dt:?})"),
-                        value: format!("{dt:?} x2"),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 2,
-                    }]
-                }
-                ComponentKind::Npn(_) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        (
-                            Some(NPN_DEFAULT.mouser_pn.to_string()),
-                            NPN_DEFAULT.description.to_string(),
-                        )
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "NPN Transistor".into(),
-                        value: "\u{2014}".into(),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Pnp(_) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        (
-                            Some(PNP_DEFAULT.mouser_pn.to_string()),
-                            PNP_DEFAULT.description.to_string(),
-                        )
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "PNP Transistor".into(),
-                        value: "\u{2014}".into(),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::OpAmp(ot) => {
-                    let (pn, desc, label) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string(), format!("{ot:?}"))
-                    } else {
-                        // Use type-specific Mouser part numbers
-                        match ot {
-                            crate::dsl::OpAmpType::Generic | crate::dsl::OpAmpType::Tl072 => (
-                                Some("595-TL072CP".to_string()),
-                                "TL072 Dual Op-Amp".to_string(),
-                                "TL072".to_string(),
-                            ),
-                            crate::dsl::OpAmpType::Tl082 => (
-                                Some("595-TL082CP".to_string()),
-                                "TL082 Dual Op-Amp".to_string(),
-                                "TL082".to_string(),
-                            ),
-                            crate::dsl::OpAmpType::Jrc4558 => (
-                                Some("513-NJM4558DD".to_string()),
-                                "JRC4558D Dual Op-Amp".to_string(),
-                                "JRC4558D".to_string(),
-                            ),
-                            crate::dsl::OpAmpType::Rc4558 => (
-                                Some("595-RC4558P".to_string()),
-                                "RC4558 Dual Op-Amp".to_string(),
-                                "RC4558".to_string(),
-                            ),
-                            crate::dsl::OpAmpType::Lm308 => (
-                                Some("926-LM308N/NOPB".to_string()),
-                                "LM308N Op-Amp".to_string(),
-                                "LM308N".to_string(),
-                            ),
-                            crate::dsl::OpAmpType::Lm741 => (
-                                Some("595-LM741CN/NOPB".to_string()),
-                                "LM741 Op-Amp".to_string(),
-                                "LM741".to_string(),
-                            ),
-                            crate::dsl::OpAmpType::Ne5532 => (
-                                Some("595-NE5532P".to_string()),
-                                "NE5532 Dual Op-Amp".to_string(),
-                                "NE5532".to_string(),
-                            ),
-                            crate::dsl::OpAmpType::Ca3080 => (
-                                Some("595-CA3080EZ".to_string()),
-                                "CA3080 OTA".to_string(),
-                                "CA3080".to_string(),
-                            ),
-                            crate::dsl::OpAmpType::Op07 => (
-                                Some("595-OP07CP".to_string()),
-                                "OP07 Precision Op-Amp".to_string(),
-                                "OP07".to_string(),
-                            ),
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Op-Amp".into(),
-                        value: label,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::NJfet(name) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        (None, format!("{name} N-JFET"))
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("N-JFET ({name})"),
-                        value: name.clone(),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::PJfet(name) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        (None, format!("{name} P-JFET"))
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("P-JFET ({name})"),
-                        value: name.clone(),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Photocoupler(pt) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        match pt {
-                            crate::dsl::PhotocouplerType::Vtl5c3 => {
-                                (Some("VTL5C3".to_string()), "VTL5C3 Vactrol".to_string())
-                            }
-                            crate::dsl::PhotocouplerType::Vtl5c1 => {
-                                (Some("VTL5C1".to_string()), "VTL5C1 Vactrol".to_string())
-                            }
-                            crate::dsl::PhotocouplerType::Nsl32 => {
-                                (Some("NSL-32".to_string()), "NSL-32 Optocoupler".to_string())
-                            }
-                            crate::dsl::PhotocouplerType::T4b => (
-                                Some("T4B".to_string()),
-                                "T4B EL Panel + LDR (LA-2A style)".to_string(),
-                            ),
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("Vactrol ({pt:?})"),
-                        value: format!("{pt:?}"),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Lfo(_wf, timing_r, timing_c) => {
-                    let mut entries = Vec::new();
+                            "NE-83 Neon Lamp (65V strike, 50V maintain)".to_string(),
+                        ),
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("Neon Lamp ({nt:?})"),
+                    value: format!("{nt:?}"),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(env) = kind.as_any().downcast_ref::<EnvelopeFollower>() {
+                let mut entries = Vec::new();
 
-                    // Timing resistor
-                    let r_val = crate::kicad::format_eng(*timing_r, "\u{2126}");
-                    let (r_pn, r_desc) = find_closest(RESISTORS, *timing_r)
-                        .map(|(pn, desc)| (Some(pn.to_string()), desc.to_string()))
-                        .unwrap_or((None, format!("{r_val} LFO Timing Resistor")));
-                    entries.push(BomEntry {
-                        reference: format!("R_{}", comp.id),
-                        display: "LFO Timing R".into(),
-                        value: r_val,
-                        mouser_pn: r_pn,
-                        description: r_desc,
-                        qty_per_unit: 1,
-                    });
+                // Attack timing resistor
+                let val = crate::kicad::format_eng(env.attack_r, "\u{2126}");
+                let (pn, desc) = find_closest(RESISTORS, env.attack_r)
+                    .map(|(pn, desc)| (Some(pn.to_string()), desc.to_string()))
+                    .unwrap_or((None, format!("{val} Attack Timing Resistor")));
+                entries.push(BomEntry {
+                    reference: format!("R_{}_ATK", comp.id),
+                    display: "Envelope Attack R".into(),
+                    value: val,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                });
 
-                    // Timing capacitor
-                    let c_val = crate::kicad::format_eng(*timing_c, "F");
-                    let (c_pn, c_desc) = find_closest_cap(*timing_c)
-                        .map(|(pn, desc, _)| (Some(pn.to_string()), desc.to_string()))
-                        .unwrap_or((None, format!("{c_val} LFO Timing Capacitor")));
-                    entries.push(BomEntry {
-                        reference: format!("C_{}", comp.id),
-                        display: "LFO Timing C".into(),
-                        value: c_val,
-                        mouser_pn: c_pn,
-                        description: c_desc,
-                        qty_per_unit: 1,
-                    });
+                // Attack timing capacitor
+                let val = crate::kicad::format_eng(env.attack_c, "F");
+                let (pn, desc) = find_closest_cap(env.attack_c)
+                    .map(|(pn, desc, _)| (Some(pn.to_string()), desc.to_string()))
+                    .unwrap_or((None, format!("{val} Attack Timing Capacitor")));
+                entries.push(BomEntry {
+                    reference: format!("C_{}_ATK", comp.id),
+                    display: "Envelope Attack C".into(),
+                    value: val,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                });
 
-                    entries
-                }
-                ComponentKind::Triode(name) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        (None, format!("{} Triode Vacuum Tube", name))
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("Triode ({})", name),
-                        value: name.clone(),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Zener(vz) => {
-                    let desc = if let Some(part_name) = hw_part {
-                        part_name.to_string()
-                    } else {
-                        format!("{:.1}V Zener Diode", vz)
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Zener Diode".into(),
-                        value: format!("{:.1}V", vz),
-                        mouser_pn: None, // Zener voltage-specific P/N varies
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Pentode(name) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        (None, format!("{} Pentode Vacuum Tube", name))
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("Pentode ({})", name),
-                        value: name.clone(),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Nmos(mt) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        match mt {
-                            crate::dsl::MosfetType::N2n7000 => (
-                                Some("512-2N7000".to_string()),
-                                "2N7000 N-MOSFET".to_string(),
-                            ),
-                            crate::dsl::MosfetType::Irf520 => (
-                                Some("942-IRF520NPBF".to_string()),
-                                "IRF520 N-MOSFET".to_string(),
-                            ),
-                            _ => (None, format!("N-MOSFET ({mt:?})")),
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("N-MOSFET ({mt:?})"),
-                        value: format!("{mt:?}"),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Pmos(mt) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        match mt {
-                            crate::dsl::MosfetType::Bs250 => {
-                                (Some("512-BS250".to_string()), "BS250 P-MOSFET".to_string())
-                            }
-                            crate::dsl::MosfetType::Irf9520 => (
-                                Some("942-IRF9520NPBF".to_string()),
-                                "IRF9520 P-MOSFET".to_string(),
-                            ),
-                            _ => (None, format!("P-MOSFET ({mt:?})")),
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("P-MOSFET ({mt:?})"),
-                        value: format!("{mt:?}"),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Bbd(bt) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        match bt {
-                            crate::dsl::BbdType::Mn3207 => (
-                                None, // NOS sourcing
-                                "MN3207 1024-stage BBD".to_string(),
-                            ),
-                            crate::dsl::BbdType::Mn3007 => {
-                                (None, "MN3007 1024-stage BBD (low-noise)".to_string())
-                            }
-                            crate::dsl::BbdType::Mn3005 => {
-                                (None, "MN3005 4096-stage BBD (long delay)".to_string())
-                            }
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("BBD ({bt:?})"),
-                        value: format!("{bt:?}"),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Neon(nt) => {
-                    let (pn, desc) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string())
-                    } else {
-                        match nt {
-                            crate::dsl::NeonType::Ne2 => (
-                                Some("606-A1A-NE2".to_string()),
-                                "NE-2 Neon Lamp (90V strike, 60V maintain)".to_string(),
-                            ),
-                            crate::dsl::NeonType::Ne51 => (
-                                Some("606-A1B-NE51".to_string()),
-                                "NE-51 Neon Lamp (95V strike, 65V maintain)".to_string(),
-                            ),
-                            crate::dsl::NeonType::Ne83 => (
+                // Release timing resistor
+                let val = crate::kicad::format_eng(env.release_r, "\u{2126}");
+                let (pn, desc) = find_closest(RESISTORS, env.release_r)
+                    .map(|(pn, desc)| (Some(pn.to_string()), desc.to_string()))
+                    .unwrap_or((None, format!("{val} Release Timing Resistor")));
+                entries.push(BomEntry {
+                    reference: format!("R_{}_REL", comp.id),
+                    display: "Envelope Release R".into(),
+                    value: val,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                });
+
+                // Release timing capacitor
+                let val = crate::kicad::format_eng(env.release_c, "F");
+                let (pn, desc) = find_closest_cap(env.release_c)
+                    .map(|(pn, desc, _)| (Some(pn.to_string()), desc.to_string()))
+                    .unwrap_or((None, format!("{val} Release Timing Capacitor")));
+                entries.push(BomEntry {
+                    reference: format!("C_{}_REL", comp.id),
+                    display: "Envelope Release C".into(),
+                    value: val,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                });
+
+                // Sensitivity resistor
+                let val = crate::kicad::format_eng(env.sensitivity_r, "\u{2126}");
+                let (pn, desc) = find_closest(RESISTORS, env.sensitivity_r)
+                    .map(|(pn, desc)| (Some(pn.to_string()), desc.to_string()))
+                    .unwrap_or((None, format!("{val} Sensitivity Resistor")));
+                entries.push(BomEntry {
+                    reference: format!("R_{}_SENS", comp.id),
+                    display: "Envelope Sens R".into(),
+                    value: val,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                });
+
+                // Rectifier diode (1N4148)
+                entries.push(BomEntry {
+                    reference: format!("D_{}", comp.id),
+                    display: "Envelope Rectifier".into(),
+                    value: "1N4148".into(),
+                    mouser_pn: Some(SILICON_DIODE.mouser_pn.to_string()),
+                    description: "1N4148 Envelope Rectifier Diode".to_string(),
+                    qty_per_unit: 1,
+                });
+
+                entries
+            // ── Synth ICs ──────────────────────────────────────────
+            } else if let Some(vco) = kind.as_any().downcast_ref::<Vco>() {
+                let vt = vco.vco_type;
+                let (pn, desc, label) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string(), format!("{vt:?}"))
+                } else {
+                    match vt {
+                        crate::dsl::VcoType::Cem3340 => (
+                            None, // NOS/specialty sourcing
+                            "CEM3340 VCO (Curtis, NOS)".to_string(),
+                            "CEM3340".to_string(),
+                        ),
+                        crate::dsl::VcoType::As3340 => (
+                            Some("ALFA-AS3340".to_string()),
+                            "AS3340 VCO (Alfa RPAR)".to_string(),
+                            "AS3340".to_string(),
+                        ),
+                        crate::dsl::VcoType::V3340 => (
+                            Some("COOLAUDIO-V3340".to_string()),
+                            "V3340 VCO (CoolAudio)".to_string(),
+                            "V3340".to_string(),
+                        ),
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "VCO".into(),
+                    value: label,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(vcf) = kind.as_any().downcast_ref::<Vcf>() {
+                let vt = vcf.vcf_type;
+                let (pn, desc, label) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string(), format!("{vt:?}"))
+                } else {
+                    match vt {
+                        crate::dsl::VcfType::Cem3320 => (
+                            None,
+                            "CEM3320 VCF (Curtis, NOS)".to_string(),
+                            "CEM3320".to_string(),
+                        ),
+                        crate::dsl::VcfType::As3320 => (
+                            Some("ALFA-AS3320".to_string()),
+                            "AS3320 VCF (Alfa RPAR)".to_string(),
+                            "AS3320".to_string(),
+                        ),
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "VCF".into(),
+                    value: label,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(vca) = kind.as_any().downcast_ref::<Vca>() {
+                let vt = vca.vca_type;
+                let (pn, desc, label) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string(), format!("{vt:?}"))
+                } else {
+                    match vt {
+                        crate::dsl::VcaType::Ssm2164 => (
+                            None,
+                            "SSM2164 Quad VCA (NOS)".to_string(),
+                            "SSM2164".to_string(),
+                        ),
+                        crate::dsl::VcaType::V2164 => (
+                            Some("COOLAUDIO-V2164".to_string()),
+                            "V2164 Quad VCA (CoolAudio)".to_string(),
+                            "V2164".to_string(),
+                        ),
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "VCA".into(),
+                    value: label,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(cmp) = kind.as_any().downcast_ref::<Comparator>() {
+                let ct = cmp.comp_type;
+                let (pn, desc, label) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string(), format!("{ct:?}"))
+                } else {
+                    match ct {
+                        crate::dsl::ComparatorType::Lm311 => (
+                            Some("595-LM311P".to_string()),
+                            "LM311 Comparator".to_string(),
+                            "LM311".to_string(),
+                        ),
+                        crate::dsl::ComparatorType::Lm393 => (
+                            Some("595-LM393P".to_string()),
+                            "LM393 Dual Comparator".to_string(),
+                            "LM393".to_string(),
+                        ),
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Comparator".into(),
+                    value: label,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(asw) = kind.as_any().downcast_ref::<AnalogSwitch>() {
+                let st = asw.switch_type;
+                let (pn, desc, label) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string(), format!("{st:?}"))
+                } else {
+                    match st {
+                        crate::dsl::AnalogSwitchType::Cd4066 => (
+                            Some("595-CD4066BE".to_string()),
+                            "CD4066 Quad Bilateral Switch".to_string(),
+                            "CD4066".to_string(),
+                        ),
+                        crate::dsl::AnalogSwitchType::Dg411 => (
+                            Some("700-DG411DJ-E3".to_string()),
+                            "DG411 Quad SPST Switch".to_string(),
+                            "DG411".to_string(),
+                        ),
+                    }
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Analog Switch".into(),
+                    value: label,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(mn) = kind.as_any().downcast_ref::<MatchedNpn>() {
+                let mt = mn.matched_type;
+                let (pn, desc, label) = matched_transistor_bom(hw_part, mt);
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Matched NPN".into(),
+                    value: label,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(mp) = kind.as_any().downcast_ref::<MatchedPnp>() {
+                let mt = mp.matched_type;
+                let (pn, desc, label) = matched_transistor_bom(hw_part, mt);
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Matched PNP".into(),
+                    value: label,
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(tc) = kind.as_any().downcast_ref::<Tempco>() {
+                let r = tc.resistance;
+                let ppm = tc.ppm;
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Tempco Resistor".into(),
+                    value: format!(
+                        "{} +{:.0}ppm/\u{b0}C",
+                        crate::kicad::format_eng(r, "\u{2126}"),
+                        ppm
+                    ),
+                    mouser_pn: None, // Specialist supplier
+                    description: format!(
+                        "{} Tempco Resistor +{:.0}ppm/\u{b0}C",
+                        crate::kicad::format_eng(r, "\u{2126}"),
+                        ppm
+                    ),
+                    qty_per_unit: 1,
+                }]
+            // ── Studio Equipment Components ──────────────────────────────
+            } else if let Some(xfmr) = kind.as_any().downcast_ref::<TransformerComp>() {
+                let cfg = &xfmr.config;
+                let winding_desc = match (cfg.primary_type, cfg.secondary_type) {
+                    (crate::dsl::WindingType::PushPull, crate::dsl::WindingType::CenterTap) => {
+                        "PP/CT"
+                    }
+                    (crate::dsl::WindingType::Standard, crate::dsl::WindingType::CenterTap) => {
+                        "CT Secondary"
+                    }
+                    (crate::dsl::WindingType::CenterTap, crate::dsl::WindingType::Standard) => {
+                        "CT Primary"
+                    }
+                    (crate::dsl::WindingType::PushPull, crate::dsl::WindingType::Standard) => {
+                        "Push-Pull"
+                    }
+                    _ => "Standard",
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Audio Transformer".into(),
+                    value: format!(
+                        "{:.1}:1 {}H {}",
+                        cfg.turns_ratio,
+                        crate::kicad::format_eng(cfg.primary_inductance, ""),
+                        winding_desc
+                    ),
+                    mouser_pn: None, // Custom/specialty (Sowter, Carnhill, etc.)
+                    description: format!(
+                        "Audio Transformer {:.1}:1, {} primary inductance, {}",
+                        cfg.turns_ratio,
+                        crate::kicad::format_eng(cfg.primary_inductance, "H"),
+                        winding_desc
+                    ),
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(cs) = kind.as_any().downcast_ref::<CapSwitched>() {
+                // Generate BOM entries for all capacitor values in the switch
+                cs.values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, val)| {
+                        let (pn, desc) = find_closest_cap(*val)
+                            .map(|(cpn, cdesc, _)| (Some(cpn.to_string()), cdesc.to_string()))
+                            .unwrap_or((
                                 None,
-                                "NE-83 Neon Lamp (65V strike, 50V maintain)".to_string(),
-                            ),
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: format!("Neon Lamp ({nt:?})"),
-                        value: format!("{nt:?}"),
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::EnvelopeFollower(
-                    attack_r,
-                    attack_c,
-                    release_r,
-                    release_c,
-                    sens_r,
-                ) => {
-                    let mut entries = Vec::new();
-
-                    // Attack timing resistor
-                    let val = crate::kicad::format_eng(*attack_r, "\u{2126}");
-                    let (pn, desc) = find_closest(RESISTORS, *attack_r)
-                        .map(|(pn, desc)| (Some(pn.to_string()), desc.to_string()))
-                        .unwrap_or((None, format!("{val} Attack Timing Resistor")));
-                    entries.push(BomEntry {
-                        reference: format!("R_{}_ATK", comp.id),
-                        display: "Envelope Attack R".into(),
-                        value: val,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    });
-
-                    // Attack timing capacitor
-                    let val = crate::kicad::format_eng(*attack_c, "F");
-                    let (pn, desc) = find_closest_cap(*attack_c)
-                        .map(|(pn, desc, _)| (Some(pn.to_string()), desc.to_string()))
-                        .unwrap_or((None, format!("{val} Attack Timing Capacitor")));
-                    entries.push(BomEntry {
-                        reference: format!("C_{}_ATK", comp.id),
-                        display: "Envelope Attack C".into(),
-                        value: val,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    });
-
-                    // Release timing resistor
-                    let val = crate::kicad::format_eng(*release_r, "\u{2126}");
-                    let (pn, desc) = find_closest(RESISTORS, *release_r)
-                        .map(|(pn, desc)| (Some(pn.to_string()), desc.to_string()))
-                        .unwrap_or((None, format!("{val} Release Timing Resistor")));
-                    entries.push(BomEntry {
-                        reference: format!("R_{}_REL", comp.id),
-                        display: "Envelope Release R".into(),
-                        value: val,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    });
-
-                    // Release timing capacitor
-                    let val = crate::kicad::format_eng(*release_c, "F");
-                    let (pn, desc) = find_closest_cap(*release_c)
-                        .map(|(pn, desc, _)| (Some(pn.to_string()), desc.to_string()))
-                        .unwrap_or((None, format!("{val} Release Timing Capacitor")));
-                    entries.push(BomEntry {
-                        reference: format!("C_{}_REL", comp.id),
-                        display: "Envelope Release C".into(),
-                        value: val,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    });
-
-                    // Sensitivity resistor
-                    let val = crate::kicad::format_eng(*sens_r, "\u{2126}");
-                    let (pn, desc) = find_closest(RESISTORS, *sens_r)
-                        .map(|(pn, desc)| (Some(pn.to_string()), desc.to_string()))
-                        .unwrap_or((None, format!("{val} Sensitivity Resistor")));
-                    entries.push(BomEntry {
-                        reference: format!("R_{}_SENS", comp.id),
-                        display: "Envelope Sens R".into(),
-                        value: val,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    });
-
-                    // Rectifier diode (1N4148)
-                    entries.push(BomEntry {
-                        reference: format!("D_{}", comp.id),
-                        display: "Envelope Rectifier".into(),
-                        value: "1N4148".into(),
-                        mouser_pn: Some(SILICON_DIODE.mouser_pn.to_string()),
-                        description: "1N4148 Envelope Rectifier Diode".to_string(),
-                        qty_per_unit: 1,
-                    });
-
-                    entries
-                }
-                // ── Synth ICs ──────────────────────────────────────────
-                ComponentKind::Vco(vt, ..) => {
-                    let (pn, desc, label) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string(), format!("{vt:?}"))
-                    } else {
-                        match vt {
-                            crate::dsl::VcoType::Cem3340 => (
-                                None, // NOS/specialty sourcing
-                                "CEM3340 VCO (Curtis, NOS)".to_string(),
-                                "CEM3340".to_string(),
-                            ),
-                            crate::dsl::VcoType::As3340 => (
-                                Some("ALFA-AS3340".to_string()),
-                                "AS3340 VCO (Alfa RPAR)".to_string(),
-                                "AS3340".to_string(),
-                            ),
-                            crate::dsl::VcoType::V3340 => (
-                                Some("COOLAUDIO-V3340".to_string()),
-                                "V3340 VCO (CoolAudio)".to_string(),
-                                "V3340".to_string(),
-                            ),
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "VCO".into(),
-                        value: label,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Vcf(vt) => {
-                    let (pn, desc, label) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string(), format!("{vt:?}"))
-                    } else {
-                        match vt {
-                            crate::dsl::VcfType::Cem3320 => (
-                                None,
-                                "CEM3320 VCF (Curtis, NOS)".to_string(),
-                                "CEM3320".to_string(),
-                            ),
-                            crate::dsl::VcfType::As3320 => (
-                                Some("ALFA-AS3320".to_string()),
-                                "AS3320 VCF (Alfa RPAR)".to_string(),
-                                "AS3320".to_string(),
-                            ),
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "VCF".into(),
-                        value: label,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Vca(vt) => {
-                    let (pn, desc, label) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string(), format!("{vt:?}"))
-                    } else {
-                        match vt {
-                            crate::dsl::VcaType::Ssm2164 => (
-                                None,
-                                "SSM2164 Quad VCA (NOS)".to_string(),
-                                "SSM2164".to_string(),
-                            ),
-                            crate::dsl::VcaType::V2164 => (
-                                Some("COOLAUDIO-V2164".to_string()),
-                                "V2164 Quad VCA (CoolAudio)".to_string(),
-                                "V2164".to_string(),
-                            ),
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "VCA".into(),
-                        value: label,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Comparator(ct) => {
-                    let (pn, desc, label) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string(), format!("{ct:?}"))
-                    } else {
-                        match ct {
-                            crate::dsl::ComparatorType::Lm311 => (
-                                Some("595-LM311P".to_string()),
-                                "LM311 Comparator".to_string(),
-                                "LM311".to_string(),
-                            ),
-                            crate::dsl::ComparatorType::Lm393 => (
-                                Some("595-LM393P".to_string()),
-                                "LM393 Dual Comparator".to_string(),
-                                "LM393".to_string(),
-                            ),
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Comparator".into(),
-                        value: label,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::AnalogSwitch(st) => {
-                    let (pn, desc, label) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string(), format!("{st:?}"))
-                    } else {
-                        match st {
-                            crate::dsl::AnalogSwitchType::Cd4066 => (
-                                Some("595-CD4066BE".to_string()),
-                                "CD4066 Quad Bilateral Switch".to_string(),
-                                "CD4066".to_string(),
-                            ),
-                            crate::dsl::AnalogSwitchType::Dg411 => (
-                                Some("700-DG411DJ-E3".to_string()),
-                                "DG411 Quad SPST Switch".to_string(),
-                                "DG411".to_string(),
-                            ),
-                        }
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Analog Switch".into(),
-                        value: label,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::MatchedNpn(mt) | ComponentKind::MatchedPnp(mt) => {
-                    let (pn, desc, label) = if let Some(part_name) = hw_part {
-                        (None, part_name.to_string(), format!("{mt:?}"))
-                    } else {
-                        match mt {
-                            crate::dsl::MatchedTransistorType::Ssm2210 => (
-                                Some("584-SSM2210PZ".to_string()),
-                                "SSM2210 Matched Dual NPN".to_string(),
-                                "SSM2210".to_string(),
-                            ),
-                            crate::dsl::MatchedTransistorType::Ca3046 => (
-                                None, // Discontinued, NOS sourcing
-                                "CA3046 5-NPN Transistor Array (NOS)".to_string(),
-                                "CA3046".to_string(),
-                            ),
-                            crate::dsl::MatchedTransistorType::Lm394 => (
-                                None, // Discontinued, NOS sourcing
-                                "LM394 Supermatch Pair (NOS)".to_string(),
-                                "LM394".to_string(),
-                            ),
-                            crate::dsl::MatchedTransistorType::That340 => (
-                                Some("THAT-340P14-U".to_string()),
-                                "THAT340 Matched Quad NPN".to_string(),
-                                "THAT340".to_string(),
-                            ),
-                        }
-                    };
-                    let is_npn = matches!(&comp.kind, ComponentKind::MatchedNpn(_));
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: if is_npn {
-                            "Matched NPN".into()
-                        } else {
-                            "Matched PNP".into()
-                        },
-                        value: label,
-                        mouser_pn: pn,
-                        description: desc,
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::Tempco(r, ppm) => {
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Tempco Resistor".into(),
-                        value: format!(
-                            "{} +{:.0}ppm/\u{b0}C",
-                            crate::kicad::format_eng(*r, "\u{2126}"),
-                            ppm
-                        ),
-                        mouser_pn: None, // Specialist supplier
-                        description: format!(
-                            "{} Tempco Resistor +{:.0}ppm/\u{b0}C",
-                            crate::kicad::format_eng(*r, "\u{2126}"),
-                            ppm
-                        ),
-                        qty_per_unit: 1,
-                    }]
-                }
-                // ── Studio Equipment Components ──────────────────────────────
-                ComponentKind::Transformer(cfg) => {
-                    let winding_desc = match (cfg.primary_type, cfg.secondary_type) {
-                        (crate::dsl::WindingType::PushPull, crate::dsl::WindingType::CenterTap) => {
-                            "PP/CT"
-                        }
-                        (crate::dsl::WindingType::Standard, crate::dsl::WindingType::CenterTap) => {
-                            "CT Secondary"
-                        }
-                        (crate::dsl::WindingType::CenterTap, crate::dsl::WindingType::Standard) => {
-                            "CT Primary"
-                        }
-                        (crate::dsl::WindingType::PushPull, crate::dsl::WindingType::Standard) => {
-                            "Push-Pull"
-                        }
-                        _ => "Standard",
-                    };
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Audio Transformer".into(),
-                        value: format!(
-                            "{:.1}:1 {}H {}",
-                            cfg.turns_ratio,
-                            crate::kicad::format_eng(cfg.primary_inductance, ""),
-                            winding_desc
-                        ),
-                        mouser_pn: None, // Custom/specialty (Sowter, Carnhill, etc.)
-                        description: format!(
-                            "Audio Transformer {:.1}:1, {} primary inductance, {}",
-                            cfg.turns_ratio,
-                            crate::kicad::format_eng(cfg.primary_inductance, "H"),
-                            winding_desc
-                        ),
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::CapSwitched(values) => {
-                    // Generate BOM entries for all capacitor values in the switch
-                    values
-                        .iter()
-                        .enumerate()
-                        .map(|(i, val)| {
-                            let (pn, desc) = find_closest_cap(*val)
-                                .map(|(cpn, cdesc, _)| (Some(cpn.to_string()), cdesc.to_string()))
-                                .unwrap_or((
-                                    None,
-                                    format!(
-                                        "{} Switched Capacitor (pos {})",
-                                        crate::kicad::format_eng(*val, "F"),
-                                        i + 1
-                                    ),
-                                ));
-                            BomEntry {
-                                reference: format!("{}_{}", comp.id, i + 1),
-                                display: "Switched Capacitor".into(),
-                                value: crate::kicad::format_eng(*val, "F"),
-                                mouser_pn: pn,
-                                description: desc,
-                                qty_per_unit: 1,
-                            }
-                        })
-                        .collect()
-                }
-                ComponentKind::InductorSwitched(values) => {
-                    // Multi-tapped inductor - typically a single wound component
-                    let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
-                    let max_val = values.iter().cloned().fold(0.0f64, f64::max);
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Multi-Tap Inductor".into(),
-                        value: format!(
-                            "{}-{} ({} taps)",
-                            crate::kicad::format_eng(min_val, "H"),
-                            crate::kicad::format_eng(max_val, "H"),
-                            values.len()
-                        ),
-                        mouser_pn: None, // Custom wound
-                        description: format!(
-                            "Multi-tapped inductor, {} positions ({}-{})",
-                            values.len(),
-                            crate::kicad::format_eng(min_val, "H"),
-                            crate::kicad::format_eng(max_val, "H")
-                        ),
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::RotarySwitch(positions) => {
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Rotary Switch".into(),
-                        value: format!("{}-position", positions.len()),
-                        mouser_pn: None, // Depends on deck count, application
-                        description: format!("{}-position rotary switch", positions.len()),
-                        qty_per_unit: 1,
-                    }]
-                }
-                ComponentKind::ResistorSwitched(values) => {
-                    // Generate entries for all resistor values in the switch
-                    values
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| {
-                            let (_, suffix, scaled) = super::kicad::format_eng_components(*v);
-                            BomEntry {
-                                reference: format!("{}_{}", comp.id, i + 1),
-                                display: "Resistor".into(),
-                                value: format!("{}{}", scaled, suffix),
-                                mouser_pn: super::hw::mouser_resistor(*v),
-                                description: format!(
-                                    "Resistor {:.2}{} (switched position {})",
-                                    scaled,
-                                    suffix,
+                                format!(
+                                    "{} Switched Capacitor (pos {})",
+                                    crate::kicad::format_eng(*val, "F"),
                                     i + 1
                                 ),
-                                qty_per_unit: 1,
-                            }
-                        })
-                        .collect()
-                }
-                ComponentKind::Switch(positions) => {
-                    vec![BomEntry {
-                        reference: comp.id.clone(),
-                        display: "Switch".into(),
-                        value: format!("{}-position", positions),
-                        mouser_pn: None, // Depends on specific switch type
-                        description: format!("{}-position mechanical switch", positions),
-                        qty_per_unit: 1,
-                    }]
-                }
-                // Virtual/software elements — no physical BOM entries
-                ComponentKind::DelayLine(..) => {
-                    // Delay line is a virtual WDF element — no physical part.
-                    vec![]
-                }
-                ComponentKind::Tap(..) => {
-                    // Tap is a virtual read port — no physical part.
-                    vec![]
-                }
+                            ));
+                        BomEntry {
+                            reference: format!("{}_{}", comp.id, i + 1),
+                            display: "Switched Capacitor".into(),
+                            value: crate::kicad::format_eng(*val, "F"),
+                            mouser_pn: pn,
+                            description: desc,
+                            qty_per_unit: 1,
+                        }
+                    })
+                    .collect()
+            } else if let Some(is) = kind.as_any().downcast_ref::<InductorSwitched>() {
+                // Multi-tapped inductor - typically a single wound component
+                let values = &is.values;
+                let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
+                let max_val = values.iter().cloned().fold(0.0f64, f64::max);
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Multi-Tap Inductor".into(),
+                    value: format!(
+                        "{}-{} ({} taps)",
+                        crate::kicad::format_eng(min_val, "H"),
+                        crate::kicad::format_eng(max_val, "H"),
+                        values.len()
+                    ),
+                    mouser_pn: None, // Custom wound
+                    description: format!(
+                        "Multi-tapped inductor, {} positions ({}-{})",
+                        values.len(),
+                        crate::kicad::format_eng(min_val, "H"),
+                        crate::kicad::format_eng(max_val, "H")
+                    ),
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(rs) = kind.as_any().downcast_ref::<RotarySwitch>() {
+                let positions = &rs.linked_ids;
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Rotary Switch".into(),
+                    value: format!("{}-position", positions.len()),
+                    mouser_pn: None, // Depends on deck count, application
+                    description: format!("{}-position rotary switch", positions.len()),
+                    qty_per_unit: 1,
+                }]
+            } else if let Some(rsw) = kind.as_any().downcast_ref::<ResistorSwitched>() {
+                // Generate entries for all resistor values in the switch
+                rsw.values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let r_val = crate::kicad::format_eng(*v, "\u{2126}");
+                        let (pn, desc) = find_closest(RESISTORS, *v)
+                            .map(|(pn, desc)| (Some(pn.to_string()), desc.to_string()))
+                            .unwrap_or((None, format!("{r_val} Resistor (switched position {})", i + 1)));
+                        BomEntry {
+                            reference: format!("{}_{}", comp.id, i + 1),
+                            display: "Resistor".into(),
+                            value: r_val,
+                            mouser_pn: pn,
+                            description: desc,
+                            qty_per_unit: 1,
+                        }
+                    })
+                    .collect()
+            } else if let Some(sw) = kind.as_any().downcast_ref::<Switch>() {
+                let positions = sw.positions;
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: "Switch".into(),
+                    value: format!("{}-position", positions),
+                    mouser_pn: None, // Depends on specific switch type
+                    description: format!("{}-position mechanical switch", positions),
+                    qty_per_unit: 1,
+                }]
+            } else if kind.as_any().downcast_ref::<DelayLineComp>().is_some()
+                || kind.as_any().downcast_ref::<Tap>().is_some()
+            {
+                // Virtual/software elements -- no physical BOM entries
+                vec![]
+            } else if let Some(vm) = kind.as_any().downcast_ref::<VariMu>() {
+                let name = &vm.model;
+                let (pn, desc) = if let Some(part_name) = hw_part {
+                    (None, part_name.to_string())
+                } else {
+                    (None, format!("{} Vari-Mu Tube", name))
+                };
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: format!("Vari-Mu ({})", name),
+                    value: name.clone(),
+                    mouser_pn: pn,
+                    description: desc,
+                    qty_per_unit: 1,
+                }]
+            } else if kind.as_any().downcast_ref::<TriggerInputComp>().is_some() {
+                // Trigger input is a virtual element -- no physical part
+                vec![]
+            } else {
+                // Unknown component type -- produce a generic entry
+                vec![BomEntry {
+                    reference: comp.id.clone(),
+                    display: kind.type_tag().to_string(),
+                    value: "\u{2014}".into(),
+                    mouser_pn: None,
+                    description: format!("{} ({})", kind.type_tag(), comp.id),
+                    qty_per_unit: 1,
+                }]
             }
         })
         .collect()
+}
+
+/// Helper for matched transistor BOM entries (shared between MatchedNpn and MatchedPnp).
+fn matched_transistor_bom(
+    hw_part: Option<&str>,
+    mt: crate::dsl::MatchedTransistorType,
+) -> (Option<String>, String, String) {
+    if let Some(part_name) = hw_part {
+        (None, part_name.to_string(), format!("{mt:?}"))
+    } else {
+        match mt {
+            crate::dsl::MatchedTransistorType::Ssm2210 => (
+                Some("584-SSM2210PZ".to_string()),
+                "SSM2210 Matched Dual NPN".to_string(),
+                "SSM2210".to_string(),
+            ),
+            crate::dsl::MatchedTransistorType::Ca3046 => (
+                None, // Discontinued, NOS sourcing
+                "CA3046 5-NPN Transistor Array (NOS)".to_string(),
+                "CA3046".to_string(),
+            ),
+            crate::dsl::MatchedTransistorType::Lm394 => (
+                None, // Discontinued, NOS sourcing
+                "LM394 Supermatch Pair (NOS)".to_string(),
+                "LM394".to_string(),
+            ),
+            crate::dsl::MatchedTransistorType::That340 => (
+                Some("THAT-340P14-U".to_string()),
+                "THAT340 Matched Quad NPN".to_string(),
+                "THAT340".to_string(),
+            ),
+        }
+    }
 }
 
 /// Export a BOM as a Mouser-compatible CSV.

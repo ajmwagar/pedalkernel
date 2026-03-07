@@ -80,6 +80,12 @@ impl Component for Npn {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:Q_NPN_BCE", "Q")
     }
+
+    fn symbol_name(&self) -> &'static str { "npn_bjt" }
+    fn layout_class(&self) -> &'static str { "npn" }
+
+    fn is_bjt(&self) -> bool { true }
+    fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -147,6 +153,12 @@ impl Component for Pnp {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:Q_PNP_BCE", "Q")
     }
+
+    fn symbol_name(&self) -> &'static str { "pnp_bjt" }
+    fn layout_class(&self) -> &'static str { "pnp" }
+
+    fn is_bjt(&self) -> bool { true }
+    fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -243,6 +255,12 @@ impl Component for NJfet {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:Q_NJFET_DGS", "J")
     }
+
+    fn symbol_name(&self) -> &'static str { "njfet" }
+    fn layout_class(&self) -> &'static str { "njfet" }
+
+    fn is_jfet(&self) -> bool { true }
+    fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -339,6 +357,12 @@ impl Component for PJfet {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:Q_PJFET_DGS", "J")
     }
+
+    fn symbol_name(&self) -> &'static str { "pjfet" }
+    fn layout_class(&self) -> &'static str { "pjfet" }
+
+    fn is_jfet(&self) -> bool { true }
+    fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -416,6 +440,11 @@ impl Component for Nmos {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:Q_NMOS_DGS", "Q")
     }
+
+    fn symbol_name(&self) -> &'static str { "nmos" }
+    fn layout_class(&self) -> &'static str { "nmos" }
+
+    fn is_mosfet(&self) -> bool { true }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -493,4 +522,9 @@ impl Component for Pmos {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:Q_PMOS_DGS", "Q")
     }
+
+    fn symbol_name(&self) -> &'static str { "pmos" }
+    fn layout_class(&self) -> &'static str { "pmos" }
+
+    fn is_mosfet(&self) -> bool { true }
 }

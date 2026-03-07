@@ -74,6 +74,9 @@ impl Component for Switch {
             _ => ("Switch:SW_Rotary4", "SW"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "switch" }
+    fn layout_class(&self) -> &'static str { "switch" }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -132,6 +135,9 @@ impl Component for RotarySwitch {
             _ => ("Switch:SW_Rotary12", "SW"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "switch" }
+    fn layout_class(&self) -> &'static str { "rotary_switch" }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -179,4 +185,9 @@ impl Component for TriggerInputComp {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Connector:TestPoint", "TP")
     }
+
+    fn symbol_name(&self) -> &'static str { "switch" }
+    fn layout_class(&self) -> &'static str { "trigger_input" }
+
+    fn is_trigger(&self) -> bool { true }
 }

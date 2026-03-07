@@ -5,7 +5,8 @@
 //! inferred from component type and pin function (e.g., triode grid = input,
 //! plate = output).
 
-use pedalkernel::dsl::{ComponentDef, ComponentKind, NetDef, PedalDef, Pin};
+use pedalkernel::compiler::Component;
+use pedalkernel::dsl::{ComponentDef, NetDef, PedalDef, Pin};
 use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
@@ -28,80 +29,85 @@ pub enum PinDirection {
 }
 
 /// Infer the signal direction for a given pin on a component.
-pub fn infer_pin_direction(kind: &ComponentKind, pin_name: &str) -> PinDirection {
-    match kind {
+pub fn infer_pin_direction(kind: &dyn Component, pin_name: &str) -> PinDirection {
+    let lc = kind.layout_class();
+    if lc == "triode" || lc == "vari_mu" {
         // Triode: grid=in, plate=out, cathode=down (bias hangs below)
-        ComponentKind::Triode(_) => match pin_name {
+        match pin_name {
             "grid" => PinDirection::Input,
             "plate" => PinDirection::Output,
             "cathode" => PinDirection::Down,
             _ => PinDirection::Bidirectional,
-        },
+        }
+    } else if lc == "pentode" {
         // Pentode: grid=in, plate=out, screen=up (to supply), cathode=down
-        ComponentKind::Pentode(_) => match pin_name {
+        match pin_name {
             "grid" => PinDirection::Input,
             "plate" => PinDirection::Output,
             "screen" => PinDirection::Up,
             "cathode" => PinDirection::Down,
             _ => PinDirection::Bidirectional,
-        },
-        // Transformer: primary=input side, secondary=output side
-        ComponentKind::Transformer(_) => {
-            if pin_name.starts_with("pri") {
-                PinDirection::Input
-            } else if pin_name.starts_with("sec") {
-                PinDirection::Output
-            } else {
-                PinDirection::Bidirectional
-            }
         }
+    } else if kind.is_transformer() {
+        // Transformer: primary=input side, secondary=output side
+        if pin_name.starts_with("pri") {
+            PinDirection::Input
+        } else if pin_name.starts_with("sec") {
+            PinDirection::Output
+        } else {
+            PinDirection::Bidirectional
+        }
+    } else if kind.is_pot() {
         // Potentiometer: wiper=output
-        ComponentKind::Potentiometer(..) => match pin_name {
+        match pin_name {
             "wiper" | "b" => PinDirection::Output,
             "a" => PinDirection::Input,
             _ => PinDirection::Bidirectional,
-        },
+        }
+    } else if kind.op_amp_type().is_some() {
         // Op-amp: pos/neg=input, out=output
-        ComponentKind::OpAmp(_) => match pin_name {
+        match pin_name {
             "pos" | "neg" => PinDirection::Input,
             "out" => PinDirection::Output,
             _ => PinDirection::Bidirectional,
-        },
+        }
+    } else if kind.is_bjt() {
         // BJTs: base=input, collector=output, emitter=down
-        ComponentKind::Npn(_) | ComponentKind::Pnp(_) => match pin_name {
+        match pin_name {
             "base" => PinDirection::Input,
             "collector" => PinDirection::Output,
             "emitter" => PinDirection::Down,
             _ => PinDirection::Bidirectional,
-        },
+        }
+    } else if kind.is_jfet() {
         // JFETs: gate=input, drain=output, source=down
-        ComponentKind::NJfet(_) | ComponentKind::PJfet(_) => match pin_name {
+        match pin_name {
             "gate" => PinDirection::Input,
             "drain" => PinDirection::Output,
             "source" => PinDirection::Down,
             _ => PinDirection::Bidirectional,
-        },
+        }
+    } else if kind.is_mosfet() {
         // MOSFETs: gate=input, drain=output, source=down
-        ComponentKind::Nmos(_) | ComponentKind::Pmos(_) => match pin_name {
+        match pin_name {
             "gate" => PinDirection::Input,
             "drain" => PinDirection::Output,
             "source" => PinDirection::Down,
             _ => PinDirection::Bidirectional,
-        },
+        }
+    } else if kind.is_diode_family() {
         // Diodes: anode=input, cathode=output (current flow direction)
-        ComponentKind::Diode(_) | ComponentKind::DiodePair(_) | ComponentKind::Zener(_) => {
-            match pin_name {
-                "a" => PinDirection::Input,
-                "b" => PinDirection::Output,
-                _ => PinDirection::Bidirectional,
-            }
+        match pin_name {
+            "a" => PinDirection::Input,
+            "b" => PinDirection::Output,
+            _ => PinDirection::Bidirectional,
         }
+    } else if kind.is_passive() && !kind.is_pot() && !kind.is_transformer() {
         // Two-terminal passives: direction from context
-        ComponentKind::Resistor(_) | ComponentKind::Capacitor(_) | ComponentKind::Inductor(_) => {
-            PinDirection::Bidirectional
-        }
+        PinDirection::Bidirectional
+    } else {
         // Everything else: bidirectional
-        _ => PinDirection::Bidirectional,
+        PinDirection::Bidirectional
     }
 }
 
@@ -269,38 +275,22 @@ impl LayoutGraph {
     }
 
     /// Get the component kind for a node, if it has one.
-    pub fn node_kind(&self, node_id: usize) -> Option<&ComponentKind> {
-        self.nodes[node_id].comp.as_ref().map(|c| &c.kind)
+    pub fn node_kind(&self, node_id: usize) -> Option<&dyn Component> {
+        self.nodes[node_id].comp.as_ref().map(|c| c.kind.as_ref())
     }
 
     /// Check if a node is an active device (tube, transistor, op-amp).
     pub fn is_active_device(&self, node_id: usize) -> bool {
-        matches!(
-            self.node_kind(node_id),
-            Some(
-                ComponentKind::Triode(_)
-                    | ComponentKind::Pentode(_)
-                    | ComponentKind::Npn(_)
-                    | ComponentKind::Pnp(_)
-                    | ComponentKind::NJfet(_)
-                    | ComponentKind::PJfet(_)
-                    | ComponentKind::Nmos(_)
-                    | ComponentKind::Pmos(_)
-                    | ComponentKind::OpAmp(_)
-            )
-        )
+        self.node_kind(node_id).map_or(false, |k| {
+            k.is_tube() || k.is_bjt() || k.is_jfet() || k.is_mosfet() || k.op_amp_type().is_some()
+        })
     }
 
     /// Check if a component is a passive (R, C, L).
     pub fn is_passive(&self, node_id: usize) -> bool {
-        matches!(
-            self.node_kind(node_id),
-            Some(
-                ComponentKind::Resistor(_)
-                    | ComponentKind::Capacitor(_)
-                    | ComponentKind::Inductor(_)
-            )
-        )
+        self.node_kind(node_id).map_or(false, |k| {
+            k.is_passive() && !k.is_pot() && !k.is_transformer()
+        })
     }
 }
 
@@ -529,7 +519,7 @@ fn get_pin_direction_in_net(node: &LayoutNode, ng: &NetGroup) -> PinDirection {
         } = pin
         {
             if *component == node.comp_id {
-                return infer_pin_direction(&comp.kind, pin_name);
+                return infer_pin_direction(comp.kind.as_ref(), pin_name);
             }
         }
     }
@@ -581,6 +571,7 @@ fn mark_feedback_edges(edges: &mut [LayoutEdge], num_nodes: usize, start: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pedalkernel::compiler::components::*;
     use pedalkernel::dsl::*;
 
     fn simple_pedal() -> PedalDef {
@@ -590,11 +581,11 @@ mod tests {
             components: vec![
                 ComponentDef {
                     id: "R1".into(),
-                    kind: ComponentKind::Resistor(4700.0),
+                    kind: Box::new(Resistor { value: 4700.0 }),
                 },
                 ComponentDef {
                     id: "C1".into(),
-                    kind: ComponentKind::Capacitor(CapConfig::new(100e-9)),
+                    kind: Box::new(Capacitor { config: CapConfig::new(100e-9) }),
                 },
             ],
             nets: vec![
@@ -628,6 +619,8 @@ mod tests {
             monitors: vec![],
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
+            subtitle: None,
+            midi_bindings: vec![],
         }
     }
 
@@ -646,28 +639,30 @@ mod tests {
 
     #[test]
     fn pin_direction_triode() {
+        let triode = Triode { model: "12AX7".into() };
         assert_eq!(
-            infer_pin_direction(&ComponentKind::Triode("12AX7".into()), "grid"),
+            infer_pin_direction(&triode, "grid"),
             PinDirection::Input
         );
         assert_eq!(
-            infer_pin_direction(&ComponentKind::Triode("12AX7".into()), "plate"),
+            infer_pin_direction(&triode, "plate"),
             PinDirection::Output
         );
         assert_eq!(
-            infer_pin_direction(&ComponentKind::Triode("12AX7".into()), "cathode"),
+            infer_pin_direction(&triode, "cathode"),
             PinDirection::Down
         );
     }
 
     #[test]
     fn pin_direction_opamp() {
+        let opamp = OpAmp { op_type: OpAmpType::Jrc4558 };
         assert_eq!(
-            infer_pin_direction(&ComponentKind::OpAmp(OpAmpType::Jrc4558), "pos"),
+            infer_pin_direction(&opamp, "pos"),
             PinDirection::Input
         );
         assert_eq!(
-            infer_pin_direction(&ComponentKind::OpAmp(OpAmpType::Jrc4558), "out"),
+            infer_pin_direction(&opamp, "out"),
             PinDirection::Output
         );
     }

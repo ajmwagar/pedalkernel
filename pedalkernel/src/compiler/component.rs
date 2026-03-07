@@ -23,7 +23,7 @@ pub(crate) const OPEN_CIRCUIT_R: f64 = 1_000_000.0;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Result of stamping a component into an MNA system.
-pub(super) enum StampResult {
+pub enum StampResult {
     /// Stamped conductance directly into G matrix (resistors, tempcos, switched resistors).
     Stamped,
     /// Produces a reactive WDF port (capacitor, inductor, switched cap/inductor).
@@ -41,7 +41,7 @@ pub(super) enum StampResult {
 }
 
 /// Pin configuration for validation and graph construction.
-pub(super) struct PinConfig {
+pub struct PinConfig {
     /// Valid pin names for this component type.
     pub valid_pins: &'static [&'static str],
     /// Pin aliases: (short, long) pairs that should be unioned in the graph.
@@ -56,7 +56,7 @@ pub(super) struct PinConfig {
 /// - Vccs needs MNA off-diagonal stamps
 /// - Behavioral breaks the graph (separate stages on each side)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum EdgeKind {
+pub enum EdgeKind {
     /// Purely resistive: R, pot sub-R, tempco, switched-R, photocoupler LDR, JFET Vr.
     Linear,
     /// Has state, must be a WDF port: C, L, switched-C, switched-L.
@@ -71,7 +71,7 @@ pub(super) enum EdgeKind {
 
 /// A single edge declared by a component.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ComponentEdge {
+pub struct ComponentEdge {
     pub pin_a: &'static str,
     pub pin_b: &'static str,
     pub kind: EdgeKind,
@@ -83,7 +83,7 @@ pub(super) struct ComponentEdge {
 
 /// A controllable parameter declared by a component.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct ControlParam {
+pub struct ControlParam {
     /// Parameter name, must match `ControlDef.property` from the DSL.
     pub name: &'static str,
     /// What kind of control target this maps to.
@@ -92,7 +92,7 @@ pub(super) struct ControlParam {
 
 /// Classification of a component's controllable parameter.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum ControlParamKind {
+pub enum ControlParamKind {
     /// Potentiometer position (0–1) — resolved to PotInStage/PotInMultiNlStage/etc.
     PotPosition,
     /// LFO rate (0–1 normalized).
@@ -115,7 +115,7 @@ pub(super) enum ControlParamKind {
 
 /// Modulation sink: how a component receives LFO/envelope control signals.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct ModulationSink {
+pub struct ModulationSink {
     /// Which kind of modulation target this maps to.
     pub target_kind: ModulationSinkKind,
     /// Center/offset voltage for the modulation.
@@ -126,7 +126,7 @@ pub(super) struct ModulationSink {
 
 /// Classification of a modulation sink by target type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ModulationSinkKind {
+pub enum ModulationSinkKind {
     JfetVgs,
     PhotocouplerLed,
     TriodeVgk,
@@ -141,7 +141,7 @@ pub(super) enum ModulationSinkKind {
 
 /// Context provided to `resolve_edges()` so a component can decide its role
 /// based on how it's wired in the circuit.
-pub(super) struct ResolveContext {
+pub struct ResolveContext {
     /// True if the component's control/modulation pin is driven by an LFO,
     /// envelope follower, or DC bias (not in the audio signal path).
     pub control_pin_is_modulated: bool,
@@ -150,7 +150,7 @@ pub(super) struct ResolveContext {
 }
 
 /// How a component participates in circuit graph construction.
-pub(super) enum GraphRole {
+pub enum GraphRole {
     /// Creates one edge between two named pins.
     Edge {
         pin_a: &'static str,
@@ -188,7 +188,7 @@ pub(super) enum GraphRole {
 /// Requires `Debug` for trait-object `Debug` forwarding.
 /// Provides `clone_box`, `as_any`, and `dyn_eq` for trait-object
 /// `Clone`, `PartialEq`, and downcasting support.
-pub(super) trait Component: std::fmt::Debug {
+pub trait Component: std::fmt::Debug {
     // ── Trait Object Support ──────────────────────────────────────────────
 
     /// Clone into a boxed trait object.
@@ -196,6 +196,9 @@ pub(super) trait Component: std::fmt::Debug {
 
     /// Downcast to `Any` for type-erased equality checks and downcasting.
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Downcast to `Any` mutably for in-place mutation (e.g., tolerance tweaks).
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
     /// Dynamic equality: returns `true` if `other` is the same concrete type
     /// and compares equal.
@@ -328,6 +331,39 @@ pub(super) trait Component: std::fmt::Debug {
 
     /// KiCad symbol library reference and designator prefix.
     fn footprint_ref(&self) -> (&'static str, &'static str);
+
+    // ── Classification (family booleans) ─────────────────────────────────
+    // Default: false. Override in concrete structs that belong to each family.
+
+    fn is_modulation_source(&self) -> bool { false }
+    fn is_bjt(&self) -> bool { false }
+    fn is_jfet(&self) -> bool { false }
+    fn is_mosfet(&self) -> bool { false }
+    fn is_tube(&self) -> bool { false }
+    fn is_transformer(&self) -> bool { false }
+    fn is_pot(&self) -> bool { false }
+    fn is_diode_family(&self) -> bool { false }
+    fn is_delay(&self) -> bool { false }
+    fn is_trigger(&self) -> bool { false }
+
+    // ── Accessor methods (defaults return None) ──────────────────────────
+
+    fn model_name(&self) -> Option<&str> { None }
+    fn op_amp_type(&self) -> Option<crate::dsl::OpAmpType> { None }
+    fn pot_taper(&self) -> Option<crate::dsl::PotTaper> { None }
+    fn diode_type(&self) -> Option<crate::dsl::DiodeType> { None }
+    fn transformer_config(&self) -> Option<&crate::dsl::TransformerConfig> { None }
+
+    // ── Layout methods (defaults use type_tag) ──────────────────────────
+
+    /// Symbol identifier for layout rendering (e.g., "resistor", "triode", "opamp").
+    fn symbol_name(&self) -> &'static str { self.type_tag() }
+
+    /// Layout class identifier for placement grouping (e.g., "resistor", "npn", "opamp").
+    fn layout_class(&self) -> &'static str { self.type_tag() }
+
+    /// Human-readable display value for labels (e.g., "4.7kΩ", "100nF").
+    fn display_value(&self) -> Option<String> { None }
 }
 
 // ── Trait-object blanket impls ────────────────────────────────────────────
@@ -415,6 +451,10 @@ impl Component for ComponentKind {
         self
     }
 
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn dyn_eq(&self, other: &dyn Component) -> bool {
         other
             .as_any()
@@ -472,6 +512,52 @@ impl Component for ComponentKind {
     }
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         with_concrete(self, |c| c.footprint_ref())
+    }
+    fn symbol_name(&self) -> &'static str { with_concrete(self, |c| c.symbol_name()) }
+    fn layout_class(&self) -> &'static str { with_concrete(self, |c| c.layout_class()) }
+    fn display_value(&self) -> Option<String> { with_concrete(self, |c| c.display_value()) }
+    fn is_modulation_source(&self) -> bool { with_concrete(self, |c| c.is_modulation_source()) }
+    fn is_bjt(&self) -> bool { with_concrete(self, |c| c.is_bjt()) }
+    fn is_jfet(&self) -> bool { with_concrete(self, |c| c.is_jfet()) }
+    fn is_mosfet(&self) -> bool { with_concrete(self, |c| c.is_mosfet()) }
+    fn is_tube(&self) -> bool { with_concrete(self, |c| c.is_tube()) }
+    fn is_transformer(&self) -> bool { with_concrete(self, |c| c.is_transformer()) }
+    fn is_pot(&self) -> bool { with_concrete(self, |c| c.is_pot()) }
+    fn is_diode_family(&self) -> bool { with_concrete(self, |c| c.is_diode_family()) }
+    fn is_delay(&self) -> bool { with_concrete(self, |c| c.is_delay()) }
+    fn is_trigger(&self) -> bool { with_concrete(self, |c| c.is_trigger()) }
+    fn model_name(&self) -> Option<&str> {
+        match self {
+            ComponentKind::Npn(m) | ComponentKind::Pnp(m)
+            | ComponentKind::NJfet(m) | ComponentKind::PJfet(m)
+            | ComponentKind::Triode(m) | ComponentKind::Pentode(m)
+            | ComponentKind::VariMu(m) => Some(m.as_str()),
+            _ => None,
+        }
+    }
+    fn op_amp_type(&self) -> Option<crate::dsl::OpAmpType> {
+        match self {
+            ComponentKind::OpAmp(ot) => Some(*ot),
+            _ => None,
+        }
+    }
+    fn pot_taper(&self) -> Option<crate::dsl::PotTaper> {
+        match self {
+            ComponentKind::Potentiometer(_, t) => Some(*t),
+            _ => None,
+        }
+    }
+    fn diode_type(&self) -> Option<crate::dsl::DiodeType> {
+        match self {
+            ComponentKind::Diode(dt) | ComponentKind::DiodePair(dt) => Some(*dt),
+            _ => None,
+        }
+    }
+    fn transformer_config(&self) -> Option<&crate::dsl::TransformerConfig> {
+        match self {
+            ComponentKind::Transformer(cfg) => Some(cfg),
+            _ => None,
+        }
     }
 }
 

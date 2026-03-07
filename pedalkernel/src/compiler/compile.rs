@@ -11,12 +11,19 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
-use crate::elements::*;
+use crate::elements::{BbdDelayLine, BbdModel, SlewRateLimiter, TriodeModel};
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::thermal::ThermalModel;
 use crate::tolerance::ToleranceEngine;
 
 use super::compiled::*;
+use super::component::Component;
+use super::components::{
+    Bbd as BbdComp, Capacitor as CapacitorComp, DelayLineComp, Inductor as InductorComp,
+    Lfo as LfoComp, Pentode as PentodeComp, Potentiometer as PotComp,
+    Resistor as ResistorComp, Tap as TapComp, Triode as TriodeComp, Vca as VcaComp,
+    VariMu as VariMuComp, Vco as VcoComp,
+};
 use super::dyn_node::DynNode;
 use super::graph::*;
 use super::helpers::*;
@@ -36,12 +43,7 @@ fn detect_envelope_controlled_otas(pedal: &PedalDef) -> HashSet<String> {
     let modulator_ids: HashSet<&str> = pedal
         .components
         .iter()
-        .filter(|c| {
-            matches!(
-                &c.kind,
-                ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..)
-            )
-        })
+        .filter(|c| c.kind.is_modulation_source())
         .map(|c| c.id.as_str())
         .collect();
 
@@ -52,7 +54,7 @@ fn detect_envelope_controlled_otas(pedal: &PedalDef) -> HashSet<String> {
     let ota_ids: HashSet<&str> = pedal
         .components
         .iter()
-        .filter(|c| matches!(&c.kind, ComponentKind::OpAmp(ot) if ot.is_ota()))
+        .filter(|c| c.kind.op_amp_type().map_or(false, |ot| ot.is_ota()))
         .map(|c| c.id.as_str())
         .collect();
 
@@ -88,12 +90,7 @@ fn detect_lfo_controlled_jfets(pedal: &PedalDef) -> HashSet<String> {
     let modulator_ids: HashSet<&str> = pedal
         .components
         .iter()
-        .filter(|c| {
-            matches!(
-                &c.kind,
-                ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..)
-            )
-        })
+        .filter(|c| c.kind.is_modulation_source())
         .map(|c| c.id.as_str())
         .collect();
 
@@ -105,7 +102,7 @@ fn detect_lfo_controlled_jfets(pedal: &PedalDef) -> HashSet<String> {
     let jfet_ids: HashSet<&str> = pedal
         .components
         .iter()
-        .filter(|c| matches!(&c.kind, ComponentKind::NJfet(_) | ComponentKind::PJfet(_)))
+        .filter(|c| c.kind.is_jfet())
         .map(|c| c.id.as_str())
         .collect();
 
@@ -149,7 +146,6 @@ fn compute_resistor_divider_gain(graph: &CircuitGraph) -> f64 {
 
 /// Find total resistance between two nodes via BFS through resistive elements.
 fn find_resistance_between(graph: &CircuitGraph, from: NodeId, to: NodeId) -> Option<f64> {
-    use super::component::Component;
     if from == to {
         return Some(0.0);
     }
@@ -213,13 +209,8 @@ fn build_passive_wdf_stage(
         .iter()
         .enumerate()
         .filter(|(_, e)| {
-            matches!(
-                graph.components[e.comp_idx].kind,
-                ComponentKind::Resistor(_)
-                    | ComponentKind::Capacitor(_)
-                    | ComponentKind::Inductor(_)
-                    | ComponentKind::Potentiometer(_, _)
-            )
+            let k = &graph.components[e.comp_idx].kind;
+            k.is_passive() && !k.is_transformer()
         })
         .map(|(i, _)| i)
         .collect();
@@ -265,7 +256,7 @@ fn build_passive_wdf_stage(
             while all_components.len() <= vs_comp_idx {
                 all_components.push(ComponentDef {
                     id: "__vs__".to_string(),
-                    kind: ComponentKind::Resistor(1.0),
+                    kind: Box::new(ResistorComp { value: 1.0 }),
                 });
             }
             let tree = sp_to_dyn_with_vs(
@@ -406,7 +397,7 @@ fn build_passive_mna_stage(
         let n2 = to_mna(e.node_b);
         let comp = &graph.components[e.comp_idx];
 
-        use super::component::{Component, StampResult};
+        use super::component::StampResult;
         match comp.kind.stamp_mna(&comp.id, n1, n2, &mut mna, effective_rate) {
             StampResult::Stamped => {}
             StampResult::Reactive { dyn_node, rp } => {
@@ -616,7 +607,7 @@ fn build_orphan_output_mna_stage(
         let n2 = to_mna(e.node_b);
         let comp = &graph.components[e.comp_idx];
 
-        use super::component::{Component, StampResult};
+        use super::component::StampResult;
         match comp.kind.stamp_mna(&comp.id, n1, n2, &mut mna, effective_rate) {
             StampResult::Stamped => {}
             StampResult::Reactive { dyn_node, rp } => {
@@ -738,7 +729,7 @@ fn rescue_orphan_output_pots(
     let all_pot_ids: Vec<String> = graph
         .components
         .iter()
-        .filter(|c| matches!(c.kind, ComponentKind::Potentiometer(_, _)))
+        .filter(|c| c.kind.is_pot())
         .map(|c| c.id.clone())
         .collect();
     eprintln!("[orphan-rescue] all pot IDs: {:?}", all_pot_ids);
@@ -797,8 +788,7 @@ fn rescue_orphan_output_pots(
         }
         // Skip transformer edges and non-passive components
         let comp = &graph.components[e.comp_idx];
-        use super::component::Component;
-        if !comp.kind.is_passive() || matches!(comp.kind, ComponentKind::Transformer(_)) {
+        if !comp.kind.is_passive() || comp.kind.is_transformer() {
             continue;
         }
         // Skip supply-node edges (except gnd — gnd is a valid termination)
@@ -861,7 +851,7 @@ fn rescue_orphan_output_pots(
     for &eidx in &output_edges {
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
-        eprintln!("  edge {}: {} ({:?}) between {:?} and {:?}", eidx, comp.id, comp.kind, e.node_a, e.node_b);
+        eprintln!("  edge {}: {} ({}) between {:?} and {:?}", eidx, comp.id, comp.kind.type_tag(), e.node_a, e.node_b);
     }
     if output_edges.is_empty() {
         return Vec::new();
@@ -979,15 +969,20 @@ fn build_output_rooted_stage(
     let source_comp = &graph.components[source_edge.comp_idx];
     let load_comp = &graph.components[load_edge.comp_idx];
 
-    // Verify this is a supported 2-element passive topology.
-    let _supported = match (&source_comp.kind, &load_comp.kind) {
-        (ComponentKind::Resistor(_), ComponentKind::Capacitor(_))
-        | (ComponentKind::Capacitor(_), ComponentKind::Resistor(_))
-        | (ComponentKind::Inductor(_), ComponentKind::Resistor(_))
-        | (ComponentKind::Resistor(_), ComponentKind::Inductor(_))
-        | (ComponentKind::Resistor(_), ComponentKind::Resistor(_)) => true,
-        _ => return None,
-    };
+    // Verify this is a supported 2-element passive topology (RC, RL, or RR).
+    // At least one element must be a resistor, and both must be basic passives (R/C/L).
+    {
+        let is_r_c_or_l = |k: &dyn Component| -> bool {
+            k.as_any().downcast_ref::<ResistorComp>().is_some()
+                || k.as_any().downcast_ref::<CapacitorComp>().is_some()
+                || k.as_any().downcast_ref::<InductorComp>().is_some()
+        };
+        let has_resistor = source_comp.kind.as_any().downcast_ref::<ResistorComp>().is_some()
+            || load_comp.kind.as_any().downcast_ref::<ResistorComp>().is_some();
+        if !is_r_c_or_l(source_comp.kind.as_ref()) || !is_r_c_or_l(load_comp.kind.as_ref()) || !has_resistor {
+            return None;
+        }
+    }
 
     // Build WDF tree: Series(source, load).
     // Source element (in→out) on left, load element (out→gnd) on right.
@@ -1075,12 +1070,12 @@ fn build_vco_bindings(
     let mut vcos = Vec::new();
 
     for comp in &pedal.components {
-        if let ComponentKind::Vco(_vco_type, base_freq, waveform_dsl) = &comp.kind {
+        if let Some(vco_comp) = comp.kind.as_any().downcast_ref::<VcoComp>() {
             let mut vco = crate::elements::Vco::new(sample_rate);
-            vco.set_base_freq(*base_freq);
+            vco.set_base_freq(vco_comp.base_freq);
 
             // Map DSL waveform to runtime waveform
-            let waveform = match waveform_dsl {
+            let waveform = match &vco_comp.waveform {
                 crate::dsl::VcoWaveformDsl::Saw => crate::elements::VcoWaveform::Saw,
                 crate::dsl::VcoWaveformDsl::Triangle => crate::elements::VcoWaveform::Triangle,
                 crate::dsl::VcoWaveformDsl::Pulse => crate::elements::VcoWaveform::Pulse,
@@ -1176,7 +1171,7 @@ fn build_vca_bindings(
     let mut vcas = Vec::new();
 
     for comp in &pedal.components {
-        if let ComponentKind::Vca(_vca_type) = &comp.kind {
+        if let Some(_vca_comp) = comp.kind.as_any().downcast_ref::<VcaComp>() {
             let vca = crate::elements::Vca::new();
             let envelope = crate::elements::AdsrEnvelope::new(sample_rate);
 
@@ -1341,17 +1336,12 @@ pub fn compile_pedal_with_options(
 
     // Apply component tolerance.
     for (i, comp) in graph.components.iter_mut().enumerate() {
-        match &mut comp.kind {
-            ComponentKind::Resistor(r) => {
-                *r = tolerance.apply_resistor(*r, i);
-            }
-            ComponentKind::Capacitor(cfg) => {
-                cfg.value = tolerance.apply_capacitor(cfg.value, i);
-            }
-            ComponentKind::Potentiometer(max_r, _) => {
-                *max_r = tolerance.apply_resistor(*max_r, i);
-            }
-            _ => {}
+        if let Some(r) = comp.kind.as_any_mut().downcast_mut::<ResistorComp>() {
+            r.value = tolerance.apply_resistor(r.value, i);
+        } else if let Some(c) = comp.kind.as_any_mut().downcast_mut::<CapacitorComp>() {
+            c.config.value = tolerance.apply_capacitor(c.config.value, i);
+        } else if let Some(p) = comp.kind.as_any_mut().downcast_mut::<PotComp>() {
+            p.max_r = tolerance.apply_resistor(p.max_r, i);
         }
     }
 
@@ -1446,12 +1436,9 @@ pub fn compile_pedal_with_options(
 
     if stages.is_empty() && multi_nl_stages.is_empty() {
         let has_reactive = pedal.components.iter().any(|c| {
-            matches!(
-                c.kind,
-                ComponentKind::Capacitor(_)
-                    | ComponentKind::Inductor(_)
-                    | ComponentKind::Potentiometer(_, _)
-            )
+            c.kind.as_any().downcast_ref::<CapacitorComp>().is_some()
+                || c.kind.as_any().downcast_ref::<InductorComp>().is_some()
+                || c.kind.is_pot()
         });
 
         if has_reactive && !graph.trigger_nodes.is_empty() {
@@ -1464,13 +1451,8 @@ pub fn compile_pedal_with_options(
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| {
-                    matches!(
-                        graph.components[e.comp_idx].kind,
-                        ComponentKind::Resistor(_)
-                            | ComponentKind::Capacitor(_)
-                            | ComponentKind::Inductor(_)
-                            | ComponentKind::Potentiometer(_, _)
-                    )
+                    let k = &graph.components[e.comp_idx].kind;
+                    k.is_passive() && !k.is_transformer()
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -1507,7 +1489,7 @@ pub fn compile_pedal_with_options(
     // ══ Transformer gain ══════════════════════════════════════════════
     let mut transformer_gain = 1.0;
     for comp in &pedal.components {
-        if let ComponentKind::Transformer(cfg) = &comp.kind {
+        if let Some(cfg) = comp.kind.transformer_config() {
             let pin_matches = |p: &Pin, comp_id: &str, pin_name: &str| -> bool {
                 matches!(p, Pin::ComponentPin { component, pin } if component == comp_id && pin == pin_name)
             };
@@ -1547,7 +1529,7 @@ pub fn compile_pedal_with_options(
     // ══ Slew rate limiters ════════════════════════════════════════════
     let mut slew_limiters = Vec::new();
     for comp in &pedal.components {
-        if let ComponentKind::OpAmp(ot) = &comp.kind {
+        if let Some(ot) = comp.kind.op_amp_type() {
             if !ot.is_ota() {
                 slew_limiters.push(SlewRateLimiter::new(ot.slew_rate(), sample_rate));
             }
@@ -1558,10 +1540,10 @@ pub fn compile_pedal_with_options(
     let mut bbds = Vec::new();
     let mut bbd_id_to_idx: HashMap<String, usize> = HashMap::new();
     for comp in &pedal.components {
-        if let ComponentKind::Bbd(bt) = &comp.kind {
+        if let Some(bbd_comp) = comp.kind.as_any().downcast_ref::<BbdComp>() {
             let idx = bbds.len();
             bbd_id_to_idx.insert(comp.id.clone(), idx);
-            let model = match bt {
+            let model = match &bbd_comp.bbd_type {
                 BbdType::Mn3207 => BbdModel::mn3207(),
                 BbdType::Mn3007 => BbdModel::mn3007(),
                 BbdType::Mn3005 => BbdModel::mn3005(),
@@ -1575,12 +1557,12 @@ pub fn compile_pedal_with_options(
     let mut delay_id_to_idx: HashMap<String, usize> = HashMap::new();
 
     for comp in &pedal.components {
-        if let ComponentKind::DelayLine(min_delay, max_delay, interp, medium) = &comp.kind {
+        if let Some(dl_comp) = comp.kind.as_any().downcast_ref::<DelayLineComp>() {
             let idx = delay_lines.len();
             delay_id_to_idx.insert(comp.id.clone(), idx);
             let mut dl =
-                crate::elements::DelayLine::new(*min_delay, *max_delay, sample_rate, *interp);
-            dl.set_medium(*medium);
+                crate::elements::DelayLine::new(dl_comp.min_delay, dl_comp.max_delay, sample_rate, dl_comp.interpolation);
+            dl.set_medium(dl_comp.medium);
             delay_lines.push(DelayLineBinding {
                 delay_line: dl,
                 taps: vec![1.0],
@@ -1590,9 +1572,9 @@ pub fn compile_pedal_with_options(
     }
 
     for comp in &pedal.components {
-        if let ComponentKind::Tap(parent_id, ratio) = &comp.kind {
-            if let Some(&dl_idx) = delay_id_to_idx.get(parent_id) {
-                delay_lines[dl_idx].taps.push(*ratio);
+        if let Some(tap_comp) = comp.kind.as_any().downcast_ref::<TapComp>() {
+            if let Some(&dl_idx) = delay_id_to_idx.get(&tap_comp.parent_id) {
+                delay_lines[dl_idx].taps.push(tap_comp.ratio);
             }
         }
     }
@@ -1613,8 +1595,8 @@ pub fn compile_pedal_with_options(
         let mut tube_mu = 100.0_f64;
         let mut opamp_swing = 0.85_f64;
         for comp in &pedal.components {
-            match &comp.kind {
-                ComponentKind::OpAmp(ot) if !ot.is_ota() => {
+            if let Some(ot) = comp.kind.op_amp_type() {
+                if !ot.is_ota() {
                     has_opamp = true;
                     opamp_swing = match ot {
                         OpAmpType::Tl072 | OpAmpType::Tl082 | OpAmpType::Generic => 0.92,
@@ -1624,30 +1606,21 @@ pub fn compile_pedal_with_options(
                         _ => 0.85,
                     };
                 }
-                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
-                    has_bjt = true;
-                }
-                ComponentKind::NJfet(_)
-                | ComponentKind::PJfet(_)
-                | ComponentKind::Nmos(_)
-                | ComponentKind::Pmos(_) => {
-                    has_fet = true;
-                }
-                ComponentKind::Triode(name) => {
-                    has_tube = true;
-                    tube_mu = TriodeModel::try_by_name(name)
-                        .map(|m| m.mu)
-                        .unwrap_or(100.0);
-                }
-                ComponentKind::VariMu(_) => {
-                    has_tube = true;
-                    tube_mu = 35.0;
-                }
-                ComponentKind::Pentode(_) => {
-                    has_tube = true;
-                    tube_mu = 200.0;
-                }
-                _ => {}
+            } else if comp.kind.is_bjt() {
+                has_bjt = true;
+            } else if comp.kind.is_jfet() || comp.kind.is_mosfet() {
+                has_fet = true;
+            } else if let Some(triode) = comp.kind.as_any().downcast_ref::<TriodeComp>() {
+                has_tube = true;
+                tube_mu = TriodeModel::try_by_name(&triode.model)
+                    .map(|m| m.mu)
+                    .unwrap_or(100.0);
+            } else if comp.kind.as_any().downcast_ref::<VariMuComp>().is_some() {
+                has_tube = true;
+                tube_mu = 35.0;
+            } else if comp.kind.as_any().downcast_ref::<PentodeComp>().is_some() {
+                has_tube = true;
+                tube_mu = 200.0;
             }
         }
         let has_source_follower = stages.iter().any(|s| s.is_source_follower);
@@ -1672,7 +1645,7 @@ pub fn compile_pedal_with_options(
         .components
         .iter()
         .filter_map(|c| {
-            if matches!(c.kind, ComponentKind::Lfo(..)) {
+            if c.kind.as_any().downcast_ref::<LfoComp>().is_some() {
                 Some(c.id.clone())
             } else {
                 None
@@ -1685,7 +1658,7 @@ pub fn compile_pedal_with_options(
     let mut triggers: Vec<super::compiled::TriggerState> = pedal
         .components
         .iter()
-        .filter(|c| matches!(c.kind, ComponentKind::TriggerInput))
+        .filter(|c| c.kind.is_trigger())
         .enumerate()
         .map(|(idx, c)| {
             trigger_id_to_idx.insert(c.id.clone(), idx);

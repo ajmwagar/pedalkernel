@@ -101,7 +101,6 @@ fn check_duplicate_component_ids(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
 /// Suspicious component values.
 fn check_component_values(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
-    use super::component::Component;
     for comp in &pedal.components {
         let issues = comp.kind.validate_values(&comp.id);
         for (severity, message) in issues {
@@ -215,36 +214,35 @@ fn check_net_references(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 }
 
 /// Valid pin names for a component type (delegates to Component trait).
-fn valid_pins_for(kind: &ComponentKind) -> &'static [&'static str] {
-    use super::component::Component;
+fn valid_pins_for(kind: &dyn super::component::Component) -> &'static [&'static str] {
     kind.pin_config().valid_pins
 }
 
 /// Check that pin names used in nets are valid for their component type.
 fn check_pin_validity(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
-    let comp_map: HashMap<&str, &ComponentKind> = pedal
+    use super::component::Component;
+
+    let comp_map: HashMap<&str, &Box<dyn Component>> = pedal
         .components
         .iter()
         .map(|c| (c.id.as_str(), &c.kind))
         .collect();
 
-    use super::component::Component;
-
     // Modulation target pins are valid on specific component types even though
     // they're not circuit pins (they're resolved during binding, not graph building).
-    let is_valid_modulation_pin = |kind: &ComponentKind, pin: &str| -> bool {
+    let is_valid_modulation_pin = |kind: &dyn Component, pin: &str| -> bool {
         kind.modulation_pins().contains(&pin)
     };
 
     let check_pin = |pin: &Pin, w: &mut Vec<PedalWarning>| {
         if let Pin::ComponentPin { component, pin } = pin {
             if let Some(kind) = comp_map.get(component.as_str()) {
-                let valid = valid_pins_for(kind);
+                let valid = valid_pins_for(kind.as_ref());
                 // Don't warn for component types that have no pin list
                 // (switches, etc.) since they're not circuit elements
                 if !valid.is_empty()
                     && !valid.contains(&pin.as_str())
-                    && !is_valid_modulation_pin(kind, pin)
+                    && !is_valid_modulation_pin(kind.as_ref(), pin)
                 {
                     w.push(PedalWarning {
                         severity: Severity::Error,
@@ -272,7 +270,6 @@ fn check_pin_validity(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
 /// Components declared but never referenced in any net.
 fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
-    use super::component::Component;
     let mut referenced: HashSet<String> = HashSet::new();
 
     fn collect_refs(pin: &Pin, refs: &mut HashSet<String>) {
@@ -332,7 +329,6 @@ fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     // Synths (circuits with VCOs) generate their own signal — they don't need
     // an in → out path since audio originates from the oscillator.
-    use super::component::Component;
     let is_synth = pedal
         .components
         .iter()
@@ -355,129 +351,103 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     // Also add implicit component-internal connections:
     // For a 2-terminal element, .a and .b are connected through the element.
     for comp in &pedal.components {
-        let pins = valid_pins_for(&comp.kind);
-        // For circuit elements, connect their terminal pairs
-        match &comp.kind {
-            ComponentKind::Resistor(_)
-            | ComponentKind::Capacitor(_)
-            | ComponentKind::Inductor(_)
-            | ComponentKind::DiodePair(_)
-            | ComponentKind::Diode(_)
-            | ComponentKind::Zener(_)
-            | ComponentKind::Neon(_)
-            | ComponentKind::Tempco(_, _)
-            | ComponentKind::CapSwitched(_)
-            | ComponentKind::InductorSwitched(_)
-            | ComponentKind::ResistorSwitched(_) => {
-                let ka = format!("{}.a", comp.id);
-                let kb = format!("{}.b", comp.id);
-                adj.entry(ka.clone()).or_default().insert(kb.clone());
-                adj.entry(kb).or_default().insert(ka);
-            }
-            ComponentKind::Potentiometer(_, _) => {
-                // a-wiper and wiper-b are connected through the pot
-                let ka = format!("{}.a", comp.id);
-                let kb = format!("{}.b", comp.id);
-                let kw = format!("{}.wiper", comp.id);
-                let kw2 = format!("{}.w", comp.id);
-                adj.entry(ka.clone()).or_default().insert(kb.clone());
-                adj.entry(kb.clone()).or_default().insert(ka.clone());
-                adj.entry(ka.clone()).or_default().insert(kw.clone());
-                adj.entry(kw.clone()).or_default().insert(ka);
-                adj.entry(kb.clone()).or_default().insert(kw2.clone());
-                adj.entry(kw2).or_default().insert(kb);
-            }
-            ComponentKind::NJfet(_)
-            | ComponentKind::PJfet(_)
-            | ComponentKind::Nmos(_)
-            | ComponentKind::Pmos(_) => {
-                let kd = format!("{}.drain", comp.id);
-                let ks = format!("{}.source", comp.id);
-                adj.entry(kd.clone()).or_default().insert(ks.clone());
-                adj.entry(ks).or_default().insert(kd);
-            }
-            ComponentKind::Triode(_) | ComponentKind::Pentode(_) | ComponentKind::VariMu(_) => {
-                let kp = format!("{}.plate", comp.id);
-                let kk = format!("{}.cathode", comp.id);
-                adj.entry(kp.clone()).or_default().insert(kk.clone());
-                adj.entry(kk).or_default().insert(kp);
-            }
-            ComponentKind::Npn(_) | ComponentKind::Pnp(_) => {
-                // Signal can flow base→collector (common-emitter),
-                // collector↔emitter, or base→emitter (follower).
-                // Connect all three terminals for reachability.
-                let kb = format!("{}.base", comp.id);
-                let kc = format!("{}.collector", comp.id);
-                let ke = format!("{}.emitter", comp.id);
-                adj.entry(kb.clone()).or_default().insert(kc.clone());
-                adj.entry(kc.clone()).or_default().insert(kb.clone());
-                adj.entry(kc.clone()).or_default().insert(ke.clone());
-                adj.entry(ke.clone()).or_default().insert(kc);
-                adj.entry(kb.clone()).or_default().insert(ke.clone());
-                adj.entry(ke).or_default().insert(kb);
-            }
-            ComponentKind::OpAmp(_) => {
-                // Op-amp: pos/neg are inputs, out is output.
-                // For signal path check, connect through the op-amp.
-                let kp = format!("{}.pos", comp.id);
-                let kn = format!("{}.neg", comp.id);
-                let ko = format!("{}.out", comp.id);
-                adj.entry(kp.clone()).or_default().insert(ko.clone());
-                adj.entry(kn.clone()).or_default().insert(ko.clone());
-                adj.entry(ko.clone()).or_default().insert(kp);
-                adj.entry(ko).or_default().insert(kn);
-            }
-            ComponentKind::Photocoupler(_) => {
-                let ka = format!("{}.a", comp.id);
-                let kb = format!("{}.b", comp.id);
-                adj.entry(ka.clone()).or_default().insert(kb.clone());
-                adj.entry(kb).or_default().insert(ka);
-            }
-            ComponentKind::Bbd(_) => {
-                let ki = format!("{}.in", comp.id);
-                let ki_alias = format!("{}.input", comp.id);
-                let ko = format!("{}.out", comp.id);
-                let ko_alias = format!("{}.output", comp.id);
-                // Connect both pin spellings to both output spellings
-                for i in [&ki, &ki_alias] {
-                    for o in [&ko, &ko_alias] {
-                        adj.entry(i.clone()).or_default().insert(o.clone());
-                        adj.entry(o.clone()).or_default().insert(i.clone());
-                    }
+        let kind = comp.kind.as_ref();
+        let pins = valid_pins_for(kind);
+        let tag = kind.type_tag();
+
+        // Two-terminal passive elements (a <-> b)
+        if matches!(
+            tag,
+            "resistor"
+                | "capacitor"
+                | "inductor"
+                | "diode pair"
+                | "diode"
+                | "zener diode"
+                | "neon bulb"
+                | "tempco resistor"
+                | "switched capacitor"
+                | "switched inductor"
+                | "switched resistor"
+                | "photocoupler"
+        ) {
+            let ka = format!("{}.a", comp.id);
+            let kb = format!("{}.b", comp.id);
+            adj.entry(ka.clone()).or_default().insert(kb.clone());
+            adj.entry(kb).or_default().insert(ka);
+        } else if kind.is_pot() {
+            // a-wiper and wiper-b are connected through the pot
+            let ka = format!("{}.a", comp.id);
+            let kb = format!("{}.b", comp.id);
+            let kw = format!("{}.wiper", comp.id);
+            let kw2 = format!("{}.w", comp.id);
+            adj.entry(ka.clone()).or_default().insert(kb.clone());
+            adj.entry(kb.clone()).or_default().insert(ka.clone());
+            adj.entry(ka.clone()).or_default().insert(kw.clone());
+            adj.entry(kw.clone()).or_default().insert(ka);
+            adj.entry(kb.clone()).or_default().insert(kw2.clone());
+            adj.entry(kw2).or_default().insert(kb);
+        } else if kind.is_jfet() || kind.is_mosfet() {
+            let kd = format!("{}.drain", comp.id);
+            let ks = format!("{}.source", comp.id);
+            adj.entry(kd.clone()).or_default().insert(ks.clone());
+            adj.entry(ks).or_default().insert(kd);
+        } else if kind.is_tube() {
+            let kp = format!("{}.plate", comp.id);
+            let kk = format!("{}.cathode", comp.id);
+            adj.entry(kp.clone()).or_default().insert(kk.clone());
+            adj.entry(kk).or_default().insert(kp);
+        } else if kind.is_bjt() {
+            // Signal can flow base->collector (common-emitter),
+            // collector<->emitter, or base->emitter (follower).
+            // Connect all three terminals for reachability.
+            let kb = format!("{}.base", comp.id);
+            let kc = format!("{}.collector", comp.id);
+            let ke = format!("{}.emitter", comp.id);
+            adj.entry(kb.clone()).or_default().insert(kc.clone());
+            adj.entry(kc.clone()).or_default().insert(kb.clone());
+            adj.entry(kc.clone()).or_default().insert(ke.clone());
+            adj.entry(ke.clone()).or_default().insert(kc);
+            adj.entry(kb.clone()).or_default().insert(ke.clone());
+            adj.entry(ke).or_default().insert(kb);
+        } else if kind.op_amp_type().is_some() {
+            // Op-amp: pos/neg are inputs, out is output.
+            // For signal path check, connect through the op-amp.
+            let kp = format!("{}.pos", comp.id);
+            let kn = format!("{}.neg", comp.id);
+            let ko = format!("{}.out", comp.id);
+            adj.entry(kp.clone()).or_default().insert(ko.clone());
+            adj.entry(kn.clone()).or_default().insert(ko.clone());
+            adj.entry(ko.clone()).or_default().insert(kp);
+            adj.entry(ko).or_default().insert(kn);
+        } else if kind.is_delay() {
+            // BBD and delay line: connect input/in <-> output/out with aliases
+            let ki = format!("{}.in", comp.id);
+            let ki_alias = format!("{}.input", comp.id);
+            let ko = format!("{}.out", comp.id);
+            let ko_alias = format!("{}.output", comp.id);
+            for i in [&ki, &ki_alias] {
+                for o in [&ko, &ko_alias] {
+                    adj.entry(i.clone()).or_default().insert(o.clone());
+                    adj.entry(o.clone()).or_default().insert(i.clone());
                 }
-                // Also alias the two input spellings and two output spellings together
-                adj.entry(ki.clone()).or_default().insert(ki_alias.clone());
-                adj.entry(ki_alias).or_default().insert(ki);
-                adj.entry(ko.clone()).or_default().insert(ko_alias.clone());
-                adj.entry(ko_alias).or_default().insert(ko);
             }
-            ComponentKind::DelayLine(..) => {
-                let ki = format!("{}.input", comp.id);
-                let ki_alias = format!("{}.in", comp.id);
-                let ko = format!("{}.output", comp.id);
-                let ko_alias = format!("{}.out", comp.id);
-                for i in [&ki, &ki_alias] {
-                    for o in [&ko, &ko_alias] {
-                        adj.entry(i.clone()).or_default().insert(o.clone());
-                        adj.entry(o.clone()).or_default().insert(i.clone());
-                    }
-                }
-                adj.entry(ki.clone()).or_default().insert(ki_alias.clone());
-                adj.entry(ki_alias).or_default().insert(ki);
-                adj.entry(ko.clone()).or_default().insert(ko_alias.clone());
-                adj.entry(ko_alias).or_default().insert(ko);
-            }
-            ComponentKind::Transformer(cfg) => {
-                // Primary and secondary are magnetically coupled
-                let ka = format!("{}.a", comp.id);
-                let kb = format!("{}.b", comp.id);
-                let kc = format!("{}.c", comp.id);
-                let kd = format!("{}.d", comp.id);
-                adj.entry(ka.clone()).or_default().insert(kb.clone());
-                adj.entry(kb).or_default().insert(ka);
-                adj.entry(kc.clone()).or_default().insert(kd.clone());
-                adj.entry(kd).or_default().insert(kc);
-                // Tertiary winding if present
+            adj.entry(ki.clone()).or_default().insert(ki_alias.clone());
+            adj.entry(ki_alias).or_default().insert(ki);
+            adj.entry(ko.clone()).or_default().insert(ko_alias.clone());
+            adj.entry(ko_alias).or_default().insert(ko);
+        } else if kind.is_transformer() {
+            // Primary and secondary are magnetically coupled
+            let ka = format!("{}.a", comp.id);
+            let kb = format!("{}.b", comp.id);
+            let kc = format!("{}.c", comp.id);
+            let kd = format!("{}.d", comp.id);
+            adj.entry(ka.clone()).or_default().insert(kb.clone());
+            adj.entry(kb).or_default().insert(ka);
+            adj.entry(kc.clone()).or_default().insert(kd.clone());
+            adj.entry(kd).or_default().insert(kc);
+            // Tertiary winding if present
+            if let Some(cfg) = kind.transformer_config() {
                 if cfg.has_tertiary() {
                     let ke = format!("{}.e", comp.id);
                     let kf = format!("{}.f", comp.id);
@@ -485,16 +455,15 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                     adj.entry(kf).or_default().insert(ke);
                 }
             }
-            // LFO, EnvelopeFollower, Switches, Taps, Synth ICs — not passive signal path
-            _ => {
-                // Connect any declared pins to ensure adjacency
-                if pins.len() >= 2 {
-                    let first = format!("{}.{}", comp.id, pins[0]);
-                    for p in &pins[1..] {
-                        let other = format!("{}.{}", comp.id, p);
-                        adj.entry(first.clone()).or_default().insert(other.clone());
-                        adj.entry(other).or_default().insert(first.clone());
-                    }
+        } else {
+            // LFO, EnvelopeFollower, Switches, Taps, Synth ICs -- not passive signal path
+            // Connect any declared pins to ensure adjacency
+            if pins.len() >= 2 {
+                let first = format!("{}.{}", comp.id, pins[0]);
+                for p in &pins[1..] {
+                    let other = format!("{}.{}", comp.id, p);
+                    adj.entry(first.clone()).or_default().insert(other.clone());
+                    adj.entry(other).or_default().insert(first.clone());
                 }
             }
         }
@@ -539,7 +508,7 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 fn check_controls(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     use super::component::Component;
 
-    let comp_map: HashMap<&str, &ComponentKind> = pedal
+    let comp_map: HashMap<&str, &Box<dyn Component>> = pedal
         .components
         .iter()
         .map(|c| (c.id.as_str(), &c.kind))
@@ -559,7 +528,7 @@ fn check_controls(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
             return;
         }
 
-        let kind = comp_map[ctrl.component.as_str()];
+        let kind = comp_map[ctrl.component.as_str()].as_ref();
         // Controls typically target potentiometers or switches
         let tag = kind.type_tag();
         if !matches!(tag, "potentiometer" | "switch" | "rotary switch") {
@@ -626,7 +595,9 @@ fn check_controls(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 ///
 /// This catches the `_ => continue` silent-skip in compile.rs lines 1409 and 1536.
 fn check_modulation_targets(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
-    let comp_map: HashMap<&str, &ComponentKind> = pedal
+    use super::component::Component;
+
+    let comp_map: HashMap<&str, &Box<dyn Component>> = pedal
         .components
         .iter()
         .map(|c| (c.id.as_str(), &c.kind))
@@ -656,8 +627,6 @@ fn check_modulation_targets(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
         .copied()
         .collect();
 
-    use super::component::Component;
-
     // Check each modulation source's output connections
     for comp in &pedal.components {
         let source_type = match comp.kind.type_tag() {
@@ -682,7 +651,7 @@ fn check_modulation_targets(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                                 continue;
                             }
 
-                            let target_kind = comp_map[target_comp.as_str()];
+                            let target_kind = comp_map[target_comp.as_str()].as_ref();
 
                             // If the target pin is a known modulation target, great
                             if valid_mod_targets.contains(target_prop.as_str()) {
@@ -748,11 +717,9 @@ fn check_mod_target_compatibility(
     source_id: &str,
     target_comp: &str,
     target_pin: &str,
-    target_kind: &ComponentKind,
+    target_kind: &dyn super::component::Component,
     w: &mut Vec<PedalWarning>,
 ) {
-    use super::component::Component;
-
     // The pin is a mismatch if this component doesn't list it as a modulation pin.
     let mismatch = !target_kind.modulation_pins().contains(&target_pin);
 
@@ -789,8 +756,7 @@ fn expected_component_for_pin(pin: &str) -> &'static str {
     }
 }
 
-fn component_type_name(kind: &ComponentKind) -> &'static str {
-    use super::component::Component;
+fn component_type_name(kind: &dyn super::component::Component) -> &'static str {
     kind.type_tag()
 }
 
@@ -878,7 +844,9 @@ fn check_monitor_references(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 /// - Mirrored pots do not appear in the controls block
 /// - Warns if mirrored and source pots have different resistances
 fn check_mirrors(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
-    let comp_map: HashMap<&str, &ComponentKind> = pedal
+    use super::component::Component;
+
+    let comp_map: HashMap<&str, &Box<dyn Component>> = pedal
         .components
         .iter()
         .map(|c| (c.id.as_str(), &c.kind))
@@ -899,7 +867,7 @@ fn check_mirrors(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
         };
 
         // 2. Source must be a potentiometer
-        if !matches!(source_kind, ComponentKind::Potentiometer(_, _)) {
+        if !source_kind.is_pot() {
             w.push(PedalWarning {
                 severity: Severity::Error,
                 code: "mirror-target-not-pot",
@@ -907,7 +875,7 @@ fn check_mirrors(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                     "Mirrored pot '{}' references '{}' which is a {}, not a potentiometer",
                     mirrored_id,
                     source_id,
-                    component_type_name(source_kind)
+                    component_type_name(source_kind.as_ref())
                 ),
             });
             continue;
@@ -915,14 +883,14 @@ fn check_mirrors(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
         // 3. Mirrored component must itself be a pot
         if let Some(mirrored_kind) = comp_map.get(mirrored_id.as_str()) {
-            if !matches!(mirrored_kind, ComponentKind::Potentiometer(_, _)) {
+            if !mirrored_kind.is_pot() {
                 w.push(PedalWarning {
                     severity: Severity::Error,
                     code: "mirror-not-pot",
                     message: format!(
                         "'{}' uses `mirrors` but is a {}, not a potentiometer",
                         mirrored_id,
-                        component_type_name(mirrored_kind)
+                        component_type_name(mirrored_kind.as_ref())
                     ),
                 });
             }
@@ -956,23 +924,24 @@ fn check_mirrors(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
         }
 
         // 6. Warn if resistances differ
-        if let (
-            Some(ComponentKind::Potentiometer(r_mirrored, _)),
-            Some(ComponentKind::Potentiometer(r_source, _)),
-        ) = (
+        if let (Some(mirrored_kind), Some(source_kind_inner)) = (
             comp_map.get(mirrored_id.as_str()),
             comp_map.get(source_id.as_str()),
         ) {
-            if (r_mirrored - r_source).abs() > f64::EPSILON {
-                w.push(PedalWarning {
-                    severity: Severity::Warning,
-                    code: "mirror-resistance-mismatch",
-                    message: format!(
-                        "Mirrored pot '{}' ({:.0} Ω) has different resistance than source '{}' ({:.0} Ω) — \
-                         dual-gang pots typically have matched gangs",
-                        mirrored_id, r_mirrored, source_id, r_source
-                    ),
-                });
+            if let (Some(r_mirrored), Some(r_source)) =
+                (mirrored_kind.resistance(), source_kind_inner.resistance())
+            {
+                if (r_mirrored - r_source).abs() > f64::EPSILON {
+                    w.push(PedalWarning {
+                        severity: Severity::Warning,
+                        code: "mirror-resistance-mismatch",
+                        message: format!(
+                            "Mirrored pot '{}' ({:.0} Ω) has different resistance than source '{}' ({:.0} Ω) — \
+                             dual-gang pots typically have matched gangs",
+                            mirrored_id, r_mirrored, source_id, r_source
+                        ),
+                    });
+                }
             }
         }
     }
@@ -983,37 +952,45 @@ fn check_mirrors(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 /// near-matches.
 fn check_model_names(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     for comp in &pedal.components {
-        let (name, kind_label, lookup, all_names): (
-            &str,
+        let kind = comp.kind.as_ref();
+        let name = match kind.model_name() {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let (kind_label, lookup, all_names): (
             &str,
             fn(&str) -> bool,
             fn() -> Vec<&'static str>,
-        ) = match &comp.kind {
-            ComponentKind::Npn(n) | ComponentKind::Pnp(n) => (
-                n.as_str(),
+        ) = if kind.is_bjt() {
+            (
                 "BJT",
                 |n| models::bjt_by_name(n).is_some(),
                 models::bjt_model_names,
-            ),
-            ComponentKind::NJfet(n) | ComponentKind::PJfet(n) => (
-                n.as_str(),
+            )
+        } else if kind.is_jfet() {
+            (
                 "JFET",
                 |n| models::jfet_by_name(n).is_some(),
                 models::jfet_model_names,
-            ),
-            ComponentKind::Triode(n) | ComponentKind::VariMu(n) => (
-                n.as_str(),
-                "triode",
-                |n| models::triode_by_name(n).is_some(),
-                models::triode_model_names,
-            ),
-            ComponentKind::Pentode(n) => (
-                n.as_str(),
-                "pentode",
-                |n| models::pentode_by_name(n).is_some(),
-                models::pentode_model_names,
-            ),
-            _ => continue,
+            )
+        } else if kind.is_tube() {
+            // Distinguish pentode vs triode/varimu for the correct model registry
+            if kind.type_tag() == "pentode" {
+                (
+                    "pentode",
+                    |n| models::pentode_by_name(n).is_some(),
+                    models::pentode_model_names,
+                )
+            } else {
+                (
+                    "triode",
+                    |n| models::triode_by_name(n).is_some(),
+                    models::triode_model_names,
+                )
+            }
+        } else {
+            continue;
         };
 
         if !lookup(name) {
@@ -1156,6 +1133,8 @@ pub fn validate_pedal_files(paths: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::component::Component;
+    use crate::compiler::components::*;
 
     /// Build a minimal valid pedal for testing.
     fn minimal_pedal() -> PedalDef {
@@ -1165,7 +1144,7 @@ mod tests {
             supplies: vec![],
             components: vec![ComponentDef {
                 id: "R1".to_string(),
-                kind: ComponentKind::Resistor(10_000.0),
+                kind: Box::new(Resistor { value: 10_000.0 }),
             }],
             nets: vec![
                 NetDef {
@@ -1216,7 +1195,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "R1".to_string(),
-            kind: ComponentKind::Resistor(1000.0),
+            kind: Box::new(Resistor { value: 1000.0 }),
         });
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "duplicate-component-id"));
@@ -1225,7 +1204,7 @@ mod tests {
     #[test]
     fn zero_resistance() {
         let mut pedal = minimal_pedal();
-        pedal.components[0].kind = ComponentKind::Resistor(0.0);
+        pedal.components[0].kind = Box::new(Resistor { value: 0.0 });
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "invalid-value"));
     }
@@ -1235,7 +1214,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "C1".to_string(),
-            kind: ComponentKind::Capacitor(CapConfig::new(100.0)), // 100 F!
+            kind: Box::new(Capacitor { config: CapConfig::new(100.0) }), // 100 F!
         });
         // Wire it in
         pedal.nets.push(NetDef {
@@ -1289,7 +1268,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "R_lonely".to_string(),
-            kind: ComponentKind::Resistor(10_000.0),
+            kind: Box::new(Resistor { value: 10_000.0 }),
         });
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "orphaned-component"));
@@ -1303,7 +1282,7 @@ mod tests {
             supplies: vec![],
             components: vec![ComponentDef {
                 id: "R1".to_string(),
-                kind: ComponentKind::Resistor(10_000.0),
+                kind: Box::new(Resistor { value: 10_000.0 }),
             }],
             nets: vec![
                 // in -> R1.a but R1.b -> gnd (not out)
@@ -1352,7 +1331,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "Vol".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1377,11 +1356,11 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "LFO1".to_string(),
-            kind: ComponentKind::Lfo(LfoWaveformDsl::Triangle, 150_000.0, 1e-6),
+            kind: Box::new(Lfo { waveform: LfoWaveformDsl::Triangle, timing_r: 150_000.0, timing_c: 1e-6 }),
         });
         pedal.components.push(ComponentDef {
             id: "Depth".to_string(),
-            kind: ComponentKind::Potentiometer(50_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 50_000.0, taper: PotTaper::B }),
         });
         // LFO1.out -> Depth.a — this is a passive connection, not a modulation target
         // The compiler silently skips it at line 1409
@@ -1408,7 +1387,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "LFO1".to_string(),
-            kind: ComponentKind::Lfo(LfoWaveformDsl::Sine, 100_000.0, 1e-6),
+            kind: Box::new(Lfo { waveform: LfoWaveformDsl::Sine, timing_r: 100_000.0, timing_c: 1e-6 }),
         });
         // LFO1.out -> R1.vgs — resistors don't have vgs
         pedal.nets.push(NetDef {
@@ -1434,11 +1413,11 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "LFO1".to_string(),
-            kind: ComponentKind::Lfo(LfoWaveformDsl::Triangle, 1_000_000.0, 220e-9),
+            kind: Box::new(Lfo { waveform: LfoWaveformDsl::Triangle, timing_r: 1_000_000.0, timing_c: 220e-9 }),
         });
         pedal.components.push(ComponentDef {
             id: "J1".to_string(),
-            kind: ComponentKind::NJfet("2N5952".to_string()),
+            kind: Box::new(NJfet { model: "2N5952".to_string() }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1482,11 +1461,11 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "LFO1".to_string(),
-            kind: ComponentKind::Lfo(LfoWaveformDsl::Triangle, 150_000.0, 1e-6),
+            kind: Box::new(Lfo { waveform: LfoWaveformDsl::Triangle, timing_r: 150_000.0, timing_c: 1e-6 }),
         });
         pedal.components.push(ComponentDef {
             id: "Depth".to_string(),
-            kind: ComponentKind::Potentiometer(50_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 50_000.0, taper: PotTaper::B }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1515,11 +1494,11 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "P1".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
         });
         pedal.components.push(ComponentDef {
             id: "P2".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1662,7 +1641,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "Q1".to_string(),
-            kind: ComponentKind::Npn("2N3904".to_string()),
+            kind: Box::new(Npn { model: "2N3904".to_string() }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1698,7 +1677,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "Q1".to_string(),
-            kind: ComponentKind::Npn("2N3904X".to_string()),
+            kind: Box::new(Npn { model: "2N3904X".to_string() }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1741,7 +1720,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "V1".to_string(),
-            kind: ComponentKind::Triode("12AX7".to_string()),
+            kind: Box::new(Triode { model: "12AX7".to_string() }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1770,7 +1749,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "J1".to_string(),
-            kind: ComponentKind::NJfet("NOTREAL".to_string()),
+            kind: Box::new(NJfet { model: "NOTREAL".to_string() }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1798,7 +1777,7 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "V1".to_string(),
-            kind: ComponentKind::Pentode("FAKETUBE".to_string()),
+            kind: Box::new(Pentode { model: "FAKETUBE".to_string() }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1846,11 +1825,11 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "Gain_A".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
         });
         pedal.components.push(ComponentDef {
             id: "Gain_B".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
         });
         // Wire pots into the circuit
         pedal.nets.push(NetDef {
@@ -1895,7 +1874,7 @@ mod tests {
             .insert("Gain_B".to_string(), "NONEXISTENT".to_string());
         pedal.components.push(ComponentDef {
             id: "Gain_B".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1915,7 +1894,7 @@ mod tests {
         pedal.mirrors.insert("P1".to_string(), "R1".to_string());
         pedal.components.push(ComponentDef {
             id: "P1".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1934,7 +1913,7 @@ mod tests {
         // Add a third pot that mirrors Gain_B (which itself mirrors Gain_A)
         pedal.components.push(ComponentDef {
             id: "Gain_C".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1970,11 +1949,11 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "P_A".to_string(),
-            kind: ComponentKind::Potentiometer(100_000.0, PotTaper::B),
+            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
         });
         pedal.components.push(ComponentDef {
             id: "P_B".to_string(),
-            kind: ComponentKind::Potentiometer(50_000.0, PotTaper::B), // different!
+            kind: Box::new(Potentiometer { max_r: 50_000.0, taper: PotTaper::B }), // different!
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {

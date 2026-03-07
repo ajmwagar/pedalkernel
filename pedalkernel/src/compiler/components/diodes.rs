@@ -70,6 +70,12 @@ impl Component for Diode {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:D", "D")
     }
+
+    fn symbol_name(&self) -> &'static str { "diode" }
+    fn layout_class(&self) -> &'static str { "diode" }
+
+    fn is_diode_family(&self) -> bool { true }
+    fn diode_type(&self) -> Option<DiodeType> { Some(self.diode_type) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -131,6 +137,12 @@ impl Component for DiodePair {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:D", "D")
     }
+
+    fn symbol_name(&self) -> &'static str { "diode" }
+    fn layout_class(&self) -> &'static str { "diode_pair" }
+
+    fn is_diode_family(&self) -> bool { true }
+    fn diode_type(&self) -> Option<DiodeType> { Some(self.diode_type) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -206,6 +218,12 @@ impl Component for Zener {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:D_Zener", "D")
     }
+
+    fn symbol_name(&self) -> &'static str { "zener" }
+    fn layout_class(&self) -> &'static str { "zener" }
+    fn display_value(&self) -> Option<String> { Some(format!("{}V", self.breakdown_voltage)) }
+
+    fn is_diode_family(&self) -> bool { true }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -257,4 +275,7 @@ impl Component for Neon {
             NeonType::Ne2 | NeonType::Ne51 | NeonType::Ne83 => ("Device:Lamp_Neon", "NE"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "neon" }
+    fn layout_class(&self) -> &'static str { "neon" }
 }

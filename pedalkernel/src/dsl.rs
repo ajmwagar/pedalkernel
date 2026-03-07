@@ -204,10 +204,16 @@ impl PedalDef {
 }
 
 /// A single component declaration, e.g. `R1: resistor(4.7k)`
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ComponentDef {
     pub id: String,
-    pub kind: ComponentKind,
+    pub kind: Box<dyn crate::compiler::Component>,
+}
+
+impl PartialEq for ComponentDef {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.kind.dyn_eq(other.kind.as_ref())
+    }
 }
 
 /// Potentiometer taper type.
@@ -1962,7 +1968,7 @@ fn component_def(input: &str) -> IResult<&str, (ComponentDef, Option<String>)> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(':')(input)?;
     let (input, _) = ws_comments(input)?;
-    let (input, kind) = component_kind(input)?;
+    let (input, kind_enum) = component_kind(input)?;
     // Optional `mirrors <ident>` suffix for dual-gang pots
     let (input, mirrors_target) = opt(tuple((
         ws_comments,
@@ -1971,6 +1977,7 @@ fn component_def(input: &str) -> IResult<&str, (ComponentDef, Option<String>)> {
         identifier,
     )))(input)?;
     let mirrors = mirrors_target.map(|(_, _, _, target)| target.to_string());
+    let kind: Box<dyn crate::compiler::Component> = kind_enum.into();
     Ok((
         input,
         (
@@ -2791,6 +2798,8 @@ pub fn parse_pedal_file(src: &str) -> Result<PedalDef, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::component::Component;
+    use crate::compiler::components::*;
 
     #[test]
     fn parse_eng_value_k() {
@@ -2827,131 +2836,110 @@ mod tests {
     fn parse_resistor_switched_with_inf() {
         let (_, (c, _)) = component_def("R_sel: resistor_switched(10k, inf, 47k)").unwrap();
         assert_eq!(c.id, "R_sel");
-        if let ComponentKind::ResistorSwitched(values) = c.kind {
-            assert_eq!(values.len(), 3);
-            assert!((values[0] - 10_000.0).abs() < 1e-6);
-            assert!(values[1].is_infinite());
-            assert!((values[2] - 47_000.0).abs() < 1e-6);
-        } else {
-            panic!("expected ResistorSwitched");
-        }
+        let rs = c.kind.as_any().downcast_ref::<ResistorSwitched>().expect("expected ResistorSwitched");
+        assert_eq!(rs.values.len(), 3);
+        assert!((rs.values[0] - 10_000.0).abs() < 1e-6);
+        assert!(rs.values[1].is_infinite());
+        assert!((rs.values[2] - 47_000.0).abs() < 1e-6);
     }
 
     #[test]
     fn parse_resistor_switched_inf_only() {
         // Open circuit position only
         let (_, (c, _)) = component_def("R_open: resistor_switched([inf])").unwrap();
-        if let ComponentKind::ResistorSwitched(values) = c.kind {
-            assert_eq!(values.len(), 1);
-            assert!(values[0].is_infinite());
-        } else {
-            panic!("expected ResistorSwitched");
-        }
+        let rs = c.kind.as_any().downcast_ref::<ResistorSwitched>().expect("expected ResistorSwitched");
+        assert_eq!(rs.values.len(), 1);
+        assert!(rs.values[0].is_infinite());
     }
 
     #[test]
     fn parse_component_resistor() {
         let (_, (c, _)) = component_def("R1: resistor(4.7k)").unwrap();
         assert_eq!(c.id, "R1");
-        assert_eq!(c.kind, ComponentKind::Resistor(4700.0));
+        assert_eq!(c.kind.as_any().downcast_ref::<Resistor>().unwrap(), &Resistor { value: 4700.0 });
     }
 
     #[test]
     fn parse_component_cap() {
         let (_, (c, _)) = component_def("C1: cap(220n)").unwrap();
         assert_eq!(c.id, "C1");
-        if let ComponentKind::Capacitor(cfg) = c.kind {
-            assert!((cfg.value - 220e-9).abs() < 1e-18);
-            assert_eq!(cfg.cap_type, CapType::Film); // default
-            assert!(cfg.leakage.is_none());
-            assert!(cfg.da.is_none());
-        } else {
-            panic!("expected Capacitor");
-        }
+        let cap = c.kind.as_any().downcast_ref::<Capacitor>().expect("expected Capacitor");
+        assert!((cap.config.value - 220e-9).abs() < 1e-18);
+        assert_eq!(cap.config.cap_type, CapType::Film); // default
+        assert!(cap.config.leakage.is_none());
+        assert!(cap.config.da.is_none());
     }
 
     #[test]
     fn parse_component_cap_electrolytic() {
         let (_, (c, _)) = component_def("C1: cap(22u, electrolytic)").unwrap();
-        if let ComponentKind::Capacitor(cfg) = c.kind {
-            assert!((cfg.value - 22e-6).abs() < 1e-15);
-            assert_eq!(cfg.cap_type, CapType::Electrolytic);
-            assert!(cfg.leakage.is_none());
-            assert!(cfg.da.is_none());
-        } else {
-            panic!("expected Capacitor");
-        }
+        let cap = c.kind.as_any().downcast_ref::<Capacitor>().expect("expected Capacitor");
+        assert!((cap.config.value - 22e-6).abs() < 1e-15);
+        assert_eq!(cap.config.cap_type, CapType::Electrolytic);
+        assert!(cap.config.leakage.is_none());
+        assert!(cap.config.da.is_none());
     }
 
     #[test]
     fn parse_component_cap_with_leakage() {
         let (_, (c, _)) = component_def("C1: cap(22u, electrolytic, leakage: 100k)").unwrap();
-        if let ComponentKind::Capacitor(cfg) = c.kind {
-            assert!((cfg.value - 22e-6).abs() < 1e-15);
-            assert_eq!(cfg.cap_type, CapType::Electrolytic);
-            assert!((cfg.leakage.unwrap() - 100_000.0).abs() < 1.0);
-            assert!(cfg.da.is_none());
-        } else {
-            panic!("expected Capacitor");
-        }
+        let cap = c.kind.as_any().downcast_ref::<Capacitor>().expect("expected Capacitor");
+        assert!((cap.config.value - 22e-6).abs() < 1e-15);
+        assert_eq!(cap.config.cap_type, CapType::Electrolytic);
+        assert!((cap.config.leakage.unwrap() - 100_000.0).abs() < 1.0);
+        assert!(cap.config.da.is_none());
     }
 
     #[test]
     fn parse_component_cap_with_da() {
         let (_, (c, _)) =
             component_def("C1: cap(22u, electrolytic, leakage: 10k, da: 0.05)").unwrap();
-        if let ComponentKind::Capacitor(cfg) = c.kind {
-            assert!((cfg.value - 22e-6).abs() < 1e-15);
-            assert_eq!(cfg.cap_type, CapType::Electrolytic);
-            assert!((cfg.leakage.unwrap() - 10_000.0).abs() < 1.0);
-            assert!((cfg.da.unwrap() - 0.05).abs() < 0.001);
-        } else {
-            panic!("expected Capacitor");
-        }
+        let cap = c.kind.as_any().downcast_ref::<Capacitor>().expect("expected Capacitor");
+        assert!((cap.config.value - 22e-6).abs() < 1e-15);
+        assert_eq!(cap.config.cap_type, CapType::Electrolytic);
+        assert!((cap.config.leakage.unwrap() - 10_000.0).abs() < 1.0);
+        assert!((cap.config.da.unwrap() - 0.05).abs() < 0.001);
     }
 
     #[test]
     fn parse_component_diode_pair() {
         let (_, (c, _)) = component_def("D1: diode_pair(silicon)").unwrap();
-        assert_eq!(c.kind, ComponentKind::DiodePair(DiodeType::Silicon));
+        assert_eq!(c.kind.as_any().downcast_ref::<DiodePair>().unwrap(), &DiodePair { diode_type: DiodeType::Silicon });
     }
 
     #[test]
     fn parse_component_pot() {
         let (_, (c, _)) = component_def("Gain: pot(500k)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Potentiometer(500_000.0, PotTaper::B));
+        assert_eq!(c.kind.as_any().downcast_ref::<Potentiometer>().unwrap(), &Potentiometer { max_r: 500_000.0, taper: PotTaper::B });
     }
 
     #[test]
     fn parse_component_pot_with_taper() {
         // Audio taper
         let (_, (c, _)) = component_def("Vol: pot(100k, a)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Potentiometer(100_000.0, PotTaper::A));
+        assert_eq!(c.kind.as_any().downcast_ref::<Potentiometer>().unwrap(), &Potentiometer { max_r: 100_000.0, taper: PotTaper::A });
 
         // Linear taper
         let (_, (c, _)) = component_def("Tone: pot(10k, b)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Potentiometer(10_000.0, PotTaper::B));
+        assert_eq!(c.kind.as_any().downcast_ref::<Potentiometer>().unwrap(), &Potentiometer { max_r: 10_000.0, taper: PotTaper::B });
 
         // Reverse log taper
         let (_, (c, _)) = component_def("Mix: pot(50k, c)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Potentiometer(50_000.0, PotTaper::C));
+        assert_eq!(c.kind.as_any().downcast_ref::<Potentiometer>().unwrap(), &Potentiometer { max_r: 50_000.0, taper: PotTaper::C });
 
         // Legacy names
         let (_, (c, _)) = component_def("P1: pot(1M, log)").unwrap();
-        assert_eq!(
-            c.kind,
-            ComponentKind::Potentiometer(1_000_000.0, PotTaper::A)
-        );
+        assert_eq!(c.kind.as_any().downcast_ref::<Potentiometer>().unwrap(), &Potentiometer { max_r: 1_000_000.0, taper: PotTaper::A });
 
         let (_, (c, _)) = component_def("P2: pot(25k, linear)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Potentiometer(25_000.0, PotTaper::B));
+        assert_eq!(c.kind.as_any().downcast_ref::<Potentiometer>().unwrap(), &Potentiometer { max_r: 25_000.0, taper: PotTaper::B });
     }
 
     #[test]
     fn parse_component_pot_mirrors() {
         let (_, (c, m)) = component_def("Gain_B: pot(100k, b) mirrors Gain_A").unwrap();
         assert_eq!(c.id, "Gain_B");
-        assert_eq!(c.kind, ComponentKind::Potentiometer(100_000.0, PotTaper::B));
+        assert_eq!(c.kind.as_any().downcast_ref::<Potentiometer>().unwrap(), &Potentiometer { max_r: 100_000.0, taper: PotTaper::B });
         assert_eq!(m, Some("Gain_A".to_string()));
     }
 
@@ -3186,32 +3174,32 @@ pedal "All" {
     fn parse_njfet_j201() {
         let (_, (c, _)) = component_def("J1: njfet(j201)").unwrap();
         assert_eq!(c.id, "J1");
-        assert_eq!(c.kind, ComponentKind::NJfet("J201".to_string()));
+        assert_eq!(c.kind.as_any().downcast_ref::<NJfet>().unwrap(), &NJfet { model: "J201".to_string() });
     }
 
     #[test]
     fn parse_njfet_2n5457() {
         let (_, (c, _)) = component_def("J2: njfet(2n5457)").unwrap();
-        assert_eq!(c.kind, ComponentKind::NJfet("2N5457".to_string()));
+        assert_eq!(c.kind.as_any().downcast_ref::<NJfet>().unwrap(), &NJfet { model: "2N5457".to_string() });
     }
 
     #[test]
     fn parse_njfet_2n5952() {
         let (_, (c, _)) = component_def("J1: njfet(2n5952)").unwrap();
-        assert_eq!(c.kind, ComponentKind::NJfet("2N5952".to_string()));
+        assert_eq!(c.kind.as_any().downcast_ref::<NJfet>().unwrap(), &NJfet { model: "2N5952".to_string() });
     }
 
     #[test]
     fn parse_pjfet_2n5460() {
         let (_, (c, _)) = component_def("J3: pjfet(2n5460)").unwrap();
-        assert_eq!(c.kind, ComponentKind::PJfet("2N5460".to_string()));
+        assert_eq!(c.kind.as_any().downcast_ref::<PJfet>().unwrap(), &PJfet { model: "2N5460".to_string() });
     }
 
     #[test]
     fn parse_njfet_any_model() {
         // Any model name from the .model file should be accepted
         let (_, (c, _)) = component_def("J1: njfet(2N3819-VSH)").unwrap();
-        assert_eq!(c.kind, ComponentKind::NJfet("2N3819-VSH".to_string()));
+        assert_eq!(c.kind.as_any().downcast_ref::<NJfet>().unwrap(), &NJfet { model: "2N3819-VSH".to_string() });
     }
 
     #[test]
@@ -3234,35 +3222,26 @@ pedal "Tremolo" {
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "Tremolo");
         assert_eq!(def.components.len(), 3);
-        assert_eq!(
-            def.components[1].kind,
-            ComponentKind::NJfet("J201".to_string())
-        );
+        assert_eq!(def.components[1].kind.as_any().downcast_ref::<NJfet>().unwrap(), &NJfet { model: "J201".to_string() });
     }
 
     #[test]
     fn parse_photocoupler_vtl5c3() {
         let (_, (c, _)) = component_def("OC1: photocoupler(vtl5c3)").unwrap();
         assert_eq!(c.id, "OC1");
-        assert_eq!(
-            c.kind,
-            ComponentKind::Photocoupler(PhotocouplerType::Vtl5c3)
-        );
+        assert_eq!(c.kind.as_any().downcast_ref::<PhotocouplerComp>().unwrap(), &PhotocouplerComp { coupler_type: PhotocouplerType::Vtl5c3 });
     }
 
     #[test]
     fn parse_photocoupler_vtl5c1() {
         let (_, (c, _)) = component_def("OC2: photocoupler(vtl5c1)").unwrap();
-        assert_eq!(
-            c.kind,
-            ComponentKind::Photocoupler(PhotocouplerType::Vtl5c1)
-        );
+        assert_eq!(c.kind.as_any().downcast_ref::<PhotocouplerComp>().unwrap(), &PhotocouplerComp { coupler_type: PhotocouplerType::Vtl5c1 });
     }
 
     #[test]
     fn parse_photocoupler_nsl32() {
         let (_, (c, _)) = component_def("OC3: photocoupler(nsl32)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Photocoupler(PhotocouplerType::Nsl32));
+        assert_eq!(c.kind.as_any().downcast_ref::<PhotocouplerComp>().unwrap(), &PhotocouplerComp { coupler_type: PhotocouplerType::Nsl32 });
     }
 
     #[test]
@@ -3285,57 +3264,54 @@ pedal "Optical Tremolo" {
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.name, "Optical Tremolo");
         assert_eq!(def.components.len(), 3);
-        assert_eq!(
-            def.components[1].kind,
-            ComponentKind::Photocoupler(PhotocouplerType::Vtl5c3)
-        );
+        assert_eq!(def.components[1].kind.as_any().downcast_ref::<PhotocouplerComp>().unwrap(), &PhotocouplerComp { coupler_type: PhotocouplerType::Vtl5c3 });
     }
 
     #[test]
     fn parse_triode_12ax7() {
         let (_, (c, _)) = component_def("V1: triode(12ax7)").unwrap();
         assert_eq!(c.id, "V1");
-        assert_eq!(c.kind, ComponentKind::Triode("12AX7".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Triode>().unwrap(), &Triode { model: "12AX7".into() });
     }
 
     #[test]
     fn parse_triode_12at7() {
         let (_, (c, _)) = component_def("V2: triode(12at7)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Triode("12AT7".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Triode>().unwrap(), &Triode { model: "12AT7".into() });
     }
 
     #[test]
     fn parse_triode_12au7() {
         let (_, (c, _)) = component_def("V3: triode(12au7)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Triode("12AU7".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Triode>().unwrap(), &Triode { model: "12AU7".into() });
     }
 
     #[test]
     fn parse_triode_ecc83() {
         // ECC83 = European 12AX7 — stored as "ECC83", resolved at model lookup
         let (_, (c, _)) = component_def("V4: triode(ecc83)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Triode("ECC83".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Triode>().unwrap(), &Triode { model: "ECC83".into() });
     }
 
     #[test]
     fn parse_triode_12ay7() {
         let (_, (c, _)) = component_def("V1: triode(12ay7)").unwrap();
         assert_eq!(c.id, "V1");
-        assert_eq!(c.kind, ComponentKind::Triode("12AY7".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Triode>().unwrap(), &Triode { model: "12AY7".into() });
     }
 
     #[test]
     fn parse_triode_6072() {
         // 6072 = military designation for 12AY7 — stored as "6072", resolved at model lookup
         let (_, (c, _)) = component_def("V1: triode(6072)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Triode("6072".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Triode>().unwrap(), &Triode { model: "6072".into() });
     }
 
     #[test]
     fn parse_vari_mu_6386() {
         let (_, (c, _)) = component_def("V1: vari_mu(6386)").unwrap();
         assert_eq!(c.id, "V1");
-        assert_eq!(c.kind, ComponentKind::VariMu("6386".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<VariMu>().unwrap(), &VariMu { model: "6386".into() });
     }
 
     #[test]
@@ -3343,13 +3319,10 @@ pedal "Optical Tremolo" {
         // lfo(triangle, 100k, 220n) -> f = 1/(2π*100000*220e-9) ≈ 7.2 Hz
         let (_, (c, _)) = component_def("LFO1: lfo(triangle, 100k, 220n)").unwrap();
         assert_eq!(c.id, "LFO1");
-        if let ComponentKind::Lfo(waveform, timing_r, timing_c) = c.kind {
-            assert_eq!(waveform, LfoWaveformDsl::Triangle);
-            assert!((timing_r - 100_000.0).abs() < 1.0);
-            assert!((timing_c - 220e-9).abs() < 1e-12);
-        } else {
-            panic!("expected Lfo");
-        }
+        let lfo = c.kind.as_any().downcast_ref::<Lfo>().expect("expected Lfo");
+        assert_eq!(lfo.waveform, LfoWaveformDsl::Triangle);
+        assert!((lfo.timing_r - 100_000.0).abs() < 1.0);
+        assert!((lfo.timing_c - 220e-9).abs() < 1e-12);
     }
 
     #[test]
@@ -3390,13 +3363,10 @@ pedal "Harmonic Tremolo" {
         assert_eq!(def.name, "Harmonic Tremolo");
         assert_eq!(def.components.len(), 4);
         // Check LFO component: 100k timing resistor, 220n timing cap
-        if let ComponentKind::Lfo(waveform, timing_r, timing_c) = &def.components[0].kind {
-            assert_eq!(*waveform, LfoWaveformDsl::Triangle);
-            assert!((*timing_r - 100_000.0).abs() < 1.0);
-            assert!((*timing_c - 220e-9).abs() < 1e-12);
-        } else {
-            panic!("expected Lfo component");
-        }
+        let lfo = def.components[0].kind.as_any().downcast_ref::<Lfo>().expect("expected Lfo component");
+        assert_eq!(lfo.waveform, LfoWaveformDsl::Triangle);
+        assert!((lfo.timing_r - 100_000.0).abs() < 1.0);
+        assert!((lfo.timing_c - 220e-9).abs() < 1e-12);
         // Check LFO.out net connection
         let lfo_net = def.nets.iter().find(|n| {
             matches!(&n.from, Pin::ComponentPin { component, pin }
@@ -3410,17 +3380,12 @@ pedal "Harmonic Tremolo" {
         // envelope_follower(1k, 4.7u, 100k, 1u, 20k)
         let (_, (c, _)) = component_def("EF1: envelope_follower(1k, 4.7u, 100k, 1u, 20k)").unwrap();
         assert_eq!(c.id, "EF1");
-        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) =
-            c.kind
-        {
-            assert!((attack_r - 1_000.0).abs() < 1.0);
-            assert!((attack_c - 4.7e-6).abs() < 1e-9);
-            assert!((release_r - 100_000.0).abs() < 1.0);
-            assert!((release_c - 1e-6).abs() < 1e-9);
-            assert!((sens_r - 20_000.0).abs() < 1.0);
-        } else {
-            panic!("expected EnvelopeFollower");
-        }
+        let ef = c.kind.as_any().downcast_ref::<EnvelopeFollower>().expect("expected EnvelopeFollower");
+        assert!((ef.attack_r - 1_000.0).abs() < 1.0);
+        assert!((ef.attack_c - 4.7e-6).abs() < 1e-9);
+        assert!((ef.release_r - 100_000.0).abs() < 1.0);
+        assert!((ef.release_c - 1e-6).abs() < 1e-9);
+        assert!((ef.sensitivity_r - 20_000.0).abs() < 1.0);
     }
 
     #[test]
@@ -3447,17 +3412,12 @@ pedal "Auto Wah" {
         assert_eq!(def.name, "Auto Wah");
         assert_eq!(def.components.len(), 4);
         // Check EnvelopeFollower component
-        if let ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) =
-            &def.components[0].kind
-        {
-            assert!((*attack_r - 1_000.0).abs() < 1.0);
-            assert!((*attack_c - 4.7e-6).abs() < 1e-9);
-            assert!((*release_r - 100_000.0).abs() < 1.0);
-            assert!((*release_c - 1.5e-6).abs() < 1e-9);
-            assert!((*sens_r - 20_000.0).abs() < 1.0);
-        } else {
-            panic!("expected EnvelopeFollower component");
-        }
+        let ef = def.components[0].kind.as_any().downcast_ref::<EnvelopeFollower>().expect("expected EnvelopeFollower component");
+        assert!((ef.attack_r - 1_000.0).abs() < 1.0);
+        assert!((ef.attack_c - 4.7e-6).abs() < 1e-9);
+        assert!((ef.release_r - 100_000.0).abs() < 1.0);
+        assert!((ef.release_c - 1.5e-6).abs() < 1e-9);
+        assert!((ef.sensitivity_r - 20_000.0).abs() < 1.0);
         // Check EF1.out net connection
         let ef_net = def.nets.iter().find(|n| {
             matches!(&n.from, Pin::ComponentPin { component, pin }
@@ -3470,38 +3430,38 @@ pedal "Auto Wah" {
     fn parse_opamp_generic() {
         let (_, (c, _)) = component_def("U1: opamp()").unwrap();
         assert_eq!(c.id, "U1");
-        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Generic));
+        assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Generic));
     }
 
     #[test]
     fn parse_opamp_tl072() {
         let (_, (c, _)) = component_def("U1: opamp(tl072)").unwrap();
-        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Tl072));
+        assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Tl072));
     }
 
     #[test]
     fn parse_opamp_jrc4558() {
         let (_, (c, _)) = component_def("U1: opamp(jrc4558)").unwrap();
-        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Jrc4558));
+        assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Jrc4558));
     }
 
     #[test]
     fn parse_opamp_4558_alias() {
         // "4558" should also work as an alias for JRC4558
         let (_, (c, _)) = component_def("U1: opamp(4558)").unwrap();
-        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Jrc4558));
+        assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Jrc4558));
     }
 
     #[test]
     fn parse_opamp_lm308() {
         let (_, (c, _)) = component_def("U1: opamp(lm308)").unwrap();
-        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Lm308));
+        assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Lm308));
     }
 
     #[test]
     fn parse_opamp_ca3080() {
         let (_, (c, _)) = component_def("U1: opamp(ca3080)").unwrap();
-        assert_eq!(c.kind, ComponentKind::OpAmp(OpAmpType::Ca3080));
+        assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Ca3080));
         // CA3080 is an OTA
         assert!(OpAmpType::Ca3080.is_ota());
     }
@@ -3527,26 +3487,26 @@ pedal "Auto Wah" {
     fn parse_nmos_2n7000() {
         let (_, (c, _)) = component_def("M1: nmos(2n7000)").unwrap();
         assert_eq!(c.id, "M1");
-        assert_eq!(c.kind, ComponentKind::Nmos(MosfetType::N2n7000));
+        assert_eq!(c.kind.as_any().downcast_ref::<Nmos>().unwrap(), &Nmos { mosfet_type: MosfetType::N2n7000 });
     }
 
     #[test]
     fn parse_nmos_irf520() {
         let (_, (c, _)) = component_def("M1: nmos(irf520)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Nmos(MosfetType::Irf520));
+        assert_eq!(c.kind.as_any().downcast_ref::<Nmos>().unwrap(), &Nmos { mosfet_type: MosfetType::Irf520 });
     }
 
     #[test]
     fn parse_pmos_bs250() {
         let (_, (c, _)) = component_def("M2: pmos(bs250)").unwrap();
         assert_eq!(c.id, "M2");
-        assert_eq!(c.kind, ComponentKind::Pmos(MosfetType::Bs250));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pmos>().unwrap(), &Pmos { mosfet_type: MosfetType::Bs250 });
     }
 
     #[test]
     fn parse_pmos_irf9520() {
         let (_, (c, _)) = component_def("M2: pmos(irf9520)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pmos(MosfetType::Irf9520));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pmos>().unwrap(), &Pmos { mosfet_type: MosfetType::Irf9520 });
     }
 
     // ── Zener diode parser tests ────────────────────────────────────────
@@ -3555,21 +3515,15 @@ pedal "Auto Wah" {
     fn parse_zener_with_voltage_suffix() {
         let (_, (c, _)) = component_def("Z1: zener(5.1v)").unwrap();
         assert_eq!(c.id, "Z1");
-        if let ComponentKind::Zener(vz) = c.kind {
-            assert!((vz - 5.1).abs() < 1e-6);
-        } else {
-            panic!("expected Zener");
-        }
+        let z = c.kind.as_any().downcast_ref::<Zener>().expect("expected Zener");
+        assert!((z.breakdown_voltage - 5.1).abs() < 1e-6);
     }
 
     #[test]
     fn parse_zener_without_suffix() {
         let (_, (c, _)) = component_def("Z2: zener(3.3)").unwrap();
-        if let ComponentKind::Zener(vz) = c.kind {
-            assert!((vz - 3.3).abs() < 1e-6);
-        } else {
-            panic!("expected Zener");
-        }
+        let z = c.kind.as_any().downcast_ref::<Zener>().expect("expected Zener");
+        assert!((z.breakdown_voltage - 3.3).abs() < 1e-6);
     }
 
     #[test]
@@ -3598,7 +3552,7 @@ pedal "MOSFET Drive" {
         assert!(def
             .components
             .iter()
-            .any(|c| matches!(c.kind, ComponentKind::Nmos(MosfetType::N2n7000))));
+            .any(|c| c.kind.as_any().downcast_ref::<Nmos>().map_or(false, |m| m.mosfet_type == MosfetType::N2n7000)));
     }
 
     #[test]
@@ -3624,7 +3578,7 @@ pedal "Zener Clipper" {
         assert!(def
             .components
             .iter()
-            .any(|c| matches!(c.kind, ComponentKind::Zener(v) if (v - 5.1).abs() < 1e-6)));
+            .any(|c| c.kind.as_any().downcast_ref::<Zener>().map_or(false, |z| (z.breakdown_voltage - 5.1).abs() < 1e-6)));
     }
 
     // ── BBD parser tests ──────────────────────────────────────────────────
@@ -3633,19 +3587,19 @@ pedal "Zener Clipper" {
     fn parse_bbd_mn3207() {
         let (_, (c, _)) = component_def("BBD1: bbd(mn3207)").unwrap();
         assert_eq!(c.id, "BBD1");
-        assert_eq!(c.kind, ComponentKind::Bbd(BbdType::Mn3207));
+        assert_eq!(c.kind.as_any().downcast_ref::<Bbd>().unwrap(), &Bbd { bbd_type: BbdType::Mn3207 });
     }
 
     #[test]
     fn parse_bbd_mn3007() {
         let (_, (c, _)) = component_def("BBD1: bbd(mn3007)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Bbd(BbdType::Mn3007));
+        assert_eq!(c.kind.as_any().downcast_ref::<Bbd>().unwrap(), &Bbd { bbd_type: BbdType::Mn3007 });
     }
 
     #[test]
     fn parse_bbd_mn3005() {
         let (_, (c, _)) = component_def("BBD1: bbd(mn3005)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Bbd(BbdType::Mn3005));
+        assert_eq!(c.kind.as_any().downcast_ref::<Bbd>().unwrap(), &Bbd { bbd_type: BbdType::Mn3005 });
     }
 
     #[test]
@@ -3673,7 +3627,7 @@ pedal "Chorus" {
         assert!(def
             .components
             .iter()
-            .any(|c| matches!(c.kind, ComponentKind::Bbd(BbdType::Mn3207))));
+            .any(|c| c.kind.as_any().downcast_ref::<Bbd>().map_or(false, |b| b.bbd_type == BbdType::Mn3207)));
     }
 
     // ── Neon bulb parser tests ─────────────────────────────────────────
@@ -3682,31 +3636,31 @@ pedal "Chorus" {
     fn parse_neon_default() {
         let (_, (c, _)) = component_def("NE1: neon()").unwrap();
         assert_eq!(c.id, "NE1");
-        assert_eq!(c.kind, ComponentKind::Neon(NeonType::Ne2));
+        assert_eq!(c.kind.as_any().downcast_ref::<Neon>().unwrap(), &Neon { neon_type: NeonType::Ne2 });
     }
 
     #[test]
     fn parse_neon_ne2() {
         let (_, (c, _)) = component_def("NE1: neon(ne2)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Neon(NeonType::Ne2));
+        assert_eq!(c.kind.as_any().downcast_ref::<Neon>().unwrap(), &Neon { neon_type: NeonType::Ne2 });
     }
 
     #[test]
     fn parse_neon_ne2_hyphen() {
         let (_, (c, _)) = component_def("NE1: neon(ne-2)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Neon(NeonType::Ne2));
+        assert_eq!(c.kind.as_any().downcast_ref::<Neon>().unwrap(), &Neon { neon_type: NeonType::Ne2 });
     }
 
     #[test]
     fn parse_neon_ne51() {
         let (_, (c, _)) = component_def("NE1: neon(ne51)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Neon(NeonType::Ne51));
+        assert_eq!(c.kind.as_any().downcast_ref::<Neon>().unwrap(), &Neon { neon_type: NeonType::Ne51 });
     }
 
     #[test]
     fn parse_neon_ne83() {
         let (_, (c, _)) = component_def("NE1: neon(ne-83)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Neon(NeonType::Ne83));
+        assert_eq!(c.kind.as_any().downcast_ref::<Neon>().unwrap(), &Neon { neon_type: NeonType::Ne83 });
     }
 
     #[test]
@@ -3736,7 +3690,7 @@ pedal "Fender Vibrato" {
         assert!(def
             .components
             .iter()
-            .any(|c| matches!(c.kind, ComponentKind::Neon(NeonType::Ne2))));
+            .any(|c| c.kind.as_any().downcast_ref::<Neon>().map_or(false, |n| n.neon_type == NeonType::Ne2)));
     }
 
     // ── Pentode parser tests ────────────────────────────────────────────
@@ -3745,27 +3699,27 @@ pedal "Fender Vibrato" {
     fn parse_pentode_ef86() {
         let (_, (c, _)) = component_def("V1: pentode(ef86)").unwrap();
         assert_eq!(c.id, "V1");
-        assert_eq!(c.kind, ComponentKind::Pentode("EF86".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "EF86".into() });
     }
 
     #[test]
     fn parse_pentode_el84() {
         let (_, (c, _)) = component_def("V1: pentode(el84)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("EL84".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "EL84".into() });
     }
 
     #[test]
     fn parse_pentode_6267() {
         // 6267 = US designation for EF86 — stored as "6267", resolved at model lookup
         let (_, (c, _)) = component_def("V1: pentode(6267)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("6267".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "6267".into() });
     }
 
     #[test]
     fn parse_pentode_6bq5() {
         // 6BQ5 = US designation for EL84 — stored as "6BQ5", resolved at model lookup
         let (_, (c, _)) = component_def("V1: pentode(6bq5)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("6BQ5".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "6BQ5".into() });
     }
 
     #[test]
@@ -3798,74 +3752,74 @@ pedal "Vox Preamp" {
         assert!(def
             .components
             .iter()
-            .any(|c| matches!(&c.kind, ComponentKind::Pentode(name) if name == "EF86")));
+            .any(|c| c.kind.as_any().downcast_ref::<Pentode>().map_or(false, |p| p.model == "EF86")));
     }
 
     #[test]
     fn parse_pentode_6l6gc() {
         let (_, (c, _)) = component_def("V1: pentode(6l6gc)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("6L6GC".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "6L6GC".into() });
     }
 
     #[test]
     fn parse_pentode_6l6_alias() {
         // 6L6 = original lower-dissipation variant — stored as "6L6", resolved at model lookup
         let (_, (c, _)) = component_def("V1: pentode(6l6)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("6L6".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "6L6".into() });
     }
 
     #[test]
     fn parse_pentode_5881_alias() {
         // 5881 = military equivalent of 6L6GC — stored as "5881", resolved at model lookup
         let (_, (c, _)) = component_def("V1: pentode(5881)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("5881".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "5881".into() });
     }
 
     #[test]
     fn parse_pentode_kt66_alias() {
         // KT66 = British equivalent of 6L6GC — stored as "KT66", resolved at model lookup
         let (_, (c, _)) = component_def("V1: pentode(kt66)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("KT66".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "KT66".into() });
     }
 
     #[test]
     fn parse_pentode_el34() {
         let (_, (c, _)) = component_def("V1: pentode(el34)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("EL34".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "EL34".into() });
     }
 
     #[test]
     fn parse_pentode_6ca7_alias() {
         // 6CA7 = American designation for EL34 — stored as "6CA7", resolved at model lookup
         let (_, (c, _)) = component_def("V1: pentode(6ca7)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("6CA7".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "6CA7".into() });
     }
 
     #[test]
     fn parse_pentode_kt77_alias() {
         // KT77 = drop-in alternative for EL34 — stored as "KT77", resolved at model lookup
         let (_, (c, _)) = component_def("V1: pentode(kt77)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("KT77".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "KT77".into() });
     }
 
     #[test]
     fn parse_pentode_6550() {
         let (_, (c, _)) = component_def("V1: pentode(6550)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("6550".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "6550".into() });
     }
 
     #[test]
     fn parse_pentode_kt88_alias() {
         // KT88 = distinct tube — stored as "KT88", resolved at model lookup
         let (_, (c, _)) = component_def("V1: pentode(kt88)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("KT88".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "KT88".into() });
     }
 
     #[test]
     fn parse_pentode_kt90_alias() {
         // KT90 = higher dissipation variant of 6550 — stored as "KT90", resolved at model lookup
         let (_, (c, _)) = component_def("V1: pentode(kt90)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Pentode("KT90".into()));
+        assert_eq!(c.kind.as_any().downcast_ref::<Pentode>().unwrap(), &Pentode { model: "KT90".into() });
     }
 
     // ── Synth component parser tests ──────────────────────────────────
@@ -3891,126 +3845,111 @@ synth "Test Synth" {
     fn parse_vco_cem3340() {
         let (_, (c, _)) = component_def("VCO1: vco(cem3340)").unwrap();
         assert_eq!(c.id, "VCO1");
-        assert_eq!(c.kind, ComponentKind::Vco(VcoType::Cem3340, 440.0, VcoWaveformDsl::Saw));
+        assert_eq!(c.kind.as_any().downcast_ref::<Vco>().unwrap(), &Vco { vco_type: VcoType::Cem3340, base_freq: 440.0, waveform: VcoWaveformDsl::Saw });
     }
 
     #[test]
     fn parse_vco_as3340() {
         let (_, (c, _)) = component_def("VCO1: vco(as3340)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Vco(VcoType::As3340, 440.0, VcoWaveformDsl::Saw));
+        assert_eq!(c.kind.as_any().downcast_ref::<Vco>().unwrap(), &Vco { vco_type: VcoType::As3340, base_freq: 440.0, waveform: VcoWaveformDsl::Saw });
     }
 
     #[test]
     fn parse_vco_v3340() {
         let (_, (c, _)) = component_def("VCO1: vco(v3340)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Vco(VcoType::V3340, 440.0, VcoWaveformDsl::Saw));
+        assert_eq!(c.kind.as_any().downcast_ref::<Vco>().unwrap(), &Vco { vco_type: VcoType::V3340, base_freq: 440.0, waveform: VcoWaveformDsl::Saw });
     }
 
     #[test]
     fn parse_vco_with_freq() {
         let (_, (c, _)) = component_def("VCO1: vco(cem3340, 540)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Vco(VcoType::Cem3340, 540.0, VcoWaveformDsl::Saw));
+        assert_eq!(c.kind.as_any().downcast_ref::<Vco>().unwrap(), &Vco { vco_type: VcoType::Cem3340, base_freq: 540.0, waveform: VcoWaveformDsl::Saw });
     }
 
     #[test]
     fn parse_vco_with_freq_and_waveform() {
         let (_, (c, _)) = component_def("VCO1: vco(cem3340, 540, pulse)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Vco(VcoType::Cem3340, 540.0, VcoWaveformDsl::Pulse));
+        assert_eq!(c.kind.as_any().downcast_ref::<Vco>().unwrap(), &Vco { vco_type: VcoType::Cem3340, base_freq: 540.0, waveform: VcoWaveformDsl::Pulse });
     }
 
     #[test]
     fn parse_vcf_cem3320() {
         let (_, (c, _)) = component_def("VCF1: vcf(cem3320)").unwrap();
         assert_eq!(c.id, "VCF1");
-        assert_eq!(c.kind, ComponentKind::Vcf(VcfType::Cem3320));
+        assert_eq!(c.kind.as_any().downcast_ref::<Vcf>().unwrap(), &Vcf { vcf_type: VcfType::Cem3320 });
     }
 
     #[test]
     fn parse_vcf_as3320() {
         let (_, (c, _)) = component_def("VCF1: vcf(as3320)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Vcf(VcfType::As3320));
+        assert_eq!(c.kind.as_any().downcast_ref::<Vcf>().unwrap(), &Vcf { vcf_type: VcfType::As3320 });
     }
 
     #[test]
     fn parse_vca_ssm2164() {
         let (_, (c, _)) = component_def("VCA1: vca(ssm2164)").unwrap();
         assert_eq!(c.id, "VCA1");
-        assert_eq!(c.kind, ComponentKind::Vca(VcaType::Ssm2164));
+        assert_eq!(c.kind.as_any().downcast_ref::<Vca>().unwrap(), &Vca { vca_type: VcaType::Ssm2164 });
     }
 
     #[test]
     fn parse_vca_v2164() {
         let (_, (c, _)) = component_def("VCA1: vca(v2164)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Vca(VcaType::V2164));
+        assert_eq!(c.kind.as_any().downcast_ref::<Vca>().unwrap(), &Vca { vca_type: VcaType::V2164 });
     }
 
     #[test]
     fn parse_comparator_lm311() {
         let (_, (c, _)) = component_def("U1: comparator(lm311)").unwrap();
         assert_eq!(c.id, "U1");
-        assert_eq!(c.kind, ComponentKind::Comparator(ComparatorType::Lm311));
+        assert_eq!(c.kind.as_any().downcast_ref::<Comparator>().unwrap(), &Comparator { comp_type: ComparatorType::Lm311 });
     }
 
     #[test]
     fn parse_comparator_lm393() {
         let (_, (c, _)) = component_def("U1: comparator(lm393)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Comparator(ComparatorType::Lm393));
+        assert_eq!(c.kind.as_any().downcast_ref::<Comparator>().unwrap(), &Comparator { comp_type: ComparatorType::Lm393 });
     }
 
     #[test]
     fn parse_analog_switch_cd4066() {
         let (_, (c, _)) = component_def("SW1: switch(cd4066)").unwrap();
         assert_eq!(c.id, "SW1");
-        assert_eq!(
-            c.kind,
-            ComponentKind::AnalogSwitch(AnalogSwitchType::Cd4066)
-        );
+        assert_eq!(c.kind.as_any().downcast_ref::<AnalogSwitch>().unwrap(), &AnalogSwitch { switch_type: AnalogSwitchType::Cd4066 });
     }
 
     #[test]
     fn parse_analog_switch_dg411() {
         let (_, (c, _)) = component_def("SW1: switch(dg411)").unwrap();
-        assert_eq!(c.kind, ComponentKind::AnalogSwitch(AnalogSwitchType::Dg411));
+        assert_eq!(c.kind.as_any().downcast_ref::<AnalogSwitch>().unwrap(), &AnalogSwitch { switch_type: AnalogSwitchType::Dg411 });
     }
 
     #[test]
     fn parse_matched_npn_ssm2210() {
         let (_, (c, _)) = component_def("QM1: matched_npn(ssm2210)").unwrap();
         assert_eq!(c.id, "QM1");
-        assert_eq!(
-            c.kind,
-            ComponentKind::MatchedNpn(MatchedTransistorType::Ssm2210)
-        );
+        assert_eq!(c.kind.as_any().downcast_ref::<MatchedNpn>().unwrap(), &MatchedNpn { matched_type: MatchedTransistorType::Ssm2210 });
     }
 
     #[test]
     fn parse_matched_npn_ca3046() {
         let (_, (c, _)) = component_def("QM1: matched_npn(ca3046)").unwrap();
-        assert_eq!(
-            c.kind,
-            ComponentKind::MatchedNpn(MatchedTransistorType::Ca3046)
-        );
+        assert_eq!(c.kind.as_any().downcast_ref::<MatchedNpn>().unwrap(), &MatchedNpn { matched_type: MatchedTransistorType::Ca3046 });
     }
 
     #[test]
     fn parse_matched_pnp_lm394() {
         let (_, (c, _)) = component_def("QM1: matched_pnp(lm394)").unwrap();
-        assert_eq!(
-            c.kind,
-            ComponentKind::MatchedPnp(MatchedTransistorType::Lm394)
-        );
+        assert_eq!(c.kind.as_any().downcast_ref::<MatchedPnp>().unwrap(), &MatchedPnp { matched_type: MatchedTransistorType::Lm394 });
     }
 
     #[test]
     fn parse_tempco() {
         let (_, (c, _)) = component_def("RT1: tempco(2k, 3500)").unwrap();
         assert_eq!(c.id, "RT1");
-        if let ComponentKind::Tempco(r, ppm) = c.kind {
-            assert!((r - 2000.0).abs() < 1e-6);
-            assert!((ppm - 3500.0).abs() < 1e-6);
-        } else {
-            panic!("expected Tempco");
-        }
+        let tc = c.kind.as_any().downcast_ref::<Tempco>().expect("expected Tempco");
+        assert!((tc.resistance - 2000.0).abs() < 1e-6);
+        assert!((tc.ppm - 3500.0).abs() < 1e-6);
     }
 
     #[test]
@@ -4057,83 +3996,65 @@ synth "CV Test" {
     fn parse_transformer_simple() {
         let (_, (c, _)) = component_def("T1: transformer(10:1, 2H)").unwrap();
         assert_eq!(c.id, "T1");
-        if let ComponentKind::Transformer(cfg) = c.kind {
-            assert!((cfg.turns_ratio - 10.0).abs() < 1e-6);
-            assert!((cfg.primary_inductance - 2.0).abs() < 1e-6);
-            assert_eq!(cfg.primary_type, WindingType::Standard);
-            assert_eq!(cfg.secondary_type, WindingType::Standard);
-        } else {
-            panic!("expected Transformer");
-        }
+        let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert!((cfg.turns_ratio - 10.0).abs() < 1e-6);
+        assert!((cfg.primary_inductance - 2.0).abs() < 1e-6);
+        assert_eq!(cfg.primary_type, WindingType::Standard);
+        assert_eq!(cfg.secondary_type, WindingType::Standard);
     }
 
     #[test]
     fn parse_transformer_with_winding_types() {
         // Parser syntax: pp = push-pull, ct = center-tap
         let (_, (c, _)) = component_def("T2: transformer(1.5:1, 4H, pp, ct)").unwrap();
-        if let ComponentKind::Transformer(cfg) = c.kind {
-            assert!((cfg.turns_ratio - 1.5).abs() < 1e-6);
-            assert!((cfg.primary_inductance - 4.0).abs() < 1e-6);
-            assert_eq!(cfg.primary_type, WindingType::PushPull);
-            assert_eq!(cfg.secondary_type, WindingType::CenterTap);
-        } else {
-            panic!("expected Transformer");
-        }
+        let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert!((cfg.turns_ratio - 1.5).abs() < 1e-6);
+        assert!((cfg.primary_inductance - 4.0).abs() < 1e-6);
+        assert_eq!(cfg.primary_type, WindingType::PushPull);
+        assert_eq!(cfg.secondary_type, WindingType::CenterTap);
     }
 
     #[test]
     fn parse_transformer_with_dcr_and_coupling() {
         // Parser syntax: dcr=value (applies to both), k=coupling
         let (_, (c, _)) = component_def("T3: transformer(5:1, 1H, dcr=50, k=0.98)").unwrap();
-        if let ComponentKind::Transformer(cfg) = c.kind {
-            assert!((cfg.turns_ratio - 5.0).abs() < 1e-6);
-            assert!((cfg.primary_dcr - 50.0).abs() < 1e-6);
-            assert!((cfg.secondary_dcr - 50.0).abs() < 1e-6); // Both set to same value
-            assert!((cfg.coupling - 0.98).abs() < 1e-6);
-        } else {
-            panic!("expected Transformer");
-        }
+        let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert!((cfg.turns_ratio - 5.0).abs() < 1e-6);
+        assert!((cfg.primary_dcr - 50.0).abs() < 1e-6);
+        assert!((cfg.secondary_dcr - 50.0).abs() < 1e-6); // Both set to same value
+        assert!((cfg.coupling - 0.98).abs() < 1e-6);
     }
 
     #[test]
     fn parse_transformer_with_tertiary() {
         let (_, (c, _)) =
             component_def("T_sc: transformer(4:1, 5.7H, 10, 10p, tertiary=9.5:1)").unwrap();
-        if let ComponentKind::Transformer(cfg) = c.kind {
-            assert!((cfg.turns_ratio - 4.0).abs() < 1e-6);
-            assert!((cfg.primary_inductance - 5.7).abs() < 1e-6);
-            assert!((cfg.primary_dcr - 10.0).abs() < 1e-6);
-            assert!((cfg.capacitance - 10e-12).abs() < 1e-15);
-            assert!(cfg.tertiary_turns_ratio.is_some());
-            assert!((cfg.tertiary_turns_ratio.unwrap() - 9.5).abs() < 1e-6);
-        } else {
-            panic!("expected Transformer");
-        }
+        let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert!((cfg.turns_ratio - 4.0).abs() < 1e-6);
+        assert!((cfg.primary_inductance - 5.7).abs() < 1e-6);
+        assert!((cfg.primary_dcr - 10.0).abs() < 1e-6);
+        assert!((cfg.capacitance - 10e-12).abs() < 1e-15);
+        assert!(cfg.tertiary_turns_ratio.is_some());
+        assert!((cfg.tertiary_turns_ratio.unwrap() - 9.5).abs() < 1e-6);
     }
 
     #[test]
     fn parse_transformer_no_tertiary() {
         let (_, (c, _)) = component_def("T1: transformer(10:1, 2H)").unwrap();
-        if let ComponentKind::Transformer(cfg) = c.kind {
-            assert!(cfg.tertiary_turns_ratio.is_none());
-        } else {
-            panic!("expected Transformer");
-        }
+        let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert!(cfg.tertiary_turns_ratio.is_none());
     }
 
     #[test]
     fn parse_cap_switched() {
         let (_, (c, _)) = component_def("C_lf: cap_switched(27n, 68n, 220n, 1.5u)").unwrap();
         assert_eq!(c.id, "C_lf");
-        if let ComponentKind::CapSwitched(values) = c.kind {
-            assert_eq!(values.len(), 4);
-            assert!((values[0] - 27e-9).abs() < 1e-12);
-            assert!((values[1] - 68e-9).abs() < 1e-12);
-            assert!((values[2] - 220e-9).abs() < 1e-12);
-            assert!((values[3] - 1.5e-6).abs() < 1e-12);
-        } else {
-            panic!("expected CapSwitched");
-        }
+        let cs = c.kind.as_any().downcast_ref::<CapSwitched>().expect("expected CapSwitched");
+        assert_eq!(cs.values.len(), 4);
+        assert!((cs.values[0] - 27e-9).abs() < 1e-12);
+        assert!((cs.values[1] - 68e-9).abs() < 1e-12);
+        assert!((cs.values[2] - 220e-9).abs() < 1e-12);
+        assert!((cs.values[3] - 1.5e-6).abs() < 1e-12);
     }
 
     #[test]
@@ -4141,26 +4062,20 @@ synth "CV Test" {
         let (_, (c, _)) =
             component_def("L_hf: inductor_switched(27m, 33m, 47m, 68m, 82m, 150m)").unwrap();
         assert_eq!(c.id, "L_hf");
-        if let ComponentKind::InductorSwitched(values) = c.kind {
-            assert_eq!(values.len(), 6);
-            assert!((values[0] - 27e-3).abs() < 1e-6);
-            assert!((values[5] - 150e-3).abs() < 1e-6);
-        } else {
-            panic!("expected InductorSwitched");
-        }
+        let is = c.kind.as_any().downcast_ref::<InductorSwitched>().expect("expected InductorSwitched");
+        assert_eq!(is.values.len(), 6);
+        assert!((is.values[0] - 27e-3).abs() < 1e-6);
+        assert!((is.values[5] - 150e-3).abs() < 1e-6);
     }
 
     #[test]
     fn parse_rotary_switch() {
         let (_, (c, _)) = component_def(r#"SW1: rotary("20Hz", "30Hz", "60Hz", "100Hz")"#).unwrap();
         assert_eq!(c.id, "SW1");
-        if let ComponentKind::RotarySwitch(positions) = c.kind {
-            assert_eq!(positions.len(), 4);
-            assert_eq!(positions[0], "20Hz");
-            assert_eq!(positions[3], "100Hz");
-        } else {
-            panic!("expected RotarySwitch");
-        }
+        let rs = c.kind.as_any().downcast_ref::<RotarySwitch>().expect("expected RotarySwitch");
+        assert_eq!(rs.linked_ids.len(), 4);
+        assert_eq!(rs.linked_ids[0], "20Hz");
+        assert_eq!(rs.linked_ids[3], "100Hz");
     }
 
     #[test]
@@ -4189,19 +4104,19 @@ equipment "Test EQ" {
         assert!(def
             .components
             .iter()
-            .any(|c| matches!(c.kind, ComponentKind::Transformer(_))));
+            .any(|c| c.kind.is_transformer()));
         assert!(def
             .components
             .iter()
-            .any(|c| matches!(c.kind, ComponentKind::CapSwitched(_))));
+            .any(|c| c.kind.as_any().downcast_ref::<CapSwitched>().is_some()));
         assert!(def
             .components
             .iter()
-            .any(|c| matches!(c.kind, ComponentKind::InductorSwitched(_))));
+            .any(|c| c.kind.as_any().downcast_ref::<InductorSwitched>().is_some()));
         assert!(def
             .components
             .iter()
-            .any(|c| matches!(c.kind, ComponentKind::RotarySwitch(_))));
+            .any(|c| c.kind.as_any().downcast_ref::<RotarySwitch>().is_some()));
     }
 
     // ── Supply voltage parser tests ───────────────────────────────────────
@@ -4810,19 +4725,16 @@ pedal "Mixed" {
     fn component_defs_with_shorthand() {
         // Resistor with embedded decimal
         let (_, (c, _)) = component_def("R1: resistor(4k7)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Resistor(4700.0));
+        assert_eq!(c.kind.as_any().downcast_ref::<Resistor>().unwrap(), &Resistor { value: 4700.0 });
 
         // Capacitor with embedded decimal
         let (_, (c, _)) = component_def("C1: cap(4n7)").unwrap();
-        if let ComponentKind::Capacitor(cfg) = c.kind {
-            assert!((cfg.value - 4.7e-9).abs() < 1e-18);
-        } else {
-            panic!("expected Capacitor");
-        }
+        let cap = c.kind.as_any().downcast_ref::<Capacitor>().expect("expected Capacitor");
+        assert!((cap.config.value - 4.7e-9).abs() < 1e-18);
 
         // Inductor with embedded decimal
         let (_, (c, _)) = component_def("L1: inductor(4m7)").unwrap();
-        assert_eq!(c.kind, ComponentKind::Inductor(4.7e-3));
+        assert_eq!(c.kind.as_any().downcast_ref::<Inductor>().unwrap(), &Inductor { value: 4.7e-3 });
     }
 
     #[test]

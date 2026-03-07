@@ -268,6 +268,7 @@ fn compute_column_widths(
 mod tests {
     use super::*;
     use crate::graph::LayoutGraph;
+    use pedalkernel::compiler::components::*;
     use pedalkernel::dsl::*;
 
     #[test]
@@ -278,19 +279,19 @@ mod tests {
             components: vec![
                 ComponentDef {
                     id: "C1".into(),
-                    kind: ComponentKind::Capacitor(CapConfig::new(100e-9)),
+                    kind: Box::new(Capacitor { config: CapConfig::new(100e-9) }),
                 },
                 ComponentDef {
                     id: "R1".into(),
-                    kind: ComponentKind::Resistor(1e6),
+                    kind: Box::new(Resistor { value: 1e6 }),
                 },
                 ComponentDef {
                     id: "V1".into(),
-                    kind: ComponentKind::Triode("12AX7".into()),
+                    kind: Box::new(Triode { model: "12AX7".into() }),
                 },
                 ComponentDef {
                     id: "R2".into(),
-                    kind: ComponentKind::Resistor(100e3),
+                    kind: Box::new(Resistor { value: 100e3 }),
                 },
             ],
             nets: vec![
@@ -354,6 +355,8 @@ mod tests {
             monitors: vec![],
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
+            subtitle: None,
+            midi_bindings: vec![],
         };
 
         let graph = LayoutGraph::from_pedal(&pedal);

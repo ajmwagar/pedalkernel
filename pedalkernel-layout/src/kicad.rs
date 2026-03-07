@@ -6,7 +6,8 @@
 //! produces.
 
 use crate::types::*;
-use pedalkernel::dsl::{ComponentKind, PedalDef};
+use pedalkernel::compiler::Component;
+use pedalkernel::dsl::PedalDef;
 use std::fmt::Write;
 
 /// Scale factor from layout units to KiCad mils (1 layout unit ≈ 5 mils).
@@ -58,7 +59,7 @@ fn write_components(out: &mut String, layout: &Layout, pedal: &PedalDef) {
     for (idx, placed) in layout.components.iter().enumerate() {
         let comp_def = comp_map.get(placed.name.as_str());
         let (lib_symbol, ref_prefix) = comp_def
-            .map(|c| kicad_symbol_ref(&c.kind))
+            .map(|c| kicad_symbol_ref(c.kind.as_ref()))
             .unwrap_or(("Device:R", "X"));
 
         let x = placed.x * SCALE;
@@ -150,42 +151,7 @@ fn write_footer(out: &mut String) {
     writeln!(out, ")").unwrap();
 }
 
-/// Map a ComponentKind to a KiCad library symbol reference and reference prefix.
-fn kicad_symbol_ref(kind: &ComponentKind) -> (&'static str, &'static str) {
-    match kind {
-        ComponentKind::Resistor(_) => ("Device:R", "R"),
-        ComponentKind::Capacitor(_) => ("Device:C", "C"),
-        ComponentKind::Inductor(_) => ("Device:L", "L"),
-        ComponentKind::DiodePair(_) | ComponentKind::Diode(_) => ("Device:D", "D"),
-        ComponentKind::Zener(_) => ("Device:D_Zener", "D"),
-        ComponentKind::Potentiometer(..) => ("Device:R_Potentiometer", "RV"),
-        ComponentKind::Npn(_) => ("Device:Q_NPN_BCE", "Q"),
-        ComponentKind::Pnp(_) => ("Device:Q_PNP_BCE", "Q"),
-        ComponentKind::OpAmp(_) => ("Amplifier_Operational:TL072", "U"),
-        ComponentKind::NJfet(_) => ("Device:Q_NJFET_DGS", "J"),
-        ComponentKind::PJfet(_) => ("Device:Q_PJFET_DGS", "J"),
-        ComponentKind::Triode(_) => ("Valve:ECC83", "V"),
-        ComponentKind::Pentode(_) => ("Valve:EL84", "V"),
-        ComponentKind::Nmos(_) => ("Device:Q_NMOS_DGS", "Q"),
-        ComponentKind::Pmos(_) => ("Device:Q_PMOS_DGS", "Q"),
-        ComponentKind::Transformer(_) => ("Transformer:Transformer_1P_1S", "T"),
-        ComponentKind::Photocoupler(_) => ("Isolator:PC817", "OC"),
-        ComponentKind::Bbd(_) => ("Analog_Delay:MN3207", "IC"),
-        ComponentKind::Neon(_) => ("Device:Lamp_Neon", "NE"),
-        ComponentKind::Vco(..) => ("Oscillator:CEM3340", "U"),
-        ComponentKind::Vcf(_) => ("Analog:CEM3320", "U"),
-        ComponentKind::Vca(_) => ("Analog:SSM2164", "U"),
-        ComponentKind::Comparator(_) => ("Comparator:LM311", "U"),
-        ComponentKind::AnalogSwitch(_) => ("Analog_Switch:CD4066", "U"),
-        ComponentKind::MatchedNpn(_) | ComponentKind::MatchedPnp(_) => {
-            ("Transistor_BJT:SSM2210", "Q")
-        }
-        ComponentKind::Tempco(..) => ("Device:R", "RT"),
-        ComponentKind::CapSwitched(_) => ("Device:C", "C"),
-        ComponentKind::InductorSwitched(_) => ("Device:L", "L"),
-        ComponentKind::ResistorSwitched(_) => ("Device:R", "R"),
-        ComponentKind::RotarySwitch(_) => ("Switch:SW_Rotary4", "SW"),
-        ComponentKind::Switch(_) => ("Switch:SW_SPDT", "SW"),
-        _ => ("Device:R", "X"),
-    }
+/// Map a Component to a KiCad library symbol reference and reference prefix.
+fn kicad_symbol_ref(kind: &dyn Component) -> (&'static str, &'static str) {
+    kind.footprint_ref()
 }

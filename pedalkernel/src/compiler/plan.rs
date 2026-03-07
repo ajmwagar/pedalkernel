@@ -1676,10 +1676,7 @@ fn find_plate_transformers(
             if edge.node_a != far_node && edge.node_b != far_node {
                 continue;
             }
-            if matches!(
-                graph.components[edge.comp_idx].kind,
-                ComponentKind::Transformer(_)
-            ) {
+            if graph.components[edge.comp_idx].kind.is_transformer() {
                 if !plate_passives.contains(&idx) && !result.contains(&idx) {
                     result.push(idx);
                 }
@@ -1738,7 +1735,7 @@ fn find_input_transformer_gain_pp(
 
     for (_edge_idx, edge) in graph.edges.iter().enumerate() {
         let comp = &graph.components[edge.comp_idx];
-        if let ComponentKind::Transformer(cfg) = &comp.kind {
+        if let Some(cfg) = comp.kind.transformer_config() {
             if matches!(
                 cfg.primary_type,
                 WindingType::CenterTap | WindingType::PushPull

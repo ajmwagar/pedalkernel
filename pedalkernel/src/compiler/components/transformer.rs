@@ -108,4 +108,10 @@ impl Component for TransformerComp {
             _ => ("Transformer:Transformer_1P_1S", "T"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "transformer" }
+    fn layout_class(&self) -> &'static str { "transformer" }
+
+    fn is_transformer(&self) -> bool { true }
+    fn transformer_config(&self) -> Option<&crate::dsl::TransformerConfig> { Some(&self.config) }
 }

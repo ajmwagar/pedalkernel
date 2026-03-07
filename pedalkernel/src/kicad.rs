@@ -4,28 +4,103 @@
 //! the same `.pedal` file can drive both tone-prototyping via WDF and
 //! PCB layout via KiCad.
 
+use crate::compiler::component::Component;
+use crate::compiler::components::*;
 use crate::dsl::*;
 use std::fmt::Write;
 
-/// Map a DSL component kind to a KiCad symbol library reference.
-/// Delegates to the Component trait impl via the compiler module wrapper.
-fn footprint_ref(kind: &ComponentKind) -> (&'static str, &'static str) {
-    crate::compiler::footprint_ref(kind)
-}
-
 /// Human-readable value string for a component.
-fn value_str(kind: &ComponentKind) -> String {
-    match kind {
-        ComponentKind::Resistor(v) => format_eng(*v, "Ω"),
-        ComponentKind::Capacitor(cfg) => format_eng(cfg.value, "F"),
-        ComponentKind::Inductor(v) => format_eng(*v, "H"),
-        ComponentKind::DiodePair(dt) => format!("{dt:?}_pair"),
-        ComponentKind::Diode(dt) => format!("{dt:?}"),
-        ComponentKind::Zener(v) => format!("{v}V_Zener"),
-        ComponentKind::Potentiometer(v, _) => format_eng(*v, "Ω"),
-        ComponentKind::Npn(name) => name.clone(),
-        ComponentKind::Pnp(name) => name.clone(),
-        ComponentKind::OpAmp(ot) => match ot {
+fn value_str(kind: &dyn Component) -> String {
+    // Switched components (check before generic resistance/capacitance/inductance)
+    if let Some(rs) = kind.as_any().downcast_ref::<ResistorSwitched>() {
+        let values = &rs.values;
+        if values.is_empty() {
+            return "R_switched".into();
+        }
+        return format!(
+            "R_switched_{}-{}",
+            format_eng(
+                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                "\u{2126}"
+            ),
+            format_eng(
+                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                "\u{2126}"
+            )
+        );
+    }
+    if let Some(cs) = kind.as_any().downcast_ref::<CapSwitched>() {
+        let values = &cs.values;
+        if values.is_empty() {
+            return "C_switched".into();
+        }
+        return format!(
+            "C_switched_{}-{}",
+            format_eng(
+                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                "F"
+            ),
+            format_eng(
+                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                "F"
+            )
+        );
+    }
+    if let Some(ls) = kind.as_any().downcast_ref::<InductorSwitched>() {
+        let values = &ls.values;
+        if values.is_empty() {
+            return "L_switched".into();
+        }
+        return format!(
+            "L_switched_{}-{}",
+            format_eng(
+                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                "H"
+            ),
+            format_eng(
+                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                "H"
+            )
+        );
+    }
+
+    // Tempco (check before generic resistance)
+    if let Some(tc) = kind.as_any().downcast_ref::<Tempco>() {
+        return format!("{}_Tempco_{:.0}ppm", format_eng(tc.resistance, "\u{2126}"), tc.ppm);
+    }
+
+    // Diodes (check before generic diode_type to handle Zener and DiodePair)
+    if let Some(z) = kind.as_any().downcast_ref::<Zener>() {
+        return format!("{}V_Zener", z.breakdown_voltage);
+    }
+    if let Some(dt) = kind.diode_type() {
+        if kind.as_any().downcast_ref::<DiodePair>().is_some() {
+            return format!("{dt:?}_pair");
+        }
+        return format!("{dt:?}");
+    }
+
+    // Passive components with scalar values
+    if let Some(r) = kind.resistance() {
+        return format_eng(r, "\u{2126}");
+    }
+    if let Some(c) = kind.capacitance() {
+        return format_eng(c, "F");
+    }
+    if let Some(l) = kind.inductance() {
+        return format_eng(l, "H");
+    }
+
+    // BJTs
+    if kind.is_bjt() {
+        if let Some(name) = kind.model_name() {
+            return name.to_string();
+        }
+    }
+
+    // Op-amp
+    if let Some(ot) = kind.op_amp_type() {
+        return match ot {
             OpAmpType::Generic => "OpAmp".into(),
             OpAmpType::Tl072 => "TL072".into(),
             OpAmpType::Tl082 => "TL082".into(),
@@ -36,160 +111,156 @@ fn value_str(kind: &ComponentKind) -> String {
             OpAmpType::Ne5532 => "NE5532".into(),
             OpAmpType::Ca3080 => "CA3080".into(),
             OpAmpType::Op07 => "OP07".into(),
-        },
-        ComponentKind::NJfet(name) => format!("N-JFET_{name}"),
-        ComponentKind::PJfet(name) => format!("P-JFET_{name}"),
-        ComponentKind::Photocoupler(pt) => format!("Vactrol_{pt:?}"),
-        ComponentKind::Lfo(wf, timing_r, timing_c) => {
-            // Show waveform and timing components for BOM reference
-            format!(
-                "LFO_{wf:?}_R{}_C{}",
-                format_eng(*timing_r, ""),
-                format_eng(*timing_c, "")
-            )
-        }
-        ComponentKind::Triode(tt) => format!("Triode_{tt:?}"),
-        ComponentKind::VariMu(name) => format!("VariMu_{name}"),
-        ComponentKind::Pentode(pt) => format!("Pentode_{pt:?}"),
-        ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) => {
-            format!(
-                "ENV_atk{}/{}_rel{}/{}_sens{}",
-                format_eng(*attack_r, ""),
-                format_eng(*attack_c, ""),
-                format_eng(*release_r, ""),
-                format_eng(*release_c, ""),
-                format_eng(*sens_r, ""),
-            )
-        }
-        ComponentKind::Nmos(mt) => format!("N-MOS_{mt:?}"),
-        ComponentKind::Pmos(mt) => format!("P-MOS_{mt:?}"),
-        ComponentKind::Bbd(bt) => format!("BBD_{bt:?}"),
-        ComponentKind::DelayLine(min, max, interp, medium) => {
-            format!(
-                "DelayLine_{}-{}_{:?}_{:?}",
-                format_eng(*min, "s"),
-                format_eng(*max, "s"),
-                interp,
-                medium
-            )
-        }
-        ComponentKind::Tap(parent, ratio) => format!("Tap_{}_{:.1}x", parent, ratio),
-        ComponentKind::Neon(nt) => match nt {
+        };
+    }
+
+    // JFETs
+    if let Some(jfet) = kind.as_any().downcast_ref::<NJfet>() {
+        return format!("N-JFET_{}", jfet.model);
+    }
+    if let Some(jfet) = kind.as_any().downcast_ref::<PJfet>() {
+        return format!("P-JFET_{}", jfet.model);
+    }
+
+    // Photocoupler
+    if let Some(pc) = kind.as_any().downcast_ref::<PhotocouplerComp>() {
+        return format!("Vactrol_{:?}", pc.coupler_type);
+    }
+
+    // LFO
+    if let Some(lfo) = kind.as_any().downcast_ref::<Lfo>() {
+        return format!(
+            "LFO_{:?}_R{}_C{}",
+            lfo.waveform,
+            format_eng(lfo.timing_r, ""),
+            format_eng(lfo.timing_c, "")
+        );
+    }
+
+    // Tubes
+    if let Some(t) = kind.as_any().downcast_ref::<Triode>() {
+        return format!("Triode_{:?}", t.model);
+    }
+    if let Some(vm) = kind.as_any().downcast_ref::<VariMu>() {
+        return format!("VariMu_{}", vm.model);
+    }
+    if let Some(p) = kind.as_any().downcast_ref::<Pentode>() {
+        return format!("Pentode_{:?}", p.model);
+    }
+
+    // Envelope follower
+    if let Some(ef) = kind.as_any().downcast_ref::<EnvelopeFollower>() {
+        return format!(
+            "ENV_atk{}/{}_rel{}/{}_sens{}",
+            format_eng(ef.attack_r, ""),
+            format_eng(ef.attack_c, ""),
+            format_eng(ef.release_r, ""),
+            format_eng(ef.release_c, ""),
+            format_eng(ef.sensitivity_r, ""),
+        );
+    }
+
+    // MOSFETs
+    if let Some(m) = kind.as_any().downcast_ref::<Nmos>() {
+        return format!("N-MOS_{:?}", m.mosfet_type);
+    }
+    if let Some(m) = kind.as_any().downcast_ref::<Pmos>() {
+        return format!("P-MOS_{:?}", m.mosfet_type);
+    }
+
+    // BBD
+    if let Some(b) = kind.as_any().downcast_ref::<Bbd>() {
+        return format!("BBD_{:?}", b.bbd_type);
+    }
+
+    // Delay line
+    if let Some(dl) = kind.as_any().downcast_ref::<DelayLineComp>() {
+        return format!(
+            "DelayLine_{}-{}_{:?}_{:?}",
+            format_eng(dl.min_delay, "s"),
+            format_eng(dl.max_delay, "s"),
+            dl.interpolation,
+            dl.medium
+        );
+    }
+
+    // Tap
+    if let Some(tap) = kind.as_any().downcast_ref::<Tap>() {
+        return format!("Tap_{}_{:.1}x", tap.parent_id, tap.ratio);
+    }
+
+    // Neon
+    if let Some(n) = kind.as_any().downcast_ref::<Neon>() {
+        return match n.neon_type {
             NeonType::Ne2 => "NE-2".into(),
             NeonType::Ne51 => "NE-51".into(),
             NeonType::Ne83 => "NE-83".into(),
-        },
-        // ── Synth ICs ──────────────────────────────────────────────────
-        ComponentKind::Vco(vt, ..) => format!("VCO_{vt:?}"),
-        ComponentKind::Vcf(vt) => format!("VCF_{vt:?}"),
-        ComponentKind::Vca(vt) => format!("VCA_{vt:?}"),
-        ComponentKind::Comparator(ct) => format!("Comparator_{ct:?}"),
-        ComponentKind::AnalogSwitch(st) => format!("Switch_{st:?}"),
-        ComponentKind::MatchedNpn(mt) => format!("Matched_NPN_{mt:?}"),
-        ComponentKind::MatchedPnp(mt) => format!("Matched_PNP_{mt:?}"),
-        ComponentKind::Tempco(r, ppm) => {
-            format!("{}_Tempco_{:.0}ppm", format_eng(*r, "\u{2126}"), ppm)
-        }
-        // ── Studio Equipment Components ──────────────────────────────
-        ComponentKind::Transformer(cfg) => {
-            let pri = match cfg.primary_type {
-                crate::dsl::WindingType::Standard => "",
-                crate::dsl::WindingType::CenterTap => "CT",
-                crate::dsl::WindingType::PushPull => "PP",
-            };
-            let sec = match cfg.secondary_type {
-                crate::dsl::WindingType::Standard => "",
-                crate::dsl::WindingType::CenterTap => "CT",
-                crate::dsl::WindingType::PushPull => "PP",
-            };
-            format!(
-                "XFMR_{:.1}:1_{}{}_{}H",
-                cfg.turns_ratio,
-                pri,
-                sec,
-                format_eng(cfg.primary_inductance, "")
-            )
-        }
-        ComponentKind::CapSwitched(values) => {
-            // Show range for BOM reference
-            if values.is_empty() {
-                "C_switched".into()
-            } else {
-                format!(
-                    "C_switched_{}-{}",
-                    format_eng(
-                        *values
-                            .iter()
-                            .min_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap(),
-                        "F"
-                    ),
-                    format_eng(
-                        *values
-                            .iter()
-                            .max_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap(),
-                        "F"
-                    )
-                )
-            }
-        }
-        ComponentKind::InductorSwitched(values) => {
-            // Show range for BOM reference
-            if values.is_empty() {
-                "L_switched".into()
-            } else {
-                format!(
-                    "L_switched_{}-{}",
-                    format_eng(
-                        *values
-                            .iter()
-                            .min_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap(),
-                        "H"
-                    ),
-                    format_eng(
-                        *values
-                            .iter()
-                            .max_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap(),
-                        "H"
-                    )
-                )
-            }
-        }
-        ComponentKind::RotarySwitch(positions) => {
-            format!("Rotary_{}pos", positions.len())
-        }
-        ComponentKind::ResistorSwitched(values) => {
-            // Show range for BOM reference
-            if values.is_empty() {
-                "R_switched".into()
-            } else {
-                format!(
-                    "R_switched_{}-{}",
-                    format_eng(
-                        *values
-                            .iter()
-                            .min_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap(),
-                        "Ω"
-                    ),
-                    format_eng(
-                        *values
-                            .iter()
-                            .max_by(|a, b| a.partial_cmp(b).unwrap())
-                            .unwrap(),
-                        "Ω"
-                    )
-                )
-            }
-        }
-        ComponentKind::Switch(positions) => {
-            format!("Switch_{}pos", positions)
-        }
-        ComponentKind::TriggerInput => "TriggerInput".into(),
+        };
     }
+
+    // Synth ICs
+    if let Some(v) = kind.as_any().downcast_ref::<Vco>() {
+        return format!("VCO_{:?}", v.vco_type);
+    }
+    if let Some(v) = kind.as_any().downcast_ref::<Vcf>() {
+        return format!("VCF_{:?}", v.vcf_type);
+    }
+    if let Some(v) = kind.as_any().downcast_ref::<Vca>() {
+        return format!("VCA_{:?}", v.vca_type);
+    }
+    if let Some(c) = kind.as_any().downcast_ref::<Comparator>() {
+        return format!("Comparator_{:?}", c.comp_type);
+    }
+    if let Some(s) = kind.as_any().downcast_ref::<AnalogSwitch>() {
+        return format!("Switch_{:?}", s.switch_type);
+    }
+
+    // Matched transistors
+    if let Some(m) = kind.as_any().downcast_ref::<MatchedNpn>() {
+        return format!("Matched_NPN_{:?}", m.matched_type);
+    }
+    if let Some(m) = kind.as_any().downcast_ref::<MatchedPnp>() {
+        return format!("Matched_PNP_{:?}", m.matched_type);
+    }
+
+    // Transformer
+    if let Some(cfg) = kind.transformer_config() {
+        let pri = match cfg.primary_type {
+            crate::dsl::WindingType::Standard => "",
+            crate::dsl::WindingType::CenterTap => "CT",
+            crate::dsl::WindingType::PushPull => "PP",
+        };
+        let sec = match cfg.secondary_type {
+            crate::dsl::WindingType::Standard => "",
+            crate::dsl::WindingType::CenterTap => "CT",
+            crate::dsl::WindingType::PushPull => "PP",
+        };
+        return format!(
+            "XFMR_{:.1}:1_{}{}_{}H",
+            cfg.turns_ratio,
+            pri,
+            sec,
+            format_eng(cfg.primary_inductance, "")
+        );
+    }
+
+    // Rotary switch
+    if let Some(sw) = kind.as_any().downcast_ref::<RotarySwitch>() {
+        return format!("Rotary_{}pos", sw.linked_ids.len());
+    }
+
+    // Switch
+    if let Some(sw) = kind.as_any().downcast_ref::<Switch>() {
+        return format!("Switch_{}pos", sw.positions);
+    }
+
+    // Trigger input
+    if kind.as_any().downcast_ref::<TriggerInputComp>().is_some() {
+        return "TriggerInput".into();
+    }
+
+    // Fallback
+    kind.type_tag().to_string()
 }
 
 /// Format a value with engineering suffix for display.
@@ -296,79 +367,76 @@ pub fn export_kicad_netlist(pedal: &PedalDef) -> String {
     // Components section
     writeln!(out, "  (components").unwrap();
     for comp in &pedal.components {
-        match &comp.kind {
+        if let Some(lfo) = comp.kind.as_any().downcast_ref::<Lfo>() {
             // LFO components expand into timing R and C for the physical circuit
-            ComponentKind::Lfo(waveform, timing_r, timing_c) => {
-                // Timing resistor
-                writeln!(
-                    out,
-                    "    (comp (ref R_{id}) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"LFO {wf:?} timing\"))",
-                    id = comp.id, val = format_eng(*timing_r, "Ω"), wf = waveform
-                )
-                .unwrap();
-                // Timing capacitor
-                writeln!(
-                    out,
-                    "    (comp (ref C_{id}) (value \"{val}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"LFO {wf:?} timing\"))",
-                    id = comp.id, val = format_eng(*timing_c, "F"), wf = waveform
-                )
-                .unwrap();
-            }
+            let waveform = &lfo.waveform;
+            // Timing resistor
+            writeln!(
+                out,
+                "    (comp (ref R_{id}) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"LFO {wf:?} timing\"))",
+                id = comp.id, val = format_eng(lfo.timing_r, "\u{2126}"), wf = waveform
+            )
+            .unwrap();
+            // Timing capacitor
+            writeln!(
+                out,
+                "    (comp (ref C_{id}) (value \"{val}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"LFO {wf:?} timing\"))",
+                id = comp.id, val = format_eng(lfo.timing_c, "F"), wf = waveform
+            )
+            .unwrap();
+        } else if let Some(ef) = comp.kind.as_any().downcast_ref::<EnvelopeFollower>() {
             // Envelope follower expands into 5 physical components
-            ComponentKind::EnvelopeFollower(attack_r, attack_c, release_r, release_c, sens_r) => {
-                // Attack timing resistor
-                writeln!(
-                    out,
-                    "    (comp (ref R_{id}_ATK) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope attack timing\"))",
-                    id = comp.id, val = format_eng(*attack_r, "Ω")
-                )
-                .unwrap();
-                // Attack timing capacitor
-                writeln!(
-                    out,
-                    "    (comp (ref C_{id}_ATK) (value \"{val}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"Envelope attack timing\"))",
-                    id = comp.id, val = format_eng(*attack_c, "F")
-                )
-                .unwrap();
-                // Release timing resistor
-                writeln!(
-                    out,
-                    "    (comp (ref R_{id}_REL) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope release timing\"))",
-                    id = comp.id, val = format_eng(*release_r, "Ω")
-                )
-                .unwrap();
-                // Release timing capacitor
-                writeln!(
-                    out,
-                    "    (comp (ref C_{id}_REL) (value \"{val}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"Envelope release timing\"))",
-                    id = comp.id, val = format_eng(*release_c, "F")
-                )
-                .unwrap();
-                // Sensitivity resistor
-                writeln!(
-                    out,
-                    "    (comp (ref R_{id}_SENS) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope sensitivity\"))",
-                    id = comp.id, val = format_eng(*sens_r, "Ω")
-                )
-                .unwrap();
-                // Rectifier diode (part of the physical envelope detector)
-                writeln!(
-                    out,
-                    "    (comp (ref D_{id}) (value \"1N4148\") (libsource (lib \"Device:D\")) (field (name \"Note\") \"Envelope rectifier\"))",
-                    id = comp.id
-                )
-                .unwrap();
-            }
-            _ => {
-                let (lib_ref, _prefix) = footprint_ref(&comp.kind);
-                let val = value_str(&comp.kind);
-                writeln!(
-                    out,
-                    "    (comp (ref {id}) (value \"{val}\") (libsource (lib \"{lib_ref}\")))",
-                    id = comp.id
-                )
-                .unwrap();
-            }
+            // Attack timing resistor
+            writeln!(
+                out,
+                "    (comp (ref R_{id}_ATK) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope attack timing\"))",
+                id = comp.id, val = format_eng(ef.attack_r, "\u{2126}")
+            )
+            .unwrap();
+            // Attack timing capacitor
+            writeln!(
+                out,
+                "    (comp (ref C_{id}_ATK) (value \"{val}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"Envelope attack timing\"))",
+                id = comp.id, val = format_eng(ef.attack_c, "F")
+            )
+            .unwrap();
+            // Release timing resistor
+            writeln!(
+                out,
+                "    (comp (ref R_{id}_REL) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope release timing\"))",
+                id = comp.id, val = format_eng(ef.release_r, "\u{2126}")
+            )
+            .unwrap();
+            // Release timing capacitor
+            writeln!(
+                out,
+                "    (comp (ref C_{id}_REL) (value \"{val}\") (libsource (lib \"Device:C\")) (field (name \"Note\") \"Envelope release timing\"))",
+                id = comp.id, val = format_eng(ef.release_c, "F")
+            )
+            .unwrap();
+            // Sensitivity resistor
+            writeln!(
+                out,
+                "    (comp (ref R_{id}_SENS) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope sensitivity\"))",
+                id = comp.id, val = format_eng(ef.sensitivity_r, "\u{2126}")
+            )
+            .unwrap();
+            // Rectifier diode (part of the physical envelope detector)
+            writeln!(
+                out,
+                "    (comp (ref D_{id}) (value \"1N4148\") (libsource (lib \"Device:D\")) (field (name \"Note\") \"Envelope rectifier\"))",
+                id = comp.id
+            )
+            .unwrap();
+        } else {
+            let (lib_ref, _prefix) = comp.kind.footprint_ref();
+            let val = value_str(&*comp.kind);
+            writeln!(
+                out,
+                "    (comp (ref {id}) (value \"{val}\") (libsource (lib \"{lib_ref}\")))",
+                id = comp.id
+            )
+            .unwrap();
         }
     }
     writeln!(out, "  )").unwrap();
@@ -413,15 +481,15 @@ mod tests {
             components: vec![
                 ComponentDef {
                     id: "R1".into(),
-                    kind: ComponentKind::Resistor(4700.0),
+                    kind: Box::new(Resistor { value: 4700.0 }),
                 },
                 ComponentDef {
                     id: "C1".into(),
-                    kind: ComponentKind::Capacitor(CapConfig::new(220e-9)),
+                    kind: Box::new(Capacitor { config: CapConfig::new(220e-9) }),
                 },
                 ComponentDef {
                     id: "D1".into(),
-                    kind: ComponentKind::DiodePair(DiodeType::Silicon),
+                    kind: Box::new(DiodePair { diode_type: DiodeType::Silicon }),
                 },
             ],
             nets: vec![

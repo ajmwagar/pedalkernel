@@ -135,6 +135,11 @@ impl Component for OpAmp {
         };
         (lib, "U")
     }
+
+    fn symbol_name(&self) -> &'static str { "opamp" }
+    fn layout_class(&self) -> &'static str { "opamp" }
+
+    fn op_amp_type(&self) -> Option<OpAmpType> { Some(self.op_type) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -186,6 +191,9 @@ impl Component for Vco {
             VcoType::V3340 => ("Oscillator:V3340", "U"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "ic_chip" }
+    fn layout_class(&self) -> &'static str { "vco" }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -232,6 +240,9 @@ impl Component for Vcf {
             VcfType::As3320 => ("Analog:AS3320", "U"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "ic_chip" }
+    fn layout_class(&self) -> &'static str { "vcf" }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -282,6 +293,9 @@ impl Component for Vca {
             VcaType::V2164 => ("Analog:V2164", "U"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "ic_chip" }
+    fn layout_class(&self) -> &'static str { "vca" }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -328,6 +342,9 @@ impl Component for Comparator {
             ComparatorType::Lm393 => ("Comparator:LM393", "U"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "ic_chip" }
+    fn layout_class(&self) -> &'static str { "comparator" }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -377,6 +394,9 @@ impl Component for AnalogSwitch {
             AnalogSwitchType::Dg411 => ("Analog_Switch:DG411", "U"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "ic_chip" }
+    fn layout_class(&self) -> &'static str { "analog_switch" }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -429,6 +449,9 @@ impl Component for MatchedNpn {
             MatchedTransistorType::That340 => ("Transistor_BJT:THAT340", "Q"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "npn_bjt" }
+    fn layout_class(&self) -> &'static str { "matched_npn" }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -481,4 +504,7 @@ impl Component for MatchedPnp {
             MatchedTransistorType::That340 => ("Transistor_BJT:THAT340", "Q"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "pnp_bjt" }
+    fn layout_class(&self) -> &'static str { "matched_pnp" }
 }

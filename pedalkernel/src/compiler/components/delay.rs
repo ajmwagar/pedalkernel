@@ -79,6 +79,11 @@ impl Component for Bbd {
             BbdType::Mn3005 => ("Analog_Delay:MN3005", "IC"),
         }
     }
+
+    fn symbol_name(&self) -> &'static str { "ic_chip" }
+    fn layout_class(&self) -> &'static str { "bbd" }
+
+    fn is_delay(&self) -> bool { true }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -155,6 +160,11 @@ impl Component for DelayLineComp {
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("", "DL") }
+
+    fn symbol_name(&self) -> &'static str { "delay" }
+    fn layout_class(&self) -> &'static str { "delay" }
+
+    fn is_delay(&self) -> bool { true }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -197,4 +207,9 @@ impl Component for Tap {
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("", "TAP") }
+
+    fn symbol_name(&self) -> &'static str { "tap" }
+    fn layout_class(&self) -> &'static str { "tap" }
+
+    fn is_delay(&self) -> bool { true }
 }

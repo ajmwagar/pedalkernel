@@ -237,9 +237,9 @@ pub(super) fn build_standalone_opamp_stages(
 ) -> Vec<super::compiled::OpAmpStage> {
     let mut opamp_stages = Vec::new();
     for comp in &pedal.components {
-        if let ComponentKind::OpAmp(ot) = &comp.kind {
+        if let Some(ot) = comp.kind.op_amp_type() {
             if !ot.is_ota() && !feedback_opamp_ids.contains(&comp.id) {
-                let model = OpAmpModel::from_opamp_type(ot);
+                let model = OpAmpModel::from_opamp_type(&ot);
                 let mut opamp = OpAmpRoot::new(model);
                 opamp.set_sample_rate(sample_rate);
                 opamp_stages.push(super::compiled::OpAmpStage {

@@ -98,6 +98,12 @@ impl Component for Triode {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Valve:Triode", "V")
     }
+
+    fn symbol_name(&self) -> &'static str { "triode" }
+    fn layout_class(&self) -> &'static str { "triode" }
+
+    fn is_tube(&self) -> bool { true }
+    fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -178,6 +184,12 @@ impl Component for Pentode {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Valve:Triode", "V")
     }
+
+    fn symbol_name(&self) -> &'static str { "pentode" }
+    fn layout_class(&self) -> &'static str { "pentode" }
+
+    fn is_tube(&self) -> bool { true }
+    fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -266,4 +278,10 @@ impl Component for VariMu {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Valve:Triode", "V")
     }
+
+    fn symbol_name(&self) -> &'static str { "triode" }
+    fn layout_class(&self) -> &'static str { "vari_mu" }
+
+    fn is_tube(&self) -> bool { true }
+    fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }

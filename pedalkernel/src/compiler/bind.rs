@@ -380,7 +380,7 @@ fn is_output_volume_pot(pot_id: &str, pedal: &PedalDef) -> bool {
             let is_resistor = pedal
                 .components
                 .iter()
-                .any(|c| c.id == *neighbor_comp && matches!(c.kind, ComponentKind::Resistor(_)));
+                .any(|c| c.id == *neighbor_comp && c.kind.type_tag() == "resistor");
             if !is_resistor {
                 continue;
             }
@@ -487,8 +487,8 @@ pub(super) fn build_lfo_bindings(
     let mut lfos = Vec::new();
 
     for comp in &pedal.components {
-        if let ComponentKind::Lfo(waveform_dsl, timing_r, timing_c) = &comp.kind {
-            let waveform = match waveform_dsl {
+        if let Some(lfo) = comp.kind.as_any().downcast_ref::<crate::compiler::components::Lfo>() {
+            let waveform = match lfo.waveform {
                 LfoWaveformDsl::Sine => crate::elements::LfoWaveform::Sine,
                 LfoWaveformDsl::Triangle => crate::elements::LfoWaveform::Triangle,
                 LfoWaveformDsl::Square => crate::elements::LfoWaveform::Square,
@@ -497,7 +497,7 @@ pub(super) fn build_lfo_bindings(
                 LfoWaveformDsl::SampleAndHold => crate::elements::LfoWaveform::SampleAndHold,
             };
 
-            let base_freq = 1.0 / (2.0 * std::f64::consts::PI * timing_r * timing_c);
+            let base_freq = 1.0 / (2.0 * std::f64::consts::PI * lfo.timing_r * lfo.timing_c);
             let mut lfo = crate::elements::Lfo::new(waveform, sample_rate);
             lfo.set_rate(base_freq);
 
@@ -578,20 +578,13 @@ pub(super) fn build_envelope_bindings(
     let mut envelopes = Vec::new();
 
     for comp in &pedal.components {
-        if let ComponentKind::EnvelopeFollower(
-            attack_r,
-            attack_c,
-            release_r,
-            release_c,
-            sensitivity_r,
-        ) = &comp.kind
-        {
+        if let Some(ef) = comp.kind.as_any().downcast_ref::<crate::compiler::components::EnvelopeFollower>() {
             let envelope = crate::elements::EnvelopeFollower::from_rc(
-                *attack_r,
-                *attack_c,
-                *release_r,
-                *release_c,
-                *sensitivity_r,
+                ef.attack_r,
+                ef.attack_c,
+                ef.release_r,
+                ef.release_c,
+                ef.sensitivity_r,
                 sample_rate,
             );
 
@@ -892,18 +885,20 @@ fn trace_through_resistive_path(
     }
 
     // Only trace through resistive elements (pots, resistors).
-    let other_pins: Vec<&str> = match &comp.kind {
-        ComponentKind::Potentiometer(_, _) => match start_pin {
+    let other_pins: Vec<&str> = if comp.kind.is_pot() {
+        match start_pin {
             "a" => vec!["b", "wiper"],
             "b" | "wiper" => vec!["a"],
             _ => return None,
-        },
-        ComponentKind::Resistor(_) => match start_pin {
+        }
+    } else if comp.kind.type_tag() == "resistor" {
+        match start_pin {
             "a" => vec!["b"],
             "b" => vec!["a"],
             _ => return None,
-        },
-        _ => return None,
+        }
+    } else {
+        return None;
     };
 
     for other_pin in other_pins {
@@ -1128,8 +1123,8 @@ fn pot_reaches_bbd_output(
 
         // Only trace through resistors and capacitors.
         let comp = pedal.components.iter().find(|c| c.id == comp_id);
-        let other_pin = match comp.map(|c| &c.kind) {
-            Some(ComponentKind::Resistor(_)) | Some(ComponentKind::Capacitor(_)) => {
+        let other_pin = match comp {
+            Some(c) if c.kind.type_tag() == "resistor" || c.kind.type_tag() == "capacitor" => {
                 match pin.as_str() {
                     "a" => "b",
                     "b" => "a",

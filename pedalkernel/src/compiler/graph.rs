@@ -3,6 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
+use super::component::{GraphRole, ResolveContext};
+use super::components::*;
 use super::dyn_node::DynNode;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -169,7 +171,7 @@ fn expand_forks(
                         // Use a small resistance for active path, large for inactive
                         let comp = ComponentDef {
                             id: comp_id.clone(),
-                            kind: ComponentKind::Resistor(1.0), // Placeholder - actual value set by SwitchedResistor
+                            kind: Box::new(Resistor { value: 1.0 }), // Placeholder - actual value set by SwitchedResistor
                         };
 
                         let info = ForkPathInfo {
@@ -319,7 +321,7 @@ impl CircuitGraph {
             });
             if !in_has_nets {
                 for comp in &all_components {
-                    if matches!(comp.kind, ComponentKind::TriggerInput) {
+                    if comp.kind.is_trigger() {
                         // Check if this trigger's .out pin appears in any net.
                         let trigger_has_nets = expanded_nets.iter().any(|net| {
                             let check = |p: &Pin| {
@@ -347,7 +349,6 @@ impl CircuitGraph {
         let mut transformer_info: HashMap<NodeId, TransformerNodeInfo> = HashMap::new();
 
         for (idx, comp) in all_components.iter().enumerate() {
-            use super::component::{Component, GraphRole};
             match comp.kind.graph_role() {
                 GraphRole::Edge { pin_a, pin_b } => {
                     let key_a = format!("{}.{}", comp.id, pin_a);
@@ -438,10 +439,8 @@ impl CircuitGraph {
                 }
                 GraphRole::Transformer => {
                     // Complex multi-winding handling: aliases, coupling, center taps.
-                    let cfg = match &comp.kind {
-                        ComponentKind::Transformer(cfg) => cfg,
-                        _ => unreachable!(),
-                    };
+                    let cfg = comp.kind.transformer_config()
+                        .expect("Transformer GraphRole requires transformer_config()");
 
                     // Winding pin aliases: union shorthand (.a/.b) with explicit
                     // (.primary.a/.primary.b) and abbreviated (.pri.a/.pri.b).
@@ -562,23 +561,23 @@ impl CircuitGraph {
         //   {id}__wb: wiper → b (R = (1 - position) * max_R)
         let mut extra_components: Vec<ComponentDef> = Vec::new();
         for (_original_idx, pot_id) in &deferred_3term {
-            let (max_r, taper) = match &pedal.components[*_original_idx].kind {
-                ComponentKind::Potentiometer(r, t) => (*r, *t),
-                _ => unreachable!(),
-            };
+            let pot_comp = pedal.components[*_original_idx].kind.as_any()
+                .downcast_ref::<Potentiometer>()
+                .expect("deferred 3-term component must be a Potentiometer");
+            let (max_r, taper) = (pot_comp.max_r, pot_comp.taper);
 
             // Synthetic upper-half: a → wiper
             let aw_idx = pedal.components.len() + extra_components.len();
             extra_components.push(ComponentDef {
                 id: format!("{pot_id}__aw"),
-                kind: ComponentKind::Potentiometer(max_r, taper),
+                kind: Box::new(Potentiometer { max_r, taper }),
             });
 
             // Synthetic lower-half: wiper → b
             let wb_idx = pedal.components.len() + extra_components.len();
             extra_components.push(ComponentDef {
                 id: format!("{pot_id}__wb"),
-                kind: ComponentKind::Potentiometer(max_r, taper),
+                kind: Box::new(Potentiometer { max_r, taper }),
             });
 
             let key_a = format!("{pot_id}.a");
@@ -612,7 +611,6 @@ impl CircuitGraph {
         // Union pin aliases (e.g. .in↔.input, .out↔.output) so pedal
         // authors can use either spelling interchangeably.
         {
-            use super::component::Component;
             for comp in &pedal.components {
                 for &(short, long) in comp.kind.pin_config().aliases {
                     let id_short = get_id(&format!("{}.{}", comp.id, short), &mut uf);
@@ -627,17 +625,17 @@ impl CircuitGraph {
         // and voltage source injection picks a proper connected node.
         let mut active_edge_indices = Vec::new();
         for comp in &pedal.components {
-            let pin_order: &[&str] = match &comp.kind {
-                ComponentKind::OpAmp(_) => {
-                    // OpAmps use either 3-pin (pos/neg/out) or 2-pin (in/out) form.
-                    if pin_ids.contains_key(&format!("{}.pos", comp.id)) {
-                        &["pos", "neg", "out"]
-                    } else {
-                        &["in", "out"]
-                    }
+            let pin_order: &[&str] = if comp.kind.op_amp_type().is_some() {
+                // OpAmps use either 3-pin (pos/neg/out) or 2-pin (in/out) form.
+                if pin_ids.contains_key(&format!("{}.pos", comp.id)) {
+                    &["pos", "neg", "out"]
+                } else {
+                    &["in", "out"]
                 }
-                ComponentKind::Npn(_) | ComponentKind::Pnp(_) => &["base", "collector", "emitter"],
-                _ => continue,
+            } else if comp.kind.is_bjt() {
+                &["base", "collector", "emitter"]
+            } else {
+                continue;
             };
 
             // Collect resolved node IDs for each pin that exists in the netlist.
@@ -725,7 +723,7 @@ impl CircuitGraph {
         // These triggers have explicit net connections and need per-voice stages.
         let trigger_nodes: Vec<(String, NodeId)> = components
             .iter()
-            .filter(|c| matches!(c.kind, ComponentKind::TriggerInput))
+            .filter(|c| c.kind.is_trigger())
             .filter_map(|c| {
                 let trigger_out = format!("{}.out", c.id);
                 if let Some(&raw_id) = pin_ids.get(&trigger_out) {
@@ -766,7 +764,6 @@ impl CircuitGraph {
     /// Returns the resolved kind if the edge was resolved during wiring resolution,
     /// otherwise falls back to the component's default edges().
     pub(super) fn effective_edge_kind(&self, edge_idx: usize) -> super::component::EdgeKind {
-        use super::component::Component;
         if let Some(&kind) = self.resolved_edge_kinds.get(&edge_idx) {
             return kind;
         }
@@ -1065,14 +1062,10 @@ impl CircuitGraph {
         let mut raw_triodes: Vec<(usize, String, NodeId, NodeId, bool)> = Vec::new();
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
-            match &comp.kind {
-                ComponentKind::Triode(name) => {
-                    raw_triodes.push((edge_idx, name.clone(), e.node_a, e.node_b, false));
-                }
-                ComponentKind::VariMu(name) => {
-                    raw_triodes.push((edge_idx, name.clone(), e.node_a, e.node_b, true));
-                }
-                _ => {}
+            if let Some(triode) = comp.kind.as_any().downcast_ref::<Triode>() {
+                raw_triodes.push((edge_idx, triode.model.clone(), e.node_a, e.node_b, false));
+            } else if let Some(varimu) = comp.kind.as_any().downcast_ref::<VariMu>() {
+                raw_triodes.push((edge_idx, varimu.model.clone(), e.node_a, e.node_b, true));
             }
         }
 
@@ -1135,7 +1128,7 @@ impl CircuitGraph {
         let mut ct_transformers: Vec<(usize, &TransformerConfig)> = Vec::new();
         for (edge_idx, e) in self.edges.iter().enumerate() {
             let comp = &self.components[e.comp_idx];
-            if let ComponentKind::Transformer(cfg) = &comp.kind {
+            if let Some(cfg) = comp.kind.transformer_config() {
                 if matches!(
                     cfg.primary_type,
                     WindingType::CenterTap | WindingType::PushPull
@@ -1229,11 +1222,8 @@ impl CircuitGraph {
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                if let ComponentKind::Transformer(cfg) = &self.components[e.comp_idx].kind {
-                    matches!(cfg.primary_type, WindingType::Standard)
-                } else {
-                    false
-                }
+                self.components[e.comp_idx].kind.transformer_config()
+                    .map_or(false, |cfg| matches!(cfg.primary_type, WindingType::Standard))
             })
             .map(|(idx, _)| idx)
             .collect();
@@ -1344,10 +1334,7 @@ impl CircuitGraph {
                 let Some(n) = neighbor else { continue };
                 // Skip push-pull transformer edges (magnetic isolation boundary).
                 // Non-PP transformers are kept so they can be built into WDF subtrees.
-                if matches!(
-                    self.components[e.comp_idx].kind,
-                    ComponentKind::Transformer(_)
-                ) {
+                if self.components[e.comp_idx].kind.is_transformer() {
                     if pp_transformer_edges.contains(&idx) {
                         continue;
                     }
@@ -1446,13 +1433,13 @@ impl CircuitGraph {
         }
         let mut resistor_nodes: Vec<ResistorInfo> = Vec::new();
         for comp in &pedal.components {
-            let (resistance, is_pot, max_r) = match &comp.kind {
-                ComponentKind::Resistor(r) => (Some(*r), false, *r),
-                ComponentKind::Potentiometer(max_r, _) => {
-                    // Use default position (0.5) for initial gain calculation
-                    (Some(*max_r * 0.5), true, *max_r)
-                }
-                _ => (None, false, 0.0),
+            let (resistance, is_pot, max_r) = if let Some(pot) = comp.kind.as_any().downcast_ref::<Potentiometer>() {
+                // Use default position (0.5) for initial gain calculation
+                (Some(pot.max_r * 0.5), true, pot.max_r)
+            } else if let Some(r) = comp.kind.as_any().downcast_ref::<Resistor>() {
+                (Some(r.value), false, r.value)
+            } else {
+                (None, false, 0.0)
             };
 
             if let Some(r) = resistance {
@@ -1669,9 +1656,9 @@ impl CircuitGraph {
         // Use the SAME UnionFind and pin_ids we just built to compute node IDs.
         let mut feedback_diodes: HashMap<(usize, usize), DiodeType> = HashMap::new();
         for comp in &pedal.components {
-            let diode_type = match &comp.kind {
-                ComponentKind::Diode(dt) | ComponentKind::DiodePair(dt) => *dt,
-                _ => continue,
+            let diode_type = match comp.kind.diode_type() {
+                Some(dt) => dt,
+                None => continue,
             };
 
             let key_a = format!("{}.a", comp.id);
@@ -1716,8 +1703,8 @@ impl CircuitGraph {
         let mut results: Vec<OpAmpFeedbackInfo> = Vec::new();
 
         for comp in &pedal.components {
-            let opamp_type = match &comp.kind {
-                ComponentKind::OpAmp(ot) if !ot.is_ota() => *ot,
+            let opamp_type = match comp.kind.op_amp_type() {
+                Some(ot) if !ot.is_ota() => ot,
                 _ => continue,
             };
 
@@ -1793,7 +1780,7 @@ impl CircuitGraph {
                     // Check for AllpassJfet: JFET drain at neg with R||C feedback (Phase 90).
                     let mut cf_val = None;
                     for c in &pedal.components {
-                        if let ComponentKind::Capacitor(cfg) = &c.kind {
+                        if let Some(cap) = c.kind.as_any().downcast_ref::<Capacitor>() {
                             let pa = format!("{}.a", c.id);
                             let pb = format!("{}.b", c.id);
                             if let (Some(&a), Some(&b)) =
@@ -1804,7 +1791,7 @@ impl CircuitGraph {
                                 if (an == neg_node && bn == out_node)
                                     || (an == out_node && bn == neg_node)
                                 {
-                                    cf_val = Some(cfg.value);
+                                    cf_val = Some(cap.config.value);
                                     break;
                                 }
                             }
@@ -1812,7 +1799,7 @@ impl CircuitGraph {
                     }
                     let mut jfet_comp_id = None;
                     for c in &pedal.components {
-                        if matches!(&c.kind, ComponentKind::NJfet(_) | ComponentKind::PJfet(_)) {
+                        if c.kind.is_jfet() {
                             let dk = format!("{}.drain", c.id);
                             if let Some(&did) = pin_ids.get(&dk) {
                                 if uf.find(did) == neg_node {
@@ -2131,8 +2118,6 @@ pub(super) fn make_leaf(
     fork_info: Option<&ForkPathInfo>,
     sample_rate: f64,
 ) -> DynNode {
-    use super::component::Component;
-
     // Check if this is a fork path component
     if let Some(info) = fork_info {
         // Fork path: create a SwitchedResistor
@@ -2172,18 +2157,11 @@ pub(super) fn make_leaf(
 /// This generalizes `detect_lfo_controlled_jfets()` and
 /// `detect_envelope_controlled_otas()` in compile.rs.
 pub(super) fn resolve_components(graph: &mut CircuitGraph, pedal: &PedalDef) {
-    use super::component::{Component, ResolveContext};
-
     // Collect modulator component IDs (LFO, EnvelopeFollower).
     let modulator_ids: HashSet<&str> = pedal
         .components
         .iter()
-        .filter(|c| {
-            matches!(
-                &c.kind,
-                ComponentKind::Lfo(..) | ComponentKind::EnvelopeFollower(..)
-            )
-        })
+        .filter(|c| c.kind.is_modulation_source())
         .map(|c| c.id.as_str())
         .collect();
 

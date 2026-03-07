@@ -84,6 +84,11 @@ impl Component for Lfo {
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("", "LFO") }
+
+    fn symbol_name(&self) -> &'static str { "lfo" }
+    fn layout_class(&self) -> &'static str { "lfo" }
+
+    fn is_modulation_source(&self) -> bool { true }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -148,6 +153,11 @@ impl Component for EnvelopeFollower {
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("", "ENV") }
+
+    fn symbol_name(&self) -> &'static str { "envelope" }
+    fn layout_class(&self) -> &'static str { "envelope" }
+
+    fn is_modulation_source(&self) -> bool { true }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -222,4 +232,7 @@ impl Component for PhotocouplerComp {
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Isolator:PC817", "OC") }
+
+    fn symbol_name(&self) -> &'static str { "photocoupler" }
+    fn layout_class(&self) -> &'static str { "photocoupler" }
 }

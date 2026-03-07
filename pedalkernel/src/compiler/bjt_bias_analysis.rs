@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
 
+use super::components::Potentiometer;
 use super::graph::{CircuitGraph, NodeId};
 
 /// Result of BJT bias pot analysis.
@@ -68,9 +69,9 @@ pub(super) fn detect_bias_pots(
             let comp = &graph.components[edge.comp_idx];
 
             // Only consider pots.
-            let (max_r, taper) = match &comp.kind {
-                ComponentKind::Potentiometer(r, t) => (*r, *t),
-                _ => continue,
+            let (max_r, taper) = match comp.kind.as_any().downcast_ref::<Potentiometer>() {
+                Some(pot) => (pot.max_r, pot.taper),
+                None => continue,
             };
 
             // Check if both endpoints are emitter nodes of different BJTs in this cluster.
