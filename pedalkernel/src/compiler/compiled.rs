@@ -1179,6 +1179,7 @@ impl CompiledPedal {
                                 stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - value);
                             }
                             stage.tree.recompute();
+                            stage.flush_passive_rtype_recompute();
                         }
                         // Also update the same pot in other WDF stages where it
                         // may appear (e.g., opamp feedback pot also in diode stage).
@@ -1190,8 +1191,15 @@ impl CompiledPedal {
                             changed |= stage.tree.set_pot(&comp_id, value);
                             changed |= stage.tree.set_pot(&comp_id_aw, value);
                             changed |= stage.tree.set_pot(&comp_id_wb, 1.0 - value);
+                            if !changed {
+                                // Try PassiveRType children in this stage too.
+                                changed |= stage.set_passive_rtype_pot(&comp_id, value);
+                                changed |= stage.set_passive_rtype_pot(&comp_id_aw, value);
+                                changed |= stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - value);
+                            }
                             if changed {
                                 stage.tree.recompute();
+                                stage.flush_passive_rtype_recompute();
                             }
                         }
                         // Component-driven updates: OpAmpRoot gain, BBD mix
