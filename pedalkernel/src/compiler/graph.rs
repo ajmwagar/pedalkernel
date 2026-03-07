@@ -1421,6 +1421,43 @@ impl CircuitGraph {
         let _in_node_resolved = uf.find(*pin_ids.get("in").unwrap_or(&0));
         let gnd_node_resolved = uf.find(*pin_ids.get("gnd").unwrap_or(&0));
 
+        // Build set of AC-ground-equivalent nodes:
+        // 1. Named supply nodes (V-, B+, etc.)
+        // 2. Nodes bypassed to ground through a large capacitor (virtual ground bias points)
+        let mut ac_ground_nodes: HashSet<usize> = HashSet::new();
+
+        for supply in &pedal.supplies {
+            if let Some(&raw_id) = pin_ids.get(&supply.name) {
+                let resolved = uf.find(raw_id);
+                if resolved != gnd_node_resolved {
+                    ac_ground_nodes.insert(resolved);
+                }
+            }
+        }
+
+        for comp in &pedal.components {
+            if let Some(cap) = comp.kind.as_any().downcast_ref::<Capacitor>() {
+                if cap.config.value < 10e-6 {
+                    continue; // Skip caps < 10µF — only large bypass caps indicate virtual ground
+                }
+                let pa = format!("{}.a", comp.id);
+                let pb = format!("{}.b", comp.id);
+                if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
+                    let a_node = uf.find(a_id);
+                    let b_node = uf.find(b_id);
+                    if a_node == gnd_node_resolved {
+                        ac_ground_nodes.insert(b_node);
+                    } else if b_node == gnd_node_resolved {
+                        ac_ground_nodes.insert(a_node);
+                    }
+                }
+            }
+        }
+
+        let is_ac_ground = |node: usize| -> bool {
+            node == gnd_node_resolved || ac_ground_nodes.contains(&node)
+        };
+
         // Build a map of component → (pin_a_node, pin_b_node, resistance, is_pot, max_r)
         // for resistors and pots. Pots use default position (0.5) for initial gain calc.
         struct ResistorInfo {
@@ -1708,6 +1745,135 @@ impl CircuitGraph {
             feedback_diodes.get(&(node_a, node_b)).copied()
         };
 
+        // Passive adjacency map: node → [(neighbor, comp_id)]
+        // Includes resistors, capacitors, inductors, and pots (all 2-terminal passive edges).
+        // Used by BFS to collect ALL passive components in an op-amp feedback network.
+        let mut passive_adj: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
+        for comp in &pedal.components {
+            let is_passive = comp.kind.as_any().downcast_ref::<Resistor>().is_some()
+                || comp.kind.as_any().downcast_ref::<Capacitor>().is_some()
+                || comp.kind.as_any().downcast_ref::<Inductor>().is_some();
+            if is_passive {
+                let pa = format!("{}.a", comp.id);
+                let pb = format!("{}.b", comp.id);
+                if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
+                    let a_node = uf.find(a_id);
+                    let b_node = uf.find(b_id);
+                    passive_adj.entry(a_node).or_default().push((b_node, comp.id.clone()));
+                    passive_adj.entry(b_node).or_default().push((a_node, comp.id.clone()));
+                }
+            }
+            if let Some(_pot) = comp.kind.as_any().downcast_ref::<Potentiometer>() {
+                // 3-terminal pot: edges a-w and w-b
+                let pa = format!("{}.a", comp.id);
+                let pb = format!("{}.b", comp.id);
+                let pw = format!("{}.w", comp.id);
+                let pw_long = format!("{}.wiper", comp.id);
+                let wiper_id = pin_ids.get(&pw).or_else(|| pin_ids.get(&pw_long));
+                if let Some(&w_id) = wiper_id {
+                    if let Some(&a_id) = pin_ids.get(&pa) {
+                        let a_node = uf.find(a_id);
+                        let w_node = uf.find(w_id);
+                        let aw_id = format!("{}__aw", comp.id);
+                        passive_adj.entry(a_node).or_default().push((w_node, aw_id.clone()));
+                        passive_adj.entry(w_node).or_default().push((a_node, aw_id));
+                    }
+                    if let Some(&b_id) = pin_ids.get(&pb) {
+                        let b_node = uf.find(b_id);
+                        let w_node = uf.find(w_id);
+                        let wb_id = format!("{}__wb", comp.id);
+                        passive_adj.entry(b_node).or_default().push((w_node, wb_id.clone()));
+                        passive_adj.entry(w_node).or_default().push((b_node, wb_id));
+                    }
+                } else {
+                    // 2-terminal pot (no wiper)
+                    if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
+                        let a_node = uf.find(a_id);
+                        let b_node = uf.find(b_id);
+                        passive_adj.entry(a_node).or_default().push((b_node, comp.id.clone()));
+                        passive_adj.entry(b_node).or_default().push((a_node, comp.id.clone()));
+                    }
+                }
+            }
+        }
+
+        // Collect all op-amp pin nodes as BFS barriers (prevents crossing stage boundaries).
+        let mut opamp_pin_nodes: HashSet<usize> = HashSet::new();
+        for c in &pedal.components {
+            if c.kind.op_amp_type().is_some() {
+                for suffix in &["neg", "out", "pos"] {
+                    let key = format!("{}.{}", c.id, suffix);
+                    if let Some(&id) = pin_ids.get(&key) {
+                        opamp_pin_nodes.insert(uf.find(id));
+                    }
+                }
+            }
+        }
+
+        // BFS from `start` through passive edges; collect IDs of all components on
+        // paths that reach `end`. Barriers prevent the BFS from escaping the local
+        // feedback network into the signal path or power supply.
+        let collect_feedback_comps = |start: usize, end: usize, extra_barriers: &HashSet<usize>| -> Vec<String> {
+            use std::collections::VecDeque;
+            // Barrier nodes: ground, AC ground, op-amp pins (except start/end),
+            // global in/out nodes.
+            let mut barriers: HashSet<usize> = HashSet::new();
+            barriers.insert(gnd_node_resolved);
+            for &ag in &ac_ground_nodes {
+                barriers.insert(ag);
+            }
+            for &op in &opamp_pin_nodes {
+                barriers.insert(op);
+            }
+            for &eb in extra_barriers {
+                barriers.insert(eb);
+            }
+            // Start and end are NOT barriers (we must traverse through them).
+            barriers.remove(&start);
+            barriers.remove(&end);
+
+            // BFS forward from start, stopping at barriers and not expanding past end.
+            let mut visited: HashSet<usize> = HashSet::new();
+            let mut parent_edges: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
+            let mut queue = VecDeque::new();
+            visited.insert(start);
+            queue.push_back(start);
+            while let Some(node) = queue.pop_front() {
+                if let Some(neighbors) = passive_adj.get(&node) {
+                    for (next, comp_id) in neighbors {
+                        parent_edges.entry(*next).or_default().push((node, comp_id.clone()));
+                        if visited.insert(*next) {
+                            // Don't expand past end node or through barrier nodes,
+                            // but DO record the edge to collect the component.
+                            if *next != end && !barriers.contains(next) {
+                                queue.push_back(*next);
+                            }
+                        }
+                    }
+                }
+            }
+            if !visited.contains(&end) {
+                return Vec::new();
+            }
+            // BFS backward from end to collect all components on paths from start
+            let mut result_comps: HashSet<String> = HashSet::new();
+            let mut back_visited: HashSet<usize> = HashSet::new();
+            let mut back_queue = VecDeque::new();
+            back_visited.insert(end);
+            back_queue.push_back(end);
+            while let Some(node) = back_queue.pop_front() {
+                if let Some(parents) = parent_edges.get(&node) {
+                    for (prev, comp_id) in parents {
+                        result_comps.insert(comp_id.clone());
+                        if back_visited.insert(*prev) {
+                            back_queue.push_back(*prev);
+                        }
+                    }
+                }
+            }
+            result_comps.into_iter().collect()
+        };
+
         // BFS distances for ordering.
         let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         for e in &self.edges {
@@ -1769,8 +1935,13 @@ impl CircuitGraph {
                 // Use resistive path finding to handle series/parallel combinations
                 // Returns (rf_value, component_ids, pot_info)
                 if let Some((rf, rf_comps, rf_pot)) = find_resistive_path(neg_node, out_node) {
-                    // Check for inverting topology: pos connected to ground
-                    if pos_node == gnd_node_resolved {
+                    // BFS through ALL passive edges (R, C, L, pot) from neg to out
+                    // to collect the complete feedback network for edge exclusion.
+                    let no_extra = HashSet::new();
+                    let all_fb_comps = collect_feedback_comps(neg_node, out_node, &no_extra);
+
+                    // Check for inverting topology: pos connected to ground (or AC ground)
+                    if is_ac_ground(pos_node) {
                         // Inverting: look for Ri connected to neg (from any input source)
                         // For cascaded op-amps, Ri may connect to a previous stage's output
                         if let Some(ri) = find_input_resistor(neg_node, out_node, gnd_node_resolved)
@@ -1788,21 +1959,27 @@ impl CircuitGraph {
                                 },
                                 neg_node,
                                 pos_node,
-                                feedback_comp_ids: rf_comps.clone(),
+                                feedback_comp_ids: all_fb_comps,
                             });
                             continue;
                         }
                     }
 
                     // Check for non-inverting topology: pos connected to input (or signal path)
-                    // Non-inverting: look for Ri path from neg to ground
-                    if let Some((ri, ri_comps, ri_pot)) =
-                        find_resistive_path(neg_node, gnd_node_resolved)
-                    {
-                        let mut fb_comps = rf_comps.clone();
-                        for c in &ri_comps {
-                            if !fb_comps.contains(c) {
-                                fb_comps.push(c.clone());
+                    // Non-inverting: look for Ri path from neg to ground (or AC ground)
+                    let ni_gnd_node = if find_resistive_path(neg_node, gnd_node_resolved).is_some() {
+                        Some(gnd_node_resolved)
+                    } else {
+                        ac_ground_nodes.iter().find(|&&ag| find_resistive_path(neg_node, ag).is_some()).copied()
+                    };
+                    if let Some(gnd_target) = ni_gnd_node {
+                        let (ri, _ri_comps, ri_pot) = find_resistive_path(neg_node, gnd_target).unwrap();
+                        // Collect ground-leg passive components too
+                        let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &no_extra);
+                        let mut fb_comps = all_fb_comps.clone();
+                        for c in gnd_leg_comps {
+                            if !fb_comps.contains(&c) {
+                                fb_comps.push(c);
                             }
                         }
                         results.push(OpAmpFeedbackInfo {
@@ -1859,7 +2036,7 @@ impl CircuitGraph {
                             },
                             neg_node,
                             pos_node,
-                            feedback_comp_ids: rf_comps.clone(),
+                            feedback_comp_ids: all_fb_comps.clone(),
                         });
                         continue;
                     }
