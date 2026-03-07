@@ -186,6 +186,11 @@ pub(super) enum RootKind {
         pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
         /// Dirty flag: set when a pot changes, cleared after S re-derivation.
         needs_recompute: bool,
+        /// Scattering matrix for free oscillation (no VS driving the circuit).
+        /// Used when vs_voltage == 0 so the VS node doesn't short the circuit
+        /// to ground. Computed from the MNA without the ideal voltage source.
+        /// If None, the main scattering is always used.
+        free_scattering: Option<Vec<f64>>,
     },
 }
 
@@ -500,19 +505,27 @@ impl WdfStage {
                     n_ports,
                     children,
                     output_port,
+                    free_scattering,
                     ..
                 } => {
                     let vs_voltage = sample * compensation;
                     let n = *n_ports;
                     // 1. Collect reflected waves from children
-                    let b_children: Vec<f64> =
+                    let mut b_children: Vec<f64> =
                         children.iter_mut().map(|c| c.reflected()).collect();
+                    // Select scattering matrix: use free_scattering when VS is idle
+                    // so the circuit isn't shunted to ground through the VS.
+                    let active_scattering = if vs_voltage == 0.0 {
+                        free_scattering.as_deref().unwrap_or(scattering)
+                    } else {
+                        scattering
+                    };
                     // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
                     let mut a_children = vec![0.0; n];
                     for i in 0..n {
                         let mut a_i = vs_injection[i] * vs_voltage;
                         for j in 0..n {
-                            a_i += scattering[i * n + j] * b_children[j];
+                            a_i += active_scattering[i * n + j] * b_children[j];
                         }
                         a_children[i] = a_i;
                     }
@@ -661,6 +674,7 @@ impl WdfStage {
             for child in children.iter_mut() {
                 if child.set_pot(comp_id, value) {
                     *needs_recompute = true;
+                    eprintln!("[passive-rtype] set_pot({comp_id}, {value:.4}) → needs_recompute");
                     return true;
                 }
             }

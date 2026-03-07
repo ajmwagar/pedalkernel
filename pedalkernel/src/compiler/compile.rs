@@ -296,6 +296,252 @@ fn build_passive_wdf_stage(
     }
 }
 
+/// Merge series LC pairs into state-space `SeriesLC` composite WDF ports.
+///
+/// When an Inductor and Capacitor share a node that no other stamped component
+/// connects to, the standard bilinear Rp values create an extreme impedance
+/// ratio (Rp_L/Rp_C ≈ (fs/πf₀)²) that numerically decouples them in the
+/// R-type adaptor. A `SeriesLC` composite models the pair using state-space
+/// trapezoidal discretization with port resistance = 2·fs·L (standard inductor
+/// Rp), giving σ=0 (no delay-free loop, compatible with R-type).
+///
+/// The composite port replaces both individual ports in the MNA, with external
+/// terminals at L's outer node and C's outer node. The shared internal node
+/// stays in the MNA with only GMIN (harmless).
+fn merge_series_lc_pairs(
+    reactive_children: &mut Vec<DynNode>,
+    reactive_ports: &mut Vec<WdfPort>,
+    mna: &MnaSystem,
+    sample_rate: f64,
+) {
+    if reactive_children.len() < 2 {
+        return;
+    }
+
+    // Build map: MNA node index → list of reactive port indices using that node.
+    // We skip None (ground) since many ports legitimately share ground.
+    let mut node_to_port_indices: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (idx, port) in reactive_ports.iter().enumerate() {
+        if let Some(n) = port.node_pos {
+            node_to_port_indices.entry(n).or_default().push(idx);
+        }
+        if let Some(n) = port.node_neg {
+            node_to_port_indices.entry(n).or_default().push(idx);
+        }
+    }
+
+    // Find LC pairs sharing a non-ground node exclusively (only those 2 ports).
+    // Also verify the shared node has no off-diagonal MNA conductance entries
+    // (meaning no stamped resistors connect through it — only GMIN to ground).
+    let mut pairs_to_merge: Vec<(usize, usize, usize)> = Vec::new(); // (l_idx, c_idx, shared_mna_node)
+
+    for (&shared_node, port_indices) in &node_to_port_indices {
+        if port_indices.len() != 2 {
+            continue;
+        }
+        let (i, j) = (port_indices[0], port_indices[1]);
+
+        // Identify which is L and which is C
+        let (l_idx, c_idx) = match (&reactive_children[i], &reactive_children[j]) {
+            (DynNode::Inductor { .. }, DynNode::Capacitor { .. }) => (i, j),
+            (DynNode::Capacitor { .. }, DynNode::Inductor { .. }) => (j, i),
+            _ => continue,
+        };
+
+        // Check the shared node has no off-diagonal MNA entries (no stamped resistors).
+        let n = mna.num_nodes;
+        let mut has_resistive_connection = false;
+        for col in 0..n {
+            if col != shared_node && mna.g_matrix[shared_node * n + col].abs() > 1e-15 {
+                has_resistive_connection = true;
+                break;
+            }
+        }
+        if has_resistive_connection {
+            eprintln!(
+                "[lc-merge] skipping node {}: has resistive connections through it",
+                shared_node
+            );
+            continue;
+        }
+
+        pairs_to_merge.push((l_idx, c_idx, shared_node));
+    }
+
+    // Merge pairs (process in reverse order to keep indices valid during removal)
+    pairs_to_merge.sort_by(|a, b| b.0.max(b.1).cmp(&a.0.max(a.1)));
+
+    let t = 1.0 / sample_rate;
+
+    for (l_idx, c_idx, shared_node) in pairs_to_merge {
+        let (inductance, capacitance) = match (&reactive_children[l_idx], &reactive_children[c_idx])
+        {
+            (DynNode::Inductor { inductance, .. }, DynNode::Capacitor { capacitance, .. }) => {
+                (*inductance, *capacitance)
+            }
+            _ => continue,
+        };
+
+        let f0 = 1.0 / (2.0 * std::f64::consts::PI * (inductance * capacitance).sqrt());
+
+        // Port resistance = standard inductor Rp → σ = 0 (no feedthrough).
+        // The coupling issue is solved by using a high-impedance resistive
+        // trigger port instead of an ideal VS.
+        let rp = 2.0 * sample_rate * inductance;
+
+        // State-space coefficients for trapezoidal discretization
+        // β = T²/(4LC), d = 1+β
+        let beta = t * t / (4.0 * inductance * capacitance);
+        let d = 1.0 + beta;
+        let phi00 = (1.0 - beta) / d;
+        let phi01 = -t / (inductance * d);
+        let phi10 = t / (capacitance * d);
+        let phi11 = (1.0 - beta) / d;
+        let gamma0 = t / (2.0 * inductance * d);
+        let gamma1 = beta / d;
+        let k_factor = 1.0 / (1.0 + rp * gamma0);
+
+        // Feedthrough coefficient: σ = (1 - R·Γ₀)/(1 + R·Γ₀)
+        let rg = rp * gamma0;
+        let sigma = (1.0 - rg) / (1.0 + rg);
+
+        eprintln!(
+            "[lc-merge] SeriesLC: L={:.3e}H + C={:.3e}F → f₀={:.1}Hz, Rp={:.1}Ω, K={:.6}, σ={:.6}",
+            inductance, capacitance, f0, rp, k_factor, sigma
+        );
+
+        let composite = DynNode::SeriesLC {
+            rp,
+            inductance,
+            capacitance,
+            sigma,
+            state_i: 0.0,
+            state_v: 0.0,
+            u_prev: 0.0,
+            phi00,
+            phi01,
+            phi10,
+            phi11,
+            gamma0,
+            gamma1,
+            k_factor,
+        };
+
+        // Composite port external terminals: L's outer node and C's outer node.
+        let l_port = &reactive_ports[l_idx];
+        let c_port = &reactive_ports[c_idx];
+
+        let l_outer = if l_port.node_pos == Some(shared_node) {
+            l_port.node_neg
+        } else {
+            l_port.node_pos
+        };
+        let c_outer = if c_port.node_pos == Some(shared_node) {
+            c_port.node_neg
+        } else {
+            c_port.node_pos
+        };
+
+        let composite_port = WdfPort {
+            node_pos: l_outer,
+            node_neg: c_outer,
+            resistance: rp,
+        };
+
+        // Remove the two individual entries (higher index first to keep lower valid)
+        let (first_rm, second_rm) = if l_idx > c_idx {
+            (l_idx, c_idx)
+        } else {
+            (c_idx, l_idx)
+        };
+        reactive_children.remove(first_rm);
+        reactive_ports.remove(first_rm);
+        reactive_children.remove(second_rm);
+        reactive_ports.remove(second_rm);
+
+        // Insert composite at the position of the lower index
+        reactive_children.insert(second_rm, composite);
+        eprintln!(
+            "[lc-merge] composite port: node_pos={:?}, node_neg={:?}, Rp={:.1}Ω",
+            composite_port.node_pos, composite_port.node_neg, composite_port.resistance
+        );
+        reactive_ports.insert(second_rm, composite_port);
+    }
+}
+
+/// Apply feedthrough correction to scattering matrix and VS injection for
+/// any SeriesLC child ports that have σ ≠ 0.
+///
+/// When a WDF port has feedthrough (b = σ·a + b_free), the standard R-type
+/// scattering assumes b depends only on internal state. We pre-correct the
+/// scattering matrix so that reflected() returns b_free and the runtime loop
+/// works unchanged. This is a rank-1 update per feedthrough port.
+fn apply_feedthrough_correction(
+    scattering: &mut [f64],
+    vs_injection: &mut [f64],
+    n_ports: usize,
+    children: &[DynNode],
+) {
+    for k in 0..n_ports.min(children.len()) {
+        let sigma = match &children[k] {
+            DynNode::SeriesLC { sigma, .. } => *sigma,
+            _ => continue,
+        };
+        if sigma.abs() < 1e-12 {
+            continue;
+        }
+
+        let s_kk = scattering[k * n_ports + k];
+        let denom = 1.0 - sigma * s_kk;
+        if denom.abs() < 1e-15 {
+            eprintln!("[feedthrough] WARNING: 1 - σ·S[{k}][{k}] ≈ 0, skipping correction");
+            continue;
+        }
+        let d = 1.0 / denom;
+
+        eprintln!(
+            "[feedthrough] port {k}: σ={sigma:.6}, S[k][k]={s_kk:.6}, D={d:.6}"
+        );
+
+        // Save column k of original scattering
+        let col_k: Vec<f64> = (0..n_ports).map(|i| scattering[i * n_ports + k]).collect();
+        let kvs_k = vs_injection[k];
+
+        // Scale row k by D
+        for j in 0..n_ports {
+            scattering[k * n_ports + j] *= d;
+        }
+        vs_injection[k] *= d;
+
+        // Update other rows: column k and cross-terms
+        for i in 0..n_ports {
+            if i == k {
+                continue;
+            }
+            let s_ik = col_k[i]; // original S[i][k]
+
+            // Cross-term correction: S'[i][j] += S[i][k] * σ * D * S[k][j]
+            // (using original S[k][j] which is now S'[k][j]/D... but we already
+            //  scaled row k. Use the pre-D values: S'[k][j] = D*S_orig[k][j])
+            // So S_orig[k][j] = S'[k][j] / D = scattering[k*n+j] / D.
+            for j in 0..n_ports {
+                if j == k {
+                    continue;
+                }
+                // scattering[k*n+j] is already D*S_orig[k][j], so divide by D
+                let s_kj_orig = scattering[k * n_ports + j] / d;
+                scattering[i * n_ports + j] += s_ik * sigma * d * s_kj_orig;
+            }
+
+            // Column k: S'[i][k] = S_orig[i][k] * D
+            scattering[i * n_ports + k] = s_ik * d;
+
+            // VS injection: k'[i] += S_orig[i][k] * σ * D * k_orig[k]
+            vs_injection[i] += s_ik * sigma * d * kvs_k;
+        }
+    }
+}
+
 /// Build a WDF stage using MNA-derived R-type adaptor for non-series-parallel
 /// passive topologies (e.g., Twin-T notch filter).
 ///
@@ -425,6 +671,9 @@ fn build_passive_mna_stage(
         mna.stamp_resistor(Some(i), None, GMIN_RESISTANCE);
     }
 
+    // ── Step 3b: Merge series LC pairs with impedance-matched Rp ─────
+    merge_series_lc_pairs(&mut reactive_children, &mut reactive_ports, &mna, effective_rate);
+
     // ── Step 4: Create output probe port ────────────────────────────────
     // High-impedance resistor at out_node → gnd to measure output voltage.
     let out_mna = to_mna(graph.out_node);
@@ -468,13 +717,16 @@ fn build_passive_mna_stage(
     let ports: Vec<WdfPort> = reactive_ports;
     let n_ports = ports.len();
 
-    let (scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&ports, 0);
+    let (mut scattering, mut vs_injection) = mna.derive_scattering_and_vs_injection(&ports, 0);
     if scattering.iter().any(|&s| !s.is_finite()) {
         return None;
     }
     if vs_injection.iter().any(|&v| !v.is_finite()) {
         return None;
     }
+
+    // Apply feedthrough correction for SeriesLC ports (σ ≠ 0)
+    apply_feedthrough_correction(&mut scattering, &mut vs_injection, n_ports, &reactive_children);
 
     // ── Step 7: Build WdfStage ──────────────────────────────────────────
     let dummy_tree = DynNode::Resistor { rp: 1000.0 };
@@ -495,6 +747,7 @@ fn build_passive_mna_stage(
             recompute_ports,
             pot_stamps,
             needs_recompute: false,
+            free_scattering: None,
         },
         compensation: 1.0,
         // Linear passive stage — no nonlinearity means no aliasing,
@@ -635,6 +888,9 @@ fn build_orphan_output_mna_stage(
         mna.stamp_resistor(Some(i), None, GMIN_RESISTANCE);
     }
 
+    // Merge series LC pairs with impedance-matched Rp
+    merge_series_lc_pairs(&mut reactive_children, &mut reactive_ports, &mna, effective_rate);
+
     // Output probe port
     let out_mna = to_mna(probe_node);
     let output_port_idx = reactive_children.len();
@@ -643,6 +899,20 @@ fn build_orphan_output_mna_stage(
         node_pos: out_mna,
         node_neg: None,
         resistance: probe_resistance,
+    });
+
+    // Trigger input port: high-impedance resistive port at VS node.
+    // During trigger pulse, its reflected wave is overridden to 2·V_trigger.
+    // After the pulse, it acts as a high-impedance grounded resistor (100kΩ),
+    // preventing the VS node from shunting the circuit to ground.
+    let in_mna = to_mna(vs_node);
+    let trigger_rp = 100_000.0; // 100kΩ — high impedance when idle
+    let trigger_port_idx_val = reactive_children.len();
+    reactive_children.push(DynNode::Resistor { rp: trigger_rp });
+    reactive_ports.push(WdfPort {
+        node_pos: in_mna,
+        node_neg: None,
+        resistance: trigger_rp,
     });
 
     // Pot children after ports
@@ -656,24 +926,20 @@ fn build_orphan_output_mna_stage(
         .collect();
     reactive_children.extend(pot_children_pending);
 
-    // VS as ideal voltage source
-    let in_mna = to_mna(vs_node);
-    let mna = {
-        let mut mna_vs = MnaSystem::new(num_mna_nodes, 1);
-        mna_vs.g_matrix = mna.g_matrix;
-        mna_vs.stamp_voltage_source(in_mna, None, 0);
-        mna_vs
-    };
-
+    // No ideal VS — trigger injects through resistive port override.
+    // Use plain scattering (no VS injection vector needed).
     let ports: Vec<WdfPort> = reactive_ports;
     let n_ports = ports.len();
-    let (scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&ports, 0);
+    let scattering = mna.derive_scattering_matrix_general(&ports);
     if scattering.iter().any(|&s| !s.is_finite()) {
         return None;
     }
-    if vs_injection.iter().any(|&v| !v.is_finite()) {
-        return None;
-    }
+    let vs_injection = vec![0.0; n_ports]; // No VS injection
+
+    // Apply feedthrough correction for SeriesLC ports (σ ≠ 0)
+    let mut scattering = scattering;
+    let mut vs_injection = vs_injection;
+    apply_feedthrough_correction(&mut scattering, &mut vs_injection, n_ports, &reactive_children);
 
     let dummy_tree = DynNode::Resistor { rp: 1000.0 };
     let has_pots = !pot_stamps.is_empty();
@@ -692,6 +958,7 @@ fn build_orphan_output_mna_stage(
             recompute_ports,
             pot_stamps,
             needs_recompute: false,
+            free_scattering: None, // TODO: dual-scattering for trigger voices
         },
         compensation: 1.0,
         oversampler: Oversampler::new(OversamplingFactor::X1),

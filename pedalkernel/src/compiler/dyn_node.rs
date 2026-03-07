@@ -55,6 +55,45 @@ pub(super) enum DynNode {
         rp: f64,
         state: f64,
     },
+    /// Series LC resonator — a single WDF port with two internal states.
+    ///
+    /// Models a series LC pair using state-space bilinear (trapezoidal)
+    /// discretization. Port resistance is Z₀ = √(L/C) for good coupling.
+    /// Since Rp ≠ 2·fs·L, the element has feedthrough σ ≠ 0: b = σ·a + b_free.
+    /// The R-type scattering matrix is modified at compile time to account for σ,
+    /// so reflected() returns b_free and the runtime loop works as normal.
+    ///
+    /// State variables: i_L (inductor current), v_C (capacitor voltage).
+    /// State-space: dx/dt = Ax + Bu where x=[i_L,v_C], u=v_port
+    ///   A = [[0, -1/L], [1/C, 0]], B = [1/L, 0]^T
+    SeriesLC {
+        rp: f64,
+        inductance: f64,
+        capacitance: f64,
+        /// Feedthrough coefficient σ = (1 - R·Γ₀)/(1 + R·Γ₀).
+        /// Scattering matrix is pre-corrected for this at compile time.
+        sigma: f64,
+        /// Inductor current state
+        state_i: f64,
+        /// Capacitor voltage state
+        state_v: f64,
+        /// Previous port voltage (for trapezoidal rule)
+        u_prev: f64,
+        /// Pre-computed: Φ[0][0] = (1-β)/d where β=T²/(4LC), d=1+β
+        phi00: f64,
+        /// Pre-computed: Φ[0][1] = -T/(L·d)
+        phi01: f64,
+        /// Pre-computed: Φ[1][0] = T/(C·d)
+        phi10: f64,
+        /// Pre-computed: Φ[1][1] = (1-β)/d
+        phi11: f64,
+        /// Pre-computed: Γ[0] = T/(2L·d)
+        gamma0: f64,
+        /// Pre-computed: Γ[1] = β/d
+        gamma1: f64,
+        /// Pre-computed: K = 1/(1 + R·Γ[0])
+        k_factor: f64,
+    },
     VoltageSource {
         voltage: f64,
         rp: f64,
@@ -188,6 +227,7 @@ impl DynNode {
             | Self::Capacitor { rp, .. }
             | Self::LeakyCapacitor { rp, .. }
             | Self::Inductor { rp, .. }
+            | Self::SeriesLC { rp, .. }
             | Self::VoltageSource { rp, .. }
             | Self::CathodeBiasSource { rp, .. }
             | Self::UnitDelay { rp, .. }
@@ -229,6 +269,24 @@ impl DynNode {
                 }
             }
             Self::Inductor { state, .. } => -*state,
+            Self::SeriesLC {
+                rp,
+                state_i,
+                state_v,
+                u_prev,
+                phi00,
+                phi01,
+                gamma0,
+                k_factor,
+                ..
+            } => {
+                // b = -Rp · K · (Φ00·i_prev + Φ01·v_prev + Γ0·u_prev) · 2
+                // Derived from: b = -2R·x1 (since σ=0, b doesn't depend on a)
+                // where x1 = K*(Φ00·i + Φ01·v + Γ0·(a + u_prev)) and at
+                // reflect time we only know the "free" part (without a).
+                let free_part = *phi00 * *state_i + *phi01 * *state_v + *gamma0 * *u_prev;
+                -2.0 * *rp * *k_factor * free_part
+            }
             Self::VoltageSource { voltage, .. } | Self::CathodeBiasSource { voltage, .. } => {
                 2.0 * *voltage
             }
@@ -311,6 +369,39 @@ impl DynNode {
                 }
             }
             Self::Inductor { state, .. } => *state = a,
+            Self::SeriesLC {
+                rp,
+                state_i,
+                state_v,
+                u_prev,
+                phi00,
+                phi01,
+                phi10,
+                phi11,
+                gamma0,
+                gamma1,
+                k_factor,
+                ..
+            } => {
+                // Compute x1[n] (inductor current) — implicit solve
+                let i_prev = *state_i;
+                let v_prev = *state_v;
+                let u_p = *u_prev;
+
+                // x1[n] = K * (Φ00·i_prev + Φ01·v_prev + Γ0·(a + u_prev))
+                let x1_new =
+                    *k_factor * (*phi00 * i_prev + *phi01 * v_prev + *gamma0 * (a + u_p));
+
+                // Port voltage: u[n] = a - R·x1[n]
+                let u_new = a - *rp * x1_new;
+
+                // x2[n] (capacitor voltage): uses u[n] explicitly
+                let x2_new = *phi10 * i_prev + *phi11 * v_prev + *gamma1 * (u_new + u_p);
+
+                *state_i = x1_new;
+                *state_v = x2_new;
+                *u_prev = u_new;
+            }
             Self::Series {
                 left,
                 right,
@@ -1021,6 +1112,19 @@ impl DynNode {
                 state,
             } => {
                 format!("{pad}Inductor(L={inductance:.3e}H, Rp={rp:.1}Ω, state={state:.6})")
+            }
+            Self::SeriesLC {
+                rp,
+                inductance,
+                capacitance,
+                state_i,
+                state_v,
+                ..
+            } => {
+                let f0 = 1.0 / (2.0 * std::f64::consts::PI * (*inductance * *capacitance).sqrt());
+                format!(
+                    "{pad}SeriesLC(L={inductance:.3e}H, C={capacitance:.3e}F, Rp={rp:.1}Ω, f₀={f0:.1}Hz, i={state_i:.6}, v={state_v:.6})"
+                )
             }
             Self::VoltageSource { voltage, rp } => {
                 format!("{pad}VoltageSource(V={voltage:.3}V, Rp={rp:.1}Ω)")

@@ -1904,23 +1904,39 @@ impl PedalProcessor for CompiledPedal {
             vca_binding.vca.set_gain(env_val);
 
             // Read audio from input node (sum all signals at that node)
-            let vca_input = self.node_signals.iter().rev()
+            let mut vca_input: f64 = self.node_signals.iter().rev()
                 .filter(|(nid, _)| *nid == vca_binding.input_node_id)
                 .map(|(_, v)| *v)
-                .sum::<f64>();
+                .sum();
 
-            // If no node signal found, use the serial chain signal
-            let vca_input = if vca_input == 0.0 && vca_binding.input_node_id == usize::MAX {
-                signal
-            } else {
-                vca_input
-            };
+            // Fallback 1: if VCA input_node has no signal but VCOs exist,
+            // sum VCO outputs directly. This handles the case where VCOs
+            // are Virtual (not in the WDF tree) and the passive components
+            // between VCO output and VCA input don't propagate the signal.
+            if vca_input == 0.0 && !self.vcos.is_empty() {
+                for vco in &self.vcos {
+                    if let Some((_, val)) = self.node_signals.iter().rev()
+                        .find(|(nid, _)| *nid == vco.output_node_id)
+                    {
+                        vca_input += *val;
+                    }
+                }
+            }
+
+            // Fallback 2: if still no input and input_node is unassigned,
+            // use the serial chain signal.
+            if vca_input == 0.0 && vca_binding.input_node_id == usize::MAX {
+                vca_input = signal;
+            }
 
             let output = vca_binding.vca.process(vca_input);
             self.node_signals.push((vca_binding.output_node_id, output));
 
-            // Feed VCA output into the serial signal chain
-            signal = output;
+            // Sum VCA output into the signal chain (not replace).
+            // In multi-voice circuits, other voices (e.g., kick drum) may
+            // already be in `signal` from WDF stages — replacing would
+            // destroy them.
+            signal += output;
         }
 
         // If VCOs exist but no VCA consumed their output, sum VCO contributions

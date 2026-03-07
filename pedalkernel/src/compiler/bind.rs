@@ -250,6 +250,7 @@ fn resolve_pot_target(
     for (si, stage) in stages.iter().enumerate() {
         if let RootKind::PassiveRType { children, .. } = &stage.root {
             if children.iter().any(|c| has_pot(c, pot_id)) {
+                eprintln!("[bind] pot '{pot_id}' → step 8: PotInStage({si}) via PassiveRType children");
                 return ControlTarget::PotInStage(si);
             }
         }
