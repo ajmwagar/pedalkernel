@@ -923,7 +923,9 @@ fn eng_suffix(input: &str) -> IResult<&str, f64> {
         value(1e-9, tag("n")),
         value(1e-6, tag("us")), // microseconds (before 'u' to consume unit)
         value(1e-6, tag("u")),
+        value(1e-6, tag("µ")),  // micro (Unicode µ)
         value(1e3, tag("k")),
+        value(1e3, tag("K")),   // kilo (uppercase variant)
         value(1e6, tag("M")),
         value(1e-3, tag("ms")), // milliseconds (before 'm' to consume unit)
         value(1e-3, tag("m")),  // milli – after 'M' to disambiguate
@@ -936,6 +938,8 @@ fn eng_suffix(input: &str) -> IResult<&str, f64> {
 }
 
 /// Parse a number with optional engineering suffix, e.g. `4.7k`, `220n`, `100m`.
+/// Supports IEC 60062 embedded-decimal notation where the multiplier letter replaces
+/// the decimal point: `4k7` = 4.7k = 4700, `2u5` = 2.5µF, `0R47` = 0.47Ω.
 /// Also accepts `inf` for infinite impedance (open circuit).
 fn eng_value(input: &str) -> IResult<&str, f64> {
     // Try `inf` keyword first (infinite impedance / open circuit)
@@ -945,7 +949,23 @@ fn eng_value(input: &str) -> IResult<&str, f64> {
     // Otherwise parse numeric value with optional suffix
     let (input, num) = double(input)?;
     let (input, mult) = opt(eng_suffix)(input)?;
-    Ok((input, num * mult.unwrap_or(1.0)))
+    match mult {
+        Some(m) => {
+            // Check for embedded-decimal notation (IEC 60062): digits after the
+            // multiplier letter form the fractional part.
+            // e.g. "4k7" → 4.7 × 1e3, "0R47" → 0.47 × 1
+            let (input, frac_digits) =
+                opt(take_while1(|c: char| c.is_ascii_digit()))(input)?;
+            if let Some(frac_str) = frac_digits {
+                let frac: f64 = frac_str.parse().unwrap_or(0.0);
+                let shift = 10f64.powi(frac_str.len() as i32);
+                Ok((input, (num + frac / shift) * m))
+            } else {
+                Ok((input, num * m))
+            }
+        }
+        None => Ok((input, num)),
+    }
 }
 
 /// Quoted string: `"Foo Bar"`
@@ -4669,5 +4689,166 @@ pedal "Mixed" {
         assert_eq!(def.midi_bindings[0].note, 48);
         assert_eq!(def.controls.len(), 1);
         assert_eq!(def.controls[0].label, "Volume");
+    }
+
+    // -----------------------------------------------------------------------
+    // IEC 60062 embedded-decimal notation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn eng_value_embedded_decimal_resistance() {
+        let cases: &[(&str, f64)] = &[
+            ("4k7", 4700.0),
+            ("2k2", 2200.0),
+            ("1M5", 1_500_000.0),
+            ("4R7", 4.7),
+            ("0R47", 0.47),
+            ("100R", 100.0),
+            ("47R", 47.0),
+            ("10R", 10.0),
+        ];
+        for &(input, expected) in cases {
+            let (rest, v) = eng_value(input).unwrap_or_else(|e| {
+                panic!("failed to parse {:?}: {}", input, e)
+            });
+            assert!(
+                rest.is_empty(),
+                "trailing input {:?} for {:?}",
+                rest,
+                input
+            );
+            assert!(
+                (v - expected).abs() < expected.abs() * 1e-9 + 1e-15,
+                "{:?}: got {} expected {}",
+                input,
+                v,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn eng_value_embedded_decimal_capacitance() {
+        let cases: &[(&str, f64)] = &[
+            ("2u5", 2.5e-6),
+            ("4u7", 4.7e-6),
+            ("4n7", 4.7e-9),
+            ("2n2", 2.2e-9),
+            ("1p5", 1.5e-12),
+        ];
+        for &(input, expected) in cases {
+            let (rest, v) = eng_value(input).unwrap_or_else(|e| {
+                panic!("failed to parse {:?}: {}", input, e)
+            });
+            assert!(rest.is_empty(), "trailing input {:?} for {:?}", rest, input);
+            assert!(
+                (v - expected).abs() < expected.abs() * 1e-9,
+                "{:?}: got {:.6e} expected {:.6e}",
+                input,
+                v,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn eng_value_embedded_decimal_inductance() {
+        let cases: &[(&str, f64)] = &[("4m7", 4.7e-3), ("2m2", 2.2e-3)];
+        for &(input, expected) in cases {
+            let (rest, v) = eng_value(input).unwrap_or_else(|e| {
+                panic!("failed to parse {:?}: {}", input, e)
+            });
+            assert!(rest.is_empty(), "trailing input {:?} for {:?}", rest, input);
+            assert!(
+                (v - expected).abs() < expected.abs() * 1e-9,
+                "{:?}: got {:.6e} expected {:.6e}",
+                input,
+                v,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn eng_value_existing_formats_unchanged() {
+        let cases: &[(&str, f64)] = &[
+            ("10k", 10_000.0),
+            ("100n", 100e-9),
+            ("470p", 470e-12),
+            ("1u", 1e-6),
+            ("100m", 100e-3),
+            ("1M", 1_000_000.0),
+            ("47", 47.0),
+            ("0.1", 0.1),
+            ("3.3k", 3300.0),
+            ("4.7k", 4700.0),
+            ("220n", 220e-9),
+        ];
+        for &(input, expected) in cases {
+            let (rest, v) = eng_value(input).unwrap_or_else(|e| {
+                panic!("failed to parse {:?}: {}", input, e)
+            });
+            assert!(rest.is_empty(), "trailing input {:?} for {:?}", rest, input);
+            assert!(
+                (v - expected).abs() < expected.abs() * 1e-9 + 1e-15,
+                "{:?}: got {} expected {}",
+                input,
+                v,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn eng_value_uppercase_k() {
+        let (rest, v) = eng_value("4K7").unwrap();
+        assert!(rest.is_empty());
+        assert!((v - 4700.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn component_defs_with_shorthand() {
+        // Resistor with embedded decimal
+        let (_, (c, _)) = component_def("R1: resistor(4k7)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Resistor(4700.0));
+
+        // Capacitor with embedded decimal
+        let (_, (c, _)) = component_def("C1: cap(4n7)").unwrap();
+        if let ComponentKind::Capacitor(cfg) = c.kind {
+            assert!((cfg.value - 4.7e-9).abs() < 1e-18);
+        } else {
+            panic!("expected Capacitor");
+        }
+
+        // Inductor with embedded decimal
+        let (_, (c, _)) = component_def("L1: inductor(4m7)").unwrap();
+        assert_eq!(c.kind, ComponentKind::Inductor(4.7e-3));
+    }
+
+    #[test]
+    fn full_pedal_with_shorthand_values() {
+        let src = r#"
+pedal "Shorthand Test" {
+    components {
+        R1: resistor(4k7)
+        R2: resistor(2k2)
+        R3: resistor(4R7)
+        C1: cap(2u5)
+        C2: cap(4n7)
+        L1: inductor(4m7)
+    }
+    nets {
+        in -> R1.a
+        R1.b -> R2.a
+        R2.b -> R3.a
+        R3.b -> C1.a
+        C1.b -> C2.a
+        C2.b -> L1.a
+        L1.b -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.components.len(), 6);
     }
 }
