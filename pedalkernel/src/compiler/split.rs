@@ -222,6 +222,7 @@ fn build_half(
         monitors,
         sidechains: vec![],
         mirrors,
+        midi_bindings: vec![],
     }
 }
 

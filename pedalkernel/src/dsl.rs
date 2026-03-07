@@ -159,6 +159,9 @@ pub struct PedalDef {
     /// A mirrored pot's position is always `1.0 - source.position`.
     /// Used for dual-gang pots where one gang tracks inversely.
     pub mirrors: std::collections::HashMap<String, String>,
+    /// MIDI note bindings for trigger components.
+    /// Maps trigger inputs to specific MIDI note numbers.
+    pub midi_bindings: Vec<MidiBinding>,
 }
 
 impl PedalDef {
@@ -826,6 +829,19 @@ pub struct ControlDef {
     pub label: String,
     pub range: (f64, f64),
     pub default: f64,
+}
+
+/// MIDI binding: maps a component trigger to a specific MIDI note number.
+///
+/// # Syntax
+/// ```text
+/// T_C.trigger -> midi(48)
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct MidiBinding {
+    pub component: String,
+    pub property: String,
+    pub note: u8,
 }
 
 /// Monitor definition for real-time metering visualization.
@@ -2162,6 +2178,31 @@ fn nets_section(input: &str) -> IResult<&str, Vec<NetDef>> {
     Ok((input, nets))
 }
 
+/// `T_C.trigger -> midi(48)` — MIDI note binding for a trigger input.
+fn midi_binding_def(input: &str) -> IResult<&str, MidiBinding> {
+    let (input, _) = ws_comments(input)?;
+    let (input, comp) = identifier(input)?;
+    let (input, _) = char('.')(input)?;
+    let (input, prop) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("->")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("midi")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, note_num) = double(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((
+        input,
+        MidiBinding {
+            component: comp.to_string(),
+            property: prop.to_string(),
+            note: note_num as u8,
+        },
+    ))
+}
+
 /// Skip a line we can't parse (for forward compatibility)
 fn skip_line(input: &str) -> IResult<&str, ()> {
     let (input, _) = ws_comments(input)?;
@@ -2172,8 +2213,14 @@ fn skip_line(input: &str) -> IResult<&str, ()> {
     Ok((input, ()))
 }
 
-/// Try to parse a control_def, or skip the line if unparsable
-fn control_or_skip(input: &str) -> IResult<&str, Option<ControlDef>> {
+/// A parsed item from the controls section: either a control or a MIDI binding.
+enum ControlItem {
+    Control(ControlDef),
+    Midi(MidiBinding),
+}
+
+/// Try to parse a control_def, midi_binding_def, or skip the line if unparsable
+fn control_or_skip(input: &str) -> IResult<&str, Option<ControlItem>> {
     let (input, _) = ws_comments(input)?;
 
     // Check if we're at closing brace
@@ -2186,7 +2233,12 @@ fn control_or_skip(input: &str) -> IResult<&str, Option<ControlDef>> {
 
     // Try to parse a control_def
     if let Ok((remaining, ctrl)) = control_def(input) {
-        return Ok((remaining, Some(ctrl)));
+        return Ok((remaining, Some(ControlItem::Control(ctrl))));
+    }
+
+    // Try to parse a midi_binding_def
+    if let Ok((remaining, midi)) = midi_binding_def(input) {
+        return Ok((remaining, Some(ControlItem::Midi(midi))));
     }
 
     // Couldn't parse, skip this line
@@ -2194,19 +2246,26 @@ fn control_or_skip(input: &str) -> IResult<&str, Option<ControlDef>> {
     Ok((remaining, None))
 }
 
-fn controls_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
+fn controls_section(input: &str) -> IResult<&str, (Vec<ControlDef>, Vec<MidiBinding>)> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("controls")(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('{')(input)?;
 
-    // Parse controls, skipping lines we can't understand
-    let (input, maybe_ctrls) = many0(control_or_skip)(input)?;
-    let ctrls: Vec<ControlDef> = maybe_ctrls.into_iter().flatten().collect();
+    // Parse controls and midi bindings, skipping lines we can't understand
+    let (input, items) = many0(control_or_skip)(input)?;
+    let mut ctrls = Vec::new();
+    let mut midi_bindings = Vec::new();
+    for item in items.into_iter().flatten() {
+        match item {
+            ControlItem::Control(c) => ctrls.push(c),
+            ControlItem::Midi(m) => midi_bindings.push(m),
+        }
+    }
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
-    Ok((input, ctrls))
+    Ok((input, (ctrls, midi_bindings)))
 }
 
 /// Internal trim pots (factory adjustments, not user-facing).
@@ -2217,9 +2276,16 @@ fn trims_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('{')(input)?;
 
-    // Parse trims, skipping lines we can't understand
-    let (input, maybe_trims) = many0(control_or_skip)(input)?;
-    let trims: Vec<ControlDef> = maybe_trims.into_iter().flatten().collect();
+    // Parse trims, skipping lines we can't understand (ignore midi bindings)
+    let (input, items) = many0(control_or_skip)(input)?;
+    let trims: Vec<ControlDef> = items
+        .into_iter()
+        .flatten()
+        .filter_map(|item| match item {
+            ControlItem::Control(c) => Some(c),
+            ControlItem::Midi(_) => None,
+        })
+        .collect();
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
@@ -2632,7 +2698,8 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
 
     let (input, (components, mirrors)) = components_section(input)?;
     let (input, nets) = nets_section(input)?;
-    let (input, controls) = opt(controls_section)(input)?;
+    let (input, controls_result) = opt(controls_section)(input)?;
+    let (controls, midi_bindings) = controls_result.unwrap_or_default();
     let (input, trims) = opt(trims_section)(input)?;
     let (input, monitors) = opt(monitors_section)(input)?;
     let (input, sidechains) = opt(sidechains_section)(input)?;
@@ -2649,11 +2716,12 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
             supplies,
             components,
             nets,
-            controls: controls.unwrap_or_default(),
+            controls,
             trims: trims.unwrap_or_default(),
             monitors: monitors.unwrap_or_default(),
             sidechains: sidechains.unwrap_or_default(),
             mirrors,
+            midi_bindings,
         },
     ))
 }
@@ -4497,5 +4565,68 @@ pedal "No Monitors" {
 "#;
         let def = parse_pedal_file(src).unwrap();
         assert!(def.monitors.is_empty());
+    }
+
+    #[test]
+    fn parse_midi_binding() {
+        let (rest, mb) = midi_binding_def("T_C.trigger -> midi(48)").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(mb.component, "T_C");
+        assert_eq!(mb.property, "trigger");
+        assert_eq!(mb.note, 48);
+    }
+
+    #[test]
+    fn parse_midi_bindings_in_controls() {
+        let src = r#"
+pedal "Drum" {
+    components {
+        T_C: trigger_input()
+        T_D: trigger_input()
+        R1: resistor(10k)
+    }
+    nets {
+        in -> R1.a
+        R1.b -> out
+    }
+    controls {
+        T_C.trigger -> midi(48)
+        T_D.trigger -> midi(50)
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.midi_bindings.len(), 2);
+        assert_eq!(def.midi_bindings[0].component, "T_C");
+        assert_eq!(def.midi_bindings[0].note, 48);
+        assert_eq!(def.midi_bindings[1].component, "T_D");
+        assert_eq!(def.midi_bindings[1].note, 50);
+        assert!(def.controls.is_empty());
+    }
+
+    #[test]
+    fn parse_mixed_controls_and_midi_bindings() {
+        let src = r#"
+pedal "Mixed" {
+    components {
+        T_C: trigger_input()
+        Vol: pot(100k)
+        R1: resistor(10k)
+    }
+    nets {
+        in -> R1.a
+        R1.b -> out
+    }
+    controls {
+        T_C.trigger -> midi(48)
+        Vol.position -> "Volume" [0.0, 1.0] = 0.5
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.midi_bindings.len(), 1);
+        assert_eq!(def.midi_bindings[0].note, 48);
+        assert_eq!(def.controls.len(), 1);
+        assert_eq!(def.controls[0].label, "Volume");
     }
 }

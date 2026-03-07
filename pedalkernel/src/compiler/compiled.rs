@@ -15,7 +15,7 @@ use super::stage::{
 };
 
 /// Reference to a stage by type and index, for topological ordering.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum StageRef {
     Wdf(usize),
     MultiNl(usize),
@@ -86,6 +86,11 @@ pub(super) enum ControlTarget {
     },
     /// Fire a trigger impulse (index into triggers vec).
     Trigger(usize),
+    /// Output volume pot — directly scales output_gain.
+    /// Used for 3-terminal pots wired as voltage dividers to the output node
+    /// (wiper → out, lug B → gnd) that would otherwise be trapped inside a
+    /// multi-NL stage where the output is extracted from the NL junction.
+    OutputVolume,
 }
 
 /// Runtime state for a single-sample impulse source (drum trigger).
@@ -93,11 +98,21 @@ pub(super) enum ControlTarget {
 pub(super) struct TriggerState {
     pub(super) amplitude: f64,
     pub(super) countdown: u32,
+    /// Index of the WDF stage this trigger injects into (None = global input).
+    pub(super) target_stage: Option<usize>,
+    /// Circuit graph node ID where this trigger injects its impulse.
+    /// `usize::MAX` means use global input (backward compat for single-trigger circuits).
+    pub(super) injection_node: usize,
 }
 
 impl TriggerState {
     pub(super) fn new(amplitude: f64) -> Self {
-        Self { amplitude, countdown: 0 }
+        Self {
+            amplitude,
+            countdown: 0,
+            target_stage: None,
+            injection_node: usize::MAX,
+        }
     }
     pub(super) fn fire(&mut self) {
         self.countdown = 1;
@@ -515,6 +530,10 @@ pub struct CompiledPedal {
     pub(super) pot_effects: HashMap<String, Vec<PotEffect>>,
     /// Trigger impulse sources for drum/percussion circuits.
     pub(super) triggers: Vec<TriggerState>,
+    /// MIDI note → trigger index mapping for per-note dispatch.
+    /// When non-empty, `note_on()` fires only the trigger for the given note.
+    /// When empty, `note_on()` fires all triggers (backward compatibility).
+    pub(super) midi_trigger_map: HashMap<u8, usize>,
 }
 
 /// Gain-like control labels.
@@ -954,6 +973,9 @@ impl CompiledPedal {
                         }
                     }
                 }
+                ControlTarget::OutputVolume => {
+                    self.output_gain = value;
+                }
                 ControlTarget::SidechainControl(sc_idx) => {
                     let sc_idx = *sc_idx;
                     if let Some(sc) = self.sidechains.get_mut(sc_idx) {
@@ -1045,10 +1067,25 @@ impl CompiledPedal {
         }
     }
 
-    /// Handle MIDI note-on by firing all trigger inputs.
-    pub fn note_on(&mut self, _note: u8, _velocity: u8) {
-        for trig in &mut self.triggers {
-            trig.fire();
+    /// Handle MIDI note-on by firing trigger inputs.
+    /// If MIDI bindings are present, fires only the trigger for the given note.
+    /// Otherwise, fires all triggers (backward compatibility).
+    pub fn note_on(&mut self, note: u8, _velocity: u8) {
+        if self.midi_trigger_map.is_empty() {
+            #[cfg(debug_assertions)]
+            eprintln!("[CompiledPedal] note_on({}) → firing ALL {} triggers", note, self.triggers.len());
+            for trig in &mut self.triggers {
+                trig.fire();
+            }
+        } else if let Some(&idx) = self.midi_trigger_map.get(&note) {
+            #[cfg(debug_assertions)]
+            eprintln!("[CompiledPedal] note_on({}) → trigger[{}]", note, idx);
+            if let Some(trig) = self.triggers.get_mut(idx) {
+                trig.fire();
+            }
+        } else {
+            #[cfg(debug_assertions)]
+            eprintln!("[CompiledPedal] note_on({}) → no trigger mapped", note);
         }
     }
 
@@ -1166,6 +1203,9 @@ impl CompiledPedal {
                                 stage.flush_recompute();
                             }
                         }
+                    }
+                    ControlTarget::OutputVolume => {
+                        self.output_gain = value;
                     }
                     ControlTarget::BjtBias { max_pot_r, taper } => {
                         let tapered = taper.apply(value);
@@ -1296,15 +1336,53 @@ impl CompiledPedal {
             }
         }
 
+        if !self.triggers.is_empty() {
+            s.push_str(&format!("\nTriggers: {}\n", self.triggers.len()));
+            s.push_str(
+                "───────────────────────────────────────────────────────────────────────────\n",
+            );
+            for (i, trig) in self.triggers.iter().enumerate() {
+                let target = match trig.target_stage {
+                    Some(idx) => format!("stage {idx}"),
+                    None => "global".to_string(),
+                };
+                let inj = if trig.injection_node != usize::MAX {
+                    format!(", inj_node={}", trig.injection_node)
+                } else {
+                    String::new()
+                };
+                s.push_str(&format!(
+                    "  [{}] amp={:.1}V, target={}{}\n",
+                    i, trig.amplitude, target, inj
+                ));
+            }
+        }
+
+        s.push_str(&format!("\nStage Order: {:?}\n", self.stage_order));
+
         s
     }
 }
 
 impl PedalProcessor for CompiledPedal {
     fn process(&mut self, input: f64) -> f64 {
-        // Fire any pending triggers — replace input with impulse.
-        let trigger_impulse: f64 = self.triggers.iter_mut().map(|t| t.tick()).sum();
-        let input = if trigger_impulse != 0.0 { trigger_impulse } else { input };
+        // Fire any pending triggers.
+        // Triggers with explicit injection nodes route through node_signals
+        // for per-voice WDF stage routing. Triggers without (injection_node == MAX)
+        // sum into a global impulse that replaces the input signal.
+        self.node_signals.clear();
+        let mut global_trigger: f64 = 0.0;
+        for trigger in &mut self.triggers {
+            let impulse = trigger.tick();
+            if impulse != 0.0 {
+                if trigger.injection_node != usize::MAX {
+                    self.node_signals.push((trigger.injection_node, impulse));
+                } else {
+                    global_trigger += impulse;
+                }
+            }
+        }
+        let input = if global_trigger != 0.0 { global_trigger } else { input };
 
         // Advance pot smoothers — smoothly interpolate pot values toward targets.
         // This eliminates zipper noise and clicks when knobs are turned.
@@ -1589,42 +1667,77 @@ impl PedalProcessor for CompiledPedal {
         let mut stage_levels = [0.0f64; crate::metering::MAX_STAGES];
         let mut wdf_stage_counter = 0usize;
 
-        // Node routing: reuse the pre-allocated buffer to avoid allocation.
-        self.node_signals.clear();
+        // Node routing: trigger impulses were already pushed to node_signals above.
 
         for sr in &self.stage_order {
             match sr {
                 StageRef::Wdf(i) => {
                     let stage = &mut self.stages[*i];
-                    // Re-amplify only after the *previous* stage clipped.
-                    if prev_was_clipping {
-                        signal *= self.pre_gain;
-                    }
+
+                    // Node-based routing for per-voice trigger stages:
+                    // Only trigger voice stages read exclusively from node_signals.
+                    // Regular stages (triodes, BJTs, etc.) use serial chain even
+                    // if they have injection_node_id set for other purposes.
+                    let stage_input = if stage.is_trigger_voice {
+                        self.node_signals
+                            .iter()
+                            .rev()
+                            .filter(|(nid, _)| *nid == stage.injection_node_id)
+                            .map(|(_, v)| *v)
+                            .sum::<f64>()
+                    } else {
+                        // Re-amplify only after the *previous* stage clipped.
+                        if prev_was_clipping {
+                            signal *= self.pre_gain;
+                        }
+                        signal
+                    };
                     prev_was_clipping = stage.root.is_clipping_stage();
 
                     if stage.has_paired_opamp() {
-                        stage.set_paired_opamp_vp(signal);
+                        stage.set_paired_opamp_vp(stage_input);
                     }
 
                     #[cfg(feature = "debug-trace")]
-                    let pre_stage = signal;
-                    signal = stage.process(signal);
+                    let pre_stage = stage_input;
+                    let stage_output = stage.process(stage_input);
+
+                    // Write output to stage's output node for junction summing
+                    // (only for trigger voice stages).
+                    if stage.is_trigger_voice && stage.output_node_id != usize::MAX {
+                        if let Some(entry) = self.node_signals.iter_mut()
+                            .find(|(nid, _)| *nid == stage.output_node_id)
+                        {
+                            entry.1 += stage_output;
+                        } else {
+                            self.node_signals.push((stage.output_node_id, stage_output));
+                        }
+                        // Use accumulated value at output node as the serial chain signal.
+                        signal = self.node_signals
+                            .iter()
+                            .rev()
+                            .find(|(nid, _)| *nid == stage.output_node_id)
+                            .map(|(_, v)| *v)
+                            .unwrap_or(stage_output);
+                    } else {
+                        signal = stage_output;
+                    }
 
                     #[cfg(feature = "debug-trace")]
                     if trace_on {
                         eprintln!(
-                            "  [WDF {wdf_stage_counter}] in={pre_stage:.6e} out={signal:.6e} rp={:.1}",
+                            "  [WDF {wdf_stage_counter}] in={pre_stage:.6e} out={stage_output:.6e} rp={:.1}",
                             stage.tree.port_resistance()
                         );
                     }
 
                     if wdf_stage_counter < crate::metering::MAX_STAGES {
-                        stage_levels[wdf_stage_counter] = signal;
+                        stage_levels[wdf_stage_counter] = stage_output;
                     }
 
                     #[cfg(debug_assertions)]
                     if let Some(ref stats) = self.debug_stats {
-                        stats.record_stage_level(wdf_stage_counter, signal);
+                        stats.record_stage_level(wdf_stage_counter, stage_output);
                     }
                     wdf_stage_counter += 1;
                 }

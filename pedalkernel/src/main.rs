@@ -26,6 +26,12 @@ enum Command {
         #[arg(trailing_var_arg = true)]
         knobs: Vec<String>,
     },
+    /// Debug a .pedal file — compile and print stage structure, WDF trees,
+    /// scattering matrices, controls, and other internal state.
+    Debug {
+        /// Path to the .pedal file.
+        file: String,
+    },
     /// Validate .pedal files — check for common errors and warnings.
     ///
     /// Accepts files, directories (recursive), or glob patterns.
@@ -80,6 +86,7 @@ fn main() {
             output,
             knobs,
         } => cli::process::run(&file, &input, &output, &knobs),
+        Command::Debug { file } => cli::debug::run(&file),
         Command::Validate { paths, fix } => cli::validate::run(&paths, fix),
         Command::Models {
             model_type,

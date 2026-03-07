@@ -290,6 +290,7 @@ fn build_passive_wdf_stage(
                 transformer_gain: 1.0,
                 injection_node_id: usize::MAX,
                 output_node_id: usize::MAX,
+                is_trigger_voice: false,
                 sample_counter: 0,
                 root_comp_id: String::new(),
             };
@@ -518,6 +519,7 @@ fn build_passive_mna_stage(
         transformer_gain: 1.0,
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
+        is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
     };
@@ -712,6 +714,7 @@ fn build_orphan_output_mna_stage(
         transformer_gain: 1.0,
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
+        is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
     })
@@ -1020,6 +1023,7 @@ fn build_output_rooted_stage(
         transformer_gain: 1.0,
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
+        is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
     })
@@ -1204,6 +1208,8 @@ pub fn compile_pedal_with_options(
 
     // ══ Passive-only fallback ═════════════════════════════════════════
     let mut passive_attenuation = 1.0;
+    // Maps trigger component ID → (WDF stage index, injection node ID).
+    let mut trigger_stage_map: HashMap<String, (usize, NodeId)> = HashMap::new();
 
     if stages.is_empty() && multi_nl_stages.is_empty() {
         let has_reactive = pedal.components.iter().any(|c| {
@@ -1215,7 +1221,48 @@ pub fn compile_pedal_with_options(
             )
         });
 
-        if has_reactive {
+        if has_reactive && !graph.trigger_nodes.is_empty() {
+            // ── Per-voice trigger stages ─────────────────────────────
+            // Build one MNA stage per trigger, each with VS at the trigger's
+            // injection node and output probe at out_node. Each voice stage
+            // has independent reactive element state so voices decay independently.
+            let passive_edges: Vec<usize> = graph
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    matches!(
+                        graph.components[e.comp_idx].kind,
+                        ComponentKind::Resistor(_)
+                            | ComponentKind::Capacitor(_)
+                            | ComponentKind::Inductor(_)
+                            | ComponentKind::Potentiometer(_, _)
+                    )
+                })
+                .map(|(i, _)| i)
+                .collect();
+
+            for (comp_id, trigger_node) in &graph.trigger_nodes {
+                let stage_idx = stages.len();
+                if let Some(mut voice_stage) = build_orphan_output_mna_stage(
+                    &graph,
+                    &passive_edges,
+                    *trigger_node,
+                    graph.out_node,
+                    100_000.0, // 100kΩ probe — matches typical mix bus impedance
+                    sample_rate,
+                ) {
+                    voice_stage.injection_node_id = *trigger_node;
+                    voice_stage.output_node_id = graph.out_node;
+                    voice_stage.is_trigger_voice = true;
+                    trigger_stage_map.insert(
+                        comp_id.clone(),
+                        (stage_idx, *trigger_node),
+                    );
+                    stages.push(voice_stage);
+                }
+            }
+        } else if has_reactive {
             if let Some(stage) = build_passive_wdf_stage(&graph, sample_rate, oversampling) {
                 stages.push(stage);
             }
@@ -1402,7 +1449,7 @@ pub fn compile_pedal_with_options(
 
     // Collect trigger inputs.
     let mut trigger_id_to_idx: HashMap<String, usize> = HashMap::new();
-    let triggers: Vec<super::compiled::TriggerState> = pedal
+    let mut triggers: Vec<super::compiled::TriggerState> = pedal
         .components
         .iter()
         .filter(|c| matches!(c.kind, ComponentKind::TriggerInput))
@@ -1411,6 +1458,23 @@ pub fn compile_pedal_with_options(
             trigger_id_to_idx.insert(c.id.clone(), idx);
             let amplitude = pedal.supplies.first().map(|s| s.config.voltage).unwrap_or(9.0);
             super::compiled::TriggerState::new(amplitude)
+        })
+        .collect();
+
+    // Wire per-voice trigger → stage mapping from the passive-only fallback.
+    for (comp_id, (stage_idx, injection_node)) in &trigger_stage_map {
+        if let Some(&trig_idx) = trigger_id_to_idx.get(comp_id) {
+            triggers[trig_idx].target_stage = Some(*stage_idx);
+            triggers[trig_idx].injection_node = *injection_node;
+        }
+    }
+
+    // Build MIDI note → trigger index map from midi_bindings.
+    let midi_trigger_map: HashMap<u8, usize> = pedal
+        .midi_bindings
+        .iter()
+        .filter_map(|mb| {
+            trigger_id_to_idx.get(&mb.component).map(|&idx| (mb.note, idx))
         })
         .collect();
 
@@ -1580,6 +1644,7 @@ pub fn compile_pedal_with_options(
         bbd_wet_mix: 0.5,
         pot_effects,
         triggers,
+        midi_trigger_map,
     };
 
     let initial_voltage = match &compiled.power_supply {

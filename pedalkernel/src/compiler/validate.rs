@@ -1188,6 +1188,7 @@ mod tests {
             monitors: vec![],
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
+            midi_bindings: vec![],
         }
     }
 
@@ -1326,6 +1327,7 @@ mod tests {
             monitors: vec![],
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
+            midi_bindings: vec![],
         };
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "no-signal-path"));

@@ -3142,3 +3142,78 @@ J1.source -> out
         .expect("JFET should have a graph edge");
     assert_eq!(graph.effective_edge_kind(jfet_edge_idx), EdgeKind::Nonlinear);
 }
+
+#[test]
+fn trigger_rlc_ping_diagnostic() {
+    // Minimal RLC ping circuit: trigger → R → L → C → gnd, output at R/L junction.
+    // f = 1/(2π√(LC)) = 1/(2π√(0.1 × 100e-9)) ≈ 1592 Hz
+    let src = r#"
+pedal "PING" subtitle "Passive RLC ring test" {
+  components {
+    T1: trigger_input()
+    R1: resistor(100)
+    L1: inductor(100m)
+    C1: cap(100n)
+    R_out: resistor(10k)
+  }
+  nets {
+    T1.out -> R1.a
+    R1.b -> L1.a
+    L1.b -> C1.a
+    C1.b -> gnd
+    R1.b -> R_out.a
+    R_out.b -> out
+  }
+  controls {
+    T1.trigger -> midi(1)
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let sr = 48000.0;
+    let mut proc = compile_pedal(&pedal, sr).unwrap();
+
+    // Diagnostic: show compilation structure
+    eprintln!("=== PING DIAGNOSTIC ===");
+    eprintln!("{}", proc.debug_dump());
+
+    // Check trigger_nodes were populated in graph
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    eprintln!("trigger_nodes: {:?}", graph.trigger_nodes);
+    eprintln!("in_node: {}, out_node: {}, gnd_node: {}", graph.in_node, graph.out_node, graph.gnd_node);
+    assert!(!graph.trigger_nodes.is_empty(), "trigger_nodes should be non-empty for explicit-net triggers");
+
+    // Check trigger has injection_node set
+    eprintln!("triggers: {:?}", proc.triggers);
+    assert!(proc.triggers.len() == 1, "should have 1 trigger");
+    assert_ne!(proc.triggers[0].injection_node, usize::MAX, "trigger should have injection_node set");
+
+    // Check we have stages
+    eprintln!("stages: {}", proc.stages.len());
+    assert!(!proc.stages.is_empty(), "should have at least 1 voice stage");
+
+    // Fire trigger and process 2400 samples (50ms at 48kHz)
+    proc.note_on(1, 127);
+    let mut output = Vec::new();
+    for _ in 0..2400 {
+        output.push(proc.process(0.0));
+    }
+
+    // Print first 20 samples
+    eprintln!("first 20 samples: {:?}", &output[..20]);
+
+    // Check peak
+    let peak = output.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    eprintln!("peak: {}", peak);
+    assert!(peak > 1e-6, "trigger should produce non-zero output, peak={}", peak);
+
+    // Check for oscillation: the output should ring, not just click.
+    // Count zero crossings in the first 1000 samples.
+    let zero_crossings: usize = output.windows(2)
+        .take(1000)
+        .filter(|w| w[0].signum() != w[1].signum() && w[0] != 0.0)
+        .count();
+    eprintln!("zero crossings in first 1000 samples: {}", zero_crossings);
+    // At 1592 Hz / 48000 Hz, expect ~33 crossings per 1000 samples (2 per cycle)
+    assert!(zero_crossings > 5, "should see oscillation (zero crossings), got {}", zero_crossings);
+}

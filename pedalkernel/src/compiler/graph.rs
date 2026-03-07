@@ -62,6 +62,10 @@ pub(super) struct CircuitGraph {
     /// Only populated for edges whose kind changed during resolution.
     /// If an edge index is absent, use the component's default edges().
     pub(super) resolved_edge_kinds: HashMap<usize, super::component::EdgeKind>,
+    /// Trigger components whose `.out` pin was NOT unioned to `in_node`.
+    /// These triggers have explicit net connections and inject at their own
+    /// resolved node IDs. Used by compile.rs to build per-voice WDF stages.
+    pub(super) trigger_nodes: Vec<(String, NodeId)>,
 }
 
 /// Identifies which transformer winding a node belongs to.
@@ -304,9 +308,10 @@ impl CircuitGraph {
             }
         }
 
-        // Auto-union trigger_input out pin with in_node when `in` has no explicit nets.
-        // This makes the trigger's output become the circuit input so the impulse
-        // flows through the existing VS injection infrastructure.
+        // Auto-union trigger_input out pin with in_node when `in` has no explicit nets
+        // AND the trigger's .out pin has no explicit net connections.
+        // When triggers have explicit nets (e.g., T_C.out -> R_C_trig.a in multi-voice
+        // synth circuits), keep them separate so each trigger injects at its own node.
         {
             let in_has_nets = expanded_nets.iter().any(|net| {
                 let check = |p: &Pin| matches!(p, Pin::Reserved(s) if s == "in");
@@ -315,10 +320,20 @@ impl CircuitGraph {
             if !in_has_nets {
                 for comp in &all_components {
                     if matches!(comp.kind, ComponentKind::TriggerInput) {
-                        let trigger_out = format!("{}.out", comp.id);
-                        let trig_id = get_id(&trigger_out, &mut uf);
-                        let in_id = get_id("in", &mut uf);
-                        uf.union(trig_id, in_id);
+                        // Check if this trigger's .out pin appears in any net.
+                        let trigger_has_nets = expanded_nets.iter().any(|net| {
+                            let check = |p: &Pin| {
+                                matches!(p, Pin::ComponentPin { component, pin }
+                                    if component == &comp.id && pin == "out")
+                            };
+                            check(&net.from) || net.to.iter().any(check)
+                        });
+                        if !trigger_has_nets {
+                            let trigger_out = format!("{}.out", comp.id);
+                            let trig_id = get_id(&trigger_out, &mut uf);
+                            let in_id = get_id("in", &mut uf);
+                            uf.union(trig_id, in_id);
+                        }
                     }
                 }
             }
@@ -706,6 +721,26 @@ impl CircuitGraph {
             node_names.insert(name.clone(), uf.find(raw_id));
         }
 
+        // Collect trigger components whose .out pin was NOT unioned to in_node.
+        // These triggers have explicit net connections and need per-voice stages.
+        let trigger_nodes: Vec<(String, NodeId)> = components
+            .iter()
+            .filter(|c| matches!(c.kind, ComponentKind::TriggerInput))
+            .filter_map(|c| {
+                let trigger_out = format!("{}.out", c.id);
+                if let Some(&raw_id) = pin_ids.get(&trigger_out) {
+                    let resolved = uf.find(raw_id);
+                    if resolved != in_node {
+                        Some((c.id.clone(), resolved))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         CircuitGraph {
             edges,
             components,
@@ -722,6 +757,7 @@ impl CircuitGraph {
             coupled_nodes,
             transformer_info,
             resolved_edge_kinds: HashMap::new(),
+            trigger_nodes,
         }
     }
 

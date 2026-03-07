@@ -134,6 +134,7 @@ pub(super) fn build_opamp_feedback_stages(
                     transformer_gain: 1.0,
                     injection_node_id: usize::MAX,
                     output_node_id: usize::MAX,
+                    is_trigger_voice: false,
                     sample_counter: 0,
                     root_comp_id: String::new(),
                 });
@@ -183,6 +184,7 @@ pub(super) fn build_opamp_feedback_stages(
                     transformer_gain: 1.0,
                     injection_node_id: usize::MAX,
                     output_node_id: usize::MAX,
+                    is_trigger_voice: false,
                     sample_counter: 0,
                     root_comp_id: String::new(),
                 });

@@ -88,6 +88,15 @@ pub(super) fn build_controls(
                 ControlTarget::Trigger(idx)
             }
             Some(ControlParamKind::PotPosition) => {
+                // Temporary diagnostic trace
+                trace_pot_binding(
+                    &ctrl.component,
+                    pedal,
+                    stages,
+                    multi_nl_stages,
+                    opamp_pot_map,
+                    bjt_bias_pot_map,
+                );
                 resolve_pot_target(
                     &ctrl.component,
                     pedal,
@@ -185,6 +194,15 @@ fn resolve_pot_target(
         }
     }
 
+    // 3b. Output volume pot (wiper → out path, lug B → gnd).
+    // These pots sit in the passive chain after the last active stage and act
+    // as simple voltage dividers.  The multi-NL stage they'd otherwise land in
+    // extracts output from the NL junction, making the pot position invisible.
+    // Handle them as direct output_gain scaling instead.
+    if is_output_volume_pot(pot_id, pedal) {
+        return ControlTarget::OutputVolume;
+    }
+
     // 4. Pot in multi-NL stage
     for (mi, mnl) in multi_nl_stages.iter().enumerate() {
         for (pi, child) in mnl.pot_children.iter().enumerate() {
@@ -242,6 +260,145 @@ fn resolve_pot_target(
         "WARNING: pot '{pot_id}' not bound to any audio stage — control will have no effect"
     );
     ControlTarget::PotInStage(0)
+}
+
+/// Temporary diagnostic: trace resolve_pot_target for a specific pedal.
+#[allow(dead_code)]
+fn trace_pot_binding(
+    pot_id: &str,
+    pedal: &PedalDef,
+    stages: &[WdfStage],
+    multi_nl_stages: &[MultiNlStage],
+    opamp_pot_map: &HashMap<String, (usize, f64, f64, f64, Option<f64>, bool)>,
+    bjt_bias_pot_map: &HashMap<String, BjtBiasPotInfo>,
+) {
+    eprintln!("[bind-trace] pot '{pot_id}' in pedal '{}':", pedal.name);
+    if opamp_pot_map.contains_key(pot_id) {
+        eprintln!("  -> step 1: opamp feedback pot");
+        return;
+    }
+    if bjt_bias_pot_map.contains_key(pot_id) {
+        eprintln!("  -> step 2: BJT bias pot");
+        return;
+    }
+    for (si, stage) in stages.iter().enumerate() {
+        if has_pot(&stage.tree, pot_id) {
+            eprintln!("  -> step 3: PotInStage({si})");
+            return;
+        }
+    }
+    if is_output_volume_pot(pot_id, pedal) {
+        eprintln!("  -> step 3b: OutputVolume");
+        return;
+    }
+    for (mi, mnl) in multi_nl_stages.iter().enumerate() {
+        for (pi, child) in mnl.pot_children.iter().enumerate() {
+            if has_pot(child, pot_id) {
+                eprintln!("  -> step 4: PotInMultiNlStage({mi}, {pi})");
+                return;
+            }
+        }
+    }
+    eprintln!("  -> steps 5-9: later fallback");
+}
+
+/// Detect output volume pots: 3-terminal pot with wiper reaching `out` and
+/// lug B connected to `gnd`.
+///
+/// Handles both direct (pot.w → out) and 1-hop (pot.w → R.a, R.b → out)
+/// wiring patterns.
+fn is_output_volume_pot(pot_id: &str, pedal: &PedalDef) -> bool {
+    let wiper_pins: &[&str] = &["w", "wiper"];
+    let out_names: &[&str] = &["out", "output"];
+    let gnd_names: &[&str] = &["gnd", "ground"];
+
+    // Helper: check if a pin matches a component pin.
+    let is_comp_pin = |p: &Pin, comp: &str, pin_name: &str| -> bool {
+        matches!(p, Pin::ComponentPin { component, pin } if component == comp && pin == pin_name)
+    };
+    let is_comp_pin_any = |p: &Pin, comp: &str, pin_names: &[&str]| -> bool {
+        matches!(p, Pin::ComponentPin { component, pin }
+            if component == comp && pin_names.contains(&pin.as_str()))
+    };
+    let is_reserved_any = |p: &Pin, names: &[&str]| -> bool {
+        matches!(p, Pin::Reserved(name) if names.contains(&name.as_str()))
+    };
+
+    // Collect all pins on the same net as a given pin.
+    let net_peers = |comp: &str, pin_name: &str| -> Vec<Pin> {
+        let mut peers = Vec::new();
+        for net in &pedal.nets {
+            let in_from = is_comp_pin(&net.from, comp, pin_name);
+            let in_to = net.to.iter().any(|p| is_comp_pin(p, comp, pin_name));
+            if in_from || in_to {
+                // Collect all other pins in this net
+                if !is_comp_pin(&net.from, comp, pin_name) {
+                    peers.push(net.from.clone());
+                }
+                for p in &net.to {
+                    if !is_comp_pin(p, comp, pin_name) {
+                        peers.push(p.clone());
+                    }
+                }
+            }
+        }
+        peers
+    };
+
+    // Check pot.b → gnd
+    let b_peers = net_peers(pot_id, "b");
+    let b_to_gnd = b_peers.iter().any(|p| is_reserved_any(p, gnd_names));
+    if !b_to_gnd {
+        return false;
+    }
+
+    // Collect peers of pot wiper
+    let mut wiper_peers = Vec::new();
+    for wp in wiper_pins {
+        wiper_peers.extend(net_peers(pot_id, wp));
+    }
+    if wiper_peers.is_empty() {
+        return false;
+    }
+
+    // Direct: pot.w on same net as "out"
+    if wiper_peers.iter().any(|p| is_reserved_any(p, out_names)) {
+        return true;
+    }
+
+    // 1-hop: pot.w → Resistor.pin, and Resistor.other_pin → out
+    for peer in &wiper_peers {
+        if let Pin::ComponentPin {
+            component: neighbor_comp,
+            pin: neighbor_pin,
+        } = peer
+        {
+            if neighbor_comp == pot_id {
+                continue;
+            }
+            // Check if the neighbor component is a resistor
+            let is_resistor = pedal
+                .components
+                .iter()
+                .any(|c| c.id == *neighbor_comp && matches!(c.kind, ComponentKind::Resistor(_)));
+            if !is_resistor {
+                continue;
+            }
+            // Find the neighbor's other pin name
+            let other_pin = match neighbor_pin.as_str() {
+                "a" => "b",
+                "b" => "a",
+                _ => continue,
+            };
+            // Check if the other pin's net contains "out"
+            let other_peers = net_peers(neighbor_comp, other_pin);
+            if other_peers.iter().any(|p| is_reserved_any(p, out_names)) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Scan nets for pot pins wired to LFO/BBD/delay modulation targets.
@@ -921,6 +1078,7 @@ fn extract_sidechain_def(
         monitors: vec![],
         sidechains: vec![],
         mirrors: std::collections::HashMap::new(),
+        midi_bindings: vec![],
     }
 }
 

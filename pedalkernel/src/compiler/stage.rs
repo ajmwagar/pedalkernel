@@ -301,6 +301,10 @@ pub(super) struct WdfStage {
     /// Typically the plate (triode), collector (BJT), or drain (JFET) node.
     /// Used for node-based routing in parallel-path topologies.
     pub(super) output_node_id: usize,
+    /// When true, this stage is a per-trigger voice stage that reads
+    /// exclusively from `node_signals` (trigger impulses) rather than
+    /// the serial chain signal. Unfired voices receive 0.0 input.
+    pub(super) is_trigger_voice: bool,
     /// Sample counter for runtime warnings rate limiting.
     /// Only meaningful when `runtime-warnings` feature is enabled.
     #[allow(dead_code)]
@@ -957,13 +961,70 @@ impl WdfStage {
         };
 
         let mut s = format!(
-            "WdfStage(root={}, compensation={:.6}, tree_rp={:.1}Ω, nodes={})\n",
+            "WdfStage(root={}, compensation={:.6}, tree_rp={:.1}Ω, nodes={}",
             root_name,
             self.compensation,
             self.tree.port_resistance(),
             self.tree.node_count()
         );
+        if self.is_trigger_voice {
+            s.push_str(", trigger_voice");
+        }
+        if self.injection_node_id != usize::MAX {
+            s.push_str(&format!(", inj={}", self.injection_node_id));
+        }
+        if self.output_node_id != usize::MAX {
+            s.push_str(&format!(", out={}", self.output_node_id));
+        }
+        s.push_str(")\n");
         s.push_str(&self.tree.debug_dump(1));
+
+        // Print PassiveRType scattering matrix and VS injection vector.
+        if let RootKind::PassiveRType {
+            scattering,
+            vs_injection,
+            n_ports,
+            children,
+            output_port,
+            ..
+        } = &self.root
+        {
+            s.push_str(&format!(
+                "  PassiveRType: {} ports, output_port={}\n",
+                n_ports, output_port
+            ));
+            // Print children port resistances.
+            for (i, child) in children.iter().enumerate() {
+                let marker = if i == *output_port { " (probe)" } else { "" };
+                s.push_str(&format!(
+                    "    port[{}]: Rp={:.1}Ω{}\n",
+                    i,
+                    child.port_resistance(),
+                    marker
+                ));
+            }
+            // Print scattering matrix (compact).
+            s.push_str(&format!("  S[{}x{}]:\n", n_ports, n_ports));
+            for i in 0..*n_ports {
+                s.push_str("    [");
+                for j in 0..*n_ports {
+                    if j > 0 {
+                        s.push_str(", ");
+                    }
+                    s.push_str(&format!("{:+.4}", scattering[i * n_ports + j]));
+                }
+                s.push_str("]\n");
+            }
+            // Print VS injection vector.
+            s.push_str("  k: [");
+            for (i, k) in vs_injection.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&format!("{:+.4}", k));
+            }
+            s.push_str("]\n");
+        }
         s
     }
 }
@@ -1810,6 +1871,35 @@ impl MultiNlStage {
                 child.port_resistance(),
             ));
         }
+        // Scattering sub-blocks (compact).
+        let n_nl = self.n_nl;
+        let n_passive = self.passive_children.len();
+        s.push_str(&format!("  S_nl[{}x{}]: [", n_nl, n_nl));
+        for (i, v) in self.scattering.s_nl.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&format!("{:+.4}", v));
+        }
+        s.push_str("]\n");
+        if n_passive > 0 {
+            s.push_str(&format!("  S_nl_passive[{}x{}]: [", n_nl, n_passive));
+            for (i, v) in self.scattering.s_nl_passive.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&format!("{:+.4}", v));
+            }
+            s.push_str("]\n");
+        }
+        s.push_str("  S_nl_adapted: [");
+        for (i, v) in self.scattering.s_nl_adapted.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&format!("{:+.4}", v));
+        }
+        s.push_str("]\n");
         s
     }
 
