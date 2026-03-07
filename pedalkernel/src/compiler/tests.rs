@@ -12,6 +12,284 @@ use crate::dsl::*;
 use crate::tree::MnaSystem;
 use crate::PedalProcessor;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Trigger / VCO / VCA integration tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Helper: compile a pedal from source, fire a MIDI note, process N samples,
+/// return the output buffer.
+fn trigger_and_collect(src: &str, midi_note: u8, num_samples: usize) -> (Vec<f64>, super::compiled::CompiledPedal) {
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    proc.note_on(midi_note, 127);
+    let output: Vec<f64> = (0..num_samples).map(|_| proc.process(0.0)).collect();
+    (output, proc)
+}
+
+/// Helper: compute peak absolute value of a signal.
+fn peak(buf: &[f64]) -> f64 {
+    buf.iter().map(|x| x.abs()).fold(0.0_f64, f64::max)
+}
+
+/// Helper: count zero crossings (sign changes) in a buffer.
+fn zero_crossings(buf: &[f64]) -> usize {
+    buf.windows(2)
+        .filter(|w| w[0].signum() != w[1].signum() && w[0] != 0.0)
+        .count()
+}
+
+#[test]
+fn vco_produces_audio_without_trigger() {
+    // A VCO should produce audio continuously — it doesn't need a trigger.
+    // Minimal circuit: VCO → output resistor → out
+    let src = r#"
+pedal "VCO TEST" subtitle "VCO direct output" {
+  components {
+    OSC: vco(cem3340, 440, saw)
+    R_out: resistor(10k)
+  }
+  nets {
+    OSC.out -> R_out.a
+    R_out.b -> out
+  }
+  controls {}
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    eprintln!("=== VCO TEST ===");
+    eprintln!("{}", proc.debug_dump());
+
+    // VCO should produce sound without any trigger
+    let output: Vec<f64> = (0..4800).map(|_| proc.process(0.0)).collect();
+    let p = peak(&output);
+    eprintln!("VCO peak: {p}");
+    eprintln!("first 10 samples: {:?}", &output[..10]);
+    assert!(p > 0.01, "VCO should produce non-zero output, peak={p}");
+
+    // Should oscillate at ~440Hz → ~18 crossings per 100 samples
+    let zc = zero_crossings(&output[..1000]);
+    eprintln!("VCO zero crossings (1000 samples): {zc}");
+    assert!(zc > 5, "VCO should oscillate, got {zc} zero crossings");
+}
+
+#[test]
+fn vca_gates_signal_on_trigger() {
+    // VCA with trigger: should be silent before trigger, produce sound after.
+    // VCO → VCA → out, VCA gated by trigger.
+    let src = r#"
+pedal "VCA GATE" subtitle "VCA envelope gating test" {
+  components {
+    T1: trigger_input()
+    OSC: vco(cem3340, 440, pulse)
+    AMP: vca(v2164)
+    R_out: resistor(10k)
+  }
+  nets {
+    OSC.out -> AMP.in
+    AMP.out -> R_out.a
+    R_out.b -> out
+    T1.out -> AMP.cv
+  }
+  controls {
+    T1.trigger -> midi(60)
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    eprintln!("=== VCA GATE TEST ===");
+    eprintln!("{}", proc.debug_dump());
+
+    // Before trigger: VCA should be closed (envelope at 0), output ~silent
+    let pre_trigger: Vec<f64> = (0..480).map(|_| proc.process(0.0)).collect();
+    let pre_peak = peak(&pre_trigger);
+    eprintln!("pre-trigger peak: {pre_peak}");
+
+    // Fire trigger
+    proc.note_on(60, 127);
+
+    // After trigger: VCA envelope opens, VCO audio passes through
+    let post_trigger: Vec<f64> = (0..4800).map(|_| proc.process(0.0)).collect();
+    let post_peak = peak(&post_trigger);
+    eprintln!("post-trigger peak: {post_peak}");
+    eprintln!("post-trigger first 20: {:?}", &post_trigger[..20]);
+
+    assert!(
+        post_peak > pre_peak * 10.0 || post_peak > 0.01,
+        "VCA should open after trigger: pre={pre_peak}, post={post_peak}"
+    );
+}
+
+#[test]
+fn tr808_bass_trigger_produces_sound() {
+    // The 808 bass drum is a passive RLC tank — should ring when triggered.
+    let src = r#"
+pedal "808 BASS" subtitle "Resonant bass drum" {
+  components {
+    T1: trigger_input()
+    R_damp: resistor(2.2)
+    L1: inductor(100m)
+    C_tank: cap(82u)
+    R_out: resistor(10k)
+  }
+  nets {
+    T1.out -> R_damp.a
+    R_damp.b -> L1.a
+    L1.b -> C_tank.a
+    C_tank.b -> gnd
+    R_damp.b -> R_out.a
+    R_out.b -> out
+  }
+  controls {
+    T1.trigger -> midi(36)
+  }
+}
+"#;
+    let (output, proc) = trigger_and_collect(src, 36, 4800);
+    eprintln!("=== 808 BASS TEST ===");
+    eprintln!("{}", proc.debug_dump());
+    let p = peak(&output);
+    let zc = zero_crossings(&output[..2400]);
+    eprintln!("peak: {p}, zero crossings: {zc}");
+    eprintln!("first 20: {:?}", &output[..20]);
+
+    assert!(p > 1e-4, "808 bass should produce output, peak={p}");
+    // ~55 Hz at 48kHz = ~2.3 crossings per 100 samples → ~55 in 2400
+    assert!(zc > 5, "808 bass should oscillate, got {zc} zero crossings");
+}
+
+#[test]
+fn tr808_cowbell_trigger_produces_sound() {
+    // Cowbell: two VCOs (540Hz + 800Hz) → mix → VCA gated by trigger → out.
+    // Simplified version without bandpass to isolate VCO→VCA path.
+    let src = r#"
+pedal "808 COWBELL" subtitle "Dual VCO cowbell" {
+  components {
+    T1: trigger_input()
+    VCO_lo: vco(cem3340, 540, pulse)
+    VCO_hi: vco(cem3340, 800, pulse)
+    R_mix_lo: resistor(10k)
+    R_mix_hi: resistor(10k)
+    AMP: vca(v2164)
+    R_out: resistor(10k)
+  }
+  nets {
+    VCO_lo.out -> R_mix_lo.a
+    VCO_hi.out -> R_mix_hi.a
+    R_mix_lo.b -> R_mix_hi.b
+    R_mix_lo.b -> AMP.in
+    AMP.out -> R_out.a
+    R_out.b -> out
+    T1.out -> AMP.cv
+  }
+  controls {
+    T1.trigger -> midi(56)
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    eprintln!("=== COWBELL TEST ===");
+    eprintln!("{}", proc.debug_dump());
+
+    // Before trigger: should be silent (VCA closed)
+    let pre: Vec<f64> = (0..480).map(|_| proc.process(0.0)).collect();
+    let pre_peak = peak(&pre);
+    eprintln!("pre-trigger peak: {pre_peak}");
+
+    // Fire trigger
+    proc.note_on(56, 127);
+
+    // After trigger: VCO audio gated through VCA
+    let post: Vec<f64> = (0..4800).map(|_| proc.process(0.0)).collect();
+    let post_peak = peak(&post);
+    let zc = zero_crossings(&post[..2400]);
+    eprintln!("post-trigger peak: {post_peak}, zero crossings: {zc}");
+    eprintln!("first 20: {:?}", &post[..20]);
+
+    assert!(post_peak > 0.01, "cowbell should produce output after trigger, peak={post_peak}");
+    assert!(zc > 10, "cowbell should oscillate, got {zc} zero crossings");
+}
+
+#[test]
+fn multi_voice_triggers_are_independent() {
+    // Two RLC voices at different frequencies, each with their own trigger.
+    // Triggering one should NOT trigger the other.
+    let src = r#"
+pedal "DUAL PING" subtitle "Two independent voices" {
+  components {
+    T1: trigger_input()
+    T2: trigger_input()
+    R1: resistor(100)
+    L1: inductor(100m)
+    C1: cap(100n)
+    R2: resistor(100)
+    L2: inductor(50m)
+    C2: cap(47n)
+    Rm1: resistor(100k)
+    Rm2: resistor(100k)
+    R_out: resistor(10k)
+  }
+  nets {
+    T1.out -> R1.a
+    R1.b -> L1.a
+    L1.b -> C1.a
+    C1.b -> gnd
+    R1.b -> Rm1.a
+
+    T2.out -> R2.a
+    R2.b -> L2.a
+    L2.b -> C2.a
+    C2.b -> gnd
+    R2.b -> Rm2.a
+
+    Rm1.b -> Rm2.b
+    Rm1.b -> R_out.a
+    R_out.b -> out
+  }
+  controls {
+    T1.trigger -> midi(60)
+    T2.trigger -> midi(62)
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    eprintln!("=== DUAL PING TEST ===");
+    eprintln!("{}", proc.debug_dump());
+
+    // Fire only T1 (note 60)
+    proc.note_on(60, 127);
+    let output_t1: Vec<f64> = (0..2400).map(|_| proc.process(0.0)).collect();
+    let peak_t1 = peak(&output_t1);
+
+    // Reset by processing silence
+    for _ in 0..48000 { proc.process(0.0); }
+
+    // Fire only T2 (note 62)
+    proc.note_on(62, 127);
+    let output_t2: Vec<f64> = (0..2400).map(|_| proc.process(0.0)).collect();
+    let peak_t2 = peak(&output_t2);
+
+    eprintln!("T1 peak: {peak_t1}, T2 peak: {peak_t2}");
+
+    // Both should produce sound
+    assert!(peak_t1 > 1e-4, "T1 should produce output, peak={peak_t1}");
+    assert!(peak_t2 > 1e-4, "T2 should produce output, peak={peak_t2}");
+
+    // Voice 1: f ≈ 1/(2π√(0.1×100e-9)) ≈ 1592 Hz → ~66 crossings/1000 samples
+    // Voice 2: f ≈ 1/(2π√(0.05×47e-9)) ≈ 3282 Hz → ~137 crossings/1000 samples
+    // They should have different frequencies
+    let zc1 = zero_crossings(&output_t1[..1000]);
+    let zc2 = zero_crossings(&output_t2[..1000]);
+    eprintln!("T1 zero crossings: {zc1}, T2 zero crossings: {zc2}");
+    assert!(
+        (zc1 as f64 - zc2 as f64).abs() > 5.0,
+        "voices should have different frequencies: zc1={zc1}, zc2={zc2}"
+    );
+}
+
 fn parse(filename: &str) -> PedalDef {
     let path = find_example(filename);
     let src = std::fs::read_to_string(&path).unwrap();

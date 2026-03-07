@@ -98,6 +98,9 @@ pub(super) enum ControlTarget {
 pub(super) struct TriggerState {
     pub(super) amplitude: f64,
     pub(super) countdown: u32,
+    /// True on the sample when this trigger fired (before tick() clears countdown).
+    /// Used by VCA envelope gating which runs after tick().
+    pub(super) active_this_sample: bool,
     /// Index of the WDF stage this trigger injects into (None = global input).
     pub(super) target_stage: Option<usize>,
     /// Circuit graph node ID where this trigger injects its impulse.
@@ -110,6 +113,7 @@ impl TriggerState {
         Self {
             amplitude,
             countdown: 0,
+            active_this_sample: false,
             target_stage: None,
             injection_node: usize::MAX,
         }
@@ -118,11 +122,15 @@ impl TriggerState {
         self.countdown = 1;
     }
     /// Returns the impulse value for this sample (amplitude or 0.0).
+    /// Also sets `active_this_sample` so downstream consumers (VCA envelopes)
+    /// can detect the trigger even after countdown is decremented.
     pub(super) fn tick(&mut self) -> f64 {
         if self.countdown > 0 {
             self.countdown -= 1;
+            self.active_this_sample = true;
             self.amplitude
         } else {
+            self.active_this_sample = false;
             0.0
         }
     }
@@ -1881,10 +1889,15 @@ impl PedalProcessor for CompiledPedal {
 
         // Tick VCAs — apply envelope-gated amplitude modulation after WDF stages.
         for vca_binding in &mut self.vcas {
-            // Gate envelope from trigger
+            // Gate envelope from trigger: only call gate_on() when the trigger
+            // fires. Do NOT call gate_off() on subsequent samples — let the ADSR
+            // run its full cycle (attack→decay→sustain). For percussive use
+            // (sustain=0), the envelope naturally decays to zero.
             if let Some(trig_idx) = vca_binding.trigger_idx {
                 if let Some(trig) = self.triggers.get(trig_idx) {
-                    vca_binding.envelope.set_gate(trig.countdown > 0);
+                    if trig.active_this_sample {
+                        vca_binding.envelope.gate_on();
+                    }
                 }
             }
             let env_val = vca_binding.envelope.tick();
@@ -1908,6 +1921,18 @@ impl PedalProcessor for CompiledPedal {
 
             // Feed VCA output into the serial signal chain
             signal = output;
+        }
+
+        // If VCOs exist but no VCA consumed their output, sum VCO contributions
+        // directly into the signal chain. This handles VCO→out circuits without a VCA.
+        if !self.vcos.is_empty() && self.vcas.is_empty() {
+            for vco_binding in &self.vcos {
+                if let Some((_, val)) = self.node_signals.iter().rev()
+                    .find(|(nid, _)| *nid == vco_binding.output_node_id)
+                {
+                    signal += *val;
+                }
+            }
         }
 
         // Process through push-pull stages (differential tube amplifiers).

@@ -1172,7 +1172,13 @@ fn build_vca_bindings(
     for comp in &pedal.components {
         if let Some(_vca_comp) = comp.kind.as_any().downcast_ref::<VcaComp>() {
             let vca = crate::elements::Vca::new();
-            let envelope = crate::elements::AdsrEnvelope::new(sample_rate);
+            let mut envelope = crate::elements::AdsrEnvelope::new(sample_rate);
+            // Percussive defaults: fast attack, short decay, no sustain.
+            // The envelope naturally shapes the hit without needing gate_off.
+            envelope.set_attack(0.001);  // 1ms
+            envelope.set_decay(0.15);    // 150ms
+            envelope.set_sustain(0.0);   // no sustain — percussive
+            envelope.set_release(0.05);  // 50ms
 
             let mut input_node_id = usize::MAX;
             let mut output_node_id = usize::MAX;
@@ -1445,7 +1451,12 @@ pub fn compile_pedal_with_options(
             // Build one MNA stage per trigger, each with VS at the trigger's
             // injection node and output probe at out_node. Each voice stage
             // has independent reactive element state so voices decay independently.
-            let passive_edges: Vec<usize> = graph
+            //
+            // Each voice gets only the passive edges reachable from its trigger
+            // node through the passive subgraph. This ensures voices with
+            // different component values (e.g., different L/C for pitch) get
+            // distinct scattering matrices.
+            let all_passive_edges: Vec<usize> = graph
                 .edges
                 .iter()
                 .enumerate()
@@ -1455,11 +1466,116 @@ pub fn compile_pedal_with_options(
                 .map(|(i, _)| i)
                 .collect();
 
-            for (comp_id, trigger_node) in &graph.trigger_nodes {
+            // Build adjacency from passive edges for reachability flood-fill.
+            let mut passive_adj: HashMap<NodeId, Vec<(NodeId, usize)>> = HashMap::new();
+            for &eidx in &all_passive_edges {
+                let e = &graph.edges[eidx];
+                passive_adj.entry(e.node_a).or_default().push((e.node_b, eidx));
+                passive_adj.entry(e.node_b).or_default().push((e.node_a, eidx));
+            }
+
+            // Distance-based voice assignment: each non-gnd node belongs to
+            // the nearest trigger. Equidistant nodes are shared (mix junctions).
+            // Build gnd-free adjacency for distance computation.
+            let mut adj_no_gnd: HashMap<NodeId, Vec<(NodeId, usize)>> = HashMap::new();
+            for &eidx in &all_passive_edges {
+                let e = &graph.edges[eidx];
+                if e.node_a != graph.gnd_node && e.node_b != graph.gnd_node {
+                    adj_no_gnd.entry(e.node_a).or_default().push((e.node_b, eidx));
+                    adj_no_gnd.entry(e.node_b).or_default().push((e.node_a, eidx));
+                }
+            }
+
+            // BFS from each trigger to compute distances.
+            let trigger_list: Vec<(String, NodeId)> = graph.trigger_nodes.clone();
+            let num_triggers = trigger_list.len();
+            let mut node_distances: HashMap<NodeId, Vec<usize>> = HashMap::new();
+            for (ti, (_, trigger_node)) in trigger_list.iter().enumerate() {
+                let mut dist: HashMap<NodeId, usize> = HashMap::new();
+                let mut queue = std::collections::VecDeque::new();
+                dist.insert(*trigger_node, 0);
+                queue.push_back(*trigger_node);
+                while let Some(node) = queue.pop_front() {
+                    let d = dist[&node];
+                    if let Some(neighbors) = adj_no_gnd.get(&node) {
+                        for &(neighbor, _) in neighbors {
+                            if !dist.contains_key(&neighbor) {
+                                dist.insert(neighbor, d + 1);
+                                queue.push_back(neighbor);
+                            }
+                        }
+                    }
+                }
+                for (&node, &d) in &dist {
+                    let dists = node_distances
+                        .entry(node)
+                        .or_insert_with(|| vec![usize::MAX; num_triggers]);
+                    dists[ti] = d;
+                }
+            }
+
+            // Assign nodes to their closest trigger. Equidistant = shared.
+            let mut voice_nodes: Vec<HashSet<NodeId>> =
+                vec![HashSet::new(); num_triggers];
+            let mut shared_nodes: HashSet<NodeId> = HashSet::new();
+            for (node, dists) in &node_distances {
+                let min_d = *dists.iter().min().unwrap_or(&usize::MAX);
+                if min_d == usize::MAX {
+                    continue;
+                }
+                let closest: Vec<usize> = dists
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &d)| d == min_d)
+                    .map(|(i, _)| i)
+                    .collect();
+                if closest.len() == 1 {
+                    voice_nodes[closest[0]].insert(*node);
+                } else {
+                    shared_nodes.insert(*node);
+                }
+            }
+
+            // Shared output edges: edges between shared nodes and/or output.
+            let all_voice_nodes: HashSet<NodeId> =
+                voice_nodes.iter().flatten().copied().collect();
+            let mut shared_output_edges: HashSet<usize> = HashSet::new();
+            for &eidx in &all_passive_edges {
+                let e = &graph.edges[eidx];
+                let a_shared = shared_nodes.contains(&e.node_a)
+                    || (!all_voice_nodes.contains(&e.node_a)
+                        && e.node_a != graph.gnd_node);
+                let b_shared = shared_nodes.contains(&e.node_b)
+                    || (!all_voice_nodes.contains(&e.node_b)
+                        && e.node_b != graph.gnd_node);
+                if a_shared && b_shared {
+                    shared_output_edges.insert(eidx);
+                }
+            }
+
+            for (voice_idx, (comp_id, trigger_node)) in
+                trigger_list.iter().enumerate()
+            {
+                // Voice edges: edges with at least one non-shared endpoint
+                // owned by this voice, plus shared output edges.
+                let voice_set = &voice_nodes[voice_idx];
+                let mut voice_edges: HashSet<usize> = HashSet::new();
+                for &eidx in &all_passive_edges {
+                    let e = &graph.edges[eidx];
+                    if voice_set.contains(&e.node_a)
+                        || voice_set.contains(&e.node_b)
+                    {
+                        voice_edges.insert(eidx);
+                    }
+                }
+                voice_edges.extend(&shared_output_edges);
+                let voice_passive_edges: Vec<usize> =
+                    voice_edges.into_iter().collect();
+
                 let stage_idx = stages.len();
                 if let Some(mut voice_stage) = build_orphan_output_mna_stage(
                     &graph,
-                    &passive_edges,
+                    &voice_passive_edges,
                     *trigger_node,
                     graph.out_node,
                     100_000.0, // 100kΩ probe — matches typical mix bus impedance
