@@ -283,6 +283,7 @@ fn build_passive_wdf_stage(
                 is_trigger_voice: false,
                 sample_counter: 0,
                 root_comp_id: String::new(),
+                is_supply_driven: false,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -593,6 +594,7 @@ fn build_passive_rtype_from_decomposed(
         is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
+        is_supply_driven: false,
     })
 }
 
@@ -906,6 +908,7 @@ fn build_output_rooted_stage(
         is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
+        is_supply_driven: false,
     })
 }
 
@@ -1803,6 +1806,7 @@ pub fn compile_pedal_with_options(
             order.push((StageRef::MultiNl(i), s.signal_flow_distance));
         }
         order.sort_by_key(|(_, dist)| *dist);
+        eprintln!("[stage-order] {:?}", order.iter().map(|(sr, d)| format!("{:?}={}", sr, d)).collect::<Vec<_>>());
         order.into_iter().map(|(sr, _)| sr).collect::<Vec<_>>()
     };
 

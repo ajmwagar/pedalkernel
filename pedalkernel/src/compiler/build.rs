@@ -417,9 +417,9 @@ pub(super) fn build_stages(
             {
                 multi_nl.transformer_gain =
                     compute_transformer_gain(&plan.passive_idxs, graph, &transformer_subtrees);
-                // Use element's BFS distance for ordering (injection node may
-                // default to in_node when plate/cathode passives lack dist_from_in).
-                multi_nl.signal_flow_distance = elem.distance;
+                // Use island-depth when available (boundary-split stages),
+                // else element's BFS distance for ordering.
+                multi_nl.signal_flow_distance = plan.signal_chain_depth.unwrap_or(elem.distance);
                 fallback_multi_nl.push(multi_nl);
             }
             continue;
@@ -476,11 +476,16 @@ pub(super) fn build_stages(
                 }
             }
 
-            stage.signal_flow_distance = classified
-                .dist_from_in
-                .get(&plan.injection_node)
-                .copied()
-                .unwrap_or(usize::MAX);
+            stage.signal_flow_distance = if let Some(depth) = plan.signal_chain_depth {
+                // Boundary-split stage: use island depth for correct ordering.
+                depth
+            } else {
+                classified
+                    .dist_from_in
+                    .get(&plan.injection_node)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            };
             stage.transformer_gain =
                 compute_transformer_gain(&plan.passive_idxs, graph, &transformer_subtrees);
             stages.push(stage);
@@ -541,6 +546,7 @@ pub(super) fn build_stages(
             is_trigger_voice: false,
             sample_counter: 0,
             root_comp_id: String::new(),
+            is_supply_driven: false,
         });
     }
 
@@ -750,6 +756,8 @@ fn build_triode_mna_fallback(
         compensation: plan.compensation,
         output_node: None,
         ota_vccs: Vec::new(),
+        output_dc_block: None,
+        signal_chain_depth: None,
     };
 
     try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling)
@@ -839,6 +847,8 @@ fn build_diode_mna_fallback(
         compensation: plan.compensation,
         output_node: None,
         ota_vccs: Vec::new(),
+        output_dc_block: None,
+        signal_chain_depth: None,
     };
 
     try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling)
@@ -1384,11 +1394,13 @@ fn build_rtype_stage(
             None
         };
 
-        let signal_flow_distance = classified
-            .dist_from_in
-            .get(&plan.injection_node)
-            .copied()
-            .unwrap_or(usize::MAX);
+        let signal_flow_distance = plan.signal_chain_depth.unwrap_or_else(|| {
+            classified
+                .dist_from_in
+                .get(&plan.injection_node)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
 
         let state_space_data = super::stage::StateSpaceData {
             x: vec![0.0; n_states],
@@ -1431,6 +1443,7 @@ fn build_rtype_stage(
             extract_coeffs: None,
             extract_vs: 0.0,
             state_space: Some(state_space_data),
+            output_dc_block: plan.output_dc_block,
         });
     }
 
@@ -1816,11 +1829,15 @@ fn build_rtype_stage(
         None
     };
 
-    let signal_flow_distance = classified
-        .dist_from_in
-        .get(&plan.injection_node)
-        .copied()
-        .unwrap_or(usize::MAX);
+    // Use island-depth (boundary crossings from input) for reliable ordering
+    // of boundary-split stages where hub shortcuts collapse dist_from_in.
+    let signal_flow_distance = plan.signal_chain_depth.unwrap_or_else(|| {
+        classified
+            .dist_from_in
+            .get(&plan.injection_node)
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
 
     let injection_node_id = plan.injection_node;
     let output_node_id = if let Some(out_node) = plan.output_node {
@@ -1876,6 +1893,7 @@ fn build_rtype_stage(
         extract_coeffs,
         extract_vs,
         state_space: None,
+        output_dc_block: plan.output_dc_block,
     })
 }
 
@@ -1932,6 +1950,34 @@ fn try_build_multi_nl_stage(
     } else {
         sp_decompose(&plan.passive_edge_indices, &junction_nodes, graph)
     };
+
+    {
+        let subtree_info: Vec<String> = decomposed
+            .wdf_subtrees
+            .iter()
+            .map(|st| format!("attach={} far={}", st.attachment_node, st.far_node))
+            .collect();
+        let residual_names: Vec<String> = decomposed
+            .residual_edges
+            .iter()
+            .map(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                format!("{}({}→{})", comp.id, graph.edges[eidx].node_a, graph.edges[eidx].node_b)
+            })
+            .collect();
+        let elem_names: Vec<String> = plan
+            .nl_element_indices
+            .iter()
+            .map(|&idx| {
+                let elem = &classified.nonlinear_elements[idx];
+                graph.components[graph.edges[elem.edge_idx].comp_idx].id.clone()
+            })
+            .collect();
+        eprintln!(
+            "[sp-decompose] elems={:?} subtrees={:?} residual={:?}",
+            elem_names, subtree_info, residual_names,
+        );
+    }
 
     build_rtype_stage(&decomposed, plan, classified, graph, sample_rate, oversampling)
 }
@@ -2149,6 +2195,7 @@ fn build_vs_stage(
         is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
+        is_supply_driven: plan.supply_driven,
     })
 }
 
@@ -2215,6 +2262,7 @@ fn build_source_follower_stage(
         is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
+        is_supply_driven: false,
     })
 }
 

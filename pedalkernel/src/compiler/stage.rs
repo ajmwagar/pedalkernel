@@ -313,6 +313,10 @@ pub(super) struct WdfStage {
     /// Only meaningful when `runtime-warnings` feature is enabled.
     #[allow(dead_code)]
     pub(super) root_comp_id: String,
+    /// When true, VS drives the device's supply voltage (v_max/Vcc) instead
+    /// of the input signal. Used for boundary-split BJTs where the base
+    /// coupling cap was removed and signal enters via set_control_voltage().
+    pub(super) is_supply_driven: bool,
 }
 
 impl WdfStage {
@@ -366,12 +370,20 @@ impl WdfStage {
             // - Triode: VS = B+ supply (plate bias)
             // - Source follower: VS = 0 (input goes to gate, not VS)
             // - Other: VS = input * compensation
+            let is_supply = self.is_supply_driven;
             let vs_voltage = if let RootKind::Triode(t) = root {
                 t.v_max()
             } else if let RootKind::VariMu(t) = root {
                 t.v_max()
             } else if is_sf {
                 0.0 // Source follower: input modulates Vgs, not VS
+            } else if is_supply {
+                // Boundary-split BJT: VS drives Vcc supply, input via set_control_voltage
+                match root {
+                    RootKind::BjtNpn(bjt) => bjt.v_max(),
+                    RootKind::BjtPnp(bjt) => bjt.v_max(),
+                    _ => sample * compensation,
+                }
             } else {
                 sample * compensation
             };
@@ -1519,6 +1531,10 @@ pub(super) struct MultiNlStage {
     /// WDF scattering. Used for linearized OTA stages where cap port
     /// conductances overwhelm circuit conductances.
     pub(super) state_space: Option<StateSpaceData>,
+    /// DC-block filter for boundary coupling cap at this stage's output.
+    /// (a1, b0, y_prev, x_prev) — single-pole IIR highpass.
+    /// Used when reactive-boundary decomposition splits cascaded NL stages.
+    pub(super) output_dc_block: Option<(f64, f64, f64, f64)>,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -1618,9 +1634,19 @@ impl MultiNlStage {
         let n_passive = self.passive_children.len();
         let output_port = self.output_port;
 
-        // Set control voltages on each NL device (only for independent devices;
-        // grouped devices get their grid voltage from the WDF port).
-        if self.device_groups.is_none() {
+        // Set control voltages on each NL device.
+        // For independent devices, set directly. For grouped devices,
+        // multi-port groups (TriodeThreePort, VariMuThreePort) get grid
+        // voltage from the WDF port, but SinglePort wrappers (e.g., BJT
+        // in a mixed BJT+Diode stage) still need explicit control voltage.
+        if let Some(ref mut dg) = self.device_groups {
+            let bias_offset = self.veb_bias_offset;
+            for group in &mut dg.groups {
+                if let NlDeviceGroupKind::SinglePort(ref mut device) = group {
+                    device.set_control_voltage(input, compensation, bias_offset);
+                }
+            }
+        } else {
             let bias_offset = self.veb_bias_offset;
             for device in &mut self.nl_devices {
                 device.set_control_voltage(input, compensation, bias_offset);
@@ -1648,6 +1674,14 @@ impl MultiNlStage {
                 known_a[i] = a_i;
             }
 
+            #[cfg(feature = "debug-trace")]
+            {
+                static NR_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = NR_TRACE.fetch_add(1, Ordering::Relaxed);
+                if n < 5 {
+                    eprintln!("[NR-input] n_nl={} sample={:.6e} comp={} known_a={:?} b_passive={:?} b_adapted={:.6e} s_nl_adapted={:?}", n_nl, sample, compensation, known_a, b_passive, b_adapted, &self.scattering.s_nl_adapted);
+                }
+            }
             // 3. Multi-port NR solve (skipped when n_nl=0, e.g. linearized OTA)
             let b_nl = if n_nl == 0 {
                 // No NR ports — signal propagation is fully encoded in S matrix.
@@ -1687,6 +1721,14 @@ impl MultiNlStage {
                 )
             };
 
+            #[cfg(feature = "debug-trace")]
+            {
+                static NR_TRACE2: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = NR_TRACE2.fetch_add(1, Ordering::Relaxed);
+                if n < 5 {
+                    eprintln!("[NR-output] b_nl={:?} v_prev={:?}", b_nl, self.v_prev);
+                }
+            }
             // 4. Build full b-vector for scatter_down:
             //    With VS injection: [b_nl_0..., b_passive_0...] (no adapted port)
             //    Without:           [b_nl_0..., b_passive_0..., b_adapted]
@@ -1786,6 +1828,14 @@ impl MultiNlStage {
             }
         }
 
+        // Apply DC-blocking filter for boundary coupling caps.
+        if let Some((a1, b0, ref mut y_prev, ref mut x_prev)) = self.output_dc_block {
+            let y = b0 * (output - *x_prev) + a1 * *y_prev;
+            *x_prev = output;
+            *y_prev = flush_denormal(y);
+            return *y_prev;
+        }
+
         flush_denormal(output)
     }
 
@@ -1819,6 +1869,10 @@ impl MultiNlStage {
             for v in &mut ss.x {
                 *v = 0.0;
             }
+        }
+        if let Some((_, _, ref mut y_prev, ref mut x_prev)) = self.output_dc_block {
+            *y_prev = 0.0;
+            *x_prev = 0.0;
         }
         self.oversampler.reset();
     }

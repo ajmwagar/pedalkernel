@@ -2284,6 +2284,7 @@ pub(super) fn sp_decompose(
 
         if comp.bordering_junctions.len() == 1 {
             // Pendant: hangs off exactly one junction node → try SP reduce.
+
             let &junction = comp.bordering_junctions.iter().next().unwrap();
 
             // Build SP edges for this pendant.

@@ -48,6 +48,12 @@ pub(super) struct StagePlan {
     pub(super) dc_block: Option<(f64, f64, f64, f64)>,
     /// Compensation factor (from triode mu, OTA feedback, etc.)
     pub(super) compensation: f64,
+    /// Signal chain depth (boundary crossings from input). Used for stage ordering.
+    pub(super) signal_chain_depth: Option<usize>,
+    /// Whether VS should drive supply voltage (Vcc) instead of input signal.
+    /// Set for boundary-split BJTs where the base coupling cap was removed.
+    /// Signal enters via set_control_voltage() only; VS models DC supply.
+    pub(super) supply_driven: bool,
 }
 
 /// Virtual edge connecting internal terminals of 3-terminal elements.
@@ -97,6 +103,11 @@ pub(super) struct MultiNlPlan {
     pub(super) output_node: Option<NodeId>,
     /// Linearized OTA VCCS stamps for the MNA.
     pub(super) ota_vccs: Vec<OtaVccsInfo>,
+    /// DC-block filter for boundary coupling cap at this stage's output.
+    /// (a1, b0, y_prev, x_prev) — single-pole IIR highpass.
+    pub(super) output_dc_block: Option<(f64, f64, f64, f64)>,
+    /// Signal chain depth (boundary crossings from input). Used for stage ordering.
+    pub(super) signal_chain_depth: Option<usize>,
 }
 
 /// Info for stamping a linearized OTA as a VCCS in the MNA.
@@ -124,6 +135,198 @@ fn edge_kind(graph: &CircuitGraph, edge_idx: usize) -> EdgeKind {
         .first()
         .map(|e| e.kind)
         .unwrap_or(EdgeKind::Linear)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Reactive boundary detection
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Find reactive edges (coupling caps) that separate distinct NL islands.
+///
+/// Builds connected components using only Linear + Nonlinear edges (skipping
+/// Reactive, Behavioral, Vccs, and sidechain edges). A Reactive edge whose
+/// both non-hub endpoints lie in different components is a boundary.
+///
+/// Hub nodes (gnd, vcc, supply, in, out) are excluded from the "different
+/// component" check — a cap from a hub to an island node is always internal
+/// (e.g., input coupling cap or bypass cap to ground).
+/// Result of reactive boundary analysis: boundary edge indices + island union-find.
+struct ReactiveAnalysis {
+    boundary_edges: HashSet<usize>,
+    /// Union-find of non-hub nodes connected by Linear/Nonlinear edges.
+    uf: UnionFind,
+    n_nodes: usize,
+}
+
+fn find_reactive_boundaries(
+    graph: &CircuitGraph,
+    classified: &ClassifiedCircuit,
+) -> ReactiveAnalysis {
+    // Compute upper bound on node count from all edge endpoints.
+    let n_nodes = graph
+        .edges
+        .iter()
+        .flat_map(|e| [e.node_a, e.node_b])
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
+    if n_nodes == 0 {
+        return ReactiveAnalysis {
+            boundary_edges: HashSet::new(),
+            uf: UnionFind::new(0),
+            n_nodes: 0,
+        };
+    }
+    let mut uf = UnionFind::new(n_nodes);
+
+    let is_hub = |node: NodeId| -> bool {
+        node == graph.gnd_node
+            || node == graph.vcc_node
+            || node == graph.in_node
+            || node == graph.out_node
+            || graph.supply_nodes.contains(&node)
+    };
+
+    // Union nodes connected by Linear or Nonlinear edges only.
+    // Skip edges touching hub nodes — hubs (gnd, vcc, supply, in, out) are
+    // AC ground and should not propagate connectivity between islands.
+    // E.g., Q1.collector→vcc via R3 and Q2.collector→vcc via R6 doesn't
+    // make Q1 and Q2 the same island.
+    for (eidx, e) in graph.edges.iter().enumerate() {
+        if classified.sidechain_edge_set.contains(&eidx) {
+            continue;
+        }
+        // Don't union through hub nodes.
+        if is_hub(e.node_a) || is_hub(e.node_b) {
+            continue;
+        }
+        let kind = edge_kind(graph, eidx);
+        match kind {
+            EdgeKind::Linear | EdgeKind::Nonlinear => {
+                uf.union(e.node_a, e.node_b);
+            }
+            _ => {} // Reactive, Behavioral, Vccs — don't union
+        }
+    }
+
+    // Identify boundary reactive edges.
+    let mut boundaries = HashSet::new();
+    for (eidx, e) in graph.edges.iter().enumerate() {
+        if classified.sidechain_edge_set.contains(&eidx) {
+            continue;
+        }
+        let kind = edge_kind(graph, eidx);
+        if kind != EdgeKind::Reactive {
+            continue;
+        }
+        // If either endpoint is a hub, the cap is internal (bypass/input cap).
+        if is_hub(e.node_a) || is_hub(e.node_b) {
+            continue;
+        }
+        // Both endpoints are non-hub — check if in different components.
+        if uf.find(e.node_a) != uf.find(e.node_b) {
+            boundaries.insert(eidx);
+        }
+    }
+
+    ReactiveAnalysis {
+        boundary_edges: boundaries,
+        uf,
+        n_nodes,
+    }
+}
+
+/// Compute island depth for each NL element: number of boundary edges
+/// between the element's island and the input node's island.
+///
+/// This gives correct signal chain ordering even when BFS distances
+/// through hub nodes collapse to uniform values.
+fn compute_island_depths(
+    analysis: &mut ReactiveAnalysis,
+    graph: &CircuitGraph,
+    classified: &ClassifiedCircuit,
+) -> HashMap<usize, usize> {
+    if analysis.boundary_edges.is_empty() {
+        return HashMap::new();
+    }
+
+    // Find the input node's island root. If in_node is a hub (which it is),
+    // find the island connected to input via the first non-boundary edge from in_node.
+    let input_island = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(eidx, e)| {
+            !analysis.boundary_edges.contains(eidx)
+                && (e.node_a == graph.in_node || e.node_b == graph.in_node)
+        })
+        .filter_map(|(_, e)| {
+            let other = if e.node_a == graph.in_node {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            // Must be a non-hub node to have a valid island root.
+            let is_hub = other == graph.gnd_node
+                || other == graph.vcc_node
+                || other == graph.out_node
+                || graph.supply_nodes.contains(&other);
+            if is_hub {
+                None
+            } else {
+                Some(analysis.uf.find(other))
+            }
+        })
+        .next();
+
+    let Some(input_root) = input_island else {
+        return HashMap::new();
+    };
+
+    // BFS on the island graph: nodes = island roots, edges = boundary edges.
+    let mut island_depth: HashMap<usize, usize> = HashMap::new();
+    island_depth.insert(input_root, 0);
+    let mut queue = VecDeque::new();
+    queue.push_back(input_root);
+
+    while let Some(current) = queue.pop_front() {
+        let depth = island_depth[&current];
+        for &be in &analysis.boundary_edges {
+            let e = &graph.edges[be];
+            let root_a = analysis.uf.find(e.node_a);
+            let root_b = analysis.uf.find(e.node_b);
+            if root_a == current && !island_depth.contains_key(&root_b) {
+                island_depth.insert(root_b, depth + 1);
+                queue.push_back(root_b);
+            } else if root_b == current && !island_depth.contains_key(&root_a) {
+                island_depth.insert(root_a, depth + 1);
+                queue.push_back(root_a);
+            }
+        }
+    }
+
+    // Map each NL element to its island depth.
+    let mut elem_depths: HashMap<usize, usize> = HashMap::new();
+    for (idx, elem) in classified.nonlinear_elements.iter().enumerate() {
+        let edge = &graph.edges[elem.edge_idx];
+        // Use whichever endpoint is non-hub.
+        let node = if edge.node_a != graph.gnd_node
+            && edge.node_a != graph.vcc_node
+            && !graph.supply_nodes.contains(&edge.node_a)
+        {
+            edge.node_a
+        } else {
+            edge.node_b
+        };
+        if node < analysis.n_nodes {
+            let root = analysis.uf.find(node);
+            if let Some(&depth) = island_depth.get(&root) {
+                elem_depths.insert(idx, depth);
+            }
+        }
+    }
+
+    elem_depths
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -172,14 +375,168 @@ impl UnionFind {
 
 /// Group nonlinear elements by connectivity through passive edges (Rule 1).
 ///
+/// Check whether two NL elements have mutual resistive coupling that requires
+/// simultaneous solving in an R-type.
+///
+/// Two NL elements need grouping only if there are ≥2 distinct resistive paths
+/// between them (a cycle in the resistive graph containing both). A single shared
+/// node gives one path. A feedback resistor gives the second. Two paths = loop =
+/// mutual dependency → group. One path = feedforward → solve sequentially.
+///
+/// Examples:
+/// - Fuzz Face Q1+Q2: shared emitter node + feedback resistor = 2 paths → group
+/// - Big Muff Q2+D1: shared collector node only = 1 path → split
+fn has_mutual_resistive_coupling(
+    seed: &NonlinearElement,
+    other: &NonlinearElement,
+    graph: &CircuitGraph,
+    classified: &ClassifiedCircuit,
+    boundary_edges: &HashSet<usize>,
+) -> bool {
+    // Collect terminal nodes for both elements (non-hub only).
+    let is_hub = |node: NodeId| -> bool {
+        node == graph.gnd_node
+            || node == graph.vcc_node
+            || node == graph.in_node
+            || node == graph.out_node
+            || graph.supply_nodes.contains(&node)
+    };
+
+    let seed_nodes: HashSet<NodeId> = {
+        let e = &graph.edges[seed.edge_idx];
+        let mut nodes: HashSet<NodeId> = [e.node_a, e.node_b]
+            .into_iter()
+            .filter(|n| !is_hub(*n))
+            .collect();
+        // Include base/grid node.
+        match &seed.kind {
+            NonlinearKind::BjtNpn { base_node, .. }
+            | NonlinearKind::BjtPnp { base_node, .. } => {
+                if !is_hub(*base_node) {
+                    nodes.insert(*base_node);
+                }
+            }
+            NonlinearKind::Triode {
+                grid_node: Some(gn),
+                ..
+            } => {
+                if !is_hub(*gn) {
+                    nodes.insert(*gn);
+                }
+            }
+            _ => {}
+        }
+        nodes
+    };
+
+    let other_nodes: HashSet<NodeId> = {
+        let e = &graph.edges[other.edge_idx];
+        let mut nodes: HashSet<NodeId> = [e.node_a, e.node_b]
+            .into_iter()
+            .filter(|n| !is_hub(*n))
+            .collect();
+        match &other.kind {
+            NonlinearKind::BjtNpn { base_node, .. }
+            | NonlinearKind::BjtPnp { base_node, .. } => {
+                if !is_hub(*base_node) {
+                    nodes.insert(*base_node);
+                }
+            }
+            NonlinearKind::Triode {
+                grid_node: Some(gn),
+                ..
+            } => {
+                if !is_hub(*gn) {
+                    nodes.insert(*gn);
+                }
+            }
+            _ => {}
+        }
+        nodes
+    };
+
+    // Count shared non-hub nodes — each shared node is one direct path.
+    let shared_nodes: usize = seed_nodes.intersection(&other_nodes).count();
+
+    // Count distinct resistive paths between any seed terminal and any other terminal.
+    // BFS through Linear edges only (no NL, no Reactive, no boundary).
+    // Each path found beyond the shared-node count indicates a resistive feedback loop.
+    let mut path_count = shared_nodes;
+    if path_count >= 2 {
+        return true;
+    }
+
+    // BFS from seed's non-hub terminal nodes through Linear edges.
+    // If we can reach any of other's terminal nodes via a path that doesn't
+    // go through a shared node, that's an additional resistive path.
+    for &start in &seed_nodes {
+        if other_nodes.contains(&start) {
+            continue; // Skip shared nodes — already counted.
+        }
+        let mut visited: HashSet<NodeId> = HashSet::new();
+        visited.insert(start);
+        // Block traversal through shared nodes — we want to find paths
+        // that go around them (creating a cycle).
+        for &shared in seed_nodes.intersection(&other_nodes) {
+            visited.insert(shared);
+        }
+        let mut queue = VecDeque::new();
+        queue.push_back(start);
+        while let Some(node) = queue.pop_front() {
+            for (eidx, e) in graph.edges.iter().enumerate() {
+                if classified.all_nonlinear_edge_indices.contains(&eidx) {
+                    continue;
+                }
+                if classified.sidechain_edge_set.contains(&eidx) {
+                    continue;
+                }
+                if boundary_edges.contains(&eidx) {
+                    continue;
+                }
+                let neighbor = if e.node_a == node {
+                    Some(e.node_b)
+                } else if e.node_b == node {
+                    Some(e.node_a)
+                } else {
+                    None
+                };
+                let Some(n) = neighbor else { continue };
+                if is_hub(n) || !visited.insert(n) {
+                    continue;
+                }
+                if other_nodes.contains(&n) {
+                    // Found a resistive path from seed to other that avoids
+                    // shared nodes — this is a feedback loop.
+                    path_count += 1;
+                    if path_count >= 2 {
+                        return true;
+                    }
+                }
+                // Only traverse Linear edges (resistors, pots — not reactive/caps).
+                let kind = edge_kind(graph, eidx);
+                if matches!(kind, EdgeKind::Linear) {
+                    queue.push_back(n);
+                }
+            }
+        }
+    }
+
+    path_count >= 2
+}
+
 /// BFS from each NL element's terminal nodes through Linear/Reactive/NL edges.
 /// All NL elements reachable from each other without crossing Behavioral edges
 /// or global hub nodes (gnd, vcc, supply, in, out) → same group.
+///
+/// Two NL elements are only grouped if they have mutual resistive coupling
+/// (≥2 resistive paths between them, forming a feedback cycle). Elements with
+/// only a single shared node (feedforward topology) are kept in separate groups.
 ///
 /// Returns groups as Vec<Vec<usize>> (each inner Vec is classified element indices).
 fn group_nl_elements(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
+    boundary_edges: &HashSet<usize>,
 ) -> Vec<Vec<usize>> {
     let n = classified.nonlinear_elements.len();
     if n == 0 {
@@ -256,25 +613,40 @@ fn group_nl_elements(
                     match edge_kinds[eidx] {
                         EdgeKind::Behavioral => continue, // Rule 5: don't cross
                         EdgeKind::Nonlinear => {
-                            // Found another NL edge — union if it's a classified element.
+                            // Found another NL edge — union only if they have
+                            // mutual resistive coupling (≥2 resistive paths
+                            // forming a feedback cycle). Single shared node
+                            // = feedforward → keep separate.
                             if let Some(&other_idx) = edge_to_elem.get(&eidx) {
                                 if !visited_from.contains(&other_idx) {
-                                    visited_from.insert(other_idx);
-                                    uf.union(seed_elem_idx, other_idx);
-                                    // Expand BFS from the new element's terminals.
-                                    let other_edge = &graph.edges[eidx];
-                                    for n in [other_edge.node_a, other_edge.node_b] {
-                                        if visited_nodes.insert(n) && !is_hub(n) {
-                                            queue.push_back(n);
-                                        }
-                                    }
-                                    seed_extra_terminals(
-                                        &classified.nonlinear_elements[other_idx],
+                                    let seed_elem = &classified.nonlinear_elements[seed_elem_idx];
+                                    let other_elem = &classified.nonlinear_elements[other_idx];
+                                    if has_mutual_resistive_coupling(
+                                        seed_elem,
+                                        other_elem,
                                         graph,
-                                        &is_hub,
-                                        &mut visited_nodes,
-                                        &mut queue,
-                                    );
+                                        classified,
+                                        boundary_edges,
+                                    ) {
+                                        visited_from.insert(other_idx);
+                                        uf.union(seed_elem_idx, other_idx);
+                                        // Expand BFS from the new element's terminals.
+                                        let other_edge = &graph.edges[eidx];
+                                        for n in [other_edge.node_a, other_edge.node_b] {
+                                            if visited_nodes.insert(n) && !is_hub(n) {
+                                                queue.push_back(n);
+                                            }
+                                        }
+                                        seed_extra_terminals(
+                                            &classified.nonlinear_elements[other_idx],
+                                            graph,
+                                            &is_hub,
+                                            &mut visited_nodes,
+                                            &mut queue,
+                                        );
+                                    }
+                                    // Don't union feedforward elements, but still
+                                    // traverse through the node for BFS connectivity.
                                 }
                             }
                             // Traverse through NL edge nodes.
@@ -283,6 +655,10 @@ fn group_nl_elements(
                             }
                         }
                         _ => {
+                            // Skip boundary reactive edges — they separate NL islands.
+                            if boundary_edges.contains(&eidx) {
+                                continue;
+                            }
                             // Linear, Reactive, Vccs — traverse through.
                             if visited_nodes.insert(neighbor) && !is_hub(neighbor) {
                                 queue.push_back(neighbor);
@@ -347,8 +723,20 @@ pub(super) fn plan_stages(
     HashSet<usize>,
     BjtBiasAnalysis,
 ) {
+    // ── Pre-compute reactive boundaries ────────────────────────────────
+    // Only apply boundary splitting for circuits with 3+ NL elements.
+    // Simple cascaded pairs (2 triodes, etc.) work fine without splitting
+    // and are better served by the standard grouping pipeline.
+    let (boundary_edges, island_depths) = if classified.nonlinear_elements.len() >= 3 {
+        let mut analysis = find_reactive_boundaries(graph, classified);
+        let depths = compute_island_depths(&mut analysis, graph, classified);
+        (analysis.boundary_edges, depths)
+    } else {
+        (HashSet::new(), HashMap::new())
+    };
+
     // ── Step 1: Edge-based NL grouping ──────────────────────────────────
-    let groups = group_nl_elements(classified, graph);
+    let groups = group_nl_elements(classified, graph, &boundary_edges);
 
     // ── Step 2: Push-pull detection ─────────────────────────────────────
     // Triodes sharing a CT transformer get push-pull plans instead of
@@ -480,6 +868,7 @@ pub(super) fn plan_stages(
                 classified,
                 true, // skip_out_node
                 &pp_transformer_edges,
+                &HashSet::new(),
             );
 
             // Convert bjt_members to indices into bjt_terminals for bias detection.
@@ -564,6 +953,7 @@ pub(super) fn plan_stages(
                 source_node_offset,
                 sample_rate,
                 &pp_transformer_edges,
+                &boundary_edges,
             ) {
                 plans.push(plan);
             }
@@ -576,11 +966,40 @@ pub(super) fn plan_stages(
                 graph,
                 &pp_transformer_edges,
                 &bjt_bias_analysis,
+                &boundary_edges,
             ) {
                 multi_nl_plans.push(plan);
             }
         }
     }
+
+    // ── Set signal_chain_depth on all plans from island depths ─────────
+    if !island_depths.is_empty() {
+        for plan in plans.iter_mut() {
+            if let Some(&depth) = island_depths.get(&plan.element_idx) {
+                plan.signal_chain_depth = Some(depth);
+            }
+        }
+        for plan in multi_nl_plans.iter_mut() {
+            let min_depth = plan
+                .nl_element_indices
+                .iter()
+                .filter_map(|idx| island_depths.get(idx))
+                .min()
+                .copied();
+            plan.signal_chain_depth = min_depth;
+        }
+    }
+
+    // ── Compute dc_block for boundary coupling caps ────────────────────
+    compute_boundary_dc_blocks(
+        &boundary_edges,
+        &mut plans,
+        &mut multi_nl_plans,
+        graph,
+        classified,
+        sample_rate,
+    );
 
     (
         plans,
@@ -607,6 +1026,7 @@ fn plan_single_nl(
     source_node_offset: usize,
     sample_rate: f64,
     pp_transformer_edges: &HashSet<usize>,
+    boundary_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
     let is_two_junction = elem.junction_nodes.len() == 2;
 
@@ -619,6 +1039,7 @@ fn plan_single_nl(
             source_node_offset,
             sample_rate,
             pp_transformer_edges,
+            boundary_edges,
         )
     } else {
         plan_one_junction(elem, elem_idx, classified, graph, source_node_offset)
@@ -686,6 +1107,8 @@ fn plan_one_junction(
                 element_idx: elem_idx,
                 dc_block: None,
                 compensation: 1.0,
+                signal_chain_depth: None,
+                supply_driven: false,
             });
         }
 
@@ -707,6 +1130,8 @@ fn plan_one_junction(
             element_idx: elem_idx,
             dc_block: None,
             compensation: 1.0,
+            signal_chain_depth: None,
+            supply_driven: false,
         })
     } else {
         // Simple 1-junction: diode, MOSFET, zener, OTA.
@@ -737,6 +1162,8 @@ fn plan_one_junction(
             element_idx: elem_idx,
             dc_block: None,
             compensation,
+            signal_chain_depth: None,
+            supply_driven: false,
         })
     }
 }
@@ -750,6 +1177,7 @@ fn plan_two_junction(
     source_node_offset: usize,
     sample_rate: f64,
     pp_transformer_edges: &HashSet<usize>,
+    boundary_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
     let (node_a, node_b) = (elem.junction_nodes[0], elem.junction_nodes[1]);
 
@@ -792,6 +1220,51 @@ fn plan_two_junction(
         )
     };
 
+    // Base/grid passives — the input domain of the two-domain device.
+    // BJTs and triodes have a control terminal (base/grid) whose voltage
+    // determines the NL port current. The WDF tree needs these passives
+    // to compute Vbe/Vgk. BFS from base/grid collects the input coupling
+    // cap, bias resistors, and everything reachable within this stage.
+    let base_passives = match &elem.kind {
+        NonlinearKind::BjtNpn { base_node, .. }
+        | NonlinearKind::BjtPnp { base_node, .. } => {
+            if *base_node != graph.gnd_node {
+                let mut exclude = classified.all_nonlinear_edge_indices.clone();
+                exclude.extend(boundary_edges.iter().copied());
+                graph.bfs_passive_edges(
+                    *base_node,
+                    &exclude,
+                    &graph.active_edge_indices,
+                    true,
+                    true, // skip_out_node
+                    pp_transformer_edges,
+                )
+            } else {
+                Vec::new()
+            }
+        }
+        NonlinearKind::Triode {
+            grid_node: Some(gn),
+            ..
+        } => {
+            if *gn != graph.gnd_node {
+                let mut exclude = classified.all_nonlinear_edge_indices.clone();
+                exclude.extend(boundary_edges.iter().copied());
+                graph.bfs_passive_edges(
+                    *gn,
+                    &exclude,
+                    &graph.active_edge_indices,
+                    true,
+                    true,
+                    pp_transformer_edges,
+                )
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    };
+
     // Node A to output edges.
     let a_to_output: Vec<usize> = graph
         .edges
@@ -807,8 +1280,12 @@ fn plan_two_junction(
         .collect();
 
     // Output passives — for pentodes, only if the tube connects to out_node.
+    // For boundary-split stages, skip output passives entirely — the orphan
+    // output stage handles the output section.
     let is_pentode = matches!(&elem.kind, NonlinearKind::Pentode { .. });
-    let output_passives = if is_pentode && a_to_output.is_empty() {
+    let output_passives = if !boundary_edges.is_empty() {
+        Vec::new()
+    } else if is_pentode && a_to_output.is_empty() {
         Vec::new()
     } else {
         graph.elements_at_junction(
@@ -821,8 +1298,42 @@ fn plan_two_junction(
     let mut passive_idxs = a_passives.clone();
     extend_dedup(&mut passive_idxs, &a_supply_edges);
     extend_dedup(&mut passive_idxs, &b_passives);
+    // For boundary-split stages where a boundary cap touches the base/grid node,
+    // exclude base/grid passives from the WDF tree. The coupling cap that normally
+    // connects the base to the signal source has been removed (boundary edge),
+    // leaving only dead-end bias resistors (e.g., R5: base→gnd). These pendants
+    // corrupt the SP tree topology by getting redirected to the source terminal
+    // during dead-end preprocessing. Signal enters via set_control_voltage().
+    // Only BJTs need base passive exclusion: their VS drives the input signal
+    // (not a constant supply like triodes), so the dead-end base bias pendant
+    // corrupts the VS path. Triodes use VS=B+ (constant) and are unaffected.
+    let is_bjt = matches!(&elem.kind, NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. });
+    let base_severed_by_boundary = is_bjt && !boundary_edges.is_empty() && {
+        let base_node = match &elem.kind {
+            NonlinearKind::BjtNpn { base_node, .. }
+            | NonlinearKind::BjtPnp { base_node, .. } => Some(*base_node),
+            _ => None,
+        };
+        base_node.map_or(false, |bn| {
+            boundary_edges.iter().any(|&eidx| {
+                let e = &graph.edges[eidx];
+                e.node_a == bn || e.node_b == bn
+            })
+        })
+    };
+    if !base_severed_by_boundary {
+        extend_dedup(&mut passive_idxs, &base_passives);
+    }
     extend_dedup(&mut passive_idxs, &a_to_output);
     extend_dedup(&mut passive_idxs, &output_passives);
+
+    // For boundary-split BJTs, exclude boundary edges from the passive set.
+    // The coupling cap is replaced by a dc_block IIR. For triodes, the coupling
+    // cap stays in the WDF tree since VS=B+ (constant) and the cap's impedance
+    // is an integral part of the frequency response.
+    if base_severed_by_boundary {
+        passive_idxs.retain(|idx| !boundary_edges.contains(idx));
+    }
 
     // Transformer injection (1-hop from node_a through plate passives).
     let xfmr_inject = find_plate_transformers(&a_passives, node_a, graph);
@@ -913,6 +1424,8 @@ fn plan_two_junction(
         element_idx: elem_idx,
         dc_block,
         compensation,
+        signal_chain_depth: None,
+        supply_driven: base_severed_by_boundary,
     })
 }
 
@@ -1030,6 +1543,95 @@ fn compute_dc_block(
     }
 }
 
+/// Compute dc_block HPF coefficients for each reactive boundary edge and
+/// attach them to the upstream stage's plan.
+///
+/// For each boundary coupling cap, finds the downstream load resistance and
+/// computes bilinear-transformed RC HPF coefficients. The dc_block is attached
+/// to the stage whose junction nodes are closest to the upstream endpoint.
+fn compute_boundary_dc_blocks(
+    boundary_edges: &HashSet<usize>,
+    plans: &mut Vec<StagePlan>,
+    multi_nl_plans: &mut Vec<MultiNlPlan>,
+    graph: &CircuitGraph,
+    classified: &ClassifiedCircuit,
+    sample_rate: f64,
+) {
+    // Sort for deterministic iteration order.
+    let mut sorted_edges: Vec<usize> = boundary_edges.iter().copied().collect();
+    sorted_edges.sort();
+    for &eidx in &sorted_edges {
+        let e = &graph.edges[eidx];
+        let cap = match graph.components[e.comp_idx].kind.capacitance() {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Determine upstream/downstream by signal flow distance from input.
+        let dist_a = classified
+            .dist_from_in
+            .get(&e.node_a)
+            .copied()
+            .unwrap_or(usize::MAX);
+        let dist_b = classified
+            .dist_from_in
+            .get(&e.node_b)
+            .copied()
+            .unwrap_or(usize::MAX);
+        let (upstream_node, downstream_node) = if dist_a <= dist_b {
+            (e.node_a, e.node_b)
+        } else {
+            (e.node_b, e.node_a)
+        };
+
+        // Find downstream load resistance (first resistor at downstream node).
+        let r_load = graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(idx, edge)| {
+                *idx != eidx
+                    && (edge.node_a == downstream_node || edge.node_b == downstream_node)
+            })
+            .find_map(|(_, edge)| graph.components[edge.comp_idx].kind.resistance())
+            .unwrap_or(1e6); // fallback: 1MΩ
+
+        // Compute HPF coefficients (same math as compute_dc_block).
+        let omega = (std::f64::consts::PI * 2.0 / sample_rate) / (r_load * cap);
+        let omega_tan = omega.tan();
+        let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
+        let b0 = 1.0 / (1.0 + omega_tan);
+        let dc_block = (a1, b0, 0.0, 0.0);
+
+        // Find upstream stage and attach dc_block.
+        // Check StagePlan junction nodes.
+        let mut attached = false;
+        for plan in plans.iter_mut() {
+            let elem = &classified.nonlinear_elements[plan.element_idx];
+            if elem.junction_nodes.contains(&upstream_node) && plan.dc_block.is_none() {
+                plan.dc_block = Some(dc_block);
+                attached = true;
+                break;
+            }
+        }
+        if attached {
+            continue;
+        }
+        // Check MultiNlPlan NL terminals.
+        for plan in multi_nl_plans.iter_mut() {
+            if plan
+                .nl_terminals
+                .iter()
+                .any(|(a, b)| *a == upstream_node || *b == upstream_node)
+                && plan.output_dc_block.is_none()
+            {
+                plan.output_dc_block = Some(dc_block);
+                break;
+            }
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Multi-NL planning (Rule 3)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1044,6 +1646,7 @@ fn plan_multi_nl_group(
     graph: &CircuitGraph,
     pp_transformer_edges: &HashSet<usize>,
     bjt_bias_analysis: &BjtBiasAnalysis,
+    boundary_edges: &HashSet<usize>,
 ) -> Option<MultiNlPlan> {
     if elem_indices.is_empty() {
         return None;
@@ -1065,12 +1668,27 @@ fn plan_multi_nl_group(
     let mut ordered = elem_indices.to_vec();
     ordered.sort_by_key(|&idx| classified.nonlinear_elements[idx].distance);
 
-    // Collect all junction nodes.
+    // Collect all junction nodes + extra terminal nodes (base, grid).
+    // Including base/grid ensures BFS collects bias resistors and allows
+    // correct injection node detection.
     let mut all_junction_nodes: HashSet<NodeId> = HashSet::new();
     for &idx in &ordered {
         let elem = &classified.nonlinear_elements[idx];
         for &jn in &elem.junction_nodes {
             all_junction_nodes.insert(jn);
+        }
+        match &elem.kind {
+            NonlinearKind::BjtNpn { base_node, .. }
+            | NonlinearKind::BjtPnp { base_node, .. } => {
+                all_junction_nodes.insert(*base_node);
+            }
+            NonlinearKind::Triode {
+                grid_node: Some(gn),
+                ..
+            } => {
+                all_junction_nodes.insert(*gn);
+            }
+            _ => {}
         }
     }
 
@@ -1081,19 +1699,76 @@ fn plan_multi_nl_group(
         classified,
         true, // skip_out_node
         pp_transformer_edges,
+        boundary_edges,
     );
 
     // Remove BJT bias pot edges.
     all_passive_edges
         .retain(|eidx| !bjt_bias_analysis.bias_pot_edge_indices.contains(eidx));
 
-    let injection_node = find_injection_node_multi_nl(
-        &all_passive_edges,
-        graph,
-        classified,
-        &HashSet::new(),
-        graph.in_node,
-    );
+    // Debug: show junction nodes and passive edges for boundary-split stages.
+    if !boundary_edges.is_empty() {
+        let mut jn_sorted: Vec<NodeId> = all_junction_nodes.iter().copied().collect();
+        jn_sorted.sort();
+        let comp_names: Vec<String> = all_passive_edges
+            .iter()
+            .map(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                format!("{}({}→{})", comp.id, graph.edges[eidx].node_a, graph.edges[eidx].node_b)
+            })
+            .collect();
+        let elem_names: Vec<String> = ordered.iter().map(|&idx| {
+            graph.components[graph.edges[classified.nonlinear_elements[idx].edge_idx].comp_idx].id.clone()
+        }).collect();
+        eprintln!(
+            "[plan-multi-nl] elems={:?} junctions={:?} passives={:?}",
+            elem_names, jn_sorted, comp_names,
+        );
+    }
+
+    // For boundary-split stages, the injection point is the first NL element's
+    // input terminal (base for BJT, grid for triode) — this is where signal
+    // enters the group from the upstream coupling cap. If no boundary touches
+    // the input terminal, fall back to standard injection search.
+    let injection_node = if !boundary_edges.is_empty() {
+        // Get the first NL element's input terminal (base/grid).
+        let first_elem = &classified.nonlinear_elements[ordered[0]];
+        let input_terminal = match &first_elem.kind {
+            NonlinearKind::BjtNpn { base_node, .. }
+            | NonlinearKind::BjtPnp { base_node, .. } => Some(*base_node),
+            NonlinearKind::Triode {
+                grid_node: Some(gn),
+                ..
+            } => Some(*gn),
+            _ => None,
+        };
+
+        // Check if any boundary edge connects to this input terminal.
+        let boundary_at_input = input_terminal.and_then(|input_term| {
+            boundary_edges.iter().any(|&be| {
+                let be_edge = &graph.edges[be];
+                be_edge.node_a == input_term || be_edge.node_b == input_term
+            }).then_some(input_term)
+        });
+
+        boundary_at_input.unwrap_or_else(|| {
+            find_injection_node_multi_nl(
+                &all_passive_edges,
+                graph,
+                classified,
+                &HashSet::new(),
+                graph.in_node,
+            )
+        })
+    } else {
+        find_injection_node_multi_nl(
+            &all_passive_edges,
+            graph,
+            classified,
+            &HashSet::new(),
+            graph.in_node,
+        )
+    };
 
     // NL terminals: (positive, negative) for each element.
     let nl_terminals: Vec<(NodeId, NodeId)> = ordered
@@ -1125,6 +1800,16 @@ fn plan_multi_nl_group(
         })
         .unwrap();
 
+    if !boundary_edges.is_empty() {
+        let elem_names: Vec<String> = ordered.iter().map(|&idx| {
+            graph.components[graph.edges[classified.nonlinear_elements[idx].edge_idx].comp_idx].id.clone()
+        }).collect();
+        eprintln!(
+            "[plan-multi-nl] elems={:?} injection_node={} output_elem={}",
+            elem_names, injection_node, output_element_idx,
+        );
+    }
+
     Some(MultiNlPlan {
         nl_element_indices: ordered,
         output_element_idx,
@@ -1134,6 +1819,8 @@ fn plan_multi_nl_group(
         compensation: 1.0,
         output_node: None,
         ota_vccs: Vec::new(),
+        output_dc_block: None,
+        signal_chain_depth: None,
     })
 }
 
@@ -1191,6 +1878,7 @@ fn try_varimu_3port(
         classified,
         true,
         pp_transformer_edges,
+        &HashSet::new(),
     );
 
     let exclude: HashSet<NodeId> =
@@ -1217,6 +1905,8 @@ fn try_varimu_3port(
         compensation: 0.35, // VariMu
         output_node: None,
         ota_vccs: Vec::new(),
+        output_dc_block: None,
+        signal_chain_depth: None,
     })
 }
 
@@ -1267,6 +1957,7 @@ fn try_linearized_ota(
         classified,
         false, // don't skip out_node — output coupling cap is in this network
         pp_transformer_edges,
+        &HashSet::new(),
     );
 
     if all_passive_edges.is_empty() {
@@ -1296,6 +1987,8 @@ fn try_linearized_ota(
             out_node,
             comp_idx: edge.comp_idx,
         }],
+        output_dc_block: None,
+        signal_chain_depth: None,
     })
 }
 
@@ -1329,6 +2022,7 @@ fn plan_diode_bridge(
         classified,
         false, // skip_out_node=false (bridge rectifier needs RC at output)
         pp_transformer_edges,
+        &HashSet::new(),
     );
 
     // Find injection node — prefer diode terminal nodes.
@@ -1424,6 +2118,8 @@ fn plan_diode_bridge(
         compensation: 1.0,
         output_node,
         ota_vccs: Vec::new(),
+        output_dc_block: None,
+        signal_chain_depth: None,
     })
 }
 
@@ -1541,6 +2237,8 @@ pub(super) fn plan_push_pull_half(
             element_idx: 0,
             dc_block: None,
             compensation,
+            signal_chain_depth: None,
+            supply_driven: false,
         })
     } else {
         None
@@ -1636,18 +2334,36 @@ fn find_injection_node_multi_nl(
 }
 
 /// Collect passive edges via BFS from multiple junction nodes, deduplicating.
+///
+/// `boundary_edges` are excluded from BFS traversal (coupling caps that
+/// separate NL islands). Pass `&HashSet::new()` when boundary-aware splitting
+/// is not needed.
 fn collect_passive_edges_from_nodes(
     junction_nodes: &HashSet<NodeId>,
     graph: &CircuitGraph,
     classified: &ClassifiedCircuit,
     skip_out_node: bool,
     pp_transformer_edges: &HashSet<usize>,
+    boundary_edges: &HashSet<usize>,
 ) -> Vec<usize> {
+    // Merge boundary edges into the NL exclusion set so BFS won't cross them.
+    let excluded: Vec<usize> = if boundary_edges.is_empty() {
+        classified.all_nonlinear_edge_indices.clone()
+    } else {
+        let mut excl = classified.all_nonlinear_edge_indices.clone();
+        for &be in boundary_edges {
+            if !excl.contains(&be) {
+                excl.push(be);
+            }
+        }
+        excl
+    };
+
     let mut all_passive_edges: Vec<usize> = Vec::new();
     for &jn in junction_nodes {
         let edges = graph.bfs_passive_edges(
             jn,
-            &classified.all_nonlinear_edge_indices,
+            &excluded,
             &graph.active_edge_indices,
             true,
             skip_out_node,
