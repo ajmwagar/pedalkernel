@@ -164,7 +164,6 @@ pub(super) fn build_opamp_feedback_stages(
                     is_trigger_voice: false,
                     sample_counter: 0,
                     root_comp_id: String::new(),
-                    is_supply_driven: false,
                     feedback_pot_id,
                 });
             }
@@ -256,7 +255,6 @@ pub(super) fn build_opamp_feedback_stages(
                     is_trigger_voice: false,
                     sample_counter: 0,
                     root_comp_id: String::new(),
-                    is_supply_driven: false,
                     feedback_pot_id,
                 });
             }

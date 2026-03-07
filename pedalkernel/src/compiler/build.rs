@@ -546,7 +546,6 @@ pub(super) fn build_stages(
             is_trigger_voice: false,
             sample_counter: 0,
             root_comp_id: String::new(),
-            is_supply_driven: false,
             feedback_pot_id: None,
         });
     }
@@ -757,7 +756,6 @@ fn build_triode_mna_fallback(
         compensation: plan.compensation,
         output_node: None,
         ota_vccs: Vec::new(),
-        output_dc_block: None,
         signal_chain_depth: None,
     };
 
@@ -848,7 +846,6 @@ fn build_diode_mna_fallback(
         compensation: plan.compensation,
         output_node: None,
         ota_vccs: Vec::new(),
-        output_dc_block: None,
         signal_chain_depth: None,
     };
 
@@ -1444,7 +1441,6 @@ fn build_rtype_stage(
             extract_coeffs: None,
             extract_vs: 0.0,
             state_space: Some(state_space_data),
-            output_dc_block: plan.output_dc_block,
             bias_pot_id: None,
             bias_emitter_r: 470.0,
         });
@@ -1896,7 +1892,6 @@ fn build_rtype_stage(
         extract_coeffs,
         extract_vs,
         state_space: None,
-        output_dc_block: plan.output_dc_block,
         bias_pot_id: None,
         bias_emitter_r: 470.0,
     })
@@ -2200,7 +2195,6 @@ fn build_vs_stage(
         is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
-        is_supply_driven: plan.supply_driven,
         feedback_pot_id: None,
     })
 }
@@ -2268,7 +2262,6 @@ fn build_source_follower_stage(
         is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
-        is_supply_driven: false,
         feedback_pot_id: None,
     })
 }

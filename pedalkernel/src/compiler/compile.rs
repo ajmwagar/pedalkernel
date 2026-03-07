@@ -283,7 +283,6 @@ fn build_passive_wdf_stage(
                 is_trigger_voice: false,
                 sample_counter: 0,
                 root_comp_id: String::new(),
-                is_supply_driven: false,
                 feedback_pot_id: None,
             };
             stage.balance_vs_impedance();
@@ -595,7 +594,6 @@ fn build_passive_rtype_from_decomposed(
         is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
-        is_supply_driven: false,
         feedback_pot_id: None,
     })
 }
@@ -910,7 +908,6 @@ fn build_output_rooted_stage(
         is_trigger_voice: false,
         sample_counter: 0,
         root_comp_id: String::new(),
-        is_supply_driven: false,
         feedback_pot_id: None,
     })
 }

@@ -313,10 +313,6 @@ pub(super) struct WdfStage {
     /// Only meaningful when `runtime-warnings` feature is enabled.
     #[allow(dead_code)]
     pub(super) root_comp_id: String,
-    /// When true, VS drives the device's supply voltage (v_max/Vcc) instead
-    /// of the input signal. Used for boundary-split BJTs where the base
-    /// coupling cap was removed and signal enters via set_control_voltage().
-    pub(super) is_supply_driven: bool,
     /// When set, identifies a pot in the WDF tree whose resistance drives
     /// OpAmpRoot gain recalculation. After pot update + recompute, the stage
     /// reads the pot's resistance and calls `OpAmpRoot::set_feedback_pot_r()`.
@@ -374,20 +370,12 @@ impl WdfStage {
             // - Triode: VS = B+ supply (plate bias)
             // - Source follower: VS = 0 (input goes to gate, not VS)
             // - Other: VS = input * compensation
-            let is_supply = self.is_supply_driven;
             let vs_voltage = if let RootKind::Triode(t) = root {
                 t.v_max()
             } else if let RootKind::VariMu(t) = root {
                 t.v_max()
             } else if is_sf {
                 0.0 // Source follower: input modulates Vgs, not VS
-            } else if is_supply {
-                // Boundary-split BJT: VS drives Vcc supply, input via set_control_voltage
-                match root {
-                    RootKind::BjtNpn(bjt) => bjt.v_max(),
-                    RootKind::BjtPnp(bjt) => bjt.v_max(),
-                    _ => sample * compensation,
-                }
             } else {
                 sample * compensation
             };
@@ -1554,10 +1542,6 @@ pub(super) struct MultiNlStage {
     /// WDF scattering. Used for linearized OTA stages where cap port
     /// conductances overwhelm circuit conductances.
     pub(super) state_space: Option<StateSpaceData>,
-    /// DC-block filter for boundary coupling cap at this stage's output.
-    /// (a1, b0, y_prev, x_prev) — single-pole IIR highpass.
-    /// Used when reactive-boundary decomposition splits cascaded NL stages.
-    pub(super) output_dc_block: Option<(f64, f64, f64, f64)>,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -1851,14 +1835,6 @@ impl MultiNlStage {
             }
         }
 
-        // Apply DC-blocking filter for boundary coupling caps.
-        if let Some((a1, b0, ref mut y_prev, ref mut x_prev)) = self.output_dc_block {
-            let y = b0 * (output - *x_prev) + a1 * *y_prev;
-            *x_prev = output;
-            *y_prev = flush_denormal(y);
-            return *y_prev;
-        }
-
         flush_denormal(output)
     }
 
@@ -1892,10 +1868,6 @@ impl MultiNlStage {
             for v in &mut ss.x {
                 *v = 0.0;
             }
-        }
-        if let Some((_, _, ref mut y_prev, ref mut x_prev)) = self.output_dc_block {
-            *y_prev = 0.0;
-            *x_prev = 0.0;
         }
         self.oversampler.reset();
     }
