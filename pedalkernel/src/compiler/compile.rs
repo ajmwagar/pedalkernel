@@ -1251,6 +1251,7 @@ pub fn compile_pedal_with_options(
     let opamp_feedback_stages = super::opamp_analysis::build_opamp_feedback_stages(
         &opamp_analysis,
         pedal,
+        &graph,
         stages.len(),
         sample_rate,
         oversampling,
