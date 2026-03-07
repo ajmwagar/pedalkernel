@@ -1344,6 +1344,8 @@ pub(super) enum NlDeviceGroupKind {
     VariMuThreePort(VariMuThreePort),
     /// 3-port Koren triode (grid-cathode + plate-cathode) for MNA fallback.
     TriodeThreePort(TriodeThreePort),
+    /// 2-port BJT (base-emitter + collector-emitter) using Gummel-Poon.
+    BjtTwoPort(BjtTwoPort),
     /// Single-port NL device adapted as a 1-port device group.
     /// Used for mixed-device collapsed stages (e.g., sidechain with
     /// triodes + pentodes + diodes in one MultiNlStage).
@@ -1355,6 +1357,7 @@ impl NlDeviceGroupKind {
         match self {
             NlDeviceGroupKind::VariMuThreePort(t) => t,
             NlDeviceGroupKind::TriodeThreePort(t) => t,
+            NlDeviceGroupKind::BjtTwoPort(b) => b,
             NlDeviceGroupKind::SinglePort(d) => d,
         }
     }
@@ -1363,6 +1366,9 @@ impl NlDeviceGroupKind {
         match self {
             NlDeviceGroupKind::VariMuThreePort(_) => "VariMuThreePort",
             NlDeviceGroupKind::TriodeThreePort(_) => "TriodeThreePort",
+            NlDeviceGroupKind::BjtTwoPort(b) => {
+                if b.is_pnp { "BjtPnp2P" } else { "BjtNpn2P" }
+            }
             NlDeviceGroupKind::SinglePort(d) => d.debug_name(),
         }
     }
@@ -1371,6 +1377,7 @@ impl NlDeviceGroupKind {
         match self {
             NlDeviceGroupKind::VariMuThreePort(_) => 2,
             NlDeviceGroupKind::TriodeThreePort(_) => 2,
+            NlDeviceGroupKind::BjtTwoPort(_) => 2,
             NlDeviceGroupKind::SinglePort(_) => 1,
         }
     }

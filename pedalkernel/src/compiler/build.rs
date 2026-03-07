@@ -1660,6 +1660,34 @@ fn build_rtype_stage(
         } else {
             unreachable!()
         }
+    } else if plan.nl_element_indices.iter().all(|&idx| {
+        matches!(
+            &classified.nonlinear_elements[idx].kind,
+            NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
+        )
+    }) && !plan.nl_element_indices.is_empty() {
+        // All-BJT group: each BJT is a 2-port device.
+        let mut groups: Vec<NlDeviceGroupKind> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut offset = 0usize;
+        for &elem_idx in &plan.nl_element_indices {
+            let elem = &classified.nonlinear_elements[elem_idx];
+            offsets.push(offset);
+            match &elem.kind {
+                NonlinearKind::BjtNpn { model_name, .. } => {
+                    let gp_model = gummel_poon_model(model_name);
+                    groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(gp_model)));
+                    offset += 2;
+                }
+                NonlinearKind::BjtPnp { model_name, .. } => {
+                    let gp_model = gummel_poon_model(model_name);
+                    groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new_pnp(gp_model)));
+                    offset += 2;
+                }
+                _ => unreachable!(),
+            }
+        }
+        (Vec::new(), Some(MultiNlDeviceGroups { groups, offsets }))
     } else if plan.nl_element_indices.len() > 1 && has_mixed_device_types(plan, classified) {
         let mut groups: Vec<NlDeviceGroupKind> = Vec::new();
         let mut offsets: Vec<usize> = Vec::new();
@@ -1692,6 +1720,16 @@ fn build_rtype_stage(
                     let model = TriodeModel::by_name(model_name);
                     let tp = TriodeThreePort::new(model).with_parallel_count(*parallel_count);
                     groups.push(NlDeviceGroupKind::TriodeThreePort(tp));
+                    offset += 2;
+                }
+                NonlinearKind::BjtNpn { model_name, .. } => {
+                    let gp_model = gummel_poon_model(model_name);
+                    groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(gp_model)));
+                    offset += 2;
+                }
+                NonlinearKind::BjtPnp { model_name, .. } => {
+                    let gp_model = gummel_poon_model(model_name);
+                    groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new_pnp(gp_model)));
                     offset += 2;
                 }
                 _ => {
@@ -1993,6 +2031,9 @@ fn has_mixed_device_types(plan: &MultiNlPlan, classified: &ClassifiedCircuit) ->
             NonlinearKind::Triode {
                 grid_node: Some(_), ..
             } => {
+                has_multi_port = true;
+            }
+            NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. } => {
                 has_multi_port = true;
             }
             _ => {

@@ -694,6 +694,7 @@ impl CompiledPedal {
                     match group {
                         NlDeviceGroupKind::VariMuThreePort(t) => t.set_v_max(tube_v_max),
                         NlDeviceGroupKind::TriodeThreePort(t) => t.set_v_max(tube_v_max),
+                        NlDeviceGroupKind::BjtTwoPort(b) => b.set_v_max(bjt_v_max),
                         NlDeviceGroupKind::SinglePort(d) => match d {
                             NlDeviceKind::Triode(t) => t.set_v_max(tube_v_max),
                             NlDeviceKind::Pentode(p) => p.set_v_max(tube_v_max),

@@ -1650,12 +1650,25 @@ fn plan_multi_nl_group(
     };
 
     // NL terminals: (positive, negative) for each element.
+    // BJTs emit 2 terminal pairs: port 0 = (base, emitter), port 1 = (collector, emitter).
     let nl_terminals: Vec<(NodeId, NodeId)> = ordered
         .iter()
-        .map(|&idx| {
+        .flat_map(|&idx| {
             let elem = &classified.nonlinear_elements[idx];
             let edge = &graph.edges[elem.edge_idx];
-            (edge.node_a, edge.node_b)
+            match &elem.kind {
+                NonlinearKind::BjtNpn { base_node, emitter_node, .. }
+                | NonlinearKind::BjtPnp { base_node, emitter_node, .. } => {
+                    // 2-port: port 0 = (base, emitter), port 1 = (collector, emitter)
+                    let collector_node = if edge.node_a == *emitter_node {
+                        edge.node_b
+                    } else {
+                        edge.node_a
+                    };
+                    vec![(*base_node, *emitter_node), (collector_node, *emitter_node)]
+                }
+                _ => vec![(edge.node_a, edge.node_b)],
+            }
         })
         .collect();
 

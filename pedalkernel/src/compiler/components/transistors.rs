@@ -71,8 +71,16 @@ impl Component for Npn {
             .get(&format!("{}.base", comp_id))
             .copied()
             .unwrap_or(node_a);
+        let collector_node = node_names
+            .get(&format!("{}.collector", comp_id))
+            .copied()
+            .unwrap_or(node_a);
+        let emitter_node = node_names
+            .get(&format!("{}.emitter", comp_id))
+            .copied()
+            .unwrap_or(node_b);
         Some((
-            NonlinearKind::BjtNpn { model_name: self.model.clone(), base_node },
+            NonlinearKind::BjtNpn { model_name: self.model.clone(), base_node, collector_node, emitter_node },
             vec![node_a, node_b],
         ))
     }
@@ -158,8 +166,16 @@ impl Component for Pnp {
             .get(&format!("{}.base", comp_id))
             .copied()
             .unwrap_or(node_a);
+        let collector_node = node_names
+            .get(&format!("{}.collector", comp_id))
+            .copied()
+            .unwrap_or(node_a);
+        let emitter_node = node_names
+            .get(&format!("{}.emitter", comp_id))
+            .copied()
+            .unwrap_or(node_b);
         Some((
-            NonlinearKind::BjtPnp { model_name: self.model.clone(), base_node },
+            NonlinearKind::BjtPnp { model_name: self.model.clone(), base_node, collector_node, emitter_node },
             vec![node_a, node_b],
         ))
     }

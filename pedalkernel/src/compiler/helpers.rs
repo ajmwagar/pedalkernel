@@ -171,6 +171,14 @@ pub(super) fn vari_mu_model(name: &str) -> VariMuModel {
     VariMuModel::by_name(name)
 }
 
+/// Look up a Gummel-Poon BJT model, falling back to converting a simple BjtModel.
+pub(super) fn gummel_poon_model(name: &str) -> GummelPoonModel {
+    GummelPoonModel::try_by_name(name).unwrap_or_else(|| {
+        let simple = BjtModel::by_name(name);
+        GummelPoonModel::from_simple(&simple)
+    })
+}
+
 pub(super) fn mosfet_model(mt: MosfetType, is_n_channel: bool) -> MosfetModel {
     match mt {
         MosfetType::N2n7000 => MosfetModel::n_2n7000(),

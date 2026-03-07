@@ -27,10 +27,14 @@ pub(super) enum NonlinearKind {
     BjtNpn {
         model_name: String,
         base_node: NodeId,
+        collector_node: NodeId,
+        emitter_node: NodeId,
     },
     BjtPnp {
         model_name: String,
         base_node: NodeId,
+        collector_node: NodeId,
+        emitter_node: NodeId,
     },
     Triode {
         model_name: String,

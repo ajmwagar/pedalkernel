@@ -2,7 +2,7 @@
 //!
 //! Models NPN and PNP transistors using Ebers-Moll equations.
 
-use super::solver::{newton_raphson_solve, NlDeviceIv};
+use super::solver::{newton_raphson_solve, NlDeviceGroupIv, NlDeviceIv};
 use crate::elements::WdfRoot;
 use crate::models::{bjt_by_name, SpiceBjtModel};
 
@@ -589,6 +589,38 @@ impl GummelPoonModel {
         bjt_by_name(name).map(Self::from)
     }
 
+    /// Convert a simple Ebers-Moll BjtModel to a full Gummel-Poon parameter set.
+    ///
+    /// Maps IS/BF/VA to the full GP parameters with sensible defaults:
+    /// NF=1, NR=1, BR=1, no leakage (ISE=ISC=0), no capacitances.
+    pub fn from_simple(bjt: &BjtModel) -> Self {
+        Self {
+            is: bjt.is,
+            bf: bjt.bf,
+            br: 1.0,
+            nf: 1.0,
+            nr: 1.0,
+            vt: bjt.vt,
+            vaf: bjt.va,
+            var: f64::INFINITY,
+            ikf: f64::INFINITY,
+            ikr: f64::INFINITY,
+            ise: 0.0,
+            ne: 1.5,
+            isc: 0.0,
+            nc: 2.0,
+            cje: 0.0,
+            vje: 0.75,
+            mje: 0.33,
+            cjc: 0.0,
+            vjc: 0.75,
+            mjc: 0.33,
+            tf: 0.0,
+            tr: 0.0,
+            is_pnp: bjt.is_pnp,
+        }
+    }
+
     /// Compute the base charge factor Qb.
     ///
     /// Qb models base-width modulation (Early effect) and high-injection effects.
@@ -1104,6 +1136,92 @@ impl WdfRoot for BjtGummelPoon1Port {
         let v = (a + b) / 2.0;
         self.ic = self.collector_current_at(v);
         b
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BjtTwoPort — 2-port grouped BJT for multi-NL solver
+// ---------------------------------------------------------------------------
+
+/// 2-port BJT for the multi-NL grouped solver.
+///
+/// Exposes both junction voltages as solver variables:
+/// - Port 0: (base, emitter) → Vbe → base current Ib
+/// - Port 1: (collector, emitter) → Vce → collector current Ic
+///
+/// The full 2×2 Jacobian includes the critical cross-derivative ∂Ic/∂Vbe
+/// (transconductance gm ≈ Ic/Vt), enabling proper coupled BJT solving
+/// (e.g., Fuzz Face where Q1 and Q2 interact through shared bias networks).
+#[derive(Debug, Clone)]
+pub struct BjtTwoPort {
+    pub model: GummelPoonModel,
+    pub(crate) is_pnp: bool,
+    v_max: f64,
+}
+
+impl BjtTwoPort {
+    /// Create a new NPN BjtTwoPort.
+    pub fn new(model: GummelPoonModel) -> Self {
+        Self {
+            model,
+            is_pnp: false,
+            v_max: 50.0,
+        }
+    }
+
+    /// Create a new PNP BjtTwoPort.
+    pub fn new_pnp(model: GummelPoonModel) -> Self {
+        Self {
+            model,
+            is_pnp: true,
+            v_max: 50.0,
+        }
+    }
+
+    /// Set the maximum Vce (supply voltage).
+    #[inline]
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0);
+    }
+}
+
+impl NlDeviceGroupIv for BjtTwoPort {
+    fn n_ports(&self) -> usize {
+        2
+    }
+
+    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+        let sign = if self.is_pnp { -1.0 } else { 1.0 };
+        let vbe = sign * v[0];
+        let vce = sign * v[1];
+        let vbc = vbe - vce;
+
+        let (ic, ib) = self.model.currents(vbe, vbc);
+        currents[0] = sign * ib;
+        currents[1] = sign * ic;
+
+        // 2×2 Jacobian via numerical differentiation.
+        // sign² = 1, so Jacobian is polarity-invariant.
+        let delta = 1e-7;
+
+        // ∂/∂Vbe (port 0): vbe varies, vbc = vbe - vce also varies
+        let (ic_p, ib_p) = self.model.currents(vbe + delta, vbe + delta - vce);
+        let (ic_m, ib_m) = self.model.currents(vbe - delta, vbe - delta - vce);
+        jacobian[0] = (ib_p - ib_m) / (2.0 * delta); // ∂Ib/∂Vbe
+        jacobian[2] = (ic_p - ic_m) / (2.0 * delta); // ∂Ic/∂Vbe (gm!)
+
+        // ∂/∂Vce (port 1): vce varies, vbc = vbe - vce varies inversely
+        let (ic_p2, ib_p2) = self.model.currents(vbe, vbe - (vce + delta));
+        let (ic_m2, ib_m2) = self.model.currents(vbe, vbe - (vce - delta));
+        jacobian[1] = (ib_p2 - ib_m2) / (2.0 * delta); // ∂Ib/∂Vce
+        jacobian[3] = (ic_p2 - ic_m2) / (2.0 * delta); // ∂Ic/∂Vce (Early)
+    }
+
+    fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+        match port {
+            0 => (-2.0, 1.0),                   // Vbe: reverse to slight forward
+            _ => (-self.v_max, self.v_max),      // Vce: full swing
+        }
     }
 }
 

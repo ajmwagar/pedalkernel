@@ -2997,8 +2997,8 @@ fn multi_nl_fuzz_face_compiles() {
         "Should produce exactly 1 multi-NL stage"
     );
     assert_eq!(
-        compiled.multi_nl_stages[0].n_nl, 2,
-        "Should have 2 NL ports (Q1, Q2)"
+        compiled.multi_nl_stages[0].n_nl, 4,
+        "Should have 4 NL ports (Q1 base-emitter + collector-emitter, Q2 base-emitter + collector-emitter)"
     );
 }
 
