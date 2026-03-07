@@ -1,6 +1,6 @@
 //! Circuit graph construction, series-parallel decomposition, and WDF tree building.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::dsl::*;
 use super::component::{GraphRole, ResolveContext};
@@ -2058,6 +2058,340 @@ pub(super) fn sp_reduce(
             "circuit is not series-parallel ({} edges remain)",
             edges.len()
         ));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Greedy series-parallel decomposition
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Result of greedy SP decomposition for a circuit stage.
+///
+/// Extracts maximum SP-reducible pendant subtrees from a circuit's passive
+/// network, leaving only non-reducible "bridging" edges for the MNA builder.
+/// Junction nodes (NL terminals, VS injection) form the R-type core.
+pub(super) struct DecomposedCircuit {
+    /// SP-reduced subtrees, each becoming a single port on the R-type adaptor.
+    pub wdf_subtrees: Vec<WdfSubtreePort>,
+    /// Residual edge indices that must be stamped into MNA (bridging resistors).
+    pub residual_edges: Vec<usize>,
+}
+
+/// A single SP-reduced subtree that feeds one port of the R-type adaptor.
+pub(super) struct WdfSubtreePort {
+    /// The SP tree for this subtree.
+    pub tree: SpTree,
+    /// The junction node where this subtree attaches (R-type side).
+    pub attachment_node: NodeId,
+    /// The far terminal (ground/supply reference node).
+    pub far_node: NodeId,
+}
+
+/// Greedily decompose a passive network into SP-reducible subtrees and residual.
+///
+/// Junction nodes are the "core" of the R-type adaptor — typically NL element
+/// terminals and the VS injection node. The algorithm:
+///
+/// 1. Map supply/ground nodes to canonical ground
+/// 2. Build adjacency from passive edges
+/// 3. Find connected components of internal (non-junction) nodes
+/// 4. Components touching exactly 1 junction node → pendant → try SP reduce
+/// 5. Components touching 2+ junction nodes → bridging → residual
+/// 6. Direct junction-to-junction/ground edges → residual
+///
+/// The resulting `DecomposedCircuit` has subtrees for SP-reducible parts and
+/// residual edges for MNA stamping. If `residual_edges` is empty, the entire
+/// circuit is SP-reducible and no MNA builder is needed.
+pub(super) fn sp_decompose(
+    passive_edge_indices: &[usize],
+    junction_nodes: &[NodeId],
+    graph: &CircuitGraph,
+) -> DecomposedCircuit {
+    // Canonical ground: gnd + all supply nodes map to the same reference.
+    let ground = graph.gnd_node;
+    let effective = |node: NodeId| -> NodeId {
+        if node == graph.vcc_node || graph.supply_nodes.contains(&node) {
+            ground
+        } else {
+            node
+        }
+    };
+
+    let junction_set: HashSet<NodeId> = junction_nodes.iter().map(|&n| effective(n)).collect();
+    let is_junction_or_ground =
+        |node: NodeId| -> bool { node == ground || junction_set.contains(&node) };
+
+    // Build adjacency with effective (ground-mapped) nodes.
+    // Each entry is (edge_index, other_effective_node).
+    struct EdgeInfo {
+        edge_idx: usize,
+        eff_a: NodeId,
+        eff_b: NodeId,
+    }
+    let edge_infos: Vec<EdgeInfo> = passive_edge_indices
+        .iter()
+        .map(|&eidx| {
+            let e = &graph.edges[eidx];
+            EdgeInfo {
+                edge_idx: eidx,
+                eff_a: effective(e.node_a),
+                eff_b: effective(e.node_b),
+            }
+        })
+        .collect();
+
+    // Classify edges and find internal nodes.
+    // An "internal" node is any node that is NOT a junction node and NOT ground.
+    let mut internal_nodes: HashSet<NodeId> = HashSet::new();
+    let mut self_loops: Vec<usize> = Vec::new(); // edges where both endpoints map to same node
+
+    for ei in &edge_infos {
+        if ei.eff_a == ei.eff_b {
+            self_loops.push(ei.edge_idx);
+            continue;
+        }
+        if !is_junction_or_ground(ei.eff_a) {
+            internal_nodes.insert(ei.eff_a);
+        }
+        if !is_junction_or_ground(ei.eff_b) {
+            internal_nodes.insert(ei.eff_b);
+        }
+    }
+
+    // Build adjacency for internal nodes only (for component discovery).
+    // adj[internal_node] = [(edge_idx, neighbor_node)]
+    // neighbor_node can be internal, junction, or ground.
+    // BTreeMap ensures deterministic iteration order.
+    let mut adj: BTreeMap<NodeId, Vec<(usize, NodeId)>> = BTreeMap::new();
+    for ei in &edge_infos {
+        if ei.eff_a == ei.eff_b {
+            continue; // skip self-loops
+        }
+        if internal_nodes.contains(&ei.eff_a) {
+            adj.entry(ei.eff_a)
+                .or_default()
+                .push((ei.edge_idx, ei.eff_b));
+        }
+        if internal_nodes.contains(&ei.eff_b) {
+            adj.entry(ei.eff_b)
+                .or_default()
+                .push((ei.edge_idx, ei.eff_a));
+        }
+    }
+
+    // Find connected components of internal nodes via BFS.
+    // For each component, track: which internal nodes, which edges, which junction nodes it borders.
+    struct InternalComponent {
+        edges: Vec<usize>,
+        bordering_junctions: Vec<NodeId>,
+    }
+
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    let mut components: Vec<InternalComponent> = Vec::new();
+
+    let mut sorted_internal: Vec<NodeId> = internal_nodes.iter().copied().collect();
+    sorted_internal.sort();
+
+    for &start in &sorted_internal {
+        if visited.contains(&start) {
+            continue;
+        }
+        let mut comp = InternalComponent {
+            edges: Vec::new(),
+            bordering_junctions: Vec::new(),
+        };
+        let mut queue = std::collections::VecDeque::new();
+        let mut comp_nodes: HashSet<NodeId> = HashSet::new();
+        visited.insert(start);
+        comp_nodes.insert(start);
+        queue.push_back(start);
+
+        while let Some(node) = queue.pop_front() {
+            if let Some(neighbors) = adj.get(&node) {
+                for &(eidx, neighbor) in neighbors {
+                    if is_junction_or_ground(neighbor) {
+                        // This edge borders a junction/ground — record it.
+                        if neighbor != ground
+                            && !comp.bordering_junctions.contains(&neighbor)
+                        {
+                            comp.bordering_junctions.push(neighbor);
+                        }
+                    } else if visited.insert(neighbor) {
+                        comp_nodes.insert(neighbor);
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
+
+        // Collect all edges that have at least one endpoint in this component's internal nodes.
+        let mut comp_edge_set: HashSet<usize> = HashSet::new();
+        for ei in &edge_infos {
+            if ei.eff_a == ei.eff_b {
+                continue;
+            }
+            let a_in = comp_nodes.contains(&ei.eff_a);
+            let b_in = comp_nodes.contains(&ei.eff_b);
+            if a_in || b_in {
+                comp_edge_set.insert(ei.edge_idx);
+                // Also track junction borders from edges.
+                if a_in
+                    && is_junction_or_ground(ei.eff_b)
+                    && ei.eff_b != ground
+                    && !comp.bordering_junctions.contains(&ei.eff_b)
+                {
+                    comp.bordering_junctions.push(ei.eff_b);
+                }
+                if b_in
+                    && is_junction_or_ground(ei.eff_a)
+                    && ei.eff_a != ground
+                    && !comp.bordering_junctions.contains(&ei.eff_a)
+                {
+                    comp.bordering_junctions.push(ei.eff_a);
+                }
+            }
+        }
+        comp.edges = comp_edge_set.into_iter().collect();
+        comp.edges.sort(); // deterministic order
+        comp.bordering_junctions.sort(); // deterministic order
+        components.push(comp);
+    }
+
+    // Also collect "direct" edges: both endpoints are junction/ground (no internal nodes).
+    let mut direct_edges: Vec<usize> = Vec::new();
+    for ei in &edge_infos {
+        if ei.eff_a == ei.eff_b {
+            continue;
+        }
+        if is_junction_or_ground(ei.eff_a) && is_junction_or_ground(ei.eff_b) {
+            direct_edges.push(ei.edge_idx);
+        }
+    }
+
+    // Now classify components and try SP-reduce pendants.
+    let mut wdf_subtrees: Vec<WdfSubtreePort> = Vec::new();
+    let mut residual_edges: Vec<usize> = Vec::new();
+
+    // Direct junction-to-junction edges always go to residual.
+    residual_edges.extend(&direct_edges);
+
+    // Self-loop edges (both endpoints map to same effective node) are dead — skip.
+
+    for comp in &components {
+        if comp.edges.is_empty() {
+            continue;
+        }
+
+        if comp.bordering_junctions.len() == 1 {
+            // Pendant: hangs off exactly one junction node → try SP reduce.
+            let &junction = comp.bordering_junctions.iter().next().unwrap();
+
+            // Build SP edges for this pendant.
+            let sp_edges: Vec<(NodeId, NodeId, SpTree)> = comp
+                .edges
+                .iter()
+                .map(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    (
+                        effective(e.node_a),
+                        effective(e.node_b),
+                        SpTree::Leaf(e.comp_idx),
+                    )
+                })
+                .collect();
+            let terminals = vec![junction, ground];
+
+            match sp_reduce(sp_edges, &terminals) {
+                Ok(tree) => {
+                    wdf_subtrees.push(WdfSubtreePort {
+                        tree,
+                        attachment_node: junction,
+                        far_node: ground,
+                    });
+                }
+                Err(_) => {
+                    // Not SP-reducible even as pendant — leave for MNA.
+                    residual_edges.extend(&comp.edges);
+                }
+            }
+        } else if comp.bordering_junctions.is_empty() {
+            // Component only touches ground, no junction nodes.
+            // This is an isolated sub-network — treat as residual (might be
+            // a grounding network that the MNA needs for regularization).
+            residual_edges.extend(&comp.edges);
+        } else {
+            // Bridging: connects 2+ junction nodes → must go to MNA.
+            residual_edges.extend(&comp.edges);
+        }
+    }
+
+    residual_edges.sort();
+    residual_edges.dedup();
+
+    DecomposedCircuit {
+        wdf_subtrees,
+        residual_edges,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LC pair impedance matching
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Detect LC pairs in an SpTree and return matched port resistance overrides.
+///
+/// When a Series or Parallel node has one L and one C child leaf, the optimal
+/// port resistance for both is Z₀ = √(L/C), giving gamma = 0.5 at resonance
+/// (perfect energy exchange). Returns a map from comp_idx → matched Rp.
+pub(super) fn detect_lc_pairs(
+    tree: &SpTree,
+    components: &[ComponentDef],
+    sample_rate: f64,
+) -> HashMap<usize, f64> {
+    let mut overrides: HashMap<usize, f64> = HashMap::new();
+    detect_lc_pairs_inner(tree, components, sample_rate, &mut overrides);
+    overrides
+}
+
+fn detect_lc_pairs_inner(
+    tree: &SpTree,
+    components: &[ComponentDef],
+    sample_rate: f64,
+    overrides: &mut HashMap<usize, f64>,
+) {
+    match tree {
+        SpTree::Leaf(_) => {}
+        SpTree::Series(left, right) | SpTree::Parallel(left, right) => {
+            // Check if left and right are both leaves, one L and one C.
+            if let (SpTree::Leaf(idx_a), SpTree::Leaf(idx_b)) = (left.as_ref(), right.as_ref()) {
+                let comp_a = &components[*idx_a];
+                let comp_b = &components[*idx_b];
+                let l_val = comp_a.kind.inductance();
+                let c_val = comp_b.kind.capacitance();
+                if let (Some(l), Some(c)) = (l_val, c_val) {
+                    if l > 0.0 && c > 0.0 {
+                        let z0 = (l / c).sqrt();
+                        overrides.insert(*idx_a, z0);
+                        overrides.insert(*idx_b, z0);
+                        return;
+                    }
+                }
+                // Try the other way: a=C, b=L.
+                let l_val = comp_b.kind.inductance();
+                let c_val = comp_a.kind.capacitance();
+                if let (Some(l), Some(c)) = (l_val, c_val) {
+                    if l > 0.0 && c > 0.0 {
+                        let z0 = (l / c).sqrt();
+                        overrides.insert(*idx_a, z0);
+                        overrides.insert(*idx_b, z0);
+                        return;
+                    }
+                }
+            }
+            // Recurse into children.
+            detect_lc_pairs_inner(left, components, sample_rate, overrides);
+            detect_lc_pairs_inner(right, components, sample_rate, overrides);
+        }
     }
 }
 

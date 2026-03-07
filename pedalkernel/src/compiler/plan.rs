@@ -295,7 +295,10 @@ fn group_nl_elements(
     }
 
     let clusters = uf.clusters();
-    clusters.into_values().collect()
+    let mut groups: Vec<Vec<usize>> = clusters.into_values().collect();
+    // Sort groups by their smallest element index for deterministic ordering.
+    groups.sort_by_key(|g| g.iter().copied().min().unwrap_or(0));
+    groups
 }
 
 /// Seed BFS queue with extra terminal nodes (base for BJTs, grid for triodes).

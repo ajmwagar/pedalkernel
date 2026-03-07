@@ -21,7 +21,7 @@ use super::components::{
     Resistor as ResistorComp,
 };
 use super::dyn_node::DynNode;
-use super::graph::{sp_reduce, sp_to_dyn, CircuitGraph, NodeId, SpTree};
+use super::graph::{sp_decompose, sp_reduce, sp_to_dyn, CircuitGraph, NodeId, SpTree};
 use super::helpers::*;
 use super::opamp_analysis::OpAmpAnalysis;
 use super::plan::{MultiNlPlan, PushPullPlan, StagePlan};
@@ -1052,9 +1052,837 @@ fn stamp_passive_edge(
     }
 }
 
+/// Build an R-type stage from a decomposed circuit.
+///
+/// This is the unified MNA builder that replaces `try_build_multi_nl_stage`,
+/// `build_triode_mna_fallback`, and `build_diode_mna_fallback`. It takes the
+/// output of `sp_decompose` which pre-extracts SP-reducible pendant subtrees
+/// as WDF ports, reducing the size of the MNA system.
+///
+/// Port ordering: [NL_0..NL_{n-1}, subtree_0..subtree_{s-1}, reactive_0..reactive_{m-1}, (adapted)]
+///
+/// Returns `None` if MNA construction fails (e.g., singular matrix).
+#[allow(dead_code)]
+fn build_rtype_stage(
+    decomposed: &super::graph::DecomposedCircuit,
+    plan: &MultiNlPlan,
+    classified: &ClassifiedCircuit,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+) -> Option<MultiNlStage> {
+    let n_nl = plan.nl_terminals.len();
+    let has_linearized_ota = !plan.ota_vccs.is_empty();
+
+    // Need either NL ports or linearized OTA, and at least some passive content.
+    if n_nl == 0 && !has_linearized_ota {
+        return None;
+    }
+    if decomposed.residual_edges.is_empty() && decomposed.wdf_subtrees.is_empty() {
+        return None;
+    }
+
+    // ── Step 1: Collect unique circuit nodes for MNA ────────────────────
+    // Ground and supply nodes are AC ground (excluded from MNA).
+    let mut node_set: Vec<NodeId> = Vec::new();
+    let mut add_node = |node: NodeId| {
+        if node == graph.gnd_node || node == graph.vcc_node || graph.supply_nodes.contains(&node) {
+            return;
+        }
+        if !node_set.contains(&node) {
+            node_set.push(node);
+        }
+    };
+
+    // Nodes from residual edges.
+    for &eidx in &decomposed.residual_edges {
+        let e = &graph.edges[eidx];
+        add_node(e.node_a);
+        add_node(e.node_b);
+    }
+
+    // Nodes from WDF subtree attachment points.
+    for subtree in &decomposed.wdf_subtrees {
+        add_node(subtree.attachment_node);
+    }
+
+    // Nodes from NL terminals.
+    for &(pos, neg) in &plan.nl_terminals {
+        add_node(pos);
+        add_node(neg);
+    }
+
+    // Nodes from linearized OTA VCCS stamps.
+    for ota in &plan.ota_vccs {
+        add_node(ota.in_pos);
+        add_node(ota.in_neg);
+        add_node(ota.out_node);
+    }
+
+    // Injection node (voltage source input).
+    add_node(plan.injection_node);
+
+    // ── Pre-scan for coupled transformers ────────────────────────────
+    struct CoupledXfmr {
+        comp_idx: usize,
+        primary_edge_idx: usize,
+        sec_node_a: NodeId,
+        sec_node_b: NodeId,
+        turns_ratio: f64,
+    }
+    let mut coupled_transformers: Vec<CoupledXfmr> = Vec::new();
+    {
+        let mut seen_comp: HashSet<usize> = HashSet::new();
+        for &eidx in &decomposed.residual_edges {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            if let Some(cfg) = comp.kind.transformer_config() {
+                if seen_comp.contains(&e.comp_idx) {
+                    continue;
+                }
+                seen_comp.insert(e.comp_idx);
+                let sec_pin_names: &[(&str, &str)] = &[
+                    ("c", "d"),
+                    ("secondary.a", "secondary.b"),
+                    ("sec.a", "sec.b"),
+                ];
+                let mut sec_a_node: Option<NodeId> = None;
+                let mut sec_b_node: Option<NodeId> = None;
+                for &(pin_a, pin_b) in sec_pin_names {
+                    let key_a = format!("{}.{}", comp.id, pin_a);
+                    let key_b = format!("{}.{}", comp.id, pin_b);
+                    if sec_a_node.is_none() {
+                        if let Some(&n) = graph.node_names.get(&key_a) {
+                            sec_a_node = Some(n);
+                        }
+                    }
+                    if sec_b_node.is_none() {
+                        if let Some(&n) = graph.node_names.get(&key_b) {
+                            sec_b_node = Some(n);
+                        }
+                    }
+                }
+                if let (Some(sna), Some(snb)) = (sec_a_node, sec_b_node) {
+                    let sec_in_circuit = [sna, snb].iter().any(|&sn| {
+                        decomposed.residual_edges.iter().any(|&ei| {
+                            let pe = &graph.edges[ei];
+                            ei != eidx && (pe.node_a == sn || pe.node_b == sn)
+                        })
+                        || plan.nl_terminals.iter().any(|&(p, n)| p == sn || n == sn)
+                    });
+                    if sec_in_circuit {
+                        add_node(sna);
+                        add_node(snb);
+                        coupled_transformers.push(CoupledXfmr {
+                            comp_idx: e.comp_idx,
+                            primary_edge_idx: eidx,
+                            sec_node_a: sna,
+                            sec_node_b: snb,
+                            turns_ratio: cfg.turns_ratio,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let coupled_edge_indices: HashSet<usize> = coupled_transformers
+        .iter()
+        .map(|ct| ct.primary_edge_idx)
+        .collect();
+    let mut num_vsources = coupled_transformers.len() * 2;
+    if has_linearized_ota && n_nl == 0 {
+        num_vsources += 1;
+    }
+
+    let num_mna_nodes = node_set.len();
+    if num_mna_nodes == 0 {
+        return None;
+    }
+
+    let node_to_mna = |node: NodeId| -> Option<usize> {
+        if node == graph.gnd_node || node == graph.vcc_node || graph.supply_nodes.contains(&node) {
+            None
+        } else {
+            node_set.iter().position(|&n| n == node)
+        }
+    };
+
+    // ── Step 2: Build MNA — stamp only residual (bridging) edges ────────
+    let mut reactive_edges: Vec<(usize, DynNode)> = Vec::new();
+    let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
+
+    // Stamp coupled transformer constraints.
+    for (ti, ct) in coupled_transformers.iter().enumerate() {
+        let e = &graph.edges[ct.primary_edge_idx];
+        let p_pos = node_to_mna(e.node_a);
+        let p_neg = node_to_mna(e.node_b);
+        let s_pos = node_to_mna(ct.sec_node_a);
+        let s_neg = node_to_mna(ct.sec_node_b);
+        let vsrc_p = ti * 2;
+        let vsrc_s = ti * 2 + 1;
+        let n = ct.turns_ratio;
+
+        mna.stamp_voltage_source(p_pos, p_neg, vsrc_p);
+        mna.stamp_voltage_source(s_pos, s_neg, vsrc_s);
+
+        if let Some(sp) = s_pos {
+            mna.c_matrix[vsrc_p * num_mna_nodes + sp] += -n;
+        }
+        if let Some(sn) = s_neg {
+            mna.c_matrix[vsrc_p * num_mna_nodes + sn] += n;
+        }
+        if let Some(sp) = s_pos {
+            mna.c_matrix[vsrc_s * num_mna_nodes + sp] = 0.0;
+        }
+        if let Some(sn) = s_neg {
+            mna.c_matrix[vsrc_s * num_mna_nodes + sn] = 0.0;
+        }
+        mna.d_matrix[vsrc_s * num_vsources + vsrc_p] = n;
+        mna.d_matrix[vsrc_s * num_vsources + vsrc_s] = 1.0;
+    }
+
+    // State-space mode for linearized OTA.
+    let use_state_space = has_linearized_ota && n_nl == 0;
+    let mut cap_stamps: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
+    let mut pot_entries: Vec<(usize, DynNode, Option<usize>, Option<usize>, f64)> = Vec::new();
+
+    // Stamp only residual edges (bridging resistors between R-type nodes).
+    for &eidx in &decomposed.residual_edges {
+        if use_state_space {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            let n1 = node_to_mna(e.node_a);
+            let n2 = node_to_mna(e.node_b);
+
+            if let Some(cap) = comp.kind.as_any().downcast_ref::<CapacitorComp>() {
+                cap_stamps.push((n1, n2, cap.config.value));
+                continue;
+            } else if let Some(cs) = comp.kind.as_any().downcast_ref::<CapSwitched>() {
+                if let Some(&c) = cs.values.first() {
+                    if c.is_finite() && c > 0.0 {
+                        cap_stamps.push((n1, n2, c));
+                    }
+                }
+                continue;
+            } else if let Some(pot) = comp.kind.as_any().downcast_ref::<PotComp>() {
+                let initial_pos = 0.5;
+                let tapered_pos = pot.taper.apply(initial_pos);
+                let r = (tapered_pos * pot.max_r).max(1.0);
+                mna.stamp_resistor(n1, n2, r);
+                pot_entries.push((
+                    eidx,
+                    DynNode::Pot {
+                        comp_id: comp.id.clone(),
+                        max_resistance: pot.max_r,
+                        position: initial_pos,
+                        taper: pot.taper,
+                        rp: r,
+                    },
+                    n1,
+                    n2,
+                    1.0 / r,
+                ));
+                continue;
+            }
+        }
+        stamp_passive_edge(
+            eidx,
+            graph,
+            &mut mna,
+            &mut reactive_edges,
+            &mut pot_entries,
+            &coupled_edge_indices,
+            &node_to_mna,
+            sample_rate,
+        );
+    }
+
+    // ── GMIN regularization ─────────────────────────────────────────────
+    const GMIN_RESISTANCE: f64 = 1e9;
+    for i in 0..num_mna_nodes {
+        mna.stamp_resistor(Some(i), None, GMIN_RESISTANCE);
+    }
+
+    // ── Stamp linearized OTA VCCS ──────────────────────────────────────
+    use crate::elements::OtaModel;
+    let mut linearized_ota_data: Option<super::stage::LinearizedOtaData> = None;
+    if has_linearized_ota {
+        let ota_info = &plan.ota_vccs[0];
+        let model = OtaModel::ca3080();
+        let gm_max = model.iabc_max / (2.0 * model.vt);
+        let initial_gain = 1.0;
+
+        let out_mna = node_to_mna(ota_info.out_node);
+        let in_pos_mna = node_to_mna(ota_info.in_pos);
+        let in_neg_mna = node_to_mna(ota_info.in_neg);
+
+        let mut stamp_cells: Vec<(usize, usize, f64)> = Vec::new();
+        if let Some(op) = out_mna {
+            if let Some(ip) = in_pos_mna {
+                stamp_cells.push((op, ip, 1.0));
+            }
+            if let Some(inn) = in_neg_mna {
+                stamp_cells.push((op, inn, -1.0));
+            }
+        }
+
+        mna.stamp_vccs(out_mna, None, in_pos_mna, in_neg_mna, gm_max * initial_gain);
+
+        linearized_ota_data = Some(super::stage::LinearizedOtaData {
+            model,
+            gain: initial_gain,
+            stamp_cells,
+            num_mna_nodes,
+        });
+    }
+
+    // ── State-space path (same as try_build_multi_nl_stage) ─────────────
+    if use_state_space {
+        let vs_idx = num_vsources - 1;
+        let injection_mna = node_to_mna(plan.injection_node);
+        mna.stamp_voltage_source(injection_mna, None, vs_idx);
+
+        let out_circuit = plan
+            .output_node
+            .unwrap_or_else(|| plan.ota_vccs[0].out_node);
+        let out_mna = node_to_mna(out_circuit);
+
+        let (a_d, b_d, c_out, n_states) =
+            mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, sample_rate);
+
+        if a_d.iter().any(|v| !v.is_finite()) || b_d.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+
+        let has_pots = !pot_entries.is_empty();
+        let mut pot_children: Vec<DynNode> = Vec::with_capacity(pot_entries.len());
+        let mut pot_mna_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)> =
+            Vec::with_capacity(pot_entries.len());
+        for (i, (_eidx, dyn_node, n1, n2, g)) in pot_entries.into_iter().enumerate() {
+            pot_children.push(dyn_node);
+            pot_mna_stamps.push((i, n1, n2, g));
+        }
+
+        let passive_children: Vec<DynNode> = Vec::new();
+        let port_node_pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+        let dummy_s = vec![1.0];
+        let adaptor = RTypeAdaptor::new(dummy_s, &[1000.0]);
+        let scattering_blocks =
+            super::stage::MultiNlScattering::from_full_matrix(&[0.0; 0], 0, 0);
+        let pot_stamps_ss: Vec<(usize, Option<usize>, Option<usize>, f64)> =
+            pot_mna_stamps.clone();
+
+        let recompute_data = if has_pots || has_linearized_ota {
+            Some(ScatteringRecomputeData {
+                mna,
+                port_node_pairs,
+                adapted_resistance: 1000.0,
+                vs_source_index: Some(vs_idx),
+                extract_output_nodes: Some((out_mna, None)),
+            })
+        } else {
+            None
+        };
+
+        let signal_flow_distance = classified
+            .dist_from_in
+            .get(&plan.injection_node)
+            .copied()
+            .unwrap_or(usize::MAX);
+
+        let state_space_data = super::stage::StateSpaceData {
+            x: vec![0.0; n_states],
+            a_matrix: a_d,
+            b_vector: b_d,
+            c_vector: c_out,
+            n_states,
+            cap_stamps,
+            vs_idx,
+            output_pos: out_mna,
+            output_neg: None,
+            sample_rate,
+            pot_stamps: pot_stamps_ss,
+        };
+
+        return Some(MultiNlStage {
+            adaptor,
+            nl_devices: Vec::new(),
+            nl_port_resistances: Vec::new(),
+            passive_children,
+            pot_children,
+            pot_mna_stamps,
+            n_nl: 0,
+            v_prev: Vec::new(),
+            scattering: scattering_blocks,
+            oversampler: Oversampler::new(oversampling),
+            compensation: plan.compensation,
+            output_port: 0,
+            device_groups: None,
+            recompute_data,
+            signal_flow_distance,
+            transformer_gain: 1.0,
+            injection_node_id: plan.injection_node,
+            output_node_id: out_circuit,
+            recompute_pending: false,
+            veb_bias_offset: 0.0,
+            feedback_scale: 0.1,
+            linearized_ota: linearized_ota_data,
+            vs_injection: None,
+            extract_coeffs: None,
+            extract_vs: 0.0,
+            state_space: Some(state_space_data),
+        });
+    }
+
+    // ── Step 3: Build WDF ports ─────────────────────────────────────────
+    // Port ordering: [NL_0..NL_{n-1}, subtree_0..subtree_{s-1}, reactive_0..reactive_{m-1}, (adapted)]
+    let n_subtrees = decomposed.wdf_subtrees.len();
+    let n_reactive = reactive_edges.len();
+
+    let mut ports: Vec<WdfPort> = Vec::with_capacity(n_nl + n_subtrees + n_reactive + 1);
+    let mut port_node_pairs: Vec<(Option<usize>, Option<usize>)> =
+        Vec::with_capacity(n_nl + n_subtrees + n_reactive + 1);
+    let has_pots = !pot_entries.is_empty();
+
+    // NL ports.
+    let mut nl_port_resistances = Vec::with_capacity(n_nl);
+    for i in 0..n_nl {
+        let (pos_node, neg_node) = plan.nl_terminals[i];
+        let pos = node_to_mna(pos_node);
+        let neg = node_to_mna(neg_node);
+        let r_nl = 10_000.0;
+        ports.push(WdfPort {
+            node_pos: pos,
+            node_neg: neg,
+            resistance: r_nl,
+        });
+        port_node_pairs.push((pos, neg));
+        nl_port_resistances.push(r_nl);
+    }
+
+    // WDF subtree ports — each pre-extracted pendant becomes a single port.
+    let mut subtree_children: Vec<DynNode> = Vec::with_capacity(n_subtrees);
+    for subtree in &decomposed.wdf_subtrees {
+        let dyn_tree = sp_to_dyn(
+            &subtree.tree,
+            &graph.components,
+            &graph.fork_paths,
+            sample_rate,
+        );
+        let rp = dyn_tree.port_resistance();
+        let pos = node_to_mna(subtree.attachment_node);
+        let neg = node_to_mna(subtree.far_node);
+        ports.push(WdfPort {
+            node_pos: pos,
+            node_neg: neg,
+            resistance: rp,
+        });
+        port_node_pairs.push((pos, neg));
+        subtree_children.push(dyn_tree);
+    }
+
+    // Reactive ports from residual edges.
+    let reactive_edge_indices: Vec<usize> = reactive_edges.iter().map(|(eidx, _)| *eidx).collect();
+    let mut reactive_children: Vec<DynNode> = Vec::with_capacity(n_reactive);
+    for (eidx, dyn_node) in reactive_edges {
+        let e = &graph.edges[eidx];
+        let pos = node_to_mna(e.node_a);
+        let neg = node_to_mna(e.node_b);
+        let rp = dyn_node.port_resistance();
+        ports.push(WdfPort {
+            node_pos: pos,
+            node_neg: neg,
+            resistance: rp,
+        });
+        port_node_pairs.push((pos, neg));
+        reactive_children.push(dyn_node);
+    }
+
+    // Combine subtree + reactive children as passive_children.
+    // Subtree children come first (matching port ordering).
+    let mut passive_children: Vec<DynNode> =
+        Vec::with_capacity(n_subtrees + n_reactive);
+    passive_children.extend(subtree_children);
+    passive_children.extend(reactive_children);
+    let n_passive = passive_children.len();
+
+    // Build pot_children and pot_mna_stamps.
+    let mut pot_children: Vec<DynNode> = Vec::with_capacity(pot_entries.len());
+    let mut pot_mna_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)> =
+        Vec::with_capacity(pot_entries.len());
+    for (i, (_eidx, dyn_node, n1, n2, g)) in pot_entries.into_iter().enumerate() {
+        pot_children.push(dyn_node);
+        pot_mna_stamps.push((i, n1, n2, g));
+    }
+
+    // ── Step 3b: Voltage source injection ───────────────────────────────
+    let injection_mna = node_to_mna(plan.injection_node);
+    let mut r_adapted = 1000.0;
+    let mut vs_injection_vec: Option<Vec<f64>> = None;
+
+    if has_linearized_ota && n_nl == 0 {
+        let vs_idx = num_vsources - 1;
+        mna.stamp_voltage_source(injection_mna, None, vs_idx);
+    } else {
+        ports.push(WdfPort {
+            node_pos: injection_mna,
+            node_neg: None,
+            resistance: r_adapted,
+        });
+        port_node_pairs.push((injection_mna, None));
+    }
+
+    // ── Step 4: Derive scattering matrix ────────────────────────────────
+    let mut scattering = if has_linearized_ota && n_nl == 0 {
+        let vs_idx = num_vsources - 1;
+        let (s, vs_inj) = mna.derive_scattering_and_vs_injection(&ports, vs_idx);
+        if s.iter().any(|&sv| !sv.is_finite()) {
+            return None;
+        }
+        vs_injection_vec = Some(vs_inj);
+        s
+    } else {
+        let s = mna.derive_scattering_matrix_general(&ports);
+        if s.iter().any(|&sv| !sv.is_finite()) {
+            return None;
+        }
+        s
+    };
+
+    let n_total = ports.len();
+
+    // ── Adaptive port resistance ────────────────────────────────────────
+    if vs_injection_vec.is_none() {
+        let mut needs_recompute = false;
+
+        // Adapt NL port resistances.
+        for i in 0..n_nl {
+            let s_refl = scattering[i * n_total + i];
+            if s_refl.abs() > 0.1 && (1.0 - s_refl.abs()) > 1e-12 {
+                let z_th = nl_port_resistances[i] * (1.0 + s_refl) / (1.0 - s_refl);
+                if z_th.is_finite() && z_th > 1.0 {
+                    nl_port_resistances[i] = z_th;
+                    ports[i].resistance = z_th;
+                    needs_recompute = true;
+                }
+            }
+        }
+
+        // Adapt the adapted (VS) port resistance.
+        let s_adapted_refl = scattering[(n_total - 1) * n_total + (n_total - 1)];
+        if s_adapted_refl.abs() > 0.05 && (1.0 - s_adapted_refl.abs()) > 1e-12 {
+            let z_th = r_adapted * (1.0 + s_adapted_refl) / (1.0 - s_adapted_refl);
+            if z_th.is_finite() && z_th > 0.0 {
+                r_adapted = z_th;
+                ports.last_mut().unwrap().resistance = r_adapted;
+                needs_recompute = true;
+            }
+        }
+
+        if needs_recompute {
+            scattering = mna.derive_scattering_matrix_general(&ports);
+            if scattering.iter().any(|&s| !s.is_finite()) {
+                return None;
+            }
+        }
+    }
+
+    // ── Step 5: Extract sub-blocks ──────────────────────────────────────
+    let scattering_blocks =
+        super::stage::MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
+
+    // ── Step 6: Create NL device roots ──────────────────────────────────
+    let is_three_port_vari_mu = plan.nl_element_indices.len() == 1
+        && n_nl == 2
+        && matches!(
+            &classified.nonlinear_elements[plan.nl_element_indices[0]].kind,
+            NonlinearKind::Triode {
+                is_vari_mu: true,
+                ..
+            }
+        );
+
+    let is_three_port_triode = plan.nl_element_indices.len() == 1
+        && n_nl == 2
+        && matches!(
+            &classified.nonlinear_elements[plan.nl_element_indices[0]].kind,
+            NonlinearKind::Triode {
+                is_vari_mu: false,
+                ..
+            }
+        );
+
+    let (nl_devices, device_groups) = if is_three_port_vari_mu {
+        let elem = &classified.nonlinear_elements[plan.nl_element_indices[0]];
+        if let NonlinearKind::Triode {
+            model_name,
+            parallel_count,
+            ..
+        } = &elem.kind
+        {
+            let model = vari_mu_model(model_name);
+            let three_port = VariMuThreePort::new(model).with_parallel_count(*parallel_count);
+            let groups = MultiNlDeviceGroups {
+                groups: vec![NlDeviceGroupKind::VariMuThreePort(three_port)],
+                offsets: vec![0],
+            };
+            (Vec::new(), Some(groups))
+        } else {
+            unreachable!()
+        }
+    } else if is_three_port_triode {
+        let elem = &classified.nonlinear_elements[plan.nl_element_indices[0]];
+        if let NonlinearKind::Triode {
+            model_name,
+            parallel_count,
+            ..
+        } = &elem.kind
+        {
+            let model = TriodeModel::by_name(model_name);
+            let three_port = TriodeThreePort::new(model).with_parallel_count(*parallel_count);
+            let groups = MultiNlDeviceGroups {
+                groups: vec![NlDeviceGroupKind::TriodeThreePort(three_port)],
+                offsets: vec![0],
+            };
+            (Vec::new(), Some(groups))
+        } else {
+            unreachable!()
+        }
+    } else if plan.nl_element_indices.len() > 1 && has_mixed_device_types(plan, classified) {
+        let mut groups: Vec<NlDeviceGroupKind> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut offset = 0usize;
+
+        for &elem_idx in &plan.nl_element_indices {
+            let elem = &classified.nonlinear_elements[elem_idx];
+            offsets.push(offset);
+
+            match &elem.kind {
+                NonlinearKind::Triode {
+                    model_name,
+                    parallel_count,
+                    is_vari_mu: true,
+                    grid_node: Some(_),
+                    ..
+                } => {
+                    let model = vari_mu_model(model_name);
+                    let tp = VariMuThreePort::new(model).with_parallel_count(*parallel_count);
+                    groups.push(NlDeviceGroupKind::VariMuThreePort(tp));
+                    offset += 2;
+                }
+                NonlinearKind::Triode {
+                    model_name,
+                    parallel_count,
+                    is_vari_mu: false,
+                    grid_node: Some(_),
+                    ..
+                } => {
+                    let model = TriodeModel::by_name(model_name);
+                    let tp = TriodeThreePort::new(model).with_parallel_count(*parallel_count);
+                    groups.push(NlDeviceGroupKind::TriodeThreePort(tp));
+                    offset += 2;
+                }
+                _ => {
+                    let device = create_nl_device(&elem.kind)?;
+                    groups.push(NlDeviceGroupKind::SinglePort(device));
+                    offset += 1;
+                }
+            }
+        }
+
+        (Vec::new(), Some(MultiNlDeviceGroups { groups, offsets }))
+    } else {
+        let mut devices = Vec::with_capacity(n_nl);
+        for &elem_idx in &plan.nl_element_indices {
+            let elem = &classified.nonlinear_elements[elem_idx];
+            let device = create_nl_device(&elem.kind)?;
+            devices.push(device);
+        }
+        (devices, None)
+    };
+
+    // ── Step 7: Determine output port ───────────────────────────────────
+    // Offset reactive_edge_indices by n_subtrees since subtree children come first.
+    let output_port = if let Some(out_node) = plan.output_node {
+        let direct_idx = reactive_edge_indices.iter().position(|&eidx| {
+            let e = &graph.edges[eidx];
+            e.node_a == out_node || e.node_b == out_node
+        });
+        if let Some(idx) = direct_idx {
+            n_nl + n_subtrees + idx
+        } else {
+            // BFS through resistor edges to find reactive port.
+            let mut visited: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            visited.insert(out_node);
+            queue.push_back(out_node);
+
+            let reactive_nodes: std::collections::HashSet<NodeId> = reactive_edge_indices
+                .iter()
+                .flat_map(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    [e.node_a, e.node_b]
+                })
+                .collect();
+
+            let mut found_node = None;
+            'bfs: while let Some(node) = queue.pop_front() {
+                if reactive_nodes.contains(&node) && node != out_node {
+                    found_node = Some(node);
+                    break 'bfs;
+                }
+                for &eidx in &decomposed.residual_edges {
+                    let e = &graph.edges[eidx];
+                    let neighbor = if e.node_a == node {
+                        Some(e.node_b)
+                    } else if e.node_b == node {
+                        Some(e.node_a)
+                    } else {
+                        None
+                    };
+                    if let Some(n) = neighbor {
+                        if visited.insert(n) {
+                            let comp = &graph.components[e.comp_idx];
+                            if comp.kind.resistance().is_some() {
+                                queue.push_back(n);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(target_node) = found_node {
+                let passive_idx = reactive_edge_indices.iter().position(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    e.node_a == target_node || e.node_b == target_node
+                });
+                match passive_idx {
+                    Some(idx) => n_nl + n_subtrees + idx,
+                    None => plan
+                        .nl_element_indices
+                        .iter()
+                        .position(|&idx| idx == plan.output_element_idx)
+                        .unwrap_or(0),
+                }
+            } else {
+                plan.nl_element_indices
+                    .iter()
+                    .position(|&idx| idx == plan.output_element_idx)
+                    .unwrap_or(0)
+            }
+        }
+    } else if is_three_port_vari_mu || is_three_port_triode {
+        1
+    } else {
+        plan.nl_element_indices
+            .iter()
+            .position(|&idx| idx == plan.output_element_idx)
+            .unwrap_or(0)
+    };
+
+    // ── Step 8: Create RTypeAdaptor and package ─────────────────────────
+    let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+    let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
+
+    // Node-voltage extraction for linearized OTA.
+    let (extract_coeffs, extract_vs, extract_output_nodes) =
+        if has_linearized_ota && n_nl == 0 && vs_injection_vec.is_some() {
+            let vs_idx = num_vsources - 1;
+            let ota_out_circuit = plan.ota_vccs[0].out_node;
+            let ota_out_mna = node_to_mna(ota_out_circuit);
+            let out_pos = ota_out_mna;
+            let out_neg = None;
+            let (coeffs, vs_coeff) =
+                mna.derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
+            (Some(coeffs), vs_coeff, Some((out_pos, out_neg)))
+        } else {
+            (None, 0.0, None)
+        };
+
+    let vs_source_index = if has_linearized_ota && n_nl == 0 {
+        Some(num_vsources - 1)
+    } else {
+        None
+    };
+    let recompute_data = if has_pots || has_linearized_ota {
+        Some(ScatteringRecomputeData {
+            mna,
+            port_node_pairs,
+            adapted_resistance: r_adapted,
+            vs_source_index,
+            extract_output_nodes,
+        })
+    } else {
+        None
+    };
+
+    let signal_flow_distance = classified
+        .dist_from_in
+        .get(&plan.injection_node)
+        .copied()
+        .unwrap_or(usize::MAX);
+
+    let injection_node_id = plan.injection_node;
+    let output_node_id = if let Some(out_node) = plan.output_node {
+        out_node
+    } else if output_port < n_nl {
+        plan.nl_terminals[output_port].0
+    } else {
+        let passive_idx = output_port - n_nl;
+        if passive_idx < n_subtrees {
+            // Output from a subtree port — use its attachment node.
+            decomposed.wdf_subtrees[passive_idx].attachment_node
+        } else {
+            let reactive_idx = passive_idx - n_subtrees;
+            if reactive_idx < reactive_edge_indices.len() {
+                let e = &graph.edges[reactive_edge_indices[reactive_idx]];
+                if e.node_a != plan.injection_node {
+                    e.node_a
+                } else {
+                    e.node_b
+                }
+            } else if !plan.nl_terminals.is_empty() {
+                plan.nl_terminals.last().unwrap().0
+            } else {
+                plan.injection_node
+            }
+        }
+    };
+
+    Some(MultiNlStage {
+        adaptor,
+        nl_devices,
+        nl_port_resistances,
+        passive_children,
+        pot_children,
+        pot_mna_stamps,
+        n_nl,
+        v_prev: vec![0.0; n_nl],
+        scattering: scattering_blocks,
+        oversampler: Oversampler::new(oversampling),
+        compensation: plan.compensation,
+        output_port,
+        device_groups,
+        recompute_data,
+        signal_flow_distance,
+        transformer_gain: 1.0,
+        injection_node_id,
+        output_node_id,
+        recompute_pending: false,
+        veb_bias_offset: 0.0,
+        feedback_scale: 0.1,
+        linearized_ota: linearized_ota_data,
+        vs_injection: vs_injection_vec,
+        extract_coeffs,
+        extract_vs,
+        state_space: None,
+    })
+}
+
 /// Try to build a single MultiNlStage from a plan.
 ///
 /// Returns `None` if MNA construction fails (e.g., singular matrix, no passive edges).
+#[cfg(feature = "legacy-mna")]
 fn try_build_multi_nl_stage(
     plan: &MultiNlPlan,
     classified: &ClassifiedCircuit,
@@ -1947,6 +2775,63 @@ fn try_build_multi_nl_stage(
         extract_vs,
         state_space: None,
     })
+}
+
+/// New pipeline: decompose passive network then build R-type stage.
+///
+/// Uses `sp_decompose` to greedily extract SP-reducible pendant subtrees,
+/// then `build_rtype_stage` to build the MNA from the residual.
+#[cfg(not(feature = "legacy-mna"))]
+fn try_build_multi_nl_stage(
+    plan: &MultiNlPlan,
+    classified: &ClassifiedCircuit,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+) -> Option<MultiNlStage> {
+    let n_nl = plan.nl_terminals.len();
+    let has_linearized_ota = !plan.ota_vccs.is_empty();
+    if (n_nl == 0 && !has_linearized_ota) || plan.passive_edge_indices.is_empty() {
+        return None;
+    }
+
+    // Collect junction nodes: NL terminal nodes + VS injection node.
+    let mut junction_nodes: Vec<NodeId> = Vec::new();
+    for &(pos, neg) in &plan.nl_terminals {
+        if !junction_nodes.contains(&pos) {
+            junction_nodes.push(pos);
+        }
+        if !junction_nodes.contains(&neg) {
+            junction_nodes.push(neg);
+        }
+    }
+    if !junction_nodes.contains(&plan.injection_node) {
+        junction_nodes.push(plan.injection_node);
+    }
+    // Also add OTA nodes as junctions.
+    for ota in &plan.ota_vccs {
+        for &n in &[ota.in_pos, ota.in_neg, ota.out_node] {
+            if !junction_nodes.contains(&n) {
+                junction_nodes.push(n);
+            }
+        }
+    }
+
+    // State-space path (linearized OTA, n_nl=0) requires ALL components in the
+    // MNA — caps in cap_stamps, resistors/pots in G matrix. WDF subtrees bypass
+    // MNA entirely, so skip subtree extraction for state-space mode.
+    let use_state_space = has_linearized_ota && n_nl == 0;
+    let decomposed = if use_state_space {
+        // No subtree extraction — all edges go to residual.
+        super::graph::DecomposedCircuit {
+            wdf_subtrees: Vec::new(),
+            residual_edges: plan.passive_edge_indices.clone(),
+        }
+    } else {
+        sp_decompose(&plan.passive_edge_indices, &junction_nodes, graph)
+    };
+
+    build_rtype_stage(&decomposed, plan, classified, graph, sample_rate, oversampling)
 }
 
 /// Check if a multi-element plan has mixed device types that require
