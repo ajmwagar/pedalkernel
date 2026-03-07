@@ -1057,6 +1057,7 @@ mod tests {
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
             midi_bindings: vec![],
+            calibrate: false,
         }
     }
 
@@ -1196,6 +1197,7 @@ mod tests {
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
             midi_bindings: vec![],
+            calibrate: false,
         };
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "no-signal-path"));

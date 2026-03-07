@@ -607,6 +607,7 @@ mod tests {
             mirrors: std::collections::HashMap::new(),
             subtitle: None,
             midi_bindings: vec![],
+            calibrate: false,
         };
 
         let graph = LayoutGraph::from_pedal(&pedal);

@@ -473,6 +473,8 @@ pub struct CompiledPedal {
     /// Multi-NL stages using R-type adaptor + multi-port NR solver.
     pub(super) multi_nl_stages: Vec<MultiNlStage>,
     pub(super) pre_gain: f64,
+    /// Auto-calibrated output gain scalar (1.0 = no calibration).
+    pub(super) output_gain: f64,
     pub(super) rail_saturation: RailSaturation,
     pub(super) sample_rate: f64,
     pub(super) controls: Vec<ControlBinding>,
@@ -2025,7 +2027,7 @@ impl PedalProcessor for CompiledPedal {
             signal = loading.process(signal);
         }
 
-        let output = signal;
+        let output = signal * self.output_gain;
 
         #[cfg(feature = "debug-trace")]
         if trace_on {

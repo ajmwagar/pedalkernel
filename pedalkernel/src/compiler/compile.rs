@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
+use crate::PedalProcessor;
 use crate::elements::{BbdDelayLine, BbdModel, SlewRateLimiter, TriodeModel};
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::thermal::ThermalModel;
@@ -1837,6 +1838,7 @@ pub fn compile_pedal_with_options(
         push_pull_stages,
         multi_nl_stages,
         pre_gain,
+        output_gain: 1.0,
         rail_saturation,
         sample_rate,
         controls,
@@ -1891,5 +1893,109 @@ pub fn compile_pedal_with_options(
     };
     compiled.set_supply_voltage(initial_voltage);
 
+    // Auto-calibrate output level if requested by pedal definition
+    if pedal.calibrate {
+        let output_gain = calibrate_output_gain(&mut compiled);
+        compiled.output_gain = output_gain;
+        compiled.reset();
+    }
+
     Ok(compiled)
+}
+
+/// Process a reference signal through the pedal and compute a gain scalar
+/// that normalizes output RMS to match input RMS.
+fn calibrate_output_gain(pedal: &mut CompiledPedal) -> f64 {
+    use std::f64::consts::PI;
+
+    let sr = pedal.sample_rate;
+    let n = (0.5 * sr) as usize; // 500ms
+    let two_pi_f = 2.0 * PI * 1000.0; // 1kHz
+    let amp = 0.25; // -12dBFS
+
+    // Warm up (128 samples — let caps settle)
+    for i in 0..128usize {
+        let _ = pedal.process(amp * (two_pi_f * i as f64 / sr).sin());
+    }
+
+    // Measure steady-state output RMS
+    let mut sum_sq = 0.0;
+    let measure_len = n - 128;
+    for i in 128..n {
+        let input = amp * (two_pi_f * i as f64 / sr).sin();
+        let out = pedal.process(input);
+        sum_sq += out * out;
+    }
+    let output_rms = (sum_sq / measure_len as f64).sqrt();
+    let input_rms = amp / std::f64::consts::SQRT_2;
+
+    if output_rms < 1e-10 {
+        return 1.0; // Silent — don't amplify noise
+    }
+
+    (input_rms / output_rms).clamp(0.01, 100.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dsl::parse_pedal_file;
+
+    #[test]
+    fn calibrate_output_gain_reasonable() {
+        // A simple resistor divider: output should be ~half input.
+        // calibrate should produce a gain ~2.0 to compensate.
+        let src = r#"
+            pedal "Divider" {
+                components {
+                    R1: resistor(10k)
+                    R2: resistor(10k)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> R2.a
+                    R2.b -> gnd
+                    R1.b -> out
+                }
+                calibrate
+            }
+        "#;
+        let pedal = parse_pedal_file(src).unwrap();
+        assert!(pedal.calibrate);
+        let compiled = compile_pedal(&pedal, 48000.0).unwrap();
+        // Output gain should compensate for the ~6dB loss
+        assert!(
+            compiled.output_gain > 1.0,
+            "expected output_gain > 1.0, got {}",
+            compiled.output_gain
+        );
+        assert!(
+            compiled.output_gain < 10.0,
+            "expected output_gain < 10.0, got {}",
+            compiled.output_gain
+        );
+    }
+
+    #[test]
+    fn no_calibrate_gives_unity_gain() {
+        let src = r#"
+            pedal "Pass" {
+                components {
+                    R1: resistor(10k)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> out
+                }
+            }
+        "#;
+        let pedal = parse_pedal_file(src).unwrap();
+        assert!(!pedal.calibrate);
+        let compiled = compile_pedal(&pedal, 48000.0).unwrap();
+        assert!(
+            (compiled.output_gain - 1.0).abs() < 1e-10,
+            "expected output_gain = 1.0, got {}",
+            compiled.output_gain
+        );
+    }
 }

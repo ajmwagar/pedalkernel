@@ -524,6 +524,7 @@ mod tests {
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
             midi_bindings: vec![],
+            calibrate: false,
         };
 
         let netlist = export_kicad_netlist(&pedal);

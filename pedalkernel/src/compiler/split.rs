@@ -223,6 +223,7 @@ fn build_half(
         sidechains: vec![],
         mirrors,
         midi_bindings: vec![],
+        calibrate: false,
     }
 }
 

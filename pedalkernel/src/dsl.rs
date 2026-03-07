@@ -167,6 +167,8 @@ pub struct PedalDef {
     /// MIDI note bindings for trigger components.
     /// Maps trigger inputs to specific MIDI note numbers.
     pub midi_bindings: Vec<MidiBinding>,
+    /// When true, auto-calibrate output level at compile time.
+    pub calibrate: bool,
 }
 
 impl PedalDef {
@@ -2621,6 +2623,14 @@ fn parse_subtitle(input: &str) -> IResult<&str, String> {
     Ok((input, s.to_string()))
 }
 
+/// Parse the `calibrate` keyword (opt-in output level auto-normalization).
+fn parse_calibrate(input: &str) -> IResult<&str, ()> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("calibrate")(input)?;
+    let (input, _) = ws_comments(input)?;
+    Ok((input, ()))
+}
+
 /// Parse a complete `.pedal` or `.synth` file.
 /// Both `pedal "Name" { ... }` and `synth "Name" { ... }` produce the same AST.
 pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
@@ -2656,6 +2666,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, trims) = opt(trims_section)(input)?;
     let (input, monitors) = opt(monitors_section)(input)?;
     let (input, sidechains) = opt(sidechains_section)(input)?;
+    let (input, calibrate) = opt(parse_calibrate)(input)?;
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
@@ -2675,6 +2686,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
             sidechains: sidechains.unwrap_or_default(),
             mirrors,
             midi_bindings,
+            calibrate: calibrate.is_some(),
         },
     ))
 }
@@ -2867,6 +2879,41 @@ mod tests {
         let pedal = parse_pedal_file(src).unwrap();
         assert_eq!(pedal.mirrors.len(), 1);
         assert_eq!(pedal.mirrors.get("Gain_B").unwrap(), "Gain_A");
+    }
+
+    #[test]
+    fn parse_calibrate_keyword() {
+        let src = r#"
+            pedal "Test" {
+                components {
+                    R1: resistor(10k)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> out
+                }
+                calibrate
+            }
+        "#;
+        let pedal = parse_pedal_file(src).unwrap();
+        assert!(pedal.calibrate);
+    }
+
+    #[test]
+    fn parse_no_calibrate_keyword() {
+        let src = r#"
+            pedal "Test" {
+                components {
+                    R1: resistor(10k)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> out
+                }
+            }
+        "#;
+        let pedal = parse_pedal_file(src).unwrap();
+        assert!(!pedal.calibrate);
     }
 
     #[test]

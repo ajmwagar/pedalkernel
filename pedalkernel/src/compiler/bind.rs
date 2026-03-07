@@ -1013,6 +1013,7 @@ fn extract_sidechain_def(
         sidechains: vec![],
         mirrors: std::collections::HashMap::new(),
         midi_bindings: vec![],
+        calibrate: false,
     }
 }
 

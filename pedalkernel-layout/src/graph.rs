@@ -521,6 +521,7 @@ mod tests {
             mirrors: std::collections::HashMap::new(),
             subtitle: None,
             midi_bindings: vec![],
+            calibrate: false,
         }
     }
 
