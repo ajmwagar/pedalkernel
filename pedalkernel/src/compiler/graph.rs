@@ -1450,6 +1450,36 @@ impl CircuitGraph {
                 {
                     let a_node = uf.find(a_id);
                     let b_node = uf.find(b_id);
+
+                    // 3-terminal pot: emit two half-segments (a→w, w→b)
+                    // matching the synthetic __aw/__wb edge IDs from graph construction
+                    if is_pot {
+                        let wiper_key = format!("{}.w", comp.id);
+                        let wiper_key_long = format!("{}.wiper", comp.id);
+                        let wiper_id = pin_ids.get(&wiper_key).or_else(|| pin_ids.get(&wiper_key_long));
+                        if let Some(&w_id) = wiper_id {
+                            let w_node = uf.find(w_id);
+                            resistor_nodes.push(ResistorInfo {
+                                id: format!("{}__aw", comp.id),
+                                node_a: a_node,
+                                node_b: w_node,
+                                resistance: max_r * 0.5,
+                                is_pot: true,
+                                max_r,
+                            });
+                            resistor_nodes.push(ResistorInfo {
+                                id: format!("{}__wb", comp.id),
+                                node_a: w_node,
+                                node_b: b_node,
+                                resistance: max_r * 0.5,
+                                is_pot: true,
+                                max_r,
+                            });
+                            continue;
+                        }
+                    }
+
+                    // 2-terminal (resistor or pot without wiper): existing behavior
                     resistor_nodes.push(ResistorInfo {
                         id: comp.id.clone(),
                         node_a: a_node,
