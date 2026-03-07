@@ -291,13 +291,17 @@ impl SmoothedParam {
         }
     }
 
-    /// Advance the smoother by one sample. Returns true if value changed significantly.
+    /// Advance the smoother by one sample. Returns true if value changed.
     #[inline]
     pub fn advance(&mut self) -> bool {
-        let prev = self.current;
         self.current = self.coef * self.current + (1.0 - self.coef) * self.target;
-        // Consider it "changed" if difference is > 0.0001 (1/10000th of range)
-        (self.current - prev).abs() > 0.0001
+        // Snap to target when asymptotically close (avoids infinite tail).
+        if (self.current - self.target).abs() < 1e-6 {
+            self.current = self.target;
+        }
+        // Always return true — caller checks is_settled() before calling us,
+        // so if we're here the pot needs updating.
+        true
     }
 
     /// Set the target value (called from set_control).
