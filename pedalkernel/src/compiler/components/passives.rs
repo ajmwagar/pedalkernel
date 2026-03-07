@@ -1,7 +1,10 @@
 //! Passive component structs: Resistor, Capacitor, Inductor, Potentiometer,
 //! Tempco, CapSwitched, InductorSwitched, ResistorSwitched.
 
-use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult, OPEN_CIRCUIT_R};
+use crate::compiler::component::{
+    Component, ComponentEdge, ControlParam, ControlParamKind, EdgeKind, GraphRole, PinConfig,
+    StampResult, OPEN_CIRCUIT_R,
+};
 use crate::compiler::dyn_node::DynNode;
 use crate::compiler::validate::Severity;
 use crate::dsl::{CapConfig, PotTaper};
@@ -54,6 +57,10 @@ impl Component for Resistor {
         } else {
             Some(DynNode::Resistor { rp: self.value })
         }
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Linear, port_group: None }]
     }
 
     fn resistance(&self) -> Option<f64> { Some(self.value) }
@@ -171,6 +178,10 @@ impl Component for Capacitor {
         }
     }
 
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Reactive, port_group: None }]
+    }
+
     fn capacitance(&self) -> Option<f64> { Some(self.config.value) }
 
     fn validate_values(&self, comp_id: &str) -> Vec<(Severity, String)> {
@@ -274,6 +285,10 @@ impl Component for Inductor {
         })
     }
 
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Reactive, port_group: None }]
+    }
+
     fn inductance(&self) -> Option<f64> { Some(self.value) }
 
     fn validate_values(&self, comp_id: &str) -> Vec<(Severity, String)> {
@@ -357,6 +372,16 @@ impl Component for Potentiometer {
         })
     }
 
+    fn is_variable(&self) -> bool { true }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Linear, port_group: None }]
+    }
+
+    fn controls(&self) -> Vec<ControlParam> {
+        vec![ControlParam { name: "position", kind: ControlParamKind::PotPosition }]
+    }
+
     fn resistance(&self) -> Option<f64> { Some(self.max_r) }
 
     fn validate_values(&self, comp_id: &str) -> Vec<(Severity, String)> {
@@ -420,6 +445,10 @@ impl Component for Tempco {
         Some(DynNode::Resistor { rp: self.resistance })
     }
 
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Linear, port_group: None }]
+    }
+
     fn resistance(&self) -> Option<f64> { Some(self.resistance) }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Device:R", "RT") }
@@ -475,6 +504,10 @@ impl Component for CapSwitched {
             }
         }
         StampResult::Skip
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Reactive, port_group: None }]
     }
 
     fn capacitance(&self) -> Option<f64> { self.values.first().copied() }
@@ -533,6 +566,10 @@ impl Component for InductorSwitched {
         StampResult::Skip
     }
 
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Reactive, port_group: None }]
+    }
+
     fn inductance(&self) -> Option<f64> { self.values.first().copied() }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Device:L", "L") }
@@ -579,6 +616,10 @@ impl Component for ResistorSwitched {
             }
         }
         StampResult::Stamped
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Linear, port_group: None }]
     }
 
     fn resistance(&self) -> Option<f64> { self.values.first().copied() }

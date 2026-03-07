@@ -1,6 +1,6 @@
 //! Switch component structs: Switch, RotarySwitch, TriggerInputComp.
 
-use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult};
+use crate::compiler::component::{Component, ControlParam, ControlParamKind, GraphRole, PinConfig, StampResult};
 use crate::compiler::validate::Severity;
 use crate::tree::MnaSystem;
 
@@ -60,6 +60,13 @@ impl Component for Switch {
         w
     }
 
+    fn controls(&self) -> Vec<ControlParam> {
+        vec![ControlParam {
+            name: "position",
+            kind: ControlParamKind::SwitchPosition { num_positions: self.positions },
+        }]
+    }
+
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         match self.positions {
             2 => ("Switch:SW_SPDT", "SW"),
@@ -109,6 +116,13 @@ impl Component for RotarySwitch {
         StampResult::Skip
     }
 
+    fn controls(&self) -> Vec<ControlParam> {
+        vec![ControlParam {
+            name: "position",
+            kind: ControlParamKind::SwitchPosition { num_positions: self.linked_ids.len() },
+        }]
+    }
+
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         let positions = self.linked_ids.len().max(2);
         match positions {
@@ -156,6 +170,10 @@ impl Component for TriggerInputComp {
         _sample_rate: f64,
     ) -> StampResult {
         StampResult::Skip
+    }
+
+    fn controls(&self) -> Vec<ControlParam> {
+        vec![ControlParam { name: "trigger", kind: ControlParamKind::Trigger }]
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {

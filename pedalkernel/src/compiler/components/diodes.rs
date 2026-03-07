@@ -1,6 +1,10 @@
 //! Diode component structs: Diode, DiodePair, Zener, Neon.
 
-use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult};
+use std::collections::HashMap;
+
+use crate::compiler::classify::NonlinearKind;
+use crate::compiler::component::{Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, StampResult};
+use crate::compiler::graph::NodeId;
 use crate::compiler::validate::Severity;
 use crate::dsl::{DiodeType, NeonType};
 use crate::tree::MnaSystem;
@@ -47,6 +51,22 @@ impl Component for Diode {
         StampResult::Skip
     }
 
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Nonlinear, port_group: None }]
+    }
+
+    fn classify_nonlinear(
+        &self,
+        _comp_id: &str,
+        node_a: NodeId,
+        node_b: NodeId,
+        gnd_node: NodeId,
+        _node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let diode_jn = if node_b == gnd_node { node_a } else if node_a == gnd_node { node_b } else { node_a };
+        Some((NonlinearKind::SingleDiode(self.diode_type), vec![diode_jn]))
+    }
+
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:D", "D")
     }
@@ -90,6 +110,22 @@ impl Component for DiodePair {
         _sample_rate: f64,
     ) -> StampResult {
         StampResult::Skip
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Nonlinear, port_group: None }]
+    }
+
+    fn classify_nonlinear(
+        &self,
+        _comp_id: &str,
+        node_a: NodeId,
+        node_b: NodeId,
+        gnd_node: NodeId,
+        _node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let diode_jn = if node_b == gnd_node { node_a } else if node_a == gnd_node { node_b } else { node_a };
+        Some((NonlinearKind::DiodePair(self.diode_type), vec![diode_jn]))
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {
@@ -151,6 +187,22 @@ impl Component for Zener {
         w
     }
 
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Nonlinear, port_group: None }]
+    }
+
+    fn classify_nonlinear(
+        &self,
+        _comp_id: &str,
+        _node_a: NodeId,
+        node_b: NodeId,
+        gnd_node: NodeId,
+        _node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let jn = if node_b == gnd_node { _node_a } else { node_b };
+        Some((NonlinearKind::Zener { voltage: self.breakdown_voltage }, vec![jn]))
+    }
+
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:D_Zener", "D")
     }
@@ -194,6 +246,10 @@ impl Component for Neon {
         _sample_rate: f64,
     ) -> StampResult {
         StampResult::Skip
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Nonlinear, port_group: None }]
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {

@@ -1,7 +1,14 @@
 //! Active IC component structs: OpAmp, Vco, Vcf, Vca, Comparator, AnalogSwitch,
 //! MatchedNpn, MatchedPnp.
 
-use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult};
+use std::collections::HashMap;
+
+use crate::compiler::classify::NonlinearKind;
+use crate::compiler::component::{
+    Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
+    ResolveContext, StampResult,
+};
+use crate::compiler::graph::NodeId;
 use crate::dsl::{
     AnalogSwitchType, ComparatorType, MatchedTransistorType, OpAmpType, VcaType, VcfType,
     VcoType, VcoWaveformDsl,
@@ -64,6 +71,53 @@ impl Component for OpAmp {
         _sample_rate: f64,
     ) -> StampResult {
         StampResult::Skip
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        if self.op_type.is_ota() {
+            vec![ComponentEdge { pin_a: "pos", pin_b: "neg", kind: EdgeKind::Nonlinear, port_group: None }]
+        } else {
+            vec![]
+        }
+    }
+
+    fn resolve_edges(&self, ctx: &ResolveContext) -> Option<Vec<ComponentEdge>> {
+        if self.op_type.is_ota() && ctx.control_pin_is_modulated {
+            Some(vec![ComponentEdge { pin_a: "pos", pin_b: "neg", kind: EdgeKind::Vccs, port_group: None }])
+        } else {
+            None
+        }
+    }
+
+    fn classify_nonlinear(
+        &self,
+        _comp_id: &str,
+        _node_a: NodeId,
+        node_b: NodeId,
+        gnd_node: NodeId,
+        _node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        if self.op_type.is_ota() {
+            let jn = if node_b == gnd_node { _node_a } else { node_b };
+            Some((NonlinearKind::Ota, vec![jn]))
+        } else {
+            None
+        }
+    }
+
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        if self.op_type.is_ota() {
+            match pin {
+                "iabc" => Some(ModulationSink {
+                    target_kind: ModulationSinkKind::OtaIabc,
+                    bias: 0.5,
+                    range: 0.5,
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        }
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {

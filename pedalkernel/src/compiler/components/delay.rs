@@ -1,6 +1,9 @@
 //! Delay component structs: Bbd, DelayLine, Tap.
 
-use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult};
+use crate::compiler::component::{
+    Component, ComponentEdge, ControlParam, ControlParamKind, EdgeKind, GraphRole, ModulationSink,
+    ModulationSinkKind, PinConfig, StampResult,
+};
 use crate::dsl::BbdType;
 use crate::elements::{Interpolation, Medium};
 use crate::tree::MnaSystem;
@@ -45,6 +48,28 @@ impl Component for Bbd {
         _sample_rate: f64,
     ) -> StampResult {
         StampResult::Skip
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "input", pin_b: "output", kind: EdgeKind::Behavioral, port_group: None }]
+    }
+
+    fn controls(&self) -> Vec<ControlParam> {
+        vec![
+            ControlParam { name: "clock", kind: ControlParamKind::BbdClockRate },
+            ControlParam { name: "feedback", kind: ControlParamKind::BbdFeedback },
+        ]
+    }
+
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        match pin {
+            "clock" => Some(ModulationSink {
+                target_kind: ModulationSinkKind::BbdClock,
+                bias: 0.15,
+                range: 0.10,
+            }),
+            _ => None,
+        }
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {
@@ -100,6 +125,33 @@ impl Component for DelayLineComp {
         _sample_rate: f64,
     ) -> StampResult {
         StampResult::Skip
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "input", pin_b: "output", kind: EdgeKind::Behavioral, port_group: None }]
+    }
+
+    fn controls(&self) -> Vec<ControlParam> {
+        vec![
+            ControlParam { name: "delay_time", kind: ControlParamKind::DelayTime },
+            ControlParam { name: "feedback", kind: ControlParamKind::DelayFeedback },
+        ]
+    }
+
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        match pin {
+            "speed_mod" => Some(ModulationSink {
+                target_kind: ModulationSinkKind::DelaySpeed,
+                bias: 0.0,
+                range: 0.02,
+            }),
+            "delay_time" => Some(ModulationSink {
+                target_kind: ModulationSinkKind::DelayTime,
+                bias: 0.5,
+                range: 0.5,
+            }),
+            _ => None,
+        }
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("", "DL") }

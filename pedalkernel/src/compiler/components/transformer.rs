@@ -1,6 +1,6 @@
 //! Transformer component struct.
 
-use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult};
+use crate::compiler::component::{Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, StampResult};
 use crate::compiler::dyn_node::DynNode;
 use crate::dsl::{TransformerConfig, WindingType};
 use crate::tree::MnaSystem;
@@ -88,6 +88,10 @@ impl Component for TransformerComp {
                 b_sec: 0.0,
             })
         }
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Reactive, port_group: None }]
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {

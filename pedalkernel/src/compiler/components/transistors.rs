@@ -1,7 +1,14 @@
 //! Transistor component structs: Npn, Pnp, NJfet, PJfet, Nmos, Pmos.
 
-use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult};
+use std::collections::HashMap;
+
+use crate::compiler::classify::NonlinearKind;
+use crate::compiler::component::{
+    Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
+    ResolveContext, StampResult,
+};
 use crate::compiler::dyn_node::DynNode;
+use crate::compiler::graph::NodeId;
 use crate::dsl::MosfetType;
 use crate::elements::{JfetModel, JfetVariableResistor};
 use crate::tree::MnaSystem;
@@ -48,6 +55,28 @@ impl Component for Npn {
         StampResult::Skip
     }
 
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "collector", pin_b: "emitter", kind: EdgeKind::Nonlinear, port_group: None }]
+    }
+
+    fn classify_nonlinear(
+        &self,
+        comp_id: &str,
+        node_a: NodeId,
+        node_b: NodeId,
+        _gnd_node: NodeId,
+        node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let base_node = node_names
+            .get(&format!("{}.base", comp_id))
+            .copied()
+            .unwrap_or(node_a);
+        Some((
+            NonlinearKind::BjtNpn { model_name: self.model.clone(), base_node },
+            vec![node_a, node_b],
+        ))
+    }
+
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:Q_NPN_BCE", "Q")
     }
@@ -91,6 +120,28 @@ impl Component for Pnp {
         _sample_rate: f64,
     ) -> StampResult {
         StampResult::Skip
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "collector", pin_b: "emitter", kind: EdgeKind::Nonlinear, port_group: None }]
+    }
+
+    fn classify_nonlinear(
+        &self,
+        comp_id: &str,
+        node_a: NodeId,
+        node_b: NodeId,
+        _gnd_node: NodeId,
+        node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let base_node = node_names
+            .get(&format!("{}.base", comp_id))
+            .copied()
+            .unwrap_or(node_a);
+        Some((
+            NonlinearKind::BjtPnp { model_name: self.model.clone(), base_node },
+            vec![node_a, node_b],
+        ))
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {
@@ -149,6 +200,46 @@ impl Component for NJfet {
         })
     }
 
+    fn is_variable(&self) -> bool { true }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Nonlinear, port_group: None }]
+    }
+
+    fn resolve_edges(&self, ctx: &ResolveContext) -> Option<Vec<ComponentEdge>> {
+        if ctx.control_pin_is_modulated {
+            Some(vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Linear, port_group: None }])
+        } else {
+            None
+        }
+    }
+
+    fn classify_nonlinear(
+        &self,
+        _comp_id: &str,
+        _node_a: NodeId,
+        node_b: NodeId,
+        gnd_node: NodeId,
+        _node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let jn = if node_b == gnd_node { _node_a } else { node_b };
+        Some((
+            NonlinearKind::Jfet { model_name: self.model.clone(), is_n_channel: true },
+            vec![jn],
+        ))
+    }
+
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        match pin {
+            "vgs" | "gate" => Some(ModulationSink {
+                target_kind: ModulationSinkKind::JfetVgs,
+                bias: -0.45,
+                range: 0.25,
+            }),
+            _ => None,
+        }
+    }
+
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:Q_NJFET_DGS", "J")
     }
@@ -205,6 +296,46 @@ impl Component for PJfet {
         })
     }
 
+    fn is_variable(&self) -> bool { true }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Nonlinear, port_group: None }]
+    }
+
+    fn resolve_edges(&self, ctx: &ResolveContext) -> Option<Vec<ComponentEdge>> {
+        if ctx.control_pin_is_modulated {
+            Some(vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Linear, port_group: None }])
+        } else {
+            None
+        }
+    }
+
+    fn classify_nonlinear(
+        &self,
+        _comp_id: &str,
+        _node_a: NodeId,
+        node_b: NodeId,
+        gnd_node: NodeId,
+        _node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let jn = if node_b == gnd_node { _node_a } else { node_b };
+        Some((
+            NonlinearKind::Jfet { model_name: self.model.clone(), is_n_channel: false },
+            vec![jn],
+        ))
+    }
+
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        match pin {
+            "vgs" | "gate" => Some(ModulationSink {
+                target_kind: ModulationSinkKind::JfetVgs,
+                bias: -0.45,
+                range: 0.25,
+            }),
+            _ => None,
+        }
+    }
+
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:Q_PJFET_DGS", "J")
     }
@@ -252,6 +383,36 @@ impl Component for Nmos {
         StampResult::Skip
     }
 
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Nonlinear, port_group: None }]
+    }
+
+    fn classify_nonlinear(
+        &self,
+        _comp_id: &str,
+        _node_a: NodeId,
+        node_b: NodeId,
+        gnd_node: NodeId,
+        _node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let jn = if node_b == gnd_node { _node_a } else { node_b };
+        Some((
+            NonlinearKind::Mosfet { mosfet_type: self.mosfet_type, is_n_channel: true },
+            vec![jn],
+        ))
+    }
+
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        match pin {
+            "vgs" | "gate" => Some(ModulationSink {
+                target_kind: ModulationSinkKind::MosfetVgs,
+                bias: 3.0,
+                range: 2.0,
+            }),
+            _ => None,
+        }
+    }
+
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:Q_NMOS_DGS", "Q")
     }
@@ -297,6 +458,36 @@ impl Component for Pmos {
         _sample_rate: f64,
     ) -> StampResult {
         StampResult::Skip
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Nonlinear, port_group: None }]
+    }
+
+    fn classify_nonlinear(
+        &self,
+        _comp_id: &str,
+        _node_a: NodeId,
+        node_b: NodeId,
+        gnd_node: NodeId,
+        _node_names: &HashMap<String, NodeId>,
+    ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let jn = if node_b == gnd_node { _node_a } else { node_b };
+        Some((
+            NonlinearKind::Mosfet { mosfet_type: self.mosfet_type, is_n_channel: false },
+            vec![jn],
+        ))
+    }
+
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        match pin {
+            "vgs" | "gate" => Some(ModulationSink {
+                target_kind: ModulationSinkKind::MosfetVgs,
+                bias: 3.0,
+                range: 2.0,
+            }),
+            _ => None,
+        }
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {

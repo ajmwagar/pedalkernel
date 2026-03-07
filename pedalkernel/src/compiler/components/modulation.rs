@@ -1,6 +1,9 @@
 //! Modulation component structs: Lfo, EnvelopeFollower, Photocoupler.
 
-use crate::compiler::component::{Component, GraphRole, PinConfig, StampResult};
+use crate::compiler::component::{
+    Component, ComponentEdge, ControlParam, ControlParamKind, EdgeKind, GraphRole, ModulationSink,
+    ModulationSinkKind, PinConfig, StampResult,
+};
 use crate::compiler::dyn_node::DynNode;
 use crate::compiler::validate::Severity;
 use crate::dsl::{LfoWaveformDsl, PhotocouplerType};
@@ -71,6 +74,13 @@ impl Component for Lfo {
             ));
         }
         w
+    }
+
+    fn controls(&self) -> Vec<ControlParam> {
+        vec![
+            ControlParam { name: "rate", kind: ControlParamKind::LfoRate },
+            ControlParam { name: "depth", kind: ControlParamKind::LfoDepth },
+        ]
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("", "LFO") }
@@ -192,6 +202,23 @@ impl Component for PhotocouplerComp {
             inner: PhotocouplerElem::new(model, sample_rate),
             prev_resistance: 0.0,
         })
+    }
+
+    fn is_variable(&self) -> bool { true }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Linear, port_group: None }]
+    }
+
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        match pin {
+            "led" => Some(ModulationSink {
+                target_kind: ModulationSinkKind::PhotocouplerLed,
+                bias: 0.5,
+                range: 0.5,
+            }),
+            _ => None,
+        }
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) { ("Isolator:PC817", "OC") }
