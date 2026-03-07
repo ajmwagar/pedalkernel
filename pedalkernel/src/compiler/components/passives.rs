@@ -3,7 +3,7 @@
 
 use crate::compiler::component::{
     Component, ComponentEdge, ControlParam, ControlParamKind, EdgeKind, GraphRole, PinConfig,
-    StampResult, OPEN_CIRCUIT_R,
+    PinDirection, StampResult, OPEN_CIRCUIT_R,
 };
 use crate::compiler::dyn_node::DynNode;
 use crate::compiler::validate::Severity;
@@ -415,6 +415,18 @@ impl Component for Potentiometer {
     fn symbol_name(&self) -> &'static str { "pot" }
     fn layout_class(&self) -> &'static str { "pot" }
     fn display_value(&self) -> Option<String> { Some(crate::kicad::format_eng(self.max_r, "\u{2126}")) }
+
+    fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("a", "b"), ("a", "wiper"), ("wiper", "b"), ("a", "w"), ("w", "b")]
+    }
+
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "a" => PinDirection::Input,
+            "wiper" | "b" | "w" => PinDirection::Output,
+            _ => PinDirection::Bidirectional,
+        }
+    }
 
     fn is_pot(&self) -> bool { true }
     fn pot_taper(&self) -> Option<crate::dsl::PotTaper> { Some(self.taper) }

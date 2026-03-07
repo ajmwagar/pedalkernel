@@ -348,124 +348,13 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
         }
     };
 
-    // Also add implicit component-internal connections:
-    // For a 2-terminal element, .a and .b are connected through the element.
+    // Also add implicit component-internal connections via signal_adjacencies().
     for comp in &pedal.components {
-        let kind = comp.kind.as_ref();
-        let pins = valid_pins_for(kind);
-        let tag = kind.type_tag();
-
-        // Two-terminal passive elements (a <-> b)
-        if matches!(
-            tag,
-            "resistor"
-                | "capacitor"
-                | "inductor"
-                | "diode pair"
-                | "diode"
-                | "zener diode"
-                | "neon bulb"
-                | "tempco resistor"
-                | "switched capacitor"
-                | "switched inductor"
-                | "switched resistor"
-                | "photocoupler"
-        ) {
-            let ka = format!("{}.a", comp.id);
-            let kb = format!("{}.b", comp.id);
+        for (pa, pb) in comp.kind.signal_adjacencies() {
+            let ka = format!("{}.{}", comp.id, pa);
+            let kb = format!("{}.{}", comp.id, pb);
             adj.entry(ka.clone()).or_default().insert(kb.clone());
             adj.entry(kb).or_default().insert(ka);
-        } else if kind.is_pot() {
-            // a-wiper and wiper-b are connected through the pot
-            let ka = format!("{}.a", comp.id);
-            let kb = format!("{}.b", comp.id);
-            let kw = format!("{}.wiper", comp.id);
-            let kw2 = format!("{}.w", comp.id);
-            adj.entry(ka.clone()).or_default().insert(kb.clone());
-            adj.entry(kb.clone()).or_default().insert(ka.clone());
-            adj.entry(ka.clone()).or_default().insert(kw.clone());
-            adj.entry(kw.clone()).or_default().insert(ka);
-            adj.entry(kb.clone()).or_default().insert(kw2.clone());
-            adj.entry(kw2).or_default().insert(kb);
-        } else if kind.is_jfet() || kind.is_mosfet() {
-            let kd = format!("{}.drain", comp.id);
-            let ks = format!("{}.source", comp.id);
-            adj.entry(kd.clone()).or_default().insert(ks.clone());
-            adj.entry(ks).or_default().insert(kd);
-        } else if kind.is_tube() {
-            let kp = format!("{}.plate", comp.id);
-            let kk = format!("{}.cathode", comp.id);
-            adj.entry(kp.clone()).or_default().insert(kk.clone());
-            adj.entry(kk).or_default().insert(kp);
-        } else if kind.is_bjt() {
-            // Signal can flow base->collector (common-emitter),
-            // collector<->emitter, or base->emitter (follower).
-            // Connect all three terminals for reachability.
-            let kb = format!("{}.base", comp.id);
-            let kc = format!("{}.collector", comp.id);
-            let ke = format!("{}.emitter", comp.id);
-            adj.entry(kb.clone()).or_default().insert(kc.clone());
-            adj.entry(kc.clone()).or_default().insert(kb.clone());
-            adj.entry(kc.clone()).or_default().insert(ke.clone());
-            adj.entry(ke.clone()).or_default().insert(kc);
-            adj.entry(kb.clone()).or_default().insert(ke.clone());
-            adj.entry(ke).or_default().insert(kb);
-        } else if kind.op_amp_type().is_some() {
-            // Op-amp: pos/neg are inputs, out is output.
-            // For signal path check, connect through the op-amp.
-            let kp = format!("{}.pos", comp.id);
-            let kn = format!("{}.neg", comp.id);
-            let ko = format!("{}.out", comp.id);
-            adj.entry(kp.clone()).or_default().insert(ko.clone());
-            adj.entry(kn.clone()).or_default().insert(ko.clone());
-            adj.entry(ko.clone()).or_default().insert(kp);
-            adj.entry(ko).or_default().insert(kn);
-        } else if kind.is_delay() {
-            // BBD and delay line: connect input/in <-> output/out with aliases
-            let ki = format!("{}.in", comp.id);
-            let ki_alias = format!("{}.input", comp.id);
-            let ko = format!("{}.out", comp.id);
-            let ko_alias = format!("{}.output", comp.id);
-            for i in [&ki, &ki_alias] {
-                for o in [&ko, &ko_alias] {
-                    adj.entry(i.clone()).or_default().insert(o.clone());
-                    adj.entry(o.clone()).or_default().insert(i.clone());
-                }
-            }
-            adj.entry(ki.clone()).or_default().insert(ki_alias.clone());
-            adj.entry(ki_alias).or_default().insert(ki);
-            adj.entry(ko.clone()).or_default().insert(ko_alias.clone());
-            adj.entry(ko_alias).or_default().insert(ko);
-        } else if kind.is_transformer() {
-            // Primary and secondary are magnetically coupled
-            let ka = format!("{}.a", comp.id);
-            let kb = format!("{}.b", comp.id);
-            let kc = format!("{}.c", comp.id);
-            let kd = format!("{}.d", comp.id);
-            adj.entry(ka.clone()).or_default().insert(kb.clone());
-            adj.entry(kb).or_default().insert(ka);
-            adj.entry(kc.clone()).or_default().insert(kd.clone());
-            adj.entry(kd).or_default().insert(kc);
-            // Tertiary winding if present
-            if let Some(cfg) = kind.transformer_config() {
-                if cfg.has_tertiary() {
-                    let ke = format!("{}.e", comp.id);
-                    let kf = format!("{}.f", comp.id);
-                    adj.entry(ke.clone()).or_default().insert(kf.clone());
-                    adj.entry(kf).or_default().insert(ke);
-                }
-            }
-        } else {
-            // LFO, EnvelopeFollower, Switches, Taps, Synth ICs -- not passive signal path
-            // Connect any declared pins to ensure adjacency
-            if pins.len() >= 2 {
-                let first = format!("{}.{}", comp.id, pins[0]);
-                for p in &pins[1..] {
-                    let other = format!("{}.{}", comp.id, p);
-                    adj.entry(first.clone()).or_default().insert(other.clone());
-                    adj.entry(other).or_default().insert(first.clone());
-                }
-            }
         }
     }
 

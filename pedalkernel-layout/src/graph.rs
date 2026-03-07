@@ -5,111 +5,11 @@
 //! inferred from component type and pin function (e.g., triode grid = input,
 //! plate = output).
 
+pub use pedalkernel::compiler::PinDirection;
+
 use pedalkernel::compiler::Component;
 use pedalkernel::dsl::{ComponentDef, NetDef, PedalDef, Pin};
 use std::collections::{HashMap, HashSet};
-
-// ---------------------------------------------------------------------------
-// Pin direction inference
-// ---------------------------------------------------------------------------
-
-/// Inferred direction for a component pin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PinDirection {
-    /// Signal enters through this pin (e.g., triode grid).
-    Input,
-    /// Signal exits through this pin (e.g., triode plate).
-    Output,
-    /// Pin connects upward toward VCC (e.g., plate load destination).
-    Up,
-    /// Pin connects downward toward GND (e.g., cathode bias).
-    Down,
-    /// Direction determined by context (e.g., resistor terminals).
-    Bidirectional,
-}
-
-/// Infer the signal direction for a given pin on a component.
-pub fn infer_pin_direction(kind: &dyn Component, pin_name: &str) -> PinDirection {
-    let lc = kind.layout_class();
-    if lc == "triode" || lc == "vari_mu" {
-        // Triode: grid=in, plate=out, cathode=down (bias hangs below)
-        match pin_name {
-            "grid" => PinDirection::Input,
-            "plate" => PinDirection::Output,
-            "cathode" => PinDirection::Down,
-            _ => PinDirection::Bidirectional,
-        }
-    } else if lc == "pentode" {
-        // Pentode: grid=in, plate=out, screen=up (to supply), cathode=down
-        match pin_name {
-            "grid" => PinDirection::Input,
-            "plate" => PinDirection::Output,
-            "screen" => PinDirection::Up,
-            "cathode" => PinDirection::Down,
-            _ => PinDirection::Bidirectional,
-        }
-    } else if kind.is_transformer() {
-        // Transformer: primary=input side, secondary=output side
-        if pin_name.starts_with("pri") {
-            PinDirection::Input
-        } else if pin_name.starts_with("sec") {
-            PinDirection::Output
-        } else {
-            PinDirection::Bidirectional
-        }
-    } else if kind.is_pot() {
-        // Potentiometer: wiper=output
-        match pin_name {
-            "wiper" | "b" => PinDirection::Output,
-            "a" => PinDirection::Input,
-            _ => PinDirection::Bidirectional,
-        }
-    } else if kind.op_amp_type().is_some() {
-        // Op-amp: pos/neg=input, out=output
-        match pin_name {
-            "pos" | "neg" => PinDirection::Input,
-            "out" => PinDirection::Output,
-            _ => PinDirection::Bidirectional,
-        }
-    } else if kind.is_bjt() {
-        // BJTs: base=input, collector=output, emitter=down
-        match pin_name {
-            "base" => PinDirection::Input,
-            "collector" => PinDirection::Output,
-            "emitter" => PinDirection::Down,
-            _ => PinDirection::Bidirectional,
-        }
-    } else if kind.is_jfet() {
-        // JFETs: gate=input, drain=output, source=down
-        match pin_name {
-            "gate" => PinDirection::Input,
-            "drain" => PinDirection::Output,
-            "source" => PinDirection::Down,
-            _ => PinDirection::Bidirectional,
-        }
-    } else if kind.is_mosfet() {
-        // MOSFETs: gate=input, drain=output, source=down
-        match pin_name {
-            "gate" => PinDirection::Input,
-            "drain" => PinDirection::Output,
-            "source" => PinDirection::Down,
-            _ => PinDirection::Bidirectional,
-        }
-    } else if kind.is_diode_family() {
-        // Diodes: anode=input, cathode=output (current flow direction)
-        match pin_name {
-            "a" => PinDirection::Input,
-            "b" => PinDirection::Output,
-            _ => PinDirection::Bidirectional,
-        }
-    } else if kind.is_passive() && !kind.is_pot() && !kind.is_transformer() {
-        // Two-terminal passives: direction from context
-        PinDirection::Bidirectional
-    } else {
-        // Everything else: bidirectional
-        PinDirection::Bidirectional
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Layout graph
@@ -282,14 +182,14 @@ impl LayoutGraph {
     /// Check if a node is an active device (tube, transistor, op-amp).
     pub fn is_active_device(&self, node_id: usize) -> bool {
         self.node_kind(node_id).map_or(false, |k| {
-            k.is_tube() || k.is_bjt() || k.is_jfet() || k.is_mosfet() || k.op_amp_type().is_some()
+            k.is_gain_device() || k.op_amp_type().is_some()
         })
     }
 
-    /// Check if a component is a passive (R, C, L).
+    /// Check if a component is a simple passive (R, C, L — not pot/transformer).
     pub fn is_passive(&self, node_id: usize) -> bool {
         self.node_kind(node_id).map_or(false, |k| {
-            k.is_passive() && !k.is_pot() && !k.is_transformer()
+            k.is_simple_passive() && !k.is_pot()
         })
     }
 }
@@ -519,7 +419,7 @@ fn get_pin_direction_in_net(node: &LayoutNode, ng: &NetGroup) -> PinDirection {
         } = pin
         {
             if *component == node.comp_id {
-                return infer_pin_direction(comp.kind.as_ref(), pin_name);
+                return comp.kind.pin_direction(pin_name);
             }
         }
     }
@@ -640,30 +540,15 @@ mod tests {
     #[test]
     fn pin_direction_triode() {
         let triode = Triode { model: "12AX7".into() };
-        assert_eq!(
-            infer_pin_direction(&triode, "grid"),
-            PinDirection::Input
-        );
-        assert_eq!(
-            infer_pin_direction(&triode, "plate"),
-            PinDirection::Output
-        );
-        assert_eq!(
-            infer_pin_direction(&triode, "cathode"),
-            PinDirection::Down
-        );
+        assert_eq!(triode.pin_direction("grid"), PinDirection::Input);
+        assert_eq!(triode.pin_direction("plate"), PinDirection::Output);
+        assert_eq!(triode.pin_direction("cathode"), PinDirection::Down);
     }
 
     #[test]
     fn pin_direction_opamp() {
         let opamp = OpAmp { op_type: OpAmpType::Jrc4558 };
-        assert_eq!(
-            infer_pin_direction(&opamp, "pos"),
-            PinDirection::Input
-        );
-        assert_eq!(
-            infer_pin_direction(&opamp, "out"),
-            PinDirection::Output
-        );
+        assert_eq!(opamp.pin_direction("pos"), PinDirection::Input);
+        assert_eq!(opamp.pin_direction("out"), PinDirection::Output);
     }
 }

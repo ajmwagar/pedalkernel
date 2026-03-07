@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    StampResult,
+    PinDirection, StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::tree::MnaSystem;
@@ -102,7 +102,17 @@ impl Component for Triode {
     fn symbol_name(&self) -> &'static str { "triode" }
     fn layout_class(&self) -> &'static str { "triode" }
 
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "grid" => PinDirection::Input,
+            "plate" => PinDirection::Output,
+            "cathode" => PinDirection::Down,
+            _ => PinDirection::Bidirectional,
+        }
+    }
+
     fn is_tube(&self) -> bool { true }
+    fn is_gain_device(&self) -> bool { true }
     fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
@@ -188,7 +198,18 @@ impl Component for Pentode {
     fn symbol_name(&self) -> &'static str { "pentode" }
     fn layout_class(&self) -> &'static str { "pentode" }
 
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "grid" => PinDirection::Input,
+            "plate" => PinDirection::Output,
+            "screen" => PinDirection::Up,
+            "cathode" => PinDirection::Down,
+            _ => PinDirection::Bidirectional,
+        }
+    }
+
     fn is_tube(&self) -> bool { true }
+    fn is_gain_device(&self) -> bool { true }
     fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
@@ -282,6 +303,16 @@ impl Component for VariMu {
     fn symbol_name(&self) -> &'static str { "triode" }
     fn layout_class(&self) -> &'static str { "vari_mu" }
 
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "grid" => PinDirection::Input,
+            "plate" => PinDirection::Output,
+            "cathode" => PinDirection::Down,
+            _ => PinDirection::Bidirectional,
+        }
+    }
+
     fn is_tube(&self) -> bool { true }
+    fn is_gain_device(&self) -> bool { true }
     fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }

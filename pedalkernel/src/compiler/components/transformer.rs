@@ -1,6 +1,6 @@
 //! Transformer component struct.
 
-use crate::compiler::component::{Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, StampResult};
+use crate::compiler::component::{Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, PinDirection, StampResult};
 use crate::compiler::dyn_node::DynNode;
 use crate::dsl::{TransformerConfig, WindingType};
 use crate::tree::MnaSystem;
@@ -111,6 +111,26 @@ impl Component for TransformerComp {
 
     fn symbol_name(&self) -> &'static str { "transformer" }
     fn layout_class(&self) -> &'static str { "transformer" }
+
+    fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
+        let mut adj = vec![("a", "b"), ("c", "d")];
+        if self.config.has_tertiary() {
+            adj.push(("e", "f"));
+        }
+        adj
+    }
+
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        if pin.starts_with("pri") || pin == "a" || pin == "b" {
+            PinDirection::Input
+        } else if pin.starts_with("sec") || pin == "c" || pin == "d"
+            || pin.starts_with("ter") || pin == "e" || pin == "f"
+        {
+            PinDirection::Output
+        } else {
+            PinDirection::Bidirectional
+        }
+    }
 
     fn is_transformer(&self) -> bool { true }
     fn transformer_config(&self) -> Option<&crate::dsl::TransformerConfig> { Some(&self.config) }

@@ -191,11 +191,8 @@ fn build_other_side_subtree(
             };
             let Some(n) = neighbor else { continue };
 
-            // Skip NL component edges (by checking component kind).
-            // Only traverse through passive, non-transformer components.
-            if !graph.components[e.comp_idx].kind.is_passive()
-                || graph.components[e.comp_idx].kind.is_transformer()
-            {
+            // Only traverse through simple passive components (R, C, L, etc.).
+            if !graph.components[e.comp_idx].kind.is_simple_passive() {
                 continue;
             }
 

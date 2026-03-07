@@ -47,6 +47,21 @@ pub struct PinConfig {
     pub aliases: &'static [(&'static str, &'static str)],
 }
 
+/// Inferred direction for a component pin (used by layout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinDirection {
+    /// Signal enters through this pin (e.g., triode grid).
+    Input,
+    /// Signal exits through this pin (e.g., triode plate).
+    Output,
+    /// Pin connects upward toward VCC (e.g., plate load destination).
+    Up,
+    /// Pin connects downward toward GND (e.g., cathode bias).
+    Down,
+    /// Direction determined by context (e.g., resistor terminals).
+    Bidirectional,
+}
+
 /// Classification of a circuit edge by electrical behavior.
 ///
 /// The planner uses edge kinds to group components into stages:
@@ -245,6 +260,31 @@ pub trait Component: std::fmt::Debug {
     /// The planner uses these edges to group components into stages by EdgeKind.
     fn edges(&self) -> Vec<ComponentEdge> { vec![] }
 
+    /// Internal signal-path adjacencies: pin pairs that signal can traverse through.
+    ///
+    /// Used by the validator to check in→out reachability. Default derives pairs
+    /// from `edges()`; if edges is empty, fans out from first valid_pin to all others.
+    /// Override for multi-terminal or complex components (BJTs, pots, transformers).
+    fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
+        let edge_list = self.edges();
+        if !edge_list.is_empty() {
+            edge_list.iter().map(|e| (e.pin_a, e.pin_b)).collect()
+        } else {
+            let pins = self.pin_config().valid_pins;
+            if pins.len() >= 2 {
+                pins[1..].iter().map(|&p| (pins[0], p)).collect()
+            } else {
+                vec![]
+            }
+        }
+    }
+
+    /// Infer the signal direction for a given pin on this component.
+    ///
+    /// Used by the layout engine to determine directed graph edges.
+    /// Default: `Bidirectional` for all pins.
+    fn pin_direction(&self, _pin: &str) -> PinDirection { PinDirection::Bidirectional }
+
     /// Context-dependent resolution: if this component's behavior depends on
     /// how it's wired, return a new edge list reflecting the resolved role.
     ///
@@ -342,8 +382,15 @@ pub trait Component: std::fmt::Debug {
     fn is_transformer(&self) -> bool { false }
     fn is_pot(&self) -> bool { false }
     fn is_diode_family(&self) -> bool { false }
-    fn is_delay(&self) -> bool { false }
     fn is_trigger(&self) -> bool { false }
+
+    // ── Composite classification ─────────────────────────────────────────
+
+    /// Passive two-terminal element (R, C, L, etc.) — excludes transformers and pots.
+    fn is_simple_passive(&self) -> bool { self.is_passive() && !self.is_transformer() }
+
+    /// Amplifying device: tube, BJT, JFET, MOSFET.
+    fn is_gain_device(&self) -> bool { false }
 
     // ── Accessor methods (defaults return None) ──────────────────────────
 

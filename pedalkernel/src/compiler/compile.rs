@@ -209,8 +209,7 @@ fn build_passive_wdf_stage(
         .iter()
         .enumerate()
         .filter(|(_, e)| {
-            let k = &graph.components[e.comp_idx].kind;
-            k.is_passive() && !k.is_transformer()
+            graph.components[e.comp_idx].kind.is_simple_passive()
         })
         .map(|(i, _)| i)
         .collect();
@@ -786,9 +785,9 @@ fn rescue_orphan_output_pots(
         if nl_edge_set.contains(&eidx) || active_edge_set.contains(&eidx) {
             continue;
         }
-        // Skip transformer edges and non-passive components
+        // Skip non-simple-passive components (transformers, nonlinear, etc.)
         let comp = &graph.components[e.comp_idx];
-        if !comp.kind.is_passive() || comp.kind.is_transformer() {
+        if !comp.kind.is_simple_passive() {
             continue;
         }
         // Skip supply-node edges (except gnd — gnd is a valid termination)
@@ -1451,8 +1450,7 @@ pub fn compile_pedal_with_options(
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| {
-                    let k = &graph.components[e.comp_idx].kind;
-                    k.is_passive() && !k.is_transformer()
+                    graph.components[e.comp_idx].kind.is_simple_passive()
                 })
                 .map(|(i, _)| i)
                 .collect();

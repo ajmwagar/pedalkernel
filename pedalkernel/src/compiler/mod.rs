@@ -25,7 +25,7 @@ mod stage;
 pub mod validate;
 mod warnings;
 
-pub use component::Component;
+pub use component::{Component, PinDirection};
 pub use compile::{compile_pedal, compile_pedal_with_options, CompileOptions};
 pub use compiled::CompiledPedal;
 pub use split::{compile_split_pedal, SplitCompiledPedal};

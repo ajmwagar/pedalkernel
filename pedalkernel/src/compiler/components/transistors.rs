@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    ResolveContext, StampResult,
+    PinDirection, ResolveContext, StampResult,
 };
 use crate::compiler::dyn_node::DynNode;
 use crate::compiler::graph::NodeId;
@@ -84,7 +84,21 @@ impl Component for Npn {
     fn symbol_name(&self) -> &'static str { "npn_bjt" }
     fn layout_class(&self) -> &'static str { "npn" }
 
+    fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("base", "collector"), ("collector", "emitter"), ("base", "emitter")]
+    }
+
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "base" => PinDirection::Input,
+            "collector" => PinDirection::Output,
+            "emitter" => PinDirection::Down,
+            _ => PinDirection::Bidirectional,
+        }
+    }
+
     fn is_bjt(&self) -> bool { true }
+    fn is_gain_device(&self) -> bool { true }
     fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
@@ -157,7 +171,21 @@ impl Component for Pnp {
     fn symbol_name(&self) -> &'static str { "pnp_bjt" }
     fn layout_class(&self) -> &'static str { "pnp" }
 
+    fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("base", "collector"), ("collector", "emitter"), ("base", "emitter")]
+    }
+
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "base" => PinDirection::Input,
+            "collector" => PinDirection::Output,
+            "emitter" => PinDirection::Down,
+            _ => PinDirection::Bidirectional,
+        }
+    }
+
     fn is_bjt(&self) -> bool { true }
+    fn is_gain_device(&self) -> bool { true }
     fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
@@ -259,7 +287,17 @@ impl Component for NJfet {
     fn symbol_name(&self) -> &'static str { "njfet" }
     fn layout_class(&self) -> &'static str { "njfet" }
 
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "gate" => PinDirection::Input,
+            "drain" => PinDirection::Output,
+            "source" => PinDirection::Down,
+            _ => PinDirection::Bidirectional,
+        }
+    }
+
     fn is_jfet(&self) -> bool { true }
+    fn is_gain_device(&self) -> bool { true }
     fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
@@ -361,7 +399,17 @@ impl Component for PJfet {
     fn symbol_name(&self) -> &'static str { "pjfet" }
     fn layout_class(&self) -> &'static str { "pjfet" }
 
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "gate" => PinDirection::Input,
+            "drain" => PinDirection::Output,
+            "source" => PinDirection::Down,
+            _ => PinDirection::Bidirectional,
+        }
+    }
+
     fn is_jfet(&self) -> bool { true }
+    fn is_gain_device(&self) -> bool { true }
     fn model_name(&self) -> Option<&str> { Some(&self.model) }
 }
 
@@ -444,7 +492,17 @@ impl Component for Nmos {
     fn symbol_name(&self) -> &'static str { "nmos" }
     fn layout_class(&self) -> &'static str { "nmos" }
 
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "gate" => PinDirection::Input,
+            "drain" => PinDirection::Output,
+            "source" => PinDirection::Down,
+            _ => PinDirection::Bidirectional,
+        }
+    }
+
     fn is_mosfet(&self) -> bool { true }
+    fn is_gain_device(&self) -> bool { true }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -526,5 +584,15 @@ impl Component for Pmos {
     fn symbol_name(&self) -> &'static str { "pmos" }
     fn layout_class(&self) -> &'static str { "pmos" }
 
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "gate" => PinDirection::Input,
+            "drain" => PinDirection::Output,
+            "source" => PinDirection::Down,
+            _ => PinDirection::Bidirectional,
+        }
+    }
+
     fn is_mosfet(&self) -> bool { true }
+    fn is_gain_device(&self) -> bool { true }
 }

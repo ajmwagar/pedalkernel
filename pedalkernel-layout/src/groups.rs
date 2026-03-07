@@ -113,8 +113,7 @@ fn detect_gain_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
         }
 
         let is_gain_device = node.comp.as_ref().map_or(false, |c| {
-            let k = c.kind.as_ref();
-            k.is_tube() || k.is_bjt() || k.is_jfet() || k.is_mosfet()
+            c.kind.is_gain_device()
         });
 
         if !is_gain_device {
@@ -167,20 +166,13 @@ fn detect_gain_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
 
         let device_name = &node.comp_id;
         let kind_name = node.comp.as_ref().map_or("Gain", |c| {
-            let k = c.kind.as_ref();
-            let lc = k.layout_class();
-            if lc == "triode" || lc == "vari_mu" {
-                "Triode"
-            } else if lc == "pentode" {
-                "Pentode"
-            } else if k.is_bjt() {
-                "BJT"
-            } else if k.is_jfet() {
-                "JFET"
-            } else if k.is_mosfet() {
-                "MOSFET"
-            } else {
-                "Gain"
+            match c.kind.layout_class() {
+                "triode" | "vari_mu" => "Triode",
+                "pentode" => "Pentode",
+                "npn" | "pnp" => "BJT",
+                "njfet" | "pjfet" => "JFET",
+                "nmos" | "pmos" => "MOSFET",
+                _ => "Gain",
             }
         });
 
@@ -229,7 +221,7 @@ fn detect_opamp_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fu
             }
             // Include passives and diodes in the feedback network
             let is_feedback_component = graph.node_kind(nid).map_or(false, |k| {
-                (k.is_passive() && !k.is_transformer()) || k.is_diode_family() || k.is_pot()
+                k.is_simple_passive() || k.is_diode_family()
             });
             if is_feedback_component {
                 members.push(nid);

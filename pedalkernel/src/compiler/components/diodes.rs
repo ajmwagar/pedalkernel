@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
-use crate::compiler::component::{Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, StampResult};
+use crate::compiler::component::{Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, PinDirection, StampResult};
 use crate::compiler::graph::NodeId;
 use crate::compiler::validate::Severity;
 use crate::dsl::{DiodeType, NeonType};
@@ -74,6 +74,14 @@ impl Component for Diode {
     fn symbol_name(&self) -> &'static str { "diode" }
     fn layout_class(&self) -> &'static str { "diode" }
 
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "a" => PinDirection::Input,
+            "b" => PinDirection::Output,
+            _ => PinDirection::Bidirectional,
+        }
+    }
+
     fn is_diode_family(&self) -> bool { true }
     fn diode_type(&self) -> Option<DiodeType> { Some(self.diode_type) }
 }
@@ -140,6 +148,14 @@ impl Component for DiodePair {
 
     fn symbol_name(&self) -> &'static str { "diode" }
     fn layout_class(&self) -> &'static str { "diode_pair" }
+
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "a" => PinDirection::Input,
+            "b" => PinDirection::Output,
+            _ => PinDirection::Bidirectional,
+        }
+    }
 
     fn is_diode_family(&self) -> bool { true }
     fn diode_type(&self) -> Option<DiodeType> { Some(self.diode_type) }
@@ -222,6 +238,14 @@ impl Component for Zener {
     fn symbol_name(&self) -> &'static str { "zener" }
     fn layout_class(&self) -> &'static str { "zener" }
     fn display_value(&self) -> Option<String> { Some(format!("{}V", self.breakdown_voltage)) }
+
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "a" => PinDirection::Input,
+            "b" => PinDirection::Output,
+            _ => PinDirection::Bidirectional,
+        }
+    }
 
     fn is_diode_family(&self) -> bool { true }
 }

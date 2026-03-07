@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    ResolveContext, StampResult,
+    PinDirection, ResolveContext, StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::dsl::{
@@ -138,6 +138,18 @@ impl Component for OpAmp {
 
     fn symbol_name(&self) -> &'static str { "opamp" }
     fn layout_class(&self) -> &'static str { "opamp" }
+
+    fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("pos", "out"), ("neg", "out")]
+    }
+
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "pos" | "neg" => PinDirection::Input,
+            "out" | "output" => PinDirection::Output,
+            _ => PinDirection::Bidirectional,
+        }
+    }
 
     fn op_amp_type(&self) -> Option<OpAmpType> { Some(self.op_type) }
 }
@@ -345,6 +357,14 @@ impl Component for Comparator {
 
     fn symbol_name(&self) -> &'static str { "ic_chip" }
     fn layout_class(&self) -> &'static str { "comparator" }
+
+    fn pin_direction(&self, pin: &str) -> PinDirection {
+        match pin {
+            "pos" | "neg" => PinDirection::Input,
+            "out" | "output" => PinDirection::Output,
+            _ => PinDirection::Bidirectional,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

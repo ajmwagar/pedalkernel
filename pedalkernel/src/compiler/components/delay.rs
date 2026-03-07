@@ -83,7 +83,9 @@ impl Component for Bbd {
     fn symbol_name(&self) -> &'static str { "ic_chip" }
     fn layout_class(&self) -> &'static str { "bbd" }
 
-    fn is_delay(&self) -> bool { true }
+    fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("in", "out"), ("input", "output"), ("in", "input"), ("out", "output")]
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -164,7 +166,9 @@ impl Component for DelayLineComp {
     fn symbol_name(&self) -> &'static str { "delay" }
     fn layout_class(&self) -> &'static str { "delay" }
 
-    fn is_delay(&self) -> bool { true }
+    fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("in", "out"), ("input", "output"), ("in", "input"), ("out", "output")]
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -210,6 +214,4 @@ impl Component for Tap {
 
     fn symbol_name(&self) -> &'static str { "tap" }
     fn layout_class(&self) -> &'static str { "tap" }
-
-    fn is_delay(&self) -> bool { true }
 }
