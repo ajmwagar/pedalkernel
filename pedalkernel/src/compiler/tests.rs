@@ -3004,24 +3004,37 @@ fn multi_nl_fuzz_face_compiles() {
 
 #[test]
 fn multi_nl_fuzz_face_dc_stable() {
-    // Zero input for 1 second should produce near-zero output.
+    // Zero input should produce a stable DC operating point.
+    // With VCC bias injection, transistors have a real DC operating point:
+    // Q2 collector ≈ -4.5V (biased at half supply). The output NL port sees
+    // this DC. The coupling cap C3 blocks it from the volume pot, but the
+    // output port is on the NL side. Check that output is finite and bounded,
+    // and stabilizes (last samples ≈ constant).
     let pedal = parse("fuzz_face.pedal");
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
     proc.set_control("Fuzz", 0.7);
     proc.set_control("Volume", 0.5);
 
     // Run 48000 samples of silence
-    let mut max_output = 0.0f64;
+    let mut last_output = 0.0f64;
     for _ in 0..48000 {
         let out = proc.process(0.0);
         assert!(out.is_finite(), "Output should be finite for zero input");
-        max_output = max_output.max(out.abs());
+        assert!(out.abs() < 20.0, "Output should be bounded: {out}");
+        last_output = out;
     }
 
-    // Allow small DC offset from biasing but should be very small
+    // After 1 second, DC should have settled (caps charged).
+    // Check the last few samples are stable (not oscillating or growing).
+    let mut max_delta = 0.0f64;
+    for _ in 0..100 {
+        let out = proc.process(0.0);
+        max_delta = max_delta.max((out - last_output).abs());
+        last_output = out;
+    }
     assert!(
-        max_output < 0.1,
-        "DC output should be small for zero input: max={max_output}"
+        max_delta < 0.01,
+        "DC output should stabilize: max_delta={max_delta}"
     );
 }
 

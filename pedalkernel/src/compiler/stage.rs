@@ -1317,7 +1317,7 @@ impl NlDeviceKind {
     }
 
     /// Get a reference to this device as an `NlDeviceIv` trait object.
-    fn as_nl_device_iv(&self) -> &dyn NlDeviceIv {
+    pub(super) fn as_nl_device_iv(&self) -> &dyn NlDeviceIv {
         match self {
             NlDeviceKind::BjtNpn(bjt) => bjt,
             NlDeviceKind::BjtPnp(bjt) => bjt,
@@ -1380,7 +1380,7 @@ pub(super) enum NlDeviceGroupKind {
 }
 
 impl NlDeviceGroupKind {
-    fn as_group_iv(&self) -> &dyn NlDeviceGroupIv {
+    pub(super) fn as_group_iv(&self) -> &dyn NlDeviceGroupIv {
         match self {
             NlDeviceGroupKind::VariMuThreePort(t) => t,
             NlDeviceGroupKind::TriodeThreePort(t) => t,
@@ -1438,6 +1438,9 @@ pub(super) struct ScatteringRecomputeData {
     /// matrices. The value is the MNA VS branch index. Recompute uses
     /// `derive_scattering_and_vs_injection()` instead of `derive_scattering_matrix_general()`.
     pub(super) vs_source_index: Option<usize>,
+    /// VCC voltage source index in MNA. When Some, VCC is an ideal VS and
+    /// recompute re-extracts dc_bias from the VCC injection vector.
+    pub(super) vcc_vs_index: Option<usize>,
     /// Output MNA node pair for direct node-voltage extraction.
     /// When Some, recompute also updates the extraction coefficients.
     pub(super) extract_output_nodes: Option<(Option<usize>, Option<usize>)>,
@@ -1461,13 +1464,23 @@ impl MultiNlScattering {
     /// Extract sub-blocks from a full scattering matrix.
     ///
     /// The full matrix is `n_total × n_total` (row-major) with port ordering:
-    /// `[NL_0..NL_{n-1}, passive_0..passive_{m-1}, adapted]`.
+    /// `[NL_0..NL_{n-1}, passive_0..passive_{m-1}, (vcc?), adapted]`.
+    /// `n_total` is inferred from the scattering matrix size, so extra ports
+    /// (like VCC) are handled automatically — only the first `n_nl` rows and
+    /// the NL, passive, and last (adapted) columns are extracted.
     pub(super) fn from_full_matrix(
         scattering: &[f64],
         n_nl: usize,
         n_passive: usize,
     ) -> Self {
-        let n_total = n_nl + n_passive + 1;
+        let n_total = if scattering.is_empty() {
+            n_nl + n_passive + 1
+        } else {
+            let len = scattering.len();
+            let nt = (len as f64).sqrt() as usize;
+            debug_assert_eq!(nt * nt, len, "scattering matrix must be square");
+            nt
+        };
         let mut s_nl = vec![0.0; n_nl * n_nl];
         for i in 0..n_nl {
             for j in 0..n_nl {
@@ -1579,6 +1592,30 @@ pub(super) struct MultiNlStage {
     /// Precomputed interpolation table for single-pot stages.
     /// When Some, pot changes use table lookup instead of MNA re-inversion.
     pub(super) interp_table: Option<ScatteringInterpolationTable>,
+    /// Precomputed DC bias from VCC supply injection vector (NL ports only).
+    /// dc_bias[i] = vcc_injection[i] * supply_voltage, for i in 0..n_nl.
+    /// Added to known_a[i] in the NR solver to establish transistor operating points.
+    pub(super) dc_bias: Vec<f64>,
+    /// Full VCC injection vector × supply_voltage for ALL ports.
+    /// Added to a_all after scatter_all to provide DC bias to passive children
+    /// and correct output extraction. Length = n_nl + n_passive + adapted(0 or 1).
+    pub(super) vcc_bias_all: Vec<f64>,
+    /// VCC voltage source index in the MNA (for recomputing dc_bias on pot changes).
+    /// When Some, VCC is stamped as an ideal VS in the MNA with zero impedance.
+    pub(super) vcc_vs_index: Option<usize>,
+    /// Nominal supply voltage (volts). Used for dc_bias computation.
+    pub(super) supply_voltage: f64,
+    /// DC ramp counter for gradual bias injection.
+    /// Counts from 0 to DC_RAMP_SAMPLES, scaling dc_bias by ramp/N to let the
+    /// NR solver track the operating point as supply voltage gradually increases.
+    pub(super) dc_ramp: u32,
+    /// Physics-based initial v_prev values. Restored on reset() instead of zeroing,
+    /// so the NR solver starts near the correct operating point after a DAW reset.
+    pub(super) initial_v_prev: Vec<f64>,
+    /// DC blocker state: previous input sample (x[n-1]).
+    pub(super) dc_blocker_x1: f64,
+    /// DC blocker state: previous output sample (y[n-1]).
+    pub(super) dc_blocker_y1: f64,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -1697,6 +1734,16 @@ impl MultiNlStage {
             }
         }
 
+        // DC ramp: gradually increase VCC bias over DC_RAMP_SAMPLES to let
+        // the NR solver track the operating point as supply voltage ramps up.
+        const DC_RAMP_SAMPLES: u32 = 256;
+        let dc_scale = if self.dc_ramp >= DC_RAMP_SAMPLES {
+            1.0
+        } else {
+            self.dc_ramp += 1;
+            self.dc_ramp as f64 / DC_RAMP_SAMPLES as f64
+        };
+
         let output = self.oversampler.process(input, |sample| {
             // 1. Scatter-up passive children
             let mut b_passive = Vec::with_capacity(n_passive);
@@ -1707,6 +1754,7 @@ impl MultiNlStage {
             // 2. Compute known_a[i] for each NL port:
             // known_a[i] = Σ_k S_nl_passive[i][k] * b_passive[k]
             //             + S_nl_adapted[i] * b_adapted
+            //             + dc_bias[i]  (VCC supply contribution, precomputed constant)
             // The adapted port's b-wave is the input signal (voltage source)
             let b_adapted = sample * compensation;
             let mut known_a = vec![0.0; n_nl];
@@ -1715,6 +1763,7 @@ impl MultiNlStage {
                 for k in 0..n_passive {
                     a_i += self.scattering.s_nl_passive[i * n_passive + k] * b_passive[k];
                 }
+                a_i += self.dc_bias[i] * dc_scale;
                 known_a[i] = a_i;
             }
 
@@ -1774,14 +1823,11 @@ impl MultiNlStage {
                 }
             }
             // 4. Build full b-vector for scatter_down:
-            //    With VS injection: [b_nl_0..., b_passive_0...] (no adapted port)
-            //    Without:           [b_nl_0..., b_passive_0..., b_adapted]
+            //    [b_nl..., b_passive..., b_adapted]
+            //    With VS injection: no adapted port at end.
+            //    VCC is an MNA voltage source (not a WDF port), so no b_vcc entry.
             let use_vs_injection = self.vs_injection.is_some();
-            let n_total = if use_vs_injection {
-                n_nl + n_passive
-            } else {
-                n_nl + n_passive + 1
-            };
+            let n_total = n_nl + n_passive + if use_vs_injection { 0 } else { 1 };
             let mut b_all = Vec::with_capacity(n_total);
             b_all.extend_from_slice(&b_nl);
             b_all.extend_from_slice(&b_passive);
@@ -1801,16 +1847,24 @@ impl MultiNlStage {
                 }
             }
 
+            // Add VCC supply injection to all ports (with DC ramp).
+            // The scattering matrix was derived with VCC as a VS, so scatter_all
+            // only gives port-to-port interactions. The VCC contribution must be
+            // added separately: a[i] += vcc_inj[i] * V_supply.
+            if !self.vcc_bias_all.is_empty() {
+                for i in 0..a_all.len().min(self.vcc_bias_all.len()) {
+                    a_all[i] += self.vcc_bias_all[i] * dc_scale;
+                }
+            }
+
             // 5. Set incident waves on passive children
             for (k, child) in self.passive_children.iter_mut().enumerate() {
                 child.set_incident(a_all[n_nl + k]);
             }
 
             // 6. Output extraction
-            if let Some(ref coeffs) = self.extract_coeffs {
+            let raw_out = if let Some(ref coeffs) = self.extract_coeffs {
                 // Direct node-voltage extraction: V = Σ coeffs[k]*b[k] + vs*V_in
-                // This reads the MNA node voltage directly, bypassing port
-                // impedance mismatch that makes WDF port waves tiny.
                 let mut v_out = self.extract_vs * b_adapted;
                 for k in 0..n_passive {
                     v_out += coeffs[k] * b_passive[k];
@@ -1828,6 +1882,21 @@ impl MultiNlStage {
                     b_passive[output_port - n_nl]
                 };
                 (a_out + b_out) / 2.0
+            };
+
+            // 7. DC blocker for stages with VCC supply injection.
+            // With VCC as an ideal VS, NL port voltages include the DC operating
+            // point. The real circuit's coupling caps block this DC, so we apply
+            // a 1-pole high-pass: y[n] = x[n] - x[n-1] + α·y[n-1]
+            // with α ≈ 0.9995 (fc ≈ 3.5Hz at 44.1kHz, below audible range).
+            if !self.vcc_bias_all.is_empty() {
+                let x0 = raw_out;
+                let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
+                self.dc_blocker_x1 = x0;
+                self.dc_blocker_y1 = y0;
+                y0
+            } else {
+                raw_out
             }
         });
 
@@ -1879,18 +1948,15 @@ impl MultiNlStage {
     ///
     /// MultiNlStage passive children (caps/inductors) need their port
     /// resistances updated to the oversampled rate for correct frequency
-    /// response. Note: the scattering matrix is NOT recomputed here because
-    /// the MNA-derived matrix uses port resistance ratios that are scale-
-    /// invariant — the relative impedances stay correct.
-    pub fn apply_oversampling_rate(&mut self, base_rate: f64) {
-        let ratio = self.oversampler.ratio();
-        if ratio <= 1 {
-            return;
-        }
-        let effective_rate = base_rate * ratio as f64;
-        for child in &mut self.passive_children {
-            child.set_sample_rate(effective_rate);
-        }
+    /// Adjust reactive element port resistances for oversampling.
+    ///
+    /// Since the scattering matrix is now built at the effective (oversampled)
+    /// rate, passive children are already at the correct rate. This is a no-op
+    /// for MultiNlStage — the builder handles oversampled rate directly.
+    pub fn apply_oversampling_rate(&mut self, _base_rate: f64) {
+        // No-op: build_rtype_stage() now uses effective_rate = sample_rate * oversampling
+        // for all DynNode creation and scattering derivation, so children are already
+        // at the correct rate and the scattering matrix is consistent.
     }
 
     /// Reset all internal state.
@@ -1898,9 +1964,13 @@ impl MultiNlStage {
         for child in &mut self.passive_children {
             child.reset();
         }
-        for v in &mut self.v_prev {
-            *v = 0.0;
-        }
+        // Restore physics-based initial guesses instead of zeroing.
+        // Zeroing v_prev causes the NR solver to start far from the operating
+        // point, leading to divergence and 100% CPU in real-time contexts.
+        self.v_prev.copy_from_slice(&self.initial_v_prev);
+        self.dc_ramp = 0;
+        self.dc_blocker_x1 = 0.0;
+        self.dc_blocker_y1 = 0.0;
         if let Some(ref mut ss) = self.state_space {
             for v in &mut ss.x {
                 *v = 0.0;
@@ -1912,7 +1982,7 @@ impl MultiNlStage {
     /// Debug dump: print multi-NL stage structure.
     pub fn debug_dump(&self) -> String {
         let n_passive = self.passive_children.len();
-        let n_total = self.n_nl + n_passive + 1;
+        let n_total = self.n_nl + n_passive + 1; // +1 for adapted port
         let solver_type = if self.device_groups.is_some() {
             "grouped"
         } else {
@@ -2179,6 +2249,15 @@ impl MultiNlStage {
                     self.scattering =
                         MultiNlScattering::from_full_matrix(&new_scat, n_nl, n_passive);
 
+                    // Re-extract dc_bias and vcc_bias_all from VCC injection vector
+                    if self.vcc_vs_index.is_some() {
+                        // The interp table's vs_injection is the VCC injection vector
+                        for i in 0..n_nl.min(new_vs.len()) {
+                            self.dc_bias[i] = new_vs[i] * self.supply_voltage;
+                        }
+                        self.vcc_bias_all = new_vs.iter().map(|&k| k * self.supply_voltage).collect();
+                    }
+
                     // Rebuild port_resistances for RTypeAdaptor
                     let mut port_resistances = self.nl_port_resistances.clone();
                     for child in &self.passive_children {
@@ -2199,11 +2278,6 @@ impl MultiNlStage {
                     // Recompute extraction coefficients from table if needed
                     if let Some(ref recompute) = self.recompute_data {
                         if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
-                            // For table mode, extraction coeffs aren't precomputed;
-                            // fall through to MNA path only if extraction is needed.
-                            // For now, extraction stages with tables still work since
-                            // extract_coeffs are only used for linearized OTA stages
-                            // which are excluded from tables.
                             let _ = (out_pos, out_neg);
                         }
                     }
@@ -2218,8 +2292,6 @@ impl MultiNlStage {
         };
 
         // Delta-update pot conductances in the MNA G matrix.
-        // Pots are stamped into G (not as WDF ports), so when pot values change
-        // we update G before re-deriving the scattering matrix.
         let n_mna = recompute.mna.num_nodes;
         for ps in &mut self.pot_mna_stamps {
             let child_idx = ps.0;
@@ -2248,6 +2320,7 @@ impl MultiNlStage {
         let n_nl = self.n_nl;
         let n_passive = self.passive_children.len();
         let use_vs = recompute.vs_source_index.is_some();
+        let has_vcc_vs = recompute.vcc_vs_index.is_some();
         let n_total = if use_vs { n_nl + n_passive } else { n_nl + n_passive + 1 };
 
         // Rebuild ports with current resistances (reactive elements only, no pots).
@@ -2275,7 +2348,7 @@ impl MultiNlStage {
         }
 
         if use_vs {
-            // VS injection mode: derive scattering + injection vector (no adapted port).
+            // VS injection mode (OTA): derive scattering + injection vector (no adapted port).
             let vs_idx = recompute.vs_source_index.unwrap();
             let (scattering, vs_inj) =
                 recompute.mna.derive_scattering_and_vs_injection(&ports, vs_idx);
@@ -2297,23 +2370,45 @@ impl MultiNlStage {
                 self.extract_vs = vs_coeff;
             }
         } else {
-            // Standard mode: adapted port included.
-            let (pos, neg) = recompute.port_node_pairs[n_nl + n_passive];
+            // Standard mode: adapted port included (always last).
+            let adapted_pair_idx = n_nl + n_passive;
+            let (pos, neg) = recompute.port_node_pairs[adapted_pair_idx];
             ports.push(WdfPort {
                 node_pos: pos,
                 node_neg: neg,
                 resistance: recompute.adapted_resistance,
             });
 
-            let scattering = recompute.mna.derive_scattering_matrix_general(&ports);
+            if let Some(vcc_idx) = recompute.vcc_vs_index {
+                // VCC as ideal VS: derive scattering + VCC injection vector
+                let (scattering, vcc_inj) =
+                    recompute.mna.derive_scattering_and_vs_injection(&ports, vcc_idx);
 
-            if scattering.iter().any(|&s| !s.is_finite()) {
-                return;
+                if scattering.iter().any(|&s| !s.is_finite()) {
+                    return;
+                }
+
+                // Re-extract dc_bias and vcc_bias_all from VCC injection vector
+                for i in 0..n_nl.min(vcc_inj.len()) {
+                    self.dc_bias[i] = vcc_inj[i] * self.supply_voltage;
+                }
+                self.vcc_bias_all = vcc_inj.iter().map(|&k| k * self.supply_voltage).collect();
+
+                self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
+                let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+                self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
+            } else {
+                // No VS at all: standard scattering derivation
+                let scattering = recompute.mna.derive_scattering_matrix_general(&ports);
+
+                if scattering.iter().any(|&s| !s.is_finite()) {
+                    return;
+                }
+
+                self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
+                let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+                self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
             }
-
-            self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
-            let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
-            self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
         }
     }
 }

@@ -1157,24 +1157,38 @@ pub struct BjtTwoPort {
     pub model: GummelPoonModel,
     pub(crate) is_pnp: bool,
     v_max: f64,
+    /// IS-dependent Vbe clamp: NF * VT * ln(I_max / IS).
+    /// Prevents exponential blow-up at forward bias for high-IS devices (Ge).
+    vbe_max: f64,
 }
 
 impl BjtTwoPort {
+    /// Compute IS-dependent Vbe clamp for max 100mA collector current.
+    fn compute_vbe_max(model: &GummelPoonModel) -> f64 {
+        let i_max = 0.1; // 100mA — generous bound for small-signal BJTs
+        let vbe_max = model.nf * model.vt * (i_max / model.is).ln();
+        vbe_max.clamp(0.3, 1.0) // At least 0.3V, at most 1.0V
+    }
+
     /// Create a new NPN BjtTwoPort.
     pub fn new(model: GummelPoonModel) -> Self {
+        let vbe_max = Self::compute_vbe_max(&model);
         Self {
             model,
             is_pnp: false,
             v_max: 50.0,
+            vbe_max,
         }
     }
 
     /// Create a new PNP BjtTwoPort.
     pub fn new_pnp(model: GummelPoonModel) -> Self {
+        let vbe_max = Self::compute_vbe_max(&model);
         Self {
             model,
             is_pnp: true,
             v_max: 50.0,
+            vbe_max,
         }
     }
 
@@ -1194,32 +1208,46 @@ impl NlDeviceGroupIv for BjtTwoPort {
         let sign = if self.is_pnp { -1.0 } else { 1.0 };
         let vbe = sign * v[0];
         let vce = sign * v[1];
-        let vbc = vbe - vce;
 
+        // Clamp Vbc to prevent catastrophic BC junction forward bias.
+        // When Vbe and Vce are clamped independently, their combination can
+        // produce Vbc >> 0 (e.g., PNP Vbe=0.5, Vce=-9 → Vbc=9.5V → ISC*exp(365)).
+        // Limit to 0.4V forward to allow saturation while preventing overflow.
+        const VBC_MAX: f64 = 0.4;
+        let clamp_vbc = |vbe: f64, vce: f64| -> f64 {
+            (vbe - vce).min(VBC_MAX)
+        };
+
+        let vbc = clamp_vbc(vbe, vce);
         let (ic, ib) = self.model.currents(vbe, vbc);
         currents[0] = sign * ib;
         currents[1] = sign * ic;
 
         // 2×2 Jacobian via numerical differentiation.
         // sign² = 1, so Jacobian is polarity-invariant.
+        // Apply same Vbc clamp to all perturbations for consistency.
         let delta = 1e-7;
 
         // ∂/∂Vbe (port 0): vbe varies, vbc = vbe - vce also varies
-        let (ic_p, ib_p) = self.model.currents(vbe + delta, vbe + delta - vce);
-        let (ic_m, ib_m) = self.model.currents(vbe - delta, vbe - delta - vce);
+        let vbc_p = clamp_vbc(vbe + delta, vce);
+        let vbc_m = clamp_vbc(vbe - delta, vce);
+        let (ic_p, ib_p) = self.model.currents(vbe + delta, vbc_p);
+        let (ic_m, ib_m) = self.model.currents(vbe - delta, vbc_m);
         jacobian[0] = (ib_p - ib_m) / (2.0 * delta); // ∂Ib/∂Vbe
         jacobian[2] = (ic_p - ic_m) / (2.0 * delta); // ∂Ic/∂Vbe (gm!)
 
         // ∂/∂Vce (port 1): vce varies, vbc = vbe - vce varies inversely
-        let (ic_p2, ib_p2) = self.model.currents(vbe, vbe - (vce + delta));
-        let (ic_m2, ib_m2) = self.model.currents(vbe, vbe - (vce - delta));
+        let vbc_p2 = clamp_vbc(vbe, vce + delta);
+        let vbc_m2 = clamp_vbc(vbe, vce - delta);
+        let (ic_p2, ib_p2) = self.model.currents(vbe, vbc_p2);
+        let (ic_m2, ib_m2) = self.model.currents(vbe, vbc_m2);
         jacobian[1] = (ib_p2 - ib_m2) / (2.0 * delta); // ∂Ib/∂Vce
         jacobian[3] = (ic_p2 - ic_m2) / (2.0 * delta); // ∂Ic/∂Vce (Early)
     }
 
     fn v_clamp_port(&self, port: usize) -> (f64, f64) {
         match port {
-            0 => (-2.0, 1.0),                   // Vbe: reverse to slight forward
+            0 => (-self.vbe_max, self.vbe_max),  // Vbe: IS-dependent (Ge ~0.32V, Si ~0.83V)
             _ => (-self.v_max, self.v_max),      // Vce: full swing
         }
     }

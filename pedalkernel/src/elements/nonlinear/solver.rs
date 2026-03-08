@@ -746,6 +746,18 @@ pub(crate) fn multi_port_nr_solve_grouped(
         }
         last_residual = max_f;
 
+        // Debug: print diagnostics for diverging solves (debug-trace feature only)
+        #[cfg(feature = "debug-trace")]
+        {
+            use std::sync::atomic::{AtomicU32, Ordering as AO};
+            static DBG_CTR: AtomicU32 = AtomicU32::new(0);
+            if iter == 0 && max_f > 100.0 && n_nl >= 4 && DBG_CTR.load(AO::Relaxed) < 5 {
+                DBG_CTR.fetch_add(1, AO::Relaxed);
+                eprintln!("[NR-diag] n_nl={} iter0_residual={:.4e} known_a={:?} port_R={:?} v={:?}",
+                    n_nl, max_f, known_a, port_resistances, &v_guess[..n_nl]);
+            }
+        }
+
         if max_f < tolerance {
             break;
         }

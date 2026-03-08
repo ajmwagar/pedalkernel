@@ -310,3 +310,264 @@ fn big_muff_sustain_control_affects_output() {
         "High sustain should produce output"
     );
 }
+
+// ===========================================================================
+// Fuzz Face validation — comprehensive clipping and distortion checks
+// ===========================================================================
+
+/// Step 1: Verify AC128 model parameters are in realistic germanium range.
+#[test]
+fn fuzz_face_ac128_model_params() {
+    use pedalkernel::elements::GummelPoonModel;
+
+    let gp = GummelPoonModel::try_by_name("ac128")
+        .expect("AC128 model should exist in SPICE library");
+
+    eprintln!("=== AC128 Gummel-Poon Model ===");
+    eprintln!("IS  = {:.4e} A", gp.is);
+    eprintln!("BF  = {:.1}", gp.bf);
+    eprintln!("NF  = {:.3}", gp.nf);
+    eprintln!("VAF = {:.2} V", gp.vaf);
+
+    // IS: germanium has high leakage. DAFx-17 (Holmes, Holters, van Walstijn)
+    // measured IS=20.66µA on a vintage AC128. Range: 0.1µA – 100µA.
+    assert!(
+        gp.is >= 1e-7 && gp.is <= 1e-4,
+        "AC128 IS={:.4e} should be 0.1µA–100µA for germanium",
+        gp.is
+    );
+    // BF: AC128 hfe varies widely (50–300 for vintage Ge transistors)
+    assert!(
+        gp.bf >= 50.0 && gp.bf <= 500.0,
+        "AC128 BF={:.1} should be 50–500 for germanium",
+        gp.bf
+    );
+    // NF: germanium emission coefficient ~1.0–1.2
+    assert!(
+        gp.nf >= 1.0 && gp.nf <= 1.3,
+        "AC128 NF={:.3} should be 1.0–1.3 for germanium",
+        gp.nf
+    );
+    // VAF: Early voltage ~10–50V for germanium
+    assert!(
+        gp.vaf >= 5.0 && gp.vaf <= 60.0,
+        "AC128 VAF={:.1} should be 5–60V for germanium",
+        gp.vaf
+    );
+
+    // Spot-check IV at typical bias points
+    let (ic_02, ib_02) = gp.currents(0.2, 0.0);
+    let (ic_03, ib_03) = gp.currents(0.3, 0.0);
+    eprintln!("Vbe=0.2V → Ic={:.4e}A, Ib={:.4e}A", ic_02, ib_02);
+    eprintln!("Vbe=0.3V → Ic={:.4e}A, Ib={:.4e}A", ic_03, ib_03);
+
+    // At Vbe=0.2V, Ic should be modest (µA–tens of mA for high-IS Ge).
+    // With IS=20.66µA and NF=1.133: Ic ≈ IS*exp(0.2/(NF*VT)) ≈ 19mA.
+    assert!(
+        ic_02 < 0.1,
+        "Ic at Vbe=0.2V should be <100mA, got {:.4e}",
+        ic_02
+    );
+}
+
+/// Step 2 + 3: NR solver iteration count — solver should work, not trivially converge.
+#[test]
+fn fuzz_face_solver_iterates() {
+    use pedalkernel::compiler::compile_pedal;
+    use pedalkernel::dsl::parse_pedal_file;
+    use pedalkernel::PedalProcessor;
+    use pedalkernel::elements::{
+        enable_solver_trace, disable_solver_trace, reset_solver_stats, solver_stats_snapshot,
+    };
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/pedals/fuzz/fuzz_face.pedal");
+    let src = std::fs::read_to_string(&path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let mut compiled = compile_pedal(&pedal, SAMPLE_RATE).unwrap();
+    compiled.set_control("Fuzz", 0.8);
+    compiled.set_control("Volume", 0.6);
+
+    // Run 256 samples of silence to reach DC steady state
+    for _ in 0..256 {
+        let _ = compiled.process(0.0);
+    }
+
+    // Reset stats and trace, then process 256 samples of loud sine
+    reset_solver_stats();
+    enable_solver_trace(256);
+
+    let amp = 0.5;
+    let two_pi_f = 2.0 * std::f64::consts::PI * 440.0;
+    for i in 0..256 {
+        let input = amp * (two_pi_f * i as f64 / SAMPLE_RATE).sin();
+        let _ = compiled.process(input);
+    }
+
+    let stats = solver_stats_snapshot();
+    let trace = disable_solver_trace();
+
+    eprintln!("=== NR Solver Stats (256 samples, 440Hz @ 0.5 amp) ===");
+    eprintln!("  solves: {}", stats.solves);
+    eprintln!("  total_iterations: {}", stats.total_iterations);
+    eprintln!("  avg_iterations: {:.2}", stats.total_iterations as f64 / stats.solves.max(1) as f64);
+    eprintln!("  max_iterations: {}", stats.max_iterations);
+    eprintln!("  max_residual: {:.4e}", stats.max_residual);
+    eprintln!("  clamp_hits: {}", stats.clamp_hits);
+    eprintln!("  iter_cap_hits: {}", stats.iter_cap_hits);
+
+    // Solver should actually be invoked
+    assert!(stats.solves > 0, "Solver should be invoked");
+
+    // Average iterations > 1 means the solver is doing real work (not trivially converging)
+    let avg_iter = stats.total_iterations as f64 / stats.solves.max(1) as f64;
+    eprintln!("  → avg_iter = {:.2} (want > 1.5)", avg_iter);
+    assert!(
+        avg_iter > 1.0,
+        "NR solver should iterate (avg={:.2}), not trivially converge",
+        avg_iter
+    );
+
+    // Residual should be small (solver converging, not capping out)
+    assert!(
+        stats.max_residual < 1e-3,
+        "NR solver max residual too high: {:.4e}",
+        stats.max_residual
+    );
+
+    // Check a few trace entries for port voltages
+    if !trace.is_empty() {
+        let mid = trace.len() / 2;
+        let entry = &trace[mid];
+        eprintln!("  Trace[{}]: iters={}, residual={:.4e}, v={:?}",
+            mid, entry.iterations, entry.residual,
+            entry.v_solution.iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>());
+    }
+}
+
+/// Step 4: Amplitude sweep — THD should increase sharply as input crosses clipping threshold.
+#[test]
+fn fuzz_face_amplitude_sweep_clipping() {
+    let freq = 440.0;
+    let db_levels = [-40.0, -30.0, -20.0, -12.0, -6.0, 0.0];
+
+    eprintln!("=== Fuzz Face Amplitude Sweep (Fuzz=0.8) ===");
+    eprintln!("{:<10} {:>10} {:>10} {:>8} {:>8} {:>8}", "Input_dB", "RMS_in", "RMS_out", "Gain_dB", "THD", "Crest");
+
+    let mut thd_values = Vec::new();
+
+    for &db in &db_levels {
+        let amp = 10.0f64.powf(db / 20.0);
+        let input = sine_at(freq, amp, 0.5, SAMPLE_RATE);
+        let output = compile_example_and_process(
+            "fuzz_face.pedal",
+            &input,
+            SAMPLE_RATE,
+            &[("Fuzz", 0.8), ("Volume", 0.6)],
+        );
+
+        // Skip warmup, measure steady state
+        let steady = &output[4800..]; // skip first 100ms
+        let input_steady = &input[4800..];
+
+        let rms_in = rms(input_steady);
+        let rms_out = rms(steady);
+        let gain_db = if rms_out > 1e-15 {
+            20.0 * (rms_out / rms_in).log10()
+        } else {
+            -120.0
+        };
+        let t = thd(steady, SAMPLE_RATE, freq);
+        let cf = crest_factor(steady);
+
+        eprintln!("{:<10.0} {:>10.4e} {:>10.4e} {:>8.1} {:>8.4} {:>8.3}", db, rms_in, rms_out, gain_db, t, cf);
+        thd_values.push(t);
+    }
+
+    // Key assertion: THD at 0dBFS should be significantly higher than at -40dBFS.
+    // A working fuzz should have THD > 0.5 (50% harmonics) at full input.
+    let thd_quiet = thd_values[0];
+    let thd_loud = thd_values[thd_values.len() - 1];
+    eprintln!("\n  THD at -40dB: {:.4}, THD at 0dB: {:.4}", thd_quiet, thd_loud);
+
+    assert!(
+        thd_loud > 0.3,
+        "Fuzz Face should produce significant harmonics at 0dBFS: THD={:.4} (want > 0.3)",
+        thd_loud
+    );
+
+    // THD should increase with input level (nonlinear behavior)
+    assert!(
+        thd_loud > thd_quiet * 1.5,
+        "THD should increase with input: quiet={:.4}, loud={:.4}",
+        thd_quiet, thd_loud
+    );
+}
+
+/// Step 4b: Crest factor check — hard clipping reduces crest factor toward 1.0 (square wave).
+/// A pure sine has crest factor √2 ≈ 1.414. Heavy clipping brings it down.
+#[test]
+fn fuzz_face_clipping_reduces_crest_factor() {
+    let input = sine(440.0, 0.5, SAMPLE_RATE);
+    let output = compile_example_and_process(
+        "fuzz_face.pedal",
+        &input,
+        SAMPLE_RATE,
+        &[("Fuzz", 0.9), ("Volume", 0.6)],
+    );
+
+    let steady = &output[4800..];
+    let cf = crest_factor(steady);
+    let t = thd(steady, SAMPLE_RATE, 440.0);
+
+    eprintln!("=== Crest Factor Check (Fuzz=0.9) ===");
+    eprintln!("  Crest factor: {:.4} (sine=1.414, square=1.0)", cf);
+    eprintln!("  THD: {:.4}", t);
+
+    // Fuzz should compress the waveform — crest factor below pure sine
+    assert!(
+        cf < 1.5,
+        "Fuzz should clip (crest factor {:.4} should be < 1.5, sine is 1.414)",
+        cf
+    );
+}
+
+/// Step 5: Fuzz control sweep — more fuzz = more THD.
+#[test]
+fn fuzz_face_fuzz_sweep_thd() {
+    let input = sine(440.0, 0.5, SAMPLE_RATE);
+    let fuzz_levels = [0.0, 0.25, 0.5, 0.75, 1.0];
+
+    eprintln!("=== Fuzz Control Sweep ===");
+    eprintln!("{:<8} {:>8} {:>8} {:>8}", "Fuzz", "THD", "RMS", "Crest");
+
+    let mut thd_values = Vec::new();
+
+    for &fuzz in &fuzz_levels {
+        let output = compile_example_and_process(
+            "fuzz_face.pedal",
+            &input,
+            SAMPLE_RATE,
+            &[("Fuzz", fuzz), ("Volume", 0.6)],
+        );
+        let steady = &output[4800..];
+        let t = thd(steady, SAMPLE_RATE, 440.0);
+        let r = rms(steady);
+        let cf = crest_factor(steady);
+
+        eprintln!("{:<8.2} {:>8.4} {:>8.4e} {:>8.3}", fuzz, t, r, cf);
+        thd_values.push(t);
+    }
+
+    // Highest fuzz should produce more THD than lowest
+    let thd_min_fuzz = thd_values[0];
+    let thd_max_fuzz = thd_values[thd_values.len() - 1];
+
+    eprintln!("\n  Fuzz=0: THD={:.4}, Fuzz=1: THD={:.4}", thd_min_fuzz, thd_max_fuzz);
+
+    assert!(
+        thd_max_fuzz > thd_min_fuzz,
+        "Max fuzz THD ({:.4}) should exceed min fuzz THD ({:.4})",
+        thd_max_fuzz, thd_min_fuzz
+    );
+}

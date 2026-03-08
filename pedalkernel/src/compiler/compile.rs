@@ -1269,6 +1269,9 @@ pub fn compile_pedal_with_options(
         }
     }
 
+    // Supply voltage (needed early for multi-NL VCC bias injection).
+    let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
+
     // ══ Pass 1: Element classification ════════════════════════════════
     let classified = super::classify::classify_circuit(&graph, pedal);
 
@@ -1334,6 +1337,7 @@ pub fn compile_pedal_with_options(
         oversampling,
         &pp_transformer_edges,
         &lfo_controlled_jfets,
+        supply_voltage,
     );
     stages.extend(nonlinear_stages);
 
@@ -1354,6 +1358,7 @@ pub fn compile_pedal_with_options(
         &graph,
         sample_rate,
         oversampling,
+        supply_voltage,
     );
 
     // Add triode fallback stages (SP-failed triodes built as single-NL MNA).
@@ -1785,7 +1790,6 @@ pub fn compile_pedal_with_options(
 
     // Power supply.
     let primary_supply = pedal.supplies.first().map(|s| &s.config);
-    let supply_voltage = primary_supply.map_or(9.0, |s| s.voltage);
 
     let power_supply = primary_supply.filter(|s| s.has_sag()).map(|s| {
         crate::elements::PowerSupply::new(

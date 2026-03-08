@@ -192,9 +192,14 @@ pub struct RTypeAdaptor {
     pub num_ports: usize,
     /// Port resistance seen from parent (adapted port)
     pub port_resistance: f64,
-    /// Scattering matrix S (row-major, num_ports × num_ports)
-    /// The last row/column corresponds to the adapted parent port.
-    scattering_matrix: Vec<f64>,
+    /// Power-normalized scattering matrix S̅ (row-major, num_ports × num_ports).
+    /// S̅[i][j] = S[i][j] * √(R_j / R_i). For passive/lossless networks,
+    /// all entries are bounded to [-1, 1] and the matrix is unitary.
+    power_scattering: Vec<f64>,
+    /// √R_i for each port — used to convert from power waves back to standard waves.
+    sqrt_r: Vec<f64>,
+    /// 1/√R_i for each port — used to convert standard waves to power waves.
+    inv_sqrt_r: Vec<f64>,
     /// Cached child reflected waves (b₁, b₂, ..., b_{n-1})
     b_children: Vec<f64>,
 }
@@ -215,10 +220,24 @@ impl RTypeAdaptor {
             "Scattering matrix must be {n}×{n}"
         );
 
+        let sqrt_r: Vec<f64> = port_resistances.iter().map(|r| r.sqrt()).collect();
+        let inv_sqrt_r: Vec<f64> = sqrt_r.iter().map(|sr| 1.0 / sr).collect();
+
+        // Compute power-normalized scattering: S̅[i][j] = S[i][j] * √(R_j / R_i)
+        let mut power_scattering = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                power_scattering[i * n + j] =
+                    scattering_matrix[i * n + j] * sqrt_r[j] * inv_sqrt_r[i];
+            }
+        }
+
         Self {
             num_ports: n,
             port_resistance: port_resistances[n - 1],
-            scattering_matrix,
+            power_scattering,
+            sqrt_r,
+            inv_sqrt_r,
             b_children: vec![0.0; n - 1],
         }
     }
@@ -307,13 +326,8 @@ impl RTypeAdaptor {
         let s33 = 0.0; // Adapted
 
         let scattering_matrix = vec![s11, s12, s13, s21, s22, s23, s31, s32, s33];
-
-        Self {
-            num_ports: 3,
-            port_resistance: r_prim,
-            scattering_matrix,
-            b_children: vec![0.0; 2],
-        }
+        let port_resistances = [r1, r2, r_prim];
+        Self::new(scattering_matrix, &port_resistances)
     }
 
     /// Create from MNA element stamps (general method).
@@ -337,18 +351,13 @@ impl RTypeAdaptor {
         // Where G, B, C, D are standard MNA blocks
 
         let scattering_matrix = mna_system.derive_scattering_matrix(port_resistances);
-
-        Self {
-            num_ports,
-            port_resistance: port_resistances[num_ports - 1],
-            scattering_matrix,
-            b_children: vec![0.0; num_ports - 1],
-        }
+        Self::new(scattering_matrix, port_resistances)
     }
 
     /// scatter_up: collect child reflected waves, produce parent reflected wave.
     ///
     /// Children send b₁, b₂, ..., b_{n-1}. We compute b_n (to parent).
+    /// Uses power-normalized S̅ internally for bounded intermediate products.
     #[inline]
     pub fn scatter_up(&mut self, b_children: &[f64]) -> f64 {
         debug_assert_eq!(b_children.len(), self.num_ports - 1);
@@ -356,53 +365,57 @@ impl RTypeAdaptor {
         // Cache for scatter_down
         self.b_children.copy_from_slice(b_children);
 
-        // b_n = Σ S[n-1][j] · b[j] for j = 0..n-1 (plus S[n-1][n-1]·a_n, but a_n unknown)
-        // Since port n is adapted (S[n-1][n-1]=0), we only need children's waves
+        // Power-wave scatter: a̅_n = Σ S̅[n-1][j] · b̅_j, then a_n = a̅_n · √R_n
+        // Since port n is adapted (S̅[n-1][n-1]≈0), only children contribute.
         let n = self.num_ports;
-        let mut b_parent = 0.0;
+        let mut sum_power = 0.0;
         for j in 0..(n - 1) {
-            b_parent += self.scattering_matrix[(n - 1) * n + j] * b_children[j];
+            sum_power += self.power_scattering[(n - 1) * n + j] * b_children[j] * self.inv_sqrt_r[j];
         }
-        b_parent
+        sum_power * self.sqrt_r[n - 1]
     }
 
     /// scatter_down: given parent incident wave, produce child incident waves.
     ///
     /// Parent sends a_n. We compute a₁, a₂, ..., a_{n-1} for children.
+    /// Uses power-normalized S̅ internally for bounded intermediate products.
     #[inline]
     pub fn scatter_down(&self, a_parent: f64) -> Vec<f64> {
         let n = self.num_ports;
         let mut a_children = vec![0.0; n - 1];
+        // a_parent enters as power wave: b̅_parent = a_parent / √R_parent
+        let b_parent_power = a_parent * self.inv_sqrt_r[n - 1];
 
         for i in 0..(n - 1) {
-            // a[i] = Σ S[i][j] · b[j] for j = 0..n
-            // = Σ_{j<n-1} S[i][j]·b_child[j] + S[i][n-1]·a_parent
-            let mut a_i = self.scattering_matrix[i * n + n - 1] * a_parent;
+            let mut sum_power = self.power_scattering[i * n + n - 1] * b_parent_power;
             for j in 0..(n - 1) {
-                a_i += self.scattering_matrix[i * n + j] * self.b_children[j];
+                sum_power += self.power_scattering[i * n + j] * self.b_children[j] * self.inv_sqrt_r[j];
             }
-            a_children[i] = a_i;
+            a_children[i] = sum_power * self.sqrt_r[i];
         }
 
         a_children
     }
 
-    /// Perform full N×N matrix-vector multiply: `a = S · b_all`.
+    /// Perform full N×N scatter: `a = S · b_all` using power-normalized waves.
     ///
-    /// Unlike `scatter_up`/`scatter_down`, this computes *all* output waves
-    /// (including NL ports) given *all* input waves. Needed by the multi-NL
-    /// solver which sets NL port `b` values after the NR solve.
+    /// Equivalent to standard scattering but uses S̅ (power-normalized) internally.
+    /// Since S̅ entries are bounded [-1,1] for passive networks, intermediate
+    /// products cannot overflow even with extreme port resistance ratios (e.g.,
+    /// 0.1Ω cap vs 10kΩ NL port).
     #[inline]
     pub fn scatter_all(&self, b_all: &[f64]) -> Vec<f64> {
         let n = self.num_ports;
         debug_assert_eq!(b_all.len(), n);
         let mut a = vec![0.0; n];
         for i in 0..n {
-            let mut sum = 0.0;
+            let mut sum_power = 0.0;
             for j in 0..n {
-                sum += self.scattering_matrix[i * n + j] * b_all[j];
+                // b̅_j = b_j / √R_j, then sum S̅[i][j] * b̅_j
+                sum_power += self.power_scattering[i * n + j] * b_all[j] * self.inv_sqrt_r[j];
             }
-            a[i] = sum;
+            // a_i = sum_power * √R_i (convert back from power wave)
+            a[i] = sum_power * self.sqrt_r[i];
         }
         a
     }
