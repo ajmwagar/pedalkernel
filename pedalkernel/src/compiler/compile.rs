@@ -649,16 +649,10 @@ fn rescue_orphan_output_pots(
         .filter(|c| c.kind.is_pot())
         .map(|c| c.id.clone())
         .collect();
-    eprintln!("[orphan-rescue] all pot IDs: {:?}", all_pot_ids);
     if all_pot_ids.is_empty() {
         return Vec::new();
     }
 
-    eprintln!("[orphan-rescue] {} WDF stages, {} multi-NL stages", stages.len(), multi_nl_stages.len());
-    for (i, stage) in stages.iter().enumerate() {
-        eprintln!("  WDF stage {}: dist={}, root={:?}", i, stage.signal_flow_distance,
-            match &stage.root { RootKind::PassiveRType { children, .. } => format!("PassiveRType({} children)", children.len()), _ => "other".to_string() });
-    }
     // ── Step 2: Find orphan pots (not in any WDF or multi-NL stage) ──────
     let orphan_pot_ids: Vec<&str> = all_pot_ids
         .iter()
@@ -686,7 +680,6 @@ fn rescue_orphan_output_pots(
         })
         .map(|s| s.as_str())
         .collect();
-    eprintln!("[orphan-rescue] orphan pot IDs: {:?}", orphan_pot_ids);
     if orphan_pot_ids.is_empty() {
         return Vec::new();
     }
@@ -764,12 +757,6 @@ fn rescue_orphan_output_pots(
         }
     }
 
-    eprintln!("[orphan-rescue] output_edges: {} edges, visited: {} nodes", output_edges.len(), visited_nodes.len());
-    for &eidx in &output_edges {
-        let e = &graph.edges[eidx];
-        let comp = &graph.components[e.comp_idx];
-        eprintln!("  edge {}: {} ({}) between {:?} and {:?}", eidx, comp.id, comp.kind.type_tag(), e.node_a, e.node_b);
-    }
     if output_edges.is_empty() {
         return Vec::new();
     }
@@ -786,7 +773,6 @@ fn rescue_orphan_output_pots(
             .enumerate()
             .any(|(ci, c)| c.id == *id && output_comp_ids.contains(&ci))
     });
-    eprintln!("[orphan-rescue] has_orphan_in_output={}", has_orphan_in_output);
     if !has_orphan_in_output {
         return Vec::new();
     }
@@ -818,8 +804,6 @@ fn rescue_orphan_output_pots(
         }
     };
 
-    eprintln!("[orphan-rescue] vs_node={:?}, out_node={:?}", vs_node, graph.out_node);
-
     // ── Step 6: Build PassiveRType stage ──────────────────────────────────
     // Standard 1 GΩ probe — 3-terminal divider pots work at any load
     // impedance because the voltage division is internal to the pot.
@@ -833,10 +817,8 @@ fn rescue_orphan_output_pots(
     ) {
         // Process last — after all NL stages, before the output probe.
         stage.signal_flow_distance = usize::MAX - 1;
-        eprintln!("[orphan-rescue] stage BUILT successfully");
         vec![stage]
     } else {
-        eprintln!("[orphan-rescue] build_orphan_output_mna_stage returned None");
         Vec::new()
     }
 }
@@ -1832,7 +1814,6 @@ pub fn compile_pedal_with_options(
             order.push((StageRef::MultiNl(i), s.signal_flow_distance));
         }
         order.sort_by_key(|(_, dist)| *dist);
-        eprintln!("[stage-order] {:?}", order.iter().map(|(sr, d)| format!("{:?}={}", sr, d)).collect::<Vec<_>>());
         order.into_iter().map(|(sr, _)| sr).collect::<Vec<_>>()
     };
 

@@ -1855,7 +1855,9 @@ impl CircuitGraph {
             if !visited.contains(&end) {
                 return Vec::new();
             }
-            // BFS backward from end to collect all components on paths from start
+            // BFS backward from end to collect all components on paths from start.
+            // Don't expand past start — otherwise we'd follow input-path edges
+            // (e.g., R_in, C_in) that happen to connect at neg_node.
             let mut result_comps: HashSet<String> = HashSet::new();
             let mut back_visited: HashSet<usize> = HashSet::new();
             let mut back_queue = VecDeque::new();
@@ -1866,7 +1868,11 @@ impl CircuitGraph {
                     for (prev, comp_id) in parents {
                         result_comps.insert(comp_id.clone());
                         if back_visited.insert(*prev) {
-                            back_queue.push_back(*prev);
+                            // Don't expand past start node — edges beyond start
+                            // are input/output path components, not feedback.
+                            if *prev != start {
+                                back_queue.push_back(*prev);
+                            }
                         }
                     }
                 }

@@ -579,10 +579,6 @@ pub(super) fn build_sidechains(
     let mut processors = Vec::new();
     let mut comp_to_sc: HashMap<String, usize> = HashMap::new();
 
-    eprintln!(
-        "[sidechain] {} sidechain definitions",
-        pedal.sidechains.len()
-    );
     for sc_info in &pedal.sidechains {
         let tap = match graph.node_names.get(&sc_info.tap_node) {
             Some(&n) => n,
