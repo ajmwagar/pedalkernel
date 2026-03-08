@@ -1959,6 +1959,25 @@ impl MultiNlStage {
         // at the correct rate and the scattering matrix is consistent.
     }
 
+    /// Update the supply voltage for power supply sag.
+    ///
+    /// Scales dc_bias and vcc_bias_all linearly with the new voltage relative
+    /// to the build-time supply voltage. This shifts the transistor DC operating
+    /// point in response to supply droop, modeling real power supply sag.
+    pub fn update_supply_voltage(&mut self, new_voltage: f64) {
+        if self.supply_voltage <= 0.0 || self.vcc_bias_all.is_empty() {
+            return;
+        }
+        let scale = new_voltage / self.supply_voltage;
+        for bias in &mut self.dc_bias {
+            *bias *= scale;
+        }
+        for bias in &mut self.vcc_bias_all {
+            *bias *= scale;
+        }
+        self.supply_voltage = new_voltage;
+    }
+
     /// Reset all internal state.
     pub fn reset(&mut self) {
         for child in &mut self.passive_children {

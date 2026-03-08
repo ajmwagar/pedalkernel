@@ -713,6 +713,11 @@ impl CompiledPedal {
                 }
             }
         }
+
+        // Update multi-NL stage DC bias for new supply voltage.
+        for stage in &mut self.multi_nl_stages {
+            stage.update_supply_voltage(voltage);
+        }
     }
 
     /// Get the tolerance seed for this pedal unit (for diagnostics/UI).
@@ -1664,6 +1669,11 @@ impl PedalProcessor for CompiledPedal {
             for pp in &mut self.push_pull_stages {
                 pp.push_root.set_v_max(tube_v_max);
                 pp.pull_root.set_v_max(tube_v_max);
+            }
+            // Update multi-NL stage DC bias for supply sag.
+            // dc_bias and vcc_bias_all scale linearly with supply voltage.
+            for stage in &mut self.multi_nl_stages {
+                stage.update_supply_voltage(sagged_voltage);
             }
         }
 
