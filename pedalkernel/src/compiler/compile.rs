@@ -243,29 +243,17 @@ fn build_passive_wdf_stage(
 
     // Fallback: full tree with ShortCircuit root (all elements in tree, gnd at root).
     let source_node = graph.edges.len() + 1000;
-    let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = Vec::new();
-    sp_edges.push((source_node, graph.in_node, SpTree::Leaf(vs_comp_idx)));
-    for &eidx in &passive_edges {
-        let e = &graph.edges[eidx];
-        sp_edges.push((e.node_a, e.node_b, SpTree::Leaf(e.comp_idx)));
-    }
+    let extra = vec![super::graph::ExtraEdge {
+        node_a: source_node,
+        node_b: graph.in_node,
+        tree: DynNode::VoltageSource { voltage: 0.0, rp: 1.0 },
+    }];
     let terminals = vec![source_node, graph.gnd_node];
-    match sp_reduce(sp_edges, &terminals) {
-        Ok(sp_tree) => {
-            let mut all_components = graph.components.clone();
-            while all_components.len() <= vs_comp_idx {
-                all_components.push(ComponentDef {
-                    id: "__vs__".to_string(),
-                    kind: Box::new(ResistorComp { value: 1.0 }),
-                });
-            }
-            let tree = sp_to_dyn_with_vs(
-                &sp_tree,
-                &all_components,
-                &graph.fork_paths,
-                sample_rate,
-                vs_comp_idx,
-            );
+    match super::graph::graph_reduce(
+        &passive_edges, &extra, &terminals,
+        graph, sample_rate, &HashMap::new(), |n| n,
+    ) {
+        Ok(tree) => {
             let mut stage = WdfStage {
                 tree,
                 root: RootKind::ShortCircuit,
@@ -342,7 +330,7 @@ fn build_passive_mna_stage(
 
     // Junction nodes for passive circuit: in_node and out_node.
     let junction_nodes = vec![graph.in_node, graph.out_node];
-    let decomposed = super::graph::sp_decompose(passive_edges, &junction_nodes, graph);
+    let decomposed = super::graph::sp_decompose(passive_edges, &junction_nodes, graph, sample_rate);
 
     build_passive_rtype_from_decomposed(
         graph,
@@ -394,7 +382,7 @@ fn build_orphan_output_mna_stage(
     }
 
     let junction_nodes = vec![vs_node, probe_node];
-    let decomposed = super::graph::sp_decompose(passive_edges, &junction_nodes, graph);
+    let decomposed = super::graph::sp_decompose(passive_edges, &junction_nodes, graph, sample_rate);
 
     build_passive_rtype_from_decomposed(
         graph,
@@ -497,15 +485,10 @@ fn build_passive_rtype_from_decomposed(
 
     // ── Step 2b: Add WDF subtree ports ─────────────────────────────────
     for subtree in &decomposed.wdf_subtrees {
-        let dyn_tree = super::graph::sp_to_dyn(
-            &subtree.tree,
-            &graph.components,
-            &graph.fork_paths,
-            sample_rate,
-        );
-        let rp = dyn_tree.port_resistance();
+        let rp = subtree.tree.port_resistance();
         let pos = to_mna(subtree.attachment_node);
         let neg = to_mna(subtree.far_node);
+        let dyn_tree = subtree.tree.clone();
         reactive_children.push(dyn_tree);
         reactive_ports.push(crate::tree::WdfPort {
             node_pos: pos,
@@ -670,9 +653,15 @@ fn rescue_orphan_output_pots(
                     }
                 }
             }
-            // Check multi-NL stages
+            // Check multi-NL stages (both pot_children and passive_children,
+            // since pots inside WDF subtrees end up in passive_children).
             for mnl in multi_nl_stages {
                 for child in &mnl.pot_children {
+                    if has_pot(child, id) {
+                        return false;
+                    }
+                }
+                for child in &mnl.passive_children {
                     if has_pot(child, id) {
                         return false;
                     }
@@ -685,6 +674,14 @@ fn rescue_orphan_output_pots(
     if orphan_pot_ids.is_empty() {
         return (Vec::new(), Vec::new());
     }
+
+    // Orphan pots indicate a collection gap — either a planner/builder bug
+    // or a feedforward path pot (expected for circuits like the Klon Centaur).
+    // Log so we can distinguish real bugs from expected feedforward orphans.
+    eprintln!(
+        "[ORPHAN-POT] {} orphan pot(s): {:?} — rescuing via PassiveRType output stage",
+        orphan_pot_ids.len(), orphan_pot_ids
+    );
 
     // ── Step 3: BFS from out_node to collect the output passive network ──
     // Walk through passive edges (R/C/L/Pot). Stop at NL junction nodes,
@@ -837,6 +834,7 @@ fn collect_claimed_edges(
     graph: &CircuitGraph,
     pp_transformer_edges: &HashSet<usize>,
     orphan_output_edges: &[usize],
+    fallback_claimed_edges: &[usize],
 ) -> HashSet<usize> {
     let mut claimed = HashSet::new();
 
@@ -860,6 +858,8 @@ fn collect_claimed_edges(
     claimed.extend(classified.sidechain_edge_set.iter().copied());
     // Orphan output pot edges
     claimed.extend(orphan_output_edges.iter().copied());
+    // Build-time fallback edges (diode/triode MNA fallback BFS)
+    claimed.extend(fallback_claimed_edges.iter().copied());
 
     claimed
 }
@@ -1620,17 +1620,18 @@ pub fn compile_pedal_with_options(
 
     // Build nonlinear WDF stages from plans.
     // Triode plans that fail SP reduction fall back to single-NL MNA stages.
-    let (nonlinear_stages, triode_fallback_stages) = super::build::build_stages(
-        &stage_plans,
-        &classified,
-        &graph,
-        &opamp_analysis,
-        sample_rate,
-        oversampling,
-        &pp_transformer_edges,
-        &lfo_controlled_jfets,
-        supply_voltage,
-    );
+    let (nonlinear_stages, triode_fallback_stages, fallback_claimed_edges) =
+        super::build::build_stages(
+            &stage_plans,
+            &classified,
+            &graph,
+            &opamp_analysis,
+            sample_rate,
+            oversampling,
+            &pp_transformer_edges,
+            &lfo_controlled_jfets,
+            supply_voltage,
+        );
     stages.extend(nonlinear_stages);
 
     // Build push-pull stages.
@@ -1672,7 +1673,7 @@ pub fn compile_pedal_with_options(
 
     // ══ Orphan feedforward path compilation ═══════════════════════════
     if !stages.is_empty() || !multi_nl_stages.is_empty() {
-        let claimed_edges = collect_claimed_edges(
+        let mut claimed_edges = collect_claimed_edges(
             &stage_plans,
             &multi_nl_plans,
             &opamp_feedback_edges,
@@ -1680,7 +1681,24 @@ pub fn compile_pedal_with_options(
             &graph,
             &pp_transformer_edges,
             &orphan_output_edges,
+            &fallback_claimed_edges,
         );
+
+        // Claim opamp input passives (coupling caps, bias resistors at
+        // pos/neg pins). These are serial-path components that the NL
+        // planner can't reach through active bridge barriers.
+        for info in &opamp_analysis.feedback_loops {
+            let input_passives = graph.bfs_passive_edges(
+                info.pos_node,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                false,
+                true,
+                &pp_transformer_edges,
+            );
+            claimed_edges.extend(input_passives.iter().copied());
+        }
+
         let feedforward_stages = build_feedforward_stages(
             &graph,
             &classified,

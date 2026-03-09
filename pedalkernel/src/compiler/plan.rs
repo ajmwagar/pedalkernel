@@ -1023,7 +1023,7 @@ fn plan_single_nl(
             boundary_edges,
         )
     } else {
-        plan_one_junction(elem, elem_idx, classified, graph, source_node_offset, boundary_edges, opamp_feedback_edges)
+        plan_one_junction(elem, elem_idx, classified, graph, source_node_offset, pp_transformer_edges, boundary_edges, opamp_feedback_edges)
     }
 }
 
@@ -1034,6 +1034,7 @@ fn plan_one_junction(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     source_node_offset: usize,
+    _pp_transformer_edges: &HashSet<usize>,
     boundary_edges: &HashSet<usize>,
     opamp_feedback_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
@@ -1126,6 +1127,10 @@ fn plan_one_junction(
         })
     } else {
         // Simple 1-junction: diode, MOSFET, zener, OTA.
+        // Use elements_at_junction (immediate edges only). Deeper passives
+        // beyond the junction are handled by build_diode_mna_fallback's BFS
+        // when SP reduction fails. Using full BFS here is too aggressive —
+        // it absorbs feedforward paths (e.g., Klon clean blend).
         if junction_passives.is_empty() {
             return None;
         }
@@ -2391,11 +2396,15 @@ fn collect_output_passive_tail(
 
             // Active bridge node (opamp/BJT pin): collect connecting edge
             // but stop BFS — this is a processing stage boundary.
-            // Exception: if this node is also in the existing stage's set,
-            // treat it as the existing-node case (connecting back to us).
-            if active_bridge_nodes.contains(&n) && !existing_nodes.contains(&n) {
+            // Always stop here, even if this node appears in the existing
+            // stage's set (e.g., SCREAMER's C3 shares U2.out, but the
+            // tone/volume chain beyond U2.out should NOT be absorbed).
+            if active_bridge_nodes.contains(&n) {
                 if !collected.contains(&idx) {
                     collected.push(idx);
+                }
+                if existing_nodes.contains(&n) {
+                    connects = true;
                 }
                 continue;
             }
@@ -2410,10 +2419,12 @@ fn collect_output_passive_tail(
                 continue;
             }
 
+            // Always collect the edge (parallel edges between visited
+            // nodes must not be dropped — e.g., C4 and C5 share nodes).
+            if !collected.contains(&idx) {
+                collected.push(idx);
+            }
             if visited.insert(n) {
-                if !collected.contains(&idx) {
-                    collected.push(idx);
-                }
                 queue.push_back(n);
             }
         }

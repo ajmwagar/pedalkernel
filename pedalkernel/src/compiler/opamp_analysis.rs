@@ -18,9 +18,8 @@ use crate::elements::FeedbackConfig;
 use super::component::Component;
 use super::dyn_node::DynNode;
 use super::graph::{
-    sp_reduce, CircuitGraph, NodeId, OpAmpFeedbackInfo, OpAmpFeedbackKind, SpTree,
+    CircuitGraph, NodeId, OpAmpFeedbackInfo, OpAmpFeedbackKind,
 };
-use super::helpers::sp_to_dyn_with_vs;
 use super::stage::WdfStage;
 
 /// Result of op-amp analysis.
@@ -445,30 +444,19 @@ fn build_feedback_tree(
         return None; // Not a clean 2-terminal feedback network
     }
 
-    // Step 3: Build SP edges + synthetic VS
-    let vs_idx = graph.components.len(); // Virtual component index
-    let mut sp_edges: Vec<(NodeId, NodeId, SpTree)> = feedback_edges
-        .iter()
-        .map(|&idx| {
-            let e = &graph.edges[idx];
-            (e.node_a, e.node_b, SpTree::Leaf(e.comp_idx))
-        })
-        .collect();
-    // Add VS edge between terminals (signal injection point)
-    sp_edges.push((border_nodes[0], border_nodes[1], SpTree::Leaf(vs_idx)));
-
-    // Step 4: SP reduce
+    // Step 3: Build graph_reduce inputs with VS as ExtraEdge
+    let extra = vec![super::graph::ExtraEdge {
+        node_a: border_nodes[0],
+        node_b: border_nodes[1],
+        tree: DynNode::VoltageSource { voltage: 0.0, rp: 1.0 },
+    }];
     let terminals = vec![border_nodes[0], border_nodes[1]];
-    let sp_tree = sp_reduce(sp_edges, &terminals).ok()?;
 
-    // Step 5: Convert to DynNode (VS leaf replaced with VoltageSource)
-    let tree = sp_to_dyn_with_vs(
-        &sp_tree,
-        &graph.components,
-        &graph.fork_paths,
-        sample_rate,
-        vs_idx,
-    );
+    // Step 4: Reduce to DynNode (VS leaf built directly as VoltageSource)
+    let tree = super::graph::graph_reduce(
+        &feedback_edges, &extra, &terminals,
+        graph, sample_rate, &std::collections::HashMap::new(), |n| n,
+    ).ok()?;
 
     // Step 6: Find feedback pot ID (if any pot in the network)
     let feedback_pot_id = info

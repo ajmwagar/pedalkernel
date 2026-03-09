@@ -1366,6 +1366,10 @@ impl CircuitGraph {
                 } else if visited_nodes.insert(n) {
                     collected_edges.push(idx);
                     queue.push_back(n);
+                } else if !collected_edges.contains(&idx) {
+                    // Parallel edge: same nodes, different component.
+                    // Must collect (e.g., C4 and C5 share nodes in SCREAMER).
+                    collected_edges.push(idx);
                 }
             }
         }
@@ -2167,48 +2171,48 @@ pub(super) enum OpAmpFeedbackKind {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Series-parallel decomposition
+// Graph-based SP reduction (builds DynNode directly)
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(super) enum SpTree {
-    Leaf(usize), // component index
-    Series(Box<SpTree>, Box<SpTree>),
-    Parallel(Box<SpTree>, Box<SpTree>),
+/// Extra edge for graph_reduce — pre-built DynNode for synthetic components
+/// (voltage sources, virtual edges, cathode bias sources).
+pub(super) struct ExtraEdge {
+    pub node_a: NodeId,
+    pub node_b: NodeId,
+    pub tree: DynNode,
 }
 
-/// Reduce a set of edges into a single SP tree.
-///
-/// `edges`: (node_a, node_b, tree) — the initial edges.
-/// `terminals`: nodes that must not be eliminated by series reduction.
-pub(super) fn sp_reduce(
-    mut edges: Vec<(NodeId, NodeId, SpTree)>,
-    terminals: &[NodeId],
-) -> Result<SpTree, String> {
-    // Pre-process: redirect dead-end nodes to the first terminal.
+/// Internal working edge for graph_reduce.
+struct WdfEdge {
+    node_a: NodeId,
+    node_b: NodeId,
+    tree: DynNode,
+}
+
+/// Eliminate degree-1 non-terminal nodes by redirecting their single edge
+/// to terminals[0]. Removes resulting self-loops.
+fn eliminate_dead_ends(edges: &mut Vec<WdfEdge>, terminals: &[NodeId]) {
     loop {
         let mut changed = false;
         let mut degree: HashMap<NodeId, Vec<usize>> = HashMap::new();
-        for (idx, (a, b, _)) in edges.iter().enumerate() {
-            degree.entry(*a).or_default().push(idx);
-            degree.entry(*b).or_default().push(idx);
+        for (idx, e) in edges.iter().enumerate() {
+            degree.entry(e.node_a).or_default().push(idx);
+            degree.entry(e.node_b).or_default().push(idx);
         }
-        // Sort nodes for deterministic iteration order
-        let mut sorted_nodes: Vec<_> = degree.keys().copied().collect();
-        sorted_nodes.sort();
-        for node in sorted_nodes {
+        let mut sorted: Vec<_> = degree.keys().copied().collect();
+        sorted.sort();
+        for node in sorted {
             let idxs = &degree[&node];
             if terminals.contains(&node) || idxs.len() != 1 {
                 continue;
             }
-            // Dead-end: redirect this edge's dead side to terminals[0].
             let eidx = idxs[0];
-            if edges[eidx].0 == node {
-                edges[eidx].0 = terminals[0];
+            if edges[eidx].node_a == node {
+                edges[eidx].node_a = terminals[0];
             } else {
-                edges[eidx].1 = terminals[0];
+                edges[eidx].node_b = terminals[0];
             }
-            // Remove self-loops.
-            if edges[eidx].0 == edges[eidx].1 {
+            if edges[eidx].node_a == edges[eidx].node_b {
                 edges.remove(eidx);
             }
             changed = true;
@@ -2218,27 +2222,112 @@ pub(super) fn sp_reduce(
             break;
         }
     }
+}
 
-    // SP reduction loop.
+/// Reduce circuit edges to a single DynNode WDF tree.
+///
+/// Builds DynNode directly during reduction (no SpTree intermediate).
+/// Dead-end elimination runs every iteration, fixing the push_pull bug
+/// when callers include transformer pin nodes in `terminals`.
+///
+/// - `edge_indices` — passive edge indices from graph
+/// - `extra_edges` — synthetic DynNodes (VS, virtual edges, supply sources)
+/// - `terminals` — protected nodes (NL junction, VS source, transformer pins)
+/// - `leaf_overrides` — comp_idx → custom DynNode (CathodeBiasSource for push-pull)
+/// - `remap` — node canonicalization (supply → gnd for AC equivalence)
+pub(super) fn graph_reduce(
+    edge_indices: &[usize],
+    extra_edges: &[ExtraEdge],
+    terminals: &[NodeId],
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    leaf_overrides: &HashMap<usize, DynNode>,
+    remap: impl Fn(NodeId) -> NodeId,
+) -> Result<DynNode, String> {
+    // 1. Build WdfEdge list from graph edges.
+    let mut edges: Vec<WdfEdge> = Vec::new();
+
+    for &eidx in edge_indices {
+        let e = &graph.edges[eidx];
+        let na = remap(e.node_a);
+        let nb = remap(e.node_b);
+        // Skip self-loops (both endpoints mapped to same node).
+        if na == nb {
+            continue;
+        }
+
+        let tree = if let Some(override_node) = leaf_overrides.get(&e.comp_idx) {
+            override_node.clone()
+        } else {
+            make_leaf(
+                e.comp_idx,
+                &graph.components[e.comp_idx],
+                graph.fork_paths.get(&e.comp_idx),
+                sample_rate,
+            )
+        };
+
+        edges.push(WdfEdge {
+            node_a: na,
+            node_b: nb,
+            tree,
+        });
+    }
+
+    // 2. Add extra edges (VS, virtual edges, etc.).
+    for extra in extra_edges {
+        let na = remap(extra.node_a);
+        let nb = remap(extra.node_b);
+        if na == nb {
+            continue;
+        }
+        edges.push(WdfEdge {
+            node_a: na,
+            node_b: nb,
+            tree: extra.tree.clone(),
+        });
+    }
+
+    // Pre-process: eliminate dead-end nodes once at the start
+    // (same as old sp_reduce — NOT per-iteration, which incorrectly
+    // reduces non-SP circuits like the RAT D1 diode stage).
+    eliminate_dead_ends(&mut edges, terminals);
+
+    // 3. Main reduction loop.
     loop {
         if edges.is_empty() {
             return Err("empty network".into());
         }
         if edges.len() == 1 {
-            return Ok(edges.remove(0).2);
+            return Ok(edges.remove(0).tree);
         }
 
         let mut changed = false;
 
-        // Parallel reduction: edges with same endpoints.
+        // b. Parallel reduction: edges with same endpoints.
         'par: for i in 0..edges.len() {
             for j in (i + 1)..edges.len() {
-                let same = (edges[i].0 == edges[j].0 && edges[i].1 == edges[j].1)
-                    || (edges[i].0 == edges[j].1 && edges[i].1 == edges[j].0);
+                let same = (edges[i].node_a == edges[j].node_a
+                    && edges[i].node_b == edges[j].node_b)
+                    || (edges[i].node_a == edges[j].node_b
+                        && edges[i].node_b == edges[j].node_a);
                 if same {
-                    let (_, _, tree_j) = edges.remove(j);
-                    let tree_i = std::mem::replace(&mut edges[i].2, SpTree::Leaf(0));
-                    edges[i].2 = SpTree::Parallel(Box::new(tree_i), Box::new(tree_j));
+                    let WdfEdge { tree: tree_j, .. } = edges.remove(j);
+                    let tree_i = std::mem::replace(
+                        &mut edges[i].tree,
+                        DynNode::Resistor { rp: 1.0 },
+                    );
+                    let r1 = tree_i.port_resistance();
+                    let r2 = tree_j.port_resistance();
+                    let rp = r1 * r2 / (r1 + r2);
+                    edges[i].tree = DynNode::Parallel {
+                        left: Box::new(tree_i),
+                        right: Box::new(tree_j),
+                        rp,
+                        gamma: r2 / (r1 + r2),
+                        b1: 0.0,
+                        b2: 0.0,
+                    };
                     changed = true;
                     break 'par;
                 }
@@ -2248,13 +2337,12 @@ pub(super) fn sp_reduce(
             continue;
         }
 
-        // Series reduction: non-terminal nodes with degree 2.
+        // c. Series reduction: non-terminal nodes with degree 2.
         let mut degree: HashMap<NodeId, Vec<usize>> = HashMap::new();
-        for (idx, (a, b, _)) in edges.iter().enumerate() {
-            degree.entry(*a).or_default().push(idx);
-            degree.entry(*b).or_default().push(idx);
+        for (idx, e) in edges.iter().enumerate() {
+            degree.entry(e.node_a).or_default().push(idx);
+            degree.entry(e.node_b).or_default().push(idx);
         }
-        // Sort nodes for deterministic iteration order
         let mut sorted_nodes: Vec<_> = degree.keys().copied().collect();
         sorted_nodes.sort();
         for node in sorted_nodes {
@@ -2264,24 +2352,34 @@ pub(super) fn sp_reduce(
             }
             let i1 = idxs[0];
             let i2 = idxs[1];
-            let other1 = if edges[i1].0 == node {
-                edges[i1].1
+            let other1 = if edges[i1].node_a == node {
+                edges[i1].node_b
             } else {
-                edges[i1].0
+                edges[i1].node_a
             };
-            let other2 = if edges[i2].0 == node {
-                edges[i2].1
+            let other2 = if edges[i2].node_a == node {
+                edges[i2].node_b
             } else {
-                edges[i2].0
+                edges[i2].node_a
             };
             let (lo, hi) = if i1 < i2 { (i1, i2) } else { (i2, i1) };
-            let (_, _, tree_hi) = edges.remove(hi);
-            let (_, _, tree_lo) = edges.remove(lo);
-            edges.push((
-                other1,
-                other2,
-                SpTree::Series(Box::new(tree_lo), Box::new(tree_hi)),
-            ));
+            let WdfEdge { tree: tree_hi, .. } = edges.remove(hi);
+            let WdfEdge { tree: tree_lo, .. } = edges.remove(lo);
+            let r1 = tree_lo.port_resistance();
+            let r2 = tree_hi.port_resistance();
+            let rp = r1 + r2;
+            edges.push(WdfEdge {
+                node_a: other1,
+                node_b: other2,
+                tree: DynNode::Series {
+                    left: Box::new(tree_lo),
+                    right: Box::new(tree_hi),
+                    rp,
+                    gamma: r1 / rp,
+                    b1: 0.0,
+                    b2: 0.0,
+                },
+            });
             changed = true;
             break;
         }
@@ -2314,8 +2412,8 @@ pub(super) struct DecomposedCircuit {
 
 /// A single SP-reduced subtree that feeds one port of the R-type adaptor.
 pub(super) struct WdfSubtreePort {
-    /// The SP tree for this subtree.
-    pub tree: SpTree,
+    /// The WDF subtree (already a DynNode, built directly by graph_reduce).
+    pub tree: DynNode,
     /// The junction node where this subtree attaches (R-type side).
     pub attachment_node: NodeId,
     /// The far terminal (ground/supply reference node).
@@ -2341,6 +2439,7 @@ pub(super) fn sp_decompose(
     passive_edge_indices: &[usize],
     junction_nodes: &[NodeId],
     graph: &CircuitGraph,
+    sample_rate: f64,
 ) -> DecomposedCircuit {
     // Canonical ground: gnd + all supply nodes map to the same reference.
     let ground = graph.gnd_node;
@@ -2518,26 +2617,21 @@ pub(super) fn sp_decompose(
         }
 
         if comp.bordering_junctions.len() == 1 {
-            // Pendant: hangs off exactly one junction node → try SP reduce.
+            // Pendant: hangs off exactly one junction node → try graph_reduce.
 
             let &junction = comp.bordering_junctions.iter().next().unwrap();
-
-            // Build SP edges for this pendant.
-            let sp_edges: Vec<(NodeId, NodeId, SpTree)> = comp
-                .edges
-                .iter()
-                .map(|&eidx| {
-                    let e = &graph.edges[eidx];
-                    (
-                        effective(e.node_a),
-                        effective(e.node_b),
-                        SpTree::Leaf(e.comp_idx),
-                    )
-                })
-                .collect();
             let terminals = vec![junction, ground];
+            let remap = |n: NodeId| -> NodeId { effective(n) };
 
-            match sp_reduce(sp_edges, &terminals) {
+            match graph_reduce(
+                &comp.edges,
+                &[],
+                &terminals,
+                graph,
+                sample_rate,
+                &HashMap::new(),
+                remap,
+            ) {
                 Ok(tree) => {
                     wdf_subtrees.push(WdfSubtreePort {
                         tree,
@@ -2567,113 +2661,6 @@ pub(super) fn sp_decompose(
     DecomposedCircuit {
         wdf_subtrees,
         residual_edges,
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// LC pair impedance matching
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Detect LC pairs in an SpTree and return matched port resistance overrides.
-///
-/// When a Series or Parallel node has one L and one C child leaf, the optimal
-/// port resistance for both is Z₀ = √(L/C), giving gamma = 0.5 at resonance
-/// (perfect energy exchange). Returns a map from comp_idx → matched Rp.
-pub(super) fn detect_lc_pairs(
-    tree: &SpTree,
-    components: &[ComponentDef],
-    sample_rate: f64,
-) -> HashMap<usize, f64> {
-    let mut overrides: HashMap<usize, f64> = HashMap::new();
-    detect_lc_pairs_inner(tree, components, sample_rate, &mut overrides);
-    overrides
-}
-
-fn detect_lc_pairs_inner(
-    tree: &SpTree,
-    components: &[ComponentDef],
-    sample_rate: f64,
-    overrides: &mut HashMap<usize, f64>,
-) {
-    match tree {
-        SpTree::Leaf(_) => {}
-        SpTree::Series(left, right) | SpTree::Parallel(left, right) => {
-            // Check if left and right are both leaves, one L and one C.
-            if let (SpTree::Leaf(idx_a), SpTree::Leaf(idx_b)) = (left.as_ref(), right.as_ref()) {
-                let comp_a = &components[*idx_a];
-                let comp_b = &components[*idx_b];
-                let l_val = comp_a.kind.inductance();
-                let c_val = comp_b.kind.capacitance();
-                if let (Some(l), Some(c)) = (l_val, c_val) {
-                    if l > 0.0 && c > 0.0 {
-                        let z0 = (l / c).sqrt();
-                        overrides.insert(*idx_a, z0);
-                        overrides.insert(*idx_b, z0);
-                        return;
-                    }
-                }
-                // Try the other way: a=C, b=L.
-                let l_val = comp_b.kind.inductance();
-                let c_val = comp_a.kind.capacitance();
-                if let (Some(l), Some(c)) = (l_val, c_val) {
-                    if l > 0.0 && c > 0.0 {
-                        let z0 = (l / c).sqrt();
-                        overrides.insert(*idx_a, z0);
-                        overrides.insert(*idx_b, z0);
-                        return;
-                    }
-                }
-            }
-            // Recurse into children.
-            detect_lc_pairs_inner(left, components, sample_rate, overrides);
-            detect_lc_pairs_inner(right, components, sample_rate, overrides);
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SP tree → DynNode conversion
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[allow(dead_code)]
-pub(super) fn sp_to_dyn(
-    tree: &SpTree,
-    components: &[ComponentDef],
-    fork_paths: &HashMap<usize, ForkPathInfo>,
-    sample_rate: f64,
-) -> DynNode {
-    match tree {
-        SpTree::Leaf(idx) => make_leaf(*idx, &components[*idx], fork_paths.get(idx), sample_rate),
-        SpTree::Series(left, right) => {
-            let l = sp_to_dyn(left, components, fork_paths, sample_rate);
-            let r = sp_to_dyn(right, components, fork_paths, sample_rate);
-            let r1 = l.port_resistance();
-            let r2 = r.port_resistance();
-            let rp = r1 + r2;
-            DynNode::Series {
-                left: Box::new(l),
-                right: Box::new(r),
-                rp,
-                gamma: r1 / rp,
-                b1: 0.0,
-                b2: 0.0,
-            }
-        }
-        SpTree::Parallel(left, right) => {
-            let l = sp_to_dyn(left, components, fork_paths, sample_rate);
-            let r = sp_to_dyn(right, components, fork_paths, sample_rate);
-            let r1 = l.port_resistance();
-            let r2 = r.port_resistance();
-            let rp = r1 * r2 / (r1 + r2);
-            DynNode::Parallel {
-                left: Box::new(l),
-                right: Box::new(r),
-                rp,
-                gamma: r2 / (r1 + r2),
-                b1: 0.0,
-                b2: 0.0,
-            }
-        }
     }
 }
 
