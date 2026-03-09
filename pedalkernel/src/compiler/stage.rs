@@ -308,6 +308,10 @@ pub(super) struct WdfStage {
     /// exclusively from `node_signals` (trigger impulses) rather than
     /// the serial chain signal. Unfired voices receive 0.0 input.
     pub(super) is_trigger_voice: bool,
+    /// When true, this stage is a feedforward (parallel) path that reads
+    /// from `node_signals` at `injection_node_id` and additively blends
+    /// its output into the serial chain signal.
+    pub(super) is_feedforward: bool,
     /// Sample counter for runtime warnings rate limiting.
     /// Only meaningful when `runtime-warnings` feature is enabled.
     #[allow(dead_code)]
@@ -1014,6 +1018,9 @@ impl WdfStage {
         );
         if self.is_trigger_voice {
             s.push_str(", trigger_voice");
+        }
+        if self.is_feedforward {
+            s.push_str(", feedforward");
         }
         if self.injection_node_id != usize::MAX {
             s.push_str(&format!(", inj={}", self.injection_node_id));

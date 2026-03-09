@@ -548,6 +548,7 @@ pub(super) fn build_stages(
             injection_node_id: usize::MAX,
             output_node_id: usize::MAX,
             is_trigger_voice: false,
+            is_feedforward: false,
             sample_counter: 0,
             root_comp_id: String::new(),
             feedback_pot_id: None,
@@ -2547,6 +2548,7 @@ fn build_vs_stage(
             .copied()
             .unwrap_or(plan.injection_node),
         is_trigger_voice: false,
+        is_feedforward: false,
         sample_counter: 0,
         root_comp_id: String::new(),
         feedback_pot_id: None,
@@ -2614,6 +2616,7 @@ fn build_source_follower_stage(
             .copied()
             .unwrap_or(plan.injection_node),
         is_trigger_voice: false,
+        is_feedforward: false,
         sample_counter: 0,
         root_comp_id: String::new(),
         feedback_pot_id: None,

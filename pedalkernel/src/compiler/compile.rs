@@ -282,6 +282,7 @@ fn build_passive_wdf_stage(
                 injection_node_id: usize::MAX,
                 output_node_id: usize::MAX,
                 is_trigger_voice: false,
+                is_feedforward: false,
                 sample_counter: 0,
                 root_comp_id: String::new(),
                 feedback_pot_id: None,
@@ -622,6 +623,7 @@ fn build_passive_rtype_from_decomposed(
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
         is_trigger_voice: false,
+        is_feedforward: false,
         sample_counter: 0,
         root_comp_id: String::new(),
         feedback_pot_id: None,
@@ -639,7 +641,7 @@ fn rescue_orphan_output_pots(
     multi_nl_stages: &[super::stage::MultiNlStage],
     sample_rate: f64,
     oversampling: OversamplingFactor,
-) -> Vec<WdfStage> {
+) -> (Vec<WdfStage>, Vec<usize>) {
     use super::stage::RootKind;
 
     // ── Step 1: Find all pot component IDs ────────────────────────────────
@@ -650,7 +652,7 @@ fn rescue_orphan_output_pots(
         .map(|c| c.id.clone())
         .collect();
     if all_pot_ids.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // ── Step 2: Find orphan pots (not in any WDF or multi-NL stage) ──────
@@ -681,7 +683,7 @@ fn rescue_orphan_output_pots(
         .map(|s| s.as_str())
         .collect();
     if orphan_pot_ids.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // ── Step 3: BFS from out_node to collect the output passive network ──
@@ -758,7 +760,7 @@ fn rescue_orphan_output_pots(
     }
 
     if output_edges.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // ── Step 4: Check if any orphan pot is in the output network ──────────
@@ -774,7 +776,7 @@ fn rescue_orphan_output_pots(
             .any(|(ci, c)| c.id == *id && output_comp_ids.contains(&ci))
     });
     if !has_orphan_in_output {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // ── Step 5: Find VS injection node ────────────────────────────────────
@@ -800,7 +802,7 @@ fn rescue_orphan_output_pots(
         }
         match best_node {
             Some(n) => n,
-            None => return Vec::new(),
+            None => return (Vec::new(), Vec::new()),
         }
     };
 
@@ -817,10 +819,247 @@ fn rescue_orphan_output_pots(
     ) {
         // Process last — after all NL stages, before the output probe.
         stage.signal_flow_distance = usize::MAX - 1;
-        vec![stage]
+        (vec![stage], output_edges)
     } else {
-        Vec::new()
+        (Vec::new(), output_edges)
     }
+}
+
+/// Collect all edge indices that are claimed by existing stages.
+///
+/// Returns the union of edges used by NL stages, multi-NL stages, opamp feedback,
+/// active bridges, push-pull transformers, sidechain, and orphan output pots.
+fn collect_claimed_edges(
+    stage_plans: &[super::plan::StagePlan],
+    multi_nl_plans: &[super::plan::MultiNlPlan],
+    opamp_feedback_edges: &HashSet<usize>,
+    classified: &super::classify::ClassifiedCircuit,
+    graph: &CircuitGraph,
+    pp_transformer_edges: &HashSet<usize>,
+    orphan_output_edges: &[usize],
+) -> HashSet<usize> {
+    let mut claimed = HashSet::new();
+
+    // NL stage passives
+    for plan in stage_plans {
+        claimed.extend(plan.passive_idxs.iter().copied());
+    }
+    // Multi-NL stage passives
+    for plan in multi_nl_plans {
+        claimed.extend(plan.passive_edge_indices.iter().copied());
+    }
+    // Opamp feedback components
+    claimed.extend(opamp_feedback_edges.iter().copied());
+    // Nonlinear device edges
+    claimed.extend(classified.all_nonlinear_edge_indices.iter().copied());
+    // Active bridge edges (opamp/BJT virtual edges)
+    claimed.extend(graph.active_edge_indices.iter().copied());
+    // Push-pull transformer edges
+    claimed.extend(pp_transformer_edges.iter().copied());
+    // Sidechain edges
+    claimed.extend(classified.sidechain_edge_set.iter().copied());
+    // Orphan output pot edges
+    claimed.extend(orphan_output_edges.iter().copied());
+
+    claimed
+}
+
+/// Build feedforward passive stages for orphaned subgraphs that bridge
+/// two active nodes (e.g., clean blend paths in the Klon Centaur).
+fn build_feedforward_stages(
+    graph: &CircuitGraph,
+    classified: &super::classify::ClassifiedCircuit,
+    claimed_edges: &HashSet<usize>,
+    sample_rate: f64,
+) -> Vec<WdfStage> {
+    // ── Step 1: Collect unclaimed simple-passive edges ────────────────
+    let nl_edge_set: HashSet<usize> = classified
+        .all_nonlinear_edge_indices
+        .iter()
+        .copied()
+        .collect();
+    let active_edge_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
+
+    let unclaimed: Vec<usize> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(eidx, e)| {
+            if claimed_edges.contains(eidx) {
+                return false;
+            }
+            if nl_edge_set.contains(eidx) || active_edge_set.contains(eidx) {
+                return false;
+            }
+            let comp = &graph.components[e.comp_idx];
+            if !comp.kind.is_simple_passive() {
+                return false;
+            }
+            // Skip supply-adjacent edges (except gnd — gnd is valid termination)
+            if graph.supply_nodes.contains(&e.node_a) && e.node_a != graph.gnd_node {
+                return false;
+            }
+            if graph.supply_nodes.contains(&e.node_b) && e.node_b != graph.gnd_node {
+                return false;
+            }
+            // Skip sidechain edges
+            if classified.sidechain_edge_set.contains(eidx) {
+                return false;
+            }
+            true
+        })
+        .map(|(eidx, _)| eidx)
+        .collect();
+
+    if unclaimed.is_empty() {
+        return Vec::new();
+    }
+
+    // ── Step 2: Build connected components via union-find ─────────────
+    let mut parent: HashMap<NodeId, NodeId> = HashMap::new();
+    fn find(parent: &mut HashMap<NodeId, NodeId>, x: NodeId) -> NodeId {
+        let p = *parent.get(&x).unwrap_or(&x);
+        if p == x {
+            return x;
+        }
+        let root = find(parent, p);
+        parent.insert(x, root);
+        root
+    }
+    fn union(parent: &mut HashMap<NodeId, NodeId>, a: NodeId, b: NodeId) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            parent.insert(ra, rb);
+        }
+    }
+
+    for &eidx in &unclaimed {
+        let e = &graph.edges[eidx];
+        union(&mut parent, e.node_a, e.node_b);
+    }
+
+    // Group edges by their component root
+    let mut components: HashMap<NodeId, Vec<usize>> = HashMap::new();
+    for &eidx in &unclaimed {
+        let e = &graph.edges[eidx];
+        let root = find(&mut parent, e.node_a);
+        components.entry(root).or_default().push(eidx);
+    }
+
+    // ── Step 3: Identify boundary nodes for each component ───────────
+    // Boundary nodes are nodes that also touch a claimed edge, or are
+    // NL junction / active / opamp nodes.
+    let mut boundary_nodes_set: HashSet<NodeId> = HashSet::new();
+    // Nodes on claimed edges
+    for &eidx in claimed_edges {
+        if eidx < graph.edges.len() {
+            let e = &graph.edges[eidx];
+            boundary_nodes_set.insert(e.node_a);
+            boundary_nodes_set.insert(e.node_b);
+        }
+    }
+    // NL junction nodes
+    for &eidx in &classified.all_nonlinear_edge_indices {
+        let e = &graph.edges[eidx];
+        boundary_nodes_set.insert(e.node_a);
+        boundary_nodes_set.insert(e.node_b);
+    }
+    // Active bridge nodes
+    for &eidx in &graph.active_edge_indices {
+        let e = &graph.edges[eidx];
+        boundary_nodes_set.insert(e.node_a);
+        boundary_nodes_set.insert(e.node_b);
+    }
+    // Global nodes
+    boundary_nodes_set.insert(graph.in_node);
+    boundary_nodes_set.insert(graph.out_node);
+    boundary_nodes_set.insert(graph.gnd_node);
+    boundary_nodes_set.insert(graph.vcc_node);
+
+    let global_nodes: HashSet<NodeId> = [graph.in_node, graph.out_node, graph.gnd_node, graph.vcc_node]
+        .iter()
+        .copied()
+        .collect();
+
+    let mut result = Vec::new();
+
+    for (_root, edges) in &components {
+        // Collect all nodes in this subgraph
+        let mut subgraph_nodes: HashSet<NodeId> = HashSet::new();
+        for &eidx in edges {
+            let e = &graph.edges[eidx];
+            subgraph_nodes.insert(e.node_a);
+            subgraph_nodes.insert(e.node_b);
+        }
+
+        // Find boundary nodes for this subgraph
+        let boundary: Vec<NodeId> = subgraph_nodes
+            .iter()
+            .copied()
+            .filter(|n| boundary_nodes_set.contains(n))
+            .collect();
+
+        // Skip subgraphs with fewer than 2 boundary nodes (dangling/bias)
+        if boundary.len() < 2 {
+            continue;
+        }
+        // Skip subgraphs where ALL boundary nodes are global (bias networks)
+        if boundary.iter().all(|n| global_nodes.contains(n)) {
+            continue;
+        }
+
+        // ── Step 4: Find injection and output nodes ──────────────────
+        // injection_node = boundary node closest to input (smallest dist_from_in)
+        // output_node = boundary node farthest from input (largest dist_from_in)
+        let mut injection_node = boundary[0];
+        let mut injection_dist = classified
+            .dist_from_in
+            .get(&boundary[0])
+            .copied()
+            .unwrap_or(usize::MAX);
+        let mut output_node = boundary[0];
+        let mut output_dist = injection_dist;
+
+        for &node in &boundary[1..] {
+            let d = classified
+                .dist_from_in
+                .get(&node)
+                .copied()
+                .unwrap_or(usize::MAX);
+            if d < injection_dist {
+                injection_dist = d;
+                injection_node = node;
+            }
+            if d > output_dist || (d == output_dist && node == graph.out_node) {
+                output_dist = d;
+                output_node = node;
+            }
+        }
+
+        // injection and output must differ
+        if injection_node == output_node {
+            continue;
+        }
+
+        // ── Step 5: Build PassiveRType stage ─────────────────────────
+        if let Some(mut stage) = build_orphan_output_mna_stage(
+            graph,
+            edges,
+            injection_node,
+            output_node,
+            1e9, // high-Z probe
+            sample_rate,
+        ) {
+            stage.is_feedforward = true;
+            stage.injection_node_id = injection_node;
+            stage.output_node_id = output_node;
+            stage.signal_flow_distance = injection_dist.saturating_add(1);
+            result.push(stage);
+        }
+    }
+
+    result
 }
 
 /// Build a WDF stage for simple 2-element passive circuits (RC, RL, resistor divider).
@@ -918,6 +1157,7 @@ fn build_output_rooted_stage(
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
         is_trigger_voice: false,
+        is_feedforward: false,
         sample_counter: 0,
         root_comp_id: String::new(),
         feedback_pot_id: None,
@@ -1316,6 +1556,29 @@ pub fn compile_pedal_with_options(
     );
     stages.extend(opamp_feedback_stages);
 
+    // Set output_node_id and signal_flow_distance on opamp feedback stages.
+    // The stages correspond 1:1 with non-UnityGain, non-AllpassJfet feedback loops.
+    {
+        let mut stage_idx = 0;
+        for info in &opamp_analysis.feedback_loops {
+            match &info.feedback_kind {
+                super::graph::OpAmpFeedbackKind::UnityGain
+                | super::graph::OpAmpFeedbackKind::AllpassJfet { .. } => continue,
+                _ => {}
+            }
+            if stage_idx < stages.len() {
+                stages[stage_idx].output_node_id = info.out_node;
+                stages[stage_idx].injection_node_id = info.neg_node;
+                stages[stage_idx].signal_flow_distance = classified
+                    .dist_from_in
+                    .get(&info.neg_node)
+                    .copied()
+                    .unwrap_or(0);
+            }
+            stage_idx += 1;
+        }
+    }
+
     // Build standalone op-amp stages (no feedback).
     let opamp_stages = super::opamp_analysis::build_standalone_opamp_stages(
         pedal,
@@ -1397,12 +1660,34 @@ pub fn compile_pedal_with_options(
     // Pots between the last processing stage and out_node are skipped
     // by elements_at_junction/bfs_passive_edges. Build a PassiveRType
     // stage so PotInStage can find and control them.
+    let mut orphan_output_edges: Vec<usize> = Vec::new();
     if !stages.is_empty() || !multi_nl_stages.is_empty() {
-        let orphan_stages = rescue_orphan_output_pots(
+        let (orphan_stages, output_edges) = rescue_orphan_output_pots(
             &graph, &classified, &stages, &multi_nl_stages,
             sample_rate, oversampling,
         );
         stages.extend(orphan_stages);
+        orphan_output_edges = output_edges;
+    }
+
+    // ══ Orphan feedforward path compilation ═══════════════════════════
+    if !stages.is_empty() || !multi_nl_stages.is_empty() {
+        let claimed_edges = collect_claimed_edges(
+            &stage_plans,
+            &multi_nl_plans,
+            &opamp_feedback_edges,
+            &classified,
+            &graph,
+            &pp_transformer_edges,
+            &orphan_output_edges,
+        );
+        let feedforward_stages = build_feedforward_stages(
+            &graph,
+            &classified,
+            &claimed_edges,
+            sample_rate,
+        );
+        stages.extend(feedforward_stages);
     }
 
     // ══ Passive-only fallback ═════════════════════════════════════════

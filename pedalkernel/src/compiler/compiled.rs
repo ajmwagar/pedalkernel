@@ -1747,6 +1747,14 @@ impl PedalProcessor for CompiledPedal {
                             .filter(|(nid, _)| *nid == stage.injection_node_id)
                             .map(|(_, v)| *v)
                             .sum::<f64>()
+                    } else if stage.is_feedforward {
+                        // Feedforward stages read from upstream node_signals
+                        self.node_signals
+                            .iter()
+                            .rev()
+                            .find(|(nid, _)| *nid == stage.injection_node_id)
+                            .map(|(_, v)| *v)
+                            .unwrap_or(0.0)
                     } else {
                         // Re-amplify only after the *previous* stage clipped.
                         if prev_was_clipping {
@@ -1754,7 +1762,7 @@ impl PedalProcessor for CompiledPedal {
                         }
                         signal
                     };
-                    prev_was_clipping = stage.root.is_clipping_stage();
+                    prev_was_clipping = !stage.is_feedforward && stage.root.is_clipping_stage();
 
                     if stage.has_paired_opamp() {
                         stage.set_paired_opamp_vp(stage_input);
@@ -1766,7 +1774,10 @@ impl PedalProcessor for CompiledPedal {
 
                     // Write output to stage's output node for junction summing
                     // (only for trigger voice stages).
-                    if stage.is_trigger_voice && stage.output_node_id != usize::MAX {
+                    if stage.is_feedforward {
+                        // Feedforward: additive blend into serial chain
+                        signal += stage_output;
+                    } else if stage.is_trigger_voice && stage.output_node_id != usize::MAX {
                         if let Some(entry) = self.node_signals.iter_mut()
                             .find(|(nid, _)| *nid == stage.output_node_id)
                         {
@@ -1783,6 +1794,10 @@ impl PedalProcessor for CompiledPedal {
                             .unwrap_or(stage_output);
                     } else {
                         signal = stage_output;
+                        // Write to node_signals for downstream feedforward stages
+                        if stage.output_node_id != usize::MAX {
+                            self.node_signals.push((stage.output_node_id, stage_output));
+                        }
                     }
 
                     #[cfg(feature = "debug-trace")]
