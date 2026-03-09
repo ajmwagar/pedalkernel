@@ -2200,7 +2200,8 @@ struct WdfEdge {
 
 /// Eliminate degree-1 non-terminal nodes by redirecting their single edge
 /// to terminals[0]. Removes resulting self-loops.
-fn eliminate_dead_ends(edges: &mut Vec<WdfEdge>, terminals: &[NodeId]) {
+fn eliminate_dead_ends(edges: &mut Vec<WdfEdge>, terminals: &[NodeId]) -> bool {
+    let mut any_changed = false;
     loop {
         let mut changed = false;
         let mut degree: HashMap<NodeId, Vec<usize>> = HashMap::new();
@@ -2225,12 +2226,14 @@ fn eliminate_dead_ends(edges: &mut Vec<WdfEdge>, terminals: &[NodeId]) {
                 edges.remove(eidx);
             }
             changed = true;
+            any_changed = true;
             break;
         }
         if !changed {
             break;
         }
     }
+    any_changed
 }
 
 /// Reduce circuit edges to a single DynNode WDF tree.
@@ -2244,6 +2247,9 @@ fn eliminate_dead_ends(edges: &mut Vec<WdfEdge>, terminals: &[NodeId]) {
 /// - `terminals` — protected nodes (NL junction, VS source, transformer pins)
 /// - `leaf_overrides` — comp_idx → custom DynNode (CathodeBiasSource for push-pull)
 /// - `remap` — node canonicalization (supply → gnd for AC equivalence)
+/// - `output_node` — if set, track which leaf component connects to this node
+///   during series reduction. Returns its comp_id so the stage can extract
+///   voltage at the output node after the WDF down-sweep.
 pub(super) fn graph_reduce(
     edge_indices: &[usize],
     extra_edges: &[ExtraEdge],
@@ -2252,7 +2258,8 @@ pub(super) fn graph_reduce(
     sample_rate: f64,
     leaf_overrides: &HashMap<usize, DynNode>,
     remap: impl Fn(NodeId) -> NodeId,
-) -> Result<DynNode, String> {
+    output_node: Option<NodeId>,
+) -> Result<(DynNode, Option<String>), String> {
     // 1. Build WdfEdge list from graph edges.
     let mut edges: Vec<WdfEdge> = Vec::new();
 
@@ -2303,12 +2310,22 @@ pub(super) fn graph_reduce(
     eliminate_dead_ends(&mut edges, terminals);
 
     // 3. Main reduction loop.
+    //
+    // Output node tracking: when a series reduction collapses output_node,
+    // we identify the ground-side leaf component. Its comp_id is the output
+    // probe — voltage at this leaf after the WDF down-sweep equals V_out.
+    let output_node = output_node.map(|n| remap(n));
+    let mut output_probe_comp_id: Option<String> = None;
+    // Track which edge (by vec index) contains the output probe subtree.
+    // Updated when edges are merged so it follows the probe through reductions.
+    let mut output_probe_edge: Option<usize> = None;
+
     loop {
         if edges.is_empty() {
             return Err("empty network".into());
         }
         if edges.len() == 1 {
-            return Ok(edges.remove(0).tree);
+            return Ok((edges.remove(0).tree, output_probe_comp_id));
         }
 
         let mut changed = false;
@@ -2321,10 +2338,17 @@ pub(super) fn graph_reduce(
                     || (edges[i].node_a == edges[j].node_b
                         && edges[i].node_b == edges[j].node_a);
                 if same {
+                    // Track output probe edge through parallel merge
+                    let probe_in_j = output_probe_edge == Some(j);
+                    let probe_in_i = output_probe_edge == Some(i);
                     let WdfEdge { tree: tree_j, .. } = edges.remove(j);
+                    // After remove(j), indices >= j shift down
+                    if let Some(ref mut ope) = output_probe_edge {
+                        if *ope > j { *ope -= 1; }
+                    }
                     let tree_i = std::mem::replace(
                         &mut edges[i].tree,
-                        DynNode::Resistor { rp: 1.0 },
+                        DynNode::Resistor { rp: 1.0, last_a: 0.0 },
                     );
                     let r1 = tree_i.port_resistance();
                     let r2 = tree_j.port_resistance();
@@ -2337,6 +2361,10 @@ pub(super) fn graph_reduce(
                         b1: 0.0,
                         b2: 0.0,
                     };
+                    // Output probe stays in edges[i] (merged result)
+                    if probe_in_i || probe_in_j {
+                        output_probe_edge = Some(i);
+                    }
                     changed = true;
                     break 'par;
                 }
@@ -2371,12 +2399,32 @@ pub(super) fn graph_reduce(
             } else {
                 edges[i2].node_a
             };
+
+            // Output node tracking: when collapsing output_node, identify
+            // the ground-side leaf. Its voltage = V_out after the down-sweep.
+            if output_node == Some(node) && output_probe_comp_id.is_none() {
+                // Determine which edge connects to ground (the "ground side").
+                // The ground-side edge's leaf comp_id is the output probe.
+                let gnd_side_idx = if terminals.contains(&other2)
+                    || other2 == graph.gnd_node
+                {
+                    i2
+                } else {
+                    i1
+                };
+                output_probe_comp_id = edges[gnd_side_idx].tree.leaf_comp_id();
+            }
+
+            let probe_in_lo = output_probe_edge == Some(if i1 < i2 { i1 } else { i2 });
+            let probe_in_hi = output_probe_edge == Some(if i1 < i2 { i2 } else { i1 });
+
             let (lo, hi) = if i1 < i2 { (i1, i2) } else { (i2, i1) };
             let WdfEdge { tree: tree_hi, .. } = edges.remove(hi);
             let WdfEdge { tree: tree_lo, .. } = edges.remove(lo);
             let r1 = tree_lo.port_resistance();
             let r2 = tree_hi.port_resistance();
             let rp = r1 + r2;
+            let new_idx = edges.len();
             edges.push(WdfEdge {
                 node_a: other1,
                 node_b: other2,
@@ -2389,10 +2437,32 @@ pub(super) fn graph_reduce(
                     b2: 0.0,
                 },
             });
+
+            // Track: merged edge inherits output probe, or this IS the output collapse
+            if probe_in_lo || probe_in_hi || output_node == Some(node) {
+                output_probe_edge = Some(new_idx);
+            }
+            // Adjust existing probe index for removed edges
+            if let Some(ref mut ope) = output_probe_edge {
+                if *ope != new_idx {
+                    if *ope > hi { *ope -= 2; }
+                    else if *ope > lo { *ope -= 1; }
+                }
+            }
+
             changed = true;
             break;
         }
         if changed {
+            continue;
+        }
+
+        // d. Last resort: series/parallel reductions may create new dead-end
+        //    nodes (degree 1, non-terminal). Run dead-end elimination and
+        //    retry. This handles pendant branches that only become dead ends
+        //    after earlier reductions (e.g. output chain collapses into one
+        //    edge to ground, leaving gnd with degree 1).
+        if eliminate_dead_ends(&mut edges, terminals) {
             continue;
         }
 
@@ -2640,8 +2710,9 @@ pub(super) fn sp_decompose(
                 sample_rate,
                 &HashMap::new(),
                 remap,
+                None,
             ) {
-                Ok(tree) => {
+                Ok((tree, _)) => {
                     wdf_subtrees.push(WdfSubtreePort {
                         tree,
                         attachment_node: junction,
@@ -2707,7 +2778,7 @@ pub(super) fn make_leaf(
     // Delegate to Component trait; fallback for non-leaf types (diodes, etc.)
     comp.kind
         .make_leaf(&comp.id, sample_rate)
-        .unwrap_or(DynNode::Resistor { rp: 1000.0 })
+        .unwrap_or(DynNode::Resistor { rp: 1000.0, last_a: 0.0 })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

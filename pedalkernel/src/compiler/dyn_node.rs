@@ -16,6 +16,8 @@ use crate::tree::RTypeAdaptor;
 pub(super) enum DynNode {
     Resistor {
         rp: f64,
+        /// Last incident wave for voltage extraction: V = last_a / 2.
+        last_a: f64,
     },
     Capacitor {
         capacitance: f64,
@@ -66,6 +68,8 @@ pub(super) enum DynNode {
         position: f64,
         taper: PotTaper,
         rp: f64,
+        /// Last incident wave, for output voltage extraction: V = last_a / 2.
+        last_a: f64,
     },
     /// Photocoupler (Vactrol) — LDR with CdS carrier dynamics.
     Photocoupler {
@@ -184,7 +188,7 @@ pub(super) enum DynNode {
 impl DynNode {
     pub fn port_resistance(&self) -> f64 {
         match self {
-            Self::Resistor { rp }
+            Self::Resistor { rp, .. }
             | Self::Capacitor { rp, .. }
             | Self::LeakyCapacitor { rp, .. }
             | Self::Inductor { rp, .. }
@@ -277,9 +281,8 @@ impl DynNode {
     /// Scatter-down + state update: propagate incident wave (root → leaves).
     pub fn set_incident(&mut self, a: f64) {
         match self {
-            Self::Resistor { .. }
-            | Self::Pot { .. }
-            | Self::VoltageSource { .. }
+            Self::Resistor { last_a, .. } | Self::Pot { last_a, .. } => { *last_a = a; }
+            Self::VoltageSource { .. }
             | Self::CathodeBiasSource { .. }
             | Self::Photocoupler { .. }
             | Self::JfetVr { .. }
@@ -394,7 +397,11 @@ impl DynNode {
                 position,
                 taper,
                 rp,
-            } if comp_id == target_id => {
+                ..
+            } if comp_id == target_id
+                || comp_id.starts_with(target_id)
+                    && comp_id[target_id.len()..].starts_with("__") =>
+            {
                 *position = pos;
                 // Apply taper curve to convert linear position to resistance ratio
                 let tapered_pos = taper.apply(pos);
@@ -402,10 +409,20 @@ impl DynNode {
                 true
             }
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
-                left.set_pot(target_id, pos) || right.set_pot(target_id, pos)
+                // Use | not || to avoid short-circuit: split pots (e.g. Level__aw + Level__wb)
+                // need BOTH halves updated.
+                let a = left.set_pot(target_id, pos);
+                let b = right.set_pot(target_id, pos);
+                a | b
             }
             Self::Transformer { secondary, .. } => secondary.set_pot(target_id, pos),
-            Self::RType { children, .. } => children.iter_mut().any(|c| c.set_pot(target_id, pos)),
+            Self::RType { children, .. } => {
+                let mut found = false;
+                for c in children.iter_mut() {
+                    found |= c.set_pot(target_id, pos);
+                }
+                found
+            }
             _ => false,
         }
     }
@@ -416,7 +433,13 @@ impl DynNode {
     /// Returns `None` if the pot is not found in this subtree.
     pub fn get_pot_resistance(&self, target_id: &str) -> Option<f64> {
         match self {
-            Self::Pot { comp_id, rp, .. } if comp_id == target_id => Some(*rp),
+            Self::Pot { comp_id, rp, .. }
+                if comp_id == target_id
+                    || comp_id.starts_with(target_id)
+                        && comp_id[target_id.len()..].starts_with("__") =>
+            {
+                Some(*rp)
+            }
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.get_pot_resistance(target_id)
                     .or_else(|| right.get_pot_resistance(target_id))
@@ -425,6 +448,50 @@ impl DynNode {
             Self::RType { children, .. } => {
                 children.iter().find_map(|c| c.get_pot_resistance(target_id))
             }
+            _ => None,
+        }
+    }
+
+    /// Extract voltage at a named leaf after the down-sweep.
+    ///
+    /// For a resistive leaf (Resistor, Pot), b=0, so V = last_a / 2.
+    /// For a capacitor, V = (last_a + last_b) / 2.
+    /// Returns None if the component is not found in this subtree.
+    pub fn leaf_voltage(&self, target_id: &str) -> Option<f64> {
+        match self {
+            Self::Resistor { last_a, .. } => None, // no comp_id to match
+            Self::Pot { comp_id, last_a, .. }
+                if comp_id == target_id
+                    || comp_id.starts_with(target_id)
+                        && comp_id[target_id.len()..].starts_with("__") =>
+            {
+                Some(*last_a / 2.0)
+            }
+            Self::Capacitor { last_b, state, .. } => None, // no comp_id to match
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                left.leaf_voltage(target_id)
+                    .or_else(|| right.leaf_voltage(target_id))
+            }
+            Self::Transformer { secondary, .. } => secondary.leaf_voltage(target_id),
+            Self::RType { children, .. } => {
+                children.iter().find_map(|c| c.leaf_voltage(target_id))
+            }
+            _ => None,
+        }
+    }
+
+    /// Return this leaf's component ID, if it is a leaf with a comp_id.
+    /// For adaptors, returns None (they don't have a single component).
+    pub fn leaf_comp_id(&self) -> Option<String> {
+        match self {
+            Self::Pot { comp_id, .. }
+            | Self::Photocoupler { comp_id, .. }
+            | Self::JfetVr { comp_id, .. }
+            | Self::SwitchedResistor { switch_id: comp_id, .. } => Some(comp_id.clone()),
+            // Resistor, Capacitor, Inductor, VoltageSource — no comp_id stored.
+            // For the output probe, we need the comp_id. If the leaf is a plain
+            // resistor/cap, we can't identify it. This is fine because output
+            // probes are typically pots or named components.
             _ => None,
         }
     }
@@ -1014,7 +1081,7 @@ impl DynNode {
     pub fn debug_dump(&self, indent: usize) -> String {
         let pad = "  ".repeat(indent);
         match self {
-            Self::Resistor { rp } => {
+            Self::Resistor { rp, .. } => {
                 format!("{pad}Resistor(Rp={rp:.1}Ω)")
             }
             Self::Capacitor {
@@ -1060,6 +1127,7 @@ impl DynNode {
                 position,
                 taper,
                 rp,
+                ..
             } => {
                 format!("{pad}Pot(id=\"{comp_id}\", max={max_resistance:.1}Ω, pos={position:.3}, taper={taper:?}, Rp={rp:.1}Ω)")
             }

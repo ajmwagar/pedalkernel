@@ -252,8 +252,9 @@ fn build_passive_wdf_stage(
     match super::graph::graph_reduce(
         &passive_edges, &extra, &terminals,
         graph, sample_rate, &HashMap::new(), |n| n,
+        None,
     ) {
-        Ok(tree) => {
+        Ok((tree, _)) => {
             let mut stage = WdfStage {
                 tree,
                 root: RootKind::ShortCircuit,
@@ -274,6 +275,7 @@ fn build_passive_wdf_stage(
                 sample_counter: 0,
                 root_comp_id: String::new(),
                 feedback_pot_id: None,
+                output_probe: None,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -506,7 +508,7 @@ fn build_passive_rtype_from_decomposed(
     // ── Step 4: Output probe port ───────────────────────────────────────
     let out_mna = to_mna(probe_node);
     let output_port_idx = reactive_children.len();
-    reactive_children.push(DynNode::Resistor { rp: probe_resistance });
+    reactive_children.push(DynNode::Resistor { rp: probe_resistance, last_a: 0.0 });
     reactive_ports.push(crate::tree::WdfPort {
         node_pos: out_mna,
         node_neg: None,
@@ -546,7 +548,7 @@ fn build_passive_rtype_from_decomposed(
     }
 
     // ── Step 7: Build WdfStage ──────────────────────────────────────────
-    let dummy_tree = DynNode::Resistor { rp: 1000.0 };
+    let dummy_tree = DynNode::Resistor { rp: 1000.0, last_a: 0.0 };
     let has_pots = !pot_stamps.is_empty();
     let recompute_mna = if has_pots { Some(mna.clone()) } else { None };
     let recompute_ports = if has_pots { Some(ports.clone()) } else { None };
@@ -610,16 +612,15 @@ fn build_passive_rtype_from_decomposed(
         sample_counter: 0,
         root_comp_id: String::new(),
         feedback_pot_id: None,
+        output_probe: None,
     })
 }
 
-/// Diagnostic check for orphan output pots. Now that the planner's BFS
-/// collects edges with barrier_nodes and the builder uses those edges
-/// directly (no fallback re-collection), orphan pots should only appear
-/// for genuine feedforward paths (e.g., Klon clean blend).
+/// Diagnostic-only check for orphan output pots.
 ///
-/// Returns (empty stages, empty edges) — no rescue. Logs diagnostics
-/// so we can catch any remaining edge-collection gaps.
+/// Output pots are now handled by `OutputPot` on the WDF stage (post-WDF
+/// gain), so this function no longer builds rescue stages. It only logs
+/// warnings to help catch edge-collection gaps.
 fn rescue_orphan_output_pots(
     graph: &CircuitGraph,
     classified: &super::classify::ClassifiedCircuit,
@@ -672,8 +673,9 @@ fn rescue_orphan_output_pots(
 
     if !orphan_pot_ids.is_empty() {
         eprintln!(
-            "[ORPHAN-POT] {} unbound pot(s): {:?} (feedforward or collection gap)",
-            orphan_pot_ids.len(), orphan_pot_ids
+            "[ORPHAN-POT] {} unbound pot(s): {:?}",
+            orphan_pot_ids.len(),
+            orphan_pot_ids
         );
     }
 
@@ -1019,6 +1021,7 @@ fn build_output_rooted_stage(
         sample_counter: 0,
         root_comp_id: String::new(),
         feedback_pot_id: None,
+        output_probe: None,
     })
 }
 
@@ -1414,8 +1417,8 @@ pub fn compile_pedal_with_options(
     );
     stages.extend(opamp_feedback_stages);
 
-    // Set output_node_id and signal_flow_distance on opamp feedback stages.
-    // The stages correspond 1:1 with non-UnityGain, non-AllpassJfet feedback loops.
+    // Set output_node_id and injection_node_id on opamp feedback stages.
+    // signal_flow_distance is set later (after plan_stages) using island depths.
     {
         let mut stage_idx = 0;
         for info in &opamp_analysis.feedback_loops {
@@ -1427,11 +1430,6 @@ pub fn compile_pedal_with_options(
             if stage_idx < stages.len() {
                 stages[stage_idx].output_node_id = info.out_node;
                 stages[stage_idx].injection_node_id = info.neg_node;
-                stages[stage_idx].signal_flow_distance = classified
-                    .dist_from_in
-                    .get(&info.neg_node)
-                    .copied()
-                    .unwrap_or(0);
             }
             stage_idx += 1;
         }
@@ -1468,8 +1466,35 @@ pub fn compile_pedal_with_options(
             .collect()
     };
 
-    let (stage_plans, push_pull_plans, multi_nl_plans, pp_transformer_edges, bjt_bias_analysis) =
+    let (stage_plans, push_pull_plans, multi_nl_plans, pp_transformer_edges, bjt_bias_analysis, node_island_depths) =
         super::plan::plan_stages(&classified, &graph, sample_rate, &envelope_controlled_otas, &opamp_feedback_edges);
+
+    // Now set signal_flow_distance on opamp feedback stages using island depths.
+    // This must happen after plan_stages which computes node_island_depths.
+    {
+        let mut stage_idx = 0;
+        for info in &opamp_analysis.feedback_loops {
+            match &info.feedback_kind {
+                super::graph::OpAmpFeedbackKind::UnityGain
+                | super::graph::OpAmpFeedbackKind::AllpassJfet { .. } => continue,
+                _ => {}
+            }
+            if stage_idx < stages.len() {
+                stages[stage_idx].signal_flow_distance = node_island_depths
+                    .get(&info.neg_node)
+                    .or_else(|| node_island_depths.get(&info.out_node))
+                    .copied()
+                    .unwrap_or_else(|| {
+                        classified
+                            .dist_from_in
+                            .get(&info.neg_node)
+                            .copied()
+                            .unwrap_or(0)
+                    });
+            }
+            stage_idx += 1;
+        }
+    }
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
     // Detect JFETs that are LFO-controlled so they use variable-resistance mode
@@ -1489,6 +1514,7 @@ pub fn compile_pedal_with_options(
             &pp_transformer_edges,
             &lfo_controlled_jfets,
             supply_voltage,
+            &node_island_depths,
         );
     stages.extend(nonlinear_stages);
 
@@ -1515,10 +1541,7 @@ pub fn compile_pedal_with_options(
     // Add triode fallback stages (SP-failed triodes built as single-NL MNA).
     multi_nl_stages.extend(triode_fallback_stages);
 
-    // ══ Orphan output pot rescue ═════════════════════════════════════
-    // Pots between the last processing stage and out_node are skipped
-    // by elements_at_junction/bfs_passive_edges. Build a PassiveRType
-    // stage so PotInStage can find and control them.
+    // ══ Orphan output pot diagnostic ═════════════════════════════════
     let mut orphan_output_edges: Vec<usize> = Vec::new();
     if !stages.is_empty() || !multi_nl_stages.is_empty() {
         let (orphan_stages, output_edges) = rescue_orphan_output_pots(

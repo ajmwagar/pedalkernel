@@ -156,6 +156,7 @@ pub(super) fn build_opamp_feedback_stages(
                                 position: initial_pos,
                                 taper,
                                 rp: pot_rp,
+                                last_a: 0.0,
                             };
                             let r_vs = vs.port_resistance();
                             let r_pot = pot.port_resistance();
@@ -199,6 +200,7 @@ pub(super) fn build_opamp_feedback_stages(
                     sample_counter: 0,
                     root_comp_id: String::new(),
                     feedback_pot_id,
+                    output_probe: None,
                 };
                 stage.balance_vs_impedance();
                 stages.push(stage);
@@ -276,6 +278,7 @@ pub(super) fn build_opamp_feedback_stages(
                                 position: initial_pos,
                                 taper,
                                 rp: pot_rp,
+                                last_a: 0.0,
                             };
                             let r_vs = vs.port_resistance();
                             let r_pot = pot.port_resistance();
@@ -323,6 +326,7 @@ pub(super) fn build_opamp_feedback_stages(
                     sample_counter: 0,
                     root_comp_id: String::new(),
                     feedback_pot_id,
+                    output_probe: None,
                 };
                 stage.balance_vs_impedance();
                 stages.push(stage);
@@ -456,7 +460,8 @@ fn build_feedback_tree(
     let tree = super::graph::graph_reduce(
         &feedback_edges, &extra, &terminals,
         graph, sample_rate, &std::collections::HashMap::new(), |n| n,
-    ).ok()?;
+        None,
+    ).ok()?.0;
 
     // Step 6: Find feedback pot ID (if any pot in the network)
     let feedback_pot_id = info

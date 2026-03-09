@@ -238,9 +238,9 @@ fn compute_island_depths(
     analysis: &mut ReactiveAnalysis,
     graph: &CircuitGraph,
     classified: &ClassifiedCircuit,
-) -> HashMap<usize, usize> {
+) -> (HashMap<usize, usize>, HashMap<super::graph::NodeId, usize>) {
     if analysis.boundary_edges.is_empty() {
-        return HashMap::new();
+        return (HashMap::new(), HashMap::new());
     }
 
     // Find the input node's island root. If in_node is a hub (which it is),
@@ -273,7 +273,7 @@ fn compute_island_depths(
         .next();
 
     let Some(input_root) = input_island else {
-        return HashMap::new();
+        return (HashMap::new(), HashMap::new());
     };
 
     // BFS on the island graph: nodes = island roots, edges = boundary edges.
@@ -319,7 +319,23 @@ fn compute_island_depths(
         }
     }
 
-    elem_depths
+    // Map every non-hub graph node to its island depth.
+    let mut node_depths: HashMap<super::graph::NodeId, usize> = HashMap::new();
+    for node_id in 0..analysis.n_nodes {
+        let is_hub = node_id == graph.gnd_node
+            || node_id == graph.vcc_node
+            || node_id == graph.out_node
+            || node_id == graph.in_node
+            || graph.supply_nodes.contains(&node_id);
+        if !is_hub {
+            let root = analysis.uf.find(node_id);
+            if let Some(&depth) = island_depth.get(&root) {
+                node_depths.insert(node_id, depth);
+            }
+        }
+    }
+
+    (elem_depths, node_depths)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -716,10 +732,11 @@ pub(super) fn plan_stages(
     Vec<MultiNlPlan>,
     HashSet<usize>,
     BjtBiasAnalysis,
+    HashMap<super::graph::NodeId, usize>,
 ) {
     // ── Pre-compute reactive boundaries ────────────────────────────────
     let mut analysis = find_reactive_boundaries(graph, classified);
-    let island_depths = compute_island_depths(&mut analysis, graph, classified);
+    let (island_depths, node_island_depths) = compute_island_depths(&mut analysis, graph, classified);
     let boundary_edges = analysis.boundary_edges;
 
     // ── Step 1: Edge-based NL grouping ──────────────────────────────────
@@ -987,6 +1004,7 @@ pub(super) fn plan_stages(
         multi_nl_plans,
         pp_transformer_edges,
         bjt_bias_analysis,
+        node_island_depths,
     )
 }
 
@@ -1041,19 +1059,49 @@ fn plan_one_junction(
     let junction = elem.junction_nodes[0];
     let is_jfet = matches!(&elem.kind, NonlinearKind::Jfet { .. });
 
-    // Collect passive edges at junction, excluding boundary edges to avoid
-    // pendants from downstream coupling caps.
-    let mut junction_passives = graph.elements_at_junction(
+    // Build exclusion set: NL edges + opamp feedback edges.
+    // Boundary edges (coupling caps) are NOT excluded for 1-junction elements.
+    // The diode BFS should traverse through coupling caps to reach the full
+    // output chain (tone + volume). Active bridge barriers still prevent
+    // crossing into adjacent active stages.
+    let mut excluded: Vec<usize> = classified.all_nonlinear_edge_indices.clone();
+    excluded.extend(opamp_feedback_edges);
+
+    // Active bridge nodes: opamp/BJT pin nodes act as BFS barriers.
+    // Collect the edge TO them but don't traverse further — prevents
+    // crossing into adjacent active stages.
+    let mut active_bridge: HashSet<super::graph::NodeId> = graph.active_edge_indices.iter()
+        .flat_map(|&eidx| {
+            let e = &graph.edges[eidx];
+            [e.node_a, e.node_b]
+        })
+        .collect();
+    // The junction itself is reachable (we start there), so remove it.
+    active_bridge.remove(&junction);
+    // For diodes/MOSFETs: the NL element's other terminal is also traversable.
+    // Without this, BFS stops at the other terminal (e.g. U2.out for a
+    // feedback diode pair) and misses the output chain (tone/volume).
+    let nl_edge = &graph.edges[elem.edge_idx];
+    let other_terminal = if nl_edge.node_a == junction { nl_edge.node_b } else { nl_edge.node_a };
+    active_bridge.remove(&other_terminal);
+
+    // Multi-hop BFS from junction through passive edges with active bridge
+    // barriers. Collects the full passive network: feedback components,
+    // input coupling, AND tone network (reached through feedback path to
+    // opamp output, then onward through coupling caps).
+    //
+    // skip_out_node=false: output pot's aw-half IS collected into the tree
+    // for impedance/loading effects. The volume attenuation is handled by
+    // OutputPot (post-WDF gain) rather than a separate PassiveRType stage.
+    let mut junction_passives = graph.bfs_passive_edges(
         junction,
-        &classified.all_nonlinear_edge_indices,
+        &excluded,
         &graph.active_edge_indices,
+        true,  // include supply-adjacent
+        false, // don't skip out_node — aw pot half stays in tree for loading
+        _pp_transformer_edges,
+        &active_bridge,
     );
-    junction_passives.retain(|idx| !boundary_edges.contains(idx));
-    // Exclude opamp feedback edges — these are handled by the opamp stage's
-    // feedback tree. Including them here double-counts the feedback impedance.
-    // Note: opamps sharing junctions with NL elements are excluded from
-    // opamp_feedback_edges in compile.rs, so their components stay here.
-    junction_passives.retain(|idx| !opamp_feedback_edges.contains(idx));
 
     if is_jfet {
         // JFET: check for source follower (junction connects to out_node).
@@ -1127,20 +1175,11 @@ fn plan_one_junction(
         })
     } else {
         // Simple 1-junction: diode, MOSFET, zener, OTA.
-        // Use elements_at_junction (immediate edges only). Keeping the plan
-        // small ensures SP reduction succeeds for simple topologies (e.g.,
-        // SCREAMER). When SP fails, stage_plan_to_multi_nl supplements with
-        // multi-hop BFS from both diode terminals.
+        // Multi-hop BFS already collected the full passive network above
+        // (feedback + input coupling + output tone/volume).
         if junction_passives.is_empty() {
             return None;
         }
-
-        // Absorb output tail: BFS from out_node through passive edges back
-        // to this stage's junction passives. This collects tone/volume
-        // networks that sit between the NL junction and out_node.
-        let output_tail =
-            collect_output_passive_tail(&junction_passives, graph, classified);
-        extend_dedup(&mut junction_passives, &output_tail);
 
         let injection_node = find_injection_node(
             &junction_passives,

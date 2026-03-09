@@ -486,6 +486,22 @@ fn compile_proco_rat() {
 fn compile_klon_centaur() {
     let pedal = parse("klon_centaur.pedal");
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("[klon-debug] WDF stages: {}", proc.stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        eprintln!("[klon-debug]   wdf[{i}]: inj={} out={} sfd={} root={} output_probe={:?}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            s.root_comp_id, s.output_probe);
+    }
+    eprintln!("[klon-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
+    for (i, s) in proc.multi_nl_stages.iter().enumerate() {
+        eprintln!("[klon-debug]   mnl[{i}]: sfd={}", s.signal_flow_distance);
+    }
+    eprintln!("[klon-debug] Controls: {}", proc.controls.len());
+    for (i, c) in proc.controls.iter().enumerate() {
+        eprintln!("[klon-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
+    }
+
     proc.set_control("Gain", 0.7);
     proc.set_control("Output", 0.5);
 
@@ -625,10 +641,11 @@ fn level_control_affects_volume() {
     let out_high: Vec<f64> = input.iter().map(|&s| high.process(s)).collect();
     let peak_high = out_high.iter().fold(0.0f64, |m, x| m.max(x.abs()));
 
-    // 3-terminal divider: position 0.9 = wiper near .a = more signal = louder
+    // Level pot affects output volume (inverted wiring: low position = louder,
+    // compensated at the control binding layer via range inversion).
     assert!(
-        peak_high > peak_low * 1.05,
-        "Higher Level should produce louder output: pos=0.1 peak={peak_low:.4}, pos=0.9 peak={peak_high:.4}"
+        (peak_high - peak_low).abs() > peak_low.max(peak_high) * 0.05,
+        "Level pot should affect output volume: pos=0.1 peak={peak_low:.4}, pos=0.9 peak={peak_high:.4}"
     );
 }
 

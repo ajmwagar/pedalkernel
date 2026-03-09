@@ -216,7 +216,7 @@ fn build_other_side_subtree(
     if collected_edges.is_empty() {
         // No passives on the other side — fall back to resistor stub.
         let r_load = find_secondary_load_resistance(graph, xfmr_comp_idx);
-        return Some(DynNode::Resistor { rp: r_load });
+        return Some(DynNode::Resistor { rp: r_load, last_a: 0.0 });
     }
 
     // Terminals: the two target nodes (secondary or primary winding pins).
@@ -230,12 +230,13 @@ fn build_other_side_subtree(
     match graph_reduce(
         &collected_edges, &[], &terminals,
         graph, sample_rate, &HashMap::new(), |n| n,
+        None,
     ) {
-        Ok(tree) => Some(tree),
+        Ok((tree, _)) => Some(tree),
         Err(_) => {
             // SP reduction failed — fall back to resistor stub.
             let r_load = find_secondary_load_resistance(graph, xfmr_comp_idx);
-            Some(DynNode::Resistor { rp: r_load })
+            Some(DynNode::Resistor { rp: r_load, last_a: 0.0 })
         }
     }
 }
@@ -371,10 +372,18 @@ pub(super) fn build_stages(
     pp_transformer_edges: &HashSet<usize>,
     lfo_controlled_jfets: &HashSet<String>,
     supply_voltage: f64,
+    node_island_depths: &HashMap<super::graph::NodeId, usize>,
 ) -> (Vec<WdfStage>, Vec<MultiNlStage>, Vec<usize>) {
     // Build unity-gain feedback op-amp queue for JFET pairing.
+    // Also collect their out_nodes for signal_flow_distance.
     let mut feedback_opamp_queue =
         super::opamp_analysis::build_unity_gain_queue(opamp_analysis, sample_rate);
+    let unity_gain_out_nodes: Vec<super::graph::NodeId> = opamp_analysis
+        .feedback_loops
+        .iter()
+        .filter(|info| matches!(info.feedback_kind, super::graph::OpAmpFeedbackKind::UnityGain))
+        .map(|info| info.out_node)
+        .collect();
 
     // Build AllpassJfet map: JFET comp_id → (rf, cf) for inverting all-pass stages.
     let allpass_jfet_map = super::opamp_analysis::build_allpass_jfet_map(opamp_analysis);
@@ -468,7 +477,6 @@ pub(super) fn build_stages(
             }
 
             stage.signal_flow_distance = if let Some(depth) = plan.signal_chain_depth {
-                // Boundary-split stage: use island depth for correct ordering.
                 depth
             } else {
                 classified
@@ -512,7 +520,14 @@ pub(super) fn build_stages(
     }
 
     // Handle remaining unity-gain op-amps that weren't paired with JFETs.
-    for opamp in feedback_opamp_queue.drain(..) {
+    // Track which unity gain opamp we're consuming from the parallel list.
+    let consumed_count = unity_gain_out_nodes.len() - feedback_opamp_queue.len();
+    for (qi, opamp) in feedback_opamp_queue.drain(..).enumerate() {
+        let out_node_idx = consumed_count + qi;
+        let out_node = unity_gain_out_nodes.get(out_node_idx).copied();
+        let sfd = out_node
+            .and_then(|n| node_island_depths.get(&n).copied())
+            .unwrap_or(usize::MAX);
         let tree = DynNode::VoltageSource {
             voltage: 0.0,
             rp: 10_000.0,
@@ -528,15 +543,16 @@ pub(super) fn build_stages(
             dc_block: None,
             is_source_follower: false,
             prev_source_voltage: 0.0,
-            signal_flow_distance: usize::MAX, // op-amp buffer — runs last
+            signal_flow_distance: sfd,
             transformer_gain: 1.0,
-            injection_node_id: usize::MAX,
-            output_node_id: usize::MAX,
+            injection_node_id: out_node.unwrap_or(usize::MAX),
+            output_node_id: out_node.unwrap_or(usize::MAX),
             is_trigger_voice: false,
             is_feedforward: false,
             sample_counter: 0,
             root_comp_id: String::new(),
             feedback_pot_id: None,
+            output_probe: None,
         });
     }
 
@@ -1201,6 +1217,7 @@ fn build_rtype_stage(
                         position: initial_pos,
                         taper: pot.taper,
                         rp: r,
+                        last_a: 0.0,
                     },
                     n1,
                     n2,
@@ -2296,16 +2313,17 @@ fn build_vs_stage(
         extra.push(ExtraEdge {
             node_a: ve.node_a,
             node_b: ve.node_b,
-            tree: DynNode::Resistor { rp: ve.resistance },
+            tree: DynNode::Resistor { rp: ve.resistance, last_a: 0.0 },
         });
     }
     let remap = |n: NodeId| -> NodeId {
         if graph.supply_nodes.contains(&n) { graph.gnd_node } else { n }
     };
 
-    let tree = graph_reduce(
+    let (tree, output_probe) = graph_reduce(
         &plan.passive_idxs, &extra, &plan.terminals,
         graph, sample_rate, &HashMap::new(), remap,
+        Some(graph.out_node),
     ).ok()?;
     let (root, base_diode_model) = create_root(&elem.kind, use_jfet_vr);
 
@@ -2333,6 +2351,7 @@ fn build_vs_stage(
         sample_counter: 0,
         root_comp_id: String::new(),
         feedback_pot_id: None,
+        output_probe,
     })
 }
 
@@ -2352,7 +2371,8 @@ fn build_source_follower_stage(
     let passive_tree = graph_reduce(
         &plan.passive_idxs, &[], &plan.terminals,
         graph, sample_rate, &HashMap::new(), |n| n,
-    ).ok()?;
+        None,
+    ).ok()?.0;
     let (root, _) = create_root(&elem.kind, use_jfet_vr);
 
     // JfetVr is a passive element — signal must enter via a voltage source.
@@ -2402,6 +2422,7 @@ fn build_source_follower_stage(
         sample_counter: 0,
         root_comp_id: String::new(),
         feedback_pot_id: None,
+        output_probe: None,
     })
 }
 
@@ -2435,13 +2456,14 @@ fn build_push_pull_half(
         extra.push(ExtraEdge {
             node_a: ve.node_a,
             node_b: ve.node_b,
-            tree: DynNode::Resistor { rp: ve.resistance },
+            tree: DynNode::Resistor { rp: ve.resistance, last_a: 0.0 },
         });
     }
     let tree = graph_reduce(
         &plan.passive_idxs, &extra, &plan.terminals,
         graph, sample_rate, &leaf_overrides, |n| n,
-    ).ok()?;
+        None,
+    ).ok()?.0;
     Some((tree, plan.compensation))
 }
 
@@ -2532,7 +2554,7 @@ fn wrap_with_transformer_load(
     // The magnetizing inductance LF rolloff is handled as a post-process
     // high-pass filter rather than an in-tree WDF inductor, avoiding
     // the DC transient/initialization issue that causes tube cutoff.
-    let secondary = DynNode::Resistor { rp: r_load };
+    let secondary = DynNode::Resistor { rp: r_load, last_a: 0.0 };
 
     // Ideal transformer: reflects secondary impedance to primary by n².
     let xfmr_rp = n_eff * n_eff * r_load;
@@ -2553,7 +2575,7 @@ fn wrap_with_transformer_load(
         };
         let combined_rp = dcr + xfmr_rp;
         xfmr = DynNode::Series {
-            left: Box::new(DynNode::Resistor { rp: dcr }),
+            left: Box::new(DynNode::Resistor { rp: dcr, last_a: 0.0 }),
             right: Box::new(xfmr),
             rp: combined_rp,
             gamma: dcr / combined_rp,

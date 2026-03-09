@@ -652,7 +652,7 @@ pedal "Test Pedal" {
         let p = parse_example("tube_screamer.pedal");
         assert_eq!(p.name, "Tube Screamer");
         assert_eq!(p.components.len(), 20);
-        assert_eq!(p.nets.len(), 26);
+        assert_eq!(p.nets.len(), 27);
         assert_eq!(p.controls.len(), 3);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Drive"));
@@ -789,7 +789,7 @@ pedal "Test Pedal" {
         let p = parse_example("klon_centaur.pedal");
         assert_eq!(p.name, "Klon Centaur");
         assert_eq!(p.components.len(), 29);
-        assert_eq!(p.nets.len(), 37);
+        assert_eq!(p.nets.len(), 38);
         assert_eq!(p.controls.len(), 3);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Gain"));

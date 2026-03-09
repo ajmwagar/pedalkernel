@@ -53,9 +53,9 @@ impl Component for Resistor {
 
     fn make_leaf(&self, _comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
         if self.value.is_infinite() {
-            Some(DynNode::Resistor { rp: OPEN_CIRCUIT_R })
+            Some(DynNode::Resistor { rp: OPEN_CIRCUIT_R, last_a: 0.0 })
         } else {
-            Some(DynNode::Resistor { rp: self.value })
+            Some(DynNode::Resistor { rp: self.value, last_a: 0.0 })
         }
     }
 
@@ -367,6 +367,7 @@ impl Component for Potentiometer {
                 position: initial_pos,
                 taper: self.taper,
                 rp: r,
+                last_a: 0.0,
             },
             initial_conductance: 1.0 / r,
         }
@@ -381,6 +382,7 @@ impl Component for Potentiometer {
             position: initial_pos,
             taper: self.taper,
             rp: (tapered_pos * self.max_r).max(1.0),
+            last_a: 0.0,
         })
     }
 
@@ -473,7 +475,7 @@ impl Component for Tempco {
     }
 
     fn make_leaf(&self, _comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
-        Some(DynNode::Resistor { rp: self.resistance })
+        Some(DynNode::Resistor { rp: self.resistance, last_a: 0.0 })
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {

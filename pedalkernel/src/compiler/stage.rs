@@ -324,6 +324,12 @@ pub(super) struct WdfStage {
     /// OpAmpRoot gain recalculation. After pot update + recompute, the stage
     /// reads the pot's resistance and calls `OpAmpRoot::set_feedback_pot_r()`.
     pub(super) feedback_pot_id: Option<String>,
+    /// When set, extract output voltage at this component (pot leaf) in the
+    /// WDF tree instead of at the root junction. After the down-sweep,
+    /// V_out = a_leaf / 2 (for a resistive leaf where b=0).
+    /// This models voltage extraction at the circuit's output node when
+    /// a pot sits between the NL junction and the output.
+    pub(super) output_probe: Option<String>,
 }
 
 impl WdfStage {
@@ -348,6 +354,7 @@ impl WdfStage {
         let tree = &mut self.tree;
         let root = &mut self.root;
         let compensation = self.compensation;
+        let output_probe = &self.output_probe;
 
         // Set control voltage for active devices (triodes, BJTs, pentodes).
         // Maps the input signal to the device's control terminal with appropriate
@@ -539,6 +546,13 @@ impl WdfStage {
                 }
             };
             tree.set_incident(a_root);
+            // If an output probe is set, extract voltage at that leaf
+            // after the down-sweep instead of the root junction.
+            if let Some(ref probe_id) = output_probe {
+                if let Some(v) = tree.leaf_voltage(probe_id) {
+                    return v;
+                }
+            }
             (a_root + b_tree) / 2.0
         });
 

@@ -734,12 +734,15 @@ fn rat_distortion_pot_changes_clipping() {
     let thd_high = thd(&out_high, SAMPLE_RATE, 440.0);
 
     // High distortion should produce more THD than low
-    // (or at minimum, they should differ)
     let corr = correlation(&out_low, &out_high);
     assert!(
-        corr < 0.99,
+        corr < 0.999,
         "Different Distortion settings should produce different output \
          (corr={corr:.4}, thd_low={thd_low:.4}, thd_high={thd_high:.4})"
+    );
+    assert!(
+        thd_high > thd_low * 1.2,
+        "Higher Distortion should produce more THD: low={thd_low:.4}, high={thd_high:.4}"
     );
 }
 
