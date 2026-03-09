@@ -1310,6 +1310,7 @@ impl CircuitGraph {
         include_supply_adjacent: bool,
         skip_out_node: bool,
         pp_transformer_edges: &HashSet<usize>,
+        barrier_nodes: &HashSet<NodeId>,
     ) -> Vec<usize> {
         let mut visited_nodes: HashSet<NodeId> = HashSet::new();
         let mut collected_edges: Vec<usize> = Vec::new();
@@ -1341,6 +1342,14 @@ impl CircuitGraph {
                 }
                 // Skip edges to output node (those become output attenuation).
                 if skip_out_node && n == self.out_node {
+                    continue;
+                }
+                // Barrier nodes: collect the edge but don't traverse further.
+                // Used to stop BFS at active bridge nodes (opamp/transistor pins).
+                if barrier_nodes.contains(&n) {
+                    if !collected_edges.contains(&idx) {
+                        collected_edges.push(idx);
+                    }
                     continue;
                 }
                 // Named supply rail handling (supply_nodes excludes vcc and gnd —

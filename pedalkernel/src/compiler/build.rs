@@ -403,16 +403,15 @@ pub(super) fn build_stages(
                 graph.components[graph.edges[idx].comp_idx].kind.is_transformer()
             });
         if pentode_with_transformer {
-            if let Some((mut multi_nl, edges)) =
-                build_triode_mna_fallback(plan, elem, classified, graph, sample_rate, oversampling, supply_voltage)
-            {
+            let multi_nl_plan = stage_plan_to_multi_nl(plan, elem, classified, graph);
+            if let Some(mut multi_nl) = try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling, supply_voltage) {
                 multi_nl.transformer_gain =
                     compute_transformer_gain(&plan.passive_idxs, graph, &transformer_subtrees);
                 // Use island-depth when available (boundary-split stages),
                 // else element's BFS distance for ordering.
                 multi_nl.signal_flow_distance = plan.signal_chain_depth.unwrap_or(elem.distance);
                 fallback_multi_nl.push(multi_nl);
-                fallback_claimed_edges.extend(edges);
+                fallback_claimed_edges.extend(&plan.passive_idxs);
             }
             continue;
         }
@@ -485,32 +484,29 @@ pub(super) fn build_stages(
             &elem.kind,
             NonlinearKind::Triode { .. } | NonlinearKind::Pentode { .. }
         ) {
-            // SP reduction failed for this triode/pentode — try building as a
-            // single-NL MNA stage. Uses plate+cathode adjacency to collect
-            // passives, which handles non-SP topologies (inter-stage coupling,
-            // Miller feedback, dangling nodes).
-            if let Some((mut multi_nl, edges)) =
-                build_triode_mna_fallback(plan, elem, classified, graph, sample_rate, oversampling, supply_voltage)
-            {
+            // SP reduction failed for this triode/pentode — build as a
+            // single-NL MNA stage using the plan's already-collected passives.
+            let multi_nl_plan = stage_plan_to_multi_nl(plan, elem, classified, graph);
+            if let Some(mut multi_nl) = try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling, supply_voltage) {
                 multi_nl.transformer_gain =
                     compute_transformer_gain(&plan.passive_idxs, graph, &transformer_subtrees);
+                multi_nl.signal_flow_distance = plan.signal_chain_depth.unwrap_or(elem.distance);
                 fallback_multi_nl.push(multi_nl);
-                fallback_claimed_edges.extend(edges);
+                fallback_claimed_edges.extend(&plan.passive_idxs);
             }
         } else if matches!(
             &elem.kind,
             NonlinearKind::SingleDiode(_) | NonlinearKind::DiodePair(_)
         ) {
             // SP reduction failed for this diode — build as single-NL MNA
-            // stage using dual-terminal BFS to capture passives on both
-            // sides of the diode.
-            if let Some((mut multi_nl, edges)) =
-                build_diode_mna_fallback(plan, elem, classified, graph, sample_rate, oversampling, supply_voltage)
-            {
+            // stage using the plan's already-collected passives.
+            let multi_nl_plan = stage_plan_to_multi_nl(plan, elem, classified, graph);
+            if let Some(mut multi_nl) = try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling, supply_voltage) {
                 multi_nl.transformer_gain =
                     compute_transformer_gain(&plan.passive_idxs, graph, &transformer_subtrees);
+                multi_nl.signal_flow_distance = plan.signal_chain_depth.unwrap_or(elem.distance);
                 fallback_multi_nl.push(multi_nl);
-                fallback_claimed_edges.extend(edges);
+                fallback_claimed_edges.extend(&plan.passive_idxs);
             }
         }
     }
@@ -561,271 +557,130 @@ pub(super) fn build_stages(
     (stages, fallback_multi_nl, fallback_claimed_edges)
 }
 
-/// Build a single-NL MNA stage for a triode/pentode that failed SP reduction.
-///
-/// Uses BFS from plate and cathode to collect only the passives that are
-/// topologically connected to the tube's circuit, avoiding output_passives
-/// from other stages that contaminate the plan. MNA handles arbitrary
-/// topologies (dangling nodes, non-SP branches, transformer dead-ends)
-/// that SP reduction can't.
-fn build_triode_mna_fallback(
-    plan: &StagePlan,
-    elem: &super::classify::NonlinearElement,
-    classified: &ClassifiedCircuit,
-    graph: &CircuitGraph,
-    sample_rate: f64,
-    oversampling: OversamplingFactor,
-    supply_voltage: f64,
-) -> Option<(MultiNlStage, Vec<usize>)> {
-    let (plate_node, cathode_node) = (elem.junction_nodes[0], elem.junction_nodes[1]);
-
-    // Extract grid_node if this is a triode (pentodes don't expose grid).
-    let grid_node = if let NonlinearKind::Triode {
-        grid_node: Some(gn),
-        ..
-    } = &elem.kind
-    {
-        Some(*gn)
-    } else {
-        None
-    };
-
-    // Collect passives directly adjacent to plate and cathode junctions,
-    // plus supply-adjacent edges. This is the "core" passive set for this
-    // tube — no output_passives from other stages.
-    let mut passive_edges = graph.elements_at_junction(
-        plate_node,
-        &classified.all_nonlinear_edge_indices,
-        &graph.active_edge_indices,
-    );
-
-    // Add supply-adjacent plate edges (plate loads to named supply rails).
-    for (idx, e) in graph.edges.iter().enumerate() {
-        if classified.all_nonlinear_edge_indices.contains(&idx) {
-            continue;
-        }
-        if graph.active_edge_indices.contains(&idx) {
-            continue;
-        }
-        if e.node_a != plate_node && e.node_b != plate_node {
-            continue;
-        }
-        let other = if e.node_a == plate_node {
-            e.node_b
-        } else {
-            e.node_a
-        };
-        if graph.supply_nodes.contains(&other) && !passive_edges.contains(&idx) {
-            passive_edges.push(idx);
+/// Append `src` elements to `dst`, skipping duplicates.
+fn extend_dedup_vec(dst: &mut Vec<usize>, src: &[usize]) {
+    for &v in src {
+        if !dst.contains(&v) {
+            dst.push(v);
         }
     }
-
-    // Discover transformers connected through plate passives (1 hop away).
-    // Pentode sidechain topology: plate → R_plate → transformer.primary.
-    let mut xfmr_edges = Vec::new();
-    for &eidx in &passive_edges {
-        let e = &graph.edges[eidx];
-        let far_node = if e.node_a == plate_node {
-            e.node_b
-        } else {
-            e.node_a
-        };
-        for (idx, edge) in graph.edges.iter().enumerate() {
-            if edge.node_a != far_node && edge.node_b != far_node {
-                continue;
-            }
-            if graph.components[edge.comp_idx].kind.is_transformer() {
-                if !passive_edges.contains(&idx) && !xfmr_edges.contains(&idx) {
-                    xfmr_edges.push(idx);
-                }
-            }
-        }
-    }
-    passive_edges.extend(xfmr_edges);
-
-    // Cathode passives (skip for grounded-cathode tubes).
-    if cathode_node != graph.gnd_node {
-        let cathode_edges = graph.elements_at_junction(
-            cathode_node,
-            &classified.all_nonlinear_edge_indices,
-            &graph.active_edge_indices,
-        );
-        for idx in cathode_edges {
-            if !passive_edges.contains(&idx) {
-                passive_edges.push(idx);
-            }
-        }
-    }
-
-    // Grid passives — BFS from the grid node to collect the full grid-side
-    // passive network (bias resistors, threshold pots, input transformers, etc.).
-    // Without these, the grid is isolated in the scattering matrix and the
-    // triode produces zero output when supply nodes are properly grounded.
-    // 1-hop collection is insufficient: pots like AC_Threshold are multiple hops
-    // away through bias resistors (grid → R_bias → node → DC_Threshold → node → AC_Threshold).
-    if let Some(gn) = grid_node {
-        if gn != graph.gnd_node {
-            let empty_pp = std::collections::HashSet::new();
-            let grid_edges = graph.bfs_passive_edges(
-                gn,
-                &classified.all_nonlinear_edge_indices,
-                &graph.active_edge_indices,
-                true,  // include supply-adjacent
-                false, // don't skip out_node
-                &empty_pp,
-            );
-            for idx in grid_edges {
-                if !passive_edges.contains(&idx) {
-                    passive_edges.push(idx);
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "debug-trace")]
-    {
-        let kind = match &elem.kind {
-            NonlinearKind::Pentode { .. } => "Pentode",
-            NonlinearKind::Triode { .. } => "Triode",
-            _ => "Other",
-        };
-    }
-
-    if passive_edges.is_empty() {
-        return None;
-    }
-
-    // Recalculate injection_node from ALL passive edge endpoints (plate +
-    // cathode + grid), preferring nodes closest to input. Exclude the tube's
-    // own junction nodes (they are NL device terminals, not injection points).
-    let mut injection_node = plan.injection_node;
-    let mut best_dist = classified
-        .dist_from_in
-        .get(&injection_node)
-        .copied()
-        .unwrap_or(usize::MAX);
-    for &eidx in &passive_edges {
-        let e = &graph.edges[eidx];
-        for candidate in [e.node_a, e.node_b] {
-            if candidate == plate_node || candidate == cathode_node {
-                continue;
-            }
-            if let Some(gn) = grid_node {
-                if candidate == gn {
-                    continue;
-                }
-            }
-            if candidate == graph.gnd_node
-                || candidate == graph.vcc_node
-                || graph.supply_nodes.contains(&candidate)
-            {
-                continue;
-            }
-            if let Some(&d) = classified.dist_from_in.get(&candidate) {
-                if d < best_dist {
-                    best_dist = d;
-                    injection_node = candidate;
-                }
-            }
-        }
-    }
-
-    // For triodes with a grid node, use 2 NL terminal pairs:
-    // port 0 = grid-cathode, port 1 = plate-cathode.
-    // This creates a TriodeThreePort device group where the NR solver
-    // handles grid-plate cross-coupling through transconductance (dIa/dVgk).
-    // Without this, the grid-side and plate-side passive networks are
-    // disconnected in the MNA, giving s_nl_adapted = 0 for the plate port.
-    let nl_terminals = if let Some(gn) = grid_node {
-        vec![(gn, cathode_node), (plate_node, cathode_node)]
-    } else {
-        vec![(plate_node, cathode_node)]
-    };
-
-    let claimed = passive_edges.clone();
-    let multi_nl_plan = MultiNlPlan {
-        nl_element_indices: vec![plan.element_idx],
-        output_element_idx: plan.element_idx,
-        passive_edge_indices: passive_edges,
-        injection_node,
-        nl_terminals,
-        compensation: plan.compensation,
-        output_node: None,
-        ota_vccs: Vec::new(),
-        signal_chain_depth: None,
-    };
-
-    try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling, supply_voltage)
-        .map(|stage| (stage, claimed))
 }
 
-/// Build a single-NL MNA stage for a diode that failed SP reduction.
+/// Convert a StagePlan (single-NL WDF plan) into a MultiNlPlan for MNA fallback.
 ///
-/// Diodes are 2-terminal devices — much simpler than triodes. We collect
-/// passives at the junction node via BFS (multi-hop), set the NL terminal
-/// pair to (junction, gnd/cathode), and route through `try_build_multi_nl_stage`.
-/// This handles non-SP topologies like the RAT's star at R3.b.
-fn build_diode_mna_fallback(
+/// When SP reduction fails, the plan's 1-hop passive_idxs are insufficient
+/// for MNA — we need the full passive network around the NL element. This
+/// function does multi-hop BFS from the NL terminals (like the old fallback
+/// functions did) to collect all reachable passives for the MNA builder.
+fn stage_plan_to_multi_nl(
     plan: &StagePlan,
     elem: &super::classify::NonlinearElement,
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
-    sample_rate: f64,
-    oversampling: OversamplingFactor,
-    supply_voltage: f64,
-) -> Option<(MultiNlStage, Vec<usize>)> {
-    let junction_node = elem.junction_nodes[0];
+) -> MultiNlPlan {
+    let empty_pp = HashSet::new();
 
-    // Determine the other terminal. For ground-referenced diodes (one terminal
-    // at gnd), the other terminal is gnd. For feedback diodes (neither terminal
-    // at gnd), use node_b from the edge.
-    let edge = &graph.edges[elem.edge_idx];
-    let other_node = if edge.node_a == junction_node {
-        edge.node_b
-    } else {
-        edge.node_a
+    let (nl_terminals, passive_edges) = match &elem.kind {
+        NonlinearKind::Triode {
+            grid_node: Some(gn),
+            ..
+        } => {
+            let (plate, cathode) = (elem.junction_nodes[0], elem.junction_nodes[1]);
+            let terminals = vec![(*gn, cathode), (plate, cathode)];
+
+            // BFS from plate, cathode, and grid to collect full passive network.
+            let mut edges = graph.bfs_passive_edges(
+                plate,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true, false, &empty_pp, &HashSet::new(),
+            );
+            if cathode != graph.gnd_node {
+                let cathode_edges = graph.bfs_passive_edges(
+                    cathode,
+                    &classified.all_nonlinear_edge_indices,
+                    &graph.active_edge_indices,
+                    true, false, &empty_pp, &HashSet::new(),
+                );
+                extend_dedup_vec(&mut edges, &cathode_edges);
+            }
+            if *gn != graph.gnd_node {
+                let grid_edges = graph.bfs_passive_edges(
+                    *gn,
+                    &classified.all_nonlinear_edge_indices,
+                    &graph.active_edge_indices,
+                    true, false, &empty_pp, &HashSet::new(),
+                );
+                extend_dedup_vec(&mut edges, &grid_edges);
+            }
+
+            (terminals, edges)
+        }
+        NonlinearKind::Triode { .. } | NonlinearKind::Pentode { .. } => {
+            let (plate, cathode) = (elem.junction_nodes[0], elem.junction_nodes[1]);
+            let terminals = vec![(plate, cathode)];
+
+            let mut edges = graph.bfs_passive_edges(
+                plate,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true, false, &empty_pp, &HashSet::new(),
+            );
+            if cathode != graph.gnd_node {
+                let cathode_edges = graph.bfs_passive_edges(
+                    cathode,
+                    &classified.all_nonlinear_edge_indices,
+                    &graph.active_edge_indices,
+                    true, false, &empty_pp, &HashSet::new(),
+                );
+                extend_dedup_vec(&mut edges, &cathode_edges);
+            }
+
+            (terminals, edges)
+        }
+        NonlinearKind::SingleDiode(_) | NonlinearKind::DiodePair(_) => {
+            let junction = elem.junction_nodes[0];
+            let edge = &graph.edges[elem.edge_idx];
+            let other = if edge.node_a == junction {
+                edge.node_b
+            } else {
+                edge.node_a
+            };
+            let terminals = vec![(junction, other)];
+
+            // BFS from both diode terminals to capture full passive network.
+            let mut edges = graph.bfs_passive_edges(
+                junction,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true, false, &empty_pp, &HashSet::new(),
+            );
+            if other != graph.gnd_node && other != graph.vcc_node
+                && !graph.supply_nodes.contains(&other)
+            {
+                let other_edges = graph.bfs_passive_edges(
+                    other,
+                    &classified.all_nonlinear_edge_indices,
+                    &graph.active_edge_indices,
+                    true, false, &empty_pp, &HashSet::new(),
+                );
+                extend_dedup_vec(&mut edges, &other_edges);
+            }
+
+            (terminals, edges)
+        }
+        _ => {
+            let terminals = vec![(elem.junction_nodes[0], graph.gnd_node)];
+            (terminals, plan.passive_idxs.clone())
+        }
     };
 
-    // BFS collect passives from BOTH diode terminals. The junction-only BFS
-    // misses output-tail passives when the other terminal (e.g., opamp output)
-    // is an active bridge node — the BFS stops there. Starting from both
-    // terminals ensures we capture the full passive network on both sides
-    // of the diode (e.g., SCREAMER: junction=U2.neg has R3/R4/C3, while
-    // other=U2.out has R5/Tone/Level chain).
-    let empty_pp = std::collections::HashSet::new();
-    let mut passive_edges = graph.bfs_passive_edges(
-        junction_node,
-        &classified.all_nonlinear_edge_indices,
-        &graph.active_edge_indices,
-        true,  // include supply-adjacent
-        false, // don't skip out_node
-        &empty_pp,
-    );
-    // Also BFS from the other terminal (non-junction side).
-    if other_node != graph.gnd_node && other_node != graph.vcc_node
-        && !graph.supply_nodes.contains(&other_node)
-    {
-        let other_edges = graph.bfs_passive_edges(
-            other_node,
-            &classified.all_nonlinear_edge_indices,
-            &graph.active_edge_indices,
-            true,
-            false,
-            &empty_pp,
-        );
-        for idx in other_edges {
-            if !passive_edges.contains(&idx) {
-                passive_edges.push(idx);
-            }
-        }
-    }
-
-    if passive_edges.is_empty() {
-        return None;
-    }
-
-    // Find injection node: BFS-closest to input among passive edge endpoints,
-    // excluding the junction node itself.
+    // Find injection node: closest to input among passive edge endpoints,
+    // excluding NL terminal nodes and global nodes.
+    let nl_nodes: HashSet<super::graph::NodeId> = nl_terminals
+        .iter()
+        .flat_map(|&(a, b)| [a, b])
+        .collect();
     let mut injection_node = plan.injection_node;
     let mut best_dist = classified
         .dist_from_in
@@ -835,7 +690,7 @@ fn build_diode_mna_fallback(
     for &eidx in &passive_edges {
         let e = &graph.edges[eidx];
         for candidate in [e.node_a, e.node_b] {
-            if candidate == junction_node {
+            if nl_nodes.contains(&candidate) {
                 continue;
             }
             if candidate == graph.gnd_node
@@ -853,11 +708,7 @@ fn build_diode_mna_fallback(
         }
     }
 
-    // NL terminal pair: (anode_junction, cathode/gnd).
-    let nl_terminals = vec![(junction_node, other_node)];
-
-    let claimed = passive_edges.clone();
-    let multi_nl_plan = MultiNlPlan {
+    MultiNlPlan {
         nl_element_indices: vec![plan.element_idx],
         output_element_idx: plan.element_idx,
         passive_edge_indices: passive_edges,
@@ -866,11 +717,8 @@ fn build_diode_mna_fallback(
         compensation: plan.compensation,
         output_node: None,
         ota_vccs: Vec::new(),
-        signal_chain_depth: None,
-    };
-
-    try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling, supply_voltage)
-        .map(|stage| (stage, claimed))
+        signal_chain_depth: plan.signal_chain_depth,
+    }
 }
 
 /// Build push-pull stages from plans.
@@ -2286,6 +2134,21 @@ fn try_build_multi_nl_stage(
             junction_nodes.push(out_node);
         }
     }
+    // Add nodes adjacent to pot edges as junctions so pots stay in the MNA
+    // residual (stamped into G matrix → pot_children) rather than being
+    // SP-reduced into WDF subtrees where they'd be invisible to pot binding.
+    for &eidx in &plan.passive_edge_indices {
+        let e = &graph.edges[eidx];
+        if graph.components[e.comp_idx].kind.is_pot() {
+            if !junction_nodes.contains(&e.node_a) {
+                junction_nodes.push(e.node_a);
+            }
+            if !junction_nodes.contains(&e.node_b) {
+                junction_nodes.push(e.node_b);
+            }
+        }
+    }
+
     // Also add OTA nodes as junctions.
     for ota in &plan.ota_vccs {
         for &n in &[ota.in_pos, ota.in_neg, ota.out_node] {

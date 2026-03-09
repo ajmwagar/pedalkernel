@@ -886,6 +886,82 @@ fn rat_controls_bound() {
     );
 }
 
+/// RATKING (legends bundle) uses a simpler topology than proco_rat.pedal:
+/// diodes clip directly at U1.out (no isolation resistor), and the tone chain
+/// connects to U1.out. Tests that multi-hop BFS in plan_one_junction collects
+/// the Filter→R_tone→C_out→Volume chain.
+#[test]
+fn ratking_legends_controls_bound() {
+    let src = r#"
+pedal "RATKING" {
+  components {
+    C1: cap(22n)
+    R1: resistor(1M)
+    R2: resistor(1k)
+    U1: opamp(lm308)
+    C_hpf: cap(100p)
+    R5: resistor(560)
+    Distortion: pot(100k, a)
+    D1: diode(silicon)
+    D2: diode(silicon)
+    C_tone: cap(3.3n)
+    Filter: pot(100k, a)
+    R_tone: resistor(1.5k)
+    C_out: cap(4.7u)
+    Volume: pot(100k, a)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a, R2.a
+    R1.b -> gnd
+    R2.b -> U1.neg
+    U1.pos -> gnd
+    U1.neg -> R5.a
+    R5.b -> Distortion.a
+    Distortion.b -> U1.out
+    U1.neg -> C_hpf.a
+    C_hpf.b -> U1.out
+    U1.out -> D1.a, D2.b
+    D1.b -> gnd
+    D2.a -> gnd
+    U1.out -> C_tone.a
+    C_tone.b -> gnd
+    U1.out -> Filter.a
+    Filter.b -> R_tone.a
+    R_tone.b -> C_out.a
+    C_out.b -> Volume.a
+    Volume.w -> out
+    Volume.b -> gnd
+  }
+  controls {
+    Distortion.position -> "Distortion" [0.0, 1.0] = 0.5
+    Filter.position -> "Filter" [0.0, 1.0] = 0.7
+    Volume.position -> "Volume" [1.0, 0.0] = 0.5
+  }
+  calibrate
+}
+"#;
+    let pedal = parse_pedal_file(src).expect("parse RATKING");
+    let compiled = compile_pedal(&pedal, SAMPLE_RATE).expect("compile RATKING");
+    let d = dump(&compiled);
+
+    assert!(
+        d.contains("Distortion -> PotInStage(")
+            || d.contains("Distortion -> OpAmpGain {"),
+        "RATKING: Distortion should bind; controls:\n{d}"
+    );
+    assert!(
+        d.contains("Filter -> PotInStage(")
+            || d.contains("Filter -> PotInMultiNlStage("),
+        "RATKING: Filter should bind to a stage; controls:\n{d}"
+    );
+    assert!(
+        d.contains("Volume -> PotInStage(")
+            || d.contains("Volume -> PotInMultiNlStage("),
+        "RATKING: Volume should bind to a stage; controls:\n{d}"
+    );
+}
+
 #[test]
 fn klon_controls_bound() {
     let compiled = compile_example("klon_centaur.pedal");

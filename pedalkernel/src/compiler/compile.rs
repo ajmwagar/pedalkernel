@@ -613,21 +613,23 @@ fn build_passive_rtype_from_decomposed(
     })
 }
 
-/// Rescue orphan output pots that sit between the last processing stage and
-/// `out_node`. These are skipped by `elements_at_junction()` and
-/// `bfs_passive_edges()` because those functions don't traverse through
-/// `out_node`. Build a PassiveRType stage so `PotInStage` can find them.
+/// Diagnostic check for orphan output pots. Now that the planner's BFS
+/// collects edges with barrier_nodes and the builder uses those edges
+/// directly (no fallback re-collection), orphan pots should only appear
+/// for genuine feedforward paths (e.g., Klon clean blend).
+///
+/// Returns (empty stages, empty edges) — no rescue. Logs diagnostics
+/// so we can catch any remaining edge-collection gaps.
 fn rescue_orphan_output_pots(
     graph: &CircuitGraph,
     classified: &super::classify::ClassifiedCircuit,
     stages: &[WdfStage],
     multi_nl_stages: &[super::stage::MultiNlStage],
-    sample_rate: f64,
-    oversampling: OversamplingFactor,
+    _sample_rate: f64,
+    _oversampling: OversamplingFactor,
 ) -> (Vec<WdfStage>, Vec<usize>) {
     use super::stage::RootKind;
 
-    // ── Step 1: Find all pot component IDs ────────────────────────────────
     let all_pot_ids: Vec<String> = graph
         .components
         .iter()
@@ -638,11 +640,9 @@ fn rescue_orphan_output_pots(
         return (Vec::new(), Vec::new());
     }
 
-    // ── Step 2: Find orphan pots (not in any WDF or multi-NL stage) ──────
     let orphan_pot_ids: Vec<&str> = all_pot_ids
         .iter()
         .filter(|id| {
-            // Check WDF stages: tree + PassiveRType children
             for stage in stages {
                 if has_pot(&stage.tree, id) {
                     return false;
@@ -653,8 +653,6 @@ fn rescue_orphan_output_pots(
                     }
                 }
             }
-            // Check multi-NL stages (both pot_children and passive_children,
-            // since pots inside WDF subtrees end up in passive_children).
             for mnl in multi_nl_stages {
                 for child in &mnl.pot_children {
                     if has_pot(child, id) {
@@ -671,155 +669,15 @@ fn rescue_orphan_output_pots(
         })
         .map(|s| s.as_str())
         .collect();
-    if orphan_pot_ids.is_empty() {
-        return (Vec::new(), Vec::new());
+
+    if !orphan_pot_ids.is_empty() {
+        eprintln!(
+            "[ORPHAN-POT] {} unbound pot(s): {:?} (feedforward or collection gap)",
+            orphan_pot_ids.len(), orphan_pot_ids
+        );
     }
 
-    // Orphan pots indicate a collection gap — either a planner/builder bug
-    // or a feedforward path pot (expected for circuits like the Klon Centaur).
-    // Log so we can distinguish real bugs from expected feedforward orphans.
-    eprintln!(
-        "[ORPHAN-POT] {} orphan pot(s): {:?} — rescuing via PassiveRType output stage",
-        orphan_pot_ids.len(), orphan_pot_ids
-    );
-
-    // ── Step 3: BFS from out_node to collect the output passive network ──
-    // Walk through passive edges (R/C/L/Pot). Stop at NL junction nodes,
-    // gnd_node, vcc_node, in_node (collect edge but don't continue).
-    let nl_edge_set: HashSet<usize> = classified.all_nonlinear_edge_indices.iter().copied().collect();
-    let active_edge_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
-
-    // Build adjacency: node → [(edge_idx, neighbor_node)]
-    let mut adj: HashMap<NodeId, Vec<(usize, NodeId)>> = HashMap::new();
-    for (eidx, e) in graph.edges.iter().enumerate() {
-        if nl_edge_set.contains(&eidx) || active_edge_set.contains(&eidx) {
-            continue;
-        }
-        // Skip non-simple-passive components (transformers, nonlinear, etc.)
-        let comp = &graph.components[e.comp_idx];
-        if !comp.kind.is_simple_passive() {
-            continue;
-        }
-        // Skip supply-node edges (except gnd — gnd is a valid termination)
-        if graph.supply_nodes.contains(&e.node_a) && e.node_a != graph.gnd_node {
-            continue;
-        }
-        if graph.supply_nodes.contains(&e.node_b) && e.node_b != graph.gnd_node {
-            continue;
-        }
-        adj.entry(e.node_a).or_default().push((eidx, e.node_b));
-        adj.entry(e.node_b).or_default().push((eidx, e.node_a));
-    }
-
-    // Nodes that have nonlinear edges (NL junction nodes)
-    let mut nl_junction_nodes: HashSet<NodeId> = HashSet::new();
-    for &eidx in &classified.all_nonlinear_edge_indices {
-        let e = &graph.edges[eidx];
-        nl_junction_nodes.insert(e.node_a);
-        nl_junction_nodes.insert(e.node_b);
-    }
-    // Also treat active bridge edges as NL boundaries
-    for &eidx in &graph.active_edge_indices {
-        let e = &graph.edges[eidx];
-        nl_junction_nodes.insert(e.node_a);
-        nl_junction_nodes.insert(e.node_b);
-    }
-
-    let boundary_nodes: HashSet<NodeId> = [graph.gnd_node, graph.vcc_node, graph.in_node]
-        .iter()
-        .copied()
-        .collect();
-
-    let mut visited_nodes: HashSet<NodeId> = HashSet::new();
-    let mut output_edges: Vec<usize> = Vec::new();
-    let mut queue = std::collections::VecDeque::new();
-    visited_nodes.insert(graph.out_node);
-    queue.push_back(graph.out_node);
-
-    while let Some(node) = queue.pop_front() {
-        if let Some(neighbors) = adj.get(&node) {
-            for &(eidx, neighbor) in neighbors {
-                if output_edges.contains(&eidx) {
-                    continue;
-                }
-                output_edges.push(eidx);
-                if visited_nodes.contains(&neighbor) {
-                    continue;
-                }
-                visited_nodes.insert(neighbor);
-                // Stop BFS at boundary/NL nodes (edge collected, don't continue)
-                if boundary_nodes.contains(&neighbor) || nl_junction_nodes.contains(&neighbor) {
-                    continue;
-                }
-                queue.push_back(neighbor);
-            }
-        }
-    }
-
-    if output_edges.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-
-    // ── Step 4: Check if any orphan pot is in the output network ──────────
-    let output_comp_ids: HashSet<usize> = output_edges
-        .iter()
-        .map(|&eidx| graph.edges[eidx].comp_idx)
-        .collect();
-    let has_orphan_in_output = orphan_pot_ids.iter().any(|id| {
-        graph
-            .components
-            .iter()
-            .enumerate()
-            .any(|(ci, c)| c.id == *id && output_comp_ids.contains(&ci))
-    });
-    if !has_orphan_in_output {
-        return (Vec::new(), Vec::new());
-    }
-
-    // ── Step 5: Find VS injection node ────────────────────────────────────
-    // The interior node (not out_node, gnd, vcc) with smallest dist_from_in.
-    // This is where signal enters the output network from the processing chain.
-    let exclude: HashSet<NodeId> = [graph.out_node, graph.gnd_node, graph.vcc_node]
-        .iter()
-        .copied()
-        .collect();
-    let vs_node = {
-        let mut best_node = None;
-        let mut best_dist = usize::MAX;
-        for &node in &visited_nodes {
-            if exclude.contains(&node) {
-                continue;
-            }
-            if let Some(&d) = classified.dist_from_in.get(&node) {
-                if d < best_dist {
-                    best_dist = d;
-                    best_node = Some(node);
-                }
-            }
-        }
-        match best_node {
-            Some(n) => n,
-            None => return (Vec::new(), Vec::new()),
-        }
-    };
-
-    // ── Step 6: Build PassiveRType stage ──────────────────────────────────
-    // Standard 1 GΩ probe — 3-terminal divider pots work at any load
-    // impedance because the voltage division is internal to the pot.
-    if let Some(mut stage) = build_orphan_output_mna_stage(
-        graph,
-        &output_edges,
-        vs_node,
-        graph.out_node,
-        1e9, // standard high-Z probe
-        sample_rate,
-    ) {
-        // Process last — after all NL stages, before the output probe.
-        stage.signal_flow_distance = usize::MAX - 1;
-        (vec![stage], output_edges)
-    } else {
-        (Vec::new(), output_edges)
-    }
+    (Vec::new(), Vec::new())
 }
 
 /// Collect all edge indices that are claimed by existing stages.
@@ -1695,6 +1553,7 @@ pub fn compile_pedal_with_options(
                 false,
                 true,
                 &pp_transformer_edges,
+                &HashSet::new(),
             );
             claimed_edges.extend(input_passives.iter().copied());
         }

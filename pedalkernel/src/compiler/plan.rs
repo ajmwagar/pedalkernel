@@ -1127,10 +1127,10 @@ fn plan_one_junction(
         })
     } else {
         // Simple 1-junction: diode, MOSFET, zener, OTA.
-        // Use elements_at_junction (immediate edges only). Deeper passives
-        // beyond the junction are handled by build_diode_mna_fallback's BFS
-        // when SP reduction fails. Using full BFS here is too aggressive —
-        // it absorbs feedforward paths (e.g., Klon clean blend).
+        // Use elements_at_junction (immediate edges only). Keeping the plan
+        // small ensures SP reduction succeeds for simple topologies (e.g.,
+        // SCREAMER). When SP fails, stage_plan_to_multi_nl supplements with
+        // multi-hop BFS from both diode terminals.
         if junction_passives.is_empty() {
             return None;
         }
@@ -1245,6 +1245,7 @@ fn plan_two_junction(
                     true,
                     true, // skip_out_node
                     pp_transformer_edges,
+                    &HashSet::new(),
                 )
             } else {
                 Vec::new()
@@ -1265,6 +1266,7 @@ fn plan_two_junction(
                     true,
                     true,
                     pp_transformer_edges,
+                    &HashSet::new(),
                 )
             } else {
                 Vec::new()
@@ -1793,6 +1795,7 @@ fn try_varimu_3port(
         true,
         true, // skip_out_node
         pp_transformer_edges,
+        &HashSet::new(),
     );
 
     if grid_passives.is_empty() {
@@ -2082,6 +2085,7 @@ pub(super) fn plan_push_pull_half(
             true,
             true,
             pp_transformer_edges,
+            &HashSet::new(),
         );
         let cathode_passives = graph.bfs_passive_edges(
             *cathode_node,
@@ -2090,6 +2094,7 @@ pub(super) fn plan_push_pull_half(
             true,
             true,
             pp_transformer_edges,
+            &HashSet::new(),
         );
 
         let mut passive_idxs = plate_passives.clone();
@@ -2305,6 +2310,7 @@ fn collect_passive_edges_from_nodes(
             true,
             skip_out_node,
             pp_transformer_edges,
+            &HashSet::new(),
         );
         extend_dedup(&mut all_passive_edges, &edges);
     }
