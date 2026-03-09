@@ -326,6 +326,29 @@ fn walkdir(dir: &str) -> Vec<String> {
 fn compile_tube_screamer() {
     let pedal = parse("tube_screamer.pedal");
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("[ts-debug] WDF stages: {}", proc.stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let root_tag = match &s.root {
+            super::stage::RootKind::DiodePair(_) => "DiodePair",
+            super::stage::RootKind::SingleDiode(_) => "SingleDiode",
+            super::stage::RootKind::ShortCircuit => "ShortCircuit",
+            super::stage::RootKind::OpAmp(_) => "OpAmp",
+            super::stage::RootKind::Jfet(_) => "Jfet",
+            super::stage::RootKind::JfetVr(_) => "JfetVr",
+            super::stage::RootKind::Triode(_) => "Triode",
+            _ => "Other",
+        };
+        eprintln!("[ts-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} paired_opamp={} output_probe={:?}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            s.paired_opamp.is_some(), s.output_probe);
+    }
+    eprintln!("[ts-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
+    eprintln!("[ts-debug] Controls: {}", proc.controls.len());
+    for (i, c) in proc.controls.iter().enumerate() {
+        eprintln!("[ts-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
+    }
+
     proc.set_control("Drive", 0.7);
     proc.set_control("Level", 0.8);
 
