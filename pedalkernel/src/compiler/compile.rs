@@ -1261,6 +1261,30 @@ pub fn compile_pedal_with_options(
     let opamp_analysis = super::opamp_analysis::analyze_opamps(&graph, pedal);
     let opamp_feedback_gain = 1.0_f64;
 
+    // Detect opamps whose feedback components share a graph node with
+    // nonlinear element junctions. For these opamps, skip build_feedback_tree
+    // so the NL stage keeps the feedback components (avoids double-counting
+    // that kills signal level in circuits like RAT, Tube Screamer, etc.).
+    let nl_junction_nodes: HashSet<super::graph::NodeId> = classified
+        .nonlinear_elements
+        .iter()
+        .flat_map(|e| e.junction_nodes.iter().copied())
+        .collect();
+
+    let skip_feedback_tree_opamps: HashSet<String> = opamp_analysis
+        .feedback_loops
+        .iter()
+        .filter(|info| {
+            graph.edges.iter().any(|e| {
+                info.feedback_comp_ids
+                    .contains(&graph.components[e.comp_idx].id)
+                    && (nl_junction_nodes.contains(&e.node_a)
+                        || nl_junction_nodes.contains(&e.node_b))
+            })
+        })
+        .map(|info| info.comp_id.clone())
+        .collect();
+
     // Build op-amp feedback stages (inverting, non-inverting).
     let mut stages: Vec<WdfStage> = Vec::new();
     let opamp_feedback_stages = super::opamp_analysis::build_opamp_feedback_stages(
@@ -1270,6 +1294,7 @@ pub fn compile_pedal_with_options(
         stages.len(),
         sample_rate,
         oversampling,
+        &skip_feedback_tree_opamps,
     );
     stages.extend(opamp_feedback_stages);
 
@@ -1286,10 +1311,14 @@ pub fn compile_pedal_with_options(
 
     // Collect edge indices for opamp feedback path components so the
     // multi-NL planner won't BFS through them (prevents pot duplication).
+    // Exclude opamps that share junctions with NL elements — their feedback
+    // components stay with the NL stage.
     let opamp_feedback_edges: HashSet<usize> = {
         let mut comp_ids: HashSet<String> = HashSet::new();
         for info in &opamp_analysis.feedback_loops {
-            comp_ids.extend(info.feedback_comp_ids.iter().cloned());
+            if !skip_feedback_tree_opamps.contains(&info.comp_id) {
+                comp_ids.extend(info.feedback_comp_ids.iter().cloned());
+            }
         }
         graph
             .edges

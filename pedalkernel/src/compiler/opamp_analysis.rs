@@ -68,6 +68,7 @@ pub(super) fn build_opamp_feedback_stages(
     _existing_stage_count: usize,
     sample_rate: f64,
     oversampling: crate::oversampling::OversamplingFactor,
+    skip_feedback_tree: &HashSet<String>,
 ) -> Vec<WdfStage> {
     use super::stage::RootKind;
 
@@ -119,50 +120,61 @@ pub(super) fn build_opamp_feedback_stages(
                     root.set_soft_clip(diode_vf);
                 }
 
+                // Skip feedback tree if opamp output shares junction with NL elements.
+                // The NL stage handles the full passive set including feedback components.
+                let skip_tree = skip_feedback_tree.contains(&info.comp_id);
                 let (tree, fb_pot_from_tree) =
-                    match build_feedback_tree(info, graph, pedal, sample_rate) {
-                        Some((t, pot_id)) => (t, pot_id),
-                        None => {
-                            // Fallback: existing bare VS + optional pot
-                            let vs = DynNode::VoltageSource {
-                                voltage: 0.0,
-                                rp: 10_000.0,
-                            };
-                            let tree = if let Some((
-                                pot_id,
-                                max_pot_r,
-                                _fixed_series_r,
-                                _parallel_fixed_r,
-                            )) = rf_pot
-                            {
-                                let taper = lookup_pot_taper(pedal, pot_id);
-                                let initial_pos = 0.5;
-                                let tapered = taper.apply(initial_pos);
-                                let pot_rp = (tapered * max_pot_r).max(1.0);
-                                let pot = DynNode::Pot {
-                                    comp_id: pot_id.clone(),
-                                    max_resistance: *max_pot_r,
-                                    position: initial_pos,
-                                    taper,
-                                    rp: pot_rp,
-                                };
-                                let r_vs = vs.port_resistance();
-                                let r_pot = pot.port_resistance();
-                                let rp = r_vs + r_pot;
-                                DynNode::Series {
-                                    gamma: r_vs / rp,
-                                    left: Box::new(vs),
-                                    right: Box::new(pot),
-                                    rp,
-                                    b1: 0.0,
-                                    b2: 0.0,
-                                }
-                            } else {
-                                vs
-                            };
-                            (tree, rf_pot.as_ref().map(|(id, ..)| id.clone()))
+                    if skip_tree {
+                        (None, None)
+                    } else {
+                        match build_feedback_tree(info, graph, pedal, sample_rate) {
+                            Some((t, pot_id)) => (Some(t), pot_id),
+                            None => (None, None),
                         }
                     };
+                let (tree, fb_pot_from_tree) = match (tree, fb_pot_from_tree) {
+                    (Some(t), pot_id) => (t, pot_id),
+                    _ => {
+                        // Fallback: existing bare VS + optional pot
+                        let vs = DynNode::VoltageSource {
+                            voltage: 0.0,
+                            rp: 10_000.0,
+                        };
+                        let tree = if let Some((
+                            pot_id,
+                            max_pot_r,
+                            _fixed_series_r,
+                            _parallel_fixed_r,
+                        )) = rf_pot
+                        {
+                            let taper = lookup_pot_taper(pedal, pot_id);
+                            let initial_pos = 0.5;
+                            let tapered = taper.apply(initial_pos);
+                            let pot_rp = (tapered * max_pot_r).max(1.0);
+                            let pot = DynNode::Pot {
+                                comp_id: pot_id.clone(),
+                                max_resistance: *max_pot_r,
+                                position: initial_pos,
+                                taper,
+                                rp: pot_rp,
+                            };
+                            let r_vs = vs.port_resistance();
+                            let r_pot = pot.port_resistance();
+                            let rp = r_vs + r_pot;
+                            DynNode::Series {
+                                gamma: r_vs / rp,
+                                left: Box::new(vs),
+                                right: Box::new(pot),
+                                rp,
+                                b1: 0.0,
+                                b2: 0.0,
+                            }
+                        } else {
+                            vs
+                        };
+                        (tree, rf_pot.as_ref().map(|(id, ..)| id.clone()))
+                    }
+                };
                 // Tree-discovered pot takes priority
                 if fb_pot_from_tree.is_some() {
                     feedback_pot_id = fb_pot_from_tree;
@@ -228,55 +240,64 @@ pub(super) fn build_opamp_feedback_stages(
                 let v_max = (default_supply / 2.0 - 1.5).max(0.5);
                 root.set_v_max(v_max);
 
+                let skip_tree = skip_feedback_tree.contains(&info.comp_id);
                 let (tree, fb_pot_from_tree) =
-                    match build_feedback_tree(info, graph, pedal, sample_rate) {
-                        Some((t, pot_id)) => (t, pot_id),
-                        None => {
-                            // Fallback: existing bare VS + optional pot
-                            let vs = DynNode::VoltageSource {
-                                voltage: 0.0,
-                                rp: 10_000.0,
-                            };
-                            let active_pot = rf_pot.as_ref().or(ri_pot.as_ref());
-                            let tree = if let Some((
-                                pot_id,
-                                max_pot_r,
-                                _fixed_series_r,
-                                _parallel_fixed_r,
-                            )) = active_pot
-                            {
-                                let taper = lookup_pot_taper(pedal, pot_id);
-                                let initial_pos = 0.5;
-                                let tapered = taper.apply(initial_pos);
-                                let pot_rp = (tapered * max_pot_r).max(1.0);
-                                let pot = DynNode::Pot {
-                                    comp_id: pot_id.clone(),
-                                    max_resistance: *max_pot_r,
-                                    position: initial_pos,
-                                    taper,
-                                    rp: pot_rp,
-                                };
-                                let r_vs = vs.port_resistance();
-                                let r_pot = pot.port_resistance();
-                                let rp = r_vs + r_pot;
-                                DynNode::Series {
-                                    gamma: r_vs / rp,
-                                    left: Box::new(vs),
-                                    right: Box::new(pot),
-                                    rp,
-                                    b1: 0.0,
-                                    b2: 0.0,
-                                }
-                            } else {
-                                vs
-                            };
-                            let pot_id = rf_pot
-                                .as_ref()
-                                .or(ri_pot.as_ref())
-                                .map(|(id, ..)| id.clone());
-                            (tree, pot_id)
+                    if skip_tree {
+                        (None, None)
+                    } else {
+                        match build_feedback_tree(info, graph, pedal, sample_rate) {
+                            Some((t, pot_id)) => (Some(t), pot_id),
+                            None => (None, None),
                         }
                     };
+                let (tree, fb_pot_from_tree) = match (tree, fb_pot_from_tree) {
+                    (Some(t), pot_id) => (t, pot_id),
+                    _ => {
+                        // Fallback: existing bare VS + optional pot
+                        let vs = DynNode::VoltageSource {
+                            voltage: 0.0,
+                            rp: 10_000.0,
+                        };
+                        let active_pot = rf_pot.as_ref().or(ri_pot.as_ref());
+                        let tree = if let Some((
+                            pot_id,
+                            max_pot_r,
+                            _fixed_series_r,
+                            _parallel_fixed_r,
+                        )) = active_pot
+                        {
+                            let taper = lookup_pot_taper(pedal, pot_id);
+                            let initial_pos = 0.5;
+                            let tapered = taper.apply(initial_pos);
+                            let pot_rp = (tapered * max_pot_r).max(1.0);
+                            let pot = DynNode::Pot {
+                                comp_id: pot_id.clone(),
+                                max_resistance: *max_pot_r,
+                                position: initial_pos,
+                                taper,
+                                rp: pot_rp,
+                            };
+                            let r_vs = vs.port_resistance();
+                            let r_pot = pot.port_resistance();
+                            let rp = r_vs + r_pot;
+                            DynNode::Series {
+                                gamma: r_vs / rp,
+                                left: Box::new(vs),
+                                right: Box::new(pot),
+                                rp,
+                                b1: 0.0,
+                                b2: 0.0,
+                            }
+                        } else {
+                            vs
+                        };
+                        let pot_id = rf_pot
+                            .as_ref()
+                            .or(ri_pot.as_ref())
+                            .map(|(id, ..)| id.clone());
+                        (tree, pot_id)
+                    }
+                };
                 // Tree-discovered pot takes priority
                 if fb_pot_from_tree.is_some() {
                     feedback_pot_id = fb_pot_from_tree;

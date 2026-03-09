@@ -1932,6 +1932,7 @@ impl CircuitGraph {
                         feedback_kind: OpAmpFeedbackKind::UnityGain,
                         neg_node,
                         pos_node,
+                        out_node,
                         feedback_comp_ids: Vec::new(),
                     });
                     continue;
@@ -1965,6 +1966,7 @@ impl CircuitGraph {
                                 },
                                 neg_node,
                                 pos_node,
+                                out_node,
                                 feedback_comp_ids: all_fb_comps,
                             });
                             continue;
@@ -1994,6 +1996,7 @@ impl CircuitGraph {
                             feedback_kind: OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot, ri_pot },
                             neg_node,
                             pos_node,
+                            out_node,
                             feedback_comp_ids: fb_comps,
                         });
                         continue;
@@ -2042,6 +2045,7 @@ impl CircuitGraph {
                             },
                             neg_node,
                             pos_node,
+                            out_node,
                             feedback_comp_ids: all_fb_comps.clone(),
                         });
                         continue;
@@ -2108,6 +2112,8 @@ pub(super) struct OpAmpFeedbackInfo {
     pub(super) neg_node: NodeId,
     /// Non-inverting input node (signal reference or bias).
     pub(super) pos_node: NodeId,
+    /// Op-amp output node (resolved graph NodeId).
+    pub(super) out_node: NodeId,
     /// Component IDs of resistors/pots in the feedback path (Rf and Ri).
     /// Used to exclude these edges from MultiNl passive BFS.
     pub(super) feedback_comp_ids: Vec<String>,

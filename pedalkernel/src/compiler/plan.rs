@@ -942,6 +942,7 @@ pub(super) fn plan_stages(
                 sample_rate,
                 &pp_transformer_edges,
                 &boundary_edges,
+                opamp_feedback_edges,
             ) {
                 plans.push(plan);
             }
@@ -1006,6 +1007,7 @@ fn plan_single_nl(
     sample_rate: f64,
     pp_transformer_edges: &HashSet<usize>,
     boundary_edges: &HashSet<usize>,
+    opamp_feedback_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
     let is_two_junction = elem.junction_nodes.len() == 2;
 
@@ -1021,7 +1023,7 @@ fn plan_single_nl(
             boundary_edges,
         )
     } else {
-        plan_one_junction(elem, elem_idx, classified, graph, source_node_offset, boundary_edges)
+        plan_one_junction(elem, elem_idx, classified, graph, source_node_offset, boundary_edges, opamp_feedback_edges)
     }
 }
 
@@ -1033,6 +1035,7 @@ fn plan_one_junction(
     graph: &CircuitGraph,
     source_node_offset: usize,
     boundary_edges: &HashSet<usize>,
+    opamp_feedback_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
     let junction = elem.junction_nodes[0];
     let is_jfet = matches!(&elem.kind, NonlinearKind::Jfet { .. });
@@ -1045,6 +1048,11 @@ fn plan_one_junction(
         &graph.active_edge_indices,
     );
     junction_passives.retain(|idx| !boundary_edges.contains(idx));
+    // Exclude opamp feedback edges — these are handled by the opamp stage's
+    // feedback tree. Including them here double-counts the feedback impedance.
+    // Note: opamps sharing junctions with NL elements are excluded from
+    // opamp_feedback_edges in compile.rs, so their components stay here.
+    junction_passives.retain(|idx| !opamp_feedback_edges.contains(idx));
 
     if is_jfet {
         // JFET: check for source follower (junction connects to out_node).
@@ -1070,6 +1078,9 @@ fn plan_one_junction(
         let mut passive_idxs = junction_passives;
         extend_dedup(&mut passive_idxs, &junction_to_output);
         extend_dedup(&mut passive_idxs, &output_passives);
+        // Absorb output tail if connected.
+        let output_tail = collect_output_passive_tail(&passive_idxs, graph, classified);
+        extend_dedup(&mut passive_idxs, &output_tail);
 
         if passive_idxs.is_empty() {
             return None;
@@ -1285,6 +1296,10 @@ fn plan_two_junction(
     extend_dedup(&mut passive_idxs, &base_passives);
     extend_dedup(&mut passive_idxs, &a_to_output);
     extend_dedup(&mut passive_idxs, &output_passives);
+
+    // Absorb output tail: BFS from out_node through passive edges, connect back to this stage.
+    let output_tail = collect_output_passive_tail(&passive_idxs, graph, classified);
+    extend_dedup(&mut passive_idxs, &output_tail);
 
     // Transformer injection (1-hop from node_a through plate passives).
     let xfmr_inject = find_plate_transformers(&a_passives, node_a, graph);
