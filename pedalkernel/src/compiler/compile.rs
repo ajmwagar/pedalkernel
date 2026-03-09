@@ -1275,11 +1275,29 @@ pub fn compile_pedal_with_options(
         .feedback_loops
         .iter()
         .filter(|info| {
-            graph.edges.iter().any(|e| {
-                info.feedback_comp_ids
-                    .contains(&graph.components[e.comp_idx].id)
-                    && (nl_junction_nodes.contains(&e.node_a)
-                        || nl_junction_nodes.contains(&e.node_b))
+            // Collect graph nodes that this opamp's feedback components touch.
+            let fb_nodes: HashSet<super::graph::NodeId> = graph
+                .edges
+                .iter()
+                .filter(|e| {
+                    info.feedback_comp_ids
+                        .contains(&graph.components[e.comp_idx].id)
+                })
+                .flat_map(|e| [e.node_a, e.node_b])
+                .collect();
+
+            // Skip feedback tree if any passive edge connects the feedback
+            // node set to an NL junction (direct overlap OR 1-hop bridge).
+            // - Direct: RAT feedback pot IS at diode junction
+            // - 1-hop: Klon R_clip bridges diode junction to U3.neg
+            graph.edges.iter().enumerate().any(|(idx, e)| {
+                if classified.all_nonlinear_edge_indices.contains(&idx)
+                    || graph.active_edge_indices.contains(&idx)
+                {
+                    return false;
+                }
+                (fb_nodes.contains(&e.node_a) && nl_junction_nodes.contains(&e.node_b))
+                    || (fb_nodes.contains(&e.node_b) && nl_junction_nodes.contains(&e.node_a))
             })
         })
         .map(|info| info.comp_id.clone())
