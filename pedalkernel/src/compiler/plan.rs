@@ -1130,6 +1130,13 @@ fn plan_one_junction(
             return None;
         }
 
+        // Absorb output tail: BFS from out_node through passive edges back
+        // to this stage's junction passives. This collects tone/volume
+        // networks that sit between the NL junction and out_node.
+        let output_tail =
+            collect_output_passive_tail(&junction_passives, graph, classified);
+        extend_dedup(&mut junction_passives, &output_tail);
+
         let injection_node = find_injection_node(
             &junction_passives,
             junction,
@@ -2325,6 +2332,19 @@ fn collect_output_passive_tail(
         })
         .collect();
 
+    // Nodes touched by active bridge edges (opamp/BJT pins).
+    // These are processing stage boundaries — the tail BFS must not
+    // cross them (otherwise the Klon's diode stage would absorb the
+    // summing amp's output passives).
+    let active_bridge_nodes: HashSet<NodeId> = graph
+        .active_edge_indices
+        .iter()
+        .flat_map(|&eidx| {
+            let e = &graph.edges[eidx];
+            [e.node_a, e.node_b]
+        })
+        .collect();
+
     let mut visited: HashSet<NodeId> = HashSet::new();
     let mut queue: VecDeque<NodeId> = VecDeque::new();
     let mut collected: Vec<usize> = Vec::new();
@@ -2363,6 +2383,17 @@ fn collect_output_passive_tail(
 
             // gnd/vcc/supply: collect edge but don't BFS further.
             if n == graph.gnd_node || n == graph.vcc_node || graph.supply_nodes.contains(&n) {
+                if !collected.contains(&idx) {
+                    collected.push(idx);
+                }
+                continue;
+            }
+
+            // Active bridge node (opamp/BJT pin): collect connecting edge
+            // but stop BFS — this is a processing stage boundary.
+            // Exception: if this node is also in the existing stage's set,
+            // treat it as the existing-node case (connecting back to us).
+            if active_bridge_nodes.contains(&n) && !existing_nodes.contains(&n) {
                 if !collected.contains(&idx) {
                     collected.push(idx);
                 }
