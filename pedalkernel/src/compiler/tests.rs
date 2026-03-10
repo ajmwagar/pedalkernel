@@ -339,9 +339,9 @@ fn compile_tube_screamer() {
             super::stage::RootKind::Triode(_) => "Triode",
             _ => "Other",
         };
-        eprintln!("[ts-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} paired_opamp={} output_probe={:?}",
+        eprintln!("[ts-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} paired_opamp={} feedback_opamp={} output_probe={:?}",
             s.injection_node_id, s.output_node_id, s.signal_flow_distance,
-            s.paired_opamp.is_some(), s.output_probe);
+            s.paired_opamp.is_some(), s.feedback_opamp.is_some(), s.output_probe);
     }
     eprintln!("[ts-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
     eprintln!("[ts-debug] Controls: {}", proc.controls.len());
@@ -512,9 +512,17 @@ fn compile_klon_centaur() {
 
     eprintln!("[klon-debug] WDF stages: {}", proc.stages.len());
     for (i, s) in proc.stages.iter().enumerate() {
-        eprintln!("[klon-debug]   wdf[{i}]: inj={} out={} sfd={} root={} output_probe={:?}",
+        let root_tag = match &s.root {
+            super::stage::RootKind::DiodePair(_) => "DiodePair",
+            super::stage::RootKind::SingleDiode(_) => "SingleDiode",
+            super::stage::RootKind::OpAmp(_) => "OpAmp",
+            super::stage::RootKind::Passthrough => "Passthrough",
+            super::stage::RootKind::PassiveRType { .. } => "PassiveRType",
+            _ => "Other",
+        };
+        eprintln!("[klon-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={} output_probe={:?} feedback_pot={:?}",
             s.injection_node_id, s.output_node_id, s.signal_flow_distance,
-            s.root_comp_id, s.output_probe);
+            s.feedback_opamp.is_some(), s.output_probe, s.feedback_pot_id);
     }
     eprintln!("[klon-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
     for (i, s) in proc.multi_nl_stages.iter().enumerate() {
@@ -533,6 +541,51 @@ fn compile_klon_centaur() {
     assert_finite(&output, "Klon Centaur");
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     assert!(peak > 0.01, "Klon should produce output: peak={peak}");
+}
+
+#[test]
+fn compile_goldenrod() {
+    // Goldenrod (Klon Centaur v3): hard-clip Ge diodes to ground + non-inverting gain stage.
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/goldenrod.pedal");
+    if !pro_path.exists() {
+        eprintln!("[goldenrod-debug] Skipping: {:?} not found", pro_path);
+        return;
+    }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("[goldenrod-debug] WDF stages: {}", proc.stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let root_tag = match &s.root {
+            super::stage::RootKind::DiodePair(_) => "DiodePair",
+            super::stage::RootKind::SingleDiode(_) => "SingleDiode",
+            super::stage::RootKind::OpAmp(_) => "OpAmp",
+            super::stage::RootKind::Passthrough => "Passthrough",
+            super::stage::RootKind::PassiveRType { .. } => "PassiveRType",
+            _ => "Other",
+        };
+        eprintln!("[goldenrod-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={} feedback_pot={:?}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            s.feedback_opamp.is_some(), s.feedback_pot_id);
+    }
+    eprintln!("[goldenrod-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
+    eprintln!("[goldenrod-debug] Controls: {}", proc.controls.len());
+    for (i, c) in proc.controls.iter().enumerate() {
+        eprintln!("[goldenrod-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
+    }
+
+    proc.set_control("Gain", 0.7);
+    proc.set_control("Output", 0.5);
+
+    let input = sine(48000);
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    assert_finite(&output, "Goldenrod");
+    let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    assert!(peak > 0.001, "Goldenrod should produce output: peak={peak}");
 }
 
 #[test]

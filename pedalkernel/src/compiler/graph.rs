@@ -1753,11 +1753,6 @@ impl CircuitGraph {
             }
         }
 
-        // Helper: find diodes between two nodes (for feedback diode detection)
-        let find_feedback_diode = |node_a: usize, node_b: usize| -> Option<DiodeType> {
-            feedback_diodes.get(&(node_a, node_b)).copied()
-        };
-
         // Passive adjacency map: node → [(neighbor, comp_id)]
         // Includes resistors, capacitors, inductors, and pots (all 2-terminal passive edges).
         // Used by BFS to collect ALL passive components in an op-amp feedback network.
@@ -1809,6 +1804,33 @@ impl CircuitGraph {
                 }
             }
         }
+
+        // Helper: find diodes between two nodes (for feedback diode detection).
+        // Checks direct match first, then 1-hop through passive adjacency.
+        // Covers Klon topology: neg → R6 → D1/D2 → out.
+        let find_feedback_diode = |node_a: usize, node_b: usize| -> Option<DiodeType> {
+            // Direct: diode spans (neg, out)
+            if let Some(&dt) = feedback_diodes.get(&(node_a, node_b)) {
+                return Some(dt);
+            }
+            // 1-hop from node_a: diode at (intermediate, node_b)
+            if let Some(neighbors) = passive_adj.get(&node_a) {
+                for &(mid, _) in neighbors {
+                    if let Some(&dt) = feedback_diodes.get(&(mid, node_b)) {
+                        return Some(dt);
+                    }
+                }
+            }
+            // 1-hop from node_b: diode at (node_a, intermediate)
+            if let Some(neighbors) = passive_adj.get(&node_b) {
+                for &(mid, _) in neighbors {
+                    if let Some(&dt) = feedback_diodes.get(&(node_a, mid)) {
+                        return Some(dt);
+                    }
+                }
+            }
+            None
+        };
 
         // Collect all op-amp pin nodes as BFS barriers (prevents crossing stage boundaries).
         let mut opamp_pin_nodes: HashSet<usize> = HashSet::new();

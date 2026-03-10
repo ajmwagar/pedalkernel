@@ -495,6 +495,38 @@ impl OpAmpRoot {
         limited
     }
 
+    /// Compute the voltage source value for a DiodePair stage with opamp feedback.
+    ///
+    /// Applies inverting gain + GBW rolloff + slew limiting, but NOT soft clipping
+    /// (the DiodePair NR solver handles the actual clipping).
+    ///
+    /// For an inverting opamp with feedback diodes, the signal path is:
+    ///   input → Ri → virtual ground (neg) → diodes in feedback → output
+    /// The opamp gain sets the drive level into the diode clipping stage.
+    ///
+    /// Returns the magnitude (positive) of the gained voltage, since WDF
+    /// DiodePair convention already negates the VS voltage.
+    #[inline]
+    pub fn compute_vs_voltage(&mut self, input: f64) -> f64 {
+        let gain = self.gain();
+        let v_max = self.model.v_max;
+
+        // Apply gain (magnitude only — WDF handles sign convention)
+        let mut v_out = gain * input;
+
+        // GBW rolloff: single-pole LPF at f_cl = GBW / gain
+        v_out = self.gbw_coeff * v_out + (1.0 - self.gbw_coeff) * self.gbw_state;
+        self.gbw_state = v_out;
+
+        // Hard clip at supply rails
+        v_out = v_out.clamp(-v_max, v_max);
+
+        // Slew rate limiting
+        v_out = self.apply_slew_limit(v_out);
+
+        v_out
+    }
+
     /// Reset internal state.
     pub fn reset(&mut self) {
         self.prev_out = 0.0;

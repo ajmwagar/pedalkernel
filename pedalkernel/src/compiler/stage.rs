@@ -330,6 +330,15 @@ pub(super) struct WdfStage {
     /// This models voltage extraction at the circuit's output node when
     /// a pot sits between the NL junction and the output.
     pub(super) output_probe: Option<String>,
+    /// Op-amp gain stage paired with a DiodePair/SingleDiode root.
+    ///
+    /// When an inverting op-amp has diodes in its feedback path (e.g., Tube Screamer,
+    /// Klon Centaur), the op-amp gain + GBW + slew limiting are applied to the VS
+    /// voltage before the diode NR solver clips. This replaces the standalone OpAmp
+    /// stage + soft-clip tanh approximation with proper gain-into-diode-clipping.
+    ///
+    /// NOT the same as `paired_opamp` (which is for Bridged-T all-pass circuits).
+    pub(super) feedback_opamp: Option<OpAmpRoot>,
 }
 
 impl WdfStage {
@@ -355,6 +364,7 @@ impl WdfStage {
         let root = &mut self.root;
         let compensation = self.compensation;
         let output_probe = &self.output_probe;
+        let feedback_opamp = &mut self.feedback_opamp;
 
         // Set control voltage for active devices (triodes, BJTs, pentodes).
         // Maps the input signal to the device's control terminal with appropriate
@@ -383,6 +393,7 @@ impl WdfStage {
             // Determine voltage source value based on stage type:
             // - Triode: VS = B+ supply (plate bias)
             // - Source follower: VS = 0 (input goes to gate, not VS)
+            // - Feedback opamp + diode: opamp gain drives diode clipping
             // - Other: VS = input * compensation
             let vs_voltage = if let RootKind::Triode(t) = root {
                 t.v_max()
@@ -390,6 +401,11 @@ impl WdfStage {
                 t.v_max()
             } else if is_sf {
                 0.0 // Source follower: input modulates Vgs, not VS
+            } else if let Some(ref mut opamp) = feedback_opamp {
+                // OpAmp feedback diode stage: apply gain + GBW + slew.
+                // compute_vs_voltage returns |gain| * input (positive magnitude).
+                // The DiodePair negation below handles WDF sign convention.
+                opamp.compute_vs_voltage(sample * compensation)
             } else {
                 sample * compensation
             };
@@ -659,6 +675,9 @@ impl WdfStage {
         self.tree.reset();
         self.oversampler.reset();
         if let Some(ref mut opamp) = self.paired_opamp {
+            opamp.reset();
+        }
+        if let Some(ref mut opamp) = self.feedback_opamp {
             opamp.reset();
         }
         if let Some((_, _, ref mut y_prev, ref mut x_prev)) = self.dc_block {
@@ -956,11 +975,15 @@ impl WdfStage {
     /// Notify that a pot in this stage changed.
     ///
     /// If this stage has a `feedback_pot_id`, reads the pot's current resistance
-    /// from the tree and calls `OpAmpRoot::set_feedback_pot_r()` to recompute gain.
+    /// and calls `OpAmpRoot::set_feedback_pot_r()` to recompute gain.
+    /// Checks both the OpAmp root (standalone) and feedback_opamp (DiodePair paired).
     pub(super) fn notify_pot_changed(&mut self) {
         if let Some(ref pot_id) = self.feedback_pot_id {
             if let Some(pot_r) = self.tree.get_pot_resistance(pot_id) {
                 if let RootKind::OpAmp(ref mut oa) = self.root {
+                    oa.set_feedback_pot_r(pot_r);
+                }
+                if let Some(ref mut oa) = self.feedback_opamp {
                     oa.set_feedback_pot_r(pot_r);
                 }
             }

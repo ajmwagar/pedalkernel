@@ -276,6 +276,7 @@ fn build_passive_wdf_stage(
                 root_comp_id: String::new(),
                 feedback_pot_id: None,
                 output_probe: None,
+                feedback_opamp: None,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -613,6 +614,7 @@ fn build_passive_rtype_from_decomposed(
         root_comp_id: String::new(),
         feedback_pot_id: None,
         output_probe: None,
+        feedback_opamp: None,
     })
 }
 
@@ -1022,6 +1024,7 @@ fn build_output_rooted_stage(
         root_comp_id: String::new(),
         feedback_pot_id: None,
         output_probe: None,
+        feedback_opamp: None,
     })
 }
 
@@ -1405,8 +1408,9 @@ pub fn compile_pedal_with_options(
         .collect();
 
     // Build op-amp feedback stages (inverting, non-inverting).
+    // Diode-paired opamps are returned separately for pairing with DiodePair stages.
     let mut stages: Vec<WdfStage> = Vec::new();
-    let opamp_feedback_stages = super::opamp_analysis::build_opamp_feedback_stages(
+    let (opamp_feedback_stages, diode_paired_opamps) = super::opamp_analysis::build_opamp_feedback_stages(
         &opamp_analysis,
         pedal,
         &graph,
@@ -1419,12 +1423,20 @@ pub fn compile_pedal_with_options(
 
     // Set output_node_id and injection_node_id on opamp feedback stages.
     // signal_flow_distance is set later (after plan_stages) using island depths.
+    // Skip diode-paired opamps (they don't produce standalone stages).
     {
         let mut stage_idx = 0;
         for info in &opamp_analysis.feedback_loops {
             match &info.feedback_kind {
                 super::graph::OpAmpFeedbackKind::UnityGain
                 | super::graph::OpAmpFeedbackKind::AllpassJfet { .. } => continue,
+                super::graph::OpAmpFeedbackKind::Inverting { feedback_diode, .. }
+                    if feedback_diode.is_some()
+                        && skip_feedback_tree_opamps.contains(&info.comp_id) =>
+                {
+                    // This opamp was routed to diode_paired_opamps, not stages.
+                    continue;
+                }
                 _ => {}
             }
             if stage_idx < stages.len() {
@@ -1515,6 +1527,7 @@ pub fn compile_pedal_with_options(
             &lfo_controlled_jfets,
             supply_voltage,
             &node_island_depths,
+            &diode_paired_opamps,
         );
     stages.extend(nonlinear_stages);
 

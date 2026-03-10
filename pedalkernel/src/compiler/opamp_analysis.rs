@@ -55,11 +55,31 @@ pub(super) fn analyze_opamps(graph: &CircuitGraph, pedal: &PedalDef) -> OpAmpAna
     }
 }
 
+/// Info for an op-amp root that should be paired with a DiodePair/SingleDiode stage.
+///
+/// When an inverting op-amp has feedback diodes AND shares a junction with the
+/// diode NL element, the opamp gain is applied as `feedback_opamp` on the
+/// DiodePair's WdfStage rather than creating a standalone OpAmp WdfStage.
+pub(super) struct DiodePairedOpAmp {
+    /// Neg node of the opamp (for matching to DiodePair junction).
+    pub(super) neg_node: NodeId,
+    /// Out node of the opamp.
+    pub(super) out_node: NodeId,
+    /// Configured OpAmpRoot (gain, GBW, slew — NO soft_clip).
+    pub(super) opamp_root: OpAmpRoot,
+    /// Feedback pot ID (if any) for runtime gain updates.
+    pub(super) feedback_pot_id: Option<String>,
+}
+
 /// Build op-amp gain stages from feedback loop analysis.
 ///
 /// Creates WDF stages for inverting and non-inverting op-amps.
 /// Sets `FeedbackConfig` on the OpAmpRoot and `feedback_pot_id` on the stage
 /// so the stage self-manages gain updates when feedback pots change.
+///
+/// Returns:
+/// - `Vec<WdfStage>`: standalone op-amp stages (gain-only, no shared NL junction)
+/// - `Vec<DiodePairedOpAmp>`: op-amps that should be paired with DiodePair stages
 pub(super) fn build_opamp_feedback_stages(
     analysis: &OpAmpAnalysis,
     pedal: &PedalDef,
@@ -68,10 +88,11 @@ pub(super) fn build_opamp_feedback_stages(
     sample_rate: f64,
     oversampling: crate::oversampling::OversamplingFactor,
     skip_feedback_tree: &HashSet<String>,
-) -> Vec<WdfStage> {
+) -> (Vec<WdfStage>, Vec<DiodePairedOpAmp>) {
     use super::stage::RootKind;
 
     let mut stages = Vec::new();
+    let mut diode_paired = Vec::new();
 
     for info in &analysis.feedback_loops {
         match &info.feedback_kind {
@@ -110,6 +131,24 @@ pub(super) fn build_opamp_feedback_stages(
                 let v_max = (default_supply / 2.0 - 1.5).max(0.5);
                 root.set_v_max(v_max);
 
+                // Skip feedback tree if opamp output shares junction with NL elements.
+                // The NL stage handles the full passive set including feedback components.
+                let skip_tree = skip_feedback_tree.contains(&info.comp_id);
+
+                // If this opamp has feedback diodes AND shares junction with NL elements,
+                // pair with the DiodePair stage instead of creating a standalone OpAmp stage.
+                // The DiodePair NR solver does accurate clipping; the opamp just provides gain.
+                // Don't set soft_clip — the NR solver handles clipping, not tanh approximation.
+                if skip_tree && feedback_diode.is_some() {
+                    diode_paired.push(DiodePairedOpAmp {
+                        neg_node: info.neg_node,
+                        out_node: info.out_node,
+                        opamp_root: root,
+                        feedback_pot_id,
+                    });
+                    continue;
+                }
+
                 if let Some(diode_type) = feedback_diode {
                     let diode_vf = match diode_type {
                         DiodeType::Silicon => 0.6,
@@ -118,10 +157,6 @@ pub(super) fn build_opamp_feedback_stages(
                     };
                     root.set_soft_clip(diode_vf);
                 }
-
-                // Skip feedback tree if opamp output shares junction with NL elements.
-                // The NL stage handles the full passive set including feedback components.
-                let skip_tree = skip_feedback_tree.contains(&info.comp_id);
                 let (tree, fb_pot_from_tree) =
                     if skip_tree {
                         (None, None)
@@ -201,6 +236,7 @@ pub(super) fn build_opamp_feedback_stages(
                     root_comp_id: String::new(),
                     feedback_pot_id,
                     output_probe: None,
+                    feedback_opamp: None,
                 };
                 stage.balance_vs_impedance();
                 stages.push(stage);
@@ -327,6 +363,7 @@ pub(super) fn build_opamp_feedback_stages(
                     root_comp_id: String::new(),
                     feedback_pot_id,
                     output_probe: None,
+                    feedback_opamp: None,
                 };
                 stage.balance_vs_impedance();
                 stages.push(stage);
@@ -337,7 +374,7 @@ pub(super) fn build_opamp_feedback_stages(
         }
     }
 
-    stages
+    (stages, diode_paired)
 }
 
 /// Build a queue of unity-gain op-amp roots for pairing with JFET stages.

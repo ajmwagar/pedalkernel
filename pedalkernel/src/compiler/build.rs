@@ -373,6 +373,7 @@ pub(super) fn build_stages(
     lfo_controlled_jfets: &HashSet<String>,
     supply_voltage: f64,
     node_island_depths: &HashMap<super::graph::NodeId, usize>,
+    diode_paired_opamps: &[super::opamp_analysis::DiodePairedOpAmp],
 ) -> (Vec<WdfStage>, Vec<MultiNlStage>, Vec<usize>) {
     // Build unity-gain feedback op-amp queue for JFET pairing.
     // Also collect their out_nodes for signal_flow_distance.
@@ -476,6 +477,36 @@ pub(super) fn build_stages(
                 }
             }
 
+            // Pair DiodePair/SingleDiode stages with feedback opamps.
+            // Match by junction node: either direct overlap or 1-hop passive adjacency.
+            if matches!(
+                &elem.kind,
+                NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)
+            ) {
+                let junction_nodes = &elem.junction_nodes;
+                if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
+                    // Direct: opamp neg/out matches diode junction node
+                    junction_nodes.iter().any(|&jn| jn == dp.neg_node || jn == dp.out_node)
+                        // 1-hop: passive edge connects opamp neg to diode junction (Klon R6)
+                        || junction_nodes.iter().any(|&jn| {
+                            graph.edges.iter().any(|e| {
+                                let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
+                                    || graph.components[e.comp_idx].kind.pot_taper().is_some();
+                                is_passive
+                                    && ((e.node_a == dp.neg_node && e.node_b == jn)
+                                        || (e.node_b == dp.neg_node && e.node_a == jn)
+                                        || (e.node_a == dp.out_node && e.node_b == jn)
+                                        || (e.node_b == dp.out_node && e.node_a == jn))
+                            })
+                        })
+                }) {
+                    stage.feedback_opamp = Some(dp.opamp_root.clone());
+                    if dp.feedback_pot_id.is_some() {
+                        stage.feedback_pot_id = dp.feedback_pot_id.clone();
+                    }
+                }
+            }
+
             stage.signal_flow_distance = if let Some(depth) = plan.signal_chain_depth {
                 depth
             } else {
@@ -553,6 +584,7 @@ pub(super) fn build_stages(
             root_comp_id: String::new(),
             feedback_pot_id: None,
             output_probe: None,
+            feedback_opamp: None,
         });
     }
 
@@ -2352,6 +2384,7 @@ fn build_vs_stage(
         root_comp_id: String::new(),
         feedback_pot_id: None,
         output_probe,
+        feedback_opamp: None,
     })
 }
 
@@ -2423,6 +2456,7 @@ fn build_source_follower_stage(
         root_comp_id: String::new(),
         feedback_pot_id: None,
         output_probe: None,
+        feedback_opamp: None,
     })
 }
 
