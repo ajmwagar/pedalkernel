@@ -20,6 +20,7 @@ pub fn optimize_layout(layout: &mut Layout) {
     snap_to_grid(layout);
     resolve_overlaps(layout);
     minimize_crossings(layout);
+    resolve_wire_component_overlaps(layout);
     center_groups(layout);
 }
 
@@ -156,6 +157,110 @@ fn minimize_crossings(layout: &mut Layout) {
                 layout.components[idx].y = y_positions[rank];
             }
         }
+    }
+}
+
+/// Resolve wire segments that pass through component bounding boxes by
+/// inserting jog waypoints to route around them.
+fn resolve_wire_component_overlaps(layout: &mut Layout) {
+    // Build component bounding boxes
+    let boxes: Vec<Rect> = layout
+        .components
+        .iter()
+        .map(|c| Rect {
+            x: c.x - COMPONENT_HALF_SIZE,
+            y: c.y - COMPONENT_HALF_SIZE,
+            w: COMPONENT_HALF_SIZE * 2.0,
+            h: COMPONENT_HALF_SIZE * 2.0,
+        })
+        .collect();
+
+    // Collect component centers for endpoint matching
+    let centers: Vec<(f32, f32)> = layout.components.iter().map(|c| (c.x, c.y)).collect();
+
+    for wire in &mut layout.wires {
+        let mut new_points: Vec<[f32; 2]> = Vec::new();
+
+        for seg in wire.points.windows(2) {
+            new_points.push(seg[0]);
+
+            let p0 = Point::new(seg[0][0], seg[0][1]);
+            let p1 = Point::new(seg[1][0], seg[1][1]);
+
+            // Check each component box for overlap with this segment
+            for (ci, bbox) in boxes.iter().enumerate() {
+                // Skip if this segment starts or ends at this component
+                let (cx, cy) = centers[ci];
+                let is_endpoint = ((p0.x - cx).abs() < 1.0 && (p0.y - cy).abs() < 1.0)
+                    || ((p1.x - cx).abs() < 1.0 && (p1.y - cy).abs() < 1.0);
+                if is_endpoint {
+                    continue;
+                }
+
+                // Check if the segment passes through the bounding box
+                if !segment_intersects_rect(p0, p1, bbox) {
+                    continue;
+                }
+
+                // Insert jog waypoints to route around the component
+                let jog_offset = COMPONENT_HALF_SIZE + 5.0;
+                let is_horizontal = (p0.y - p1.y).abs() < 0.5;
+
+                if is_horizontal {
+                    // Horizontal segment: jog vertically around component
+                    let jog_y = if p0.y < cy {
+                        bbox.y - 5.0
+                    } else {
+                        bbox.y + bbox.h + 5.0
+                    };
+                    new_points.push([cx - jog_offset, p0.y]);
+                    new_points.push([cx - jog_offset, jog_y]);
+                    new_points.push([cx + jog_offset, jog_y]);
+                    new_points.push([cx + jog_offset, p1.y]);
+                } else {
+                    // Vertical segment: jog horizontally around component
+                    let jog_x = if p0.x < cx {
+                        bbox.x - 5.0
+                    } else {
+                        bbox.x + bbox.w + 5.0
+                    };
+                    new_points.push([p0.x, cy - jog_offset]);
+                    new_points.push([jog_x, cy - jog_offset]);
+                    new_points.push([jog_x, cy + jog_offset]);
+                    new_points.push([p1.x, cy + jog_offset]);
+                }
+                break; // Only jog around the first overlapping component per segment
+            }
+        }
+
+        // Push the final point
+        if let Some(&last) = wire.points.last() {
+            new_points.push(last);
+        }
+
+        // Deduplicate consecutive identical points
+        new_points.dedup();
+        wire.points = new_points;
+    }
+}
+
+/// Check if a line segment from p0 to p1 intersects a rectangle.
+fn segment_intersects_rect(p0: Point, p1: Point, rect: &Rect) -> bool {
+    let is_horizontal = (p0.y - p1.y).abs() < 0.5;
+    let is_vertical = (p0.x - p1.x).abs() < 0.5;
+
+    if is_horizontal {
+        // Horizontal segment: check if it crosses through the rect vertically
+        let min_x = p0.x.min(p1.x);
+        let max_x = p0.x.max(p1.x);
+        p0.y > rect.y && p0.y < rect.y + rect.h && max_x > rect.x && min_x < rect.x + rect.w
+    } else if is_vertical {
+        // Vertical segment: check if it crosses through the rect horizontally
+        let min_y = p0.y.min(p1.y);
+        let max_y = p0.y.max(p1.y);
+        p0.x > rect.x && p0.x < rect.x + rect.w && max_y > rect.y && min_y < rect.y + rect.h
+    } else {
+        false // Non-orthogonal segments shouldn't exist in Manhattan routing
     }
 }
 

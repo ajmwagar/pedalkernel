@@ -463,6 +463,12 @@ impl WdfStage {
                 RootKind::Passthrough => {
                     // Standard open-circuit behavior for state updates
                     tree.set_incident(b_tree);
+                    // Check output_probe BEFORE resistive_termination fallback
+                    if let Some(ref probe_id) = output_probe {
+                        if let Some(v) = tree.leaf_voltage(probe_id) {
+                            return v;
+                        }
+                    }
                     // For passive filters with embedded voltage source, the output
                     // voltage at the load is half the root wave (resistive extraction)
                     if let Some(_) = tree.resistive_termination_voltage(b_tree) {

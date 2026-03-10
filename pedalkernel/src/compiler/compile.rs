@@ -904,21 +904,65 @@ fn build_feedforward_stages(
             continue;
         }
 
-        // ── Step 5: Build PassiveRType stage ─────────────────────────
-        if let Some(mut stage) = build_orphan_output_mna_stage(
-            graph,
-            edges,
-            injection_node,
-            output_node,
-            1e9, // high-Z probe
-            sample_rate,
+        // ── Step 5: Try SP reduction first, fall back to PassiveRType ───
+        let source_node = graph.edges.len() + 2000;
+        let extra = vec![super::graph::ExtraEdge {
+            node_a: source_node,
+            node_b: injection_node,
+            tree: DynNode::VoltageSource { voltage: 0.0, rp: 1.0 },
+        }];
+        let terminals = vec![source_node, graph.gnd_node];
+        let remap = |n: NodeId| -> NodeId {
+            if graph.supply_nodes.contains(&n) { graph.gnd_node } else { n }
+        };
+
+        let mut stage = match super::graph::graph_reduce(
+            edges, &extra, &terminals,
+            graph, sample_rate, &HashMap::new(), remap,
+            Some(output_node),
         ) {
-            stage.is_feedforward = true;
-            stage.injection_node_id = injection_node;
-            stage.output_node_id = output_node;
-            stage.signal_flow_distance = injection_dist.saturating_add(1);
-            result.push(stage);
-        }
+            Ok((tree, output_probe)) => {
+                let mut s = WdfStage {
+                    tree,
+                    root: RootKind::Passthrough,
+                    compensation: 1.0,
+                    oversampler: Oversampler::new(OversamplingFactor::X1),
+                    base_diode_model: None,
+                    paired_opamp: None,
+                    allpass_feedback: None,
+                    dc_block: None,
+                    is_source_follower: false,
+                    prev_source_voltage: 0.0,
+                    signal_flow_distance: 0,
+                    transformer_gain: 1.0,
+                    injection_node_id: injection_node,
+                    output_node_id: output_node,
+                    is_trigger_voice: false,
+                    is_feedforward: true,
+                    sample_counter: 0,
+                    root_comp_id: String::new(),
+                    feedback_pot_id: None,
+                    output_probe,
+                    feedback_opamp: None,
+                };
+                s.balance_vs_impedance();
+                s
+            }
+            Err(_) => {
+                // SP reduction failed → fall back to PassiveRType MNA
+                match build_orphan_output_mna_stage(
+                    graph, edges, injection_node, output_node, 1e9, sample_rate,
+                ) {
+                    Some(s) => s,
+                    None => continue,
+                }
+            }
+        };
+        stage.is_feedforward = true;
+        stage.injection_node_id = injection_node;
+        stage.output_node_id = output_node;
+        stage.signal_flow_distance = injection_dist.saturating_add(1);
+        result.push(stage);
     }
 
     result
@@ -1579,9 +1623,19 @@ pub fn compile_pedal_with_options(
         );
 
         // Claim opamp input passives (coupling caps, bias resistors at
-        // pos/neg pins). These are serial-path components that the NL
-        // planner can't reach through active bridge barriers.
+        // pos/neg pins). Only for non-inverting opamps where pos is the
+        // signal input — inverting opamps have pos at AC ground (Vref),
+        // and BFS from Vref would over-claim tone/volume sections.
+        // Use output-pin barriers to prevent leaking through opamp outputs.
         for info in &opamp_analysis.feedback_loops {
+            let skip = matches!(
+                info.feedback_kind,
+                super::graph::OpAmpFeedbackKind::Inverting { .. }
+                    | super::graph::OpAmpFeedbackKind::UnityGain
+            );
+            if skip {
+                continue;
+            }
             let input_passives = graph.bfs_passive_edges(
                 info.pos_node,
                 &classified.all_nonlinear_edge_indices,
@@ -1589,7 +1643,7 @@ pub fn compile_pedal_with_options(
                 false,
                 true,
                 &pp_transformer_edges,
-                &HashSet::new(),
+                &graph.output_pin_nodes,
             );
             claimed_edges.extend(input_passives.iter().copied());
         }

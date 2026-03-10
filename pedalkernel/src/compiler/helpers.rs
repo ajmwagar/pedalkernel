@@ -153,6 +153,24 @@ pub(super) fn set_vs_rp(node: &mut DynNode, rp_val: f64) {
     }
 }
 
+/// Collect all pot component IDs from a DynNode tree (for debugging).
+pub(super) fn collect_pot_ids(node: &DynNode, out: &mut Vec<String>) {
+    match node {
+        DynNode::Pot { comp_id, .. } => out.push(comp_id.clone()),
+        DynNode::Series { left, right, .. } | DynNode::Parallel { left, right, .. } => {
+            collect_pot_ids(left, out);
+            collect_pot_ids(right, out);
+        }
+        DynNode::Transformer { secondary, .. } => collect_pot_ids(secondary, out),
+        DynNode::RType { children, .. } => {
+            for c in children {
+                collect_pot_ids(c, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn has_pot(node: &DynNode, comp_id: &str) -> bool {
     match node {
         DynNode::Pot { comp_id: id, .. } => {

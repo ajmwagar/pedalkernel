@@ -679,11 +679,17 @@ fn compile_goldenrod() {
             super::stage::RootKind::PassiveRType { .. } => "PassiveRType",
             _ => "Other",
         };
-        eprintln!("[goldenrod-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={} feedback_pot={:?}",
+        eprintln!("[goldenrod-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedforward={} feedback_opamp={} feedback_pot={:?} rp={:.1}",
             s.injection_node_id, s.output_node_id, s.signal_flow_distance,
-            s.feedback_opamp.is_some(), s.feedback_pot_id);
+            s.is_feedforward, s.feedback_opamp.is_some(), s.feedback_pot_id,
+            s.tree.port_resistance());
     }
     eprintln!("[goldenrod-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
+    for (i, mnl) in proc.multi_nl_stages.iter().enumerate() {
+        eprintln!("[goldenrod-debug]   mnl[{i}]: sfd={} n_nl={} inj={} out={}",
+            mnl.signal_flow_distance, mnl.n_nl, mnl.injection_node, mnl.output_node);
+    }
+    eprintln!("[goldenrod-debug] Stage Order: {:?}", proc.stage_order);
     eprintln!("[goldenrod-debug] Controls: {}", proc.controls.len());
     for (i, c) in proc.controls.iter().enumerate() {
         eprintln!("[goldenrod-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
@@ -697,6 +703,88 @@ fn compile_goldenrod() {
     assert_finite(&output, "Goldenrod");
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     assert!(peak > 0.001, "Goldenrod should produce output: peak={peak}");
+}
+
+#[test]
+fn compile_blues() {
+    // Marshall Bluesbreaker MkI from pedalkernel-pro legends
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/blues.pedal");
+    if !pro_path.exists() {
+        eprintln!("[blues-debug] Skipping: {:?} not found", pro_path);
+        return;
+    }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("[blues-debug] WDF stages: {}", proc.stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let root_tag = match &s.root {
+            super::stage::RootKind::DiodePair(_) => "DiodePair",
+            super::stage::RootKind::SingleDiode(_) => "SingleDiode",
+            super::stage::RootKind::OpAmp(_) => "OpAmp",
+            super::stage::RootKind::Passthrough => "Passthrough",
+            super::stage::RootKind::PassiveRType { .. } => "PassiveRType",
+            _ => "Other",
+        };
+        eprintln!("[blues-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={} output_probe={:?} feedback_pot={:?}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            s.feedback_opamp.is_some(), s.output_probe, s.feedback_pot_id);
+    }
+    eprintln!("[blues-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
+    for (i, s) in proc.multi_nl_stages.iter().enumerate() {
+        eprintln!("[blues-debug]   mnl[{i}]: n_nl={} n_passive_children={} n_pots={} sfd={}", s.n_nl, s.passive_children.len(), s.pot_children.len(), s.signal_flow_distance);
+    }
+    eprintln!("[blues-debug] Controls: {}", proc.controls.len());
+    for (i, c) in proc.controls.iter().enumerate() {
+        eprintln!("[blues-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
+    }
+
+    // Check stage_order
+    eprintln!("[blues-debug] stage_order: {:?}", proc.stage_order);
+    for (i, s) in proc.stages.iter().enumerate() {
+        let mut pot_ids = Vec::new();
+        super::helpers::collect_pot_ids(&s.tree, &mut pot_ids);
+        eprintln!("[blues-debug]   wdf[{i}] pots in tree: {:?}", pot_ids);
+        if let super::stage::RootKind::PassiveRType { children, .. } = &s.root {
+            for (ci, c) in children.iter().enumerate() {
+                let mut cpot_ids = Vec::new();
+                super::helpers::collect_pot_ids(c, &mut cpot_ids);
+                eprintln!("[blues-debug]     PassiveRType child[{ci}] pots: {:?}", cpot_ids);
+            }
+        }
+    }
+    for (i, s) in proc.multi_nl_stages.iter().enumerate() {
+        for (pi, p) in s.pot_children.iter().enumerate() {
+            let mut pot_ids = Vec::new();
+            super::helpers::collect_pot_ids(p, &mut pot_ids);
+            eprintln!("[blues-debug]   mnl[{i}] pot_child[{pi}]: {:?}", pot_ids);
+        }
+    }
+
+    // Verify controls bound correctly
+    assert!(
+        matches!(proc.controls.iter().find(|c| c.label == "Tone").map(|c| &c.target),
+            Some(super::compiled::ControlTarget::PotInStage(1))),
+        "Tone should bind to PotInStage(1), got {:?}",
+        proc.controls.iter().find(|c| c.label == "Tone").map(|c| &c.target),
+    );
+
+    proc.set_control("Drive", 0.7);
+    proc.set_control("Tone", 0.5);
+    proc.set_control("Volume", 0.5);
+
+    let input = sine(48000);
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    assert_finite(&output, "Blues");
+    let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    eprintln!("[blues-debug] output peak: {peak:.6}");
+    // Output is currently low (~0.0001) — this is a separate signal level issue,
+    // not related to tone binding.
+    assert!(peak > 1e-6, "Blues should produce non-zero output: peak={peak}");
 }
 
 #[test]

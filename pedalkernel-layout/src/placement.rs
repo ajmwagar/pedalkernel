@@ -248,7 +248,7 @@ fn place_tone_stack(
     let signal_y = SIGNAL_PATH_Y * height;
 
     let count = group.members.len() as f32;
-    let spacing = (col_width * 0.7).min(count * MIN_COMPONENT_SPACING) / count.max(1.0);
+    let spacing = ((col_width * 0.7) / count.max(1.0)).max(MIN_COMPONENT_SPACING);
 
     for (i, &member_id) in group.members.iter().enumerate() {
         let node = &graph.nodes[member_id];
@@ -364,7 +364,7 @@ fn place_generic(
     let mut placed = Vec::new();
     let signal_y = SIGNAL_PATH_Y * height;
     let count = group.members.len() as f32;
-    let spacing = (col_width * 0.6).min(count * MIN_COMPONENT_SPACING) / count.max(1.0);
+    let spacing = ((col_width * 0.6) / count.max(1.0)).max(MIN_COMPONENT_SPACING);
 
     for (i, &member_id) in group.members.iter().enumerate() {
         let node = &graph.nodes[member_id];
@@ -439,16 +439,74 @@ fn compute_group_bounds(
     }
 }
 
-fn compute_signal_path_order(placed: &[PlacedComponent], _graph: &LayoutGraph) -> Vec<usize> {
-    // Sort by x position (left to right = signal flow)
-    let mut indices: Vec<usize> = (0..placed.len()).collect();
-    indices.sort_by(|&a, &b| {
+fn compute_signal_path_order(placed: &[PlacedComponent], graph: &LayoutGraph) -> Vec<usize> {
+    // BFS from graph.in_node following non-feedback, non-supply edges
+    // to determine signal-flow ordering.
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    let mut bfs_order: Vec<String> = Vec::new();
+
+    visited.insert(graph.in_node);
+    queue.push_back(graph.in_node);
+
+    while let Some(node_id) = queue.pop_front() {
+        let comp_id = &graph.nodes[node_id].comp_id;
+        if !graph.nodes[node_id].is_anchor {
+            bfs_order.push(comp_id.clone());
+        }
+
+        // Follow outgoing non-feedback, non-supply edges
+        for edge in &graph.edges {
+            let neighbor = if edge.from == node_id {
+                edge.to
+            } else if edge.to == node_id {
+                edge.from
+            } else {
+                continue;
+            };
+
+            if edge.is_feedback || edge.is_supply {
+                continue;
+            }
+            if visited.contains(&neighbor) {
+                continue;
+            }
+            visited.insert(neighbor);
+            queue.push_back(neighbor);
+        }
+    }
+
+    // Map BFS comp_id order → placed component indices
+    let name_to_placed: std::collections::HashMap<&str, usize> = placed
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.name.as_str(), i))
+        .collect();
+
+    let mut ordered: Vec<usize> = Vec::new();
+    let mut used = std::collections::HashSet::new();
+
+    for comp_id in &bfs_order {
+        if let Some(&idx) = name_to_placed.get(comp_id.as_str()) {
+            if used.insert(idx) {
+                ordered.push(idx);
+            }
+        }
+    }
+
+    // Append any unreached components at the end (sorted by x as fallback)
+    let mut remaining: Vec<usize> = (0..placed.len())
+        .filter(|i| !used.contains(i))
+        .collect();
+    remaining.sort_by(|&a, &b| {
         placed[a]
             .x
             .partial_cmp(&placed[b].x)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    indices
+    ordered.extend(remaining);
+
+    ordered
 }
 
 fn kind_to_string(kind: &dyn Component) -> String {

@@ -146,7 +146,7 @@ fn detect_gain_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
             // Check if this passive connects to only this active device and one other
             // (coupling cap or grid leak)
             let passive_neighbors = graph.neighbors(nid);
-            if passive_neighbors.len() <= 3 {
+            if passive_neighbors.len() <= 5 {
                 // Small connectivity — likely part of this stage
                 let connects_to_other_active = passive_neighbors.iter().any(|&pid| {
                     pid != node.id
