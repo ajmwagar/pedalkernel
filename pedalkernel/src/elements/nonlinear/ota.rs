@@ -79,7 +79,7 @@ impl OtaRoot {
         Self {
             iabc: model.iabc_max,
             model,
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
         }
     }
 

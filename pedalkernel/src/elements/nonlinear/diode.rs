@@ -244,7 +244,7 @@ impl ZenerRoot {
     pub fn new(model: ZenerModel) -> Self {
         Self {
             model,
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             prev_v: 0.0,
         }
     }
@@ -342,7 +342,7 @@ impl DiodePairRoot {
     pub fn new(model: DiodeModel) -> Self {
         Self {
             model,
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             prev_v: 0.0,
         }
     }
@@ -461,7 +461,7 @@ impl DiodeRoot {
     pub fn new(model: DiodeModel) -> Self {
         Self {
             model,
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             prev_v: 0.0,
         }
     }

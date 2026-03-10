@@ -129,7 +129,7 @@ impl PentodeRoot {
             vg1k: 0.0,
             vg2k,
             v_max: 500.0, // Default to high-voltage tube amp (will be set by supply)
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
         }
     }
 
@@ -143,7 +143,7 @@ impl PentodeRoot {
             vg1k: 0.0,
             vg2k,
             v_max: v_max.max(1.0),
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
         }
     }
 

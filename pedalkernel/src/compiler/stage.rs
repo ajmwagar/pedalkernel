@@ -339,6 +339,12 @@ pub(super) struct WdfStage {
     ///
     /// NOT the same as `paired_opamp` (which is for Bridged-T all-pass circuits).
     pub(super) feedback_opamp: Option<OpAmpRoot>,
+    /// VCC injection coefficient (per-unit, wave domain).
+    /// Multiply by supply voltage to get the DC bias added to the reflected wave.
+    /// Computed from a small resistive MNA at build time. Zero when no VCC edge.
+    pub(super) vcc_injection_coeff: f64,
+    /// Gradual DC ramp counter (0..256) to prevent NR solver divergence on startup.
+    pub(super) vcc_dc_ramp: u32,
 }
 
 impl WdfStage {
@@ -365,6 +371,8 @@ impl WdfStage {
         let compensation = self.compensation;
         let output_probe = &self.output_probe;
         let feedback_opamp = &mut self.feedback_opamp;
+        let vcc_injection_coeff = self.vcc_injection_coeff;
+        let vcc_dc_ramp = &mut self.vcc_dc_ramp;
 
         // Set control voltage for active devices (triodes, BJTs, pentodes).
         // Maps the input signal to the device's control terminal with appropriate
@@ -420,6 +428,20 @@ impl WdfStage {
             };
             tree.set_voltage(vs_voltage);
             let b_tree = tree.reflected();
+            // VCC bias injection: add DC operating point from supply voltage.
+            // Ramped over 256 samples to prevent NR solver divergence on startup.
+            let b_tree = if vcc_injection_coeff != 0.0 {
+                const DC_RAMP_SAMPLES: u32 = 256;
+                let dc_scale = if *vcc_dc_ramp >= DC_RAMP_SAMPLES {
+                    1.0
+                } else {
+                    *vcc_dc_ramp += 1;
+                    *vcc_dc_ramp as f64 / DC_RAMP_SAMPLES as f64
+                };
+                b_tree + vcc_injection_coeff * dc_scale
+            } else {
+                b_tree
+            };
             let rp = tree.port_resistance();
 
             let a_root = match root {

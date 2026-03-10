@@ -115,7 +115,7 @@ impl BjtNpnRoot {
             vbe: 0.0,
             ic: 0.0,
             v_max: 100.0,
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             tolerance: 1e-6,
             prev_v: 0.0,
         }
@@ -130,7 +130,7 @@ impl BjtNpnRoot {
             vbe: 0.0,
             ic: 0.0,
             v_max: v_max.max(1.0),
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             tolerance: 1e-6,
             prev_v: 0.0,
         }
@@ -331,7 +331,7 @@ impl BjtPnpRoot {
             veb: 0.0,
             ic: 0.0,
             v_max: 100.0,
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             tolerance: 1e-6,
             prev_v: 0.0,
         }
@@ -344,7 +344,7 @@ impl BjtPnpRoot {
             veb: 0.0,
             ic: 0.0,
             v_max: v_max.max(1.0),
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             tolerance: 1e-6,
             prev_v: 0.0,
         }
@@ -823,7 +823,7 @@ impl BjtGummelPoonRoot {
             sample_rate,
             cap_be_state: 0.0,
             cap_bc_state: 0.0,
-            max_iter: 20,
+            max_iter: super::solver::NR_MAX_ITER,
             tolerance: 1e-6,
         }
     }
@@ -1047,7 +1047,7 @@ impl BjtGummelPoon1Port {
             vbe: 0.0,
             ic: 0.0,
             v_max: 50.0,
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             tolerance: 1e-6,
         }
     }

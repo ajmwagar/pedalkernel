@@ -2,6 +2,11 @@
 
 use std::cell::RefCell;
 
+/// Default maximum Newton-Raphson iterations for nonlinear device solvers.
+/// Higher values reduce convergence failures (waveform discontinuities)
+/// at the cost of increased CPU usage per sample.
+pub const NR_MAX_ITER: usize = 24;
+
 const SOLVER_STATS_ENABLED: bool = true;
 
 thread_local! {

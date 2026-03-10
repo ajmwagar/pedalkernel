@@ -1052,14 +1052,14 @@ fn parse_pot(input: &str) -> IResult<&str, BoxComp> {
         char(','),
         ws_comments,
         alt((
+            // Legacy names (must be before single-letter to avoid partial match)
+            value(PotTaper::A, tag("audio")),
+            value(PotTaper::B, tag("linear")),
+            value(PotTaper::A, tag("log")),
             // Single-letter tapers (preferred)
             value(PotTaper::A, tag("a")),
             value(PotTaper::B, tag("b")),
             value(PotTaper::C, tag("c")),
-            // Legacy names
-            value(PotTaper::A, tag("log")),
-            value(PotTaper::A, tag("audio")),
-            value(PotTaper::B, tag("linear")),
         )),
     )))(input)?;
 

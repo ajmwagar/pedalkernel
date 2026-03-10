@@ -437,7 +437,7 @@ pub(super) fn build_stages(
         let stage = if plan.skip_vs {
             build_source_follower_stage(plan, elem, graph, sample_rate, oversampling, use_jfet_vr)
         } else {
-            build_vs_stage(plan, elem, graph, sample_rate, oversampling, use_jfet_vr)
+            build_vs_stage(plan, elem, graph, sample_rate, oversampling, use_jfet_vr, supply_voltage)
         };
 
         if let Some(mut stage) = stage {
@@ -585,6 +585,8 @@ pub(super) fn build_stages(
             feedback_pot_id: None,
             output_probe: None,
             feedback_opamp: None,
+            vcc_injection_coeff: 0.0,
+            vcc_dc_ramp: 0,
         });
     }
 
@@ -2348,9 +2350,10 @@ fn build_vs_stage(
     sample_rate: f64,
     oversampling: OversamplingFactor,
     use_jfet_vr: bool,
+    supply_voltage: f64,
 ) -> Option<WdfStage> {
-    // Use supply remap so triodes with plate loads to named supply rails
-    // (vcc_sc, A_bal, etc.) can reduce to valid SP trees.
+    // Use supply remap so triodes/BJTs with loads to named supply rails
+    // or VCC can reduce to valid SP trees. VCC bias is captured separately.
     let mut extra = vec![ExtraEdge {
         node_a: plan.source_node,
         node_b: plan.injection_node,
@@ -2363,8 +2366,41 @@ fn build_vs_stage(
             tree: DynNode::Resistor { rp: ve.resistance, last_a: 0.0 },
         });
     }
+
+    // ── VCC bias injection for single-NL stages ───────────────────────
+    // BJTs, diodes, JFETs, MOSFETs need VCC bias injection because their
+    // VS doesn't carry the supply voltage.
+    // Triodes/pentodes/varimu already get supply via v_max() — skip to avoid
+    // double-counting.
+    let needs_vcc_bias = matches!(
+        &elem.kind,
+        NonlinearKind::BjtNpn { .. }
+        | NonlinearKind::BjtPnp { .. }
+        | NonlinearKind::DiodePair(_)
+        | NonlinearKind::SingleDiode(_)
+        | NonlinearKind::Jfet { .. }
+        | NonlinearKind::Mosfet { .. }
+    );
+
     let remap = |n: NodeId| -> NodeId {
-        if graph.supply_nodes.contains(&n) { graph.gnd_node } else { n }
+        // Collapse VCC to ground for stages that use VCC bias injection.
+        // Triodes/pentodes keep VCC as a real node (v_max() handles supply).
+        if (needs_vcc_bias && n == graph.vcc_node) || graph.supply_nodes.contains(&n) {
+            graph.gnd_node
+        } else {
+            n
+        }
+    };
+    let vcc_injection_coeff = if needs_vcc_bias {
+        compute_vcc_injection_single(
+            &plan.passive_idxs,
+            graph,
+            &elem.junction_nodes,
+            plan.injection_node,
+            supply_voltage,
+        )
+    } else {
+        0.0
     };
 
     let (tree, output_probe) = graph_reduce(
@@ -2400,7 +2436,130 @@ fn build_vs_stage(
         feedback_pot_id: None,
         output_probe,
         feedback_opamp: None,
+        vcc_injection_coeff,
+        vcc_dc_ramp: 0,
     })
+}
+
+/// Compute VCC injection coefficient for a single-NL WDF stage.
+///
+/// Builds a minimal resistive MNA (caps open, inductors shorted at DC) with
+/// VCC as an ideal voltage source, and extracts the wave-domain injection
+/// coefficient at the NL root port. Returns 0.0 if no passive edge touches VCC.
+///
+/// The coefficient is in wave-domain per-unit: multiply by supply voltage to
+/// get the DC bias added to the reflected wave before the NR solver.
+fn compute_vcc_injection_single(
+    passive_idxs: &[usize],
+    graph: &CircuitGraph,
+    junction_nodes: &[super::graph::NodeId],
+    injection_node: super::graph::NodeId,
+    supply_voltage: f64,
+) -> f64 {
+    use crate::tree::{MnaSystem, WdfPort};
+
+    // Check if any passive edge touches VCC node.
+    let has_vcc = passive_idxs.iter().any(|&eidx| {
+        let e = &graph.edges[eidx];
+        e.node_a == graph.vcc_node || e.node_b == graph.vcc_node
+    });
+    if !has_vcc || junction_nodes.is_empty() {
+        return 0.0;
+    }
+
+    // Collect unique circuit nodes from passive edges (excluding ground).
+    let mut node_set: Vec<super::graph::NodeId> = Vec::new();
+    for &eidx in passive_idxs {
+        let e = &graph.edges[eidx];
+        for &n in &[e.node_a, e.node_b] {
+            if n != graph.gnd_node && !graph.supply_nodes.contains(&n) && !node_set.contains(&n) {
+                node_set.push(n);
+            }
+        }
+    }
+    // Ensure junction nodes and injection node are in the set.
+    for &n in junction_nodes {
+        if n != graph.gnd_node && !graph.supply_nodes.contains(&n) && !node_set.contains(&n) {
+            node_set.push(n);
+        }
+    }
+    if injection_node != graph.gnd_node
+        && !graph.supply_nodes.contains(&injection_node)
+        && !node_set.contains(&injection_node)
+    {
+        node_set.push(injection_node);
+    }
+
+    let num_mna_nodes = node_set.len();
+    if num_mna_nodes == 0 {
+        return 0.0;
+    }
+
+    let node_to_mna = |n: super::graph::NodeId| -> Option<usize> {
+        if n == graph.gnd_node || graph.supply_nodes.contains(&n) {
+            None // ground reference
+        } else {
+            node_set.iter().position(|&x| x == n)
+        }
+    };
+
+    // Build resistive MNA: stamp only resistors/pots (caps open at DC, inductors short).
+    // VCC is an ideal voltage source (1 VS).
+    let num_vsources = 1;
+    let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
+
+    for &eidx in passive_idxs {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+
+        // At DC: resistors/pots stamp normally, caps are open (skip), inductors are short.
+        // resistance() returns Some for both resistors and pots (max_r for pots).
+        if let Some(r) = comp.kind.resistance() {
+            let n1 = node_to_mna(e.node_a);
+            let n2 = node_to_mna(e.node_b);
+            mna.stamp_resistor(n1, n2, r);
+        } else if comp.kind.inductance().is_some() {
+            // Inductor is short at DC: stamp as very low resistance.
+            let n1 = node_to_mna(e.node_a);
+            let n2 = node_to_mna(e.node_b);
+            mna.stamp_resistor(n1, n2, 0.01);
+        }
+        // Capacitors: open at DC → skip (no stamp)
+    }
+
+    // GMIN regularization to avoid singular matrix.
+    for i in 0..num_mna_nodes {
+        mna.stamp_resistor(Some(i), None, 1e9);
+    }
+
+    // Stamp VCC as ideal voltage source.
+    let vcc_mna = node_to_mna(graph.vcc_node);
+    mna.stamp_voltage_source(vcc_mna, None, 0);
+
+    // NL root port: junction_nodes[0] to junction_nodes[1] (or ground).
+    let port_pos = node_to_mna(junction_nodes[0]);
+    let port_neg = if junction_nodes.len() > 1 {
+        node_to_mna(junction_nodes[1])
+    } else {
+        None
+    };
+
+    // Use a nominal port resistance (1kΩ) for the injection extraction.
+    let port = WdfPort {
+        node_pos: port_pos,
+        node_neg: port_neg,
+        resistance: 1000.0,
+    };
+
+    let (_scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&[port], 0);
+
+    // vs_injection[0] is the per-unit VCC injection coefficient at the NL root port.
+    // Multiply by supply voltage to get the wave-domain DC bias.
+    if vs_injection[0].is_finite() {
+        vs_injection[0] * supply_voltage
+    } else {
+        0.0
+    }
 }
 
 /// Build a source follower stage (no voltage source in tree).
@@ -2472,6 +2631,8 @@ fn build_source_follower_stage(
         feedback_pot_id: None,
         output_probe: None,
         feedback_opamp: None,
+        vcc_injection_coeff: 0.0,
+        vcc_dc_ramp: 0,
     })
 }
 

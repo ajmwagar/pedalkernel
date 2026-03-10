@@ -117,8 +117,7 @@ pedal "Big Muff" {
     R14.b -> C8.a, C9.a
     C8.b -> Tone.a             # Treble path
     C9.b -> Tone.b             # Bass path (opposite end)
-    Tone.a -> R15.a
-    Tone.b -> R15.a            # Both paths mix at R15
+    Tone.w -> R15.a            # Wiper blends treble/bass into mixing resistor
     R15.b -> C10.a
 
     # Output

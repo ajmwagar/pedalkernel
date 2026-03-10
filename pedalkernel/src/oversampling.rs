@@ -9,8 +9,8 @@
 //! 2. Processes each oversampled sample through the nonlinear stage
 //! 3. Filters and decimates back to the original sample rate
 //!
-//! The filters use half-band IIR designs (3rd-order Butterworth) for minimal
-//! latency and CPU cost while providing adequate alias rejection (~60 dB).
+//! The filters use half-band IIR designs (Butterworth) for minimal latency
+//! and CPU cost while providing strong alias rejection (~80 dB).
 
 /// Oversampling factor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,12 +54,12 @@ impl HalfBandFilter {
         let sections = match factor {
             OversamplingFactor::X1 => vec![],
             OversamplingFactor::X2 => {
-                // 4th-order Butterworth, fc = 0.25 * fs_oversampled
-                Self::design_butterworth(4, 0.25)
+                // 6th-order Butterworth, fc = 0.25 * fs_oversampled (~80dB rejection)
+                Self::design_butterworth(6, 0.25)
             }
             OversamplingFactor::X4 => {
-                // 6th-order Butterworth, fc = 0.125 * fs_oversampled
-                Self::design_butterworth(6, 0.125)
+                // 8th-order Butterworth, fc = 0.125 * fs_oversampled (~80dB rejection)
+                Self::design_butterworth(8, 0.125)
             }
         };
         let n = sections.len();

@@ -144,7 +144,7 @@ impl JfetRoot {
         Self {
             model,
             vgs: 0.0,
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             prev_v: 0.0,
         }
     }

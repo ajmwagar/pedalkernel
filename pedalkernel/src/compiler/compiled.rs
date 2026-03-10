@@ -645,6 +645,7 @@ impl CompiledPedal {
     /// For tube circuits, the plate voltage can swing from 0V to B+ (supply).
     /// For BJT circuits, Vce can swing from ~0V to Vcc (supply).
     pub fn set_supply_voltage(&mut self, voltage: f64) {
+        let prev_voltage = self.supply_voltage;
         self.supply_voltage = voltage.clamp(5.0, 500.0); // Allow up to 500V for tube gear
 
         // Calculate op-amp v_max from supply voltage.
@@ -720,6 +721,16 @@ impl CompiledPedal {
         // Update multi-NL stage DC bias for new supply voltage.
         for stage in &mut self.multi_nl_stages {
             stage.update_supply_voltage(voltage);
+        }
+
+        // Update single-NL WDF stage VCC bias.
+        if prev_voltage > 0.0 {
+            let scale = self.supply_voltage / prev_voltage;
+            for stage in &mut self.stages {
+                if stage.vcc_injection_coeff != 0.0 {
+                    stage.vcc_injection_coeff *= scale;
+                }
+            }
         }
     }
 
@@ -1650,6 +1661,7 @@ impl PedalProcessor for CompiledPedal {
             // Propagate the sagged voltage to all voltage-dependent elements.
             // This is the same mechanism as set_supply_voltage() but avoids
             // the clamp so we can track the dynamic sag precisely.
+            let prev_supply_voltage = self.supply_voltage;
             self.supply_voltage = sagged_voltage;
             // Update v_max for all root elements
             let saturation_margin = 1.5;
@@ -1677,6 +1689,15 @@ impl PedalProcessor for CompiledPedal {
             // dc_bias and vcc_bias_all scale linearly with supply voltage.
             for stage in &mut self.multi_nl_stages {
                 stage.update_supply_voltage(sagged_voltage);
+            }
+            // Update single-NL WDF stage VCC bias for supply sag.
+            if prev_supply_voltage > 0.0 {
+                let scale = sagged_voltage / prev_supply_voltage;
+                for stage in &mut self.stages {
+                    if stage.vcc_injection_coeff != 0.0 {
+                        stage.vcc_injection_coeff *= scale;
+                    }
+                }
             }
         }
 
@@ -1826,18 +1847,12 @@ impl PedalProcessor for CompiledPedal {
                 StageRef::MultiNl(i) => {
                     prev_was_clipping = false;
 
-                    // Node-based routing: look up the stage's injection node
-                    // in previously written outputs. If found, use that signal
-                    // instead of the serial chain value. This enables parallel
-                    // channels to each receive their correct predecessor's output.
+                    // Main-path multi-NL stages use the serial chain signal.
+                    // Sidechain multi-NL stages live in self.sidechains (separate
+                    // SidechainProcessor structs) and are NOT in stage_order,
+                    // so all MultiNl refs here are main-path.
                     let mnl = &mut self.multi_nl_stages[*i];
-                    let mnl_input = self
-                        .node_signals
-                        .iter()
-                        .rev()
-                        .find(|(nid, _)| *nid == mnl.injection_node_id)
-                        .map(|(_, v)| *v)
-                        .unwrap_or(signal);
+                    let mnl_input = signal;
 
                     #[cfg(feature = "debug-trace")]
                     let pre = mnl_input;

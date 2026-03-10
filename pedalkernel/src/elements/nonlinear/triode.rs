@@ -104,7 +104,7 @@ impl TriodeRoot {
             model,
             vgk: 0.0,
             v_max: 500.0,
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             parallel_count: 1,
             prev_v: 0.0,
         }
@@ -116,7 +116,7 @@ impl TriodeRoot {
             model,
             vgk: 0.0,
             v_max: v_max.max(1.0),
-            max_iter: 16,
+            max_iter: super::solver::NR_MAX_ITER,
             parallel_count: 1,
             prev_v: 0.0,
         }

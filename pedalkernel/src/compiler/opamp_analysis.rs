@@ -237,6 +237,8 @@ pub(super) fn build_opamp_feedback_stages(
                     feedback_pot_id,
                     output_probe: None,
                     feedback_opamp: None,
+                    vcc_injection_coeff: 0.0,
+                    vcc_dc_ramp: 0,
                 };
                 stage.balance_vs_impedance();
                 stages.push(stage);
@@ -364,6 +366,8 @@ pub(super) fn build_opamp_feedback_stages(
                     feedback_pot_id,
                     output_probe: None,
                     feedback_opamp: None,
+                    vcc_injection_coeff: 0.0,
+                    vcc_dc_ramp: 0,
                 };
                 stage.balance_vs_impedance();
                 stages.push(stage);

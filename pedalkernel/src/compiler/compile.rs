@@ -277,6 +277,8 @@ fn build_passive_wdf_stage(
                 feedback_pot_id: None,
                 output_probe: None,
                 feedback_opamp: None,
+                vcc_injection_coeff: 0.0,
+                vcc_dc_ramp: 0,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -615,6 +617,8 @@ fn build_passive_rtype_from_decomposed(
         feedback_pot_id: None,
         output_probe: None,
         feedback_opamp: None,
+        vcc_injection_coeff: 0.0,
+        vcc_dc_ramp: 0,
     })
 }
 
@@ -982,6 +986,8 @@ fn build_feedforward_stages(
                     feedback_pot_id: None,
                     output_probe,
                     feedback_opamp: None,
+                    vcc_injection_coeff: 0.0,
+                    vcc_dc_ramp: 0,
                 }
             }
             Err(_) => {
@@ -1108,6 +1114,8 @@ fn build_output_rooted_stage(
         feedback_pot_id: None,
         output_probe: None,
         feedback_opamp: None,
+        vcc_injection_coeff: 0.0,
+        vcc_dc_ramp: 0,
     })
 }
 
