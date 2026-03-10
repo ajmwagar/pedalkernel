@@ -8,6 +8,8 @@ use std::process;
 pub fn run(file_path: &str, input_path: &str, output_path: &str, knob_args: &[String]) {
     if file_path.ends_with(".board") {
         run_board(file_path, input_path, output_path, knob_args);
+    } else if file_path.ends_with(".cab") {
+        run_cab(file_path, input_path, output_path);
     } else {
         run_pedal(file_path, input_path, output_path, knob_args);
     }
@@ -87,6 +89,42 @@ fn run_pedal(pedal_path: &str, input_path: &str, output_path: &str, knob_args: &
         eprintln!("  {label}: {val:.2}");
     }
     eprintln!("Output: {} ({} samples)", output_path, output_samples.len());
+}
+
+fn run_cab(cab_path: &str, input_path: &str, output_path: &str) {
+    let source = std::fs::read_to_string(cab_path).unwrap_or_else(|e| {
+        eprintln!("Error reading {cab_path}: {e}");
+        process::exit(1);
+    });
+
+    let cab = pedalkernel::cab::parse_cab_file(&source).unwrap_or_else(|e| {
+        eprintln!("Parse error: {e}");
+        process::exit(1);
+    });
+
+    let (input_samples, sample_rate) = pedalkernel::wav::read_wav_mono(Path::new(input_path))
+        .unwrap_or_else(|e| {
+            eprintln!("Error reading {input_path}: {e}");
+            process::exit(1);
+        });
+    eprintln!(
+        "Input: {} ({} samples, {} Hz)",
+        input_path,
+        input_samples.len(),
+        sample_rate,
+    );
+
+    let mut proc = pedalkernel::cab::compile_cab(&cab, sample_rate as f64).unwrap_or_else(|e| {
+        eprintln!("Compilation error: {e}");
+        process::exit(1);
+    });
+
+    let output_samples: Vec<f64> = input_samples.iter().map(|&s| proc.process(s)).collect();
+
+    write_wav(output_path, sample_rate, &output_samples);
+
+    eprintln!("Cabinet: \"{}\"", cab.name);
+    eprintln!("Output:  {} ({} samples)", output_path, output_samples.len());
 }
 
 fn run_board(board_path: &str, input_path: &str, output_path: &str, knob_args: &[String]) {

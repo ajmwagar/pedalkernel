@@ -65,6 +65,27 @@ enum Command {
         #[arg(long)]
         show: Option<String>,
     },
+    /// Export an impulse response WAV from a .cab file.
+    ///
+    /// Examples:
+    ///   pedalkernel ir my_cab.cab output.wav
+    ///   pedalkernel ir my_cab.cab output.wav --rate 96000 --length 2000 --bits 24
+    Ir {
+        /// Path to the .cab file.
+        file: String,
+        /// Output WAV file path.
+        output: String,
+        /// Sample rate in Hz (default: 48000).
+        #[arg(long, default_value = "48000")]
+        rate: u32,
+        /// IR length in milliseconds (default: 1000).
+        #[arg(long, default_value = "1000")]
+        length: u32,
+        /// Bit depth: 16, 24, or 32 (default: 32).
+        #[arg(long, default_value = "32")]
+        bits: u16,
+    },
+
     /// Interactive TUI with live JACK audio — select I/O ports and tweak knobs.
     #[cfg(all(feature = "jack-rt", feature = "tui"))]
     Tui {
@@ -88,6 +109,13 @@ fn main() {
         } => cli::process::run(&file, &input, &output, &knobs),
         Command::Debug { file } => cli::debug::run(&file),
         Command::Validate { paths, fix } => cli::validate::run(&paths, fix),
+        Command::Ir {
+            file,
+            output,
+            rate,
+            length,
+            bits,
+        } => cli::ir::run(&file, &output, rate, length, bits),
         Command::Models {
             model_type,
             search,

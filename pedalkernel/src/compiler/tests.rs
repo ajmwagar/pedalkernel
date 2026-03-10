@@ -686,8 +686,8 @@ fn compile_goldenrod() {
     }
     eprintln!("[goldenrod-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
     for (i, mnl) in proc.multi_nl_stages.iter().enumerate() {
-        eprintln!("[goldenrod-debug]   mnl[{i}]: sfd={} n_nl={} inj={} out={}",
-            mnl.signal_flow_distance, mnl.n_nl, mnl.injection_node, mnl.output_node);
+        eprintln!("[goldenrod-debug]   mnl[{i}]: sfd={} n_nl={}",
+            mnl.signal_flow_distance, mnl.n_nl);
     }
     eprintln!("[goldenrod-debug] Stage Order: {:?}", proc.stage_order);
     eprintln!("[goldenrod-debug] Controls: {}", proc.controls.len());

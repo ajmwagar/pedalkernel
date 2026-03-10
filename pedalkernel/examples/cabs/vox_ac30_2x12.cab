@@ -1,0 +1,55 @@
+# Vox AC30 2x12 Open Back
+# Semi-open back 2x12 with Celestion Blue alnico speakers.
+# Lightweight construction, very resonant.
+
+cab "Vox AC30 2x12" {
+  driver left {
+    preset: g12_blue
+    position: [17cm, 24cm]
+    cone { material: paper, dust_cap: felt, surround: cloth }
+    suspension { Xmax: 1.5mm, curve: hardening, bl_symmetry: 0.80 }
+  }
+
+  driver right {
+    preset: g12_blue
+    position: [48cm, 24cm]
+  }
+
+  enclosure {
+    type: open_back
+    volume: 75L
+    open_area: 65%
+    depth: 26cm
+
+    construction {
+      material: birch_ply(15mm)
+      width: 65cm
+      height: 48cm
+      depth: 26cm
+      bracing {}
+      joints: butt
+      covering: tolex
+      corners: butt
+    }
+
+    damping { material: none }
+
+    baffle {
+      edge: square
+      grille: cloth
+    }
+  }
+
+  mic close {
+    model: sm57
+    position: [2cm, 0cm, 2cm]
+    target: left
+    angle: 0deg
+  }
+
+  controls {
+    mic.close.position.x -> "Mic Position" [-8cm, 8cm] = 2cm
+    mic.close.position.z -> "Mic Distance" [1cm, 15cm] = 2cm
+    mic.close.angle -> "Mic Angle" [0deg, 60deg] = 0deg
+  }
+}

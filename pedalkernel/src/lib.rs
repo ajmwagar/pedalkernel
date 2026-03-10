@@ -16,6 +16,7 @@
 //! - [`metering`] — lock-free audio-to-UI metrics for VU meters and visualizations
 
 pub mod board;
+pub mod cab;
 pub mod compiler;
 pub mod debug;
 pub mod dsl;

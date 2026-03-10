@@ -804,7 +804,7 @@ pub enum MeterType {
 // ---------------------------------------------------------------------------
 
 /// Consume whitespace **and** `# …` comments.
-fn ws_comments(input: &str) -> IResult<&str, ()> {
+pub(crate) fn ws_comments(input: &str) -> IResult<&str, ()> {
     let (input, _) = many0(alt((
         value((), multispace1),
         value((), pair(char('#'), not_line_ending)),
@@ -813,7 +813,7 @@ fn ws_comments(input: &str) -> IResult<&str, ()> {
 }
 
 /// Identifier: starts with alpha/underscore, continues with alphanumeric/underscore.
-fn identifier(input: &str) -> IResult<&str, &str> {
+pub(crate) fn identifier(input: &str) -> IResult<&str, &str> {
     recognize(pair(
         take_while1(|c: char| c.is_ascii_alphabetic() || c == '_'),
         take_while(|c: char| c.is_ascii_alphanumeric() || c == '_'),
@@ -821,7 +821,7 @@ fn identifier(input: &str) -> IResult<&str, &str> {
 }
 
 /// Engineering-notation multiplier suffix.
-fn eng_suffix(input: &str) -> IResult<&str, f64> {
+pub(crate) fn eng_suffix(input: &str) -> IResult<&str, f64> {
     alt((
         value(1e-12, tag("p")),
         value(1e-9, tag("n")),
@@ -845,7 +845,7 @@ fn eng_suffix(input: &str) -> IResult<&str, f64> {
 /// Supports IEC 60062 embedded-decimal notation where the multiplier letter replaces
 /// the decimal point: `4k7` = 4.7k = 4700, `2u5` = 2.5µF, `0R47` = 0.47Ω.
 /// Also accepts `inf` for infinite impedance (open circuit).
-fn eng_value(input: &str) -> IResult<&str, f64> {
+pub(crate) fn eng_value(input: &str) -> IResult<&str, f64> {
     // Try `inf` keyword first (infinite impedance / open circuit)
     if let Ok((rest, _)) = tag::<&str, &str, nom::error::Error<&str>>("inf")(input) {
         return Ok((rest, f64::INFINITY));
@@ -873,7 +873,7 @@ fn eng_value(input: &str) -> IResult<&str, f64> {
 }
 
 /// Quoted string: `"Foo Bar"`
-fn quoted_string(input: &str) -> IResult<&str, &str> {
+pub(crate) fn quoted_string(input: &str) -> IResult<&str, &str> {
     delimited(char('"'), take_while(|c: char| c != '"'), char('"'))(input)
 }
 
