@@ -544,6 +544,117 @@ fn compile_klon_centaur() {
 }
 
 #[test]
+fn compile_ratking() {
+    // RAT: LM308 inverting opamp + hard clipping diodes to ground + passive tone
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/ratking.pedal");
+    if !pro_path.exists() {
+        eprintln!("[rat-debug] Skipping: {:?} not found", pro_path);
+        return;
+    }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("[rat-debug] WDF stages: {}", proc.stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let root_tag = match &s.root {
+            super::stage::RootKind::DiodePair(_) => "DiodePair",
+            super::stage::RootKind::SingleDiode(_) => "SingleDiode",
+            super::stage::RootKind::OpAmp(_) => "OpAmp",
+            super::stage::RootKind::Passthrough => "Passthrough",
+            _ => "Other",
+        };
+        eprintln!("[rat-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={} feedback_pot={:?} output_probe={:?}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            s.feedback_opamp.is_some(), s.feedback_pot_id, s.output_probe);
+    }
+    eprintln!("[rat-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
+    eprintln!("[rat-debug] Controls: {}", proc.controls.len());
+    for (i, c) in proc.controls.iter().enumerate() {
+        eprintln!("[rat-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
+    }
+
+    // Test that Volume knob changes output level
+    let input = sine(48000);
+    for &vol in &[0.0, 0.3, 0.6, 1.0] {
+        proc.set_control("Distortion", 0.5);
+        proc.set_control("Filter", 0.5);
+        proc.set_control("Volume", vol);
+        // Reset state
+        for _ in 0..4800 { proc.process(0.0); }
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        let peak = output[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        eprintln!("[rat-debug] Volume={:.1}: peak={:.6}", vol, peak);
+    }
+
+    // Test that Filter knob changes tone
+    for &filt in &[0.0, 0.5, 1.0] {
+        proc.set_control("Distortion", 0.5);
+        proc.set_control("Filter", filt);
+        proc.set_control("Volume", 0.5);
+        for _ in 0..4800 { proc.process(0.0); }
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        let peak = output[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        eprintln!("[rat-debug] Filter={:.1}: peak={:.6}", filt, peak);
+    }
+}
+
+#[test]
+fn compile_muff() {
+    // Big Muff Pi: 4 BJT stages + 2 DiodePair clipping + tone stack
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/muff.pedal");
+    if !pro_path.exists() {
+        eprintln!("[muff-debug] Skipping: {:?} not found", pro_path);
+        return;
+    }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("[muff-debug] WDF stages: {}", proc.stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let root_tag = match &s.root {
+            super::stage::RootKind::DiodePair(_) => "DiodePair",
+            super::stage::RootKind::SingleDiode(_) => "SingleDiode",
+            super::stage::RootKind::OpAmp(_) => "OpAmp",
+            super::stage::RootKind::Passthrough => "Passthrough",
+            super::stage::RootKind::BjtNpn(_) => "BjtNpn",
+            super::stage::RootKind::BjtPnp(_) => "BjtPnp",
+            _ => "Other",
+        };
+        eprintln!("[muff-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            s.feedback_opamp.is_some());
+    }
+    eprintln!("[muff-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
+    for (i, m) in proc.multi_nl_stages.iter().enumerate() {
+        eprintln!("[muff-debug]   mnl[{i}]: n_nl={}", m.n_nl);
+    }
+    eprintln!("[muff-debug] Controls: {}", proc.controls.len());
+    for (i, c) in proc.controls.iter().enumerate() {
+        eprintln!("[muff-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
+    }
+
+    proc.set_control("Sustain", 0.7);
+    proc.set_control("Tone", 0.5);
+    proc.set_control("Volume", 0.6);
+
+    let input = sine(48000);
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    assert_finite(&output, "Muff");
+    let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    eprintln!("[muff-debug] Peak output: {:.6} (gain={:.1}x, {:.1}dB)",
+        peak, peak / 0.1, 20.0 * (peak / 0.1).log10());
+    assert!(peak > 0.001, "Muff should produce output: peak={peak}");
+}
+
+#[test]
 fn compile_goldenrod() {
     // Goldenrod (Klon Centaur v3): hard-clip Ge diodes to ground + non-inverting gain stage.
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

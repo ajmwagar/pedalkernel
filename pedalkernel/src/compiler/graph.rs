@@ -2427,12 +2427,18 @@ pub(super) fn graph_reduce(
             if output_node == Some(node) && output_probe_comp_id.is_none() {
                 // Determine which edge connects to ground (the "ground side").
                 // The ground-side edge's leaf comp_id is the output probe.
-                let gnd_side_idx = if terminals.contains(&other2)
-                    || other2 == graph.gnd_node
-                {
-                    i2
+                // The gnd side is the edge going AWAY from terminals (junction/source),
+                // i.e., toward the ground termination.
+                let gnd_side_idx = if other2 == graph.gnd_node {
+                    i2 // other2 IS gnd → i2 goes to gnd
+                } else if other1 == graph.gnd_node {
+                    i1 // other1 IS gnd → i1 goes to gnd
+                } else if terminals.contains(&other2) {
+                    i1 // other2 is terminal (junction) → gnd side is i1
+                } else if terminals.contains(&other1) {
+                    i2 // other1 is terminal → gnd side is i2
                 } else {
-                    i1
+                    i2 // default fallback
                 };
                 output_probe_comp_id = edges[gnd_side_idx].tree.leaf_comp_id();
             }
