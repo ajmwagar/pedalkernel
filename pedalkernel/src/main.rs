@@ -69,7 +69,7 @@ enum Command {
     ///
     /// Examples:
     ///   pedalkernel ir my_cab.cab output.wav
-    ///   pedalkernel ir my_cab.cab output.wav --rate 96000 --length 2000 --bits 24
+    ///   pedalkernel ir my_cab.cab output.wav --rate 96000 --length 4096 --bits 24
     Ir {
         /// Path to the .cab file.
         file: String,
@@ -78,8 +78,8 @@ enum Command {
         /// Sample rate in Hz (default: 48000).
         #[arg(long, default_value = "48000")]
         rate: u32,
-        /// IR length in milliseconds (default: 1000).
-        #[arg(long, default_value = "1000")]
+        /// IR length in samples (default: 2048).
+        #[arg(long, default_value = "2048")]
         length: u32,
         /// Bit depth: 16, 24, or 32 (default: 32).
         #[arg(long, default_value = "32")]

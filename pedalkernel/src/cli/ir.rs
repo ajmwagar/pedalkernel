@@ -5,7 +5,7 @@ use std::process;
 
 use pedalkernel::cab::{compile_cab, ir_export, parse_cab_file, IrExportConfig};
 
-pub fn run(cab_path: &str, output_path: &str, sample_rate: u32, length_ms: u32, bit_depth: u16) {
+pub fn run(cab_path: &str, output_path: &str, sample_rate: u32, length_samples: u32, bit_depth: u16) {
     let source = std::fs::read_to_string(cab_path).unwrap_or_else(|e| {
         eprintln!("Error reading {cab_path}: {e}");
         process::exit(1);
@@ -21,7 +21,7 @@ pub fn run(cab_path: &str, output_path: &str, sample_rate: u32, length_ms: u32, 
         process::exit(1);
     });
 
-    let length = (sample_rate as usize * length_ms as usize) / 1000;
+    let length = length_samples as usize;
     let config = IrExportConfig {
         sample_rate,
         length,

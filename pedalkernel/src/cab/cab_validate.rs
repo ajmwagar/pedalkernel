@@ -56,6 +56,9 @@ pub fn validate_cab(cab: &mut CabDef) -> Result<Vec<CabWarning>, String> {
         warnings.extend(plausibility_check(driver, i));
     }
 
+    // Derive volume from construction dimensions if not explicitly set
+    derive_volume(&mut cab.enclosure);
+
     // Enclosure validation
     warnings.extend(validate_enclosure(&cab.enclosure));
 
@@ -254,6 +257,29 @@ fn plausibility_check(driver: &DriverDef, index: usize) -> Vec<CabWarning> {
     }
 
     warnings
+}
+
+/// Derive internal volume from construction dimensions when not explicitly specified.
+///
+/// If `volume` is already set, it is left unchanged (user override wins).
+/// Otherwise, if `construction` provides width, height, and depth, the internal
+/// volume is computed by subtracting 2× panel thickness per axis.
+fn derive_volume(enc: &mut EnclosureDef) {
+    if enc.volume.is_some() {
+        return; // User explicitly specified volume, respect it
+    }
+    if let Some(ref construction) = enc.construction {
+        if let (Some(w), Some(h), Some(d)) =
+            (construction.width, construction.height, construction.depth)
+        {
+            let t = construction.thickness;
+            // Internal dimensions = external minus 2× panel thickness per axis
+            let w_int = (w - 2.0 * t).max(0.01);
+            let h_int = (h - 2.0 * t).max(0.01);
+            let d_int = (d - 2.0 * t).max(0.01);
+            enc.volume = Some(w_int * h_int * d_int);
+        }
+    }
 }
 
 fn validate_enclosure(enc: &EnclosureDef) -> Vec<CabWarning> {
@@ -481,6 +507,68 @@ mod tests {
             monitors: Vec::new(),
         };
         assert!(validate_cab(&mut cab).is_err());
+    }
+
+    #[test]
+    fn volume_derived_from_construction() {
+        let mut enc = EnclosureDef {
+            enclosure_type: EnclosureType::Sealed,
+            volume: None,
+            construction: Some(ConstructionDef {
+                width: Some(0.60),    // 60cm
+                height: Some(0.70),   // 70cm
+                depth: Some(0.30),    // 30cm
+                thickness: 0.018,     // 18mm birch ply
+                ..ConstructionDef::default()
+            }),
+            ..EnclosureDef::default()
+        };
+        derive_volume(&mut enc);
+        let vol = enc.volume.expect("Volume should be derived");
+        // Internal: (0.60-0.036) × (0.70-0.036) × (0.30-0.036) = 0.564 × 0.664 × 0.264 ≈ 0.0988 m³
+        assert!(
+            (vol - 0.0988).abs() < 0.005,
+            "Derived volume should be ~0.099 m³, got {vol:.4}"
+        );
+    }
+
+    #[test]
+    fn explicit_volume_overrides_construction() {
+        let mut enc = EnclosureDef {
+            enclosure_type: EnclosureType::Sealed,
+            volume: Some(0.045),
+            construction: Some(ConstructionDef {
+                width: Some(0.60),
+                height: Some(0.70),
+                depth: Some(0.30),
+                thickness: 0.018,
+                ..ConstructionDef::default()
+            }),
+            ..EnclosureDef::default()
+        };
+        derive_volume(&mut enc);
+        assert_eq!(
+            enc.volume,
+            Some(0.045),
+            "Explicit volume should not be overridden"
+        );
+    }
+
+    #[test]
+    fn volume_not_derived_without_all_dimensions() {
+        let mut enc = EnclosureDef {
+            volume: None,
+            construction: Some(ConstructionDef {
+                width: Some(0.60),
+                height: None, // missing
+                depth: Some(0.30),
+                thickness: 0.018,
+                ..ConstructionDef::default()
+            }),
+            ..EnclosureDef::default()
+        };
+        derive_volume(&mut enc);
+        assert!(enc.volume.is_none(), "Volume should not be derived without all 3 dimensions");
     }
 
     #[test]

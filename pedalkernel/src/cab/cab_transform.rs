@@ -19,11 +19,12 @@
 
 use std::f64::consts::PI;
 
+use crate::compiler::components::TransformerComp;
 use crate::compiler::{compile_pedal, CompiledPedal};
-use crate::dsl::{CapConfig, CapType, ControlDef, NetDef, PedalDef, Pin};
+use crate::dsl::{CapConfig, CapType, ControlDef, NetDef, PedalDef, Pin, TransformerConfig};
 
 use super::cab_def::*;
-use super::cab_validate::{resolved_ts, validate_cab};
+use super::cab_validate::{calculate_panel_modes, resolved_ts, validate_cab};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Public API
@@ -309,24 +310,34 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
     });
 
     // ── Cone breakup mode RLC branches ──────────────────────────────────
-    let cone = driver.cone.as_ref().map(|c| c.clone()).unwrap_or_default();
+    // Cone material affects breakup: stiffer materials push breakup higher,
+    // higher damping factor reduces Q of breakup resonances.
+    let cone = driver.cone.as_ref().cloned().unwrap_or_default();
     let breakup_freq = cone.breakup_freq.unwrap_or_else(|| {
         let diam = 2.0 * piston_radius(ts.sd);
         let ref_diam = 0.30; // 12 inch reference
         cone.material.default_breakup_freq_12in() * (ref_diam / diam)
     });
 
+    // Material properties modulate the user-specified (or default) Q and level:
+    //   - Higher damping_factor → lower Q (more damped breakup peaks)
+    //   - Higher stiffness → sharper peaks (higher Q) but material damping counteracts
+    // Reference: paper cone (damping=0.08, stiffness=1.0)
+    let mat_damping = cone.material.damping_factor();
+    let ref_damping = ConeMaterial::Paper.damping_factor(); // 0.08
+    let damping_ratio = ref_damping / mat_damping.max(1e-6); // >1 for low-damping materials
+
     let mut breakup_ids = Vec::new();
     for mode_n in 0..cone.breakup_modes.min(4) {
-        let f_mode = breakup_freq * (1.0 + mode_n as f64 * 0.6); // modes spaced ~60% apart
-        let q_mode = cone.breakup_q / (1.0 + mode_n as f64 * 0.3);
+        let f_mode = breakup_freq * (1.0 + mode_n as f64 * 0.6);
+        // Scale Q by inverse damping ratio: aluminum (low damping) → higher Q peaks
+        let q_mode = (cone.breakup_q * damping_ratio) / (1.0 + mode_n as f64 * 0.3);
         let level = 10f64.powf(cone.breakup_level / 20.0) / (1.0 + mode_n as f64);
 
         // RLC values for a parallel resonator at f_mode with Q = q_mode
-        // Normalized to match the motional impedance level
         let r_bp = r_es * level;
-        let c_bp = 1.0 / (2.0 * PI * f_mode * r_bp * q_mode);
-        let l_bp = r_bp * q_mode / (2.0 * PI * f_mode);
+        let c_bp = 1.0 / (2.0 * PI * f_mode * r_bp * q_mode.max(0.1));
+        let l_bp = r_bp * q_mode.max(0.1) / (2.0 * PI * f_mode);
 
         let rbp_id = next_id("Rbp");
         let cbp_id = next_id("Cbp");
@@ -354,6 +365,82 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
 
         breakup_ids.push((rbp_id, cbp_id, lbp_id));
     }
+
+    // ── Panel vibration mode RLC branches ─────────────────────────────
+    // Cabinet panels vibrate at resonant frequencies determined by material,
+    // thickness, dimensions, and covering. These add coloration (the "woody"
+    // character of a cab) as parallel RLC branches on the motional junction.
+    let mut panel_mode_ids: Vec<(String, String, String)> = Vec::new();
+    if let Some(ref construction) = cab.enclosure.construction {
+        // Need width and height to compute panel modes
+        if let (Some(w), Some(h)) = (construction.width, construction.height) {
+            let modes = calculate_panel_modes(
+                construction.material,
+                construction.thickness,
+                w,
+                h,
+                construction.covering,
+                4, // up to 4 panel modes
+            );
+            for pm in &modes {
+                // Scale panel mode level: lower modes couple more strongly
+                let pm_level = 10f64.powf(pm.level_db / 20.0) * 0.3; // panels are weaker than cone breakup
+                let r_pm = r_es * pm_level.max(1e-6);
+                let q_pm = pm.q;
+                let f_pm = pm.frequency;
+
+                let c_pm = 1.0 / (2.0 * PI * f_pm * r_pm * q_pm.max(0.1));
+                let l_pm = r_pm * q_pm.max(0.1) / (2.0 * PI * f_pm);
+
+                let rpm_id = next_id("Rpm");
+                let cpm_id = next_id("Cpm");
+                let lpm_id = next_id("Lpm");
+
+                components.push(crate::dsl::ComponentDef {
+                    id: rpm_id.clone(),
+                    kind: Box::new(crate::compiler::components::Resistor { value: r_pm }),
+                });
+                components.push(crate::dsl::ComponentDef {
+                    id: cpm_id.clone(),
+                    kind: Box::new(crate::compiler::components::Capacitor {
+                        config: CapConfig {
+                            value: c_pm,
+                            cap_type: CapType::Film,
+                            leakage: None,
+                            da: None,
+                        },
+                    }),
+                });
+                components.push(crate::dsl::ComponentDef {
+                    id: lpm_id.clone(),
+                    kind: Box::new(crate::compiler::components::Inductor { value: l_pm }),
+                });
+
+                panel_mode_ids.push((rpm_id, cpm_id, lpm_id));
+            }
+        }
+    }
+
+    // ── Internal damping material ─────────────────────────────────────
+    // Damping material (polyester fill, fiberglass, etc.) absorbs acoustic
+    // energy inside the enclosure, reducing the Q of the box resonance.
+    // Modeled as a resistor in parallel with the box compliance (L_box).
+    // Higher absorption → lower resistance → more damping.
+    let damping_r = if let Some(ref damping_def) = cab.enclosure.damping {
+        let alpha = damping_def.material.absorption_coefficient();
+        if alpha > 0.0 && damping_def.coverage > 0.0 {
+            // Effective absorption scales with coverage and material coefficient.
+            // The damping resistance is inversely proportional to absorption:
+            // less resistance = more energy dissipated = more damping.
+            // Scale relative to R_es so the damping is meaningful in the circuit.
+            let effective_alpha = alpha * damping_def.coverage;
+            Some(r_es / effective_alpha.max(0.01))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // ── Build the netlist ───────────────────────────────────────────────
 
@@ -410,13 +497,44 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
         });
     }
 
+    // Add panel mode branches to junction
+    for (rpm_id, cpm_id, lpm_id) in &panel_mode_ids {
+        junction_pins.push(Pin::ComponentPin {
+            component: rpm_id.clone(),
+            pin: "a".to_string(),
+        });
+        junction_pins.push(Pin::ComponentPin {
+            component: cpm_id.clone(),
+            pin: "a".to_string(),
+        });
+        junction_pins.push(Pin::ComponentPin {
+            component: lpm_id.clone(),
+            pin: "a".to_string(),
+        });
+    }
+
+    // Add damping material resistor to junction (parallel with box compliance)
+    if let Some(r_damp) = damping_r {
+        let rdamp_id = next_id("Rdamp");
+        components.push(crate::dsl::ComponentDef {
+            id: rdamp_id.clone(),
+            kind: Box::new(crate::compiler::components::Resistor { value: r_damp }),
+        });
+        junction_pins.push(Pin::ComponentPin {
+            component: rdamp_id.clone(),
+            pin: "a".to_string(),
+        });
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: rdamp_id,
+                pin: "b".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+    }
+
     // For open_back, L_ces is already connected above; for sealed, add it here
     if cab.enclosure.enclosure_type != EnclosureType::OpenBack {
-        // L_ces.a is also at the junction
-        let lces_existing_id = format!("Lces_{}", comp_id - breakup_ids.len() * 3 - 1);
-        // Actually we need to track the L_ces ID properly. Let me use the component list.
-        // The L_ces component was added with next_id("Lces"), so its ID is deterministic.
-        // Let me find it from components.
         if let Some(lces_comp) = components.iter().find(|c| c.id.starts_with("Lces")) {
             junction_pins.push(Pin::ComponentPin {
                 component: lces_comp.id.clone(),
@@ -474,14 +592,196 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
         });
     }
 
-    // R_rad.b -> out
-    nets.push(NetDef {
-        from: Pin::ComponentPin {
-            component: rrad_id,
+    // Panel mode branch .b -> gnd
+    for (rpm_id, cpm_id, lpm_id) in &panel_mode_ids {
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: rpm_id.clone(),
+                pin: "b".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: cpm_id.clone(),
+                pin: "b".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: lpm_id.clone(),
+                pin: "b".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+    }
+
+    // ── Microphone circuit ──────────────────────────────────────────────
+    // Determine if we have a mic with an equivalent circuit to model.
+    let mic_params = if !cab.mics.is_empty() && mic_index < cab.mics.len() {
+        cab.mics[mic_index].model.circuit_params()
+    } else {
+        None
+    };
+
+    if let Some(ref mp) = mic_params {
+        // Build mic transducer equivalent circuit:
+        //   R_rad.b → [coupling_cap →] [R_fet →] R_vc → L_vc → Transformer → out
+        //
+        // For condensers: coupling cap + FET output R replace voice coil R/L.
+        // For dynamic/ribbon: voice coil R + L feed the transformer primary.
+
+        let mut prev_pin = Pin::ComponentPin {
+            component: rrad_id.clone(),
             pin: "b".to_string(),
-        },
-        to: vec![Pin::Reserved("out".to_string())],
-    });
+        };
+
+        // Condenser: coupling capacitor (capsule equivalent)
+        if let Some(cc) = mp.coupling_cap {
+            let cc_id = next_id("Ccap");
+            components.push(crate::dsl::ComponentDef {
+                id: cc_id.clone(),
+                kind: Box::new(crate::compiler::components::Capacitor {
+                    config: CapConfig {
+                        value: cc,
+                        cap_type: CapType::Film,
+                        leakage: None,
+                        da: None,
+                    },
+                }),
+            });
+            nets.push(NetDef {
+                from: prev_pin,
+                to: vec![Pin::ComponentPin {
+                    component: cc_id.clone(),
+                    pin: "a".to_string(),
+                }],
+            });
+            prev_pin = Pin::ComponentPin {
+                component: cc_id,
+                pin: "b".to_string(),
+            };
+        }
+
+        // Condenser: FET output impedance
+        if let Some(r_fet) = mp.fet_output_r {
+            let rfet_id = next_id("Rfet");
+            components.push(crate::dsl::ComponentDef {
+                id: rfet_id.clone(),
+                kind: Box::new(crate::compiler::components::Resistor { value: r_fet }),
+            });
+            nets.push(NetDef {
+                from: prev_pin,
+                to: vec![Pin::ComponentPin {
+                    component: rfet_id.clone(),
+                    pin: "a".to_string(),
+                }],
+            });
+            prev_pin = Pin::ComponentPin {
+                component: rfet_id,
+                pin: "b".to_string(),
+            };
+        }
+
+        // Dynamic/ribbon: voice coil resistance (skip if zero for condensers)
+        if mp.voice_coil_re > 0.0 {
+            let rvc_id = next_id("Rvc");
+            components.push(crate::dsl::ComponentDef {
+                id: rvc_id.clone(),
+                kind: Box::new(crate::compiler::components::Resistor {
+                    value: mp.voice_coil_re,
+                }),
+            });
+            nets.push(NetDef {
+                from: prev_pin,
+                to: vec![Pin::ComponentPin {
+                    component: rvc_id.clone(),
+                    pin: "a".to_string(),
+                }],
+            });
+            prev_pin = Pin::ComponentPin {
+                component: rvc_id,
+                pin: "b".to_string(),
+            };
+        }
+
+        // Dynamic/ribbon: voice coil inductance (skip if zero for condensers)
+        if mp.voice_coil_le > 0.0 {
+            let lvc_id = next_id("Lvc");
+            components.push(crate::dsl::ComponentDef {
+                id: lvc_id.clone(),
+                kind: Box::new(crate::compiler::components::Inductor {
+                    value: mp.voice_coil_le,
+                }),
+            });
+            nets.push(NetDef {
+                from: prev_pin,
+                to: vec![Pin::ComponentPin {
+                    component: lvc_id.clone(),
+                    pin: "a".to_string(),
+                }],
+            });
+            prev_pin = Pin::ComponentPin {
+                component: lvc_id,
+                pin: "b".to_string(),
+            };
+        }
+
+        // Step-up transformer
+        let xfmr_id = next_id("Tmic");
+        let xfmr_config = TransformerConfig::new(1.0 / mp.transformer_ratio, mp.transformer_l_pri)
+            .with_dcr(mp.transformer_dcr_pri, mp.transformer_dcr_sec)
+            .with_capacitance(mp.transformer_cap);
+        components.push(crate::dsl::ComponentDef {
+            id: xfmr_id.clone(),
+            kind: Box::new(TransformerComp {
+                config: xfmr_config,
+            }),
+        });
+
+        // prev_pin → transformer primary.a
+        nets.push(NetDef {
+            from: prev_pin,
+            to: vec![Pin::ComponentPin {
+                component: xfmr_id.clone(),
+                pin: "pri.a".to_string(),
+            }],
+        });
+        // transformer primary.b → gnd
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: xfmr_id.clone(),
+                pin: "pri.b".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        // transformer secondary.a → out
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: xfmr_id.clone(),
+                pin: "sec.a".to_string(),
+            },
+            to: vec![Pin::Reserved("out".to_string())],
+        });
+        // transformer secondary.b → gnd
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: xfmr_id,
+                pin: "sec.b".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+    } else {
+        // No mic circuit — direct pickup: R_rad.b → out
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: rrad_id,
+                pin: "b".to_string(),
+            },
+            to: vec![Pin::Reserved("out".to_string())],
+        });
+    }
 
     // ── Assemble PedalDef ───────────────────────────────────────────────
     Ok(PedalDef {
@@ -602,6 +902,171 @@ mod tests {
         assert!(
             max_out < 100.0,
             "Cab output should be bounded, got max={max_out}"
+        );
+    }
+
+    #[test]
+    fn compile_cab_with_sm57_mic() {
+        let src = r#"
+            cab "SM57 Test" {
+                driver { preset: v30 }
+                enclosure { type: sealed, volume: 45L }
+                mic close {
+                    model: sm57
+                    position: [0cm, 0cm, 2.5cm]
+                }
+            }
+        "#;
+        let cab = parse_cab_file(src).unwrap();
+        let result = compile_cab(&cab, 48000.0);
+        assert!(
+            result.is_ok(),
+            "Cab with SM57 should compile: {}",
+            result.err().unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn compile_cab_with_ribbon_mic() {
+        let src = r#"
+            cab "Ribbon Test" {
+                driver { preset: g12m_greenback }
+                enclosure { type: sealed, volume: 45L }
+                mic ribbon {
+                    model: r121
+                    position: [0cm, 0cm, 5cm]
+                }
+            }
+        "#;
+        let cab = parse_cab_file(src).unwrap();
+        let result = compile_cab(&cab, 48000.0);
+        assert!(
+            result.is_ok(),
+            "Cab with R121 should compile: {}",
+            result.err().unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn compile_cab_with_condenser_mic() {
+        let src = r#"
+            cab "Condenser Test" {
+                driver { preset: v30 }
+                enclosure { type: sealed, volume: 45L }
+                mic room {
+                    model: u87
+                    position: [0cm, 0cm, 30cm]
+                }
+            }
+        "#;
+        let cab = parse_cab_file(src).unwrap();
+        let result = compile_cab(&cab, 48000.0);
+        assert!(
+            result.is_ok(),
+            "Cab with U87 should compile: {}",
+            result.err().unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn compile_cab_with_flat_mic() {
+        let src = r#"
+            cab "Flat Test" {
+                driver { preset: v30 }
+                enclosure { type: sealed, volume: 45L }
+                mic direct {
+                    model: flat
+                    position: [0cm, 0cm, 2.5cm]
+                }
+            }
+        "#;
+        let cab = parse_cab_file(src).unwrap();
+        let result = compile_cab(&cab, 48000.0);
+        assert!(
+            result.is_ok(),
+            "Cab with Flat mic should compile: {}",
+            result.err().unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn mic_cab_produces_output() {
+        use crate::PedalProcessor;
+
+        let src = r#"
+            cab "SM57 Output Test" {
+                driver { preset: v30 }
+                enclosure { type: sealed, volume: 45L }
+                mic close {
+                    model: sm57
+                    position: [0cm, 0cm, 2.5cm]
+                }
+            }
+        "#;
+        let cab = parse_cab_file(src).unwrap();
+        let mut proc = compile_cab(&cab, 48000.0).unwrap();
+
+        let mut max_out = 0.0f64;
+        for i in 0..4800 {
+            let t = i as f64 / 48000.0;
+            let input = 0.5 * (2.0 * PI * 440.0 * t).sin();
+            let output = proc.process(input);
+            if output.is_finite() {
+                max_out = max_out.max(output.abs());
+            }
+        }
+
+        assert!(
+            max_out > 1e-6,
+            "Cab with mic should produce non-zero output, got max={max_out}"
+        );
+    }
+
+    #[test]
+    fn pedal_def_with_mic_has_transformer() {
+        let src = r#"
+            cab "Transformer Check" {
+                driver { preset: v30 }
+                enclosure { type: sealed, volume: 45L }
+                mic close {
+                    model: sm57
+                    position: [0cm, 0cm, 2.5cm]
+                }
+            }
+        "#;
+        let cab = parse_cab_file(src).unwrap();
+        let mut cab = cab;
+        validate_cab(&mut cab).unwrap();
+        let pedal = generate_pedal_def(&cab, 0).unwrap();
+
+        // Should have transformer component
+        assert!(
+            pedal.components.iter().any(|c| c.id.starts_with("Tmic")),
+            "Pedal def with mic should contain a transformer"
+        );
+        // Should have voice coil resistor
+        assert!(
+            pedal.components.iter().any(|c| c.id.starts_with("Rvc")),
+            "Pedal def with dynamic mic should have voice coil R"
+        );
+    }
+
+    #[test]
+    fn pedal_def_without_mic_has_no_transformer() {
+        let src = r#"
+            cab "No Mic" {
+                driver { preset: v30 }
+                enclosure { type: sealed, volume: 45L }
+            }
+        "#;
+        let cab = parse_cab_file(src).unwrap();
+        let mut cab = cab;
+        validate_cab(&mut cab).unwrap();
+        let pedal = generate_pedal_def(&cab, 0).unwrap();
+
+        assert!(
+            !pedal.components.iter().any(|c| c.id.starts_with("Tmic")),
+            "Pedal def without mic should not contain a transformer"
         );
     }
 }
