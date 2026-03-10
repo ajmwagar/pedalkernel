@@ -496,6 +496,31 @@ impl DynNode {
         }
     }
 
+    /// Tag the deepest Resistor leaf as a Pot for output probe identification.
+    ///
+    /// Converts a plain Resistor (no comp_id) into a Pot with the given tag.
+    /// The Pot has position=1.0 and the same rp, so it's electrically equivalent.
+    /// Follows right branches of Series/Parallel to find the ground-side leaf.
+    pub fn tag_as_probe(&mut self, tag: &str) -> bool {
+        match self {
+            Self::Resistor { rp, .. } => {
+                *self = Self::Pot {
+                    comp_id: tag.to_string(),
+                    max_resistance: *rp,
+                    position: 1.0,
+                    taper: PotTaper::B,
+                    rp: *rp,
+                    last_a: 0.0,
+                };
+                true
+            }
+            Self::Series { right, .. } | Self::Parallel { right, .. } => {
+                right.tag_as_probe(tag)
+            }
+            _ => false,
+        }
+    }
+
     /// Recompute all adaptor coefficients bottom-up (call after pot changes).
     pub fn recompute(&mut self) {
         match self {

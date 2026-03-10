@@ -485,6 +485,12 @@ impl WdfStage {
                     // Short-circuit reflection: a = -b
                     let a_root = -b_tree;
                     tree.set_incident(a_root);
+                    // Check output_probe first (for SP-reduced orphan stages)
+                    if let Some(ref probe_id) = output_probe {
+                        if let Some(v) = tree.leaf_voltage(probe_id) {
+                            return v;
+                        }
+                    }
                     // Extract output at junction (voltage across load resistor)
                     // For Series(VS, Series(L, R)) with short at gnd:
                     // - VS emits b_vs = 2 * Vin (already done in reflected())
@@ -508,6 +514,12 @@ impl WdfStage {
                     let a_root = 2.0 * v_in - b_tree;
                     tree.set_incident(a_root);
 
+                    // Check output_probe first (for SP-reduced feedforward stages)
+                    if let Some(ref probe_id) = output_probe {
+                        if let Some(v) = tree.leaf_voltage(probe_id) {
+                            return v;
+                        }
+                    }
                     if let Some(v_junction) = tree.series_junction_voltage(a_root) {
                         return -v_junction;
                     }

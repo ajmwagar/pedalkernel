@@ -2463,6 +2463,14 @@ pub(super) fn graph_reduce(
                     i2 // default fallback
                 };
                 output_probe_comp_id = edges[gnd_side_idx].tree.leaf_comp_id();
+                // If the leaf has no comp_id (plain Resistor), tag it as a probe
+                // so leaf_voltage() can extract voltage at this point.
+                if output_probe_comp_id.is_none() {
+                    let tag = "__out_probe__".to_string();
+                    if edges[gnd_side_idx].tree.tag_as_probe(&tag) {
+                        output_probe_comp_id = Some(tag);
+                    }
+                }
             }
 
             let probe_in_lo = output_probe_edge == Some(if i1 < i2 { i1 } else { i2 });

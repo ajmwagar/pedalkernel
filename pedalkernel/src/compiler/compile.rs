@@ -872,32 +872,72 @@ fn build_feedforward_stages(
         }
 
         // ── Step 4: Find injection and output nodes ──────────────────
-        // injection_node = boundary node closest to input (smallest dist_from_in)
-        // output_node = boundary node farthest from input (largest dist_from_in)
-        let mut injection_node = boundary[0];
-        let mut injection_dist = classified
-            .dist_from_in
-            .get(&boundary[0])
-            .copied()
-            .unwrap_or(usize::MAX);
-        let mut output_node = boundary[0];
-        let mut output_dist = injection_dist;
+        // Prefer active stage output pins (output_pin_nodes) as injection —
+        // these are where signal enters the orphan passive subgraph from an
+        // upstream active stage. Prefer graph.out_node as output.
+        // Fallback: dist_from_in heuristic (smallest = injection, largest = output).
 
-        for &node in &boundary[1..] {
-            let d = classified
-                .dist_from_in
-                .get(&node)
-                .copied()
-                .unwrap_or(usize::MAX);
-            if d < injection_dist {
-                injection_dist = d;
-                injection_node = node;
-            }
-            if d > output_dist || (d == output_dist && node == graph.out_node) {
-                output_dist = d;
-                output_node = node;
+        // Find best injection candidate: active output pin with largest
+        // dist_from_in (deepest in signal chain = latest active stage before
+        // this passive section).
+        let mut best_active_inj: Option<(NodeId, usize)> = None;
+        for &node in &boundary {
+            if graph.output_pin_nodes.contains(&node) {
+                let d = classified.dist_from_in.get(&node).copied().unwrap_or(0);
+                match best_active_inj {
+                    None => best_active_inj = Some((node, d)),
+                    Some((_, prev_d)) if d > prev_d => best_active_inj = Some((node, d)),
+                    _ => {}
+                }
             }
         }
+
+        let (injection_node, output_node);
+        if let Some((inj_node, _)) = best_active_inj {
+            injection_node = inj_node;
+            // Output: prefer graph.out_node, else farthest-from-input
+            // non-injection boundary node
+            if boundary.contains(&graph.out_node) && graph.out_node != inj_node {
+                output_node = graph.out_node;
+            } else {
+                let mut best: Option<(NodeId, usize)> = None;
+                for &node in &boundary {
+                    if node == inj_node { continue; }
+                    let d = classified.dist_from_in.get(&node).copied().unwrap_or(usize::MAX);
+                    match best {
+                        None => best = Some((node, d)),
+                        Some((_, pd)) if d > pd => best = Some((node, d)),
+                        Some((_, pd)) if d == pd && node == graph.out_node => best = Some((node, d)),
+                        _ => {}
+                    }
+                }
+                match best {
+                    Some((n, _)) => output_node = n,
+                    None => continue,
+                }
+            }
+        } else {
+            // No active output pin in boundary — fall back to dist_from_in
+            let mut inj = boundary[0];
+            let mut inj_d = classified.dist_from_in.get(&boundary[0]).copied().unwrap_or(usize::MAX);
+            let mut out = boundary[0];
+            let mut out_d = inj_d;
+            for &node in &boundary[1..] {
+                let d = classified.dist_from_in.get(&node).copied().unwrap_or(usize::MAX);
+                if d < inj_d {
+                    inj_d = d;
+                    inj = node;
+                }
+                if d > out_d || (d == out_d && node == graph.out_node) {
+                    out_d = d;
+                    out = node;
+                }
+            }
+            injection_node = inj;
+            output_node = out;
+        }
+
+        let injection_dist = classified.dist_from_in.get(&injection_node).copied().unwrap_or(1);
 
         // injection and output must differ
         if injection_node == output_node {
@@ -905,26 +945,24 @@ fn build_feedforward_stages(
         }
 
         // ── Step 5: Try SP reduction first, fall back to PassiveRType ───
-        let source_node = graph.edges.len() + 2000;
-        let extra = vec![super::graph::ExtraEdge {
-            node_a: source_node,
-            node_b: injection_node,
-            tree: DynNode::VoltageSource { voltage: 0.0, rp: 1.0 },
-        }];
-        let terminals = vec![source_node, graph.gnd_node];
+        // Use VoltageSourceDriver root: the VS drives the injection node from
+        // outside the tree, and the tree is just the passive network from
+        // injection_node to gnd. No embedded VS (avoids impedance balancing
+        // artefacts and gives the exact voltage divider).
+        let terminals = vec![injection_node, graph.gnd_node];
         let remap = |n: NodeId| -> NodeId {
             if graph.supply_nodes.contains(&n) { graph.gnd_node } else { n }
         };
 
         let mut stage = match super::graph::graph_reduce(
-            edges, &extra, &terminals,
+            edges, &[], &terminals,
             graph, sample_rate, &HashMap::new(), remap,
             Some(output_node),
         ) {
             Ok((tree, output_probe)) => {
-                let mut s = WdfStage {
+                WdfStage {
                     tree,
-                    root: RootKind::Passthrough,
+                    root: RootKind::VoltageSourceDriver,
                     compensation: 1.0,
                     oversampler: Oversampler::new(OversamplingFactor::X1),
                     base_diode_model: None,
@@ -944,9 +982,7 @@ fn build_feedforward_stages(
                     feedback_pot_id: None,
                     output_probe,
                     feedback_opamp: None,
-                };
-                s.balance_vs_impedance();
-                s
+                }
             }
             Err(_) => {
                 // SP reduction failed → fall back to PassiveRType MNA
@@ -958,7 +994,10 @@ fn build_feedforward_stages(
                 }
             }
         };
-        stage.is_feedforward = true;
+        // If the stage terminates at the circuit output, it should be in the
+        // serial chain (not feedforward) so pots like Volume/Output actually
+        // control the signal level.
+        stage.is_feedforward = output_node != graph.out_node;
         stage.injection_node_id = injection_node;
         stage.output_node_id = output_node;
         stage.signal_flow_distance = injection_dist.saturating_add(1);
