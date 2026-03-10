@@ -14,6 +14,6 @@ pub mod presets;
 // Re-exports for convenience
 pub use cab_def::CabDef;
 pub use cab_dsl::parse_cab_file;
-pub use cab_transform::compile_cab;
+pub use cab_transform::{compile_cab, CompiledCab};
 pub use cab_validate::{validate_cab, CabWarning, CabWarningSeverity};
 pub use ir_export::{capture_ir, export_ir_wav, IrExportConfig};

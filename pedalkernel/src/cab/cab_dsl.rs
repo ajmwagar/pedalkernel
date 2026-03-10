@@ -858,15 +858,14 @@ fn construction_block(input: &str) -> IResult<&str, ConstructionDef> {
             let (rest2, _) = ws_comments(rest2)?;
             let (rest2, _) = char('{')(rest2)?;
             let mut rest2 = rest2;
-            // Parse brace entries (or empty block)
             loop {
                 let r = skip_sep(rest2);
                 if let Ok((r2, _)) = char::<&str, nom::error::Error<&str>>('}')(r) {
                     rest2 = r2;
                     break;
                 }
-                // Skip brace definitions for now (B1: brace(...))
-                let (r2, _) = skip_field(r)?;
+                let (r2, brace) = parse_brace_entry(r)?;
+                con.bracing.push(brace);
                 rest2 = r2;
             }
             input = rest2;
@@ -1285,6 +1284,74 @@ fn parse_cab(input: &str) -> IResult<&str, CabDef> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Brace entry parser
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parse a single brace entry: `ID: orientation(position, [position2,] WxH)`
+///
+/// Examples:
+///   B1: horizontal(0.30m, 20mm x 40mm)
+///   B2: vertical(0.25m, 20mm x 40mm)
+///   B3: cross(0.30m, 0.25m, 20mm x 40mm)
+fn parse_brace_entry(input: &str) -> IResult<&str, BraceDef> {
+    let (input, _) = ws_comments(input)?;
+    let (input, id) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, orient_str) = identifier(input)?;
+    let orientation = match orient_str {
+        "horizontal" => BraceOrientation::Horizontal,
+        "vertical" => BraceOrientation::Vertical,
+        "cross" => BraceOrientation::Cross,
+        _ => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+    };
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, position) = any_value(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    // For cross braces, parse second position
+    let (input, position2) = if orientation == BraceOrientation::Cross {
+        let (input, _) = char(',')(input)?;
+        let (input, _) = ws_comments(input)?;
+        let (input, p2) = any_value(input)?;
+        (input, Some(p2))
+    } else {
+        (input, None)
+    };
+
+    let (input, _) = char(',')(input)?;
+    let (input, _) = ws_comments(input)?;
+    // Parse WxH cross-section: e.g. "20mm x 40mm"
+    let (input, cs_w) = any_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('x')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, cs_h) = any_value(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+
+    Ok((
+        input,
+        BraceDef {
+            id: id.to_string(),
+            orientation,
+            position,
+            position2,
+            cs_width: Some(cs_w),
+            cs_height: Some(cs_h),
+        },
+    ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1587,5 +1654,61 @@ mod tests {
         "#;
         let cab = parse_cab_file(src).unwrap();
         assert_eq!(cab.name, "Test");
+    }
+
+    #[test]
+    fn parse_bracing_block() {
+        let src = r#"
+            cab "Braced" {
+                driver { preset: v30 }
+                enclosure {
+                    type: sealed
+                    volume: 170L
+                    construction {
+                        material: birch_ply(18mm)
+                        width: 76cm
+                        height: 76cm
+                        bracing {
+                            B1: horizontal(38cm, 20mm x 40mm)
+                            B2: vertical(38cm, 20mm x 40mm)
+                        }
+                    }
+                }
+            }
+        "#;
+        let cab = parse_cab_file(src).unwrap();
+        let con = cab.enclosure.construction.as_ref().unwrap();
+        assert_eq!(con.bracing.len(), 2);
+        assert_eq!(con.bracing[0].id, "B1");
+        assert_eq!(con.bracing[0].orientation, BraceOrientation::Horizontal);
+        assert!((con.bracing[0].position - 0.38).abs() < 1e-6);
+        assert_eq!(con.bracing[1].orientation, BraceOrientation::Vertical);
+    }
+
+    #[test]
+    fn parse_cross_brace() {
+        let src = r#"
+            cab "Cross Braced" {
+                driver { preset: v30 }
+                enclosure {
+                    type: sealed
+                    volume: 170L
+                    construction {
+                        material: birch_ply(18mm)
+                        width: 76cm
+                        height: 76cm
+                        bracing {
+                            B1: cross(38cm, 38cm, 20mm x 40mm)
+                        }
+                    }
+                }
+            }
+        "#;
+        let cab = parse_cab_file(src).unwrap();
+        let con = cab.enclosure.construction.as_ref().unwrap();
+        assert_eq!(con.bracing.len(), 1);
+        assert_eq!(con.bracing[0].orientation, BraceOrientation::Cross);
+        assert!((con.bracing[0].position - 0.38).abs() < 1e-6);
+        assert!((con.bracing[0].position2.unwrap() - 0.38).abs() < 1e-6);
     }
 }
