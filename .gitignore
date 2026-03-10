@@ -13,3 +13,7 @@ Cargo.lock
 /output/
 tools/.venv/
 *.net
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db

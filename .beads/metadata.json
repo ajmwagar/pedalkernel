@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "pedalkernel",
+  "project_id": "0eb0e168-016e-462b-b16b-7d172c1b01a9"
+}
