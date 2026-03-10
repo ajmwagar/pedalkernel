@@ -19,7 +19,7 @@ use crate::dsl::*;
 
 use super::bjt_bias_analysis::{self, BjtBiasAnalysis};
 use super::classify::{ClassifiedCircuit, NonlinearElement, NonlinearKind};
-use super::component::{Component, EdgeKind};
+use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -50,6 +50,18 @@ pub(super) struct StagePlan {
     pub(super) compensation: f64,
     /// Signal chain depth (boundary crossings from input). Used for stage ordering.
     pub(super) signal_chain_depth: Option<usize>,
+    /// Collector + emitter passive edge indices for the auxiliary load tree.
+    ///
+    /// When non-empty, the builder constructs a separate load WDF tree
+    /// between `load_terminals` (collector, emitter) that computes the
+    /// correct collector-emitter load impedance.  At runtime, the NL solver
+    /// uses `load_tree.port_resistance()` as rp instead of the signal tree's
+    /// rp, giving the correct load-line slope for Sustain-style controls.
+    pub(super) load_passive_idxs: Vec<usize>,
+    /// Terminal nodes (collector, emitter) for the load tree.
+    /// The load tree is built between these two nodes with the virtual Rce
+    /// edge providing the BJT output resistance path.
+    pub(super) load_terminals: Option<(NodeId, NodeId)>,
 }
 
 /// Virtual edge connecting internal terminals of 3-terminal elements.
@@ -699,7 +711,7 @@ fn group_nl_elements(
 /// Seed BFS queue with extra terminal nodes (base for BJTs, grid for triodes).
 fn seed_extra_terminals(
     elem: &NonlinearElement,
-    graph: &CircuitGraph,
+    _graph: &CircuitGraph,
     is_hub: &impl Fn(NodeId) -> bool,
     visited: &mut HashSet<NodeId>,
     queue: &mut VecDeque<NodeId>,
@@ -759,23 +771,22 @@ pub(super) fn plan_stages(
         .nonlinear_elements
         .iter()
         .enumerate()
-        .filter(|(_, e)| matches!(&e.kind, NonlinearKind::Triode { .. }))
+        .filter(|(_, e)| matches!(&e.kind, NonlinearKind::Triode { .. } | NonlinearKind::Pentode { .. }))
         .collect();
 
     use super::graph::TriodeInfo;
     let triode_infos: Vec<(usize, TriodeInfo)> = triode_elements
         .iter()
         .map(|(_, elem)| {
-            if let NonlinearKind::Triode {
-                model_name,
-                plate_node,
-                cathode_node,
-                parallel_count,
-                is_vari_mu,
-                ..
-            } = &elem.kind
-            {
-                (
+            match &elem.kind {
+                NonlinearKind::Triode {
+                    model_name,
+                    plate_node,
+                    cathode_node,
+                    parallel_count,
+                    is_vari_mu,
+                    ..
+                } => (
                     elem.edge_idx,
                     TriodeInfo {
                         model_name: model_name.clone(),
@@ -786,9 +797,25 @@ pub(super) fn plan_stages(
                         parallel_count: *parallel_count,
                         is_vari_mu: *is_vari_mu,
                     },
-                )
-            } else {
-                unreachable!()
+                ),
+                NonlinearKind::Pentode { model_name } => {
+                    // Pentodes use junction_nodes[0]=plate, [1]=cathode
+                    let plate_node = elem.junction_nodes[0];
+                    let cathode_node = elem.junction_nodes[1];
+                    (
+                        elem.edge_idx,
+                        TriodeInfo {
+                            model_name: model_name.clone(),
+                            plate_node,
+                            cathode_node,
+                            junction_node: cathode_node,
+                            ground_node: graph.gnd_node,
+                            parallel_count: 1,
+                            is_vari_mu: false,
+                        },
+                    )
+                }
+                _ => unreachable!(),
             }
         })
         .collect();
@@ -1063,7 +1090,7 @@ fn plan_one_junction(
     graph: &CircuitGraph,
     source_node_offset: usize,
     _pp_transformer_edges: &HashSet<usize>,
-    boundary_edges: &HashSet<usize>,
+    _boundary_edges: &HashSet<usize>,
     opamp_feedback_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
     let junction = elem.junction_nodes[0];
@@ -1099,7 +1126,7 @@ fn plan_one_junction(
     // skip_out_node=false: output pot's aw-half IS collected into the tree
     // for impedance/loading effects. The volume attenuation is handled by
     // OutputPot (post-WDF gain) rather than a separate PassiveRType stage.
-    let mut junction_passives = graph.bfs_passive_edges(
+    let junction_passives = graph.bfs_passive_edges(
         junction,
         &excluded,
         &graph.active_edge_indices,
@@ -1156,6 +1183,8 @@ fn plan_one_junction(
                 dc_block: None,
                 compensation: 1.0,
                 signal_chain_depth: None,
+                load_passive_idxs: Vec::new(),
+                load_terminals: None,
             });
         }
 
@@ -1178,6 +1207,8 @@ fn plan_one_junction(
             dc_block: None,
             compensation: 1.0,
             signal_chain_depth: None,
+            load_passive_idxs: Vec::new(),
+            load_terminals: None,
         })
     } else {
         // Simple 1-junction: diode, MOSFET, zener, OTA.
@@ -1211,6 +1242,8 @@ fn plan_one_junction(
             dc_block: None,
             compensation,
             signal_chain_depth: None,
+            load_passive_idxs: Vec::new(),
+            load_terminals: None,
         })
     }
 }
@@ -1229,6 +1262,7 @@ fn plan_two_junction(
     let (node_a, node_b) = (elem.junction_nodes[0], elem.junction_nodes[1]);
 
     // Collect passives at junction A (plate/collector).
+    // 1-hop: direct edges at the collector/plate node.
     // Exclude boundary edges — downstream coupling caps create pendants in the
     // upstream stage's tree (the downstream base_node is a dead-end in the
     // upstream context, causing SP reduce corruption).
@@ -1238,6 +1272,18 @@ fn plan_two_junction(
         &graph.active_edge_indices,
     );
     a_passives.retain(|idx| !boundary_edges.contains(idx));
+    // Extend with multi-hop supply chains: follow passive edges from node_a
+    // through intermediate nodes to supply/VCC/GND.  This captures collector
+    // loads like Big Muff's VCC → Sustain pot → R9 → collector without BFS-ing
+    // into neighboring passive stages (tone stacks, volume networks).
+    let supply_chain = collect_supply_chain_edges(
+        node_a,
+        &classified.all_nonlinear_edge_indices,
+        &graph.active_edge_indices,
+        boundary_edges,
+        graph,
+    );
+    extend_dedup(&mut a_passives, &supply_chain);
 
     // Supply edges adjacent to node_a (plate load to vcc_sc, etc.).
     let a_supply_edges: Vec<usize> = graph
@@ -1474,10 +1520,37 @@ fn plan_two_junction(
 
     let source_node = graph.edges.len() + source_node_offset;
 
+    // ── BJT load tree: auxiliary collector-emitter impedance tree ────────
+    // For BJTs with non-grounded emitter passives, build a separate load tree
+    // between (collector, emitter) containing collector load + emitter bypass
+    // + virtual Rce.  The signal tree stays unchanged (base network, [source, GND]).
+    // At runtime, the NL solver uses load_tree.port_resistance() as rp
+    // instead of the signal tree's rp, giving the correct load-line slope.
+    //
+    // Without this, both collector and emitter chains terminate at GND and get
+    // eliminated as dead-ends during SP reduction, making rp insensitive to
+    // collector load controls (Sustain pot, etc.).
+    let (load_passive_idxs, load_terminals) = match &elem.kind {
+        NonlinearKind::BjtNpn { emitter_node, .. }
+        | NonlinearKind::BjtPnp { emitter_node, .. }
+            if !b_passives.is_empty() && *emitter_node != graph.gnd_node =>
+        {
+            // Collector passives (a_passives + supply chain) + emitter passives (b_passives)
+            let mut load_idxs = a_passives.clone();
+            extend_dedup(&mut load_idxs, &a_supply_edges);
+            extend_dedup(&mut load_idxs, &b_passives);
+            (load_idxs, Some((node_a, node_b)))
+        }
+        _ => (Vec::new(), None),
+    };
+
+    // Signal tree terminals: always [source, GND] for the original base network.
+    let terminals = vec![source_node, graph.gnd_node];
+
     Some(StagePlan {
         passive_idxs,
         injection_node,
-        terminals: vec![source_node, graph.gnd_node],
+        terminals,
         source_node,
         virtual_edge,
         skip_vs: false,
@@ -1485,6 +1558,8 @@ fn plan_two_junction(
         dc_block,
         compensation,
         signal_chain_depth: None,
+        load_passive_idxs,
+        load_terminals,
     })
 }
 
@@ -1615,7 +1690,7 @@ fn plan_multi_nl_group(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     pp_transformer_edges: &HashSet<usize>,
-    bjt_bias_analysis: &BjtBiasAnalysis,
+    _bjt_bias_analysis: &BjtBiasAnalysis,
     boundary_edges: &HashSet<usize>,
     opamp_feedback_edges: &HashSet<usize>,
 ) -> Option<MultiNlPlan> {
@@ -2128,16 +2203,44 @@ pub(super) fn plan_push_pull_half(
     graph: &CircuitGraph,
     pp_transformer_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
-    if let NonlinearKind::Triode {
-        plate_node,
-        cathode_node,
-        model_name,
-        is_vari_mu,
-        ..
-    } = &elem.kind
+    // Extract plate/cathode nodes and model info for triodes and pentodes.
+    let (plate_node, cathode_node, virtual_rp, compensation) = match &elem.kind {
+        NonlinearKind::Triode {
+            plate_node,
+            cathode_node,
+            model_name,
+            is_vari_mu,
+            ..
+        } => {
+            let model = super::helpers::triode_model(model_name);
+            let comp = if *is_vari_mu {
+                find_input_transformer_gain_pp(graph, classified)
+            } else {
+                model.mu / 100.0
+            };
+            (*plate_node, *cathode_node, model.rp, comp)
+        }
+        NonlinearKind::Pentode { model_name } => {
+            let plate_node = elem.junction_nodes[0];
+            let cathode_node = elem.junction_nodes[1];
+            let model = super::helpers::pentode_model(model_name);
+            // Pentode rp is very high (52kΩ for 6V6GT) — a current-source
+            // device. Using model.rp as virtual_rp makes the WDF tree's
+            // port resistance too high for the NR solver (wave variables
+            // exceed the v_max clamp). The transformer reflected load
+            // (~1.8kΩ) IS the primary plate load; the tube's internal rp
+            // is modeled by the NR solver's I-V curve. Use a small virtual_rp
+            // just to bridge plate-cathode in the WDF tree topology.
+            let rp = 1.0;
+            let comp = model.mu / 100.0;
+            (plate_node, cathode_node, rp, comp)
+        }
+        _ => return None,
+    };
+
     {
         let plate_passives = graph.bfs_passive_edges(
-            *plate_node,
+            plate_node,
             &classified.all_nonlinear_edge_indices,
             &graph.active_edge_indices,
             true,
@@ -2146,7 +2249,7 @@ pub(super) fn plan_push_pull_half(
             &HashSet::new(),
         );
         let cathode_passives = graph.bfs_passive_edges(
-            *cathode_node,
+            cathode_node,
             &classified.all_nonlinear_edge_indices,
             &graph.active_edge_indices,
             true,
@@ -2164,7 +2267,7 @@ pub(super) fn plan_push_pull_half(
 
         // Find injection node, excluding plate/cathode.
         let exclude: HashSet<NodeId> =
-            [*plate_node, *cathode_node].into_iter().collect();
+            [plate_node, cathode_node].into_iter().collect();
         let mut injection_node = find_injection_node_multi_nl(
             &passive_idxs,
             graph,
@@ -2177,8 +2280,8 @@ pub(super) fn plan_push_pull_half(
                 let e = &graph.edges[eidx];
                 for candidate in [e.node_a, e.node_b] {
                     if candidate != graph.gnd_node
-                        && candidate != *cathode_node
-                        && candidate != *plate_node
+                        && candidate != cathode_node
+                        && candidate != plate_node
                     {
                         injection_node = candidate;
                         break 'outer;
@@ -2198,8 +2301,8 @@ pub(super) fn plan_push_pull_half(
             }
             for (&node, &deg) in &degree {
                 if deg == 1
-                    && node != *plate_node
-                    && node != *cathode_node
+                    && node != plate_node
+                    && node != cathode_node
                     && node != injection_node
                 {
                     ground_terminal = node;
@@ -2211,22 +2314,15 @@ pub(super) fn plan_push_pull_half(
         let source_node = graph.edges.len() + 5000;
         let terminals = vec![source_node, ground_terminal];
 
-        let model = super::helpers::triode_model(model_name);
-        let compensation = if *is_vari_mu {
-            find_input_transformer_gain_pp(graph, classified)
-        } else {
-            model.mu / 100.0
-        };
-
         Some(StagePlan {
             passive_idxs,
             injection_node,
             terminals,
             source_node,
             virtual_edge: Some(VirtualEdge {
-                node_a: *plate_node,
-                node_b: *cathode_node,
-                resistance: model.rp,
+                node_a: plate_node,
+                node_b: cathode_node,
+                resistance: virtual_rp,
                 name: "__triode_rp__",
             }),
             skip_vs: false,
@@ -2234,9 +2330,9 @@ pub(super) fn plan_push_pull_half(
             dc_block: None,
             compensation,
             signal_chain_depth: None,
+            load_passive_idxs: Vec::new(),
+            load_terminals: None,
         })
-    } else {
-        None
     }
 }
 
@@ -2385,6 +2481,93 @@ fn collect_passive_edges_from_nodes(
     all_passive_edges
 }
 
+/// Collect multi-hop passive chains from `start` to supply rails (VCC/GND/named).
+///
+/// BFS from `start` through passive edges, only continuing through "series
+/// chain" intermediate nodes (≤ 2 passive edges — one in, one out).  Edges
+/// to complex junctions (3+ passive edges, like tone stack nodes) are NOT
+/// collected, preventing leakage into downstream passive networks.
+///
+/// This captures multi-hop collector loads like `VCC → Sustain pot → R9 → collector`
+/// without crawling into tone stacks or output networks.
+fn collect_supply_chain_edges(
+    start: NodeId,
+    nonlinear_indices: &[usize],
+    active_indices: &[usize],
+    boundary_edges: &HashSet<usize>,
+    graph: &CircuitGraph,
+) -> Vec<usize> {
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    let mut collected: Vec<usize> = Vec::new();
+    let mut queue = std::collections::VecDeque::new();
+    visited.insert(start);
+    queue.push_back(start);
+
+    // Helper: count passive edges at a node (excluding NL, active, boundary).
+    let passive_edge_count = |n: NodeId| -> usize {
+        graph.edges.iter().enumerate().filter(|(ei, ee)| {
+            (ee.node_a == n || ee.node_b == n)
+                && !nonlinear_indices.contains(ei)
+                && !active_indices.contains(ei)
+                && !boundary_edges.contains(ei)
+        }).count()
+    };
+
+    while let Some(node) = queue.pop_front() {
+        for (idx, e) in graph.edges.iter().enumerate() {
+            // Skip NL, active, and boundary edges.
+            if nonlinear_indices.contains(&idx)
+                || active_indices.contains(&idx)
+                || boundary_edges.contains(&idx)
+            {
+                continue;
+            }
+            let neighbor = if e.node_a == node {
+                Some(e.node_b)
+            } else if e.node_b == node {
+                Some(e.node_a)
+            } else {
+                None
+            };
+            let Some(n) = neighbor else { continue };
+
+            // Star nodes (GND, VCC): collect edge, don't traverse further.
+            if n == graph.gnd_node || n == graph.vcc_node {
+                if !collected.contains(&idx) {
+                    collected.push(idx);
+                }
+                continue;
+            }
+            // Named supply nodes: collect edge, don't traverse further.
+            if graph.supply_nodes.contains(&n) {
+                if !collected.contains(&idx) {
+                    collected.push(idx);
+                }
+                continue;
+            }
+            // Output node, transistor/opamp pins: don't collect, don't traverse.
+            if n == graph.out_node || graph.output_pin_nodes.contains(&n) {
+                continue;
+            }
+            // Interior intermediate node: only collect + traverse if it's a
+            // simple series chain link (≤ 2 passive edges).  Complex junctions
+            // (3+ edges) are tone stacks, volume networks, etc. — skip them.
+            if !visited.contains(&n) {
+                let pc = passive_edge_count(n);
+                if pc <= 2 {
+                    visited.insert(n);
+                    if !collected.contains(&idx) {
+                        collected.push(idx);
+                    }
+                    queue.push_back(n);
+                }
+                // else: complex junction — don't collect, don't traverse
+            }
+        }
+    }
+    collected
+}
+
 /// BFS from `out_node` through passive edges to find the output tail
 /// (coupling cap + volume pot + load, etc.). If the tail connects back to
 /// any node in the existing stage's passive set, return the new tail edges
@@ -2514,11 +2697,10 @@ fn find_plate_transformers(
             if edge.node_a != far_node && edge.node_b != far_node {
                 continue;
             }
-            if graph.components[edge.comp_idx].kind.is_transformer() {
-                if !plate_passives.contains(&idx) && !result.contains(&idx) {
+            if graph.components[edge.comp_idx].kind.is_transformer()
+                && !plate_passives.contains(&idx) && !result.contains(&idx) {
                     result.push(idx);
                 }
-            }
         }
     }
     result
@@ -2571,7 +2753,7 @@ fn find_input_transformer_gain_pp(
     let mut best_gain = None;
     let mut best_dist = usize::MAX;
 
-    for (_edge_idx, edge) in graph.edges.iter().enumerate() {
+    for edge in graph.edges.iter() {
         let comp = &graph.components[edge.comp_idx];
         if let Some(cfg) = comp.kind.transformer_config() {
             if matches!(

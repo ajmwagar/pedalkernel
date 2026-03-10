@@ -15,7 +15,6 @@ use crate::dsl::*;
 use crate::elements::*;
 use crate::elements::FeedbackConfig;
 
-use super::component::Component;
 use super::dyn_node::DynNode;
 use super::graph::{
     CircuitGraph, NodeId, OpAmpFeedbackInfo, OpAmpFeedbackKind,
@@ -211,7 +210,8 @@ pub(super) fn build_opamp_feedback_stages(
                     }
                 };
                 // Tree-discovered pot takes priority
-                if fb_pot_from_tree.is_some() {
+                let has_tree_pot = fb_pot_from_tree.is_some();
+                if has_tree_pot {
                     feedback_pot_id = fb_pot_from_tree;
                 }
 
@@ -239,6 +239,8 @@ pub(super) fn build_opamp_feedback_stages(
                     feedback_opamp: None,
                     vcc_injection_coeff: 0.0,
                     vcc_dc_ramp: 0,
+                    tone_feedback: None,
+                    load_tree: None,
                 };
                 stage.balance_vs_impedance();
                 stages.push(stage);
@@ -340,7 +342,8 @@ pub(super) fn build_opamp_feedback_stages(
                     }
                 };
                 // Tree-discovered pot takes priority
-                if fb_pot_from_tree.is_some() {
+                let has_tree_pot = fb_pot_from_tree.is_some();
+                if has_tree_pot {
                     feedback_pot_id = fb_pot_from_tree;
                 }
 
@@ -368,6 +371,8 @@ pub(super) fn build_opamp_feedback_stages(
                     feedback_opamp: None,
                     vcc_injection_coeff: 0.0,
                     vcc_dc_ramp: 0,
+                    tone_feedback: None,
+                    load_tree: None,
                 };
                 stage.balance_vs_impedance();
                 stages.push(stage);

@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
 
-use super::component::Component;
 use super::graph::{CircuitGraph, NodeId};
 
 // ═══════════════════════════════════════════════════════════════════════════

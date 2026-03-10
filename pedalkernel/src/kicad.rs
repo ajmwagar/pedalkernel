@@ -21,11 +21,11 @@ fn value_str(kind: &dyn Component) -> String {
             "R_switched_{}-{}",
             format_eng(
                 *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
-                "\u{2126}"
+                "Ω"
             ),
             format_eng(
                 *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
-                "\u{2126}"
+                "Ω"
             )
         );
     }
@@ -66,7 +66,7 @@ fn value_str(kind: &dyn Component) -> String {
 
     // Tempco (check before generic resistance)
     if let Some(tc) = kind.as_any().downcast_ref::<Tempco>() {
-        return format!("{}_Tempco_{:.0}ppm", format_eng(tc.resistance, "\u{2126}"), tc.ppm);
+        return format!("{}_Tempco_{:.0}ppm", format_eng(tc.resistance, "Ω"), tc.ppm);
     }
 
     // Diodes (check before generic diode_type to handle Zener and DiodePair)
@@ -82,7 +82,7 @@ fn value_str(kind: &dyn Component) -> String {
 
     // Passive components with scalar values
     if let Some(r) = kind.resistance() {
-        return format_eng(r, "\u{2126}");
+        return format_eng(r, "Ω");
     }
     if let Some(c) = kind.capacitance() {
         return format_eng(c, "F");
@@ -374,7 +374,7 @@ pub fn export_kicad_netlist(pedal: &PedalDef) -> String {
             writeln!(
                 out,
                 "    (comp (ref R_{id}) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"LFO {wf:?} timing\"))",
-                id = comp.id, val = format_eng(lfo.timing_r, "\u{2126}"), wf = waveform
+                id = comp.id, val = format_eng(lfo.timing_r, "Ω"), wf = waveform
             )
             .unwrap();
             // Timing capacitor
@@ -390,7 +390,7 @@ pub fn export_kicad_netlist(pedal: &PedalDef) -> String {
             writeln!(
                 out,
                 "    (comp (ref R_{id}_ATK) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope attack timing\"))",
-                id = comp.id, val = format_eng(ef.attack_r, "\u{2126}")
+                id = comp.id, val = format_eng(ef.attack_r, "Ω")
             )
             .unwrap();
             // Attack timing capacitor
@@ -404,7 +404,7 @@ pub fn export_kicad_netlist(pedal: &PedalDef) -> String {
             writeln!(
                 out,
                 "    (comp (ref R_{id}_REL) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope release timing\"))",
-                id = comp.id, val = format_eng(ef.release_r, "\u{2126}")
+                id = comp.id, val = format_eng(ef.release_r, "Ω")
             )
             .unwrap();
             // Release timing capacitor
@@ -418,7 +418,7 @@ pub fn export_kicad_netlist(pedal: &PedalDef) -> String {
             writeln!(
                 out,
                 "    (comp (ref R_{id}_SENS) (value \"{val}\") (libsource (lib \"Device:R\")) (field (name \"Note\") \"Envelope sensitivity\"))",
-                id = comp.id, val = format_eng(ef.sensitivity_r, "\u{2126}")
+                id = comp.id, val = format_eng(ef.sensitivity_r, "Ω")
             )
             .unwrap();
             // Rectifier diode (part of the physical envelope detector)

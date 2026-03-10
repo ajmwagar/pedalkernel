@@ -9,7 +9,7 @@ use crate::dsl::*;
 use crate::elements::*;
 
 use super::compiled::*;
-use super::component::{Component, ControlParamKind};
+use super::component::ControlParamKind;
 use super::graph::CircuitGraph;
 use super::helpers::has_pot;
 use super::stage::{MultiNlStage, RootKind, SidechainProcessor, WdfStage};
@@ -162,6 +162,12 @@ fn resolve_pot_target(
         if has_pot(&stage.tree, pot_id) {
             return (ControlTarget::PotInStage(si), false);
         }
+        // Also check load tree (BJT collector-emitter load).
+        if let Some(ref et) = stage.load_tree {
+            if has_pot(et, pot_id) {
+                return (ControlTarget::PotInStage(si), false);
+            }
+        }
     }
 
     // 3. Pot in multi-NL stage (includes BJT bias pots, output volume pots)
@@ -255,7 +261,7 @@ fn is_output_volume_pot(pot_id: &str, pedal: &PedalDef) -> bool {
     let is_comp_pin = |p: &Pin, comp: &str, pin_name: &str| -> bool {
         matches!(p, Pin::ComponentPin { component, pin } if component == comp && pin == pin_name)
     };
-    let is_comp_pin_any = |p: &Pin, comp: &str, pin_names: &[&str]| -> bool {
+    let _is_comp_pin_any = |p: &Pin, comp: &str, pin_names: &[&str]| -> bool {
         matches!(p, Pin::ComponentPin { component, pin }
             if component == comp && pin_names.contains(&pin.as_str()))
     };
