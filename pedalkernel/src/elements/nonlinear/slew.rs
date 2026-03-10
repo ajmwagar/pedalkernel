@@ -66,6 +66,7 @@ impl SlewRateLimiter {
         } else {
             input
         };
+        let limited = if limited.is_finite() { limited } else { 0.0 };
         self.prev_out = limited;
         limited
     }

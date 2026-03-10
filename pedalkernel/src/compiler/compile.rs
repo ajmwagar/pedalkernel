@@ -2108,14 +2108,19 @@ pub fn compile_pedal_with_options(
         None
     };
 
-    // Power supply.
+    // Power supply — always create a PSU model for dynamic sag.
+    // When impedance/filter_cap aren't specified, use defaults scaled by voltage:
+    //   - 9V pedal: ~5Ω impedance (battery/adapter), 100µF cap
+    //   - 300V+ tube amp: ~100Ω impedance (rectifier+transformer), 40µF cap
     let primary_supply = pedal.supplies.first().map(|s| &s.config);
 
-    let power_supply = primary_supply.filter(|s| s.has_sag()).map(|s| {
+    let power_supply = primary_supply.map(|s| {
+        let default_impedance = if s.voltage > 100.0 { 100.0 } else { 5.0 };
+        let default_cap = if s.voltage > 100.0 { 40e-6 } else { 100e-6 };
         crate::elements::PowerSupply::new(
             s.voltage,
-            s.impedance.unwrap_or(0.0),
-            s.filter_cap.unwrap_or(100e-6),
+            s.impedance.unwrap_or(default_impedance),
+            s.filter_cap.unwrap_or(default_cap),
             s.rectifier,
             sample_rate,
         )
@@ -2141,8 +2146,9 @@ pub fn compile_pedal_with_options(
         .collect();
 
     // ══ Topological stage ordering ═════════════════════════════════════
-    // Build a unified stage execution order sorted by signal_flow_distance.
-    // This ensures stages process in signal-flow order regardless of type.
+    // Build a unified stage execution order sorted by signal_flow_distance,
+    // then topologically refined within same-sfd groups using output→injection
+    // passive-edge reachability.
     let stage_order = {
         let mut order: Vec<(StageRef, usize)> = Vec::new();
         for (i, s) in stages.iter().enumerate() {
@@ -2151,8 +2157,67 @@ pub fn compile_pedal_with_options(
         for (i, s) in multi_nl_stages.iter().enumerate() {
             order.push((StageRef::MultiNl(i), s.signal_flow_distance));
         }
-        order.sort_by_key(|(_, dist)| *dist);
-        order.into_iter().map(|(sr, _)| sr).collect::<Vec<_>>()
+
+        // Build hub node set (shared nodes that would create false dependencies).
+        let hub_nodes: HashSet<NodeId> = {
+            let mut h = HashSet::new();
+            h.insert(graph.in_node);
+            h.insert(graph.out_node);
+            h.insert(graph.gnd_node);
+            h.insert(graph.vcc_node);
+            h.extend(graph.supply_nodes.iter());
+            h
+        };
+
+        // Collect injection node for each stage.
+        let injection_nodes: Vec<usize> = order
+            .iter()
+            .map(|(sr, _)| match sr {
+                StageRef::Wdf(i) => stages[*i].injection_node_id,
+                StageRef::MultiNl(i) => multi_nl_stages[*i].injection_node_id,
+            })
+            .collect();
+
+        // Build injection barrier set: injection nodes act as BFS barriers to
+        // prevent traversal through opamp feedback paths (out→Rf→neg→R→prev_stage)
+        // which would create false reverse dependencies.
+        let injection_barrier: HashSet<NodeId> = injection_nodes
+            .iter()
+            .filter(|&&n| n != usize::MAX)
+            .copied()
+            .collect();
+
+        // For each stage, BFS passive-reachable nodes from its output.
+        let reachable: Vec<HashSet<NodeId>> = order
+            .iter()
+            .map(|(sr, _)| {
+                let out_id = match sr {
+                    StageRef::Wdf(i) => stages[*i].output_node_id,
+                    StageRef::MultiNl(i) => multi_nl_stages[*i].output_node_id,
+                };
+                if out_id == usize::MAX {
+                    HashSet::new()
+                } else {
+                    bfs_passive_reachable_nodes(&graph, out_id, &hub_nodes, &injection_barrier)
+                }
+            })
+            .collect();
+
+        // Build dependency graph: deps[j] contains indices i where stage j
+        // depends on stage i (i's output reaches j's injection).
+        let mut deps: Vec<Vec<usize>> = vec![Vec::new(); order.len()];
+        for (i, reach) in reachable.iter().enumerate() {
+            if reach.is_empty() {
+                continue;
+            }
+            for (j, &inj) in injection_nodes.iter().enumerate() {
+                if i != j && inj != usize::MAX && reach.contains(&inj) {
+                    deps[j].push(i);
+                }
+            }
+        }
+
+        topological_refine_stage_order(order, &deps)
     };
 
     // ══ Assembly ══════════════════════════════════════════════════════
@@ -2163,6 +2228,7 @@ pub fn compile_pedal_with_options(
         pre_gain,
         output_gain: 1.0,
         rail_saturation,
+        rail_sat_oversampler: crate::oversampling::Oversampler::new(oversampling),
         sample_rate,
         controls,
         gain_range: gain_range_final,
@@ -2224,6 +2290,145 @@ pub fn compile_pedal_with_options(
     }
 
     Ok(compiled)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Topological stage ordering helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// BFS from `start` through passive edges, returning all reachable nodes.
+///
+/// - Only traverses edges whose component `is_passive()` (R, C, L, pot, transformer).
+/// - Hub nodes (gnd, vcc, in, out, supply) are excluded to avoid false dependencies
+///   through shared power/ground rails.
+/// - `output_pin_nodes` (opamp out, BJT collector, etc.) and `injection_barriers`
+///   (stage injection nodes) act as barriers: included in the result but not
+///   traversed further. Injection barriers prevent feedback paths (out→Rf→neg)
+///   from creating false reverse dependencies.
+fn bfs_passive_reachable_nodes(
+    graph: &CircuitGraph,
+    start: NodeId,
+    hub_nodes: &HashSet<NodeId>,
+    injection_barriers: &HashSet<NodeId>,
+) -> HashSet<NodeId> {
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    visited.insert(start);
+    queue.push_back(start);
+
+    while let Some(node) = queue.pop_front() {
+        for e in &graph.edges {
+            // Only traverse passive/reactive edges.
+            if !graph.components[e.comp_idx].kind.is_passive() {
+                continue;
+            }
+            let neighbor = if e.node_a == node {
+                Some(e.node_b)
+            } else if e.node_b == node {
+                Some(e.node_a)
+            } else {
+                None
+            };
+            let Some(n) = neighbor else { continue };
+            // Hub nodes: skip entirely (don't include or traverse).
+            if hub_nodes.contains(&n) {
+                continue;
+            }
+            if !visited.insert(n) {
+                continue;
+            }
+            // Barrier nodes: include but don't traverse further.
+            // - output_pin_nodes: active device outputs (opamp.out, BJT collector)
+            // - injection_barriers: stage injection points (opamp.neg, etc.)
+            if graph.output_pin_nodes.contains(&n) || injection_barriers.contains(&n) {
+                continue;
+            }
+            queue.push_back(n);
+        }
+    }
+
+    visited
+}
+
+/// Topologically refine stage ordering within same-sfd groups.
+///
+/// Groups stages by `signal_flow_distance`. Within each group, runs Kahn's
+/// algorithm using the provided dependency edges. Zero-in-degree stages are
+/// emitted first, using original insertion order as tiebreaker. Any cycle
+/// members are appended in original order.
+fn topological_refine_stage_order(
+    order: Vec<(StageRef, usize)>,
+    deps: &[Vec<usize>],
+) -> Vec<StageRef> {
+    use std::collections::BTreeMap;
+
+    // Group indices by sfd value (BTreeMap for sorted iteration).
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (i, &(_, sfd)) in order.iter().enumerate() {
+        groups.entry(sfd).or_default().push(i);
+    }
+
+    let mut result = Vec::with_capacity(order.len());
+
+    for (_, group) in &groups {
+        if group.len() <= 1 {
+            for &i in group {
+                result.push(order[i].0);
+            }
+            continue;
+        }
+
+        let group_set: HashSet<usize> = group.iter().copied().collect();
+
+        // Compute in-degree for nodes within this sfd group.
+        let mut in_degree: HashMap<usize, usize> = HashMap::new();
+        let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &i in group {
+            in_degree.entry(i).or_insert(0);
+            for &dep in &deps[i] {
+                if group_set.contains(&dep) {
+                    adj.entry(dep).or_default().push(i);
+                    *in_degree.entry(i).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Kahn's algorithm: seed queue with zero-in-degree nodes in original order.
+        let mut queue = std::collections::VecDeque::new();
+        for &i in group {
+            if in_degree[&i] == 0 {
+                queue.push_back(i);
+            }
+        }
+
+        let mut sorted = Vec::new();
+        while let Some(i) = queue.pop_front() {
+            sorted.push(i);
+            if let Some(neighbors) = adj.get(&i) {
+                for &n in neighbors {
+                    let deg = in_degree.get_mut(&n).unwrap();
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(n);
+                    }
+                }
+            }
+        }
+
+        // Append any cycle members in original order.
+        let sorted_set: HashSet<usize> = sorted.iter().copied().collect();
+        for &i in group {
+            if !sorted_set.contains(&i) {
+                sorted.push(i);
+            }
+        }
+
+        for i in sorted {
+            result.push(order[i].0);
+        }
+    }
+
+    result
 }
 
 /// Process a reference signal through the pedal and compute a gain scalar

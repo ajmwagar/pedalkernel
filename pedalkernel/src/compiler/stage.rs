@@ -1853,7 +1853,7 @@ impl MultiNlStage {
                     &groups,
                     &dg.offsets,
                     &mut self.v_prev,
-                    20,
+                    crate::elements::nonlinear::solver::NR_MAX_ITER,
                     1e-6,
                 );
                 result
@@ -1871,7 +1871,7 @@ impl MultiNlStage {
                     &self.nl_port_resistances,
                     &devices,
                     &mut self.v_prev,
-                    20,
+                    crate::elements::nonlinear::solver::NR_MAX_ITER,
                     1e-6,
                 )
             };
@@ -1952,8 +1952,9 @@ impl MultiNlStage {
             // a 1-pole high-pass: y[n] = x[n] - x[n-1] + α·y[n-1]
             // with α ≈ 0.9995 (fc ≈ 3.5Hz at 44.1kHz, below audible range).
             if !self.vcc_bias_all.is_empty() {
-                let x0 = raw_out;
+                let x0 = if raw_out.is_finite() { raw_out } else { 0.0 };
                 let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
+                let y0 = if y0.is_finite() { y0 } else { 0.0 };
                 self.dc_blocker_x1 = x0;
                 self.dc_blocker_y1 = y0;
                 y0

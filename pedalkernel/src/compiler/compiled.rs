@@ -476,6 +476,9 @@ pub struct CompiledPedal {
     /// Auto-calibrated output gain scalar (1.0 = no calibration).
     pub(super) output_gain: f64,
     pub(super) rail_saturation: RailSaturation,
+    /// Oversampler for rail saturation to anti-alias harmonics generated
+    /// by the nonlinear clipping at supply rails.
+    pub(super) rail_sat_oversampler: crate::oversampling::Oversampler,
     pub(super) sample_rate: f64,
     pub(super) controls: Vec<ControlBinding>,
     pub(super) gain_range: (f64, f64),
@@ -1771,6 +1774,8 @@ impl PedalProcessor for CompiledPedal {
                     #[cfg(feature = "debug-trace")]
                     let pre_stage = stage_input;
                     let stage_output = stage.process(stage_input);
+                    // Guard against NaN from NR solver divergence.
+                    let stage_output = if stage_output.is_finite() { stage_output } else { 0.0 };
 
                     // Write output to stage's output node for junction summing
                     // (only for trigger voice stages).
@@ -1837,6 +1842,8 @@ impl PedalProcessor for CompiledPedal {
                     #[cfg(feature = "debug-trace")]
                     let pre = mnl_input;
                     let mnl_output = mnl.process(mnl_input);
+                    // Guard against NaN from multi-NL NR solver divergence.
+                    let mnl_output = if mnl_output.is_finite() { mnl_output } else { 0.0 };
 
                     // Store output at the stage's output node for downstream routing.
                     self.node_signals.push((mnl.output_node_id, mnl_output));
@@ -2008,7 +2015,14 @@ impl PedalProcessor for CompiledPedal {
             signal = slew.process(signal);
         }
 
-        signal = self.rail_saturation.process(signal, headroom);
+        // Guard against NaN/Inf from NL solver divergence — prevents
+        // permanent state corruption in the oversampler's IIR filters.
+        if !signal.is_finite() {
+            signal = 0.0;
+        }
+        signal = self.rail_sat_oversampler.process(signal, |s| {
+            self.rail_saturation.process(s, headroom)
+        });
 
         // Process through BBD delay lines (wet signal mixed with dry).
         for bbd in &mut self.bbds {
@@ -2052,6 +2066,10 @@ impl PedalProcessor for CompiledPedal {
             signal = loading.process(signal);
         }
 
+        // Final NaN guard — prevent corrupted audio from reaching the output.
+        if !signal.is_finite() {
+            signal = 0.0;
+        }
         let output = signal * self.output_gain;
 
         #[cfg(feature = "debug-trace")]
@@ -2198,6 +2216,7 @@ impl PedalProcessor for CompiledPedal {
         for sc in &mut self.sidechains {
             sc.reset();
         }
+        self.rail_sat_oversampler.reset();
     }
 
     fn set_control(&mut self, label: &str, value: f64) {
