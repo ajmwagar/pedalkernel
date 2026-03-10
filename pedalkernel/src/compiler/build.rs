@@ -636,19 +636,25 @@ fn stage_plan_to_multi_nl(
             let (plate, cathode) = (elem.junction_nodes[0], elem.junction_nodes[1]);
             let terminals = vec![(*gn, cathode), (plate, cathode)];
 
+            // Output-pin barriers prevent BFS from crossing into other stages.
+            let mut barriers = graph.output_pin_nodes.clone();
+            barriers.remove(&plate);
+            barriers.remove(&cathode);
+            barriers.remove(gn);
+
             // BFS from plate, cathode, and grid to collect full passive network.
             let mut edges = graph.bfs_passive_edges(
                 plate,
                 &classified.all_nonlinear_edge_indices,
                 &graph.active_edge_indices,
-                true, false, &empty_pp, &HashSet::new(),
+                true, false, &empty_pp, &barriers,
             );
             if cathode != graph.gnd_node {
                 let cathode_edges = graph.bfs_passive_edges(
                     cathode,
                     &classified.all_nonlinear_edge_indices,
                     &graph.active_edge_indices,
-                    true, false, &empty_pp, &HashSet::new(),
+                    true, false, &empty_pp, &barriers,
                 );
                 extend_dedup_vec(&mut edges, &cathode_edges);
             }
@@ -657,7 +663,7 @@ fn stage_plan_to_multi_nl(
                     *gn,
                     &classified.all_nonlinear_edge_indices,
                     &graph.active_edge_indices,
-                    true, false, &empty_pp, &HashSet::new(),
+                    true, false, &empty_pp, &barriers,
                 );
                 extend_dedup_vec(&mut edges, &grid_edges);
             }
@@ -668,18 +674,22 @@ fn stage_plan_to_multi_nl(
             let (plate, cathode) = (elem.junction_nodes[0], elem.junction_nodes[1]);
             let terminals = vec![(plate, cathode)];
 
+            let mut barriers = graph.output_pin_nodes.clone();
+            barriers.remove(&plate);
+            barriers.remove(&cathode);
+
             let mut edges = graph.bfs_passive_edges(
                 plate,
                 &classified.all_nonlinear_edge_indices,
                 &graph.active_edge_indices,
-                true, false, &empty_pp, &HashSet::new(),
+                true, false, &empty_pp, &barriers,
             );
             if cathode != graph.gnd_node {
                 let cathode_edges = graph.bfs_passive_edges(
                     cathode,
                     &classified.all_nonlinear_edge_indices,
                     &graph.active_edge_indices,
-                    true, false, &empty_pp, &HashSet::new(),
+                    true, false, &empty_pp, &barriers,
                 );
                 extend_dedup_vec(&mut edges, &cathode_edges);
             }
@@ -696,12 +706,17 @@ fn stage_plan_to_multi_nl(
             };
             let terminals = vec![(junction, other)];
 
-            // BFS from both diode terminals to capture full passive network.
+            // Output-pin barriers prevent BFS from absorbing downstream stages.
+            let mut barriers = graph.output_pin_nodes.clone();
+            barriers.remove(&junction);
+            barriers.remove(&other);
+
+            // BFS from both diode terminals to capture passive network.
             let mut edges = graph.bfs_passive_edges(
                 junction,
                 &classified.all_nonlinear_edge_indices,
                 &graph.active_edge_indices,
-                true, false, &empty_pp, &HashSet::new(),
+                true, false, &empty_pp, &barriers,
             );
             if other != graph.gnd_node && other != graph.vcc_node
                 && !graph.supply_nodes.contains(&other)
@@ -710,7 +725,7 @@ fn stage_plan_to_multi_nl(
                     other,
                     &classified.all_nonlinear_edge_indices,
                     &graph.active_edge_indices,
-                    true, false, &empty_pp, &HashSet::new(),
+                    true, false, &empty_pp, &barriers,
                 );
                 extend_dedup_vec(&mut edges, &other_edges);
             }

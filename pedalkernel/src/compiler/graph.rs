@@ -60,6 +60,10 @@ pub(super) struct CircuitGraph {
     /// component index, whether they are secondary-side, and the turns ratio.
     /// Used by build.rs to apply inter-stage voltage gain across transformers.
     pub(super) transformer_info: HashMap<NodeId, TransformerNodeInfo>,
+    /// Nodes corresponding to Output pins of active/gain components
+    /// (opamp .out, BJT collector, triode plate, JFET drain).
+    /// Used as BFS barriers instead of the ad-hoc active_bridge set.
+    pub(super) output_pin_nodes: HashSet<NodeId>,
     /// Post-resolution edge classifications. Maps edge index → resolved EdgeKind.
     /// Only populated for edges whose kind changed during resolution.
     /// If an edge index is absent, use the component's default edges().
@@ -739,6 +743,23 @@ impl CircuitGraph {
             })
             .collect();
 
+        // Compute output-pin barrier nodes from active/gain components.
+        // Only Output pins of opamps, BJTs, tubes, JFETs, and MOSFETs are
+        // included — passive component pins (diode .b, pot .wiper) are excluded.
+        let mut output_pin_nodes = HashSet::new();
+        for comp in &components {
+            if comp.kind.is_gain_device() || comp.kind.op_amp_type().is_some() {
+                for pin_name in comp.kind.pin_config().valid_pins {
+                    if comp.kind.pin_direction(pin_name) == super::component::PinDirection::Output {
+                        let key = format!("{}.{}", comp.id, pin_name);
+                        if let Some(&raw_id) = pin_ids.get(&key) {
+                            output_pin_nodes.insert(uf.find(raw_id));
+                        }
+                    }
+                }
+            }
+        }
+
         CircuitGraph {
             edges,
             components,
@@ -754,6 +775,7 @@ impl CircuitGraph {
             node_names,
             coupled_nodes,
             transformer_info,
+            output_pin_nodes,
             resolved_edge_kinds: HashMap::new(),
             trigger_nodes,
         }
@@ -2881,6 +2903,21 @@ pub(super) fn resolve_components(graph: &mut CircuitGraph, pedal: &PedalDef) {
             // Works because JFET/OTA each produce a single circuit edge.
             if let Some(first) = resolved_edges.first() {
                 graph.resolved_edge_kinds.insert(edge_idx, first.kind);
+            }
+        }
+    }
+
+    // Remove JFET drain nodes from output_pin_nodes when resolved to Linear
+    // (variable resistor mode). In this mode the drain is not a unidirectional
+    // output — it's one terminal of a variable resistor.
+    for (&eidx, &resolved_kind) in &graph.resolved_edge_kinds {
+        if resolved_kind == super::component::EdgeKind::Linear {
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            if comp.kind.is_jfet() {
+                let drain_key = format!("{}.drain", comp.id);
+                if let Some(&drain_node) = graph.node_names.get(&drain_key) {
+                    graph.output_pin_nodes.remove(&drain_node);
+                }
             }
         }
     }

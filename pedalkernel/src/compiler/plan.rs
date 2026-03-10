@@ -619,6 +619,16 @@ fn group_nl_elements(
         while let Some(node) = queue.pop_front() {
             if let Some(neighbors) = adj.get(&node) {
                 for &(eidx, neighbor) in neighbors {
+                    // Don't traverse through Output pin nodes of other components.
+                    // This prevents grouping NL elements across unidirectional
+                    // boundaries (e.g., two diodes on opposite sides of an opamp
+                    // output). Starting nodes are already in visited_nodes, so
+                    // they aren't blocked — only output pins of OTHER components.
+                    if graph.output_pin_nodes.contains(&neighbor)
+                        && !visited_nodes.contains(&neighbor)
+                    {
+                        continue;
+                    }
                     match edge_kinds[eidx] {
                         EdgeKind::Behavioral => continue, // Rule 5: don't cross
                         EdgeKind::Nonlinear => {
@@ -1067,25 +1077,21 @@ fn plan_one_junction(
     let mut excluded: Vec<usize> = classified.all_nonlinear_edge_indices.clone();
     excluded.extend(opamp_feedback_edges);
 
-    // Active bridge nodes: opamp/BJT pin nodes act as BFS barriers.
-    // Collect the edge TO them but don't traverse further — prevents
-    // crossing into adjacent active stages.
-    let mut active_bridge: HashSet<super::graph::NodeId> = graph.active_edge_indices.iter()
-        .flat_map(|&eidx| {
-            let e = &graph.edges[eidx];
-            [e.node_a, e.node_b]
-        })
-        .collect();
+    // Output-pin barrier nodes: only Output pins of active/gain components
+    // (opamp .out, BJT collector, triode plate, JFET drain) act as BFS
+    // barriers. Input pins (opamp neg/pos, BJT base) are traversable,
+    // allowing BFS to reach feedback networks through them.
+    let mut output_barriers = graph.output_pin_nodes.clone();
     // The junction itself is reachable (we start there), so remove it.
-    active_bridge.remove(&junction);
+    output_barriers.remove(&junction);
     // For diodes/MOSFETs: the NL element's other terminal is also traversable.
     // Without this, BFS stops at the other terminal (e.g. U2.out for a
     // feedback diode pair) and misses the output chain (tone/volume).
     let nl_edge = &graph.edges[elem.edge_idx];
     let other_terminal = if nl_edge.node_a == junction { nl_edge.node_b } else { nl_edge.node_a };
-    active_bridge.remove(&other_terminal);
+    output_barriers.remove(&other_terminal);
 
-    // Multi-hop BFS from junction through passive edges with active bridge
+    // Multi-hop BFS from junction through passive edges with output-pin
     // barriers. Collects the full passive network: feedback components,
     // input coupling, AND tone network (reached through feedback path to
     // opamp output, then onward through coupling caps).
@@ -1100,7 +1106,7 @@ fn plan_one_junction(
         true,  // include supply-adjacent
         false, // don't skip out_node — aw pot half stays in tree for loading
         _pp_transformer_edges,
-        &active_bridge,
+        &output_barriers,
     );
 
     if is_jfet {
@@ -1270,11 +1276,17 @@ fn plan_two_junction(
     // determines the NL port current. The WDF tree needs these passives
     // to compute Vbe/Vgk. BFS from base/grid collects the input coupling
     // cap, bias resistors, and everything reachable within this stage.
+    // Output-pin barriers prevent BFS from crossing into other active stages.
     let base_passives = match &elem.kind {
-        NonlinearKind::BjtNpn { base_node, .. }
-        | NonlinearKind::BjtPnp { base_node, .. } => {
+        NonlinearKind::BjtNpn { base_node, collector_node, emitter_node, .. }
+        | NonlinearKind::BjtPnp { base_node, collector_node, emitter_node, .. } => {
             if *base_node != graph.gnd_node {
                 let exclude = classified.all_nonlinear_edge_indices.clone();
+                let mut base_barriers = graph.output_pin_nodes.clone();
+                // Remove own terminal nodes so BFS can start/traverse
+                base_barriers.remove(base_node);
+                base_barriers.remove(collector_node);
+                base_barriers.remove(emitter_node);
                 // boundary edges are NOT excluded — BFS traverses through
                 // coupling cap so it stays in the downstream stage's WDF tree
                 graph.bfs_passive_edges(
@@ -1284,7 +1296,7 @@ fn plan_two_junction(
                     true,
                     true, // skip_out_node
                     pp_transformer_edges,
-                    &HashSet::new(),
+                    &base_barriers,
                 )
             } else {
                 Vec::new()
@@ -1292,10 +1304,17 @@ fn plan_two_junction(
         }
         NonlinearKind::Triode {
             grid_node: Some(gn),
+            plate_node,
+            cathode_node,
             ..
         } => {
             if *gn != graph.gnd_node {
                 let exclude = classified.all_nonlinear_edge_indices.clone();
+                let mut grid_barriers = graph.output_pin_nodes.clone();
+                // Remove own terminal nodes so BFS can start/traverse
+                grid_barriers.remove(gn);
+                grid_barriers.remove(plate_node);
+                grid_barriers.remove(cathode_node);
                 // boundary edges are NOT excluded — BFS traverses through
                 // coupling cap so it stays in the downstream stage's WDF tree
                 graph.bfs_passive_edges(
@@ -1305,7 +1324,7 @@ fn plan_two_junction(
                     true,
                     true,
                     pp_transformer_edges,
-                    &HashSet::new(),
+                    &grid_barriers,
                 )
             } else {
                 Vec::new()
@@ -2340,6 +2359,13 @@ fn collect_passive_edges_from_nodes(
         excl
     };
 
+    // Output-pin barriers prevent BFS from crossing into other active stages.
+    // Remove the group's own junction nodes so BFS can start from them.
+    let mut output_barriers = graph.output_pin_nodes.clone();
+    for &jn in junction_nodes {
+        output_barriers.remove(&jn);
+    }
+
     let mut all_passive_edges: Vec<usize> = Vec::new();
     for &jn in junction_nodes {
         let edges = graph.bfs_passive_edges(
@@ -2349,7 +2375,7 @@ fn collect_passive_edges_from_nodes(
             true,
             skip_out_node,
             pp_transformer_edges,
-            &HashSet::new(),
+            &output_barriers,
         );
         extend_dedup(&mut all_passive_edges, &edges);
     }
@@ -2382,18 +2408,10 @@ fn collect_output_passive_tail(
         })
         .collect();
 
-    // Nodes touched by active bridge edges (opamp/BJT pins).
-    // These are processing stage boundaries — the tail BFS must not
-    // cross them (otherwise the Klon's diode stage would absorb the
-    // summing amp's output passives).
-    let active_bridge_nodes: HashSet<NodeId> = graph
-        .active_edge_indices
-        .iter()
-        .flat_map(|&eidx| {
-            let e = &graph.edges[eidx];
-            [e.node_a, e.node_b]
-        })
-        .collect();
+    // Output-pin barrier nodes — processing stage boundaries.
+    // The tail BFS must not cross them (otherwise the Klon's diode stage
+    // would absorb the summing amp's output passives).
+    let output_barriers = &graph.output_pin_nodes;
 
     let mut visited: HashSet<NodeId> = HashSet::new();
     let mut queue: VecDeque<NodeId> = VecDeque::new();
@@ -2439,12 +2457,12 @@ fn collect_output_passive_tail(
                 continue;
             }
 
-            // Active bridge node (opamp/BJT pin): collect connecting edge
-            // but stop BFS — this is a processing stage boundary.
+            // Output-pin barrier node: collect connecting edge but stop
+            // BFS — this is a processing stage boundary.
             // Always stop here, even if this node appears in the existing
             // stage's set (e.g., SCREAMER's C3 shares U2.out, but the
             // tone/volume chain beyond U2.out should NOT be absorbed).
-            if active_bridge_nodes.contains(&n) {
+            if output_barriers.contains(&n) {
                 if !collected.contains(&idx) {
                     collected.push(idx);
                 }
