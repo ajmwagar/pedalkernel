@@ -279,6 +279,8 @@ fn build_passive_wdf_stage(
                 feedback_opamp: None,
                 vcc_injection_coeff: 0.0,
                 vcc_dc_ramp: 0,
+                tone_feedback: None,
+                load_tree: None,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -619,6 +621,8 @@ fn build_passive_rtype_from_decomposed(
         feedback_opamp: None,
         vcc_injection_coeff: 0.0,
         vcc_dc_ramp: 0,
+        tone_feedback: None,
+        load_tree: None,
     })
 }
 
@@ -678,10 +682,10 @@ fn rescue_orphan_output_pots(
         .collect();
 
     if !orphan_pot_ids.is_empty() {
-        eprintln!(
-            "[ORPHAN-POT] {} unbound pot(s): {:?}",
-            orphan_pot_ids.len(),
-            orphan_pot_ids
+        tracing::warn!(
+            count = orphan_pot_ids.len(),
+            pots = ?orphan_pot_ids,
+            "unbound pot(s) — declared but not mapped in controls block",
         );
     }
 
@@ -988,6 +992,8 @@ fn build_feedforward_stages(
                     feedback_opamp: None,
                     vcc_injection_coeff: 0.0,
                     vcc_dc_ramp: 0,
+                    tone_feedback: None,
+                    load_tree: None,
                 }
             }
             Err(_) => {
@@ -1116,6 +1122,8 @@ fn build_output_rooted_stage(
         feedback_opamp: None,
         vcc_injection_coeff: 0.0,
         vcc_dc_ramp: 0,
+        tone_feedback: None,
+        load_tree: None,
     })
 }
 
@@ -1414,18 +1422,20 @@ pub fn compile_pedal_with_options(
     let _collapse_nl = options.collapse_nl;
 
     // ══ Pass 0.5: Validation ═══════════════════════════════════════════
-    // Run validation to catch pin errors early. Only hard-fail on
-    // unknown-pin errors — other Error-severity warnings (e.g. no-signal-path)
-    // may have false positives for sub-circuits and complex topologies.
+    // Run validation and hard-fail on all Error-severity warnings.
+    // Warnings that may have false positives (e.g. no-signal-path) use
+    // Severity::Warning instead so they don't block compilation.
     let warnings = super::validate::validate_pedal(pedal);
     for w in &warnings {
-        if w.severity == super::validate::Severity::Error && w.code == "unknown-pin" {
+        if w.severity == super::validate::Severity::Error {
             return Err(w.message.clone());
         }
     }
     for w in &warnings {
-        if w.severity == super::validate::Severity::Warning {
-            eprintln!("[pedalkernel] {}", w);
+        match w.severity {
+            super::validate::Severity::Warning => tracing::warn!("{}", w),
+            super::validate::Severity::Info => tracing::info!("{}", w),
+            super::validate::Severity::Error => {} // hard-fail errors handled above
         }
     }
 
@@ -1709,7 +1719,7 @@ pub fn compile_pedal_with_options(
     // Maps trigger component ID → (WDF stage index, injection node ID).
     let mut trigger_stage_map: HashMap<String, (usize, NodeId)> = HashMap::new();
 
-    if stages.is_empty() && multi_nl_stages.is_empty() {
+    if stages.is_empty() && multi_nl_stages.is_empty() && push_pull_plans.is_empty() {
         let has_reactive = pedal.components.iter().any(|c| {
             c.kind.as_any().downcast_ref::<CapacitorComp>().is_some()
                 || c.kind.as_any().downcast_ref::<InductorComp>().is_some()

@@ -64,6 +64,7 @@ pub fn validate_pedal(pedal: &PedalDef) -> Vec<PedalWarning> {
     check_component_values(pedal, &mut warnings);
     check_net_references(pedal, &mut warnings);
     check_pin_validity(pedal, &mut warnings);
+    check_transformer_pins(pedal, &mut warnings);
     check_orphaned_components(pedal, &mut warnings);
     check_signal_path(pedal, &mut warnings);
     check_controls(pedal, &mut warnings);
@@ -268,6 +269,101 @@ fn check_pin_validity(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     }
 }
 
+/// Check transformer pins against winding configuration.
+///
+/// Rejects center-tap pins on non-center-tap windings and tertiary pins
+/// when no tertiary winding exists. These are hard errors — the circuit
+/// would silently produce wrong results.
+fn check_transformer_pins(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
+    // Collect transformer configs by component ID.
+    let transformers: HashMap<&str, &TransformerConfig> = pedal
+        .components
+        .iter()
+        .filter_map(|c| {
+            c.kind
+                .transformer_config()
+                .map(|cfg| (c.id.as_str(), cfg))
+        })
+        .collect();
+
+    if transformers.is_empty() {
+        return;
+    }
+
+    // Pins that require a center-tap winding.
+    const PRIMARY_CT_PINS: &[&str] = &["pri_ct", "pri.ct", "primary.ct"];
+    const SECONDARY_CT_PINS: &[&str] = &["sec_ct", "sec.ct", "secondary.ct", "ct"];
+
+    // Pins that require a tertiary winding.
+    const TERTIARY_PINS: &[&str] = &[
+        "e", "f", "tertiary.a", "tertiary.b", "ter.a", "ter.b", "ter_a", "ter_b",
+    ];
+
+    let check_pin = |pin: &Pin, w: &mut Vec<PedalWarning>| {
+        if let Pin::ComponentPin { component, pin } = pin {
+            if let Some(cfg) = transformers.get(component.as_str()) {
+                let pin_str = pin.as_str();
+
+                // Center-tap on primary
+                if PRIMARY_CT_PINS.contains(&pin_str)
+                    && !matches!(cfg.primary_type, WindingType::CenterTap | WindingType::PushPull)
+                {
+                    w.push(PedalWarning {
+                        severity: Severity::Error,
+                        code: "invalid-transformer-pin",
+                        message: format!(
+                            "'{}.{}' requires a center-tap or push-pull primary, \
+                             but {} has a standard primary winding. \
+                             Use transformer({}, {}, ct_primary) to add a center tap.",
+                            component, pin, component,
+                            cfg.turns_ratio, cfg.primary_inductance,
+                        ),
+                    });
+                }
+
+                // Center-tap on secondary
+                if SECONDARY_CT_PINS.contains(&pin_str)
+                    && !matches!(cfg.secondary_type, WindingType::CenterTap | WindingType::PushPull)
+                {
+                    w.push(PedalWarning {
+                        severity: Severity::Error,
+                        code: "invalid-transformer-pin",
+                        message: format!(
+                            "'{}.{}' requires a center-tap secondary, \
+                             but {} has a standard secondary winding. \
+                             Use transformer({}, {}, ct_secondary) to add a center tap.",
+                            component, pin, component,
+                            cfg.turns_ratio, cfg.primary_inductance,
+                        ),
+                    });
+                }
+
+                // Tertiary pins without tertiary winding
+                if TERTIARY_PINS.contains(&pin_str) && !cfg.has_tertiary() {
+                    w.push(PedalWarning {
+                        severity: Severity::Error,
+                        code: "invalid-transformer-pin",
+                        message: format!(
+                            "'{}.{}' references a tertiary winding, \
+                             but {} is a 2-winding transformer. \
+                             Add a tertiary turns ratio: transformer({}, {}, tertiary=N)",
+                            component, pin, component,
+                            cfg.turns_ratio, cfg.primary_inductance,
+                        ),
+                    });
+                }
+            }
+        }
+    };
+
+    for net in &pedal.nets {
+        check_pin(&net.from, w);
+        for to_pin in &net.to {
+            check_pin(to_pin, w);
+        }
+    }
+}
+
 /// Components declared but never referenced in any net.
 fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     let mut referenced: HashSet<String> = HashSet::new();
@@ -385,8 +481,10 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     }
 
     if !visited.contains("out") {
+        // Warning, not Error — sub-circuits and complex topologies may not
+        // have a direct in→out path but still compile correctly.
         w.push(PedalWarning {
-            severity: Severity::Error,
+            severity: Severity::Warning,
             code: "no-signal-path",
             message: "No signal path found from 'in' to 'out'".to_string(),
         });
@@ -434,20 +532,27 @@ fn check_controls(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
             });
         }
 
-        // Check range validity
-        if ctrl.range.0 >= ctrl.range.1 {
+        // Check range validity — only reject empty ranges (min == max).
+        // Inverted ranges (min > max) are intentional for VST controls
+        // like "Cut" knobs where max position = minimum value.
+        if ctrl.range.0 == ctrl.range.1 {
             w.push(PedalWarning {
                 severity: Severity::Warning,
-                code: "invalid-control-range",
+                code: "empty-control-range",
                 message: format!(
-                    "{} entry '{}' has inverted or empty range [{}, {}]",
+                    "{} entry '{}' has empty range [{}, {}] — min and max are equal",
                     section, ctrl.label, ctrl.range.0, ctrl.range.1
                 ),
             });
         }
 
-        // Check default is within range
-        if ctrl.default < ctrl.range.0 || ctrl.default > ctrl.range.1 {
+        // Check default is within range (handles both normal and inverted ranges)
+        let (lo, hi) = if ctrl.range.0 <= ctrl.range.1 {
+            (ctrl.range.0, ctrl.range.1)
+        } else {
+            (ctrl.range.1, ctrl.range.0)
+        };
+        if ctrl.default < lo || ctrl.default > hi {
             w.push(PedalWarning {
                 severity: Severity::Warning,
                 code: "default-out-of-range",
@@ -1863,5 +1968,168 @@ mod tests {
         pedal.mirrors.insert("P_B".to_string(), "P_A".to_string());
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "mirror-resistance-mismatch"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Transformer pin validation
+    // ═══════════════════════════════════════════════════════════════════
+
+    fn transformer_pedal(cfg: TransformerConfig) -> PedalDef {
+        PedalDef {
+            name: "XfmrTest".to_string(),
+            subtitle: None,
+            supplies: vec![],
+            components: vec![ComponentDef {
+                id: "T1".to_string(),
+                kind: Box::new(TransformerComp { config: cfg }),
+            }],
+            nets: vec![
+                NetDef {
+                    from: Pin::Reserved("in".to_string()),
+                    to: vec![Pin::ComponentPin {
+                        component: "T1".to_string(),
+                        pin: "a".to_string(),
+                    }],
+                },
+                NetDef {
+                    from: Pin::ComponentPin {
+                        component: "T1".to_string(),
+                        pin: "b".to_string(),
+                    },
+                    to: vec![Pin::Reserved("gnd".to_string())],
+                },
+                NetDef {
+                    from: Pin::ComponentPin {
+                        component: "T1".to_string(),
+                        pin: "c".to_string(),
+                    },
+                    to: vec![Pin::Reserved("out".to_string())],
+                },
+                NetDef {
+                    from: Pin::ComponentPin {
+                        component: "T1".to_string(),
+                        pin: "d".to_string(),
+                    },
+                    to: vec![Pin::Reserved("gnd".to_string())],
+                },
+            ],
+            controls: vec![],
+            trims: vec![],
+            monitors: vec![],
+            sidechains: vec![],
+            mirrors: std::collections::HashMap::new(),
+            midi_bindings: vec![],
+            calibrate: false,
+        }
+    }
+
+    #[test]
+    fn valid_transformer_no_errors() {
+        let pedal = transformer_pedal(TransformerConfig::new(15.0, 10.0));
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            !has_code(&warnings, "invalid-transformer-pin"),
+            "Standard transformer with standard pins should not error: {:?}",
+            warnings_with_code(&warnings, "invalid-transformer-pin"),
+        );
+    }
+
+    #[test]
+    fn valid_center_tap_transformer_no_errors() {
+        let cfg = TransformerConfig::new(15.0, 10.0).with_center_tap();
+        let mut pedal = transformer_pedal(cfg);
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "T1".to_string(),
+                pin: "sec.ct".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            !has_code(&warnings, "invalid-transformer-pin"),
+            "CT transformer with CT pin should not error: {:?}",
+            warnings_with_code(&warnings, "invalid-transformer-pin"),
+        );
+    }
+
+    #[test]
+    fn center_tap_pin_on_standard_secondary_errors() {
+        let cfg = TransformerConfig::new(15.0, 10.0); // standard, no CT
+        let mut pedal = transformer_pedal(cfg);
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "T1".to_string(),
+                pin: "sec.ct".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            has_code(&warnings, "invalid-transformer-pin"),
+            "CT pin on standard secondary should error",
+        );
+    }
+
+    #[test]
+    fn primary_ct_pin_on_standard_primary_errors() {
+        let cfg = TransformerConfig::new(15.0, 10.0);
+        let mut pedal = transformer_pedal(cfg);
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "T1".to_string(),
+                pin: "pri.ct".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            has_code(&warnings, "invalid-transformer-pin"),
+            "CT pin on standard primary should error",
+        );
+    }
+
+    #[test]
+    fn tertiary_pin_on_two_winding_transformer_errors() {
+        let cfg = TransformerConfig::new(15.0, 10.0); // no tertiary
+        let mut pedal = transformer_pedal(cfg);
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "T1".to_string(),
+                pin: "e".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            has_code(&warnings, "invalid-transformer-pin"),
+            "Tertiary pin on 2-winding transformer should error",
+        );
+    }
+
+    #[test]
+    fn tertiary_pin_on_three_winding_transformer_ok() {
+        let cfg = TransformerConfig::new(15.0, 10.0).with_tertiary(5.0);
+        let mut pedal = transformer_pedal(cfg);
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "T1".to_string(),
+                pin: "e".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        pedal.nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: "T1".to_string(),
+                pin: "f".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+        let warnings = validate_pedal(&pedal);
+        assert!(
+            !has_code(&warnings, "invalid-transformer-pin"),
+            "Tertiary pins on 3-winding transformer should be valid: {:?}",
+            warnings_with_code(&warnings, "invalid-transformer-pin"),
+        );
     }
 }

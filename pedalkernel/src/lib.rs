@@ -715,7 +715,7 @@ pedal "Test Pedal" {
         let p = parse_example("dyna_comp.pedal");
         assert_eq!(p.name, "MXR Dyna Comp");
         assert_eq!(p.components.len(), 10);
-        assert_eq!(p.nets.len(), 13);
+        assert_eq!(p.nets.len(), 14);
         assert_eq!(p.controls.len(), 2);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Sensitivity"));
@@ -732,7 +732,7 @@ pedal "Test Pedal" {
         let p = parse_example("proco_rat.pedal");
         assert_eq!(p.name, "ProCo RAT");
         assert_eq!(p.components.len(), 22);
-        assert_eq!(p.nets.len(), 28);
+        assert_eq!(p.nets.len(), 29);
         assert_eq!(p.controls.len(), 3);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Distortion"));
@@ -756,7 +756,7 @@ pedal "Test Pedal" {
         let p = parse_example("blues_driver.pedal");
         assert_eq!(p.name, "Boss Blues Driver");
         assert_eq!(p.components.len(), 32);
-        assert_eq!(p.nets.len(), 39);
+        assert_eq!(p.nets.len(), 40);
         assert_eq!(p.controls.len(), 3);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Gain"));
@@ -821,7 +821,7 @@ pedal "Test Pedal" {
         let p = parse_example("fulltone_ocd.pedal");
         assert_eq!(p.name, "Fulltone OCD");
         assert_eq!(p.components.len(), 18);
-        assert_eq!(p.nets.len(), 23);
+        assert_eq!(p.nets.len(), 24);
         assert_eq!(p.controls.len(), 3);
         let labels: Vec<&str> = p.controls.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"Drive"));

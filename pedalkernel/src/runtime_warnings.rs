@@ -228,7 +228,7 @@ pub fn record_warning(warning: RuntimeWarning) {
     WARNING_COLLECTOR.with(|collector| {
         let msg = warning.to_string();
         if collector.borrow_mut().record(warning) {
-            eprintln!("{}", msg);
+            tracing::warn!("{}", msg);
         }
     });
 }
