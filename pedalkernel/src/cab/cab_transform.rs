@@ -158,6 +158,65 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
         None
     };
 
+    // ── Sealed enclosure leakage ────────────────────────────────────────
+    // All sealed enclosures have some air leakage. This is modeled as a
+    // high-value resistor in parallel with the box compliance, representing
+    // the slow pressure equalization through gaps. Default: ~10 MΩ (well sealed).
+    let sealed_leak = if cab.enclosure.enclosure_type == EnclosureType::Sealed {
+        // User-specified leakage or default 10M acoustic ohms
+        let r_leak_acoustic = cab.enclosure.leakage.unwrap_or(10e6);
+        // Reflect to electrical domain: R_leak_elec = BL² / (R_leak_acoustic × Sd²)
+        // This is a very high resistance, minimal effect except at very low frequencies
+        Some(bl2 / (r_leak_acoustic * ts.sd * ts.sd).max(1e-12))
+    } else {
+        None
+    };
+
+    // ── Bass reflex port (Helmholtz resonator) ────────────────────────
+    // The port acts as an acoustic mass (inductor) with viscous losses (resistor)
+    // in series, placed in parallel with the box compliance.
+    // Tuning freq: fb = (c / 2π) × √(Sp / (lp × Vb))
+    // where Sp = port area, lp = effective port length, Vb = box volume
+    let port_rl = if cab.enclosure.enclosure_type == EnclosureType::BassReflex {
+        if let Some(ref port) = cab.enclosure.port {
+            let v_box = cab.enclosure.volume.unwrap_or(0.045);
+            // Port area
+            let sp = if let Some(d) = port.diameter {
+                PI * (d / 2.0) * (d / 2.0)
+            } else if let (Some(w), Some(h)) = (port.width, port.height) {
+                w * h
+            } else {
+                PI * 0.025 * 0.025 // default ~50mm diameter
+            };
+            // Effective port length includes end corrections (~0.85 × diameter per end)
+            let port_radius = (sp / PI).sqrt();
+            let l_eff = port.length + 1.7 * port_radius;
+            // Acoustic mass of port air: Ma = ρ × l_eff / Sp
+            let m_port_acoustic = rho * l_eff / sp;
+            // Reflect to electrical domain via Sd² and BL²
+            // Port mechanical mass = Ma × Sp² (acoustic → mechanical)
+            // Port electrical capacitance = M_port_mech / BL²
+            let c_port_elec = m_port_acoustic * sp * sp / bl2;
+            // Viscous losses in port: Rv ≈ 8πμl / Sp (Poiseuille-like)
+            // μ_air ≈ 1.8e-5 Pa·s
+            let mu_air = 1.8e-5;
+            let r_port_acoustic = 8.0 * PI * mu_air * l_eff / (sp * sp);
+            let r_port_elec = bl2 / (r_port_acoustic * ts.sd * ts.sd).max(1e-12);
+            Some((r_port_elec, c_port_elec))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // ── Grille filtering ──────────────────────────────────────────────
+    // Grille cloth/metal adds a small series R + L between the radiation
+    // resistance and the output, creating a gentle low-pass filter.
+    let grille = cab.enclosure.baffle.as_ref().map(|b| b.grille).unwrap_or_default();
+    let grille_r = grille.resistance_factor() * r_rad_elec;
+    let grille_l = grille.mass_factor() * l_e; // scale relative to voice coil Le
+
     // ── Build component list and netlist ────────────────────────────────
     let mut components = Vec::new();
     let mut nets = Vec::new();
@@ -316,23 +375,29 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
     let breakup_freq = cone.breakup_freq.unwrap_or_else(|| {
         let diam = 2.0 * piston_radius(ts.sd);
         let ref_diam = 0.30; // 12 inch reference
-        cone.material.default_breakup_freq_12in() * (ref_diam / diam)
+        // Dust cap shifts breakup: aluminum cap raises it, felt lowers it
+        // Surround HF loss effectively lowers the audible breakup contribution
+        let base_freq = cone.material.default_breakup_freq_12in() * (ref_diam / diam);
+        base_freq * cone.dust_cap.breakup_freq_multiplier()
     });
 
     // Material properties modulate the user-specified (or default) Q and level:
     //   - Higher damping_factor → lower Q (more damped breakup peaks)
-    //   - Higher stiffness → sharper peaks (higher Q) but material damping counteracts
+    //   - Dust cap HF damping adds to overall breakup damping
+    //   - Surround HF loss reduces effective breakup level
     // Reference: paper cone (damping=0.08, stiffness=1.0)
-    let mat_damping = cone.material.damping_factor();
+    let mat_damping = cone.material.damping_factor() + cone.dust_cap.hf_damping();
     let ref_damping = ConeMaterial::Paper.damping_factor(); // 0.08
-    let damping_ratio = ref_damping / mat_damping.max(1e-6); // >1 for low-damping materials
+    let damping_ratio = ref_damping / mat_damping.max(1e-6);
+    let surround_atten = 1.0 - cone.surround.hf_loss(); // surround HF loss reduces breakup level
 
     let mut breakup_ids = Vec::new();
     for mode_n in 0..cone.breakup_modes.min(4) {
         let f_mode = breakup_freq * (1.0 + mode_n as f64 * 0.6);
         // Scale Q by inverse damping ratio: aluminum (low damping) → higher Q peaks
         let q_mode = (cone.breakup_q * damping_ratio) / (1.0 + mode_n as f64 * 0.3);
-        let level = 10f64.powf(cone.breakup_level / 20.0) / (1.0 + mode_n as f64);
+        let level =
+            10f64.powf(cone.breakup_level / 20.0) * surround_atten / (1.0 + mode_n as f64);
 
         // RLC values for a parallel resonator at f_mode with Q = q_mode
         let r_bp = r_es * level;
@@ -429,11 +494,11 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
     let damping_r = if let Some(ref damping_def) = cab.enclosure.damping {
         let alpha = damping_def.material.absorption_coefficient();
         if alpha > 0.0 && damping_def.coverage > 0.0 {
-            // Effective absorption scales with coverage and material coefficient.
-            // The damping resistance is inversely proportional to absorption:
-            // less resistance = more energy dissipated = more damping.
-            // Scale relative to R_es so the damping is meaningful in the circuit.
-            let effective_alpha = alpha * damping_def.coverage;
+            // Effective absorption scales with coverage, material coefficient,
+            // and thickness (thicker fill absorbs more, especially at lower frequencies).
+            // Reference thickness: 25mm. Thicker = more absorption (diminishing returns).
+            let thickness_factor = (damping_def.thickness / 0.025).sqrt().min(2.0);
+            let effective_alpha = alpha * damping_def.coverage * thickness_factor;
             Some(r_es / effective_alpha.max(0.01))
         } else {
             None
@@ -533,6 +598,71 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
         });
     }
 
+    // Add sealed enclosure leakage resistor to junction
+    if let Some(r_leak) = sealed_leak {
+        let rleak_id = next_id("Rleak");
+        components.push(crate::dsl::ComponentDef {
+            id: rleak_id.clone(),
+            kind: Box::new(crate::compiler::components::Resistor { value: r_leak }),
+        });
+        junction_pins.push(Pin::ComponentPin {
+            component: rleak_id.clone(),
+            pin: "a".to_string(),
+        });
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: rleak_id,
+                pin: "b".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+    }
+
+    // Add bass reflex port (series R + C from junction to gnd)
+    // The port capacitor (acoustic mass) resonates with the box compliance (inductor)
+    // creating the Helmholtz resonance that extends bass response.
+    if let Some((r_port, c_port)) = port_rl {
+        let rport_id = next_id("Rport");
+        let cport_id = next_id("Cport");
+        components.push(crate::dsl::ComponentDef {
+            id: rport_id.clone(),
+            kind: Box::new(crate::compiler::components::Resistor { value: r_port }),
+        });
+        components.push(crate::dsl::ComponentDef {
+            id: cport_id.clone(),
+            kind: Box::new(crate::compiler::components::Capacitor {
+                config: CapConfig {
+                    value: c_port,
+                    cap_type: CapType::Film,
+                    leakage: None,
+                    da: None,
+                },
+            }),
+        });
+        // Port R.a at junction, R.b -> C.a, C.b -> gnd
+        junction_pins.push(Pin::ComponentPin {
+            component: rport_id.clone(),
+            pin: "a".to_string(),
+        });
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: rport_id,
+                pin: "b".to_string(),
+            },
+            to: vec![Pin::ComponentPin {
+                component: cport_id.clone(),
+                pin: "a".to_string(),
+            }],
+        });
+        nets.push(NetDef {
+            from: Pin::ComponentPin {
+                component: cport_id,
+                pin: "b".to_string(),
+            },
+            to: vec![Pin::Reserved("gnd".to_string())],
+        });
+    }
+
     // For open_back, L_ces is already connected above; for sealed, add it here
     if cab.enclosure.enclosure_type != EnclosureType::OpenBack {
         if let Some(lces_comp) = components.iter().find(|c| c.id.starts_with("Lces")) {
@@ -617,6 +747,53 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
         });
     }
 
+    // ── Grille filtering ────────────────────────────────────────────────
+    // Grille cloth/metal adds series R + L between R_rad and output,
+    // creating a gentle low-pass that attenuates high frequencies.
+    // Inserted into the signal path before the mic circuit.
+    let mut post_rad_pin = Pin::ComponentPin {
+        component: rrad_id.clone(),
+        pin: "b".to_string(),
+    };
+
+    if grille_r > 0.0 {
+        let rgrille_id = next_id("Rgrille");
+        components.push(crate::dsl::ComponentDef {
+            id: rgrille_id.clone(),
+            kind: Box::new(crate::compiler::components::Resistor { value: grille_r }),
+        });
+        nets.push(NetDef {
+            from: post_rad_pin,
+            to: vec![Pin::ComponentPin {
+                component: rgrille_id.clone(),
+                pin: "a".to_string(),
+            }],
+        });
+        post_rad_pin = Pin::ComponentPin {
+            component: rgrille_id,
+            pin: "b".to_string(),
+        };
+    }
+
+    if grille_l > 0.0 {
+        let lgrille_id = next_id("Lgrille");
+        components.push(crate::dsl::ComponentDef {
+            id: lgrille_id.clone(),
+            kind: Box::new(crate::compiler::components::Inductor { value: grille_l }),
+        });
+        nets.push(NetDef {
+            from: post_rad_pin,
+            to: vec![Pin::ComponentPin {
+                component: lgrille_id.clone(),
+                pin: "a".to_string(),
+            }],
+        });
+        post_rad_pin = Pin::ComponentPin {
+            component: lgrille_id,
+            pin: "b".to_string(),
+        };
+    }
+
     // ── Microphone circuit ──────────────────────────────────────────────
     // Determine if we have a mic with an equivalent circuit to model.
     let mic_params = if !cab.mics.is_empty() && mic_index < cab.mics.len() {
@@ -627,15 +804,12 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
 
     if let Some(ref mp) = mic_params {
         // Build mic transducer equivalent circuit:
-        //   R_rad.b → [coupling_cap →] [R_fet →] R_vc → L_vc → Transformer → out
+        //   post_rad → [coupling_cap →] [R_fet →] R_vc → L_vc → Transformer → out
         //
         // For condensers: coupling cap + FET output R replace voice coil R/L.
         // For dynamic/ribbon: voice coil R + L feed the transformer primary.
 
-        let mut prev_pin = Pin::ComponentPin {
-            component: rrad_id.clone(),
-            pin: "b".to_string(),
-        };
+        let mut prev_pin = post_rad_pin;
 
         // Condenser: coupling capacitor (capsule equivalent)
         if let Some(cc) = mp.coupling_cap {
@@ -773,12 +947,9 @@ fn generate_pedal_def(cab: &CabDef, mic_index: usize) -> Result<PedalDef, String
             to: vec![Pin::Reserved("gnd".to_string())],
         });
     } else {
-        // No mic circuit — direct pickup: R_rad.b → out
+        // No mic circuit — direct pickup: post_rad → out
         nets.push(NetDef {
-            from: Pin::ComponentPin {
-                component: rrad_id,
-                pin: "b".to_string(),
-            },
+            from: post_rad_pin,
             to: vec![Pin::Reserved("out".to_string())],
         });
     }

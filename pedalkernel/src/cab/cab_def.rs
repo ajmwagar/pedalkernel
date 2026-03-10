@@ -485,9 +485,17 @@ impl Default for EnvironmentDef {
 }
 
 impl EnvironmentDef {
-    /// Speed of sound in m/s at the given temperature.
+    /// Speed of sound in m/s at the given temperature and humidity.
+    ///
+    /// Humidity correction: moist air is lighter than dry air (water vapor
+    /// Mw=18 displaces N₂ Mw=28), increasing the speed of sound by up to
+    /// ~0.5% at 100% RH at 20°C.
     pub fn speed_of_sound(&self) -> f64 {
-        331.3 * (1.0 + self.temperature / 273.15).sqrt()
+        let c_dry = 331.3 * (1.0 + self.temperature / 273.15).sqrt();
+        // Humidity correction (Cramer, 1993 simplified):
+        // Δc/c ≈ 0.0016 × h (where h is fractional RH at 20°C, scales with temp)
+        let humidity_correction = 1.0 + 0.0016 * self.humidity;
+        c_dry * humidity_correction
     }
 
     /// Air density in kg/m³ at the given altitude.
@@ -648,6 +656,35 @@ pub enum DustCapType {
     None,
 }
 
+impl DustCapType {
+    /// Breakup frequency multiplier relative to the cone's base breakup.
+    ///
+    /// Heavier dust caps lower the breakup frequency; phase plugs eliminate
+    /// the dust cap resonance entirely (modeled as pushing it above audible range).
+    pub fn breakup_freq_multiplier(&self) -> f64 {
+        match self {
+            Self::Paper => 1.0,       // reference
+            Self::Felt => 0.9,        // heavier, damps HF
+            Self::Aluminum => 1.3,    // light + stiff, raises breakup
+            Self::Screen => 1.1,      // minimal mass
+            Self::PhasePlug => 1.5,   // eliminates cap resonance
+            Self::None => 1.2,        // no added mass
+        }
+    }
+
+    /// HF damping factor: higher = more HF absorption by the dust cap.
+    pub fn hf_damping(&self) -> f64 {
+        match self {
+            Self::Paper => 0.0,
+            Self::Felt => 0.15,       // felt absorbs HF significantly
+            Self::Aluminum => 0.0,
+            Self::Screen => 0.05,     // slight diffraction loss
+            Self::PhasePlug => 0.0,
+            Self::None => 0.0,
+        }
+    }
+}
+
 /// Surround type — affects HF rolloff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SurroundType {
@@ -656,6 +693,19 @@ pub enum SurroundType {
     Rubber,
     Foam,
     Accordion,
+}
+
+impl SurroundType {
+    /// HF rolloff factor: fraction of energy lost at high frequencies
+    /// due to surround compliance and mass. Higher = more rolloff.
+    pub fn hf_loss(&self) -> f64 {
+        match self {
+            Self::Cloth => 0.05,      // minimal loss, classic guitar speaker
+            Self::Rubber => 0.10,     // heavier, more HF absorption
+            Self::Foam => 0.15,       // significant HF damping
+            Self::Accordion => 0.03,  // stiff corrugated, minimal loss
+        }
+    }
 }
 
 /// Suspension compliance curve shape.
@@ -899,6 +949,35 @@ pub enum GrilleType {
     Cloth,
     MetalPerf,
     ExpandedMetal,
+}
+
+impl GrilleType {
+    /// Acoustic resistance of the grille (Ω, reflected to electrical domain).
+    ///
+    /// Returns a multiplier applied to a reference impedance. Grilles add
+    /// a slight series resistance that absorbs HF energy through viscous
+    /// losses in the cloth/perforations.
+    pub fn resistance_factor(&self) -> f64 {
+        match self {
+            Self::None => 0.0,
+            Self::Cloth => 0.08,          // typical speaker cloth, mild HF loss
+            Self::MetalPerf => 0.03,      // open area ~50%, minimal loss
+            Self::ExpandedMetal => 0.05,  // moderate open area
+        }
+    }
+
+    /// Acoustic mass (inductance factor) of the grille.
+    ///
+    /// Air in the grille openings has mass that creates a low-pass effect.
+    /// Returns a multiplier for a reference inductance.
+    pub fn mass_factor(&self) -> f64 {
+        match self {
+            Self::None => 0.0,
+            Self::Cloth => 0.05,          // tightly woven cloth adds air mass
+            Self::MetalPerf => 0.02,      // thin perforated sheet
+            Self::ExpandedMetal => 0.04,  // thicker metal mesh
+        }
+    }
 }
 
 /// Brace orientation.
