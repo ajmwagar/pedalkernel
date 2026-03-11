@@ -513,7 +513,7 @@ fn build_passive_rtype_from_decomposed(
     // ── Step 4: Output probe port ───────────────────────────────────────
     let out_mna = to_mna(probe_node);
     let output_port_idx = reactive_children.len();
-    reactive_children.push(DynNode::Resistor { rp: probe_resistance, last_a: 0.0 });
+    reactive_children.push(DynNode::Resistor { comp_id: None, rp: probe_resistance, last_a: 0.0 });
     reactive_ports.push(crate::tree::WdfPort {
         node_pos: out_mna,
         node_neg: None,
@@ -553,7 +553,7 @@ fn build_passive_rtype_from_decomposed(
     }
 
     // ── Step 7: Build WdfStage ──────────────────────────────────────────
-    let dummy_tree = DynNode::Resistor { rp: 1000.0, last_a: 0.0 };
+    let dummy_tree = DynNode::Resistor { comp_id: None, rp: 1000.0, last_a: 0.0 };
     let has_pots = !pot_stamps.is_empty();
     let recompute_mna = if has_pots { Some(mna.clone()) } else { None };
     let recompute_ports = if has_pots { Some(ports.clone()) } else { None };
@@ -2327,7 +2327,7 @@ pub fn compile_pedal_with_options(
         sample_rate,
         controls,
         gain_range: gain_range_final,
-        supply_voltage: 9.0,
+        supply_voltage,
         lfos,
         envelopes,
         slew_limiters,
@@ -2369,6 +2369,7 @@ pub fn compile_pedal_with_options(
         bbd_mix_pot_id,
         triggers,
         midi_trigger_map,
+        original_passive_values: HashMap::new(),
     };
 
     let initial_voltage = match &compiled.power_supply {
@@ -2383,6 +2384,9 @@ pub fn compile_pedal_with_options(
         compiled.output_gain = output_gain;
         compiled.reset();
     }
+
+    // Snapshot original passive values for reset support.
+    compiled.snapshot_original_values();
 
     Ok(compiled)
 }

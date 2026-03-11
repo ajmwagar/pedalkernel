@@ -569,6 +569,9 @@ pub struct CompiledPedal {
     /// When non-empty, `note_on()` fires only the trigger for the given note.
     /// When empty, `note_on()` fires all triggers (backward compatibility).
     pub(super) midi_trigger_map: HashMap<u8, usize>,
+    /// Original passive component values for reset support.
+    /// Maps comp_id -> (kind_str, original_value).
+    pub(super) original_passive_values: HashMap<String, (&'static str, f64)>,
 }
 
 /// Gain-like control labels.
@@ -952,6 +955,110 @@ impl CompiledPedal {
             .as_ref()
             .map(|b| b.read_latest())
             .unwrap_or_default()
+    }
+
+    /// List all editable passive components across all stages.
+    pub fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> {
+        let mut result = Vec::new();
+        for stage in &self.stages {
+            result.extend(stage.tree.list_editable_leaves());
+        }
+        for stage in &self.push_pull_stages {
+            result.extend(stage.push_tree.list_editable_leaves());
+            result.extend(stage.pull_tree.list_editable_leaves());
+        }
+        for stage in &self.multi_nl_stages {
+            for child in &stage.passive_children {
+                result.extend(child.list_editable_leaves());
+            }
+        }
+        result
+    }
+
+    /// Set a passive component's value by comp_id across all stages.
+    /// Automatically determines component type from original_passive_values.
+    /// After setting, recomputes all affected WDF tree coefficients.
+    pub fn set_passive(&mut self, comp_id: &str, value: f64) -> bool {
+        let kind = match self.original_passive_values.get(comp_id) {
+            Some((k, _)) => *k,
+            None => return false,
+        };
+        let sample_rate = self.sample_rate;
+        let mut found = false;
+
+        // Search WDF stages
+        for stage in &mut self.stages {
+            let hit = match kind {
+                "resistor" => stage.tree.set_resistor(comp_id, value),
+                "capacitor" => stage.tree.set_capacitor(comp_id, value, sample_rate),
+                "inductor" => stage.tree.set_inductor(comp_id, value, sample_rate),
+                _ => false,
+            };
+            if hit {
+                stage.tree.recompute();
+                found = true;
+            }
+        }
+
+        // Search push-pull stages
+        for stage in &mut self.push_pull_stages {
+            let hit_push = match kind {
+                "resistor" => stage.push_tree.set_resistor(comp_id, value),
+                "capacitor" => stage.push_tree.set_capacitor(comp_id, value, sample_rate),
+                "inductor" => stage.push_tree.set_inductor(comp_id, value, sample_rate),
+                _ => false,
+            };
+            let hit_pull = match kind {
+                "resistor" => stage.pull_tree.set_resistor(comp_id, value),
+                "capacitor" => stage.pull_tree.set_capacitor(comp_id, value, sample_rate),
+                "inductor" => stage.pull_tree.set_inductor(comp_id, value, sample_rate),
+                _ => false,
+            };
+            if hit_push {
+                stage.push_tree.recompute();
+                found = true;
+            }
+            if hit_pull {
+                stage.pull_tree.recompute();
+                found = true;
+            }
+        }
+
+        // Search multi-NL stages (passive children)
+        for stage in &mut self.multi_nl_stages {
+            for child in &mut stage.passive_children {
+                let hit = match kind {
+                    "resistor" => child.set_resistor(comp_id, value),
+                    "capacitor" => child.set_capacitor(comp_id, value, sample_rate),
+                    "inductor" => child.set_inductor(comp_id, value, sample_rate),
+                    _ => false,
+                };
+                if hit {
+                    child.recompute();
+                    stage.recompute_pending = true;
+                    found = true;
+                }
+            }
+        }
+
+        found
+    }
+
+    /// Reset a passive component to its original value.
+    pub fn reset_passive(&mut self, comp_id: &str) -> bool {
+        if let Some(&(_, original_value)) = self.original_passive_values.get(comp_id) {
+            self.set_passive(comp_id, original_value)
+        } else {
+            false
+        }
+    }
+
+    /// Populate original_passive_values from all stages' current editable leaves.
+    /// Should be called once after compilation is complete.
+    pub fn snapshot_original_values(&mut self) {
+        for (id, kind, value) in self.list_editable_components() {
+            self.original_passive_values.entry(id).or_insert((kind, value));
+        }
     }
 
     /// Set a control by its label (e.g., "Drive", "Level", "Rate").
@@ -2271,5 +2378,17 @@ impl PedalProcessor for CompiledPedal {
 
     fn set_supply_voltage(&mut self, voltage: f64) {
         self.set_supply_voltage(voltage);
+    }
+
+    fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> {
+        self.list_editable_components()
+    }
+
+    fn set_passive(&mut self, comp_id: &str, value: f64) -> bool {
+        self.set_passive(comp_id, value)
+    }
+
+    fn reset_passive(&mut self, comp_id: &str) -> bool {
+        self.reset_passive(comp_id)
     }
 }

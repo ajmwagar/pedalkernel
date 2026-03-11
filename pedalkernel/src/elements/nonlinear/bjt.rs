@@ -414,9 +414,11 @@ impl BjtPnpRoot {
             1.0
         };
 
-        let saturation_factor = if vec > 0.0 { (vec / 0.2).tanh() } else { 0.0 };
+        // Smooth tanh saturation — no hard cutoff at vec=0 so NR
+        // can converge across the transition for PNP sign convention.
+        let saturation_factor = (vec / 0.2).tanh();
 
-        ic_base * early_factor * saturation_factor.max(0.0)
+        ic_base * early_factor * saturation_factor
     }
 
     #[inline]
@@ -429,13 +431,20 @@ impl BjtPnpRoot {
 }
 
 impl WdfRoot for BjtPnpRoot {
-    /// PNP BJT emitter-collector path with warm-starting.
+    /// PNP BJT collector-emitter path with warm-starting.
+    ///
+    /// PNP sign convention (matches BjtTwoPort::eval at bjt.rs:1217):
+    /// Port voltage v = Vc - Ve (negative for forward-active PNP).
+    /// Model expects Vec = Ve - Vc = -v (positive). Current exits collector
+    /// for PNP, so i_port = -Ic. Derivative: sign² = 1 → polarity-invariant.
     #[inline]
     fn process(&mut self, a: f64, rp: f64) -> f64 {
         let root = *self;
         let v_max = self.v_max;
+        // PNP: port voltage is negative in forward-active, so cold start
+        // should be negative too.
         let cold = if self.veb > 0.2 {
-            (a * 0.5).max(0.1)
+            (a * 0.5).min(-0.1)
         } else {
             a * 0.5
         };
@@ -450,17 +459,29 @@ impl WdfRoot for BjtPnpRoot {
             v0,
             self.max_iter,
             self.tolerance,
-            Some((-1.0, v_max)),
+            Some((-v_max, 1.0)),
             None,
             |v| {
-                (
-                    root.collector_current_at(v),
-                    root.collector_current_derivative(v),
-                )
+                // PNP sign convention: Vec = -v, i_port = -Ic
+                let vec = -v;
+                let ic = root.collector_current_at(vec);
+                let dic_dvec = root.collector_current_derivative(vec);
+                (-ic, dic_dvec)
             },
         );
         let v = (a + b) / 2.0;
-        self.ic = self.collector_current_at(v);
+        self.ic = self.collector_current_at(-v);
+
+        #[cfg(test)]
+        {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static COUNT: AtomicU32 = AtomicU32::new(0);
+            let n = COUNT.fetch_add(1, Ordering::Relaxed);
+            if n < 10 || (n >= 250 && n < 260) {
+                eprintln!("  [PNP n={n}] a={a:.4} rp={rp:.0} v0={v0:.4} v={v:.4} b={b:.4} ic={:.6e} veb={:.4}", self.ic, self.veb);
+            }
+        }
+
         self.prev_v = v;
         b
     }
@@ -469,15 +490,16 @@ impl WdfRoot for BjtPnpRoot {
 impl NlDeviceIv for BjtPnpRoot {
     #[inline]
     fn iv(&self, v: f64) -> (f64, f64) {
-        (
-            self.collector_current_at(v),
-            self.collector_current_derivative(v),
-        )
+        // PNP sign convention: Vec = -v, i_port = -Ic
+        let vec = -v;
+        let ic = self.collector_current_at(vec);
+        let dic_dvec = self.collector_current_derivative(vec);
+        (-ic, dic_dvec)
     }
 
     #[inline]
     fn v_clamp(&self) -> (f64, f64) {
-        (-1.0, self.v_max)
+        (-self.v_max, 1.0)
     }
 }
 

@@ -2412,7 +2412,7 @@ pub(super) fn graph_reduce(
                     }
                     let tree_i = std::mem::replace(
                         &mut edges[i].tree,
-                        DynNode::Resistor { rp: 1.0, last_a: 0.0 },
+                        DynNode::Resistor { comp_id: None, rp: 1.0, last_a: 0.0 },
                     );
                     let r1 = tree_i.port_resistance();
                     let r2 = tree_j.port_resistance();
@@ -2856,7 +2856,7 @@ pub(super) fn make_leaf(
     // Delegate to Component trait; fallback for non-leaf types (diodes, etc.)
     comp.kind
         .make_leaf(&comp.id, sample_rate)
-        .unwrap_or(DynNode::Resistor { rp: 1000.0, last_a: 0.0 })
+        .unwrap_or(DynNode::Resistor { comp_id: None, rp: 1000.0, last_a: 0.0 })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

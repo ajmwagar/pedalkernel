@@ -216,7 +216,7 @@ fn build_other_side_subtree(
     if collected_edges.is_empty() {
         // No passives on the other side — fall back to resistor stub.
         let r_load = find_secondary_load_resistance(graph, xfmr_comp_idx);
-        return Some(DynNode::Resistor { rp: r_load, last_a: 0.0 });
+        return Some(DynNode::Resistor { comp_id: None, rp: r_load, last_a: 0.0 });
     }
 
     // Terminals: the two target nodes (secondary or primary winding pins).
@@ -236,7 +236,7 @@ fn build_other_side_subtree(
         Err(_) => {
             // SP reduction failed — fall back to resistor stub.
             let r_load = find_secondary_load_resistance(graph, xfmr_comp_idx);
-            Some(DynNode::Resistor { rp: r_load, last_a: 0.0 })
+            Some(DynNode::Resistor { comp_id: None, rp: r_load, last_a: 0.0 })
         }
     }
 }
@@ -841,10 +841,12 @@ pub(super) fn build_push_pull_stages(
 
                     stages.push(PushPullStage {
                         push_tree: DynNode::Resistor {
+                            comp_id: None,
                             rp: 1.0,
                             last_a: 0.0,
                         },
                         pull_tree: DynNode::Resistor {
+                            comp_id: None,
                             rp: 1.0,
                             last_a: 0.0,
                         },
@@ -1031,6 +1033,7 @@ fn stamp_passive_edge(
                 reactive_edges.push((
                     eidx,
                     DynNode::Inductor {
+                        comp_id: None,
                         inductance: l,
                         rp: 2.0 * sample_rate * l,
                         state: 0.0,
@@ -2417,7 +2420,7 @@ fn build_vs_stage(
     sample_rate: f64,
     oversampling: OversamplingFactor,
     use_jfet_vr: bool,
-    supply_voltage: f64,
+    _supply_voltage: f64,
 ) -> Option<WdfStage> {
     // Use supply remap so triodes/BJTs with loads to named supply rails
     // or VCC can reduce to valid SP trees. VCC bias is captured separately.
@@ -2430,56 +2433,31 @@ fn build_vs_stage(
         extra.push(ExtraEdge {
             node_a: ve.node_a,
             node_b: ve.node_b,
-            tree: DynNode::Resistor { rp: ve.resistance, last_a: 0.0 },
+            tree: DynNode::Resistor { comp_id: None, rp: ve.resistance, last_a: 0.0 },
         });
     }
 
     // ── VCC bias injection for single-NL stages ───────────────────────
-    // BJTs, diodes, JFETs, MOSFETs need VCC bias injection because their
-    // VS doesn't carry the supply voltage.
-    // Triodes/pentodes/varimu already get supply via v_max() — skip to avoid
-    // double-counting.
-    let needs_vcc_bias = matches!(
-        &elem.kind,
-        NonlinearKind::BjtNpn { .. }
-        | NonlinearKind::BjtPnp { .. }
-        | NonlinearKind::DiodePair(_)
-        | NonlinearKind::SingleDiode(_)
-        | NonlinearKind::Jfet { .. }
-        | NonlinearKind::Mosfet { .. }
-    );
-
+    // VCC injection is disabled for all single-NL stages (BJTs, diodes,
+    // JFETs, MOSFETs).  DC bias injection was causing pure-DC output with
+    // zero crossings in clipping stages (e.g. Big Muff) because the
+    // injected offset overwhelmed the AC signal.  Triodes/pentodes use
+    // v_max() for supply, so they never needed injection either.
+    //
+    // VCC stays as a real supply node in the WDF tree — the bias network
+    // resistors (Rb1/Rb2, Rc, Re) already encode the correct DC operating
+    // point through the Thevenin equivalent seen at each port.
     let remap = |n: NodeId| -> NodeId {
-        // Collapse VCC to ground for stages that use VCC bias injection.
-        // Triodes/pentodes keep VCC as a real node (v_max() handles supply).
-        if (needs_vcc_bias && n == graph.vcc_node) || graph.supply_nodes.contains(&n) {
+        // Only collapse explicit supply nodes (e.g. secondary rails) to GND.
+        // VCC is kept as a real node so the bias network sees the correct
+        // supply voltage through the tree topology.
+        if graph.supply_nodes.contains(&n) {
             graph.gnd_node
         } else {
             n
         }
     };
-    // When a load tree is present (BJT with non-grounded emitter passives),
-    // compute VCC injection from the load passives + virtual Rce.  This gives
-    // the correct DC operating point: V_thev ≈ VCC * Rce/(Rc + Rce + Re).
-    // Without Rce, collector and emitter are disconnected at DC (caps open),
-    // giving a near-zero injection coefficient.
-    let vcc_injection_coeff = if needs_vcc_bias {
-        let (vcc_idxs, vcc_ve) = if !plan.load_passive_idxs.is_empty() {
-            (&plan.load_passive_idxs as &[usize], plan.virtual_edge.as_ref())
-        } else {
-            (&plan.passive_idxs as &[usize], None)
-        };
-        compute_vcc_injection_single(
-            vcc_idxs,
-            graph,
-            &elem.junction_nodes,
-            plan.injection_node,
-            supply_voltage,
-            vcc_ve,
-        )
-    } else {
-        0.0
-    };
+    let vcc_injection_coeff = 0.0;
 
     // ── BJT load tree: auxiliary collector-emitter impedance tree ────────
     // When the planner identified load passives (collector + emitter),
@@ -2494,7 +2472,7 @@ fn build_vs_stage(
                 vec![ExtraEdge {
                     node_a: ve.node_a,
                     node_b: ve.node_b,
-                    tree: DynNode::Resistor { rp: ve.resistance, last_a: 0.0 },
+                    tree: DynNode::Resistor { comp_id: None, rp: ve.resistance, last_a: 0.0 },
                 }]
             } else {
                 vec![]
@@ -2563,146 +2541,6 @@ fn build_vs_stage(
     })
 }
 
-/// Compute VCC injection coefficient for a single-NL WDF stage.
-///
-/// Builds a minimal resistive MNA (caps open, inductors shorted at DC) with
-/// VCC as an ideal voltage source, and extracts the wave-domain injection
-/// coefficient at the NL root port. Returns 0.0 if no passive edge touches VCC.
-///
-/// The coefficient is in wave-domain per-unit: multiply by supply voltage to
-/// get the DC bias added to the reflected wave before the NR solver.
-fn compute_vcc_injection_single(
-    passive_idxs: &[usize],
-    graph: &CircuitGraph,
-    junction_nodes: &[super::graph::NodeId],
-    injection_node: super::graph::NodeId,
-    supply_voltage: f64,
-    virtual_edge: Option<&super::plan::VirtualEdge>,
-) -> f64 {
-    use crate::tree::{MnaSystem, WdfPort};
-
-    // Check if any passive edge touches VCC node.
-    let has_vcc = passive_idxs.iter().any(|&eidx| {
-        let e = &graph.edges[eidx];
-        e.node_a == graph.vcc_node || e.node_b == graph.vcc_node
-    });
-    if !has_vcc || junction_nodes.is_empty() {
-        return 0.0;
-    }
-
-    // Collect unique circuit nodes from passive edges (excluding ground).
-    let mut node_set: Vec<super::graph::NodeId> = Vec::new();
-    for &eidx in passive_idxs {
-        let e = &graph.edges[eidx];
-        for &n in &[e.node_a, e.node_b] {
-            if n != graph.gnd_node && !graph.supply_nodes.contains(&n) && !node_set.contains(&n) {
-                node_set.push(n);
-            }
-        }
-    }
-    // Include virtual edge nodes (Rce between collector and emitter).
-    if let Some(ve) = virtual_edge {
-        for &n in &[ve.node_a, ve.node_b] {
-            if n != graph.gnd_node && !graph.supply_nodes.contains(&n) && !node_set.contains(&n) {
-                node_set.push(n);
-            }
-        }
-    }
-    // Ensure junction nodes and injection node are in the set.
-    for &n in junction_nodes {
-        if n != graph.gnd_node && !graph.supply_nodes.contains(&n) && !node_set.contains(&n) {
-            node_set.push(n);
-        }
-    }
-    if injection_node != graph.gnd_node
-        && !graph.supply_nodes.contains(&injection_node)
-        && !node_set.contains(&injection_node)
-    {
-        node_set.push(injection_node);
-    }
-
-    let num_mna_nodes = node_set.len();
-    if num_mna_nodes == 0 {
-        return 0.0;
-    }
-
-    let node_to_mna = |n: super::graph::NodeId| -> Option<usize> {
-        if n == graph.gnd_node || graph.supply_nodes.contains(&n) {
-            None // ground reference
-        } else {
-            node_set.iter().position(|&x| x == n)
-        }
-    };
-
-    // Build resistive MNA: stamp only resistors/pots (caps open at DC, inductors short).
-    // VCC is an ideal voltage source (1 VS).
-    let num_vsources = 1;
-    let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
-
-    for &eidx in passive_idxs {
-        let e = &graph.edges[eidx];
-        let comp = &graph.components[e.comp_idx];
-
-        // At DC: resistors/pots stamp normally, caps are open (skip), inductors are short.
-        // resistance() returns Some for both resistors and pots (max_r for pots).
-        if let Some(r) = comp.kind.resistance() {
-            let n1 = node_to_mna(e.node_a);
-            let n2 = node_to_mna(e.node_b);
-            mna.stamp_resistor(n1, n2, r);
-        } else if comp.kind.inductance().is_some() {
-            // Inductor is short at DC: stamp as very low resistance.
-            let n1 = node_to_mna(e.node_a);
-            let n2 = node_to_mna(e.node_b);
-            mna.stamp_resistor(n1, n2, 0.01);
-        }
-        // Capacitors: open at DC → skip (no stamp)
-    }
-
-    // Stamp virtual edge (Rce) as a resistor if provided.
-    if let Some(ve) = virtual_edge {
-        let n1 = node_to_mna(ve.node_a);
-        let n2 = node_to_mna(ve.node_b);
-        mna.stamp_resistor(n1, n2, ve.resistance);
-    }
-
-    // GMIN regularization to avoid singular matrix.
-    for i in 0..num_mna_nodes {
-        mna.stamp_resistor(Some(i), None, 1e9);
-    }
-
-    // Stamp VCC as ideal voltage source.
-    let vcc_mna = node_to_mna(graph.vcc_node);
-    mna.stamp_voltage_source(vcc_mna, None, 0);
-
-    // NL root port: junction_nodes[0] to junction_nodes[1] (or ground).
-    let port_pos = node_to_mna(junction_nodes[0]);
-    let port_neg = if junction_nodes.len() > 1 {
-        node_to_mna(junction_nodes[1])
-    } else {
-        None
-    };
-
-    // Use Rce (virtual edge resistance) as port resistance when available,
-    // otherwise fall back to 1kΩ.  Rce gives a physically meaningful DC
-    // operating point: the collector-emitter load line slope matches the
-    // BJT's output resistance, so the MNA produces V_thev ≈ VCC * Rce/(Rc+Rce+Re).
-    let port_r = virtual_edge.map_or(1000.0, |ve| ve.resistance);
-    let port = WdfPort {
-        node_pos: port_pos,
-        node_neg: port_neg,
-        resistance: port_r,
-    };
-
-    let (_scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&[port], 0);
-
-    // vs_injection[0] is the per-unit VCC injection coefficient at the NL root port.
-    // Multiply by supply voltage to get the wave-domain DC bias.
-    if vs_injection[0].is_finite() {
-        vs_injection[0] * supply_voltage
-    } else {
-        0.0
-    }
-}
 
 /// Build a source follower stage (no voltage source in tree).
 ///
@@ -2810,7 +2648,7 @@ fn build_push_pull_half(
         extra.push(ExtraEdge {
             node_a: ve.node_a,
             node_b: ve.node_b,
-            tree: DynNode::Resistor { rp: ve.resistance, last_a: 0.0 },
+            tree: DynNode::Resistor { comp_id: None, rp: ve.resistance, last_a: 0.0 },
         });
     }
     let tree = graph_reduce(
@@ -3158,7 +2996,7 @@ fn wrap_with_transformer_load(
     // The magnetizing inductance LF rolloff is handled as a post-process
     // high-pass filter rather than an in-tree WDF inductor, avoiding
     // the DC transient/initialization issue that causes tube cutoff.
-    let secondary = DynNode::Resistor { rp: r_load, last_a: 0.0 };
+    let secondary = DynNode::Resistor { comp_id: None, rp: r_load, last_a: 0.0 };
 
     // Ideal transformer: reflects secondary impedance to primary by n².
     let xfmr_rp = n_eff * n_eff * r_load;
@@ -3179,7 +3017,7 @@ fn wrap_with_transformer_load(
         };
         let combined_rp = dcr + xfmr_rp;
         xfmr = DynNode::Series {
-            left: Box::new(DynNode::Resistor { rp: dcr, last_a: 0.0 }),
+            left: Box::new(DynNode::Resistor { comp_id: None, rp: dcr, last_a: 0.0 }),
             right: Box::new(xfmr),
             rp: combined_rp,
             gamma: dcr / combined_rp,

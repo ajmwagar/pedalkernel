@@ -725,6 +725,15 @@ impl WdfStage {
             // after the down-sweep instead of the root junction.
             if let Some(ref probe_id) = output_probe {
                 if let Some(v) = tree.leaf_voltage(probe_id) {
+                    #[cfg(test)]
+                    {
+                        static PROBE_DBG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        let n = PROBE_DBG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n < 20 || (n % 1000 == 0 && n < 5000) {
+                            eprintln!("  [probe] n={n} b_tree={b_tree:.6} a_root={a_root:.6} junction={:.6} probe({probe_id})={v:.6}",
+                                (a_root + b_tree) / 2.0);
+                        }
+                    }
                     return v;
                 }
             }

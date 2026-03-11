@@ -634,10 +634,136 @@ fn compile_muff() {
     let input = sine(48000);
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     assert_finite(&output, "Muff");
-    let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    let muff_peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     eprintln!("[muff-debug] Peak output: {:.6} (gain={:.1}x, {:.1}dB)",
-        peak, peak / 0.1, 20.0 * (peak / 0.1).log10());
-    assert!(peak > 0.001, "Muff should produce output: peak={peak}");
+        muff_peak, muff_peak / 0.1, 20.0 * (muff_peak / 0.1).log10());
+    assert!(muff_peak > 0.001, "Muff should produce output: peak={muff_peak}");
+
+    // Per-stage trace: warm up, then trace one sample through each stage.
+    let mut proc2 = compile_pedal(&pedal, 48000.0).unwrap();
+    proc2.set_control("Sustain", 0.7);
+    proc2.set_control("Tone", 0.5);
+    proc2.set_control("Volume", 0.6);
+    for i in 0..2048 {
+        let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+        proc2.process(s);
+    }
+    eprintln!("[muff-trace] pre_gain={:.4} output_gain={:.4}", proc2.pre_gain, proc2.output_gain);
+    let test_input = 0.5_f64;
+    let mut signal = test_input * proc2.pre_gain;
+    eprintln!("[muff-trace] test_input={:.6} after_pre_gain={:.6}", test_input, signal);
+    let mut prev_was_clipping = false;
+    for sr in &proc2.stage_order {
+        match sr {
+            super::compiled::StageRef::Wdf(i) => {
+                let stage = &mut proc2.stages[*i];
+                if prev_was_clipping {
+                    signal *= proc2.pre_gain;
+                }
+                prev_was_clipping = stage.root.is_clipping_stage();
+                let root_tag = match &stage.root {
+                    super::stage::RootKind::DiodePair(_) => "DiodePair",
+                    super::stage::RootKind::BjtNpn(_) => "BjtNpn",
+                    super::stage::RootKind::BjtPnp(_) => "BjtPnp",
+                    _ => "Other",
+                };
+                let out = stage.process(signal);
+                let out = if out.is_finite() { out } else { 0.0 };
+                eprintln!("[muff-trace] Wdf({i}) {root_tag} in={signal:.6e} out={out:.6e} comp={:.6} clipping={prev_was_clipping} rp={:.1}",
+                    stage.compensation, stage.tree.port_resistance());
+                signal = out;
+            }
+            super::compiled::StageRef::MultiNl(i) => {
+                let stage = &mut proc2.multi_nl_stages[*i];
+                let out = stage.process(signal);
+                let out = if out.is_finite() { out } else { 0.0 };
+                eprintln!("[muff-trace] MultiNl({i}) in={signal:.6e} out={out:.6e}");
+                signal = out;
+            }
+        }
+    }
+    let final_out = signal * proc2.output_gain;
+    eprintln!("[muff-trace] final_output={final_out:.6e}");
+
+    // Frequency tracking check: does the output track the input 440Hz?
+    let mut proc3 = compile_pedal(&pedal, 48000.0).unwrap();
+    proc3.set_control("Sustain", 0.7);
+    proc3.set_control("Tone", 0.5);
+    proc3.set_control("Volume", 0.6);
+    // Warm up with silence to settle DC bias
+    for _ in 0..4800 { proc3.process(0.0); }
+    // Process 440Hz sine
+    let out440: Vec<f64> = (0..4800)
+        .map(|i| {
+            let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            proc3.process(s)
+        })
+        .collect();
+    let zc = zero_crossings(&out440[2400..]);
+    // 440Hz in 2400 samples at 48kHz = 50ms → expect ~44 zero crossings (2 per cycle)
+    // Heavy clipping adds odd harmonics but fundamental ZC should still be ~44
+    eprintln!("[muff-freq] zero_crossings(last 2400 samples)={zc} (expect ~44 for 440Hz)");
+    let peak440 = out440[2400..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    eprintln!("[muff-freq] peak={peak440:.6}");
+
+    // Sustain pot effect: does changing it affect the output?
+    let mut peaks = Vec::new();
+    for &sust in &[0.1, 0.5, 0.9] {
+        let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+        p.set_control("Sustain", sust);
+        p.set_control("Tone", 0.5);
+        p.set_control("Volume", 0.6);
+        for _ in 0..4800 { p.process(0.0); }
+        let out: Vec<f64> = (0..4800)
+            .map(|i| {
+                let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+                p.process(s)
+            })
+            .collect();
+        let pk = out[2400..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        eprintln!("[muff-sustain] sustain={sust:.1} peak={pk:.6}");
+        peaks.push(pk);
+    }
+    let sustain_range = peaks.iter().fold(0.0f64, |m, x| m.max(*x))
+        - peaks.iter().fold(f64::MAX, |m, x| m.min(*x));
+    eprintln!("[muff-sustain] range={sustain_range:.6}");
+
+    // Per-stage waveform: manually trace each stage with sine input
+    let mut proc4 = compile_pedal(&pedal, 48000.0).unwrap();
+    proc4.set_control("Sustain", 0.7);
+    proc4.set_control("Tone", 0.5);
+    proc4.set_control("Volume", 0.6);
+    for _ in 0..4800 { proc4.process(0.0); }
+    let n_stages = proc4.stages.len();
+    let mut stage_bufs: Vec<Vec<f64>> = vec![Vec::new(); n_stages + 1];
+    for i in 0..2400 {
+        let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+        let mut signal = s * proc4.pre_gain;
+        stage_bufs[0].push(signal);
+        let mut prev_was_clipping = false;
+        for sr in &proc4.stage_order {
+            match sr {
+                super::compiled::StageRef::Wdf(si) => {
+                    let stage = &mut proc4.stages[*si];
+                    if prev_was_clipping { signal *= proc4.pre_gain; }
+                    prev_was_clipping = stage.root.is_clipping_stage();
+                    let out = stage.process(signal);
+                    signal = if out.is_finite() { out } else { 0.0 };
+                    stage_bufs[*si + 1].push(signal);
+                }
+                super::compiled::StageRef::MultiNl(_) => {}
+            }
+        }
+    }
+    for si in 0..=n_stages {
+        let buf = &stage_bufs[si];
+        if buf.is_empty() { continue; }
+        let zc = zero_crossings(buf);
+        let mn = buf.iter().fold(f64::MAX, |m, x| m.min(*x));
+        let mx = buf.iter().fold(f64::MIN, |m, x| m.max(*x));
+        let label = if si == 0 { "input".to_string() } else { format!("stage[{}]", si - 1) };
+        eprintln!("[muff-per-stage] {label} zc={zc} min={mn:.6} max={mx:.6}");
+    }
 }
 
 #[test]
@@ -1002,8 +1128,41 @@ fn compile_rangemaster() {
 
     proc.set_control("Boost", 1.0);
 
+    // Debug: print stage and gain details
+    eprintln!("[rangemaster] pre_gain={:.6} output_gain={:.6}", proc.pre_gain, proc.output_gain);
+    eprintln!("[rangemaster] stage_order len={}", proc.stage_order.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        eprintln!("[rangemaster]   wdf[{i}]: comp={:.4} rp={:.1} dc_block={} xfmr_gain={:.4} inj_node={} out_node={} probe={:?} load_tree={}",
+            s.compensation,
+            s.tree.port_resistance(),
+            s.dc_block.is_some(),
+            s.transformer_gain,
+            s.injection_node_id,
+            s.output_node_id,
+            s.output_probe,
+            s.load_tree.is_some());
+    }
+
+    // Debug controls
+    for c in &proc.controls {
+        eprintln!("[rangemaster] control: label={:?} comp={:?}", c.label, c.component_id);
+    }
+
+    // Dump WDF tree structure
+    eprintln!("[rangemaster] WDF tree structure:\n{}", proc.stages[0].tree.debug_dump(1));
+
     let input = sine(48000);
-    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    let mut debug_count = 0;
+    let output: Vec<f64> = input.iter().enumerate().map(|(i, &s)| {
+        let out = proc.process(s);
+        if i < 5 || (i > 250 && i < 260) || (i % 4800 == 0) {
+            if debug_count < 30 {
+                eprintln!("[rangemaster] sample[{i}]: in={s:.6} out={out:.6}");
+                debug_count += 1;
+            }
+        }
+        out
+    }).collect();
     assert_finite(&output, "Rangemaster");
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     eprintln!("[rangemaster] Peak output: {:.6} (gain={:.1}x, {:.1}dB)",

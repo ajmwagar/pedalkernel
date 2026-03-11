@@ -15,11 +15,13 @@ use crate::tree::RTypeAdaptor;
 #[derive(Clone)]
 pub(super) enum DynNode {
     Resistor {
+        comp_id: Option<String>,
         rp: f64,
         /// Last incident wave for voltage extraction: V = last_a / 2.
         last_a: f64,
     },
     Capacitor {
+        comp_id: Option<String>,
         capacitance: f64,
         rp: f64,
         state: f64,
@@ -36,6 +38,7 @@ pub(super) enum DynNode {
     /// and slowly creep back toward it after discharge — a subtle compression
     /// effect on low frequencies.
     LeakyCapacitor {
+        comp_id: Option<String>,
         capacitance: f64,
         /// Port resistance: 1/(2*fs*C)
         rp: f64,
@@ -53,6 +56,7 @@ pub(super) enum DynNode {
         da_rate: f64,
     },
     Inductor {
+        comp_id: Option<String>,
         inductance: f64,
         rp: f64,
         state: f64,
@@ -427,6 +431,127 @@ impl DynNode {
         }
     }
 
+    /// Update a resistor's resistance by component ID. Returns true if found.
+    pub fn set_resistor(&mut self, target_id: &str, new_ohms: f64) -> bool {
+        match self {
+            Self::Resistor { comp_id: Some(id), rp, .. } if id == target_id => {
+                *rp = new_ohms;
+                true
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                let a = left.set_resistor(target_id, new_ohms);
+                let b = right.set_resistor(target_id, new_ohms);
+                a | b
+            }
+            Self::Transformer { secondary, .. } => secondary.set_resistor(target_id, new_ohms),
+            Self::RType { children, .. } => {
+                let mut found = false;
+                for c in children.iter_mut() {
+                    found |= c.set_resistor(target_id, new_ohms);
+                }
+                found
+            }
+            _ => false,
+        }
+    }
+
+    /// Update a capacitor's value and port resistance by component ID.
+    /// Recalculates rp = 1/(2*fs*C) using the existing rp to derive fs.
+    /// Returns true if found.
+    pub fn set_capacitor(&mut self, target_id: &str, new_farads: f64, sample_rate: f64) -> bool {
+        match self {
+            Self::Capacitor { comp_id: Some(id), capacitance, rp, .. } if id == target_id => {
+                *capacitance = new_farads;
+                *rp = 1.0 / (2.0 * sample_rate * new_farads);
+                true
+            }
+            Self::LeakyCapacitor { comp_id: Some(id), capacitance, rp, .. } if id == target_id => {
+                *capacitance = new_farads;
+                *rp = 1.0 / (2.0 * sample_rate * new_farads);
+                true
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                let a = left.set_capacitor(target_id, new_farads, sample_rate);
+                let b = right.set_capacitor(target_id, new_farads, sample_rate);
+                a | b
+            }
+            Self::Transformer { secondary, .. } => secondary.set_capacitor(target_id, new_farads, sample_rate),
+            Self::RType { children, .. } => {
+                let mut found = false;
+                for c in children.iter_mut() {
+                    found |= c.set_capacitor(target_id, new_farads, sample_rate);
+                }
+                found
+            }
+            _ => false,
+        }
+    }
+
+    /// Update an inductor's value and port resistance by component ID.
+    /// Recalculates rp = 2*fs*L.
+    /// Returns true if found.
+    pub fn set_inductor(&mut self, target_id: &str, new_henries: f64, sample_rate: f64) -> bool {
+        match self {
+            Self::Inductor { comp_id: Some(id), inductance, rp, .. } if id == target_id => {
+                *inductance = new_henries;
+                *rp = 2.0 * sample_rate * new_henries;
+                true
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                let a = left.set_inductor(target_id, new_henries, sample_rate);
+                let b = right.set_inductor(target_id, new_henries, sample_rate);
+                a | b
+            }
+            Self::Transformer { secondary, .. } => secondary.set_inductor(target_id, new_henries, sample_rate),
+            Self::RType { children, .. } => {
+                let mut found = false;
+                for c in children.iter_mut() {
+                    found |= c.set_inductor(target_id, new_henries, sample_rate);
+                }
+                found
+            }
+            _ => false,
+        }
+    }
+
+    /// List all editable passive leaves in the tree.
+    /// Returns (comp_id, kind, current_value) for each R/C/L with a comp_id.
+    pub fn list_editable_leaves(&self) -> Vec<(String, &'static str, f64)> {
+        let mut result = Vec::new();
+        self.collect_editable_leaves(&mut result);
+        result
+    }
+
+    fn collect_editable_leaves(&self, out: &mut Vec<(String, &'static str, f64)>) {
+        match self {
+            Self::Resistor { comp_id: Some(id), rp, .. } => {
+                out.push((id.clone(), "resistor", *rp));
+            }
+            Self::Capacitor { comp_id: Some(id), capacitance, .. } => {
+                out.push((id.clone(), "capacitor", *capacitance));
+            }
+            Self::LeakyCapacitor { comp_id: Some(id), capacitance, .. } => {
+                out.push((id.clone(), "capacitor", *capacitance));
+            }
+            Self::Inductor { comp_id: Some(id), inductance, .. } => {
+                out.push((id.clone(), "inductor", *inductance));
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                left.collect_editable_leaves(out);
+                right.collect_editable_leaves(out);
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.collect_editable_leaves(out);
+            }
+            Self::RType { children, .. } => {
+                for c in children.iter() {
+                    c.collect_editable_leaves(out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Read a pot's current resistance by component ID.
     ///
     /// Recursively searches through Series/Parallel/Transformer/RType children.
@@ -484,7 +609,9 @@ impl DynNode {
     /// Returns None if the component is not found in this subtree.
     pub fn leaf_voltage(&self, target_id: &str) -> Option<f64> {
         match self {
-            Self::Resistor { last_a: _, .. } => None, // no comp_id to match
+            Self::Resistor { comp_id: Some(id), last_a, .. } if id == target_id => {
+                Some(*last_a / 2.0)
+            }
             Self::Pot { comp_id, last_a, .. }
                 if comp_id == target_id
                     || comp_id.starts_with(target_id)
@@ -492,7 +619,9 @@ impl DynNode {
             {
                 Some(*last_a / 2.0)
             }
-            Self::Capacitor { last_b: _, state: _, .. } => None, // no comp_id to match
+            Self::Capacitor { comp_id: Some(id), last_b, state, .. } if id == target_id => {
+                Some((*state + *last_b) / 2.0)
+            }
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.leaf_voltage(target_id)
                     .or_else(|| right.leaf_voltage(target_id))
@@ -513,10 +642,10 @@ impl DynNode {
             | Self::Photocoupler { comp_id, .. }
             | Self::JfetVr { comp_id, .. }
             | Self::SwitchedResistor { switch_id: comp_id, .. } => Some(comp_id.clone()),
-            // Resistor, Capacitor, Inductor, VoltageSource — no comp_id stored.
-            // For the output probe, we need the comp_id. If the leaf is a plain
-            // resistor/cap, we can't identify it. This is fine because output
-            // probes are typically pots or named components.
+            Self::Resistor { comp_id: Some(id), .. }
+            | Self::Capacitor { comp_id: Some(id), .. }
+            | Self::LeakyCapacitor { comp_id: Some(id), .. }
+            | Self::Inductor { comp_id: Some(id), .. } => Some(id.clone()),
             _ => None,
         }
     }
@@ -1131,32 +1260,40 @@ impl DynNode {
     pub fn debug_dump(&self, indent: usize) -> String {
         let pad = "  ".repeat(indent);
         match self {
-            Self::Resistor { rp, .. } => {
-                format!("{pad}Resistor(Rp={rp:.1}Ω)")
+            Self::Resistor { comp_id, rp, .. } => {
+                let id_str = comp_id.as_deref().unwrap_or("?");
+                format!("{pad}Resistor(id=\"{id_str}\", Rp={rp:.1}Ω)")
             }
             Self::Capacitor {
+                comp_id,
                 capacitance,
                 rp,
                 state,
                 ..
             } => {
-                format!("{pad}Capacitor(C={capacitance:.3e}F, Rp={rp:.1}Ω, state={state:.6})")
+                let id_str = comp_id.as_deref().unwrap_or("?");
+                format!("{pad}Capacitor(id=\"{id_str}\", C={capacitance:.3e}F, Rp={rp:.1}Ω, state={state:.6})")
             }
             Self::LeakyCapacitor {
+                comp_id,
                 capacitance,
                 rp,
                 state,
                 leakage_decay,
                 ..
             } => {
-                format!("{pad}LeakyCapacitor(C={capacitance:.3e}F, Rp={rp:.1}Ω, state={state:.6}, decay={leakage_decay:.6})")
+                let id_str = comp_id.as_deref().unwrap_or("?");
+                format!("{pad}LeakyCapacitor(id=\"{id_str}\", C={capacitance:.3e}F, Rp={rp:.1}Ω, state={state:.6}, decay={leakage_decay:.6})")
             }
             Self::Inductor {
+                comp_id,
                 inductance,
                 rp,
                 state,
+                ..
             } => {
-                format!("{pad}Inductor(L={inductance:.3e}H, Rp={rp:.1}Ω, state={state:.6})")
+                let id_str = comp_id.as_deref().unwrap_or("?");
+                format!("{pad}Inductor(id=\"{id_str}\", L={inductance:.3e}H, Rp={rp:.1}Ω, state={state:.6})")
             }
             Self::VoltageSource { voltage, rp } => {
                 format!("{pad}VoltageSource(V={voltage:.3}V, Rp={rp:.1}Ω)")

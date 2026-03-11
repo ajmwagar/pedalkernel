@@ -51,11 +51,11 @@ impl Component for Resistor {
         StampResult::Stamped
     }
 
-    fn make_leaf(&self, _comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
+    fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
         if self.value.is_infinite() {
-            Some(DynNode::Resistor { rp: OPEN_CIRCUIT_R, last_a: 0.0 })
+            Some(DynNode::Resistor { comp_id: Some(comp_id.to_string()), rp: OPEN_CIRCUIT_R, last_a: 0.0 })
         } else {
-            Some(DynNode::Resistor { rp: self.value, last_a: 0.0 })
+            Some(DynNode::Resistor { comp_id: Some(comp_id.to_string()), rp: self.value, last_a: 0.0 })
         }
     }
 
@@ -129,7 +129,7 @@ impl Component for Capacitor {
 
     fn stamp_mna(
         &self,
-        _comp_id: &str,
+        comp_id: &str,
         _n1: Option<usize>,
         _n2: Option<usize>,
         _mna: &mut MnaSystem,
@@ -138,6 +138,7 @@ impl Component for Capacitor {
         let rp = 1.0 / (2.0 * sample_rate * self.config.value);
         StampResult::Reactive {
             dyn_node: DynNode::Capacitor {
+                comp_id: Some(comp_id.to_string()),
                 capacitance: self.config.value,
                 rp,
                 state: 0.0,
@@ -147,7 +148,7 @@ impl Component for Capacitor {
         }
     }
 
-    fn make_leaf(&self, _comp_id: &str, sample_rate: f64) -> Option<DynNode> {
+    fn make_leaf(&self, comp_id: &str, sample_rate: f64) -> Option<DynNode> {
         if self.config.leakage.is_some() || self.config.da.is_some() {
             let rp = 1.0 / (2.0 * sample_rate * self.config.value);
             let leakage_decay = if let Some(r_leak) = self.config.leakage {
@@ -164,6 +165,7 @@ impl Component for Capacitor {
                 0.0
             };
             Some(DynNode::LeakyCapacitor {
+                comp_id: Some(comp_id.to_string()),
                 capacitance: self.config.value,
                 rp,
                 state: 0.0,
@@ -174,6 +176,7 @@ impl Component for Capacitor {
             })
         } else {
             Some(DynNode::Capacitor {
+                comp_id: Some(comp_id.to_string()),
                 capacitance: self.config.value,
                 rp: 1.0 / (2.0 * sample_rate * self.config.value),
                 state: 0.0,
@@ -268,7 +271,7 @@ impl Component for Inductor {
 
     fn stamp_mna(
         &self,
-        _comp_id: &str,
+        comp_id: &str,
         _n1: Option<usize>,
         _n2: Option<usize>,
         _mna: &mut MnaSystem,
@@ -277,6 +280,7 @@ impl Component for Inductor {
         let rp = 2.0 * sample_rate * self.value;
         StampResult::Reactive {
             dyn_node: DynNode::Inductor {
+                comp_id: Some(comp_id.to_string()),
                 inductance: self.value,
                 rp,
                 state: 0.0,
@@ -285,8 +289,9 @@ impl Component for Inductor {
         }
     }
 
-    fn make_leaf(&self, _comp_id: &str, sample_rate: f64) -> Option<DynNode> {
+    fn make_leaf(&self, comp_id: &str, sample_rate: f64) -> Option<DynNode> {
         Some(DynNode::Inductor {
+            comp_id: Some(comp_id.to_string()),
             inductance: self.value,
             rp: 2.0 * sample_rate * self.value,
             state: 0.0,
@@ -474,8 +479,8 @@ impl Component for Tempco {
         StampResult::Stamped
     }
 
-    fn make_leaf(&self, _comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
-        Some(DynNode::Resistor { rp: self.resistance, last_a: 0.0 })
+    fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
+        Some(DynNode::Resistor { comp_id: Some(comp_id.to_string()), rp: self.resistance, last_a: 0.0 })
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
@@ -520,7 +525,7 @@ impl Component for CapSwitched {
 
     fn stamp_mna(
         &self,
-        _comp_id: &str,
+        comp_id: &str,
         _n1: Option<usize>,
         _n2: Option<usize>,
         _mna: &mut MnaSystem,
@@ -531,6 +536,7 @@ impl Component for CapSwitched {
                 let rp = 1.0 / (2.0 * sample_rate * c);
                 return StampResult::Reactive {
                     dyn_node: DynNode::Capacitor {
+                        comp_id: Some(comp_id.to_string()),
                         capacitance: c,
                         rp,
                         state: 0.0,
@@ -584,7 +590,7 @@ impl Component for InductorSwitched {
 
     fn stamp_mna(
         &self,
-        _comp_id: &str,
+        comp_id: &str,
         _n1: Option<usize>,
         _n2: Option<usize>,
         _mna: &mut MnaSystem,
@@ -595,6 +601,7 @@ impl Component for InductorSwitched {
                 let rp = 2.0 * sample_rate * l;
                 return StampResult::Reactive {
                     dyn_node: DynNode::Inductor {
+                        comp_id: Some(comp_id.to_string()),
                         inductance: l,
                         rp,
                         state: 0.0,

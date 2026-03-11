@@ -62,6 +62,17 @@ pub trait PedalProcessor {
     /// hitting their supply rails, preserving more dynamics before the diode
     /// clipping stage.  The diode clipping threshold itself is unchanged.
     fn set_supply_voltage(&mut self, _voltage: f64) {}
+
+    /// List all editable passive components (R, C, L with comp_ids).
+    /// Returns (comp_id, kind_str, current_value) for each editable leaf.
+    fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> { Vec::new() }
+
+    /// Set a passive component's value by comp_id. Returns true if found.
+    /// For resistors: value is in ohms. For capacitors: farads. For inductors: henries.
+    fn set_passive(&mut self, _comp_id: &str, _value: f64) -> bool { false }
+
+    /// Reset a passive component to its original value. Returns true if found.
+    fn reset_passive(&mut self, _comp_id: &str) -> bool { false }
 }
 
 // ---------------------------------------------------------------------------

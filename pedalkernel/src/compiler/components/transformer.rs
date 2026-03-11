@@ -58,6 +58,7 @@ impl Component for TransformerComp {
         let n = self.config.turns_ratio;
         let l_secondary = l_primary / (n * n);
         let secondary = Box::new(DynNode::Inductor {
+            comp_id: None,
             inductance: l_secondary,
             rp: 2.0 * sample_rate * l_secondary,
             state: 0.0,
@@ -65,6 +66,7 @@ impl Component for TransformerComp {
         if let Some(n_tertiary) = self.config.tertiary_turns_ratio {
             let l_tertiary = l_primary / (n_tertiary * n_tertiary);
             let tertiary = Box::new(DynNode::Inductor {
+                comp_id: None,
                 inductance: l_tertiary,
                 rp: 2.0 * sample_rate * l_tertiary,
                 state: 0.0,

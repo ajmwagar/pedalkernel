@@ -1828,18 +1828,21 @@ mod tests {
 
     #[test]
     fn bjt_pnp_forward_active() {
-        // PNP test: collector current should flow when Veb > 0 and Vec > 0
+        // PNP test: collector current should flow when Veb > 0.
+        // PNP convention: port voltage v = Vc - Ve is NEGATIVE in forward-active
+        // (collector more negative than emitter with negative supply).
+        // Incident wave a must be negative to bias the collector correctly.
         let model = BjtModel::by_name("AC128"); // Classic germanium PNP
         let mut root = BjtPnpRoot::new(model);
 
         // Set forward bias on emitter-base junction
-        root.set_veb(0.3); // Germanium: lower Vbe ~0.2-0.3V
+        root.set_veb(0.15); // Germanium: lower Vbe ~0.15-0.25V
 
-        // Process with positive input (emitter-collector path)
-        let b = root.process(10.0, 1000.0);
-        let v = (10.0 + b) / 2.0;
+        // Process with negative incident wave (PNP: collector at negative voltage)
+        let b = root.process(-10.0, 1000.0);
+        let v = (-10.0 + b) / 2.0;
 
-        assert!(v > 0.0, "Vec should be positive: v={v}");
+        assert!(v < 0.0, "PNP port voltage should be negative: v={v}");
 
         let ic = root.collector_current();
         assert!(ic > 1e-6, "PNP should conduct: ic={ic}");
@@ -1966,17 +1969,18 @@ mod tests {
     #[test]
     fn bjt_pnp_veb_affects_ic() {
         // Higher Veb should produce higher Ic (exponential relationship)
+        // PNP convention: use negative incident wave.
         let model = BjtModel::by_name("AC128");
         let mut root = BjtPnpRoot::new(model);
 
         // Low Veb
-        root.set_veb(0.15);
-        root.process(10.0, 1000.0);
+        root.set_veb(0.10);
+        root.process(-10.0, 1000.0);
         let ic_low = root.collector_current();
 
         // Higher Veb (germanium saturates at lower voltage)
-        root.set_veb(0.3);
-        root.process(10.0, 1000.0);
+        root.set_veb(0.20);
+        root.process(-10.0, 1000.0);
         let ic_high = root.collector_current();
 
         // Ic should increase with Veb
@@ -2010,11 +2014,12 @@ mod tests {
     #[test]
     fn bjt_pnp_base_current() {
         // Verify PNP base current tracking
+        // PNP convention: use negative incident wave.
         let model = BjtModel::by_name("AC128");
         let mut root = BjtPnpRoot::new(model);
 
-        root.set_veb(0.25);
-        root.process(10.0, 1000.0);
+        root.set_veb(0.15);
+        root.process(-10.0, 1000.0);
 
         let ic = root.collector_current();
         let ib = root.base_current();
