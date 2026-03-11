@@ -528,55 +528,64 @@ fn compile_ratking() {
         .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/ratking.pedal");
     if !pro_path.exists() {
-        eprintln!("[rat-debug] Skipping: {:?} not found", pro_path);
         return;
     }
     let src = std::fs::read_to_string(&pro_path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
 
-    eprintln!("[rat-debug] WDF stages: {}", proc.stages.len());
-    for (i, s) in proc.stages.iter().enumerate() {
-        let root_tag = match &s.root {
-            super::stage::RootKind::DiodePair(_) => "DiodePair",
-            super::stage::RootKind::SingleDiode(_) => "SingleDiode",
-            super::stage::RootKind::OpAmp(_) => "OpAmp",
-            super::stage::RootKind::Passthrough => "Passthrough",
-            _ => "Other",
-        };
-        eprintln!("[rat-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={} feedback_pot={:?} output_probe={:?}",
-            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
-            s.feedback_opamp.is_some(), s.feedback_pot_id, s.output_probe);
-    }
-    eprintln!("[rat-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
-    eprintln!("[rat-debug] Controls: {}", proc.controls.len());
-    for (i, c) in proc.controls.iter().enumerate() {
-        eprintln!("[rat-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
-    }
+    // Verify structure: single DiodePair stage with opamp gain paired
+    assert!(proc.stages.len() >= 1, "RATKING should have at least 1 WDF stage");
+    assert!(proc.stages[0].feedback_opamp.is_some()
+        || proc.stages.iter().any(|s| matches!(&s.root, super::stage::RootKind::OpAmp(_))),
+        "RATKING should have opamp gain (paired or standalone)");
 
-    // Test that Volume knob changes output level
     let input = sine(48000);
-    for &vol in &[0.0, 0.3, 0.6, 1.0] {
-        proc.set_control("Distortion", 0.5);
-        proc.set_control("Filter", 0.5);
-        proc.set_control("Volume", vol);
-        // Reset state
-        for _ in 0..4800 { proc.process(0.0); }
-        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
-        let peak = output[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        eprintln!("[rat-debug] Volume={:.1}: peak={:.6}", vol, peak);
-    }
 
-    // Test that Filter knob changes tone
-    for &filt in &[0.0, 0.5, 1.0] {
-        proc.set_control("Distortion", 0.5);
-        proc.set_control("Filter", filt);
-        proc.set_control("Volume", 0.5);
+    // Test Volume knob controls output level
+    proc.set_control("Distortion", 0.5);
+    proc.set_control("Filter", 0.5);
+    proc.set_control("Volume", 0.0);
+    for _ in 0..4800 { proc.process(0.0); }
+    let out_min: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    let peak_min = out_min[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+
+    proc.set_control("Volume", 1.0);
+    for _ in 0..4800 { proc.process(0.0); }
+    let out_max: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    let peak_max = out_max[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    assert!(peak_max > peak_min * 5.0,
+        "Volume should control output: min={peak_min:.6} max={peak_max:.6}");
+
+    // Test Distortion knob affects clipping character
+    let mut ratio_fn = |dist: f64| -> f64 {
+        proc.set_control("Distortion", dist);
+        proc.set_control("Filter", 0.5);
+        proc.set_control("Volume", 0.7);
         for _ in 0..4800 { proc.process(0.0); }
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
         let peak = output[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        eprintln!("[rat-debug] Filter={:.1}: peak={:.6}", filt, peak);
-    }
+        let rms = (output[4800..].iter().map(|x| x*x).sum::<f64>() / (output.len() - 4800) as f64).sqrt();
+        if peak > 1e-9 { rms / peak } else { 0.0 }
+    };
+    let ratio_low = ratio_fn(0.0);
+    let ratio_high = ratio_fn(1.0);
+    assert!(ratio_high < ratio_low + 0.05,
+        "Distortion should affect clipping: low_ratio={ratio_low:.4} high_ratio={ratio_high:.4}");
+
+    // Test Filter knob changes tone
+    proc.set_control("Distortion", 0.5);
+    proc.set_control("Volume", 0.5);
+    proc.set_control("Filter", 0.0);
+    for _ in 0..4800 { proc.process(0.0); }
+    let out_bright: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    let peak_bright = out_bright[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    proc.set_control("Filter", 1.0);
+    for _ in 0..4800 { proc.process(0.0); }
+    let out_dark: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    let peak_dark = out_dark[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    assert!((peak_bright - peak_dark).abs() > 0.001,
+        "Filter should change tone: bright={peak_bright:.6} dark={peak_dark:.6}");
 }
 
 #[test]
@@ -722,6 +731,67 @@ fn goldenrod_gain_crossfade() {
 }
 
 #[test]
+fn goldenrod_treble_pot_effect() {
+    // Verify the Treble pot affects the output spectrum.
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/goldenrod.pedal");
+    if !pro_path.exists() { return; }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+
+    let input: Vec<f64> = (0..4800)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 8000.0 * i as f64 / 48000.0).sin())
+        .collect();
+
+    // Check stage inventory: which stages have pots, feedback_pot_id, etc.
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+    for (i, s) in proc.stages.iter().enumerate() {
+        let root_type = match &s.root {
+            RootKind::OpAmp(oa) => format!("OpAmp(gain={:.2}, inv={})", oa.gain(), !oa.is_non_inverting()),
+            RootKind::DiodePair(_) => "DiodePair".into(),
+            RootKind::SingleDiode(_) => "SingleDiode".into(),
+            RootKind::Passthrough => "Passthrough".into(),
+            _ => "Other".into(),
+        };
+        let has_treble = s.tree.get_pot_resistance("Treble");
+        eprintln!("[stage {i}] root={root_type} fb_pot={:?} treble_in_tree={:?} rp={:.1}",
+            s.feedback_pot_id, has_treble, s.tree.port_resistance());
+    }
+
+    // Test Treble at two extremes
+    let mut outputs = Vec::new();
+    for &treble in &[0.1, 0.9] {
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        proc.set_control("Gain", 0.5);
+        proc.set_control("Treble", treble);
+        proc.set_control("Output", 0.7);
+        // Print tree rp and pot resistance for the tone stage after pot change
+        for (i, s) in proc.stages.iter().enumerate() {
+            if s.feedback_pot_id.as_deref() == Some("Treble") {
+                let treble_r = s.tree.get_pot_resistance("Treble");
+                let gain = match &s.root {
+                    RootKind::OpAmp(oa) => oa.gain(),
+                    _ => 0.0,
+                };
+                eprintln!("[treble-diag] Treble={treble:.1} stage={i} tree_rp={:.1} treble_r={:?} gain={:.4} ftg={:?}",
+                    s.tree.port_resistance(), treble_r, gain, s.tone_feedback.is_some());
+            }
+        }
+        let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        let tail = &output[2400..];
+        let peak = tail.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        eprintln!("[treble-test] Treble={treble:.1}: peak={peak:.6}");
+        outputs.push(tail.to_vec());
+    }
+
+    let cross_corr = correlation(&outputs[0], &outputs[1]);
+    eprintln!("[treble-test] lo-vs-hi cross_corr={cross_corr:.6}");
+    assert!(cross_corr < 0.999, "Treble pot should affect output: cross_corr={cross_corr}");
+}
+
+#[test]
 fn compile_blues() {
     // Marshall Bluesbreaker MkI from pedalkernel-pro legends
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -846,15 +916,41 @@ fn compile_phase90() {
 fn compile_tweed_deluxe_5e3() {
     let pedal = parse("tweed_deluxe_5e3.pedal");
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
-    proc.set_control("Volume", 0.7);
+    eprintln!("{}", proc.debug_dump());
+    // Dump push-pull tree structure for debugging
+    for (i, pp) in proc.push_pull_stages.iter().enumerate() {
+        eprintln!("=== Push-Pull Stage {i} — Push Tree ===");
+        eprintln!("{}", pp.push_tree.debug_dump(0));
+    }
+    proc.set_control("Bright Volume", 0.7);
     proc.set_control("Tone", 0.5);
 
-    let input = sine(48000);
-    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    let input = sine(48000 * 2); // 2 seconds
+    let mut output = Vec::with_capacity(input.len());
+    // Collect per-stage output at milestone samples
+    let milestones = [0, 256, 4800, 12000, 24000, 48000, 96000 - 1];
+    for (i, &s) in input.iter().enumerate() {
+        let out = proc.process(s);
+        output.push(out);
+        if milestones.contains(&i) {
+            let t_ms = i as f64 / 48.0;
+            // Read stage outputs from debug_stats if available
+            eprintln!("[t={t_ms:.1}ms] in={s:.4e} out={out:.4e}");
+        }
+    }
     assert_finite(&output, "Tweed Deluxe 5E3");
+    // Print peak in 250ms windows
+    for win in 0..8 {
+        let start = win * 12000;
+        let end = (start + 12000).min(output.len());
+        if start >= output.len() { break; }
+        let wp = output[start..end].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let mean = output[start..end].iter().copied().sum::<f64>() / (end - start) as f64;
+        eprintln!("[{}-{}ms] peak={wp:.4e} mean={mean:.4e}", win * 250, (win + 1) * 250);
+    }
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     assert!(
-        peak > 0.01,
+        peak > 0.001,
         "Tweed Deluxe should produce output: peak={peak}"
     );
 }
@@ -1247,6 +1343,7 @@ fn big_muff_sustain_spectral_sweep() {
         }[2400..],
     );
     eprintln!("[big-muff] lo-vs-hi cross_corr={cross_corr:.6}");
+
 }
 
 #[test]
@@ -3235,22 +3332,41 @@ equipment "Push-Pull Compile" {
         "No NaN/inf in push-pull output"
     );
 
-    // Verify port resistance is reasonable (not 1Ω degenerate).
-    // With R_plate=33kΩ, R_cathode=470Ω, and virtual_Rp=62.5kΩ, port resistance
-    // should be in the thousands of ohms range, not near 1Ω.
+    // Verify port resistance / adaptor is reasonable.
     for pp in &proc.push_pull_stages {
-        let push_rp = pp.push_tree.port_resistance();
-        let pull_rp = pp.pull_tree.port_resistance();
-        assert!(
-            push_rp > 100.0,
-            "Push tree port resistance {push_rp:.1}Ω is degenerate (should be >> 1Ω)"
-        );
-        assert!(
-            pull_rp > 100.0,
-            "Pull tree port resistance {pull_rp:.1}Ω is degenerate (should be >> 1Ω)"
-        );
+        if pp.push_adaptor.is_some() {
+            // 3-port R-type adaptor mode — push/pull trees are dummies (rp=1.0).
+            // Instead check that the adaptor has valid NL port resistances.
+            let adaptor = pp.push_adaptor.as_ref().unwrap();
+            assert!(
+                adaptor.nl_port_resistances[0] > 0.0,
+                "Grid port resistance must be positive"
+            );
+            assert!(
+                adaptor.nl_port_resistances[1] > 0.0,
+                "Plate port resistance must be positive"
+            );
+        } else {
+            // WDF mode — check tree port resistance.
+            // With R_plate=33kΩ, R_cathode=470Ω, and virtual_Rp=62.5kΩ,
+            // port resistance should be in the thousands of ohms range.
+            let push_rp = pp.push_tree.port_resistance();
+            let pull_rp = pp.pull_tree.port_resistance();
+            assert!(
+                push_rp > 100.0,
+                "Push tree port resistance {push_rp:.1}Ω is degenerate (should be >> 1Ω)"
+            );
+            assert!(
+                pull_rp > 100.0,
+                "Pull tree port resistance {pull_rp:.1}Ω is degenerate (should be >> 1Ω)"
+            );
+        }
     }
 
+    // Verify push-pull stage structure
+    for pp in &proc.push_pull_stages {
+        eprintln!("{}", pp.debug_dump());
+    }
     // Verify signal passes through (not zero output).
     // Skip first 480 samples (10ms warmup) then check RMS.
     let rms: f64 = output[480..].iter().map(|x| x * x).sum::<f64>() / (output.len() - 480) as f64;

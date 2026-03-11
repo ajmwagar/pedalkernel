@@ -29,7 +29,7 @@ use super::dyn_node::DynNode;
 use super::graph::*;
 use super::helpers::*;
 use super::stage::{RootKind, WdfStage};
-use crate::tree::{MnaSystem, ScatteringInterpolationTable, WdfPort};
+use crate::tree::ScatteringInterpolationTable;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Modulation-controlled element detection
@@ -55,7 +55,7 @@ fn detect_envelope_controlled_otas(pedal: &PedalDef) -> HashSet<String> {
     let ota_ids: HashSet<&str> = pedal
         .components
         .iter()
-        .filter(|c| c.kind.op_amp_type().map_or(false, |ot| ot.is_ota()))
+        .filter(|c| c.kind.op_amp_type().is_some_and(|ot| ot.is_ota()))
         .map(|c| c.id.as_str())
         .collect();
 
@@ -156,7 +156,7 @@ fn find_resistance_between(graph: &CircuitGraph, from: NodeId, to: NodeId) -> Op
     queue.push_back((from, 0.0));
 
     while let Some((node, r_so_far)) = queue.pop_front() {
-        for (_, e) in graph.edges.iter().enumerate() {
+        for e in graph.edges.iter() {
             let (other, matches) = if e.node_a == node {
                 (e.node_b, true)
             } else if e.node_b == node {
@@ -204,7 +204,7 @@ fn build_passive_wdf_stage(
     sample_rate: f64,
     oversampling: OversamplingFactor,
 ) -> Option<WdfStage> {
-    let vs_comp_idx = graph.components.len();
+    let _vs_comp_idx = graph.components.len();
     let passive_edges: Vec<usize> = graph
         .edges
         .iter()
@@ -633,7 +633,7 @@ fn build_passive_rtype_from_decomposed(
 /// warnings to help catch edge-collection gaps.
 fn rescue_orphan_output_pots(
     graph: &CircuitGraph,
-    classified: &super::classify::ClassifiedCircuit,
+    _classified: &super::classify::ClassifiedCircuit,
     stages: &[WdfStage],
     multi_nl_stages: &[super::stage::MultiNlStage],
     _sample_rate: f64,
@@ -854,7 +854,7 @@ fn build_feedforward_stages(
 
     let mut result = Vec::new();
 
-    for (_root, edges) in &components {
+    for edges in components.values() {
         // Collect all nodes in this subgraph
         let mut subgraph_nodes: HashSet<NodeId> = HashSet::new();
         for &eidx in edges {
@@ -1519,6 +1519,7 @@ pub fn compile_pedal_with_options(
         sample_rate,
         oversampling,
         &skip_feedback_tree_opamps,
+        &nl_junction_nodes,
     );
     stages.extend(opamp_feedback_stages);
 
@@ -1532,8 +1533,9 @@ pub fn compile_pedal_with_options(
                 super::graph::OpAmpFeedbackKind::UnityGain
                 | super::graph::OpAmpFeedbackKind::AllpassJfet { .. } => continue,
                 super::graph::OpAmpFeedbackKind::Inverting { feedback_diode, .. }
-                    if feedback_diode.is_some()
-                        && skip_feedback_tree_opamps.contains(&info.comp_id) =>
+                    if skip_feedback_tree_opamps.contains(&info.comp_id)
+                        && (feedback_diode.is_some()
+                            || nl_junction_nodes.contains(&info.out_node)) =>
                 {
                     // This opamp was routed to diode_paired_opamps, not stages.
                     continue;
@@ -1579,7 +1581,7 @@ pub fn compile_pedal_with_options(
             .collect()
     };
 
-    let (stage_plans, push_pull_plans, multi_nl_plans, pp_transformer_edges, bjt_bias_analysis, node_island_depths) =
+    let (stage_plans, push_pull_plans, multi_nl_plans, pp_transformer_edges, _bjt_bias_analysis, node_island_depths) =
         super::plan::plan_stages(&classified, &graph, sample_rate, &envelope_controlled_otas, &opamp_feedback_edges);
 
     // Now set signal_flow_distance on opamp feedback stages using island depths.
@@ -1590,6 +1592,13 @@ pub fn compile_pedal_with_options(
             match &info.feedback_kind {
                 super::graph::OpAmpFeedbackKind::UnityGain
                 | super::graph::OpAmpFeedbackKind::AllpassJfet { .. } => continue,
+                super::graph::OpAmpFeedbackKind::Inverting { feedback_diode, .. }
+                    if skip_feedback_tree_opamps.contains(&info.comp_id)
+                        && (feedback_diode.is_some()
+                            || nl_junction_nodes.contains(&info.out_node)) =>
+                {
+                    continue;
+                }
                 _ => {}
             }
             if stage_idx < stages.len() {
@@ -1640,6 +1649,7 @@ pub fn compile_pedal_with_options(
         sample_rate,
         oversampling,
         &pp_transformer_edges,
+        supply_voltage,
     );
 
     // Build multi-NL stages (R-type adaptor approach).
@@ -1779,8 +1789,8 @@ pub fn compile_pedal_with_options(
                     let d = dist[&node];
                     if let Some(neighbors) = adj_no_gnd.get(&node) {
                         for &(neighbor, _) in neighbors {
-                            if !dist.contains_key(&neighbor) {
-                                dist.insert(neighbor, d + 1);
+                            if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(neighbor) {
+                                e.insert(d + 1);
                                 queue.push_back(neighbor);
                             }
                         }
@@ -1900,7 +1910,7 @@ pub fn compile_pedal_with_options(
                     .iter()
                     .any(|p| pin_matches(p, &comp.id, "c") || pin_matches(p, &comp.id, "d"));
                 let has_output =
-                    is_output_pin(&net.from) || net.to.iter().any(|p| is_output_pin(p));
+                    is_output_pin(&net.from) || net.to.iter().any(&is_output_pin);
                 (has_secondary || has_secondary_to) && has_output
             });
             let input_to_primary = pedal.nets.iter().any(|net| {
@@ -1910,7 +1920,7 @@ pub fn compile_pedal_with_options(
                     .to
                     .iter()
                     .any(|p| pin_matches(p, &comp.id, "a") || pin_matches(p, &comp.id, "b"));
-                let has_input = is_input_pin(&net.from) || net.to.iter().any(|p| is_input_pin(p));
+                let has_input = is_input_pin(&net.from) || net.to.iter().any(&is_input_pin);
                 (has_primary || has_primary_to) && has_input
             });
 
@@ -2388,7 +2398,7 @@ fn topological_refine_stage_order(
 
     let mut result = Vec::with_capacity(order.len());
 
-    for (_, group) in &groups {
+    for group in groups.values() {
         if group.len() <= 1 {
             for &i in group {
                 result.push(order[i].0);

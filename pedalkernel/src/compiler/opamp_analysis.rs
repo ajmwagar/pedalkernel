@@ -87,6 +87,7 @@ pub(super) fn build_opamp_feedback_stages(
     sample_rate: f64,
     oversampling: crate::oversampling::OversamplingFactor,
     skip_feedback_tree: &HashSet<String>,
+    nl_junction_nodes: &HashSet<NodeId>,
 ) -> (Vec<WdfStage>, Vec<DiodePairedOpAmp>) {
     use super::stage::RootKind;
 
@@ -134,11 +135,13 @@ pub(super) fn build_opamp_feedback_stages(
                 // The NL stage handles the full passive set including feedback components.
                 let skip_tree = skip_feedback_tree.contains(&info.comp_id);
 
-                // If this opamp has feedback diodes AND shares junction with NL elements,
-                // pair with the DiodePair stage instead of creating a standalone OpAmp stage.
-                // The DiodePair NR solver does accurate clipping; the opamp just provides gain.
-                // Don't set soft_clip — the NR solver handles clipping, not tanh approximation.
-                if skip_tree && feedback_diode.is_some() {
+                // Pair this opamp with the DiodePair/SingleDiode stage when:
+                // - feedback_diode: diodes ARE in feedback (Tube Screamer, Klon)
+                // - output IS diode junction: diodes shunt opamp output to ground (RAT)
+                // In both cases the NR solver does accurate clipping; opamp just provides gain.
+                // Don't set soft_clip — the NR solver handles it.
+                let output_is_nl_junction = nl_junction_nodes.contains(&info.out_node);
+                if skip_tree && (feedback_diode.is_some() || output_is_nl_junction) {
                     diode_paired.push(DiodePairedOpAmp {
                         neg_node: info.neg_node,
                         out_node: info.out_node,
