@@ -254,6 +254,10 @@ impl WdfRoot for BjtNpnRoot {
         let v_max = self.v_max;
         let cold = if self.vbe > 0.3 {
             (a * 0.5).max(0.1)
+        } else if self.prev_v == 0.0 {
+            // Cold start: bias toward active region (Vce ≈ Vcc * 0.4).
+            // Without this, the solver starts at a=0 and may converge slowly.
+            v_max * 0.4
         } else {
             a * 0.5
         };
@@ -445,6 +449,11 @@ impl WdfRoot for BjtPnpRoot {
         // should be negative too.
         let cold = if self.veb > 0.2 {
             (a * 0.5).min(-0.1)
+        } else if self.prev_v == 0.0 {
+            // Cold start: bias toward PNP active region (Vce ≈ -Vcc * 0.4).
+            // PNP collector swings negative; without this the solver starts
+            // at v=0 (cutoff) and never finds the operating point.
+            -v_max * 0.4
         } else {
             a * 0.5
         };

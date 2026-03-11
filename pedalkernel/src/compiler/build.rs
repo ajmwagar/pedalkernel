@@ -2448,10 +2448,10 @@ fn build_vs_stage(
     // resistors (Rb1/Rb2, Rc, Re) already encode the correct DC operating
     // point through the Thevenin equivalent seen at each port.
     let remap = |n: NodeId| -> NodeId {
-        // Only collapse explicit supply nodes (e.g. secondary rails) to GND.
-        // VCC is kept as a real node so the bias network sees the correct
-        // supply voltage through the tree topology.
-        if graph.supply_nodes.contains(&n) {
+        // Collapse VCC and all supply nodes to GND for WDF tree construction.
+        // The DC operating point is handled by v_max (NR clamp) and the
+        // load line slope (rp), not by injecting VCC into the wave domain.
+        if n == graph.vcc_node || graph.supply_nodes.contains(&n) {
             graph.gnd_node
         } else {
             n
@@ -2506,7 +2506,17 @@ fn build_vs_stage(
         Some(graph.out_node),
     ).ok()?;
 
-    let (root, base_diode_model) = create_root(&elem.kind, use_jfet_vr);
+    let (mut root, base_diode_model) = create_root(&elem.kind, use_jfet_vr);
+
+    // Set v_max from supply voltage so the NR solver knows the rail voltage.
+    // This sets the clamp range AND enables supply-aware cold start.
+    if _supply_voltage.abs() > 1.0 {
+        match &mut root {
+            RootKind::BjtNpn(bjt) => bjt.set_v_max(_supply_voltage.abs()),
+            RootKind::BjtPnp(bjt) => bjt.set_v_max(_supply_voltage.abs()),
+            _ => {}
+        }
+    }
 
     Some(WdfStage {
         tree,
