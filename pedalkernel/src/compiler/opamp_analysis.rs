@@ -12,13 +12,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
-use crate::elements::*;
 use crate::elements::FeedbackConfig;
+use crate::elements::*;
 
 use super::dyn_node::DynNode;
-use super::graph::{
-    CircuitGraph, NodeId, OpAmpFeedbackInfo, OpAmpFeedbackKind,
-};
+use super::graph::{CircuitGraph, NodeId, OpAmpFeedbackInfo, OpAmpFeedbackKind};
 use super::stage::WdfStage;
 
 /// Result of op-amp analysis.
@@ -159,15 +157,14 @@ pub(super) fn build_opamp_feedback_stages(
                     };
                     root.set_soft_clip(diode_vf);
                 }
-                let (tree, fb_pot_from_tree) =
-                    if skip_tree {
-                        (None, None)
-                    } else {
-                        match build_feedback_tree(info, graph, pedal, sample_rate) {
-                            Some((t, pot_id)) => (Some(t), pot_id),
-                            None => (None, None),
-                        }
-                    };
+                let (tree, fb_pot_from_tree) = if skip_tree {
+                    (None, None)
+                } else {
+                    match build_feedback_tree(info, graph, pedal, sample_rate) {
+                        Some((t, pot_id)) => (Some(t), pot_id),
+                        None => (None, None),
+                    }
+                };
                 // Track whether graph_reduce built the tree (has reactive elements).
                 // If so, skip balance_vs_impedance — the VS must stay low-Rp so
                 // the capacitor's frequency-dependent scattering isn't swamped.
@@ -180,39 +177,36 @@ pub(super) fn build_opamp_feedback_stages(
                             voltage: 0.0,
                             rp: 10_000.0,
                         };
-                        let tree = if let Some((
-                            pot_id,
-                            max_pot_r,
-                            _fixed_series_r,
-                            _parallel_fixed_r,
-                        )) = rf_pot
-                        {
-                            let taper = lookup_pot_taper(pedal, pot_id);
-                            let initial_pos = 0.5;
-                            let tapered = taper.apply(initial_pos);
-                            let pot_rp = (tapered * max_pot_r).max(1.0);
-                            let pot = DynNode::Pot {
-                                comp_id: pot_id.clone(),
-                                max_resistance: *max_pot_r,
-                                position: initial_pos,
-                                taper,
-                                rp: pot_rp,
-                                last_a: 0.0,
+                        let tree =
+                            if let Some((pot_id, max_pot_r, _fixed_series_r, _parallel_fixed_r)) =
+                                rf_pot
+                            {
+                                let taper = lookup_pot_taper(pedal, pot_id);
+                                let initial_pos = 0.5;
+                                let tapered = taper.apply(initial_pos);
+                                let pot_rp = (tapered * max_pot_r).max(1.0);
+                                let pot = DynNode::Pot {
+                                    comp_id: pot_id.clone(),
+                                    max_resistance: *max_pot_r,
+                                    position: initial_pos,
+                                    taper,
+                                    rp: pot_rp,
+                                    last_a: 0.0,
+                                };
+                                let r_vs = vs.port_resistance();
+                                let r_pot = pot.port_resistance();
+                                let rp = r_vs + r_pot;
+                                DynNode::Series {
+                                    gamma: r_vs / rp,
+                                    left: Box::new(vs),
+                                    right: Box::new(pot),
+                                    rp,
+                                    b1: 0.0,
+                                    b2: 0.0,
+                                }
+                            } else {
+                                vs
                             };
-                            let r_vs = vs.port_resistance();
-                            let r_pot = pot.port_resistance();
-                            let rp = r_vs + r_pot;
-                            DynNode::Series {
-                                gamma: r_vs / rp,
-                                left: Box::new(vs),
-                                right: Box::new(pot),
-                                rp,
-                                b1: 0.0,
-                                b2: 0.0,
-                            }
-                        } else {
-                            vs
-                        };
                         (tree, rf_pot.as_ref().map(|(id, ..)| id.clone()))
                     }
                 };
@@ -244,8 +238,6 @@ pub(super) fn build_opamp_feedback_stages(
                     feedback_pot_id,
                     output_probe: None,
                     feedback_opamp: None,
-                    vcc_injection_coeff: 0.0,
-                    vcc_dc_ramp: 0,
                     tone_feedback: None,
                     load_tree: None,
                 };
@@ -256,7 +248,12 @@ pub(super) fn build_opamp_feedback_stages(
                 }
                 stages.push(stage);
             }
-            OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot, ri_pot } => {
+            OpAmpFeedbackKind::NonInverting {
+                rf,
+                ri,
+                rf_pot,
+                ri_pot,
+            } => {
                 let mut feedback_pot_id = None;
 
                 let model = OpAmpModel::from_opamp_type(&info.opamp_type);
@@ -294,15 +291,14 @@ pub(super) fn build_opamp_feedback_stages(
                 root.set_v_max(v_max);
 
                 let skip_tree = skip_feedback_tree.contains(&info.comp_id);
-                let (tree, fb_pot_from_tree) =
-                    if skip_tree {
-                        (None, None)
-                    } else {
-                        match build_feedback_tree(info, graph, pedal, sample_rate) {
-                            Some((t, pot_id)) => (Some(t), pot_id),
-                            None => (None, None),
-                        }
-                    };
+                let (tree, fb_pot_from_tree) = if skip_tree {
+                    (None, None)
+                } else {
+                    match build_feedback_tree(info, graph, pedal, sample_rate) {
+                        Some((t, pot_id)) => (Some(t), pot_id),
+                        None => (None, None),
+                    }
+                };
                 let has_complex_fb_tree = tree.is_some();
                 let (tree, fb_pot_from_tree) = match (tree, fb_pot_from_tree) {
                     (Some(t), pot_id) => (t, pot_id),
@@ -313,39 +309,36 @@ pub(super) fn build_opamp_feedback_stages(
                             rp: 10_000.0,
                         };
                         let active_pot = rf_pot.as_ref().or(ri_pot.as_ref());
-                        let tree = if let Some((
-                            pot_id,
-                            max_pot_r,
-                            _fixed_series_r,
-                            _parallel_fixed_r,
-                        )) = active_pot
-                        {
-                            let taper = lookup_pot_taper(pedal, pot_id);
-                            let initial_pos = 0.5;
-                            let tapered = taper.apply(initial_pos);
-                            let pot_rp = (tapered * max_pot_r).max(1.0);
-                            let pot = DynNode::Pot {
-                                comp_id: pot_id.clone(),
-                                max_resistance: *max_pot_r,
-                                position: initial_pos,
-                                taper,
-                                rp: pot_rp,
-                                last_a: 0.0,
+                        let tree =
+                            if let Some((pot_id, max_pot_r, _fixed_series_r, _parallel_fixed_r)) =
+                                active_pot
+                            {
+                                let taper = lookup_pot_taper(pedal, pot_id);
+                                let initial_pos = 0.5;
+                                let tapered = taper.apply(initial_pos);
+                                let pot_rp = (tapered * max_pot_r).max(1.0);
+                                let pot = DynNode::Pot {
+                                    comp_id: pot_id.clone(),
+                                    max_resistance: *max_pot_r,
+                                    position: initial_pos,
+                                    taper,
+                                    rp: pot_rp,
+                                    last_a: 0.0,
+                                };
+                                let r_vs = vs.port_resistance();
+                                let r_pot = pot.port_resistance();
+                                let rp = r_vs + r_pot;
+                                DynNode::Series {
+                                    gamma: r_vs / rp,
+                                    left: Box::new(vs),
+                                    right: Box::new(pot),
+                                    rp,
+                                    b1: 0.0,
+                                    b2: 0.0,
+                                }
+                            } else {
+                                vs
                             };
-                            let r_vs = vs.port_resistance();
-                            let r_pot = pot.port_resistance();
-                            let rp = r_vs + r_pot;
-                            DynNode::Series {
-                                gamma: r_vs / rp,
-                                left: Box::new(vs),
-                                right: Box::new(pot),
-                                rp,
-                                b1: 0.0,
-                                b2: 0.0,
-                            }
-                        } else {
-                            vs
-                        };
                         let pot_id = rf_pot
                             .as_ref()
                             .or(ri_pot.as_ref())
@@ -381,8 +374,6 @@ pub(super) fn build_opamp_feedback_stages(
                     feedback_pot_id,
                     output_probe: None,
                     feedback_opamp: None,
-                    vcc_injection_coeff: 0.0,
-                    vcc_dc_ramp: 0,
                     tone_feedback: None,
                     load_tree: None,
                 };
@@ -516,13 +507,23 @@ fn build_feedback_tree(
     let terminals = vec![border_nodes[0], border_nodes[1]];
 
     let fb_tree = super::graph::graph_reduce(
-        &feedback_edges, &extra, &terminals,
-        graph, sample_rate, &std::collections::HashMap::new(), |n| n,
+        &feedback_edges,
+        &extra,
+        &terminals,
+        graph,
+        sample_rate,
+        &std::collections::HashMap::new(),
+        |n| n,
         None,
-    ).ok()?.0;
+    )
+    .ok()?
+    .0;
 
     // Wrap in Series(VS, feedback_tree) — VS drives the feedback impedance
-    let vs = DynNode::VoltageSource { voltage: 0.0, rp: 1.0 };
+    let vs = DynNode::VoltageSource {
+        voltage: 0.0,
+        rp: 1.0,
+    };
     let r_vs = vs.port_resistance();
     let r_fb = fb_tree.port_resistance();
     let rp = r_vs + r_fb;
