@@ -646,19 +646,25 @@ impl CompiledPedal {
     /// For BJT circuits, Vce can swing from ~0V to Vcc (supply).
     pub fn set_supply_voltage(&mut self, voltage: f64) {
         let prev_voltage = self.supply_voltage;
-        self.supply_voltage = voltage.clamp(5.0, 500.0); // Allow up to 500V for tube gear
+        // Support negative supplies (PNP positive-ground, e.g. -9V Rangemaster)
+        self.supply_voltage = if voltage >= 0.0 {
+            voltage.clamp(5.0, 500.0)
+        } else {
+            voltage.clamp(-500.0, -5.0)
+        };
 
         // Calculate op-amp v_max from supply voltage.
         // For single-supply biased at Vsupply/2: v_max = (Vsupply/2) - saturation_margin
         // Saturation margin is typically 1.0-1.5V for most op-amps.
         // For high voltages (tube gear), the margin stays ~1.5V.
         let saturation_margin = 1.5;
-        let opamp_v_max = (voltage / 2.0 - saturation_margin).max(1.0);
+        let abs_voltage = voltage.abs();
+        let opamp_v_max = (abs_voltage / 2.0 - saturation_margin).max(1.0);
 
-        // For tubes and transistors, v_max is the full supply voltage
-        // (plate/collector can swing from 0V to B+/Vcc)
-        let tube_v_max = voltage;
-        let bjt_v_max = voltage;
+        // For tubes and transistors, v_max is the magnitude of the supply voltage
+        // (plate/collector can swing from 0V to |B+/Vcc|)
+        let tube_v_max = abs_voltage;
+        let bjt_v_max = abs_voltage;
 
         // Propagate v_max to standalone op-amp stages
         for stage in &mut self.opamp_stages {
@@ -725,7 +731,7 @@ impl CompiledPedal {
         }
 
         // Update single-NL WDF stage VCC bias.
-        if prev_voltage > 0.0 {
+        if prev_voltage.abs() > 0.0 {
             let scale = self.supply_voltage / prev_voltage;
             for stage in &mut self.stages {
                 if stage.vcc_injection_coeff != 0.0 {
@@ -1685,9 +1691,10 @@ impl PedalProcessor for CompiledPedal {
             self.supply_voltage = sagged_voltage;
             // Update v_max for all root elements
             let saturation_margin = 1.5;
-            let opamp_v_max = (sagged_voltage / 2.0 - saturation_margin).max(1.0);
-            let tube_v_max = sagged_voltage;
-            let bjt_v_max = sagged_voltage;
+            let abs_sagged = sagged_voltage.abs();
+            let opamp_v_max = (abs_sagged / 2.0 - saturation_margin).max(1.0);
+            let tube_v_max = abs_sagged;
+            let bjt_v_max = abs_sagged;
             for stage in &mut self.opamp_stages {
                 stage.opamp.set_v_max(opamp_v_max);
             }
@@ -1711,7 +1718,7 @@ impl PedalProcessor for CompiledPedal {
                 stage.update_supply_voltage(sagged_voltage);
             }
             // Update single-NL WDF stage VCC bias for supply sag.
-            if prev_supply_voltage > 0.0 {
+            if prev_supply_voltage.abs() > 0.0 {
                 let scale = sagged_voltage / prev_supply_voltage;
                 for stage in &mut self.stages {
                     if stage.vcc_injection_coeff != 0.0 {
@@ -1727,7 +1734,7 @@ impl PedalProcessor for CompiledPedal {
         // element can swing before hitting the rail — i.e. the clipping
         // ceiling.  So headroom only scales the soft limiter, not pre_gain
         // or output_gain.
-        let headroom = self.supply_voltage / 9.0;
+        let headroom = self.supply_voltage.abs() / 9.0;
 
         // Apply pre-gain ONCE at the input.  This models the initial active
         // gain element (op-amp or transistor) that drives signal into the

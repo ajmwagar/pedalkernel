@@ -2245,6 +2245,73 @@ pub fn compile_pedal_with_options(
             }
         }
 
+        // Main-chain priority: within the same sfd group, stages whose injection
+        // matches a previous-sfd stage's output (main chain) should process before
+        // stages whose injection doesn't (side branches like shunt clippers).
+        {
+            // Collect output_node_ids grouped by sfd.
+            let mut outputs_by_sfd: std::collections::BTreeMap<usize, HashSet<NodeId>> =
+                std::collections::BTreeMap::new();
+            for &(ref sr, sfd) in order.iter() {
+                let out_id = match sr {
+                    StageRef::Wdf(i) => stages[*i].output_node_id,
+                    StageRef::MultiNl(i) => multi_nl_stages[*i].output_node_id,
+                };
+                if out_id != usize::MAX {
+                    outputs_by_sfd.entry(sfd).or_default().insert(out_id);
+                }
+            }
+
+            // For each sfd group > 0, check if stages are "main chain" (injection
+            // matches a previous-sfd output) or "side branch" (injection doesn't).
+            // Side branches depend on all main chain stages in the same group.
+            let mut groups_by_sfd: std::collections::BTreeMap<usize, Vec<usize>> =
+                std::collections::BTreeMap::new();
+            for (i, &(_, sfd)) in order.iter().enumerate() {
+                groups_by_sfd.entry(sfd).or_default().push(i);
+            }
+
+            for (&sfd, group) in &groups_by_sfd {
+                if sfd == 0 || group.len() <= 1 {
+                    continue;
+                }
+                // Collect all outputs from previous sfd levels.
+                let prev_outputs: HashSet<NodeId> = outputs_by_sfd
+                    .range(..sfd)
+                    .flat_map(|(_, outs)| outs.iter().copied())
+                    .collect();
+                if prev_outputs.is_empty() {
+                    continue;
+                }
+
+                let main_chain: Vec<usize> = group
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let inj = injection_nodes[i];
+                        inj != usize::MAX && prev_outputs.contains(&inj)
+                    })
+                    .collect();
+                let side_branch: Vec<usize> = group
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let inj = injection_nodes[i];
+                        inj == usize::MAX || !prev_outputs.contains(&inj)
+                    })
+                    .collect();
+
+                // Side branches depend on all main chain stages.
+                for &sb in &side_branch {
+                    for &mc in &main_chain {
+                        if !deps[sb].contains(&mc) {
+                            deps[sb].push(mc);
+                        }
+                    }
+                }
+            }
+        }
+
         topological_refine_stage_order(order, &deps)
     };
 

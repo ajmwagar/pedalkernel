@@ -957,6 +957,62 @@ fn compile_blues() {
 }
 
 #[test]
+fn compile_rangemaster() {
+    // Dallas Rangemaster Treble Booster: PNP germanium (OC44), supply -9V.
+    // Verifies negative supply voltage is handled correctly (not clamped to 5V).
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/rangemaster.pedal");
+    if !pro_path.exists() {
+        eprintln!("[rangemaster] Skipping: {:?} not found", pro_path);
+        return;
+    }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+
+    // Verify the parser preserved the negative supply voltage.
+    assert_eq!(
+        pedal.supplies.first().map(|s| s.config.voltage),
+        Some(-9.0),
+        "Parser should preserve -9V supply"
+    );
+
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // The critical check: supply voltage must be negative (not clamped to +5V).
+    // PSU model subtracts rectifier drop: -9V + 1.4V = -7.6V steady state.
+    assert!(
+        proc.supply_voltage() < -5.0,
+        "Supply should be negative (around -7.6V), got {:.1}V",
+        proc.supply_voltage()
+    );
+
+    eprintln!("[rangemaster] Supply voltage: {:.1}V", proc.supply_voltage());
+    eprintln!("[rangemaster] WDF stages: {}", proc.stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let root_tag = match &s.root {
+            super::stage::RootKind::BjtPnp(_) => "BjtPnp",
+            super::stage::RootKind::BjtNpn(_) => "BjtNpn",
+            _ => "Other",
+        };
+        eprintln!("[rangemaster]   wdf[{i}]: root={root_tag} sfd={} vcc_inj={:.4}",
+            s.signal_flow_distance, s.vcc_injection_coeff);
+    }
+
+    proc.set_control("Boost", 1.0);
+
+    let input = sine(48000);
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    assert_finite(&output, "Rangemaster");
+    let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    eprintln!("[rangemaster] Peak output: {:.6} (gain={:.1}x, {:.1}dB)",
+        peak, peak / 0.5, 20.0 * (peak / 0.5).max(1e-20).log10());
+    // Treble booster with Boost=1.0 should produce significant output.
+    assert!(peak > 0.01, "Rangemaster should produce output: peak={peak}");
+}
+
+#[test]
 fn compile_dyna_comp() {
     // Dyna Comp has linearized OTA (VCCS in R-type MNA).
     let pedal = parse("dyna_comp.pedal");

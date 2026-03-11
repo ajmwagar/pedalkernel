@@ -2389,7 +2389,7 @@ impl MultiNlStage {
     /// to the build-time supply voltage. This shifts the transistor DC operating
     /// point in response to supply droop, modeling real power supply sag.
     pub fn update_supply_voltage(&mut self, new_voltage: f64) {
-        if self.supply_voltage <= 0.0 || self.vcc_bias_all.is_empty() {
+        if self.supply_voltage == 0.0 || self.vcc_bias_all.is_empty() {
             return;
         }
         let scale = new_voltage / self.supply_voltage;

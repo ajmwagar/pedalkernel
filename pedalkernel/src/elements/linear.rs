@@ -287,8 +287,13 @@ impl PowerSupply {
         self.cap_voltage += net_current * self.dt_over_c;
 
         // Clamp: cap voltage can't exceed nominal (rectifier doesn't reverse)
-        // and shouldn't go below zero (physically impossible).
-        self.cap_voltage = self.cap_voltage.clamp(0.0, self.nominal_voltage);
+        // and shouldn't go below zero (or above zero for negative supplies).
+        if self.nominal_voltage >= 0.0 {
+            self.cap_voltage = self.cap_voltage.clamp(0.0, self.nominal_voltage);
+        } else {
+            // Negative supply (PNP positive-ground): cap charges negative.
+            self.cap_voltage = self.cap_voltage.clamp(self.nominal_voltage, 0.0);
+        }
 
         // For tube rectifiers, add a small static voltage drop that increases
         // with current draw (tube rectifier forward drop is current-dependent).
@@ -306,7 +311,12 @@ impl PowerSupply {
             }
         };
 
-        (self.cap_voltage - static_drop).max(0.0)
+        // Drop reduces magnitude: positive supply goes down, negative goes up.
+        if self.nominal_voltage >= 0.0 {
+            (self.cap_voltage - static_drop).max(0.0)
+        } else {
+            (self.cap_voltage + static_drop).min(0.0)
+        }
     }
 
     /// Update the sample rate (recomputes dt/C).
@@ -344,7 +354,12 @@ impl PowerSupply {
             RectifierType::Tube => 10.0,
             RectifierType::SolidState => 1.4,
         };
-        (self.nominal_voltage - static_drop).max(0.0)
+        if self.nominal_voltage >= 0.0 {
+            (self.nominal_voltage - static_drop).max(0.0)
+        } else {
+            // Negative supply: drop reduces magnitude (voltage moves toward 0).
+            (self.nominal_voltage + static_drop).min(0.0)
+        }
     }
 }
 

@@ -2845,7 +2845,8 @@ fn build_push_pull_half_adaptor(
     // Use the graph's VCC node directly (graph.supply_voltages excludes the
     // main vcc rail, so we use graph.vcc_node + the supply_voltage parameter).
     let vcc_node_id = graph.vcc_node;
-    let has_vcc_node = vcc_node_id != graph.gnd_node && supply_voltage > 0.0;
+    // Negative supply is still a valid VCC node (PNP positive-ground circuits)
+    let has_vcc_node = vcc_node_id != graph.gnd_node && supply_voltage.abs() > 0.0;
 
     // Compute reflected transformer load: n_eff² × R_load
     let xfmr_comp_idx = graph.edges[transformer_edge_idx].comp_idx;
@@ -3008,8 +3009,8 @@ fn build_push_pull_half_adaptor(
         NonlinearKind::Pentode { model_name, .. } => {
             let model = pentode_model(model_name);
             let mut tp = PentodeThreePort::new(model);
-            if supply_voltage > 1.0 {
-                tp.set_v_max(supply_voltage);
+            if supply_voltage.abs() > 1.0 {
+                tp.set_v_max(supply_voltage.abs());
             }
             NlDeviceGroupKind::PentodeThreePort(tp)
         }
@@ -3022,15 +3023,15 @@ fn build_push_pull_half_adaptor(
             if *is_vari_mu {
                 let model = vari_mu_model(model_name);
                 let mut tp = VariMuThreePort::new(model);
-                if supply_voltage > 1.0 {
-                    tp.set_v_max(supply_voltage);
+                if supply_voltage.abs() > 1.0 {
+                    tp.set_v_max(supply_voltage.abs());
                 }
                 NlDeviceGroupKind::VariMuThreePort(tp.with_parallel_count(*parallel_count))
             } else {
                 let model = triode_model(model_name);
                 let mut tp = TriodeThreePort::new(model);
-                if supply_voltage > 1.0 {
-                    tp.set_v_max(supply_voltage);
+                if supply_voltage.abs() > 1.0 {
+                    tp.set_v_max(supply_voltage.abs());
                 }
                 NlDeviceGroupKind::TriodeThreePort(tp.with_parallel_count(*parallel_count))
             }
