@@ -18,11 +18,7 @@ use crate::PedalProcessor;
 
 /// Helper: compile a pedal from source, fire a MIDI note, process N samples,
 /// return the output buffer.
-fn trigger_and_collect(
-    src: &str,
-    midi_note: u8,
-    num_samples: usize,
-) -> (Vec<f64>, super::compiled::CompiledPedal) {
+fn trigger_and_collect(src: &str, midi_note: u8, num_samples: usize) -> (Vec<f64>, super::compiled::CompiledPedal) {
     let pedal = parse_pedal_file(src).unwrap();
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
     proc.note_on(midi_note, 127);
@@ -212,10 +208,7 @@ pedal "808 COWBELL" subtitle "Dual VCO cowbell" {
     eprintln!("post-trigger peak: {post_peak}, zero crossings: {zc}");
     eprintln!("first 20: {:?}", &post[..20]);
 
-    assert!(
-        post_peak > 0.01,
-        "cowbell should produce output after trigger, peak={post_peak}"
-    );
+    assert!(post_peak > 0.01, "cowbell should produce output after trigger, peak={post_peak}");
     assert!(zc > 10, "cowbell should oscillate, got {zc} zero crossings");
 }
 
@@ -272,9 +265,7 @@ pedal "DUAL PING" subtitle "Two independent voices" {
     let peak_t1 = peak(&output_t1);
 
     // Reset by processing silence
-    for _ in 0..48000 {
-        proc.process(0.0);
-    }
+    for _ in 0..48000 { proc.process(0.0); }
 
     // Fire only T2 (note 62)
     proc.note_on(62, 127);
@@ -355,10 +346,7 @@ fn compile_tube_screamer() {
     eprintln!("[ts-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
     eprintln!("[ts-debug] Controls: {}", proc.controls.len());
     for (i, c) in proc.controls.iter().enumerate() {
-        eprintln!(
-            "[ts-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}",
-            c.label, c.component_id, c.target
-        );
+        eprintln!("[ts-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
     }
 
     proc.set_control("Drive", 0.7);
@@ -536,10 +524,8 @@ fn compile_klon_centaur() {
 fn compile_ratking() {
     // RAT: LM308 inverting opamp + hard clipping diodes to ground + passive tone
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/ratking.pedal");
     if !pro_path.exists() {
         return;
@@ -549,18 +535,10 @@ fn compile_ratking() {
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
 
     // Verify structure: single DiodePair stage with opamp gain paired
-    assert!(
-        proc.stages.len() >= 1,
-        "RATKING should have at least 1 WDF stage"
-    );
-    assert!(
-        proc.stages[0].feedback_opamp.is_some()
-            || proc
-                .stages
-                .iter()
-                .any(|s| matches!(&s.root, super::stage::RootKind::OpAmp(_))),
-        "RATKING should have opamp gain (paired or standalone)"
-    );
+    assert!(proc.stages.len() >= 1, "RATKING should have at least 1 WDF stage");
+    assert!(proc.stages[0].feedback_opamp.is_some()
+        || proc.stages.iter().any(|s| matches!(&s.root, super::stage::RootKind::OpAmp(_))),
+        "RATKING should have opamp gain (paired or standalone)");
 
     let input = sine(48000);
 
@@ -568,80 +546,54 @@ fn compile_ratking() {
     proc.set_control("Distortion", 0.5);
     proc.set_control("Filter", 0.5);
     proc.set_control("Volume", 0.0);
-    for _ in 0..4800 {
-        proc.process(0.0);
-    }
+    for _ in 0..4800 { proc.process(0.0); }
     let out_min: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     let peak_min = out_min[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
 
     proc.set_control("Volume", 1.0);
-    for _ in 0..4800 {
-        proc.process(0.0);
-    }
+    for _ in 0..4800 { proc.process(0.0); }
     let out_max: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     let peak_max = out_max[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    assert!(
-        peak_max > peak_min * 5.0,
-        "Volume should control output: min={peak_min:.6} max={peak_max:.6}"
-    );
+    assert!(peak_max > peak_min * 5.0,
+        "Volume should control output: min={peak_min:.6} max={peak_max:.6}");
 
     // Test Distortion knob affects clipping character
     let mut ratio_fn = |dist: f64| -> f64 {
         proc.set_control("Distortion", dist);
         proc.set_control("Filter", 0.5);
         proc.set_control("Volume", 0.7);
-        for _ in 0..4800 {
-            proc.process(0.0);
-        }
+        for _ in 0..4800 { proc.process(0.0); }
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
         let peak = output[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        let rms = (output[4800..].iter().map(|x| x * x).sum::<f64>()
-            / (output.len() - 4800) as f64)
-            .sqrt();
-        if peak > 1e-9 {
-            rms / peak
-        } else {
-            0.0
-        }
+        let rms = (output[4800..].iter().map(|x| x*x).sum::<f64>() / (output.len() - 4800) as f64).sqrt();
+        if peak > 1e-9 { rms / peak } else { 0.0 }
     };
     let ratio_low = ratio_fn(0.0);
     let ratio_high = ratio_fn(1.0);
-    assert!(
-        ratio_high < ratio_low + 0.05,
-        "Distortion should affect clipping: low_ratio={ratio_low:.4} high_ratio={ratio_high:.4}"
-    );
+    assert!(ratio_high < ratio_low + 0.05,
+        "Distortion should affect clipping: low_ratio={ratio_low:.4} high_ratio={ratio_high:.4}");
 
     // Test Filter knob changes tone
     proc.set_control("Distortion", 0.5);
     proc.set_control("Volume", 0.5);
     proc.set_control("Filter", 0.0);
-    for _ in 0..4800 {
-        proc.process(0.0);
-    }
+    for _ in 0..4800 { proc.process(0.0); }
     let out_bright: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
-    let peak_bright = out_bright[4800..]
-        .iter()
-        .fold(0.0f64, |m, x| m.max(x.abs()));
+    let peak_bright = out_bright[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
     proc.set_control("Filter", 1.0);
-    for _ in 0..4800 {
-        proc.process(0.0);
-    }
+    for _ in 0..4800 { proc.process(0.0); }
     let out_dark: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     let peak_dark = out_dark[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    assert!(
-        (peak_bright - peak_dark).abs() > 0.001,
-        "Filter should change tone: bright={peak_bright:.6} dark={peak_dark:.6}"
-    );
+    assert!((peak_bright - peak_dark).abs() > 0.001,
+        "Filter should change tone: bright={peak_bright:.6} dark={peak_dark:.6}");
 }
 
 #[test]
 fn compile_muff() {
     // Big Muff Pi: 4 BJT stages + 2 DiodePair clipping + tone stack
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/muff.pedal");
     if !pro_path.exists() {
         eprintln!("[muff-debug] Skipping: {:?} not found", pro_path);
@@ -662,27 +614,17 @@ fn compile_muff() {
             super::stage::RootKind::BjtPnp(_) => "BjtPnp",
             _ => "Other",
         };
-        eprintln!(
-            "[muff-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={}",
-            s.injection_node_id,
-            s.output_node_id,
-            s.signal_flow_distance,
-            s.feedback_opamp.is_some()
-        );
+        eprintln!("[muff-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            s.feedback_opamp.is_some());
     }
-    eprintln!(
-        "[muff-debug] MultiNL stages: {}",
-        proc.multi_nl_stages.len()
-    );
+    eprintln!("[muff-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
     for (i, m) in proc.multi_nl_stages.iter().enumerate() {
         eprintln!("[muff-debug]   mnl[{i}]: n_nl={}", m.n_nl);
     }
     eprintln!("[muff-debug] Controls: {}", proc.controls.len());
     for (i, c) in proc.controls.iter().enumerate() {
-        eprintln!(
-            "[muff-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}",
-            c.label, c.component_id, c.target
-        );
+        eprintln!("[muff-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
     }
 
     proc.set_control("Sustain", 0.7);
@@ -693,16 +635,9 @@ fn compile_muff() {
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     assert_finite(&output, "Muff");
     let muff_peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    eprintln!(
-        "[muff-debug] Peak output: {:.6} (gain={:.1}x, {:.1}dB)",
-        muff_peak,
-        muff_peak / 0.1,
-        20.0 * (muff_peak / 0.1).log10()
-    );
-    assert!(
-        muff_peak > 0.001,
-        "Muff should produce output: peak={muff_peak}"
-    );
+    eprintln!("[muff-debug] Peak output: {:.6} (gain={:.1}x, {:.1}dB)",
+        muff_peak, muff_peak / 0.1, 20.0 * (muff_peak / 0.1).log10());
+    assert!(muff_peak > 0.001, "Muff should produce output: peak={muff_peak}");
 
     // Per-stage trace: warm up, then trace one sample through each stage.
     let mut proc2 = compile_pedal(&pedal, 48000.0).unwrap();
@@ -713,16 +648,10 @@ fn compile_muff() {
         let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
         proc2.process(s);
     }
-    eprintln!(
-        "[muff-trace] pre_gain={:.4} output_gain={:.4}",
-        proc2.pre_gain, proc2.output_gain
-    );
+    eprintln!("[muff-trace] pre_gain={:.4} output_gain={:.4}", proc2.pre_gain, proc2.output_gain);
     let test_input = 0.5_f64;
     let mut signal = test_input * proc2.pre_gain;
-    eprintln!(
-        "[muff-trace] test_input={:.6} after_pre_gain={:.6}",
-        test_input, signal
-    );
+    eprintln!("[muff-trace] test_input={:.6} after_pre_gain={:.6}", test_input, signal);
     let mut prev_was_clipping = false;
     for sr in &proc2.stage_order {
         match sr {
@@ -762,9 +691,7 @@ fn compile_muff() {
     proc3.set_control("Tone", 0.5);
     proc3.set_control("Volume", 0.6);
     // Warm up with silence to settle DC bias
-    for _ in 0..4800 {
-        proc3.process(0.0);
-    }
+    for _ in 0..4800 { proc3.process(0.0); }
     // Process 440Hz sine
     let out440: Vec<f64> = (0..4800)
         .map(|i| {
@@ -786,9 +713,7 @@ fn compile_muff() {
         p.set_control("Sustain", sust);
         p.set_control("Tone", 0.5);
         p.set_control("Volume", 0.6);
-        for _ in 0..4800 {
-            p.process(0.0);
-        }
+        for _ in 0..4800 { p.process(0.0); }
         let out: Vec<f64> = (0..4800)
             .map(|i| {
                 let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
@@ -799,8 +724,8 @@ fn compile_muff() {
         eprintln!("[muff-sustain] sustain={sust:.1} peak={pk:.6}");
         peaks.push(pk);
     }
-    let sustain_range =
-        peaks.iter().fold(0.0f64, |m, x| m.max(*x)) - peaks.iter().fold(f64::MAX, |m, x| m.min(*x));
+    let sustain_range = peaks.iter().fold(0.0f64, |m, x| m.max(*x))
+        - peaks.iter().fold(f64::MAX, |m, x| m.min(*x));
     eprintln!("[muff-sustain] range={sustain_range:.6}");
 
     // Per-stage waveform: manually trace each stage with sine input
@@ -808,9 +733,7 @@ fn compile_muff() {
     proc4.set_control("Sustain", 0.7);
     proc4.set_control("Tone", 0.5);
     proc4.set_control("Volume", 0.6);
-    for _ in 0..4800 {
-        proc4.process(0.0);
-    }
+    for _ in 0..4800 { proc4.process(0.0); }
     let n_stages = proc4.stages.len();
     let mut stage_bufs: Vec<Vec<f64>> = vec![Vec::new(); n_stages + 1];
     for i in 0..2400 {
@@ -822,9 +745,7 @@ fn compile_muff() {
             match sr {
                 super::compiled::StageRef::Wdf(si) => {
                     let stage = &mut proc4.stages[*si];
-                    if prev_was_clipping {
-                        signal *= proc4.pre_gain;
-                    }
+                    if prev_was_clipping { signal *= proc4.pre_gain; }
                     prev_was_clipping = stage.root.is_clipping_stage();
                     let out = stage.process(signal);
                     signal = if out.is_finite() { out } else { 0.0 };
@@ -836,17 +757,11 @@ fn compile_muff() {
     }
     for si in 0..=n_stages {
         let buf = &stage_bufs[si];
-        if buf.is_empty() {
-            continue;
-        }
+        if buf.is_empty() { continue; }
         let zc = zero_crossings(buf);
         let mn = buf.iter().fold(f64::MAX, |m, x| m.min(*x));
         let mx = buf.iter().fold(f64::MIN, |m, x| m.max(*x));
-        let label = if si == 0 {
-            "input".to_string()
-        } else {
-            format!("stage[{}]", si - 1)
-        };
+        let label = if si == 0 { "input".to_string() } else { format!("stage[{}]", si - 1) };
         eprintln!("[muff-per-stage] {label} zc={zc} min={mn:.6} max={mx:.6}");
     }
 }
@@ -855,10 +770,8 @@ fn compile_muff() {
 fn compile_goldenrod() {
     // Goldenrod (Klon Centaur v3): hard-clip Ge diodes to ground + non-inverting gain stage.
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/goldenrod.pedal");
     if !pro_path.exists() {
         return;
@@ -874,10 +787,7 @@ fn compile_goldenrod() {
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     assert_finite(&output, "Goldenrod");
     let peak_mid = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    assert!(
-        peak_mid > 0.001,
-        "Goldenrod should produce output: peak={peak_mid}"
-    );
+    assert!(peak_mid > 0.001, "Goldenrod should produce output: peak={peak_mid}");
 
     // Verify Output pot affects level (use longer run for smoother convergence)
     proc.set_control("Output", 0.1);
@@ -889,10 +799,7 @@ fn compile_goldenrod() {
     proc.set_control("Output", 0.9);
     let output_hi: Vec<f64> = long_input.iter().map(|&s| proc.process(s)).collect();
     let peak_hi = output_hi[1024..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    assert!(
-        peak_hi > peak_lo * 1.5,
-        "Output pot should affect level: hi={peak_hi} lo={peak_lo}"
-    );
+    assert!(peak_hi > peak_lo * 1.5, "Output pot should affect level: hi={peak_hi} lo={peak_lo}");
 }
 
 #[test]
@@ -903,14 +810,10 @@ fn goldenrod_gain_crossfade() {
     // the signal into hard Ge diode clipping at all Gain settings.
     // So we verify the binding (opamp gain changes) + check waveforms differ.
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/goldenrod.pedal");
-    if !pro_path.exists() {
-        return;
-    }
+    if !pro_path.exists() { return; }
     let src = std::fs::read_to_string(&pro_path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
 
@@ -929,9 +832,7 @@ fn goldenrod_gain_crossfade() {
         proc.set_control("Output", 0.8);
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
         // After processing, smoother has converged — read the actual opamp gain.
-        let opamp_gain = proc
-            .stages
-            .iter()
+        let opamp_gain = proc.stages.iter()
             .find(|s| s.feedback_pot_id.as_deref() == Some("Gain_A"))
             .and_then(|s| match &s.root {
                 RootKind::OpAmp(oa) => Some(oa.gain()),
@@ -947,18 +848,12 @@ fn goldenrod_gain_crossfade() {
     // Opamp gain should increase as Gain knob goes up.
     // Gain_A range is [1.0, 0.0] (inverted), so Gain=0.1 → pot 0.9 → low gain,
     // Gain=0.9 → pot 0.1 → high gain.
-    assert!(
-        gains[2] > gains[0] * 1.5,
-        "Gain pot should change opamp gain: lo={:.2} hi={:.2}",
-        gains[0],
-        gains[2]
-    );
+    assert!(gains[2] > gains[0] * 1.5,
+        "Gain pot should change opamp gain: lo={:.2} hi={:.2}", gains[0], gains[2]);
     // Waveforms should not be perfectly identical (even subtle Ge clipping differences).
     let cross_corr = correlation(&outputs[0], &outputs[2]);
-    eprintln!(
-        "[gain-xfade] lo-vs-hi cross-corr={cross_corr:.6} gain_ratio={:.2}",
-        gains[2] / gains[0]
-    );
+    eprintln!("[gain-xfade] lo-vs-hi cross-corr={cross_corr:.6} gain_ratio={:.2}",
+        gains[2] / gains[0]);
 }
 
 #[test]
@@ -967,14 +862,10 @@ fn goldenrod_treble_pot_effect() {
     // The Klon tone control is a cap+pot shelving filter in U4's feedback —
     // it must produce different frequency content at different pot positions.
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/goldenrod.pedal");
-    if !pro_path.exists() {
-        return;
-    }
+    if !pro_path.exists() { return; }
     let src = std::fs::read_to_string(&pro_path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
 
@@ -994,12 +885,8 @@ fn goldenrod_treble_pot_effect() {
 
     // Treble pot must be in a feedback tree with reactive elements
     let proc = compile_pedal(&pedal, 48000.0).unwrap();
-    assert!(
-        proc.stages
-            .iter()
-            .any(|s| s.feedback_pot_id.as_deref() == Some("Treble")),
-        "Treble pot should be a feedback pot in a WDF stage"
-    );
+    assert!(proc.stages.iter().any(|s| s.feedback_pot_id.as_deref() == Some("Treble")),
+        "Treble pot should be a feedback pot in a WDF stage");
 
     // Test Treble at two extremes
     let mut outputs = Vec::new();
@@ -1013,10 +900,7 @@ fn goldenrod_treble_pot_effect() {
     }
 
     let cross_corr = correlation(&outputs[0], &outputs[1]);
-    assert!(
-        cross_corr < 0.998,
-        "Treble pot should affect output spectrum: cross_corr={cross_corr}"
-    );
+    assert!(cross_corr < 0.998, "Treble pot should affect output spectrum: cross_corr={cross_corr}");
 }
 
 /// Regression: RATKING (RAT) opamp-diode pairing must produce clipping distortion.
@@ -1025,26 +909,18 @@ fn goldenrod_treble_pot_effect() {
 #[test]
 fn ratking_distortion_clips() {
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/ratking.pedal");
-    if !pro_path.exists() {
-        return;
-    }
+    if !pro_path.exists() { return; }
     let src = std::fs::read_to_string(&pro_path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
 
     // Structure: opamp must be paired (feedback_opamp) or standalone
-    assert!(
-        proc.stages
-            .iter()
-            .any(|s| s.feedback_opamp.is_some()
-                || matches!(&s.root, super::stage::RootKind::OpAmp(_))),
-        "RATKING must have opamp gain"
-    );
+    assert!(proc.stages.iter().any(|s| s.feedback_opamp.is_some()
+        || matches!(&s.root, super::stage::RootKind::OpAmp(_))),
+        "RATKING must have opamp gain");
 
     let input = sine(48000);
 
@@ -1054,16 +930,12 @@ fn ratking_distortion_clips() {
         p.set_control("Distortion", dist);
         p.set_control("Filter", 0.5);
         p.set_control("Volume", 0.7);
-        for _ in 0..4800 {
-            p.process(0.0);
-        }
+        for _ in 0..4800 { p.process(0.0); }
         let out: Vec<f64> = input.iter().map(|&s| p.process(s)).collect();
         let tail = &out[4800..];
         let peak = tail.iter().fold(0.0f64, |m, x| m.max(x.abs()));
         let rms = (tail.iter().map(|x| x * x).sum::<f64>() / tail.len() as f64).sqrt();
-        if peak < 1e-6 {
-            return 0.707;
-        }
+        if peak < 1e-6 { return 0.707; }
         rms / peak
     };
     let ratio_low = ratio(0.1);
@@ -1079,14 +951,10 @@ fn ratking_distortion_clips() {
 #[test]
 fn goldenrod_gain_drives_distortion() {
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/goldenrod.pedal");
-    if !pro_path.exists() {
-        return;
-    }
+    if !pro_path.exists() { return; }
     let src = std::fs::read_to_string(&pro_path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
 
@@ -1097,18 +965,14 @@ fn goldenrod_gain_drives_distortion() {
         proc.set_control("Gain", gain);
         proc.set_control("Treble", 0.5);
         proc.set_control("Output", 0.7);
-        for _ in 0..4800 {
-            proc.process(0.0);
-        }
+        for _ in 0..4800 { proc.process(0.0); }
         let out: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
         out[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()))
     };
     let peak_low = peak_at(0.1);
     let peak_high = peak_at(0.9);
-    assert!(
-        peak_high > peak_low * 1.1,
-        "Gain should increase output: low={peak_low:.4} high={peak_high:.4}"
-    );
+    assert!(peak_high > peak_low * 1.1,
+        "Gain should increase output: low={peak_low:.4} high={peak_high:.4}");
 }
 
 /// Regression: opamp feedback tree VS must be in Series with the feedback network,
@@ -1116,41 +980,32 @@ fn goldenrod_gain_drives_distortion() {
 #[test]
 fn opamp_feedback_tree_vs_is_series() {
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/goldenrod.pedal");
-    if !pro_path.exists() {
-        return;
-    }
+    if !pro_path.exists() { return; }
     let src = std::fs::read_to_string(&pro_path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
     let proc = compile_pedal(&pedal, 48000.0).unwrap();
 
     // Find the tone stage (has Treble as feedback pot)
-    let tone_stage = proc
-        .stages
-        .iter()
+    let tone_stage = proc.stages.iter()
         .find(|s| s.feedback_pot_id.as_deref() == Some("Treble"))
         .expect("Goldenrod must have a Treble feedback stage");
 
     // The tree root must be a Series adaptor (Series(VS, feedback_network))
     // If it's Parallel, the VS gets swamped and tone control doesn't work.
-    assert!(
-        matches!(&tone_stage.tree, super::dyn_node::DynNode::Series { .. }),
-        "Feedback tree root must be Series(VS, feedback_network), not Parallel"
-    );
+    assert!(matches!(&tone_stage.tree,
+        super::dyn_node::DynNode::Series { .. }),
+        "Feedback tree root must be Series(VS, feedback_network), not Parallel");
 }
 
 #[test]
 fn compile_blues() {
     // Marshall Bluesbreaker MkI from pedalkernel-pro legends
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/blues.pedal");
     if !pro_path.exists() {
         eprintln!("[blues-debug] Skipping: {:?} not found", pro_path);
@@ -1174,25 +1029,13 @@ fn compile_blues() {
             s.injection_node_id, s.output_node_id, s.signal_flow_distance,
             s.feedback_opamp.is_some(), s.output_probe, s.feedback_pot_id);
     }
-    eprintln!(
-        "[blues-debug] MultiNL stages: {}",
-        proc.multi_nl_stages.len()
-    );
+    eprintln!("[blues-debug] MultiNL stages: {}", proc.multi_nl_stages.len());
     for (i, s) in proc.multi_nl_stages.iter().enumerate() {
-        eprintln!(
-            "[blues-debug]   mnl[{i}]: n_nl={} n_passive_children={} n_pots={} sfd={}",
-            s.n_nl,
-            s.passive_children.len(),
-            s.pot_children.len(),
-            s.signal_flow_distance
-        );
+        eprintln!("[blues-debug]   mnl[{i}]: n_nl={} n_passive_children={} n_pots={} sfd={}", s.n_nl, s.passive_children.len(), s.pot_children.len(), s.signal_flow_distance);
     }
     eprintln!("[blues-debug] Controls: {}", proc.controls.len());
     for (i, c) in proc.controls.iter().enumerate() {
-        eprintln!(
-            "[blues-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}",
-            c.label, c.component_id, c.target
-        );
+        eprintln!("[blues-debug]   ctrl[{i}]: label={:?} comp={:?} target={:?}", c.label, c.component_id, c.target);
     }
 
     // Check stage_order
@@ -1205,10 +1048,7 @@ fn compile_blues() {
             for (ci, c) in children.iter().enumerate() {
                 let mut cpot_ids = Vec::new();
                 super::helpers::collect_pot_ids(c, &mut cpot_ids);
-                eprintln!(
-                    "[blues-debug]     PassiveRType child[{ci}] pots: {:?}",
-                    cpot_ids
-                );
+                eprintln!("[blues-debug]     PassiveRType child[{ci}] pots: {:?}", cpot_ids);
             }
         }
     }
@@ -1222,18 +1062,10 @@ fn compile_blues() {
 
     // Verify controls bound correctly
     assert!(
-        matches!(
-            proc.controls
-                .iter()
-                .find(|c| c.label == "Tone")
-                .map(|c| &c.target),
-            Some(super::compiled::ControlTarget::PotInStage(1))
-        ),
+        matches!(proc.controls.iter().find(|c| c.label == "Tone").map(|c| &c.target),
+            Some(super::compiled::ControlTarget::PotInStage(1))),
         "Tone should bind to PotInStage(1), got {:?}",
-        proc.controls
-            .iter()
-            .find(|c| c.label == "Tone")
-            .map(|c| &c.target),
+        proc.controls.iter().find(|c| c.label == "Tone").map(|c| &c.target),
     );
 
     proc.set_control("Drive", 0.7);
@@ -1247,10 +1079,7 @@ fn compile_blues() {
     eprintln!("[blues-debug] output peak: {peak:.6}");
     // Output is currently low (~0.0001) — this is a separate signal level issue,
     // not related to tone binding.
-    assert!(
-        peak > 1e-6,
-        "Blues should produce non-zero output: peak={peak}"
-    );
+    assert!(peak > 1e-6, "Blues should produce non-zero output: peak={peak}");
 }
 
 #[test]
@@ -1258,10 +1087,8 @@ fn compile_rangemaster() {
     // Dallas Rangemaster Treble Booster: PNP germanium (OC44), supply -9V.
     // Verifies negative supply voltage is handled correctly (not clamped to 5V).
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
         .join("pedalkernel-pro/pedals/legends/rangemaster.pedal");
     if !pro_path.exists() {
         eprintln!("[rangemaster] Skipping: {:?} not found", pro_path);
@@ -1287,10 +1114,7 @@ fn compile_rangemaster() {
         proc.supply_voltage()
     );
 
-    eprintln!(
-        "[rangemaster] Supply voltage: {:.1}V",
-        proc.supply_voltage()
-    );
+    eprintln!("[rangemaster] Supply voltage: {:.1}V", proc.supply_voltage());
     eprintln!("[rangemaster] WDF stages: {}", proc.stages.len());
     for (i, s) in proc.stages.iter().enumerate() {
         let root_tag = match &s.root {
@@ -1298,19 +1122,14 @@ fn compile_rangemaster() {
             super::stage::RootKind::BjtNpn(_) => "BjtNpn",
             _ => "Other",
         };
-        eprintln!(
-            "[rangemaster]   wdf[{i}]: root={root_tag} sfd={}",
-            s.signal_flow_distance
-        );
+        eprintln!("[rangemaster]   wdf[{i}]: root={root_tag} sfd={} vcc_inj={:.4}",
+            s.signal_flow_distance, s.vcc_injection_coeff);
     }
 
     proc.set_control("Boost", 1.0);
 
     // Debug: print stage and gain details
-    eprintln!(
-        "[rangemaster] pre_gain={:.6} output_gain={:.6}",
-        proc.pre_gain, proc.output_gain
-    );
+    eprintln!("[rangemaster] pre_gain={:.6} output_gain={:.6}", proc.pre_gain, proc.output_gain);
     eprintln!("[rangemaster] stage_order len={}", proc.stage_order.len());
     for (i, s) in proc.stages.iter().enumerate() {
         eprintln!("[rangemaster]   wdf[{i}]: comp={:.4} rp={:.1} dc_block={} xfmr_gain={:.4} inj_node={} out_node={} probe={:?} load_tree={}",
@@ -1326,47 +1145,30 @@ fn compile_rangemaster() {
 
     // Debug controls
     for c in &proc.controls {
-        eprintln!(
-            "[rangemaster] control: label={:?} comp={:?}",
-            c.label, c.component_id
-        );
+        eprintln!("[rangemaster] control: label={:?} comp={:?}", c.label, c.component_id);
     }
 
     // Dump WDF tree structure
-    eprintln!(
-        "[rangemaster] WDF tree structure:\n{}",
-        proc.stages[0].tree.debug_dump(1)
-    );
+    eprintln!("[rangemaster] WDF tree structure:\n{}", proc.stages[0].tree.debug_dump(1));
 
     let input = sine(48000);
     let mut debug_count = 0;
-    let output: Vec<f64> = input
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| {
-            let out = proc.process(s);
-            if i < 5 || (i > 250 && i < 260) || (i % 4800 == 0) {
-                if debug_count < 30 {
-                    eprintln!("[rangemaster] sample[{i}]: in={s:.6} out={out:.6}");
-                    debug_count += 1;
-                }
+    let output: Vec<f64> = input.iter().enumerate().map(|(i, &s)| {
+        let out = proc.process(s);
+        if i < 5 || (i > 250 && i < 260) || (i % 4800 == 0) {
+            if debug_count < 30 {
+                eprintln!("[rangemaster] sample[{i}]: in={s:.6} out={out:.6}");
+                debug_count += 1;
             }
-            out
-        })
-        .collect();
+        }
+        out
+    }).collect();
     assert_finite(&output, "Rangemaster");
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    eprintln!(
-        "[rangemaster] Peak output: {:.6} (gain={:.1}x, {:.1}dB)",
-        peak,
-        peak / 0.5,
-        20.0 * (peak / 0.5).max(1e-20).log10()
-    );
+    eprintln!("[rangemaster] Peak output: {:.6} (gain={:.1}x, {:.1}dB)",
+        peak, peak / 0.5, 20.0 * (peak / 0.5).max(1e-20).log10());
     // Treble booster with Boost=1.0 should produce significant output.
-    assert!(
-        peak > 0.01,
-        "Rangemaster should produce output: peak={peak}"
-    );
+    assert!(peak > 0.01, "Rangemaster should produce output: peak={peak}");
 }
 
 #[test]
@@ -1439,18 +1241,10 @@ fn compile_tweed_deluxe_5e3() {
     for win in 0..8 {
         let start = win * 12000;
         let end = (start + 12000).min(output.len());
-        if start >= output.len() {
-            break;
-        }
-        let wp = output[start..end]
-            .iter()
-            .fold(0.0f64, |m, x| m.max(x.abs()));
+        if start >= output.len() { break; }
+        let wp = output[start..end].iter().fold(0.0f64, |m, x| m.max(x.abs()));
         let mean = output[start..end].iter().copied().sum::<f64>() / (end - start) as f64;
-        eprintln!(
-            "[{}-{}ms] peak={wp:.4e} mean={mean:.4e}",
-            win * 250,
-            (win + 1) * 250
-        );
+        eprintln!("[{}-{}ms] peak={wp:.4e} mean={mean:.4e}", win * 250, (win + 1) * 250);
     }
     let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     assert!(
@@ -1712,12 +1506,9 @@ fn big_muff_per_stage_signal_levels() {
     eprintln!("[bm-diag] pre_gain={:.4}", proc.pre_gain);
     eprintln!("[bm-diag] output_gain={:.4}", proc.output_gain);
     for (i, s) in proc.stages.iter().enumerate() {
-        eprintln!(
-            "[bm-diag] stage[{i}] comp={:.6} sfd={} root={:?}",
-            s.compensation,
-            s.signal_flow_distance,
-            std::mem::discriminant(&s.root)
-        );
+        eprintln!("[bm-diag] stage[{i}] comp={:.6} sfd={} root={:?}",
+            s.compensation, s.signal_flow_distance,
+            std::mem::discriminant(&s.root));
     }
 
     // Process 2048 samples and track per-stage peak levels.
@@ -1762,10 +1553,8 @@ fn big_muff_per_stage_signal_levels() {
                 prev_was_clipping = stage.root.is_clipping_stage();
                 let out = stage.process(signal);
                 let out = if out.is_finite() { out } else { 0.0 };
-                eprintln!(
-                    "[bm-diag] Wdf({i}) in={signal:.6e} out={out:.6e} comp={:.6} clipping={}",
-                    stage.compensation, prev_was_clipping
-                );
+                eprintln!("[bm-diag] Wdf({i}) in={signal:.6e} out={out:.6e} comp={:.6} clipping={}",
+                    stage.compensation, prev_was_clipping);
                 signal = out;
             }
             super::compiled::StageRef::MultiNl(i) => {
@@ -1803,25 +1592,19 @@ fn big_muff_sustain_spectral_sweep() {
 
         // Print stage order on first iteration.
         if sustain < 0.2 {
-            eprintln!(
-                "[big-muff] stage_order ({} stages):",
-                proc.stage_order.len()
-            );
+            eprintln!("[big-muff] stage_order ({} stages):", proc.stage_order.len());
             for (pos, sr) in proc.stage_order.iter().enumerate() {
                 match sr {
                     super::compiled::StageRef::Wdf(i) => {
                         let s = &proc.stages[*i];
-                        eprintln!(
-                            "  [{pos}] Wdf({i}) sfd={} inj={} out={}",
-                            s.signal_flow_distance, s.injection_node_id, s.output_node_id
-                        );
+                        eprintln!("  [{pos}] Wdf({i}) sfd={} inj={} out={}",
+                            s.signal_flow_distance, s.injection_node_id, s.output_node_id);
                     }
                     super::compiled::StageRef::MultiNl(i) => {
                         let s = &proc.multi_nl_stages[*i];
-                        eprintln!(
-                            "  [{pos}] MultiNl({i}) sfd={} inj={} out={} n_nl={}",
-                            s.signal_flow_distance, s.injection_node_id, s.output_node_id, s.n_nl
-                        );
+                        eprintln!("  [{pos}] MultiNl({i}) sfd={} inj={} out={} n_nl={}",
+                            s.signal_flow_distance, s.injection_node_id, s.output_node_id,
+                            s.n_nl);
                     }
                 }
             }
@@ -1858,6 +1641,7 @@ fn big_muff_sustain_spectral_sweep() {
         }[2400..],
     );
     eprintln!("[big-muff] lo-vs-hi cross_corr={cross_corr:.6}");
+
 }
 
 #[test]
@@ -1984,7 +1768,10 @@ fn dyna_comp_has_ota_stage() {
     // Dyna Comp should have a linearized OTA in a multi-NL stage (R-type adaptor).
     let pedal = parse("dyna_comp.pedal");
     let proc = compile_pedal(&pedal, 48000.0).unwrap();
-    let has_linearized_ota = proc.multi_nl_stages.iter().any(|s| s.has_linearized_ota());
+    let has_linearized_ota = proc
+        .multi_nl_stages
+        .iter()
+        .any(|s| s.has_linearized_ota());
     assert!(
         has_linearized_ota,
         "Dyna Comp should have a linearized OTA in multi-NL stage"
@@ -2073,43 +1860,18 @@ fn dump_tree(node: &super::dyn_node::DynNode, depth: usize) {
     let indent = "  ".repeat(depth);
     match node {
         DynNode::Resistor { rp, .. } => eprintln!("{indent}R({rp:.1})"),
-        DynNode::Capacitor {
-            capacitance, rp, ..
-        } => eprintln!("{indent}C({capacitance:.2e}, rp={rp:.1})"),
-        DynNode::LeakyCapacitor {
-            capacitance, rp, ..
-        } => eprintln!("{indent}LC({capacitance:.2e}, rp={rp:.1})"),
-        DynNode::Inductor { inductance, rp, .. } => {
-            eprintln!("{indent}L({inductance:.2e}, rp={rp:.1})")
-        }
+        DynNode::Capacitor { capacitance, rp, .. } => eprintln!("{indent}C({capacitance:.2e}, rp={rp:.1})"),
+        DynNode::LeakyCapacitor { capacitance, rp, .. } => eprintln!("{indent}LC({capacitance:.2e}, rp={rp:.1})"),
+        DynNode::Inductor { inductance, rp, .. } => eprintln!("{indent}L({inductance:.2e}, rp={rp:.1})"),
         DynNode::VoltageSource { rp, .. } => eprintln!("{indent}VS(rp={rp:.1})"),
-        DynNode::Pot {
-            comp_id,
-            rp,
-            position,
-            max_resistance,
-            ..
-        } => eprintln!(
-            "{indent}Pot({comp_id}, pos={position:.2}, rp={rp:.1}, max={max_resistance:.0})"
-        ),
-        DynNode::Series {
-            left,
-            right,
-            rp,
-            gamma,
-            ..
-        } => {
+        DynNode::Pot { comp_id, rp, position, max_resistance, .. } =>
+            eprintln!("{indent}Pot({comp_id}, pos={position:.2}, rp={rp:.1}, max={max_resistance:.0})"),
+        DynNode::Series { left, right, rp, gamma, .. } => {
             eprintln!("{indent}Series(rp={rp:.1}, γ={gamma:.4})");
             dump_tree(left, depth + 1);
             dump_tree(right, depth + 1);
         }
-        DynNode::Parallel {
-            left,
-            right,
-            rp,
-            gamma,
-            ..
-        } => {
+        DynNode::Parallel { left, right, rp, gamma, .. } => {
             eprintln!("{indent}Parallel(rp={rp:.1}, γ={gamma:.4})");
             dump_tree(left, depth + 1);
             dump_tree(right, depth + 1);
@@ -4096,7 +3858,9 @@ pedal "Transformer Pin Test" {
         .edges
         .iter()
         .enumerate()
-        .filter(|(_, e)| graph.components[e.comp_idx].kind.is_transformer())
+        .filter(|(_, e)| {
+            graph.components[e.comp_idx].kind.is_transformer()
+        })
         .collect();
 
     assert_eq!(xfmr_edges.len(), 1, "Should have 1 transformer edge");
@@ -4278,10 +4042,7 @@ fn multi_nl_fuzz_face_pot_recomputes_scattering() {
     let proc = compile_pedal(&pedal, 48000.0).unwrap();
 
     // Stage should exist as multi-NL.
-    assert!(
-        !proc.multi_nl_stages.is_empty(),
-        "Should have multi-NL stage(s)"
-    );
+    assert!(!proc.multi_nl_stages.is_empty(), "Should have multi-NL stage(s)");
 
     // The Fuzz control should be bound as a pot target.
     let fuzz_ctrl = proc
@@ -4315,7 +4076,9 @@ fn multi_nl_fuzz_face_pot_audio_impact() {
             .map(|i| amp * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
             .collect()
     };
-    let rms = |s: &[f64]| -> f64 { (s.iter().map(|x| x * x).sum::<f64>() / s.len() as f64).sqrt() };
+    let rms = |s: &[f64]| -> f64 {
+        (s.iter().map(|x| x * x).sum::<f64>() / s.len() as f64).sqrt()
+    };
 
     let capture = |knob_val: f64, amp: f64| -> Vec<f64> {
         let mut p = compile_pedal(&pedal, sr).unwrap();
@@ -4353,77 +4116,31 @@ fn multi_nl_fuzz_face_pot_audio_impact() {
 fn component_is_passive() {
     // Passive components
     assert!(Resistor { value: 10_000.0 }.is_passive());
-    assert!(Capacitor {
-        config: CapConfig::new(100e-9)
-    }
-    .is_passive());
+    assert!(Capacitor { config: CapConfig::new(100e-9) }.is_passive());
     assert!(Inductor { value: 47e-3 }.is_passive());
-    assert!(Potentiometer {
-        max_r: 100_000.0,
-        taper: PotTaper::B
-    }
-    .is_passive());
-    assert!(Tempco {
-        resistance: 10_000.0,
-        ppm: 100.0
-    }
-    .is_passive());
-    assert!(ResistorSwitched {
-        values: vec![1000.0, 2000.0]
-    }
-    .is_passive());
-    assert!(CapSwitched {
-        values: vec![100e-9, 200e-9]
-    }
-    .is_passive());
-    assert!(InductorSwitched {
-        values: vec![47e-3, 100e-3]
-    }
-    .is_passive());
-    assert!(TransformerComp {
-        config: TransformerConfig::default()
-    }
-    .is_passive());
+    assert!(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }.is_passive());
+    assert!(Tempco { resistance: 10_000.0, ppm: 100.0 }.is_passive());
+    assert!(ResistorSwitched { values: vec![1000.0, 2000.0] }.is_passive());
+    assert!(CapSwitched { values: vec![100e-9, 200e-9] }.is_passive());
+    assert!(InductorSwitched { values: vec![47e-3, 100e-3] }.is_passive());
+    assert!(TransformerComp { config: TransformerConfig::default() }.is_passive());
 
     // Non-passive components
-    assert!(!Diode {
-        diode_type: DiodeType::Silicon
-    }
-    .is_passive());
-    assert!(!DiodePair {
-        diode_type: DiodeType::Silicon
-    }
-    .is_passive());
-    assert!(!OpAmp {
-        op_type: OpAmpType::Generic
-    }
-    .is_passive());
-    assert!(!Npn {
-        model: "2N3904".to_string()
-    }
-    .is_passive());
-    assert!(!Pnp {
-        model: "AC128".to_string()
-    }
-    .is_passive());
-    assert!(!NJfet {
-        model: "2N5457".to_string()
-    }
-    .is_passive());
-    assert!(!Triode {
-        model: "12AX7".to_string()
-    }
-    .is_passive());
-    assert!(!VariMu {
-        model: "6386".to_string()
-    }
-    .is_passive());
+    assert!(!Diode { diode_type: DiodeType::Silicon }.is_passive());
+    assert!(!DiodePair { diode_type: DiodeType::Silicon }.is_passive());
+    assert!(!OpAmp { op_type: OpAmpType::Generic }.is_passive());
+    assert!(!Npn { model: "2N3904".to_string() }.is_passive());
+    assert!(!Pnp { model: "AC128".to_string() }.is_passive());
+    assert!(!NJfet { model: "2N5457".to_string() }.is_passive());
+    assert!(!Triode { model: "12AX7".to_string() }.is_passive());
+    assert!(!VariMu { model: "6386".to_string() }.is_passive());
 }
 
 #[test]
 fn component_stamp_resistor() {
     let mut mna = MnaSystem::new(2, 0);
-    let result = Resistor { value: 10_000.0 }.stamp_mna("R1", Some(0), Some(1), &mut mna, 48_000.0);
+    let result =
+        Resistor { value: 10_000.0 }.stamp_mna("R1", Some(0), Some(1), &mut mna, 48_000.0);
     assert!(matches!(result, StampResult::Stamped));
     // G matrix diagonal should have 1/R = 1e-4
     let g = 1.0 / 10_000.0;
@@ -4438,7 +4155,8 @@ fn component_stamp_resistor() {
 fn component_stamp_capacitor() {
     let mut mna = MnaSystem::new(2, 0);
     let cfg = CapConfig::new(100e-9);
-    let result = Capacitor { config: cfg }.stamp_mna("C1", Some(0), Some(1), &mut mna, 48_000.0);
+    let result =
+        Capacitor { config: cfg }.stamp_mna("C1", Some(0), Some(1), &mut mna, 48_000.0);
     match result {
         StampResult::Reactive { rp, .. } => {
             let expected_rp = 1.0 / (2.0 * 48_000.0 * 100e-9);
@@ -4453,7 +4171,8 @@ fn component_stamp_capacitor() {
 #[test]
 fn component_stamp_inductor() {
     let mut mna = MnaSystem::new(2, 0);
-    let result = Inductor { value: 47e-3 }.stamp_mna("L1", Some(0), Some(1), &mut mna, 48_000.0);
+    let result =
+        Inductor { value: 47e-3 }.stamp_mna("L1", Some(0), Some(1), &mut mna, 48_000.0);
     match result {
         StampResult::Reactive { rp, .. } => {
             let expected_rp = 2.0 * 48_000.0 * 47e-3;
@@ -4467,15 +4186,16 @@ fn component_stamp_inductor() {
 #[test]
 fn component_stamp_pot() {
     let mut mna = MnaSystem::new(2, 0);
-    let result = Potentiometer {
-        max_r: 100_000.0,
-        taper: PotTaper::B,
-    }
-    .stamp_mna("Vol", Some(0), Some(1), &mut mna, 48_000.0);
+    let result = Potentiometer { max_r: 100_000.0, taper: PotTaper::B }.stamp_mna(
+        "Vol",
+        Some(0),
+        Some(1),
+        &mut mna,
+        48_000.0,
+    );
     match result {
         StampResult::Pot {
-            initial_conductance,
-            ..
+            initial_conductance, ..
         } => {
             // Linear taper at 0.5 → 50kΩ → conductance = 1/50000 = 2e-5
             let expected_g = 1.0 / 50_000.0;
@@ -4490,11 +4210,8 @@ fn component_stamp_pot() {
 #[test]
 fn component_stamp_tempco() {
     let mut mna = MnaSystem::new(2, 0);
-    let result = Tempco {
-        resistance: 4700.0,
-        ppm: 3500.0,
-    }
-    .stamp_mna("RT1", Some(0), Some(1), &mut mna, 48_000.0);
+    let result =
+        Tempco { resistance: 4700.0, ppm: 3500.0 }.stamp_mna("RT1", Some(0), Some(1), &mut mna, 48_000.0);
     assert!(matches!(result, StampResult::Stamped));
     let g = 1.0 / 4700.0;
     assert!((mna.g_matrix[0] - g).abs() < 1e-12);
@@ -4503,10 +4220,13 @@ fn component_stamp_tempco() {
 #[test]
 fn component_stamp_transformer_skips() {
     let mut mna = MnaSystem::new(2, 0);
-    let result = TransformerComp {
-        config: TransformerConfig::default(),
-    }
-    .stamp_mna("T1", Some(0), Some(1), &mut mna, 48_000.0);
+    let result = TransformerComp { config: TransformerConfig::default() }.stamp_mna(
+        "T1",
+        Some(0),
+        Some(1),
+        &mut mna,
+        48_000.0,
+    );
     assert!(matches!(result, StampResult::Skip));
     assert_eq!(mna.g_matrix[0], 0.0);
 }
@@ -4514,10 +4234,13 @@ fn component_stamp_transformer_skips() {
 #[test]
 fn component_stamp_diode_skips() {
     let mut mna = MnaSystem::new(2, 0);
-    let result = Diode {
-        diode_type: DiodeType::Silicon,
-    }
-    .stamp_mna("D1", Some(0), Some(1), &mut mna, 48_000.0);
+    let result = Diode { diode_type: DiodeType::Silicon }.stamp_mna(
+        "D1",
+        Some(0),
+        Some(1),
+        &mut mna,
+        48_000.0,
+    );
     assert!(matches!(result, StampResult::Skip));
     assert_eq!(mna.g_matrix[0], 0.0);
 }
@@ -4549,10 +4272,7 @@ LFO1.out -> J1.vgs
         .iter()
         .position(|e| graph.components[e.comp_idx].id == "J1")
         .expect("JFET should have a graph edge");
-    assert_eq!(
-        graph.effective_edge_kind(jfet_edge_idx),
-        EdgeKind::Nonlinear
-    );
+    assert_eq!(graph.effective_edge_kind(jfet_edge_idx), EdgeKind::Nonlinear);
 
     // Resolve
     super::graph::resolve_components(&mut graph, &pedal);
@@ -4589,10 +4309,7 @@ J1.source -> out
         .iter()
         .position(|e| graph.components[e.comp_idx].id == "J1")
         .expect("JFET should have a graph edge");
-    assert_eq!(
-        graph.effective_edge_kind(jfet_edge_idx),
-        EdgeKind::Nonlinear
-    );
+    assert_eq!(graph.effective_edge_kind(jfet_edge_idx), EdgeKind::Nonlinear);
 }
 
 #[test]
@@ -4632,30 +4349,17 @@ pedal "PING" subtitle "Passive RLC ring test" {
     // Check trigger_nodes were populated in graph
     let graph = super::graph::CircuitGraph::from_pedal(&pedal);
     eprintln!("trigger_nodes: {:?}", graph.trigger_nodes);
-    eprintln!(
-        "in_node: {}, out_node: {}, gnd_node: {}",
-        graph.in_node, graph.out_node, graph.gnd_node
-    );
-    assert!(
-        !graph.trigger_nodes.is_empty(),
-        "trigger_nodes should be non-empty for explicit-net triggers"
-    );
+    eprintln!("in_node: {}, out_node: {}, gnd_node: {}", graph.in_node, graph.out_node, graph.gnd_node);
+    assert!(!graph.trigger_nodes.is_empty(), "trigger_nodes should be non-empty for explicit-net triggers");
 
     // Check trigger has injection_node set
     eprintln!("triggers: {:?}", proc.triggers);
     assert!(proc.triggers.len() == 1, "should have 1 trigger");
-    assert_ne!(
-        proc.triggers[0].injection_node,
-        usize::MAX,
-        "trigger should have injection_node set"
-    );
+    assert_ne!(proc.triggers[0].injection_node, usize::MAX, "trigger should have injection_node set");
 
     // Check we have stages
     eprintln!("stages: {}", proc.stages.len());
-    assert!(
-        !proc.stages.is_empty(),
-        "should have at least 1 voice stage"
-    );
+    assert!(!proc.stages.is_empty(), "should have at least 1 voice stage");
 
     // Fire trigger and process 2400 samples (50ms at 48kHz)
     proc.note_on(1, 127);
@@ -4670,24 +4374,15 @@ pedal "PING" subtitle "Passive RLC ring test" {
     // Check peak
     let peak = output.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
     eprintln!("peak: {}", peak);
-    assert!(
-        peak > 1e-6,
-        "trigger should produce non-zero output, peak={}",
-        peak
-    );
+    assert!(peak > 1e-6, "trigger should produce non-zero output, peak={}", peak);
 
     // Check for oscillation: the output should ring, not just click.
     // Count zero crossings in the first 1000 samples.
-    let zero_crossings: usize = output
-        .windows(2)
+    let zero_crossings: usize = output.windows(2)
         .take(1000)
         .filter(|w| w[0].signum() != w[1].signum() && w[0] != 0.0)
         .count();
     eprintln!("zero crossings in first 1000 samples: {}", zero_crossings);
     // At 1592 Hz / 48000 Hz, expect ~33 crossings per 1000 samples (2 per cycle)
-    assert!(
-        zero_crossings > 5,
-        "should see oscillation (zero crossings), got {}",
-        zero_crossings
-    );
+    assert!(zero_crossings > 5, "should see oscillation (zero crossings), got {}", zero_crossings);
 }

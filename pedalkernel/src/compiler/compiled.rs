@@ -648,6 +648,7 @@ impl CompiledPedal {
     /// For tube circuits, the plate voltage can swing from 0V to B+ (supply).
     /// For BJT circuits, Vce can swing from ~0V to Vcc (supply).
     pub fn set_supply_voltage(&mut self, voltage: f64) {
+        let prev_voltage = self.supply_voltage;
         // Support negative supplies (PNP positive-ground, e.g. -9V Rangemaster)
         self.supply_voltage = if voltage >= 0.0 {
             voltage.clamp(5.0, 500.0)
@@ -730,6 +731,16 @@ impl CompiledPedal {
         // Update multi-NL stage DC bias for new supply voltage.
         for stage in &mut self.multi_nl_stages {
             stage.update_supply_voltage(voltage);
+        }
+
+        // Update single-NL WDF stage VCC bias.
+        if prev_voltage.abs() > 0.0 {
+            let scale = self.supply_voltage / prev_voltage;
+            for stage in &mut self.stages {
+                if stage.vcc_injection_coeff != 0.0 {
+                    stage.vcc_injection_coeff *= scale;
+                }
+            }
         }
     }
 
@@ -1046,9 +1057,7 @@ impl CompiledPedal {
     /// Should be called once after compilation is complete.
     pub fn snapshot_original_values(&mut self) {
         for (id, kind, value) in self.list_editable_components() {
-            self.original_passive_values
-                .entry(id)
-                .or_insert((kind, value));
+            self.original_passive_values.entry(id).or_insert((kind, value));
         }
     }
 
@@ -1202,11 +1211,7 @@ impl CompiledPedal {
     pub fn note_on(&mut self, note: u8, _velocity: u8) {
         if self.midi_trigger_map.is_empty() {
             #[cfg(debug_assertions)]
-            eprintln!(
-                "[CompiledPedal] note_on({}) → firing ALL {} triggers",
-                note,
-                self.triggers.len()
-            );
+            eprintln!("[CompiledPedal] note_on({}) → firing ALL {} triggers", note, self.triggers.len());
             for trig in &mut self.triggers {
                 trig.fire();
             }
@@ -1501,11 +1506,7 @@ impl CompiledPedal {
             for (i, vco) in self.vcos.iter().enumerate() {
                 s.push_str(&format!(
                     "  [{}] {} - freq={:.1}Hz, waveform={:?}, out_node={}\n",
-                    i,
-                    vco.comp_id,
-                    vco.vco.frequency(),
-                    vco.waveform,
-                    vco.output_node_id
+                    i, vco.comp_id, vco.vco.frequency(), vco.waveform, vco.output_node_id
                 ));
             }
         }
@@ -1573,11 +1574,7 @@ impl PedalProcessor for CompiledPedal {
                 }
             }
         }
-        let input = if global_trigger != 0.0 {
-            global_trigger
-        } else {
-            input
-        };
+        let input = if global_trigger != 0.0 { global_trigger } else { input };
 
         // Advance pot smoothers — smoothly interpolate pot values toward targets.
         // This eliminates zipper noise and clicks when knobs are turned.
@@ -1797,6 +1794,7 @@ impl PedalProcessor for CompiledPedal {
             // Propagate the sagged voltage to all voltage-dependent elements.
             // This is the same mechanism as set_supply_voltage() but avoids
             // the clamp so we can track the dynamic sag precisely.
+            let prev_supply_voltage = self.supply_voltage;
             self.supply_voltage = sagged_voltage;
             // Update v_max for all root elements
             let saturation_margin = 1.5;
@@ -1825,6 +1823,15 @@ impl PedalProcessor for CompiledPedal {
             // dc_bias and vcc_bias_all scale linearly with supply voltage.
             for stage in &mut self.multi_nl_stages {
                 stage.update_supply_voltage(sagged_voltage);
+            }
+            // Update single-NL WDF stage VCC bias for supply sag.
+            if prev_supply_voltage.abs() > 0.0 {
+                let scale = sagged_voltage / prev_supply_voltage;
+                for stage in &mut self.stages {
+                    if stage.vcc_injection_coeff != 0.0 {
+                        stage.vcc_injection_coeff *= scale;
+                    }
+                }
             }
         }
 
@@ -1923,11 +1930,7 @@ impl PedalProcessor for CompiledPedal {
                     let pre_stage = stage_input;
                     let stage_output = stage.process(stage_input);
                     // Guard against NaN from NR solver divergence.
-                    let stage_output = if stage_output.is_finite() {
-                        stage_output
-                    } else {
-                        0.0
-                    };
+                    let stage_output = if stage_output.is_finite() { stage_output } else { 0.0 };
 
                     // Write output to stage's output node for junction summing
                     // (only for trigger voice stages).
@@ -1935,9 +1938,7 @@ impl PedalProcessor for CompiledPedal {
                         // Feedforward: additive blend into serial chain
                         signal += stage_output;
                     } else if stage.is_trigger_voice && stage.output_node_id != usize::MAX {
-                        if let Some(entry) = self
-                            .node_signals
-                            .iter_mut()
+                        if let Some(entry) = self.node_signals.iter_mut()
                             .find(|(nid, _)| *nid == stage.output_node_id)
                         {
                             entry.1 += stage_output;
@@ -1945,8 +1946,7 @@ impl PedalProcessor for CompiledPedal {
                             self.node_signals.push((stage.output_node_id, stage_output));
                         }
                         // Use accumulated value at output node as the serial chain signal.
-                        signal = self
-                            .node_signals
+                        signal = self.node_signals
                             .iter()
                             .rev()
                             .find(|(nid, _)| *nid == stage.output_node_id)
@@ -1992,11 +1992,7 @@ impl PedalProcessor for CompiledPedal {
                     let pre = mnl_input;
                     let mnl_output = mnl.process(mnl_input);
                     // Guard against NaN from multi-NL NR solver divergence.
-                    let mnl_output = if mnl_output.is_finite() {
-                        mnl_output
-                    } else {
-                        0.0
-                    };
+                    let mnl_output = if mnl_output.is_finite() { mnl_output } else { 0.0 };
 
                     // Store output at the stage's output node for downstream routing.
                     self.node_signals.push((mnl.output_node_id, mnl_output));
@@ -2036,10 +2032,8 @@ impl PedalProcessor for CompiledPedal {
         if trace_on {
             eprintln!(
                 "  [PRE-PP] signal={signal:.6e} n_pp={} n_sc={} stage_order={}(wdf={}, mnl={})",
-                self.push_pull_stages.len(),
-                self.sidechains.len(),
-                self.stage_order.len(),
-                self.stages.len(),
+                self.push_pull_stages.len(), self.sidechains.len(),
+                self.stage_order.len(), self.stages.len(),
                 self.multi_nl_stages.len()
             );
         }
@@ -2061,10 +2055,7 @@ impl PedalProcessor for CompiledPedal {
             vca_binding.vca.set_gain(env_val);
 
             // Read audio from input node (sum all signals at that node)
-            let vca_input = self
-                .node_signals
-                .iter()
-                .rev()
+            let vca_input = self.node_signals.iter().rev()
                 .filter(|(nid, _)| *nid == vca_binding.input_node_id)
                 .map(|(_, v)| *v)
                 .sum::<f64>();
@@ -2087,10 +2078,7 @@ impl PedalProcessor for CompiledPedal {
         // directly into the signal chain. This handles VCO→out circuits without a VCA.
         if !self.vcos.is_empty() && self.vcas.is_empty() {
             for vco_binding in &self.vcos {
-                if let Some((_, val)) = self
-                    .node_signals
-                    .iter()
-                    .rev()
+                if let Some((_, val)) = self.node_signals.iter().rev()
                     .find(|(nid, _)| *nid == vco_binding.output_node_id)
                 {
                     signal += *val;
@@ -2181,9 +2169,9 @@ impl PedalProcessor for CompiledPedal {
         if !signal.is_finite() {
             signal = 0.0;
         }
-        signal = self
-            .rail_sat_oversampler
-            .process(signal, |s| self.rail_saturation.process(s, headroom));
+        signal = self.rail_sat_oversampler.process(signal, |s| {
+            self.rail_saturation.process(s, headroom)
+        });
 
         // Process through BBD delay lines (wet signal mixed with dry).
         for bbd in &mut self.bbds {

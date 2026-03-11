@@ -310,19 +310,10 @@ impl ToneFeedback {
         initial_pot_position: f64,
     ) -> Self {
         let mut fb = ToneFeedback {
-            r_fb,
-            r_in,
-            c_tone,
-            r_shelf,
-            max_pot_r,
-            pot_id,
-            sample_rate,
-            b0: 0.0,
-            b1: 0.0,
-            a1: 0.0,
+            r_fb, r_in, c_tone, r_shelf, max_pot_r, pot_id, sample_rate,
+            b0: 0.0, b1: 0.0, a1: 0.0,
             dc_gain: r_fb / r_in,
-            x_prev: 0.0,
-            y_prev: 0.0,
+            x_prev: 0.0, y_prev: 0.0,
         };
         fb.update_coefficients(initial_pot_position);
         fb
@@ -444,6 +435,12 @@ pub(super) struct WdfStage {
     ///
     /// NOT the same as `paired_opamp` (which is for Bridged-T all-pass circuits).
     pub(super) feedback_opamp: Option<OpAmpRoot>,
+    /// VCC injection coefficient (per-unit, wave domain).
+    /// Multiply by supply voltage to get the DC bias added to the reflected wave.
+    /// Computed from a small resistive MNA at build time. Zero when no VCC edge.
+    pub(super) vcc_injection_coeff: f64,
+    /// Gradual DC ramp counter (0..256) to prevent NR solver divergence on startup.
+    pub(super) vcc_dc_ramp: u32,
     /// IIR-based tone feedback for inverting opamps with a cap+pot in the
     /// feedback path (e.g., Klon Centaur Treble).  When present, the stage
     /// output is computed from this IIR instead of the WDF tree, giving the
@@ -487,6 +484,8 @@ impl WdfStage {
         let compensation = self.compensation;
         let output_probe = &self.output_probe;
         let feedback_opamp = &mut self.feedback_opamp;
+        let vcc_injection_coeff = self.vcc_injection_coeff;
+        let vcc_dc_ramp = &mut self.vcc_dc_ramp;
         let load_tree = &mut self.load_tree;
 
         // Set control voltage for active devices (triodes, BJTs, pentodes).
@@ -543,28 +542,31 @@ impl WdfStage {
             };
             tree.set_voltage(vs_voltage);
             let b1 = tree.reflected();
-
-            // ── Load tree Thevenin voltage + rp for BJT stages ───────
-            // For BJT stages, the load tree provides both the Thevenin
-            // voltage (b_tree, which encodes the VCC supply through the
-            // collector load resistor) and the correct port_resistance for
-            // the NL solver's load line.
-            //
-            // Using b1 (signal tree) instead of lt.reflected() would give
-            // zero Thevenin voltage (VCC collapsed to GND) and zero gain.
-            //
-            // For non-BJT stages, b1 carries the incident wave as usual and
-            // only rp is overridden.
-            let (b_tree, rp) = if let Some(ref mut lt) = load_tree {
-                match root {
-                    RootKind::BjtNpn(_) | RootKind::BjtPnp(_) => {
-                        // BJT two-domain: load tree provides collector Thevenin voltage + impedance
-                        (lt.reflected(), lt.port_resistance())
-                    }
-                    _ => (b1, lt.port_resistance()),
-                }
+            // VCC bias injection: add DC operating point from supply voltage.
+            // Ramped over 256 samples to prevent NR solver divergence on startup.
+            let b1 = if vcc_injection_coeff != 0.0 {
+                const DC_RAMP_SAMPLES: u32 = 256;
+                let dc_scale = if *vcc_dc_ramp >= DC_RAMP_SAMPLES {
+                    1.0
+                } else {
+                    *vcc_dc_ramp += 1;
+                    *vcc_dc_ramp as f64 / DC_RAMP_SAMPLES as f64
+                };
+                b1 + vcc_injection_coeff * dc_scale
             } else {
-                (b1, tree.port_resistance())
+                b1
+            };
+
+            // ── Load tree rp override for BJT stages ─────────────────
+            // When a load tree is present, it provides the correct
+            // collector-emitter load impedance for the NL solver's load
+            // line.  The signal tree's reflected wave b1 still carries the
+            // input signal; only rp is overridden.
+            let b_tree = b1;
+            let rp = if let Some(ref lt) = load_tree {
+                lt.port_resistance()
+            } else {
+                tree.port_resistance()
             };
 
             let a_root = match root {
@@ -719,11 +721,6 @@ impl WdfStage {
             };
             // ── Down-sweep: propagate reflected wave back through signal tree
             tree.set_incident(a_root);
-            // Also down-sweep the load tree so its capacitor states (e.g.,
-            // emitter bypass capacitor) advance correctly each sample.
-            if let Some(ref mut lt) = load_tree {
-                lt.set_incident(a_root);
-            }
             // If an output probe is set, extract voltage at that leaf
             // after the down-sweep instead of the root junction.
             if let Some(ref probe_id) = output_probe {
@@ -836,7 +833,9 @@ impl WdfStage {
             } => {
                 *rp = 1.0 / (2.0 * effective_rate * *capacitance);
             }
-            RootKind::InductorRoot { inductance, rp, .. } => {
+            RootKind::InductorRoot {
+                inductance, rp, ..
+            } => {
                 *rp = 2.0 * effective_rate * *inductance;
             }
             RootKind::PassiveRType { .. } => {
@@ -1458,10 +1457,7 @@ impl PushPullStage {
             let a = self.push_root.process(b, rp);
             self.push_tree.set_incident(a);
             #[cfg(feature = "debug-trace")]
-            {
-                push_b.set(b);
-                push_a.set(a);
-            }
+            { push_b.set(b); push_a.set(a); }
             (a + b) / 2.0
         });
 
@@ -1493,11 +1489,7 @@ impl PushPullStage {
         // The push-pull stage generates DC from plate bias voltages;
         // the real output transformer provides AC coupling, so we model
         // that with a DC blocking filter.
-        let x0 = if raw_output.is_finite() {
-            raw_output
-        } else {
-            0.0
-        };
+        let x0 = if raw_output.is_finite() { raw_output } else { 0.0 };
         let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
         self.dc_blocker_x1 = x0;
         self.dc_blocker_y1 = if y0.is_finite() { y0 } else { 0.0 };
@@ -1547,11 +1539,7 @@ impl PushPullStage {
         let raw_output = diff / self.turns_ratio;
 
         // DC blocker
-        let x0 = if raw_output.is_finite() {
-            raw_output
-        } else {
-            0.0
-        };
+        let x0 = if raw_output.is_finite() { raw_output } else { 0.0 };
         let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
         self.dc_blocker_x1 = x0;
         self.dc_blocker_y1 = if y0.is_finite() { y0 } else { 0.0 };
@@ -1649,11 +1637,7 @@ impl PushPullStage {
     }
 
     pub fn debug_dump(&self) -> String {
-        let mode = if self.push_adaptor.is_some() {
-            "3-port"
-        } else {
-            "WDF"
-        };
+        let mode = if self.push_adaptor.is_some() { "3-port" } else { "WDF" };
         format!(
             "PushPullStage(mode={}, ratio={:.1}:1, bias={:.1}V, push_par={}, pull_par={}, comp={:.4})\n  Push: rp={:.1}Ω, nodes={}\n  Pull: rp={:.1}Ω, nodes={}",
             mode,
@@ -1841,11 +1825,7 @@ impl NlDeviceGroupKind {
             NlDeviceGroupKind::TriodeThreePort(_) => "TriodeThreePort",
             NlDeviceGroupKind::PentodeThreePort(_) => "PentodeThreePort",
             NlDeviceGroupKind::BjtTwoPort(b) => {
-                if b.is_pnp {
-                    "BjtPnp2P"
-                } else {
-                    "BjtNpn2P"
-                }
+                if b.is_pnp { "BjtPnp2P" } else { "BjtNpn2P" }
             }
             NlDeviceGroupKind::SinglePort(d) => d.debug_name(),
         }
@@ -1920,7 +1900,11 @@ impl MultiNlScattering {
     /// `n_total` is inferred from the scattering matrix size, so extra ports
     /// (like VCC) are handled automatically — only the first `n_nl` rows and
     /// the NL, passive, and last (adapted) columns are extracted.
-    pub(super) fn from_full_matrix(scattering: &[f64], n_nl: usize, n_passive: usize) -> Self {
+    pub(super) fn from_full_matrix(
+        scattering: &[f64],
+        n_nl: usize,
+        n_passive: usize,
+    ) -> Self {
         let n_total = if scattering.is_empty() {
             n_nl + n_passive + 1
         } else {
@@ -2231,6 +2215,7 @@ impl MultiNlStage {
                 // Grouped solver: cross-coupled device Jacobians
                 let groups: Vec<&dyn NlDeviceGroupIv> =
                     dg.groups.iter().map(|g| g.as_group_iv()).collect();
+                
                 multi_port_nr_solve_grouped(
                     n_nl,
                     &self.scattering.s_nl,
@@ -2722,8 +2707,7 @@ impl MultiNlStage {
                         for i in 0..n_nl.min(new_vs.len()) {
                             self.dc_bias[i] = new_vs[i] * self.supply_voltage;
                         }
-                        self.vcc_bias_all =
-                            new_vs.iter().map(|&k| k * self.supply_voltage).collect();
+                        self.vcc_bias_all = new_vs.iter().map(|&k| k * self.supply_voltage).collect();
                     }
 
                     // Rebuild port_resistances for RTypeAdaptor
@@ -2789,11 +2773,7 @@ impl MultiNlStage {
         let n_passive = self.passive_children.len();
         let use_vs = recompute.vs_source_index.is_some();
         let _has_vcc_vs = recompute.vcc_vs_index.is_some();
-        let n_total = if use_vs {
-            n_nl + n_passive
-        } else {
-            n_nl + n_passive + 1
-        };
+        let n_total = if use_vs { n_nl + n_passive } else { n_nl + n_passive + 1 };
 
         // Rebuild ports with current resistances (reactive elements only, no pots).
         let mut ports: Vec<WdfPort> = Vec::with_capacity(n_total);
@@ -2822,9 +2802,8 @@ impl MultiNlStage {
         if use_vs {
             // VS injection mode (OTA): derive scattering + injection vector (no adapted port).
             let vs_idx = recompute.vs_source_index.unwrap();
-            let (scattering, vs_inj) = recompute
-                .mna
-                .derive_scattering_and_vs_injection(&ports, vs_idx);
+            let (scattering, vs_inj) =
+                recompute.mna.derive_scattering_and_vs_injection(&ports, vs_idx);
 
             if scattering.iter().any(|&s| !s.is_finite()) {
                 return;
@@ -2837,9 +2816,8 @@ impl MultiNlStage {
 
             // Recompute extraction coefficients if used.
             if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
-                let (coeffs, vs_coeff) = recompute
-                    .mna
-                    .derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
+                let (coeffs, vs_coeff) =
+                    recompute.mna.derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
                 self.extract_coeffs = Some(coeffs);
                 self.extract_vs = vs_coeff;
             }
@@ -2855,9 +2833,8 @@ impl MultiNlStage {
 
             if let Some(vcc_idx) = recompute.vcc_vs_index {
                 // VCC as ideal VS: derive scattering + VCC injection vector
-                let (scattering, vcc_inj) = recompute
-                    .mna
-                    .derive_scattering_and_vs_injection(&ports, vcc_idx);
+                let (scattering, vcc_inj) =
+                    recompute.mna.derive_scattering_and_vs_injection(&ports, vcc_idx);
 
                 if scattering.iter().any(|&s| !s.is_finite()) {
                     return;

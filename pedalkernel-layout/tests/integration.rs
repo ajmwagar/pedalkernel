@@ -14,9 +14,7 @@ fn tube_screamer_pedal() -> PedalDef {
         components: vec![
             ComponentDef {
                 id: "C1".into(),
-                kind: Box::new(Capacitor {
-                    config: CapConfig::new(100e-9),
-                }),
+                kind: Box::new(Capacitor { config: CapConfig::new(100e-9) }),
             },
             ComponentDef {
                 id: "R1".into(),
@@ -24,9 +22,7 @@ fn tube_screamer_pedal() -> PedalDef {
             },
             ComponentDef {
                 id: "U1".into(),
-                kind: Box::new(OpAmp {
-                    op_type: OpAmpType::Jrc4558,
-                }),
+                kind: Box::new(OpAmp { op_type: OpAmpType::Jrc4558 }),
             },
             ComponentDef {
                 id: "R3".into(),
@@ -34,9 +30,7 @@ fn tube_screamer_pedal() -> PedalDef {
             },
             ComponentDef {
                 id: "U2".into(),
-                kind: Box::new(OpAmp {
-                    op_type: OpAmpType::Jrc4558,
-                }),
+                kind: Box::new(OpAmp { op_type: OpAmpType::Jrc4558 }),
             },
             ComponentDef {
                 id: "R4".into(),
@@ -44,42 +38,27 @@ fn tube_screamer_pedal() -> PedalDef {
             },
             ComponentDef {
                 id: "Drive".into(),
-                kind: Box::new(Potentiometer {
-                    max_r: 500e3,
-                    taper: PotTaper::B,
-                }),
+                kind: Box::new(Potentiometer { max_r: 500e3, taper: PotTaper::B }),
             },
             ComponentDef {
                 id: "D1".into(),
-                kind: Box::new(Diode {
-                    diode_type: DiodeType::Silicon,
-                }),
+                kind: Box::new(Diode { diode_type: DiodeType::Silicon }),
             },
             ComponentDef {
                 id: "D2".into(),
-                kind: Box::new(Diode {
-                    diode_type: DiodeType::Silicon,
-                }),
+                kind: Box::new(Diode { diode_type: DiodeType::Silicon }),
             },
             ComponentDef {
                 id: "Tone".into(),
-                kind: Box::new(Potentiometer {
-                    max_r: 20e3,
-                    taper: PotTaper::B,
-                }),
+                kind: Box::new(Potentiometer { max_r: 20e3, taper: PotTaper::B }),
             },
             ComponentDef {
                 id: "C4".into(),
-                kind: Box::new(Capacitor {
-                    config: CapConfig::new(220e-9),
-                }),
+                kind: Box::new(Capacitor { config: CapConfig::new(220e-9) }),
             },
             ComponentDef {
                 id: "Level".into(),
-                kind: Box::new(Potentiometer {
-                    max_r: 100e3,
-                    taper: PotTaper::B,
-                }),
+                kind: Box::new(Potentiometer { max_r: 100e3, taper: PotTaper::B }),
             },
             ComponentDef {
                 id: "R7".into(),
@@ -288,7 +267,6 @@ fn tube_screamer_pedal() -> PedalDef {
         mirrors: std::collections::HashMap::new(),
         subtitle: None,
         midi_bindings: vec![],
-        calibrate: false,
     }
 }
 
@@ -300,9 +278,7 @@ fn triode_gain_stage() -> PedalDef {
         components: vec![
             ComponentDef {
                 id: "C1".into(),
-                kind: Box::new(Capacitor {
-                    config: CapConfig::new(20e-9),
-                }),
+                kind: Box::new(Capacitor { config: CapConfig::new(20e-9) }),
             },
             ComponentDef {
                 id: "R1".into(),
@@ -310,9 +286,7 @@ fn triode_gain_stage() -> PedalDef {
             },
             ComponentDef {
                 id: "V1".into(),
-                kind: Box::new(Triode {
-                    model: "12AX7".into(),
-                }),
+                kind: Box::new(Triode { model: "12AX7".into() }),
             },
             ComponentDef {
                 id: "R2".into(),
@@ -324,15 +298,11 @@ fn triode_gain_stage() -> PedalDef {
             },
             ComponentDef {
                 id: "C2".into(),
-                kind: Box::new(Capacitor {
-                    config: CapConfig::new(25e-6),
-                }),
+                kind: Box::new(Capacitor { config: CapConfig::new(25e-6) }),
             },
             ComponentDef {
                 id: "C3".into(),
-                kind: Box::new(Capacitor {
-                    config: CapConfig::new(22e-9),
-                }),
+                kind: Box::new(Capacitor { config: CapConfig::new(22e-9) }),
             },
         ],
         nets: vec![
@@ -438,7 +408,6 @@ fn triode_gain_stage() -> PedalDef {
         mirrors: std::collections::HashMap::new(),
         subtitle: None,
         midi_bindings: vec![],
-        calibrate: false,
     }
 }
 
@@ -664,7 +633,6 @@ fn empty_pedal_produces_empty_layout() {
         mirrors: std::collections::HashMap::new(),
         subtitle: None,
         midi_bindings: vec![],
-        calibrate: false,
     };
 
     let layout = generate_layout(&pedal, 1024.0, 512.0);
