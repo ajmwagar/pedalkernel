@@ -447,7 +447,8 @@ impl CircuitGraph {
                         .expect("Transformer GraphRole requires transformer_config()");
 
                     // Winding pin aliases: union shorthand (.a/.b) with explicit
-                    // (.primary.a/.primary.b) and abbreviated (.pri.a/.pri.b).
+                    // (.primary.a/.primary.b), abbreviated (.pri.a/.pri.b), and
+                    // underscore (.pri_a/.pri_b) forms.
                     let windings: &[(&str, &str, &[&str])] = &[
                         ("a", "b", &["primary", "pri"]),
                         ("c", "d", &["secondary", "sec"]),
@@ -458,12 +459,20 @@ impl CircuitGraph {
                         let id_short_b =
                             get_id(&format!("{}.{}", comp.id, short_b), &mut uf);
                         for prefix in prefixes {
+                            // Dot-separated: OT.pri.a
                             let alias_a =
                                 get_id(&format!("{}.{}.a", comp.id, prefix), &mut uf);
                             let alias_b =
                                 get_id(&format!("{}.{}.b", comp.id, prefix), &mut uf);
                             uf.union(id_short_a, alias_a);
                             uf.union(id_short_b, alias_b);
+                            // Underscore: OT.pri_a
+                            let alias_a_us =
+                                get_id(&format!("{}.{}_a", comp.id, prefix), &mut uf);
+                            let alias_b_us =
+                                get_id(&format!("{}.{}_b", comp.id, prefix), &mut uf);
+                            uf.union(id_short_a, alias_a_us);
+                            uf.union(id_short_b, alias_b_us);
                         }
                     }
 
@@ -478,6 +487,12 @@ impl CircuitGraph {
                                 get_id(&format!("{}.{}.b", comp.id, prefix), &mut uf);
                             uf.union(id_e, alias_a);
                             uf.union(id_f, alias_b);
+                            let alias_a_us =
+                                get_id(&format!("{}.{}_a", comp.id, prefix), &mut uf);
+                            let alias_b_us =
+                                get_id(&format!("{}.{}_b", comp.id, prefix), &mut uf);
+                            uf.union(id_e, alias_a_us);
+                            uf.union(id_f, alias_b_us);
                         }
                     }
 
@@ -514,8 +529,14 @@ impl CircuitGraph {
                             get_id(&format!("{}.pri.ct", comp.id), &mut uf);
                         let ct_short =
                             get_id(&format!("{}.ct", comp.id), &mut uf);
+                        let ct_us =
+                            get_id(&format!("{}.pri_ct", comp.id), &mut uf);
+                        let ct_us_long =
+                            get_id(&format!("{}.primary_ct", comp.id), &mut uf);
                         uf.union(ct_id, ct_abbr);
                         uf.union(ct_id, ct_short);
+                        uf.union(ct_id, ct_us);
+                        uf.union(ct_id, ct_us_long);
                         all_winding_nodes.push(uf.find(ct_id));
                     }
                     all_winding_nodes.sort();
@@ -1245,7 +1266,7 @@ impl CircuitGraph {
             .enumerate()
             .filter(|(_, e)| {
                 self.components[e.comp_idx].kind.transformer_config()
-                    .map_or(false, |cfg| matches!(cfg.primary_type, WindingType::Standard))
+                    .is_some_and(|cfg| matches!(cfg.primary_type, WindingType::Standard))
             })
             .map(|(idx, _)| idx)
             .collect();
@@ -1357,11 +1378,10 @@ impl CircuitGraph {
                 let Some(n) = neighbor else { continue };
                 // Skip push-pull transformer edges (magnetic isolation boundary).
                 // Non-PP transformers are kept so they can be built into WDF subtrees.
-                if self.components[e.comp_idx].kind.is_transformer() {
-                    if pp_transformer_edges.contains(&idx) {
+                if self.components[e.comp_idx].kind.is_transformer()
+                    && pp_transformer_edges.contains(&idx) {
                         continue;
                     }
-                }
                 // Skip edges to output node (those become output attenuation).
                 if skip_out_node && n == self.out_node {
                     continue;
@@ -1998,7 +2018,7 @@ impl CircuitGraph {
                 // Look for feedback resistor path (Rf: neg to out)
                 // Use resistive path finding to handle series/parallel combinations
                 // Returns (rf_value, component_ids, pot_info)
-                if let Some((rf, rf_comps, rf_pot)) = find_resistive_path(neg_node, out_node) {
+                if let Some((rf, _rf_comps, rf_pot)) = find_resistive_path(neg_node, out_node) {
                     // BFS through ALL passive edges (R, C, L, pot) from neg to out
                     // to collect the complete feedback network for edge exclusion.
                     let no_extra = HashSet::new();
@@ -2358,7 +2378,7 @@ pub(super) fn graph_reduce(
     // Output node tracking: when a series reduction collapses output_node,
     // we identify the ground-side leaf component. Its comp_id is the output
     // probe — voltage at this leaf after the WDF down-sweep equals V_out.
-    let output_node = output_node.map(|n| remap(n));
+    let output_node = output_node.map(remap);
     let mut output_probe_comp_id: Option<String> = None;
     // Track which edge (by vec index) contains the output probe subtree.
     // Updated when edges are merged so it follows the probe through reductions.
@@ -2679,7 +2699,7 @@ pub(super) fn sp_decompose(
 
         while let Some(node) = queue.pop_front() {
             if let Some(neighbors) = adj.get(&node) {
-                for &(eidx, neighbor) in neighbors {
+                for &(_eidx, neighbor) in neighbors {
                     if is_junction_or_ground(neighbor) {
                         // This edge borders a junction/ground — record it.
                         if neighbor != ground
@@ -2756,7 +2776,7 @@ pub(super) fn sp_decompose(
         if comp.bordering_junctions.len() == 1 {
             // Pendant: hangs off exactly one junction node → try graph_reduce.
 
-            let &junction = comp.bordering_junctions.iter().next().unwrap();
+            let &junction = comp.bordering_junctions.first().unwrap();
             let terminals = vec![junction, ground];
             let remap = |n: NodeId| -> NodeId { effective(n) };
 

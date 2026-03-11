@@ -1,103 +1,207 @@
-# Fender 5E3 Tweed Deluxe (1955-1960)
-# The amp that defined rock and roll — Neil Young, Billy Gibbons, countless others.
+# Fender Tweed Deluxe 5E3 (1958)
 #
-# Circuit topology (preamp only):
-#   V1a: 12AY7 first gain stage (lower mu = more dynamic, cleans up with volume)
-#   V1b: 12AX7 second gain stage (higher gain, where the breakup lives)
-#   Tone stack between stages (simple single-knob Fender style)
+# Circuit topology:
+#   V1a (12AY7) — first gain stage, bright channel
+#   V1b (12AX7) — second gain stage / mixer
+#   V2  (12AX7) — cathodyne phase inverter
+#   V3a/V3b (6V6) — push-pull class AB output
+#   5Y3 tube rectifier — the sag machine
 #
-# The 5E3's magic is in the interaction between its two volume controls
-# and the cathode follower mixing. We model the "Normal" channel path
-# which is the most commonly used for guitar.
+# The 5E3 is famous for its interactive volume controls, early breakup,
+# and the "bloom" from the saggy 5Y3 rectifier. It cleans up beautifully
+# with guitar volume, and when pushed, has a thick vocal midrange grind.
 #
-# Key characteristics:
-#   - Touch-sensitive: the 12AY7 front end cleans up beautifully with picking dynamics
-#   - Saggy, compressed breakup from the cathode-biased output stage interaction
-#   - The tone control is a simple treble rolloff between stages
-#   - Volume interaction: both channels share a cathode follower (modeled as gain)
+# Pairs well with: Klon Centaur into the bright channel (Volume ~6),
+# or use the normal channel for a darker, jazzier response.
 
 pedal "Tweed Deluxe 5E3" {
-  supply 350V {
-    impedance: 180      # 5Y3 tube rectifier (~120Ω) + transformer winding (~60Ω)
-    filter_cap: 16u     # vintage small filter cap — slow recovery, saggy feel
-    rectifier: tube     # 5Y3 — the sag king, large voltage drop under load
+  supplies {
+    B+: 330V {
+      impedance: 120        # 5Y3 tube rectifier — lots of sag
+      filter_cap: 16u       # vintage 16µF filter cap
+      rectifier: tube
+    }
+    # 5E3 is cathode-biased (shared 250Ω cathode resistor), NOT fixed-bias
   }
 
   components {
-    # Input stage
-    C1: cap(20n)            # Input coupling cap (0.02uF in original)
-    R1: resistor(1M)        # Grid leak resistor
-    R2: resistor(68k)       # Plate load resistor
+    # ── Input & coupling ──────────────────────────────────
+    R_grid1:  resistor(68k)          # V1a grid stopper
+    C_in:     cap(22n)               # input coupling cap
+    R_in:     resistor(1M)           # input grid leak
 
-    # V1a: 12AY7 first triode gain stage
-    V1: triode(12ay7)       # 12AY7 — lower gain, more dynamic
-    R3: resistor(820)       # Cathode resistor (self-bias)
-    C2: cap(25u)            # Cathode bypass cap (full bypass for gain)
+    # ── V1a — first gain stage (12AY7, lower gain for cleaner headroom) ──
+    V1a:      triode(12ay7)
+    R_plate1: resistor(100k)         # V1a plate load
+    R_cath1:  resistor(1.5k)         # V1a cathode resistor
+    C_cath1:  cap(25u, electrolytic) # cathode bypass — full bypass for gain
 
-    # Volume control (Normal channel)
-    Volume: pot(1M)         # 1M audio taper volume pot
+    # ── Bright channel volume ─────────────────────────────
+    Vol_B:    pot(1M)                # bright volume (log taper)
+    C_bright: cap(100p)             # bright cap across volume pot
 
-    # Interstage coupling and tone control
-    C3: cap(20n)            # Coupling cap to second stage (0.02uF)
-    R4: resistor(100k)      # Tone circuit series resistor
-    Tone: pot(250k)         # Tone control (treble rolloff)
-    C4: cap(250p)           # Tone cap — rolls off treble to ground
+    # ── Normal channel volume ─────────────────────────────
+    Vol_N:    pot(1M)                # normal volume (log taper)
 
-    # V1b: 12AX7 second triode gain stage
-    R5: resistor(100k)      # Plate load resistor
-    V2: triode(12ax7)       # 12AX7 — higher gain stage
-    R6: resistor(1.5k)      # Cathode resistor (self-bias)
-    C5: cap(22u)            # Cathode bypass cap
+    # ── Mixer resistors (interactive volume network) ──────
+    R_mix_B:  resistor(270k)         # bright channel mix
+    R_mix_N:  resistor(270k)         # normal channel mix
 
-    # Output coupling
-    C6: cap(22n)            # Output coupling cap
-    R7: resistor(1M)        # Grid leak / output load
+    # ── Coupling to V1b ───────────────────────────────────
+    C_couple1: cap(22n)              # coupling cap to second stage
+
+    # ── V1b — second gain stage (12AX7, high gain) ───────
+    V1b:      triode(12ax7)
+    R_plate2: resistor(100k)         # V1b plate load
+    R_cath2:  resistor(820)          # V1b cathode resistor
+    C_cath2:  cap(25u, electrolytic) # cathode bypass
+
+    # ── Tone stack (simple single-knob) ───────────────────
+    C_tone:   cap(500p)              # treble bleed to ground
+    R_tone:   pot(1M)                # tone control
+
+    # ── Coupling to phase inverter ────────────────────────
+    C_couple2: cap(22n)              # coupling to PI
+
+    # ── V2 — cathodyne phase inverter (12AX7) ────────────
+    V2:       triode(12ax7)
+    R_plate3: resistor(100k)         # PI plate load
+    R_cath3:  resistor(100k)         # PI cathode load (matched for balance)
+    R_grid3:  resistor(1M)           # PI grid leak
+
+    # ── Output stage coupling ─────────────────────────────
+    C_phase_p: cap(22n)              # coupling — plate phase to V3a
+    C_phase_c: cap(22n)              # coupling — cathode phase to V3b
+
+    # ── V3a/V3b — push-pull 6V6 output ───────────────────
+    V3a:      pentode(6v6gt)         # output tube A
+    V3b:      pentode(6v6gt)         # output tube B
+    R_grid4a: resistor(220k)         # V3a grid stopper
+    R_grid4b: resistor(220k)         # V3b grid stopper
+    R_screen: resistor(470)          # shared screen dropping resistor
+    C_screen: cap(22u, electrolytic) # screen bypass
+
+    # ── Output stage cathode bias ──────────────────────────
+    R_cath_pp: resistor(250)          # shared cathode resistor (the sag source!)
+    C_cath_pp: cap(25u, electrolytic) # cathode bypass cap
+
+    # ── Negative feedback ─────────────────────────────────
+    R_nfb:    resistor(22k)          # NFB from OT secondary to PI cathode
+    C_nfb:    cap(100p)              # HF rolloff on feedback
+
+    # ── Output transformer ────────────────────────────────
+    OT:       transformer(30:1, 8H, pp)  # push-pull primary, ~30:1 to 8Ω speaker
   }
+
   nets {
-    # Input coupling and grid leak
-    in -> C1.a
-    C1.b -> R1.a, V1.grid
-    R1.b -> gnd
+    # ── Input stage ───────────────────────────────────────
+    in -> C_in.a
+    C_in.b -> R_grid1.a
+    R_grid1.b -> V1a.grid, R_in.a
+    R_in.b -> gnd
 
-    # V1a: 12AY7 plate circuit
-    vcc -> R2.a
-    R2.b -> V1.plate
+    # V1a plate circuit
+    B+ -> R_plate1.a
+    R_plate1.b -> V1a.plate
 
-    # V1a: cathode bias
-    V1.cathode -> R3.a, C2.a
-    R3.b -> gnd
-    C2.b -> gnd
+    # V1a cathode
+    V1a.cathode -> R_cath1.a, C_cath1.a
+    R_cath1.b -> gnd
+    C_cath1.b -> gnd
 
-    # Volume control
-    V1.plate -> Volume.a
-    Volume.b -> C3.a
+    # ── Volume controls (interactive mixing network) ──────
+    # Both volumes see the same V1a plate signal through their mix resistors
+    V1a.plate -> R_mix_B.a, R_mix_N.a
 
-    # Tone control between stages
-    C3.b -> R4.a
-    R4.b -> Tone.a, fx_send
-    Tone.b -> C4.a
-    C4.b -> gnd
+    # Bright channel
+    R_mix_B.b -> Vol_B.a, C_bright.a
+    Vol_B.b -> gnd
+    C_bright.b -> gnd
 
-    # FX send/return loop point (between preamp and power amp)
-    fx_return -> V2.grid
+    # Normal channel
+    R_mix_N.b -> Vol_N.a
+    Vol_N.b -> gnd
 
-    # V2: 12AX7 plate circuit
-    vcc -> R5.a
-    R5.b -> V2.plate
+    # Wipers sum at coupling cap (the famous interactive network)
+    Vol_B.w -> C_couple1.a
+    Vol_N.w -> C_couple1.a
 
-    # V2: cathode bias
-    V2.cathode -> R6.a, C5.a
-    R6.b -> gnd
-    C5.b -> gnd
+    # ── Second gain stage ─────────────────────────────────
+    C_couple1.b -> V1b.grid
 
-    # Output coupling
-    V2.plate -> C6.a
-    C6.b -> R7.a
-    R7.b -> gnd
-    C6.b -> out
+    B+ -> R_plate2.a
+    R_plate2.b -> V1b.plate
+
+    V1b.cathode -> R_cath2.a, C_cath2.a
+    R_cath2.b -> gnd
+    C_cath2.b -> gnd
+
+    # ── Tone control ─────────────────────────────────────
+    # V1b plate feeds the tone pot; wiper picks off signal,
+    # tone cap bleeds treble to ground from the pot end
+    V1b.plate -> R_tone.a
+    R_tone.b -> C_tone.a
+    C_tone.b -> gnd
+    R_tone.w -> C_couple2.a
+
+    # ── Phase inverter ───────────────────────────────────
+    C_couple2.b -> R_grid3.a, V2.grid
+    R_grid3.b -> gnd
+
+    B+ -> R_plate3.a
+    R_plate3.b -> V2.plate
+
+    V2.cathode -> R_cath3.a
+    R_cath3.b -> gnd
+
+    # NFB from output transformer back to PI cathode
+    R_nfb.a -> V2.cathode
+    R_nfb.b -> C_nfb.a
+    C_nfb.b -> OT.sec.a
+
+    # ── Push-pull output ─────────────────────────────────
+    V2.plate -> C_phase_p.a
+    C_phase_p.b -> R_grid4a.a
+    R_grid4a.b -> V3a.grid
+
+    V2.cathode -> C_phase_c.a
+    C_phase_c.b -> R_grid4b.a
+    R_grid4b.b -> V3b.grid
+
+    # Screen supply
+    B+ -> R_screen.a
+    R_screen.b -> V3a.screen, V3b.screen, C_screen.a
+    C_screen.b -> gnd
+
+    # Output transformer — push-pull primary
+    B+ -> OT.pri.ct
+    V3a.plate -> OT.pri.a
+    V3b.plate -> OT.pri.b
+
+    # Shared cathode bias — both 6V6s to same resistor (cathode-biased)
+    V3a.cathode -> R_cath_pp.a, C_cath_pp.a
+    V3b.cathode -> R_cath_pp.a, C_cath_pp.a
+    R_cath_pp.b -> gnd
+    C_cath_pp.b -> gnd
+
+    # Output
+    OT.sec.a -> out
+    OT.sec.b -> gnd
   }
+
   controls {
-    Volume.position -> "Volume" [0.0, 1.0] = 0.5
-    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+    Vol_B.position -> "Bright Volume" [0.0, 1.0] = 0.5
+    Vol_N.position -> "Normal Volume" [0.0, 1.0] = 0.0
+    R_tone.position -> "Tone" [0.0, 1.0] = 0.6
+  }
+
+  monitors {
+    V1a.plate_current -> "V1a" [glow]
+    V1b.plate_current -> "V1b" [glow]
+    V2.plate_current -> "V2 PI" [glow]
+    V3a.plate_current -> "6V6 A" [glow]
+    V3b.plate_current -> "6V6 B" [glow]
+    supply -> "B+ Sag" [sag]
+    output -> "Output" [vu]
   }
 }

@@ -1,289 +1,165 @@
-# PedalKernel Development Guide
+# pedalkernel
 
-## Core Philosophy: True-to-Circuit Modeling
+## Project Overview
 
-PedalKernel models guitar pedal circuits using Wave Digital Filters (WDF). The fundamental principle is:
+Rust WDF (Wave Digital Filter) kernel for guitar FX pedal simulation — a DSL compiler that transforms `.pedal` circuit netlists into real-time audio processors using wave digital filter theory, with op-amp/BJT/tube analysis, JACK audio I/O, and a SPICE validation harness.
 
-**DSL → Circuit Understanding → Accurate Tone**
+## Tech Stack
 
-We do NOT add shortcuts, hacks, or "fake DSP fixes" to make things sound right. If the output doesn't match the expected behavior, the fix is to improve how we model the actual circuit components and topology—not to special-case certain pedal types.
+- **Language**: Rust 2021 (edition), workspace with resolver = "2"
+- **DSL Parsing**: nom 7
+- **Audio I/O**: JACK (real-time), hound (WAV)
+- **TUI/CLI**: ratatui, crossterm, clap
+- **Math**: num-complex, rustfft, realfft, ndarray
+- **Serialization**: serde, serde_json, serde_yaml
+- **Logging/Tracing**: tracing
+- **Error Handling**: thiserror, anyhow
+- **Testing/Benchmarks**: criterion, tempfile, rand, approx
+- **CI/CD**: GitHub Actions (rustfmt, clippy feature matrix, test feature matrix, benchmarks)
 
-### What This Means in Practice
+## Your Identity
 
-**ACCEPTABLE:**
-- Improving WDF element models (diodes, transistors, op-amps, JFETs)
-- Adding new component types with accurate electrical models
-- Fixing how circuit topology is analyzed and converted to WDF trees
-- Correcting component parameter values to match datasheets
+**You are an orchestrator, delegator, and constructive skeptic architect co-pilot.**
 
-**NOT ACCEPTABLE:**
-- Adding `if is_phaser` or `if is_fuzz` special cases
-- Hardcoding DSP effects that bypass the circuit model
-- Using component IDs to trigger special behavior (e.g., `if comp.id.contains("lfo")`)
-- Any "it sounds wrong so let's add a filter/gain/effect" fixes
+- **Never write code** — use Glob, Grep, Read to investigate, Plan mode to design, then delegate to supervisors via Task()
+- **Constructive skeptic** — present alternatives and trade-offs, flag risks, but don't block progress
+- **Co-pilot** — discuss before acting. Summarize your proposed plan. Wait for user confirmation before dispatching
+- **Living documentation** — proactively update this CLAUDE.md to reflect project state, learnings, and architecture
 
-### The Pipeline
+## Why Beads & Worktrees Matter
 
-```
-.pedal file (DSL)
-    ↓
-Parse → PedalDef (components + nets)
-    ↓
-CircuitGraph (nodes, edges, topology analysis)
-    ↓
-WDF Tree (series/parallel decomposition)
-    ↓
-Nonlinear Roots (diodes, JFETs, transistors)
-    ↓
-CompiledPedal (real-time processor)
-```
+Beads provide **traceability** (what changed, why, by whom) and worktrees provide **isolation** (changes don't affect main until merged). This matters because:
 
-Each stage must faithfully represent the circuit. If a pedal doesn't sound right, trace back through this pipeline to find where the model diverges from reality.
+- Parallel orchestrators can work without conflicts
+- Failed experiments are contained and easily discarded
+- Every change has an audit trail back to a bead
+- User merges via UI after CI passes — no surprise commits
 
-## Current Limitations (To Be Fixed Properly)
+## Quick Fix Escape Hatch
 
-### Op-Amp Modeling
+For trivial changes (<10 lines) on a **feature branch**, you can bypass the full bead workflow:
 
-Op-amps are currently treated as "bridge edges" for graph connectivity but don't process signal in the WDF tree. This breaks circuits that depend on op-amp behavior:
+1. `git checkout -b quick-fix-description` (must be off main)
+2. Investigate the issue normally
+3. Attempt the Edit — hook prompts user for approval
+4. User approves → edit proceeds → commit immediately
+5. User denies → create bead and dispatch supervisor
 
-- **Unity-gain buffers** (used in all-pass filters, phasers)
-- **Inverting amplifiers** (gain stages)
-- **Integrators/differentiators** (filters, oscillators)
+**On main/master:** Hard blocked. Must use bead + worktree workflow.
+**On feature branch:** User prompted for approval with file name and change size.
 
-**Proper fix:** Add op-amp WDF elements that model:
-- Input impedance (very high)
-- Output impedance (very low)
-- Voltage gain (open-loop → closed-loop via feedback network)
-- Slew rate limiting (already partially implemented)
+**When to use:** typos, config tweaks, small bug fixes where investigation > implementation.
+**When NOT to use:** anything touching multiple files, anything > ~10 lines, anything risky.
 
-### JFET Variable Resistance
+**Always commit immediately after quick-fix** to avoid orphaned uncommitted changes.
 
-JFETs in phasers act as voltage-controlled resistors, not clipping elements. The current JFET model focuses on the Shockley equation for drain current, but for phaser applications we need:
+## Investigation Before Delegation
 
-- Accurate Rds(on) vs Vgs relationship
-- Proper triode-region modeling for small Vds
+**Lead with evidence, not assumptions.** Before delegating any work:
 
-**Proper fix:** Extend JfetRoot to handle variable-resistance mode when Vds is small.
+1. **Read the actual code** — Don't just grep for keywords. Open the file, understand the context.
+2. **Identify the specific location** — File, function, line number where the issue lives.
+3. **Understand why** — What's the root cause? Don't guess. Trace the logic.
+4. **Log your findings** — `bd comment {ID} "INVESTIGATION: ..."` so supervisors have full context.
 
-## Testing Practices
+**Anti-pattern:** "I think the bug is probably in X" → dispatching without reading X.
+**Good pattern:** "Read src/foo.ts:142-180. The bug is at line 156 — null check missing."
 
-### Unit Tests
+The supervisor should execute confidently, not re-investigate.
 
-Every component model should have unit tests verifying:
+### Hard Constraints
 
-1. **DC behavior** - Correct operating point
-2. **AC behavior** - Frequency response matches theory
-3. **Nonlinear behavior** - Clipping, saturation at correct levels
-4. **Edge cases** - Extreme parameter values don't cause NaN/infinity
+- Never dispatch without reading the actual source file involved
+- Never create a bead with a vague description — include file:line references
+- No partial investigations — if you can't identify the root cause, say so
+- No guessing at fixes — if unsure, investigate more or ask the user
 
-Example:
-```rust
-#[test]
-fn jfet_variable_resistance_region() {
-    // When Vds << Vp, JFET should act as voltage-controlled resistor
-    let model = JfetModel::n_2n5952();
-    // Test Rds varies with Vgs as expected
-}
-```
+## Workflow
 
-### Integration Tests
+Every task goes through beads. No exceptions (unless user approves a quick fix).
 
-Each pedal type should have tests verifying:
+### Standalone (single supervisor)
 
-1. **Compiles without error**
-2. **Produces finite output** (no NaN/infinity)
-3. **Signal passes through** (output RMS > threshold)
-4. **Controls affect output** (changing knobs changes sound)
+1. **Investigate deeply** — Read the relevant files (not just grep). Identify the specific line/function.
+2. **Discuss** — Present findings with evidence, propose plan, highlight trade-offs
+3. **User confirms** approach
+4. **Create bead** — `bd create "Task" -d "Details"`
+5. **Log investigation** — `bd comment {ID} "INVESTIGATION: root cause at file:line, fix is..."`
+6. **Dispatch** — `Task(subagent_type="{tech}-supervisor", prompt="BEAD_ID: {id}\n\n{brief summary}")`
 
-Example:
-```rust
-#[test]
-fn phase90_speed_controls_sweep_rate() {
-    let pedal = parse("phase90.pedal");
-    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+Dispatch prompts are auto-logged to the bead by a PostToolUse hook.
 
-    // Measure sweep rate at Speed=0.2 vs Speed=0.8
-    // Verify higher speed = faster modulation
-}
-```
+### Plan Mode (complex features)
 
-### Running Tests
+Use when: new feature, multiple approaches, multi-file changes, or unclear requirements.
 
-#### Library Unit Tests (685 tests)
-```bash
-cargo test -p pedalkernel --lib
-```
-Core compiler, WDF tree, element models, NR solver, DSL parser.
+1. EnterPlanMode → explore with Glob/Grep/Read → design in plan file
+2. AskUserQuestion for clarification → ExitPlanMode for approval
+3. Create bead(s) from approved plan → dispatch supervisors
 
-#### Integration Tests
+**Plan → Bead mapping:**
+- Single-domain plan → standalone bead
+- Cross-domain plan → epic + children with dependencies
+
+## Beads Commands
 
 ```bash
-# Control binding pipeline — verifies 6-step bind produces correct pot/switch mappings
-cargo test --test control_binding          # 34 tests
-
-# Stage structure — checks compiled stage counts, types, control bindings
-cargo test --test stage_investigation      # 5 tests
-
-# Scattering sanity — property-style adaptor KCL/KVL validation
-cargo test --test scattering_sanity        # 2 tests
-
-# Pedal diagnostics — aliasing, sample-rate scaling, solver convergence
-cargo test --test pedal_diagnostics        # 7 tests
-
-# Golden regression — deterministic output locked to golden .npy snapshots
-cargo test --test golden_regression        # 1 test (+ 1 ignored regenerate helper)
-
-# BJT circuits (Fuzz Face multi-NL)
-cargo test --test integration_bjt          # 21 tests
-
-# Tube circuits (triodes, pentodes, push-pull)
-cargo test --test integration_tubes        # 48 tests
-
-# Full pedal compile-and-process
-cargo test --test integration_pedals       # 15 tests
-
-# Other integration suites
-cargo test --test integration_engine       # Engine processing tests
-cargo test --test integration_clipping     # Diode clipping circuits
-cargo test --test integration_opamp_jfet   # Op-amp and JFET circuits
-cargo test --test integration_compressor   # Compressor circuits
-cargo test --test integration_lfo          # LFO and modulation
-cargo test --test integration_bbd          # Bucket Brigade Device (requires bbd feature)
-cargo test --test nonlinear_solver         # NR solver convergence tests
-cargo test --test invariants               # Compiler invariant checks
+bd create "Title" -d "Description"                    # Create task
+bd create "Title" -d "..." --type epic                # Create epic
+bd create "Title" -d "..." --parent {EPIC_ID}         # Child task
+bd create "Title" -d "..." --parent {ID} --deps {ID}  # Child with dependency
+bd list                                               # List beads
+bd show ID                                            # Details
+bd ready                                              # Unblocked tasks
+bd update ID --status inreview                        # Mark done
+bd close ID                                           # Close
+bd dep relate {NEW_ID} {OLD_ID}                       # Link related beads
 ```
 
-#### SPICE Golden Reference Validation (36 tests)
+## When to Use Standalone or Epic
 
-The `pedalkernel-validate` binary compares WDF output against SPICE golden references with dB/RMS/spectral metrics. **Must be run from the `pedalkernel-validate/` directory** (circuits and golden .npy files are relative to CWD).
+| Signals | Workflow |
+|---------|----------|
+| Single tech domain | **Standalone** |
+| Multiple supervisors needed | **Epic** |
+| "First X, then Y" in your thinking | **Epic** |
+| DB + API + frontend change | **Epic** |
+
+Cross-domain = Epic. No exceptions.
+
+## Epic Workflow
+
+1. `bd create "Feature" -d "..." --type epic` → {EPIC_ID}
+2. Create children with `--parent {EPIC_ID}` and `--deps` for ordering
+3. `bd ready` to find unblocked children → dispatch ALL ready in parallel
+4. Repeat step 3 as children complete
+5. `bd close {EPIC_ID}` when all merged
+
+## Bug Fixes & Follow-Up
+
+**Closed beads stay closed.** For follow-up work:
 
 ```bash
-cd pedalkernel-validate
-
-# Run all 7 suites with detailed metrics table (RMS dB, Peak dB, THD, Spectral)
-cargo run --release --bin pedalkernel-validate -- --detailed run --suite all
-
-# Run a specific suite
-cargo run --release --bin pedalkernel-validate -- --detailed run --suite nonlinear
-cargo run --release --bin pedalkernel-validate -- --detailed run --suite pedals
-
-# Run a single test within a suite
-cargo run --release --bin pedalkernel-validate -- --detailed run --suite active --test fuzz_face_pnp
-
-# List all available suites and tests
-cargo run --release --bin pedalkernel-validate -- list
-
-# Generate JSON report
-cargo run --release --bin pedalkernel-validate -- --report report.json run --suite all
+bd create "Fix: [desc]" -d "Follow-up to {OLD_ID}: [details]"
+bd dep relate {NEW_ID} {OLD_ID}  # Traceability link
 ```
 
-**Validation suites:**
-| Suite | Tests | Description |
-|-------|-------|-------------|
-| `linear` | 4 | RC/RL filter transfer functions |
-| `nonlinear` | 5 | Diode clipper, cathode 12AX7, zener |
-| `opamp` | 6 | Unity buffer, inverting/noninverting gain, integrator |
-| `active` | 10 | BJT, JFET, MOSFET, OTA, triode, push-pull |
-| `pedals` | 4 | Fuzz core, RAT clipper, Big Muff, TS808 |
-| `reactive` | 4 | Delay, LC resonant, transformer step-up/down |
-| `stress` | 1 | DC stability |
-| `canonical` | 8 | Systematic WDF failure mode coverage (RC LP/HP, RLC, Twin-T, transformer, diode, op-amp clipper, BJT diff pair) |
+## Knowledge Base
 
-**Metrics reported:**
-- **RMS Error (dB)** — `20*log10(rms(wdf-ref)/rms(ref))`
-- **Peak Error (dB)** — `20*log10(max|wdf-ref|/max|ref|)`
-- **THD Error (dB)** — Total Harmonic Distortion difference
-- **Spectral Error (dB)** — Frequency-domain magnitude difference (bins >-80dB of peak)
+Search before investigating unfamiliar code: `.beads/memory/recall.sh "keyword"`
 
-**Golden reference management:**
-```bash
-# Bootstrap golden refs from current WDF output (for regression locking)
-cargo run --release --bin pedalkernel-validate -- bootstrap --suite all
+Log learnings: `bd comment {ID} "LEARNED: [insight]"` — captured automatically to `.beads/memory/knowledge.jsonl`
 
-# Generate analytical refs for linear circuits (no external deps)
-cargo run --release --bin pedalkernel-validate -- generate-linear
+## Supervisors
 
-# Generate from ngspice (requires `brew install ngspice`)
-cargo run --release --bin pedalkernel-validate -- generate-spice --suite all --spice-dir spice-circuits
+- rust-supervisor
+- infra-supervisor
+- merge-supervisor
 
-# Check ngspice availability
-cargo run --release --bin pedalkernel-validate -- check-spice
-```
+## Current State
 
-**Data locations:**
-- Circuit definitions: `pedalkernel-validate/circuits/{suite}/{test}.pedal`
-- Golden references: `pedalkernel-validate/golden/{suite}/{test}/{signal}.npy`
-- SPICE netlists: `pedalkernel-validate/spice-circuits/{suite}/{test}.spice`
-
-#### pedalkernel-pro Tests (run from pedalkernel-pro/)
-```bash
-# Fairchild 670 compression tests
-cargo test -p fairchild-670
-
-# Full workspace tests (may fail if resvg dep is broken)
-cargo test --workspace
-```
-
-### A/B Testing Against Reference
-
-For critical pedals, record reference audio from:
-- SPICE simulation of the exact circuit
-- Actual hardware (if available)
-
-Compare PedalKernel output using the `pedalkernel-validate` binary (see above) or manually:
-- Frequency spectrum analysis
-- THD measurements at various input levels
-- Transient response comparison
-
-## Adding New Components
-
-When adding a new component type:
-
-1. **Research the electronics** - Find datasheets, application notes, SPICE models
-2. **Understand the WDF representation** - How does this element fit in the WDF framework?
-3. **Implement the model** - Add to `elements/` with proper documentation
-4. **Add to DSL parser** - Update `dsl.rs` with syntax
-5. **Add to compiler** - Handle in `compiler.rs` graph building
-6. **Write tests** - Unit tests for the element, integration test with a pedal
-7. **Document** - Update DSL.md with syntax and usage
-
-## Debugging Circuit Issues
-
-When a pedal doesn't sound right:
-
-1. **Verify the .pedal file** - Does it match the schematic exactly?
-2. **Check component values** - Are resistors/caps in correct units?
-3. **Trace the signal path** - Use debug output to see signal at each stage
-4. **Compare to SPICE** - Simulate the same circuit, compare waveforms
-5. **Isolate the problem** - Simplify the circuit to find which element is wrong
-
-**Never** add a hack to fix the symptom. Find and fix the root cause.
-
-## Code Style
-
-- Use descriptive names that match electronics terminology
-- Comment with circuit theory, not just code explanation
-- Reference datasheets and application notes where relevant
-- Keep WDF math separate from circuit topology logic
-
-## File Structure
-
-```
-pedalkernel/
-├── src/
-│   ├── dsl.rs          # DSL parser
-│   ├── compiler.rs     # Circuit → WDF compilation
-│   ├── elements/
-│   │   ├── mod.rs
-│   │   ├── nonlinear.rs   # Diodes, JFETs, transistors
-│   │   ├── modulation.rs  # LFO, envelope followers
-│   │   └── ...
-│   └── tree.rs         # WDF tree structures
-├── examples/
-│   └── pedals/         # Example .pedal files for testing
-└── tests/
-```
-
-## Remember
-
-The goal is to understand circuits well enough that the DSL description naturally produces the correct tone. If you find yourself writing `if pedal_type == "phaser"`, stop and ask: "What's actually different about this circuit that my model isn't capturing?"
+<!--
+ORCHESTRATOR: Update this section as the project evolves.
+Include: active work, recent decisions, known issues, architectural notes.
+Keep it concise — pointers to files are better than duplicated content.
+-->

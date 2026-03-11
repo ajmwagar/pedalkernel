@@ -99,6 +99,11 @@ pub(super) fn balance_parallel_vs(node: &mut DynNode) {
             balance_parallel_vs(left);
             balance_parallel_vs(right);
         }
+        // Recurse through Transformer nodes so VS balancing reaches
+        // inner trees (e.g., push-pull trees wrapped with transformer load).
+        DynNode::Transformer { secondary, .. } => {
+            balance_parallel_vs(secondary);
+        }
         _ => {}
     }
 }

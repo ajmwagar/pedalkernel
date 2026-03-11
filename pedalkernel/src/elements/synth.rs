@@ -510,7 +510,7 @@ impl AdsrEnvelope {
             }
             EnvelopeStage::Release => {
                 // Exponential fall toward 0
-                self.value = self.release_coef * self.value;
+                self.value *= self.release_coef;
                 if self.value < 0.001 {
                     self.value = 0.0;
                     self.stage = EnvelopeStage::Idle;

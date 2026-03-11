@@ -28,8 +28,8 @@ use super::helpers::*;
 use super::opamp_analysis::OpAmpAnalysis;
 use super::plan::{MultiNlPlan, PushPullPlan, StagePlan};
 use super::stage::{
-    MultiNlDeviceGroups, MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind,
-    ScatteringRecomputeData, TubeRoot, WdfStage,
+    MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
+    PushPullHalfAdaptor, PushPullStage, RootKind, ScatteringRecomputeData, TubeRoot, WdfStage,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -267,9 +267,9 @@ fn replace_transformer_stubs(
             // Try to find a matching TransformerSubtree by comp_idx.
             // We match by turns_ratio since Transformer DynNodes don't store comp_idx.
             // Each stage has at most one transformer, so this is unambiguous.
-            for (_comp_idx, ts) in transformer_subtrees {
+            for ts in transformer_subtrees.values() {
                 if (ts.turns_ratio - *turns_ratio).abs() < 1e-10 {
-                    *secondary = Box::new(ts.subtree.clone());
+                    **secondary = ts.subtree.clone();
                     let rp_sec = secondary.port_resistance();
                     *rp = *turns_ratio * *turns_ratio * rp_sec;
                     return;
@@ -587,6 +587,8 @@ pub(super) fn build_stages(
             feedback_opamp: None,
             vcc_injection_coeff: 0.0,
             vcc_dc_ramp: 0,
+            tone_feedback: None,
+            load_tree: None,
         });
     }
 
@@ -794,6 +796,7 @@ pub(super) fn build_push_pull_stages(
     sample_rate: f64,
     oversampling: OversamplingFactor,
     pp_transformer_edges: &HashSet<usize>,
+    supply_voltage: f64,
 ) -> Vec<PushPullStage> {
     let mut stages = Vec::new();
 
@@ -807,6 +810,61 @@ pub(super) fn build_push_pull_stages(
             super::plan::plan_push_pull_half(pull_elem, classified, graph, pp_transformer_edges);
 
         if let (Some(push_plan), Some(pull_plan)) = (push_plan, pull_plan) {
+            // 3-port R-type adaptor path (when grid passives present)
+            if push_plan.grid_node.is_some() {
+                let push_adaptor = build_push_pull_half_adaptor(
+                    &push_plan,
+                    push_elem,
+                    graph,
+                    sample_rate,
+                    supply_voltage,
+                    pp_plan.transformer_edge_idx,
+                    pp_plan.turns_ratio,
+                );
+                let pull_adaptor = build_push_pull_half_adaptor(
+                    &pull_plan,
+                    pull_elem,
+                    graph,
+                    sample_rate,
+                    supply_voltage,
+                    pp_plan.transformer_edge_idx,
+                    pp_plan.turns_ratio,
+                );
+
+                if push_adaptor.is_some() && pull_adaptor.is_some() {
+                    let (push_root, pull_root) = build_push_pull_roots(push_elem, pull_elem);
+                    let grid_bias = match &push_root {
+                        TubeRoot::VariMu(_) => -7.2,
+                        TubeRoot::Pentode(_) => -8.0,
+                        TubeRoot::Koren(_) => -2.0,
+                    };
+
+                    stages.push(PushPullStage {
+                        push_tree: DynNode::Resistor {
+                            rp: 1.0,
+                            last_a: 0.0,
+                        },
+                        pull_tree: DynNode::Resistor {
+                            rp: 1.0,
+                            last_a: 0.0,
+                        },
+                        push_root,
+                        pull_root,
+                        push_adaptor,
+                        pull_adaptor,
+                        push_oversampler: Oversampler::new(oversampling),
+                        pull_oversampler: Oversampler::new(oversampling),
+                        compensation: push_plan.compensation,
+                        turns_ratio: pp_plan.turns_ratio,
+                        grid_bias,
+                        dc_blocker_x1: 0.0,
+                        dc_blocker_y1: 0.0,
+                    });
+                    continue;
+                }
+                // Fall through to WDF path if adaptor build fails
+            }
+
             let push_half = build_push_pull_half(&push_plan, graph, sample_rate);
             let pull_half = build_push_pull_half(&pull_plan, graph, sample_rate);
 
@@ -855,20 +913,28 @@ pub(super) fn build_push_pull_stages(
 
                 // Determine grid bias from tube type.
                 // Variable-mu (6386): -7.2V per Raffensperger's wavechild670 model.
+                // Pentodes: -8.0V (class AB beam tetrode operation).
                 // Standard triodes: -2.0V (class A/AB operation).
-                let is_vari_mu = matches!(&push_root, TubeRoot::VariMu(_));
-                let grid_bias = if is_vari_mu { -7.2 } else { -2.0 };
+                let grid_bias = match &push_root {
+                    TubeRoot::VariMu(_) => -7.2,
+                    TubeRoot::Pentode(_) => -8.0,
+                    TubeRoot::Koren(_) => -2.0,
+                };
 
                 stages.push(PushPullStage {
                     push_tree,
                     pull_tree,
                     push_root,
                     pull_root,
+                    push_adaptor: None,
+                    pull_adaptor: None,
                     push_oversampler: Oversampler::new(oversampling),
                     pull_oversampler: Oversampler::new(oversampling),
                     compensation: push_comp,
                     turns_ratio: pp_plan.turns_ratio,
                     grid_bias,
+                    dc_blocker_x1: 0.0,
+                    dc_blocker_y1: 0.0,
                 });
             }
         }
@@ -1087,11 +1153,10 @@ fn build_rtype_stage(
         p == graph.vcc_node || n == graph.vcc_node
     }));
 
-    if needs_vcc_port {
-        if !node_set.contains(&graph.vcc_node) {
+    if needs_vcc_port
+        && !node_set.contains(&graph.vcc_node) {
             node_set.push(graph.vcc_node);
         }
-    }
 
     // ── Pre-scan for coupled transformers ────────────────────────────
     struct CoupledXfmr {
@@ -1452,7 +1517,7 @@ fn build_rtype_stage(
     let mut ports: Vec<WdfPort> = Vec::with_capacity(n_nl + n_subtrees + n_reactive + 1);
     let mut port_node_pairs: Vec<(Option<usize>, Option<usize>)> =
         Vec::with_capacity(n_nl + n_subtrees + n_reactive + 1);
-    let has_pots = !pot_entries.is_empty();
+    let _has_pots = !pot_entries.is_empty();
 
     // NL ports.
     // Initial NL port resistance: use geometric mean of resistive passive ports
@@ -2140,7 +2205,9 @@ fn compute_initial_v_prev(
                         v_prev[offset + 1] = sign * supply_voltage * 0.5;
                     }
                 }
-                NlDeviceGroupKind::TriodeThreePort(_) | NlDeviceGroupKind::VariMuThreePort(_) => {
+                NlDeviceGroupKind::TriodeThreePort(_)
+                | NlDeviceGroupKind::VariMuThreePort(_)
+                | NlDeviceGroupKind::PentodeThreePort(_) => {
                     // Port 0: grid-cathode — slight negative bias
                     if offset < n_nl {
                         v_prev[offset] = -2.0;
@@ -2330,7 +2397,7 @@ fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
             let model = diode_model(*dt);
             Some(NlDeviceKind::DiodePair(DiodePairRoot::new(model)))
         }
-        NonlinearKind::Pentode { model_name } => {
+        NonlinearKind::Pentode { model_name, .. } => {
             let model = pentode_model(model_name);
             Some(NlDeviceKind::Pentode(PentodeRoot::new(model)))
         }
@@ -2391,23 +2458,76 @@ fn build_vs_stage(
             n
         }
     };
+    // When a load tree is present (BJT with non-grounded emitter passives),
+    // compute VCC injection from the load passives + virtual Rce.  This gives
+    // the correct DC operating point: V_thev ≈ VCC * Rce/(Rc + Rce + Re).
+    // Without Rce, collector and emitter are disconnected at DC (caps open),
+    // giving a near-zero injection coefficient.
     let vcc_injection_coeff = if needs_vcc_bias {
+        let (vcc_idxs, vcc_ve) = if !plan.load_passive_idxs.is_empty() {
+            (&plan.load_passive_idxs as &[usize], plan.virtual_edge.as_ref())
+        } else {
+            (&plan.passive_idxs as &[usize], None)
+        };
         compute_vcc_injection_single(
-            &plan.passive_idxs,
+            vcc_idxs,
             graph,
             &elem.junction_nodes,
             plan.injection_node,
             supply_voltage,
+            vcc_ve,
         )
     } else {
         0.0
     };
 
+    // ── BJT load tree: auxiliary collector-emitter impedance tree ────────
+    // When the planner identified load passives (collector + emitter),
+    // build a separate tree between (collector, emitter) that provides
+    // the correct port_resistance for the NL solver's load line.
+    // The virtual Rce edge connects the two terminals in this tree.
+    let load_tree = if !plan.load_passive_idxs.is_empty() {
+        if let Some((col_node, emit_node)) = plan.load_terminals {
+            let load_terminals = vec![col_node, emit_node];
+            // Add virtual Rce as extra edge in the load tree
+            let load_extra: Vec<ExtraEdge> = if let Some(ve) = &plan.virtual_edge {
+                vec![ExtraEdge {
+                    node_a: ve.node_a,
+                    node_b: ve.node_b,
+                    tree: DynNode::Resistor { rp: ve.resistance, last_a: 0.0 },
+                }]
+            } else {
+                vec![]
+            };
+            graph_reduce(
+                &plan.load_passive_idxs,
+                &load_extra,
+                &load_terminals,
+                graph,
+                sample_rate,
+                &HashMap::new(),
+                remap,               // VCC→GND remap applies here too
+                None,                // no output probe needed
+            )
+            .ok()
+            .map(|(tree, _)| tree)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Build the signal tree.  This is the original base-network tree with
+    // terminals [source_node, GND].  Collector/emitter passives are dead-ends
+    // here and get eliminated — that's fine because the load tree handles
+    // their impedance separately.
     let (tree, output_probe) = graph_reduce(
         &plan.passive_idxs, &extra, &plan.terminals,
         graph, sample_rate, &HashMap::new(), remap,
         Some(graph.out_node),
     ).ok()?;
+
     let (root, base_diode_model) = create_root(&elem.kind, use_jfet_vr);
 
     Some(WdfStage {
@@ -2438,6 +2558,8 @@ fn build_vs_stage(
         feedback_opamp: None,
         vcc_injection_coeff,
         vcc_dc_ramp: 0,
+        tone_feedback: None,
+        load_tree,
     })
 }
 
@@ -2455,6 +2577,7 @@ fn compute_vcc_injection_single(
     junction_nodes: &[super::graph::NodeId],
     injection_node: super::graph::NodeId,
     supply_voltage: f64,
+    virtual_edge: Option<&super::plan::VirtualEdge>,
 ) -> f64 {
     use crate::tree::{MnaSystem, WdfPort};
 
@@ -2472,6 +2595,14 @@ fn compute_vcc_injection_single(
     for &eidx in passive_idxs {
         let e = &graph.edges[eidx];
         for &n in &[e.node_a, e.node_b] {
+            if n != graph.gnd_node && !graph.supply_nodes.contains(&n) && !node_set.contains(&n) {
+                node_set.push(n);
+            }
+        }
+    }
+    // Include virtual edge nodes (Rce between collector and emitter).
+    if let Some(ve) = virtual_edge {
+        for &n in &[ve.node_a, ve.node_b] {
             if n != graph.gnd_node && !graph.supply_nodes.contains(&n) && !node_set.contains(&n) {
                 node_set.push(n);
             }
@@ -2527,6 +2658,13 @@ fn compute_vcc_injection_single(
         // Capacitors: open at DC → skip (no stamp)
     }
 
+    // Stamp virtual edge (Rce) as a resistor if provided.
+    if let Some(ve) = virtual_edge {
+        let n1 = node_to_mna(ve.node_a);
+        let n2 = node_to_mna(ve.node_b);
+        mna.stamp_resistor(n1, n2, ve.resistance);
+    }
+
     // GMIN regularization to avoid singular matrix.
     for i in 0..num_mna_nodes {
         mna.stamp_resistor(Some(i), None, 1e9);
@@ -2544,11 +2682,15 @@ fn compute_vcc_injection_single(
         None
     };
 
-    // Use a nominal port resistance (1kΩ) for the injection extraction.
+    // Use Rce (virtual edge resistance) as port resistance when available,
+    // otherwise fall back to 1kΩ.  Rce gives a physically meaningful DC
+    // operating point: the collector-emitter load line slope matches the
+    // BJT's output resistance, so the MNA produces V_thev ≈ VCC * Rce/(Rc+Rce+Re).
+    let port_r = virtual_edge.map_or(1000.0, |ve| ve.resistance);
     let port = WdfPort {
         node_pos: port_pos,
         node_neg: port_neg,
-        resistance: 1000.0,
+        resistance: port_r,
     };
 
     let (_scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&[port], 0);
@@ -2633,6 +2775,8 @@ fn build_source_follower_stage(
         feedback_opamp: None,
         vcc_injection_coeff: 0.0,
         vcc_dc_ramp: 0,
+        tone_feedback: None,
+        load_tree: None,
     })
 }
 
@@ -2677,29 +2821,271 @@ fn build_push_pull_half(
     Some((tree, plan.compensation))
 }
 
+/// Build an R-type adaptor for a push-pull half when grid passives are present.
+///
+/// Uses MNA-based construction with:
+/// - NL ports: [(grid, cathode), (plate, cathode)]
+/// - Passive ports: coupling cap, grid stopper, cathode R+C
+/// - VCC supply as ideal voltage source for DC bias injection
+/// - Signal input as ideal voltage source (VS injection mode)
+fn build_push_pull_half_adaptor(
+    plan: &StagePlan,
+    elem: &super::classify::NonlinearElement,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    supply_voltage: f64,
+    transformer_edge_idx: usize,
+    turns_ratio: f64,
+) -> Option<PushPullHalfAdaptor> {
+    let nl_terminals = &plan.nl_terminals;
+    if nl_terminals.len() != 2 {
+        return None;
+    }
+
+    // Use the graph's VCC node directly (graph.supply_voltages excludes the
+    // main vcc rail, so we use graph.vcc_node + the supply_voltage parameter).
+    let vcc_node_id = graph.vcc_node;
+    let has_vcc_node = vcc_node_id != graph.gnd_node && supply_voltage > 0.0;
+
+    // Compute reflected transformer load: n_eff² × R_load
+    let xfmr_comp_idx = graph.edges[transformer_edge_idx].comp_idx;
+    let xfmr_cfg = graph.components[xfmr_comp_idx]
+        .kind
+        .transformer_config();
+    let is_ct = xfmr_cfg
+        .map(|c| {
+            matches!(
+                c.primary_type,
+                crate::dsl::WindingType::CenterTap | crate::dsl::WindingType::PushPull
+            )
+        })
+        .unwrap_or(false);
+    let n_eff = if is_ct { turns_ratio / 2.0 } else { turns_ratio };
+    let r_load = find_secondary_load_resistance(graph, xfmr_comp_idx);
+    let r_reflected = n_eff * n_eff * r_load;
+
+    // Collect all unique nodes from passive edges + NL terminals + injection
+    let mut node_set: HashSet<NodeId> = HashSet::new();
+    for &(a, b) in nl_terminals {
+        node_set.insert(a);
+        node_set.insert(b);
+    }
+    node_set.insert(plan.injection_node);
+    for &eidx in &plan.passive_idxs {
+        let e = &graph.edges[eidx];
+        node_set.insert(e.node_a);
+        node_set.insert(e.node_b);
+    }
+
+    // Add VCC node to node set (for reflected load connection)
+    if has_vcc_node {
+        node_set.insert(vcc_node_id);
+    }
+
+    // Build MNA node map (ground node -> None)
+    let mut node_to_mna: HashMap<NodeId, usize> = HashMap::new();
+    let mut mna_idx = 0;
+    for &node in &node_set {
+        if node != graph.gnd_node {
+            node_to_mna.insert(node, mna_idx);
+            mna_idx += 1;
+        }
+    }
+    let num_nodes = mna_idx;
+
+    let has_vcc = has_vcc_node;
+    let num_vs = if has_vcc { 2 } else { 1 };
+
+    // Initialize MNA
+    let mut mna = MnaSystem::new(num_nodes, num_vs);
+    let node_lookup = |n: NodeId| -> Option<usize> { node_to_mna.get(&n).copied() };
+
+    // Stamp passive edges into MNA, collecting reactive elements as WDF ports
+    let mut reactive_edges: Vec<(usize, DynNode)> = Vec::new();
+    let mut pot_entries: Vec<(usize, DynNode, Option<usize>, Option<usize>, f64)> = Vec::new();
+    let coupled = HashSet::new();
+
+    for &eidx in &plan.passive_idxs {
+        stamp_passive_edge(
+            eidx,
+            graph,
+            &mut mna,
+            &mut reactive_edges,
+            &mut pot_entries,
+            &coupled,
+            &node_lookup,
+            sample_rate,
+        );
+    }
+
+    // Stamp reflected transformer load (plate <-> VCC)
+    let plate_node_id = nl_terminals[1].0;
+    if has_vcc {
+        let plate_mna = node_to_mna.get(&plate_node_id).copied();
+        let vcc_mna = node_to_mna.get(&vcc_node_id).copied();
+        mna.stamp_resistor(plate_mna, vcc_mna, r_reflected);
+    }
+
+    // Build WDF ports: NL ports first, then passive (reactive) ports
+    let n_nl = 2; // grid-cathode, plate-cathode
+    let mut ports: Vec<WdfPort> = Vec::new();
+
+    // NL ports - use moderate port resistance
+    for &(pos_node, neg_node) in nl_terminals {
+        let pos_mna = node_to_mna.get(&pos_node).copied();
+        let neg_mna = node_to_mna.get(&neg_node).copied();
+        ports.push(WdfPort {
+            node_pos: pos_mna,
+            node_neg: neg_mna,
+            resistance: 100_000.0,
+        });
+    }
+
+    // Passive (reactive) ports
+    let mut passive_children: Vec<DynNode> = Vec::new();
+    for (eidx, dyn_node) in reactive_edges {
+        let e = &graph.edges[eidx];
+        let pos_mna = node_to_mna.get(&e.node_a).copied();
+        let neg_mna = node_to_mna.get(&e.node_b).copied();
+        let rp = dyn_node.port_resistance();
+        ports.push(WdfPort {
+            node_pos: pos_mna,
+            node_neg: neg_mna,
+            resistance: rp,
+        });
+        passive_children.push(dyn_node);
+    }
+    let n_passive = passive_children.len();
+
+    // Stamp VCC as ideal voltage source
+    let mut vcc_vs_idx = None;
+    if has_vcc {
+        let mna_n = node_to_mna.get(&vcc_node_id).copied();
+        if mna_n.is_some() {
+            let idx = 0; // First VS = VCC
+            mna.stamp_voltage_source(mna_n, None, idx);
+            vcc_vs_idx = Some(idx);
+        }
+    }
+
+    // Stamp input VS (signal injection)
+    let inj_mna = node_to_mna.get(&plan.injection_node).copied();
+    let input_vs_idx = if has_vcc { 1 } else { 0 };
+    mna.stamp_voltage_source(inj_mna, None, input_vs_idx);
+
+    // Derive scattering matrix with VS injection for the input signal
+    let (scattering_vec, vs_inj_vec) =
+        mna.derive_scattering_and_vs_injection(&ports, input_vs_idx);
+
+    if scattering_vec.iter().any(|&sv| !sv.is_finite()) {
+        eprintln!("Warning: push-pull adaptor scattering has non-finite values");
+        return None;
+    }
+
+    // Extract VCC injection for DC bias
+    let mut dc_bias = vec![0.0; n_nl];
+    let mut vcc_bias_all = Vec::new();
+    if let Some(vcc_idx) = vcc_vs_idx {
+        let (_, vcc_inj) = mna.derive_scattering_and_vs_injection(&ports, vcc_idx);
+        for i in 0..n_nl.min(vcc_inj.len()) {
+            dc_bias[i] = vcc_inj[i] * supply_voltage;
+        }
+        vcc_bias_all = vcc_inj.iter().map(|&k| k * supply_voltage).collect();
+    }
+
+    // Build R-type adaptor (VS injection mode)
+    let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+    let adaptor = RTypeAdaptor::new(scattering_vec.clone(), &port_resistances);
+
+    // Extract scattering sub-blocks
+    let scattering = MultiNlScattering::from_full_matrix(&scattering_vec, n_nl, n_passive);
+
+    // NL port resistances
+    let nl_port_resistances: Vec<f64> = ports[..n_nl].iter().map(|p| p.resistance).collect();
+
+    // Build the NL device group
+    let device = match &elem.kind {
+        NonlinearKind::Pentode { model_name, .. } => {
+            let model = pentode_model(model_name);
+            let mut tp = PentodeThreePort::new(model);
+            if supply_voltage > 1.0 {
+                tp.set_v_max(supply_voltage);
+            }
+            NlDeviceGroupKind::PentodeThreePort(tp)
+        }
+        NonlinearKind::Triode {
+            model_name,
+            parallel_count,
+            is_vari_mu,
+            ..
+        } => {
+            if *is_vari_mu {
+                let model = vari_mu_model(model_name);
+                let mut tp = VariMuThreePort::new(model);
+                if supply_voltage > 1.0 {
+                    tp.set_v_max(supply_voltage);
+                }
+                NlDeviceGroupKind::VariMuThreePort(tp.with_parallel_count(*parallel_count))
+            } else {
+                let model = triode_model(model_name);
+                let mut tp = TriodeThreePort::new(model);
+                if supply_voltage > 1.0 {
+                    tp.set_v_max(supply_voltage);
+                }
+                NlDeviceGroupKind::TriodeThreePort(tp.with_parallel_count(*parallel_count))
+            }
+        }
+        _ => return None,
+    };
+
+    // Initial v_prev: grid biased negative, plate at 0 (WDF centered)
+    let v_prev = vec![-8.0, 0.0];
+
+    Some(PushPullHalfAdaptor {
+        adaptor,
+        device,
+        scattering,
+        passive_children,
+        nl_port_resistances,
+        v_prev,
+        dc_bias,
+        output_port: 1, // plate-cathode
+        n_nl,
+        vs_injection: Some(vs_inj_vec),
+        vcc_bias_all,
+        dc_ramp: 0,
+    })
+}
+
 /// Build push-pull tube roots from classified elements.
 fn build_push_pull_roots(
     push_elem: &super::classify::NonlinearElement,
     pull_elem: &super::classify::NonlinearElement,
 ) -> (TubeRoot, TubeRoot) {
     let build_root = |elem: &super::classify::NonlinearElement| -> TubeRoot {
-        if let NonlinearKind::Triode {
-            model_name,
-            parallel_count,
-            is_vari_mu,
-            ..
-        } = &elem.kind
-        {
-            if *is_vari_mu {
-                let model = vari_mu_model(model_name);
-                TubeRoot::VariMu(VariMuTriodeRoot::new(model).with_parallel_count(*parallel_count))
-            } else {
-                let model = triode_model(model_name);
-                TubeRoot::Koren(TriodeRoot::new(model).with_parallel_count(*parallel_count))
+        match &elem.kind {
+            NonlinearKind::Triode {
+                model_name,
+                parallel_count,
+                is_vari_mu,
+                ..
+            } => {
+                if *is_vari_mu {
+                    let model = vari_mu_model(model_name);
+                    TubeRoot::VariMu(VariMuTriodeRoot::new(model).with_parallel_count(*parallel_count))
+                } else {
+                    let model = triode_model(model_name);
+                    TubeRoot::Koren(TriodeRoot::new(model).with_parallel_count(*parallel_count))
+                }
             }
-        } else {
-            // Fallback — shouldn't happen.
-            TubeRoot::Koren(TriodeRoot::new(TriodeModel::by_name("12AX7")))
+            NonlinearKind::Pentode { model_name, .. } => {
+                let model = pentode_model(model_name);
+                TubeRoot::Pentode(PentodeRoot::new(model))
+            }
+            _ => {
+                // Fallback — shouldn't happen.
+                TubeRoot::Koren(TriodeRoot::new(TriodeModel::by_name("12AX7")))
+            }
         }
     };
 
@@ -2720,6 +3106,7 @@ fn find_secondary_load_resistance(graph: &CircuitGraph, xfmr_comp_idx: usize) ->
         graph.node_names.get(&sec_a_key),
         graph.node_names.get(&sec_b_key),
     ) {
+        // Look for an explicit load resistor between secondary terminals.
         for edge in &graph.edges {
             if (edge.node_a == node_a && edge.node_b == node_b)
                 || (edge.node_a == node_b && edge.node_b == node_a)
@@ -2728,6 +3115,12 @@ fn find_secondary_load_resistance(graph: &CircuitGraph, xfmr_comp_idx: usize) ->
                     return r;
                 }
             }
+        }
+        // If no explicit load but secondary connects to the output node,
+        // this is a speaker-driving output transformer. Use 8Ω (standard
+        // guitar speaker impedance) instead of the 600Ω line-level default.
+        if node_a == graph.out_node || node_b == graph.out_node {
+            return 8.0;
         }
     }
     600.0 // Default: standard 600Ω line-level termination
@@ -2887,7 +3280,7 @@ fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<Dio
                 )
             }
         }
-        NonlinearKind::Pentode { model_name } => {
+        NonlinearKind::Pentode { model_name, .. } => {
             let model = pentode_model(model_name);
             (RootKind::Pentode(PentodeRoot::new(model)), None)
         }

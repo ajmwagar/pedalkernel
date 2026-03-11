@@ -181,8 +181,8 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                     ),
                 });
             }
-        } else if tag == "analog switch" {
-            if voltage > 20.0 {
+        } else if tag == "analog switch"
+            && voltage > 20.0 {
                 warnings.push(VoltageWarning {
                     component_id: comp.id.clone(),
                     severity: WarningSeverity::Danger,
@@ -192,7 +192,6 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                     ),
                 });
             }
-        }
         // Resistors, inductors, Si/LED diodes, pots, VCA, comparator, matched
         // transistors, tempco: no voltage concerns within the 5-24V range
         // (or handled by supply_max spec if provided).

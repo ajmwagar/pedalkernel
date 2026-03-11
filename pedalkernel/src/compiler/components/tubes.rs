@@ -168,14 +168,22 @@ impl Component for Pentode {
 
     fn classify_nonlinear(
         &self,
-        _comp_id: &str,
+        comp_id: &str,
         node_a: NodeId,
         node_b: NodeId,
         _gnd_node: NodeId,
-        _node_names: &HashMap<String, NodeId>,
+        node_names: &HashMap<String, NodeId>,
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+        let grid_node = node_names.get(&format!("{comp_id}.grid", ))
+            .or_else(|| node_names.get(&format!("{comp_id}.g1")))
+            .copied();
         Some((
-            NonlinearKind::Pentode { model_name: self.model.clone() },
+            NonlinearKind::Pentode {
+                model_name: self.model.clone(),
+                plate_node: node_a,
+                cathode_node: node_b,
+                grid_node,
+            },
             vec![node_a, node_b],
         ))
     }

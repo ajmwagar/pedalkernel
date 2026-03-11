@@ -4,7 +4,7 @@
 //! using the Koren equation. Parameters are loaded from the embedded
 //! `pentodes.model` file.
 
-use super::solver::{newton_raphson_solve, softplus, LEAKAGE_CONDUCTANCE};
+use super::solver::{newton_raphson_solve, softplus, NlDeviceGroupIv, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
 use crate::models::{pentode_by_name, SpicePentodeModel};
 
@@ -295,6 +295,187 @@ impl WdfRoot for PentodeRoot {
             None,
             |v| (root.plate_current(v), root.plate_current_derivative(v)),
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PentodeThreePort — 3-port (grid + plate) for R-type adaptor push-pull
+// ---------------------------------------------------------------------------
+
+/// 3-port Koren pentode for use with the grouped multi-port NR solver.
+///
+/// Presents 2 WDF ports to the R-type adaptor:
+/// - Port 0: grid-to-cathode (grid conduction diode)
+/// - Port 1: plate-to-cathode (Koren pentode plate current, depends on Vg1k)
+///
+/// Unlike `PentodeRoot` where the grid voltage is an external parameter set
+/// via `set_vg1k()`, here the grid voltage comes from the grid port of the
+/// R-type adaptor. This allows coupling caps and grid stoppers to naturally
+/// AC-couple the signal to the grid, which is essential for push-pull output
+/// stages where DC blocking at the grid is required.
+///
+/// Screen voltage (Vg2k) remains an external parameter (not a WDF port).
+///
+/// Grid current model: `i_g = I_gs × (exp(Vgk/Vt) - 1)`
+/// Plate current: screen-referenced Koren pentode equation
+/// Transconductance: `∂Ip/∂Vgk` derived from the pentode Koren model
+#[derive(Debug, Clone, Copy)]
+pub struct PentodeThreePort {
+    pub model: PentodeModel,
+    /// Maximum plate voltage (B+ supply rail).
+    v_max: f64,
+    /// Screen grid voltage (external parameter).
+    vg2k: f64,
+    /// Grid emission current (saturation current for grid diode).
+    grid_is: f64,
+    /// Grid thermal voltage.
+    grid_vt: f64,
+}
+
+impl PentodeThreePort {
+    pub fn new(model: PentodeModel) -> Self {
+        let vg2k = model.vg2_default;
+        Self {
+            model,
+            v_max: 500.0,
+            vg2k,
+            grid_is: 1e-9,
+            grid_vt: 0.025,
+        }
+    }
+
+    pub fn new_with_v_max(model: PentodeModel, v_max: f64) -> Self {
+        Self {
+            v_max: v_max.max(1.0),
+            ..Self::new(model)
+        }
+    }
+
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0);
+    }
+
+    pub fn v_max(&self) -> f64 {
+        self.v_max
+    }
+
+    pub fn set_vg2k(&mut self, vg2k: f64) {
+        self.vg2k = vg2k;
+    }
+
+    pub fn vg2k(&self) -> f64 {
+        self.vg2k
+    }
+
+    /// Grid current (diode model): i_g = I_gs × (exp(Vgk/Vt) - 1).
+    /// Returns (current, di_g/dv_gk).
+    #[inline]
+    fn grid_iv(&self, vgk: f64) -> (f64, f64) {
+        let x = (vgk / self.grid_vt).clamp(-500.0, 500.0);
+        let ev = x.exp();
+        let ig = self.grid_is * (ev - 1.0);
+        let dig = self.grid_is * ev / self.grid_vt;
+        (ig, dig)
+    }
+
+    /// Plate current using the screen-referenced Koren pentode equation.
+    /// Takes both Vg1k and Vpk as inputs (Vg2k is external).
+    /// Returns (Ip, ∂Ip/∂Vpk, ∂Ip/∂Vg1k).
+    #[inline]
+    fn plate_iv(&self, vg1k: f64, vpk: f64) -> (f64, f64, f64) {
+        let m = &self.model;
+        let vg2k = self.vg2k;
+
+        if vpk <= 0.0 || vg2k <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE, 0.0);
+        }
+
+        // Screen-referenced Koren: E1 = Kp * (1/mu + Vg1k/Vg2k)
+        let e1 = m.kp * (1.0 / m.mu + vg1k / vg2k);
+
+        let ln_term = softplus(e1);
+        let base = (vg2k / m.kp) * ln_term;
+        if base <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE, 0.0);
+        }
+
+        let ip_base = base.powf(m.ex);
+
+        // Pentode plate saturation: atan(Vpk/KVB)
+        let vpk_ratio = vpk / m.kvb;
+        let plate_factor = vpk_ratio.atan();
+
+        let ip = (ip_base / m.kg1) * plate_factor.max(0.0);
+        if ip <= 0.0 {
+            return (0.0, LEAKAGE_CONDUCTANCE, 0.0);
+        }
+
+        // ∂Ip/∂Vpk: only the plate saturation factor depends on Vpk
+        // d/dVpk of atan(Vpk/KVB) = 1/(1 + (Vpk/KVB)^2) * 1/KVB
+        let d_plate_factor = 1.0 / (1.0 + vpk_ratio * vpk_ratio) / m.kvb;
+        let dip_dvpk = ((ip_base / m.kg1) * d_plate_factor).max(LEAKAGE_CONDUCTANCE);
+
+        // ∂Ip/∂Vg1k (transconductance):
+        // E1 = Kp * (1/mu + Vg1k/Vg2k)
+        // dE1/dVg1k = Kp / Vg2k
+        //
+        // base = (Vg2k/Kp) * ln(1 + exp(E1))
+        // dbase/dVg1k = (Vg2k/Kp) * sigmoid(E1) * dE1/dVg1k
+        //             = (Vg2k/Kp) * sigmoid(E1) * Kp/Vg2k
+        //             = sigmoid(E1)
+        //
+        // ip_base = base^Ex
+        // dip_base/dVg1k = Ex * base^(Ex-1) * sigmoid(E1)
+        //
+        // Ip = (ip_base / KG1) * atan(Vpk/KVB)
+        // dIp/dVg1k = (dip_base/dVg1k / KG1) * atan(Vpk/KVB)
+        let sigmoid_e1 = if e1 > 50.0 {
+            1.0
+        } else if e1 < -50.0 {
+            0.0
+        } else {
+            let exp_e1 = e1.exp();
+            exp_e1 / (1.0 + exp_e1)
+        };
+
+        let dip_dvg1k = (m.ex * base.powf(m.ex - 1.0) * sigmoid_e1 / m.kg1)
+            * plate_factor.max(0.0);
+
+        (ip, dip_dvpk, dip_dvg1k)
+    }
+}
+
+impl NlDeviceGroupIv for PentodeThreePort {
+    fn n_ports(&self) -> usize {
+        2
+    }
+
+    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+        let vg1k = v[0]; // Port 0: grid-cathode
+
+        // Port 1: plate-cathode. In the R-type adaptor, the supply node (B+)
+        // is grounded in the MNA, so the WDF voltage v[1] represents
+        // V_plate - V_supply. Shift by +v_max to recover the actual Vpk.
+        let vpk = v[1] + self.v_max;
+
+        // Grid current (diode model)
+        let (ig, dig_dvg1k) = self.grid_iv(vg1k);
+        currents[0] = ig;
+        jacobian[0] = dig_dvg1k; // ∂ig/∂vg1k
+        jacobian[1] = 0.0;       // ∂ig/∂vpk (grid current independent of plate voltage)
+
+        // Plate current (Koren pentode model with cross-coupling)
+        let (ip, dip_dvpk, dip_dvg1k) = self.plate_iv(vg1k, vpk);
+        currents[1] = ip;
+        jacobian[2] = dip_dvg1k; // ∂ip/∂vg1k (transconductance — cross-coupling)
+        jacobian[3] = dip_dvpk;  // ∂ip/∂vpk
+    }
+
+    fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+        match port {
+            0 => (-50.0, 10.0),        // Grid: well below cutoff to slight forward bias
+            _ => (-self.v_max, 10.0),   // Plate: WDF range [-V_supply, ~0] (maps to actual [0, V_supply])
+        }
     }
 }
 
@@ -592,6 +773,160 @@ mod tests {
         assert!(
             error < 0.01,
             "6550 Ip should match SPICE reference within 1%: got {ip:.6e}, expected {expected:.6e}, error={error:.4}"
+        );
+    }
+
+    // ── PentodeThreePort tests ──────────────────────────────────────
+
+    /// PentodeThreePort plate current must match PentodeRoot plate current.
+    #[test]
+    fn pentode_three_port_matches_single_port() {
+        let model = PentodeModel::by_name("6L6GC");
+        let mut root = PentodeRoot::new(model);
+        root.set_vg2k(450.0);
+        let mut tp = PentodeThreePort::new(model);
+        tp.set_vg2k(450.0);
+
+        for &vg1k in &[-45.0, -30.0, -10.0, 0.0] {
+            for &vpk in &[50.0, 200.0, 400.0, 460.0] {
+                root.set_vg1k(vg1k);
+                let ip_root = root.plate_current(vpk);
+                let (ip_tp, _, _) = tp.plate_iv(vg1k, vpk);
+
+                let diff = (ip_root - ip_tp).abs();
+                assert!(
+                    diff < 1e-12,
+                    "Plate current mismatch at Vg1k={vg1k}, Vpk={vpk}: root={ip_root:.6e}, tp={ip_tp:.6e}"
+                );
+            }
+        }
+    }
+
+    /// PentodeThreePort derivative w.r.t Vpk must match PentodeRoot derivative.
+    #[test]
+    fn pentode_three_port_derivative_matches_single_port() {
+        let model = PentodeModel::by_name("6L6GC");
+        let mut root = PentodeRoot::new(model);
+        root.set_vg2k(450.0);
+        let mut tp = PentodeThreePort::new(model);
+        tp.set_vg2k(450.0);
+
+        for &vg1k in &[-30.0, -10.0, 0.0] {
+            for &vpk in &[100.0, 200.0, 400.0] {
+                root.set_vg1k(vg1k);
+                let dip_root = root.plate_current_derivative(vpk);
+                let (_, dip_tp, _) = tp.plate_iv(vg1k, vpk);
+
+                if dip_root < 1e-10 && dip_tp < 1e-10 {
+                    continue;
+                }
+                let rel_err = (dip_root - dip_tp).abs() / dip_root.abs().max(1e-15);
+                assert!(
+                    rel_err < 0.01,
+                    "dIp/dVpk mismatch at Vg1k={vg1k}, Vpk={vpk}: root={dip_root:.6e}, tp={dip_tp:.6e}"
+                );
+            }
+        }
+    }
+
+    /// Transconductance (dIp/dVg1k) is positive and finite in conducting region.
+    #[test]
+    fn pentode_three_port_transconductance_positive() {
+        let mut tp = PentodeThreePort::new(PentodeModel::by_name("6L6GC"));
+        tp.set_vg2k(450.0);
+
+        for &vpk in &[200.0, 400.0] {
+            for &vg1k in &[-30.0, -20.0, -10.0, 0.0] {
+                let (ip, _, gm) = tp.plate_iv(vg1k, vpk);
+                assert!(
+                    gm >= 0.0,
+                    "gm should be non-negative at Vg1k={vg1k}, Vpk={vpk}: got {gm:.6e}"
+                );
+                assert!(
+                    gm.is_finite(),
+                    "gm should be finite at Vg1k={vg1k}, Vpk={vpk}"
+                );
+                if ip > 1e-10 {
+                    assert!(gm > 1e-10, "gm should be significantly positive when conducting: ip={ip:.6e}, gm={gm:.6e}");
+                }
+            }
+        }
+    }
+
+    /// Finite-difference Jacobian validation for PentodeThreePort.
+    #[test]
+    fn pentode_three_port_fd_jacobian() {
+        use crate::elements::nonlinear::solver::NlDeviceGroupIv;
+
+        let mut tp = PentodeThreePort::new(PentodeModel::by_name("6L6GC"));
+        tp.set_vg2k(450.0);
+        let h = 1e-6;
+
+        for &vg1k in &[-30.0, -10.0, 0.0] {
+            for &vpk_wdf in &[-200.0, -100.0, -50.0] {
+                let v = [vg1k, vpk_wdf];
+                let mut i = [0.0; 2];
+                let mut j = [0.0; 4];
+                tp.eval(&v, &mut i, &mut j);
+
+                // FD for each partial
+                for port in 0..2 {
+                    let mut v_plus = v;
+                    v_plus[port] += h;
+                    let mut i_plus = [0.0; 2];
+                    let mut j_dummy = [0.0; 4];
+                    tp.eval(&v_plus, &mut i_plus, &mut j_dummy);
+
+                    for row in 0..2 {
+                        let fd = (i_plus[row] - i[row]) / h;
+                        let analytic = j[row * 2 + port];
+                        let err = (fd - analytic).abs();
+                        let rel = err / analytic.abs().max(1e-12);
+                        assert!(
+                            rel < 0.01 || err < 1e-10,
+                            "FD Jacobian mismatch J[{row}][{port}] at v={v:?}: fd={fd:.6e}, analytic={analytic:.6e}, rel={rel:.4}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// PentodeThreePort in grouped solver produces finite, physical results.
+    #[test]
+    fn pentode_three_port_in_grouped_solver() {
+        use crate::elements::nonlinear::solver::{multi_port_nr_solve_grouped, NlDeviceGroupIv};
+
+        let v_cc = 460.0;
+        let mut tp = PentodeThreePort::new_with_v_max(PentodeModel::by_name("6L6GC"), v_cc);
+        tp.set_vg2k(450.0);
+        let groups: [&dyn NlDeviceGroupIv; 1] = [&tp];
+        let offsets = [0];
+
+        let s_nl = [-0.1, 0.0, 0.0, -0.5];
+        let known_a = [-8.0, 0.0]; // Grid biased negative
+        let port_resistances = [500_000.0, 50_000.0];
+        let mut v_guess = [-8.0, 0.0];
+
+        let b = multi_port_nr_solve_grouped(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess,
+            50,
+            1e-8,
+        );
+
+        assert!(b[0].is_finite(), "Grid reflected wave should be finite");
+        assert!(b[1].is_finite(), "Plate reflected wave should be finite");
+        // WDF plate voltage should be negative (V_plate < V_CC)
+        assert!(
+            v_guess[1] < 0.0,
+            "Plate WDF voltage should be negative (below V_CC): got {}",
+            v_guess[1]
         );
     }
 }

@@ -11,7 +11,7 @@ const SOLVER_STATS_ENABLED: bool = true;
 
 thread_local! {
     static SOLVER_STATS: RefCell<SolverStatsAggregate> = RefCell::new(SolverStatsAggregate::default());
-    static SOLVER_TRACE: RefCell<Option<Vec<SolverTraceEntry>>> = RefCell::new(None);
+    static SOLVER_TRACE: RefCell<Option<Vec<SolverTraceEntry>>> = const { RefCell::new(None) };
 }
 
 #[derive(Default, Clone, Debug)]

@@ -116,7 +116,7 @@ fn build_half(
             Pin::Reserved(n) if n == old_node => Pin::Reserved(new_node.to_string()),
             // Drop the other fx node — it doesn't exist in this half
             Pin::Reserved(n) if (n == "fx_send" || n == "fx_return") && n != old_node => {
-                return pin.clone(); // will be filtered out
+                pin.clone()// will be filtered out
             }
             _ => pin.clone(),
         }

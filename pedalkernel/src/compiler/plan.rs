@@ -62,6 +62,12 @@ pub(super) struct StagePlan {
     /// The load tree is built between these two nodes with the virtual Rce
     /// edge providing the BJT output resistance path.
     pub(super) load_terminals: Option<(NodeId, NodeId)>,
+    /// Grid node for 3-port push-pull mode.
+    /// When Some, the builder uses an R-type adaptor with grid as a WDF port
+    /// instead of the simple WDF tree path.
+    pub(super) grid_node: Option<NodeId>,
+    /// NL terminal pairs for 3-port mode: [(grid, cathode), (plate, cathode)].
+    pub(super) nl_terminals: Vec<(NodeId, NodeId)>,
 }
 
 /// Virtual edge connecting internal terminals of 3-terminal elements.
@@ -798,17 +804,14 @@ pub(super) fn plan_stages(
                         is_vari_mu: *is_vari_mu,
                     },
                 ),
-                NonlinearKind::Pentode { model_name } => {
-                    // Pentodes use junction_nodes[0]=plate, [1]=cathode
-                    let plate_node = elem.junction_nodes[0];
-                    let cathode_node = elem.junction_nodes[1];
+                NonlinearKind::Pentode { model_name, plate_node, cathode_node, .. } => {
                     (
                         elem.edge_idx,
                         TriodeInfo {
                             model_name: model_name.clone(),
-                            plate_node,
-                            cathode_node,
-                            junction_node: cathode_node,
+                            plate_node: *plate_node,
+                            cathode_node: *cathode_node,
+                            junction_node: *cathode_node,
                             ground_node: graph.gnd_node,
                             parallel_count: 1,
                             is_vari_mu: false,
@@ -1185,6 +1188,8 @@ fn plan_one_junction(
                 signal_chain_depth: None,
                 load_passive_idxs: Vec::new(),
                 load_terminals: None,
+                grid_node: None,
+                nl_terminals: Vec::new(),
             });
         }
 
@@ -1209,6 +1214,8 @@ fn plan_one_junction(
             signal_chain_depth: None,
             load_passive_idxs: Vec::new(),
             load_terminals: None,
+            grid_node: None,
+            nl_terminals: Vec::new(),
         })
     } else {
         // Simple 1-junction: diode, MOSFET, zener, OTA.
@@ -1244,6 +1251,8 @@ fn plan_one_junction(
             signal_chain_depth: None,
             load_passive_idxs: Vec::new(),
             load_terminals: None,
+            grid_node: None,
+            nl_terminals: Vec::new(),
         })
     }
 }
@@ -1486,7 +1495,7 @@ fn plan_two_junction(
                 dc,
             )
         }
-        NonlinearKind::Pentode { model_name } => {
+        NonlinearKind::Pentode { model_name, .. } => {
             let model = super::helpers::pentode_model(model_name);
             let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate);
             (
@@ -1560,6 +1569,8 @@ fn plan_two_junction(
         signal_chain_depth: None,
         load_passive_idxs,
         load_terminals,
+        grid_node: None,
+        nl_terminals: Vec::new(),
     })
 }
 
@@ -2203,11 +2214,12 @@ pub(super) fn plan_push_pull_half(
     graph: &CircuitGraph,
     pp_transformer_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
-    // Extract plate/cathode nodes and model info for triodes and pentodes.
-    let (plate_node, cathode_node, virtual_rp, compensation) = match &elem.kind {
+    // Extract plate/cathode/grid nodes and model info for triodes and pentodes.
+    let (plate_node, cathode_node, virtual_rp, compensation, grid_node) = match &elem.kind {
         NonlinearKind::Triode {
             plate_node,
             cathode_node,
+            grid_node,
             model_name,
             is_vari_mu,
             ..
@@ -2218,11 +2230,9 @@ pub(super) fn plan_push_pull_half(
             } else {
                 model.mu / 100.0
             };
-            (*plate_node, *cathode_node, model.rp, comp)
+            (*plate_node, *cathode_node, model.rp, comp, *grid_node)
         }
-        NonlinearKind::Pentode { model_name } => {
-            let plate_node = elem.junction_nodes[0];
-            let cathode_node = elem.junction_nodes[1];
+        NonlinearKind::Pentode { model_name, plate_node, cathode_node, grid_node } => {
             let model = super::helpers::pentode_model(model_name);
             // Pentode rp is very high (52kΩ for 6V6GT) — a current-source
             // device. Using model.rp as virtual_rp makes the WDF tree's
@@ -2233,7 +2243,7 @@ pub(super) fn plan_push_pull_half(
             // just to bridge plate-cathode in the WDF tree topology.
             let rp = 1.0;
             let comp = model.mu / 100.0;
-            (plate_node, cathode_node, rp, comp)
+            (*plate_node, *cathode_node, rp, comp, *grid_node)
         }
         _ => return None,
     };
@@ -2261,6 +2271,20 @@ pub(super) fn plan_push_pull_half(
         let mut passive_idxs = plate_passives.clone();
         extend_dedup(&mut passive_idxs, &cathode_passives);
 
+        // BFS from grid_node to collect coupling cap + grid stopper + grid leak.
+        if let Some(gn) = grid_node {
+            let grid_passives = graph.bfs_passive_edges(
+                gn,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true,   // include_supply_adjacent
+                true,   // skip_out_node
+                pp_transformer_edges,
+                &HashSet::new(),
+            );
+            extend_dedup(&mut passive_idxs, &grid_passives);
+        }
+
         if passive_idxs.is_empty() {
             return None;
         }
@@ -2285,6 +2309,52 @@ pub(super) fn plan_push_pull_half(
                     {
                         injection_node = candidate;
                         break 'outer;
+                    }
+                }
+            }
+        }
+        // For 3-port mode: if injection is still ground, use the outermost
+        // grid passive node (farthest from the grid in the BFS chain) as
+        // the signal entry point. Push-pull stages behind a transformer
+        // barrier have dist_from_in=None for all nodes, so the generic
+        // finder returns ground.
+        if injection_node == graph.gnd_node {
+            if let Some(gn) = grid_node {
+                let grid_passives = graph.bfs_passive_edges(
+                    gn,
+                    &classified.all_nonlinear_edge_indices,
+                    &graph.active_edge_indices,
+                    true,
+                    true,
+                    pp_transformer_edges,
+                    &HashSet::new(),
+                );
+                // Find the node farthest from grid (most hops in BFS order).
+                // This is the signal entry point (input side of coupling cap).
+                let mut grid_adj_nodes: HashSet<NodeId> = HashSet::new();
+                grid_adj_nodes.insert(gn);
+                for &eidx in &grid_passives {
+                    let e = &graph.edges[eidx];
+                    grid_adj_nodes.insert(e.node_a);
+                    grid_adj_nodes.insert(e.node_b);
+                }
+                // Pick a leaf node (degree-1 in grid subgraph, not the grid itself).
+                let mut degree: HashMap<NodeId, usize> = HashMap::new();
+                for &eidx in &grid_passives {
+                    let e = &graph.edges[eidx];
+                    *degree.entry(e.node_a).or_insert(0) += 1;
+                    *degree.entry(e.node_b).or_insert(0) += 1;
+                }
+                for (&node, &deg) in &degree {
+                    if deg == 1
+                        && node != gn
+                        && node != graph.gnd_node
+                        && node != graph.vcc_node
+                        && node != plate_node
+                        && node != cathode_node
+                    {
+                        injection_node = node;
+                        break;
                     }
                 }
             }
@@ -2332,6 +2402,12 @@ pub(super) fn plan_push_pull_half(
             signal_chain_depth: None,
             load_passive_idxs: Vec::new(),
             load_terminals: None,
+            grid_node,
+            nl_terminals: if grid_node.is_some() {
+                vec![(grid_node.unwrap(), cathode_node), (plate_node, cathode_node)]
+            } else {
+                Vec::new()
+            },
         })
     }
 }

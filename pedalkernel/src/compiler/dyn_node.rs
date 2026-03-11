@@ -452,6 +452,31 @@ impl DynNode {
         }
     }
 
+    /// Read a pot's current position (0.0..1.0) by component ID.
+    ///
+    /// Recursively searches through Series/Parallel/Transformer/RType children.
+    /// Returns `None` if the pot is not found in this subtree.
+    pub fn get_pot_position(&self, target_id: &str) -> Option<f64> {
+        match self {
+            Self::Pot { comp_id, position, .. }
+                if comp_id == target_id
+                    || comp_id.starts_with(target_id)
+                        && comp_id[target_id.len()..].starts_with("__") =>
+            {
+                Some(*position)
+            }
+            Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
+                left.get_pot_position(target_id)
+                    .or_else(|| right.get_pot_position(target_id))
+            }
+            Self::Transformer { secondary, .. } => secondary.get_pot_position(target_id),
+            Self::RType { children, .. } => {
+                children.iter().find_map(|c| c.get_pot_position(target_id))
+            }
+            _ => None,
+        }
+    }
+
     /// Extract voltage at a named leaf after the down-sweep.
     ///
     /// For a resistive leaf (Resistor, Pot), b=0, so V = last_a / 2.
@@ -459,7 +484,7 @@ impl DynNode {
     /// Returns None if the component is not found in this subtree.
     pub fn leaf_voltage(&self, target_id: &str) -> Option<f64> {
         match self {
-            Self::Resistor { last_a, .. } => None, // no comp_id to match
+            Self::Resistor { last_a: _, .. } => None, // no comp_id to match
             Self::Pot { comp_id, last_a, .. }
                 if comp_id == target_id
                     || comp_id.starts_with(target_id)
@@ -467,7 +492,7 @@ impl DynNode {
             {
                 Some(*last_a / 2.0)
             }
-            Self::Capacitor { last_b, state, .. } => None, // no comp_id to match
+            Self::Capacitor { last_b: _, state: _, .. } => None, // no comp_id to match
             Self::Series { left, right, .. } | Self::Parallel { left, right, .. } => {
                 left.leaf_voltage(target_id)
                     .or_else(|| right.leaf_voltage(target_id))

@@ -25,20 +25,17 @@ type BoxComp = Box<dyn crate::compiler::Component>;
 
 /// Rectifier type — determines supply output impedance character.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum RectifierType {
     /// Tube rectifier (GZ34, 5U4, 5Y3) — high impedance, significant sag.
     /// Adds ~40–80V drop under load depending on tube type.
     Tube,
     /// Solid-state rectifier (silicon diodes) — very low impedance, stiff supply.
     /// Adds ~1–2V drop under load.
+    #[default]
     SolidState,
 }
 
-impl Default for RectifierType {
-    fn default() -> Self {
-        RectifierType::SolidState
-    }
-}
 
 /// Power supply configuration — models B+ rail behavior under load.
 ///
@@ -2440,7 +2437,7 @@ fn supply_section(input: &str) -> IResult<&str, SupplyConfig> {
     // Also support "9v" lowercase
     let (input, voltage) = recognize(pair(double, opt(alt((char('V'), char('v'))))))(input)?;
     // Extract just the numeric part
-    let num_str = voltage.trim_end_matches(|c| c == 'V' || c == 'v');
+    let num_str = voltage.trim_end_matches(['V', 'v']);
     let volts = num_str.parse::<f64>().unwrap_or(9.0);
 
     // Try to parse an optional block with sag parameters
@@ -2562,7 +2559,7 @@ fn named_supply(input: &str) -> IResult<&str, NamedSupply> {
 
     // Parse the voltage value
     let (input, voltage_str) = recognize(pair(double, opt(alt((char('V'), char('v'))))))(input)?;
-    let num_str = voltage_str.trim_end_matches(|c| c == 'V' || c == 'v');
+    let num_str = voltage_str.trim_end_matches(['V', 'v']);
     let mut volts = num_str.parse::<f64>().unwrap_or(9.0);
     if is_negative.is_some() {
         volts = -volts;

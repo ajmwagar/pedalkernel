@@ -17,3 +17,7 @@ tools/.venv/
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Beads task tracking (ephemeral)
+.beads/
+.mcp.json

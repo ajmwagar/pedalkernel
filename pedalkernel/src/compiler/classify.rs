@@ -45,6 +45,9 @@ pub(super) enum NonlinearKind {
     },
     Pentode {
         model_name: String,
+        plate_node: NodeId,
+        cathode_node: NodeId,
+        grid_node: Option<NodeId>,
     },
     Mosfet {
         mosfet_type: MosfetType,
