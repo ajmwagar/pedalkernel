@@ -168,6 +168,10 @@ pub(super) fn build_opamp_feedback_stages(
                             None => (None, None),
                         }
                     };
+                // Track whether graph_reduce built the tree (has reactive elements).
+                // If so, skip balance_vs_impedance — the VS must stay low-Rp so
+                // the capacitor's frequency-dependent scattering isn't swamped.
+                let has_complex_fb_tree = tree.is_some();
                 let (tree, fb_pot_from_tree) = match (tree, fb_pot_from_tree) {
                     (Some(t), pot_id) => (t, pot_id),
                     _ => {
@@ -245,7 +249,11 @@ pub(super) fn build_opamp_feedback_stages(
                     tone_feedback: None,
                     load_tree: None,
                 };
-                stage.balance_vs_impedance();
+                // Don't balance VS impedance for complex feedback trees — their
+                // VS must remain low-Rp so the cap/pot frequency shaping works.
+                if !has_complex_fb_tree {
+                    stage.balance_vs_impedance();
+                }
                 stages.push(stage);
             }
             OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot, ri_pot } => {
@@ -295,6 +303,7 @@ pub(super) fn build_opamp_feedback_stages(
                             None => (None, None),
                         }
                     };
+                let has_complex_fb_tree = tree.is_some();
                 let (tree, fb_pot_from_tree) = match (tree, fb_pot_from_tree) {
                     (Some(t), pot_id) => (t, pot_id),
                     _ => {
@@ -377,7 +386,9 @@ pub(super) fn build_opamp_feedback_stages(
                     tone_feedback: None,
                     load_tree: None,
                 };
-                stage.balance_vs_impedance();
+                if !has_complex_fb_tree {
+                    stage.balance_vs_impedance();
+                }
                 stages.push(stage);
             }
             OpAmpFeedbackKind::AllpassJfet { .. } => {
@@ -497,20 +508,32 @@ fn build_feedback_tree(
         return None; // Not a clean 2-terminal feedback network
     }
 
-    // Step 3: Build graph_reduce inputs with VS as ExtraEdge
-    let extra = vec![super::graph::ExtraEdge {
-        node_a: border_nodes[0],
-        node_b: border_nodes[1],
-        tree: DynNode::VoltageSource { voltage: 0.0, rp: 1.0 },
-    }];
+    // Step 3: Reduce the feedback network to a 2-terminal DynNode tree.
+    // Don't embed VS as an ExtraEdge (it'd end up in Parallel with feedback
+    // resistors sharing the same border nodes, making the VS invisible).
+    // Instead, build the pure passive tree and wrap it in Series(VS, tree).
+    let extra = vec![];
     let terminals = vec![border_nodes[0], border_nodes[1]];
 
-    // Step 4: Reduce to DynNode (VS leaf built directly as VoltageSource)
-    let tree = super::graph::graph_reduce(
+    let fb_tree = super::graph::graph_reduce(
         &feedback_edges, &extra, &terminals,
         graph, sample_rate, &std::collections::HashMap::new(), |n| n,
         None,
     ).ok()?.0;
+
+    // Wrap in Series(VS, feedback_tree) — VS drives the feedback impedance
+    let vs = DynNode::VoltageSource { voltage: 0.0, rp: 1.0 };
+    let r_vs = vs.port_resistance();
+    let r_fb = fb_tree.port_resistance();
+    let rp = r_vs + r_fb;
+    let tree = DynNode::Series {
+        gamma: r_vs / rp,
+        left: Box::new(vs),
+        right: Box::new(fb_tree),
+        rp,
+        b1: 0.0,
+        b2: 0.0,
+    };
 
     // Step 6: Find feedback pot ID (if any pot in the network)
     let feedback_pot_id = info

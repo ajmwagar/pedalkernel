@@ -733,6 +733,8 @@ fn goldenrod_gain_crossfade() {
 #[test]
 fn goldenrod_treble_pot_effect() {
     // Verify the Treble pot affects the output spectrum.
+    // The Klon tone control is a cap+pot shelving filter in U4's feedback —
+    // it must produce different frequency content at different pot positions.
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent().unwrap()
         .parent().unwrap()
@@ -741,24 +743,24 @@ fn goldenrod_treble_pot_effect() {
     let src = std::fs::read_to_string(&pro_path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
 
+    // Use broadband input (multi-tone) so cross-correlation detects spectral changes.
+    // A single sine won't work because normalized cross-corr is ~1.0 for any amplitude scaling.
     let input: Vec<f64> = (0..4800)
-        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 8000.0 * i as f64 / 48000.0).sin())
+        .map(|i| {
+            let t = i as f64 / 48000.0;
+            let tau = std::f64::consts::TAU;
+            0.2 * (tau * 500.0 * t).sin()
+                + 0.2 * (tau * 2000.0 * t).sin()
+                + 0.2 * (tau * 6000.0 * t).sin()
+                + 0.2 * (tau * 10000.0 * t).sin()
+                + 0.2 * (tau * 15000.0 * t).sin()
+        })
         .collect();
 
-    // Check stage inventory: which stages have pots, feedback_pot_id, etc.
+    // Treble pot must be in a feedback tree with reactive elements
     let proc = compile_pedal(&pedal, 48000.0).unwrap();
-    for (i, s) in proc.stages.iter().enumerate() {
-        let root_type = match &s.root {
-            RootKind::OpAmp(oa) => format!("OpAmp(gain={:.2}, inv={})", oa.gain(), !oa.is_non_inverting()),
-            RootKind::DiodePair(_) => "DiodePair".into(),
-            RootKind::SingleDiode(_) => "SingleDiode".into(),
-            RootKind::Passthrough => "Passthrough".into(),
-            _ => "Other".into(),
-        };
-        let has_treble = s.tree.get_pot_resistance("Treble");
-        eprintln!("[stage {i}] root={root_type} fb_pot={:?} treble_in_tree={:?} rp={:.1}",
-            s.feedback_pot_id, has_treble, s.tree.port_resistance());
-    }
+    assert!(proc.stages.iter().any(|s| s.feedback_pot_id.as_deref() == Some("Treble")),
+        "Treble pot should be a feedback pot in a WDF stage");
 
     // Test Treble at two extremes
     let mut outputs = Vec::new();
@@ -767,28 +769,109 @@ fn goldenrod_treble_pot_effect() {
         proc.set_control("Gain", 0.5);
         proc.set_control("Treble", treble);
         proc.set_control("Output", 0.7);
-        // Print tree rp and pot resistance for the tone stage after pot change
-        for (i, s) in proc.stages.iter().enumerate() {
-            if s.feedback_pot_id.as_deref() == Some("Treble") {
-                let treble_r = s.tree.get_pot_resistance("Treble");
-                let gain = match &s.root {
-                    RootKind::OpAmp(oa) => oa.gain(),
-                    _ => 0.0,
-                };
-                eprintln!("[treble-diag] Treble={treble:.1} stage={i} tree_rp={:.1} treble_r={:?} gain={:.4} ftg={:?}",
-                    s.tree.port_resistance(), treble_r, gain, s.tone_feedback.is_some());
-            }
-        }
         let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
-        let tail = &output[2400..];
-        let peak = tail.iter().fold(0.0f64, |m, x| m.max(x.abs()));
-        eprintln!("[treble-test] Treble={treble:.1}: peak={peak:.6}");
-        outputs.push(tail.to_vec());
+        outputs.push(output[2400..].to_vec());
     }
 
     let cross_corr = correlation(&outputs[0], &outputs[1]);
-    eprintln!("[treble-test] lo-vs-hi cross_corr={cross_corr:.6}");
-    assert!(cross_corr < 0.999, "Treble pot should affect output: cross_corr={cross_corr}");
+    assert!(cross_corr < 0.998, "Treble pot should affect output spectrum: cross_corr={cross_corr}");
+}
+
+/// Regression: RATKING (RAT) opamp-diode pairing must produce clipping distortion.
+/// The opamp (LM308) is paired into the DiodePair stage since its output IS the
+/// diode junction node. All 3 knobs (Volume, Distortion, Filter) must work.
+#[test]
+fn ratking_distortion_clips() {
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/ratking.pedal");
+    if !pro_path.exists() { return; }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Structure: opamp must be paired (feedback_opamp) or standalone
+    assert!(proc.stages.iter().any(|s| s.feedback_opamp.is_some()
+        || matches!(&s.root, super::stage::RootKind::OpAmp(_))),
+        "RATKING must have opamp gain");
+
+    let input = sine(48000);
+
+    // Distortion pot: increasing it should increase clipping (lower RMS/peak ratio)
+    let mut ratio = |dist: f64| -> f64 {
+        let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+        p.set_control("Distortion", dist);
+        p.set_control("Filter", 0.5);
+        p.set_control("Volume", 0.7);
+        for _ in 0..4800 { p.process(0.0); }
+        let out: Vec<f64> = input.iter().map(|&s| p.process(s)).collect();
+        let tail = &out[4800..];
+        let peak = tail.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let rms = (tail.iter().map(|x| x * x).sum::<f64>() / tail.len() as f64).sqrt();
+        if peak < 1e-6 { return 0.707; }
+        rms / peak
+    };
+    let ratio_low = ratio(0.1);
+    let ratio_high = ratio(0.9);
+    // Distortion pot must change the clipping character (RMS/peak ratio differs)
+    let delta = (ratio_high - ratio_low).abs();
+    assert!(delta > 0.02,
+        "Distortion pot should change clipping character: ratio_low={ratio_low:.3} ratio_high={ratio_high:.3} delta={delta:.3}");
+}
+
+/// Regression: Goldenrod (Klon) gain crossfade must produce increasing output.
+/// The Gain_A pot in U2's feedback increases the gain stage, verified by peak ratio.
+#[test]
+fn goldenrod_gain_drives_distortion() {
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/goldenrod.pedal");
+    if !pro_path.exists() { return; }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+
+    let input = sine(48000);
+
+    let mut peak_at = |gain: f64| -> f64 {
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        proc.set_control("Gain", gain);
+        proc.set_control("Treble", 0.5);
+        proc.set_control("Output", 0.7);
+        for _ in 0..4800 { proc.process(0.0); }
+        let out: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        out[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()))
+    };
+    let peak_low = peak_at(0.1);
+    let peak_high = peak_at(0.9);
+    assert!(peak_high > peak_low * 1.1,
+        "Gain should increase output: low={peak_low:.4} high={peak_high:.4}");
+}
+
+/// Regression: opamp feedback tree VS must be in Series with the feedback network,
+/// not Parallel. Ensures frequency-dependent feedback (tone controls) actually works.
+#[test]
+fn opamp_feedback_tree_vs_is_series() {
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/goldenrod.pedal");
+    if !pro_path.exists() { return; }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Find the tone stage (has Treble as feedback pot)
+    let tone_stage = proc.stages.iter()
+        .find(|s| s.feedback_pot_id.as_deref() == Some("Treble"))
+        .expect("Goldenrod must have a Treble feedback stage");
+
+    // The tree root must be a Series adaptor (Series(VS, feedback_network))
+    // If it's Parallel, the VS gets swamped and tone control doesn't work.
+    assert!(matches!(&tone_stage.tree,
+        super::dyn_node::DynNode::Series { .. }),
+        "Feedback tree root must be Series(VS, feedback_network), not Parallel");
 }
 
 #[test]
@@ -1555,6 +1638,31 @@ fn assert_finite(output: &[f64], name: &str) {
         output.iter().all(|x| x.is_finite()),
         "{name}: output contains NaN/inf"
     );
+}
+
+fn dump_tree(node: &super::dyn_node::DynNode, depth: usize) {
+    use super::dyn_node::DynNode;
+    let indent = "  ".repeat(depth);
+    match node {
+        DynNode::Resistor { rp, .. } => eprintln!("{indent}R({rp:.1})"),
+        DynNode::Capacitor { capacitance, rp, .. } => eprintln!("{indent}C({capacitance:.2e}, rp={rp:.1})"),
+        DynNode::LeakyCapacitor { capacitance, rp, .. } => eprintln!("{indent}LC({capacitance:.2e}, rp={rp:.1})"),
+        DynNode::Inductor { inductance, rp, .. } => eprintln!("{indent}L({inductance:.2e}, rp={rp:.1})"),
+        DynNode::VoltageSource { rp, .. } => eprintln!("{indent}VS(rp={rp:.1})"),
+        DynNode::Pot { comp_id, rp, position, max_resistance, .. } =>
+            eprintln!("{indent}Pot({comp_id}, pos={position:.2}, rp={rp:.1}, max={max_resistance:.0})"),
+        DynNode::Series { left, right, rp, gamma, .. } => {
+            eprintln!("{indent}Series(rp={rp:.1}, γ={gamma:.4})");
+            dump_tree(left, depth + 1);
+            dump_tree(right, depth + 1);
+        }
+        DynNode::Parallel { left, right, rp, gamma, .. } => {
+            eprintln!("{indent}Parallel(rp={rp:.1}, γ={gamma:.4})");
+            dump_tree(left, depth + 1);
+            dump_tree(right, depth + 1);
+        }
+        _ => eprintln!("{indent}Other(rp={:.1})", node.port_resistance()),
+    }
 }
 
 fn correlation(a: &[f64], b: &[f64]) -> f64 {
