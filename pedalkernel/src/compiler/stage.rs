@@ -195,9 +195,7 @@ pub(super) enum RootKind {
 // Shared bias constants for NL device control voltage setting.
 // Used by both RootKind (WdfStage) and NlDeviceKind (MultiNlStage).
 const BJT_VBE_BIAS: f64 = 0.6;
-const BJT_VBE_SCALE: f64 = 0.15;
 const PNP_VEB_BIAS: f64 = 0.15;
-const PNP_VEB_SCALE: f64 = 0.3;
 const TRIODE_GRID_BIAS: f64 = -2.0;
 const PENTODE_GRID_BIAS: f64 = -8.0;
 
@@ -220,10 +218,10 @@ impl RootKind {
     pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
         match self {
             RootKind::BjtNpn(bjt) => {
-                bjt.set_vbe(BJT_VBE_BIAS + bias_offset + input * compensation * BJT_VBE_SCALE);
+                bjt.set_vbe(BJT_VBE_BIAS + bias_offset + input * compensation);
             }
             RootKind::BjtPnp(bjt) => {
-                bjt.set_veb(PNP_VEB_BIAS + bias_offset + input * compensation * PNP_VEB_SCALE);
+                bjt.set_veb(PNP_VEB_BIAS + bias_offset + input * compensation);
             }
             RootKind::Triode(t) => {
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
@@ -577,11 +575,11 @@ impl WdfStage {
                 //
                 // 1. Extract Vbe from signal tree's reflected wave (base domain).
                 let v_base = b1;
-                let vbe = BJT_VBE_BIAS + v_base * BJT_VBE_SCALE;
+                let vbe = BJT_VBE_BIAS + v_base;
                 match root {
                     RootKind::BjtNpn(ref mut bjt) => bjt.set_vbe(vbe),
                     RootKind::BjtPnp(ref mut bjt) => bjt.set_veb(
-                        PNP_VEB_BIAS + v_base * PNP_VEB_SCALE,
+                        PNP_VEB_BIAS + v_base,
                     ),
                     _ => {}
                 }
@@ -1775,10 +1773,10 @@ impl NlDeviceKind {
     pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
         match self {
             NlDeviceKind::BjtNpn(bjt) => {
-                bjt.set_vbe(BJT_VBE_BIAS + bias_offset + input * compensation * BJT_VBE_SCALE);
+                bjt.set_vbe(BJT_VBE_BIAS + bias_offset + input * compensation);
             }
             NlDeviceKind::BjtPnp(bjt) => {
-                bjt.set_veb(PNP_VEB_BIAS + bias_offset + input * compensation * PNP_VEB_SCALE);
+                bjt.set_veb(PNP_VEB_BIAS + bias_offset + input * compensation);
             }
             NlDeviceKind::Triode(t) => {
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
