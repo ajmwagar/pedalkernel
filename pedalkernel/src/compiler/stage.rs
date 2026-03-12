@@ -772,8 +772,10 @@ impl WdfStage {
                 };
                 let b_passive = b_tree - 2.0 * v_supply;
                 let vce_ac = (a_root + b_passive) / 2.0;
-                // Also down-sweep signal tree (for reactive element updates)
-                tree.set_incident(a_root);
+                // Open-circuit termination for signal tree (a = b preserves
+                // coupling cap states in the base domain, preventing cross-domain
+                // corruption that would give wrong Vbe on subsequent samples).
+                tree.set_incident(b1);
                 vce_ac
             } else {
                 tree.set_incident(a_root);
