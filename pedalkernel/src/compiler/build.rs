@@ -2437,26 +2437,43 @@ fn build_vs_stage(
         });
     }
 
-    // ── VCC bias injection for single-NL stages ───────────────────────
-    // VCC injection is disabled for all single-NL stages (BJTs, diodes,
-    // JFETs, MOSFETs).  DC bias injection was causing pure-DC output with
-    // zero crossings in clipping stages (e.g. Big Muff) because the
-    // injected offset overwhelmed the AC signal.  Triodes/pentodes use
-    // v_max() for supply, so they never needed injection either.
+    // ── VCC handling for single-NL stages ──────────────────────────────
+    let is_bjt = matches!(
+        &elem.kind,
+        NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
+    );
+
+    // BJTs: keep VCC as a real node (identity remap) and add a
+    // CathodeBiasSource leaf so the collector load path sees the real
+    // supply voltage.  The collector load resistor (R_load → VCC) naturally
+    // sets the correct Thevenin voltage and load-line intercept in the
+    // reflected wave.  Coupling caps between stages block the DC.
     //
-    // VCC stays as a real supply node in the WDF tree — the bias network
-    // resistors (Rb1/Rb2, Rc, Re) already encode the correct DC operating
-    // point through the Thevenin equivalent seen at each port.
+    // Non-BJTs: collapse VCC→GND as before.  Triodes use VS=B+ instead;
+    // diodes/JFETs don't need supply voltage in the wave domain.
     let remap = |n: NodeId| -> NodeId {
-        // Collapse VCC and all supply nodes to GND for WDF tree construction.
-        // The DC operating point is handled by v_max (NR clamp) and the
-        // load line slope (rp), not by injecting VCC into the wave domain.
-        if n == graph.vcc_node || graph.supply_nodes.contains(&n) {
+        if is_bjt {
+            n // identity: keep VCC as a real node
+        } else if n == graph.vcc_node || graph.supply_nodes.contains(&n) {
             graph.gnd_node
         } else {
             n
         }
     };
+
+    if is_bjt {
+        let supply_v = if matches!(&elem.kind, NonlinearKind::BjtPnp { .. }) {
+            -_supply_voltage.abs()
+        } else {
+            _supply_voltage.abs()
+        };
+        extra.push(ExtraEdge {
+            node_a: graph.vcc_node,
+            node_b: graph.gnd_node,
+            tree: DynNode::CathodeBiasSource { voltage: supply_v, rp: 1.0 },
+        });
+    }
+
     let vcc_injection_coeff = 0.0;
 
     // ── BJT load tree: auxiliary collector-emitter impedance tree ────────
