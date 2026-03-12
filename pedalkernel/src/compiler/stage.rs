@@ -491,7 +491,13 @@ impl WdfStage {
         // Set control voltage for active devices (triodes, BJTs, pentodes).
         // Maps the input signal to the device's control terminal with appropriate
         // bias point and scaling. No-op for diodes/JFETs/other passive roots.
-        root.set_control_voltage(input, compensation, 0.0);
+        // For BJTs with load trees, Vbe is extracted from the signal tree below
+        // instead of using this hardcoded scaling.
+        let bjt_has_load_tree = matches!(root, RootKind::BjtNpn(_) | RootKind::BjtPnp(_))
+            && load_tree.is_some();
+        if !bjt_has_load_tree {
+            root.set_control_voltage(input, compensation, 0.0);
+        }
 
         // For JFET source followers, compute Vgs from input (gate) and previous output (source).
         // Vgs = Vgate - Vsource, where Vgate ≈ input and Vsource is the WDF output.
@@ -557,16 +563,50 @@ impl WdfStage {
                 b1
             };
 
-            // ── Load tree rp override for BJT stages ─────────────────
-            // When a load tree is present, it provides the correct
-            // collector-emitter load impedance for the NL solver's load
-            // line.  The signal tree's reflected wave b1 still carries the
-            // input signal; only rp is overridden.
-            let b_tree = b1;
-            let rp = if let Some(ref lt) = load_tree {
-                lt.port_resistance()
+            // ── Two-domain BJT processing ─────────────────────────────
+            // BJTs with load trees use a two-domain approach:
+            //   Base domain:  signal tree provides Vbe (control voltage)
+            //   Collector domain: load tree provides b_load + rp for NR
+            // The NR solver operates on the collector load line, and the
+            // output is Vce = (a_root + b_load) / 2.
+            //
+            // For non-BJT stages, b1 carries the signal and rp comes from
+            // the load tree (if present) or the signal tree.
+            let (b_tree, rp) = if bjt_has_load_tree {
+                // Two-domain BJT: base domain (signal tree) + collector domain (load tree).
+                //
+                // 1. Extract Vbe from signal tree's reflected wave (base domain).
+                let v_base = b1;
+                let vbe = BJT_VBE_BIAS + v_base * BJT_VBE_SCALE;
+                match root {
+                    RootKind::BjtNpn(ref mut bjt) => bjt.set_vbe(vbe),
+                    RootKind::BjtPnp(ref mut bjt) => bjt.set_veb(
+                        PNP_VEB_BIAS + v_base * PNP_VEB_SCALE,
+                    ),
+                    _ => {}
+                }
+                // 2. Load tree: VCC is pulled out as a boundary condition.
+                //    The load tree contains only collector passives (R_load, bypass
+                //    caps, etc.) with VCC→GND remap, so rp = R_load.
+                //    An ideal voltage source (zero impedance) at one end of a
+                //    linear network shifts the wave variables by 2*V via superposition:
+                //      b_load = b_passive + 2*VCC
+                //    This is the standard WDF treatment for ideal sources that are
+                //    not part of the tree (Werner/Smith, option 2).
+                let lt = load_tree.as_mut().unwrap();
+                let v_supply = match root {
+                    RootKind::BjtNpn(ref bjt) => bjt.v_max(),
+                    RootKind::BjtPnp(ref bjt) => -bjt.v_max().abs(),
+                    _ => 0.0,
+                };
+                let lt_b_passive = lt.reflected();
+                let lt_b = lt_b_passive + 2.0 * v_supply;
+                let lt_rp = lt.port_resistance();
+                (lt_b, lt_rp)
+            } else if let Some(ref lt) = load_tree {
+                (b1, lt.port_resistance())
             } else {
-                tree.port_resistance()
+                (b1, tree.port_resistance())
             };
 
             let a_root = match root {
@@ -719,25 +759,33 @@ impl WdfStage {
                     return (a_out + b_out) / 2.0;
                 }
             };
-            // ── Down-sweep: propagate reflected wave back through signal tree
-            tree.set_incident(a_root);
-            // If an output probe is set, extract voltage at that leaf
-            // after the down-sweep instead of the root junction.
-            if let Some(ref probe_id) = output_probe {
-                if let Some(v) = tree.leaf_voltage(probe_id) {
-                    #[cfg(test)]
-                    {
-                        static PROBE_DBG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                        let n = PROBE_DBG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if n < 20 || (n % 1000 == 0 && n < 5000) {
-                            eprintln!("  [probe] n={n} b_tree={b_tree:.6} a_root={a_root:.6} junction={:.6} probe({probe_id})={v:.6}",
-                                (a_root + b_tree) / 2.0);
-                        }
+            // ── Down-sweep ────────────────────────────────────────────
+            if bjt_has_load_tree {
+                // Two-domain BJT: down-sweep load tree for reactive updates.
+                let lt = load_tree.as_mut().unwrap();
+                lt.set_incident(a_root);
+                // Compute collector AC voltage (strip VCC DC via superposition).
+                let v_supply = match root {
+                    RootKind::BjtNpn(ref bjt) => bjt.v_max(),
+                    RootKind::BjtPnp(ref bjt) => -bjt.v_max().abs(),
+                    _ => 0.0,
+                };
+                let b_passive = b_tree - 2.0 * v_supply;
+                let vce_ac = (a_root + b_passive) / 2.0;
+                // Also down-sweep signal tree (for reactive element updates)
+                tree.set_incident(a_root);
+                vce_ac
+            } else {
+                tree.set_incident(a_root);
+                // If an output probe is set, extract voltage at that leaf
+                // after the down-sweep instead of the root junction.
+                if let Some(ref probe_id) = output_probe {
+                    if let Some(v) = tree.leaf_voltage(probe_id) {
+                        return v;
                     }
-                    return v;
                 }
+                (a_root + b_tree) / 2.0
             }
-            (a_root + b_tree) / 2.0
         });
 
         // Inverting all-pass feedback (Phase 90 topology).

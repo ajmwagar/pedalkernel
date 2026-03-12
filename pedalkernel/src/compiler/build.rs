@@ -2438,41 +2438,17 @@ fn build_vs_stage(
     }
 
     // ── VCC handling for single-NL stages ──────────────────────────────
-    let is_bjt = matches!(
-        &elem.kind,
-        NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
-    );
-
-    // BJTs: keep VCC as a real node (identity remap) and add a
-    // CathodeBiasSource leaf so the collector load path sees the real
-    // supply voltage.  The collector load resistor (R_load → VCC) naturally
-    // sets the correct Thevenin voltage and load-line intercept in the
-    // reflected wave.  Coupling caps between stages block the DC.
-    //
-    // Non-BJTs: collapse VCC→GND as before.  Triodes use VS=B+ instead;
-    // diodes/JFETs don't need supply voltage in the wave domain.
+    // All stages: remap VCC→GND.  For BJTs, the supply voltage is injected
+    // via superposition (+2*VCC) on the load tree's reflected wave at runtime,
+    // not as a tree element.  This avoids impedance ratio dilution from
+    // CathodeBiasSource leaves.
     let remap = |n: NodeId| -> NodeId {
-        if is_bjt {
-            n // identity: keep VCC as a real node
-        } else if n == graph.vcc_node || graph.supply_nodes.contains(&n) {
+        if n == graph.vcc_node || graph.supply_nodes.contains(&n) {
             graph.gnd_node
         } else {
             n
         }
     };
-
-    if is_bjt {
-        let supply_v = if matches!(&elem.kind, NonlinearKind::BjtPnp { .. }) {
-            -_supply_voltage.abs()
-        } else {
-            _supply_voltage.abs()
-        };
-        extra.push(ExtraEdge {
-            node_a: graph.vcc_node,
-            node_b: graph.gnd_node,
-            tree: DynNode::CathodeBiasSource { voltage: supply_v, rp: 1.0 },
-        });
-    }
 
     let vcc_injection_coeff = 0.0;
 

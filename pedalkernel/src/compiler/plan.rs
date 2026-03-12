@@ -1513,6 +1513,18 @@ fn plan_two_junction(
         | NonlinearKind::BjtPnp { model_name, .. } => {
             let model = crate::elements::BjtModel::by_name(model_name);
             let r_ce = model.va * 1000.0; // Va / 1mA
+            // DC block: the two-domain model outputs Vce which includes the
+            // DC quiescent voltage.  A first-order IIR highpass (modeling the
+            // inter-stage coupling cap) strips the DC.
+            let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate)
+                .or_else(|| {
+                    // Default DC blocker: ~20Hz at the given sample rate
+                    let omega = (std::f64::consts::PI * 2.0 * 20.0) / sample_rate;
+                    let omega_tan = omega.tan();
+                    let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
+                    let b0 = 1.0 / (1.0 + omega_tan);
+                    Some((a1, b0, 0.0, 0.0))
+                });
             (
                 Some(VirtualEdge {
                     node_a,
@@ -1521,7 +1533,7 @@ fn plan_two_junction(
                     name: "__bjt_rce__",
                 }),
                 1.0,
-                None,
+                dc,
             )
         }
         _ => (None, 1.0, None),
@@ -1541,14 +1553,19 @@ fn plan_two_junction(
     // collector load controls (Sustain pot, etc.).
     let (load_passive_idxs, load_terminals) = match &elem.kind {
         NonlinearKind::BjtNpn { emitter_node, .. }
-        | NonlinearKind::BjtPnp { emitter_node, .. }
-            if !b_passives.is_empty() && *emitter_node != graph.gnd_node =>
-        {
-            // Collector passives (a_passives + supply chain) + emitter passives (b_passives)
+        | NonlinearKind::BjtPnp { emitter_node, .. } => {
+            // ALL BJTs get a load tree: collector passives + supply chain.
+            // The load tree provides rp (collector load impedance) and b_load
+            // (VCC Thevenin via +2*VCC superposition) for the two-domain NR solve.
             let mut load_idxs = a_passives.clone();
             extend_dedup(&mut load_idxs, &a_supply_edges);
-            extend_dedup(&mut load_idxs, &b_passives);
-            (load_idxs, Some((node_a, node_b)))
+            if !b_passives.is_empty() && *emitter_node != graph.gnd_node {
+                extend_dedup(&mut load_idxs, &b_passives);
+                (load_idxs, Some((node_a, *emitter_node)))
+            } else {
+                // Grounded emitter: load tree = collector → GND
+                (load_idxs, Some((node_a, graph.gnd_node)))
+            }
         }
         _ => (Vec::new(), None),
     };
