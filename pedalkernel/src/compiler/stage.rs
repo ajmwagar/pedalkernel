@@ -577,47 +577,16 @@ impl WdfStage {
             //
             // For non-BJT stages, b1 carries the signal and rp comes from
             // the load tree (if present) or the signal tree.
-            // Compute rπ termination for BJT signal tree (used for both
-            // Vbe extraction and down-sweep). For non-BJT stages, a_base is
-            // unused — the down-sweep uses a_root directly.
-            let a_base = if bjt_has_load_tree {
-                // Quiescent rπ = β·Vt/Ic_q, computed from the model-derived
-                // Vbe bias stored at build time. Using the quiescent operating
-                // point (fixed) instead of instantaneous Ic avoids a nonlinear
-                // feedback loop that causes gating artifacts.
-                let r_pi = match root {
-                    RootKind::BjtNpn(ref bjt) => {
-                        let ic_q = bjt.model.is * (*vbe_quiescent / bjt.model.vt).exp();
-                        let ic_q = ic_q.max(1e-6);
-                        bjt.model.bf * bjt.model.vt / ic_q
-                    }
-                    RootKind::BjtPnp(ref bjt) => {
-                        let ic_q = bjt.model.is * (*vbe_quiescent / bjt.model.vt).exp();
-                        let ic_q = ic_q.max(1e-6);
-                        bjt.model.bf * bjt.model.vt / ic_q
-                    }
-                    _ => 1e6,
-                };
-                let r_port = tree.port_resistance();
-                let gamma = (r_pi - r_port) / (r_pi + r_port);
-                gamma * b1
-            } else {
-                b1 // unused fallback
-            };
 
             let (b_tree, rp) = if bjt_has_load_tree {
-                // Two-domain BJT: base domain (signal tree) + collector domain (load tree).
-                //
-                // 1. Extract Vbe from signal tree via rπ termination.
-                //    The signal tree's reflected wave b1 is the Thevenin voltage at
-                //    the base with no load (open-circuit). The real BJT base draws
-                //    current Ib = Ic/β, presenting input impedance rπ = β·Vt/Ic.
-                //    A resistive termination with rπ at the root port naturally
-                //    limits the Vbe swing through WDF scattering:
-                //      Γ = (rπ - Rport) / (rπ + Rport)
-                //      a_base = Γ · b1
-                //      Vbe_ac = (a_base + b1) / 2 = b1 · rπ / (rπ + Rport)
-                let vbe_ac = (a_base + b1) / 2.0;
+                // Two-domain BJT: open-circuit termination for Vbe.
+                // b1 is the Thevenin open-circuit voltage at the base port.
+                // Vbe_ac = b1/2 (open-circuit: V = (a+b)/2 with a=b).
+                // Base current loading (rπ) is not modeled — this gives
+                // slightly more gain than reality but avoids the signal tree
+                // contamination problem where VCC→GND remap pulls collector
+                // passives into the base port resistance.
+                let vbe_ac = b1 / 2.0;
                 let vbe = *vbe_quiescent + vbe_ac;
                 match root {
                     RootKind::BjtNpn(ref mut bjt) => bjt.set_vbe(vbe),
@@ -800,10 +769,10 @@ impl WdfStage {
             };
             // ── Down-sweep ────────────────────────────────────────────
             if bjt_has_load_tree {
-                // Two-domain BJT: down-sweep load tree for reactive updates.
+                // Two-domain BJT: down-sweep both trees.
                 let lt = load_tree.as_mut().unwrap();
                 lt.set_incident(a_root);
-                // Compute collector AC voltage (strip VCC DC via superposition).
+                // Collector AC voltage (strip VCC DC via superposition).
                 let v_supply = match root {
                     RootKind::BjtNpn(ref bjt) => bjt.v_max(),
                     RootKind::BjtPnp(ref bjt) => -bjt.v_max().abs(),
@@ -811,10 +780,9 @@ impl WdfStage {
                 };
                 let b_passive = b_tree - 2.0 * v_supply;
                 let vce_ac = (a_root + b_passive) / 2.0;
-                // rπ termination for signal tree (same reflection coefficient
-                // used for Vbe extraction). Preserves coupling cap states in the
-                // base domain while correctly modeling base current loading.
-                tree.set_incident(a_base);
+                // Open-circuit down-sweep for signal tree (a = b1).
+                // Updates coupling cap states in the base domain.
+                tree.set_incident(b1);
                 vce_ac
             } else {
                 tree.set_incident(a_root);
