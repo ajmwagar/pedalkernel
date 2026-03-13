@@ -195,7 +195,7 @@ pub(super) enum RootKind {
 // Shared bias constants for NL device control voltage setting.
 // Used by both RootKind (WdfStage) and NlDeviceKind (MultiNlStage).
 const BJT_VBE_BIAS: f64 = 0.6;
-const PNP_VEB_BIAS: f64 = 0.15;
+const PNP_VEB_BIAS: f64 = 0.3;
 const TRIODE_GRID_BIAS: f64 = -2.0;
 const PENTODE_GRID_BIAS: f64 = -8.0;
 
@@ -444,6 +444,12 @@ pub(super) struct WdfStage {
     /// output is computed from this IIR instead of the WDF tree, giving the
     /// correct frequency-dependent shelving behaviour.
     pub(super) tone_feedback: Option<ToneFeedback>,
+    /// Quiescent base-emitter voltage for BJT two-domain model.
+    /// Computed at build time from the BJT model parameters and supply voltage:
+    ///   Ic_q = VCC / (2 * R_load)  (midpoint bias approximation)
+    ///   Vbe_q = Vt * ln(Ic_q / Is + 1)
+    /// This replaces the hardcoded BJT_VBE_BIAS / PNP_VEB_BIAS constants.
+    pub(super) vbe_quiescent: f64,
     /// Auxiliary load tree for BJT collector-emitter impedance.
     ///
     /// When present, this tree is built between (collector, emitter) and
@@ -485,6 +491,7 @@ impl WdfStage {
         let vcc_injection_coeff = self.vcc_injection_coeff;
         let vcc_dc_ramp = &mut self.vcc_dc_ramp;
         let load_tree = &mut self.load_tree;
+        let vbe_quiescent = &self.vbe_quiescent;
 
         // Set control voltage for active devices (triodes, BJTs, pentodes).
         // Maps the input signal to the device's control terminal with appropriate
@@ -570,17 +577,45 @@ impl WdfStage {
             //
             // For non-BJT stages, b1 carries the signal and rp comes from
             // the load tree (if present) or the signal tree.
+            // Compute rπ termination for BJT signal tree (used for both
+            // Vbe extraction and down-sweep). For non-BJT stages, a_base is
+            // unused — the down-sweep uses a_root directly.
+            let a_base = if bjt_has_load_tree {
+                let (r_pi, _) = match root {
+                    RootKind::BjtNpn(ref bjt) => {
+                        let ic = bjt.collector_current().max(1e-6);
+                        (bjt.model.bf * bjt.model.vt / ic, BJT_VBE_BIAS)
+                    }
+                    RootKind::BjtPnp(ref bjt) => {
+                        let ic = bjt.collector_current().max(1e-6);
+                        (bjt.model.bf * bjt.model.vt / ic, PNP_VEB_BIAS)
+                    }
+                    _ => (1e6, BJT_VBE_BIAS),
+                };
+                let r_port = tree.port_resistance();
+                let gamma = (r_pi - r_port) / (r_pi + r_port);
+                gamma * b1
+            } else {
+                b1 // unused fallback
+            };
+
             let (b_tree, rp) = if bjt_has_load_tree {
                 // Two-domain BJT: base domain (signal tree) + collector domain (load tree).
                 //
-                // 1. Extract Vbe from signal tree's reflected wave (base domain).
-                let v_base = b1;
-                let vbe = BJT_VBE_BIAS + v_base;
+                // 1. Extract Vbe from signal tree via rπ termination.
+                //    The signal tree's reflected wave b1 is the Thevenin voltage at
+                //    the base with no load (open-circuit). The real BJT base draws
+                //    current Ib = Ic/β, presenting input impedance rπ = β·Vt/Ic.
+                //    A resistive termination with rπ at the root port naturally
+                //    limits the Vbe swing through WDF scattering:
+                //      Γ = (rπ - Rport) / (rπ + Rport)
+                //      a_base = Γ · b1
+                //      Vbe_ac = (a_base + b1) / 2 = b1 · rπ / (rπ + Rport)
+                let vbe_ac = (a_base + b1) / 2.0;
+                let vbe = *vbe_quiescent + vbe_ac;
                 match root {
                     RootKind::BjtNpn(ref mut bjt) => bjt.set_vbe(vbe),
-                    RootKind::BjtPnp(ref mut bjt) => bjt.set_veb(
-                        PNP_VEB_BIAS + v_base,
-                    ),
+                    RootKind::BjtPnp(ref mut bjt) => bjt.set_veb(vbe),
                     _ => {}
                 }
                 // 2. Load tree: VCC is pulled out as a boundary condition.
@@ -770,10 +805,10 @@ impl WdfStage {
                 };
                 let b_passive = b_tree - 2.0 * v_supply;
                 let vce_ac = (a_root + b_passive) / 2.0;
-                // Open-circuit termination for signal tree (a = b preserves
-                // coupling cap states in the base domain, preventing cross-domain
-                // corruption that would give wrong Vbe on subsequent samples).
-                tree.set_incident(b1);
+                // rπ termination for signal tree (same reflection coefficient
+                // used for Vbe extraction). Preserves coupling cap states in the
+                // base domain while correctly modeling base current loading.
+                tree.set_incident(a_base);
                 vce_ac
             } else {
                 tree.set_incident(a_root);

@@ -589,6 +589,7 @@ pub(super) fn build_stages(
             vcc_dc_ramp: 0,
             tone_feedback: None,
             load_tree: None,
+            vbe_quiescent: 0.0,
         });
     }
 
@@ -2511,6 +2512,23 @@ fn build_vs_stage(
         }
     }
 
+    // Compute quiescent Vbe from the BJT model and supply voltage.
+    // Midpoint bias: Ic_q ≈ VCC / (2 * R_load), then Vbe_q = Vt * ln(Ic_q/Is + 1).
+    // For unknown R_load, assume Ic_q ≈ 1mA (typical small-signal BJT bias).
+    let vbe_quiescent = match &root {
+        RootKind::BjtNpn(bjt) => {
+            let ic_q = 1e-3; // 1mA quiescent — typical for guitar pedal BJTs
+            let vbe_q = bjt.model.vt * (ic_q / bjt.model.is + 1.0).ln();
+            vbe_q.clamp(0.1, 0.8) // sane range for silicon/germanium
+        }
+        RootKind::BjtPnp(bjt) => {
+            let ic_q = 1e-3;
+            let vbe_q = bjt.model.vt * (ic_q / bjt.model.is + 1.0).ln();
+            vbe_q.clamp(0.1, 0.8)
+        }
+        _ => 0.0,
+    };
+
     Some(WdfStage {
         tree,
         root,
@@ -2541,6 +2559,7 @@ fn build_vs_stage(
         vcc_dc_ramp: 0,
         tone_feedback: None,
         load_tree,
+        vbe_quiescent,
     })
 }
 
@@ -2618,6 +2637,7 @@ fn build_source_follower_stage(
         vcc_dc_ramp: 0,
         tone_feedback: None,
         load_tree: None,
+        vbe_quiescent: 0.0,
     })
 }
 
