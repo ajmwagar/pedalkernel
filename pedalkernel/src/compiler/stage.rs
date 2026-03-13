@@ -581,16 +581,22 @@ impl WdfStage {
             // Vbe extraction and down-sweep). For non-BJT stages, a_base is
             // unused — the down-sweep uses a_root directly.
             let a_base = if bjt_has_load_tree {
-                let (r_pi, _) = match root {
+                // Quiescent rπ = β·Vt/Ic_q, computed from the model-derived
+                // Vbe bias stored at build time. Using the quiescent operating
+                // point (fixed) instead of instantaneous Ic avoids a nonlinear
+                // feedback loop that causes gating artifacts.
+                let r_pi = match root {
                     RootKind::BjtNpn(ref bjt) => {
-                        let ic = bjt.collector_current().max(1e-6);
-                        (bjt.model.bf * bjt.model.vt / ic, BJT_VBE_BIAS)
+                        let ic_q = bjt.model.is * (*vbe_quiescent / bjt.model.vt).exp();
+                        let ic_q = ic_q.max(1e-6);
+                        bjt.model.bf * bjt.model.vt / ic_q
                     }
                     RootKind::BjtPnp(ref bjt) => {
-                        let ic = bjt.collector_current().max(1e-6);
-                        (bjt.model.bf * bjt.model.vt / ic, PNP_VEB_BIAS)
+                        let ic_q = bjt.model.is * (*vbe_quiescent / bjt.model.vt).exp();
+                        let ic_q = ic_q.max(1e-6);
+                        bjt.model.bf * bjt.model.vt / ic_q
                     }
-                    _ => (1e6, BJT_VBE_BIAS),
+                    _ => 1e6,
                 };
                 let r_port = tree.port_resistance();
                 let gamma = (r_pi - r_port) / (r_pi + r_port);
