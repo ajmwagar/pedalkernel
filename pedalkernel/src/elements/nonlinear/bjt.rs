@@ -2,6 +2,10 @@
 //!
 //! Models NPN and PNP transistors using Ebers-Moll equations.
 
+// BjtNpnRoot and BjtPnpRoot are deprecated (Phase 2 will remove them).
+// Allow deprecated at file scope so that their own impl blocks compile cleanly.
+#![allow(deprecated)]
+
 use super::solver::{newton_raphson_solve, NlDeviceGroupIv, NlDeviceIv};
 use crate::elements::WdfRoot;
 use crate::models::{bjt_by_name, SpiceBjtModel};
@@ -90,6 +94,7 @@ impl From<&SpiceBjtModel> for BjtModel {
 /// ```
 ///
 /// The Early effect term `(1 + Vce/Va)` models the slight Vce dependence of Ic.
+#[deprecated(note = "Use BjtGummelPoonRoot 3-port via NlDeviceGroupKind")]
 #[derive(Debug, Clone, Copy)]
 pub struct BjtNpnRoot {
     pub model: BjtModel,
@@ -312,6 +317,7 @@ impl NlDeviceIv for BjtNpnRoot {
 /// For germanium PNP Fuzz Face (AC128, NKT275), the biasing is:
 /// - Negative ground topology (emitter to "ground" which is V+)
 /// - Collector pulls current down toward ground
+#[deprecated(note = "Use BjtGummelPoonRoot 3-port via NlDeviceGroupKind")]
 #[derive(Debug, Clone, Copy)]
 pub struct BjtPnpRoot {
     pub model: BjtModel,
@@ -1051,125 +1057,6 @@ impl BjtGummelPoonRoot {
     }
 }
 
-/// Single-port Gummel-Poon BJT root for collector-emitter path.
-///
-/// This is a simplified interface compatible with the existing WdfRoot trait,
-/// treating the BJT as a 2-terminal nonlinear element (collector-emitter)
-/// with Vbe set externally.
-///
-/// For full 3-port behavior, use `BjtGummelPoonRoot::process_3port()`.
-#[derive(Debug, Clone)]
-pub struct BjtGummelPoon1Port {
-    pub model: GummelPoonModel,
-    /// Base-emitter voltage (set externally).
-    vbe: f64,
-    /// Last computed collector current.
-    ic: f64,
-    /// Maximum Vce (supply rail).
-    v_max: f64,
-    max_iter: usize,
-    tolerance: f64,
-}
-
-impl BjtGummelPoon1Port {
-    pub fn new(model: GummelPoonModel) -> Self {
-        Self {
-            model,
-            vbe: 0.0,
-            ic: 0.0,
-            v_max: 50.0,
-            max_iter: super::solver::NR_MAX_ITER,
-            tolerance: 1e-6,
-        }
-    }
-
-    /// Set base-emitter voltage.
-    #[inline]
-    pub fn set_vbe(&mut self, vbe: f64) {
-        self.vbe = vbe;
-    }
-
-    /// Get base-emitter voltage.
-    #[inline]
-    pub fn vbe(&self) -> f64 {
-        self.vbe
-    }
-
-    /// Set maximum Vce (supply voltage).
-    #[inline]
-    pub fn set_v_max(&mut self, v_max: f64) {
-        self.v_max = v_max.max(1.0);
-    }
-
-    /// Get collector current after processing.
-    #[inline]
-    pub fn collector_current(&self) -> f64 {
-        self.ic
-    }
-
-    /// Get base current (from Ic/Bf approximation at high Qb).
-    #[inline]
-    pub fn base_current(&self) -> f64 {
-        let vbc = self.vbe; // Approximate for small-signal
-        let (_, ib) = self.model.currents(self.vbe, vbc);
-        ib
-    }
-
-    /// Compute collector current at given Vce.
-    #[inline]
-    fn collector_current_at(&self, vce: f64) -> f64 {
-        let vbc = self.vbe - vce;
-        let sign = if self.model.is_pnp { -1.0 } else { 1.0 };
-        let (ic, _) = self.model.currents(self.vbe * sign, vbc * sign);
-
-        // Apply saturation limiting for small Vce
-        let sat_factor = if vce > 0.0 { (vce / 0.2).tanh() } else { 0.0 };
-
-        ic * sign * sat_factor.max(0.0)
-    }
-
-    #[inline]
-    fn collector_current_derivative(&self, vce: f64) -> f64 {
-        let delta = 1e-6;
-        let ic_plus = self.collector_current_at(vce + delta);
-        let ic_minus = self.collector_current_at(vce - delta);
-        (ic_plus - ic_minus) / (2.0 * delta)
-    }
-}
-
-impl WdfRoot for BjtGummelPoon1Port {
-    #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
-        let root_clone = self.clone();
-        let v_max = self.v_max;
-        let v0 = if self.vbe > 0.3 {
-            (a * 0.5).max(0.1)
-        } else {
-            a * 0.5
-        };
-
-        let b = newton_raphson_solve(
-            a,
-            rp,
-            v0,
-            self.max_iter,
-            self.tolerance,
-            Some((-1.0, v_max)),
-            None,
-            |v| {
-                (
-                    root_clone.collector_current_at(v),
-                    root_clone.collector_current_derivative(v),
-                )
-            },
-        );
-
-        let v = (a + b) / 2.0;
-        self.ic = self.collector_current_at(v);
-        b
-    }
-}
-
 // ---------------------------------------------------------------------------
 // BjtTwoPort — 2-port grouped BJT for multi-NL solver
 // ---------------------------------------------------------------------------
@@ -1367,27 +1254,6 @@ mod gummel_poon_tests {
     }
 
     #[test]
-    fn gummel_poon_1port_dc_gain() {
-        let model = GummelPoonModel::by_name("2N3904");
-        let mut bjt = BjtGummelPoon1Port::new(model);
-        bjt.set_vbe(0.65);
-        bjt.set_v_max(9.0);
-
-        // Process with a simulated collector load
-        let rp = 10000.0; // 10k collector resistor
-        let a = 5.0; // Incident wave ~ Vcc/2
-        let b = bjt.process(a, rp);
-
-        // Should produce a reasonable output
-        assert!(b.is_finite(), "Output should be finite");
-        let vce = (a + b) / 2.0;
-        assert!(
-            vce > 0.1 && vce < 9.0,
-            "Vce={vce} should be in active region"
-        );
-    }
-
-    #[test]
     fn gummel_poon_3port_basic() {
         let model = GummelPoonModel::by_name("2N3904");
         let mut bjt = BjtGummelPoonRoot::new(model, [1000.0, 10000.0, 100.0], 48000.0);
@@ -1411,9 +1277,6 @@ mod gummel_poon_tests {
             );
         }
 
-        // The 3-port solver is experimental; for production use, the 1-port
-        // interface (BjtGummelPoon1Port) is recommended until the 3-port
-        // iteration is fully validated.
     }
 
     #[test]

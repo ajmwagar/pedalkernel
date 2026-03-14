@@ -1,7 +1,8 @@
 // Compare Ebers-Moll vs Gummel-Poon BJT models
 // Run with: cargo run --example bjt_model_compare
 
-use pedalkernel::elements::{BjtGummelPoon1Port, BjtModel, BjtNpnRoot, GummelPoonModel, WdfRoot};
+#[allow(deprecated)]
+use pedalkernel::elements::{BjtModel, BjtNpnRoot, GummelPoonModel, WdfRoot};
 
 fn main() {
     println!("=== BJT Model Comparison: Ebers-Moll vs Gummel-Poon ===\n");
@@ -19,26 +20,25 @@ fn main() {
     );
     println!("{:-<6}-+-{:-<12}-+-{:-<12}-+-{:-<8}", "", "", "", "");
 
+    let gp_model = GummelPoonModel::by_name("2N3904");
+
     for vbe in vbe_points {
-        // Ebers-Moll
-        let em_model = BjtModel::by_name("2N3904");
-        let mut em_bjt = BjtNpnRoot::new(em_model);
-        em_bjt.set_vbe(vbe);
-        em_bjt.set_v_max(9.0);
+        // Ebers-Moll (via BjtNpnRoot WDF root — deprecated, Phase 2 will replace)
+        #[allow(deprecated)]
+        let ic_em = {
+            let em_model = BjtModel::by_name("2N3904");
+            let mut em_bjt = BjtNpnRoot::new(em_model);
+            em_bjt.set_vbe(vbe);
+            em_bjt.set_v_max(9.0);
+            let a = 4.5; // ~Vcc/2 incident wave
+            let _ = em_bjt.process(a, rp);
+            em_bjt.collector_current()
+        };
 
-        // Process a sample to get Ic
-        let a = 4.5; // ~Vcc/2 incident wave
-        let _ = em_bjt.process(a, rp);
-        let ic_em = em_bjt.collector_current();
-
-        // Gummel-Poon
-        let gp_model = GummelPoonModel::by_name("2N3904");
-        let mut gp_bjt = BjtGummelPoon1Port::new(gp_model);
-        gp_bjt.set_vbe(vbe);
-        gp_bjt.set_v_max(9.0);
-
-        let _ = gp_bjt.process(a, rp);
-        let ic_gp = gp_bjt.collector_current();
+        // Gummel-Poon (direct model evaluation at typical Vce=4.5V)
+        let vce = 4.5;
+        let vbc = vbe - vce;
+        let (ic_gp, _) = gp_model.currents(vbe, vbc);
 
         let ratio = if ic_em.abs() > 1e-15 {
             ic_gp / ic_em
@@ -56,70 +56,52 @@ fn main() {
 
     println!("\n(Ic in mA)\n");
 
-    // Dynamic test - process sine wave
-    println!("=== Dynamic Response Test ===\n");
-    println!("Processing 1kHz sine through both models...\n");
+    // Dynamic test - process sine wave through Ebers-Moll root
+    println!("=== Dynamic Response Test (Ebers-Moll WDF root) ===\n");
+    println!("Processing 1kHz sine through Ebers-Moll model...\n");
 
     let freq = 1000.0;
     let num_samples = (sample_rate / freq * 10.0) as usize; // 10 cycles
 
-    let em_model = BjtModel::by_name("2N3904");
-    let mut em_bjt = BjtNpnRoot::new(em_model);
-    em_bjt.set_v_max(9.0);
+    #[allow(deprecated)]
+    let em_rms = {
+        let em_model = BjtModel::by_name("2N3904");
+        let mut em_bjt = BjtNpnRoot::new(em_model);
+        em_bjt.set_v_max(9.0);
 
-    let mut gp_bjt = {
-        let gp_model = GummelPoonModel::by_name("2N3904");
-        let mut bjt = BjtGummelPoon1Port::new(gp_model);
-        bjt.set_v_max(9.0);
-        bjt
+        let mut rms = 0.0;
+        let mut _em_max = 0.0f64;
+
+        for i in 0..num_samples {
+            let t = i as f64 / sample_rate;
+            let vbe = 0.65 + 0.02 * (2.0 * std::f64::consts::PI * freq * t).sin();
+            em_bjt.set_vbe(vbe);
+            let a = 4.5;
+            let b_em = em_bjt.process(a, rp);
+            let v_em = (a + b_em) / 2.0;
+            rms += v_em * v_em;
+            _em_max = _em_max.max(v_em.abs());
+        }
+        (rms / num_samples as f64).sqrt()
     };
 
-    let mut em_rms = 0.0;
-    let mut gp_rms = 0.0;
-    let mut em_max = 0.0f64;
-    let mut gp_max = 0.0f64;
-
-    for i in 0..num_samples {
-        let t = i as f64 / sample_rate;
-        // Small signal centered around typical bias point
-        let vbe = 0.65 + 0.02 * (2.0 * std::f64::consts::PI * freq * t).sin();
-
-        em_bjt.set_vbe(vbe);
-        let a = 4.5;
-        let b_em = em_bjt.process(a, rp);
-        let v_em = (a + b_em) / 2.0;
-
-        gp_bjt.set_vbe(vbe);
-        let b_gp = gp_bjt.process(a, rp);
-        let v_gp = (a + b_gp) / 2.0;
-
-        em_rms += v_em * v_em;
-        gp_rms += v_gp * v_gp;
-        em_max = em_max.max(v_em.abs());
-        gp_max = gp_max.max(v_gp.abs());
-    }
-
-    em_rms = (em_rms / num_samples as f64).sqrt();
-    gp_rms = (gp_rms / num_samples as f64).sqrt();
+    let _ = sample_rate; // used above
 
     println!("Output Vce Statistics:");
-    println!("  Ebers-Moll:   RMS={:.4}V, Peak={:.4}V", em_rms, em_max);
-    println!("  Gummel-Poon:  RMS={:.4}V, Peak={:.4}V", gp_rms, gp_max);
-    println!("  Difference:   {:.2}%", (gp_rms - em_rms) / em_rms * 100.0);
+    println!("  Ebers-Moll:   RMS={em_rms:.4}V");
 
     // Base charge comparison
     println!("\n=== Gummel-Poon Base Charge (Qb) ===\n");
     println!("Qb models high-injection effects and Early effect.");
     println!("When Qb > 1, effective beta drops.\n");
 
-    let gp_model = GummelPoonModel::by_name("2N3904");
     println!("{:>6} | {:>6} | {:>8}", "Vbe", "Vbc", "Qb");
     println!("{:-<6}-+-{:-<6}-+-{:-<8}", "", "", "");
 
     for vbe in [0.5, 0.6, 0.7, 0.8] {
         for vbc in [-5.0, -2.0, 0.0] {
             let qb = gp_model.base_charge(vbe, vbc);
-            println!("{:>6.2} | {:>6.1} | {:>8.4}", vbe, vbc, qb);
+            println!("{vbe:>6.2} | {vbc:>6.1} | {qb:>8.4}");
         }
     }
 

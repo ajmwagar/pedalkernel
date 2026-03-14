@@ -1,5 +1,10 @@
 //! WDF clipping/processing stage combining a tree with a nonlinear root.
 
+// BjtNpnRoot and BjtPnpRoot are deprecated (Phase 2 will remove them).
+// Allow deprecated here to suppress warnings in match arms and enum variants
+// that still reference these types until Phase 2 replaces them.
+#![allow(deprecated)]
+
 use crate::elements::*;
 use crate::oversampling::Oversampler;
 use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort};
@@ -66,7 +71,7 @@ const MAX_TRACE_MNL: u64 = 20;
 // WDF clipping stage
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 pub(super) enum RootKind {
     DiodePair(DiodePairRoot),
     SingleDiode(DiodeRoot),
@@ -1763,7 +1768,7 @@ use crate::elements::nonlinear::{PentodeThreePort, VariMuThreePort};
 ///
 /// Each variant wraps a concrete nonlinear root type that implements
 /// `NlDeviceIv`, providing the I-V characteristic and its derivative.
-#[allow(dead_code)]
+#[allow(dead_code, deprecated)]
 pub(super) enum NlDeviceKind {
     BjtNpn(BjtNpnRoot),
     BjtPnp(BjtPnpRoot),

@@ -7,6 +7,11 @@
 //! 4. Balance VS impedance
 //! 5. Package into WdfStage
 
+// BjtNpnRoot and BjtPnpRoot are deprecated (Phase 2 will remove them).
+// Allow deprecated at module level to suppress warnings from match arms
+// and factory functions that still reference these types.
+#![allow(deprecated)]
+
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
@@ -2365,6 +2370,8 @@ fn has_mixed_device_types(plan: &MultiNlPlan, classified: &ClassifiedCircuit) ->
 }
 
 /// Create an NlDeviceKind from a NonlinearKind classification.
+// BjtNpnRoot/BjtPnpRoot are deprecated; suppressed here until Phase 2 removes them.
+#[allow(deprecated)]
 fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
     match kind {
         NonlinearKind::BjtNpn { model_name, .. } => {
@@ -3088,6 +3095,8 @@ fn wrap_with_transformer_load(
 ///
 /// `use_jfet_vr` overrides JFET creation: when true, builds a
 /// `JfetVr` (variable resistance, no NR) instead of `Jfet` (full NR solver).
+// BjtNpnRoot/BjtPnpRoot are deprecated; suppressed here until Phase 2 removes them.
+#[allow(deprecated)]
 fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<DiodeModel>) {
     match kind {
         NonlinearKind::DiodePair(dt) => {

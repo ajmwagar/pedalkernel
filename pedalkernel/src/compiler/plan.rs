@@ -1511,8 +1511,8 @@ fn plan_two_junction(
         }
         NonlinearKind::BjtNpn { model_name, .. }
         | NonlinearKind::BjtPnp { model_name, .. } => {
-            let model = crate::elements::BjtModel::by_name(model_name);
-            let r_ce = model.va * 1000.0; // Va / 1mA
+            let model = super::helpers::gummel_poon_model(model_name);
+            let r_ce = model.vaf * 1000.0; // Vaf / 1mA
             // DC block: the two-domain model outputs Vce which includes the
             // DC quiescent voltage.  A first-order IIR highpass (modeling the
             // inter-stage coupling cap) strips the DC.
