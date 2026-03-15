@@ -1903,7 +1903,23 @@ impl PedalProcessor for CompiledPedal {
                     let pre_stage = stage_input;
                     let stage_output = stage.process(stage_input);
                     // Guard against NaN from NR solver divergence.
-                    let stage_output = if stage_output.is_finite() { stage_output } else { 0.0 };
+                    let stage_output = if stage_output.is_finite() {
+                        stage_output
+                    } else {
+                        static NAN_COUNT: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let n = NAN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n < 10 || n % 48000 == 0 {
+                            tracing::warn!(
+                                "NaN/Inf in WDF stage {} ({}): input={:.6e} output={:.6e}",
+                                wdf_stage_counter,
+                                stage.root_comp_id,
+                                stage_input,
+                                stage_output,
+                            );
+                        }
+                        0.0
+                    };
 
                     // Write output to stage's output node for junction summing
                     // (only for trigger voice stages).
@@ -1965,7 +1981,25 @@ impl PedalProcessor for CompiledPedal {
                     let pre = mnl_input;
                     let mnl_output = mnl.process(mnl_input);
                     // Guard against NaN from multi-NL NR solver divergence.
-                    let mnl_output = if mnl_output.is_finite() { mnl_output } else { 0.0 };
+                    let mnl_output = if mnl_output.is_finite() {
+                        mnl_output
+                    } else {
+                        static NAN_COUNT: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let n = NAN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n < 10 || n % 48000 == 0 {
+                            let devices: String = if let Some(ref dg) = mnl.device_groups {
+                                dg.groups.iter().map(|g| g.debug_name()).collect::<Vec<_>>().join(",")
+                            } else {
+                                mnl.nl_devices.iter().map(|d| d.debug_name()).collect::<Vec<_>>().join(",")
+                            };
+                            tracing::warn!(
+                                "NaN/Inf in MultiNL stage {} [{}]: input={:.6e} output={:.6e} v_prev={:.4?}",
+                                i, devices, mnl_input, mnl_output, &mnl.v_prev,
+                            );
+                        }
+                        0.0
+                    };
 
                     // Store output at the stage's output node for downstream routing.
                     self.node_signals.push((mnl.output_node_id, mnl_output));

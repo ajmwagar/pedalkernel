@@ -923,24 +923,56 @@ fn build_feedforward_stages(
                 }
             }
         } else {
-            // No active output pin in boundary — fall back to dist_from_in
-            let mut inj = boundary[0];
-            let mut inj_d = classified.dist_from_in.get(&boundary[0]).copied().unwrap_or(usize::MAX);
-            let mut out = boundary[0];
-            let mut out_d = inj_d;
-            for &node in &boundary[1..] {
-                let d = classified.dist_from_in.get(&node).copied().unwrap_or(usize::MAX);
-                if d < inj_d {
-                    inj_d = d;
-                    inj = node;
-                }
-                if d > out_d || (d == out_d && node == graph.out_node) {
-                    out_d = d;
-                    out = node;
-                }
+            // No active output pin in boundary — fall back to dist_from_in.
+            // Exclude GND/VCC/in from injection candidates — they are supply/reference
+            // nodes, not signal injection points. GND in particular has dist=0 and
+            // would always win the "smallest distance" heuristic.
+            let signal_boundary: Vec<NodeId> = boundary
+                .iter()
+                .copied()
+                .filter(|n| *n != graph.gnd_node && *n != graph.vcc_node && *n != graph.in_node)
+                .collect();
+            if signal_boundary.len() < 2 {
+                // Not enough non-global boundary nodes to form injection→output
+                continue;
             }
-            injection_node = inj;
-            output_node = out;
+
+            // If out_node is in boundary, it's always the output (signal flows
+            // toward circuit output). The injection is the other non-global node
+            // with smallest dist_from_in.
+            if signal_boundary.contains(&graph.out_node) {
+                output_node = graph.out_node;
+                let candidates: Vec<NodeId> = signal_boundary
+                    .iter()
+                    .copied()
+                    .filter(|n| *n != graph.out_node)
+                    .collect();
+                if candidates.is_empty() {
+                    continue;
+                }
+                injection_node = *candidates
+                    .iter()
+                    .min_by_key(|n| classified.dist_from_in.get(n).copied().unwrap_or(usize::MAX))
+                    .unwrap();
+            } else {
+                let mut inj = signal_boundary[0];
+                let mut inj_d = classified.dist_from_in.get(&signal_boundary[0]).copied().unwrap_or(usize::MAX);
+                let mut out = signal_boundary[0];
+                let mut out_d = inj_d;
+                for &node in &signal_boundary[1..] {
+                    let d = classified.dist_from_in.get(&node).copied().unwrap_or(usize::MAX);
+                    if d < inj_d {
+                        inj_d = d;
+                        inj = node;
+                    }
+                    if d > out_d {
+                        out_d = d;
+                        out = node;
+                    }
+                }
+                injection_node = inj;
+                output_node = out;
+            }
         }
 
         let injection_dist = classified.dist_from_in.get(&injection_node).copied().unwrap_or(1);
