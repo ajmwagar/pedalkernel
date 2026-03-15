@@ -2057,7 +2057,7 @@ fn try_bjt_two_port(
     // collector load to VCC, emitter bypass cap/resistor.
     let junction_nodes: HashSet<NodeId> =
         [base_node, collector_node, emitter_node].into_iter().collect();
-    let all_passive_edges = collect_passive_edges_from_nodes(
+    let mut all_passive_edges = collect_passive_edges_from_nodes(
         &junction_nodes,
         graph,
         classified,
@@ -2071,19 +2071,44 @@ fn try_bjt_two_port(
         return None;
     }
 
-    // Injection node: the input coupling point (e.g., one side of the input
-    // coupling cap, or the signal source node). For boundary-split stages,
-    // it's the upstream side of the coupling cap touching the base node.
+    // Build the passive node set BEFORE adding boundary edges, so we can
+    // identify which side of each boundary edge is "external" (injection).
+    let passive_node_set: HashSet<NodeId> = all_passive_edges
+        .iter()
+        .flat_map(|&eidx| {
+            let e = &graph.edges[eidx];
+            [e.node_a, e.node_b]
+        })
+        .chain(junction_nodes.iter().copied())
+        .collect();
+
+    // Find injection node from boundary edges: the "external" side of a
+    // coupling cap that feeds into this BJT's passive network. The boundary
+    // edge might not touch base_node directly (e.g., SCREAMER: C_c2 → Level.a
+    // → Level.w = base), so check all boundary edges touching any passive node.
     let boundary_injection = boundary_edges.iter().find_map(|&eidx| {
         let e = &graph.edges[eidx];
-        if e.node_a == base_node {
+        let a_in = passive_node_set.contains(&e.node_a);
+        let b_in = passive_node_set.contains(&e.node_b);
+        if a_in && !b_in {
             Some(e.node_b)
-        } else if e.node_b == base_node {
+        } else if b_in && !a_in {
             Some(e.node_a)
         } else {
             None
         }
     });
+
+    // Now include boundary edges touching the passive network into the
+    // passive set. They provide the AC coupling path from injection to base.
+    for &eidx in boundary_edges {
+        let e = &graph.edges[eidx];
+        if passive_node_set.contains(&e.node_a) || passive_node_set.contains(&e.node_b) {
+            if !all_passive_edges.contains(&eidx) {
+                all_passive_edges.push(eidx);
+            }
+        }
+    }
 
     let exclude: HashSet<NodeId> =
         [base_node, collector_node, emitter_node].into_iter().collect();
