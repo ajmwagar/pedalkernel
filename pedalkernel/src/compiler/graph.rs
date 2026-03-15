@@ -1614,164 +1614,31 @@ impl CircuitGraph {
         // Returns (effective_resistance, component_ids, pot_info)
         // pot_info: Option<(pot_comp_id, pot_max_r, fixed_series_r, parallel_fixed_r)>
         // The return type includes parallel_fixed_r for pots in parallel with fixed resistors
+        // Pre-build resistor-only adjacency map (used by find_resistive_path).
+        // Store (next_node, resistance, comp_id, is_pot, max_r)
+        let mut resistor_adj: HashMap<usize, Vec<(usize, f64, String, bool, f64)>> =
+            HashMap::new();
+        for info in &resistor_nodes {
+            resistor_adj.entry(info.node_a).or_default().push((
+                info.node_b,
+                info.resistance,
+                info.id.clone(),
+                info.is_pot,
+                info.max_r,
+            ));
+            resistor_adj.entry(info.node_b).or_default().push((
+                info.node_a,
+                info.resistance,
+                info.id.clone(),
+                info.is_pot,
+                info.max_r,
+            ));
+        }
+
         let find_resistive_path =
-            |start: usize,
-             end: usize|
+            |start: usize, end: usize|
              -> Option<(f64, Vec<String>, Option<(String, f64, f64, Option<f64>)>)> {
-                if start == end {
-                    return None; // Same node, no resistance
-                }
-
-                // Build adjacency for resistor-only edges
-                // Store (next_node, resistance, comp_id, is_pot, max_r)
-                let mut resistor_adj: HashMap<usize, Vec<(usize, f64, String, bool, f64)>> =
-                    HashMap::new();
-                for info in &resistor_nodes {
-                    resistor_adj.entry(info.node_a).or_default().push((
-                        info.node_b,
-                        info.resistance,
-                        info.id.clone(),
-                        info.is_pot,
-                        info.max_r,
-                    ));
-                    resistor_adj.entry(info.node_b).or_default().push((
-                        info.node_a,
-                        info.resistance,
-                        info.id.clone(),
-                        info.is_pot,
-                        info.max_r,
-                    ));
-                }
-
-                // Find all simple paths from start to end using DFS
-                // Track: (resistance, comp_ids, pot_info: Option<(id, max_r, fixed_series_r)>)
-                // Note: pot_info here is 3 elements; we add parallel_fixed_r at the end
-                #[derive(Clone)]
-                struct PathState {
-                    node: usize,
-                    path_r: f64,
-                    path_comps: Vec<String>,
-                    pot_info: Option<(String, f64)>, // (pot_id, pot_max_r)
-                    fixed_r: f64,                    // Sum of non-pot resistors in path
-                    visited: HashSet<usize>,
-                }
-
-                // Intermediate paths have 3-element pot_info (without parallel_fixed_r)
-                let mut all_paths: Vec<(f64, Vec<String>, Option<(String, f64, f64)>)> = Vec::new();
-                let mut stack: Vec<PathState> = Vec::new();
-                let mut visited_start = HashSet::new();
-                visited_start.insert(start);
-                stack.push(PathState {
-                    node: start,
-                    path_r: 0.0,
-                    path_comps: Vec::new(),
-                    pot_info: None,
-                    fixed_r: 0.0,
-                    visited: visited_start,
-                });
-
-                while let Some(state) = stack.pop() {
-                    if state.node == end {
-                        let pot_info = state.pot_info.map(|(id, max_r)| (id, max_r, state.fixed_r));
-                        all_paths.push((state.path_r, state.path_comps, pot_info));
-                        continue;
-                    }
-
-                    if let Some(neighbors) = resistor_adj.get(&state.node) {
-                        for (next_node, r, comp_id, is_pot, max_r) in neighbors {
-                            if !state.visited.contains(next_node) {
-                                let mut new_visited = state.visited.clone();
-                                new_visited.insert(*next_node);
-                                let mut new_comps = state.path_comps.clone();
-                                new_comps.push(comp_id.clone());
-
-                                // Track pot info and fixed series resistance
-                                let (new_pot_info, new_fixed_r) = if *is_pot {
-                                    // This is a pot - record it (only track first pot in path)
-                                    let pot_info =
-                                        state.pot_info.clone().or(Some((comp_id.clone(), *max_r)));
-                                    (pot_info, state.fixed_r)
-                                } else {
-                                    // Fixed resistor - add to fixed_r
-                                    (state.pot_info.clone(), state.fixed_r + r)
-                                };
-
-                                // Series: add resistances
-                                stack.push(PathState {
-                                    node: *next_node,
-                                    path_r: state.path_r + r,
-                                    path_comps: new_comps,
-                                    pot_info: new_pot_info,
-                                    fixed_r: new_fixed_r,
-                                    visited: new_visited,
-                                });
-                            }
-                        }
-                    }
-                }
-
-                if all_paths.is_empty() {
-                    return None;
-                }
-
-                // If single path, use it directly (no parallel fixed resistance)
-                if all_paths.len() == 1 {
-                    let (r, comps, pot_info) = all_paths.into_iter().next().unwrap();
-                    // Convert pot_info to 4-element tuple with None for parallel_fixed_r
-                    let pot_info_4 =
-                        pot_info.map(|(id, max_r, fixed_series)| (id, max_r, fixed_series, None));
-                    return Some((r, comps, pot_info_4));
-                }
-
-                // Parallel paths: 1/R_total = 1/R1 + 1/R2 + ...
-                // For pots in parallel paths, track pot info AND the parallel fixed resistance
-                // (the resistance of paths that don't include the pot)
-                let mut conductance_sum = 0.0;
-                let mut all_comps: Vec<String> = Vec::new();
-                let mut first_pot_info: Option<(String, f64, f64)> = None;
-                let mut fixed_paths_conductance = 0.0; // Conductance of paths without the pot
-
-                for (r, comps, pot_info) in &all_paths {
-                    if *r > 0.0 {
-                        conductance_sum += 1.0 / r;
-
-                        if pot_info.is_some() {
-                            // This path has a pot
-                            if first_pot_info.is_none() {
-                                first_pot_info = pot_info.clone();
-                            }
-                        } else {
-                            // This is a fixed path (no pot) - track its conductance
-                            fixed_paths_conductance += 1.0 / r;
-                        }
-                    }
-                    for c in comps {
-                        if !all_comps.contains(c) {
-                            all_comps.push(c.clone());
-                        }
-                    }
-                }
-
-                // If there's a pot AND fixed parallel paths, include the parallel fixed R
-                // in the pot info as a 4th element (parallel_fixed_r)
-                let final_pot_info = if let Some((id, max_r, fixed_series)) = first_pot_info {
-                    if fixed_paths_conductance > 0.0 {
-                        // There are fixed paths in parallel with the pot
-                        // parallel_fixed_r = 1 / fixed_paths_conductance
-                        let parallel_fixed_r = 1.0 / fixed_paths_conductance;
-                        Some((id, max_r, fixed_series, Some(parallel_fixed_r)))
-                    } else {
-                        Some((id, max_r, fixed_series, None))
-                    }
-                } else {
-                    None
-                };
-
-                if conductance_sum > 0.0 {
-                    Some((1.0 / conductance_sum, all_comps, final_pot_info))
-                } else {
-                    None
-                }
+                find_path_through_adj(start, end, &resistor_adj)
             };
 
         // Build a map of diodes: (node_a, node_b) -> DiodeType
@@ -1846,6 +1713,36 @@ impl CircuitGraph {
                 }
             }
         }
+
+        // Passive-aware adjacency map for non-inverting ground-leg detection.
+        // Like resistor_adj but includes caps and inductors as 0Ω passthrough
+        // edges, so DFS can traverse R+C series paths (e.g. R4→C5→gnd in RAT).
+        let mut ground_leg_adj: HashMap<usize, Vec<(usize, f64, String, bool, f64)>> =
+            resistor_adj.clone();
+        for comp in &pedal.components {
+            if comp.kind.as_any().downcast_ref::<Capacitor>().is_some()
+                || comp.kind.as_any().downcast_ref::<Inductor>().is_some()
+            {
+                let pa = format!("{}.a", comp.id);
+                let pb = format!("{}.b", comp.id);
+                if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
+                    let a_node = uf.find(a_id);
+                    let b_node = uf.find(b_id);
+                    ground_leg_adj.entry(a_node).or_default().push((
+                        b_node, 0.0, comp.id.clone(), false, 0.0,
+                    ));
+                    ground_leg_adj.entry(b_node).or_default().push((
+                        a_node, 0.0, comp.id.clone(), false, 0.0,
+                    ));
+                }
+            }
+        }
+
+        let find_ground_leg_path =
+            |start: usize, end: usize|
+             -> Option<(f64, Vec<String>, Option<(String, f64, f64, Option<f64>)>)> {
+                find_path_through_adj(start, end, &ground_leg_adj)
+            };
 
         // Helper: find diodes between two nodes (for feedback diode detection).
         // Checks direct match first, then 1-hop through passive adjacency.
@@ -2051,14 +1948,16 @@ impl CircuitGraph {
                     }
 
                     // Check for non-inverting topology: pos connected to input (or signal path)
-                    // Non-inverting: look for Ri path from neg to ground (or AC ground)
-                    let ni_gnd_node = if find_resistive_path(neg_node, gnd_node_resolved).is_some() {
+                    // Non-inverting: look for Ri path from neg to ground (or AC ground).
+                    // Use find_ground_leg_path (traverses R+C/R+L series paths) instead of
+                    // find_resistive_path, so ground legs like R4→C5→gnd are discoverable.
+                    let ni_gnd_node = if find_ground_leg_path(neg_node, gnd_node_resolved).is_some() {
                         Some(gnd_node_resolved)
                     } else {
-                        ac_ground_nodes.iter().find(|&&ag| find_resistive_path(neg_node, ag).is_some()).copied()
+                        ac_ground_nodes.iter().find(|&&ag| find_ground_leg_path(neg_node, ag).is_some()).copied()
                     };
                     if let Some(gnd_target) = ni_gnd_node {
-                        let (ri, _ri_comps, ri_pot) = find_resistive_path(neg_node, gnd_target).unwrap();
+                        let (ri, _ri_comps, ri_pot) = find_ground_leg_path(neg_node, gnd_target).unwrap();
                         // Collect ground-leg passive components too
                         let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &no_extra);
                         let mut fb_comps = all_fb_comps.clone();
@@ -2139,6 +2038,141 @@ impl CircuitGraph {
         results.sort_by_key(|info| dist.get(&info.pos_node).copied().unwrap_or(usize::MAX));
 
         results
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Shared DFS path-finder for resistive/passive adjacency maps
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Find all simple paths from `start` to `end` through an adjacency map of
+/// `(neighbor, resistance, comp_id, is_pot, max_r)` entries.  Returns the
+/// effective parallel resistance, collected component IDs, and pot metadata.
+///
+/// Caps and inductors in the adjacency map should have resistance = 0.0 so
+/// they are traversable without inflating the impedance sum.
+///
+/// Used by both `find_resistive_path` (resistor-only adj) and
+/// `find_ground_leg_path` (resistor + reactive adj).
+fn find_path_through_adj(
+    start: usize,
+    end: usize,
+    adj: &HashMap<usize, Vec<(usize, f64, String, bool, f64)>>,
+) -> Option<(f64, Vec<String>, Option<(String, f64, f64, Option<f64>)>)> {
+    if start == end {
+        return None;
+    }
+
+    #[derive(Clone)]
+    struct PathState {
+        node: usize,
+        path_r: f64,
+        path_comps: Vec<String>,
+        pot_info: Option<(String, f64)>, // (pot_id, pot_max_r)
+        fixed_r: f64,                    // Sum of non-pot resistors in path
+        visited: HashSet<usize>,
+    }
+
+    let mut all_paths: Vec<(f64, Vec<String>, Option<(String, f64, f64)>)> = Vec::new();
+    let mut stack: Vec<PathState> = Vec::new();
+    let mut visited_start = HashSet::new();
+    visited_start.insert(start);
+    stack.push(PathState {
+        node: start,
+        path_r: 0.0,
+        path_comps: Vec::new(),
+        pot_info: None,
+        fixed_r: 0.0,
+        visited: visited_start,
+    });
+
+    while let Some(state) = stack.pop() {
+        if state.node == end {
+            let pot_info = state.pot_info.map(|(id, max_r)| (id, max_r, state.fixed_r));
+            all_paths.push((state.path_r, state.path_comps, pot_info));
+            continue;
+        }
+
+        if let Some(neighbors) = adj.get(&state.node) {
+            for (next_node, r, comp_id, is_pot, max_r) in neighbors {
+                if !state.visited.contains(next_node) {
+                    let mut new_visited = state.visited.clone();
+                    new_visited.insert(*next_node);
+                    let mut new_comps = state.path_comps.clone();
+                    new_comps.push(comp_id.clone());
+
+                    let (new_pot_info, new_fixed_r) = if *is_pot {
+                        let pot_info =
+                            state.pot_info.clone().or(Some((comp_id.clone(), *max_r)));
+                        (pot_info, state.fixed_r)
+                    } else {
+                        (state.pot_info.clone(), state.fixed_r + r)
+                    };
+
+                    stack.push(PathState {
+                        node: *next_node,
+                        path_r: state.path_r + r,
+                        path_comps: new_comps,
+                        pot_info: new_pot_info,
+                        fixed_r: new_fixed_r,
+                        visited: new_visited,
+                    });
+                }
+            }
+        }
+    }
+
+    if all_paths.is_empty() {
+        return None;
+    }
+
+    if all_paths.len() == 1 {
+        let (r, comps, pot_info) = all_paths.into_iter().next().unwrap();
+        let pot_info_4 =
+            pot_info.map(|(id, max_r, fixed_series)| (id, max_r, fixed_series, None));
+        return Some((r, comps, pot_info_4));
+    }
+
+    // Parallel paths: 1/R_total = 1/R1 + 1/R2 + ...
+    let mut conductance_sum = 0.0;
+    let mut all_comps: Vec<String> = Vec::new();
+    let mut first_pot_info: Option<(String, f64, f64)> = None;
+    let mut fixed_paths_conductance = 0.0;
+
+    for (r, comps, pot_info) in &all_paths {
+        if *r > 0.0 {
+            conductance_sum += 1.0 / r;
+
+            if pot_info.is_some() {
+                if first_pot_info.is_none() {
+                    first_pot_info = pot_info.clone();
+                }
+            } else {
+                fixed_paths_conductance += 1.0 / r;
+            }
+        }
+        for c in comps {
+            if !all_comps.contains(c) {
+                all_comps.push(c.clone());
+            }
+        }
+    }
+
+    let final_pot_info = if let Some((id, max_r, fixed_series)) = first_pot_info {
+        if fixed_paths_conductance > 0.0 {
+            let parallel_fixed_r = 1.0 / fixed_paths_conductance;
+            Some((id, max_r, fixed_series, Some(parallel_fixed_r)))
+        } else {
+            Some((id, max_r, fixed_series, None))
+        }
+    } else {
+        None
+    };
+
+    if conductance_sum > 0.0 {
+        Some((1.0 / conductance_sum, all_comps, final_pot_info))
+    } else {
+        None
     }
 }
 
