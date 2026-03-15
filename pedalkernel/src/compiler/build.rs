@@ -7,11 +7,6 @@
 //! 4. Balance VS impedance
 //! 5. Package into WdfStage
 
-// BjtNpnRoot and BjtPnpRoot are deprecated (Phase 2 will remove them).
-// Allow deprecated at module level to suppress warnings from match arms
-// and factory functions that still reference these types.
-#![allow(deprecated)]
-
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
@@ -526,9 +521,12 @@ pub(super) fn build_stages(
             stages.push(stage);
         } else if matches!(
             &elem.kind,
-            NonlinearKind::Triode { .. } | NonlinearKind::Pentode { .. }
+            NonlinearKind::Triode { .. }
+                | NonlinearKind::Pentode { .. }
+                | NonlinearKind::BjtNpn { .. }
+                | NonlinearKind::BjtPnp { .. }
         ) {
-            // SP reduction failed for this triode/pentode — build as a
+            // SP reduction failed for this triode/pentode/BJT — build as a
             // single-NL MNA stage using the plan's already-collected passives.
             let multi_nl_plan = stage_plan_to_multi_nl(plan, elem, classified, graph);
             if let Some(mut multi_nl) = try_build_multi_nl_stage(&multi_nl_plan, classified, graph, sample_rate, oversampling, supply_voltage) {
@@ -593,8 +591,6 @@ pub(super) fn build_stages(
             vcc_injection_coeff: 0.0,
             vcc_dc_ramp: 0,
             tone_feedback: None,
-            load_tree: None,
-            vbe_quiescent: 0.0,
         });
     }
 
@@ -702,6 +698,43 @@ fn stage_plan_to_multi_nl(
                     true, false, &empty_pp, &barriers,
                 );
                 extend_dedup_vec(&mut edges, &cathode_edges);
+            }
+
+            (terminals, edges)
+        }
+        NonlinearKind::BjtNpn { base_node, collector_node, emitter_node, .. }
+        | NonlinearKind::BjtPnp { base_node, collector_node, emitter_node, .. } => {
+            // 2 NL ports: port 0 = (base, emitter), port 1 = (collector, emitter).
+            // Matches BjtTwoPort::eval() port ordering.
+            let terminals = vec![(*base_node, *emitter_node), (*collector_node, *emitter_node)];
+
+            let mut barriers = graph.output_pin_nodes.clone();
+            barriers.remove(base_node);
+            barriers.remove(collector_node);
+            barriers.remove(emitter_node);
+
+            // BFS from all 3 BJT terminals to collect full passive network.
+            let mut edges = graph.bfs_passive_edges(
+                *base_node,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true, false, &empty_pp, &barriers,
+            );
+            let collector_edges = graph.bfs_passive_edges(
+                *collector_node,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                true, false, &empty_pp, &barriers,
+            );
+            extend_dedup_vec(&mut edges, &collector_edges);
+            if *emitter_node != graph.gnd_node {
+                let emitter_edges = graph.bfs_passive_edges(
+                    *emitter_node,
+                    &classified.all_nonlinear_edge_indices,
+                    &graph.active_edge_indices,
+                    true, false, &empty_pp, &barriers,
+                );
+                extend_dedup_vec(&mut edges, &emitter_edges);
             }
 
             (terminals, edges)
@@ -2370,18 +2403,8 @@ fn has_mixed_device_types(plan: &MultiNlPlan, classified: &ClassifiedCircuit) ->
 }
 
 /// Create an NlDeviceKind from a NonlinearKind classification.
-// BjtNpnRoot/BjtPnpRoot are deprecated; suppressed here until Phase 2 removes them.
-#[allow(deprecated)]
 fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
     match kind {
-        NonlinearKind::BjtNpn { model_name, .. } => {
-            let model = BjtModel::by_name(model_name);
-            Some(NlDeviceKind::BjtNpn(BjtNpnRoot::new(model)))
-        }
-        NonlinearKind::BjtPnp { model_name, .. } => {
-            let model = BjtModel::by_name(model_name);
-            Some(NlDeviceKind::BjtPnp(BjtPnpRoot::new(model)))
-        }
         NonlinearKind::Triode {
             model_name,
             parallel_count,
@@ -2460,44 +2483,7 @@ fn build_vs_stage(
 
     let vcc_injection_coeff = 0.0;
 
-    // ── BJT load tree: auxiliary collector-emitter impedance tree ────────
-    // When the planner identified load passives (collector + emitter),
-    // build a separate tree between (collector, emitter) that provides
-    // the correct port_resistance for the NL solver's load line.
-    // The virtual Rce edge connects the two terminals in this tree.
-    let load_tree = if !plan.load_passive_idxs.is_empty() {
-        if let Some((col_node, emit_node)) = plan.load_terminals {
-            let load_terminals = vec![col_node, emit_node];
-            // Add virtual Rce as extra edge in the load tree
-            let load_extra: Vec<ExtraEdge> = if let Some(ve) = &plan.virtual_edge {
-                vec![ExtraEdge {
-                    node_a: ve.node_a,
-                    node_b: ve.node_b,
-                    tree: DynNode::Resistor { comp_id: None, rp: ve.resistance, last_a: 0.0 },
-                }]
-            } else {
-                vec![]
-            };
-            graph_reduce(
-                &plan.load_passive_idxs,
-                &load_extra,
-                &load_terminals,
-                graph,
-                sample_rate,
-                &HashMap::new(),
-                remap,               // VCC→GND remap applies here too
-                None,                // no output probe needed
-            )
-            .ok()
-            .map(|(tree, _)| tree)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Build the signal tree.  This is the original base-network tree with
+    // Build the signal tree.
     // terminals [source_node, GND].  Collector/emitter passives are dead-ends
     // here and get eliminated — that's fine because the load tree handles
     // their impedance separately.
@@ -2508,33 +2494,6 @@ fn build_vs_stage(
     ).ok()?;
 
     let (mut root, base_diode_model) = create_root(&elem.kind, use_jfet_vr);
-
-    // Set v_max from supply voltage so the NR solver knows the rail voltage.
-    // This sets the clamp range AND enables supply-aware cold start.
-    if _supply_voltage.abs() > 1.0 {
-        match &mut root {
-            RootKind::BjtNpn(bjt) => bjt.set_v_max(_supply_voltage.abs()),
-            RootKind::BjtPnp(bjt) => bjt.set_v_max(_supply_voltage.abs()),
-            _ => {}
-        }
-    }
-
-    // Compute quiescent Vbe from the BJT model and supply voltage.
-    // Midpoint bias: Ic_q ≈ VCC / (2 * R_load), then Vbe_q = Vt * ln(Ic_q/Is + 1).
-    // For unknown R_load, assume Ic_q ≈ 1mA (typical small-signal BJT bias).
-    let vbe_quiescent = match &root {
-        RootKind::BjtNpn(bjt) => {
-            let ic_q = 1e-3; // 1mA quiescent — typical for guitar pedal BJTs
-            let vbe_q = bjt.model.vt * (ic_q / bjt.model.is + 1.0).ln();
-            vbe_q.clamp(0.1, 0.8) // sane range for silicon/germanium
-        }
-        RootKind::BjtPnp(bjt) => {
-            let ic_q = 1e-3;
-            let vbe_q = bjt.model.vt * (ic_q / bjt.model.is + 1.0).ln();
-            vbe_q.clamp(0.1, 0.8)
-        }
-        _ => 0.0,
-    };
 
     Some(WdfStage {
         tree,
@@ -2565,8 +2524,6 @@ fn build_vs_stage(
         vcc_injection_coeff,
         vcc_dc_ramp: 0,
         tone_feedback: None,
-        load_tree,
-        vbe_quiescent,
     })
 }
 
@@ -2643,8 +2600,6 @@ fn build_source_follower_stage(
         vcc_injection_coeff: 0.0,
         vcc_dc_ramp: 0,
         tone_feedback: None,
-        load_tree: None,
-        vbe_quiescent: 0.0,
     })
 }
 
@@ -3095,8 +3050,6 @@ fn wrap_with_transformer_load(
 ///
 /// `use_jfet_vr` overrides JFET creation: when true, builds a
 /// `JfetVr` (variable resistance, no NR) instead of `Jfet` (full NR solver).
-// BjtNpnRoot/BjtPnpRoot are deprecated; suppressed here until Phase 2 removes them.
-#[allow(deprecated)]
 fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<DiodeModel>) {
     match kind {
         NonlinearKind::DiodePair(dt) => {
@@ -3120,14 +3073,6 @@ fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<Dio
             } else {
                 (RootKind::Jfet(JfetRoot::new(model)), None)
             }
-        }
-        NonlinearKind::BjtNpn { model_name, .. } => {
-            let model = BjtModel::by_name(model_name);
-            (RootKind::BjtNpn(BjtNpnRoot::new(model)), None)
-        }
-        NonlinearKind::BjtPnp { model_name, .. } => {
-            let model = BjtModel::by_name(model_name);
-            (RootKind::BjtPnp(BjtPnpRoot::new(model)), None)
         }
         NonlinearKind::Triode {
             model_name,
@@ -3169,6 +3114,11 @@ fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<Dio
         NonlinearKind::Ota => {
             let model = OtaModel::ca3080();
             (RootKind::Ota(OtaRoot::new(model)), None)
+        }
+        NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. } => {
+            // BJTs are routed through MultiNlStage (BjtTwoPort) via try_bjt_two_port.
+            // create_root() should never be called for BJTs in normal operation.
+            unreachable!("BJTs use MultiNlStage, not WdfStage root — create_root should not be called for BJTs");
         }
     }
 }

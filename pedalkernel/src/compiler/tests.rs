@@ -610,8 +610,6 @@ fn compile_muff() {
             super::stage::RootKind::SingleDiode(_) => "SingleDiode",
             super::stage::RootKind::OpAmp(_) => "OpAmp",
             super::stage::RootKind::Passthrough => "Passthrough",
-            super::stage::RootKind::BjtNpn(_) => "BjtNpn",
-            super::stage::RootKind::BjtPnp(_) => "BjtPnp",
             _ => "Other",
         };
         eprintln!("[muff-debug]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={}",
@@ -663,8 +661,6 @@ fn compile_muff() {
                 prev_was_clipping = stage.root.is_clipping_stage();
                 let root_tag = match &stage.root {
                     super::stage::RootKind::DiodePair(_) => "DiodePair",
-                    super::stage::RootKind::BjtNpn(_) => "BjtNpn",
-                    super::stage::RootKind::BjtPnp(_) => "BjtPnp",
                     _ => "Other",
                 };
                 let out = stage.process(signal);
@@ -1118,8 +1114,6 @@ fn compile_rangemaster() {
     eprintln!("[rangemaster] WDF stages: {}", proc.stages.len());
     for (i, s) in proc.stages.iter().enumerate() {
         let root_tag = match &s.root {
-            super::stage::RootKind::BjtPnp(_) => "BjtPnp",
-            super::stage::RootKind::BjtNpn(_) => "BjtNpn",
             _ => "Other",
         };
         eprintln!("[rangemaster]   wdf[{i}]: root={root_tag} sfd={} vcc_inj={:.4}",
@@ -1132,15 +1126,14 @@ fn compile_rangemaster() {
     eprintln!("[rangemaster] pre_gain={:.6} output_gain={:.6}", proc.pre_gain, proc.output_gain);
     eprintln!("[rangemaster] stage_order len={}", proc.stage_order.len());
     for (i, s) in proc.stages.iter().enumerate() {
-        eprintln!("[rangemaster]   wdf[{i}]: comp={:.4} rp={:.1} dc_block={} xfmr_gain={:.4} inj_node={} out_node={} probe={:?} load_tree={}",
+        eprintln!("[rangemaster]   wdf[{i}]: comp={:.4} rp={:.1} dc_block={} xfmr_gain={:.4} inj_node={} out_node={} probe={:?}",
             s.compensation,
             s.tree.port_resistance(),
             s.dc_block.is_some(),
             s.transformer_gain,
             s.injection_node_id,
             s.output_node_id,
-            s.output_probe,
-            s.load_tree.is_some());
+            s.output_probe);
     }
 
     // Debug controls

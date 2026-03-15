@@ -681,8 +681,6 @@ impl CompiledPedal {
                 RootKind::Triode(t) => t.set_v_max(tube_v_max),
                 RootKind::VariMu(t) => t.set_v_max(tube_v_max),
                 RootKind::Pentode(p) => p.set_v_max(tube_v_max),
-                RootKind::BjtNpn(bjt) => bjt.set_v_max(bjt_v_max),
-                RootKind::BjtPnp(bjt) => bjt.set_v_max(bjt_v_max),
                 // Diodes, JFETs, MOSFETs, OTAs, Zeners don't need supply voltage
                 // (their behavior is determined by their intrinsic parameters)
                 _ => {}
@@ -702,8 +700,6 @@ impl CompiledPedal {
                     NlDeviceKind::Triode(t) => t.set_v_max(tube_v_max),
                     NlDeviceKind::Pentode(p) => p.set_v_max(tube_v_max),
                     NlDeviceKind::VariMu(t) => t.set_v_max(tube_v_max),
-                    NlDeviceKind::BjtNpn(b) => b.set_v_max(bjt_v_max),
-                    NlDeviceKind::BjtPnp(b) => b.set_v_max(bjt_v_max),
                     NlDeviceKind::Diode(_) | NlDeviceKind::DiodePair(_) => {}
                 }
             }
@@ -719,8 +715,6 @@ impl CompiledPedal {
                             NlDeviceKind::Triode(t) => t.set_v_max(tube_v_max),
                             NlDeviceKind::Pentode(p) => p.set_v_max(tube_v_max),
                             NlDeviceKind::VariMu(t) => t.set_v_max(tube_v_max),
-                            NlDeviceKind::BjtNpn(b) => b.set_v_max(bjt_v_max),
-                            NlDeviceKind::BjtPnp(b) => b.set_v_max(bjt_v_max),
                             NlDeviceKind::Diode(_) | NlDeviceKind::DiodePair(_) => {}
                         },
                     }
@@ -1314,16 +1308,6 @@ impl CompiledPedal {
                                 stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - value);
                             }
                             stage.tree.recompute();
-                            // Also search load tree for the pot (BJT collector-emitter load).
-                            if let Some(ref mut et) = stage.load_tree {
-                                let mut et_changed = false;
-                                et_changed |= et.set_pot(&comp_id, value);
-                                et_changed |= et.set_pot(&comp_id_aw, value);
-                                et_changed |= et.set_pot(&comp_id_wb, 1.0 - value);
-                                if et_changed {
-                                    et.recompute();
-                                }
-                            }
                             stage.flush_passive_rtype_recompute();
                         }
                         // Also update the same pot in other WDF stages where it
@@ -1342,17 +1326,8 @@ impl CompiledPedal {
                                 changed |= stage.set_passive_rtype_pot(&comp_id_aw, value);
                                 changed |= stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - value);
                             }
-                            // Also search load tree.
-                            if let Some(ref mut et) = stage.load_tree {
-                                changed |= et.set_pot(&comp_id, value);
-                                changed |= et.set_pot(&comp_id_aw, value);
-                                changed |= et.set_pot(&comp_id_wb, 1.0 - value);
-                            }
                             if changed {
                                 stage.tree.recompute();
-                                if let Some(ref mut et) = stage.load_tree {
-                                    et.recompute();
-                                }
                                 stage.flush_passive_rtype_recompute();
                             }
                         }
@@ -1810,8 +1785,6 @@ impl PedalProcessor for CompiledPedal {
                     RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
                     RootKind::Triode(t) => t.set_v_max(tube_v_max),
                     RootKind::Pentode(p) => p.set_v_max(tube_v_max),
-                    RootKind::BjtNpn(bjt) => bjt.set_v_max(bjt_v_max),
-                    RootKind::BjtPnp(bjt) => bjt.set_v_max(bjt_v_max),
                     _ => {}
                 }
             }
@@ -2301,10 +2274,6 @@ impl PedalProcessor for CompiledPedal {
         for stage in &mut self.stages {
             stage.tree.update_sample_rate(rate);
             stage.tree.recompute();
-            if let Some(ref mut et) = stage.load_tree {
-                et.update_sample_rate(rate);
-                et.recompute();
-            }
         }
         for binding in &mut self.lfos {
             binding.lfo.set_sample_rate(rate);

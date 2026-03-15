@@ -13,10 +13,11 @@
 mod audio_analysis;
 
 use pedalkernel::elements::{
-    reset_solver_stats, solver_stats_snapshot, BjtModel, BjtNpnRoot,
+    reset_solver_stats, solver_stats_snapshot,
     DiodeModel, DiodePairRoot, DiodeRoot, JfetModel, JfetRoot, SolverStatsSnapshot,
     TriodeModel, TriodeRoot, WdfRoot, ZenerModel, ZenerRoot,
 };
+use pedalkernel::elements::GummelPoonModel;
 
 use audio_analysis::{
     compile_and_process, dc_offset, peak, rms, sine_at, SAMPLE_RATE,
@@ -226,20 +227,17 @@ fn nr_l0e_germanium_vs_silicon_vs_led() {
 
 #[test]
 fn nr_l0f_bjt_vbe_sweep() {
-    let model = BjtModel::by_name("2n3904");
-    let mut bjt = BjtNpnRoot::new(model);
-    bjt.set_v_max(9.0);
-    let rp = 10_000.0;
+    // Verify Gummel-Poon model: Ic increases monotonically with Vbe.
+    let model = GummelPoonModel::by_name("2N3904");
 
-    // Sweep Vbe from 0.0 to 0.7 and verify monotonically increasing Ic
-    let mut prev_ic = -1.0;
+    // Fixed Vce = 4.5 V (half-supply), sweep Vbe from 0.0 to 0.7 V.
+    let vce = 4.5;
     let vbe_values: Vec<f64> = (0..=14).map(|i| i as f64 * 0.05).collect();
+    let mut prev_ic = -1.0;
 
     for &vbe in &vbe_values {
-        bjt.set_vbe(vbe);
-        // Incident wave representing ~half supply
-        let _b = bjt.process(4.5, rp);
-        let ic = bjt.collector_current();
+        let vbc = vbe - vce;
+        let (ic, _ib) = model.currents(vbe, vbc);
 
         assert!(
             ic >= prev_ic - 1e-12,
@@ -248,10 +246,9 @@ fn nr_l0f_bjt_vbe_sweep() {
         prev_ic = ic;
     }
 
-    // At Vbe=0.65V, should have measurable collector current
-    bjt.set_vbe(0.65);
-    let _b = bjt.process(4.5, rp);
-    let ic_active = bjt.collector_current();
+    // At Vbe = 0.65 V, should have measurable collector current.
+    let vbc = 0.65 - vce;
+    let (ic_active, _) = model.currents(0.65, vbc);
     assert!(
         ic_active > 1e-6,
         "BJT should have measurable Ic at Vbe=0.65V, got {ic_active:.6e}"

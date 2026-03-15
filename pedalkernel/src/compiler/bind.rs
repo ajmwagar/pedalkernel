@@ -162,12 +162,6 @@ fn resolve_pot_target(
         if has_pot(&stage.tree, pot_id) {
             return (ControlTarget::PotInStage(si), false);
         }
-        // Also check load tree (BJT collector-emitter load).
-        if let Some(ref et) = stage.load_tree {
-            if has_pot(et, pot_id) {
-                return (ControlTarget::PotInStage(si), false);
-            }
-        }
     }
 
     // 3. Pot in multi-NL stage (includes BJT bias pots, output volume pots)

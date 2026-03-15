@@ -2096,7 +2096,7 @@ mod tests {
     #[test]
     fn test_device_iv_derivative_accuracy() {
         use super::super::{
-            BjtModel, BjtNpnRoot, BjtPnpRoot, DiodeModel, DiodePairRoot, DiodeRoot, PentodeModel,
+            DiodeModel, DiodePairRoot, DiodeRoot, PentodeModel,
             PentodeRoot, TriodeModel, TriodeRoot, TriodeThreePort, VariMuModel, VariMuThreePort,
             VariMuTriodeRoot,
         };
@@ -2117,16 +2117,6 @@ mod tests {
                 name: "DiodePairRoot(silicon)",
                 device: Box::new(DiodePairRoot::new(DiodeModel::silicon())),
                 test_voltages: vec![-0.7, -0.4, -0.2, 0.0, 0.2, 0.4, 0.7],
-            },
-            TestCase {
-                name: "BjtNpnRoot(2N2222)",
-                device: Box::new(BjtNpnRoot::new(BjtModel::by_name("2N2222"))),
-                test_voltages: vec![-0.5, 0.0, 0.5, 1.0, 5.0, 20.0, 50.0],
-            },
-            TestCase {
-                name: "BjtPnpRoot(2N3906)",
-                device: Box::new(BjtPnpRoot::new(BjtModel::by_name("2N3906"))),
-                test_voltages: vec![-0.5, 0.0, 0.5, 1.0, 5.0, 20.0, 50.0],
             },
             TestCase {
                 name: "TriodeRoot(12AX7)",
@@ -2911,15 +2901,19 @@ mod tests {
 
     #[test]
     fn test_system_jacobian_fd_bjt() {
-        use super::super::{BjtModel, BjtNpnRoot};
-        let bjt0 = BjtNpnRoot::new(BjtModel::by_name("2N2222"));
-        let bjt1 = BjtNpnRoot::new(BjtModel::by_name("2N2222"));
+        // Tests multi-port system Jacobian accuracy using diode devices.
+        // (BjtNpnRoot was removed in favour of BjtTwoPort; diodes exercise the same
+        //  compute_residual_ungrouped Jacobian path.)
+        use super::super::{DiodeModel, DiodeRoot};
+        let bjt0 = DiodeRoot::new(DiodeModel::silicon());
+        let bjt1 = DiodeRoot::new(DiodeModel::silicon());
         let devices: [&dyn NlDeviceIv; 2] = [&bjt0, &bjt1];
 
         let s_nl = [0.2, 0.3, 0.3, 0.2];
-        let known_a = [5.0, 3.0];
+        let known_a = [0.5, 0.3];
         let port_resistances = [1000.0, 2000.0];
-        let v = [2.0, 5.0];
+        // Use moderate diode voltages (near turn-on) where the derivative is finite.
+        let v = [0.4, 0.35];
         let n_nl = 2;
         let eps = 1e-7;
 

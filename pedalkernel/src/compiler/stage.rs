@@ -1,10 +1,5 @@
 //! WDF clipping/processing stage combining a tree with a nonlinear root.
 
-// BjtNpnRoot and BjtPnpRoot are deprecated (Phase 2 will remove them).
-// Allow deprecated here to suppress warnings in match arms and enum variants
-// that still reference these types until Phase 2 replaces them.
-#![allow(deprecated)]
-
 use crate::elements::*;
 use crate::oversampling::Oversampler;
 use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort};
@@ -71,7 +66,7 @@ const MAX_TRACE_MNL: u64 = 20;
 // WDF clipping stage
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[allow(dead_code, deprecated)]
+#[allow(dead_code)]
 pub(super) enum RootKind {
     DiodePair(DiodePairRoot),
     SingleDiode(DiodeRoot),
@@ -91,12 +86,6 @@ pub(super) enum RootKind {
     /// - Inverting: Vout = -(Rf/Ri) * Vin
     /// - Non-inverting: Vout = (1 + Rf/Ri) * Vin
     OpAmp(OpAmpRoot),
-    /// NPN BJT transistor (2N3904, BC109, 2N5089, etc.).
-    /// Modeled with Ebers-Moll equations.
-    BjtNpn(BjtNpnRoot),
-    /// PNP BJT transistor (2N3906, AC128, NKT275, etc.).
-    /// Modeled with Ebers-Moll equations.
-    BjtPnp(BjtPnpRoot),
     /// Passthrough (transparent) root for passive-only circuits.
     /// Models an open-circuit termination: b = a (reflected = incident).
     /// Used when the circuit has reactive elements (caps/inductors) but no
@@ -199,8 +188,6 @@ pub(super) enum RootKind {
 
 // Shared bias constants for NL device control voltage setting.
 // Used by both RootKind (WdfStage) and NlDeviceKind (MultiNlStage).
-const BJT_VBE_BIAS: f64 = 0.6;
-const PNP_VEB_BIAS: f64 = 0.3;
 const TRIODE_GRID_BIAS: f64 = -2.0;
 const PENTODE_GRID_BIAS: f64 = -8.0;
 
@@ -220,14 +207,8 @@ impl RootKind {
     /// - Triodes/VariMu: Vgk from input
     /// - Pentodes: Vg1k from input
     /// - Diodes/JFETs/other: no control voltage
-    pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
+    pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, _bias_offset: f64) {
         match self {
-            RootKind::BjtNpn(bjt) => {
-                bjt.set_vbe(BJT_VBE_BIAS + bias_offset + input * compensation);
-            }
-            RootKind::BjtPnp(bjt) => {
-                bjt.set_veb(PNP_VEB_BIAS + bias_offset + input * compensation);
-            }
             RootKind::Triode(t) => {
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
             }
@@ -449,24 +430,6 @@ pub(super) struct WdfStage {
     /// output is computed from this IIR instead of the WDF tree, giving the
     /// correct frequency-dependent shelving behaviour.
     pub(super) tone_feedback: Option<ToneFeedback>,
-    /// Quiescent base-emitter voltage for BJT two-domain model.
-    /// Computed at build time from the BJT model parameters and supply voltage:
-    ///   Ic_q = VCC / (2 * R_load)  (midpoint bias approximation)
-    ///   Vbe_q = Vt * ln(Ic_q / Is + 1)
-    /// This replaces the hardcoded BJT_VBE_BIAS / PNP_VEB_BIAS constants.
-    pub(super) vbe_quiescent: f64,
-    /// Auxiliary load tree for BJT collector-emitter impedance.
-    ///
-    /// When present, this tree is built between (collector, emitter) and
-    /// contains the collector load + emitter bypass + virtual Rce.  The NL
-    /// solver uses `load_tree.port_resistance()` as rp instead of the signal
-    /// tree's rp, giving the correct load-line slope.  The signal tree
-    /// (base network) provides the incident wave b as usual.
-    ///
-    /// This is purely an impedance calculator — it doesn't participate in
-    /// wave scattering.  Pot changes update its resistance via `set_pot()`
-    /// and `recompute()`.
-    pub(super) load_tree: Option<DynNode>,
 }
 
 impl WdfStage {
@@ -495,19 +458,9 @@ impl WdfStage {
         let feedback_opamp = &mut self.feedback_opamp;
         let vcc_injection_coeff = self.vcc_injection_coeff;
         let vcc_dc_ramp = &mut self.vcc_dc_ramp;
-        let load_tree = &mut self.load_tree;
-        let vbe_quiescent = &self.vbe_quiescent;
-
-        // Set control voltage for active devices (triodes, BJTs, pentodes).
-        // Maps the input signal to the device's control terminal with appropriate
-        // bias point and scaling. No-op for diodes/JFETs/other passive roots.
-        // For BJTs with load trees, Vbe is extracted from the signal tree below
-        // instead of using this hardcoded scaling.
-        let bjt_has_load_tree = matches!(root, RootKind::BjtNpn(_) | RootKind::BjtPnp(_))
-            && load_tree.is_some();
-        if !bjt_has_load_tree {
-            root.set_control_voltage(input, compensation, 0.0);
-        }
+        // Set control voltage for active devices (triodes, pentodes).
+        // No-op for diodes/JFETs/other passive roots.
+        root.set_control_voltage(input, compensation, 0.0);
 
         // For JFET source followers, compute Vgs from input (gate) and previous output (source).
         // Vgs = Vgate - Vsource, where Vgate ≈ input and Vsource is the WDF output.
@@ -573,54 +526,8 @@ impl WdfStage {
                 b1
             };
 
-            // ── Two-domain BJT processing ─────────────────────────────
-            // BJTs with load trees use a two-domain approach:
-            //   Base domain:  signal tree provides Vbe (control voltage)
-            //   Collector domain: load tree provides b_load + rp for NR
-            // The NR solver operates on the collector load line, and the
-            // output is Vce = (a_root + b_load) / 2.
-            //
-            // For non-BJT stages, b1 carries the signal and rp comes from
-            // the load tree (if present) or the signal tree.
-
-            let (b_tree, rp) = if bjt_has_load_tree {
-                // Two-domain BJT: open-circuit termination for Vbe.
-                // b1 is the Thevenin open-circuit voltage at the base port.
-                // Vbe_ac = b1/2 (open-circuit: V = (a+b)/2 with a=b).
-                // Base current loading (rπ) is not modeled — this gives
-                // slightly more gain than reality but avoids the signal tree
-                // contamination problem where VCC→GND remap pulls collector
-                // passives into the base port resistance.
-                let vbe_ac = b1 / 2.0;
-                let vbe = *vbe_quiescent + vbe_ac;
-                match root {
-                    RootKind::BjtNpn(ref mut bjt) => bjt.set_vbe(vbe),
-                    RootKind::BjtPnp(ref mut bjt) => bjt.set_veb(vbe),
-                    _ => {}
-                }
-                // 2. Load tree: VCC is pulled out as a boundary condition.
-                //    The load tree contains only collector passives (R_load, bypass
-                //    caps, etc.) with VCC→GND remap, so rp = R_load.
-                //    An ideal voltage source (zero impedance) at one end of a
-                //    linear network shifts the wave variables by 2*V via superposition:
-                //      b_load = b_passive + 2*VCC
-                //    This is the standard WDF treatment for ideal sources that are
-                //    not part of the tree (Werner/Smith, option 2).
-                let lt = load_tree.as_mut().unwrap();
-                let v_supply = match root {
-                    RootKind::BjtNpn(ref bjt) => bjt.v_max(),
-                    RootKind::BjtPnp(ref bjt) => -bjt.v_max().abs(),
-                    _ => 0.0,
-                };
-                let lt_b_passive = lt.reflected();
-                let lt_b = lt_b_passive + 2.0 * v_supply;
-                let lt_rp = lt.port_resistance();
-                (lt_b, lt_rp)
-            } else if let Some(ref lt) = load_tree {
-                (b1, lt.port_resistance())
-            } else {
-                (b1, tree.port_resistance())
-            };
+            let rp = tree.port_resistance();
+            let b_tree = b1;
 
             let a_root = match root {
                 RootKind::DiodePair(dp) => dp.process(b_tree, rp),
@@ -647,8 +554,6 @@ impl WdfStage {
                     }
                     op.process(b_tree, rp)
                 }
-                RootKind::BjtNpn(bjt) => bjt.process(b_tree, rp),
-                RootKind::BjtPnp(bjt) => bjt.process(b_tree, rp),
                 // Passthrough: open-circuit termination (b = a)
                 // The tree processes normally but the root just reflects.
                 // For passive filters with voltage source, the output voltage
@@ -773,33 +678,15 @@ impl WdfStage {
                 }
             };
             // ── Down-sweep ────────────────────────────────────────────
-            if bjt_has_load_tree {
-                // Two-domain BJT: down-sweep both trees.
-                let lt = load_tree.as_mut().unwrap();
-                lt.set_incident(a_root);
-                // Collector AC voltage (strip VCC DC via superposition).
-                let v_supply = match root {
-                    RootKind::BjtNpn(ref bjt) => bjt.v_max(),
-                    RootKind::BjtPnp(ref bjt) => -bjt.v_max().abs(),
-                    _ => 0.0,
-                };
-                let b_passive = b_tree - 2.0 * v_supply;
-                let vce_ac = (a_root + b_passive) / 2.0;
-                // Open-circuit down-sweep for signal tree (a = b1).
-                // Updates coupling cap states in the base domain.
-                tree.set_incident(b1);
-                vce_ac
-            } else {
-                tree.set_incident(a_root);
-                // If an output probe is set, extract voltage at that leaf
-                // after the down-sweep instead of the root junction.
-                if let Some(ref probe_id) = output_probe {
-                    if let Some(v) = tree.leaf_voltage(probe_id) {
-                        return v;
-                    }
+            tree.set_incident(a_root);
+            // If an output probe is set, extract voltage at that leaf
+            // after the down-sweep instead of the root junction.
+            if let Some(ref probe_id) = output_probe {
+                if let Some(v) = tree.leaf_voltage(probe_id) {
+                    return v;
                 }
-                (a_root + b_tree) / 2.0
             }
+            (a_root + b_tree) / 2.0
         });
 
         // Inverting all-pass feedback (Phase 90 topology).
@@ -1281,8 +1168,6 @@ impl WdfStage {
             RootKind::Mosfet(_) => "Mosfet",
             RootKind::Ota(_) => "Ota",
             RootKind::OpAmp(_) => "OpAmp",
-            RootKind::BjtNpn(_) => "BjtNpn",
-            RootKind::BjtPnp(_) => "BjtPnp",
             RootKind::Passthrough => "Passthrough",
             RootKind::ShortCircuit => "ShortCircuit",
             RootKind::VoltageSourceDriver => "VoltageSourceDriver",
@@ -1768,10 +1653,8 @@ use crate::elements::nonlinear::{PentodeThreePort, VariMuThreePort};
 ///
 /// Each variant wraps a concrete nonlinear root type that implements
 /// `NlDeviceIv`, providing the I-V characteristic and its derivative.
-#[allow(dead_code, deprecated)]
+#[allow(dead_code)]
 pub(super) enum NlDeviceKind {
-    BjtNpn(BjtNpnRoot),
-    BjtPnp(BjtPnpRoot),
     Triode(TriodeRoot),
     VariMu(VariMuTriodeRoot),
     Pentode(PentodeRoot),
@@ -1786,12 +1669,6 @@ impl NlDeviceKind {
     /// (e.g., BJT bias pots). Zero for non-BJT devices.
     pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
         match self {
-            NlDeviceKind::BjtNpn(bjt) => {
-                bjt.set_vbe(BJT_VBE_BIAS + bias_offset + input * compensation);
-            }
-            NlDeviceKind::BjtPnp(bjt) => {
-                bjt.set_veb(PNP_VEB_BIAS + bias_offset + input * compensation);
-            }
             NlDeviceKind::Triode(t) => {
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
             }
@@ -1808,8 +1685,6 @@ impl NlDeviceKind {
     /// Get a reference to this device as an `NlDeviceIv` trait object.
     pub(super) fn as_nl_device_iv(&self) -> &dyn NlDeviceIv {
         match self {
-            NlDeviceKind::BjtNpn(bjt) => bjt,
-            NlDeviceKind::BjtPnp(bjt) => bjt,
             NlDeviceKind::Triode(t) => t,
             NlDeviceKind::VariMu(t) => t,
             NlDeviceKind::Pentode(p) => p,
@@ -1820,8 +1695,6 @@ impl NlDeviceKind {
 
     pub(super) fn debug_name(&self) -> &'static str {
         match self {
-            NlDeviceKind::BjtNpn(_) => "BjtNpn",
-            NlDeviceKind::BjtPnp(_) => "BjtPnp",
             NlDeviceKind::Triode(_) => "Triode",
             NlDeviceKind::VariMu(_) => "VariMu",
             NlDeviceKind::Pentode(_) => "Pentode",

@@ -976,6 +976,22 @@ pub(super) fn plan_stages(
                 continue;
             }
 
+            // Check: BJT 2-port upgrade (all BJTs → MultiNlPlan with BjtTwoPort).
+            // Routes standalone BJTs through the grouped multi-port NR solver
+            // (same path as multi-BJT stages like Fuzz Face) instead of the
+            // legacy two-domain WDF tree approach.
+            if let Some(plan) = try_bjt_two_port(
+                elem,
+                elem_idx,
+                classified,
+                graph,
+                &pp_transformer_edges,
+                &boundary_edges,
+            ) {
+                multi_nl_plans.push(plan);
+                continue;
+            }
+
             // Check: Linearized OTA (envelope-controlled → MultiNlPlan with VCCS).
             if let Some(plan) = try_linearized_ota(
                 elem,
@@ -2001,6 +2017,99 @@ fn try_varimu_3port(
         output_node: None,
         ota_vccs: Vec::new(),
 
+        signal_chain_depth: None,
+    })
+}
+
+/// Try upgrading a solo BJT to a 2-port MultiNlPlan using BjtTwoPort.
+///
+/// All standalone BJTs (NPN and PNP) use the grouped multi-port NR solver:
+/// - Port 0: base-emitter (Vbe), models base current
+/// - Port 1: collector-emitter (Vce), models collector current
+///
+/// This replaces the legacy two-domain WDF tree approach (signal tree for
+/// Vbe + load tree for rp) with a physically correct MNA R-type adaptor.
+/// The grouped solver captures the 2×2 Jacobian (transconductance cross-coupling)
+/// and all passives (base network, collector load, emitter bypass, VCC) are
+/// part of the MNA, making BJT stages fully consistent with triode stages.
+fn try_bjt_two_port(
+    elem: &NonlinearElement,
+    elem_idx: usize,
+    classified: &ClassifiedCircuit,
+    graph: &CircuitGraph,
+    pp_transformer_edges: &HashSet<usize>,
+    boundary_edges: &HashSet<usize>,
+) -> Option<MultiNlPlan> {
+    let (base_node, collector_node, emitter_node) = match &elem.kind {
+        NonlinearKind::BjtNpn { base_node, collector_node, emitter_node, .. }
+        | NonlinearKind::BjtPnp { base_node, collector_node, emitter_node, .. } => {
+            (*base_node, *collector_node, *emitter_node)
+        }
+        _ => return None,
+    };
+
+    if classified.sidechain_edge_set.contains(&elem.edge_idx) {
+        return None;
+    }
+
+    // Collect all passive edges from all 3 BJT terminals (base, collector, emitter).
+    // The MNA needs the full network — base bias resistors, coupling cap,
+    // collector load to VCC, emitter bypass cap/resistor.
+    let junction_nodes: HashSet<NodeId> =
+        [base_node, collector_node, emitter_node].into_iter().collect();
+    let all_passive_edges = collect_passive_edges_from_nodes(
+        &junction_nodes,
+        graph,
+        classified,
+        true, // skip_out_node
+        pp_transformer_edges,
+        boundary_edges,
+        &HashSet::new(),
+    );
+
+    if all_passive_edges.is_empty() {
+        return None;
+    }
+
+    // Injection node: the input coupling point (e.g., one side of the input
+    // coupling cap, or the signal source node). For boundary-split stages,
+    // it's the upstream side of the coupling cap touching the base node.
+    let boundary_injection = boundary_edges.iter().find_map(|&eidx| {
+        let e = &graph.edges[eidx];
+        if e.node_a == base_node {
+            Some(e.node_b)
+        } else if e.node_b == base_node {
+            Some(e.node_a)
+        } else {
+            None
+        }
+    });
+
+    let exclude: HashSet<NodeId> =
+        [base_node, collector_node, emitter_node].into_iter().collect();
+    let injection_node = boundary_injection.unwrap_or_else(|| {
+        find_injection_node_multi_nl(
+            &all_passive_edges,
+            graph,
+            classified,
+            &exclude,
+            graph.in_node,
+        )
+    });
+
+    // NL terminals: port 0 = (base, emitter), port 1 = (collector, emitter).
+    // This matches BjtTwoPort::eval() port ordering.
+    let nl_terminals = vec![(base_node, emitter_node), (collector_node, emitter_node)];
+
+    Some(MultiNlPlan {
+        nl_element_indices: vec![elem_idx],
+        output_element_idx: elem_idx,
+        passive_edge_indices: all_passive_edges,
+        injection_node,
+        nl_terminals,
+        compensation: 1.0,
+        output_node: None,
+        ota_vccs: Vec::new(),
         signal_chain_depth: None,
     })
 }
