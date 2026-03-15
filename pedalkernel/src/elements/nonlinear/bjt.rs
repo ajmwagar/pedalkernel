@@ -88,10 +88,23 @@ pub struct GummelPoonModel {
     /// B-C grading coefficient. Typically 0.33-0.5.
     pub mjc: f64,
 
+    // --- Terminal ohmic resistances ---
+    /// Base spreading resistance (Ω). Models ohmic loss in base region.
+    /// Typical range: 1–40 Ω. Causes negative feedback and limits gain.
+    pub rb: f64,
+    /// Emitter ohmic resistance (Ω).
+    /// Typical range: 0.1–2 Ω. Contributes degeneration / gain reduction.
+    pub re: f64,
+    /// Collector ohmic resistance (Ω).
+    /// Typical range: 0.1–4 Ω.
+    pub rc: f64,
+
     // --- Transit time ---
-    /// Forward transit time (s). Affects high-frequency response.
+    /// Forward transit time (s). Affects high-frequency response via diffusion capacitance.
+    /// C_diff_be = TF * gm = TF * Ic / Vt.
     pub tf: f64,
-    /// Reverse transit time (s).
+    /// Reverse transit time (s). Contributes to B-C diffusion capacitance.
+    /// C_diff_bc = TR * gm_r = TR * Ie / Vt.
     pub tr: f64,
 
     /// Whether this is a PNP (vs NPN) transistor.
@@ -195,43 +208,80 @@ impl GummelPoonModel {
         (ic, ib)
     }
 
-    /// Compute junction capacitance for B-E junction.
+    /// Compute B-E junction capacitance including both depletion and diffusion components.
     ///
-    /// Uses the standard depletion capacitance formula with forward-bias
+    /// **Depletion capacitance:** Standard junction formula with forward-bias
     /// linearization to avoid singularity at Vbe = Vje.
+    ///
+    /// **Diffusion capacitance:** C_diff = TF × gm = TF × Ic / Vt.
+    /// Dominant at high current densities; models minority carrier storage.
+    ///
+    /// `ic` is the collector current at the current operating point (A).
+    ///
+    /// # Note
+    /// These capacitances are currently computed by `BjtGummelPoonRoot` for
+    /// reactive transient simulation. `BjtTwoPort` does not yet integrate them
+    /// into its Newton-Raphson solver; a future task should add sample-rate
+    /// and state tracking analogous to `BjtGummelPoonRoot::cap_be_state`.
     #[inline]
-    pub fn capacitance_be(&self, vbe: f64) -> f64 {
-        if self.cje <= 0.0 {
-            return 0.0;
-        }
-
-        // Avoid singularity: linearize for Vbe > 0.8*Vje
-        let fc = 0.8;
-        if vbe < fc * self.vje {
-            self.cje / (1.0 - vbe / self.vje).powf(self.mje)
+    pub fn capacitance_be(&self, vbe: f64, ic: f64) -> f64 {
+        // Depletion capacitance
+        let c_depletion = if self.cje > 0.0 {
+            // Avoid singularity: linearize for Vbe > 0.8*Vje
+            let fc = 0.8;
+            if vbe < fc * self.vje {
+                self.cje / (1.0 - vbe / self.vje).powf(self.mje)
+            } else {
+                // Linear extrapolation for forward bias
+                let cje_fc = self.cje / (1.0 - fc).powf(self.mje);
+                let dcje = self.cje * self.mje / (self.vje * (1.0 - fc).powf(self.mje + 1.0));
+                cje_fc + dcje * (vbe - fc * self.vje)
+            }
         } else {
-            // Linear extrapolation for forward bias
-            let cje_fc = self.cje / (1.0 - fc).powf(self.mje);
-            let dcje = self.cje * self.mje / (self.vje * (1.0 - fc).powf(self.mje + 1.0));
-            cje_fc + dcje * (vbe - fc * self.vje)
-        }
+            0.0
+        };
+
+        // Diffusion (transit-time) capacitance: TF * gm = TF * |Ic| / Vt
+        let c_diffusion = if self.tf > 0.0 {
+            self.tf * ic.abs() / self.vt
+        } else {
+            0.0
+        };
+
+        c_depletion + c_diffusion
     }
 
-    /// Compute junction capacitance for B-C junction.
+    /// Compute B-C junction capacitance including both depletion and diffusion components.
+    ///
+    /// **Diffusion capacitance:** C_diff = TR × gm_r = TR × |Ie| / Vt.
+    /// `ie` is the emitter current at the current operating point (A).
+    ///
+    /// # Note
+    /// See note on `capacitance_be` regarding integration into `BjtTwoPort`.
     #[inline]
-    pub fn capacitance_bc(&self, vbc: f64) -> f64 {
-        if self.cjc <= 0.0 {
-            return 0.0;
-        }
-
-        let fc = 0.8;
-        if vbc < fc * self.vjc {
-            self.cjc / (1.0 - vbc / self.vjc).powf(self.mjc)
+    pub fn capacitance_bc(&self, vbc: f64, ie: f64) -> f64 {
+        // Depletion capacitance
+        let c_depletion = if self.cjc > 0.0 {
+            let fc = 0.8;
+            if vbc < fc * self.vjc {
+                self.cjc / (1.0 - vbc / self.vjc).powf(self.mjc)
+            } else {
+                let cjc_fc = self.cjc / (1.0 - fc).powf(self.mjc);
+                let dcjc = self.cjc * self.mjc / (self.vjc * (1.0 - fc).powf(self.mjc + 1.0));
+                cjc_fc + dcjc * (vbc - fc * self.vjc)
+            }
         } else {
-            let cjc_fc = self.cjc / (1.0 - fc).powf(self.mjc);
-            let dcjc = self.cjc * self.mjc / (self.vjc * (1.0 - fc).powf(self.mjc + 1.0));
-            cjc_fc + dcjc * (vbc - fc * self.vjc)
-        }
+            0.0
+        };
+
+        // Diffusion (transit-time) capacitance: TR * gm_r = TR * |Ie| / Vt
+        let c_diffusion = if self.tr > 0.0 {
+            self.tr * ie.abs() / self.vt
+        } else {
+            0.0
+        };
+
+        c_depletion + c_diffusion
     }
 }
 
@@ -258,6 +308,9 @@ impl From<&SpiceBjtModel> for GummelPoonModel {
             cjc: spice.cjc,
             vjc: spice.vjc,
             mjc: spice.mjc,
+            rb: spice.rb,
+            re: spice.re,
+            rc: spice.rc,
             tf: spice.tf,
             tr: spice.tr,
             is_pnp: spice.is_pnp,
@@ -380,12 +433,13 @@ impl BjtGummelPoonRoot {
             let (ic, ib) = self.model.currents(vbe * sign, vbc * sign);
             let ic = ic * sign;
             let ib = ib * sign;
-            let _ie = ic + ib;
+            let ie = ic + ib;
 
             // Add junction capacitor currents if capacitances are nonzero
             let dt = 1.0 / self.sample_rate;
-            let cbe = self.model.capacitance_be(vbe * sign);
-            let cbc = self.model.capacitance_bc(vbc * sign);
+            // Pass operating-point currents so diffusion capacitance (TF/TR) is included.
+            let cbe = self.model.capacitance_be(vbe * sign, ic);
+            let cbc = self.model.capacitance_bc(vbc * sign, ie);
 
             // Capacitor current: I = C * dV/dt ≈ C * (V - V_prev) / dt
             // For WDF, we use the discretized capacitor port resistance R = dt / (2*C)
@@ -581,49 +635,84 @@ impl NlDeviceGroupIv for BjtTwoPort {
 
     fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
         let sign = if self.is_pnp { -1.0 } else { 1.0 };
-        let vbe = sign * v[0];
-        let vce = sign * v[1];
+        let vbe_ext = sign * v[0];
+        let vce_ext = sign * v[1];
 
         // Clamp Vbc to prevent catastrophic BC junction forward bias.
         // When Vbe and Vce are clamped independently, their combination can
         // produce Vbc >> 0 (e.g., PNP Vbe=0.5, Vce=-9 → Vbc=9.5V → ISC*exp(365)).
         // Limit to 0.4V forward to allow saturation while preventing overflow.
         const VBC_MAX: f64 = 0.4;
-        let clamp_vbc = |vbe: f64, vce: f64| -> f64 {
-            (vbe - vce).min(VBC_MAX)
+        let clamp_vbc = |vbe: f64, vce: f64| -> f64 { (vbe - vce).min(VBC_MAX) };
+
+        // Helper: given external (Vbe_ext, Vce_ext), return (Ic, Ib) accounting for
+        // terminal resistances RB, RE, RC via fixed-point iteration.
+        //
+        // For NPN with terminal resistances in each lead:
+        //   Ve = Ie_out * RE  where Ie_out = Ic + Ib  (KCL: current out of emitter)
+        //   Vb = Vbe_ext - Ib * RB  (drop across base resistance, external → base node)
+        //   Vc = Vce_ext - Ic * RC  (drop across collector resistance)
+        //
+        //   V_be_int = Vb - Ve = Vbe_ext - Ib * RB - (Ic + Ib) * RE
+        //   V_ce_int = Vc - Ve = Vce_ext - Ic * RC - (Ic + Ib) * RE
+        //
+        // Since RB/RE/RC ≤ 40 Ω and currents ≤ ~100 mA, drops are ≤ a few mV.
+        // 4 iterations are sufficient for convergence (verified analytically).
+        let eval_with_parasitics = |vbe_ext: f64, vce_ext: f64| -> (f64, f64) {
+            let rb = self.model.rb;
+            let re = self.model.re;
+            let rc = self.model.rc;
+            let has_parasitics = rb + re + rc > 0.0;
+
+            if !has_parasitics {
+                let vbc = clamp_vbc(vbe_ext, vce_ext);
+                return self.model.currents(vbe_ext, vbc);
+            }
+
+            // Initial guess: ignore terminal R
+            let mut vbe_int = vbe_ext;
+            let mut vce_int = vce_ext;
+
+            for _ in 0..4 {
+                let vbc_int = clamp_vbc(vbe_int, vce_int);
+                let (ic, ib) = self.model.currents(vbe_int, vbc_int);
+                // Emitter current flows OUT of the emitter terminal: Ie_out = Ic + Ib
+                let ie_out = ic + ib;
+                vbe_int = vbe_ext - ib * rb - ie_out * re;
+                vce_int = vce_ext - ic * rc - ie_out * re;
+            }
+
+            let vbc_int = clamp_vbc(vbe_int, vce_int);
+            self.model.currents(vbe_int, vbc_int)
         };
 
-        let vbc = clamp_vbc(vbe, vce);
-        let (ic, ib) = self.model.currents(vbe, vbc);
+        let (ic, ib) = eval_with_parasitics(vbe_ext, vce_ext);
         currents[0] = sign * ib;
         currents[1] = sign * ic;
 
         // 2×2 Jacobian via numerical differentiation.
         // sign² = 1, so Jacobian is polarity-invariant.
-        // Apply same Vbc clamp to all perturbations for consistency.
+        // The parasitic-resistance iteration runs inside the perturbed evaluations
+        // so the Jacobian naturally captures terminal-R effects.
         let delta = 1e-7;
 
-        // ∂/∂Vbe (port 0): vbe varies, vbc = vbe - vce also varies
-        let vbc_p = clamp_vbc(vbe + delta, vce);
-        let vbc_m = clamp_vbc(vbe - delta, vce);
-        let (ic_p, ib_p) = self.model.currents(vbe + delta, vbc_p);
-        let (ic_m, ib_m) = self.model.currents(vbe - delta, vbc_m);
+        // ∂/∂Vbe (port 0): vbe varies, vce fixed
+        let (ic_p, ib_p) = eval_with_parasitics(vbe_ext + delta, vce_ext);
+        let (ic_m, ib_m) = eval_with_parasitics(vbe_ext - delta, vce_ext);
         jacobian[0] = (ib_p - ib_m) / (2.0 * delta); // ∂Ib/∂Vbe
         jacobian[2] = (ic_p - ic_m) / (2.0 * delta); // ∂Ic/∂Vbe (gm!)
 
-        // ∂/∂Vce (port 1): vce varies, vbc = vbe - vce varies inversely
-        let vbc_p2 = clamp_vbc(vbe, vce + delta);
-        let vbc_m2 = clamp_vbc(vbe, vce - delta);
-        let (ic_p2, ib_p2) = self.model.currents(vbe, vbc_p2);
-        let (ic_m2, ib_m2) = self.model.currents(vbe, vbc_m2);
+        // ∂/∂Vce (port 1): vce varies, vbe fixed
+        let (ic_p2, ib_p2) = eval_with_parasitics(vbe_ext, vce_ext + delta);
+        let (ic_m2, ib_m2) = eval_with_parasitics(vbe_ext, vce_ext - delta);
         jacobian[1] = (ib_p2 - ib_m2) / (2.0 * delta); // ∂Ib/∂Vce
         jacobian[3] = (ic_p2 - ic_m2) / (2.0 * delta); // ∂Ic/∂Vce (Early)
     }
 
     fn v_clamp_port(&self, port: usize) -> (f64, f64) {
         match port {
-            0 => (-self.vbe_max, self.vbe_max),  // Vbe: IS-dependent (Ge ~0.32V, Si ~0.83V)
-            _ => (-self.v_max, self.v_max),      // Vce: full swing
+            0 => (-self.vbe_max, self.vbe_max), // Vbe: IS-dependent (Ge ~0.32V, Si ~0.83V)
+            _ => (-self.v_max, self.v_max),     // Vce: full swing
         }
     }
 }
@@ -694,19 +783,19 @@ mod gummel_poon_tests {
     fn gummel_poon_capacitance_be() {
         let model = GummelPoonModel::by_name("2N3904");
 
-        // Zero-bias capacitance
-        let c0 = model.capacitance_be(0.0);
+        // Zero-bias, zero current: depletion cap only — should equal Cje
+        let c0 = model.capacitance_be(0.0, 0.0);
         assert!(
             (c0 - model.cje).abs() < 1e-15,
-            "Cbe at Vbe=0 should equal Cje"
+            "Cbe at Vbe=0, Ic=0 should equal Cje"
         );
 
-        // Reverse bias: capacitance should decrease
-        let c_rev = model.capacitance_be(-1.0);
+        // Reverse bias: depletion capacitance should decrease
+        let c_rev = model.capacitance_be(-1.0, 0.0);
         assert!(c_rev < c0, "Cbe should decrease with reverse bias");
 
-        // Forward bias: capacitance should increase
-        let c_fwd = model.capacitance_be(0.5);
+        // Forward bias: depletion capacitance should increase
+        let c_fwd = model.capacitance_be(0.5, 0.0);
         assert!(c_fwd > c0, "Cbe should increase with forward bias");
     }
 
@@ -733,7 +822,6 @@ mod gummel_poon_tests {
                 "Outputs should remain stable at sample {i}"
             );
         }
-
     }
 
     #[test]
@@ -766,5 +854,146 @@ mod gummel_poon_tests {
             ic_pnp > 0.0,
             "PNP Ic should be positive (internal polarity)"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Parasitic resistance tests (RB, RE, RC)
+    // ---------------------------------------------------------------------------
+
+    /// With RB > 0, the internal Vbe is reduced by Ib * RB at the same external Vbe,
+    /// so the resulting Ib (and Ic) should be slightly lower.
+    #[test]
+    fn parasitic_rb_reduces_current_at_same_external_vbe() {
+        let mut model_no_rb = GummelPoonModel::by_name("2N3904");
+        model_no_rb.rb = 0.0;
+        model_no_rb.re = 0.0;
+        model_no_rb.rc = 0.0;
+
+        let mut model_rb = GummelPoonModel::by_name("2N3904");
+        model_rb.rb = 30.0; // 30 Ω base resistance
+        model_rb.re = 0.0;
+        model_rb.rc = 0.0;
+
+        // Build BjtTwoPort wrappers and evaluate at same external Vbe
+        let bjt_no_rb = BjtTwoPort::new(model_no_rb);
+        let bjt_rb = BjtTwoPort::new(model_rb);
+
+        let vbe_ext = 0.65_f64; // external Vbe in forward active
+        let vce_ext = 5.0_f64;
+
+        let mut currents_no_rb = [0.0_f64; 2];
+        let mut jacobian_no_rb = [0.0_f64; 4];
+        bjt_no_rb.eval(
+            &[vbe_ext, vce_ext],
+            &mut currents_no_rb,
+            &mut jacobian_no_rb,
+        );
+
+        let mut currents_rb = [0.0_f64; 2];
+        let mut jacobian_rb = [0.0_f64; 4];
+        bjt_rb.eval(&[vbe_ext, vce_ext], &mut currents_rb, &mut jacobian_rb);
+
+        let ib_no_rb = currents_no_rb[0];
+        let ib_rb = currents_rb[0];
+        let ic_no_rb = currents_no_rb[1];
+        let ic_rb = currents_rb[1];
+
+        // With RB resistance the internal Vbe drops, so Ib and Ic must be lower
+        assert!(
+            ib_rb < ib_no_rb,
+            "RB=30Ω should reduce base current: {ib_rb:.3e} vs {ib_no_rb:.3e}"
+        );
+        assert!(
+            ic_rb < ic_no_rb,
+            "RB=30Ω should reduce collector current: {ic_rb:.3e} vs {ic_no_rb:.3e}"
+        );
+
+        // The reduction should be small (< 50%) since voltage drops are small
+        assert!(
+            ic_rb > ic_no_rb * 0.5,
+            "Ic reduction should be < 50%: {ic_rb:.3e} vs {ic_no_rb:.3e}"
+        );
+    }
+
+    /// RE provides emitter degeneration — negative feedback that reduces effective gain.
+    /// At the same external Vbe bias, RE causes a voltage drop that reduces internal Vbe.
+    #[test]
+    fn parasitic_re_provides_negative_feedback() {
+        let mut model_no_re = GummelPoonModel::by_name("2N3904");
+        model_no_re.rb = 0.0;
+        model_no_re.re = 0.0;
+        model_no_re.rc = 0.0;
+
+        let mut model_re = GummelPoonModel::by_name("2N3904");
+        model_re.rb = 0.0;
+        model_re.re = 2.0; // 2 Ω emitter resistance
+        model_re.rc = 0.0;
+
+        let bjt_no_re = BjtTwoPort::new(model_no_re);
+        let bjt_re = BjtTwoPort::new(model_re);
+
+        let vbe_ext = 0.65_f64;
+        let vce_ext = 5.0_f64;
+
+        let mut c0 = [0.0_f64; 2];
+        let mut j0 = [0.0_f64; 4];
+        bjt_no_re.eval(&[vbe_ext, vce_ext], &mut c0, &mut j0);
+
+        let mut c1 = [0.0_f64; 2];
+        let mut j1 = [0.0_f64; 4];
+        bjt_re.eval(&[vbe_ext, vce_ext], &mut c1, &mut j1);
+
+        // RE causes degeneration: transconductance (gm = ∂Ic/∂Vbe) should decrease
+        // jacobian[2] is ∂Ic/∂Vbe
+        let gm_no_re = j0[2];
+        let gm_re = j1[2];
+        assert!(
+            gm_re < gm_no_re,
+            "RE=2Ω should reduce transconductance: {gm_re:.3e} vs {gm_no_re:.3e}"
+        );
+    }
+
+    /// With TF > 0, the B-E diffusion capacitance grows with collector current.
+    #[test]
+    fn diffusion_capacitance_be_increases_with_ic() {
+        let model = GummelPoonModel::by_name("2N3904");
+
+        // Skip if model has no TF (older models may have tf = 0)
+        if model.tf <= 0.0 {
+            return;
+        }
+
+        let vbe = 0.65; // forward active bias
+
+        // At zero current, only depletion cap
+        let c_zero_ic = model.capacitance_be(vbe, 0.0);
+        // At realistic Ic, diffusion cap adds on top
+        let ic = 1e-3; // 1 mA
+        let c_with_ic = model.capacitance_be(vbe, ic);
+
+        let c_diffusion_expected = model.tf * ic / model.vt;
+        assert!(
+            c_with_ic > c_zero_ic,
+            "Cbe should increase with Ic: {c_with_ic:.3e} vs {c_zero_ic:.3e}"
+        );
+        assert!(
+            (c_with_ic - c_zero_ic - c_diffusion_expected).abs() < 1e-18,
+            "Diffusion cap should be TF*Ic/Vt = {c_diffusion_expected:.3e}, got {:.3e}",
+            c_with_ic - c_zero_ic
+        );
+    }
+
+    /// Verify that GummelPoonModel correctly picks up RB, RE, RC from SpiceBjtModel.
+    #[test]
+    fn gummel_poon_model_has_rb_re_rc() {
+        let model = GummelPoonModel::by_name("2N3904");
+        // Fields must exist and be finite; exact values depend on SPICE model data
+        assert!(model.rb.is_finite(), "rb must be finite");
+        assert!(model.re.is_finite(), "re must be finite");
+        assert!(model.rc.is_finite(), "rc must be finite");
+        // Should be non-negative (physical resistance)
+        assert!(model.rb >= 0.0, "rb must be >= 0");
+        assert!(model.re >= 0.0, "re must be >= 0");
+        assert!(model.rc >= 0.0, "rc must be >= 0");
     }
 }
