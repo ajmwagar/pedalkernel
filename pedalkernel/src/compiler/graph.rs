@@ -1957,7 +1957,17 @@ impl CircuitGraph {
                         ac_ground_nodes.iter().find(|&&ag| find_ground_leg_path(neg_node, ag).is_some()).copied()
                     };
                     if let Some(gnd_target) = ni_gnd_node {
-                        let (ri, _ri_comps, ri_pot) = find_ground_leg_path(neg_node, gnd_target).unwrap();
+                        // Prefer pure-resistive path for ri/pot extraction (avoids
+                        // bypass caps inflating parallel conductance — e.g. Klon's
+                        // C_gnd creating a 0Ω shortcut that swamps the Gain pot).
+                        // Fall back to ground_leg_path only when no resistive path
+                        // exists (e.g. RAT's R4→C5→gnd series topology).
+                        let (ri, _ri_comps, ri_pot) =
+                            if let Some(rp) = find_resistive_path(neg_node, gnd_target) {
+                                rp
+                            } else {
+                                find_ground_leg_path(neg_node, gnd_target).unwrap()
+                            };
                         // Collect ground-leg passive components too
                         let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &no_extra);
                         let mut fb_comps = all_fb_comps.clone();
