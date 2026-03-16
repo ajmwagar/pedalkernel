@@ -1057,6 +1057,7 @@ impl WdfStage {
 pub(super) enum TubeRoot {
     Koren(TriodeRoot),
     VariMu(VariMuTriodeRoot),
+    Pentode(PentodeRoot),
 }
 
 impl TubeRoot {
@@ -1065,6 +1066,7 @@ impl TubeRoot {
         match self {
             TubeRoot::Koren(t) => t.set_vgk(vgk),
             TubeRoot::VariMu(t) => t.set_vgk(vgk),
+            TubeRoot::Pentode(p) => p.set_vg1k(vgk),
         }
     }
 
@@ -1073,6 +1075,7 @@ impl TubeRoot {
         match self {
             TubeRoot::Koren(t) => t.v_max(),
             TubeRoot::VariMu(t) => t.v_max(),
+            TubeRoot::Pentode(p) => p.v_max(),
         }
     }
 
@@ -1081,6 +1084,7 @@ impl TubeRoot {
         match self {
             TubeRoot::Koren(t) => t.set_v_max(v_max),
             TubeRoot::VariMu(t) => t.set_v_max(v_max),
+            TubeRoot::Pentode(p) => p.set_v_max(v_max),
         }
     }
 
@@ -1089,6 +1093,7 @@ impl TubeRoot {
         match self {
             TubeRoot::Koren(t) => t.process(b_tree, rp),
             TubeRoot::VariMu(t) => t.process(b_tree, rp),
+            TubeRoot::Pentode(p) => p.process(b_tree, rp),
         }
     }
 
@@ -1097,6 +1102,7 @@ impl TubeRoot {
         match self {
             TubeRoot::Koren(t) => t.plate_current(vpk),
             TubeRoot::VariMu(t) => t.plate_current(vpk),
+            TubeRoot::Pentode(p) => p.plate_current(vpk),
         }
     }
 
@@ -1104,6 +1110,7 @@ impl TubeRoot {
         match self {
             TubeRoot::Koren(t) => t.parallel_count(),
             TubeRoot::VariMu(t) => t.parallel_count(),
+            TubeRoot::Pentode(_) => 1,
         }
     }
 }

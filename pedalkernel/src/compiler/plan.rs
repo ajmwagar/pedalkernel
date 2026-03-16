@@ -726,29 +726,28 @@ pub(super) fn plan_stages(
     let groups = group_nl_elements(classified, graph, &boundary_edges);
 
     // ── Step 2: Push-pull detection ─────────────────────────────────────
-    // Triodes sharing a CT transformer get push-pull plans instead of
-    // normal NL stages. Detect before per-group planning.
+    // Triodes and pentodes sharing a CT transformer get push-pull plans
+    // instead of normal NL stages. Detect before per-group planning.
     let triode_elements: Vec<(usize, &NonlinearElement)> = classified
         .nonlinear_elements
         .iter()
         .enumerate()
-        .filter(|(_, e)| matches!(&e.kind, NonlinearKind::Triode { .. }))
+        .filter(|(_, e)| matches!(&e.kind, NonlinearKind::Triode { .. } | NonlinearKind::Pentode { .. }))
         .collect();
 
     use super::graph::TriodeInfo;
     let triode_infos: Vec<(usize, TriodeInfo)> = triode_elements
         .iter()
         .map(|(_, elem)| {
-            if let NonlinearKind::Triode {
-                model_name,
-                plate_node,
-                cathode_node,
-                parallel_count,
-                is_vari_mu,
-                ..
-            } = &elem.kind
-            {
-                (
+            match &elem.kind {
+                NonlinearKind::Triode {
+                    model_name,
+                    plate_node,
+                    cathode_node,
+                    parallel_count,
+                    is_vari_mu,
+                    ..
+                } => (
                     elem.edge_idx,
                     TriodeInfo {
                         model_name: model_name.clone(),
@@ -759,9 +758,25 @@ pub(super) fn plan_stages(
                         parallel_count: *parallel_count,
                         is_vari_mu: *is_vari_mu,
                     },
-                )
-            } else {
-                unreachable!()
+                ),
+                NonlinearKind::Pentode { model_name } => {
+                    // Pentode junction_nodes: [0]=plate, [1]=cathode
+                    let plate_node = elem.junction_nodes[0];
+                    let cathode_node = elem.junction_nodes[1];
+                    (
+                        elem.edge_idx,
+                        TriodeInfo {
+                            model_name: model_name.clone(),
+                            plate_node,
+                            cathode_node,
+                            junction_node: cathode_node,
+                            ground_node: graph.gnd_node,
+                            parallel_count: 1,
+                            is_vari_mu: false,
+                        },
+                    )
+                }
+                _ => unreachable!(),
             }
         })
         .collect();
@@ -2040,16 +2055,24 @@ pub(super) fn plan_push_pull_half(
     graph: &CircuitGraph,
     pp_transformer_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
-    if let NonlinearKind::Triode {
-        plate_node,
-        cathode_node,
-        model_name,
-        is_vari_mu,
-        ..
-    } = &elem.kind
+    // Extract plate/cathode nodes and model info from either Triode or Pentode.
+    let (plate_node, cathode_node, model_name, is_vari_mu, is_pentode) = match &elem.kind {
+        NonlinearKind::Triode {
+            plate_node,
+            cathode_node,
+            model_name,
+            is_vari_mu,
+            ..
+        } => (*plate_node, *cathode_node, model_name.clone(), *is_vari_mu, false),
+        NonlinearKind::Pentode { model_name } => {
+            // Pentode junction_nodes: [0]=plate, [1]=cathode
+            (elem.junction_nodes[0], elem.junction_nodes[1], model_name.clone(), false, true)
+        }
+        _ => return None,
+    };
     {
         let plate_passives = graph.bfs_passive_edges(
-            *plate_node,
+            plate_node,
             &classified.all_nonlinear_edge_indices,
             &graph.active_edge_indices,
             true,
@@ -2057,7 +2080,7 @@ pub(super) fn plan_push_pull_half(
             pp_transformer_edges,
         );
         let cathode_passives = graph.bfs_passive_edges(
-            *cathode_node,
+            cathode_node,
             &classified.all_nonlinear_edge_indices,
             &graph.active_edge_indices,
             true,
@@ -2074,7 +2097,7 @@ pub(super) fn plan_push_pull_half(
 
         // Find injection node, excluding plate/cathode.
         let exclude: HashSet<NodeId> =
-            [*plate_node, *cathode_node].into_iter().collect();
+            [plate_node, cathode_node].into_iter().collect();
         let mut injection_node = find_injection_node_multi_nl(
             &passive_idxs,
             graph,
@@ -2087,8 +2110,8 @@ pub(super) fn plan_push_pull_half(
                 let e = &graph.edges[eidx];
                 for candidate in [e.node_a, e.node_b] {
                     if candidate != graph.gnd_node
-                        && candidate != *cathode_node
-                        && candidate != *plate_node
+                        && candidate != cathode_node
+                        && candidate != plate_node
                     {
                         injection_node = candidate;
                         break 'outer;
@@ -2108,8 +2131,8 @@ pub(super) fn plan_push_pull_half(
             }
             for (&node, &deg) in &degree {
                 if deg == 1
-                    && node != *plate_node
-                    && node != *cathode_node
+                    && node != plate_node
+                    && node != cathode_node
                     && node != injection_node
                 {
                     ground_terminal = node;
@@ -2121,11 +2144,15 @@ pub(super) fn plan_push_pull_half(
         let source_node = graph.edges.len() + 5000;
         let terminals = vec![source_node, ground_terminal];
 
-        let model = super::helpers::triode_model(model_name);
-        let compensation = if *is_vari_mu {
-            find_input_transformer_gain_pp(graph, classified)
+        let (rp, compensation) = if is_pentode {
+            let model = super::helpers::pentode_model(&model_name);
+            (model.rp, model.mu / 100.0)
+        } else if is_vari_mu {
+            let model = super::helpers::triode_model(&model_name);
+            (model.rp, find_input_transformer_gain_pp(graph, classified))
         } else {
-            model.mu / 100.0
+            let model = super::helpers::triode_model(&model_name);
+            (model.rp, model.mu / 100.0)
         };
 
         Some(StagePlan {
@@ -2134,9 +2161,9 @@ pub(super) fn plan_push_pull_half(
             terminals,
             source_node,
             virtual_edge: Some(VirtualEdge {
-                node_a: *plate_node,
-                node_b: *cathode_node,
-                resistance: model.rp,
+                node_a: plate_node,
+                node_b: cathode_node,
+                resistance: rp,
                 name: "__triode_rp__",
             }),
             skip_vs: false,
@@ -2145,8 +2172,6 @@ pub(super) fn plan_push_pull_half(
             compensation,
             signal_chain_depth: None,
         })
-    } else {
-        None
     }
 }
 

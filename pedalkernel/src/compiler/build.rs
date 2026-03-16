@@ -923,8 +923,11 @@ pub(super) fn build_push_pull_stages(
                 // Determine grid bias from tube type.
                 // Variable-mu (6386): -7.2V per Raffensperger's wavechild670 model.
                 // Standard triodes: -2.0V (class A/AB operation).
-                let is_vari_mu = matches!(&push_root, TubeRoot::VariMu(_));
-                let grid_bias = if is_vari_mu { -7.2 } else { -2.0 };
+                let grid_bias = match &push_root {
+                    TubeRoot::VariMu(_) => -7.2,
+                    TubeRoot::Pentode(_) => -15.0, // Power pentode class AB bias
+                    TubeRoot::Koren(_) => -2.0,    // Triode class A/AB
+                };
 
                 stages.push(PushPullStage {
                     push_tree,
@@ -2370,23 +2373,29 @@ fn build_push_pull_roots(
     pull_elem: &super::classify::NonlinearElement,
 ) -> (TubeRoot, TubeRoot) {
     let build_root = |elem: &super::classify::NonlinearElement| -> TubeRoot {
-        if let NonlinearKind::Triode {
-            model_name,
-            parallel_count,
-            is_vari_mu,
-            ..
-        } = &elem.kind
-        {
-            if *is_vari_mu {
-                let model = vari_mu_model(model_name);
-                TubeRoot::VariMu(VariMuTriodeRoot::new(model).with_parallel_count(*parallel_count))
-            } else {
-                let model = triode_model(model_name);
-                TubeRoot::Koren(TriodeRoot::new(model).with_parallel_count(*parallel_count))
+        match &elem.kind {
+            NonlinearKind::Triode {
+                model_name,
+                parallel_count,
+                is_vari_mu,
+                ..
+            } => {
+                if *is_vari_mu {
+                    let model = vari_mu_model(model_name);
+                    TubeRoot::VariMu(VariMuTriodeRoot::new(model).with_parallel_count(*parallel_count))
+                } else {
+                    let model = triode_model(model_name);
+                    TubeRoot::Koren(TriodeRoot::new(model).with_parallel_count(*parallel_count))
+                }
             }
-        } else {
-            // Fallback — shouldn't happen.
-            TubeRoot::Koren(TriodeRoot::new(TriodeModel::by_name("12AX7")))
+            NonlinearKind::Pentode { model_name } => {
+                let model = pentode_model(model_name);
+                TubeRoot::Pentode(PentodeRoot::new(model))
+            }
+            _ => {
+                // Fallback — shouldn't happen.
+                TubeRoot::Koren(TriodeRoot::new(TriodeModel::by_name("12AX7")))
+            }
         }
     };
 
