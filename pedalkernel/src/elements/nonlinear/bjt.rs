@@ -140,6 +140,14 @@ impl GummelPoonModel {
     /// ```
     #[inline]
     pub fn base_charge(&self, vbe: f64, vbc: f64) -> f64 {
+        let exp_vbe = ((vbe / (self.nf * self.vt)).min(40.0)).exp();
+        let exp_vbc = ((vbc / (self.nr * self.vt)).min(40.0)).exp();
+        self.base_charge_from_exp(vbe, vbc, exp_vbe, exp_vbc)
+    }
+
+    /// Compute base charge from pre-computed exponentials (avoids redundant exp calls).
+    #[inline]
+    fn base_charge_from_exp(&self, vbe: f64, vbc: f64, exp_vbe: f64, exp_vbc: f64) -> f64 {
         // q1: Early effect term
         let q1 =
             1.0 + if self.vaf.is_finite() {
@@ -153,9 +161,6 @@ impl GummelPoonModel {
             };
 
         // q2: High-injection term
-        let exp_vbe = ((vbe / (self.nf * self.vt)).min(40.0)).exp();
-        let exp_vbc = ((vbc / (self.nr * self.vt)).min(40.0)).exp();
-
         let q2_f = if self.ikf.is_finite() && self.ikf > 0.0 {
             self.is * (exp_vbe - 1.0) / self.ikf
         } else {
@@ -177,11 +182,11 @@ impl GummelPoonModel {
     /// Returns (Ic, Ib) tuple.
     #[inline]
     pub fn currents(&self, vbe: f64, vbc: f64) -> (f64, f64) {
-        let qb = self.base_charge(vbe, vbc);
-
-        // Transport currents
+        // Compute all exponentials once — shared between base_charge and transport
         let exp_vbe = ((vbe / (self.nf * self.vt)).min(40.0)).exp();
         let exp_vbc = ((vbc / (self.nr * self.vt)).min(40.0)).exp();
+
+        let qb = self.base_charge_from_exp(vbe, vbc, exp_vbe, exp_vbc);
 
         // Forward and reverse currents divided by Qb
         let icc = self.is * (exp_vbe - 1.0) / qb; // Forward transport
@@ -669,14 +674,14 @@ impl NlDeviceGroupIv for BjtTwoPort {
                 return self.model.currents(vbe_ext, vbc);
             }
 
-            // Initial guess: ignore terminal R
+            // Fixed-point iteration: voltage updates, then final eval at converged voltages.
+            // Each iteration computes currents → voltage drops → updated internal voltages.
             let mut vbe_int = vbe_ext;
             let mut vce_int = vce_ext;
 
             for _ in 0..4 {
                 let vbc_int = clamp_vbc(vbe_int, vce_int);
                 let (ic, ib) = self.model.currents(vbe_int, vbc_int);
-                // Emitter current flows OUT of the emitter terminal: Ie_out = Ic + Ib
                 let ie_out = ic + ib;
                 vbe_int = vbe_ext - ib * rb - ie_out * re;
                 vce_int = vce_ext - ic * rc - ie_out * re;

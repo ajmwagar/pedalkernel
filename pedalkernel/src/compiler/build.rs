@@ -1510,6 +1510,7 @@ fn build_rtype_stage(
             pot_stamps: pot_stamps_ss,
         };
 
+        let n_passive_ss = passive_children.len();
         return Some(MultiNlStage {
             adaptor,
             nl_devices: Vec::new(),
@@ -1548,6 +1549,11 @@ fn build_rtype_stage(
             dc_blocker_y1: 0.0,
             dc_ramp: 0,
             initial_v_prev: Vec::new(),
+            nr_workspace: crate::elements::nonlinear::solver::NrWorkspace::new(0),
+            work_b_passive: vec![0.0; n_passive_ss],
+            work_known_a: Vec::new(),
+            work_b_all: Vec::new(),
+            work_a_all: Vec::new(),
         });
     }
 
@@ -2179,6 +2185,16 @@ fn build_rtype_stage(
         eprintln!("[vcc-preconverge] DC operating point: {:?}", initial_v);
     }
 
+    // Pre-compute sizes before moving values into struct
+    let n_passive_children = passive_children.len();
+    let n_adaptor_ports = adaptor.num_ports;
+    let nr_ws = if let Some(ref dg) = device_groups {
+        let mgp = dg.groups.iter().map(|g| g.n_ports()).max().unwrap_or(1);
+        crate::elements::nonlinear::solver::NrWorkspace::new_grouped(n_nl, mgp)
+    } else {
+        crate::elements::nonlinear::solver::NrWorkspace::new(n_nl)
+    };
+
     Some(MultiNlStage {
         adaptor,
         nl_devices,
@@ -2217,6 +2233,11 @@ fn build_rtype_stage(
         initial_v_prev: initial_v,
         dc_blocker_x1: 0.0,
         dc_blocker_y1: 0.0,
+        nr_workspace: nr_ws,
+        work_b_passive: vec![0.0; n_passive_children],
+        work_known_a: vec![0.0; n_nl],
+        work_b_all: vec![0.0; n_adaptor_ports],
+        work_a_all: vec![0.0; n_adaptor_ports],
     })
 }
 

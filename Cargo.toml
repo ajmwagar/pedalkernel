@@ -10,3 +10,11 @@ members = [
 [profile.release]
 lto = "thin"
 strip = "symbols"
+
+[profile.bench]
+debug = true
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = "none"

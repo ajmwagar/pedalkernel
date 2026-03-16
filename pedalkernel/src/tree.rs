@@ -408,16 +408,23 @@ impl RTypeAdaptor {
         let n = self.num_ports;
         debug_assert_eq!(b_all.len(), n);
         let mut a = vec![0.0; n];
+        self.scatter_all_into(b_all, &mut a);
+        a
+    }
+
+    /// Like `scatter_all`, but writes into a pre-allocated output buffer
+    /// to avoid per-sample heap allocation.
+    pub fn scatter_all_into(&self, b_all: &[f64], a_out: &mut [f64]) {
+        let n = self.num_ports;
+        debug_assert_eq!(b_all.len(), n);
+        debug_assert!(a_out.len() >= n);
         for i in 0..n {
             let mut sum_power = 0.0;
             for j in 0..n {
-                // b̅_j = b_j / √R_j, then sum S̅[i][j] * b̅_j
                 sum_power += self.power_scattering[i * n + j] * b_all[j] * self.inv_sqrt_r[j];
             }
-            // a_i = sum_power * √R_i (convert back from power wave)
-            a[i] = sum_power * self.sqrt_r[i];
+            a_out[i] = sum_power * self.sqrt_r[i];
         }
-        a
     }
 
     /// Manually set the cached child reflected waves.

@@ -1645,7 +1645,9 @@ impl PushPullStage {
 // ═══════════════════════════════════════════════════════════════════════════
 
 use crate::elements::nonlinear::solver::{
-    multi_port_nr_solve, multi_port_nr_solve_grouped, NlDeviceGroupIv, NlDeviceIv,
+    multi_port_nr_solve, multi_port_nr_solve_grouped,
+    multi_port_nr_solve_into, multi_port_nr_solve_grouped_into,
+    NlDeviceGroupIv, NlDeviceIv,
 };
 use crate::elements::nonlinear::{PentodeThreePort, VariMuThreePort};
 
@@ -1983,6 +1985,13 @@ pub(super) struct MultiNlStage {
     pub(super) dc_blocker_x1: f64,
     /// DC blocker state: previous output sample (y[n-1]).
     pub(super) dc_blocker_y1: f64,
+    /// Pre-allocated workspace for NR solver (eliminates per-sample heap allocations).
+    pub(super) nr_workspace: crate::elements::nonlinear::solver::NrWorkspace,
+    /// Pre-allocated process buffers.
+    pub(super) work_b_passive: Vec<f64>,
+    pub(super) work_known_a: Vec<f64>,
+    pub(super) work_b_all: Vec<f64>,
+    pub(super) work_a_all: Vec<f64>,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -2054,24 +2063,25 @@ impl MultiNlStage {
         // Bypasses WDF scattering entirely. Used for linearized OTA stages
         // where cap port conductances overwhelm circuit conductances.
         if let Some(ref mut ss) = self.state_space {
+            let work = &mut self.work_b_passive;
             let output = self.oversampler.process(input, |sample| {
                 let n = ss.n_states;
                 // x[n] = A · x[n-1] + b · u[n]
-                let mut x_new = vec![0.0; n];
+                work.resize(n, 0.0);
                 for i in 0..n {
                     let mut v = ss.b_vector[i] * sample;
                     let row_start = i * n;
                     for j in 0..n {
                         v += ss.a_matrix[row_start + j] * ss.x[j];
                     }
-                    x_new[i] = flush_denormal(v);
+                    work[i] = flush_denormal(v);
                 }
                 // y[n] = c · x[n]
                 let mut y = 0.0;
                 for i in 0..n {
-                    y += ss.c_vector[i] * x_new[i];
+                    y += ss.c_vector[i] * work[i];
                 }
-                ss.x = x_new;
+                ss.x[..n].copy_from_slice(&work[..n]);
                 y
             });
             return flush_denormal(output);
@@ -2113,9 +2123,9 @@ impl MultiNlStage {
 
         let output = self.oversampler.process(input, |sample| {
             // 1. Scatter-up passive children
-            let mut b_passive = Vec::with_capacity(n_passive);
-            for child in &mut self.passive_children {
-                b_passive.push(child.reflected());
+            let b_passive = &mut self.work_b_passive[..n_passive];
+            for (k, child) in self.passive_children.iter_mut().enumerate() {
+                b_passive[k] = child.reflected();
             }
 
             // 2. Compute known_a[i] for each NL port:
@@ -2124,7 +2134,7 @@ impl MultiNlStage {
             //             + dc_bias[i]  (VCC supply contribution, precomputed constant)
             // The adapted port's b-wave is the input signal (voltage source)
             let b_adapted = sample * compensation;
-            let mut known_a = vec![0.0; n_nl];
+            let known_a = &mut self.work_known_a[..n_nl];
             for i in 0..n_nl {
                 let mut a_i = self.scattering.s_nl_adapted[i] * b_adapted;
                 for k in 0..n_passive {
@@ -2143,43 +2153,45 @@ impl MultiNlStage {
                 }
             }
             // 3. Multi-port NR solve (skipped when n_nl=0, e.g. linearized OTA)
-            let b_nl = if n_nl == 0 {
-                // No NR ports — signal propagation is fully encoded in S matrix.
-                Vec::new()
-            } else if let Some(ref dg) = self.device_groups {
-                // Grouped solver: cross-coupled device Jacobians
-                let groups: Vec<&dyn NlDeviceGroupIv> =
-                    dg.groups.iter().map(|g| g.as_group_iv()).collect();
-                
-                multi_port_nr_solve_grouped(
-                    n_nl,
-                    &self.scattering.s_nl,
-                    &known_a,
-                    &self.nl_port_resistances,
-                    &groups,
-                    &dg.offsets,
-                    &mut self.v_prev,
-                    crate::elements::nonlinear::solver::NR_MAX_ITER,
-                    1e-6,
-                )
-            } else {
-                // Independent solver: each device has its own I-V
-                let devices: Vec<&dyn NlDeviceIv> = self
-                    .nl_devices
-                    .iter()
-                    .map(|d| d.as_nl_device_iv())
-                    .collect();
-                multi_port_nr_solve(
-                    n_nl,
-                    &self.scattering.s_nl,
-                    &known_a,
-                    &self.nl_port_resistances,
-                    &devices,
-                    &mut self.v_prev,
-                    crate::elements::nonlinear::solver::NR_MAX_ITER,
-                    1e-6,
-                )
-            };
+            if n_nl > 0 {
+                if let Some(ref dg) = self.device_groups {
+                    // Grouped solver: cross-coupled device Jacobians
+                    let groups: Vec<&dyn NlDeviceGroupIv> =
+                        dg.groups.iter().map(|g| g.as_group_iv()).collect();
+
+                    multi_port_nr_solve_grouped_into(
+                        n_nl,
+                        &self.scattering.s_nl,
+                        known_a,
+                        &self.nl_port_resistances,
+                        &groups,
+                        &dg.offsets,
+                        &mut self.v_prev,
+                        crate::elements::nonlinear::solver::NR_MAX_ITER,
+                        1e-6,
+                        &mut self.nr_workspace,
+                    );
+                } else {
+                    // Independent solver: each device has its own I-V
+                    let devices: Vec<&dyn NlDeviceIv> = self
+                        .nl_devices
+                        .iter()
+                        .map(|d| d.as_nl_device_iv())
+                        .collect();
+                    multi_port_nr_solve_into(
+                        n_nl,
+                        &self.scattering.s_nl,
+                        known_a,
+                        &self.nl_port_resistances,
+                        &devices,
+                        &mut self.v_prev,
+                        crate::elements::nonlinear::solver::NR_MAX_ITER,
+                        1e-6,
+                        &mut self.nr_workspace,
+                    );
+                }
+            }
+            let b_nl = &self.nr_workspace.b_nl[..n_nl];
 
             #[cfg(feature = "debug-trace")]
             {
@@ -2189,21 +2201,21 @@ impl MultiNlStage {
                     eprintln!("[NR-output] b_nl={:?} v_prev={:?}", b_nl, self.v_prev);
                 }
             }
-            // 4. Build full b-vector for scatter_down:
+            // 4. Build full b-vector for scatter_down (into pre-allocated buffer):
             //    [b_nl..., b_passive..., b_adapted]
             //    With VS injection: no adapted port at end.
-            //    VCC is an MNA voltage source (not a WDF port), so no b_vcc entry.
             let use_vs_injection = self.vs_injection.is_some();
             let n_total = n_nl + n_passive + if use_vs_injection { 0 } else { 1 };
-            let mut b_all = Vec::with_capacity(n_total);
-            b_all.extend_from_slice(&b_nl);
-            b_all.extend_from_slice(&b_passive);
+            let b_all = &mut self.work_b_all[..n_total];
+            b_all[..n_nl].copy_from_slice(b_nl);
+            b_all[n_nl..n_nl + n_passive].copy_from_slice(b_passive);
             if !use_vs_injection {
-                b_all.push(b_adapted);
+                b_all[n_nl + n_passive] = b_adapted;
             }
 
-            // Use scatter_all to get incident waves for all ports
-            let mut a_all = self.adaptor.scatter_all(&b_all);
+            // Use scatter_all_into to avoid allocation
+            let a_all = &mut self.work_a_all[..n_total];
+            self.adaptor.scatter_all_into(b_all, a_all);
 
             // Add VS injection: a[i] += k[i] * V_in
             if let Some(ref k) = self.vs_injection {
@@ -2215,9 +2227,6 @@ impl MultiNlStage {
             }
 
             // Add VCC supply injection to all ports (with DC ramp).
-            // The scattering matrix was derived with VCC as a VS, so scatter_all
-            // only gives port-to-port interactions. The VCC contribution must be
-            // added separately: a[i] += vcc_inj[i] * V_supply.
             if !self.vcc_bias_all.is_empty() {
                 for i in 0..a_all.len().min(self.vcc_bias_all.len()) {
                     a_all[i] += self.vcc_bias_all[i] * dc_scale;

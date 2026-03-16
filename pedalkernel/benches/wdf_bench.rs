@@ -78,6 +78,12 @@ fn compile_example(name: &str) -> Box<dyn PedalProcessor> {
     Box::new(compile_pedal(&pedal, SAMPLE_RATE).unwrap())
 }
 
+fn compile_pedal_file(path: &str) -> Box<dyn PedalProcessor> {
+    let src = std::fs::read_to_string(path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    Box::new(compile_pedal(&pedal, SAMPLE_RATE).unwrap())
+}
+
 fn find_example(filename: &str) -> String {
     fn walk(dir: &str, target: &str) -> Option<String> {
         for entry in std::fs::read_dir(dir).ok()?.flatten() {
@@ -655,6 +661,95 @@ fn bench_sample_rates(c: &mut Criterion) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Group 7: Pro legends — per-sample and block benchmarks
+// ═══════════════════════════════════════════════════════════════════
+
+fn bench_legends_sample(c: &mut Criterion) {
+    let mut group = c.benchmark_group("legends_sample");
+
+    let legends_dir = concat!(env!("HOME"), "/src/pedalkernel/pedalkernel-pro/pedals/legends");
+    let pedals = [
+        ("muff", "muff.pedal"),
+        ("screamer", "screamer.pedal"),
+        ("rangemaster", "rangemaster.pedal"),
+        ("goldenrod", "goldenrod.pedal"),
+        ("ratking", "ratking.pedal"),
+        ("blues", "blues.pedal"),
+    ];
+
+    for (label, filename) in pedals {
+        let path = format!("{}/{}", legends_dir, filename);
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("  Skipping {label}: {path} not found");
+            continue;
+        }
+        let mut proc = compile_pedal_file(&path);
+        group.bench_function(label, |b| {
+            let mut phase = 0.0_f64;
+            b.iter(|| {
+                phase += 440.0 / SAMPLE_RATE;
+                let input = 0.5 * (2.0 * std::f64::consts::PI * phase).sin();
+                black_box(proc.process(black_box(input)))
+            })
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_legends_block(c: &mut Criterion) {
+    let mut group = c.benchmark_group("legends_block");
+    group.measurement_time(Duration::from_secs(5));
+
+    let legends_dir = concat!(env!("HOME"), "/src/pedalkernel/pedalkernel-pro/pedals/legends");
+    let pedals = [
+        ("muff", "muff.pedal"),
+        ("screamer", "screamer.pedal"),
+        ("rangemaster", "rangemaster.pedal"),
+        ("goldenrod", "goldenrod.pedal"),
+        ("ratking", "ratking.pedal"),
+    ];
+
+    let num_samples = 48000; // 1 second
+    let block = test_block(num_samples);
+    let budget_ms = num_samples as f64 / SAMPLE_RATE * 1_000.0;
+
+    for (label, filename) in pedals {
+        let path = format!("{}/{}", legends_dir, filename);
+        if !std::path::Path::new(&path).exists() {
+            continue;
+        }
+        let mut proc = compile_pedal_file(&path);
+
+        // Warm up
+        for &s in &block[..1000] {
+            black_box(proc.process(black_box(s)));
+        }
+
+        // Quick manual timing for the report
+        let start = Instant::now();
+        for &s in &block {
+            black_box(proc.process(black_box(s)));
+        }
+        let elapsed = start.elapsed();
+        let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+        let cpu_pct = (elapsed_ms / budget_ms) * 100.0;
+        eprintln!("  {label:15} {elapsed_ms:8.2} ms  ({cpu_pct:5.1}% CPU @ 48kHz)");
+
+        group.throughput(Throughput::Elements(num_samples as u64));
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                for &s in &block {
+                    black_box(proc.process(black_box(s)));
+                }
+            })
+        });
+    }
+
+    group.finish();
+}
+
+// ═══════════════════════════════════════════════════════════════════
 
 criterion_group!(
     existing,
@@ -680,4 +775,10 @@ criterion_group!(
     bench_sample_rates
 );
 
-criterion_main!(existing, compiled, realtime, flops);
+criterion_group!(
+    legends,
+    bench_legends_sample,
+    bench_legends_block
+);
+
+criterion_main!(existing, compiled, realtime, flops, legends);
