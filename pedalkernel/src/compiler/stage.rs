@@ -2119,7 +2119,8 @@ impl MultiNlStage {
         // DC ramp: gradually increase VCC bias over DC_RAMP_SAMPLES to let
         // the NR solver track the operating point as supply voltage ramps up.
         const DC_RAMP_SAMPLES: u32 = 256;
-        let dc_scale = if self.dc_ramp >= DC_RAMP_SAMPLES {
+        let still_ramping = self.dc_ramp < DC_RAMP_SAMPLES;
+        let dc_scale = if !still_ramping {
             1.0
         } else {
             self.dc_ramp += 1;
@@ -2288,11 +2289,20 @@ impl MultiNlStage {
             // with α ≈ 0.9995 (fc ≈ 3.5Hz at 44.1kHz, below audible range).
             if !self.vcc_bias_all.is_empty() {
                 let x0 = if raw_out.is_finite() { raw_out } else { 0.0 };
-                let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
-                let y0 = if y0.is_finite() { y0 } else { 0.0 };
-                self.dc_blocker_x1 = x0;
-                self.dc_blocker_y1 = y0;
-                y0
+                if still_ramping {
+                    // During DC ramp, seed the blocker state with the current
+                    // DC operating point but output zero — the ramp transient
+                    // is not audio, just NR solver initialization.
+                    self.dc_blocker_x1 = x0;
+                    self.dc_blocker_y1 = 0.0;
+                    0.0
+                } else {
+                    let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
+                    let y0 = if y0.is_finite() { y0 } else { 0.0 };
+                    self.dc_blocker_x1 = x0;
+                    self.dc_blocker_y1 = y0;
+                    y0
+                }
             } else {
                 raw_out
             }

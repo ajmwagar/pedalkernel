@@ -198,17 +198,28 @@ fn find_reactive_boundaries(
             || graph.supply_nodes.contains(&node)
     };
 
-    // Union nodes connected by Linear or Nonlinear edges only.
+    // Union nodes connected by Linear, Nonlinear, or Active edges.
     // Skip edges touching hub nodes — hubs (gnd, vcc, supply, in, out) are
     // AC ground and should not propagate connectivity between islands.
     // E.g., Q1.collector→vcc via R3 and Q2.collector→vcc via R6 doesn't
     // make Q1 and Q2 the same island.
+    //
+    // Active bridge edges (virtual edges for BJT/OpAmp pin traversal) ARE
+    // included in the union-find to maintain connectivity between terminal
+    // nodes (base, collector, emitter). Without them, each BJT terminal
+    // becomes an isolated island, breaking multi-stage ordering.
+    let active_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
     for (eidx, e) in graph.edges.iter().enumerate() {
         if classified.sidechain_edge_set.contains(&eidx) {
             continue;
         }
         // Don't union through hub nodes.
         if is_hub(e.node_a) || is_hub(e.node_b) {
+            continue;
+        }
+        // Active bridge edges always union (they connect BJT/OpAmp pins).
+        if active_set.contains(&eidx) {
+            uf.union(e.node_a, e.node_b);
             continue;
         }
         let kind = edge_kind(graph, eidx);
@@ -221,9 +232,15 @@ fn find_reactive_boundaries(
     }
 
     // Identify boundary reactive edges.
+    // Skip active bridge edges here — they have placeholder comp_idx=0 which
+    // causes edge_kind() to misclassify them based on component 0's type
+    // (often a capacitor), creating false reactive boundaries.
     let mut boundaries = HashSet::new();
     for (eidx, e) in graph.edges.iter().enumerate() {
         if classified.sidechain_edge_set.contains(&eidx) {
+            continue;
+        }
+        if active_set.contains(&eidx) {
             continue;
         }
         let kind = edge_kind(graph, eidx);
@@ -1751,7 +1768,7 @@ fn plan_multi_nl_group(
     });
 
     if all_diodes {
-        return plan_diode_bridge(elem_indices, classified, graph, pp_transformer_edges);
+        return plan_diode_bridge(elem_indices, classified, graph, pp_transformer_edges, opamp_feedback_edges);
     }
 
     // Order by distance from input (signal-flow order).
@@ -2112,15 +2129,39 @@ fn try_bjt_two_port(
 
     let exclude: HashSet<NodeId> =
         [base_node, collector_node, emitter_node].into_iter().collect();
-    let injection_node = boundary_injection.unwrap_or_else(|| {
-        find_injection_node_multi_nl(
-            &all_passive_edges,
-            graph,
-            classified,
-            &exclude,
-            graph.in_node,
-        )
-    });
+    // Pick the injection node closest to the circuit input.  boundary_injection
+    // finds the external side of a coupling cap, but in single-BJT circuits
+    // there may be boundary edges on both sides (input coupling cap AND output
+    // coupling cap).  The output side (e.g., C_out → Boost pot) is farther
+    // from input than the input side (e.g., C_in → guitar), so compare both
+    // candidates by dist_from_in and pick the nearer one.
+    let fallback_injection = find_injection_node_multi_nl(
+        &all_passive_edges,
+        graph,
+        classified,
+        &exclude,
+        graph.in_node,
+    );
+    let injection_node = match boundary_injection {
+        Some(bi) => {
+            // Never prefer a hub node (gnd/vcc/in/out) over a boundary injection.
+            // Hub nodes like ground can have very small dist_from_in (e.g., in→C1→R1→gnd = 2)
+            // which would incorrectly beat legitimate boundary injection nodes (e.g., dist=3).
+            let fb_is_hub = fallback_injection == graph.gnd_node
+                || fallback_injection == graph.vcc_node
+                || fallback_injection == graph.in_node
+                || fallback_injection == graph.out_node
+                || graph.supply_nodes.contains(&fallback_injection);
+            if fb_is_hub {
+                bi
+            } else {
+                let bi_dist = classified.dist_from_in.get(&bi).copied().unwrap_or(usize::MAX);
+                let fb_dist = classified.dist_from_in.get(&fallback_injection).copied().unwrap_or(usize::MAX);
+                if fb_dist < bi_dist { fallback_injection } else { bi }
+            }
+        }
+        None => fallback_injection,
+    };
 
     // NL terminals: port 0 = (base, emitter), port 1 = (collector, emitter).
     // This matches BjtTwoPort::eval() port ordering.
@@ -2235,6 +2276,7 @@ fn plan_diode_bridge(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     pp_transformer_edges: &HashSet<usize>,
+    opamp_feedback_edges: &HashSet<usize>,
 ) -> Option<MultiNlPlan> {
     // Collect all terminal nodes from coupled diodes.
     let mut all_diode_nodes: HashSet<NodeId> = HashSet::new();
@@ -2244,16 +2286,39 @@ fn plan_diode_bridge(
         all_diode_nodes.insert(edge.node_b);
     }
 
-    // BFS passive edges from ALL terminal nodes, with skip_out_node=false
+    // Detect diode terminal nodes that are also opamp/active-device pins.
+    // These shared nodes (e.g. Blues: D2.b = IC1b.neg) must NOT be BFS
+    // starting points — otherwise BFS walks into the opamp's inter-stage
+    // network (R4→Gain→R3→IC1a.neg). Remove them from the starting set
+    // and use them as additional barriers instead.
+    let active_pin_nodes: HashSet<NodeId> = graph
+        .active_edge_indices
+        .iter()
+        .flat_map(|&idx| {
+            let e = &graph.edges[idx];
+            [e.node_a, e.node_b]
+        })
+        .collect();
+    let shared_active_diode_nodes: HashSet<NodeId> = all_diode_nodes
+        .intersection(&active_pin_nodes)
+        .copied()
+        .collect();
+    let bfs_start_nodes: HashSet<NodeId> = all_diode_nodes
+        .difference(&shared_active_diode_nodes)
+        .copied()
+        .collect();
+
+    // BFS passive edges from non-active diode terminals, with skip_out_node=false
     // so that RC time constant edges touching out_node are collected.
+    // Active-shared diode nodes act as barriers via output_pin_nodes + extra.
     let all_passive_edges = collect_passive_edges_from_nodes(
-        &all_diode_nodes,
+        if bfs_start_nodes.is_empty() { &all_diode_nodes } else { &bfs_start_nodes },
         graph,
         classified,
         false, // skip_out_node=false (bridge rectifier needs RC at output)
         pp_transformer_edges,
         &HashSet::new(),
-        &HashSet::new(),
+        opamp_feedback_edges,
     );
 
     // Find injection node — prefer diode terminal nodes.

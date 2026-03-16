@@ -1744,26 +1744,69 @@ impl CircuitGraph {
                 find_path_through_adj(start, end, &ground_leg_adj)
             };
 
+        // Diode adjacency map: node → [(neighbor, diode_type)]
+        // Used to traverse through chained diodes in feedback paths.
+        let mut diode_adj: HashMap<usize, Vec<(usize, DiodeType)>> = HashMap::new();
+        for comp in &pedal.components {
+            let dt = match comp.kind.diode_type() {
+                Some(dt) => dt,
+                None => continue,
+            };
+            let key_a = format!("{}.a", comp.id);
+            let key_b = format!("{}.b", comp.id);
+            if let (Some(&id_a), Some(&id_b)) = (pin_ids.get(&key_a), pin_ids.get(&key_b)) {
+                let na = uf.find(id_a);
+                let nb = uf.find(id_b);
+                diode_adj.entry(na).or_default().push((nb, dt));
+                diode_adj.entry(nb).or_default().push((na, dt));
+            }
+        }
+
         // Helper: find diodes between two nodes (for feedback diode detection).
-        // Checks direct match first, then 1-hop through passive adjacency.
-        // Covers Klon topology: neg → R6 → D1/D2 → out.
+        // Searches through passive elements and chained diodes.
+        // Covers: direct diode, Klon (neg → R → D → out),
+        // and Bluesbreaker (out → R_clip → D1 → D2 → neg).
         let find_feedback_diode = |node_a: usize, node_b: usize| -> Option<DiodeType> {
             // Direct: diode spans (neg, out)
             if let Some(&dt) = feedback_diodes.get(&(node_a, node_b)) {
                 return Some(dt);
             }
-            // 1-hop from node_a: diode at (intermediate, node_b)
+            // 1-hop from node_a through passive: diode at (intermediate, node_b)
             if let Some(neighbors) = passive_adj.get(&node_a) {
                 for &(mid, _) in neighbors {
                     if let Some(&dt) = feedback_diodes.get(&(mid, node_b)) {
                         return Some(dt);
                     }
+                    // 2-hop: passive → diode → diode → node_b (chained diode_pairs)
+                    if let Some(diode_neighbors) = diode_adj.get(&mid) {
+                        for &(mid2, dt) in diode_neighbors {
+                            if let Some(&_) = feedback_diodes.get(&(mid2, node_b)) {
+                                return Some(dt);
+                            }
+                        }
+                    }
                 }
             }
-            // 1-hop from node_b: diode at (node_a, intermediate)
+            // 1-hop from node_b through passive: diode at (node_a, intermediate)
             if let Some(neighbors) = passive_adj.get(&node_b) {
                 for &(mid, _) in neighbors {
                     if let Some(&dt) = feedback_diodes.get(&(node_a, mid)) {
+                        return Some(dt);
+                    }
+                    // 2-hop: node_a → diode → diode → passive → node_b
+                    if let Some(diode_neighbors) = diode_adj.get(&mid) {
+                        for &(mid2, dt) in diode_neighbors {
+                            if let Some(&_) = feedback_diodes.get(&(node_a, mid2)) {
+                                return Some(dt);
+                            }
+                        }
+                    }
+                }
+            }
+            // Direct chain: node_a → diode → diode → node_b (no passive hop)
+            if let Some(diode_neighbors) = diode_adj.get(&node_a) {
+                for &(mid, dt) in diode_neighbors {
+                    if let Some(&_) = feedback_diodes.get(&(mid, node_b)) {
                         return Some(dt);
                     }
                 }
