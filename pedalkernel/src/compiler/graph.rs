@@ -1964,8 +1964,13 @@ impl CircuitGraph {
                     let no_extra = HashSet::new();
                     let all_fb_comps = collect_feedback_comps(neg_node, out_node, &no_extra);
 
-                    // Check for inverting topology: pos connected to ground (or AC ground)
-                    if is_ac_ground(pos_node) {
+                    // Check for inverting topology: pos connected to ground (or AC ground).
+                    // Also accept pos grounded through resistors (e.g. difference amp
+                    // with R3/R4 divider from pos to gnd — pos is AC-grounded via R network).
+                    let pos_grounded = is_ac_ground(pos_node)
+                        || find_resistive_path(pos_node, gnd_node_resolved).is_some()
+                        || ac_ground_nodes.iter().any(|&ag| find_resistive_path(pos_node, ag).is_some());
+                    if pos_grounded {
                         // Inverting: look for Ri connected to neg (from any input source)
                         // For cascaded op-amps, Ri may connect to a previous stage's output
                         if let Some(ri) = find_input_resistor(neg_node, out_node, gnd_node_resolved)

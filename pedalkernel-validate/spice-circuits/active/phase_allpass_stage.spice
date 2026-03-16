@@ -1,10 +1,13 @@
 * ============================================================================
-* Phase All-Pass Stage - Single JFET + Op-Amp
+* Phase All-Pass Stage - Single JFET + Op-Amp (Phase 90 style)
 * PedalKernel Validation Circuit
 * ============================================================================
 * First-order all-pass filter for phaser circuits.
 * JFET (2N5952) acts as voltage-controlled resistor in triode region.
-* Op-amp provides unity-gain buffering.
+* Op-amp in gain-of-2 inverting configuration:
+*   - Inverting path: R_ap from input to V(-), R_fb from V(-) to output
+*   - Non-inverting path: JFET Rds + C_ap lowpass to V(+)
+*   - H(s) = (1 - s*Rds*C) / (1 + s*Rds*C)
 * ============================================================================
 
 * Supply
@@ -15,27 +18,29 @@ R_vref1 vcc vref 470k
 R_vref2 vref 0 470k
 C_vref vref 0 10u
 
-* Input coupling (AC couples to Vref bias)
+* Input coupling (AC coupled, biased to Vref)
 C_in v_in vin_ac 100n
 R_in vin_ac vref 1MEG
 
-* All-pass network
-* Standard first-order all-pass: R in series, RC to virtual ground via JFET
-R_ap vin_ac vap 24k
+* All-pass network - input splits to inverting and non-inverting paths
+* Inverting path: R_ap from input to opamp(-)
+R_ap vin_ac vneg 24k
+* Feedback: R_fb from opamp(-) to opamp output
+R_fb vneg vopout 24k
 
-* JFET as variable resistor (source follower config for Rds)
-* Drain to ground, source is the resistive element
-J1 0 vgate vap JMOD
-C_ap vap vneg 47n
+* Non-inverting path: JFET Rds + C_ap lowpass to opamp(+)
+* JFET drain connects to input, source to cap junction / opamp(+)
+J1 vin_ac vgate vpos JMOD
+C_ap vpos vref 47n
 
-* JFET gate bias - divider from Vref
+* JFET gate bias - divider from Vref to ground
 R_jb1 vref vgate 150k
 R_jb2 vgate 0 150k
 
-* Op-amp unity buffer (TL072)
-* Uses simple VCVS model - we just need unity gain behavior
-E_opamp vopout vref vneg vref 100k
-R_opfb vneg vopout 100
+* Op-amp (TL072) - VCVS model
+* V(+) = vpos (JFET/cap junction), V(-) = vneg
+* Output referenced to ground (single supply, Vref is DC operating point)
+E_opamp vopout 0 vpos vneg 100k
 
 * Output coupling
 C_out vopout vout_ac 100n
