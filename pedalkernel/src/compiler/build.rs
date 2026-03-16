@@ -1751,36 +1751,33 @@ fn build_rtype_stage(
         }
     }
 
-    // ── Step 4b: Geometric mean scaling of NL port resistances ──────────
-    // NL port resistances are free parameters in the R-type adaptor.
-    // After adaptive Thevenin matching, normalize all NL ports to their
-    // geometric mean. This balances impedance ratios across the NL-NL
-    // sub-block of the scattering matrix, improving NR solver conditioning.
-    // The adapted port keeps its Thévenin-matched value for VCC stages
-    // to avoid impedance mismatch that attenuates the signal.
-    if n_nl > 1 {
-        let log_sum: f64 = nl_port_resistances.iter().map(|r| r.ln()).sum();
-        let gmean = (log_sum / n_nl as f64).exp();
-        #[cfg(feature = "debug-trace")]
-        eprintln!(
-            "[geo-scale] NL R before: {:?} → gmean={:.1}",
-            &nl_port_resistances, gmean,
-        );
-        for i in 0..n_nl {
-            nl_port_resistances[i] = gmean;
-            ports[i].resistance = gmean;
+    // ── Step 4b: Iterative Thévenin adaptation of NL port resistances ────
+    // Each NL port resistance should match the Thévenin equivalent impedance
+    // seen from that port, giving S_refl ≈ 0 (no self-reflection). The initial
+    // adaptation (Step 4a) does one iteration; here we iterate until all NL
+    // self-reflections are small. This prevents Nyquist-rate instability from
+    // impedance mismatch (e.g. BE port at 282Ω vs geometric mean of 2991Ω
+    // gives S_refl=-0.83, causing period-2 oscillation).
+    {
+        let max_iters = 5;
+        for _iter in 0..max_iters {
+            let mut needs_recompute = false;
+            for i in 0..n_nl {
+                let s_refl = scattering[i * n_total + i];
+                if s_refl.abs() > 0.05 {
+                    let z_th = nl_port_resistances[i] * (1.0 + s_refl) / (1.0 - s_refl);
+                    if z_th.is_finite() && z_th > 1.0 {
+                        nl_port_resistances[i] = z_th;
+                        ports[i].resistance = z_th;
+                        needs_recompute = true;
+                    }
+                }
+            }
+            if !needs_recompute { break; }
+            let (new_s, new_vcc) = recompute_scattering(&mna, &ports, vcc_vs_idx)?;
+            scattering = new_s;
+            if new_vcc.is_some() { vcc_injection_vec = new_vcc; }
         }
-        // Only reset adapted port to gmean for non-VCC stages.
-        // VCC stages keep the Thévenin-matched adapted port to preserve
-        // signal coupling at the injection node.
-        if vs_injection_vec.is_none() && vcc_vs_idx.is_none() {
-            r_adapted = gmean;
-            ports.last_mut().unwrap().resistance = gmean;
-        }
-        // Recompute scattering with balanced port resistances
-        let (new_s, new_vcc) = recompute_scattering(&mna, &ports, vcc_vs_idx)?;
-        scattering = new_s;
-        if new_vcc.is_some() { vcc_injection_vec = new_vcc; }
     }
 
     // ── Step 5: Extract sub-blocks ──────────────────────────────────────
@@ -1803,6 +1800,48 @@ fn build_rtype_stage(
     } else {
         (vec![0.0; n_nl], Vec::new())
     };
+
+    // ── Step 5c: Correct BJT BE port dc_bias ────────────────────────────
+    // The linear MNA doesn't model BJT gain, so it underestimates the
+    // base-emitter bias (typically ~0.003V instead of ~0.65V). Without
+    // proper BE bias, the BJT sits in cutoff and provides no gain.
+    // Fix: ensure BE port dc_bias is at least at the forward-bias threshold.
+    {
+        let vbe_threshold = 0.65;
+        let mut port_idx = 0usize;
+        for &elem_idx in &plan.nl_element_indices {
+            let elem = &classified.nonlinear_elements[elem_idx];
+            match &elem.kind {
+                NonlinearKind::BjtNpn { .. } => {
+                    // Port 0 = BE (base-emitter)
+                    if port_idx < n_nl && dc_bias[port_idx].abs() < vbe_threshold {
+                        #[cfg(feature = "debug-trace")]
+                        eprintln!(
+                            "[bjt-bias-fix] BE port {} dc_bias {:.4} → {:.4}",
+                            port_idx, dc_bias[port_idx], vbe_threshold
+                        );
+                        dc_bias[port_idx] = vbe_threshold;
+                    }
+                    port_idx += 2; // BJT has 2 ports (BE, CE)
+                }
+                NonlinearKind::BjtPnp { .. } => {
+                    // PNP: BE port bias is negative (emitter higher than base)
+                    if port_idx < n_nl && dc_bias[port_idx].abs() < vbe_threshold {
+                        #[cfg(feature = "debug-trace")]
+                        eprintln!(
+                            "[bjt-bias-fix] PNP BE port {} dc_bias {:.4} → {:.4}",
+                            port_idx, dc_bias[port_idx], -vbe_threshold
+                        );
+                        dc_bias[port_idx] = -vbe_threshold;
+                    }
+                    port_idx += 2;
+                }
+                _ => {
+                    port_idx += 1; // Diodes have 1 port
+                }
+            }
+        }
+    }
 
     // ── Step 6: Create NL device roots ──────────────────────────────────
     let is_three_port_vari_mu = plan.nl_element_indices.len() == 1
@@ -2184,7 +2223,7 @@ fn build_rtype_stage(
             }
         }
         #[cfg(feature = "debug-trace")]
-        eprintln!("[vcc-preconverge] DC operating point: {:?}", initial_v);
+        eprintln!("[vcc-preconverge] dc_bias={:?} initial_v={:?}", dc_bias, initial_v);
     }
 
     // Pre-compute sizes before moving values into struct

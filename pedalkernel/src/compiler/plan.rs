@@ -429,7 +429,7 @@ impl UnionFind {
 ///
 /// Examples:
 /// - Fuzz Face Q1+Q2: shared emitter node + feedback resistor = 2 paths → group
-/// - Big Muff Q2+D1: shared collector node only = 1 path → split
+/// - Big Muff Q2+D1: BJT + diode on shared collector → co-locate (special case)
 fn has_mutual_resistive_coupling(
     seed: &NonlinearElement,
     other: &NonlinearElement,
@@ -501,6 +501,25 @@ fn has_mutual_resistive_coupling(
 
     // Count shared non-hub nodes — each shared node is one direct path.
     let shared_nodes: usize = seed_nodes.intersection(&other_nodes).count();
+
+    // Special case: BJT + diode sharing a node should be co-located.
+    // In circuits like the Big Muff, the diode clipping pair sits on the BJT's
+    // collector node. They share only 1 node (no feedback resistor between them),
+    // so the general ≥2-path rule would split them. But the diode clips the BJT's
+    // output signal — they must be solved simultaneously for correct clipping behavior.
+    if shared_nodes >= 1 {
+        let is_bjt = |k: &NonlinearKind| {
+            matches!(k, NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. })
+        };
+        let is_diode = |k: &NonlinearKind| {
+            matches!(k, NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_))
+        };
+        if (is_bjt(&seed.kind) && is_diode(&other.kind))
+            || (is_diode(&seed.kind) && is_bjt(&other.kind))
+        {
+            return true;
+        }
+    }
 
     // Count distinct resistive paths between any seed terminal and any other terminal.
     // BFS through Linear edges only (no NL, no Reactive, no boundary).

@@ -4,8 +4,16 @@
 # Famous "wall of fuzz" tone with scooped mids
 #
 # Q1-Q4: 2N5088 or similar high-gain NPN transistors
+#
+# v2 fixes:
+#   - Tone stack: use pot wiper (Tone.w) for blended output instead of
+#     shorting both pot terminals to R15. The wiper sweeps between the
+#     treble path (C8) and bass path (C9), creating the mid-scoop.
+#   - Sustain pot: rewired from vcc->R9->Sustain->Q3.collector so the
+#     pot stays on Q3's side of the C6 coupling cap boundary. Prevents
+#     the pot from being collected into Q4's downstream stage.
 
-pedal "Big Muff" {
+pedal "MUFF" {
   components {
     # Power supply
     R_bias: resistor(10k)   # Bias voltage divider
@@ -71,53 +79,61 @@ pedal "Big Muff" {
     C1.b -> R1.a
     R1.b -> gnd
 
-    # Stage 1: Input buffer
-    C1.b -> R2.a, Q1.base
-    R2.b -> gnd
+    # Stage 1: Input buffer (collector-base feedback bias)
+    C1.b -> Q1.base
     vcc -> R3.a
     R3.b -> Q1.collector
+    Q1.collector -> R2.a, C2.a
+    R2.b -> Q1.base
     Q1.emitter -> R4.a
     R4.b -> gnd
-    Q1.collector -> C2.a
 
-    # Stage 2: First clipping
-    C2.b -> R5.a, Q2.base
-    R5.b -> gnd
+    # Stage 2: First clipping (collector-base feedback bias)
+    C2.b -> Q2.base
     vcc -> R6.a
-    R6.b -> Q2.collector, D1.a
+    R6.b -> Q2.collector
+    Q2.collector -> R5.a, D1.a, C4.a
+    R5.b -> Q2.base
     D1.b -> gnd
     Q2.emitter -> R7.a, C3.a
     R7.b -> gnd
     C3.b -> gnd
-    Q2.collector -> C4.a
 
-    # Stage 3: Second clipping + Sustain
-    C4.b -> R8.a, Q3.base
-    R8.b -> gnd
-    vcc -> Sustain.a
-    Sustain.b -> R9.a
-    R9.b -> Q3.collector, D2.a
+    # Stage 3: Second clipping + Sustain (collector-base feedback bias)
+    # Sustain pot controls Q3's collector load resistance, setting
+    # the gain of this clipping stage. Wired from vcc through R9
+    # (minimum resistance) then Sustain pot to Q3's collector.
+    # This keeps the pot on Q3's side of the C6 coupling boundary.
+    C4.b -> Q3.base
+    vcc -> R9.a
+    R9.b -> Sustain.a
+    Sustain.b -> Q3.collector
+    Q3.collector -> R8.a, D2.a, C6.a
+    R8.b -> Q3.base
     D2.b -> gnd
     Q3.emitter -> R10.a, C5.a
     R10.b -> gnd
     C5.b -> gnd
-    Q3.collector -> C6.a
 
-    # Stage 4: Output driver
-    C6.b -> R11.a, Q4.base
-    R11.b -> gnd
+    # Stage 4: Output driver (collector-base feedback bias)
+    C6.b -> Q4.base
     vcc -> R12.a
     R12.b -> Q4.collector
+    Q4.collector -> R11.a, C7.a
+    R11.b -> Q4.base
     Q4.emitter -> R13.a
     R13.b -> gnd
-    Q4.collector -> C7.a
 
-    # Tone stack (parallel treble/bass paths)
+    # Tone stack (parallel treble/bass paths, wiper blends)
+    # The Big Muff tone control: treble and bass paths feed opposite
+    # ends of the pot, wiper sweeps between them. This creates the
+    # famous mid-scoop — at noon, both paths partially cancel at
+    # mid frequencies, scooping the mids.
     C7.b -> R14.a
     R14.b -> C8.a, C9.a
-    C8.b -> Tone.a             # Treble path
-    C9.b -> Tone.b             # Bass path (opposite end)
-    Tone.w -> R15.a            # Wiper blends treble/bass into mixing resistor
+    C8.b -> Tone.a             # Treble path to pot top
+    C9.b -> Tone.b             # Bass path to pot bottom
+    Tone.w -> R15.a            # Wiper output — blended treble/bass
     R15.b -> C10.a
 
     # Output
@@ -129,6 +145,7 @@ pedal "Big Muff" {
   controls {
     Sustain.position -> "Sustain" [0.0, 1.0] = 0.7
     Tone.position -> "Tone" [0.0, 1.0] = 0.5
-    Volume.position -> "Volume" [0.0, 1.0] = 0.6
+    Volume.position -> "Volume" [1.0, 0.0] = 0.6
   }
+  calibrate
 }
