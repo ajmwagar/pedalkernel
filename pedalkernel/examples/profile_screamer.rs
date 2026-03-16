@@ -4,8 +4,9 @@ use pedalkernel::elements::{reset_solver_stats, solver_stats_snapshot};
 use pedalkernel::PedalProcessor;
 
 fn main() {
+    let pedal_name = std::env::args().nth(1).unwrap_or_else(|| "screamer".to_string());
     let path = format!(
-        "{}/src/pedalkernel/pedalkernel-pro/pedals/legends/screamer.pedal",
+        "{}/src/pedalkernel/pedalkernel-pro/pedals/legends/{pedal_name}.pedal",
         env!("HOME")
     );
     let src = std::fs::read_to_string(&path).expect("screamer.pedal not found");

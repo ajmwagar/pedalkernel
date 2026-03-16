@@ -675,6 +675,7 @@ fn bench_legends_sample(c: &mut Criterion) {
         ("goldenrod", "goldenrod.pedal"),
         ("ratking", "ratking.pedal"),
         ("blues", "blues.pedal"),
+        ("fizz", "fizz.pedal"),
     ];
 
     for (label, filename) in pedals {

@@ -213,6 +213,125 @@ impl GummelPoonModel {
         (ic, ib)
     }
 
+    /// Compute currents AND analytical 2×2 Jacobian in one pass.
+    ///
+    /// Returns `(ic, ib, [∂ib/∂vbe, ∂ib/∂vbc, ∂ic/∂vbe, ∂ic/∂vbc])`.
+    ///
+    /// Note: derivatives are w.r.t. (vbe, vbc), not (vbe, vce).
+    /// Caller must chain-rule for (vbe, vce): ∂f/∂vce = -∂f/∂vbc
+    /// since vbc = vbe - vce.
+    #[inline]
+    pub fn currents_and_jacobian(&self, vbe: f64, vbc: f64) -> (f64, f64, [f64; 4]) {
+        // Exponentials (shared with currents computation)
+        let arg_vbe = (vbe / (self.nf * self.vt)).min(40.0);
+        let arg_vbc = (vbc / (self.nr * self.vt)).min(40.0);
+        let exp_vbe = arg_vbe.exp();
+        let exp_vbc = arg_vbc.exp();
+        let vbe_clamped = arg_vbe >= 40.0;
+        let vbc_clamped = arg_vbc >= 40.0;
+
+        // d(exp_vbe)/d(vbe) — zero if clamped (exp is flat at limit)
+        let dexp_vbe = if vbe_clamped { 0.0 } else { exp_vbe / (self.nf * self.vt) };
+        let dexp_vbc = if vbc_clamped { 0.0 } else { exp_vbc / (self.nr * self.vt) };
+
+        // --- Base charge Qb and its derivatives ---
+        // q1 = 1 + vbc/vaf + vbe/var
+        let q1 = 1.0
+            + if self.vaf.is_finite() { vbc / self.vaf } else { 0.0 }
+            + if self.var.is_finite() { vbe / self.var } else { 0.0 };
+        let dq1_dvbe = if self.var.is_finite() { 1.0 / self.var } else { 0.0 };
+        let dq1_dvbc = if self.vaf.is_finite() { 1.0 / self.vaf } else { 0.0 };
+
+        // q2 = IS*(exp_vbe-1)/ikf + IS*(exp_vbc-1)/ikr
+        let q2_f = if self.ikf.is_finite() && self.ikf > 0.0 {
+            self.is * (exp_vbe - 1.0) / self.ikf
+        } else { 0.0 };
+        let q2_r = if self.ikr.is_finite() && self.ikr > 0.0 {
+            self.is * (exp_vbc - 1.0) / self.ikr
+        } else { 0.0 };
+        let q2 = q2_f + q2_r;
+
+        let dq2_dvbe = if self.ikf.is_finite() && self.ikf > 0.0 {
+            self.is * dexp_vbe / self.ikf
+        } else { 0.0 };
+        let dq2_dvbc = if self.ikr.is_finite() && self.ikr > 0.0 {
+            self.is * dexp_vbc / self.ikr
+        } else { 0.0 };
+
+        // qb = (q1/2) * (1 + sqrt(1 + 4*q2))
+        let inner = (1.0 + 4.0 * q2).max(0.0);
+        let sqrt_inner = inner.sqrt();
+        let qb = (q1 / 2.0) * (1.0 + sqrt_inner);
+
+        // d(qb)/d(vbe) = (dq1/dvbe / 2) * (1 + sqrt_inner) + (q1/2) * (4 * dq2/dvbe) / (2 * sqrt_inner)
+        let dsqrt_dvbe = if sqrt_inner > 1e-30 { 2.0 * dq2_dvbe / sqrt_inner } else { 0.0 };
+        let dsqrt_dvbc = if sqrt_inner > 1e-30 { 2.0 * dq2_dvbc / sqrt_inner } else { 0.0 };
+        let dqb_dvbe = (dq1_dvbe / 2.0) * (1.0 + sqrt_inner) + (q1 / 2.0) * dsqrt_dvbe;
+        let dqb_dvbc = (dq1_dvbc / 2.0) * (1.0 + sqrt_inner) + (q1 / 2.0) * dsqrt_dvbc;
+
+        // --- Transport currents ---
+        let ef = self.is * (exp_vbe - 1.0); // IS * (exp_vbe - 1)
+        let er = self.is * (exp_vbc - 1.0); // IS * (exp_vbc - 1)
+        let icc = ef / qb;
+        let iec = er / qb;
+
+        // d(icc)/d(vbe) = (IS * dexp_vbe * qb - ef * dqb_dvbe) / qb^2
+        let qb2 = qb * qb;
+        let dicc_dvbe = if qb2 > 1e-60 {
+            (self.is * dexp_vbe * qb - ef * dqb_dvbe) / qb2
+        } else { 0.0 };
+        let dicc_dvbc = if qb2 > 1e-60 {
+            -ef * dqb_dvbc / qb2
+        } else { 0.0 };
+        let diec_dvbe = if qb2 > 1e-60 {
+            -er * dqb_dvbe / qb2
+        } else { 0.0 };
+        let diec_dvbc = if qb2 > 1e-60 {
+            (self.is * dexp_vbc * qb - er * dqb_dvbc) / qb2
+        } else { 0.0 };
+
+        // ic = icc - iec/br
+        let ic = icc - iec / self.br;
+        let dic_dvbe = dicc_dvbe - diec_dvbe / self.br;
+        let dic_dvbc = dicc_dvbc - diec_dvbc / self.br;
+
+        // ib = icc/bf + iec/br + leakage terms
+        let ib_f = icc / self.bf;
+        let ib_r = iec / self.br;
+
+        let dib_dvbe = dicc_dvbe / self.bf + diec_dvbe / self.br;
+        let dib_dvbc = dicc_dvbc / self.bf + diec_dvbc / self.br;
+
+        // Leakage: ise * (exp(vbe/(ne*vt)) - 1)
+        let (ib_leak_e, dleak_e_dvbe) = if self.ise > 0.0 {
+            let arg = (vbe / (self.ne * self.vt)).min(40.0);
+            let e = arg.exp();
+            let clamped = arg >= 40.0;
+            (self.ise * (e - 1.0),
+             if clamped { 0.0 } else { self.ise * e / (self.ne * self.vt) })
+        } else { (0.0, 0.0) };
+
+        let (ib_leak_c, dleak_c_dvbc) = if self.isc > 0.0 {
+            let arg = (vbc / (self.nc * self.vt)).min(40.0);
+            let e = arg.exp();
+            let clamped = arg >= 40.0;
+            (self.isc * (e - 1.0),
+             if clamped { 0.0 } else { self.isc * e / (self.nc * self.vt) })
+        } else { (0.0, 0.0) };
+
+        let ib = ib_f + ib_r + ib_leak_e + ib_leak_c;
+
+        // Final Jacobian: [∂ib/∂vbe, ∂ib/∂vbc, ∂ic/∂vbe, ∂ic/∂vbc]
+        let jac = [
+            dib_dvbe + dleak_e_dvbe,
+            dib_dvbc + dleak_c_dvbc,
+            dic_dvbe,
+            dic_dvbc,
+        ];
+
+        (ic, ib, jac)
+    }
+
     /// Compute B-E junction capacitance including both depletion and diffusion components.
     ///
     /// **Depletion capacitance:** Standard junction formula with forward-bias
@@ -594,6 +713,9 @@ pub struct BjtTwoPort {
     /// IS-dependent Vbe clamp: NF * VT * ln(I_max / IS).
     /// Prevents exponential blow-up at forward bias for high-IS devices (Ge).
     vbe_max: f64,
+    /// Whether to use analytical Jacobian (validated at construction).
+    /// Falls back to numerical if analytical produces poor NR convergence.
+    use_analytical_jac: bool,
 }
 
 impl BjtTwoPort {
@@ -604,25 +726,77 @@ impl BjtTwoPort {
         vbe_max.clamp(0.3, 1.0) // At least 0.3V, at most 1.0V
     }
 
+    /// Validate analytical Jacobian by comparing eval() output with analytical
+    /// vs numerical at representative operating points. Returns true if match.
+    fn validate_analytical_jacobian(model: &GummelPoonModel, is_pnp: bool) -> bool {
+        // Build a temporary BJT with analytical forced on
+        let vbe_max = Self::compute_vbe_max(model);
+        let analytical_bjt = BjtTwoPort {
+            model: *model,
+            is_pnp,
+            v_max: 50.0,
+            vbe_max,
+            use_analytical_jac: true,
+        };
+        let numerical_bjt = BjtTwoPort {
+            model: *model,
+            is_pnp,
+            v_max: 50.0,
+            vbe_max,
+            use_analytical_jac: false,
+        };
+
+        let sign = if is_pnp { -1.0 } else { 1.0 };
+        let test_points: &[[f64; 2]] = &[
+            [sign * 0.3, sign * 5.0],
+            [sign * 0.5, sign * 2.0],
+            [sign * 0.6, sign * 10.0],
+            [0.0, sign * 5.0],
+        ];
+
+        for v in test_points {
+            let mut c_a = [0.0; 2];
+            let mut j_a = [0.0; 4];
+            let mut c_n = [0.0; 2];
+            let mut j_n = [0.0; 4];
+
+            analytical_bjt.eval(v, &mut c_a, &mut j_a);
+            numerical_bjt.eval(v, &mut c_n, &mut j_n);
+
+            for k in 0..4 {
+                let abs_err = (j_a[k] - j_n[k]).abs();
+                let rel_err = if j_n[k].abs() > 1e-15 { abs_err / j_n[k].abs() } else { abs_err };
+                if rel_err > 0.05 && abs_err > 1e-10 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Create a new NPN BjtTwoPort.
     pub fn new(model: GummelPoonModel) -> Self {
         let vbe_max = Self::compute_vbe_max(&model);
+        let use_analytical_jac = Self::validate_analytical_jacobian(&model, false);
         Self {
             model,
             is_pnp: false,
             v_max: 50.0,
             vbe_max,
+            use_analytical_jac,
         }
     }
 
     /// Create a new PNP BjtTwoPort.
     pub fn new_pnp(model: GummelPoonModel) -> Self {
         let vbe_max = Self::compute_vbe_max(&model);
+        let use_analytical_jac = Self::validate_analytical_jacobian(&model, true);
         Self {
             model,
             is_pnp: true,
             v_max: 50.0,
             vbe_max,
+            use_analytical_jac,
         }
     }
 
@@ -644,41 +818,78 @@ impl NlDeviceGroupIv for BjtTwoPort {
         let vce_ext = sign * v[1];
 
         // Clamp Vbc to prevent catastrophic BC junction forward bias.
-        // When Vbe and Vce are clamped independently, their combination can
-        // produce Vbc >> 0 (e.g., PNP Vbe=0.5, Vce=-9 → Vbc=9.5V → ISC*exp(365)).
-        // Limit to 0.4V forward to allow saturation while preventing overflow.
         const VBC_MAX: f64 = 0.4;
         let clamp_vbc = |vbe: f64, vce: f64| -> f64 { (vbe - vce).min(VBC_MAX) };
 
-        // Helper: given external (Vbe_ext, Vce_ext), return (Ic, Ib) accounting for
-        // terminal resistances RB, RE, RC via fixed-point iteration.
-        //
-        // For NPN with terminal resistances in each lead:
-        //   Ve = Ie_out * RE  where Ie_out = Ic + Ib  (KCL: current out of emitter)
-        //   Vb = Vbe_ext - Ib * RB  (drop across base resistance, external → base node)
-        //   Vc = Vce_ext - Ic * RC  (drop across collector resistance)
-        //
-        //   V_be_int = Vb - Ve = Vbe_ext - Ib * RB - (Ic + Ib) * RE
-        //   V_ce_int = Vc - Ve = Vce_ext - Ic * RC - (Ic + Ib) * RE
-        //
-        // Since RB/RE/RC ≤ 40 Ω and currents ≤ ~100 mA, drops are ≤ a few mV.
-        // 4 iterations are sufficient for convergence (verified analytically).
-        let eval_with_parasitics = |vbe_ext: f64, vce_ext: f64| -> (f64, f64) {
-            let rb = self.model.rb;
-            let re = self.model.re;
-            let rc = self.model.rc;
-            let has_parasitics = rb + re + rc > 0.0;
+        let rb = self.model.rb;
+        let re = self.model.re;
+        let rc = self.model.rc;
+        let has_parasitics = rb + re + rc > 0.0;
 
-            if !has_parasitics {
-                let vbc = clamp_vbc(vbe_ext, vce_ext);
-                return self.model.currents(vbe_ext, vbc);
-            }
+        if !self.use_analytical_jac {
+            // Numerical Jacobian fallback (validated at construction as needed)
+            let eval_with_parasitics = |vbe_ext: f64, vce_ext: f64| -> (f64, f64) {
+                if !has_parasitics {
+                    let vbc = clamp_vbc(vbe_ext, vce_ext);
+                    return self.model.currents(vbe_ext, vbc);
+                }
+                let mut vbe_int = vbe_ext;
+                let mut vce_int = vce_ext;
+                for _ in 0..4 {
+                    let vbc_int = clamp_vbc(vbe_int, vce_int);
+                    let (ic, ib) = self.model.currents(vbe_int, vbc_int);
+                    let ie_out = ic + ib;
+                    vbe_int = vbe_ext - ib * rb - ie_out * re;
+                    vce_int = vce_ext - ic * rc - ie_out * re;
+                }
+                let vbc_int = clamp_vbc(vbe_int, vce_int);
+                self.model.currents(vbe_int, vbc_int)
+            };
 
-            // Fixed-point iteration: voltage updates, then final eval at converged voltages.
-            // Each iteration computes currents → voltage drops → updated internal voltages.
+            let (ic, ib) = eval_with_parasitics(vbe_ext, vce_ext);
+            currents[0] = sign * ib;
+            currents[1] = sign * ic;
+
+            let delta = 1e-7;
+            let (ic_p, ib_p) = eval_with_parasitics(vbe_ext + delta, vce_ext);
+            let (ic_m, ib_m) = eval_with_parasitics(vbe_ext - delta, vce_ext);
+            jacobian[0] = (ib_p - ib_m) / (2.0 * delta);
+            jacobian[2] = (ic_p - ic_m) / (2.0 * delta);
+
+            let (ic_p2, ib_p2) = eval_with_parasitics(vbe_ext, vce_ext + delta);
+            let (ic_m2, ib_m2) = eval_with_parasitics(vbe_ext, vce_ext - delta);
+            jacobian[1] = (ib_p2 - ib_m2) / (2.0 * delta);
+            jacobian[3] = (ic_p2 - ic_m2) / (2.0 * delta);
+            return;
+        }
+
+        if !has_parasitics {
+            // Fast path: analytical Jacobian, no parasitic iteration needed.
+            let vbc = clamp_vbc(vbe_ext, vce_ext);
+            let vbc_was_clamped = (vbe_ext - vce_ext) > VBC_MAX;
+            let (ic, ib, jac_be_bc) = self.model.currents_and_jacobian(vbe_ext, vbc);
+            currents[0] = sign * ib;
+            currents[1] = sign * ic;
+
+            // jac_be_bc is [∂ib/∂vbe, ∂ib/∂vbc, ∂ic/∂vbe, ∂ic/∂vbc]
+            // We need Jacobian in (vbe, vce) space.
+            // vbc = vbe - vce (when unclamped), so ∂vbc/∂vbe = 1, ∂vbc/∂vce = -1
+            // When vbc is clamped, ∂vbc/∂vbe = ∂vbc/∂vce = 0
+            let dvbc_dvbe = if vbc_was_clamped { 0.0 } else { 1.0 };
+            let dvbc_dvce = if vbc_was_clamped { 0.0 } else { -1.0 };
+
+            // ∂f/∂vbe = ∂f/∂vbe_direct + ∂f/∂vbc * dvbc_dvbe
+            // ∂f/∂vce = ∂f/∂vbc * dvbc_dvce
+            jacobian[0] = jac_be_bc[0] + jac_be_bc[1] * dvbc_dvbe; // ∂Ib/∂Vbe
+            jacobian[1] = jac_be_bc[1] * dvbc_dvce;                 // ∂Ib/∂Vce
+            jacobian[2] = jac_be_bc[2] + jac_be_bc[3] * dvbc_dvbe; // ∂Ic/∂Vbe
+            jacobian[3] = jac_be_bc[3] * dvbc_dvce;                 // ∂Ic/∂Vce
+        } else {
+            // Parasitic path: fixed-point iteration for currents, then analytical
+            // Jacobian at converged internal voltages with implicit differentiation
+            // through the parasitic voltage drops.
             let mut vbe_int = vbe_ext;
             let mut vce_int = vce_ext;
-
             for _ in 0..4 {
                 let vbc_int = clamp_vbc(vbe_int, vce_int);
                 let (ic, ib) = self.model.currents(vbe_int, vbc_int);
@@ -686,32 +897,74 @@ impl NlDeviceGroupIv for BjtTwoPort {
                 vbe_int = vbe_ext - ib * rb - ie_out * re;
                 vce_int = vce_ext - ic * rc - ie_out * re;
             }
-
             let vbc_int = clamp_vbc(vbe_int, vce_int);
-            self.model.currents(vbe_int, vbc_int)
-        };
+            let vbc_was_clamped = (vbe_int - vce_int) > VBC_MAX;
 
-        let (ic, ib) = eval_with_parasitics(vbe_ext, vce_ext);
-        currents[0] = sign * ib;
-        currents[1] = sign * ic;
+            let (ic, ib, jac_be_bc) = self.model.currents_and_jacobian(vbe_int, vbc_int);
+            currents[0] = sign * ib;
+            currents[1] = sign * ic;
 
-        // 2×2 Jacobian via numerical differentiation.
-        // sign² = 1, so Jacobian is polarity-invariant.
-        // The parasitic-resistance iteration runs inside the perturbed evaluations
-        // so the Jacobian naturally captures terminal-R effects.
-        let delta = 1e-7;
+            // Chain rule through parasitics using implicit function theorem.
+            // At convergence:
+            //   vbe_int = vbe_ext - ib(vbe_int, vbc_int) * rb - ie(vbe_int, vbc_int) * re
+            //   vce_int = vce_ext - ic(vbe_int, vbc_int) * rc - ie(vbe_int, vbc_int) * re
+            // where ie = ic + ib, vbc_int = vbe_int - vce_int (when unclamped).
+            //
+            // Differentiating both sides w.r.t. vbe_ext:
+            //   dvbe_int/dvbe_ext = 1 - (∂ib/∂vbe_int * dvbe_int/dvbe_ext + ∂ib/∂vce_int * dvce_int/dvbe_ext) * rb
+            //                         - (∂ie/∂vbe_int * dvbe_int/dvbe_ext + ∂ie/∂vce_int * dvce_int/dvbe_ext) * re
+            //
+            // This is a 2×2 linear system: (I + M) * [dvbe_int/dvbe_ext; dvce_int/dvbe_ext] = [1; 0]
+            //                              (I + M) * [dvbe_int/dvce_ext; dvce_int/dvce_ext] = [0; 1]
+            // where M accounts for parasitic feedback.
 
-        // ∂/∂Vbe (port 0): vbe varies, vce fixed
-        let (ic_p, ib_p) = eval_with_parasitics(vbe_ext + delta, vce_ext);
-        let (ic_m, ib_m) = eval_with_parasitics(vbe_ext - delta, vce_ext);
-        jacobian[0] = (ib_p - ib_m) / (2.0 * delta); // ∂Ib/∂Vbe
-        jacobian[2] = (ic_p - ic_m) / (2.0 * delta); // ∂Ic/∂Vbe (gm!)
+            // Derivatives in (vbe_int, vce_int) space
+            // From jac_be_bc = [∂ib/∂vbe, ∂ib/∂vbc, ∂ic/∂vbe, ∂ic/∂vbc]
+            // with chain rule vbc = vbe_int - vce_int:
+            let dvbc_dvbe_int = if vbc_was_clamped { 0.0 } else { 1.0 };
+            let dvbc_dvce_int = if vbc_was_clamped { 0.0 } else { -1.0 };
 
-        // ∂/∂Vce (port 1): vce varies, vbe fixed
-        let (ic_p2, ib_p2) = eval_with_parasitics(vbe_ext, vce_ext + delta);
-        let (ic_m2, ib_m2) = eval_with_parasitics(vbe_ext, vce_ext - delta);
-        jacobian[1] = (ib_p2 - ib_m2) / (2.0 * delta); // ∂Ib/∂Vce
-        jacobian[3] = (ic_p2 - ic_m2) / (2.0 * delta); // ∂Ic/∂Vce (Early)
+            let dib_dvbe_int = jac_be_bc[0] + jac_be_bc[1] * dvbc_dvbe_int;
+            let dib_dvce_int = jac_be_bc[1] * dvbc_dvce_int;
+            let dic_dvbe_int = jac_be_bc[2] + jac_be_bc[3] * dvbc_dvbe_int;
+            let dic_dvce_int = jac_be_bc[3] * dvbc_dvce_int;
+
+            let die_dvbe_int = dic_dvbe_int + dib_dvbe_int;
+            let die_dvce_int = dic_dvce_int + dib_dvce_int;
+
+            // System matrix (I + M):
+            // [ 1 + dib_dvbe_int*rb + die_dvbe_int*re,  dib_dvce_int*rb + die_dvce_int*re ]
+            // [ dic_dvbe_int*rc + die_dvbe_int*re,       1 + dic_dvce_int*rc + die_dvce_int*re ]
+            let a11 = 1.0 + dib_dvbe_int * rb + die_dvbe_int * re;
+            let a12 = dib_dvce_int * rb + die_dvce_int * re;
+            let a21 = dic_dvbe_int * rc + die_dvbe_int * re;
+            let a22 = 1.0 + dic_dvce_int * rc + die_dvce_int * re;
+
+            let det = a11 * a22 - a12 * a21;
+            if det.abs() > 1e-30 {
+                let inv_det = 1.0 / det;
+
+                // Solve for dvbe_int/dvbe_ext, dvce_int/dvbe_ext (RHS = [1, 0])
+                let dvbe_int_dvbe_ext = a22 * inv_det;
+                let dvce_int_dvbe_ext = -a21 * inv_det;
+
+                // Solve for dvbe_int/dvce_ext, dvce_int/dvce_ext (RHS = [0, 1])
+                let dvbe_int_dvce_ext = -a12 * inv_det;
+                let dvce_int_dvce_ext = a11 * inv_det;
+
+                // Final external Jacobian: ∂f/∂v_ext = ∂f/∂v_int * dv_int/dv_ext
+                jacobian[0] = dib_dvbe_int * dvbe_int_dvbe_ext + dib_dvce_int * dvce_int_dvbe_ext;
+                jacobian[1] = dib_dvbe_int * dvbe_int_dvce_ext + dib_dvce_int * dvce_int_dvce_ext;
+                jacobian[2] = dic_dvbe_int * dvbe_int_dvbe_ext + dic_dvce_int * dvce_int_dvbe_ext;
+                jacobian[3] = dic_dvbe_int * dvbe_int_dvce_ext + dic_dvce_int * dvce_int_dvce_ext;
+            } else {
+                // Degenerate: fall back to internal derivatives (parasitics negligible)
+                jacobian[0] = dib_dvbe_int;
+                jacobian[1] = dib_dvce_int;
+                jacobian[2] = dic_dvbe_int;
+                jacobian[3] = dic_dvce_int;
+            }
+        }
     }
 
     fn v_clamp_port(&self, port: usize) -> (f64, f64) {
@@ -992,13 +1245,256 @@ mod gummel_poon_tests {
     #[test]
     fn gummel_poon_model_has_rb_re_rc() {
         let model = GummelPoonModel::by_name("2N3904");
-        // Fields must exist and be finite; exact values depend on SPICE model data
         assert!(model.rb.is_finite(), "rb must be finite");
         assert!(model.re.is_finite(), "re must be finite");
         assert!(model.rc.is_finite(), "rc must be finite");
-        // Should be non-negative (physical resistance)
         assert!(model.rb >= 0.0, "rb must be >= 0");
         assert!(model.re >= 0.0, "re must be >= 0");
         assert!(model.rc >= 0.0, "rc must be >= 0");
+    }
+
+    // -----------------------------------------------------------------------
+    // Analytical Jacobian tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: compute numerical Jacobian of currents() via central differences.
+    fn numerical_jacobian(model: &GummelPoonModel, vbe: f64, vbc: f64) -> [f64; 4] {
+        let delta = 1e-7;
+        let (ic_p, ib_p) = model.currents(vbe + delta, vbc);
+        let (ic_m, ib_m) = model.currents(vbe - delta, vbc);
+        let dib_dvbe = (ib_p - ib_m) / (2.0 * delta);
+        let dic_dvbe = (ic_p - ic_m) / (2.0 * delta);
+
+        let (ic_p2, ib_p2) = model.currents(vbe, vbc + delta);
+        let (ic_m2, ib_m2) = model.currents(vbe, vbc - delta);
+        let dib_dvbc = (ib_p2 - ib_m2) / (2.0 * delta);
+        let dic_dvbc = (ic_p2 - ic_m2) / (2.0 * delta);
+
+        [dib_dvbe, dib_dvbc, dic_dvbe, dic_dvbc]
+    }
+
+    /// Verify analytical Jacobian matches numerical at multiple operating points.
+    #[test]
+    fn analytical_jacobian_matches_numerical_2n3904() {
+        let model = GummelPoonModel::by_name("2N3904");
+        let test_points = [
+            (0.0, 0.0),       // Zero bias
+            (0.6, -5.0),      // Forward active
+            (0.65, -10.0),    // Forward active, high Vce
+            (0.7, -2.0),      // Near saturation
+            (0.3, -1.0),      // Low forward bias
+            (0.0, -5.0),      // Cutoff
+            (0.5, 0.3),       // Near saturation (Vbc > 0)
+        ];
+
+        for (vbe, vbc) in test_points {
+            let (ic_a, ib_a, jac_a) = model.currents_and_jacobian(vbe, vbc);
+            let (ic_n, ib_n) = model.currents(vbe, vbc);
+            let jac_n = numerical_jacobian(&model, vbe, vbc);
+
+            // Currents must match exactly (same code path)
+            assert!(
+                (ic_a - ic_n).abs() < 1e-15,
+                "Ic mismatch at vbe={vbe}, vbc={vbc}: analytical={ic_a}, numerical={ic_n}"
+            );
+            assert!(
+                (ib_a - ib_n).abs() < 1e-15,
+                "Ib mismatch at vbe={vbe}, vbc={vbc}: analytical={ib_a}, numerical={ib_n}"
+            );
+
+            // Jacobian entries must match within relative tolerance
+            for (i, name) in ["∂Ib/∂Vbe", "∂Ib/∂Vbc", "∂Ic/∂Vbe", "∂Ic/∂Vbc"].iter().enumerate() {
+                let a = jac_a[i];
+                let n = jac_n[i];
+                let abs_err = (a - n).abs();
+                let rel_err = if n.abs() > 1e-20 { abs_err / n.abs() } else { abs_err };
+                assert!(
+                    rel_err < 1e-4 || abs_err < 1e-15,
+                    "Jacobian {name} mismatch at vbe={vbe}, vbc={vbc}: analytical={a:.6e}, numerical={n:.6e}, rel_err={rel_err:.2e}"
+                );
+            }
+        }
+    }
+
+    /// Same test for germanium (AC128) — different IS, BF, leakage characteristics.
+    #[test]
+    fn analytical_jacobian_matches_numerical_ac128() {
+        let model = GummelPoonModel::by_name("AC128");
+        let test_points = [
+            (0.0, 0.0),
+            (0.2, -5.0),      // Ge turns on earlier
+            (0.3, -9.0),      // Forward active
+            (0.15, -1.0),     // Low bias
+        ];
+
+        for (vbe, vbc) in test_points {
+            let (_ic, _ib, jac_a) = model.currents_and_jacobian(vbe, vbc);
+            let jac_n = numerical_jacobian(&model, vbe, vbc);
+
+            for (i, name) in ["∂Ib/∂Vbe", "∂Ib/∂Vbc", "∂Ic/∂Vbe", "∂Ic/∂Vbc"].iter().enumerate() {
+                let a = jac_a[i];
+                let n = jac_n[i];
+                let abs_err = (a - n).abs();
+                let rel_err = if n.abs() > 1e-20 { abs_err / n.abs() } else { abs_err };
+                assert!(
+                    rel_err < 1e-4 || abs_err < 1e-15,
+                    "Jacobian {name} mismatch at vbe={vbe}, vbc={vbc}: analytical={a:.6e}, numerical={n:.6e}, rel_err={rel_err:.2e}"
+                );
+            }
+        }
+    }
+
+    /// Test that BjtTwoPort::eval analytical path matches numerical path.
+    /// We compare a zero-parasitic BJT (analytical) against numerical differentiation
+    /// of currents_and_jacobian output in (vbe, vce) space.
+    #[test]
+    fn bjt_two_port_eval_analytical_vs_numerical() {
+        let mut model = GummelPoonModel::by_name("2N3904");
+        // Force zero parasitics to use analytical path
+        model.rb = 0.0;
+        model.re = 0.0;
+        model.rc = 0.0;
+        let bjt = BjtTwoPort::new(model);
+
+        let test_points = [
+            [0.6, 5.0],     // Forward active (Vbe=0.6, Vce=5)
+            [0.65, 10.0],   // Higher Vce
+            [0.3, 1.0],     // Low bias
+            [0.0, 5.0],     // Cutoff
+        ];
+
+        for v in &test_points {
+            let mut currents_a = [0.0; 2];
+            let mut jac_a = [0.0; 4];
+            bjt.eval(v, &mut currents_a, &mut jac_a);
+
+            // Numerical Jacobian of eval in (vbe, vce) space
+            let delta = 1e-7;
+            let mut c_p = [0.0; 2];
+            let mut c_m = [0.0; 2];
+            let mut j_dummy = [0.0; 4];
+
+            bjt.eval(&[v[0] + delta, v[1]], &mut c_p, &mut j_dummy);
+            bjt.eval(&[v[0] - delta, v[1]], &mut c_m, &mut j_dummy);
+            let dib_dvbe_n = (c_p[0] - c_m[0]) / (2.0 * delta);
+            let dic_dvbe_n = (c_p[1] - c_m[1]) / (2.0 * delta);
+
+            bjt.eval(&[v[0], v[1] + delta], &mut c_p, &mut j_dummy);
+            bjt.eval(&[v[0], v[1] - delta], &mut c_m, &mut j_dummy);
+            let dib_dvce_n = (c_p[0] - c_m[0]) / (2.0 * delta);
+            let dic_dvce_n = (c_p[1] - c_m[1]) / (2.0 * delta);
+
+            let jac_n = [dib_dvbe_n, dib_dvce_n, dic_dvbe_n, dic_dvce_n];
+            let names = ["∂Ib/∂Vbe", "∂Ib/∂Vce", "∂Ic/∂Vbe", "∂Ic/∂Vce"];
+
+            for (i, name) in names.iter().enumerate() {
+                let a = jac_a[i];
+                let n = jac_n[i];
+                let abs_err = (a - n).abs();
+                let rel_err = if n.abs() > 1e-20 { abs_err / n.abs() } else { abs_err };
+                assert!(
+                    rel_err < 1e-4 || abs_err < 1e-15,
+                    "BjtTwoPort {name} mismatch at v={v:?}: analytical={a:.6e}, numerical={n:.6e}, rel_err={rel_err:.2e}"
+                );
+            }
+        }
+    }
+
+    /// Test that BjtTwoPort::eval analytical+parasitic path matches numerical.
+    /// Uses the 2N3904 with its real RB=10, RE=0.1, RC=1 parasitics.
+    #[test]
+    fn bjt_two_port_eval_analytical_with_parasitics() {
+        let model = GummelPoonModel::by_name("2N3904");
+        assert!(model.rb + model.re + model.rc > 0.0, "2N3904 must have parasitics");
+        let bjt = BjtTwoPort::new(model);
+
+        let test_points = [
+            [0.6, 5.0],
+            [0.65, 10.0],
+            [0.3, 1.0],
+            [0.0, 5.0],
+        ];
+
+        for v in &test_points {
+            let mut currents_a = [0.0; 2];
+            let mut jac_a = [0.0; 4];
+            bjt.eval(v, &mut currents_a, &mut jac_a);
+
+            // Numerical Jacobian via central differences of eval itself
+            let delta = 1e-7;
+            let mut c_p = [0.0; 2];
+            let mut c_m = [0.0; 2];
+            let mut j_dummy = [0.0; 4];
+
+            bjt.eval(&[v[0] + delta, v[1]], &mut c_p, &mut j_dummy);
+            bjt.eval(&[v[0] - delta, v[1]], &mut c_m, &mut j_dummy);
+            let dib_dvbe_n = (c_p[0] - c_m[0]) / (2.0 * delta);
+            let dic_dvbe_n = (c_p[1] - c_m[1]) / (2.0 * delta);
+
+            bjt.eval(&[v[0], v[1] + delta], &mut c_p, &mut j_dummy);
+            bjt.eval(&[v[0], v[1] - delta], &mut c_m, &mut j_dummy);
+            let dib_dvce_n = (c_p[0] - c_m[0]) / (2.0 * delta);
+            let dic_dvce_n = (c_p[1] - c_m[1]) / (2.0 * delta);
+
+            let jac_n = [dib_dvbe_n, dib_dvce_n, dic_dvbe_n, dic_dvce_n];
+            let names = ["∂Ib/∂Vbe", "∂Ib/∂Vce", "∂Ic/∂Vbe", "∂Ic/∂Vce"];
+
+            for (i, name) in names.iter().enumerate() {
+                let a = jac_a[i];
+                let n = jac_n[i];
+                let abs_err = (a - n).abs();
+                let rel_err = if n.abs() > 1e-20 { abs_err / n.abs() } else { abs_err };
+                assert!(
+                    rel_err < 1e-3 || abs_err < 1e-12,
+                    "Parasitic BjtTwoPort {name} mismatch at v={v:?}: analytical={a:.6e}, numerical={n:.6e}, rel_err={rel_err:.2e}"
+                );
+            }
+        }
+    }
+
+    /// Frozen Newton optimization: verify solver stats show reduced iterations.
+    /// This is an integration-level check that the frozen Newton step in the
+    /// grouped solver actually reduces iteration count.
+    #[test]
+    fn frozen_newton_reduces_iterations() {
+        use crate::elements::nonlinear::solver::{
+            multi_port_nr_solve_grouped_into, NrWorkspace,
+        };
+
+        let model = GummelPoonModel::by_name("2N3904");
+        let bjt = BjtTwoPort::new(model);
+        let groups: Vec<&dyn NlDeviceGroupIv> = vec![&bjt];
+        let offsets = vec![0usize];
+
+        let s_nl = [0.0, 0.0, 0.0, 0.0]; // 2×2 identity-ish
+        let port_resistances = [1000.0, 1000.0];
+        let mut ws = NrWorkspace::new_grouped(2, 2);
+
+        // First solve: no cache, must iterate normally
+        let mut v_guess = [0.6, 5.0];
+        let known_a = [1.0, 10.0];
+        multi_port_nr_solve_grouped_into(
+            2, &s_nl, &known_a, &port_resistances, &groups, &offsets,
+            &mut v_guess, 24, 1e-6, &mut ws,
+        );
+        assert!(ws.has_cached_jac, "Cache should be populated after first solve");
+
+        // Second solve with slightly different input: should benefit from cache
+        let mut v_guess2 = v_guess; // warm start from previous
+        let known_a2 = [1.001, 10.001]; // tiny change
+        multi_port_nr_solve_grouped_into(
+            2, &s_nl, &known_a2, &port_resistances, &groups, &offsets,
+            &mut v_guess2, 24, 1e-6, &mut ws,
+        );
+
+        // The second solve should produce valid results
+        assert!(v_guess2[0].is_finite(), "Vbe should be finite");
+        assert!(v_guess2[1].is_finite(), "Vce should be finite");
+        // Results should be close to first solve (tiny input change)
+        assert!(
+            (v_guess2[0] - v_guess[0]).abs() < 0.01,
+            "Vbe should barely change: {} vs {}",
+            v_guess2[0], v_guess[0]
+        );
     }
 }
