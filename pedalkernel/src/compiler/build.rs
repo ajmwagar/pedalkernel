@@ -1790,7 +1790,7 @@ fn build_rtype_stage(
     // ── Step 5b: Extract DC bias from VCC injection vector ──────────────
     // dc_bias: NL ports only (for NR solver known_a)
     // vcc_bias_all: ALL ports (for scatter_all post-addition)
-    let (dc_bias, vcc_bias_all) = if let Some(ref vcc_inj) = vcc_injection_vec {
+    let (mut dc_bias, vcc_bias_all) = if let Some(ref vcc_inj) = vcc_injection_vec {
         let mut bias: Vec<f64> = vcc_inj.iter().take(n_nl).map(|&k| k * supply_voltage).collect();
         bias.resize(n_nl, 0.0);
         let bias_all: Vec<f64> = vcc_inj.iter().map(|&k| k * supply_voltage).collect();
@@ -2262,9 +2262,12 @@ fn compute_initial_v_prev(
             match group {
                 NlDeviceGroupKind::BjtTwoPort(bjt) => {
                     let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
-                    // Port 0: base-emitter — near forward-bias threshold
+                    // Port 0: base-emitter — IS-dependent forward-bias
+                    // Si (IS~1e-14): ~0.64V, Ge (IS~1e-6): ~0.18V
                     if offset < n_nl {
-                        v_prev[offset] = sign * 0.15; // Ge: 0.15V, Si: ~0.6V
+                        let vbe = bjt.model.nf * bjt.model.vt
+                            * (1.0e-3_f64 / bjt.model.is).ln();
+                        v_prev[offset] = sign * vbe.clamp(0.1, 0.8);
                     }
                     // Port 1: collector-emitter — mid-supply for active region
                     // PNP: Vce_port < 0 (collector below emitter), NPN: > 0
