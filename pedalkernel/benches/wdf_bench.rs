@@ -698,6 +698,44 @@ fn bench_legends_sample(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark with decaying signal (simulates plucked note sustain/decay).
+/// This tests adaptive oversampling effectiveness: during decay, frozen Newton
+/// succeeds more often → adaptive X2 kicks in → fewer NR solves.
+fn bench_legends_decay(c: &mut Criterion) {
+    let mut group = c.benchmark_group("legends_decay");
+
+    let legends_dir = concat!(env!("HOME"), "/src/pedalkernel/pedalkernel-pro/pedals/legends");
+    let pedals = [
+        ("muff", "muff.pedal"),
+        ("screamer", "screamer.pedal"),
+        ("rangemaster", "rangemaster.pedal"),
+        ("fizz", "fizz.pedal"),
+    ];
+
+    for (label, filename) in pedals {
+        let path = format!("{}/{}", legends_dir, filename);
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("  Skipping {label}: {path} not found");
+            continue;
+        }
+        let mut proc = compile_pedal_file(&path);
+        group.bench_function(label, |b| {
+            let mut phase = 0.0_f64;
+            let mut sample_idx = 0u64;
+            b.iter(|| {
+                phase += 440.0 / SAMPLE_RATE;
+                sample_idx += 1;
+                // Exponential decay: -60dB over 1 second (48000 samples)
+                let envelope = (-3.0 * sample_idx as f64 / SAMPLE_RATE).exp();
+                let input = 0.5 * envelope * (2.0 * std::f64::consts::PI * phase).sin();
+                black_box(proc.process(black_box(input)))
+            })
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_legends_block(c: &mut Criterion) {
     let mut group = c.benchmark_group("legends_block");
     group.measurement_time(Duration::from_secs(5));
@@ -779,6 +817,7 @@ criterion_group!(
 criterion_group!(
     legends,
     bench_legends_sample,
+    bench_legends_decay,
     bench_legends_block
 );
 

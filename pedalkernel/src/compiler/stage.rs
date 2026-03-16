@@ -1992,6 +1992,11 @@ pub(super) struct MultiNlStage {
     pub(super) work_known_a: Vec<f64>,
     pub(super) work_b_all: Vec<f64>,
     pub(super) work_a_all: Vec<f64>,
+    /// Adaptive oversampling: when true, skip NR on odd sub-samples (X2 NR rate).
+    /// Set based on previous base sample's frozen Newton success rate.
+    pub(super) adaptive_x2: bool,
+    /// Sub-sample counter within oversampler loop.
+    pub(super) subsample_counter: u8,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -2121,19 +2126,33 @@ impl MultiNlStage {
             self.dc_ramp as f64 / DC_RAMP_SAMPLES as f64
         };
 
+        // Reset frozen failure counter for this base sample's sub-samples
+        self.nr_workspace.frozen_failures = 0;
+        self.subsample_counter = 0;
+        let adaptive_x2 = self.adaptive_x2;
+
         let output = self.oversampler.process(input, |sample| {
-            // 1. Scatter-up passive children
+            let subsample_idx = self.subsample_counter;
+            self.subsample_counter += 1;
+
+            // 1. Scatter-up passive children (always — caps need state updates)
             let b_passive = &mut self.work_b_passive[..n_passive];
             for (k, child) in self.passive_children.iter_mut().enumerate() {
                 b_passive[k] = child.reflected();
             }
 
+            // Adaptive X2: on odd sub-samples, skip known_a + NR solve.
+            // Reuse b_nl from previous sub-sample (still in nr_workspace).
+            let skip_nr = adaptive_x2 && (subsample_idx % 2 == 1) && n_nl > 0;
+
+            // The adapted port's b-wave is the input signal (voltage source)
+            let b_adapted = sample * compensation;
+
+            if !skip_nr {
             // 2. Compute known_a[i] for each NL port:
             // known_a[i] = Σ_k S_nl_passive[i][k] * b_passive[k]
             //             + S_nl_adapted[i] * b_adapted
             //             + dc_bias[i]  (VCC supply contribution, precomputed constant)
-            // The adapted port's b-wave is the input signal (voltage source)
-            let b_adapted = sample * compensation;
             let known_a = &mut self.work_known_a[..n_nl];
             for i in 0..n_nl {
                 let mut a_i = self.scattering.s_nl_adapted[i] * b_adapted;
@@ -2191,6 +2210,8 @@ impl MultiNlStage {
                     );
                 }
             }
+            } // end if !skip_nr — b_nl in workspace is either fresh or reused
+
             let b_nl = &self.nr_workspace.b_nl[..n_nl];
 
             #[cfg(feature = "debug-trace")]
@@ -2276,6 +2297,13 @@ impl MultiNlStage {
                 raw_out
             }
         });
+
+        // Update adaptive oversampling for next base sample:
+        // If all sub-samples converged via frozen Newton (zero failures),
+        // the signal is slowly varying → X2 NR rate suffices next sample.
+        self.adaptive_x2 = self.nr_workspace.frozen_failures == 0
+            && self.nr_workspace.has_cached_jac
+            && n_nl > 0;
 
         #[cfg(feature = "debug-trace")]
         if input.abs() > 1e-10 {
@@ -2373,6 +2401,9 @@ impl MultiNlStage {
             }
         }
         self.oversampler.reset();
+        self.adaptive_x2 = false;
+        self.nr_workspace.has_cached_jac = false;
+        self.nr_workspace.frozen_failures = 0;
     }
 
     /// Debug dump: print multi-NL stage structure.

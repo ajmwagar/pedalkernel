@@ -32,6 +32,10 @@ pub struct NrWorkspace {
     pub(crate) cached_sys_jac: Vec<f64>, // n_nl * n_nl
     pub(crate) cached_currents: Vec<f64>, // n_nl
     pub(crate) has_cached_jac: bool,
+
+    // Adaptive oversampling: track frozen Newton failures within a base sample.
+    // When zero, the signal is slowly varying and X2 NR rate suffices.
+    pub(crate) frozen_failures: u8,
 }
 
 impl NrWorkspace {
@@ -52,6 +56,7 @@ impl NrWorkspace {
             cached_sys_jac: vec![0.0; n_nl * n_nl],
             cached_currents: vec![0.0; n_nl],
             has_cached_jac: false,
+            frozen_failures: 0,
         }
     }
 
@@ -72,6 +77,7 @@ impl NrWorkspace {
             cached_sys_jac: vec![0.0; n_nl * n_nl],
             cached_currents: vec![0.0; n_nl],
             has_cached_jac: false,
+            frozen_failures: 0,
         }
     }
 
@@ -793,6 +799,9 @@ pub(crate) fn multi_port_nr_solve_grouped_into(
     if converged_on_residual {
         // Skip NR loop entirely — frozen step was sufficient
     } else {
+
+    // Frozen Newton failed — signal changed enough to need full NR
+    ws.frozen_failures = ws.frozen_failures.saturating_add(1);
 
     for iter in 0..max_iter {
         if let Some(entry) = stats_entry.as_mut() {
