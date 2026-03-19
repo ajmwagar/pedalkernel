@@ -604,6 +604,7 @@ pub(super) fn build_stages(
             coupling_cap_id: None,
             tone_feedback: None,
             negate_vs: false,
+            input_photocouplers: Vec::new(),
         });
     }
 
@@ -2696,6 +2697,7 @@ fn build_vs_stage(
         coupling_cap_id,
         tone_feedback: None,
         negate_vs,
+        input_photocouplers: Vec::new(),
     })
 }
 
@@ -2763,6 +2765,7 @@ fn build_source_follower_stage(
         coupling_cap_id: None,
         tone_feedback: None,
         negate_vs: false,
+        input_photocouplers: Vec::new(),
     })
 }
 

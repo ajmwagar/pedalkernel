@@ -15,6 +15,7 @@ use crate::dsl::*;
 use crate::elements::*;
 use crate::elements::FeedbackConfig;
 
+use super::components::PhotocouplerComp;
 use super::dyn_node::DynNode;
 use super::graph::{
     CircuitGraph, NodeId, OpAmpFeedbackInfo, OpAmpFeedbackKind,
@@ -248,7 +249,33 @@ pub(super) fn build_opamp_feedback_stages(
                     coupling_cap_id: None,
                     tone_feedback: None,
                     negate_vs: false,
+                    input_photocouplers: Vec::new(),
                 };
+
+                // Create input-path photocoupler elements if present.
+                if !info.input_photocoupler_ids.is_empty() {
+                    for pc_id in &info.input_photocoupler_ids {
+                        // Find the photocoupler component to get its model.
+                        if let Some(pc_comp) = pedal.components.iter().find(|c| c.id == *pc_id) {
+                            if let Some(pc_type) = pc_comp.kind.as_any().downcast_ref::<PhotocouplerComp>() {
+                                use crate::dsl::PhotocouplerType;
+                                let model = match pc_type.coupler_type {
+                                    PhotocouplerType::Vtl5c3 => PhotocouplerModel::vtl5c3(),
+                                    PhotocouplerType::Vtl5c1 => PhotocouplerModel::vtl5c1(),
+                                    PhotocouplerType::Nsl32 => PhotocouplerModel::nsl32(),
+                                    PhotocouplerType::T4b => PhotocouplerModel::t4b(),
+                                };
+                                stage.input_photocouplers.push(super::stage::InputPhotocoupler {
+                                    comp_id: pc_id.clone(),
+                                    element: Photocoupler::new(model, sample_rate),
+                                    fixed_series_r: info.input_fixed_r,
+                                    dc_rf: *rf,
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // Don't balance VS impedance for complex feedback trees — their
                 // VS must remain low-Rp so the cap/pot frequency shaping works.
                 if !has_complex_fb_tree {
@@ -371,6 +398,7 @@ pub(super) fn build_opamp_feedback_stages(
                     coupling_cap_id: None,
                     tone_feedback: None,
                     negate_vs: false,
+                    input_photocouplers: Vec::new(),
                 };
                 if !has_complex_fb_tree {
                     stage.balance_vs_impedance();

@@ -730,10 +730,24 @@ fn resolve_modulation_target(
                 ModulationTarget::JfetVgs { stage_idx: 0 }
             }
         }
-        ModulationSinkKind::PhotocouplerLed => ModulationTarget::PhotocouplerLed {
-            stage_idx: 0,
-            comp_id: target_comp.to_string(),
-        },
+        ModulationSinkKind::PhotocouplerLed => {
+            // Find the stage containing this photocoupler — either in the WDF tree
+            // or as an input-path photocoupler on an opamp stage.
+            let tc = target_comp;
+            let stage_idx = stages
+                .iter()
+                .position(|s| {
+                    s.tree.find_leaf(&|leaf| {
+                        if leaf.comp_id() == Some(tc) { Some(()) } else { None }
+                    }).is_some()
+                        || s.input_photocouplers.iter().any(|pc| pc.comp_id == tc)
+                })
+                .unwrap_or(0);
+            ModulationTarget::PhotocouplerLed {
+                stage_idx,
+                comp_id: tc.to_string(),
+            }
+        }
         ModulationSinkKind::TriodeVgk => {
             let stage_idx = stages
                 .iter()

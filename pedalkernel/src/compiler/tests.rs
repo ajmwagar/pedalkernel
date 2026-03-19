@@ -4760,3 +4760,47 @@ pedal "PING" subtitle "Passive RLC ring test" {
     // At 1592 Hz / 48000 Hz, expect ~33 crossings per 1000 samples (2 per cycle)
     assert!(zero_crossings > 5, "should see oscillation (zero crossings), got {}", zero_crossings);
 }
+
+#[test]
+fn mutron_iii_photocoupler_modulation() {
+    // Mu-Tron III Bass from pedalkernel-pro — tests input-path photocoupler detection
+    let pro_path = std::path::PathBuf::from(
+        "/Users/ajmwagar/src/pedalkernel/pedalkernel-pro/pedals/real/bass/mutron_iii_bass.pedal"
+    );
+    if !pro_path.exists() {
+        return; // Skip if pedal file not available
+    }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Check that input photocouplers were detected on opamp stages
+    let pc_stages: Vec<usize> = proc.stages.iter().enumerate()
+        .filter(|(_, s)| !s.input_photocouplers.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !pc_stages.is_empty(),
+        "Mu-Tron should have opamp stages with input-path photocouplers (PC1/PC2)"
+    );
+
+    // Verify the photocoupler comp IDs and parameters
+    for &idx in &pc_stages {
+        let stage = &proc.stages[idx];
+        for pc in &stage.input_photocouplers {
+            assert!(pc.fixed_series_r > 0.0, "fixed_series_r should be positive");
+            assert!(pc.dc_rf > 0.0, "dc_rf should be positive");
+        }
+    }
+
+    // Verify that modulating PC1 changes the opamp gain by observing output change
+    let pc_stage = &mut proc.stages[pc_stages[0]];
+    let out_before = pc_stage.process(0.1);
+    pc_stage.set_input_photocoupler_led("PC1", 0.8);
+    let out_after = pc_stage.process(0.1);
+    assert!(
+        (out_after - out_before).abs() > 1e-6,
+        "Photocoupler LED modulation should change stage output: before={:.6e} after={:.6e}",
+        out_before, out_after,
+    );
+}

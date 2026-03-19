@@ -1673,7 +1673,8 @@ impl CircuitGraph {
         for comp in &pedal.components {
             let is_passive = comp.kind.as_any().downcast_ref::<Resistor>().is_some()
                 || comp.kind.as_any().downcast_ref::<Capacitor>().is_some()
-                || comp.kind.as_any().downcast_ref::<Inductor>().is_some();
+                || comp.kind.as_any().downcast_ref::<Inductor>().is_some()
+                || comp.kind.as_any().downcast_ref::<PhotocouplerComp>().is_some();
             if is_passive {
                 let pa = format!("{}.a", comp.id);
                 let pb = format!("{}.b", comp.id);
@@ -1959,6 +1960,8 @@ impl CircuitGraph {
                         pos_node,
                         out_node,
                         feedback_comp_ids: Vec::new(),
+                        input_photocoupler_ids: Vec::new(),
+                        input_fixed_r: 0.0,
                     });
                     continue;
                 }
@@ -2001,6 +2004,61 @@ impl CircuitGraph {
                         {
                             // Check for feedback diodes (Tube Screamer style soft clipping)
                             let feedback_diode = find_feedback_diode(neg_node, out_node);
+
+                            // Collect input-path photocouplers at neg_node.
+                            // BFS backward from neg through passive_adj, excluding
+                            // feedback direction (out_node) and ground.
+                            let mut input_pc_ids = Vec::new();
+                            let mut input_fixed_r = ri; // default: Ri from find_input_resistor
+                            {
+                                let mut visited = HashSet::new();
+                                visited.insert(neg_node);
+                                visited.insert(out_node); // don't go into feedback
+                                visited.insert(gnd_node_resolved);
+                                for &ag in &ac_ground_nodes {
+                                    visited.insert(ag);
+                                }
+                                let mut queue = std::collections::VecDeque::new();
+                                queue.push_back(neg_node);
+                                let mut fixed_r_sum = 0.0_f64;
+                                while let Some(node) = queue.pop_front() {
+                                    if let Some(neighbors) = passive_adj.get(&node) {
+                                        for (next, comp_id) in neighbors {
+                                            // Check photocoupler BEFORE visited check —
+                                            // photocouplers often terminate at ground (pre-visited).
+                                            let base_id = comp_id.as_str();
+                                            let is_pc = pedal.components.iter().any(|c| {
+                                                c.id == base_id
+                                                    && c.kind
+                                                        .as_any()
+                                                        .downcast_ref::<PhotocouplerComp>()
+                                                        .is_some()
+                                            });
+                                            if is_pc {
+                                                input_pc_ids.push(comp_id.clone());
+                                                continue; // Don't traverse through photocoupler
+                                            }
+                                            if !visited.insert(*next) {
+                                                continue;
+                                            }
+                                            // Accumulate fixed resistance in input path
+                                            for info in &resistor_nodes {
+                                                if info.id == *comp_id {
+                                                    fixed_r_sum += info.resistance;
+                                                }
+                                            }
+                                            // Keep traversing input path (stop at opamp pins)
+                                            if !opamp_pin_nodes.contains(next) {
+                                                queue.push_back(*next);
+                                            }
+                                        }
+                                    }
+                                }
+                                if !input_pc_ids.is_empty() {
+                                    input_fixed_r = fixed_r_sum.max(100.0);
+                                }
+                            }
+
                             results.push(OpAmpFeedbackInfo {
                                 comp_id: comp.id.clone(),
                                 opamp_type,
@@ -2014,6 +2072,8 @@ impl CircuitGraph {
                                 pos_node,
                                 out_node,
                                 feedback_comp_ids: all_fb_comps,
+                                input_photocoupler_ids: input_pc_ids,
+                                input_fixed_r,
                             });
                             continue;
                         }
@@ -2089,6 +2149,8 @@ impl CircuitGraph {
                                         pos_node,
                                         out_node,
                                         feedback_comp_ids: fb_comps,
+                                        input_photocoupler_ids: Vec::new(),
+                                        input_fixed_r: 0.0,
                                     });
                                     continue;
                                 }
@@ -2133,6 +2195,8 @@ impl CircuitGraph {
                             pos_node,
                             out_node,
                             feedback_comp_ids: fb_comps,
+                            input_photocoupler_ids: Vec::new(),
+                            input_fixed_r: 0.0,
                         });
                         continue;
                     }
@@ -2182,6 +2246,8 @@ impl CircuitGraph {
                             pos_node,
                             out_node,
                             feedback_comp_ids: all_fb_comps.clone(),
+                            input_photocoupler_ids: Vec::new(),
+                            input_fixed_r: 0.0,
                         });
                         continue;
                     }
@@ -2423,6 +2489,11 @@ pub(super) struct OpAmpFeedbackInfo {
     /// Component IDs of resistors/pots in the feedback path (Rf and Ri).
     /// Used to exclude these edges from MultiNl passive BFS.
     pub(super) feedback_comp_ids: Vec<String>,
+    /// Photocoupler component IDs in the input path (between input and neg).
+    /// These modulate the input impedance (Ri) for envelope-controlled filters.
+    pub(super) input_photocoupler_ids: Vec<String>,
+    /// Fixed resistance in series with input photocouplers (e.g., R_min).
+    pub(super) input_fixed_r: f64,
 }
 
 /// The feedback topology of an op-amp.

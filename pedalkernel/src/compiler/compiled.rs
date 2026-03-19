@@ -1588,10 +1588,13 @@ impl PedalProcessor for CompiledPedal {
                 }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage
-                            .tree
-                            .set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
-                        stage.tree.recompute();
+                        let led = modulation.clamp(0.0, 1.0);
+                        // Try WDF tree first (photocoupler in passive stage)
+                        if stage.tree.set_photocoupler_led(comp_id, led) {
+                            stage.tree.recompute();
+                        }
+                        // Also update input-path photocouplers (opamp integrator stages)
+                        stage.set_input_photocoupler_led(comp_id, led);
                     }
                 }
                 ModulationTarget::TriodeVgk { stage_idx } => {
@@ -1675,10 +1678,13 @@ impl PedalProcessor for CompiledPedal {
                 }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                     if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage
-                            .tree
-                            .set_photocoupler_led(comp_id, modulation.clamp(0.0, 1.0));
-                        stage.tree.recompute();
+                        let led = modulation.clamp(0.0, 1.0);
+                        // Try WDF tree first (photocoupler in passive stage)
+                        if stage.tree.set_photocoupler_led(comp_id, led) {
+                            stage.tree.recompute();
+                        }
+                        // Also update input-path photocouplers (opamp integrator stages)
+                        stage.set_input_photocoupler_led(comp_id, led);
                     }
                 }
                 ModulationTarget::TriodeVgk { stage_idx } => {

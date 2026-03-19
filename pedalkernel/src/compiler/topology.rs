@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::dsl::*;
 
-use super::components::{Capacitor, Inductor, Potentiometer, Resistor};
+use super::components::{Capacitor, Inductor, PhotocouplerComp, Potentiometer, Resistor};
 use super::graph::{OpAmpFeedbackInfo, OpAmpFeedbackKind};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -230,7 +230,8 @@ impl<'a> ResolvedTopology<'a> {
         for comp in &pedal.components {
             let is_simple_passive = comp.kind.as_any().downcast_ref::<Resistor>().is_some()
                 || comp.kind.as_any().downcast_ref::<Capacitor>().is_some()
-                || comp.kind.as_any().downcast_ref::<Inductor>().is_some();
+                || comp.kind.as_any().downcast_ref::<Inductor>().is_some()
+                || comp.kind.as_any().downcast_ref::<PhotocouplerComp>().is_some();
             if is_simple_passive {
                 let pa = format!("{}.a", comp.id);
                 let pb = format!("{}.b", comp.id);
@@ -533,6 +534,84 @@ impl<'a> TopologyContext<'a> {
         None
     }
 
+    /// Collect input-path photocouplers at neg_node for inverting opamps.
+    ///
+    /// BFS backward from neg_node through passive_adj (which now includes
+    /// photocouplers), excluding the feedback direction (out_node) and ground.
+    /// Returns (photocoupler_ids, input_fixed_r).
+    pub fn collect_input_photocouplers(
+        &self,
+        neg_node: usize,
+        out_node: usize,
+        default_ri: f64,
+    ) -> (Vec<String>, f64) {
+        use std::collections::{HashSet, VecDeque};
+
+        let mut input_pc_ids = Vec::new();
+        let mut visited = HashSet::new();
+        visited.insert(neg_node);
+        visited.insert(out_node);
+        visited.insert(self.resolved.gnd_node);
+        for &ag in &self.resolved.ac_ground_nodes {
+            visited.insert(ag);
+        }
+
+        // Collect opamp pin nodes as barriers
+        let mut opamp_pins = HashSet::new();
+        for comp in &self.resolved.pedal.components {
+            if comp.kind.op_amp_type().is_some() {
+                for suffix in &["neg", "out", "pos"] {
+                    let key = format!("{}.{}", comp.id, suffix);
+                    if let Some(&node) = self.resolved.pin_to_node.get(&key) {
+                        opamp_pins.insert(node);
+                    }
+                }
+            }
+        }
+
+        let mut queue = VecDeque::new();
+        queue.push_back(neg_node);
+        let mut fixed_r_sum = 0.0_f64;
+
+        while let Some(node) = queue.pop_front() {
+            if let Some(neighbors) = self.resolved.passive_adj.get(&node) {
+                for (next, comp_id) in neighbors {
+                    // Check if this component is a photocoupler BEFORE visited check —
+                    // photocouplers often terminate at ground, which is pre-visited.
+                    let is_pc = self.resolved.pedal.components.iter().any(|c| {
+                        c.id == *comp_id
+                            && c.kind.as_any().downcast_ref::<PhotocouplerComp>().is_some()
+                    });
+                    if is_pc {
+                        input_pc_ids.push(comp_id.clone());
+                        continue; // Don't traverse through photocoupler
+                    }
+                    if !visited.insert(*next) {
+                        continue;
+                    }
+                    // Accumulate fixed resistance from resistor_adj
+                    if let Some(neighbors_r) = self.resolved.resistor_adj.get(&node) {
+                        for &(n, r, ref id, _, _) in neighbors_r {
+                            if n == *next && id == comp_id {
+                                fixed_r_sum += r;
+                            }
+                        }
+                    }
+                    // Don't expand past opamp pins
+                    if !opamp_pins.contains(next) {
+                        queue.push_back(*next);
+                    }
+                }
+            }
+        }
+
+        if input_pc_ids.is_empty() {
+            (Vec::new(), 0.0)
+        } else {
+            (input_pc_ids, fixed_r_sum.max(100.0))
+        }
+    }
+
     /// Collect feedback component IDs between two nodes via passive BFS.
     ///
     /// Used to build `feedback_comp_ids` for the OpAmpFeedbackInfo.
@@ -544,7 +623,8 @@ impl<'a> TopologyContext<'a> {
         for comp in &self.resolved.pedal.components {
             let is_passive = comp.kind.as_any().downcast_ref::<Resistor>().is_some()
                 || comp.kind.as_any().downcast_ref::<Capacitor>().is_some()
-                || comp.kind.as_any().downcast_ref::<Inductor>().is_some();
+                || comp.kind.as_any().downcast_ref::<Inductor>().is_some()
+                || comp.kind.as_any().downcast_ref::<PhotocouplerComp>().is_some();
             if !is_passive {
                 if let Some(_pot) = comp.kind.as_any().downcast_ref::<Potentiometer>() {
                     // Handle 3-terminal pots.
@@ -781,6 +861,8 @@ fn classify_opamp(
             pos_node,
             out_node,
             feedback_comp_ids: Vec::new(),
+            input_photocoupler_ids: Vec::new(),
+            input_fixed_r: 0.0,
         });
     }
 
@@ -819,6 +901,8 @@ fn classify_opamp(
                     pos_node,
                     out_node,
                     feedback_comp_ids: fb_comps,
+                    input_photocoupler_ids: Vec::new(),
+                    input_fixed_r: 0.0,
                 });
             }
         }
@@ -839,6 +923,8 @@ fn classify_opamp(
                 pos_node,
                 out_node,
                 feedback_comp_ids: all_fb_comps,
+                input_photocoupler_ids: Vec::new(),
+                input_fixed_r: 0.0,
             });
         }
     }
@@ -878,6 +964,10 @@ fn classify_opamp(
     if pos_grounded && !neg_has_independent_ground_leg {
         if let Some(ri) = ctx.find_input_resistor(neg_node, out_node) {
             let feedback_diode = ctx.find_feedback_diode(neg_node, out_node);
+
+            // Collect input-path photocouplers at neg_node.
+            let (input_pc_ids, input_fixed_r) = ctx.collect_input_photocouplers(neg_node, out_node, ri);
+
             return Some(OpAmpFeedbackInfo {
                 comp_id: comp_id.to_string(),
                 opamp_type,
@@ -891,6 +981,8 @@ fn classify_opamp(
                 pos_node,
                 out_node,
                 feedback_comp_ids: all_fb_comps,
+                input_photocoupler_ids: input_pc_ids,
+                input_fixed_r,
             });
         }
     }
@@ -942,6 +1034,8 @@ fn classify_opamp(
             pos_node,
             out_node,
             feedback_comp_ids: fb_comps,
+            input_photocoupler_ids: Vec::new(),
+            input_fixed_r: 0.0,
         });
     }
 

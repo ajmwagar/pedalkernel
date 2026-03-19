@@ -502,6 +502,23 @@ pub(super) struct WdfStage {
     /// negative b_tree, the VS must be negated so the NR solver can find
     /// a valid operating point (plate/collector voltage must be positive).
     pub(super) negate_vs: bool,
+    /// Input-path photocouplers that modulate the input impedance (Ri) of
+    /// an inverting opamp. When the envelope follower drives these, the
+    /// opamp gain is updated: gain = Rf / (fixed_r + photocoupler_r).
+    /// Used by Mu-Tron style envelope-controlled integrators.
+    pub(super) input_photocouplers: Vec<InputPhotocoupler>,
+}
+
+/// A photocoupler in the input path of an inverting opamp stage.
+/// Stores the element itself (for asymmetric time constant modeling)
+/// plus the fixed series resistance and DC feedback resistance for gain updates.
+pub(super) struct InputPhotocoupler {
+    pub(super) comp_id: String,
+    pub(super) element: Photocoupler,
+    /// Fixed resistance in series with this photocoupler (e.g., R_min).
+    pub(super) fixed_series_r: f64,
+    /// DC feedback resistance (Rf) for gain recalculation.
+    pub(super) dc_rf: f64,
 }
 
 impl WdfStage {
@@ -1259,6 +1276,30 @@ impl WdfStage {
                 tf.update_coefficients(pot_pos);
             }
         }
+    }
+
+    /// Update an input-path photocoupler's LED drive and recompute opamp gain.
+    ///
+    /// Called by the modulation system when an envelope follower drives a
+    /// photocoupler that's in the input path of an inverting opamp (e.g.,
+    /// Mu-Tron integrator). The photocoupler's asymmetric time constants
+    /// are modeled internally, and the resulting resistance modulates the
+    /// opamp's gain: gain = dc_rf / (fixed_r + photocoupler_r).
+    pub(super) fn set_input_photocoupler_led(&mut self, comp_id: &str, led_drive: f64) -> bool {
+        let mut found = false;
+        for pc in &mut self.input_photocouplers {
+            if pc.comp_id == comp_id {
+                pc.element.set_led_drive(led_drive);
+                let pc_r = pc.element.port_resistance();
+                let total_ri = pc.fixed_series_r + pc_r;
+                let gain = pc.dc_rf / total_ri;
+                if let RootKind::OpAmp(ref mut oa) = self.root {
+                    oa.set_gain(gain);
+                }
+                found = true;
+            }
+        }
+        found
     }
 
     /// Set the closed-loop gain for inverting or non-inverting op-amp stages.
