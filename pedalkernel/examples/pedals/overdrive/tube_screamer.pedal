@@ -78,6 +78,6 @@ pedal "Tube Screamer" {
   controls {
     Drive.position -> "Drive" [0.0, 1.0] = 0.5
     Tone.position -> "Tone" [0.0, 1.0] = 0.5
-    Level.position -> "Level" [0.0, 1.0] = 0.7
+    Level.position -> "Level" [1.0, 0.0] = 0.7
   }
 }
