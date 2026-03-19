@@ -91,8 +91,8 @@ fn resolve_overlaps(layout: &mut Layout) {
 /// crossing minimization step.
 fn minimize_crossings(layout: &mut Layout) {
     // Group components by their group name
-    let mut group_members: std::collections::HashMap<String, Vec<usize>> =
-        std::collections::HashMap::new();
+    let mut group_members: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
     for (i, comp) in layout.components.iter().enumerate() {
         group_members.entry(comp.group.clone()).or_default().push(i);
     }

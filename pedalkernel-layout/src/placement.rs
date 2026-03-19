@@ -442,7 +442,7 @@ fn compute_group_bounds(
 fn compute_signal_path_order(placed: &[PlacedComponent], graph: &LayoutGraph) -> Vec<usize> {
     // BFS from graph.in_node following non-feedback, non-supply edges
     // to determine signal-flow ordering.
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = std::collections::BTreeSet::new();
     let mut queue = std::collections::VecDeque::new();
     let mut bfs_order: Vec<String> = Vec::new();
 
@@ -477,14 +477,14 @@ fn compute_signal_path_order(placed: &[PlacedComponent], graph: &LayoutGraph) ->
     }
 
     // Map BFS comp_id order → placed component indices
-    let name_to_placed: std::collections::HashMap<&str, usize> = placed
+    let name_to_placed: std::collections::BTreeMap<&str, usize> = placed
         .iter()
         .enumerate()
         .map(|(i, c)| (c.name.as_str(), i))
         .collect();
 
     let mut ordered: Vec<usize> = Vec::new();
-    let mut used = std::collections::HashSet::new();
+    let mut used = std::collections::BTreeSet::new();
 
     for comp_id in &bfs_order {
         if let Some(&idx) = name_to_placed.get(comp_id.as_str()) {
