@@ -120,6 +120,7 @@ pub(super) fn build_opamp_feedback_stages(
                 ri,
                 feedback_diode,
                 rf_pot,
+                ri_pot,
             } => {
                 let mut feedback_pot_id = None;
 
@@ -137,6 +138,20 @@ pub(super) fn build_opamp_feedback_stages(
                         fixed_series_r: *fixed_series_r,
                         parallel_r: *parallel_fixed_r,
                         pot_is_feedback: true,
+                        is_inverting: true,
+                    });
+                    feedback_pot_id = Some(pot_id.clone());
+                }
+
+                // If there's a pot in the Ri input path, configure the root
+                // to self-manage gain from pot resistance.
+                if let Some((pot_id, max_pot_r, fixed_series_r)) = ri_pot {
+                    root.set_feedback_config(FeedbackConfig {
+                        pot_comp_id: pot_id.clone(),
+                        other_leg_r: *rf,
+                        fixed_series_r: *fixed_series_r,
+                        parallel_r: None,
+                        pot_is_feedback: false,
                         is_inverting: true,
                     });
                     feedback_pot_id = Some(pot_id.clone());
@@ -190,9 +205,9 @@ pub(super) fn build_opamp_feedback_stages(
                 let (tree, fb_pot_from_tree) = match (tree, fb_pot_from_tree) {
                     (Some(t), pot_id) => (t, pot_id),
                     _ => {
-                        // Fallback: existing bare VS + optional pot
+                        // Fallback: existing bare VS + optional pot(s)
                         let vs = DynNode::VoltageSource(0.0, 10_000.0);
-                        let tree = if let Some((
+                        let mut tree = if let Some((
                             pot_id,
                             max_pot_r,
                             _fixed_series_r,
@@ -211,7 +226,26 @@ pub(super) fn build_opamp_feedback_stages(
                         } else {
                             vs
                         };
-                        (tree, rf_pot.as_ref().map(|(id, ..)| id.clone()))
+                        let mut fb_pot = rf_pot.as_ref().map(|(id, ..)| id.clone());
+
+                        // Also add ri_pot to tree so pot binding and
+                        // notify_pot_changed can read its resistance.
+                        if let Some((pot_id, max_pot_r, _fixed_series_r)) = ri_pot {
+                            let taper = lookup_pot_taper(pedal, pot_id);
+                            let initial_pos = 0.5;
+                            let pot = DynNode::Pot(
+                                pot_id.clone(),
+                                *max_pot_r,
+                                initial_pos,
+                                taper,
+                            );
+                            tree = DynNode::Series(Box::new(tree), Box::new(pot));
+                            if fb_pot.is_none() {
+                                fb_pot = Some(pot_id.clone());
+                            }
+                        }
+
+                        (tree, fb_pot)
                     }
                 };
                 // Tree-discovered pot takes priority

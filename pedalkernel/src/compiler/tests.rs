@@ -1317,7 +1317,7 @@ pedal "Inverting Test" subtitle "test" {
     let info = &analysis.feedback_loops[0];
     assert_eq!(info.comp_id, "U1");
     match &info.feedback_kind {
-        super::graph::OpAmpFeedbackKind::Inverting { rf, ri, feedback_diode, rf_pot } => {
+        super::graph::OpAmpFeedbackKind::Inverting { rf, ri, feedback_diode, rf_pot, .. } => {
             assert!((rf - 100_000.0).abs() < 1.0, "Rf should be 100k: {rf}");
             assert!((ri - 10_000.0).abs() < 1.0, "Ri should be 10k: {ri}");
             assert!(feedback_diode.is_none(), "No feedback diode");
@@ -1390,7 +1390,7 @@ fn topology_classify_inverting_with_feedback_diodes() {
 
     let u2 = analysis.feedback_loops.iter().find(|i| i.comp_id == "U2").unwrap();
     match &u2.feedback_kind {
-        super::graph::OpAmpFeedbackKind::Inverting { rf, ri, feedback_diode, rf_pot } => {
+        super::graph::OpAmpFeedbackKind::Inverting { rf, ri, feedback_diode, rf_pot, .. } => {
             assert!(*rf > 0.0, "Rf should be positive: {rf}");
             assert!(*ri > 0.0, "Ri should be positive: {ri}");
             assert!(feedback_diode.is_some(), "Tube Screamer U2 should have feedback diodes");
@@ -4793,11 +4793,22 @@ fn mutron_iii_photocoupler_modulation() {
         }
     }
 
-    // Verify that modulating PC1 changes the opamp gain by observing output change
+    // Verify full pipeline produces output
+    let mut peak = 0.0f64;
+    for i in 0..4800 {
+        let input = 0.3 * (2.0 * std::f64::consts::PI * 220.0 * i as f64 / 48000.0).sin();
+        let output = proc.process(input);
+        peak = peak.max(output.abs());
+    }
+    assert!(peak > 0.001, "Mu-Tron output should not be silent, peak={:.6e}", peak);
+
+    // Verify that modulating PC1 changes the opamp gain by observing output change.
+    // Reset first — the integrator accumulates DC that saturates at v_max.
+    proc.reset();
     let pc_stage = &mut proc.stages[pc_stages[0]];
-    let out_before = pc_stage.process(0.1);
+    let out_before = pc_stage.process(1e-5);
     pc_stage.set_input_photocoupler_led("PC1", 0.8);
-    let out_after = pc_stage.process(0.1);
+    let out_after = pc_stage.process(1e-5);
     assert!(
         (out_after - out_before).abs() > 1e-6,
         "Photocoupler LED modulation should change stage output: before={:.6e} after={:.6e}",

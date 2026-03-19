@@ -397,6 +397,38 @@ impl<'a> TopologyContext<'a> {
         None
     }
 
+    /// Find the input resistor at `neg_node`, also returning pot info if it's a pot.
+    /// Returns `(ri, Option<(pot_comp_id, max_r, fixed_series_r)>)`.
+    /// `fixed_series_r` is the sum of fixed resistors in series with the pot in the input path.
+    pub fn find_input_resistor_with_pot(
+        &self, neg_node: usize, out_node: usize,
+    ) -> Option<(f64, Option<(String, f64, f64)>)> {
+        if let Some(neighbors) = self.resolved.resistor_adj.get(&neg_node) {
+            for &(next, r, ref id, is_pot, max_r) in neighbors {
+                if next == out_node { continue; }
+                if self.is_ac_grounded(next) { continue; }
+                if is_pot {
+                    // Found a pot in the input path. Check for fixed series R beyond it.
+                    let mut fixed_r = 0.0;
+                    if let Some(beyond) = self.resolved.resistor_adj.get(&next) {
+                        for &(nn, rr, _, ip, _) in beyond {
+                            if nn == neg_node { continue; }
+                            if !ip { fixed_r += rr; }
+                        }
+                    }
+                    // Strip __aw/__wb suffix to get the original pot comp_id
+                    let pot_id = id.strip_suffix("__aw")
+                        .or_else(|| id.strip_suffix("__wb"))
+                        .unwrap_or(id)
+                        .to_string();
+                    return Some((r + fixed_r, Some((pot_id, max_r, fixed_r))));
+                }
+                return Some((r, None));
+            }
+        }
+        None
+    }
+
     /// Find a JFET component with a pin at the given node.
     ///
     /// Returns the component ID if found.
@@ -962,7 +994,7 @@ fn classify_opamp(
                 .any(|&ag| check(ag))
     };
     if pos_grounded && !neg_has_independent_ground_leg {
-        if let Some(ri) = ctx.find_input_resistor(neg_node, out_node) {
+        if let Some((ri, ri_pot_info)) = ctx.find_input_resistor_with_pot(neg_node, out_node) {
             let feedback_diode = ctx.find_feedback_diode(neg_node, out_node);
 
             // Collect input-path photocouplers at neg_node.
@@ -976,6 +1008,7 @@ fn classify_opamp(
                     ri,
                     feedback_diode,
                     rf_pot,
+                    ri_pot: ri_pot_info,
                 },
                 neg_node,
                 pos_node,

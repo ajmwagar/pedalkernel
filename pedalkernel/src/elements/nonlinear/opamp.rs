@@ -467,7 +467,11 @@ impl OpAmpRoot {
         } else {
             // Pot is in Ri leg
             let ri = (cfg.fixed_series_r + pot_r).max(100.0);
-            1.0 + cfg.other_leg_r / ri
+            if cfg.is_inverting {
+                cfg.other_leg_r / ri
+            } else {
+                1.0 + cfg.other_leg_r / ri
+            }
         };
         self.set_gain(gain);
     }

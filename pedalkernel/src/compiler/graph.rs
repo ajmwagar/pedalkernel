@@ -591,15 +591,15 @@ impl CircuitGraph {
                 .expect("deferred 3-term component must be a Potentiometer");
             let (max_r, taper) = (pot_comp.max_r, pot_comp.taper);
 
-            // Synthetic upper-half: a → wiper
-            let aw_idx = pedal.components.len() + extra_components.len();
+            // Indices must be relative to all_components (which includes fork paths),
+            // not pedal.components.
+            let aw_idx = all_components.len() + extra_components.len();
             extra_components.push(ComponentDef {
                 id: format!("{pot_id}__aw"),
                 kind: Box::new(Potentiometer { max_r, taper }),
             });
 
-            // Synthetic lower-half: wiper → b
-            let wb_idx = pedal.components.len() + extra_components.len();
+            let wb_idx = all_components.len() + extra_components.len();
             extra_components.push(ComponentDef {
                 id: format!("{pot_id}__wb"),
                 kind: Box::new(Potentiometer { max_r, taper }),
@@ -2067,6 +2067,7 @@ impl CircuitGraph {
                                     ri,
                                     feedback_diode,
                                     rf_pot,
+                                    ri_pot: None,
                                 },
                                 neg_node,
                                 pos_node,
@@ -2512,10 +2513,12 @@ pub(super) enum OpAmpFeedbackKind {
         /// Diode type in feedback loop (if any) for soft clipping.
         /// Tube Screamer style: diodes in parallel with Rf create soft clipping.
         feedback_diode: Option<DiodeType>,
-        /// Potentiometer info for runtime gain modulation.
+        /// Potentiometer info for feedback (Rf) path runtime gain modulation.
         /// (comp_id, max_resistance, fixed_series_resistance, parallel_fixed_resistance)
-        /// parallel_fixed_r is the resistance of paths in parallel with the pot (e.g., TS R4)
         rf_pot: Option<(String, f64, f64, Option<f64>)>,
+        /// Potentiometer info for input (Ri) path runtime gain modulation.
+        /// (comp_id, max_resistance, fixed_series_resistance)
+        ri_pot: Option<(String, f64, f64)>,
     },
     /// Non-inverting amplifier: pos connected to input, neg connected through Ri
     /// to ground and through Rf to output. Closed-loop gain = 1 + Rf/Ri.

@@ -149,6 +149,7 @@ impl DynNode {
         let rp = if path_index == position { r_active } else { r_inactive };
         Self::Leaf(Box::new(WdfSwitchedResistor {
             switch_id, path_index, num_paths, r_active, r_inactive, position, rp,
+            last_a: 0.0,
         }))
     }
 

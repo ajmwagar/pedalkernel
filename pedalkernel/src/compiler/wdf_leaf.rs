@@ -441,11 +441,13 @@ pub struct WdfSwitchedResistor {
     pub r_inactive: f64,
     pub position: usize,
     pub rp: f64,
+    pub(crate) last_a: f64,
 }
 
 impl WdfLeaf for WdfSwitchedResistor {
     fn reflected(&mut self) -> f64 { 0.0 }
-    fn set_incident(&mut self, _a: f64) {}
+    fn set_incident(&mut self, a: f64) { self.last_a = a; }
+    fn leaf_voltage(&self) -> f64 { self.last_a / 2.0 }
     fn port_resistance(&self) -> f64 { self.rp }
     fn comp_id(&self) -> Option<&str> { Some(&self.switch_id) }
     fn type_tag(&self) -> &'static str { "switched_resistor" }
