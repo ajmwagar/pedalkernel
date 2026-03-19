@@ -20,7 +20,7 @@ use super::dyn_node::DynNode;
 use super::graph::{
     CircuitGraph, NodeId, OpAmpFeedbackInfo, OpAmpFeedbackKind,
 };
-use super::stage::WdfStage;
+use super::stage::{ToneFeedback, WdfStage};
 
 /// Result of op-amp analysis.
 pub(super) struct OpAmpAnalysis {
@@ -114,6 +114,93 @@ pub(super) fn build_opamp_feedback_stages(
             OpAmpFeedbackKind::UnityGain => {
                 // Unity-gain op-amps are paired with JFET stages for all-pass filters.
                 // Skip here — handled in plan.rs during JFET stage creation.
+            }
+            OpAmpFeedbackKind::InvertingShelving {
+                rf,
+                ri,
+                c_tone,
+                r_shelf,
+                ref pot_id,
+                max_pot_r,
+            } => {
+                // Klon Centaur-style active shelving EQ: inverting opamp with
+                // R_fb (DC) in parallel with C_tone → pot → R_shelf (HF).
+                //
+                // Build a ToneFeedback IIR that computes the exact first-order
+                // shelving transfer function and recomputes coefficients when
+                // the pot position changes.
+                let model = OpAmpModel::from_opamp_type(&info.opamp_type);
+                // DC gain = -R_fb / R_in
+                let gain = rf / ri;
+                let mut root = OpAmpRoot::new_inverting(model, gain);
+                root.set_sample_rate(sample_rate);
+
+                let default_supply = 9.0_f64;
+                let v_max = (default_supply / 2.0 - 1.5).max(0.5);
+                root.set_v_max(v_max);
+
+                // Build a tree that holds the tone pot so that:
+                //   (a) `tree.set_pot(pot_id, value)` succeeds when the pot changes, and
+                //   (b) `tree.get_pot_position(pot_id)` returns the current position so
+                //       notify_pot_changed() can update ToneFeedback coefficients.
+                // The ToneFeedback IIR bypasses the WDF output so the tree is never
+                // used for audio — it only holds pot state.
+                let initial_pot_pos = 0.5;
+                let taper = lookup_pot_taper(pedal, pot_id);
+                let pot_node = DynNode::Pot(
+                    pot_id.clone(),
+                    *max_pot_r,
+                    initial_pot_pos,
+                    taper,
+                );
+                let vs = DynNode::VoltageSource(0.0, 10_000.0);
+                let tree = DynNode::Series(Box::new(vs), Box::new(pot_node));
+
+                // Instantiate the shelving IIR with the same initial pot position
+                let tone_fb = ToneFeedback::new(
+                    *rf,
+                    *ri,
+                    *c_tone,
+                    *r_shelf,
+                    *max_pot_r,
+                    pot_id.clone(),
+                    sample_rate,
+                    initial_pot_pos,
+                );
+
+                let mut stage = WdfStage {
+                    tree,
+                    root: RootKind::OpAmp(root),
+                    compensation: 1.0,
+                    oversampler: crate::oversampling::Oversampler::new(oversampling),
+                    base_diode_model: None,
+                    paired_opamp: None,
+                    allpass_feedback: None,
+                    allpass_direct: None,
+                    dc_block: None,
+                    grid_dc_blocker: None,
+                    is_source_follower: false,
+                    prev_source_voltage: 0.0,
+                    signal_flow_distance: 0,
+                    transformer_gain: 1.0,
+                    injection_node_id: usize::MAX,
+                    output_node_id: usize::MAX,
+                    is_trigger_voice: false,
+                    is_feedforward: false,
+                    sample_counter: 0,
+                    root_comp_id: String::new(),
+                    feedback_pot_id: Some(pot_id.clone()),
+                    output_probe: None,
+                    feedback_opamp: None,
+                    vcc_injection_coeff: 0.0,
+                    vcc_dc_ramp: 0,
+                    coupling_cap_id: None,
+                    tone_feedback: Some(tone_fb),
+                    negate_vs: false,
+                    input_photocouplers: Vec::new(),
+                };
+                stage.balance_vs_impedance();
+                stages.push(stage);
             }
             OpAmpFeedbackKind::Inverting {
                 rf,
