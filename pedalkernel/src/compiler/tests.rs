@@ -992,7 +992,7 @@ fn opamp_feedback_tree_vs_is_series() {
     // The tree root must be a Series adaptor (Series(VS, feedback_network))
     // If it's Parallel, the VS gets swamped and tone control doesn't work.
     assert!(matches!(&tone_stage.tree,
-        super::dyn_node::DynNode::Series { .. }),
+        super::dyn_node::DynNode::Binary { kind: super::dyn_node::BinaryKind::Series, .. }),
         "Feedback tree root must be Series(VS, feedback_network), not Parallel");
 }
 
@@ -1849,27 +1849,31 @@ fn assert_finite(output: &[f64], name: &str) {
 }
 
 fn dump_tree(node: &super::dyn_node::DynNode, depth: usize) {
-    use super::dyn_node::DynNode;
+    use super::dyn_node::{DynNode, BinaryKind};
     let indent = "  ".repeat(depth);
     match node {
-        DynNode::Resistor { rp, .. } => eprintln!("{indent}R({rp:.1})"),
-        DynNode::Capacitor { capacitance, rp, .. } => eprintln!("{indent}C({capacitance:.2e}, rp={rp:.1})"),
-        DynNode::LeakyCapacitor { capacitance, rp, .. } => eprintln!("{indent}LC({capacitance:.2e}, rp={rp:.1})"),
-        DynNode::Inductor { inductance, rp, .. } => eprintln!("{indent}L({inductance:.2e}, rp={rp:.1})"),
-        DynNode::VoltageSource { rp, .. } => eprintln!("{indent}VS(rp={rp:.1})"),
-        DynNode::Pot { comp_id, rp, position, max_resistance, .. } =>
-            eprintln!("{indent}Pot({comp_id}, pos={position:.2}, rp={rp:.1}, max={max_resistance:.0})"),
-        DynNode::Series { left, right, rp, gamma, .. } => {
-            eprintln!("{indent}Series(rp={rp:.1}, γ={gamma:.4})");
+        DynNode::Leaf(leaf) => {
+            eprintln!("{indent}{}", leaf.debug_info());
+        }
+        DynNode::Binary { kind, left, right, rp, gamma, .. } => {
+            let kind_str = match kind {
+                BinaryKind::Series => "Series",
+                BinaryKind::Parallel => "Parallel",
+            };
+            eprintln!("{indent}{kind_str}(rp={rp:.1}, γ={gamma:.4})");
             dump_tree(left, depth + 1);
             dump_tree(right, depth + 1);
         }
-        DynNode::Parallel { left, right, rp, gamma, .. } => {
-            eprintln!("{indent}Parallel(rp={rp:.1}, γ={gamma:.4})");
-            dump_tree(left, depth + 1);
-            dump_tree(right, depth + 1);
+        DynNode::Transformer { secondary, turns_ratio, rp, .. } => {
+            eprintln!("{indent}Transformer(n={turns_ratio:.3}, rp={rp:.1})");
+            dump_tree(secondary, depth + 1);
         }
-        _ => eprintln!("{indent}Other(rp={:.1})", node.port_resistance()),
+        DynNode::RType { adaptor, children } => {
+            eprintln!("{indent}RType(ports={}, rp={:.1})", adaptor.num_ports, adaptor.port_resistance);
+            for c in children {
+                dump_tree(c, depth + 1);
+            }
+        }
     }
 }
 

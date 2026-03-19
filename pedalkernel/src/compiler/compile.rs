@@ -246,7 +246,7 @@ fn build_passive_wdf_stage(
     let extra = vec![super::graph::ExtraEdge {
         node_a: source_node,
         node_b: graph.in_node,
-        tree: DynNode::VoltageSource { voltage: 0.0, rp: 1.0 },
+        tree: DynNode::VoltageSource(0.0, 1.0),
     }];
     let terminals = vec![source_node, graph.gnd_node];
     match super::graph::graph_reduce(
@@ -263,6 +263,7 @@ fn build_passive_wdf_stage(
                 base_diode_model: None,
                 paired_opamp: None,
                 allpass_feedback: None,
+                allpass_direct: None,
                 dc_block: None,
                 is_source_follower: false,
                 prev_source_voltage: 0.0,
@@ -512,7 +513,7 @@ fn build_passive_rtype_from_decomposed(
     // ── Step 4: Output probe port ───────────────────────────────────────
     let out_mna = to_mna(probe_node);
     let output_port_idx = reactive_children.len();
-    reactive_children.push(DynNode::Resistor { comp_id: None, rp: probe_resistance, last_a: 0.0 });
+    reactive_children.push(DynNode::Resistor(None, probe_resistance));
     reactive_ports.push(crate::tree::WdfPort {
         node_pos: out_mna,
         node_neg: None,
@@ -552,7 +553,7 @@ fn build_passive_rtype_from_decomposed(
     }
 
     // ── Step 7: Build WdfStage ──────────────────────────────────────────
-    let dummy_tree = DynNode::Resistor { comp_id: None, rp: 1000.0, last_a: 0.0 };
+    let dummy_tree = DynNode::Resistor(None, 1000.0);
     let has_pots = !pot_stamps.is_empty();
     let recompute_mna = if has_pots { Some(mna.clone()) } else { None };
     let recompute_ports = if has_pots { Some(ports.clone()) } else { None };
@@ -562,7 +563,7 @@ fn build_passive_rtype_from_decomposed(
         // Find the pot's max_resistance from the DynNode
         let pot_child_idx = pot_stamps[0].0;
         let max_r = match &reactive_children[pot_child_idx] {
-            DynNode::Pot { max_resistance, .. } => *max_resistance,
+            DynNode::Leaf(leaf) => leaf.pot_max_resistance().unwrap_or(0.0),
             _ => 0.0,
         };
         if max_r > 1.0 {
@@ -604,6 +605,7 @@ fn build_passive_rtype_from_decomposed(
         base_diode_model: None,
         paired_opamp: None,
         allpass_feedback: None,
+        allpass_direct: None,
         dc_block: None,
         is_source_follower: false,
         prev_source_voltage: 0.0,
@@ -1006,6 +1008,7 @@ fn build_feedforward_stages(
                     base_diode_model: None,
                     paired_opamp: None,
                     allpass_feedback: None,
+                    allpass_direct: None,
                     dc_block: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
@@ -1113,17 +1116,7 @@ fn build_output_rooted_stage(
     // Output is extracted at right child (load port) via series_junction_voltage.
     let source_dyn = make_leaf(source_edge.comp_idx, source_comp, None, sample_rate);
     let load_dyn = make_leaf(load_edge.comp_idx, load_comp, None, sample_rate);
-    let r1 = source_dyn.port_resistance();
-    let r2 = load_dyn.port_resistance();
-    let rp = r1 + r2;
-    let tree = DynNode::Series {
-        left: Box::new(source_dyn),
-        right: Box::new(load_dyn),
-        rp,
-        gamma: r1 / rp,
-        b1: 0.0,
-        b2: 0.0,
-    };
+    let tree = DynNode::Series(Box::new(source_dyn), Box::new(load_dyn));
 
     Some(WdfStage {
         tree,
@@ -1135,6 +1128,7 @@ fn build_output_rooted_stage(
         base_diode_model: None,
         paired_opamp: None,
         allpass_feedback: None,
+        allpass_direct: None,
         dc_block: None,
         is_source_follower: false,
         prev_source_voltage: 0.0,
@@ -1559,7 +1553,8 @@ pub fn compile_pedal_with_options(
         for info in &opamp_analysis.feedback_loops {
             match &info.feedback_kind {
                 super::graph::OpAmpFeedbackKind::UnityGain
-                | super::graph::OpAmpFeedbackKind::AllpassJfet { .. } => continue,
+                | super::graph::OpAmpFeedbackKind::AllpassJfet { .. }
+                | super::graph::OpAmpFeedbackKind::Allpass { .. } => continue,
                 super::graph::OpAmpFeedbackKind::Inverting { feedback_diode, .. }
                     if skip_feedback_tree_opamps.contains(&info.comp_id)
                         && (feedback_diode.is_some()
@@ -1596,7 +1591,13 @@ pub fn compile_pedal_with_options(
     let opamp_feedback_edges: HashSet<usize> = {
         let mut comp_ids: HashSet<String> = HashSet::new();
         for info in &opamp_analysis.feedback_loops {
-            if !skip_feedback_tree_opamps.contains(&info.comp_id) {
+            // Allpass feedback components (R_ap, R_fb) must always be excluded
+            // from the NL BFS — they belong to the opamp, not the JFET stage.
+            let always_exclude = matches!(
+                info.feedback_kind,
+                super::graph::OpAmpFeedbackKind::Allpass { .. }
+            );
+            if always_exclude || !skip_feedback_tree_opamps.contains(&info.comp_id) {
                 comp_ids.extend(info.feedback_comp_ids.iter().cloned());
             }
         }
@@ -1619,7 +1620,8 @@ pub fn compile_pedal_with_options(
         for info in &opamp_analysis.feedback_loops {
             match &info.feedback_kind {
                 super::graph::OpAmpFeedbackKind::UnityGain
-                | super::graph::OpAmpFeedbackKind::AllpassJfet { .. } => continue,
+                | super::graph::OpAmpFeedbackKind::AllpassJfet { .. }
+                | super::graph::OpAmpFeedbackKind::Allpass { .. } => continue,
                 super::graph::OpAmpFeedbackKind::Inverting { feedback_diode, .. }
                     if skip_feedback_tree_opamps.contains(&info.comp_id)
                         && (feedback_diode.is_some()

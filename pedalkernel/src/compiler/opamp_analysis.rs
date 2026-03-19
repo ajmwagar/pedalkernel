@@ -176,10 +176,7 @@ pub(super) fn build_opamp_feedback_stages(
                     (Some(t), pot_id) => (t, pot_id),
                     _ => {
                         // Fallback: existing bare VS + optional pot
-                        let vs = DynNode::VoltageSource {
-                            voltage: 0.0,
-                            rp: 10_000.0,
-                        };
+                        let vs = DynNode::VoltageSource(0.0, 10_000.0);
                         let tree = if let Some((
                             pot_id,
                             max_pot_r,
@@ -189,27 +186,13 @@ pub(super) fn build_opamp_feedback_stages(
                         {
                             let taper = lookup_pot_taper(pedal, pot_id);
                             let initial_pos = 0.5;
-                            let tapered = taper.apply(initial_pos);
-                            let pot_rp = (tapered * max_pot_r).max(1.0);
-                            let pot = DynNode::Pot {
-                                comp_id: pot_id.clone(),
-                                max_resistance: *max_pot_r,
-                                position: initial_pos,
+                            let pot = DynNode::Pot(
+                                pot_id.clone(),
+                                *max_pot_r,
+                                initial_pos,
                                 taper,
-                                rp: pot_rp,
-                                last_a: 0.0,
-                            };
-                            let r_vs = vs.port_resistance();
-                            let r_pot = pot.port_resistance();
-                            let rp = r_vs + r_pot;
-                            DynNode::Series {
-                                gamma: r_vs / rp,
-                                left: Box::new(vs),
-                                right: Box::new(pot),
-                                rp,
-                                b1: 0.0,
-                                b2: 0.0,
-                            }
+                            );
+                            DynNode::Series(Box::new(vs), Box::new(pot))
                         } else {
                             vs
                         };
@@ -230,6 +213,7 @@ pub(super) fn build_opamp_feedback_stages(
                     base_diode_model: None,
                     paired_opamp: None,
                     allpass_feedback: None,
+                    allpass_direct: None,
                     dc_block: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
@@ -307,10 +291,7 @@ pub(super) fn build_opamp_feedback_stages(
                     (Some(t), pot_id) => (t, pot_id),
                     _ => {
                         // Fallback: existing bare VS + optional pot
-                        let vs = DynNode::VoltageSource {
-                            voltage: 0.0,
-                            rp: 10_000.0,
-                        };
+                        let vs = DynNode::VoltageSource(0.0, 10_000.0);
                         let active_pot = rf_pot.as_ref().or(ri_pot.as_ref());
                         let tree = if let Some((
                             pot_id,
@@ -321,27 +302,13 @@ pub(super) fn build_opamp_feedback_stages(
                         {
                             let taper = lookup_pot_taper(pedal, pot_id);
                             let initial_pos = 0.5;
-                            let tapered = taper.apply(initial_pos);
-                            let pot_rp = (tapered * max_pot_r).max(1.0);
-                            let pot = DynNode::Pot {
-                                comp_id: pot_id.clone(),
-                                max_resistance: *max_pot_r,
-                                position: initial_pos,
+                            let pot = DynNode::Pot(
+                                pot_id.clone(),
+                                *max_pot_r,
+                                initial_pos,
                                 taper,
-                                rp: pot_rp,
-                                last_a: 0.0,
-                            };
-                            let r_vs = vs.port_resistance();
-                            let r_pot = pot.port_resistance();
-                            let rp = r_vs + r_pot;
-                            DynNode::Series {
-                                gamma: r_vs / rp,
-                                left: Box::new(vs),
-                                right: Box::new(pot),
-                                rp,
-                                b1: 0.0,
-                                b2: 0.0,
-                            }
+                            );
+                            DynNode::Series(Box::new(vs), Box::new(pot))
                         } else {
                             vs
                         };
@@ -366,6 +333,7 @@ pub(super) fn build_opamp_feedback_stages(
                     base_diode_model: None,
                     paired_opamp: None,
                     allpass_feedback: None,
+                    allpass_direct: None,
                     dc_block: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
@@ -391,6 +359,9 @@ pub(super) fn build_opamp_feedback_stages(
             }
             OpAmpFeedbackKind::AllpassJfet { .. } => {
                 // Handled during JFET stage building in build_stages().
+            }
+            OpAmpFeedbackKind::Allpass { .. } => {
+                // Paired with JFET stage via paired_opamp in build_stages().
             }
         }
     }
@@ -424,6 +395,37 @@ pub(super) fn build_allpass_jfet_map(analysis: &OpAmpAnalysis) -> HashMap<String
         } = info.feedback_kind
         {
             map.insert(jfet_id.clone(), (rf, cf));
+        }
+    }
+    map
+}
+
+/// Info for an all-pass opamp to be paired with a JFET stage.
+pub(super) struct AllpassPairing {
+    /// Phase-shifting capacitor value in Farads.
+    pub(super) cap: f64,
+    /// Sample rate for IIR coefficient computation.
+    pub(super) sample_rate: f64,
+}
+
+/// Build a map from JFET component ID → AllpassPairing for Allpass feedback topologies.
+/// The AllpassDirect IIR computes H(s) = (1-sRC)/(1+sRC) using the JFET's Rds and C_ap.
+pub(super) fn build_allpass_queue(
+    analysis: &OpAmpAnalysis,
+    sample_rate: f64,
+) -> HashMap<String, AllpassPairing> {
+    let mut map = HashMap::new();
+    for info in &analysis.feedback_loops {
+        if let OpAmpFeedbackKind::Allpass {
+            ref jfet_id,
+            cap,
+            ..
+        } = info.feedback_kind
+        {
+            map.insert(jfet_id.clone(), AllpassPairing {
+                cap,
+                sample_rate,
+            });
         }
     }
     map
@@ -520,18 +522,8 @@ fn build_feedback_tree(
     ).ok()?.0;
 
     // Wrap in Series(VS, feedback_tree) — VS drives the feedback impedance
-    let vs = DynNode::VoltageSource { voltage: 0.0, rp: 1.0 };
-    let r_vs = vs.port_resistance();
-    let r_fb = fb_tree.port_resistance();
-    let rp = r_vs + r_fb;
-    let tree = DynNode::Series {
-        gamma: r_vs / rp,
-        left: Box::new(vs),
-        right: Box::new(fb_tree),
-        rp,
-        b1: 0.0,
-        b2: 0.0,
-    };
+    let vs = DynNode::VoltageSource(0.0, 1.0);
+    let tree = DynNode::Series(Box::new(vs), Box::new(fb_tree));
 
     // Step 6: Find feedback pot ID (if any pot in the network)
     let feedback_pot_id = info

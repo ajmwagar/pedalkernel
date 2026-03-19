@@ -3,7 +3,7 @@
 use crate::dsl::*;
 use crate::elements::*;
 
-use super::dyn_node::DynNode;
+use super::dyn_node::{BinaryKind, DynNode};
 
 pub(super) fn diode_model(dt: DiodeType) -> DiodeModel {
     match dt {
@@ -64,8 +64,8 @@ pub(super) fn mosfet_model(mt: MosfetType, is_n_channel: bool) -> MosfetModel {
 
 pub(super) fn has_vs(node: &DynNode) -> bool {
     match node {
-        DynNode::VoltageSource { .. } => true,
-        DynNode::Series { left, right, .. } | DynNode::Parallel { left, right, .. } => {
+        DynNode::Leaf(leaf) if leaf.type_tag() == "voltage_source" => true,
+        DynNode::Binary { left, right, .. } => {
             has_vs(left) || has_vs(right)
         }
         _ => false,
@@ -75,13 +75,13 @@ pub(super) fn has_vs(node: &DynNode) -> bool {
 /// Walk the tree and balance any adaptor where one branch contains the
 /// VoltageSource and the other has much higher impedance.
 ///
-/// - **Parallel**: high-Z sibling causes gamma→1, attenuating the Vs signal
+/// - **Parallel**: high-Z sibling causes gamma->1, attenuating the Vs signal
 ///   (silent output, e.g. Big Muff).
-/// - **Series**: high-Z sibling causes gamma→0, dumping all scattered-down
+/// - **Series**: high-Z sibling causes gamma->0, dumping all scattered-down
 ///   energy into the passives and causing oscillation/instability (e.g. ProCo RAT).
 pub(super) fn balance_parallel_vs(node: &mut DynNode) {
     match node {
-        DynNode::Parallel { left, right, .. } | DynNode::Series { left, right, .. } => {
+        DynNode::Binary { left, right, .. } => {
             let left_has_vs = has_vs(left);
             let right_has_vs = has_vs(right);
 
@@ -105,7 +105,7 @@ pub(super) fn balance_parallel_vs(node: &mut DynNode) {
     }
 }
 
-/// Adjust the Vs port resistance inside `branch` so that `branch.port_resistance() ≈ target_rp`.
+/// Adjust the Vs port resistance inside `branch` so that `branch.port_resistance() ~ target_rp`.
 ///
 /// If the branch already has comparable impedance, do nothing.
 pub(super) fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
@@ -114,11 +114,11 @@ pub(super) fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
         return; // Already reasonably balanced.
     }
     match branch {
-        DynNode::VoltageSource { rp, .. } => {
-            *rp = target_rp.max(1.0);
+        DynNode::Leaf(leaf) if leaf.type_tag() == "voltage_source" => {
+            leaf.set_resistance(target_rp.max(1.0));
         }
-        DynNode::Series { left, right, .. } => {
-            // Series(Vs_branch, other): set Vs rp so that series total ≈ target.
+        DynNode::Binary { kind: BinaryKind::Series, left, right, .. } => {
+            // Series(Vs_branch, other): set Vs rp so that series total ~ target.
             if has_vs(left) {
                 let other_rp = right.port_resistance();
                 let vs_target = (target_rp - other_rp).max(1.0);
@@ -129,8 +129,8 @@ pub(super) fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
                 set_vs_rp(right, vs_target);
             }
         }
-        DynNode::Parallel { left, right, .. } => {
-            // Recurse — the Vs is deeper.
+        DynNode::Binary { kind: BinaryKind::Parallel, left, right, .. } => {
+            // Recurse -- the Vs is deeper.
             if has_vs(left) {
                 adjust_vs_branch_rp(left, target_rp);
             } else {
@@ -143,8 +143,10 @@ pub(super) fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
 
 pub(super) fn set_vs_rp(node: &mut DynNode, rp_val: f64) {
     match node {
-        DynNode::VoltageSource { rp, .. } => *rp = rp_val,
-        DynNode::Series { left, right, .. } | DynNode::Parallel { left, right, .. } => {
+        DynNode::Leaf(leaf) if leaf.type_tag() == "voltage_source" => {
+            leaf.set_resistance(rp_val);
+        }
+        DynNode::Binary { left, right, .. } => {
             if has_vs(left) {
                 set_vs_rp(left, rp_val);
             } else {
@@ -158,8 +160,12 @@ pub(super) fn set_vs_rp(node: &mut DynNode, rp_val: f64) {
 /// Collect all pot component IDs from a DynNode tree (for debugging).
 pub(super) fn collect_pot_ids(node: &DynNode, out: &mut Vec<String>) {
     match node {
-        DynNode::Pot { comp_id, .. } => out.push(comp_id.clone()),
-        DynNode::Series { left, right, .. } | DynNode::Parallel { left, right, .. } => {
+        DynNode::Leaf(leaf) if leaf.type_tag() == "pot" => {
+            if let Some(id) = leaf.comp_id() {
+                out.push(id.to_string());
+            }
+        }
+        DynNode::Binary { left, right, .. } => {
             collect_pot_ids(left, out);
             collect_pot_ids(right, out);
         }
@@ -175,12 +181,17 @@ pub(super) fn collect_pot_ids(node: &DynNode, out: &mut Vec<String>) {
 
 pub(super) fn has_pot(node: &DynNode, comp_id: &str) -> bool {
     match node {
-        DynNode::Pot { comp_id: id, .. } => {
-            // Match the pot itself or the synthetic __aw half of a 3-terminal pot.
-            // (Finding either half means the control is in this stage.)
-            id == comp_id || *id == format!("{comp_id}__aw")
+        DynNode::Leaf(leaf) if leaf.type_tag() == "pot" => {
+            match leaf.comp_id() {
+                Some(id) => {
+                    // Match the pot itself or the synthetic __aw half of a 3-terminal pot.
+                    // (Finding either half means the control is in this stage.)
+                    id == comp_id || id == format!("{comp_id}__aw")
+                }
+                None => false,
+            }
         }
-        DynNode::Series { left, right, .. } | DynNode::Parallel { left, right, .. } => {
+        DynNode::Binary { left, right, .. } => {
             has_pot(left, comp_id) || has_pot(right, comp_id)
         }
         DynNode::Transformer { secondary, .. } => has_pot(secondary, comp_id),

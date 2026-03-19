@@ -53,9 +53,9 @@ impl Component for Resistor {
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
         if self.value.is_infinite() {
-            Some(DynNode::Resistor { comp_id: Some(comp_id.to_string()), rp: OPEN_CIRCUIT_R, last_a: 0.0 })
+            Some(DynNode::Resistor(Some(comp_id.to_string()), OPEN_CIRCUIT_R))
         } else {
-            Some(DynNode::Resistor { comp_id: Some(comp_id.to_string()), rp: self.value, last_a: 0.0 })
+            Some(DynNode::Resistor(Some(comp_id.to_string()), self.value))
         }
     }
 
@@ -137,13 +137,7 @@ impl Component for Capacitor {
     ) -> StampResult {
         let rp = 1.0 / (2.0 * sample_rate * self.config.value);
         StampResult::Reactive {
-            dyn_node: DynNode::Capacitor {
-                comp_id: Some(comp_id.to_string()),
-                capacitance: self.config.value,
-                rp,
-                state: 0.0,
-                last_b: 0.0,
-            },
+            dyn_node: DynNode::Capacitor(Some(comp_id.to_string()), self.config.value, rp),
             rp,
         }
     }
@@ -164,24 +158,9 @@ impl Component for Capacitor {
             } else {
                 0.0
             };
-            Some(DynNode::LeakyCapacitor {
-                comp_id: Some(comp_id.to_string()),
-                capacitance: self.config.value,
-                rp,
-                state: 0.0,
-                leakage_decay,
-                da_coef: self.config.da,
-                da_state: 0.0,
-                da_rate,
-            })
+            Some(DynNode::LeakyCapacitor(Some(comp_id.to_string()), self.config.value, rp, leakage_decay, self.config.da, 0.0, da_rate))
         } else {
-            Some(DynNode::Capacitor {
-                comp_id: Some(comp_id.to_string()),
-                capacitance: self.config.value,
-                rp: 1.0 / (2.0 * sample_rate * self.config.value),
-                state: 0.0,
-                last_b: 0.0,
-            })
+            Some(DynNode::Capacitor(Some(comp_id.to_string()), self.config.value, 1.0 / (2.0 * sample_rate * self.config.value)))
         }
     }
 
@@ -279,23 +258,13 @@ impl Component for Inductor {
     ) -> StampResult {
         let rp = 2.0 * sample_rate * self.value;
         StampResult::Reactive {
-            dyn_node: DynNode::Inductor {
-                comp_id: Some(comp_id.to_string()),
-                inductance: self.value,
-                rp,
-                state: 0.0,
-            },
+            dyn_node: DynNode::Inductor(Some(comp_id.to_string()), self.value, rp),
             rp,
         }
     }
 
     fn make_leaf(&self, comp_id: &str, sample_rate: f64) -> Option<DynNode> {
-        Some(DynNode::Inductor {
-            comp_id: Some(comp_id.to_string()),
-            inductance: self.value,
-            rp: 2.0 * sample_rate * self.value,
-            state: 0.0,
-        })
+        Some(DynNode::Inductor(Some(comp_id.to_string()), self.value, 2.0 * sample_rate * self.value))
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
@@ -366,14 +335,7 @@ impl Component for Potentiometer {
         let r = (tapered_pos * self.max_r).max(1.0);
         mna.stamp_resistor(n1, n2, r);
         StampResult::Pot {
-            dyn_node: DynNode::Pot {
-                comp_id: comp_id.to_string(),
-                max_resistance: self.max_r,
-                position: initial_pos,
-                taper: self.taper,
-                rp: r,
-                last_a: 0.0,
-            },
+            dyn_node: DynNode::Pot(comp_id.to_string(), self.max_r, initial_pos, self.taper),
             initial_conductance: 1.0 / r,
         }
     }
@@ -381,14 +343,7 @@ impl Component for Potentiometer {
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
         let initial_pos = 0.5;
         let tapered_pos = self.taper.apply(initial_pos);
-        Some(DynNode::Pot {
-            comp_id: comp_id.to_string(),
-            max_resistance: self.max_r,
-            position: initial_pos,
-            taper: self.taper,
-            rp: (tapered_pos * self.max_r).max(1.0),
-            last_a: 0.0,
-        })
+        Some(DynNode::Pot(comp_id.to_string(), self.max_r, initial_pos, self.taper))
     }
 
     fn is_variable(&self) -> bool { true }
@@ -480,7 +435,7 @@ impl Component for Tempco {
     }
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
-        Some(DynNode::Resistor { comp_id: Some(comp_id.to_string()), rp: self.resistance, last_a: 0.0 })
+        Some(DynNode::Resistor(Some(comp_id.to_string()), self.resistance))
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
@@ -535,13 +490,7 @@ impl Component for CapSwitched {
             if c.is_finite() && c > 0.0 {
                 let rp = 1.0 / (2.0 * sample_rate * c);
                 return StampResult::Reactive {
-                    dyn_node: DynNode::Capacitor {
-                        comp_id: Some(comp_id.to_string()),
-                        capacitance: c,
-                        rp,
-                        state: 0.0,
-                        last_b: 0.0,
-                    },
+                    dyn_node: DynNode::Capacitor(Some(comp_id.to_string()), c, rp),
                     rp,
                 };
             }
@@ -600,12 +549,7 @@ impl Component for InductorSwitched {
             if l.is_finite() && l > 0.0 {
                 let rp = 2.0 * sample_rate * l;
                 return StampResult::Reactive {
-                    dyn_node: DynNode::Inductor {
-                        comp_id: Some(comp_id.to_string()),
-                        inductance: l,
-                        rp,
-                        state: 0.0,
-                    },
+                    dyn_node: DynNode::Inductor(Some(comp_id.to_string()), l, rp),
                     rp,
                 };
             }

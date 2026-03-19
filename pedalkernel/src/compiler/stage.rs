@@ -241,6 +241,25 @@ pub(super) struct AllpassFeedback {
     pub(super) y_prev: f64,
 }
 
+/// Non-inverting all-pass IIR for Phase 90-style JFET + opamp topology.
+///
+/// Transfer function: H(s) = (1 - s·Rds·C) / (1 + s·Rds·C)
+/// Bilinear-transformed: y[n] = a1·(x[n] - y[n-1]) + x[n-1]
+/// where a1 = (1 - K) / (1 + K), K = 2·fs·Rds·C.
+///
+/// The WDF tree still processes each sample to maintain the JFET's NR state,
+/// but the output comes from this IIR rather than the tree's root port voltage.
+pub(super) struct AllpassDirect {
+    /// Phase-shifting capacitor value (e.g., C_ap = 47nF).
+    pub(super) cap: f64,
+    /// Sample rate for coefficient computation.
+    pub(super) sample_rate: f64,
+    /// Previous input sample.
+    pub(super) x_prev: f64,
+    /// Previous output sample.
+    pub(super) y_prev: f64,
+}
+
 /// Models a frequency-dependent opamp feedback tone control where a resistive
 /// DC path (R_fb) is in parallel with a cap-series AC path (C + R_pot + R_shelf).
 ///
@@ -360,6 +379,10 @@ pub(super) struct WdfStage {
     /// When present, bypasses the WDF output and computes V_out = -(Z_fb/Z_in) * V_in
     /// where Z_in includes the JFET variable resistance.
     pub(super) allpass_feedback: Option<AllpassFeedback>,
+    /// Non-inverting all-pass IIR (Phase 90 gain-of-2 style).
+    /// Computes H(s) = (1 - s·Rds·C) / (1 + s·Rds·C) directly,
+    /// using the JFET's approximate Rds from its operating point.
+    pub(super) allpass_direct: Option<AllpassDirect>,
     /// DC-blocking highpass filter for triode stages.
     /// Models the output coupling capacitor's DC blocking behavior.
     /// Format: (a1, b0, y_prev, x_prev) for IIR highpass.
@@ -712,7 +735,27 @@ impl WdfStage {
             return flush_denormal(tf.process(input * self.compensation));
         }
 
-        // Bridged-T all-pass with unity-gain op-amp buffer:
+        // Non-inverting all-pass IIR (Phase 90 gain-of-2 style).
+        // The WDF tree runs the JFET NR solver to maintain its Vgs/Vds state,
+        // but the output comes from a direct IIR: H(s) = (1-sRC)/(1+sRC)
+        // where R = JFET Rds (variable) and C = phase-shift cap.
+        // Bilinear: y[n] = a1*(x[n] - y[n-1]) + x[n-1], a1 = (1-K)/(1+K), K = 2fs*R*C.
+        if let Some(ref mut ap) = self.allpass_direct {
+            let rds = match &self.root {
+                RootKind::Jfet(j) => j.rds_approx(),
+                RootKind::JfetVr(jvr) => jvr.rds(),
+                _ => 10_000.0,
+            };
+            let k = 2.0 * ap.sample_rate * rds * ap.cap;
+            let a1 = (1.0 - k) / (1.0 + k);
+            let x = input * self.compensation;
+            let y = a1 * (x - ap.y_prev) + ap.x_prev;
+            ap.x_prev = x;
+            ap.y_prev = flush_denormal(y);
+            return ap.y_prev;
+        }
+
+        // All-pass with op-amp buffer (bridged-T topology):
         // V_allpass = 2 * V_junction - V_in.
         // The WDF tree models the RC network phase shift; the op-amp
         // reconstructs the all-pass output at unity magnitude.

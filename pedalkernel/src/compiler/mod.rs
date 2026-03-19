@@ -17,6 +17,7 @@ pub mod component;
 pub mod components;
 mod dyn_node;
 mod graph;
+pub(crate) mod wdf_leaf;
 mod helpers;
 mod opamp_analysis;
 mod plan;

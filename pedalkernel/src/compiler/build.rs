@@ -22,7 +22,7 @@ use super::component::StampResult;
 use super::components::{
     CapSwitched, Capacitor as CapacitorComp, Potentiometer as PotComp,
 };
-use super::dyn_node::DynNode;
+use super::dyn_node::{BinaryKind, DynNode};
 use super::graph::{sp_decompose, graph_reduce, ExtraEdge, CircuitGraph, NodeId};
 use super::helpers::*;
 use super::opamp_analysis::OpAmpAnalysis;
@@ -216,7 +216,7 @@ fn build_other_side_subtree(
     if collected_edges.is_empty() {
         // No passives on the other side — fall back to resistor stub.
         let r_load = find_secondary_load_resistance(graph, xfmr_comp_idx);
-        return Some(DynNode::Resistor { comp_id: None, rp: r_load, last_a: 0.0 });
+        return Some(DynNode::Resistor(None, r_load));
     }
 
     // Terminals: the two target nodes (secondary or primary winding pins).
@@ -236,7 +236,7 @@ fn build_other_side_subtree(
         Err(_) => {
             // SP reduction failed — fall back to resistor stub.
             let r_load = find_secondary_load_resistance(graph, xfmr_comp_idx);
-            Some(DynNode::Resistor { comp_id: None, rp: r_load, last_a: 0.0 })
+            Some(DynNode::Resistor(None, r_load))
         }
     }
 }
@@ -276,7 +276,8 @@ fn replace_transformer_stubs(
                 }
             }
         }
-        DynNode::Series {
+        DynNode::Binary {
+            kind,
             left,
             right,
             rp,
@@ -287,26 +288,20 @@ fn replace_transformer_stubs(
             replace_transformer_stubs(right, transformer_subtrees, components);
             let r1 = left.port_resistance();
             let r2 = right.port_resistance();
-            *rp = r1 + r2;
-            if *rp > 0.0 {
-                *gamma = r1 / *rp;
-            }
-        }
-        DynNode::Parallel {
-            left,
-            right,
-            rp,
-            gamma,
-            ..
-        } => {
-            replace_transformer_stubs(left, transformer_subtrees, components);
-            replace_transformer_stubs(right, transformer_subtrees, components);
-            let r1 = left.port_resistance();
-            let r2 = right.port_resistance();
-            *rp = r1 * r2 / (r1 + r2);
-            let denom = r1 + r2;
-            if denom > 0.0 {
-                *gamma = r2 / denom;
+            match kind {
+                BinaryKind::Series => {
+                    *rp = r1 + r2;
+                    if *rp > 0.0 {
+                        *gamma = r1 / *rp;
+                    }
+                }
+                BinaryKind::Parallel => {
+                    *rp = r1 * r2 / (r1 + r2);
+                    let denom = r1 + r2;
+                    if denom > 0.0 {
+                        *gamma = r2 / denom;
+                    }
+                }
             }
         }
         DynNode::RType { children, .. } => {
@@ -388,6 +383,9 @@ pub(super) fn build_stages(
 
     // Build AllpassJfet map: JFET comp_id → (rf, cf) for inverting all-pass stages.
     let allpass_jfet_map = super::opamp_analysis::build_allpass_jfet_map(opamp_analysis);
+
+    // Build Allpass queue: JFET comp_id → OpAmpRoot for gain-of-2 style all-pass.
+    let mut allpass_queue = super::opamp_analysis::build_allpass_queue(opamp_analysis, sample_rate);
 
     let mut stages: Vec<WdfStage> = Vec::new();
     let mut fallback_multi_nl: Vec<MultiNlStage> = Vec::new();
@@ -472,6 +470,14 @@ pub(super) fn build_stages(
                             x_prev: 0.0,
                             y_prev: 0.0,
                         });
+                } else if let Some(pairing) = allpass_queue.remove(comp_id) {
+                    // Allpass: direct IIR using JFET Rds and C_ap.
+                    stage.allpass_direct = Some(super::stage::AllpassDirect {
+                        cap: pairing.cap,
+                        sample_rate: pairing.sample_rate,
+                        x_prev: 0.0,
+                        y_prev: 0.0,
+                    });
                 } else if !feedback_opamp_queue.is_empty() {
                     stage.paired_opamp = Some(feedback_opamp_queue.remove(0));
                 }
@@ -562,10 +568,7 @@ pub(super) fn build_stages(
         let sfd = out_node
             .and_then(|n| node_island_depths.get(&n).copied())
             .unwrap_or(usize::MAX);
-        let tree = DynNode::VoltageSource {
-            voltage: 0.0,
-            rp: 10_000.0,
-        };
+        let tree = DynNode::VoltageSource(0.0, 10_000.0);
         stages.push(WdfStage {
             tree,
             root: RootKind::OpAmp(opamp),
@@ -574,6 +577,7 @@ pub(super) fn build_stages(
             base_diode_model: None,
             paired_opamp: None,
             allpass_feedback: None,
+            allpass_direct: None,
             dc_block: None,
             is_source_follower: false,
             prev_source_voltage: 0.0,
@@ -879,16 +883,8 @@ pub(super) fn build_push_pull_stages(
                     };
 
                     stages.push(PushPullStage {
-                        push_tree: DynNode::Resistor {
-                            comp_id: None,
-                            rp: 1.0,
-                            last_a: 0.0,
-                        },
-                        pull_tree: DynNode::Resistor {
-                            comp_id: None,
-                            rp: 1.0,
-                            last_a: 0.0,
-                        },
+                        push_tree: DynNode::Resistor(None, 1.0),
+                        pull_tree: DynNode::Resistor(None, 1.0),
                         push_root,
                         pull_root,
                         push_adaptor,
@@ -1071,12 +1067,7 @@ fn stamp_passive_edge(
             if l > 0.0 && l.is_finite() {
                 reactive_edges.push((
                     eidx,
-                    DynNode::Inductor {
-                        comp_id: None,
-                        inductance: l,
-                        rp: 2.0 * sample_rate * l,
-                        state: 0.0,
-                    },
+                    DynNode::Inductor(None, l, 2.0 * sample_rate * l),
                 ));
             }
             if cfg.primary_dcr > 0.0 {
@@ -1367,14 +1358,7 @@ fn build_rtype_stage(
                 mna.stamp_resistor(n1, n2, r);
                 pot_entries.push((
                     eidx,
-                    DynNode::Pot {
-                        comp_id: comp.id.clone(),
-                        max_resistance: pot.max_r,
-                        position: initial_pos,
-                        taper: pot.taper,
-                        rp: r,
-                        last_a: 0.0,
-                    },
+                    DynNode::Pot(comp.id.clone(), pot.max_r, initial_pos, pot.taper),
                     n1,
                     n2,
                     1.0 / r,
@@ -2166,7 +2150,7 @@ fn build_rtype_stage(
     {
         // Find the pot's max_resistance from the DynNode
         let max_r = match &pot_children[0] {
-            DynNode::Pot { max_resistance, .. } => *max_resistance,
+            DynNode::Leaf(leaf) => leaf.pot_max_resistance().unwrap_or(0.0),
             _ => 0.0,
         };
         if max_r > 1.0 {
@@ -2525,13 +2509,13 @@ fn build_vs_stage(
     let mut extra = vec![ExtraEdge {
         node_a: plan.source_node,
         node_b: plan.injection_node,
-        tree: DynNode::VoltageSource { voltage: 0.0, rp: 1.0 },
+        tree: DynNode::VoltageSource(0.0, 1.0),
     }];
     if let Some(ve) = &plan.virtual_edge {
         extra.push(ExtraEdge {
             node_a: ve.node_a,
             node_b: ve.node_b,
-            tree: DynNode::Resistor { comp_id: None, rp: ve.resistance, last_a: 0.0 },
+            tree: DynNode::Resistor(None, ve.resistance),
         });
     }
 
@@ -2570,6 +2554,7 @@ fn build_vs_stage(
         base_diode_model,
         paired_opamp: None,
         allpass_feedback: None,
+        allpass_direct: None,
         dc_block: plan.dc_block,
         is_source_follower: false,
         prev_source_voltage: 0.0,
@@ -2618,21 +2603,8 @@ fn build_source_follower_stage(
     // JfetVr is a passive element — signal must enter via a voltage source.
     // Wrap the passive tree in Series(VS, passive) to inject signal.
     let (tree, is_sf) = if use_jfet_vr {
-        let vs = DynNode::VoltageSource {
-            voltage: 0.0,
-            rp: 1.0,
-        };
-        let r_passive = passive_tree.port_resistance();
-        let r_vs = 1.0;
-        let rp = r_vs + r_passive;
-        let tree = DynNode::Series {
-            left: Box::new(vs),
-            right: Box::new(passive_tree),
-            rp,
-            gamma: r_vs / rp,
-            b1: 0.0,
-            b2: 0.0,
-        };
+        let vs = DynNode::VoltageSource(0.0, 1.0);
+        let tree = DynNode::Series(Box::new(vs), Box::new(passive_tree));
         (tree, false) // Not a source follower — VS drives signal
     } else {
         (passive_tree, true)
@@ -2646,6 +2618,7 @@ fn build_source_follower_stage(
         base_diode_model: None,
         paired_opamp: None,
         allpass_feedback: None,
+        allpass_direct: None,
         dc_block: None,
         is_source_follower: is_sf,
         prev_source_voltage: 0.0,
@@ -2686,7 +2659,7 @@ fn build_push_pull_half(
         let e = &graph.edges[eidx];
         for &node in &[e.node_a, e.node_b] {
             if let Some(&voltage) = graph.supply_voltages.get(&node) {
-                leaf_overrides.insert(e.comp_idx, DynNode::CathodeBiasSource { voltage, rp: 1.0 });
+                leaf_overrides.insert(e.comp_idx, DynNode::CathodeBiasSource(voltage, 1.0));
             }
         }
     }
@@ -2694,13 +2667,13 @@ fn build_push_pull_half(
     let mut extra = vec![ExtraEdge {
         node_a: plan.source_node,
         node_b: plan.injection_node,
-        tree: DynNode::VoltageSource { voltage: 0.0, rp: 1.0 },
+        tree: DynNode::VoltageSource(0.0, 1.0),
     }];
     if let Some(ve) = &plan.virtual_edge {
         extra.push(ExtraEdge {
             node_a: ve.node_a,
             node_b: ve.node_b,
-            tree: DynNode::Resistor { comp_id: None, rp: ve.resistance, last_a: 0.0 },
+            tree: DynNode::Resistor(None, ve.resistance),
         });
     }
     let tree = graph_reduce(
@@ -3048,37 +3021,22 @@ fn wrap_with_transformer_load(
     // The magnetizing inductance LF rolloff is handled as a post-process
     // high-pass filter rather than an in-tree WDF inductor, avoiding
     // the DC transient/initialization issue that causes tube cutoff.
-    let secondary = DynNode::Resistor { comp_id: None, rp: r_load, last_a: 0.0 };
+    let secondary = DynNode::Resistor(None, r_load);
 
     // Ideal transformer: reflects secondary impedance to primary by n².
-    let xfmr_rp = n_eff * n_eff * r_load;
-    let mut xfmr: DynNode = DynNode::Transformer {
-        secondary: Box::new(secondary),
-        turns_ratio: n_eff,
-        rp: xfmr_rp,
-        b_sec: 0.0,
-    };
+    let mut xfmr: DynNode = DynNode::TransformerNode(Box::new(secondary), n_eff);
 
     // Add primary DCR in series if non-zero.
-    let xfmr_total_rp;
     if primary_dcr > 1e-6 {
         let dcr = if is_ct {
             primary_dcr / 2.0
         } else {
             primary_dcr
         };
-        let combined_rp = dcr + xfmr_rp;
-        xfmr = DynNode::Series {
-            left: Box::new(DynNode::Resistor { comp_id: None, rp: dcr, last_a: 0.0 }),
-            right: Box::new(xfmr),
-            rp: combined_rp,
-            gamma: dcr / combined_rp,
-            b1: 0.0,
-            b2: 0.0,
-        };
-        xfmr_total_rp = combined_rp;
-    } else {
-        xfmr_total_rp = xfmr_rp;
+        xfmr = DynNode::Series(
+            Box::new(DynNode::Resistor(None, dcr)),
+            Box::new(xfmr),
+        );
     }
 
     // Add in series with existing tree.
@@ -3090,22 +3048,8 @@ fn wrap_with_transformer_load(
     // This cancels the sign flip: b_out = n * b_series = -1 * (-(b_tree + b_xfmr))
     //                                    = b_tree + b_xfmr (correct sign)
     // Port resistance is unchanged: n² * rp = 1 * rp.
-    let tree_rp = tree.port_resistance();
-    let total_rp = tree_rp + xfmr_total_rp;
-    let inner_series = DynNode::Series {
-        left: Box::new(tree),
-        right: Box::new(xfmr),
-        rp: total_rp,
-        gamma: tree_rp / total_rp,
-        b1: 0.0,
-        b2: 0.0,
-    };
-    DynNode::Transformer {
-        secondary: Box::new(inner_series),
-        turns_ratio: -1.0,
-        rp: total_rp, // n² = 1
-        b_sec: 0.0,
-    }
+    let inner_series = DynNode::Series(Box::new(tree), Box::new(xfmr));
+    DynNode::TransformerNode(Box::new(inner_series), -1.0)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

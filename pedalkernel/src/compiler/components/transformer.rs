@@ -57,20 +57,10 @@ impl Component for TransformerComp {
         let l_primary = self.config.primary_inductance;
         let n = self.config.turns_ratio;
         let l_secondary = l_primary / (n * n);
-        let secondary = Box::new(DynNode::Inductor {
-            comp_id: None,
-            inductance: l_secondary,
-            rp: 2.0 * sample_rate * l_secondary,
-            state: 0.0,
-        });
+        let secondary = Box::new(DynNode::Inductor(None, l_secondary, 2.0 * sample_rate * l_secondary));
         if let Some(n_tertiary) = self.config.tertiary_turns_ratio {
             let l_tertiary = l_primary / (n_tertiary * n_tertiary);
-            let tertiary = Box::new(DynNode::Inductor {
-                comp_id: None,
-                inductance: l_tertiary,
-                rp: 2.0 * sample_rate * l_tertiary,
-                state: 0.0,
-            });
+            let tertiary = Box::new(DynNode::Inductor(None, l_tertiary, 2.0 * sample_rate * l_tertiary));
             let r_sec = secondary.port_resistance();
             let r_ter = tertiary.port_resistance();
             let adaptor = crate::tree::RTypeAdaptor::three_winding_transformer(
@@ -81,14 +71,7 @@ impl Component for TransformerComp {
                 children: vec![secondary, tertiary],
             })
         } else {
-            let rp_sec = secondary.port_resistance();
-            let rp_prim = n * n * rp_sec;
-            Some(DynNode::Transformer {
-                secondary,
-                turns_ratio: n,
-                rp: rp_prim,
-                b_sec: 0.0,
-            })
+            Some(DynNode::TransformerNode(secondary, n))
         }
     }
 

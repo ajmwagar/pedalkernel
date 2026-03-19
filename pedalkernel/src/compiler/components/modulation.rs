@@ -207,11 +207,7 @@ impl Component for PhotocouplerComp {
             PhotocouplerType::Nsl32 => PhotocouplerModel::nsl32(),
             PhotocouplerType::T4b => PhotocouplerModel::t4b(),
         };
-        Some(DynNode::Photocoupler {
-            comp_id: comp_id.to_string(),
-            inner: PhotocouplerElem::new(model, sample_rate),
-            prev_resistance: 0.0,
-        })
+        Some(DynNode::PhotocouplerNode(comp_id.to_string(), PhotocouplerElem::new(model, sample_rate)))
     }
 
     fn is_variable(&self) -> bool { true }

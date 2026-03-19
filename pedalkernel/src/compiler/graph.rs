@@ -1995,6 +1995,83 @@ impl CircuitGraph {
                         }
                     }
 
+                    // Check for all-pass topology: JFET at pos with Ri from input to neg.
+                    // Phase 90 style: Vin → R_ap → neg, R_fb → out, JFET+C → pos.
+                    // The JFET's WDF tree models the RC phase shift; the opamp
+                    // provides gain via paired_opamp: (1+Rf/Ri)*Vp - (Rf/Ri)*Vin.
+                    {
+                        let mut jfet_at_pos = None;
+                        for c in &pedal.components {
+                            if c.kind.is_jfet() {
+                                for pin in &["source", "drain"] {
+                                    let pk = format!("{}.{}", c.id, pin);
+                                    if let Some(&pid) = pin_ids.get(&pk) {
+                                        if uf.find(pid) == pos_node {
+                                            jfet_at_pos = Some(c.id.clone());
+                                            break;
+                                        }
+                                    }
+                                }
+                                if jfet_at_pos.is_some() {
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(jfet_id) = jfet_at_pos {
+                            if let Some(ri) = find_input_resistor(neg_node, out_node, gnd_node_resolved) {
+                                // Find the reactive element (cap) at pos_node for output probing.
+                                // The cap voltage ≈ Vp since its other terminal is at AC ground.
+                                let mut allpass_cap = None;
+                                for c in &pedal.components {
+                                    if let Some(cap) = c.kind.as_any().downcast_ref::<Capacitor>() {
+                                        let pa = format!("{}.a", c.id);
+                                        let pb = format!("{}.b", c.id);
+                                        if let (Some(&a), Some(&b)) =
+                                            (pin_ids.get(&pa), pin_ids.get(&pb))
+                                        {
+                                            if uf.find(a) == pos_node || uf.find(b) == pos_node {
+                                                allpass_cap = Some(cap.config.value);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(cap) = allpass_cap {
+                                    // Collect R_ap comp ID (the input resistor at neg)
+                                    let mut fb_comps = all_fb_comps.clone();
+                                    for info_r in &resistor_nodes {
+                                        if (info_r.node_a == neg_node && info_r.node_b == out_node)
+                                            || (info_r.node_a == out_node && info_r.node_b == neg_node)
+                                        {
+                                            continue; // skip Rf (already in all_fb_comps)
+                                        }
+                                        if info_r.node_a == neg_node || info_r.node_b == neg_node {
+                                            if !fb_comps.contains(&info_r.id) {
+                                                fb_comps.push(info_r.id.clone());
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    results.push(OpAmpFeedbackInfo {
+                                        comp_id: comp.id.clone(),
+                                        opamp_type,
+                                        feedback_kind: OpAmpFeedbackKind::Allpass {
+                                            rf,
+                                            ri,
+                                            jfet_id,
+                                            cap,
+                                        },
+                                        neg_node,
+                                        pos_node,
+                                        out_node,
+                                        feedback_comp_ids: fb_comps,
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
                     // Check for non-inverting topology: pos connected to input (or signal path)
                     // Non-inverting: look for Ri path from neg to ground (or AC ground).
                     // Use find_ground_leg_path (traverses R+C/R+L series paths) instead of
@@ -2333,6 +2410,20 @@ pub(super) enum OpAmpFeedbackKind {
         /// Component ID of the JFET whose drain connects to neg
         jfet_id: String,
     },
+    /// All-pass with JFET at pos (Phase 90 gain-of-2 style).
+    /// JFET + C form a lowpass on the non-inverting input; R_ap and R_fb
+    /// set the inverting gain. Output = (1 + Rf/Ri) * Vp - (Rf/Ri) * Vin.
+    /// Paired with the JFET stage via `paired_opamp` (no standalone WDF stage).
+    Allpass {
+        /// Feedback resistor value (neg to out)
+        rf: f64,
+        /// Input resistor value (input to neg)
+        ri: f64,
+        /// Component ID of the JFET whose source/drain connects to pos
+        jfet_id: String,
+        /// Phase-shifting capacitor value in Farads (e.g., C_ap = 47nF)
+        cap: f64,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2504,19 +2595,9 @@ pub(super) fn graph_reduce(
                     }
                     let tree_i = std::mem::replace(
                         &mut edges[i].tree,
-                        DynNode::Resistor { comp_id: None, rp: 1.0, last_a: 0.0 },
+                        DynNode::Resistor(None, 1.0),
                     );
-                    let r1 = tree_i.port_resistance();
-                    let r2 = tree_j.port_resistance();
-                    let rp = r1 * r2 / (r1 + r2);
-                    edges[i].tree = DynNode::Parallel {
-                        left: Box::new(tree_i),
-                        right: Box::new(tree_j),
-                        rp,
-                        gamma: r2 / (r1 + r2),
-                        b1: 0.0,
-                        b2: 0.0,
-                    };
+                    edges[i].tree = DynNode::Parallel(Box::new(tree_i), Box::new(tree_j));
                     // Output probe stays in edges[i] (merged result)
                     if probe_in_i || probe_in_j {
                         output_probe_edge = Some(i);
@@ -2591,21 +2672,11 @@ pub(super) fn graph_reduce(
             let (lo, hi) = if i1 < i2 { (i1, i2) } else { (i2, i1) };
             let WdfEdge { tree: tree_hi, .. } = edges.remove(hi);
             let WdfEdge { tree: tree_lo, .. } = edges.remove(lo);
-            let r1 = tree_lo.port_resistance();
-            let r2 = tree_hi.port_resistance();
-            let rp = r1 + r2;
             let new_idx = edges.len();
             edges.push(WdfEdge {
                 node_a: other1,
                 node_b: other2,
-                tree: DynNode::Series {
-                    left: Box::new(tree_lo),
-                    right: Box::new(tree_hi),
-                    rp,
-                    gamma: r1 / rp,
-                    b1: 0.0,
-                    b2: 0.0,
-                },
+                tree: DynNode::Series(Box::new(tree_lo), Box::new(tree_hi)),
             });
 
             // Track: merged edge inherits output probe, or this IS the output collapse
@@ -2928,27 +2999,19 @@ pub(super) fn make_leaf(
     // Check if this is a fork path component
     if let Some(info) = fork_info {
         // Fork path: create a SwitchedResistor
-        // Default to position 0 (first path active)
-        let is_active = info.path_index == 0;
-        return DynNode::SwitchedResistor {
-            switch_id: info.switch_id.clone(),
-            path_index: info.path_index,
-            num_paths: info.num_paths,
-            r_active: FORK_R_ACTIVE,
-            r_inactive: FORK_R_INACTIVE,
-            position: 0,
-            rp: if is_active {
-                FORK_R_ACTIVE
-            } else {
-                FORK_R_INACTIVE
-            },
-        };
+        return DynNode::SwitchedResistor(
+            info.switch_id.clone(),
+            info.path_index,
+            info.num_paths,
+            FORK_R_ACTIVE,
+            FORK_R_INACTIVE,
+        );
     }
 
     // Delegate to Component trait; fallback for non-leaf types (diodes, etc.)
     comp.kind
         .make_leaf(&comp.id, sample_rate)
-        .unwrap_or(DynNode::Resistor { comp_id: None, rp: 1000.0, last_a: 0.0 })
+        .unwrap_or(DynNode::Resistor(None, 1000.0))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
