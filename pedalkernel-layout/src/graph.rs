@@ -9,7 +9,7 @@ pub use pedalkernel::compiler::PinDirection;
 
 use pedalkernel::compiler::Component;
 use pedalkernel::dsl::{ComponentDef, NetDef, PedalDef, Pin};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // Layout graph
@@ -49,7 +49,7 @@ pub struct LayoutGraph {
     pub nodes: Vec<LayoutNode>,
     pub edges: Vec<LayoutEdge>,
     /// Map from component ID to node index.
-    pub id_to_node: HashMap<String, usize>,
+    pub id_to_node: BTreeMap<String, usize>,
     /// Index of the `in` anchor node.
     pub in_node: usize,
     /// Index of the `out` anchor node.
@@ -81,7 +81,7 @@ impl LayoutGraph {
     /// Build a layout graph from a parsed pedal definition.
     pub fn from_pedal(pedal: &PedalDef) -> Self {
         let mut nodes = Vec::new();
-        let mut id_to_node = HashMap::new();
+        let mut id_to_node = BTreeMap::new();
 
         // Create anchor nodes for in, out, vcc, gnd
         let anchors = ["__in", "__out", "__vcc", "__gnd"];
@@ -145,8 +145,8 @@ impl LayoutGraph {
     }
 
     /// Get all neighbors (both directions) of a node.
-    pub fn neighbors(&self, node_id: usize) -> HashSet<usize> {
-        let mut result = HashSet::new();
+    pub fn neighbors(&self, node_id: usize) -> BTreeSet<usize> {
+        let mut result = BTreeSet::new();
         for e in &self.edges {
             if e.from == node_id {
                 result.insert(e.to);
@@ -283,11 +283,11 @@ fn build_net_groups(nets: &[NetDef]) -> Vec<NetGroup> {
 fn build_edges(
     net_groups: &[NetGroup],
     nodes: &[LayoutNode],
-    id_to_node: &HashMap<String, usize>,
+    id_to_node: &BTreeMap<String, usize>,
     pedal: &PedalDef,
 ) -> Vec<LayoutEdge> {
     let mut edges = Vec::new();
-    let mut seen_pairs: HashSet<(usize, usize)> = HashSet::new();
+    let mut seen_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
 
     // For each net group, create edges between all component pairs in the net
     for ng in net_groups {

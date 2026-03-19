@@ -5,7 +5,7 @@
 //! phase inverters, and generic groups for unmatched components.
 
 use crate::graph::LayoutGraph;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 /// The type of functional group detected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub struct FunctionalGroup {
 
 /// Detect all functional groups in the layout graph.
 pub fn detect_groups(graph: &LayoutGraph) -> Vec<FunctionalGroup> {
-    let mut assigned: HashSet<usize> = HashSet::new();
+    let mut assigned: BTreeSet<usize> = BTreeSet::new();
     let mut groups = Vec::new();
 
     // Mark anchor nodes as assigned (they don't belong to groups)
@@ -102,10 +102,10 @@ pub fn detect_groups(graph: &LayoutGraph) -> Vec<FunctionalGroup> {
 // Gain stage detection
 // ---------------------------------------------------------------------------
 
-fn detect_gain_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<FunctionalGroup> {
+fn detect_gain_stages(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<FunctionalGroup> {
     let mut groups = Vec::new();
     let mut stage_num = 0;
-    let mut locally_assigned: HashSet<usize> = HashSet::new();
+    let mut locally_assigned: BTreeSet<usize> = BTreeSet::new();
 
     for node in &graph.nodes {
         if assigned.contains(&node.id) || locally_assigned.contains(&node.id) {
@@ -192,10 +192,10 @@ fn detect_gain_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
 // Op-amp stage detection
 // ---------------------------------------------------------------------------
 
-fn detect_opamp_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<FunctionalGroup> {
+fn detect_opamp_stages(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<FunctionalGroup> {
     let mut groups = Vec::new();
     let mut stage_num = 0;
-    let mut locally_assigned: HashSet<usize> = HashSet::new();
+    let mut locally_assigned: BTreeSet<usize> = BTreeSet::new();
 
     for node in &graph.nodes {
         if assigned.contains(&node.id) || locally_assigned.contains(&node.id) {
@@ -249,7 +249,7 @@ fn detect_opamp_stages(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fu
 // Push-pull output detection
 // ---------------------------------------------------------------------------
 
-fn detect_push_pull(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<FunctionalGroup> {
+fn detect_push_pull(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<FunctionalGroup> {
     let mut groups = Vec::new();
 
     // Find transformers — push-pull outputs always have one
@@ -308,7 +308,7 @@ fn detect_push_pull(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Funct
 // Tone stack detection
 // ---------------------------------------------------------------------------
 
-fn detect_tone_stacks(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<FunctionalGroup> {
+fn detect_tone_stacks(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<FunctionalGroup> {
     let mut groups = Vec::new();
 
     // Find pots that aren't already assigned
@@ -327,7 +327,7 @@ fn detect_tone_stacks(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
     }
 
     // Group pots that are connected to each other (or to shared passives)
-    let mut pot_clusters: Vec<HashSet<usize>> = Vec::new();
+    let mut pot_clusters: Vec<BTreeSet<usize>> = Vec::new();
 
     for &pot_id in &unassigned_pots {
         // Find which existing cluster this pot belongs to (via shared neighbors)
@@ -357,7 +357,7 @@ fn detect_tone_stacks(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
                 pot_clusters[ci].insert(pot_id);
             }
             None => {
-                let mut cluster = HashSet::new();
+                let mut cluster = BTreeSet::new();
                 cluster.insert(pot_id);
                 pot_clusters.push(cluster);
             }
@@ -414,7 +414,7 @@ fn detect_tone_stacks(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<Fun
 // Remaining components
 // ---------------------------------------------------------------------------
 
-fn assign_remaining(graph: &LayoutGraph, assigned: &HashSet<usize>) -> Vec<FunctionalGroup> {
+fn assign_remaining(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<FunctionalGroup> {
     let mut groups = Vec::new();
     let mut input_members = Vec::new();
     let mut output_members = Vec::new();

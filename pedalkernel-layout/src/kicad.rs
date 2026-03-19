@@ -50,7 +50,7 @@ fn write_header(out: &mut String, layout: &Layout) {
 
 fn write_components(out: &mut String, layout: &Layout, pedal: &PedalDef) {
     // Build a lookup from component name to ComponentDef
-    let comp_map: std::collections::HashMap<&str, &pedalkernel::dsl::ComponentDef> = pedal
+    let comp_map: std::collections::BTreeMap<&str, &pedalkernel::dsl::ComponentDef> = pedal
         .components
         .iter()
         .map(|c| (c.id.as_str(), c))
