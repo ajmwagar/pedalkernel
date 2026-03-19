@@ -265,6 +265,7 @@ fn build_passive_wdf_stage(
                 allpass_feedback: None,
                 allpass_direct: None,
                 dc_block: None,
+                grid_dc_blocker: None,
                 is_source_follower: false,
                 prev_source_voltage: 0.0,
                 signal_flow_distance: 0,
@@ -280,7 +281,9 @@ fn build_passive_wdf_stage(
                 feedback_opamp: None,
                 vcc_injection_coeff: 0.0,
                 vcc_dc_ramp: 0,
+                coupling_cap_id: None,
                 tone_feedback: None,
+                negate_triode_vs: false,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -607,6 +610,7 @@ fn build_passive_rtype_from_decomposed(
         allpass_feedback: None,
         allpass_direct: None,
         dc_block: None,
+                grid_dc_blocker: None,
         is_source_follower: false,
         prev_source_voltage: 0.0,
         signal_flow_distance: 0,
@@ -622,7 +626,9 @@ fn build_passive_rtype_from_decomposed(
         feedback_opamp: None,
         vcc_injection_coeff: 0.0,
         vcc_dc_ramp: 0,
+        coupling_cap_id: None,
         tone_feedback: None,
+        negate_triode_vs: false,
     })
 }
 
@@ -1010,6 +1016,7 @@ fn build_feedforward_stages(
                     allpass_feedback: None,
                     allpass_direct: None,
                     dc_block: None,
+                grid_dc_blocker: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
                     signal_flow_distance: 0,
@@ -1025,7 +1032,9 @@ fn build_feedforward_stages(
                     feedback_opamp: None,
                     vcc_injection_coeff: 0.0,
                     vcc_dc_ramp: 0,
+                    coupling_cap_id: None,
                     tone_feedback: None,
+                    negate_triode_vs: false,
                 }
             }
             Err(_) => {
@@ -1130,6 +1139,7 @@ fn build_output_rooted_stage(
         allpass_feedback: None,
         allpass_direct: None,
         dc_block: None,
+                grid_dc_blocker: None,
         is_source_follower: false,
         prev_source_voltage: 0.0,
         signal_flow_distance: 0,
@@ -1145,7 +1155,9 @@ fn build_output_rooted_stage(
         feedback_opamp: None,
         vcc_injection_coeff: 0.0,
         vcc_dc_ramp: 0,
+        coupling_cap_id: None,
         tone_feedback: None,
+        negate_triode_vs: false,
     })
 }
 
@@ -2409,6 +2421,62 @@ pub fn compile_pedal_with_options(
         midi_trigger_map,
         original_passive_values: HashMap::new(),
     };
+
+    // Enable inter-stage grid DC blocker for tube stages that aren't the first
+    // in the signal chain. Without this, plate DC from the previous stage
+    // (~80-200V) is fed directly into the tube's Vgk, saturating the grid.
+    // The WDF tree's coupling cap blocks DC for wave propagation, but the grid
+    // voltage is set externally via set_control_voltage(input). This DC blocker
+    // mimics the coupling cap's effect on the grid voltage path.
+    //
+    // Additionally, add an output DC block to all tube stages that don't already
+    // have one. Triode stages output the full plate voltage (~80-300V DC + AC).
+    // Without a DC block, this large voltage propagates to downstream stages,
+    // disrupting passive tone stacks and subsequent tube grid voltages. The
+    // real circuit uses an inter-stage coupling cap for DC blocking; here we
+    // model that with an IIR highpass at ~20 Hz (fc << 20 Hz audio content).
+    for stage in &mut compiled.stages {
+        // Set up input DC blocker for inter-stage tube grids
+        if stage.signal_flow_distance > 0 {
+            match &stage.root {
+                super::stage::RootKind::Triode(_)
+                | super::stage::RootKind::VariMu(_)
+                | super::stage::RootKind::Pentode(_) => {
+                    // Initialize the HPF state so the first-sample grid output is
+                    // negative (safe operating point) rather than tracking the large
+                    // positive DC from the previous stage's plate voltage.
+                    //
+                    // y_prev = -10.0 ensures the HPF output at sample 0 is:
+                    //   y = input - 0 + α × (-10) ≈ -9V (for small input)
+                    // This keeps the tube below positive grid bias during the first
+                    // few milliseconds before the HPF converges, preventing cathode
+                    // bypass cap latch from saturation-level plate current.
+                    stage.grid_dc_blocker = Some((0.0, -10.0));
+                }
+                _ => {}
+            }
+        }
+        // Set up output DC block for all tube stages that don't already have one.
+        // This models the inter-stage coupling cap that blocks plate DC from
+        // reaching downstream passive stages and tube grids.
+        if stage.dc_block.is_none() {
+            match &stage.root {
+                super::stage::RootKind::Triode(_)
+                | super::stage::RootKind::VariMu(_)
+                | super::stage::RootKind::Pentode(_) => {
+                    // IIR highpass at fc ≈ 20 Hz: passes audio, blocks plate DC.
+                    // This approximates the typical 0.022 µF × 470 kΩ = 10ms RC
+                    // time constant found in inter-stage coupling caps.
+                    let omega = (std::f64::consts::PI * 2.0 * 20.0) / sample_rate;
+                    let omega_tan = omega.tan();
+                    let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
+                    let b0 = 1.0 / (1.0 + omega_tan);
+                    stage.dc_block = Some((a1, b0, 0.0, 0.0));
+                }
+                _ => {}
+            }
+        }
+    }
 
     let initial_voltage = match &compiled.power_supply {
         Some(psu) => psu.steady_state_voltage(),

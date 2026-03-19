@@ -229,6 +229,7 @@ pub(super) fn build_opamp_feedback_stages(
                     allpass_feedback: None,
                     allpass_direct: None,
                     dc_block: None,
+                grid_dc_blocker: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
                     signal_flow_distance: 0,
@@ -244,7 +245,9 @@ pub(super) fn build_opamp_feedback_stages(
                     feedback_opamp: None,
                     vcc_injection_coeff: 0.0,
                     vcc_dc_ramp: 0,
+                    coupling_cap_id: None,
                     tone_feedback: None,
+                    negate_triode_vs: false,
                 };
                 // Don't balance VS impedance for complex feedback trees — their
                 // VS must remain low-Rp so the cap/pot frequency shaping works.
@@ -349,6 +352,7 @@ pub(super) fn build_opamp_feedback_stages(
                     allpass_feedback: None,
                     allpass_direct: None,
                     dc_block: None,
+                grid_dc_blocker: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
                     signal_flow_distance: 0,
@@ -364,7 +368,9 @@ pub(super) fn build_opamp_feedback_stages(
                     feedback_opamp: None,
                     vcc_injection_coeff: 0.0,
                     vcc_dc_ramp: 0,
+                    coupling_cap_id: None,
                     tone_feedback: None,
+                    negate_triode_vs: false,
                 };
                 if !has_complex_fb_tree {
                     stage.balance_vs_impedance();

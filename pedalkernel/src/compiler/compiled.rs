@@ -1902,6 +1902,7 @@ impl PedalProcessor for CompiledPedal {
                     #[cfg(feature = "debug-trace")]
                     let pre_stage = stage_input;
                     let stage_output = stage.process(stage_input);
+
                     // Guard against NaN from NR solver divergence.
                     let stage_output = if stage_output.is_finite() {
                         stage_output

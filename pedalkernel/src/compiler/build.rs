@@ -579,6 +579,7 @@ pub(super) fn build_stages(
             allpass_feedback: None,
             allpass_direct: None,
             dc_block: None,
+                grid_dc_blocker: None,
             is_source_follower: false,
             prev_source_voltage: 0.0,
             signal_flow_distance: sfd,
@@ -594,7 +595,9 @@ pub(super) fn build_stages(
             feedback_opamp: None,
             vcc_injection_coeff: 0.0,
             vcc_dc_ramp: 0,
+            coupling_cap_id: None,
             tone_feedback: None,
+            negate_triode_vs: false,
         });
     }
 
@@ -2532,7 +2535,11 @@ fn build_vs_stage(
         }
     };
 
-    let vcc_injection_coeff = 0.0;
+    // Detect tube stages (triode / pentode) for coupling-cap routing.
+    let is_tube = matches!(
+        &elem.kind,
+        NonlinearKind::Triode { .. } | NonlinearKind::Pentode { .. }
+    );
 
     // Build the signal tree.
     // terminals [source_node, GND].  Collector/emitter passives are dead-ends
@@ -2544,7 +2551,70 @@ fn build_vs_stage(
         Some(graph.out_node),
     ).ok()?;
 
-    let (mut root, base_diode_model) = create_root(&elem.kind, use_jfet_vr);
+    // Find the inter-stage coupling capacitor connected to the tube's grid node.
+    //
+    // The injection_node is the plate-side signal entry point, but the inter-stage
+    // coupling cap sits on the grid side, blocking DC from the previous stage's plate.
+    // We search for a capacitor that:
+    //   1. Touches the grid node on one side
+    //   2. Has its OTHER side connected to something upstream (not ground, not the
+    //      circuit input node) — this distinguishes an inter-stage coupling cap
+    //      (previous plate → grid) from an input coupling cap (circuit in → grid).
+    //
+    // When found, the input signal flows through the WDF tree (through the coupling
+    // cap) so DC is naturally blocked, and we extract the cap's WDF state to compute
+    // Vgk each sample instead of using the slow software HPF.
+    let coupling_cap_id = if is_tube {
+        let grid_node: Option<NodeId> = match &elem.kind {
+            NonlinearKind::Triode { grid_node, .. } => *grid_node,
+            NonlinearKind::Pentode { grid_node, .. } => *grid_node,
+            _ => None,
+        };
+        if let Some(gn) = grid_node {
+            plan.passive_idxs.iter().find_map(|&eidx| {
+                let e = &graph.edges[eidx];
+                let comp = &graph.components[e.comp_idx];
+                if comp.kind.as_any().downcast_ref::<CapacitorComp>().is_some() {
+                    // Determine which side touches the grid and which is "upstream".
+                    let upstream_node = if e.node_a == gn {
+                        e.node_b
+                    } else if e.node_b == gn {
+                        e.node_a
+                    } else {
+                        return None;
+                    };
+                    // Skip caps to GND (bypass caps) or directly to the circuit input
+                    // (input coupling caps). We want INTER-STAGE caps whose upstream
+                    // side comes from a previous stage's plate or collector node.
+                    if upstream_node == graph.gnd_node || upstream_node == graph.in_node {
+                        return None;
+                    }
+                    Some(comp.id.clone())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Triode stages use VS = B+ directly, so vcc_injection_coeff is not needed —
+    // the supply voltage is already embedded in the VS. Pentode stages use
+    // VS = signal, but pentodes are first-stage only (no coupling cap identified)
+    // so vcc_injection_coeff = 0 there too.
+    let vcc_injection_coeff = 0.0;
+
+    // Detect if the tree root is a Series adaptor for triode stages.
+    // When the plate load reduces to a single Series chain (VS → R_plate),
+    // the Series formula b = -(b_VS + b_R) negates the B+ contribution,
+    // giving b_tree = -2*B+ (wrong sign). Setting negate_triode_vs = true
+    // instructs the processor to negate VS so b_tree = +2*B+ (correct).
+    let negate_triode_vs = is_tube && tree.is_series_root();
+
+    let (root, base_diode_model) = create_root(&elem.kind, use_jfet_vr);
 
     Some(WdfStage {
         tree,
@@ -2556,6 +2626,7 @@ fn build_vs_stage(
         allpass_feedback: None,
         allpass_direct: None,
         dc_block: plan.dc_block,
+        grid_dc_blocker: None,
         is_source_follower: false,
         prev_source_voltage: 0.0,
         signal_flow_distance: 0, // set by caller
@@ -2575,7 +2646,9 @@ fn build_vs_stage(
         feedback_opamp: None,
         vcc_injection_coeff,
         vcc_dc_ramp: 0,
+        coupling_cap_id,
         tone_feedback: None,
+        negate_triode_vs,
     })
 }
 
@@ -2620,6 +2693,7 @@ fn build_source_follower_stage(
         allpass_feedback: None,
         allpass_direct: None,
         dc_block: None,
+                grid_dc_blocker: None,
         is_source_follower: is_sf,
         prev_source_voltage: 0.0,
         signal_flow_distance: 0, // set by caller
@@ -2639,7 +2713,9 @@ fn build_source_follower_stage(
         feedback_opamp: None,
         vcc_injection_coeff: 0.0,
         vcc_dc_ramp: 0,
+        coupling_cap_id: None,
         tone_feedback: None,
+        negate_triode_vs: false,
     })
 }
 
@@ -2838,12 +2914,44 @@ fn build_push_pull_half_adaptor(
     mna.stamp_voltage_source(inj_mna, None, input_vs_idx);
 
     // Derive scattering matrix with VS injection for the input signal
-    let (scattering_vec, vs_inj_vec) =
+    let (mut scattering_vec, mut vs_inj_vec) =
         mna.derive_scattering_and_vs_injection(&ports, input_vs_idx);
 
     if scattering_vec.iter().any(|&sv| !sv.is_finite()) {
         eprintln!("Warning: push-pull adaptor scattering has non-finite values");
         return None;
+    }
+
+    // Iterative Thevenin adaptation of NL port resistances.
+    // Match each NL port resistance to the Thevenin impedance seen from
+    // that port (S_refl -> 0). Without this, the 100k default causes
+    // massive impedance mismatch (plate Zth ~ 1.8k), leading to
+    // b-value clamping and NR divergence.
+    {
+        let n_total = ports.len();
+        for _iter in 0..5 {
+            let mut needs_recompute = false;
+            for i in 0..n_nl {
+                let s_refl = scattering_vec[i * n_total + i];
+                if s_refl.abs() > 0.05 {
+                    let z_th = ports[i].resistance * (1.0 + s_refl) / (1.0 - s_refl);
+                    if z_th.is_finite() && z_th > 1.0 {
+                        ports[i].resistance = z_th;
+                        needs_recompute = true;
+                    }
+                }
+            }
+            if !needs_recompute {
+                break;
+            }
+            let (new_s, new_vs) =
+                mna.derive_scattering_and_vs_injection(&ports, input_vs_idx);
+            if new_s.iter().any(|&sv| !sv.is_finite()) {
+                break;
+            }
+            scattering_vec = new_s;
+            vs_inj_vec = new_vs;
+        }
     }
 
     // Extract VCC injection for DC bias
@@ -2855,6 +2963,21 @@ fn build_push_pull_half_adaptor(
             dc_bias[i] = vcc_inj[i] * supply_voltage;
         }
         vcc_bias_all = vcc_inj.iter().map(|&k| k * supply_voltage).collect();
+    }
+
+    // Correct plate port dc_bias: the ThreePort eval functions (triode, pentode,
+    // vari-mu) shift the NR voltage by +v_max to convert from WDF-centered to
+    // actual Vpk: `vpk = v[1] + self.v_max`. The VCC injection already embeds
+    // the full supply voltage into dc_bias[1], so we subtract v_max here to
+    // avoid double-counting. Without this, the plate sits at ~2×VCC and the
+    // tube operates in a nonsense region with zero AC modulation.
+    if n_nl > 1 {
+        dc_bias[1] -= supply_voltage;
+        // Also correct the full bias vector used for scatter_all post-addition.
+        // The output is (a_out + b_out)/2 — both must use consistent offsets.
+        if vcc_bias_all.len() > 1 {
+            vcc_bias_all[1] -= supply_voltage;
+        }
     }
 
     // Build R-type adaptor (VS injection mode)
