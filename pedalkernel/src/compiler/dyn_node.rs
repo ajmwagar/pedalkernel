@@ -251,28 +251,21 @@ impl DynNode {
     /// the sign of the Thevenin voltage seen by the NL root.  When true,
     /// triode stages must negate VS so that `b_tree = 2*B+` (positive).
     pub fn is_series_root(&self) -> bool {
-        matches!(self, Self::Series { .. })
+        matches!(self, Self::Binary { kind: BinaryKind::Series, .. })
     }
 
-    /// Find a capacitor's state (DC voltage) by component ID.
-    /// Searches the tree recursively. Returns None if not found.
+    /// Find a capacitor's voltage by component ID.
+    /// Searches the tree recursively via `find_leaf`. Returns None if not found.
     pub fn find_cap_state(&self, target_id: &str) -> Option<f64> {
-        match self {
-            Self::Capacitor { comp_id: Some(id), state, .. }
-            | Self::LeakyCapacitor { comp_id: Some(id), state, .. } if id == target_id => {
-                Some(*state)
+        self.find_leaf(&|leaf| {
+            if leaf.comp_id() == Some(target_id)
+                && (leaf.type_tag() == "capacitor" || leaf.type_tag() == "leaky_capacitor")
+            {
+                Some(leaf.leaf_voltage())
+            } else {
+                None
             }
-            Self::Series { left, right, .. }
-            | Self::Parallel { left, right, .. } => {
-                left.find_cap_state(target_id)
-                    .or_else(|| right.find_cap_state(target_id))
-            }
-            Self::Transformer { secondary, .. } => secondary.find_cap_state(target_id),
-            Self::RType { children, .. } => {
-                children.iter().find_map(|c| c.find_cap_state(target_id))
-            }
-            _ => None,
-        }
+        })
     }
 
     /// Scatter-up: compute reflected wave (bottom → root), caching child waves.
