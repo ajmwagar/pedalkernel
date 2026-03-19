@@ -16,12 +16,21 @@ fn main() {
     // 10 seconds of audio at 48kHz = 480k samples
     let num_samples = 480_000;
     let mut phase = 0.0_f64;
+    let mut max_out = 0.0_f64;
+    let mut max_in = 0.0_f64;
     reset_solver_stats();
-    for _ in 0..num_samples {
+    for i in 0..num_samples {
         phase += 440.0 / 48000.0;
         let input = 0.5 * (2.0 * std::f64::consts::PI * phase).sin();
-        std::hint::black_box(proc.process(std::hint::black_box(input)));
+        let out = proc.process(input);
+        max_out = max_out.max(out.abs());
+        max_in = max_in.max(input.abs());
+        if i < 10 || (i % 48000 == 0) {
+            eprintln!("  sample {i}: in={input:.6e} out={out:.6e}");
+        }
+        std::hint::black_box(out);
     }
+    eprintln!("max_in={max_in:.6e} max_out={max_out:.6e}");
     let stats = solver_stats_snapshot();
     let avg_iter = if stats.solves > 0 {
         stats.total_iterations as f64 / stats.solves as f64

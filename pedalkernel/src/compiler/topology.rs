@@ -32,6 +32,15 @@ pub(super) struct ResolvedTopology<'a> {
     pub(super) ac_ground_nodes: HashSet<usize>,
     /// Resistor/pot adjacency: node → [(neighbor, resistance, comp_id, is_pot, max_r)].
     pub(super) resistor_adj: HashMap<usize, Vec<(usize, f64, String, bool, f64)>>,
+    /// Ground-leg adjacency: like resistor_adj but includes caps/inductors as 0Ω passthrough.
+    /// Used by NonInverting detection to traverse R+C series paths (e.g., RAT R4→C5→gnd).
+    pub(super) ground_leg_adj: HashMap<usize, Vec<(usize, f64, String, bool, f64)>>,
+    /// Diode map: (node_a, node_b) → DiodeType. Both orderings stored.
+    pub(super) diode_map: HashMap<(usize, usize), DiodeType>,
+    /// Passive adjacency: node → [(neighbor, comp_id)]. Includes R, C, L, pots.
+    pub(super) passive_adj: HashMap<usize, Vec<(usize, String)>>,
+    /// Diode adjacency: node → [(neighbor, DiodeType)].
+    pub(super) diode_adj: HashMap<usize, Vec<(usize, DiodeType)>>,
     /// Reference to the pedal definition.
     pub(super) pedal: &'a PedalDef,
 }
@@ -173,6 +182,121 @@ impl<'a> ResolvedTopology<'a> {
             }
         }
 
+        // Ground-leg adjacency: resistor_adj + caps/inductors as 0Ω passthrough.
+        let mut ground_leg_adj = resistor_adj.clone();
+        for comp in &pedal.components {
+            if comp.kind.as_any().downcast_ref::<Capacitor>().is_some()
+                || comp.kind.as_any().downcast_ref::<Inductor>().is_some()
+            {
+                let pa = format!("{}.a", comp.id);
+                let pb = format!("{}.b", comp.id);
+                if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
+                    let a_node = uf.find(a_id);
+                    let b_node = uf.find(b_id);
+                    ground_leg_adj
+                        .entry(a_node)
+                        .or_default()
+                        .push((b_node, 0.0, comp.id.clone(), false, 0.0));
+                    ground_leg_adj
+                        .entry(b_node)
+                        .or_default()
+                        .push((a_node, 0.0, comp.id.clone(), false, 0.0));
+                }
+            }
+        }
+
+        // Diode map and adjacency.
+        let mut diode_map: HashMap<(usize, usize), DiodeType> = HashMap::new();
+        let mut diode_adj: HashMap<usize, Vec<(usize, DiodeType)>> = HashMap::new();
+        for comp in &pedal.components {
+            let dt = match comp.kind.diode_type() {
+                Some(dt) => dt,
+                None => continue,
+            };
+            let key_a = format!("{}.a", comp.id);
+            let key_b = format!("{}.b", comp.id);
+            if let (Some(&id_a), Some(&id_b)) = (pin_ids.get(&key_a), pin_ids.get(&key_b)) {
+                let na = uf.find(id_a);
+                let nb = uf.find(id_b);
+                diode_map.insert((na, nb), dt);
+                diode_map.insert((nb, na), dt);
+                diode_adj.entry(na).or_default().push((nb, dt));
+                diode_adj.entry(nb).or_default().push((na, dt));
+            }
+        }
+
+        // Passive adjacency: R, C, L, pots.
+        let mut passive_adj: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
+        for comp in &pedal.components {
+            let is_simple_passive = comp.kind.as_any().downcast_ref::<Resistor>().is_some()
+                || comp.kind.as_any().downcast_ref::<Capacitor>().is_some()
+                || comp.kind.as_any().downcast_ref::<Inductor>().is_some();
+            if is_simple_passive {
+                let pa = format!("{}.a", comp.id);
+                let pb = format!("{}.b", comp.id);
+                if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
+                    let a_node = uf.find(a_id);
+                    let b_node = uf.find(b_id);
+                    passive_adj
+                        .entry(a_node)
+                        .or_default()
+                        .push((b_node, comp.id.clone()));
+                    passive_adj
+                        .entry(b_node)
+                        .or_default()
+                        .push((a_node, comp.id.clone()));
+                }
+            }
+            if let Some(_pot) = comp.kind.as_any().downcast_ref::<Potentiometer>() {
+                let pa = format!("{}.a", comp.id);
+                let pb = format!("{}.b", comp.id);
+                let pw = format!("{}.w", comp.id);
+                let pw_long = format!("{}.wiper", comp.id);
+                let wiper_id = pin_ids.get(&pw).or_else(|| pin_ids.get(&pw_long));
+                if let Some(&w_id) = wiper_id {
+                    if let Some(&a_id) = pin_ids.get(&pa) {
+                        let a_node = uf.find(a_id);
+                        let w_node = uf.find(w_id);
+                        let aw_id = format!("{}__aw", comp.id);
+                        passive_adj
+                            .entry(a_node)
+                            .or_default()
+                            .push((w_node, aw_id.clone()));
+                        passive_adj
+                            .entry(w_node)
+                            .or_default()
+                            .push((a_node, aw_id));
+                    }
+                    if let Some(&b_id) = pin_ids.get(&pb) {
+                        let b_node = uf.find(b_id);
+                        let w_node = uf.find(w_id);
+                        let wb_id = format!("{}__wb", comp.id);
+                        passive_adj
+                            .entry(w_node)
+                            .or_default()
+                            .push((b_node, wb_id.clone()));
+                        passive_adj
+                            .entry(b_node)
+                            .or_default()
+                            .push((w_node, wb_id));
+                    }
+                } else {
+                    if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
+                        let a_node = uf.find(a_id);
+                        let b_node = uf.find(b_id);
+                        passive_adj
+                            .entry(a_node)
+                            .or_default()
+                            .push((b_node, comp.id.clone()));
+                        passive_adj
+                            .entry(b_node)
+                            .or_default()
+                            .push((a_node, comp.id.clone()));
+                    }
+                }
+            }
+        }
+
         // Resolve all pin keys to final node IDs.
         let pin_to_node: HashMap<String, usize> = pin_ids
             .iter()
@@ -184,6 +308,10 @@ impl<'a> ResolvedTopology<'a> {
             gnd_node,
             ac_ground_nodes,
             resistor_adj,
+            ground_leg_adj,
+            diode_map,
+            passive_adj,
+            diode_adj,
             pedal,
         }
     }
@@ -335,6 +463,70 @@ impl<'a> TopologyContext<'a> {
                     if (a == node_a && b == node_b) || (a == node_b && b == node_a) {
                         return Some(cap.config.value);
                     }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a ground-leg path from `from` to `to` through resistors AND caps/inductors.
+    ///
+    /// Like `find_resistive_path` but caps/inductors are treated as 0Ω passthrough,
+    /// so R→C→gnd series paths are discoverable (e.g., RAT's R4→C5→gnd).
+    pub fn find_ground_leg_path(
+        &self,
+        from: usize,
+        to: usize,
+    ) -> Option<(f64, Vec<String>, Option<(String, f64, f64, Option<f64>)>)> {
+        super::graph::find_path_through_adj(from, to, &self.resolved.ground_leg_adj)
+    }
+
+    /// Find feedback diodes between two nodes.
+    ///
+    /// Searches direct connections, 1-hop through passives, and chained diodes.
+    /// Matches the logic in `find_opamp_feedback_loops` for Tube Screamer/Klon/Bluesbreaker.
+    pub fn find_feedback_diode(&self, node_a: usize, node_b: usize) -> Option<DiodeType> {
+        // Direct: diode spans (node_a, node_b)
+        if let Some(&dt) = self.resolved.diode_map.get(&(node_a, node_b)) {
+            return Some(dt);
+        }
+        // 1-hop from node_a through passive: diode at (intermediate, node_b)
+        if let Some(neighbors) = self.resolved.passive_adj.get(&node_a) {
+            for &(mid, _) in neighbors {
+                if let Some(&dt) = self.resolved.diode_map.get(&(mid, node_b)) {
+                    return Some(dt);
+                }
+                // 2-hop: passive → diode → diode → node_b
+                if let Some(diode_neighbors) = self.resolved.diode_adj.get(&mid) {
+                    for &(mid2, dt) in diode_neighbors {
+                        if self.resolved.diode_map.get(&(mid2, node_b)).is_some() {
+                            return Some(dt);
+                        }
+                    }
+                }
+            }
+        }
+        // 1-hop from node_b through passive: diode at (node_a, intermediate)
+        if let Some(neighbors) = self.resolved.passive_adj.get(&node_b) {
+            for &(mid, _) in neighbors {
+                if let Some(&dt) = self.resolved.diode_map.get(&(node_a, mid)) {
+                    return Some(dt);
+                }
+                // 2-hop: node_a → diode → diode → passive → node_b
+                if let Some(diode_neighbors) = self.resolved.diode_adj.get(&mid) {
+                    for &(mid2, dt) in diode_neighbors {
+                        if self.resolved.diode_map.get(&(node_a, mid2)).is_some() {
+                            return Some(dt);
+                        }
+                    }
+                }
+            }
+        }
+        // Direct chain: node_a → diode → diode → node_b
+        if let Some(diode_neighbors) = self.resolved.diode_adj.get(&node_a) {
+            for &(mid, dt) in diode_neighbors {
+                if self.resolved.diode_map.get(&(mid, node_b)).is_some() {
+                    return Some(dt);
                 }
             }
         }
@@ -557,7 +749,7 @@ fn classify_opamp(
     }
 
     // Need Rf (feedback resistor from neg to out) for remaining topologies.
-    let (rf, _rf_comps, _rf_pot) = ctx.find_resistive_path(neg_node, out_node)?;
+    let (rf, _rf_comps, rf_pot) = ctx.find_resistive_path(neg_node, out_node)?;
     let all_fb_comps = ctx.collect_passive_comps_between(neg_node, out_node);
 
     // ── Allpass (gain-of-2 style): JFET at pos ──────────────────────────
@@ -615,7 +807,86 @@ fn classify_opamp(
         }
     }
 
-    // Not a topology we handle yet — let the monolith deal with it.
+    // ── Inverting amplifier ──────────────────────────────────────────────
+    // pos grounded (directly or via resistive path to gnd/AC-gnd).
+    let pos_grounded = ctx.is_ac_grounded(pos_node)
+        || ctx.find_resistive_path(pos_node, ctx.resolved.gnd_node).is_some()
+        || ctx
+            .resolved
+            .ac_ground_nodes
+            .iter()
+            .any(|&ag| ctx.find_resistive_path(pos_node, ag).is_some());
+    if pos_grounded {
+        if let Some(ri) = ctx.find_input_resistor(neg_node, out_node) {
+            let feedback_diode = ctx.find_feedback_diode(neg_node, out_node);
+            return Some(OpAmpFeedbackInfo {
+                comp_id: comp_id.to_string(),
+                opamp_type,
+                feedback_kind: OpAmpFeedbackKind::Inverting {
+                    rf,
+                    ri,
+                    feedback_diode,
+                    rf_pot,
+                },
+                neg_node,
+                pos_node,
+                out_node,
+                feedback_comp_ids: all_fb_comps,
+            });
+        }
+    }
+
+    // ── All-pass check with JFET at pos (before NonInverting) ────────────
+    // Moved above NonInverting so JFET-at-pos circuits aren't misclassified.
+    // (Already handled above in the Allpass section.)
+
+    // ── Non-inverting amplifier ──────────────────────────────────────────
+    // Ri path from neg to ground (or AC ground). Pos is not grounded.
+    // Use ground_leg_path to traverse R+C series paths (e.g., RAT R4→C5→gnd).
+    let ni_gnd_node = if ctx.find_ground_leg_path(neg_node, ctx.resolved.gnd_node).is_some() {
+        Some(ctx.resolved.gnd_node)
+    } else {
+        ctx.resolved
+            .ac_ground_nodes
+            .iter()
+            .find(|&&ag| ctx.find_ground_leg_path(neg_node, ag).is_some())
+            .copied()
+    };
+    if let Some(gnd_target) = ni_gnd_node {
+        // Prefer pure-resistive path for ri/pot extraction (avoids bypass caps
+        // inflating parallel conductance — e.g., Klon C_gnd creating 0Ω shortcut).
+        // Fall back to ground_leg_path only when no resistive path exists.
+        let (ri, _ri_comps, ri_pot) =
+            if let Some(rp) = ctx.find_resistive_path(neg_node, gnd_target) {
+                rp
+            } else {
+                ctx.find_ground_leg_path(neg_node, gnd_target)?
+            };
+        // Collect ground-leg passive components too.
+        let gnd_leg_comps = ctx.collect_passive_comps_between(neg_node, gnd_target);
+        let mut fb_comps = all_fb_comps.clone();
+        for c in gnd_leg_comps {
+            if !fb_comps.contains(&c) {
+                fb_comps.push(c);
+            }
+        }
+        return Some(OpAmpFeedbackInfo {
+            comp_id: comp_id.to_string(),
+            opamp_type,
+            feedback_kind: OpAmpFeedbackKind::NonInverting {
+                rf,
+                ri,
+                rf_pot,
+                ri_pot,
+            },
+            neg_node,
+            pos_node,
+            out_node,
+            feedback_comp_ids: fb_comps,
+        });
+    }
+
+    // Unrecognized topology — let the monolith deal with it.
     None
 }
 

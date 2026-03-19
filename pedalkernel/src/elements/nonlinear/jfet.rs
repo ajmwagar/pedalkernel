@@ -161,6 +161,20 @@ impl JfetRoot {
         self.vgs
     }
 
+    /// Approximate drain-source resistance at Vds ≈ 0 (triode region onset).
+    /// Rds = 1 / (2 × Beta × Vov), where Vov = Vgs - Vto.
+    /// Returns a large resistance (1MΩ) if the JFET is in cutoff.
+    #[inline]
+    pub fn rds_approx(&self) -> f64 {
+        let sign = if self.model.is_n_channel { 1.0 } else { -1.0 };
+        let vov = sign * self.vgs - self.model.vto;
+        if vov > 0.0 {
+            1.0 / (2.0 * self.model.beta * vov)
+        } else {
+            1e6
+        }
+    }
+
     /// Compute drain current for given Vds at current Vgs.
     ///
     /// Handles triode, saturation, and cutoff regions using SPICE sign
