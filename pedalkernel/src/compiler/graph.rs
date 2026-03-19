@@ -1975,10 +1975,26 @@ impl CircuitGraph {
                     // Check for inverting topology: pos connected to ground (or AC ground).
                     // Also accept pos grounded through resistors (e.g. difference amp
                     // with R3/R4 divider from pos to gnd — pos is AC-grounded via R network).
+                    //
+                    // IMPORTANT: If neg also has a ground leg (R→C→gnd or R→gnd), this
+                    // is a non-inverting topology with DC bias at pos (e.g. RAT: pos has
+                    // R3→R1→gnd bias path, but neg has R4→C5→gnd ground leg).
+                    // Only classify as Inverting when neg does NOT have a ground leg.
                     let pos_grounded = is_ac_ground(pos_node)
                         || find_resistive_path(pos_node, gnd_node_resolved).is_some()
                         || ac_ground_nodes.iter().any(|&ag| find_resistive_path(pos_node, ag).is_some());
-                    if pos_grounded {
+                    // Check if neg has an INDEPENDENT ground leg: a path from neg
+                    // to ground that does NOT pass through out_node.  This distinguishes
+                    // non-inverting (RAT: neg→R4→C5→gnd) from inverting (Tube Screamer:
+                    // neg→gnd path only exists via feedback→out→load→gnd).
+                    let neg_has_independent_ground_leg = {
+                        let check = |target: usize| -> bool {
+                            has_short_path_excluding(neg_node, target, &ground_leg_adj, out_node, 4)
+                        };
+                        check(gnd_node_resolved)
+                            || ac_ground_nodes.iter().any(|&ag| check(ag))
+                    };
+                    if pos_grounded && !neg_has_independent_ground_leg {
                         // Inverting: look for Ri connected to neg (from any input source)
                         // For cascaded op-amps, Ri may connect to a previous stage's output
                         if let Some(ri) = find_input_resistor(neg_node, out_node, gnd_node_resolved)
@@ -2185,6 +2201,41 @@ impl CircuitGraph {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+/// Check if a path exists from `start` to `end` through `adj` that does NOT
+/// visit `exclude`.  Used to find ground legs that bypass the opamp output.
+fn has_short_path_excluding(
+    start: usize,
+    end: usize,
+    adj: &HashMap<usize, Vec<(usize, f64, String, bool, f64)>>,
+    exclude: usize,
+    max_hops: usize,
+) -> bool {
+    if start == end {
+        return true;
+    }
+    if start == exclude || max_hops == 0 {
+        return false;
+    }
+    let mut visited = HashSet::new();
+    visited.insert(start);
+    visited.insert(exclude);
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((start, 0usize));
+    while let Some((node, depth)) = queue.pop_front() {
+        if let Some(neighbors) = adj.get(&node) {
+            for (next, _, _, _, _) in neighbors {
+                if *next == end {
+                    return true;
+                }
+                if depth + 1 < max_hops && visited.insert(*next) {
+                    queue.push_back((*next, depth + 1));
+                }
+            }
+        }
+    }
+    false
+}
+
 // Shared DFS path-finder for resistive/passive adjacency maps
 // ─────────────────────────────────────────────────────────────────────────
 

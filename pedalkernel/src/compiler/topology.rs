@@ -8,7 +8,7 @@
 //! Over time, each topology migrates into its component's `classify_topology()`
 //! implementation, shrinking the monolith.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::dsl::*;
 
@@ -685,8 +685,44 @@ impl<'a> TopologyContext<'a> {
 // Pass 1.5: classify_topologies
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Run topology classification on all components.
-///
+/// Short-range BFS from `start` to `end` through `adj`, excluding `exclude`
+/// node, limited to `max_hops` edges.  Used to find direct ground legs
+/// (e.g. RAT neg→R4→C5→gnd = 2 hops) without traversing the entire signal
+/// chain (e.g. Klon neg→R4→R2→R3→C2→…→gnd = many hops).
+fn has_short_path_excluding(
+    start: usize,
+    end: usize,
+    adj: &HashMap<usize, Vec<(usize, f64, String, bool, f64)>>,
+    exclude: usize,
+    max_hops: usize,
+) -> bool {
+    if start == end {
+        return true;
+    }
+    if start == exclude || max_hops == 0 {
+        return false;
+    }
+    let mut visited = HashSet::new();
+    visited.insert(start);
+    visited.insert(exclude);
+    // BFS with depth tracking: (node, depth)
+    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+    queue.push_back((start, 0));
+    while let Some((node, depth)) = queue.pop_front() {
+        if let Some(neighbors) = adj.get(&node) {
+            for (next, _, _, _, _) in neighbors {
+                if *next == end {
+                    return true;
+                }
+                if depth + 1 < max_hops && visited.insert(*next) {
+                    queue.push_back((*next, depth + 1));
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Returns a list of `OpAmpFeedbackInfo` for components that self-classified,
 /// and a set of component IDs that were classified (to be skipped by the
 /// monolithic `find_opamp_feedback_loops`).
@@ -809,6 +845,11 @@ fn classify_opamp(
 
     // ── Inverting amplifier ──────────────────────────────────────────────
     // pos grounded (directly or via resistive path to gnd/AC-gnd).
+    //
+    // IMPORTANT: If neg also has a ground leg (R→C→gnd or R→gnd), this
+    // is a non-inverting topology with DC bias at pos (e.g. RAT: pos has
+    // R3→R1→gnd bias path, but neg has R4→C5→gnd ground leg).
+    // Only classify as Inverting when neg does NOT have a ground leg.
     let pos_grounded = ctx.is_ac_grounded(pos_node)
         || ctx.find_resistive_path(pos_node, ctx.resolved.gnd_node).is_some()
         || ctx
@@ -816,7 +857,25 @@ fn classify_opamp(
             .ac_ground_nodes
             .iter()
             .any(|&ag| ctx.find_resistive_path(pos_node, ag).is_some());
-    if pos_grounded {
+    // Check if neg has an INDEPENDENT ground leg (one that doesn't share
+    // components with the feedback path out→neg).  This distinguishes
+    // non-inverting (RAT: neg→R4→C5→gnd) from inverting (Tube Screamer:
+    // neg→gnd path only exists through feedback/signal components).
+    // Check for ground leg that doesn't pass through out_node.
+    // This uses a custom BFS that excludes out_node from traversal,
+    // so only direct neg→gnd paths (like RAT's R4→C5→gnd) are found.
+    let neg_has_independent_ground_leg = {
+        let check = |target: usize| -> bool {
+            has_short_path_excluding(neg_node, target, &ctx.resolved.ground_leg_adj, out_node, 4)
+        };
+        check(ctx.resolved.gnd_node)
+            || ctx
+                .resolved
+                .ac_ground_nodes
+                .iter()
+                .any(|&ag| check(ag))
+    };
+    if pos_grounded && !neg_has_independent_ground_leg {
         if let Some(ri) = ctx.find_input_resistor(neg_node, out_node) {
             let feedback_diode = ctx.find_feedback_diode(neg_node, out_node);
             return Some(OpAmpFeedbackInfo {
