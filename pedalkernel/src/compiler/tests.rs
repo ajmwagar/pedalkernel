@@ -1079,6 +1079,191 @@ fn compile_blues() {
 }
 
 #[test]
+fn compile_blues_inline() {
+    // Self-contained Marshall Bluesbreaker: two opamp stages + passive tone + volume
+    let src = r#"
+pedal "Marshall Bluesbreaker" {
+  supply 9V
+  components {
+    R_in:    resistor(2.2M)
+    C_in:    cap(10n)
+    R2:      resistor(3.3k)
+    R3:      resistor(4.7k)
+    C2:      cap(47p)
+    C3:      cap(10n)
+    C4:      cap(10n)
+    Gain:    pot(100k)
+    IC1a:    opamp(tl072)
+    R4:      resistor(10k)
+    R_fb:    resistor(220k)
+    C5:      cap(220n)
+    R_clip:  resistor(6.8k)
+    D1:      diode_pair(silicon)
+    D2:      diode_pair(silicon)
+    IC1b:    opamp(tl072)
+    R_tone:  resistor(6.8k)
+    C_tone:  cap(10n)
+    Tone:    pot(25k)
+    C_out:   cap(100n)
+    Volume:  pot(100k)
+    R_out:   resistor(1M)
+    R10:     resistor(47k)
+    R11:     resistor(47k)
+    C_bias:  cap(100u, electrolytic)
+    C_pwr:   cap(100u, electrolytic)
+  }
+  nets {
+    vcc -> R10.a, C_pwr.a
+    R10.b -> R11.a, C_bias.a
+    R11.b -> gnd
+    C_bias.b -> gnd
+    C_pwr.b -> gnd
+    in -> C_in.a
+    C_in.b -> R_in.a, IC1a.pos
+    R_in.b -> R10.b
+    IC1a.neg -> R3.a, C4.a
+    R3.b -> Gain.a
+    C4.b -> gnd
+    IC1a.out -> R2.a, C2.a
+    R2.b -> C3.a
+    C3.b -> IC1a.neg
+    C2.b -> IC1a.neg
+    Gain.b -> gnd
+    Gain.w -> R4.a, C5.a
+    R4.b -> IC1b.neg
+    C5.b -> gnd
+    IC1b.pos -> R10.b
+    IC1b.out -> R_fb.a
+    R_fb.b -> IC1b.neg
+    IC1b.out -> R_clip.a
+    R_clip.b -> D1.a
+    D1.b -> D2.a
+    D2.b -> IC1b.neg
+    IC1b.out -> R_tone.a
+    R_tone.b -> C_tone.a, Tone.a
+    C_tone.b -> R10.b
+    Tone.b -> R10.b
+    Tone.w -> C_out.a
+    C_out.b -> Volume.a
+    Volume.w -> out
+    Volume.b -> R10.b
+    R_out.a -> out
+    R_out.b -> gnd
+  }
+  controls {
+    Gain.position   -> "Drive"  [0.0, 1.0] = 0.5
+    Tone.position   -> "Tone"   [0.0, 1.0] = 0.5
+    Volume.position -> "Volume" [1.0, 0.0] = 0.7
+  }
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("[blues-driver] WDF stages: {}", proc.stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let root_tag = match &s.root {
+            super::stage::RootKind::DiodePair(_) => "DiodePair",
+            super::stage::RootKind::SingleDiode(_) => "SingleDiode",
+            super::stage::RootKind::OpAmp(_) => "OpAmp",
+            super::stage::RootKind::Passthrough => "Passthrough",
+            super::stage::RootKind::PassiveRType { .. } => "PassiveRType",
+            super::stage::RootKind::VoltageSourceDriver => "VoltageSourceDriver",
+            super::stage::RootKind::ShortCircuit => "ShortCircuit",
+            _ => "Other",
+        };
+        let mut pot_ids = Vec::new();
+        super::helpers::collect_pot_ids(&s.tree, &mut pot_ids);
+        eprintln!("[blues-driver]   wdf[{i}]: inj={} out={} sfd={} root={root_tag} feedback_opamp={} output_probe={:?} feedback_pot={:?} pots={:?} ff={}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            s.feedback_opamp.is_some(), s.output_probe, s.feedback_pot_id, pot_ids, s.is_feedforward);
+    }
+    eprintln!("[blues-driver] MultiNL stages: {}", proc.multi_nl_stages.len());
+    eprintln!("[blues-driver] Controls:");
+    for c in proc.controls.iter() {
+        eprintln!("[blues-driver]   {:?} -> {:?}", c.label, c.target);
+    }
+    eprintln!("[blues-driver] stage_order: {:?}", proc.stage_order);
+
+    proc.set_control("Drive", 0.5);
+    proc.set_control("Tone", 0.5);
+    proc.set_control("Volume", 0.5);
+
+    // Warmup
+    for _ in 0..480 { proc.process(0.0); }
+
+    // Run 100 samples of 0.1 through the full pipeline to allow oversampler to settle
+    let test_input = 0.1;
+    // Check oversampler factor indirectly
+    if let super::stage::RootKind::OpAmp(ref op) = proc.stages[0].root {
+        eprintln!("[blues-driver] stage0 opamp: gain={:.4} v_max={:.2} is_non_inv={}", op.gain(), op.v_max(), op.is_non_inverting());
+    }
+    for sample_idx in 0..100 {
+        let out = proc.process(test_input);
+        if sample_idx < 10 || sample_idx % 20 == 0 {
+            eprintln!("[blues-driver] sample {sample_idx}: out={out:.6e}");
+        }
+    }
+    // Test each stage independently with significant input
+    eprintln!("[blues-driver] --- stage0 solo ---");
+    proc.stages[0].reset();
+    let mut s0_settled = 0.0;
+    for i in 0..20 { s0_settled = proc.stages[0].process(test_input); }
+    eprintln!("[blues-driver]   stage0 settled: {s0_settled:.6e}");
+
+    eprintln!("[blues-driver] --- mnl0 solo with input 0.1 ---");
+    for i in 0..20 {
+        let m0 = proc.multi_nl_stages[0].process(test_input);
+        if i < 5 || i == 19 {
+            eprintln!("[blues-driver]   mnl0[{i}]: {m0:.6e}");
+        }
+    }
+
+    eprintln!("[blues-driver] --- stage1 solo with input 0.1 ---");
+    proc.stages[1].reset();
+    for i in 0..20 {
+        let s1 = proc.stages[1].process(test_input);
+        if i < 5 || i == 19 {
+            eprintln!("[blues-driver]   stage1[{i}]: {s1:.6e}");
+        }
+    }
+    // The PassiveRType stage has IC1a's feedback components (C2,C3,C4) mixed with
+    // output components (Volume, R_out). This is wrong - these should be separate.
+    // C2,C3,C4 are feedback components that should be claimed by opamp_feedback_edges.
+    // Check if the PassiveRType stage has any vs_injection at the output port.
+    if let super::stage::RootKind::PassiveRType { vs_injection, output_port, n_ports, .. } = &proc.stages[1].root {
+        eprintln!("[blues-driver]   PassiveRType vs_injection: {:?}", vs_injection);
+        eprintln!("[blues-driver]   PassiveRType output_port={output_port} n_ports={n_ports}");
+    }
+
+    let input = sine(48000);
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    let peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    eprintln!("[blues-driver] output peak: {peak:.6}");
+
+    // Check per-stage signal flow
+    for (i, s) in proc.stages.iter().enumerate() {
+        eprintln!("[blues-driver]   wdf[{i}] prev_source_voltage={:.6}", s.prev_source_voltage);
+    }
+
+    // Dump the tree structure
+    for (i, s) in proc.stages.iter().enumerate() {
+        eprintln!("[blues-driver]   wdf[{i}] tree: {}", s.tree.debug_dump(0));
+        if let super::stage::RootKind::PassiveRType { children, output_port, n_ports, .. } = &s.root {
+            eprintln!("[blues-driver]   wdf[{i}] PassiveRType: n_ports={n_ports} output_port={output_port}");
+            for (ci, c) in children.iter().enumerate() {
+                eprintln!("[blues-driver]     child[{ci}]: {}", c.debug_dump(0));
+            }
+        }
+    }
+    for (i, s) in proc.multi_nl_stages.iter().enumerate() {
+        eprintln!("[blues-driver]   mnl[{i}] output_node={} sfd={}", s.output_node_id, s.signal_flow_distance);
+    }
+
+    assert!(peak > 0.001, "Blues should produce audible output: peak={peak}");
+}
+
+#[test]
 fn compile_rangemaster() {
     // Dallas Rangemaster Treble Booster: PNP germanium (OC44), supply -9V.
     // Verifies negative supply voltage is handled correctly (not clamped to 5V).
@@ -4801,6 +4986,7 @@ fn mutron_iii_photocoupler_modulation() {
         peak = peak.max(output.abs());
     }
     assert!(peak > 0.001, "Mu-Tron output should not be silent, peak={:.6e}", peak);
+
 
     // Verify that modulating PC1 changes the opamp gain by observing output change.
     // Reset first — the integrator accumulates DC that saturates at v_max.

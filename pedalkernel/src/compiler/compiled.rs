@@ -532,6 +532,10 @@ pub struct CompiledPedal {
     /// Applies DC attenuation and frequency-dependent rolloff based on what
     /// this circuit is driving (e.g., downstream pedal, amp input).
     pub(super) output_loading: Option<InterstageLoading>,
+    /// Output DC blocker — first-order HPF at ~5 Hz to remove subsonic drift
+    /// from integrator DC tails and opamp offset accumulation.
+    /// Format: (a1, b0, y_prev, x_prev) for IIR highpass.
+    pub(super) output_dc_block: Option<(f64, f64, f64, f64)>,
     /// Sidechain processors for feedback compression loops.
     /// Each sidechain taps audio, extracts an envelope, and modulates
     /// the push-pull grid bias. Multiple sidechains are supported
@@ -2243,6 +2247,15 @@ impl PedalProcessor for CompiledPedal {
             signal = loading.process(signal);
         }
 
+        // Output DC blocker — remove subsonic drift from integrator DC tails.
+        if let Some((a1, b0, ref mut y_prev, ref mut x_prev)) = self.output_dc_block {
+            let x = signal;
+            let y = b0 * (x - *x_prev) + a1 * *y_prev;
+            *x_prev = x;
+            *y_prev = super::stage::flush_denormal(y);
+            signal = *y_prev;
+        }
+
         // Final NaN guard — prevent corrupted audio from reaching the output.
         if !signal.is_finite() {
             signal = 0.0;
@@ -2394,6 +2407,10 @@ impl PedalProcessor for CompiledPedal {
             sc.reset();
         }
         self.rail_sat_oversampler.reset();
+        if let Some((_, _, ref mut y_prev, ref mut x_prev)) = self.output_dc_block {
+            *y_prev = 0.0;
+            *x_prev = 0.0;
+        }
     }
 
     fn set_control(&mut self, label: &str, value: f64) {

@@ -72,6 +72,10 @@ pub(super) struct CircuitGraph {
     /// These triggers have explicit net connections and inject at their own
     /// resolved node IDs. Used by compile.rs to build per-voice WDF stages.
     pub(super) trigger_nodes: Vec<(String, NodeId)>,
+    /// Nodes that are AC-equivalent to ground: supply rails and nodes
+    /// bypassed to ground through large capacitors (≥10µF).
+    /// Used as BFS barriers to prevent claiming components through bias nodes.
+    pub(super) ac_ground_nodes: HashSet<NodeId>,
 }
 
 /// Identifies which transformer winding a node belongs to.
@@ -799,7 +803,51 @@ impl CircuitGraph {
             output_pin_nodes,
             resolved_edge_kinds: HashMap::new(),
             trigger_nodes,
+            ac_ground_nodes: HashSet::new(),
         }
+    }
+
+    /// Compute AC ground nodes: supply rails and nodes bypassed to ground
+    /// through large capacitors (≥10µF). Call after construction.
+    pub(super) fn compute_ac_ground_nodes(&mut self, pedal: &PedalDef) {
+        let mut ac_ground = HashSet::new();
+
+        // Named supply nodes
+        for supply in &pedal.supplies {
+            for edge in &self.edges {
+                let comp = &self.components[edge.comp_idx];
+                if comp.id == supply.name {
+                    if edge.node_a != self.gnd_node {
+                        ac_ground.insert(edge.node_a);
+                    }
+                    if edge.node_b != self.gnd_node {
+                        ac_ground.insert(edge.node_b);
+                    }
+                }
+            }
+        }
+        // Add supply_nodes directly
+        for &sn in &self.supply_nodes {
+            if sn != self.gnd_node {
+                ac_ground.insert(sn);
+            }
+        }
+
+        // Nodes bypassed to ground through large caps (≥10µF)
+        for edge in &self.edges {
+            let comp = &self.components[edge.comp_idx];
+            if let Some(cap) = comp.kind.as_any().downcast_ref::<super::components::Capacitor>() {
+                if cap.config.value >= 10e-6 {
+                    if edge.node_a == self.gnd_node {
+                        ac_ground.insert(edge.node_b);
+                    } else if edge.node_b == self.gnd_node {
+                        ac_ground.insert(edge.node_a);
+                    }
+                }
+            }
+        }
+
+        self.ac_ground_nodes = ac_ground;
     }
 
     /// Get the effective edge kind for a given edge index.
@@ -2255,6 +2303,115 @@ impl CircuitGraph {
 
                     // Rf found but no Ri - could be unity-gain buffer through resistor
                     // or more complex topology. Skip for now.
+                }
+
+                // ── Fallback: frequency-dependent feedback (reactive path only) ──
+                // Some op-amp circuits have feedback through R+C series or C-only paths
+                // (e.g. Bluesbreaker IC1a: R2+C3 series from out→neg, C2 direct from out→neg).
+                // find_resistive_path returns None because there's no purely resistive path,
+                // but there IS a passive connection from neg to out.
+                //
+                // Detect these by checking passive_adj connectivity. Estimate rf from
+                // the largest resistor in the feedback path (at midband the caps pass signal
+                // through this resistor). If no resistor in path, use a default.
+                let no_extra_fb = HashSet::new();
+                let reactive_fb_comps = collect_feedback_comps(neg_node, out_node, &no_extra_fb);
+                if !reactive_fb_comps.is_empty() {
+                    // Estimate rf from the largest resistor in the feedback path
+                    let rf_estimate = reactive_fb_comps.iter()
+                        .filter_map(|id| {
+                            resistor_nodes.iter().find(|r| r.id == *id).map(|r| r.resistance)
+                        })
+                        .fold(0.0_f64, f64::max)
+                        .max(1000.0); // minimum 1kΩ default
+
+                    // Check rf_pot: any pot in the feedback path
+                    let rf_pot_info: Option<(String, f64, f64, Option<f64>)> = reactive_fb_comps.iter()
+                        .find_map(|id| {
+                            let base = id.strip_suffix("__aw").or_else(|| id.strip_suffix("__wb")).unwrap_or(id);
+                            pedal.components.iter().find(|c| c.id == base && c.kind.pot_taper().is_some())
+                                .map(|_| {
+                                    resistor_nodes.iter().find(|r| r.id == *id && r.is_pot)
+                                        .map(|r| (base.to_string(), r.max_r, 0.0, None))
+                                })
+                                .flatten()
+                        });
+
+                    // Determine topology: inverting or non-inverting
+                    let pos_grounded = is_ac_ground(pos_node)
+                        || find_resistive_path(pos_node, gnd_node_resolved).is_some()
+                        || ac_ground_nodes.iter().any(|&ag| find_resistive_path(pos_node, ag).is_some());
+                    let neg_has_independent_ground_leg = {
+                        let check = |target: usize| -> bool {
+                            has_short_path_excluding(neg_node, target, &ground_leg_adj, out_node, 4)
+                        };
+                        check(gnd_node_resolved)
+                            || ac_ground_nodes.iter().any(|&ag| check(ag))
+                    };
+
+                    if pos_grounded && !neg_has_independent_ground_leg {
+                        // Inverting with reactive feedback
+                        if let Some(ri) = find_input_resistor(neg_node, out_node, gnd_node_resolved) {
+                            let feedback_diode = find_feedback_diode(neg_node, out_node);
+                            results.push(OpAmpFeedbackInfo {
+                                comp_id: comp.id.clone(),
+                                opamp_type,
+                                feedback_kind: OpAmpFeedbackKind::Inverting {
+                                    rf: rf_estimate,
+                                    ri,
+                                    feedback_diode,
+                                    rf_pot: rf_pot_info,
+                                    ri_pot: None,
+                                },
+                                neg_node,
+                                pos_node,
+                                out_node,
+                                feedback_comp_ids: reactive_fb_comps,
+                                input_photocoupler_ids: Vec::new(),
+                                input_fixed_r: 0.0,
+                            });
+                            continue;
+                        }
+                    } else if neg_has_independent_ground_leg {
+                        // Non-inverting with reactive feedback
+                        let ni_gnd_node = if find_ground_leg_path(neg_node, gnd_node_resolved).is_some() {
+                            Some(gnd_node_resolved)
+                        } else {
+                            ac_ground_nodes.iter().find(|&&ag| find_ground_leg_path(neg_node, ag).is_some()).copied()
+                        };
+                        if let Some(gnd_target) = ni_gnd_node {
+                            let (ri, _ri_comps, ri_pot) =
+                                if let Some(rp) = find_resistive_path(neg_node, gnd_target) {
+                                    rp
+                                } else {
+                                    find_ground_leg_path(neg_node, gnd_target).unwrap()
+                                };
+                            let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &no_extra_fb);
+                            let mut fb_comps = reactive_fb_comps.clone();
+                            for c in gnd_leg_comps {
+                                if !fb_comps.contains(&c) {
+                                    fb_comps.push(c);
+                                }
+                            }
+                            results.push(OpAmpFeedbackInfo {
+                                comp_id: comp.id.clone(),
+                                opamp_type,
+                                feedback_kind: OpAmpFeedbackKind::NonInverting {
+                                    rf: rf_estimate,
+                                    ri,
+                                    rf_pot: rf_pot_info,
+                                    ri_pot,
+                                },
+                                neg_node,
+                                pos_node,
+                                out_node,
+                                feedback_comp_ids: fb_comps,
+                                input_photocoupler_ids: Vec::new(),
+                                input_fixed_r: 0.0,
+                            });
+                            continue;
+                        }
+                    }
                 }
             }
         }

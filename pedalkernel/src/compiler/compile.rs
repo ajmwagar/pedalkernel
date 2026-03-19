@@ -1484,6 +1484,9 @@ pub fn compile_pedal_with_options(
     // Post-construction: resolve context-dependent edge kinds (JFET Vr, OTA linear).
     super::graph::resolve_components(&mut graph, pedal);
 
+    // Compute AC ground nodes for BFS barriers.
+    graph.compute_ac_ground_nodes(pedal);
+
     // Apply component tolerance.
     for (i, comp) in graph.components.iter_mut().enumerate() {
         if let Some(r) = comp.kind.as_any_mut().downcast_mut::<ResistorComp>() {
@@ -1622,7 +1625,8 @@ pub fn compile_pedal_with_options(
                 info.feedback_kind,
                 super::graph::OpAmpFeedbackKind::Allpass { .. }
             );
-            if always_exclude || !skip_feedback_tree_opamps.contains(&info.comp_id) {
+            let skip = skip_feedback_tree_opamps.contains(&info.comp_id);
+            if always_exclude || !skip {
                 comp_ids.extend(info.feedback_comp_ids.iter().cloned());
             }
         }
@@ -1748,7 +1752,17 @@ pub fn compile_pedal_with_options(
         // pos/neg pins). Only for non-inverting opamps where pos is the
         // signal input — inverting opamps have pos at AC ground (Vref),
         // and BFS from Vref would over-claim tone/volume sections.
-        // Use output-pin barriers to prevent leaking through opamp outputs.
+        // Use output-pin barriers AND AC-ground barriers to prevent the
+        // BFS from leaking through shared bias nodes (e.g. Vref) into
+        // unrelated circuit sections (tone/volume networks).
+        let mut input_bfs_barriers = graph.output_pin_nodes.clone();
+        // Add AC ground nodes as barriers: these are bias reference points
+        // shared by many circuit branches (bypass-capped supply dividers).
+        // BFS from the signal input should stop at these nodes to avoid
+        // over-claiming downstream passive sections.
+        for &ag_node in &graph.ac_ground_nodes {
+            input_bfs_barriers.insert(ag_node);
+        }
         for info in &opamp_analysis.feedback_loops {
             let skip = matches!(
                 info.feedback_kind,
@@ -1765,7 +1779,7 @@ pub fn compile_pedal_with_options(
                 false,
                 true,
                 &pp_transformer_edges,
-                &graph.output_pin_nodes,
+                &input_bfs_barriers,
             );
             claimed_edges.extend(input_passives.iter().copied());
         }
@@ -2401,6 +2415,7 @@ pub fn compile_pedal_with_options(
         metrics_buffer: None,
         input_loading: None,
         output_loading: None,
+        output_dc_block: None,
         sidechains,
         pot_smoothers,
         pot_mirrors: {
