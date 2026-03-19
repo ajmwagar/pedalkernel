@@ -1536,6 +1536,7 @@ fn build_rtype_stage(
             dc_blocker_y1: 0.0,
             dc_ramp: 0,
             initial_v_prev: Vec::new(),
+            v_prev_2: Vec::new(),
             nr_workspace: crate::elements::nonlinear::solver::NrWorkspace::new(0),
             work_b_passive: vec![0.0; n_passive_ss],
             work_known_a: Vec::new(),
@@ -1543,6 +1544,7 @@ fn build_rtype_stage(
             work_a_all: Vec::new(),
             adaptive_x2: false,
             subsample_counter: 0,
+            iteration_budget_remaining: super::stage::NR_ITERATION_BUDGET,
             prev_input: 0.0,
         });
     }
@@ -2259,6 +2261,7 @@ fn build_rtype_stage(
         vcc_vs_index: vcc_vs_idx,
         supply_voltage,
         dc_ramp: 0,
+        v_prev_2: initial_v.clone(),
         initial_v_prev: initial_v,
         dc_blocker_x1: 0.0,
         dc_blocker_y1: 0.0,
@@ -2269,6 +2272,7 @@ fn build_rtype_stage(
         work_a_all: vec![0.0; n_adaptor_ports],
         adaptive_x2: false,
         subsample_counter: 0,
+        iteration_budget_remaining: super::stage::NR_ITERATION_BUDGET,
         prev_input: 0.0,
     })
 }

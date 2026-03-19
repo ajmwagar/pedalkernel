@@ -36,6 +36,11 @@ pub struct NrWorkspace {
     // Adaptive oversampling: track frozen Newton failures within a base sample.
     // When zero, the signal is slowly varying and X2 NR rate suffices.
     pub(crate) frozen_failures: u8,
+
+    /// Actual NR iterations consumed by the most recent solve call.
+    /// Written by both `multi_port_nr_solve_into` and `multi_port_nr_solve_grouped_into`
+    /// so that `MultiNlStage::process` can deduct from the per-base-sample budget.
+    pub(crate) iters_used: usize,
 }
 
 impl NrWorkspace {
@@ -57,6 +62,7 @@ impl NrWorkspace {
             cached_currents: vec![0.0; n_nl],
             has_cached_jac: false,
             frozen_failures: 0,
+            iters_used: 0,
         }
     }
 
@@ -78,6 +84,7 @@ impl NrWorkspace {
             cached_currents: vec![0.0; n_nl],
             has_cached_jac: false,
             frozen_failures: 0,
+            iters_used: 0,
         }
     }
 
@@ -495,6 +502,7 @@ pub(crate) fn multi_port_nr_solve_into(
 
     // Reuse pre-allocated working arrays
     ws.zero_all(n_nl);
+    ws.iters_used = 0;
     let mut stats_entry = if SOLVER_STATS_ENABLED {
         Some(SolverStatsEntry::default())
     } else {
@@ -506,6 +514,7 @@ pub(crate) fn multi_port_nr_solve_into(
     let mut converged_on_residual = false;
 
     for iter in 0..max_iter {
+        ws.iters_used = iter + 1;
         if let Some(entry) = stats_entry.as_mut() {
             entry.iterations = iter as u32 + 1;
         }
@@ -738,6 +747,7 @@ pub(crate) fn multi_port_nr_solve_grouped_into(
     // Build port-to-group mapping and zero workspace
     let n_groups = device_groups.len();
     ws.zero_all(n_nl);
+    ws.iters_used = 0;
     for g in 0..n_groups {
         let np = device_groups[g].n_ports();
         let offset = group_port_offsets[g];
@@ -804,6 +814,7 @@ pub(crate) fn multi_port_nr_solve_grouped_into(
     ws.frozen_failures = ws.frozen_failures.saturating_add(1);
 
     for iter in 0..max_iter {
+        ws.iters_used = iter + 1;
         if let Some(entry) = stats_entry.as_mut() {
             entry.iterations = iter as u32 + 1;
         }

@@ -34,8 +34,13 @@ fn adaptive_nr_tolerance(input_delta: f64) -> f64 {
     const LOOSE: f64 = 1e-4;
     const TRANSIENT_THRESHOLD: f64 = 0.1; // ~-20dBFS delta
 
-    let t = (input_delta.abs() / TRANSIENT_THRESHOLD).min(1.0);
-    TIGHT + t * (LOOSE - TIGHT)
+    if input_delta.abs() > TRANSIENT_THRESHOLD {
+        LOOSE
+    } else {
+        // Smooth interpolation between tight and loose
+        let t = (input_delta.abs() / TRANSIENT_THRESHOLD).min(1.0);
+        TIGHT + t * (LOOSE - TIGHT)
+    }
 }
 
 /// Stamp (or unstamp) a conductance value into an MNA G matrix.
@@ -205,6 +210,16 @@ pub(super) enum RootKind {
 // Used by both RootKind (WdfStage) and NlDeviceKind (MultiNlStage).
 const TRIODE_GRID_BIAS: f64 = -2.0;
 const PENTODE_GRID_BIAS: f64 = -8.0;
+
+/// Maximum total NR iterations per base sample across all sub-samples.
+///
+/// With X4 oversampling and NR_MAX_ITER=24, uncapped cost is 4×24 = 96 iterations
+/// per base sample per stage. On transients, all sub-samples may need full NR,
+/// causing CPU spikes. This budget caps the total across all sub-samples so that
+/// later sub-samples reuse the previous b_nl when the budget is exhausted.
+/// 48 is generous enough for normal signals (most sub-samples converge in 2–5 iters)
+/// while protecting against extreme transient spikes.
+pub(super) const NR_ITERATION_BUDGET: usize = 48;
 
 impl RootKind {
     /// Returns `true` for roots that clip the signal (diodes, zeners).
@@ -2101,6 +2116,11 @@ pub(super) struct MultiNlStage {
     /// Physics-based initial v_prev values. Restored on reset() instead of zeroing,
     /// so the NR solver starts near the correct operating point after a DAW reset.
     pub(super) initial_v_prev: Vec<f64>,
+    /// Previous-previous sample's NR solution (v[n-2]).
+    /// Used with v_prev (v[n-1]) to extrapolate a warm-start guess for v[n]:
+    ///   v_guess = 2·v[n-1] − v[n-2]
+    /// Reduces NR iterations on transients compared to a plain v_prev warm-start.
+    pub(super) v_prev_2: Vec<f64>,
     /// DC blocker state: previous input sample (x[n-1]).
     pub(super) dc_blocker_x1: f64,
     /// DC blocker state: previous output sample (y[n-1]).
@@ -2117,6 +2137,14 @@ pub(super) struct MultiNlStage {
     pub(super) adaptive_x2: bool,
     /// Sub-sample counter within oversampler loop.
     pub(super) subsample_counter: u8,
+    /// Remaining NR iteration budget for the current base sample.
+    ///
+    /// Reset to `NR_ITERATION_BUDGET` at the start of each base sample's
+    /// oversampler loop. Each sub-sample's solve decrements it by `iters_used`.
+    /// When it reaches zero, subsequent sub-samples skip the NR solve and reuse
+    /// the most recent `b_nl` values from the workspace — still doing scattering
+    /// and WDF port updates correctly.
+    pub(super) iteration_budget_remaining: usize,
     /// Previous base-sample input value for transient detection.
     ///
     /// Used to compute `input_delta = input - prev_input` each sample.
@@ -2261,8 +2289,26 @@ impl MultiNlStage {
         // Reset frozen failure counter for this base sample's sub-samples
         self.nr_workspace.frozen_failures = 0;
         self.subsample_counter = 0;
+        // Reset per-base-sample NR iteration budget. This caps total NR work
+        // across all sub-samples to prevent CPU spikes on transients.
+        self.iteration_budget_remaining = NR_ITERATION_BUDGET;
         let adaptive_x2 = self.adaptive_x2;
 
+
+        // Linear extrapolation warm-start for NR solver (first sub-sample only).
+        // v_prev holds v[n-1]; v_prev_2 holds v[n-2].
+        // Extrapolated guess: v[n] ~= 2*v[n-1] - v[n-2].
+        // We shift history and write the guess into v_prev in one pass
+        // (no allocation). Subsequent sub-samples naturally warm-start from
+        // the previous sub-sample's converged solution.
+        if !self.v_prev.is_empty() {
+            for i in 0..self.v_prev.len() {
+                let old = self.v_prev[i];
+                let extrap = 2.0 * old - self.v_prev_2[i];
+                self.v_prev_2[i] = old;
+                self.v_prev[i] = if extrap.is_finite() { extrap } else { old };
+            }
+        }
         let output = self.oversampler.process(input, |sample| {
             let subsample_idx = self.subsample_counter;
             self.subsample_counter += 1;
@@ -2275,7 +2321,11 @@ impl MultiNlStage {
 
             // Adaptive X2: on odd sub-samples, skip known_a + NR solve.
             // Reuse b_nl from previous sub-sample (still in nr_workspace).
-            let skip_nr = adaptive_x2 && (subsample_idx % 2 == 1) && n_nl > 0;
+            let skip_nr_adaptive = adaptive_x2 && (subsample_idx % 2 == 1) && n_nl > 0;
+            // Budget cap: skip NR when this base sample's iteration budget is exhausted.
+            // Reuse last b_nl from workspace — still valid from the previous sub-sample.
+            let skip_nr_budget = n_nl > 0 && self.iteration_budget_remaining == 0;
+            let skip_nr = skip_nr_adaptive || skip_nr_budget;
 
             // The adapted port's b-wave is the input signal (voltage source)
             let b_adapted = sample * compensation;
@@ -2305,6 +2355,11 @@ impl MultiNlStage {
             }
             // 3. Multi-port NR solve (skipped when n_nl=0, e.g. linearized OTA)
             if n_nl > 0 {
+                // Clamp per-solve max_iter to whatever budget remains for this
+                // base sample. This prevents unlimited iteration consumption on
+                // transients when all sub-samples need full NR convergence.
+                let max_iter = crate::elements::nonlinear::solver::NR_MAX_ITER
+                    .min(self.iteration_budget_remaining);
                 if let Some(ref dg) = self.device_groups {
                     // Grouped solver: cross-coupled device Jacobians
                     let groups: Vec<&dyn NlDeviceGroupIv> =
@@ -2318,7 +2373,7 @@ impl MultiNlStage {
                         &groups,
                         &dg.offsets,
                         &mut self.v_prev,
-                        crate::elements::nonlinear::solver::NR_MAX_ITER,
+                        max_iter,
                         nr_tolerance,
                         &mut self.nr_workspace,
                     );
@@ -2336,11 +2391,16 @@ impl MultiNlStage {
                         &self.nl_port_resistances,
                         &devices,
                         &mut self.v_prev,
-                        crate::elements::nonlinear::solver::NR_MAX_ITER,
+                        max_iter,
                         nr_tolerance,
                         &mut self.nr_workspace,
                     );
                 }
+                // Deduct actual iterations from the remaining budget.
+                // When budget reaches zero, subsequent sub-samples reuse b_nl.
+                self.iteration_budget_remaining = self
+                    .iteration_budget_remaining
+                    .saturating_sub(self.nr_workspace.iters_used);
             }
             } // end if !skip_nr — b_nl in workspace is either fresh or reused
 
@@ -2533,6 +2593,9 @@ impl MultiNlStage {
         // Zeroing v_prev causes the NR solver to start far from the operating
         // point, leading to divergence and 100% CPU in real-time contexts.
         self.v_prev.copy_from_slice(&self.initial_v_prev);
+        // Reset 2-sample history for extrapolation warm-start.
+        // Seed from initial_v_prev so extrapolation starts near the operating point.
+        self.v_prev_2.copy_from_slice(&self.initial_v_prev);
         self.dc_ramp = 0;
         self.dc_blocker_x1 = 0.0;
         self.dc_blocker_y1 = 0.0;
@@ -2546,6 +2609,7 @@ impl MultiNlStage {
         self.nr_workspace.has_cached_jac = false;
         self.nr_workspace.frozen_failures = 0;
         self.prev_input = 0.0;
+        self.iteration_budget_remaining = NR_ITERATION_BUDGET;
     }
 
     /// Debug dump: print multi-NL stage structure.
