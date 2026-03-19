@@ -1204,6 +1204,72 @@ fn compile_phase90() {
 }
 
 #[test]
+fn topology_classify_phase90_allpass() {
+    // Verify that classify_topologies detects AllpassJfet topologies
+    // in the Phase 90 circuit (4 JFET all-pass stages with opamps).
+    let pedal = parse("phase90.pedal");
+    let (classified, classified_ids) = super::topology::classify_topologies(&pedal, 48000.0);
+
+    // Phase 90 has 4 opamps with AllpassJfet feedback topology.
+    assert!(
+        !classified.is_empty(),
+        "Phase 90 should have self-classified opamp topologies"
+    );
+    assert_eq!(
+        classified_ids.len(),
+        classified.len(),
+        "Each classified opamp should have a unique ID"
+    );
+
+    // All classified topologies should be AllpassJfet.
+    for info in &classified {
+        match &info.feedback_kind {
+            super::graph::OpAmpFeedbackKind::AllpassJfet { rf, cf, jfet_id } => {
+                assert!(*rf > 0.0, "Rf should be positive: {rf}");
+                assert!(*cf > 0.0, "Cf should be positive: {cf}");
+                assert!(!jfet_id.is_empty(), "JFET ID should not be empty");
+            }
+            other => panic!(
+                "Expected AllpassJfet, got {:?} for {}",
+                other, info.comp_id
+            ),
+        }
+    }
+}
+
+#[test]
+fn topology_classify_unity_gain_buffer() {
+    // A pedal with a unity-gain buffer (neg tied to out) should be classified.
+    let src = r#"
+pedal "unity_gain_test" subtitle "test" {
+  components {
+    U1: opamp(tl072)
+    R1: resistor(10k)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> U1.pos
+    U1.neg -> U1.out
+    U1.out -> out
+  }
+  controls {}
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let (classified, classified_ids) = super::topology::classify_topologies(&pedal, 48000.0);
+
+    assert_eq!(classified.len(), 1, "Should classify exactly one opamp");
+    assert!(classified_ids.contains("U1"));
+    assert!(
+        matches!(
+            classified[0].feedback_kind,
+            super::graph::OpAmpFeedbackKind::UnityGain
+        ),
+        "Should detect UnityGain topology"
+    );
+}
+
+#[test]
 fn compile_tweed_deluxe_5e3() {
     let pedal = parse("tweed_deluxe_5e3.pedal");
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();

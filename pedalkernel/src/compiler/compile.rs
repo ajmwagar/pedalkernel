@@ -1484,8 +1484,16 @@ pub fn compile_pedal_with_options(
     // ══ Pass 1: Element classification ════════════════════════════════
     let classified = super::classify::classify_circuit(&graph, pedal);
 
+    // ══ Pass 1.5: Component self-classification ═══════════════════════
+    // Components inspect their neighborhood and self-classify topologies.
+    // Pre-classified opamps are skipped by the monolithic find_opamp_feedback_loops.
+    let (topology_classified, topology_classified_ids) =
+        super::topology::classify_topologies(pedal, sample_rate);
+
     // ══ Pass 2: Op-amp analysis ═══════════════════════════════════════
-    let opamp_analysis = super::opamp_analysis::analyze_opamps(&graph, pedal);
+    let opamp_analysis = super::opamp_analysis::analyze_opamps(
+        &graph, pedal, &topology_classified, &topology_classified_ids,
+    );
     let opamp_feedback_gain = 1.0_f64;
 
     // Detect opamps whose feedback components share a graph node with

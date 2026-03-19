@@ -33,22 +33,36 @@ pub(super) struct OpAmpAnalysis {
 }
 
 /// Run op-amp feedback analysis on the circuit.
-pub(super) fn analyze_opamps(graph: &CircuitGraph, pedal: &PedalDef) -> OpAmpAnalysis {
-    let feedback_loops = graph.find_opamp_feedback_loops(pedal);
+///
+/// Merges pre-classified topologies from Pass 1.5 with the monolithic
+/// `find_opamp_feedback_loops()` analysis. Components that self-classified
+/// in Pass 1.5 are skipped by the monolith.
+pub(super) fn analyze_opamps(
+    graph: &CircuitGraph,
+    pedal: &PedalDef,
+    pre_classified: &[OpAmpFeedbackInfo],
+    skip_ids: &HashSet<String>,
+) -> OpAmpAnalysis {
+    // Run the monolithic analysis, skipping already-classified opamps.
+    let mut feedback_loops = graph.find_opamp_feedback_loops(pedal, skip_ids);
 
-    let feedback_opamp_ids: HashSet<String> = feedback_loops
+    // Merge pre-classified results (prepend so they appear first in order).
+    let mut merged = pre_classified.to_vec();
+    merged.append(&mut feedback_loops);
+
+    let feedback_opamp_ids: HashSet<String> = merged
         .iter()
         .map(|info| info.comp_id.clone())
         .collect();
 
-    let unity_gain_opamp_ids: HashSet<String> = feedback_loops
+    let unity_gain_opamp_ids: HashSet<String> = merged
         .iter()
         .filter(|info| matches!(info.feedback_kind, OpAmpFeedbackKind::UnityGain))
         .map(|info| info.comp_id.clone())
         .collect();
 
     OpAmpAnalysis {
-        feedback_loops,
+        feedback_loops: merged,
         feedback_opamp_ids,
         unity_gain_opamp_ids,
     }

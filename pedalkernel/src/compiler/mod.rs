@@ -21,6 +21,7 @@ pub(crate) mod wdf_leaf;
 mod helpers;
 mod opamp_analysis;
 mod plan;
+mod topology;
 mod split;
 mod stage;
 pub mod validate;

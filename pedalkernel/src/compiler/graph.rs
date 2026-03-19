@@ -1437,7 +1437,11 @@ impl CircuitGraph {
     ///
     /// Returns a list of `OpAmpFeedbackInfo` ordered by topological distance
     /// from the input node.
-    pub(super) fn find_opamp_feedback_loops(&self, pedal: &PedalDef) -> Vec<OpAmpFeedbackInfo> {
+    pub(super) fn find_opamp_feedback_loops(
+        &self,
+        pedal: &PedalDef,
+        skip_ids: &HashSet<String>,
+    ) -> Vec<OpAmpFeedbackInfo> {
         // Build a pin → resolved node map from the netlist.
         // We need to re-resolve pins because CircuitGraph doesn't store the
         // full pin_ids map (only edges and resolved nodes).
@@ -1922,6 +1926,10 @@ impl CircuitGraph {
         let mut results: Vec<OpAmpFeedbackInfo> = Vec::new();
 
         for comp in &pedal.components {
+            // Skip opamps already classified by Pass 1.5 (classify_topologies).
+            if skip_ids.contains(&comp.id) {
+                continue;
+            }
             let opamp_type = match comp.kind.op_amp_type() {
                 Some(ot) if !ot.is_ota() => ot,
                 _ => continue,
@@ -2189,7 +2197,7 @@ impl CircuitGraph {
 ///
 /// Used by both `find_resistive_path` (resistor-only adj) and
 /// `find_ground_leg_path` (resistor + reactive adj).
-fn find_path_through_adj(
+pub(super) fn find_path_through_adj(
     start: usize,
     end: usize,
     adj: &HashMap<usize, Vec<(usize, f64, String, bool, f64)>>,
@@ -2345,6 +2353,7 @@ pub(super) struct TriodeInfo {
 /// Detected when an op-amp's `neg` and `out` pins resolve to the same node
 /// (unity-gain buffer / voltage follower), or when they connect through a
 /// feedback resistor network.
+#[derive(Clone)]
 pub(super) struct OpAmpFeedbackInfo {
     /// Component ID of the op-amp (e.g., "U1").
     pub(super) comp_id: String,
