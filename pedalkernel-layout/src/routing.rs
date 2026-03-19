@@ -6,7 +6,7 @@
 
 use crate::graph::LayoutGraph;
 use crate::types::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Radius for obstacle avoidance — if an L-route corner is within this
 /// distance of a component center, switch to a Z-route.
@@ -17,14 +17,14 @@ pub fn route_wires(layout: &mut Layout, graph: &LayoutGraph) {
     let mut wires = Vec::new();
 
     // Build a map from component name to placed position
-    let comp_positions: HashMap<&str, (f32, f32)> = layout
+    let comp_positions: BTreeMap<&str, (f32, f32)> = layout
         .components
         .iter()
         .map(|c| (c.name.as_str(), (c.x, c.y)))
         .collect();
 
     // Build a map from component name to index in layout.components
-    let comp_indices: HashMap<&str, usize> = layout
+    let comp_indices: BTreeMap<&str, usize> = layout
         .components
         .iter()
         .enumerate()
@@ -35,7 +35,7 @@ pub fn route_wires(layout: &mut Layout, graph: &LayoutGraph) {
     let obstacles: Vec<(f32, f32)> = layout.components.iter().map(|c| (c.x, c.y)).collect();
 
     // Collect feedback component pairs for feedback wire detection
-    let feedback_comps: HashSet<(usize, usize)> = graph
+    let feedback_comps: BTreeSet<(usize, usize)> = graph
         .edges
         .iter()
         .filter(|e| e.is_feedback)

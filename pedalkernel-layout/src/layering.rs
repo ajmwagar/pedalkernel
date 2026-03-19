@@ -6,13 +6,13 @@
 
 use crate::graph::LayoutGraph;
 use crate::groups::{FunctionalGroup, GroupKind};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Column assignment for each functional group.
 #[derive(Debug, Clone)]
 pub struct ColumnAssignment {
     /// Map from group name to column index (0 = leftmost).
-    pub group_columns: HashMap<String, usize>,
+    pub group_columns: BTreeMap<String, usize>,
     /// Total number of columns.
     pub num_columns: usize,
     /// Column widths (relative, normalized to sum=1.0 later).
@@ -52,18 +52,18 @@ pub fn assign_columns(graph: &LayoutGraph, groups: &[FunctionalGroup]) -> Column
 /// Adjacency list for the group-level directed graph.
 struct GroupGraph {
     /// Edges: group index → set of successor group indices.
-    adj: Vec<HashSet<usize>>,
+    adj: Vec<BTreeSet<usize>>,
     /// Reverse edges: group index → set of predecessor group indices.
-    rev: Vec<HashSet<usize>>,
+    rev: Vec<BTreeSet<usize>>,
 }
 
 fn build_group_graph(graph: &LayoutGraph, groups: &[FunctionalGroup]) -> GroupGraph {
     let n = groups.len();
-    let mut adj = vec![HashSet::new(); n];
-    let mut rev = vec![HashSet::new(); n];
+    let mut adj = vec![BTreeSet::new(); n];
+    let mut rev = vec![BTreeSet::new(); n];
 
     // Map node ID → group index
-    let mut node_to_group: HashMap<usize, usize> = HashMap::new();
+    let mut node_to_group: BTreeMap<usize, usize> = BTreeMap::new();
     for (gi, g) in groups.iter().enumerate() {
         for &m in &g.members {
             node_to_group.insert(m, gi);
@@ -160,7 +160,7 @@ fn longest_path_layering(
     gg: &GroupGraph,
     topo_order: &[usize],
     groups: &[FunctionalGroup],
-) -> HashMap<String, usize> {
+) -> BTreeMap<String, usize> {
     let n = groups.len();
     let mut layer = vec![0usize; n];
 
@@ -193,9 +193,9 @@ fn longest_path_layering(
 
 /// Compact layers by merging single-passive groups into adjacent columns.
 fn compact_layers(
-    mut layers: HashMap<String, usize>,
+    mut layers: BTreeMap<String, usize>,
     groups: &[FunctionalGroup],
-) -> HashMap<String, usize> {
+) -> BTreeMap<String, usize> {
     // If a group has only one passive member and it bridges two columns,
     // merge it with the earlier column.
     for g in groups {
@@ -213,7 +213,7 @@ fn compact_layers(
     used.sort();
     used.dedup();
 
-    let remap: HashMap<usize, usize> = used
+    let remap: BTreeMap<usize, usize> = used
         .iter()
         .enumerate()
         .map(|(new, &old)| (old, new))
@@ -230,7 +230,7 @@ fn compact_layers(
 
 fn compute_column_widths(
     groups: &[FunctionalGroup],
-    layers: &HashMap<String, usize>,
+    layers: &BTreeMap<String, usize>,
     num_columns: usize,
 ) -> Vec<f32> {
     let mut widths = vec![1.0f32; num_columns];
