@@ -1,0 +1,174 @@
+# PK:
+# ProCo RAT — The workhorse distortion. From gritty low-gain crunch to saturated
+# wall-of-fuzz, shaped by the LM308's uniquely slow slew rate. The Filter knob
+# is a secret weapon — sweeps from full brightness to dark, wooly mush.
+# Type: distortion
+#
+# ProCo RAT Distortion (1978 original / 1988 "Whiteface" reissue)
+# LM308 op-amp with hard clipping 1N914 diodes to ground
+# Passive lowpass tone control sweeps from ~32kHz (bright) to ~475Hz (dark)
+#
+# v5a — Non-inverting topology rewrite from ElectroSmash verified schematic:
+#   - Corrected to non-inverting op-amp topology (signal → pos, feedback → neg)
+#   - R3 (1k) is now input protection on non-inverting input, NOT in gain path
+#   - C2 (1nF) RF filter shunt on non-inverting input
+#   - R4 (47Ω) + C5 (2.2µF) parallel ground leg — HPF pole at 1539Hz
+#   - R5 (560Ω) + C6 (4.7µF) parallel ground leg — HPF pole at 60Hz
+#   - Gain = 1 + R_DIST / (R4 // R5) — min unity, max ~2305x (67dB)
+#   - 30pF compensation cap (C3) in feedback — shapes LM308 dominant pole
+#   - 100pF HF rolloff cap (C4) across feedback
+#   - Output coupling via C7 (4.7µF) after diodes
+#   - JFET output buffer OMITTED — Q1 source follower kills signal due to
+#     incomplete JFET Rds modeling. Buffer is unity-gain impedance isolation
+#     only; doesn't shape tone. Restore when JFET modeling is solid.
+#   - Volume pot as standard ground-bleeding attenuator
+#
+# Real BOM reference (ElectroSmash verified):
+#   C1=22nF, C2=1nF, C3=30pF, C4=100pF, C5=2.2µF, C6/C7=4.7µF,
+#   C8=3.3nF, C9=22nF, C10/C13=1µF, C11=100µF, C12=0.1µF
+#   R1/R2/R8=1M, R3/R6=1k, R4/R10=47, R5=560, R7=1.5k, R9=10k,
+#   R11/R12=100k, D1/D2=1N914, D3=1N4002, Q1=2N5458, U1=LM308
+#
+# Key frequencies:
+#   Input HPF:       fc = 1/(2π × 1M × 22nF) = 7.2Hz
+#   Gain stage HPF:  fc1 = 1/(2π × 47 × 2.2µF) = 1539Hz (mid emphasis)
+#                    fc2 = 1/(2π × 560 × 4.7µF) = 60Hz (bass rolloff)
+#   Feedback LPF:    fc = 1/(2π × 100k × 100pF) = 16kHz (at max distortion)
+#   Tone control:    fc = 475Hz (dark) to 32kHz (bright)
+
+pedal "RATKING" subtitle "ProCo RAT — LM308 distortion" {
+  components {
+    # === Input network ===
+    C1: cap(22n)              # Input DC blocking cap (C1) — HPF fc=7.2Hz w/ R1
+    R1: resistor(1M)          # Input pulldown / bias return to ground (R1)
+    R2: resistor(1M)          # Bias resistor — non-inv input to Vref (R2)
+    R3: resistor(1k)          # Input current protection for op-amp (R3)
+    C2: cap(1n)               # RF filter shunt on non-inv input (C2) — kills radio
+
+    # === Op-amp gain stage (LM308 — non-inverting) ===
+    U1: opamp(lm308)          # LM308 — 0.3V/µs slew rate shapes the RAT's voice
+    # U1: opamp(op07)         # OP07 — replacement in later RAT2, similar slew rate
+    # U1: opamp(tl072)        # TL072 — 13V/µs, brighter/cleaner (mod)
+
+    # === Feedback network ===
+    Distortion: pot(100k, a)  # Gain control (audio taper) — feedback resistor
+    C3: cap(30p)              # External compensation cap (C3) — pins 1&8
+                              # Sets LM308 dominant pole, defines slew rate
+    C4: cap(100p)             # HF rolloff across feedback (C4)
+                              # fc = 16kHz at max gain, tames ice-pick
+
+    # === Ground-leg impedance (sets gain denominator) ===
+    # These two parallel RC networks from inverting input to ground
+    # create frequency-dependent gain:
+    #   Low freq gain set by R4//R5 = 43.4Ω
+    #   Above 60Hz: R5 branch opens, gain denominator → R4 alone (47Ω)
+    #   Above 1539Hz: R4 branch opens, gain drops toward unity
+    # This is the RAT's signature mid-hump character.
+    R4: resistor(47)          # Ground leg resistor (R4) — HPF pole at 1539Hz
+    C5: cap(2.2u)             # Ground leg coupling cap (C5) — series with R4
+    R5: resistor(560)         # Ground leg resistor (R5) — HPF pole at 60Hz
+    C6: cap(4.7u)             # Ground leg coupling cap (C6) — series with R5
+
+    # === Hard clipping to ground (the RAT's signature) ===
+    R6: resistor(1k)          # Current limiter before diodes (R6)
+    C7: cap(4.7u)             # Coupling cap, op-amp output to diode stage (C7)
+    D1: diode(silicon)        # 1N914 — clips positive swings at ~0.6V
+    D2: diode(silicon)        # 1N914 — clips negative swings at ~0.6V
+
+    # === Passive tone control (variable lowpass) ===
+    C8: cap(3.3n)             # Filter cap (C8) — shunts HF to ground
+    Filter: pot(100k, a)      # Filter control (audio taper)
+                              # CW (pos=0): R7 only → fc ≈ 32kHz (bright, open)
+                              # CCW (pos=1): R7 + 100k → fc ≈ 475Hz (dark, wooly)
+    R7: resistor(1.5k)        # Minimum filter resistance (R7) — never fully open
+
+    # === Output buffer (JFET source follower) — OMITTED ===
+    # Real circuit has Q1 (2N5458) source follower with R8 (1M) and R9 (10k).
+    # Omitted: JFET modeling doesn't yet produce accurate unity-gain buffer
+    # behavior. The buffer only provides impedance isolation — it doesn't
+    # shape the RAT's tone. Add back when JFET Rds modeling is solid.
+    # TODO: Restore Q1/R8/R9/C9 when JFET source follower works correctly.
+
+    # === Output stage ===
+    C_out: cap(4.7u)          # Output coupling (C7 equivalent — blocks DC)
+    Volume: pot(100k, a)      # Volume control (audio taper) — bleeds signal to gnd
+  }
+
+  nets {
+    # --- Input network ---
+    # Signal enters through C1, which blocks DC.
+    # R1 is a pulldown to ground (prevents pop).
+    # R2 biases the non-inverting input to Vref (4.5V virtual ground).
+    # R3 limits current into the op-amp input.
+    # C2 shunts RF to ground (low-pass with R3, fc ≈ 160kHz).
+    in -> C1.a
+    C1.b -> R1.a, R2.a, R3.a
+    R1.b -> gnd
+    R2.b -> vcc                # Bias to Vref (supply midpoint)
+    R3.b -> C2.a, U1.pos      # Signal to non-inverting input
+    C2.b -> gnd                # RF shunt to ground
+
+    # --- Non-inverting gain stage ---
+    # Gain = 1 + Zf / Zg
+    #   Zf = Distortion pot (0–100k), with C3 (30pF) and C4 (100pF) in parallel
+    #   Zg = R4+C5 // R5+C6 to ground
+    # At DC/low freq: Zg = R4//R5 = 43.4Ω → max gain = 1 + 100k/43.4 ≈ 2305x
+    # At min distortion: Zf = 0 → gain = 1 (unity, clean pass-through)
+
+    # Feedback path: op-amp output back to inverting input through Distortion pot
+    U1.out -> Distortion.a
+    Distortion.b -> U1.neg
+
+    # Compensation cap across feedback (C3) — sets LM308 dominant pole
+    U1.out -> C3.a
+    C3.b -> U1.neg
+
+    # HF rolloff cap across feedback (C4) — parallel with Distortion pot
+    U1.out -> C4.a
+    C4.b -> U1.neg
+
+    # Ground-leg impedance: two parallel RC branches from inverting input to ground
+    # R4 (47Ω) + C5 (2.2µF): above 1539Hz this branch opens → gain drops
+    # R5 (560Ω) + C6 (4.7µF): above 60Hz this branch opens → mid emphasis
+    U1.neg -> R4.a
+    R4.b -> C5.a
+    C5.b -> gnd
+
+    U1.neg -> R5.a
+    R5.b -> C6.a
+    C6.b -> gnd
+
+    # --- Clipping stage ---
+    # C7 AC-couples the op-amp output. R6 limits diode current.
+    # D1/D2 hard-clip to ground — the RAT's characteristic square-wave distortion.
+    U1.out -> C7.a
+    C7.b -> R6.a
+    R6.b -> D1.a, D2.b        # Diode junction node
+
+    D1.b -> gnd                # D1 clips positive swing
+    D2.a -> gnd                # D2 clips negative swing
+
+    # --- Passive tone control (lowpass) ---
+    # Signal from diode junction through Filter pot + R7, with C8 shunting HF.
+    # fc = 1/(2π × (Filter + R7) × C8)
+    R6.b -> Filter.a           # Signal enters filter from diode node
+    Filter.b -> R7.a           # Through minimum resistance
+    R6.b -> C8.a               # Filter cap shunts HF to ground
+    C8.b -> gnd
+
+    # --- Output volume ---
+    # JFET buffer omitted (see components section). Tone output goes directly
+    # through coupling cap to volume pot. C_out blocks DC from the gain stage.
+    R7.b -> C_out.a
+    C_out.b -> Volume.a
+    Volume.w -> out            # Wiper to output
+    Volume.b -> gnd            # Bottom of pot to ground
+  }
+
+  controls {
+    Distortion.position -> "Distortion" [0.0, 1.0] = 0.5
+    Filter.position -> "Filter" [0.0, 1.0] = 0.7
+    Volume.position -> "Volume" [0.0, 1.0] = 0.5
+  }
+  calibrate
+}
