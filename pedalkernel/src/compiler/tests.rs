@@ -5001,3 +5001,83 @@ fn mutron_iii_photocoupler_modulation() {
         out_before, out_after,
     );
 }
+
+#[test]
+fn goldenrod_treble_pot_sweeps_hf_gain() {
+    // Verify that the Goldenrod (Klon Centaur) active tone control actually
+    // changes output at 10kHz when the Treble pot moves from 0 → 1.
+    //
+    // Pre-fix: ~1.4dB at 10kHz (ToneFeedback never instantiated → WDF fallback).
+    // Post-fix: ≥1.5dB at 10kHz (ToneFeedback IIR correctly models shelving EQ).
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("pedalkernel-pro/pedals/legends/goldenrod.pedal"))
+        .unwrap_or_default();
+    if !pro_path.exists() {
+        eprintln!("  [skip] goldenrod.pedal not found at {}", pro_path.display());
+        return;
+    }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+
+    // Verify U4 is detected as InvertingShelving
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let (pre_classified, skip_ids) = super::topology::classify_topologies(&pedal, 48000.0);
+    let analysis = super::opamp_analysis::analyze_opamps(&graph, &pedal, &pre_classified, &skip_ids);
+    let u4_info = analysis.feedback_loops.iter().find(|i| i.comp_id == "U4");
+    assert!(
+        u4_info.is_some(),
+        "U4 should be detected as an opamp feedback loop"
+    );
+    if let Some(u4) = u4_info {
+        assert!(
+            matches!(u4.feedback_kind, super::graph::OpAmpFeedbackKind::InvertingShelving { .. }),
+            "U4 should be classified as InvertingShelving, got {:?}",
+            u4.feedback_kind,
+        );
+    }
+
+    // Process 10kHz sine at Treble=0 vs Treble=1, compare RMS
+    let sample_rate = 48000.0_f64;
+    let n_samples = 4800_usize;
+    let freq = 10_000.0_f64;
+    let input: Vec<f64> = (0..n_samples)
+        .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / sample_rate).sin() * 0.1)
+        .collect();
+
+    let rms_tail = |v: &[f64]| -> f64 {
+        let skip = n_samples / 2;
+        (v.iter().skip(skip).map(|x| x * x).sum::<f64>() / (n_samples - skip) as f64).sqrt()
+    };
+
+    let process_with_treble = |treble: f64| -> Vec<f64> {
+        let mut proc = compile_pedal(&pedal, sample_rate).unwrap();
+        proc.set_control("Gain", 0.5);
+        proc.set_control("Treble", treble);
+        proc.set_control("Output", 0.8);
+        input.iter().map(|&s| proc.process(s)).collect()
+    };
+
+    let out_dark = process_with_treble(0.0);
+    let out_bright = process_with_treble(1.0);
+
+    let rms_dark = rms_tail(&out_dark);
+    let rms_bright = rms_tail(&out_bright);
+    let ratio = rms_bright / rms_dark.max(1e-12);
+    let db = 20.0 * ratio.log10();
+
+    eprintln!(
+        "  [goldenrod] Treble sweep at 10kHz: dark={:.6}, bright={:.6}, ratio={:.3}x, dB={:.2}",
+        rms_dark, rms_bright, ratio, db
+    );
+
+    assert!(
+        rms_dark > 1e-6 && rms_bright > 1e-6,
+        "Both Treble positions should produce output, dark={rms_dark:.6e} bright={rms_bright:.6e}"
+    );
+    assert!(
+        db.abs() > 1.5,
+        "Treble pot should move 10kHz gain by ≥1.5dB, got {db:.2}dB"
+    );
+}

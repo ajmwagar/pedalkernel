@@ -2107,6 +2107,101 @@ impl CircuitGraph {
                                 }
                             }
 
+                            // ── Shelving EQ detection (Klon Centaur style) ──────────────
+                            // When the feedback network contains a capacitor AND a pot where
+                            // one pot terminal is directly at out_node, the stage is an active
+                            // shelving EQ (cap+pot+shelf path in parallel with DC R_fb).
+                            // This distinguishes tone-control pots (one end at out) from
+                            // gain-control pots (one end at neg, other toward ground).
+                            // Only applies when there are no diodes (diodes → soft clipper).
+                            let cap_in_fb = if feedback_diode.is_none() {
+                                all_fb_comps.iter().find_map(|id| {
+                                    pedal.components.iter()
+                                        .find(|c| c.id == *id)
+                                        .and_then(|c| c.kind.capacitance())
+                                })
+                            } else {
+                                None
+                            };
+                            // A pot is a shelving-EQ pot only if one of its terminals (a or b)
+                            // is at out_node. This prevents gain-control pots (whose "b" end
+                            // goes toward ground, not toward the opamp output) from triggering
+                            // the shelving detection (e.g. Blues Driver Gain pot).
+                            //
+                            // Use resistor_nodes (pre-resolved node IDs via uf.find()) so we
+                            // don't need to call uf.find() directly on raw pin IDs here.
+                            // Each pot segment is stored as "__aw" (a→wiper) and "__wb" (wiper→b).
+                            // Terminal "a" has node_a in "__aw"; terminal "b" has node_b in "__wb".
+                            let pot_in_fb = if feedback_diode.is_none() {
+                                all_fb_comps.iter().find_map(|id| {
+                                    let base = id.strip_suffix("__aw")
+                                        .or_else(|| id.strip_suffix("__wb"))
+                                        .unwrap_or(id);
+                                    let is_pot = pedal.components.iter()
+                                        .any(|c| c.id == base && c.kind.pot_taper().is_some());
+                                    if !is_pot {
+                                        return None;
+                                    }
+                                    // Terminal "a" is node_a of "__aw" segment.
+                                    // Terminal "b" is node_b of "__wb" segment.
+                                    let aw_id = format!("{base}__aw");
+                                    let wb_id = format!("{base}__wb");
+                                    let a_node = resistor_nodes.iter()
+                                        .find(|r| r.id == aw_id)
+                                        .map(|r| r.node_a);
+                                    let b_node = resistor_nodes.iter()
+                                        .find(|r| r.id == wb_id)
+                                        .map(|r| r.node_b);
+                                    let a_at_out = a_node == Some(out_node);
+                                    let b_at_out = b_node == Some(out_node);
+                                    if a_at_out || b_at_out {
+                                        Some(base.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            } else {
+                                None
+                            };
+
+                            if let (Some(c_tone), Some(shelf_pot_id)) = (cap_in_fb, pot_in_fb) {
+                                // Shelf resistor: a resistor in all_fb_comps that is neither
+                                // the DC-feedback resistor (value == rf) nor part of the pot.
+                                let r_shelf = all_fb_comps.iter().find_map(|id| {
+                                    resistor_nodes.iter()
+                                        .find(|r| &r.id == id && !r.is_pot && (r.resistance - rf).abs() > 1.0)
+                                        .map(|r| r.resistance)
+                                }).unwrap_or(0.0);
+
+                                let max_pot_r = resistor_nodes.iter()
+                                    .find(|r| {
+                                        r.id.starts_with(&format!("{shelf_pot_id}__"))
+                                            && r.is_pot
+                                    })
+                                    .map(|r| r.max_r)
+                                    .unwrap_or(10_000.0);
+
+                                results.push(OpAmpFeedbackInfo {
+                                    comp_id: comp.id.clone(),
+                                    opamp_type,
+                                    feedback_kind: OpAmpFeedbackKind::InvertingShelving {
+                                        rf,
+                                        ri,
+                                        c_tone,
+                                        r_shelf,
+                                        pot_id: shelf_pot_id,
+                                        max_pot_r,
+                                    },
+                                    neg_node,
+                                    pos_node,
+                                    out_node,
+                                    feedback_comp_ids: all_fb_comps,
+                                    input_photocoupler_ids: input_pc_ids,
+                                    input_fixed_r,
+                                });
+                                continue;
+                            }
+
                             results.push(OpAmpFeedbackInfo {
                                 comp_id: comp.id.clone(),
                                 opamp_type,
@@ -2660,6 +2755,29 @@ pub(super) enum OpAmpFeedbackKind {
     /// Direct connection: neg tied to out (voltage follower).
     /// Closed-loop gain = 1.0.
     UnityGain,
+    /// Inverting shelving EQ: R_fb (DC path) in parallel with C_tone → pot → R_shelf
+    /// (Klon Centaur active tone control, IC2b topology).
+    ///
+    /// Transfer function:
+    ///   H(s) = -(R_fb/R_in) * (1 + s·C·R_ac) / (1 + s·C·(R_fb + R_ac))
+    /// where R_ac = pot_position × max_pot_r + r_shelf.
+    ///
+    /// Implemented as a bilinear-transformed first-order IIR (ToneFeedback) that
+    /// recomputes coefficients whenever the pot position changes.
+    InvertingShelving {
+        /// DC feedback resistor value (neg to out), constant.
+        rf: f64,
+        /// Input resistor value (input to neg), constant.
+        ri: f64,
+        /// Frequency-setting capacitor in series with the pot (Farads).
+        c_tone: f64,
+        /// Fixed shelf resistor between pot wiper and output (Ohms).
+        r_shelf: f64,
+        /// Component ID of the pot that varies the HF gain.
+        pot_id: String,
+        /// Maximum resistance of the tone pot (Ohms).
+        max_pot_r: f64,
+    },
     /// Inverting amplifier: pos tied to ground, neg connected through Ri to input
     /// and through Rf to output. Closed-loop gain = Rf/Ri.
     Inverting {
