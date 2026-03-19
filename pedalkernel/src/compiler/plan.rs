@@ -1416,14 +1416,22 @@ fn plan_two_junction(
             ..
         } => {
             if *gn != graph.gnd_node {
-                let exclude = classified.all_nonlinear_edge_indices.clone();
+                // Exclude boundary edges (inter-stage coupling caps) from the
+                // grid-side BFS. When an inter-stage triode has a coupling cap
+                // between the previous stage's plate and its grid, including
+                // that cap in the WDF tree causes a large negative b_tree (the
+                // cap charges via VS=B+ in a direction that drives the WDF tree
+                // away from the triode's operating point). The inter-stage
+                // signal coupling is handled by the serial chain + grid_dc_blocker
+                // in stage.rs; the WDF tree only needs the local grid-bias network
+                // (grid leak, grid stopper) for correct input impedance modeling.
+                let mut exclude = classified.all_nonlinear_edge_indices.clone();
+                exclude.extend(boundary_edges.iter().copied());
                 let mut grid_barriers = graph.output_pin_nodes.clone();
                 // Remove own terminal nodes so BFS can start/traverse
                 grid_barriers.remove(gn);
                 grid_barriers.remove(plate_node);
                 grid_barriers.remove(cathode_node);
-                // boundary edges are NOT excluded — BFS traverses through
-                // coupling cap so it stays in the downstream stage's WDF tree
                 graph.bfs_passive_edges(
                     *gn,
                     &exclude,

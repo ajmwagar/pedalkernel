@@ -210,6 +210,37 @@ impl DynNode {
         }
     }
 
+    /// Returns true if the tree's root node is a Series adaptor.
+    ///
+    /// Used by the compiler to detect when the VS contribution to b_tree is
+    /// negated by the Series adaptor formula `b = -(b1 + b2)`, which inverts
+    /// the sign of the Thevenin voltage seen by the NL root.  When true,
+    /// triode stages must negate VS so that `b_tree = 2*B+` (positive).
+    pub fn is_series_root(&self) -> bool {
+        matches!(self, Self::Series { .. })
+    }
+
+    /// Find a capacitor's state (DC voltage) by component ID.
+    /// Searches the tree recursively. Returns None if not found.
+    pub fn find_cap_state(&self, target_id: &str) -> Option<f64> {
+        match self {
+            Self::Capacitor { comp_id: Some(id), state, .. }
+            | Self::LeakyCapacitor { comp_id: Some(id), state, .. } if id == target_id => {
+                Some(*state)
+            }
+            Self::Series { left, right, .. }
+            | Self::Parallel { left, right, .. } => {
+                left.find_cap_state(target_id)
+                    .or_else(|| right.find_cap_state(target_id))
+            }
+            Self::Transformer { secondary, .. } => secondary.find_cap_state(target_id),
+            Self::RType { children, .. } => {
+                children.iter().find_map(|c| c.find_cap_state(target_id))
+            }
+            _ => None,
+        }
+    }
+
     /// Scatter-up: compute reflected wave (bottom → root), caching child waves.
     pub fn reflected(&mut self) -> f64 {
         match self {

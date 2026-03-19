@@ -364,6 +364,14 @@ pub(super) struct WdfStage {
     /// Models the output coupling capacitor's DC blocking behavior.
     /// Format: (a1, b0, y_prev, x_prev) for IIR highpass.
     pub(super) dc_block: Option<(f64, f64, f64, f64)>,
+    /// Inter-stage grid DC blocker: removes plate DC from the previous stage
+    /// before setting the tube's grid voltage. Without this, multi-stage chains
+    /// feed plate voltage (~80-200V) directly into Vgk, saturating the tube.
+    /// The WDF tree's coupling cap blocks DC for wave propagation but the grid
+    /// voltage is set externally via set_control_voltage(). This HPF mimics
+    /// the coupling cap's DC-blocking effect on the grid bias.
+    /// Format: (x_prev, y_prev). α = 0.9995, fc ≈ 3.5 Hz at 48 kHz.
+    pub(super) grid_dc_blocker: Option<(f64, f64)>,
     /// Source follower mode for JFETs.
     /// When true, Vgs is computed as Vgate (input) - Vsource (output).
     /// This enables proper source follower behavior where the source follows the gate.
@@ -425,11 +433,24 @@ pub(super) struct WdfStage {
     pub(super) vcc_injection_coeff: f64,
     /// Gradual DC ramp counter (0..256) to prevent NR solver divergence on startup.
     pub(super) vcc_dc_ramp: u32,
+    /// Component ID of the coupling capacitor connected to the injection node.
+    /// When set for triode/pentode stages, the input signal flows through the WDF
+    /// tree (through the coupling cap) so DC is naturally blocked. The cap's WDF
+    /// state is used to extract Vgk instead of a software HPF.
+    pub(super) coupling_cap_id: Option<String>,
     /// IIR-based tone feedback for inverting opamps with a cap+pot in the
     /// feedback path (e.g., Klon Centaur Treble).  When present, the stage
     /// output is computed from this IIR instead of the WDF tree, giving the
     /// correct frequency-dependent shelving behaviour.
     pub(super) tone_feedback: Option<ToneFeedback>,
+    /// When true, negate the VS voltage before setting it on the tree.
+    ///
+    /// The Series adaptor formula `b = -(b1 + b2)` negates the VS contribution
+    /// to b_tree.  For triode stages where the plate load reduces to a single
+    /// Series chain (VS → R_plate), b_tree = -(2*B+) which is physically wrong
+    /// (the Thevenin voltage at the plate should be positive ≈ B+).  Negating
+    /// VS restores the correct sign: b_tree = -(−2*B+) = +2*B+.
+    pub(super) negate_triode_vs: bool,
 }
 
 impl WdfStage {
@@ -458,9 +479,35 @@ impl WdfStage {
         let feedback_opamp = &mut self.feedback_opamp;
         let vcc_injection_coeff = self.vcc_injection_coeff;
         let vcc_dc_ramp = &mut self.vcc_dc_ramp;
+
+        // Determine the grid voltage for the control input of tube stages.
+        // For inter-stage triode/pentode stages the incoming signal carries the
+        // previous stage's full plate voltage (DC + tiny AC). The coupling
+        // capacitor between stages blocks DC in the real circuit; here we mimic
+        // that with a software HPF (grid_dc_blocker) so the tube grid only sees
+        // the AC component.
+        //
+        // α = 0.9 → τ ≈ 0.21ms at 48kHz. This fast convergence removes the large
+        // DC offset from the previous stage's plate voltage within < 1ms, preventing
+        // the tube from being driven with large positive Vgk during startup (which
+        // would cause cathode bypass cap latch).
+        //
+        // The output is NOT clamped to ≤ 0: clamping causes half-wave rectification
+        // of the inter-stage signal, as only negative Vgk excursions would pass
+        // through to the grid. The full AC signal must be preserved for correct gain.
+        let grid_input = if let Some((ref mut x_prev, ref mut y_prev)) = self.grid_dc_blocker {
+            let x = input;
+            let y = x - *x_prev + 0.9 * *y_prev;
+            *x_prev = x;
+            *y_prev = if y.is_finite() { y } else { 0.0 };
+            *y_prev
+        } else {
+            input
+        };
+
         // Set control voltage for active devices (triodes, pentodes).
         // No-op for diodes/JFETs/other passive roots.
-        root.set_control_voltage(input, compensation, 0.0);
+        root.set_control_voltage(grid_input, compensation, 0.0);
 
         // For JFET source followers, compute Vgs from input (gate) and previous output (source).
         // Vgs = Vgate - Vsource, where Vgate ≈ input and Vsource is the WDF output.
@@ -479,15 +526,25 @@ impl WdfStage {
         // the source follows via the JFET current. The voltage source is just
         // a WDF artifact that should be 0.
         let is_sf = self.is_source_follower;
+        let negate_triode_vs = self.negate_triode_vs;
 
         let wdf_out = self.oversampler.process(input, |sample| {
             // Determine voltage source value based on stage type:
-            // - Triode: VS = B+ supply (plate bias)
+            // - Triode: VS = B+ supply voltage (provides DC operating point)
+            // - Pentode: VS = input signal (legacy; pentode's B+ comes from plate load)
+            // - VariMu: VS = B+ supply (3-port MultiNlStage handles grid separately)
             // - Source follower: VS = 0 (input goes to gate, not VS)
             // - Feedback opamp + diode: opamp gain drives diode clipping
             // - Other: VS = input * compensation
             let vs_voltage = if let RootKind::Triode(t) = root {
-                t.v_max()
+                // Use B+ as VS for triodes. When the tree root is a Series adaptor,
+                // b_tree = -(2*B+) which is the wrong sign (plate Thevenin should be
+                // positive). negate_triode_vs flips VS so b_tree = -(−2*B+) = +2*B+,
+                // restoring the correct Thevenin open-circuit plate voltage.
+                if negate_triode_vs { -t.v_max() } else { t.v_max() }
+            } else if let RootKind::Pentode(_) = root {
+                // Pentodes always use the signal as VS (original behavior).
+                sample * compensation
             } else if let RootKind::VariMu(t) = root {
                 t.v_max()
             } else if is_sf {
@@ -807,6 +864,10 @@ impl WdfStage {
         if let Some((_, _, ref mut y_prev, ref mut x_prev)) = self.dc_block {
             *y_prev = 0.0;
             *x_prev = 0.0;
+        }
+        if let Some((ref mut x_prev, ref mut y_prev)) = self.grid_dc_blocker {
+            *x_prev = 0.0;
+            *y_prev = 0.0;
         }
         self.prev_source_voltage = 0.0;
         if let RootKind::PassiveRType { children, .. } = &mut self.root {
@@ -1498,7 +1559,8 @@ impl PushPullStage {
         let n_nl = adaptor.n_nl;
         let n_passive = adaptor.passive_children.len();
 
-        // DC ramp
+        // DC ramp: gradually increase VCC bias over DC_RAMP_SAMPLES to let
+        // the NR solver converge to the correct operating point without diverging.
         const DC_RAMP_SAMPLES: u32 = 256;
         let dc_scale = if adaptor.dc_ramp >= DC_RAMP_SAMPLES {
             1.0

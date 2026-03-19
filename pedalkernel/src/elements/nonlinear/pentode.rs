@@ -473,7 +473,13 @@ impl NlDeviceGroupIv for PentodeThreePort {
 
     fn v_clamp_port(&self, port: usize) -> (f64, f64) {
         match port {
-            0 => (-50.0, 10.0),        // Grid: well below cutoff to slight forward bias
+            // Grid: wide range to allow coupling cap charging in 3-port push-pull.
+            // When input has large DC (e.g., preamp plate voltage ~150V), the
+            // coupling cap needs the solver to represent the actual grid voltage
+            // during charging. With -50V clamp, the cap can't charge and the
+            // tube latches in cutoff. At deep cutoff (Vgk << 0), Ig=Ip=0, so
+            // the wide range is safe (no overflow in the current model).
+            0 => (-500.0, 10.0),
             _ => (-self.v_max, 10.0),   // Plate: WDF range [-V_supply, ~0] (maps to actual [0, V_supply])
         }
     }
