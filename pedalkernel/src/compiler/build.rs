@@ -2518,7 +2518,7 @@ fn build_vs_stage(
     sample_rate: f64,
     oversampling: OversamplingFactor,
     use_jfet_vr: bool,
-    _supply_voltage: f64,
+    supply_voltage: f64,
 ) -> Option<WdfStage> {
     // Use supply remap so triodes/BJTs with loads to named supply rails
     // or VCC can reduce to valid SP trees. VCC bias is captured separately.
@@ -2614,11 +2614,34 @@ fn build_vs_stage(
         None
     };
 
-    // Triode stages use VS = B+ directly, so vcc_injection_coeff is not needed —
-    // the supply voltage is already embedded in the VS. Pentode stages use
-    // VS = signal, but pentodes are first-stage only (no coupling cap identified)
-    // so vcc_injection_coeff = 0 there too.
-    let vcc_injection_coeff = 0.0;
+    // When a coupling cap is present on a triode/pentode stage, we route the
+    // input signal through the WDF tree (VS = input) instead of setting VS = B+.
+    // The DC operating point (B+) is then injected via superposition as a constant
+    // offset on the reflected wave: b_total = k_vs * input + b_reactive + k_vs * B+.
+    //
+    // k_vs is computed by probing the tree's scattering response to a unit VS input.
+    // This tells us how much of the VS appears at the root after scattering up.
+    //
+    // For stages without a coupling cap (first stage in chain, or non-tube stages),
+    // vcc_injection_coeff = 0.0 and VS = B+ continues to work as before.
+    let vcc_injection_coeff = if coupling_cap_id.is_some()
+        && matches!(
+            &elem.kind,
+            NonlinearKind::Triode { .. } | NonlinearKind::Pentode { .. }
+        )
+    {
+        // Probe the tree: set VS = 1.0 and read the reflected wave.
+        // k_vs = reflected / 1.0 = reflected.
+        // Multiply by supply_voltage to get the DC offset contribution from B+.
+        let mut probe_tree = tree.clone();
+        probe_tree.set_voltage(1.0);
+        let k_vs = probe_tree.reflected();
+        // Reset probe tree state (set VS = 0 to avoid polluting the real tree)
+        // (we cloned so the real tree is unchanged)
+        k_vs * supply_voltage
+    } else {
+        0.0
+    };
 
     let (root, base_diode_model) = create_root(&elem.kind, use_jfet_vr);
 

@@ -547,7 +547,17 @@ impl WdfStage {
         let feedback_opamp = &mut self.feedback_opamp;
         let vcc_injection_coeff = self.vcc_injection_coeff;
         let vcc_dc_ramp = &mut self.vcc_dc_ramp;
+        let coupling_cap_id = &self.coupling_cap_id;
 
+        // For stages with an inter-stage coupling cap, the input signal is routed
+        // through the WDF tree (VS = input) so the coupling cap naturally blocks
+        // DC. In that case we skip the software grid_dc_blocker and also skip the
+        // up-front set_control_voltage() — Vgk is computed inside the oversampler
+        // closure from the cap's WDF state after tree.reflected().
+        //
+        // For all other stages (first stage, non-tube, JFET, etc.) we keep the
+        // original software HPF + set_control_voltage() flow.
+        let has_coupling_cap = coupling_cap_id.is_some();
 
         // Determine the grid voltage for the control input of tube stages.
         // For inter-stage triode/pentode stages the incoming signal carries the
@@ -564,12 +574,18 @@ impl WdfStage {
         // The output is NOT clamped to ≤ 0: clamping causes half-wave rectification
         // of the inter-stage signal, as only negative Vgk excursions would pass
         // through to the grid. The full AC signal must be preserved for correct gain.
-        let grid_input = if let Some((ref mut x_prev, ref mut y_prev)) = self.grid_dc_blocker {
-            let x = input;
-            let y = x - *x_prev + 0.9 * *y_prev;
-            *x_prev = x;
-            *y_prev = if y.is_finite() { y } else { 0.0 };
-            *y_prev
+        //
+        // Skip for coupling-cap stages: Vgk is computed from cap state inside closure.
+        let grid_input = if !has_coupling_cap {
+            if let Some((ref mut x_prev, ref mut y_prev)) = self.grid_dc_blocker {
+                let x = input;
+                let y = x - *x_prev + 0.9 * *y_prev;
+                *x_prev = x;
+                *y_prev = if y.is_finite() { y } else { 0.0 };
+                *y_prev
+            } else {
+                input
+            }
         } else {
             input
         };
@@ -577,7 +593,11 @@ impl WdfStage {
         let negate_vs = self.negate_vs;
         // Set control voltage for active devices (triodes, pentodes).
         // No-op for diodes/JFETs/other passive roots.
-        root.set_control_voltage(grid_input, compensation, 0.0);
+        // Skip for coupling-cap stages: Vgk is set after tree.reflected() inside
+        // the oversampler closure using the cap's WDF state.
+        if !has_coupling_cap {
+            root.set_control_voltage(grid_input, compensation, 0.0);
+        }
 
         // For JFET source followers, compute Vgs from input (gate) and previous output (source).
         // Vgs = Vgate - Vsource, where Vgate ≈ input and Vsource is the WDF output.
@@ -599,18 +619,29 @@ impl WdfStage {
 
         let wdf_out = self.oversampler.process(input, |sample| {
             // Determine voltage source value based on stage type:
-            // - Triode: VS = B+ supply voltage (provides DC operating point)
+            // - Triode with coupling cap: VS = input signal (cap blocks DC naturally)
+            // - Triode without coupling cap: VS = B+ supply voltage (DC operating point)
             // - Pentode: VS = input signal (legacy; pentode's B+ comes from plate load)
             // - VariMu: VS = B+ supply (3-port MultiNlStage handles grid separately)
             // - Source follower: VS = 0 (input goes to gate, not VS)
             // - Feedback opamp + diode: opamp gain drives diode clipping
             // - Other: VS = input * compensation
             let vs_voltage = if let RootKind::Triode(t) = root {
-                // Use B+ as VS for triodes. negate_vs (applied below) handles
-                // Series adaptor sign correction when needed.
-                t.v_max()
+                if has_coupling_cap {
+                    // Route input through tree so coupling cap naturally blocks DC.
+                    // B+ is injected separately via vcc_injection_coeff after reflected().
+                    // negate_vs sign correction is also applied below.
+                    sample * compensation
+                } else {
+                    // Use B+ as VS for triodes. negate_vs (applied below) handles
+                    // Series adaptor sign correction when needed.
+                    t.v_max()
+                }
             } else if let RootKind::Pentode(_) = root {
-                // Pentodes always use the signal as VS (original behavior).
+                // Pentodes use VS = input signal in both cases (coupling-cap or not).
+                // When has_coupling_cap: cap blocks DC naturally, B+ injected via
+                // vcc_injection_coeff after reflected().
+                // When no coupling cap: original behavior (signal is first-stage input).
                 sample * compensation
             } else if let RootKind::VariMu(t) = root {
                 t.v_max()
@@ -639,8 +670,27 @@ impl WdfStage {
             let vs_voltage = if negate_vs { -vs_voltage } else { vs_voltage };
             tree.set_voltage(vs_voltage);
             let b1 = tree.reflected();
+
+            // For coupling-cap stages: after tree.reflected(), the capacitor's WDF
+            // state encodes its DC charge (the DC component of previous input samples).
+            // Extract it to compute Vgk = GRID_BIAS + (input_ac) where
+            //   input_ac = sample * compensation - cap_voltage  (DC blocked by cap).
+            // This must happen after reflected() so the cap state is current.
+            if has_coupling_cap {
+                if let Some(ref cap_id) = coupling_cap_id {
+                    // cap_voltage is the voltage across the coupling cap from the
+                    // previous down-sweep (one-sample delay, negligible at audio rates).
+                    let cap_v = tree.leaf_voltage(cap_id).unwrap_or(0.0);
+                    // AC grid voltage = total input minus cap's stored DC
+                    let vgk_ac = sample * compensation - cap_v;
+                    root.set_control_voltage(vgk_ac, 1.0, 0.0);
+                }
+            }
+
             // VCC bias injection: add DC operating point from supply voltage.
             // Ramped over 256 samples to prevent NR solver divergence on startup.
+            // For coupling-cap stages, vcc_injection_coeff = k_vs * B+ (non-zero).
+            // For other triode stages, vcc_injection_coeff = 0.0 (B+ already in VS).
             let b1 = if vcc_injection_coeff != 0.0 {
                 const DC_RAMP_SAMPLES: u32 = 256;
                 let dc_scale = if *vcc_dc_ramp >= DC_RAMP_SAMPLES {
