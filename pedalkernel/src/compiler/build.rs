@@ -1543,6 +1543,7 @@ fn build_rtype_stage(
             work_a_all: Vec::new(),
             adaptive_x2: false,
             subsample_counter: 0,
+            prev_input: 0.0,
         });
     }
 
@@ -2268,6 +2269,7 @@ fn build_rtype_stage(
         work_a_all: vec![0.0; n_adaptor_ports],
         adaptive_x2: false,
         subsample_counter: 0,
+        prev_input: 0.0,
     })
 }
 

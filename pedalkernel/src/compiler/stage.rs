@@ -23,6 +23,21 @@ fn flush_denormal(x: f64) -> f64 {
     }
 }
 
+/// Compute adaptive NR tolerance based on input signal change rate.
+///
+/// During transients (large delta), loosen tolerance to reduce iterations.
+/// During steady-state (small delta), use tight tolerance for accuracy.
+/// The linear interpolation avoids a discontinuity at the threshold boundary.
+#[inline]
+fn adaptive_nr_tolerance(input_delta: f64) -> f64 {
+    const TIGHT: f64 = 1e-6;
+    const LOOSE: f64 = 1e-4;
+    const TRANSIENT_THRESHOLD: f64 = 0.1; // ~-20dBFS delta
+
+    let t = (input_delta.abs() / TRANSIENT_THRESHOLD).min(1.0);
+    TIGHT + t * (LOOSE - TIGHT)
+}
+
 /// Stamp (or unstamp) a conductance value into an MNA G matrix.
 ///
 /// Adds `g` to the diagonal entries and subtracts from off-diagonal.
@@ -2102,6 +2117,12 @@ pub(super) struct MultiNlStage {
     pub(super) adaptive_x2: bool,
     /// Sub-sample counter within oversampler loop.
     pub(super) subsample_counter: u8,
+    /// Previous base-sample input value for transient detection.
+    ///
+    /// Used to compute `input_delta = input - prev_input` each sample.
+    /// A large delta indicates a transient, allowing the NR tolerance to be
+    /// loosened via `adaptive_nr_tolerance()` to reduce iteration count.
+    pub(super) prev_input: f64,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -2232,6 +2253,11 @@ impl MultiNlStage {
             self.dc_ramp as f64 / DC_RAMP_SAMPLES as f64
         };
 
+        // Adaptive NR tolerance: loosen on transients to reduce iterations.
+        let input_delta = input - self.prev_input;
+        self.prev_input = input;
+        let nr_tolerance = adaptive_nr_tolerance(input_delta);
+
         // Reset frozen failure counter for this base sample's sub-samples
         self.nr_workspace.frozen_failures = 0;
         self.subsample_counter = 0;
@@ -2293,7 +2319,7 @@ impl MultiNlStage {
                         &dg.offsets,
                         &mut self.v_prev,
                         crate::elements::nonlinear::solver::NR_MAX_ITER,
-                        1e-6,
+                        nr_tolerance,
                         &mut self.nr_workspace,
                     );
                 } else {
@@ -2311,7 +2337,7 @@ impl MultiNlStage {
                         &devices,
                         &mut self.v_prev,
                         crate::elements::nonlinear::solver::NR_MAX_ITER,
-                        1e-6,
+                        nr_tolerance,
                         &mut self.nr_workspace,
                     );
                 }
@@ -2519,6 +2545,7 @@ impl MultiNlStage {
         self.adaptive_x2 = false;
         self.nr_workspace.has_cached_jac = false;
         self.nr_workspace.frozen_failures = 0;
+        self.prev_input = 0.0;
     }
 
     /// Debug dump: print multi-NL stage structure.
