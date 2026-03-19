@@ -496,14 +496,12 @@ pub(super) struct WdfStage {
     /// output is computed from this IIR instead of the WDF tree, giving the
     /// correct frequency-dependent shelving behaviour.
     pub(super) tone_feedback: Option<ToneFeedback>,
-    /// When true, negate the VS voltage before setting it on the tree.
-    ///
-    /// The Series adaptor formula `b = -(b1 + b2)` negates the VS contribution
-    /// to b_tree.  For triode stages where the plate load reduces to a single
-    /// Series chain (VS → R_plate), b_tree = -(2*B+) which is physically wrong
-    /// (the Thevenin voltage at the plate should be positive ≈ B+).  Negating
-    /// VS restores the correct sign: b_tree = -(−2*B+) = +2*B+.
-    pub(super) negate_triode_vs: bool,
+    /// Negate the voltage source value for tree topologies where the Series
+    /// adaptor sign convention produces a negative reflected wave. Detected
+    /// during construction: if `tree.reflected()` with positive VS gives a
+    /// negative b_tree, the VS must be negated so the NR solver can find
+    /// a valid operating point (plate/collector voltage must be positive).
+    pub(super) negate_vs: bool,
 }
 
 impl WdfStage {
@@ -533,6 +531,7 @@ impl WdfStage {
         let vcc_injection_coeff = self.vcc_injection_coeff;
         let vcc_dc_ramp = &mut self.vcc_dc_ramp;
 
+
         // Determine the grid voltage for the control input of tube stages.
         // For inter-stage triode/pentode stages the incoming signal carries the
         // previous stage's full plate voltage (DC + tiny AC). The coupling
@@ -558,6 +557,7 @@ impl WdfStage {
             input
         };
 
+        let negate_vs = self.negate_vs;
         // Set control voltage for active devices (triodes, pentodes).
         // No-op for diodes/JFETs/other passive roots.
         root.set_control_voltage(grid_input, compensation, 0.0);
@@ -579,7 +579,6 @@ impl WdfStage {
         // the source follows via the JFET current. The voltage source is just
         // a WDF artifact that should be 0.
         let is_sf = self.is_source_follower;
-        let negate_triode_vs = self.negate_triode_vs;
 
         let wdf_out = self.oversampler.process(input, |sample| {
             // Determine voltage source value based on stage type:
@@ -590,11 +589,9 @@ impl WdfStage {
             // - Feedback opamp + diode: opamp gain drives diode clipping
             // - Other: VS = input * compensation
             let vs_voltage = if let RootKind::Triode(t) = root {
-                // Use B+ as VS for triodes. When the tree root is a Series adaptor,
-                // b_tree = -(2*B+) which is the wrong sign (plate Thevenin should be
-                // positive). negate_triode_vs flips VS so b_tree = -(−2*B+) = +2*B+,
-                // restoring the correct Thevenin open-circuit plate voltage.
-                if negate_triode_vs { -t.v_max() } else { t.v_max() }
+                // Use B+ as VS for triodes. negate_vs (applied below) handles
+                // Series adaptor sign correction when needed.
+                t.v_max()
             } else if let RootKind::Pentode(_) = root {
                 // Pentodes always use the signal as VS (original behavior).
                 sample * compensation
@@ -619,6 +616,10 @@ impl WdfStage {
                 }
                 _ => vs_voltage,
             };
+            // Apply tree-topology sign correction (detected during construction).
+            // Some trees produce negative b_tree with positive VS due to Series
+            // adaptor nesting — negate VS to make b_tree positive for the NR solver.
+            let vs_voltage = if negate_vs { -vs_voltage } else { vs_voltage };
             tree.set_voltage(vs_voltage);
             let b1 = tree.reflected();
             // VCC bias injection: add DC operating point from supply voltage.
@@ -653,7 +654,9 @@ impl WdfStage {
                 RootKind::JfetVr(j) => {
                     j.process_root(b_tree, rp)
                 }
-                RootKind::Triode(t) => t.process(b_tree, rp),
+                RootKind::Triode(t) => {
+                    t.process(b_tree, rp)
+                }
                 RootKind::VariMu(t) => t.process(b_tree, rp),
                 RootKind::Pentode(p) => p.process(b_tree, rp),
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
@@ -864,6 +867,7 @@ impl WdfStage {
             let y = b0 * (x - *x_prev) + a1 * *y_prev;
             *x_prev = x;
             *y_prev = flush_denormal(y);
+
             return *y_prev;
         }
 
@@ -1624,6 +1628,7 @@ impl PushPullStage {
         let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
         self.dc_blocker_x1 = x0;
         self.dc_blocker_y1 = if y0.is_finite() { y0 } else { 0.0 };
+
         flush_denormal(self.dc_blocker_y1)
     }
 

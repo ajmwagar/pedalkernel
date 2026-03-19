@@ -1409,41 +1409,14 @@ fn plan_two_junction(
                 Vec::new()
             }
         }
-        NonlinearKind::Triode {
-            grid_node: Some(gn),
-            plate_node,
-            cathode_node,
-            ..
-        } => {
-            if *gn != graph.gnd_node {
-                // Exclude boundary edges (inter-stage coupling caps) from the
-                // grid-side BFS. When an inter-stage triode has a coupling cap
-                // between the previous stage's plate and its grid, including
-                // that cap in the WDF tree causes a large negative b_tree (the
-                // cap charges via VS=B+ in a direction that drives the WDF tree
-                // away from the triode's operating point). The inter-stage
-                // signal coupling is handled by the serial chain + grid_dc_blocker
-                // in stage.rs; the WDF tree only needs the local grid-bias network
-                // (grid leak, grid stopper) for correct input impedance modeling.
-                let mut exclude = classified.all_nonlinear_edge_indices.clone();
-                exclude.extend(boundary_edges.iter().copied());
-                let mut grid_barriers = graph.output_pin_nodes.clone();
-                // Remove own terminal nodes so BFS can start/traverse
-                grid_barriers.remove(gn);
-                grid_barriers.remove(plate_node);
-                grid_barriers.remove(cathode_node);
-                graph.bfs_passive_edges(
-                    *gn,
-                    &exclude,
-                    &graph.active_edge_indices,
-                    true,
-                    true,
-                    pp_transformer_edges,
-                    &grid_barriers,
-                )
-            } else {
-                Vec::new()
-            }
+        NonlinearKind::Triode { .. } => {
+            // Triode grid voltage (Vgk) is set externally via set_control_voltage
+            // from the serial chain. Grid passives (coupling cap, grid leak, etc.)
+            // must NOT be in the WDF tree — they would charge to the upstream
+            // plate voltage and corrupt the tree's DC equilibrium, making b_tree
+            // permanently negative and preventing the NR solver from finding a
+            // valid plate voltage.
+            Vec::new()
         }
         _ => Vec::new(),
     };
@@ -1543,7 +1516,18 @@ fn plan_two_junction(
         } => {
             let model = super::helpers::triode_model(model_name);
             let comp = if *is_vari_mu { 0.35 } else { 1.0 };
-            let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate);
+            let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate)
+                .or_else(|| {
+                    // Default DC blocker: ~20Hz at the given sample rate
+                    // Triode WDF stages output full plate voltage (DC + AC).
+                    // Without DC blocking, downstream stages receive ~200V DC
+                    // which overdrives the next tube's grid to saturation.
+                    let omega = (std::f64::consts::PI * 2.0 * 20.0) / sample_rate;
+                    let omega_tan = omega.tan();
+                    let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
+                    let b0 = 1.0 / (1.0 + omega_tan);
+                    Some((a1, b0, 0.0, 0.0))
+                });
             (
                 Some(VirtualEdge {
                     node_a,
@@ -1557,7 +1541,14 @@ fn plan_two_junction(
         }
         NonlinearKind::Pentode { model_name, .. } => {
             let model = super::helpers::pentode_model(model_name);
-            let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate);
+            let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate)
+                .or_else(|| {
+                    let omega = (std::f64::consts::PI * 2.0 * 20.0) / sample_rate;
+                    let omega_tan = omega.tan();
+                    let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
+                    let b0 = 1.0 / (1.0 + omega_tan);
+                    Some((a1, b0, 0.0, 0.0))
+                });
             (
                 Some(VirtualEdge {
                     node_a,
@@ -2514,19 +2505,12 @@ pub(super) fn plan_push_pull_half(
         let mut passive_idxs = plate_passives.clone();
         extend_dedup(&mut passive_idxs, &cathode_passives);
 
-        // BFS from grid_node to collect coupling cap + grid stopper + grid leak.
-        if let Some(gn) = grid_node {
-            let grid_passives = graph.bfs_passive_edges(
-                gn,
-                &classified.all_nonlinear_edge_indices,
-                &graph.active_edge_indices,
-                true,   // include_supply_adjacent
-                true,   // skip_out_node
-                pp_transformer_edges,
-                &HashSet::new(),
-            );
-            extend_dedup(&mut passive_idxs, &grid_passives);
-        }
+        // Grid passives (coupling cap, grid stopper, grid leak) are NOT included.
+        // Push-pull grid voltage (Vgk) is set externally via the serial chain
+        // (bias + input * compensation). Including grid passives in the WDF tree
+        // creates a 3-port R-type adaptor where the signal enters via scattering
+        // coefficients against a ~640V DC bias — the ~30mV AC signal is lost.
+        let grid_node: Option<NodeId> = None;
 
         if passive_idxs.is_empty() {
             return None;
@@ -2556,52 +2540,8 @@ pub(super) fn plan_push_pull_half(
                 }
             }
         }
-        // For 3-port mode: if injection is still ground, use the outermost
-        // grid passive node (farthest from the grid in the BFS chain) as
-        // the signal entry point. Push-pull stages behind a transformer
-        // barrier have dist_from_in=None for all nodes, so the generic
-        // finder returns ground.
-        if injection_node == graph.gnd_node {
-            if let Some(gn) = grid_node {
-                let grid_passives = graph.bfs_passive_edges(
-                    gn,
-                    &classified.all_nonlinear_edge_indices,
-                    &graph.active_edge_indices,
-                    true,
-                    true,
-                    pp_transformer_edges,
-                    &HashSet::new(),
-                );
-                // Find the node farthest from grid (most hops in BFS order).
-                // This is the signal entry point (input side of coupling cap).
-                let mut grid_adj_nodes: HashSet<NodeId> = HashSet::new();
-                grid_adj_nodes.insert(gn);
-                for &eidx in &grid_passives {
-                    let e = &graph.edges[eidx];
-                    grid_adj_nodes.insert(e.node_a);
-                    grid_adj_nodes.insert(e.node_b);
-                }
-                // Pick a leaf node (degree-1 in grid subgraph, not the grid itself).
-                let mut degree: HashMap<NodeId, usize> = HashMap::new();
-                for &eidx in &grid_passives {
-                    let e = &graph.edges[eidx];
-                    *degree.entry(e.node_a).or_insert(0) += 1;
-                    *degree.entry(e.node_b).or_insert(0) += 1;
-                }
-                for (&node, &deg) in &degree {
-                    if deg == 1
-                        && node != gn
-                        && node != graph.gnd_node
-                        && node != graph.vcc_node
-                        && node != plate_node
-                        && node != cathode_node
-                    {
-                        injection_node = node;
-                        break;
-                    }
-                }
-            }
-        }
+        // Grid passives excluded (grid_node is always None for push-pull),
+        // so no 3-port injection node search needed.
 
         // Ground terminal: degree-1 leaf in cathode passives.
         let mut ground_terminal = graph.gnd_node;

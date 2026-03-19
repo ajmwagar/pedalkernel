@@ -283,7 +283,7 @@ fn build_passive_wdf_stage(
                 vcc_dc_ramp: 0,
                 coupling_cap_id: None,
                 tone_feedback: None,
-                negate_triode_vs: false,
+                negate_vs: false,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -628,7 +628,7 @@ fn build_passive_rtype_from_decomposed(
         vcc_dc_ramp: 0,
         coupling_cap_id: None,
         tone_feedback: None,
-        negate_triode_vs: false,
+        negate_vs: false,
     })
 }
 
@@ -1034,7 +1034,7 @@ fn build_feedforward_stages(
                     vcc_dc_ramp: 0,
                     coupling_cap_id: None,
                     tone_feedback: None,
-                    negate_triode_vs: false,
+                    negate_vs: false,
                 }
             }
             Err(_) => {
@@ -1157,7 +1157,7 @@ fn build_output_rooted_stage(
         vcc_dc_ramp: 0,
         coupling_cap_id: None,
         tone_feedback: None,
-        negate_triode_vs: false,
+        negate_vs: false,
     })
 }
 

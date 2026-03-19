@@ -337,6 +337,12 @@ fn compute_transformer_gain(
             return 1.0;
         }
         for node in [edge.node_a, edge.node_b] {
+            // Skip power rail nodes — gnd/vcc often coincide with transformer
+            // secondary connections (e.g., OT.sec.b -> gnd) but aren't real
+            // inter-stage transformer coupling.
+            if node == graph.gnd_node || node == graph.vcc_node {
+                continue;
+            }
             if let Some(info) = graph.transformer_info.get(&node) {
                 if info.is_secondary {
                     // Secondary side of a transformer — apply step-up gain.
@@ -597,7 +603,7 @@ pub(super) fn build_stages(
             vcc_dc_ramp: 0,
             coupling_cap_id: None,
             tone_feedback: None,
-            negate_triode_vs: false,
+            negate_vs: false,
         });
     }
 
@@ -2613,14 +2619,49 @@ fn build_vs_stage(
     // so vcc_injection_coeff = 0 there too.
     let vcc_injection_coeff = 0.0;
 
-    // Detect if the tree root is a Series adaptor for triode stages.
-    // When the plate load reduces to a single Series chain (VS → R_plate),
-    // the Series formula b = -(b_VS + b_R) negates the B+ contribution,
-    // giving b_tree = -2*B+ (wrong sign). Setting negate_triode_vs = true
-    // instructs the processor to negate VS so b_tree = +2*B+ (correct).
-    let negate_triode_vs = is_tube && tree.is_series_root();
-
     let (root, base_diode_model) = create_root(&elem.kind, use_jfet_vr);
+
+    // Detect if the voltage source sign needs negation for this tree topology.
+    // WDF Series adaptors produce b = -(b1+b2), which can flip the VS sign.
+    // For triode/pentode stages where VS = B+, a negative b_tree makes the
+    // NR solver unable to find a positive plate voltage. If detected, we
+    // negate VS so the tree produces the correct sign.
+    let negate_vs = match &root {
+        RootKind::Triode(t) => {
+            let test_v = t.v_max();
+            if test_v > 0.0 {
+                let mut test_tree = tree.clone();
+                test_tree.set_voltage(test_v);
+                let b = test_tree.reflected();
+                b < 0.0
+            } else {
+                false
+            }
+        }
+        RootKind::VariMu(t) => {
+            let test_v = t.v_max();
+            if test_v > 0.0 {
+                let mut test_tree = tree.clone();
+                test_tree.set_voltage(test_v);
+                let b = test_tree.reflected();
+                b < 0.0
+            } else {
+                false
+            }
+        }
+        RootKind::Pentode(p) => {
+            let test_v = p.v_max();
+            if test_v > 0.0 {
+                let mut test_tree = tree.clone();
+                test_tree.set_voltage(test_v);
+                let b = test_tree.reflected();
+                b < 0.0
+            } else {
+                false
+            }
+        }
+        _ => false,
+    };
 
     Some(WdfStage {
         tree,
@@ -2654,7 +2695,7 @@ fn build_vs_stage(
         vcc_dc_ramp: 0,
         coupling_cap_id,
         tone_feedback: None,
-        negate_triode_vs,
+        negate_vs,
     })
 }
 
@@ -2721,7 +2762,7 @@ fn build_source_follower_stage(
         vcc_dc_ramp: 0,
         coupling_cap_id: None,
         tone_feedback: None,
-        negate_triode_vs: false,
+        negate_vs: false,
     })
 }
 

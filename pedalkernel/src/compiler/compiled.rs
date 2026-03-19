@@ -31,6 +31,8 @@ static TRACE_COUNT_PIPELINE: AtomicU64 = AtomicU64::new(0);
 /// Max pipeline samples to trace (non-zero only).
 #[cfg(feature = "debug-trace")]
 const MAX_TRACE_PIPELINE: u64 = 5;
+#[cfg(feature = "debug-trace")]
+static LATE_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Compiled pedal
@@ -1957,7 +1959,6 @@ impl PedalProcessor for CompiledPedal {
                             stage.tree.port_resistance()
                         );
                     }
-
                     if wdf_stage_counter < crate::metering::MAX_STAGES {
                         stage_levels[wdf_stage_counter] = stage_output;
                     }
@@ -2044,6 +2045,19 @@ impl PedalProcessor for CompiledPedal {
                 self.stage_order.len(), self.stages.len(),
                 self.multi_nl_stages.len()
             );
+        }
+
+        // Late-stage periodic trace: every 4410 samples (0.1s at 44.1kHz)
+        #[cfg(feature = "debug-trace")]
+        {
+            let n = LATE_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if n > 500 && n % 4800 == 0 {
+                let pre_pp = signal;
+                eprintln!(
+                    "[LATE n={}] input={:.6e} pre_pp={:.6e} signal_so_far={:.6e}",
+                    n, input, pre_pp, signal
+                );
+            }
         }
 
         // Tick VCAs — apply envelope-gated amplitude modulation after WDF stages.
