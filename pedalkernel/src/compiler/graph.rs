@@ -597,16 +597,19 @@ impl CircuitGraph {
 
             // Indices must be relative to all_components (which includes fork paths),
             // not pedal.components.
+            // Split halves use Linear taper — the real taper is applied once
+            // at the control level (compiled.rs) before splitting into aw/wb.
+            // This ensures aw + wb = max_R always, even for nonlinear tapers.
             let aw_idx = all_components.len() + extra_components.len();
             extra_components.push(ComponentDef {
                 id: format!("{pot_id}__aw"),
-                kind: Box::new(Potentiometer { max_r, taper }),
+                kind: Box::new(Potentiometer { max_r, taper: PotTaper::B }),
             });
 
             let wb_idx = all_components.len() + extra_components.len();
             extra_components.push(ComponentDef {
                 id: format!("{pot_id}__wb"),
-                kind: Box::new(Potentiometer { max_r, taper }),
+                kind: Box::new(Potentiometer { max_r, taper: PotTaper::B }),
             });
 
             let key_a = format!("{pot_id}.a");
@@ -2760,6 +2763,7 @@ impl OpAmpFeedbackInfo {
         matches!(
             &self.feedback_kind,
             OpAmpFeedbackKind::Inverting { feedback_diode: Some(_), .. }
+            | OpAmpFeedbackKind::NonInverting { feedback_diode: Some(_), .. }
         )
     }
 }

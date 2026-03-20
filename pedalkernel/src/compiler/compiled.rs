@@ -56,6 +56,9 @@ pub(super) struct ControlBinding {
     pub(super) component_id_wb: String,
     #[allow(dead_code)]
     pub(super) max_resistance: f64,
+    /// Pot taper curve — applied once before splitting into aw/wb halves
+    /// so that aw + wb = max_R always (split halves use Linear taper internally).
+    pub(super) taper: crate::dsl::PotTaper,
     /// Range mapping: (min, max).  Input 0→min, 1→max.
     /// Default (0.0, 1.0) is identity; (1.0, 0.0) inverts.
     pub(super) range: (f64, f64),
@@ -1088,15 +1091,18 @@ impl CompiledPedal {
                         let comp_id = self.controls[i].component_id.clone();
                         let comp_id_aw = self.controls[i].component_id_aw.clone();
                         let comp_id_wb = self.controls[i].component_id_wb.clone();
+                        // Pre-apply taper once for split halves (aw/wb use Linear
+                        // taper internally) so aw + wb = max_R always.
+                        let tapered = self.controls[i].taper.apply(value);
                         if let Some(stage) = self.stages.get_mut(stage_idx) {
                             if !stage.tree.set_pot(&comp_id, value) {
                                 stage.set_passive_rtype_pot(&comp_id, value);
                             }
-                            if !stage.tree.set_pot(&comp_id_aw, value) {
-                                stage.set_passive_rtype_pot(&comp_id_aw, value);
+                            if !stage.tree.set_pot(&comp_id_aw, tapered) {
+                                stage.set_passive_rtype_pot(&comp_id_aw, tapered);
                             }
-                            if !stage.tree.set_pot(&comp_id_wb, 1.0 - value) {
-                                stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - value);
+                            if !stage.tree.set_pot(&comp_id_wb, 1.0 - tapered) {
+                                stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - tapered);
                             }
                             stage.tree.recompute();
                             stage.flush_passive_rtype_recompute();
@@ -1308,6 +1314,9 @@ impl CompiledPedal {
                 let comp_id_aw = self.controls[ctrl_idx].component_id_aw.clone();
                 let comp_id_wb = self.controls[ctrl_idx].component_id_wb.clone();
                 let max_r = self.controls[ctrl_idx].max_resistance;
+                // Pre-apply taper once for split halves (aw/wb use Linear
+                // taper internally) so aw + wb = max_R always.
+                let tapered = self.controls[ctrl_idx].taper.apply(value);
                 match &self.controls[ctrl_idx].target {
                     ControlTarget::PotInStage(stage_idx) => {
                         let stage_idx = *stage_idx;
@@ -1315,11 +1324,11 @@ impl CompiledPedal {
                             if !stage.tree.set_pot(&comp_id, value) {
                                 stage.set_passive_rtype_pot(&comp_id, value);
                             }
-                            if !stage.tree.set_pot(&comp_id_aw, value) {
-                                stage.set_passive_rtype_pot(&comp_id_aw, value);
+                            if !stage.tree.set_pot(&comp_id_aw, tapered) {
+                                stage.set_passive_rtype_pot(&comp_id_aw, tapered);
                             }
-                            if !stage.tree.set_pot(&comp_id_wb, 1.0 - value) {
-                                stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - value);
+                            if !stage.tree.set_pot(&comp_id_wb, 1.0 - tapered) {
+                                stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - tapered);
                             }
                             stage.tree.recompute();
                             stage.flush_passive_rtype_recompute();
@@ -1332,13 +1341,13 @@ impl CompiledPedal {
                             }
                             let mut changed = false;
                             changed |= stage.tree.set_pot(&comp_id, value);
-                            changed |= stage.tree.set_pot(&comp_id_aw, value);
-                            changed |= stage.tree.set_pot(&comp_id_wb, 1.0 - value);
+                            changed |= stage.tree.set_pot(&comp_id_aw, tapered);
+                            changed |= stage.tree.set_pot(&comp_id_wb, 1.0 - tapered);
                             if !changed {
                                 // Try PassiveRType children in this stage too.
                                 changed |= stage.set_passive_rtype_pot(&comp_id, value);
-                                changed |= stage.set_passive_rtype_pot(&comp_id_aw, value);
-                                changed |= stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - value);
+                                changed |= stage.set_passive_rtype_pot(&comp_id_aw, tapered);
+                                changed |= stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - tapered);
                             }
                             if changed {
                                 stage.tree.recompute();
