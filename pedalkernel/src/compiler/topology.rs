@@ -1128,6 +1128,7 @@ fn classify_opamp(
             feedback_kind: OpAmpFeedbackKind::NonInverting {
                 rf,
                 ri,
+                feedback_diode: None,
                 rf_pot,
                 ri_pot,
             },

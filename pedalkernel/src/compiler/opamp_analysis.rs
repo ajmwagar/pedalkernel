@@ -404,7 +404,7 @@ pub(super) fn build_opamp_feedback_stages(
                 }
                 stages.push(stage);
             }
-            OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot, ri_pot } => {
+            OpAmpFeedbackKind::NonInverting { rf, ri, feedback_diode, rf_pot, ri_pot } => {
                 let mut feedback_pot_id = None;
 
                 let model = OpAmpModel::from_opamp_type(&info.opamp_type);
@@ -442,6 +442,28 @@ pub(super) fn build_opamp_feedback_stages(
                 root.set_v_max(v_max);
 
                 let skip_tree = skip_feedback_tree.contains(&info.comp_id);
+
+                // Pair this opamp with DiodePair/SingleDiode stage when feedback
+                // diodes exist (e.g. Bluesbreaker classified as NonInverting).
+                let output_is_nl_junction = nl_junction_nodes.contains(&info.out_node);
+                if skip_tree && (feedback_diode.is_some() || output_is_nl_junction) {
+                    diode_paired.push(DiodePairedOpAmp {
+                        neg_node: info.neg_node,
+                        out_node: info.out_node,
+                        opamp_root: root,
+                        feedback_pot_id,
+                    });
+                    continue;
+                }
+
+                if let Some(diode_type) = feedback_diode {
+                    let diode_vf = match diode_type {
+                        DiodeType::Silicon => 0.6,
+                        DiodeType::Germanium => 0.3,
+                        DiodeType::Led => 1.6,
+                    };
+                    root.set_soft_clip(diode_vf);
+                }
                 let (tree, fb_pot_from_tree) =
                     if skip_tree {
                         (None, None)

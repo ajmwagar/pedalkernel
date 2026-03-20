@@ -1242,6 +1242,14 @@ impl CompiledPedal {
             if stage.bias_pot_id.as_deref() == Some(comp_id) {
                 stage.update_bias_from_pot();
             }
+            // Update feedback opamp gain when its controlling pot changes.
+            if stage.feedback_pot_id.as_deref() == Some(comp_id) {
+                let pot_r = stage.pot_children.iter()
+                    .find_map(|p| p.get_pot_resistance(comp_id));
+                if let (Some(pot_r), Some(ref mut oa)) = (pot_r, &mut stage.feedback_opamp) {
+                    oa.set_feedback_pot_r(pot_r);
+                }
+            }
         }
     }
 

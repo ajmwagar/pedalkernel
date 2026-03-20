@@ -1729,6 +1729,7 @@ pub fn compile_pedal_with_options(
         sample_rate,
         oversampling,
         supply_voltage,
+        &diode_paired_opamps,
     );
 
     // Add triode fallback stages (SP-failed triodes built as single-NL MNA).

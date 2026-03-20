@@ -2331,10 +2331,13 @@ impl CircuitGraph {
                                 fb_comps.push(c);
                             }
                         }
+                        // Check for feedback diodes (clipping in feedback path)
+                        let feedback_diode = find_feedback_diode(neg_node, out_node);
+
                         results.push(OpAmpFeedbackInfo {
                             comp_id: comp.id.clone(),
                             opamp_type,
-                            feedback_kind: OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot, ri_pot },
+                            feedback_kind: OpAmpFeedbackKind::NonInverting { rf, ri, feedback_diode, rf_pot, ri_pot },
                             neg_node,
                             pos_node,
                             out_node,
@@ -2488,12 +2491,14 @@ impl CircuitGraph {
                                     fb_comps.push(c);
                                 }
                             }
+                            let feedback_diode = find_feedback_diode(neg_node, out_node);
                             results.push(OpAmpFeedbackInfo {
                                 comp_id: comp.id.clone(),
                                 opamp_type,
                                 feedback_kind: OpAmpFeedbackKind::NonInverting {
                                     rf: rf_estimate,
                                     ri,
+                                    feedback_diode,
                                     rf_pot: rf_pot_info,
                                     ri_pot,
                                 },
@@ -2812,6 +2817,10 @@ pub(super) enum OpAmpFeedbackKind {
         rf: f64,
         /// Ground resistor value (neg to gnd)
         ri: f64,
+        /// Diode type in feedback loop (if any) for soft clipping.
+        /// Same as Inverting: diodes in parallel with Rf create soft clipping.
+        /// Needed for circuits misclassified as non-inverting (e.g. Bluesbreaker).
+        feedback_diode: Option<DiodeType>,
         /// Potentiometer info for Rf path (runtime gain modulation).
         /// (comp_id, max_resistance, fixed_series_resistance, parallel_fixed_resistance)
         rf_pot: Option<(String, f64, f64, Option<f64>)>,
