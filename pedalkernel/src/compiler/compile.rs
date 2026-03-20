@@ -1629,14 +1629,29 @@ pub fn compile_pedal_with_options(
     let opamp_feedback_edges: HashSet<usize> = {
         let mut comp_ids: HashSet<String> = HashSet::new();
         for info in &opamp_analysis.feedback_loops {
-            // Allpass feedback components (R_ap, R_fb) must always be excluded
-            // from the NL BFS — they belong to the opamp, not the JFET stage.
-            let always_exclude = matches!(
+            // Determine whether this opamp's feedback components must be claimed
+            // regardless of skip_feedback_tree status.
+            //
+            // Opamps whose feedback kind is independent of NL element pairing
+            // (Allpass, InvertingShelving, UnityGain) must always claim their
+            // feedback edges. If they are left unclaimed when the opamp is also
+            // in skip_feedback_tree_opamps (e.g. from a 1-hop NL-junction bridge),
+            // the NL BFS absorbs their feedback resistors/caps/pots into the
+            // multi-NL passive network, creating orphan feedforward stages that
+            // bypass downstream Volume/Tone pots.
+            //
+            // Inverting opamps that are in skip_feedback_tree_opamps are
+            // genuinely paired with an NL solver stage (Tube Screamer, Blues-
+            // breaker). Their feedback components (including gain pots like Drive)
+            // must remain unclaimed so the NL BFS can incorporate them.
+            let always_claim = matches!(
                 info.feedback_kind,
                 super::graph::OpAmpFeedbackKind::Allpass { .. }
+                    | super::graph::OpAmpFeedbackKind::InvertingShelving { .. }
+                    | super::graph::OpAmpFeedbackKind::UnityGain
             );
             let skip = skip_feedback_tree_opamps.contains(&info.comp_id);
-            if always_exclude || !skip {
+            if always_claim || !skip {
                 comp_ids.extend(info.feedback_comp_ids.iter().cloned());
             }
         }
