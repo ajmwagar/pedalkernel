@@ -2329,7 +2329,7 @@ fn plan_diode_bridge(
     // BFS passive edges from non-active diode terminals, with skip_out_node=false
     // so that RC time constant edges touching out_node are collected.
     // Active-shared diode nodes act as barriers via output_pin_nodes + extra.
-    let all_passive_edges = collect_passive_edges_from_nodes(
+    let mut all_passive_edges = collect_passive_edges_from_nodes(
         if bfs_start_nodes.is_empty() { &all_diode_nodes } else { &bfs_start_nodes },
         graph,
         classified,
@@ -2339,11 +2339,26 @@ fn plan_diode_bridge(
         opamp_feedback_edges,
     );
 
+    // Save original passive edges (before output tail) for injection node selection.
+    // The output tail (R_tone, Tone, C_out, Volume, R_out) may include far-input
+    // nodes like IC1a.pos that would incorrectly bias injection_node selection.
+    let pre_tail_passive_edges = all_passive_edges.clone();
+
+    // Absorb output tail (coupling cap + tone/volume pots, etc.) into this stage.
+    // Without this, downstream passive components become orphan feedforward stages
+    // that add signal and bypass controls like Tone and Volume (e.g. Blues pedal).
+    let output_tail = collect_output_passive_tail(&all_passive_edges, graph, classified);
+    if !output_tail.is_empty() {
+        extend_dedup(&mut all_passive_edges, &output_tail);
+    }
+
     // Find injection node — prefer diode terminal nodes.
+    // Use only pre-tail passive edges so output tail nodes (e.g. IC1a.pos via R_in)
+    // don't pull the injection point to the wrong side of the circuit.
     let exclude: HashSet<NodeId> = [graph.out_node, graph.gnd_node].into_iter().collect();
     let injection_node = {
         let mut best = find_injection_node_multi_nl(
-            &all_passive_edges,
+            &pre_tail_passive_edges,
             graph,
             classified,
             &exclude,

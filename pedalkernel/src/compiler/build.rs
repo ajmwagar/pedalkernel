@@ -1703,10 +1703,49 @@ fn build_rtype_stage(
         reactive_children.push(dyn_node);
     }
 
+    // ── Output probe port for feedback-diode stages with passive output tail ──
+    //
+    // When the planner sets plan.output_node (e.g. Blues feedback diodes + Tone/Volume),
+    // the audio output is at graph.out_node — a pure resistive node with no reactive
+    // element. A high-impedance (1 GΩ) WDF probe port is added so the stage can read
+    // V(out_node) as (a+b)/2 at this port. The probe resistance is chosen to negligibly
+    // load the circuit (<0.02% with 100 kΩ Volume pot impedance).
+    //
+    // The probe port IS included in the scattering matrix and recomputed whenever
+    // pot_children change, so Tone/Volume pots correctly affect V(out_node).
+    const R_PROBE: f64 = 1e9; // 1 GΩ — matches GMIN regularization level
+    let probe_port_idx: Option<usize> = if n_nl > 0
+        && plan.output_node.is_some()
+        && !has_linearized_ota
+    {
+        let out_node = plan.output_node.unwrap();
+        let out_pos_mna = node_to_mna(out_node);
+        if let Some(_out_pos) = out_pos_mna {
+            // NOTE: Do NOT stamp the probe into the MNA G matrix.
+            // The probe's conductance is added as a WDF port Thévenin resistance
+            // during derive_scattering_matrix_general — stamping it here would
+            // double-count it in the x_matrix.  The GMIN regularization already
+            // provides a small (1e9 Ω) path to ground on all nodes for stability.
+            let probe_idx = n_nl + n_subtrees + reactive_children.len();
+            ports.push(WdfPort {
+                node_pos: out_pos_mna,
+                node_neg: None,
+                resistance: R_PROBE,
+            });
+            port_node_pairs.push((out_pos_mna, None));
+            reactive_children.push(DynNode::Resistor(None, R_PROBE));
+            Some(probe_idx)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Combine subtree + reactive children as passive_children.
     // Subtree children come first (matching port ordering).
     let mut passive_children: Vec<DynNode> =
-        Vec::with_capacity(n_subtrees + n_reactive);
+        Vec::with_capacity(n_subtrees + reactive_children.len());
     passive_children.extend(subtree_children);
     passive_children.extend(reactive_children);
     let n_passive = passive_children.len();
@@ -2062,7 +2101,10 @@ fn build_rtype_stage(
     //
     // For passive-output stages (bridge rectifiers): BFS from output node
     // to find the nearest reactive port.
-    let output_port = if is_three_port_vari_mu || is_three_port_triode {
+    let output_port = if let Some(probe_idx) = probe_port_idx {
+        // Feedback-diode stage with passive output tail: read from probe port at out_node.
+        probe_idx
+    } else if is_three_port_vari_mu || is_three_port_triode {
         1 // plate-cathode port
     } else if let Some(ref dg) = device_groups {
         // For grouped devices (BJT 2-port, triode 3-port), output from the
