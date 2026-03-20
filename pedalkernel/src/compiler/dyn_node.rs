@@ -129,7 +129,7 @@ impl DynNode {
 
     pub fn Pot(comp_id: String, max_resistance: f64, position: f64, taper: PotTaper) -> Self {
         let tapered_pos = taper.apply(position);
-        let rp = (tapered_pos * max_resistance).max(1.0);
+        let rp = tapered_pos * max_resistance;
         Self::Leaf(Box::new(WdfPot { comp_id, max_resistance, position, taper, rp, last_a: 0.0 }))
     }
 
@@ -157,15 +157,16 @@ impl DynNode {
         let r1 = left.port_resistance();
         let r2 = right.port_resistance();
         let rp = r1 + r2;
-        let gamma = r1 / rp;
+        let gamma = if rp > 0.0 { r1 / rp } else { 0.5 };
         Self::Binary { kind: BinaryKind::Series, left, right, rp, gamma, b1: 0.0, b2: 0.0 }
     }
 
     pub fn Parallel(left: Box<DynNode>, right: Box<DynNode>) -> Self {
         let r1 = left.port_resistance();
         let r2 = right.port_resistance();
-        let rp = r1 * r2 / (r1 + r2);
-        let gamma = r2 / (r1 + r2);
+        let sum = r1 + r2;
+        let rp = if sum > 0.0 { r1 * r2 / sum } else { 0.0 };
+        let gamma = if sum > 0.0 { r2 / sum } else { 0.5 };
         Self::Binary { kind: BinaryKind::Parallel, left, right, rp, gamma, b1: 0.0, b2: 0.0 }
     }
 
@@ -472,11 +473,16 @@ impl DynNode {
                 match kind {
                     BinaryKind::Series => {
                         *rp = r1 + r2;
-                        *gamma = r1 / *rp;
+                        // Guard: if both children are 0Ω (short circuit),
+                        // gamma is undefined — default to 0.5 (equal split).
+                        *gamma = if *rp > 0.0 { r1 / *rp } else { 0.5 };
                     }
                     BinaryKind::Parallel => {
-                        *rp = r1 * r2 / (r1 + r2);
-                        *gamma = r2 / (r1 + r2);
+                        let sum = r1 + r2;
+                        // Guard: if both children are 0Ω, parallel is 0Ω
+                        // and gamma is undefined — default to 0.5.
+                        *rp = if sum > 0.0 { r1 * r2 / sum } else { 0.0 };
+                        *gamma = if sum > 0.0 { r2 / sum } else { 0.5 };
                     }
                 }
             }
