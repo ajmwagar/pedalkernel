@@ -1530,6 +1530,16 @@ pub fn compile_pedal_with_options(
         .feedback_loops
         .iter()
         .filter(|info| {
+            // If find_feedback_diode already detected diodes between neg and out,
+            // skip the feedback tree so the opamp can be paired with the DiodePair
+            // WDF stage for proper NR solver clipping (Bluesbreaker, Tube Screamer).
+            // The diode chain may traverse nodes not in passive_adj (diodes are NL),
+            // so the BFS-based check below can miss multi-hop feedback paths like
+            // IC1b.out -> R_clip -> D1 -> D2 -> IC1b.neg.
+            if info.has_feedback_diode() {
+                return true;
+            }
+
             // Collect graph nodes that this opamp's feedback components touch.
             let fb_nodes: HashSet<super::graph::NodeId> = graph
                 .edges

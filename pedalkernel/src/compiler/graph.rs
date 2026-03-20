@@ -2749,6 +2749,16 @@ pub(super) struct OpAmpFeedbackInfo {
     pub(super) input_fixed_r: f64,
 }
 
+impl OpAmpFeedbackInfo {
+    /// Returns true if the feedback topology includes diodes (e.g., Inverting with clipping).
+    pub(super) fn has_feedback_diode(&self) -> bool {
+        matches!(
+            &self.feedback_kind,
+            OpAmpFeedbackKind::Inverting { feedback_diode: Some(_), .. }
+        )
+    }
+}
+
 /// The feedback topology of an op-amp.
 #[derive(Debug, Clone)]
 pub(super) enum OpAmpFeedbackKind {
