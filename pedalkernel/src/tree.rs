@@ -1022,6 +1022,96 @@ impl MnaSystem {
         (port_coeffs, vs_coeff)
     }
 
+    /// Derive node-voltage extraction coefficients for reading the output voltage
+    /// at a specific MNA node from the WDF port b-waves, without a voltage source.
+    ///
+    /// This is the same computation as `derive_extraction_coeffs` but omits the VS
+    /// term. Use this for standard adapted-WDF-port stages (non-VS-injection mode)
+    /// where the adapted port is itself the last element of `ports`.
+    ///
+    /// Returns `port_coeffs` where `V(out) = Σ_k port_coeffs[k] * b[k]`.
+    pub fn derive_node_extraction_coeffs(
+        &self,
+        ports: &[WdfPort],
+        output_pos: Option<usize>,
+        output_neg: Option<usize>,
+    ) -> Vec<f64> {
+        let n_ports = ports.len();
+        let n_total = self.num_nodes + self.num_vsources;
+        let mut x_matrix = vec![0.0; n_total * n_total];
+
+        // Fill G block
+        for i in 0..self.num_nodes {
+            for j in 0..self.num_nodes {
+                x_matrix[i * n_total + j] = self.g_matrix[i * self.num_nodes + j];
+            }
+        }
+        // Fill B block
+        for i in 0..self.num_nodes {
+            for j in 0..self.num_vsources {
+                x_matrix[i * n_total + self.num_nodes + j] =
+                    self.b_matrix[i * self.num_vsources + j];
+            }
+        }
+        // Fill C block
+        for i in 0..self.num_vsources {
+            for j in 0..self.num_nodes {
+                x_matrix[(self.num_nodes + i) * n_total + j] =
+                    self.c_matrix[i * self.num_nodes + j];
+            }
+        }
+        // Fill D block
+        for i in 0..self.num_vsources {
+            for j in 0..self.num_vsources {
+                x_matrix[(self.num_nodes + i) * n_total + self.num_nodes + j] =
+                    self.d_matrix[i * self.num_vsources + j];
+            }
+        }
+
+        // Add port Thévenin resistances
+        for port in ports.iter() {
+            let g = 1.0 / port.resistance;
+            if let Some(p) = port.node_pos {
+                x_matrix[p * n_total + p] += g;
+                if let Some(n) = port.node_neg {
+                    x_matrix[p * n_total + n] -= g;
+                }
+            }
+            if let Some(n) = port.node_neg {
+                x_matrix[n * n_total + n] += g;
+                if let Some(p) = port.node_pos {
+                    x_matrix[n * n_total + p] -= g;
+                }
+            }
+        }
+
+        let x_inv = invert_matrix_equilibrated(&x_matrix, n_total);
+
+        let lookup = |row: Option<usize>, col: usize| -> f64 {
+            match row {
+                Some(r) => x_inv[r * n_total + col],
+                None => 0.0,
+            }
+        };
+
+        let mut port_coeffs = vec![0.0; n_ports];
+        for k in 0..n_ports {
+            let pk = ports[k].node_pos;
+            let nk = ports[k].node_neg;
+            let pos_contrib = match pk {
+                Some(p) => lookup(output_pos, p) - lookup(output_neg, p),
+                None => 0.0,
+            };
+            let neg_contrib = match nk {
+                Some(n) => lookup(output_pos, n) - lookup(output_neg, n),
+                None => 0.0,
+            };
+            port_coeffs[k] = (pos_contrib - neg_contrib) / ports[k].resistance;
+        }
+
+        port_coeffs
+    }
+
     /// Build discrete-time state-space matrices from the continuous-time MNA
     /// using the bilinear (trapezoidal) transform.
     ///

@@ -1056,13 +1056,19 @@ fn compile_blues() {
         }
     }
 
-    // Verify controls bound correctly — Tone pot is in a WDF stage
-    // (index may shift when IC1b clipping opamp gets paired with DiodePair MultiNl stage)
+    // Verify controls bound correctly — Tone and Volume pots are absorbed into the
+    // MultiNl stage as part of the output passive tail (after the clipping diode pair).
     let tone_target = proc.controls.iter().find(|c| c.label == "Tone").map(|c| &c.target);
     assert!(
-        matches!(tone_target, Some(super::compiled::ControlTarget::PotInStage(_))),
-        "Tone should bind to PotInStage, got {:?}",
+        matches!(tone_target, Some(super::compiled::ControlTarget::PotInMultiNlStage(_, _))),
+        "Tone should bind to PotInMultiNlStage, got {:?}",
         tone_target,
+    );
+    let volume_target = proc.controls.iter().find(|c| c.label == "Volume").map(|c| &c.target);
+    assert!(
+        matches!(volume_target, Some(super::compiled::ControlTarget::PotInMultiNlStage(_, _))),
+        "Volume should bind to PotInMultiNlStage, got {:?}",
+        volume_target,
     );
 
     proc.set_control("Drive", 0.7);
