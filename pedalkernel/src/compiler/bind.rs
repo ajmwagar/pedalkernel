@@ -112,6 +112,10 @@ pub(super) fn build_controls(
             .and_then(|c| c.kind.resistance())
             .unwrap_or(100_000.0);
 
+        let taper = comp
+            .and_then(|c| c.kind.pot_taper())
+            .unwrap_or(PotTaper::B);
+
         controls.push(ControlBinding {
             label: ctrl.label.clone(),
             target,
@@ -119,6 +123,7 @@ pub(super) fn build_controls(
             component_id_aw: format!("{}__aw", ctrl.component),
             component_id_wb: format!("{}__wb", ctrl.component),
             max_resistance: max_r,
+            taper,
             range: ctrl.range,
         });
     }

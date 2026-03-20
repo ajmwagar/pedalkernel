@@ -4,7 +4,7 @@
 #
 # Key: Diodes are in the FEEDBACK loop (soft clipping), not to ground
 
-pedal "Tube Screamer" {
+pedal "Tube Screamer" subtitle "TS-808 — JRC4558 overdrive" {
   components {
     # Input buffer stage (first half of JRC4558)
     C1: cap(100n)           # Input DC blocking
@@ -77,7 +77,7 @@ pedal "Tube Screamer" {
   }
   controls {
     Drive.position -> "Drive" [0.0, 1.0] = 0.5
-    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+    Tone.position -> "Tone" [1.0, 0.0] = 0.5
     Level.position -> "Level" [1.0, 0.0] = 0.7
   }
 }
