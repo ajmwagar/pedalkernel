@@ -1547,7 +1547,7 @@ pedal "NonInverting Test" subtitle "test" {
     let info = &analysis.feedback_loops[0];
     assert_eq!(info.comp_id, "U1");
     match &info.feedback_kind {
-        super::graph::OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot, ri_pot } => {
+        super::graph::OpAmpFeedbackKind::NonInverting { rf, ri, rf_pot, ri_pot, .. } => {
             assert!((rf - 90_000.0).abs() < 1.0, "Rf should be 90k: {rf}");
             assert!((ri - 10_000.0).abs() < 1.0, "Ri should be 10k: {ri}");
             assert!(rf_pot.is_none(), "No Rf pot");

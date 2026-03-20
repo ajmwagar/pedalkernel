@@ -559,6 +559,31 @@ pub(super) fn build_stages(
                 multi_nl.transformer_gain =
                     compute_transformer_gain(&plan.passive_idxs, graph, &transformer_subtrees);
                 multi_nl.signal_flow_distance = plan.signal_chain_depth.unwrap_or(elem.distance);
+
+                // Pair with feedback opamp (Bluesbreaker, Tube Screamer fallback).
+                // Same matching logic as the WdfStage path: junction node overlap
+                // or 1-hop passive adjacency to opamp neg/out.
+                let junction_nodes = &elem.junction_nodes;
+                if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
+                    junction_nodes.iter().any(|&jn| jn == dp.neg_node || jn == dp.out_node)
+                        || junction_nodes.iter().any(|&jn| {
+                            graph.edges.iter().any(|e| {
+                                let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
+                                    || graph.components[e.comp_idx].kind.pot_taper().is_some();
+                                is_passive
+                                    && ((e.node_a == dp.neg_node && e.node_b == jn)
+                                        || (e.node_b == dp.neg_node && e.node_a == jn)
+                                        || (e.node_a == dp.out_node && e.node_b == jn)
+                                        || (e.node_b == dp.out_node && e.node_a == jn))
+                            })
+                        })
+                }) {
+                    multi_nl.feedback_opamp = Some(dp.opamp_root.clone());
+                    if dp.feedback_pot_id.is_some() {
+                        multi_nl.feedback_pot_id = dp.feedback_pot_id.clone();
+                    }
+                }
+
                 fallback_multi_nl.push(multi_nl);
                 fallback_claimed_edges.extend(&plan.passive_idxs);
             }
@@ -1016,6 +1041,7 @@ pub(super) fn build_multi_nl_stages(
     sample_rate: f64,
     oversampling: OversamplingFactor,
     supply_voltage: f64,
+    diode_paired_opamps: &[super::opamp_analysis::DiodePairedOpAmp],
 ) -> Vec<MultiNlStage> {
     let mut multi_nl_stages = Vec::new();
 
@@ -1025,6 +1051,44 @@ pub(super) fn build_multi_nl_stages(
                 let empty_subtrees = HashMap::new();
                 stage.transformer_gain =
                     compute_transformer_gain(&plan.passive_edge_indices, graph, &empty_subtrees);
+
+                // Pair DiodePair/SingleDiode MultiNl stages with feedback opamps.
+                // Collect all junction nodes from all NL elements in this plan.
+                let has_diode = plan.nl_element_indices.iter().any(|&idx| {
+                    matches!(
+                        &classified.nonlinear_elements[idx].kind,
+                        NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)
+                    )
+                });
+                if has_diode {
+                    let all_junction_nodes: Vec<super::graph::NodeId> = plan
+                        .nl_element_indices
+                        .iter()
+                        .flat_map(|&idx| classified.nonlinear_elements[idx].junction_nodes.iter().copied())
+                        .collect();
+                    if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
+                        // Direct: opamp neg/out matches any diode junction node
+                        all_junction_nodes.iter().any(|&jn| jn == dp.neg_node || jn == dp.out_node)
+                            // 1-hop: passive edge connects opamp neg/out to diode junction
+                            || all_junction_nodes.iter().any(|&jn| {
+                                graph.edges.iter().any(|e| {
+                                    let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
+                                        || graph.components[e.comp_idx].kind.pot_taper().is_some();
+                                    is_passive
+                                        && ((e.node_a == dp.neg_node && e.node_b == jn)
+                                            || (e.node_b == dp.neg_node && e.node_a == jn)
+                                            || (e.node_a == dp.out_node && e.node_b == jn)
+                                            || (e.node_b == dp.out_node && e.node_a == jn))
+                                })
+                            })
+                    }) {
+                        stage.feedback_opamp = Some(dp.opamp_root.clone());
+                        if dp.feedback_pot_id.is_some() {
+                            stage.feedback_pot_id = dp.feedback_pot_id.clone();
+                        }
+                    }
+                }
+
                 multi_nl_stages.push(stage);
             }
             None => {
@@ -1527,6 +1591,8 @@ fn build_rtype_stage(
             recompute_pending: false,
             veb_bias_offset: 0.0,
             feedback_scale: 0.1,
+            feedback_opamp: None,
+            feedback_pot_id: None,
             linearized_ota: linearized_ota_data,
             vs_injection: None,
             extract_coeffs: None,
@@ -2255,6 +2321,8 @@ fn build_rtype_stage(
         recompute_pending: false,
         veb_bias_offset: 0.0,
         feedback_scale: 0.1,
+        feedback_opamp: None,
+        feedback_pot_id: None,
         linearized_ota: linearized_ota_data,
         vs_injection: vs_injection_vec,
         extract_coeffs,

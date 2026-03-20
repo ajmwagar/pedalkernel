@@ -2162,6 +2162,11 @@ pub(super) struct MultiNlStage {
     pub(super) veb_bias_offset: f64,
     /// Feedback scale for coupled BJT stages.
     pub(super) feedback_scale: f64,
+    /// Feedback opamp root for diode-paired stages (Bluesbreaker, Tube Screamer).
+    /// Applies opamp gain + GBW + slew to the input before MNA/NR solve.
+    pub(super) feedback_opamp: Option<OpAmpRoot>,
+    /// Pot ID that controls feedback opamp gain (if any).
+    pub(super) feedback_pot_id: Option<String>,
     /// Linearized OTA data for gm-based scattering recompute.
     /// When Some, the OTA's transconductance is stamped into the MNA as a linear
     /// conductance. When the envelope changes gain, we delta-update the MNA and
@@ -2423,8 +2428,14 @@ impl MultiNlStage {
             let skip_nr_budget = n_nl > 0 && self.iteration_budget_remaining == 0;
             let skip_nr = skip_nr_adaptive || skip_nr_budget;
 
-            // The adapted port's b-wave is the input signal (voltage source)
-            let b_adapted = sample * compensation;
+            // The adapted port's b-wave is the input signal (voltage source).
+            // When a feedback opamp is paired (e.g. Bluesbreaker, Tube Screamer fallback),
+            // apply opamp gain + GBW + slew limiting before the MNA/NR solve.
+            let b_adapted = if let Some(ref mut opamp) = self.feedback_opamp {
+                opamp.compute_vs_voltage(sample * compensation)
+            } else {
+                sample * compensation
+            };
 
             if !skip_nr {
             // 2. Compute known_a[i] for each NL port:
@@ -2706,6 +2717,9 @@ impl MultiNlStage {
         self.nr_workspace.frozen_failures = 0;
         self.prev_input = 0.0;
         self.iteration_budget_remaining = NR_ITERATION_BUDGET;
+        if let Some(ref mut opamp) = self.feedback_opamp {
+            opamp.reset();
+        }
     }
 
     /// Debug dump: print multi-NL stage structure.
@@ -2755,6 +2769,9 @@ impl MultiNlStage {
                 k,
                 child.port_resistance(),
             ));
+        }
+        if let Some(ref opamp) = self.feedback_opamp {
+            s.push_str(&format!("  feedback_opamp: gain={:.2}\n", opamp.gain()));
         }
         // Scattering sub-blocks (compact).
         let n_nl = self.n_nl;
