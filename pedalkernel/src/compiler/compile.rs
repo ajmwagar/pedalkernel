@@ -1555,14 +1555,32 @@ pub fn compile_pedal_with_options(
             // node set to an NL junction (direct overlap OR 1-hop bridge).
             // - Direct: RAT feedback pot IS at diode junction
             // - 1-hop: Klon R_clip bridges diode junction to U3.neg
+            //
+            // Exclude global nodes (gnd, vcc, in, out) from the bridge check:
+            // many components connect to ground, and a feedback cap grounding
+            // through gnd does not constitute a bridge to a diode that also
+            // grounds through gnd (e.g., RAT C5/C6 → gnd ≠ D1/D2 → gnd).
             graph.edges.iter().enumerate().any(|(idx, e)| {
                 if classified.all_nonlinear_edge_indices.contains(&idx)
                     || graph.active_edge_indices.contains(&idx)
                 {
                     return false;
                 }
-                (fb_nodes.contains(&e.node_a) && nl_junction_nodes.contains(&e.node_b))
-                    || (fb_nodes.contains(&e.node_b) && nl_junction_nodes.contains(&e.node_a))
+                // A true bridge requires BOTH sides to be non-global.
+                // Ground/VCC/in/out are shared by many components and
+                // don't indicate actual signal-path bridging. Without this
+                // exclusion, feedback caps grounding through gnd (RAT C5/C6)
+                // falsely bridge to diodes that also connect to gnd, causing
+                // the feedback network to be left unclaimed and creating a
+                // parasitic feedforward stage that drowns out the Volume pot.
+                let is_global = |n: super::graph::NodeId| {
+                    n == graph.gnd_node || n == graph.vcc_node
+                        || n == graph.in_node || n == graph.out_node
+                };
+                (fb_nodes.contains(&e.node_a) && nl_junction_nodes.contains(&e.node_b)
+                    && !is_global(e.node_a) && !is_global(e.node_b))
+                || (fb_nodes.contains(&e.node_b) && nl_junction_nodes.contains(&e.node_a)
+                    && !is_global(e.node_a) && !is_global(e.node_b))
             })
         })
         .map(|info| info.comp_id.clone())

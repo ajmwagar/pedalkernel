@@ -2668,11 +2668,29 @@ fn build_vs_stage(
     // terminals [source_node, GND].  Collector/emitter passives are dead-ends
     // here and get eliminated — that's fine because the load tree handles
     // their impedance separately.
-    let (tree, output_probe) = graph_reduce(
+    let (tree, mut output_probe) = graph_reduce(
         &plan.passive_idxs, &extra, &plan.terminals,
         graph, sample_rate, &HashMap::new(), remap,
         Some(graph.out_node),
     ).ok()?;
+
+    // Tone filter output probe: for diode/zener stages where the signal exits
+    // through a transistor input barrier (JFET gate, BJT base), the WDF output
+    // should be extracted after the tone filter, not at the NL junction.
+    // Find the passive edge touching the barrier — its component is the probe.
+    if output_probe.is_none() && matches!(&elem.kind,
+        NonlinearKind::DiodePair { .. } | NonlinearKind::SingleDiode { .. } | NonlinearKind::Zener { .. })
+    {
+        for &eidx in &plan.passive_idxs {
+            let e = &graph.edges[eidx];
+            if graph.transistor_input_nodes.contains(&e.node_a)
+                || graph.transistor_input_nodes.contains(&e.node_b)
+            {
+                output_probe = Some(graph.components[e.comp_idx].id.clone());
+                break;
+            }
+        }
+    }
 
     // Find the inter-stage coupling capacitor connected to the tube's grid node.
     //
@@ -2848,11 +2866,11 @@ fn build_source_follower_stage(
     oversampling: OversamplingFactor,
     use_jfet_vr: bool,
 ) -> Option<WdfStage> {
-    let passive_tree = graph_reduce(
+    let (passive_tree, output_probe) = graph_reduce(
         &plan.passive_idxs, &[], &plan.terminals,
         graph, sample_rate, &HashMap::new(), |n| n,
-        None,
-    ).ok()?.0;
+        Some(graph.out_node),
+    ).ok()?;
     let (root, _) = create_root(&elem.kind, use_jfet_vr);
 
     // JfetVr is a passive element — signal must enter via a voltage source.
@@ -2891,7 +2909,7 @@ fn build_source_follower_stage(
         sample_counter: 0,
         root_comp_id: String::new(),
         feedback_pot_id: None,
-        output_probe: None,
+        output_probe,
         feedback_opamp: None,
         vcc_injection_coeff: 0.0,
         vcc_dc_ramp: 0,

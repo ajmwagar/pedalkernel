@@ -64,6 +64,13 @@ pub(super) struct CircuitGraph {
     /// (opamp .out, BJT collector, triode plate, JFET drain).
     /// Used as BFS barriers instead of the ad-hoc active_bridge set.
     pub(super) output_pin_nodes: HashSet<NodeId>,
+    /// Nodes corresponding to Input pins of transistors (JFET gate, BJT base,
+    /// MOSFET gate). Used as additional BFS barriers during NL stage planning
+    /// to prevent gate/base bias resistors from bleeding into upstream stages'
+    /// WDF trees (e.g. RAT R8 1MΩ gate bias masking Filter pot effect).
+    /// Not used for all BFS — transistor stages' own planning can still reach
+    /// bias components through their gate/base nodes.
+    pub(super) transistor_input_nodes: HashSet<NodeId>,
     /// Post-resolution edge classifications. Maps edge index → resolved EdgeKind.
     /// Only populated for edges whose kind changed during resolution.
     /// If an edge index is absent, use the component's default edges().
@@ -775,13 +782,23 @@ impl CircuitGraph {
         // Only Output pins of opamps, BJTs, tubes, JFETs, and MOSFETs are
         // included — passive component pins (diode .b, pot .wiper) are excluded.
         let mut output_pin_nodes = HashSet::new();
+        let mut transistor_input_nodes = HashSet::new();
         for comp in &components {
             if comp.kind.is_gain_device() || comp.kind.op_amp_type().is_some() {
+                let is_opamp = comp.kind.op_amp_type().is_some();
                 for pin_name in comp.kind.pin_config().valid_pins {
-                    if comp.kind.pin_direction(pin_name) == super::component::PinDirection::Output {
+                    let dir = comp.kind.pin_direction(pin_name);
+                    if dir == super::component::PinDirection::Output {
                         let key = format!("{}.{}", comp.id, pin_name);
                         if let Some(&raw_id) = pin_ids.get(&key) {
                             output_pin_nodes.insert(uf.find(raw_id));
+                        }
+                    }
+                    // Transistor input pins (gate/base) — NOT opamp inputs.
+                    if dir == super::component::PinDirection::Input && !is_opamp {
+                        let key = format!("{}.{}", comp.id, pin_name);
+                        if let Some(&raw_id) = pin_ids.get(&key) {
+                            transistor_input_nodes.insert(uf.find(raw_id));
                         }
                     }
                 }
@@ -804,6 +821,7 @@ impl CircuitGraph {
             coupled_nodes,
             transformer_info,
             output_pin_nodes,
+            transistor_input_nodes,
             resolved_edge_kinds: HashMap::new(),
             trigger_nodes,
             ac_ground_nodes: HashSet::new(),
@@ -2986,6 +3004,10 @@ pub(super) fn graph_reduce(
     // Pre-process: eliminate dead-end nodes once at the start
     // (same as old sp_reduce — NOT per-iteration, which incorrectly
     // reduces non-SP circuits like the RAT D1 diode stage).
+    // Output probe may be set here if the output_node is a dead-end
+    // (e.g. transistor input barrier node for tone filter extraction).
+    let output_node = output_node.map(remap);
+    let mut output_probe_comp_id: Option<String> = None;
     eliminate_dead_ends(&mut edges, terminals);
 
     // 3. Main reduction loop.
@@ -2993,8 +3015,6 @@ pub(super) fn graph_reduce(
     // Output node tracking: when a series reduction collapses output_node,
     // we identify the ground-side leaf component. Its comp_id is the output
     // probe — voltage at this leaf after the WDF down-sweep equals V_out.
-    let output_node = output_node.map(remap);
-    let mut output_probe_comp_id: Option<String> = None;
     // Track which edge (by vec index) contains the output probe subtree.
     // Updated when edges are merged so it follows the probe through reductions.
     let mut output_probe_edge: Option<usize> = None;
