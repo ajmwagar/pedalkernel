@@ -1888,12 +1888,19 @@ fn level_control_affects_volume() {
     let out_high: Vec<f64> = input.iter().map(|&s| high.process(s)).collect();
     let peak_high = out_high.iter().fold(0.0f64, |m, x| m.max(x.abs()));
 
-    // Level pot affects output volume (inverted wiring: low position = louder,
-    // compensated at the control binding layer via range inversion).
     assert!(
-        (peak_high - peak_low).abs() > peak_low.max(peak_high) * 0.05,
-        "Level pot should affect output volume: pos=0.1 peak={peak_low:.4}, pos=0.9 peak={peak_high:.4}"
+        peak_high > peak_low,
+        "Level=0.9 should be louder than Level=0.1: lo={peak_low:.4}, hi={peak_high:.4}"
     );
+
+    // Level=0 must produce silence
+    let mut zero = compile_pedal(&pedal, 48000.0).unwrap();
+    zero.set_control("Level", 0.0);
+    for _ in 0..4800 { zero.process(0.0); }
+    let out_zero: Vec<f64> = input.iter().map(|&s| zero.process(s)).collect();
+    let peak_zero = out_zero[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    assert!(peak_zero < 0.01,
+        "Level=0 should silence output, got peak={peak_zero:.6}");
 }
 
 #[test]
@@ -5165,24 +5172,49 @@ fn diag_ratking_pots() {
         eprintln!("    tree: {}", s.tree.debug_dump(0));
     }
 
-    let others = [("Distortion", 0.5), ("Filter", 0.5)];
-    let (lo, hi, nan) = pot_affects_output(&pedal, "Volume", 0.1, 0.9, &others);
-    eprintln!("[RATKING] Volume: lo={lo:.6} hi={hi:.6} nan={nan}");
-    assert!(!nan, "RATKING Volume should not produce NaN");
-    assert!((hi - lo).abs() > lo.max(hi) * 0.05,
-        "RATKING Volume pot should affect output: lo={lo:.6} hi={hi:.6}");
+    // ── Volume pot: 0 = silence, 1 = full signal ──────────────────
+    // Volume has range [1.0, 0.0] (inverted) + A taper.
+    // Knob=0 → internal=1.0, aw=100%, wb=0% → output=0.
+    {
+        let input: Vec<f64> = (0..48000)
+            .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+            .collect();
 
-    let others = [("Volume", 0.7), ("Filter", 0.5)];
-    let (lo, hi, nan) = pot_affects_output(&pedal, "Distortion", 0.1, 0.9, &others);
-    eprintln!("[RATKING] Distortion: lo={lo:.6} hi={hi:.6} nan={nan}");
-    assert!(!nan, "RATKING Distortion should not produce NaN");
+        let measure = |vol: f64| -> f64 {
+            let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+            p.set_control("Volume", vol);
+            p.set_control("Distortion", 0.5);
+            p.set_control("Filter", 0.5);
+            for _ in 0..9600 { p.process(0.0); }
+            let out: Vec<f64> = input.iter().map(|&s| p.process(s)).collect();
+            out[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()))
+        };
 
-    let others = [("Volume", 0.7), ("Distortion", 0.5)];
-    let (lo, hi, nan) = pot_affects_output(&pedal, "Filter", 0.1, 0.9, &others);
-    eprintln!("[RATKING] Filter: lo={lo:.6} hi={hi:.6} nan={nan}");
-    assert!(!nan, "RATKING Filter should not produce NaN");
+        let peak_zero = measure(0.0);
+        let peak_low  = measure(0.1);
+        let peak_mid  = measure(0.5);
+        let peak_high = measure(0.9);
+        let peak_full = measure(1.0);
 
-    // Detailed Distortion pot diagnostic: check RMS and gain
+        eprintln!("[RATKING] Volume sweep: 0={peak_zero:.6} 0.1={peak_low:.6} 0.5={peak_mid:.6} 0.9={peak_high:.6} 1.0={peak_full:.6}");
+
+        assert!(peak_zero < 0.001,
+            "Volume=0 should silence output, got {peak_zero:.6}");
+        assert!(peak_low < peak_mid,
+            "Volume=0.1 ({peak_low:.4}) should be less than Volume=0.5 ({peak_mid:.4})");
+        assert!(peak_mid < peak_high,
+            "Volume=0.5 ({peak_mid:.4}) should be less than Volume=0.9 ({peak_high:.4})");
+        assert!(peak_high <= peak_full * 1.01,
+            "Volume=0.9 ({peak_high:.4}) should be ≤ Volume=1.0 ({peak_full:.4})");
+        assert!(peak_full > 0.1,
+            "Volume=1.0 should produce significant output, got {peak_full:.6}");
+    }
+
+    // ── Distortion pot: changes opamp gain ──────────────────────
+    // At low Distortion the opamp gain is low (~1-70x).
+    // At high Distortion the gain is very high (~2000x).
+    // The gain must actually change with the pot position, and the
+    // GBW filter must produce a darker tone at high gain (LM308 GBW=1MHz).
     {
         let input: Vec<f64> = (0..48000)
             .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
@@ -5193,9 +5225,7 @@ fn diag_ratking_pots() {
         lo.set_control("Volume", 0.7);
         lo.set_control("Filter", 0.5);
         for _ in 0..9600 { lo.process(0.0); }
-        // Check opamp gain
-        let gain_lo = lo.stages[0].opamp_gain();
-        let pot_r_lo = lo.stages[0].tree.get_pot_resistance("Distortion");
+        let gain_lo = lo.stages[0].opamp_gain().unwrap();
         let out_lo: Vec<f64> = input.iter().map(|&s| lo.process(s)).collect();
         let rms_lo = (out_lo[4800..].iter().map(|x| x*x).sum::<f64>() / (out_lo.len() - 4800) as f64).sqrt();
 
@@ -5204,52 +5234,84 @@ fn diag_ratking_pots() {
         hi.set_control("Volume", 0.7);
         hi.set_control("Filter", 0.5);
         for _ in 0..9600 { hi.process(0.0); }
-        let gain_hi = hi.stages[0].opamp_gain();
-        let pot_r_hi = hi.stages[0].tree.get_pot_resistance("Distortion");
+        let gain_hi = hi.stages[0].opamp_gain().unwrap();
         let out_hi: Vec<f64> = input.iter().map(|&s| hi.process(s)).collect();
         let rms_hi = (out_hi[4800..].iter().map(|x| x*x).sum::<f64>() / (out_hi.len() - 4800) as f64).sqrt();
 
-        eprintln!("[RATKING] Distortion detail:");
-        eprintln!("  pos=0.1: pot_r={pot_r_lo:?} gain={gain_lo:?} rms={rms_lo:.6}");
-        eprintln!("  pos=0.9: pot_r={pot_r_hi:?} gain={gain_hi:?} rms={rms_hi:.6}");
+        eprintln!("[RATKING] Distortion: gain_lo={gain_lo:.1} gain_hi={gain_hi:.1} rms_lo={rms_lo:.6} rms_hi={rms_hi:.6}");
+
+        assert!(gain_hi > gain_lo * 10.0,
+            "High Distortion gain ({gain_hi:.1}) should be >10× low ({gain_lo:.1})");
+        assert!(gain_lo > 1.0,
+            "Low Distortion should still have gain > 1, got {gain_lo:.1}");
+        // RMS may be similar due to hard clipping, but both should produce output
+        assert!(rms_lo > 0.01, "Low Distortion should produce output, rms={rms_lo:.6}");
+        assert!(rms_hi > 0.01, "High Distortion should produce output, rms={rms_hi:.6}");
     }
 
-    // Detailed Filter pot diagnostic
+    // ── Filter pot: lowpass sweep ───────────────────────────────
+    // Filter=0.1 (bright) → high peak, lots of harmonics.
+    // Filter=0.9 (dark) → low peak, harmonics attenuated.
     {
         let input: Vec<f64> = (0..48000)
             .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
             .collect();
 
-        let mut lo = compile_pedal(&pedal, 48000.0).unwrap();
-        lo.set_control("Filter", 0.1);
-        lo.set_control("Volume", 0.7);
-        lo.set_control("Distortion", 0.5);
-        for _ in 0..9600 { lo.process(0.0); }
-        let pot_r_lo = lo.stages[1].tree.get_pot_resistance("Filter");
-        let rp_lo = lo.stages[1].tree.port_resistance();
-        let out_lo: Vec<f64> = input.iter().map(|&s| lo.process(s)).collect();
-        let rms_lo = (out_lo[4800..].iter().map(|x| x*x).sum::<f64>() / (out_lo.len() - 4800) as f64).sqrt();
-        let peak_lo = out_lo[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let mut bright = compile_pedal(&pedal, 48000.0).unwrap();
+        bright.set_control("Filter", 0.1);
+        bright.set_control("Volume", 0.7);
+        bright.set_control("Distortion", 0.5);
+        for _ in 0..9600 { bright.process(0.0); }
+        let out_bright: Vec<f64> = input.iter().map(|&s| bright.process(s)).collect();
+        let peak_bright = out_bright[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
 
-        let mut hi = compile_pedal(&pedal, 48000.0).unwrap();
-        hi.set_control("Filter", 0.9);
-        hi.set_control("Volume", 0.7);
-        hi.set_control("Distortion", 0.5);
-        for _ in 0..9600 { hi.process(0.0); }
-        let pot_r_hi = hi.stages[1].tree.get_pot_resistance("Filter");
-        let rp_hi = hi.stages[1].tree.port_resistance();
-        let out_hi: Vec<f64> = input.iter().map(|&s| hi.process(s)).collect();
-        let rms_hi = (out_hi[4800..].iter().map(|x| x*x).sum::<f64>() / (out_hi.len() - 4800) as f64).sqrt();
-        let peak_hi = out_hi[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let mut dark = compile_pedal(&pedal, 48000.0).unwrap();
+        dark.set_control("Filter", 0.9);
+        dark.set_control("Volume", 0.7);
+        dark.set_control("Distortion", 0.5);
+        for _ in 0..9600 { dark.process(0.0); }
+        let out_dark: Vec<f64> = input.iter().map(|&s| dark.process(s)).collect();
+        let peak_dark = out_dark[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
 
-        eprintln!("[RATKING] Filter detail:");
-        eprintln!("  pos=0.1: pot_r={pot_r_lo:?} rp={rp_lo:.1} rms={rms_lo:.6} peak={peak_lo:.6}");
-        eprintln!("  pos=0.9: pot_r={pot_r_hi:?} rp={rp_hi:.1} rms={rms_hi:.6} peak={peak_hi:.6}");
+        eprintln!("[RATKING] Filter: bright(0.1)={peak_bright:.6} dark(0.9)={peak_dark:.6}");
+
+        assert!(peak_bright > peak_dark * 3.0,
+            "Bright filter ({peak_bright:.4}) should be >3× dark ({peak_dark:.4}) — LPF should attenuate");
+        assert!(peak_dark > 0.01,
+            "Dark filter should still produce output, got {peak_dark:.6}");
+    }
+
+    // ── OpAmp oversampling: GBW coeff must use oversampled rate ─
+    // Regression test: OpAmpRoot's GBW filter and slew rate limiter must use
+    // the oversampled rate (192kHz at X4), not the base rate (48kHz).
+    // Without this, both are 4× too gentle.
+    {
+        let proc = compile_pedal(&pedal, 48000.0).unwrap();
+        let ratio = proc.stages[0].oversampler.ratio();
+        assert_eq!(ratio, 4, "OpAmp stage should use X4 oversampling");
+
+        let sr = proc.stages[0].opamp_sample_rate().unwrap();
+        let expected_sr = 48000.0 * ratio as f64;
+        assert!((sr - expected_sr).abs() < 1.0,
+            "OpAmpRoot sample_rate should be {expected_sr} (oversampled), got {sr}");
+
+        // GBW coeff at 192kHz must be ~4× smaller than at 48kHz for the same gain.
+        let gbw_coeff = proc.stages[0].opamp_gbw_coeff().unwrap();
+        let gain = proc.stages[0].opamp_gain().unwrap();
+        // Compute what it would be at the wrong (base) rate:
+        let f_cl = 1_000_000.0 / gain; // LM308 GBW = 1MHz
+        let coeff_at_48k = 1.0 - (-std::f64::consts::TAU * f_cl / 48000.0).exp();
+        assert!(gbw_coeff < coeff_at_48k * 0.5,
+            "GBW coeff ({gbw_coeff:.6}) should be significantly less than at 48kHz ({coeff_at_48k:.6})");
+        eprintln!("[RATKING] GBW oversampling: sr={sr} gain={gain:.1} coeff={gbw_coeff:.6} (would be {coeff_at_48k:.6} at 48kHz)");
     }
 }
 
 #[test]
-fn diag_ratking_volume_trace() {
+fn ratking_volume_zero_is_silent() {
+    // Regression test: Volume=0 must produce silence.
+    // The Volume pot has range [1.0, 0.0] (inverted) so knob=0 → internal=1.0
+    // → wiper at pin B (ground) → output=0.
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent().unwrap()
@@ -5258,60 +5320,56 @@ fn diag_ratking_volume_trace() {
     let pedal = parse_pedal_file(&src).unwrap();
     let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
 
-    // Set Volume to low and process
-    proc.set_control("Volume", 0.1);
-    for _ in 0..9600 { proc.process(0.0); } // settle smoother
+    proc.set_control("Volume", 0.0);
+    proc.set_control("Distortion", 0.5);
+    proc.set_control("Filter", 0.5);
+    for _ in 0..9600 { proc.process(0.0); }
 
-    // Check the actual pot resistances in the source follower stage
-    let sf_stage = proc.stages.iter().find(|s| s.is_source_follower).unwrap();
-    let aw_r = sf_stage.tree.get_pot_resistance("Volume__aw");
-    let wb_r = sf_stage.tree.get_pot_resistance("Volume__wb");
-    let aw_pos = sf_stage.tree.get_pot_position("Volume__aw");
-    let wb_pos = sf_stage.tree.get_pot_position("Volume__wb");
-    eprintln!("[TRACE] Volume=0.1: aw_r={aw_r:?} wb_r={wb_r:?} aw_pos={aw_pos:?} wb_pos={wb_pos:?}");
-    eprintln!("[TRACE] tree dump: {}", sf_stage.tree.debug_dump(0));
+    let input: Vec<f64> = (0..48000)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let out: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    let peak = out[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
 
-    // Process some signal and trace first few samples
-    let mut peak_lo = 0.0f64;
-    for i in 0..48000 {
-        let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
-        let out = proc.process(s);
-        if i >= 4825 && i <= 4830 {
-            let sf_stage = proc.stages.iter().find(|s| s.is_source_follower).unwrap();
-            let wb_v = sf_stage.tree.leaf_voltage("Volume__wb");
-            eprintln!("[LO i={i}] in={s:.6} out={out:.6} wb_v={wb_v:?}");
-        }
-        if i >= 4800 { peak_lo = peak_lo.max(out.abs()); }
+    eprintln!("[RATKING] Volume=0 peak={peak:.6}");
+    assert!(peak < 0.001, "Volume=0 should silence output, got peak={peak:.6}");
+}
+
+#[test]
+fn ratking_volume_monotonic() {
+    // Volume pot must be monotonically increasing: 0 < 0.25 < 0.5 < 0.75 < 1.0
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("ratking_non_invert.pedal")
+    ).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+
+    let input: Vec<f64> = (0..48000)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+
+    let positions = [0.0, 0.25, 0.5, 0.75, 1.0];
+    let mut peaks = Vec::new();
+    for &vol in &positions {
+        let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+        p.set_control("Volume", vol);
+        p.set_control("Distortion", 0.5);
+        p.set_control("Filter", 0.5);
+        for _ in 0..9600 { p.process(0.0); }
+        let out: Vec<f64> = input.iter().map(|&s| p.process(s)).collect();
+        let peak = out[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        peaks.push(peak);
     }
 
-    // Reset and try with Volume high
-    let mut proc2 = compile_pedal(&pedal, 48000.0).unwrap();
-    proc2.set_control("Volume", 0.9);
-    for _ in 0..9600 { proc2.process(0.0); }
+    eprintln!("[RATKING] Volume monotonic: {:?}", positions.iter().zip(&peaks)
+        .map(|(p, v)| format!("{p:.2}={v:.4}")).collect::<Vec<_>>());
 
-    let sf_stage2 = proc2.stages.iter().find(|s| s.is_source_follower).unwrap();
-    let aw_r2 = sf_stage2.tree.get_pot_resistance("Volume__aw");
-    let wb_r2 = sf_stage2.tree.get_pot_resistance("Volume__wb");
-    let aw_pos2 = sf_stage2.tree.get_pot_position("Volume__aw");
-    let wb_pos2 = sf_stage2.tree.get_pot_position("Volume__wb");
-    eprintln!("[TRACE] Volume=0.9: aw_r={aw_r2:?} wb_r={wb_r2:?} aw_pos={aw_pos2:?} wb_pos={wb_pos2:?}");
-    eprintln!("[TRACE] tree dump: {}", sf_stage2.tree.debug_dump(0));
-
-    let mut peak_hi = 0.0f64;
-    for i in 0..48000 {
-        let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
-        let out = proc2.process(s);
-        if i >= 4825 && i <= 4830 {
-            let sf_stage = proc2.stages.iter().find(|s| s.is_source_follower).unwrap();
-            let wb_v = sf_stage.tree.leaf_voltage("Volume__wb");
-            eprintln!("[HI i={i}] in={s:.6} out={out:.6} wb_v={wb_v:?}");
-        }
-        if i >= 4800 { peak_hi = peak_hi.max(out.abs()); }
+    for i in 1..peaks.len() {
+        assert!(peaks[i] >= peaks[i-1] - 0.001,
+            "Volume must be monotonic: pos={} peak={:.4} < pos={} peak={:.4}",
+            positions[i], peaks[i], positions[i-1], peaks[i-1]);
     }
-
-    eprintln!("[TRACE] peak_lo={peak_lo:.6} peak_hi={peak_hi:.6}");
-    assert!((peak_hi - peak_lo).abs() > peak_lo.max(peak_hi) * 0.05,
-        "Volume pot resistances should affect output: lo={peak_lo:.6} hi={peak_hi:.6}");
 }
 
 #[test]
@@ -5423,7 +5481,9 @@ fn diag_bluesbreaker_inner(pedal: &PedalDef) {
             pot_ids, s.feedback_opamp.is_some(), s.output_probe, s.feedback_pot_id);
     }
     for (i, s) in proc.multi_nl_stages.iter().enumerate() {
-        eprintln!("  mnl[{i}]: pot_children={}", s.pot_children.len());
+        eprintln!("  mnl[{i}]: pot_children={} sfd={} inj={} out={} fb_op={}",
+            s.pot_children.len(), s.signal_flow_distance, s.injection_node_id,
+            s.output_node_id, s.feedback_opamp.is_some());
         for (pi, pc) in s.pot_children.iter().enumerate() {
             let mut pot_ids = Vec::new();
             super::helpers::collect_pot_ids(pc, &mut pot_ids);
@@ -5431,6 +5491,51 @@ fn diag_bluesbreaker_inner(pedal: &PedalDef) {
         }
     }
     eprintln!("[Bluesbreaker] stage_order: {:?}", proc.stage_order);
+
+    // Per-stage signal trace
+    {
+        let mut p = compile_pedal(pedal, 48000.0).unwrap();
+        eprintln!("[Bluesbreaker] pre_gain={:.6} output_gain={:.6}", p.pre_gain, p.output_gain);
+        for _ in 0..4800 { p.process(0.0); }
+        // Manual per-stage processing trace
+        for i in 0..3 {
+            let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            let mut signal = s * p.pre_gain;
+            eprintln!("[Bluesbreaker] sample {i}: input={s:.6} scaled={signal:.6}");
+            for sr in &p.stage_order {
+                match sr {
+                    super::compiled::StageRef::Wdf(wi) => {
+                        let stage = &mut p.stages[*wi];
+                        let root_tag = match &stage.root {
+                            super::stage::RootKind::OpAmp(op) => {
+                                format!("OpAmp(ni={},gain={:.4})", op.is_non_inverting(), op.gain())
+                            }
+                            _ => format!("{:?}", std::mem::discriminant(&stage.root)),
+                        };
+                        let out = stage.process(signal);
+                        eprintln!("  Wdf({wi}): in={signal:.6e} out={out:.6e} root={root_tag}",);
+                        signal = out;
+                    }
+                    super::compiled::StageRef::MultiNl(mi) => {
+                        let mnl = &mut p.multi_nl_stages[*mi];
+                        let out = mnl.process(signal);
+                        eprintln!("  MultiNl({mi}): in={signal:.6e} out={out:.6e} inj={} out_node={}",
+                            mnl.injection_node_id, mnl.output_node_id);
+                        signal = out;
+                    }
+                }
+            }
+            let out = signal * p.output_gain;
+            eprintln!("  final output={out:.6e}");
+        }
+        eprintln!("[Bluesbreaker] wdf trees:");
+        for (i, s) in p.stages.iter().enumerate() {
+            eprintln!("  wdf[{i}]: {}", s.tree.debug_dump(0));
+        }
+        for (i, s) in p.multi_nl_stages.iter().enumerate() {
+            eprintln!("  mnl[{i}]: debug={}", s.debug_dump());
+        }
+    }
 
     let others = [("Tone", 0.5), ("Volume", 0.5)];
     let (lo, hi, nan) = pot_affects_output(pedal, "Drive", 0.1, 0.9, &others);
@@ -5487,4 +5592,106 @@ fn diag_screamer_pots() {
     assert!(!nan, "Screamer Level should not produce NaN");
     assert!((hi - lo).abs() > lo.max(hi) * 0.05,
         "Screamer Level pot should affect output: lo={lo:.6} hi={hi:.6}");
+}
+
+// ─── Volume sweep helpers ────────────────────────────────────────────
+
+/// Measure peak output for a given volume setting. Settles for 9600 samples
+/// of silence before measuring 48000 samples of 440Hz sine.
+fn measure_volume_peak(pedal: &PedalDef, vol_name: &str, vol_pos: f64,
+                       other_controls: &[(&str, f64)]) -> f64 {
+    let mut proc = compile_pedal(pedal, 48000.0).unwrap();
+    proc.set_control(vol_name, vol_pos);
+    for &(name, val) in other_controls { proc.set_control(name, val); }
+    for _ in 0..9600 { proc.process(0.0); }
+    let input: Vec<f64> = (0..48000)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let out: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    out[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()))
+}
+
+/// Assert that Volume=0 produces silence and that the volume sweep is monotonic.
+fn assert_volume_sweep(pedal: &PedalDef, vol_name: &str,
+                       other_controls: &[(&str, f64)], label: &str) {
+    // Volume=0 must be silent
+    let peak_zero = measure_volume_peak(pedal, vol_name, 0.0, other_controls);
+    eprintln!("[{label}] {vol_name}=0 peak={peak_zero:.6}");
+    assert!(peak_zero < 0.01,
+        "[{label}] {vol_name}=0 should silence output, got peak={peak_zero:.6}");
+
+    // Monotonic sweep
+    let positions = [0.0, 0.25, 0.5, 0.75, 1.0];
+    let peaks: Vec<f64> = positions.iter()
+        .map(|&pos| measure_volume_peak(pedal, vol_name, pos, other_controls))
+        .collect();
+
+    eprintln!("[{label}] {vol_name} sweep: {:?}", positions.iter().zip(&peaks)
+        .map(|(p, v)| format!("{p:.2}={v:.4}")).collect::<Vec<_>>());
+
+    for i in 1..peaks.len() {
+        assert!(peaks[i] >= peaks[i-1] - 0.001,
+            "[{label}] {vol_name} must be monotonic: pos={} peak={:.4} < pos={} peak={:.4}",
+            positions[i], peaks[i], positions[i-1], peaks[i-1]);
+    }
+
+    // Full volume should be substantially louder than zero
+    assert!(peaks[4] > 0.01,
+        "[{label}] {vol_name}=1.0 should produce audible output, got peak={:.6}", peaks[4]);
+}
+
+// ─── Volume sweep tests per pedal ────────────────────────────────────
+
+#[test]
+fn screamer_volume_sweep() {
+    let pedal = parse("tube_screamer.pedal");
+    assert_volume_sweep(&pedal, "Level", &[("Drive", 0.5), ("Tone", 0.5)], "Screamer");
+}
+
+#[test]
+fn blues_driver_volume_sweep() {
+    let pedal = parse("blues_driver.pedal");
+    assert_volume_sweep(&pedal, "Level", &[("Gain", 0.5), ("Tone", 0.5)], "BluesDriver");
+}
+
+#[test]
+fn fuzz_face_volume_sweep() {
+    let pedal = parse("fuzz_face.pedal");
+    assert_volume_sweep(&pedal, "Volume", &[("Fuzz", 0.5)], "FuzzFace");
+}
+
+#[test]
+fn big_muff_volume_sweep() {
+    let pedal = parse("big_muff.pedal");
+    assert_volume_sweep(&pedal, "Volume", &[("Sustain", 0.5), ("Tone", 0.5)], "BigMuff");
+}
+
+#[test]
+fn klon_output_sweep() {
+    let pedal = parse("klon_centaur.pedal");
+    assert_volume_sweep(&pedal, "Output", &[("Gain", 0.5), ("Treble", 0.5)], "Klon");
+}
+
+#[test]
+fn proco_rat_volume_sweep() {
+    let pedal = parse("proco_rat.pedal");
+    assert_volume_sweep(&pedal, "Volume", &[("Distortion", 0.5), ("Filter", 0.5)], "ProcoRat");
+}
+
+#[test]
+fn fulltone_ocd_volume_sweep() {
+    let pedal = parse("fulltone_ocd.pedal");
+    assert_volume_sweep(&pedal, "Volume", &[("Drive", 0.5), ("Tone", 0.5)], "OCD");
+}
+
+#[test]
+fn goldenrod_output_sweep() {
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/goldenrod.pedal");
+    if !pro_path.exists() { eprintln!("goldenrod.pedal not found, skipping"); return; }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    assert_volume_sweep(&pedal, "Output", &[("Gain", 0.5), ("Treble", 0.5)], "Goldenrod");
 }
