@@ -1589,7 +1589,7 @@ pub fn compile_pedal_with_options(
     // Build op-amp feedback stages (inverting, non-inverting).
     // Diode-paired opamps are returned separately for pairing with DiodePair stages.
     let mut stages: Vec<WdfStage> = Vec::new();
-    let (opamp_feedback_stages, diode_paired_opamps) = super::opamp_analysis::build_opamp_feedback_stages(
+    let (mut opamp_feedback_stages, diode_paired_opamps) = super::opamp_analysis::build_opamp_feedback_stages(
         &opamp_analysis,
         pedal,
         &graph,
@@ -1599,6 +1599,13 @@ pub fn compile_pedal_with_options(
         &skip_feedback_tree_opamps,
         &nl_junction_nodes,
     );
+    // Apply oversampling rate to opamp feedback stages.
+    // The OpAmpRoot GBW filter and slew rate limiter are initialized at base_rate
+    // but run inside the oversampler at effective_rate. Without this correction,
+    // both are N× too gentle (e.g. 4× at X4 oversampling).
+    for stage in &mut opamp_feedback_stages {
+        stage.apply_oversampling_rate(sample_rate);
+    }
     stages.extend(opamp_feedback_stages);
 
     // Set output_node_id and injection_node_id on opamp feedback stages.
@@ -2329,9 +2336,14 @@ pub fn compile_pedal_with_options(
             .collect();
 
         // For each stage, BFS passive-reachable nodes from its output.
+        // Exclude the stage's OWN injection from barriers so the BFS can
+        // traverse through the opamp's feedback path to downstream stages.
+        // Example: Bluesbreaker IC1a.out → IC1a.neg → Gain → R4 → IC1b.neg
+        // requires traversing through IC1a.neg (wdf[0]'s own injection).
         let reachable: Vec<HashSet<NodeId>> = order
             .iter()
-            .map(|(sr, _)| {
+            .enumerate()
+            .map(|(idx, (sr, _))| {
                 let out_id = match sr {
                     StageRef::Wdf(i) => stages[*i].output_node_id,
                     StageRef::MultiNl(i) => multi_nl_stages[*i].output_node_id,
@@ -2339,7 +2351,16 @@ pub fn compile_pedal_with_options(
                 if out_id == usize::MAX {
                     HashSet::new()
                 } else {
-                    bfs_passive_reachable_nodes(&graph, out_id, &hub_nodes, &injection_barrier)
+                    // Remove own injection from barriers so BFS can traverse
+                    // the stage's own feedback network to find downstream stages.
+                    let own_inj = injection_nodes[idx];
+                    if own_inj != usize::MAX && injection_barrier.contains(&own_inj) {
+                        let mut local_barrier = injection_barrier.clone();
+                        local_barrier.remove(&own_inj);
+                        bfs_passive_reachable_nodes(&graph, out_id, &hub_nodes, &local_barrier)
+                    } else {
+                        bfs_passive_reachable_nodes(&graph, out_id, &hub_nodes, &injection_barrier)
+                    }
                 }
             })
             .collect();

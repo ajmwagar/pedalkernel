@@ -964,25 +964,25 @@ fn classify_opamp(
     // ── Inverting amplifier ──────────────────────────────────────────────
     // pos grounded (directly or via resistive path to gnd/AC-gnd).
     //
-    // IMPORTANT: If neg also has a ground leg (R→C→gnd or R→gnd), this
-    // is a non-inverting topology with DC bias at pos (e.g. RAT: pos has
-    // R3→R1→gnd bias path, but neg has R4→C5→gnd ground leg).
-    // Only classify as Inverting when neg does NOT have a ground leg.
-    let pos_grounded = ctx.is_ac_grounded(pos_node)
-        || ctx.find_resistive_path(pos_node, ctx.resolved.gnd_node).is_some()
-        || ctx
-            .resolved
-            .ac_ground_nodes
-            .iter()
-            .any(|&ag| ctx.find_resistive_path(pos_node, ag).is_some());
-    // Check if neg has an INDEPENDENT ground leg (one that doesn't share
-    // components with the feedback path out→neg).  This distinguishes
-    // non-inverting (RAT: neg→R4→C5→gnd) from inverting (Tube Screamer:
-    // neg→gnd path only exists through feedback/signal components).
-    // Check for ground leg that doesn't pass through out_node.
-    // This uses a custom BFS that excludes out_node from traversal,
-    // so only direct neg→gnd paths (like RAT's R4→C5→gnd) are found.
-    let neg_has_independent_ground_leg = {
+    // Two cases:
+    // (a) pos IS DIRECTLY at AC ground (is_ac_grounded) — definitively inverting.
+    //     No need to check neg ground leg; pos can't carry signal.
+    //     Example: Bluesbreaker IC1b (pos→Vref via C_bias bypass).
+    // (b) pos reaches ground only via resistive path — ambiguous.
+    //     Could be inverting (difference amp) or non-inverting with DC bias.
+    //     Only classify as Inverting when neg does NOT have an independent
+    //     ground leg (e.g. RAT: neg→R4→C5→gnd = ground leg = non-inverting).
+    let pos_directly_ac_ground = ctx.is_ac_grounded(pos_node);
+    let pos_grounded_via_resistor = !pos_directly_ac_ground
+        && (ctx.find_resistive_path(pos_node, ctx.resolved.gnd_node).is_some()
+            || ctx
+                .resolved
+                .ac_ground_nodes
+                .iter()
+                .any(|&ag| ctx.find_resistive_path(pos_node, ag).is_some()));
+    let neg_has_independent_ground_leg = if pos_directly_ac_ground {
+        false // skip check — pos at AC ground is definitively inverting
+    } else {
         let check = |target: usize| -> bool {
             has_short_path_excluding(neg_node, target, &ctx.resolved.ground_leg_adj, out_node, 4)
         };
@@ -993,7 +993,7 @@ fn classify_opamp(
                 .iter()
                 .any(|&ag| check(ag))
     };
-    if pos_grounded && !neg_has_independent_ground_leg {
+    if (pos_directly_ac_ground || pos_grounded_via_resistor) && !neg_has_independent_ground_leg {
         if let Some((ri, ri_pot_info)) = ctx.find_input_resistor_with_pot(neg_node, out_node) {
             let feedback_diode = ctx.find_feedback_diode(neg_node, out_node);
 

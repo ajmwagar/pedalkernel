@@ -2038,6 +2038,10 @@ impl CircuitGraph {
                 // Look for feedback resistor path (Rf: neg to out)
                 // Use resistive path finding to handle series/parallel combinations
                 // Returns (rf_value, component_ids, pot_info)
+                #[cfg(test)]
+                eprintln!("[OPAMP_RF_CHECK] comp={} neg={} out={} pos={} rf_path={:?}",
+                    comp.id, neg_node, out_node, pos_node,
+                    find_resistive_path(neg_node, out_node).map(|(r,_,_)| r));
                 if let Some((rf, _rf_comps, rf_pot)) = find_resistive_path(neg_node, out_node) {
                     // BFS through ALL passive edges (R, C, L, pot) from neg to out
                     // to collect the complete feedback network for edge exclusion.
@@ -2048,25 +2052,31 @@ impl CircuitGraph {
                     // Also accept pos grounded through resistors (e.g. difference amp
                     // with R3/R4 divider from pos to gnd — pos is AC-grounded via R network).
                     //
-                    // IMPORTANT: If neg also has a ground leg (R→C→gnd or R→gnd), this
-                    // is a non-inverting topology with DC bias at pos (e.g. RAT: pos has
-                    // R3→R1→gnd bias path, but neg has R4→C5→gnd ground leg).
-                    // Only classify as Inverting when neg does NOT have a ground leg.
-                    let pos_grounded = is_ac_ground(pos_node)
-                        || find_resistive_path(pos_node, gnd_node_resolved).is_some()
-                        || ac_ground_nodes.iter().any(|&ag| find_resistive_path(pos_node, ag).is_some());
-                    // Check if neg has an INDEPENDENT ground leg: a path from neg
-                    // to ground that does NOT pass through out_node.  This distinguishes
-                    // non-inverting (RAT: neg→R4→C5→gnd) from inverting (Tube Screamer:
-                    // neg→gnd path only exists via feedback→out→load→gnd).
-                    let neg_has_independent_ground_leg = {
+                    // Two cases:
+                    // (a) pos IS DIRECTLY at AC ground (is_ac_ground) — definitively inverting.
+                    //     No need to check neg ground leg; pos can't carry signal.
+                    //     Example: Bluesbreaker IC1b (pos→Vref via C_bias bypass).
+                    // (b) pos reaches ground only via resistive path — ambiguous.
+                    //     Could be inverting (difference amp) or non-inverting with DC bias.
+                    //     Only classify as Inverting when neg does NOT have an independent
+                    //     ground leg (e.g. RAT: neg→R4→C5→gnd = ground leg = non-inverting).
+                    let pos_directly_ac_ground = is_ac_ground(pos_node);
+                    #[cfg(test)]
+                    eprintln!("[OPAMP_INV_CHECK] comp={} pos_node={} pos_directly_ac_ground={} ac_ground_nodes={:?} gnd={}",
+                        comp.id, pos_node, pos_directly_ac_ground, ac_ground_nodes, gnd_node_resolved);
+                    let pos_grounded_via_resistor = !pos_directly_ac_ground
+                        && (find_resistive_path(pos_node, gnd_node_resolved).is_some()
+                            || ac_ground_nodes.iter().any(|&ag| find_resistive_path(pos_node, ag).is_some()));
+                    let neg_has_independent_ground_leg = if pos_directly_ac_ground {
+                        false // skip check — pos at AC ground is definitively inverting
+                    } else {
                         let check = |target: usize| -> bool {
                             has_short_path_excluding(neg_node, target, &ground_leg_adj, out_node, 4)
                         };
                         check(gnd_node_resolved)
                             || ac_ground_nodes.iter().any(|&ag| check(ag))
                     };
-                    if pos_grounded && !neg_has_independent_ground_leg {
+                    if (pos_directly_ac_ground || pos_grounded_via_resistor) && !neg_has_independent_ground_leg {
                         // Inverting: look for Ri connected to neg (from any input source)
                         // For cascaded op-amps, Ri may connect to a previous stage's output
                         if let Some(ri) = find_input_resistor(neg_node, out_node, gnd_node_resolved)
