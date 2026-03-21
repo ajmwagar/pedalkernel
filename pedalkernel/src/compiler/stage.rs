@@ -992,7 +992,21 @@ impl WdfStage {
                 // Children and scattering matrix were derived at the effective
                 // (oversampled) rate during construction. No update needed.
             }
+            RootKind::OpAmp(op) => {
+                // OpAmpRoot GBW filter and slew rate limiter depend on sample rate.
+                // Without this, both are 4x too gentle at X4 oversampling.
+                op.set_sample_rate(effective_rate);
+            }
             _ => {}
+        }
+
+        // Update OpAmpRoots used as feedback/paired opamps in diode stages.
+        // These also have GBW and slew rate filters that need the oversampled rate.
+        if let Some(ref mut opamp) = self.feedback_opamp {
+            opamp.set_sample_rate(effective_rate);
+        }
+        if let Some(ref mut opamp) = self.paired_opamp {
+            opamp.set_sample_rate(effective_rate);
         }
     }
 
@@ -1373,6 +1387,22 @@ impl WdfStage {
     pub fn opamp_gain(&self) -> Option<f64> {
         match &self.root {
             RootKind::OpAmp(op) => Some(op.gain()),
+            _ => None,
+        }
+    }
+
+    /// Get OpAmpRoot sample rate (for verifying oversampling propagation).
+    pub fn opamp_sample_rate(&self) -> Option<f64> {
+        match &self.root {
+            RootKind::OpAmp(op) => Some(op.sample_rate()),
+            _ => None,
+        }
+    }
+
+    /// Get OpAmpRoot GBW coefficient (for verifying oversampling propagation).
+    pub fn opamp_gbw_coeff(&self) -> Option<f64> {
+        match &self.root {
+            RootKind::OpAmp(op) => Some(op.gbw_coeff()),
             _ => None,
         }
     }
@@ -2666,10 +2696,15 @@ impl MultiNlStage {
     /// Since the scattering matrix is now built at the effective (oversampled)
     /// rate, passive children are already at the correct rate. This is a no-op
     /// for MultiNlStage — the builder handles oversampled rate directly.
-    pub fn apply_oversampling_rate(&mut self, _base_rate: f64) {
-        // No-op: build_rtype_stage() now uses effective_rate = sample_rate * oversampling
-        // for all DynNode creation and scattering derivation, so children are already
-        // at the correct rate and the scattering matrix is consistent.
+    pub fn apply_oversampling_rate(&mut self, base_rate: f64) {
+        // DynNode trees are already at the correct rate (built with effective_rate).
+        // But feedback_opamp GBW/slew filters need the oversampled rate.
+        if let Some(ref mut opamp) = self.feedback_opamp {
+            let effective_rate = base_rate * self.oversampler.ratio() as f64;
+            if effective_rate > base_rate {
+                opamp.set_sample_rate(effective_rate);
+            }
+        }
     }
 
     /// Update the supply voltage for power supply sag.
