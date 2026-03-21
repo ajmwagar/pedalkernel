@@ -5088,3 +5088,403 @@ fn goldenrod_treble_pot_sweeps_hf_gain() {
         "Treble pot should move 10kHz gain by ≥1.5dB, got {db:.2}dB"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Pot behavior diagnostics
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Helper: compile a pedal, test that a pot changes output level.
+fn pot_affects_output(pedal: &PedalDef, pot_name: &str, val_lo: f64, val_hi: f64, other_pots: &[(&str, f64)]) -> (f64, f64, bool) {
+    let input: Vec<f64> = (0..48000)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+
+    let mut lo = compile_pedal(pedal, 48000.0).unwrap();
+    lo.set_control(pot_name, val_lo);
+    for (name, val) in other_pots { lo.set_control(name, *val); }
+    for _ in 0..4800 { lo.process(0.0); }
+    let out_lo: Vec<f64> = input.iter().map(|&s| lo.process(s)).collect();
+    let peak_lo = out_lo[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    let has_nan_lo = out_lo.iter().any(|x| x.is_nan() || x.is_infinite());
+
+    let mut hi = compile_pedal(pedal, 48000.0).unwrap();
+    hi.set_control(pot_name, val_hi);
+    for (name, val) in other_pots { hi.set_control(name, *val); }
+    for _ in 0..4800 { hi.process(0.0); }
+    let out_hi: Vec<f64> = input.iter().map(|&s| hi.process(s)).collect();
+    let peak_hi = out_hi[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    let has_nan_hi = out_hi.iter().any(|x| x.is_nan() || x.is_infinite());
+
+    (peak_lo, peak_hi, has_nan_lo || has_nan_hi)
+}
+
+#[test]
+fn diag_ratking_pots() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("ratking_non_invert.pedal")
+    ).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("\n[RATKING] Controls:");
+    for c in &proc.controls {
+        eprintln!("  {} -> {:?} (comp={}, taper={:?}, range={:?})", c.label, c.target, c.component_id, c.taper, c.range);
+    }
+    eprintln!("[RATKING] WDF stages: {}, MultiNL stages: {}", proc.stages.len(), proc.multi_nl_stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let mut pot_ids = Vec::new();
+        super::helpers::collect_pot_ids(&s.tree, &mut pot_ids);
+        eprintln!("  wdf[{i}]: pots={:?} feedback_opamp={}", pot_ids, s.feedback_opamp.is_some());
+    }
+    for (i, s) in proc.multi_nl_stages.iter().enumerate() {
+        eprintln!("  mnl[{i}]: pot_children={}", s.pot_children.len());
+        for (pi, pc) in s.pot_children.iter().enumerate() {
+            let mut pot_ids = Vec::new();
+            super::helpers::collect_pot_ids(pc, &mut pot_ids);
+            eprintln!("    pot_child[{pi}]: pots={:?}", pot_ids);
+        }
+    }
+
+    eprintln!("[RATKING] stage_order: {:?}", proc.stage_order);
+    for (i, s) in proc.stages.iter().enumerate() {
+        let mut pot_ids = Vec::new();
+        super::helpers::collect_pot_ids(&s.tree, &mut pot_ids);
+        let root_tag = match &s.root {
+            super::stage::RootKind::DiodePair(_) => "DiodePair",
+            super::stage::RootKind::OpAmp(_) => "OpAmp",
+            super::stage::RootKind::PassiveRType { .. } => "PassiveRType",
+            super::stage::RootKind::Passthrough => "Passthrough",
+            super::stage::RootKind::ShortCircuit => "ShortCircuit",
+            _ => "Other",
+        };
+        eprintln!("  wdf[{i}]: root={root_tag} inj={} out={} sfd={} pots={:?} fb_op={} ff={} probe={:?} sf={} fb_pot={:?}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            pot_ids, s.feedback_opamp.is_some(), s.is_feedforward, s.output_probe, s.is_source_follower, s.feedback_pot_id);
+        eprintln!("    tree: {}", s.tree.debug_dump(0));
+    }
+
+    let others = [("Distortion", 0.5), ("Filter", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(&pedal, "Volume", 0.1, 0.9, &others);
+    eprintln!("[RATKING] Volume: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "RATKING Volume should not produce NaN");
+    assert!((hi - lo).abs() > lo.max(hi) * 0.05,
+        "RATKING Volume pot should affect output: lo={lo:.6} hi={hi:.6}");
+
+    let others = [("Volume", 0.7), ("Filter", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(&pedal, "Distortion", 0.1, 0.9, &others);
+    eprintln!("[RATKING] Distortion: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "RATKING Distortion should not produce NaN");
+
+    let others = [("Volume", 0.7), ("Distortion", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(&pedal, "Filter", 0.1, 0.9, &others);
+    eprintln!("[RATKING] Filter: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "RATKING Filter should not produce NaN");
+
+    // Detailed Distortion pot diagnostic: check RMS and gain
+    {
+        let input: Vec<f64> = (0..48000)
+            .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+            .collect();
+
+        let mut lo = compile_pedal(&pedal, 48000.0).unwrap();
+        lo.set_control("Distortion", 0.1);
+        lo.set_control("Volume", 0.7);
+        lo.set_control("Filter", 0.5);
+        for _ in 0..9600 { lo.process(0.0); }
+        // Check opamp gain
+        let gain_lo = lo.stages[0].opamp_gain();
+        let pot_r_lo = lo.stages[0].tree.get_pot_resistance("Distortion");
+        let out_lo: Vec<f64> = input.iter().map(|&s| lo.process(s)).collect();
+        let rms_lo = (out_lo[4800..].iter().map(|x| x*x).sum::<f64>() / (out_lo.len() - 4800) as f64).sqrt();
+
+        let mut hi = compile_pedal(&pedal, 48000.0).unwrap();
+        hi.set_control("Distortion", 0.9);
+        hi.set_control("Volume", 0.7);
+        hi.set_control("Filter", 0.5);
+        for _ in 0..9600 { hi.process(0.0); }
+        let gain_hi = hi.stages[0].opamp_gain();
+        let pot_r_hi = hi.stages[0].tree.get_pot_resistance("Distortion");
+        let out_hi: Vec<f64> = input.iter().map(|&s| hi.process(s)).collect();
+        let rms_hi = (out_hi[4800..].iter().map(|x| x*x).sum::<f64>() / (out_hi.len() - 4800) as f64).sqrt();
+
+        eprintln!("[RATKING] Distortion detail:");
+        eprintln!("  pos=0.1: pot_r={pot_r_lo:?} gain={gain_lo:?} rms={rms_lo:.6}");
+        eprintln!("  pos=0.9: pot_r={pot_r_hi:?} gain={gain_hi:?} rms={rms_hi:.6}");
+    }
+
+    // Detailed Filter pot diagnostic
+    {
+        let input: Vec<f64> = (0..48000)
+            .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+            .collect();
+
+        let mut lo = compile_pedal(&pedal, 48000.0).unwrap();
+        lo.set_control("Filter", 0.1);
+        lo.set_control("Volume", 0.7);
+        lo.set_control("Distortion", 0.5);
+        for _ in 0..9600 { lo.process(0.0); }
+        let pot_r_lo = lo.stages[1].tree.get_pot_resistance("Filter");
+        let rp_lo = lo.stages[1].tree.port_resistance();
+        let out_lo: Vec<f64> = input.iter().map(|&s| lo.process(s)).collect();
+        let rms_lo = (out_lo[4800..].iter().map(|x| x*x).sum::<f64>() / (out_lo.len() - 4800) as f64).sqrt();
+        let peak_lo = out_lo[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+
+        let mut hi = compile_pedal(&pedal, 48000.0).unwrap();
+        hi.set_control("Filter", 0.9);
+        hi.set_control("Volume", 0.7);
+        hi.set_control("Distortion", 0.5);
+        for _ in 0..9600 { hi.process(0.0); }
+        let pot_r_hi = hi.stages[1].tree.get_pot_resistance("Filter");
+        let rp_hi = hi.stages[1].tree.port_resistance();
+        let out_hi: Vec<f64> = input.iter().map(|&s| hi.process(s)).collect();
+        let rms_hi = (out_hi[4800..].iter().map(|x| x*x).sum::<f64>() / (out_hi.len() - 4800) as f64).sqrt();
+        let peak_hi = out_hi[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+
+        eprintln!("[RATKING] Filter detail:");
+        eprintln!("  pos=0.1: pot_r={pot_r_lo:?} rp={rp_lo:.1} rms={rms_lo:.6} peak={peak_lo:.6}");
+        eprintln!("  pos=0.9: pot_r={pot_r_hi:?} rp={rp_hi:.1} rms={rms_hi:.6} peak={peak_hi:.6}");
+    }
+}
+
+#[test]
+fn diag_ratking_volume_trace() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("ratking_non_invert.pedal")
+    ).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // Set Volume to low and process
+    proc.set_control("Volume", 0.1);
+    for _ in 0..9600 { proc.process(0.0); } // settle smoother
+
+    // Check the actual pot resistances in the source follower stage
+    let sf_stage = proc.stages.iter().find(|s| s.is_source_follower).unwrap();
+    let aw_r = sf_stage.tree.get_pot_resistance("Volume__aw");
+    let wb_r = sf_stage.tree.get_pot_resistance("Volume__wb");
+    let aw_pos = sf_stage.tree.get_pot_position("Volume__aw");
+    let wb_pos = sf_stage.tree.get_pot_position("Volume__wb");
+    eprintln!("[TRACE] Volume=0.1: aw_r={aw_r:?} wb_r={wb_r:?} aw_pos={aw_pos:?} wb_pos={wb_pos:?}");
+    eprintln!("[TRACE] tree dump: {}", sf_stage.tree.debug_dump(0));
+
+    // Process some signal and trace first few samples
+    let mut peak_lo = 0.0f64;
+    for i in 0..48000 {
+        let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+        let out = proc.process(s);
+        if i >= 4825 && i <= 4830 {
+            let sf_stage = proc.stages.iter().find(|s| s.is_source_follower).unwrap();
+            let wb_v = sf_stage.tree.leaf_voltage("Volume__wb");
+            eprintln!("[LO i={i}] in={s:.6} out={out:.6} wb_v={wb_v:?}");
+        }
+        if i >= 4800 { peak_lo = peak_lo.max(out.abs()); }
+    }
+
+    // Reset and try with Volume high
+    let mut proc2 = compile_pedal(&pedal, 48000.0).unwrap();
+    proc2.set_control("Volume", 0.9);
+    for _ in 0..9600 { proc2.process(0.0); }
+
+    let sf_stage2 = proc2.stages.iter().find(|s| s.is_source_follower).unwrap();
+    let aw_r2 = sf_stage2.tree.get_pot_resistance("Volume__aw");
+    let wb_r2 = sf_stage2.tree.get_pot_resistance("Volume__wb");
+    let aw_pos2 = sf_stage2.tree.get_pot_position("Volume__aw");
+    let wb_pos2 = sf_stage2.tree.get_pot_position("Volume__wb");
+    eprintln!("[TRACE] Volume=0.9: aw_r={aw_r2:?} wb_r={wb_r2:?} aw_pos={aw_pos2:?} wb_pos={wb_pos2:?}");
+    eprintln!("[TRACE] tree dump: {}", sf_stage2.tree.debug_dump(0));
+
+    let mut peak_hi = 0.0f64;
+    for i in 0..48000 {
+        let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+        let out = proc2.process(s);
+        if i >= 4825 && i <= 4830 {
+            let sf_stage = proc2.stages.iter().find(|s| s.is_source_follower).unwrap();
+            let wb_v = sf_stage.tree.leaf_voltage("Volume__wb");
+            eprintln!("[HI i={i}] in={s:.6} out={out:.6} wb_v={wb_v:?}");
+        }
+        if i >= 4800 { peak_hi = peak_hi.max(out.abs()); }
+    }
+
+    eprintln!("[TRACE] peak_lo={peak_lo:.6} peak_hi={peak_hi:.6}");
+    assert!((peak_hi - peak_lo).abs() > peak_lo.max(peak_hi) * 0.05,
+        "Volume pot resistances should affect output: lo={peak_lo:.6} hi={peak_hi:.6}");
+}
+
+#[test]
+fn diag_ratking_no_feedforward_feedback() {
+    // Regression test: the RAT's opamp feedback components (Distortion pot,
+    // C3, C4, R4+C5, R5+C6) must be claimed by the opamp analysis and NOT
+    // appear as a separate feedforward stage. When they become feedforward,
+    // they pass the opamp signal directly through, drowning out the Volume pot.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("ratking_non_invert.pedal")
+    ).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    // No feedforward stages should exist for the RAT
+    let ff_count = proc.stages.iter().filter(|s| s.is_feedforward).count();
+    assert_eq!(ff_count, 0, "RAT should not have feedforward stages (feedback network must be claimed)");
+
+    // Source follower stage should exist with output probe
+    let sf = proc.stages.iter().find(|s| s.is_source_follower);
+    assert!(sf.is_some(), "RAT should have a source follower stage");
+    assert!(sf.unwrap().output_probe.is_some(), "Source follower should have output probe");
+}
+
+#[test]
+fn diag_blues_driver_pots() {
+    let pedal = parse("blues_driver.pedal");
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("\n[Blues] Controls:");
+    for c in &proc.controls {
+        eprintln!("  {} -> {:?} (comp={}, taper={:?}, range={:?})", c.label, c.target, c.component_id, c.taper, c.range);
+    }
+    eprintln!("[Blues] WDF stages: {}, MultiNL stages: {}", proc.stages.len(), proc.multi_nl_stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let mut pot_ids = Vec::new();
+        super::helpers::collect_pot_ids(&s.tree, &mut pot_ids);
+        eprintln!("  wdf[{i}]: pots={:?} feedback_opamp={}", pot_ids, s.feedback_opamp.is_some());
+    }
+    for (i, s) in proc.multi_nl_stages.iter().enumerate() {
+        eprintln!("  mnl[{i}]: pot_children={}", s.pot_children.len());
+        for (pi, pc) in s.pot_children.iter().enumerate() {
+            let mut pot_ids = Vec::new();
+            super::helpers::collect_pot_ids(pc, &mut pot_ids);
+            eprintln!("    pot_child[{pi}]: pots={:?}", pot_ids);
+        }
+    }
+
+    let others = [("Tone", 0.5), ("Level", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(&pedal, "Gain", 0.1, 0.9, &others);
+    eprintln!("[Blues] Gain: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "Blues Gain should not produce NaN");
+    assert!((hi - lo).abs() > 0.001,
+        "Blues Gain pot should affect output: lo={lo:.6} hi={hi:.6}");
+
+    let others = [("Gain", 0.5), ("Level", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(&pedal, "Tone", 0.1, 0.9, &others);
+    eprintln!("[Blues] Tone: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "Blues Tone should not produce NaN");
+
+    let others = [("Gain", 0.5), ("Tone", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(&pedal, "Level", 0.1, 0.9, &others);
+    eprintln!("[Blues] Level: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "Blues Level should not produce NaN");
+    assert!((hi - lo).abs() > lo.max(hi) * 0.05,
+        "Blues Level pot should affect output: lo={lo:.6} hi={hi:.6}");
+}
+
+#[test]
+fn diag_bluesbreaker_pots() {
+    let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap()
+        .parent().unwrap()
+        .join("pedalkernel-pro/pedals/legends/blues.pedal");
+    if !pro_path.exists() {
+        // Also check the pedalkernel repo
+        let alt_path = std::path::Path::new("/Users/ajmwagar/src/pedalkernel/pedalkernel-pro/pedals/legends/blues.pedal");
+        if !alt_path.exists() { eprintln!("Bluesbreaker pedal not found, skipping"); return; }
+        let src = std::fs::read_to_string(alt_path).unwrap();
+        let pedal = parse_pedal_file(&src).unwrap();
+        return diag_bluesbreaker_inner(&pedal);
+    }
+    let src = std::fs::read_to_string(&pro_path).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    diag_bluesbreaker_inner(&pedal);
+}
+
+fn diag_bluesbreaker_inner(pedal: &PedalDef) {
+    let proc = compile_pedal(pedal, 48000.0).unwrap();
+
+    eprintln!("\n[Bluesbreaker] Controls:");
+    for c in &proc.controls {
+        eprintln!("  {} -> {:?} (comp={}, taper={:?}, range={:?})", c.label, c.target, c.component_id, c.taper, c.range);
+    }
+    eprintln!("[Bluesbreaker] WDF stages: {}, MultiNL stages: {}", proc.stages.len(), proc.multi_nl_stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let mut pot_ids = Vec::new();
+        super::helpers::collect_pot_ids(&s.tree, &mut pot_ids);
+        let root_tag = match &s.root {
+            super::stage::RootKind::DiodePair(_) => "DiodePair",
+            super::stage::RootKind::OpAmp(_) => "OpAmp",
+            super::stage::RootKind::PassiveRType { .. } => "PassiveRType",
+            _ => "Other",
+        };
+        eprintln!("  wdf[{i}]: root={root_tag} inj={} out={} sfd={} pots={:?} fb_op={} probe={:?} fb_pot={:?}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            pot_ids, s.feedback_opamp.is_some(), s.output_probe, s.feedback_pot_id);
+    }
+    for (i, s) in proc.multi_nl_stages.iter().enumerate() {
+        eprintln!("  mnl[{i}]: pot_children={}", s.pot_children.len());
+        for (pi, pc) in s.pot_children.iter().enumerate() {
+            let mut pot_ids = Vec::new();
+            super::helpers::collect_pot_ids(pc, &mut pot_ids);
+            eprintln!("    pot_child[{pi}]: pots={:?}", pot_ids);
+        }
+    }
+    eprintln!("[Bluesbreaker] stage_order: {:?}", proc.stage_order);
+
+    let others = [("Tone", 0.5), ("Volume", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(pedal, "Drive", 0.1, 0.9, &others);
+    eprintln!("[Bluesbreaker] Drive: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "Bluesbreaker Drive should not produce NaN");
+    assert!((hi - lo).abs() > 0.001,
+        "Bluesbreaker Drive pot should affect output: lo={lo:.6} hi={hi:.6}");
+
+    let others = [("Drive", 0.5), ("Volume", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(pedal, "Tone", 0.1, 0.9, &others);
+    eprintln!("[Bluesbreaker] Tone: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "Bluesbreaker Tone should not produce NaN");
+
+    let others = [("Drive", 0.5), ("Tone", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(pedal, "Volume", 0.1, 0.9, &others);
+    eprintln!("[Bluesbreaker] Volume: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "Bluesbreaker Volume should not produce NaN");
+    assert!((hi - lo).abs() > lo.max(hi) * 0.05,
+        "Bluesbreaker Volume pot should affect output: lo={lo:.6} hi={hi:.6}");
+}
+
+#[test]
+fn diag_screamer_pots() {
+    let pedal = parse("tube_screamer.pedal");
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("\n[Screamer] Controls:");
+    for c in &proc.controls {
+        eprintln!("  {} -> {:?} (comp={}, taper={:?}, range={:?})", c.label, c.target, c.component_id, c.taper, c.range);
+    }
+    eprintln!("[Screamer] WDF stages: {}, MultiNL stages: {}", proc.stages.len(), proc.multi_nl_stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let mut pot_ids = Vec::new();
+        super::helpers::collect_pot_ids(&s.tree, &mut pot_ids);
+        eprintln!("  wdf[{i}]: pots={:?} feedback_opamp={}", pot_ids, s.feedback_opamp.is_some());
+    }
+
+    let others = [("Tone", 0.5), ("Level", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(&pedal, "Drive", 0.1, 0.9, &others);
+    eprintln!("[Screamer] Drive: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "Screamer Drive should not produce NaN");
+    assert!((hi - lo).abs() > 0.001,
+        "Screamer Drive pot should affect output: lo={lo:.6} hi={hi:.6}");
+
+    // Test tone at extreme values including 0
+    let others = [("Drive", 0.5), ("Level", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(&pedal, "Tone", 0.0, 1.0, &others);
+    eprintln!("[Screamer] Tone: lo(0.0)={lo:.6} hi(1.0)={hi:.6} nan={nan}");
+    assert!(!nan, "Screamer Tone at 0.0 should not produce NaN/Inf");
+
+    let others = [("Drive", 0.5), ("Tone", 0.5)];
+    let (lo, hi, nan) = pot_affects_output(&pedal, "Level", 0.1, 0.9, &others);
+    eprintln!("[Screamer] Level: lo={lo:.6} hi={hi:.6} nan={nan}");
+    assert!(!nan, "Screamer Level should not produce NaN");
+    assert!((hi - lo).abs() > lo.max(hi) * 0.05,
+        "Screamer Level pot should affect output: lo={lo:.6} hi={hi:.6}");
+}

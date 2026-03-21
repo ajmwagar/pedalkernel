@@ -230,18 +230,21 @@ pub(super) fn build_opamp_feedback_stages(
                     feedback_pot_id = Some(pot_id.clone());
                 }
 
-                // If there's a pot in the Ri input path, configure the root
-                // to self-manage gain from pot resistance.
-                if let Some((pot_id, max_pot_r, fixed_series_r)) = ri_pot {
-                    root.set_feedback_config(FeedbackConfig {
-                        pot_comp_id: pot_id.clone(),
-                        other_leg_r: *rf,
-                        fixed_series_r: *fixed_series_r,
-                        parallel_r: None,
-                        pot_is_feedback: false,
-                        is_inverting: true,
-                    });
-                    feedback_pot_id = Some(pot_id.clone());
+                // Ri pot in input path — only use if rf_pot was NOT found.
+                // Same guard as NonInverting: circuitous ground paths can find
+                // downstream pots that aren't part of the gain equation.
+                if rf_pot.is_none() {
+                    if let Some((pot_id, max_pot_r, fixed_series_r)) = ri_pot {
+                        root.set_feedback_config(FeedbackConfig {
+                            pot_comp_id: pot_id.clone(),
+                            other_leg_r: *rf,
+                            fixed_series_r: *fixed_series_r,
+                            parallel_r: None,
+                            pot_is_feedback: false,
+                            is_inverting: true,
+                        });
+                        feedback_pot_id = Some(pot_id.clone());
+                    }
                 }
 
                 let default_supply = 9.0_f64;
@@ -407,6 +410,10 @@ pub(super) fn build_opamp_feedback_stages(
             OpAmpFeedbackKind::NonInverting { rf, ri, feedback_diode, rf_pot, ri_pot } => {
                 let mut feedback_pot_id = None;
 
+                #[cfg(test)]
+                eprintln!("[OPAMP_ANALYSIS] NonInverting comp={} rf={rf:.1} ri={ri:.1} rf_pot={rf_pot:?} ri_pot={ri_pot:?}",
+                    info.comp_id);
+
                 let model = OpAmpModel::from_opamp_type(&info.opamp_type);
                 let gain = 1.0 + (rf / ri);
                 let mut root = OpAmpRoot::new_non_inverting(model, gain);
@@ -424,17 +431,22 @@ pub(super) fn build_opamp_feedback_stages(
                     });
                     feedback_pot_id = Some(pot_id.clone());
                 }
-                // Ri pot in ground leg (overrides Rf pot if both present — unlikely)
-                if let Some((pot_id, _max_pot_r, fixed_series_r, _parallel_fixed_r)) = ri_pot {
-                    root.set_feedback_config(FeedbackConfig {
-                        pot_comp_id: pot_id.clone(),
-                        other_leg_r: *rf,
-                        fixed_series_r: *fixed_series_r,
-                        parallel_r: None,
-                        pot_is_feedback: false,
-                        is_inverting: false,
-                    });
-                    feedback_pot_id = Some(pot_id.clone());
+                // Ri pot in ground leg — only use if rf_pot was NOT found.
+                // When rf_pot exists, the ground-leg path search can find spurious pots
+                // via circuitous routes (neg → Rf → out → coupling_cap → ... → pot → gnd).
+                // These are downstream tone/filter pots, not gain-determining ground-leg pots.
+                if rf_pot.is_none() {
+                    if let Some((pot_id, _max_pot_r, fixed_series_r, _parallel_fixed_r)) = ri_pot {
+                        root.set_feedback_config(FeedbackConfig {
+                            pot_comp_id: pot_id.clone(),
+                            other_leg_r: *rf,
+                            fixed_series_r: *fixed_series_r,
+                            parallel_r: None,
+                            pot_is_feedback: false,
+                            is_inverting: false,
+                        });
+                        feedback_pot_id = Some(pot_id.clone());
+                    }
                 }
 
                 let default_supply = 9.0_f64;

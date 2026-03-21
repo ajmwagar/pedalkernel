@@ -473,6 +473,9 @@ impl OpAmpRoot {
                 1.0 + cfg.other_leg_r / ri
             }
         };
+        #[cfg(test)]
+        eprintln!("[OPAMP_DEBUG] set_feedback_pot_r: pot_r={pot_r:.1} pot_is_fb={} is_inv={} fixed_series={:.1} parallel_r={:?} other_leg={:.1} → gain={gain:.4}",
+            cfg.pot_is_feedback, cfg.is_inverting, cfg.fixed_series_r, cfg.parallel_r, cfg.other_leg_r);
         self.set_gain(gain);
     }
 

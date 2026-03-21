@@ -1354,8 +1354,25 @@ impl CompiledPedal {
                                 stage.flush_passive_rtype_recompute();
                             }
                         }
-                        // Component-driven updates: OpAmpRoot gain, BBD mix
+                        // Component-driven updates: OpAmpRoot gain, BBD mix.
+                        // Notify the primary stage AND any secondary stages that
+                        // contain this pot. Split pots (3-terminal) can span multiple
+                        // stages — e.g., a feedback pot's aw half in the opamp stage
+                        // and wb half in the diode stage.
                         self.notify_stage_pot_changed(stage_idx);
+                        for (oi, stage) in self.stages.iter_mut().enumerate() {
+                            if oi == stage_idx {
+                                continue;
+                            }
+                            // Only notify if this stage's feedback_pot_id matches
+                            // the pot we just changed (base name or split halves).
+                            let should_notify = stage.feedback_pot_id.as_ref().map_or(false, |fb_id| {
+                                fb_id == &comp_id || fb_id == &comp_id_aw || fb_id == &comp_id_wb
+                            });
+                            if should_notify {
+                                stage.notify_pot_changed();
+                            }
+                        }
                         if self.bbd_mix_pot_id.as_deref() == Some(&comp_id) {
                             self.bbd_wet_mix = value;
                         }

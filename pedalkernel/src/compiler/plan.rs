@@ -1159,11 +1159,15 @@ fn plan_one_junction(
     let mut excluded: Vec<usize> = classified.all_nonlinear_edge_indices.clone();
     excluded.extend(opamp_feedback_edges);
 
-    // Output-pin barrier nodes: only Output pins of active/gain components
+    // Output-pin barrier nodes: Output pins of active/gain components
     // (opamp .out, BJT collector, triode plate, JFET drain) act as BFS
-    // barriers. Input pins (opamp neg/pos, BJT base) are traversable,
-    // allowing BFS to reach feedback networks through them.
+    // barriers. Input pins (opamp neg/pos) are traversable, allowing BFS
+    // to reach feedback networks through them.
+    // Also include transistor input pins (JFET gate, BJT base) as barriers
+    // to prevent gate/base bias resistors from being absorbed into this
+    // stage's WDF tree (e.g. RAT R8 1MΩ gate bias masking Filter pot).
     let mut output_barriers = graph.output_pin_nodes.clone();
+    output_barriers.extend(&graph.transistor_input_nodes);
     // The junction itself is reachable (we start there), so remove it.
     output_barriers.remove(&junction);
     // For diodes/MOSFETs: the NL element's other terminal is also traversable.
@@ -1223,8 +1227,15 @@ fn plan_one_junction(
             return None;
         }
 
+        // Source follower if junction directly connects to out_node OR if
+        // the BFS-collected passives reach out_node (e.g., through coupling
+        // caps and volume pots like RATKING: Q1.source → C9 → Volume → out).
+        let reaches_output = passive_idxs.iter().any(|&idx| {
+            let e = &graph.edges[idx];
+            e.node_a == graph.out_node || e.node_b == graph.out_node
+        });
         let is_source_follower =
-            !junction_to_output.is_empty() || junction == graph.out_node;
+            !junction_to_output.is_empty() || junction == graph.out_node || reaches_output;
 
         if is_source_follower {
             return Some(StagePlan {
@@ -2730,8 +2741,11 @@ fn collect_passive_edges_from_nodes(
     };
 
     // Output-pin barriers prevent BFS from crossing into other active stages.
+    // Also include transistor input pins to prevent bias resistors from
+    // bleeding into this stage's WDF tree.
     // Remove the group's own junction nodes so BFS can start from them.
     let mut output_barriers = graph.output_pin_nodes.clone();
+    output_barriers.extend(&graph.transistor_input_nodes);
     for &jn in junction_nodes {
         output_barriers.remove(&jn);
     }
