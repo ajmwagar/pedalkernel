@@ -1918,12 +1918,24 @@ impl PedalProcessor for CompiledPedal {
                     // Regular stages (triodes, BJTs, etc.) use serial chain even
                     // if they have injection_node_id set for other purposes.
                     let stage_input = if stage.is_trigger_voice {
-                        self.node_signals
+                        let impulse: f64 = self.node_signals
                             .iter()
                             .rev()
                             .filter(|(nid, _)| *nid == stage.injection_node_id)
                             .map(|(_, v)| *v)
-                            .sum::<f64>()
+                            .sum();
+                        // Activate voice on first trigger impulse.
+                        if impulse != 0.0 {
+                            stage.voice_active = true;
+                        }
+                        // Skip processing entirely until first trigger fires.
+                        // This prevents unfired voices from contributing VCC
+                        // bias to the output sum.
+                        if !stage.voice_active {
+                            wdf_stage_counter += 1;
+                            continue;
+                        }
+                        impulse
                     } else if stage.is_feedforward {
                         // Feedforward stages read from upstream node_signals
                         self.node_signals

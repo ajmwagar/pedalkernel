@@ -273,6 +273,7 @@ fn build_passive_wdf_stage(
                 injection_node_id: usize::MAX,
                 output_node_id: usize::MAX,
                 is_trigger_voice: false,
+                voice_active: false,
                 is_feedforward: false,
                 sample_counter: 0,
                 root_comp_id: String::new(),
@@ -283,6 +284,7 @@ fn build_passive_wdf_stage(
                 vcc_dc_ramp: 0,
                 coupling_cap_id: None,
                 tone_feedback: None,
+                resonator_feedback: None,
                 negate_vs: false,
                 input_photocouplers: Vec::new(),
             };
@@ -619,6 +621,7 @@ fn build_passive_rtype_from_decomposed(
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
         is_trigger_voice: false,
+        voice_active: false,
         is_feedforward: false,
         sample_counter: 0,
         root_comp_id: String::new(),
@@ -629,6 +632,7 @@ fn build_passive_rtype_from_decomposed(
         vcc_dc_ramp: 0,
         coupling_cap_id: None,
         tone_feedback: None,
+        resonator_feedback: None,
         negate_vs: false,
         input_photocouplers: Vec::new(),
     })
@@ -1027,6 +1031,7 @@ fn build_feedforward_stages(
                     injection_node_id: injection_node,
                     output_node_id: output_node,
                     is_trigger_voice: false,
+                    voice_active: false,
                     is_feedforward: true,
                     sample_counter: 0,
                     root_comp_id: String::new(),
@@ -1037,6 +1042,7 @@ fn build_feedforward_stages(
                     vcc_dc_ramp: 0,
                     coupling_cap_id: None,
                     tone_feedback: None,
+                    resonator_feedback: None,
                     negate_vs: false,
                     input_photocouplers: Vec::new(),
                 }
@@ -1151,6 +1157,7 @@ fn build_output_rooted_stage(
         injection_node_id: usize::MAX,
         output_node_id: usize::MAX,
         is_trigger_voice: false,
+        voice_active: false,
         is_feedforward: false,
         sample_counter: 0,
         root_comp_id: String::new(),
@@ -1161,6 +1168,7 @@ fn build_output_rooted_stage(
         vcc_dc_ramp: 0,
         coupling_cap_id: None,
         tone_feedback: None,
+        resonator_feedback: None,
         negate_vs: false,
         input_photocouplers: Vec::new(),
     })
@@ -1667,6 +1675,7 @@ pub fn compile_pedal_with_options(
                 info.feedback_kind,
                 super::graph::OpAmpFeedbackKind::Allpass { .. }
                     | super::graph::OpAmpFeedbackKind::InvertingShelving { .. }
+                    | super::graph::OpAmpFeedbackKind::BridgedTResonator { .. }
                     | super::graph::OpAmpFeedbackKind::UnityGain
             );
             let skip = skip_feedback_tree_opamps.contains(&info.comp_id);
@@ -2001,6 +2010,94 @@ pub fn compile_pedal_with_options(
             }
         } else {
             passive_attenuation = compute_resistor_divider_gain(&graph);
+        }
+    }
+
+    // ══ Trigger → opamp stage mapping ═════════════════════════════════
+    // For opamp-based synth pedals (e.g. sine_drum), each trigger connects
+    // through an injection resistor to a specific opamp stage's WDF tree.
+    // BFS from each trigger node through passive edges to find the associated
+    // opamp stage, then mark it as a trigger voice for per-note isolation.
+    if !graph.trigger_nodes.is_empty() && !stages.is_empty() && trigger_stage_map.is_empty() {
+        let hub_nodes: HashSet<super::graph::NodeId> = {
+            let mut h = HashSet::new();
+            h.insert(graph.gnd_node);
+            h.insert(graph.in_node);
+            h.insert(graph.out_node);
+            h.extend(graph.supply_nodes.iter().copied());
+            h
+        };
+
+        // Build passive adjacency (resistors, caps, inductors, pots).
+        let mut passive_adj: HashMap<super::graph::NodeId, Vec<super::graph::NodeId>> =
+            HashMap::new();
+        for e in &graph.edges {
+            if graph.components[e.comp_idx].kind.is_simple_passive() {
+                passive_adj
+                    .entry(e.node_a)
+                    .or_default()
+                    .push(e.node_b);
+                passive_adj
+                    .entry(e.node_b)
+                    .or_default()
+                    .push(e.node_a);
+            }
+        }
+
+        // Map injection_node_id → stage index for quick lookup.
+        let inj_to_stage: HashMap<super::graph::NodeId, usize> = stages
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.injection_node_id != usize::MAX)
+            .map(|(i, s)| (s.injection_node_id, i))
+            .collect();
+
+        // Treat opamp output nodes as BFS barriers — stop before crossing
+        // into another voice's domain through the shared mix bus.
+        let mut barrier_nodes = hub_nodes.clone();
+        barrier_nodes.extend(graph.output_pin_nodes.iter().copied());
+
+        for (comp_id, trigger_node) in &graph.trigger_nodes {
+            // BFS from trigger node through passive edges, stopping at
+            // opamp output pins and hub nodes (gnd/vcc/in/out).
+            let mut visited = HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            visited.insert(*trigger_node);
+            queue.push_back(*trigger_node);
+
+            let mut found_stage = None;
+            while let Some(node) = queue.pop_front() {
+                if let Some(&stage_idx) = inj_to_stage.get(&node) {
+                    found_stage = Some(stage_idx);
+                    break;
+                }
+                if let Some(neighbors) = passive_adj.get(&node) {
+                    for &neighbor in neighbors {
+                        if !visited.contains(&neighbor) && !barrier_nodes.contains(&neighbor) {
+                            visited.insert(neighbor);
+                            queue.push_back(neighbor);
+                        }
+                    }
+                }
+            }
+
+            if let Some(stage_idx) = found_stage {
+                let inj_node = stages[stage_idx].injection_node_id;
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "[trigger→stage] {} (node={}) → stage {} (inj={})",
+                    comp_id, trigger_node, stage_idx, inj_node
+                );
+                trigger_stage_map.insert(comp_id.clone(), (stage_idx, inj_node));
+                stages[stage_idx].is_trigger_voice = true;
+                stages[stage_idx].output_node_id = graph.out_node;
+            } else {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "[trigger→stage] {} (node={}) → NO STAGE FOUND",
+                    comp_id, trigger_node
+                );
+            }
         }
     }
 

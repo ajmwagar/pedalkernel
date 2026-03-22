@@ -1,0 +1,60 @@
+# Single bridged-T resonator at C3 (130.81 Hz).
+# Minimal test case — one voice, no output mix or tone control.
+#
+# Topology:
+#   U.neg ── R1 ── junction ── R2 ── U.out   (series R path)
+#   U.neg ── C1 ── gnd                        (left shunt cap)
+#   junction ── C2 ── gnd                     (center shunt cap)
+#   U.neg ── R_fb ── U.out                    (feedback / decay)
+#   T.out ── R_trig ── junction               (trigger injection)
+#   vcc ── Rb1 ── Rb2 ── gnd, midpoint ── U.pos (bias)
+#
+# Expected f0 = 1/(2π·R·C) = 1/(2π·150k·8.2n) ≈ 129.5 Hz
+
+pedal "Bridged-T Resonator" subtitle "Single voice test" {
+  supply 9V
+
+  components {
+    T1: trigger_input()
+    U1: opamp(tl072)
+    Rb1: resistor(100k)
+    Rb2: resistor(100k)
+    R1: resistor(150k)
+    R2: resistor(150k)
+    C1: cap(8.2n)
+    C2: cap(8.2n)
+    R_fb: resistor(470k)
+    R_trig: resistor(100k)
+    R_out: resistor(10k)
+  }
+
+  nets {
+    # Bias
+    vcc -> Rb1.a
+    Rb1.b -> Rb2.a, U1.pos
+    Rb2.b -> gnd
+
+    # Bridged-T network (neg → out)
+    U1.neg -> R1.a, C1.a
+    R1.b -> R2.a, C2.a
+    R2.b -> U1.out
+    C1.b -> gnd
+    C2.b -> gnd
+
+    # Feedback
+    U1.neg -> R_fb.a
+    R_fb.b -> U1.out
+
+    # Trigger injection at midpoint
+    T1.out -> R_trig.a
+    R_trig.b -> R1.b
+
+    # Output
+    U1.out -> R_out.a
+    R_out.b -> out
+  }
+
+  controls {
+    T1.trigger -> midi(48)
+  }
+}

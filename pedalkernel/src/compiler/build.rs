@@ -618,6 +618,7 @@ pub(super) fn build_stages(
             injection_node_id: out_node.unwrap_or(usize::MAX),
             output_node_id: out_node.unwrap_or(usize::MAX),
             is_trigger_voice: false,
+            voice_active: false,
             is_feedforward: false,
             sample_counter: 0,
             root_comp_id: String::new(),
@@ -628,6 +629,7 @@ pub(super) fn build_stages(
             vcc_dc_ramp: 0,
             coupling_cap_id: None,
             tone_feedback: None,
+            resonator_feedback: None,
             negate_vs: false,
             input_photocouplers: Vec::new(),
         });
@@ -2837,6 +2839,7 @@ fn build_vs_stage(
             .copied()
             .unwrap_or(plan.injection_node),
         is_trigger_voice: false,
+        voice_active: false,
         is_feedforward: false,
         sample_counter: 0,
         root_comp_id: String::new(),
@@ -2847,6 +2850,7 @@ fn build_vs_stage(
         vcc_dc_ramp: 0,
         coupling_cap_id,
         tone_feedback: None,
+        resonator_feedback: None,
         negate_vs,
         input_photocouplers: Vec::new(),
     })
@@ -2905,6 +2909,7 @@ fn build_source_follower_stage(
             .copied()
             .unwrap_or(plan.injection_node),
         is_trigger_voice: false,
+        voice_active: false,
         is_feedforward: false,
         sample_counter: 0,
         root_comp_id: String::new(),
@@ -2915,6 +2920,7 @@ fn build_source_follower_stage(
         vcc_dc_ramp: 0,
         coupling_cap_id: None,
         tone_feedback: None,
+        resonator_feedback: None,
         negate_vs: false,
         input_photocouplers: Vec::new(),
     })

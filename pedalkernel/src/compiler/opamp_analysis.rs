@@ -186,6 +186,7 @@ pub(super) fn build_opamp_feedback_stages(
                     injection_node_id: usize::MAX,
                     output_node_id: usize::MAX,
                     is_trigger_voice: false,
+                    voice_active: false,
                     is_feedforward: false,
                     sample_counter: 0,
                     root_comp_id: String::new(),
@@ -196,6 +197,61 @@ pub(super) fn build_opamp_feedback_stages(
                     vcc_dc_ramp: 0,
                     coupling_cap_id: None,
                     tone_feedback: Some(tone_fb),
+                    resonator_feedback: None,
+                    negate_vs: false,
+                    input_photocouplers: Vec::new(),
+                };
+                stage.balance_vs_impedance();
+                stages.push(stage);
+            }
+            OpAmpFeedbackKind::BridgedTResonator { r1, r2, c1, c2, rf } => {
+                let model = OpAmpModel::from_opamp_type(&info.opamp_type);
+                let gain = rf / r1;
+                let mut root = OpAmpRoot::new_inverting(model, gain);
+                root.set_sample_rate(sample_rate);
+
+                let default_supply = 9.0_f64;
+                let v_max = (default_supply / 2.0 - 1.5).max(0.5);
+                root.set_v_max(v_max);
+
+                let res_fb = super::stage::ResonatorFeedback::new(
+                    *r1, *r2, *c1, *c2, *rf, sample_rate,
+                );
+
+                // Minimal tree — the IIR bypasses WDF output, so the tree
+                // is only needed for pot state tracking (none for bridged-T).
+                let vs = DynNode::VoltageSource(0.0, 10_000.0);
+
+                let mut stage = WdfStage {
+                    tree: vs,
+                    root: RootKind::OpAmp(root),
+                    compensation: 1.0,
+                    oversampler: crate::oversampling::Oversampler::new(oversampling),
+                    base_diode_model: None,
+                    paired_opamp: None,
+                    allpass_feedback: None,
+                    allpass_direct: None,
+                    dc_block: None,
+                    grid_dc_blocker: None,
+                    is_source_follower: false,
+                    prev_source_voltage: 0.0,
+                    signal_flow_distance: 0,
+                    transformer_gain: 1.0,
+                    injection_node_id: info.neg_node,
+                    output_node_id: info.out_node,
+                    is_trigger_voice: false,
+                    voice_active: false,
+                    is_feedforward: false,
+                    sample_counter: 0,
+                    root_comp_id: String::new(),
+                    feedback_pot_id: None,
+                    output_probe: None,
+                    feedback_opamp: None,
+                    vcc_injection_coeff: 0.0,
+                    vcc_dc_ramp: 0,
+                    coupling_cap_id: None,
+                    tone_feedback: None,
+                    resonator_feedback: Some(res_fb),
                     negate_vs: false,
                     input_photocouplers: Vec::new(),
                 };
@@ -362,6 +418,7 @@ pub(super) fn build_opamp_feedback_stages(
                     injection_node_id: usize::MAX,
                     output_node_id: usize::MAX,
                     is_trigger_voice: false,
+                    voice_active: false,
                     is_feedforward: false,
                     sample_counter: 0,
                     root_comp_id: String::new(),
@@ -372,6 +429,7 @@ pub(super) fn build_opamp_feedback_stages(
                     vcc_dc_ramp: 0,
                     coupling_cap_id: None,
                     tone_feedback: None,
+                    resonator_feedback: None,
                     negate_vs: false,
                     input_photocouplers: Vec::new(),
                 };
@@ -542,6 +600,7 @@ pub(super) fn build_opamp_feedback_stages(
                     injection_node_id: usize::MAX,
                     output_node_id: usize::MAX,
                     is_trigger_voice: false,
+                    voice_active: false,
                     is_feedforward: false,
                     sample_counter: 0,
                     root_comp_id: String::new(),
@@ -552,6 +611,7 @@ pub(super) fn build_opamp_feedback_stages(
                     vcc_dc_ramp: 0,
                     coupling_cap_id: None,
                     tone_feedback: None,
+                    resonator_feedback: None,
                     negate_vs: false,
                     input_photocouplers: Vec::new(),
                 };
