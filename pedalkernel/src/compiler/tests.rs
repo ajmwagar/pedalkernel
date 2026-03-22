@@ -1226,21 +1226,21 @@ pedal "Marshall Bluesbreaker" {
         }
     }
 
-    eprintln!("[blues-driver] --- stage1 solo with input 0.1 ---");
-    proc.stages[1].reset();
-    for i in 0..20 {
-        let s1 = proc.stages[1].process(test_input);
-        if i < 5 || i == 19 {
-            eprintln!("[blues-driver]   stage1[{i}]: {s1:.6e}");
+    if proc.stages.len() > 1 {
+        eprintln!("[blues-driver] --- stage1 solo with input 0.1 ---");
+        proc.stages[1].reset();
+        for i in 0..20 {
+            let s1 = proc.stages[1].process(test_input);
+            if i < 5 || i == 19 {
+                eprintln!("[blues-driver]   stage1[{i}]: {s1:.6e}");
+            }
         }
-    }
-    // The PassiveRType stage has IC1a's feedback components (C2,C3,C4) mixed with
-    // output components (Volume, R_out). This is wrong - these should be separate.
-    // C2,C3,C4 are feedback components that should be claimed by opamp_feedback_edges.
-    // Check if the PassiveRType stage has any vs_injection at the output port.
-    if let super::stage::RootKind::PassiveRType { vs_injection, output_port, n_ports, .. } = &proc.stages[1].root {
-        eprintln!("[blues-driver]   PassiveRType vs_injection: {:?}", vs_injection);
-        eprintln!("[blues-driver]   PassiveRType output_port={output_port} n_ports={n_ports}");
+        if let super::stage::RootKind::PassiveRType { vs_injection, output_port, n_ports, .. } = &proc.stages[1].root {
+            eprintln!("[blues-driver]   PassiveRType vs_injection: {:?}", vs_injection);
+            eprintln!("[blues-driver]   PassiveRType output_port={output_port} n_ports={n_ports}");
+        }
+    } else {
+        eprintln!("[blues-driver] --- no stage1 (Gain pot halves absorbed into mnl[0]) ---");
     }
 
     let input = sine(48000);

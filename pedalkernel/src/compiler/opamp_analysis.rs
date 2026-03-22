@@ -667,6 +667,8 @@ fn build_feedback_tree(
     sample_rate: f64,
 ) -> Option<(DynNode, Option<String>)> {
     if info.feedback_comp_ids.len() <= 1 {
+        #[cfg(test)]
+        eprintln!("[BUILD_FB_TREE] {} skipped: only {} feedback comps", info.comp_id, info.feedback_comp_ids.len());
         return None; // Single resistor — use existing simple path
     }
 
@@ -680,7 +682,13 @@ fn build_feedback_tree(
         .map(|(idx, _)| idx)
         .collect();
 
+    #[cfg(test)]
+    eprintln!("[BUILD_FB_TREE] {} feedback_comp_ids={:?} feedback_set={:?} feedback_edges={}",
+        info.comp_id, info.feedback_comp_ids, feedback_set, feedback_edges.len());
+
     if feedback_edges.len() < 2 {
+        #[cfg(test)]
+        eprintln!("[BUILD_FB_TREE] {} skipped: only {} feedback edges", info.comp_id, feedback_edges.len());
         return None;
     }
 
@@ -706,6 +714,9 @@ fn build_feedback_tree(
         .collect();
     border_nodes.sort();
     border_nodes.dedup();
+
+    #[cfg(test)]
+    eprintln!("[BUILD_FB_TREE] {} border_nodes={:?} (need exactly 2)", info.comp_id, border_nodes);
 
     if border_nodes.len() != 2 {
         return None; // Not a clean 2-terminal feedback network
