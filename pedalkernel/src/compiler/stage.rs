@@ -386,6 +386,97 @@ impl ToneFeedback {
     }
 }
 
+/// Models a bridged-T opamp resonator as a 2nd-order IIR bandpass.
+///
+/// The analog transfer function from trigger injection to output is
+/// a 2nd-order bandpass centered at f0 = 1/(2π·√(R1·R2·C1·C2)).
+/// The Q factor is controlled by Rf/√(R1·R2) — higher Rf = longer ring.
+///
+/// Bilinear-transformed to a 2nd-order IIR:
+///   y[n] = b0·x[n] + b1·x[n-1] + b2·x[n-2] - a1·y[n-1] - a2·y[n-2]
+pub(super) struct ResonatorFeedback {
+    /// IIR coefficients (normalized by a0).
+    pub(super) b0: f64,
+    pub(super) b1: f64,
+    pub(super) b2: f64,
+    pub(super) a1: f64,
+    pub(super) a2: f64,
+    /// State: previous input samples.
+    pub(super) x1: f64,
+    pub(super) x2: f64,
+    /// State: previous output samples.
+    pub(super) y1: f64,
+    pub(super) y2: f64,
+}
+
+impl ResonatorFeedback {
+    /// Create a new bridged-T resonator IIR from circuit parameters.
+    ///
+    /// Uses the Audio EQ Cookbook bandpass formula with bilinear pre-warping.
+    pub(super) fn new(r1: f64, r2: f64, c1: f64, c2: f64, rf: f64, sample_rate: f64) -> Self {
+        use std::f64::consts::PI;
+
+        // Resonant angular frequency
+        let omega_0 = 1.0 / (r1 * r2 * c1 * c2).sqrt();
+
+        // Q factor for a bridged-T oscillator.
+        // The T-network has a notch attenuation of ~1/3 for equal R,C.
+        // For oscillation, Rf must exceed the critical value R_crit.
+        // Q = Rf / (Rf - R_crit) where R_crit ≈ R1 + R2 + R1*C1/C2.
+        // For equal R,C: R_crit = 3*R, so Q = Rf/(Rf - 3*R).
+        let r_crit = r1 + r2 + r1 * c1 / c2;
+        // Clamp to avoid division by zero / negative Q when Rf is too small
+        let q = if rf > r_crit * 1.01 {
+            rf / (rf - r_crit)
+        } else {
+            // At or below oscillation threshold — use high Q for marginal oscillation
+            100.0
+        };
+
+        // Bilinear pre-warping: map analog frequency to digital
+        let w0 = 2.0 * (omega_0 / (2.0 * sample_rate)).atan();
+
+        // Audio EQ Cookbook: BPF (constant 0 dB peak gain)
+        let sin_w0 = w0.sin();
+        let cos_w0 = w0.cos();
+        let alpha = sin_w0 / (2.0 * q);
+
+        let b0 = alpha;
+        let b1 = 0.0;
+        let b2 = -alpha;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_w0;
+        let a2 = 1.0 - alpha;
+
+        // Normalize by a0 and scale output by loop gain (Rf/R1)
+        let gain = rf / r1;
+
+        ResonatorFeedback {
+            b0: gain * b0 / a0,
+            b1: gain * b1 / a0,
+            b2: gain * b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    /// Process one sample through the 2nd-order bandpass.
+    #[inline]
+    pub(super) fn process(&mut self, input: f64) -> f64 {
+        let y = self.b0 * input + self.b1 * self.x1 + self.b2 * self.x2
+              - self.a1 * self.y1 - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = input;
+        self.y2 = self.y1;
+        self.y1 = flush_denormal(y);
+        self.y1
+    }
+}
+
 pub(super) struct WdfStage {
     pub(super) tree: DynNode,
     pub(super) root: RootKind,
@@ -449,6 +540,11 @@ pub(super) struct WdfStage {
     /// exclusively from `node_signals` (trigger impulses) rather than
     /// the serial chain signal. Unfired voices receive 0.0 input.
     pub(super) is_trigger_voice: bool,
+    /// Activation gate for trigger voice stages. When false, the stage
+    /// skips processing entirely (outputs 0.0). Set to true on the first
+    /// trigger impulse. Prevents unfired voices from contributing VCC
+    /// bias to the output sum.
+    pub(super) voice_active: bool,
     /// When true, this stage is a feedforward (parallel) path that reads
     /// from `node_signals` at `injection_node_id` and additively blends
     /// its output into the serial chain signal.
@@ -496,6 +592,10 @@ pub(super) struct WdfStage {
     /// output is computed from this IIR instead of the WDF tree, giving the
     /// correct frequency-dependent shelving behaviour.
     pub(super) tone_feedback: Option<ToneFeedback>,
+    /// Bridged-T resonator IIR for opamps with series R1→R2 path and
+    /// C1/C2 shunt caps to ground. When present, the stage output is
+    /// computed from this 2nd-order bandpass IIR instead of the WDF tree.
+    pub(super) resonator_feedback: Option<ResonatorFeedback>,
     /// Negate the voltage source value for tree topologies where the Series
     /// adaptor sign convention produces a negative reflected wave. Detected
     /// during construction: if `tree.reflected()` with positive VS gives a
@@ -890,6 +990,13 @@ impl WdfStage {
         // coefficients track the pot position.
         if let Some(ref mut tf) = self.tone_feedback {
             return flush_denormal(tf.process(input * self.compensation));
+        }
+
+        // Bridged-T resonator IIR (opamp with series R1-R2 and shunt C1/C2).
+        // Bypasses WDF output with a 2nd-order bandpass filter whose
+        // resonant frequency matches 1/(2π·√(R1·R2·C1·C2)).
+        if let Some(ref mut rf) = self.resonator_feedback {
+            return flush_denormal(rf.process(input * self.compensation));
         }
 
         // Non-inverting all-pass IIR (Phase 90 gain-of-2 style).

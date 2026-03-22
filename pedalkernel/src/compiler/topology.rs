@@ -463,6 +463,31 @@ impl<'a> TopologyContext<'a> {
         None
     }
 
+    /// Find a capacitor from the given node to ground (gnd or AC ground).
+    ///
+    /// Returns `(capacitance, component_id)` if found.
+    pub fn find_cap_to_ground(&self, node: usize) -> Option<(f64, String)> {
+        for comp in &self.resolved.pedal.components {
+            if let Some(cap) = comp.kind.as_any().downcast_ref::<Capacitor>() {
+                let pa = format!("{}.a", comp.id);
+                let pb = format!("{}.b", comp.id);
+                if let (Some(&a), Some(&b)) = (
+                    self.resolved.pin_to_node.get(&pa),
+                    self.resolved.pin_to_node.get(&pb),
+                ) {
+                    let to_gnd = |n: usize| self.is_ac_grounded(n);
+                    if a == node && to_gnd(b) {
+                        return Some((cap.config.value, comp.id.clone()));
+                    }
+                    if b == node && to_gnd(a) {
+                        return Some((cap.config.value, comp.id.clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Find a capacitor with a pin at the given node.
     ///
     /// Returns the capacitance value if found.
@@ -901,6 +926,85 @@ fn classify_opamp(
     // Need Rf (feedback resistor from neg to out) for remaining topologies.
     let (rf, _rf_comps, rf_pot) = ctx.find_resistive_path(neg_node, out_node)?;
     let all_fb_comps = ctx.collect_passive_comps_between(neg_node, out_node);
+
+    // ── Bridged-T resonator detection ────────────────────────────────────
+    // Must check BEFORE Inverting/NonInverting because C1 from neg→gnd
+    // creates an "independent ground leg" that skips the Inverting branch.
+    //
+    // Topology: R1 from neg→junction, R2 from junction→out,
+    // C1 from neg→gnd, C2 from junction→gnd, R_fb from neg→out (direct).
+    if rf_pot.is_none() {
+        let bridged_t = 'bt: {
+            // Find R1: resistor from neg to an interior junction node
+            let r1_info = if let Some(neighbors) = ctx.resolved.resistor_adj.get(&neg_node) {
+                neighbors.iter().find_map(|&(next, r, ref id, is_pot, _)| {
+                    if is_pot { return None; }
+                    if next == out_node { return None; }
+                    if ctx.is_ac_grounded(next) { return None; }
+                    Some((r, next, id.clone()))
+                })
+            } else {
+                None
+            };
+            let (r1_val, junction, r1_id) = match r1_info {
+                Some(v) => v,
+                None => break 'bt None,
+            };
+
+            // Find R2: resistor from junction to out_node
+            let r2_info = if let Some(neighbors) = ctx.resolved.resistor_adj.get(&junction) {
+                neighbors.iter().find_map(|&(next, r, ref id, is_pot, _)| {
+                    if is_pot { return None; }
+                    if next != out_node { return None; }
+                    Some((r, id.clone()))
+                })
+            } else {
+                None
+            };
+            let (r2_val, r2_id) = match r2_info {
+                Some(v) => v,
+                None => break 'bt None,
+            };
+
+            // Find C1: cap from neg_node to gnd
+            let c1_info = ctx.find_cap_to_ground(neg_node);
+            let (c1_val, c1_id) = match c1_info {
+                Some(v) => v,
+                None => break 'bt None,
+            };
+
+            // Find C2: cap from junction to gnd
+            let c2_info = ctx.find_cap_to_ground(junction);
+            let (c2_val, c2_id) = match c2_info {
+                Some(v) => v,
+                None => break 'bt None,
+            };
+
+            Some((r1_val, r2_val, c1_val, c2_val, r1_id, r2_id, c1_id, c2_id))
+        };
+
+        if let Some((r1, r2, c1, c2, r1_id, r2_id, c1_id, c2_id)) = bridged_t {
+            let mut bt_comps = all_fb_comps.clone();
+            for id in [&c1_id, &c2_id, &r1_id, &r2_id] {
+                if !bt_comps.contains(id) {
+                    bt_comps.push(id.clone());
+                }
+            }
+            return Some(OpAmpFeedbackInfo {
+                comp_id: comp_id.to_string(),
+                opamp_type,
+                feedback_kind: OpAmpFeedbackKind::BridgedTResonator {
+                    r1, r2, c1, c2, rf,
+                },
+                neg_node,
+                pos_node,
+                out_node,
+                feedback_comp_ids: bt_comps,
+                input_photocoupler_ids: Vec::new(),
+                input_fixed_r: 0.0,
+            });
+        }
+    }
 
     // ── Allpass (gain-of-2 style): JFET at pos ──────────────────────────
     // Phase 90 topology: Vin → R_ap → neg, R_fb → out, JFET+C → pos.

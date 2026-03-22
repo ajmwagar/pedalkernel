@@ -2064,6 +2064,134 @@ impl CircuitGraph {
                     let no_extra = HashSet::new();
                     let all_fb_comps = collect_feedback_comps(neg_node, out_node, &no_extra);
 
+                    // ── Bridged-T resonator detection ────────────────────
+                    // Must check BEFORE Inverting/NonInverting classification because
+                    // C1 from neg→gnd creates an "independent ground leg" that would
+                    // skip the Inverting branch (where the topology looks most like).
+                    //
+                    // Topology: R1 from neg→junction, R2 from junction→out,
+                    // C1 from neg→gnd, C2 from junction→gnd, R_fb from neg→out.
+                    // Produces a 2nd-order bandpass resonator at
+                    // f0 = 1/(2π·√(R1·R2·C1·C2)).
+                    if rf_pot.is_none() {
+                        let bridged_t = 'bt: {
+                            let mut r1_info = None;
+                            for info_r in &resistor_nodes {
+                                if info_r.is_pot { continue; }
+                                let other = if info_r.node_a == neg_node {
+                                    info_r.node_b
+                                } else if info_r.node_b == neg_node {
+                                    info_r.node_a
+                                } else {
+                                    continue;
+                                };
+                                if other == out_node || other == gnd_node_resolved {
+                                    continue;
+                                }
+                                if ac_ground_nodes.contains(&other) {
+                                    continue;
+                                }
+                                r1_info = Some((info_r.resistance, other, info_r.id.clone()));
+                                break;
+                            };
+                            let (r1_val, junction, r1_id) = match r1_info {
+                                Some(v) => v,
+                                None => break 'bt None,
+                            };
+
+                            // Find R2: resistor from junction to out_node
+                            let mut r2_val = None;
+                            let mut r2_id = String::new();
+                            for info_r in &resistor_nodes {
+                                if info_r.is_pot { continue; }
+                                let connects = (info_r.node_a == junction && info_r.node_b == out_node)
+                                    || (info_r.node_a == out_node && info_r.node_b == junction);
+                                if connects {
+                                    r2_val = Some(info_r.resistance);
+                                    r2_id = info_r.id.clone();
+                                    break;
+                                }
+                            }
+                            let r2_val = match r2_val {
+                                Some(v) => v,
+                                None => break 'bt None,
+                            };
+
+                            // Find C1: cap from neg_node to gnd
+                            let mut c1_val = None;
+                            let mut c1_id = String::new();
+                            for c in &pedal.components {
+                                if let Some(cap) = c.kind.capacitance() {
+                                    let pa = format!("{}.a", c.id);
+                                    let pb = format!("{}.b", c.id);
+                                    if let (Some(&a), Some(&b)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
+                                        let an = uf.find(a);
+                                        let bn = uf.find(b);
+                                        let to_gnd = |n: usize| n == gnd_node_resolved || ac_ground_nodes.contains(&n);
+                                        if (an == neg_node && to_gnd(bn)) || (bn == neg_node && to_gnd(an)) {
+                                            c1_val = Some(cap);
+                                            c1_id = c.id.clone();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            let c1_val = match c1_val {
+                                Some(v) => v,
+                                None => break 'bt None,
+                            };
+
+                            // Find C2: cap from junction to gnd
+                            let mut c2_val = None;
+                            let mut c2_id = String::new();
+                            for c in &pedal.components {
+                                if let Some(cap) = c.kind.capacitance() {
+                                    let pa = format!("{}.a", c.id);
+                                    let pb = format!("{}.b", c.id);
+                                    if let (Some(&a), Some(&b)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
+                                        let an = uf.find(a);
+                                        let bn = uf.find(b);
+                                        let to_gnd = |n: usize| n == gnd_node_resolved || ac_ground_nodes.contains(&n);
+                                        if (an == junction && to_gnd(bn)) || (bn == junction && to_gnd(an)) {
+                                            c2_val = Some(cap);
+                                            c2_id = c.id.clone();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            let c2_val = match c2_val {
+                                Some(v) => v,
+                                None => break 'bt None,
+                            };
+
+                            Some((r1_val, r2_val, c1_val, c2_val, r1_id, r2_id, c1_id, c2_id))
+                        };
+
+                        if let Some((r1, r2, c1, c2, r1_id, r2_id, c1_id, c2_id)) = bridged_t {
+                            let mut bt_comps = all_fb_comps.clone();
+                            for id in [&c1_id, &c2_id, &r1_id, &r2_id] {
+                                if !bt_comps.contains(id) {
+                                    bt_comps.push(id.clone());
+                                }
+                            }
+                            results.push(OpAmpFeedbackInfo {
+                                comp_id: comp.id.clone(),
+                                opamp_type,
+                                feedback_kind: OpAmpFeedbackKind::BridgedTResonator {
+                                    r1, r2, c1, c2, rf,
+                                },
+                                neg_node,
+                                pos_node,
+                                out_node,
+                                feedback_comp_ids: bt_comps,
+                                input_photocoupler_ids: Vec::new(),
+                                input_fixed_r: 0.0,
+                            });
+                            continue;
+                        }
+                    }
+
                     // Check for inverting topology: pos connected to ground (or AC ground).
                     // Also accept pos grounded through resistors (e.g. difference amp
                     // with R3/R4 divider from pos to gnd — pos is AC-grounded via R network).
@@ -2927,6 +3055,22 @@ pub(super) enum OpAmpFeedbackKind {
         /// Potentiometer info for Ri path (ground leg, e.g. Tumnus Gain).
         /// (comp_id, max_resistance, fixed_series_resistance, parallel_fixed_resistance)
         ri_pot: Option<(String, f64, f64, Option<f64>)>,
+    },
+    /// Bridged-T resonator: opamp with series R1→R2 between neg/out,
+    /// C1 from neg→gnd, C2 from R1/R2 junction→gnd, and R_fb direct feedback.
+    /// Produces a 2nd-order bandpass at f0 = 1/(2π·√(R1·R2·C1·C2)).
+    /// Used in sine_drum synth for tuned percussion voices.
+    BridgedTResonator {
+        /// Series resistance R1 (neg to junction), Ohms.
+        r1: f64,
+        /// Series resistance R2 (junction to out), Ohms.
+        r2: f64,
+        /// Shunt capacitance C1 (neg to gnd), Farads.
+        c1: f64,
+        /// Shunt capacitance C2 (junction to gnd), Farads.
+        c2: f64,
+        /// Direct feedback resistance R_fb (neg to out), Ohms.
+        rf: f64,
     },
     /// JFET drain at neg with R||C feedback to out (Phase 90 inverting all-pass).
     /// Gain = -Z_fb/Z_in where Z_in = R_ap + R_jfet and Z_fb = Rf || Cf.
