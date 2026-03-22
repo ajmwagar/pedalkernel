@@ -5684,6 +5684,96 @@ fn fulltone_ocd_volume_sweep() {
     assert_volume_sweep(&pedal, "Volume", &[("Drive", 0.5), ("Tone", 0.5)], "OCD");
 }
 
+/// Measure peak and RMS at specific control settings.
+fn measure_pedal(pedal: &PedalDef, controls: &[(&str, f64)]) -> (f64, f64) {
+    let mut proc = compile_pedal(pedal, 48000.0).unwrap();
+    for &(name, val) in controls { proc.set_control(name, val); }
+    for _ in 0..9600 { proc.process(0.0); }
+    let input: Vec<f64> = (0..48000)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let out: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    let tail = &out[4800..];
+    let peak = tail.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    let rms = (tail.iter().map(|x| x * x).sum::<f64>() / tail.len() as f64).sqrt();
+    (peak, rms)
+}
+
+// ─── Lock-in regression tests ────────────────────────────────────────
+// These lock in the known-good behavior of pedals that sound correct.
+// If a refactor changes pot behavior or signal levels, these will catch it.
+// Tolerances are ±20% to allow minor numerical improvements while catching
+// regressions that fundamentally break pot routing or gain structure.
+
+fn assert_approx(label: &str, actual: f64, expected: f64, tolerance: f64) {
+    let lo = expected * (1.0 - tolerance);
+    let hi = expected * (1.0 + tolerance);
+    assert!(actual >= lo && actual <= hi,
+        "{label}: expected {expected:.6} ±{tol}%, got {actual:.6}",
+        tol = tolerance * 100.0);
+}
+
+#[test]
+fn lockin_screamer_pots() {
+    let pedal = parse("tube_screamer.pedal");
+    let tol = 0.20;
+
+    // Drive sweep: low drive = cleaner (lower peak), high drive = more clipping
+    let (peak_lo, _) = measure_pedal(&pedal, &[("Drive", 0.0), ("Tone", 0.5), ("Level", 0.5)]);
+    let (peak_hi, _) = measure_pedal(&pedal, &[("Drive", 1.0), ("Tone", 0.5), ("Level", 0.5)]);
+    assert_approx("Drive=0.0 peak", peak_lo, 0.127, tol);
+    assert_approx("Drive=1.0 peak", peak_hi, 0.186, tol);
+    assert!(peak_hi > peak_lo, "High Drive should produce higher peak than low Drive");
+
+    // Tone sweep: dark (0.0) vs bright (1.0)
+    let (peak_dark, _) = measure_pedal(&pedal, &[("Drive", 0.5), ("Tone", 0.0), ("Level", 0.5)]);
+    let (peak_bright, _) = measure_pedal(&pedal, &[("Drive", 0.5), ("Tone", 1.0), ("Level", 0.5)]);
+    assert_approx("Tone=0.0 peak", peak_dark, 0.101, tol);
+    assert_approx("Tone=1.0 peak", peak_bright, 0.405, tol);
+    assert!(peak_bright > peak_dark * 2.0, "Bright tone should be >2x dark tone");
+
+    // Level: 0 = silence, 1 = full
+    let (peak_zero, _) = measure_pedal(&pedal, &[("Drive", 0.5), ("Tone", 0.5), ("Level", 0.0)]);
+    let (peak_full, _) = measure_pedal(&pedal, &[("Drive", 0.5), ("Tone", 0.5), ("Level", 1.0)]);
+    assert!(peak_zero < 0.001, "Level=0 should be silent, got {peak_zero:.6}");
+    assert_approx("Level=1.0 peak", peak_full, 0.338, tol);
+}
+
+#[test]
+fn lockin_ratking_pots() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap()
+            .join("ratking_non_invert.pedal")
+    ).unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+    let tol = 0.20;
+
+    // Distortion sweep: increases gain, but hard-clips so peak similar at high settings
+    let (peak_lo, _) = measure_pedal(&pedal, &[("Distortion", 0.0), ("Filter", 0.5), ("Volume", 0.7)]);
+    let (peak_hi, _) = measure_pedal(&pedal, &[("Distortion", 1.0), ("Filter", 0.5), ("Volume", 0.7)]);
+    assert_approx("Dist=0.0 peak", peak_lo, 0.282, tol);
+    assert_approx("Dist=1.0 peak", peak_hi, 0.446, tol);
+    assert!(peak_hi > peak_lo, "High Distortion should produce higher peak");
+
+    // Filter sweep: bright (0.0) = high peak, dark (1.0) = attenuated
+    let (peak_bright, _) = measure_pedal(&pedal, &[("Distortion", 0.5), ("Filter", 0.0), ("Volume", 0.7)]);
+    let (peak_dark, _) = measure_pedal(&pedal, &[("Distortion", 0.5), ("Filter", 1.0), ("Volume", 0.7)]);
+    assert!(peak_bright > peak_dark * 3.0,
+        "Bright filter ({peak_bright:.4}) should be >3x dark ({peak_dark:.4})");
+    assert_approx("Filter=1.0 peak", peak_dark, 0.111, tol);
+
+    // Volume: 0 = silence, monotonic sweep
+    let (peak_zero, _) = measure_pedal(&pedal, &[("Distortion", 0.5), ("Filter", 0.5), ("Volume", 0.0)]);
+    let (peak_half, _) = measure_pedal(&pedal, &[("Distortion", 0.5), ("Filter", 0.5), ("Volume", 0.5)]);
+    let (peak_full, _) = measure_pedal(&pedal, &[("Distortion", 0.5), ("Filter", 0.5), ("Volume", 1.0)]);
+    assert!(peak_zero < 0.001, "Volume=0 should be silent, got {peak_zero:.6}");
+    assert_approx("Volume=0.5 peak", peak_half, 0.250, tol);
+    assert_approx("Volume=1.0 peak", peak_full, 0.500, tol);
+    assert!(peak_full > peak_half, "Volume=1.0 should be louder than 0.5");
+    assert!(peak_half > peak_zero + 0.01, "Volume=0.5 should be louder than 0.0");
+}
+
 #[test]
 fn goldenrod_output_sweep() {
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
