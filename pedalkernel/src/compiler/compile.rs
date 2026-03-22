@@ -1537,50 +1537,44 @@ pub fn compile_pedal_with_options(
             // so the BFS-based check below can miss multi-hop feedback paths like
             // IC1b.out -> R_clip -> D1 -> D2 -> IC1b.neg.
             if info.has_feedback_diode() {
+                #[cfg(test)]
+                eprintln!("[SKIP_FB_TREE] {} has feedback_diode → skip", info.comp_id);
                 return true;
             }
 
-            // Collect graph nodes that this opamp's feedback components touch.
-            let fb_nodes: HashSet<super::graph::NodeId> = graph
-                .edges
-                .iter()
-                .filter(|e| {
-                    info.feedback_comp_ids
-                        .contains(&graph.components[e.comp_idx].id)
-                })
-                .flat_map(|e| [e.node_a, e.node_b])
-                .collect();
-
-            // Skip feedback tree if any passive edge connects the feedback
-            // node set to an NL junction (direct overlap OR 1-hop bridge).
-            // - Direct: RAT feedback pot IS at diode junction
+            // Skip feedback tree if the opamp's neg or out node directly
+            // touches an NL junction, or a single passive edge bridges from
+            // neg/out to an NL junction.
+            // - Direct: RAT feedback pot IS at diode junction (neg = NL node)
             // - 1-hop: Klon R_clip bridges diode junction to U3.neg
             //
-            // Exclude global nodes (gnd, vcc, in, out) from the bridge check:
-            // many components connect to ground, and a feedback cap grounding
-            // through gnd does not constitute a bridge to a diode that also
-            // grounds through gnd (e.g., RAT C5/C6 → gnd ≠ D1/D2 → gnd).
+            // We only check the opamp's own neg/out pins — NOT intermediate
+            // nodes deep in the ground leg (e.g. pot wipers). This prevents
+            // false positives where a ground-leg pot wiper coincidentally
+            // connects to another stage's NL junction (Bluesbreaker Gain pot
+            // wiper → R4 → IC1b.neg with diodes).
+            if nl_junction_nodes.contains(&info.neg_node)
+                || nl_junction_nodes.contains(&info.out_node)
+            {
+                return true;
+            }
+            let is_global = |n: super::graph::NodeId| {
+                n == graph.gnd_node || n == graph.vcc_node
+                    || n == graph.in_node || n == graph.out_node
+            };
             graph.edges.iter().enumerate().any(|(idx, e)| {
                 if classified.all_nonlinear_edge_indices.contains(&idx)
                     || graph.active_edge_indices.contains(&idx)
                 {
                     return false;
                 }
-                // A true bridge requires BOTH sides to be non-global.
-                // Ground/VCC/in/out are shared by many components and
-                // don't indicate actual signal-path bridging. Without this
-                // exclusion, feedback caps grounding through gnd (RAT C5/C6)
-                // falsely bridge to diodes that also connect to gnd, causing
-                // the feedback network to be left unclaimed and creating a
-                // parasitic feedforward stage that drowns out the Volume pot.
-                let is_global = |n: super::graph::NodeId| {
-                    n == graph.gnd_node || n == graph.vcc_node
-                        || n == graph.in_node || n == graph.out_node
+                let at_opamp_pin = |n: super::graph::NodeId| {
+                    n == info.neg_node || n == info.out_node
                 };
-                (fb_nodes.contains(&e.node_a) && nl_junction_nodes.contains(&e.node_b)
-                    && !is_global(e.node_a) && !is_global(e.node_b))
-                || (fb_nodes.contains(&e.node_b) && nl_junction_nodes.contains(&e.node_a)
-                    && !is_global(e.node_a) && !is_global(e.node_b))
+                (at_opamp_pin(e.node_a) && nl_junction_nodes.contains(&e.node_b)
+                    && !is_global(e.node_b))
+                || (at_opamp_pin(e.node_b) && nl_junction_nodes.contains(&e.node_a)
+                    && !is_global(e.node_a))
             })
         })
         .map(|info| info.comp_id.clone())

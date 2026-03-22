@@ -1788,6 +1788,22 @@ impl CircuitGraph {
             }
         }
 
+        // Collect 3-terminal pot wiper nodes. These are junction points where
+        // a pot's voltage divider tap connects to a different circuit stage.
+        // Used as extra barriers in ground-leg BFS to prevent traversing through
+        // a pot wiper into another stage's network (e.g. Bluesbreaker Gain pot
+        // wiper → R4 → IC1b pulling IC1b components into IC1a's feedback set).
+        let mut pot_wiper_nodes: HashSet<usize> = HashSet::new();
+        for comp in &pedal.components {
+            if comp.kind.as_any().downcast_ref::<Potentiometer>().is_some() {
+                let pw = format!("{}.w", comp.id);
+                let pw_long = format!("{}.wiper", comp.id);
+                if let Some(&w_id) = pin_ids.get(&pw).or_else(|| pin_ids.get(&pw_long)) {
+                    pot_wiper_nodes.insert(uf.find(w_id));
+                }
+            }
+        }
+
         // Passive-aware adjacency map for non-inverting ground-leg detection.
         // Like resistor_adj but includes caps and inductors as 0Ω passthrough
         // edges, so DFS can traverse R+C series paths (e.g. R4→C5→gnd in RAT).
@@ -2355,7 +2371,10 @@ impl CircuitGraph {
                                 find_ground_leg_path(neg_node, gnd_target).unwrap()
                             };
                         // Collect ground-leg passive components too
-                        let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &no_extra);
+                        // Use pot wiper nodes as extra barriers for ground-leg BFS.
+                        // This prevents traversing through a pot wiper that connects
+                        // to another stage (e.g. Bluesbreaker Gain pot wiper → IC1b).
+                        let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &pot_wiper_nodes);
                         let mut fb_comps = all_fb_comps.clone();
                         for c in gnd_leg_comps {
                             if !fb_comps.contains(&c) {
@@ -2515,7 +2534,8 @@ impl CircuitGraph {
                                 } else {
                                     find_ground_leg_path(neg_node, gnd_target).unwrap()
                                 };
-                            let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &no_extra_fb);
+                            let gnd_leg_barriers: HashSet<usize> = no_extra_fb.iter().chain(pot_wiper_nodes.iter()).copied().collect();
+                            let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &gnd_leg_barriers);
                             let mut fb_comps = reactive_fb_comps.clone();
                             for c in gnd_leg_comps {
                                 if !fb_comps.contains(&c) {
@@ -2651,9 +2671,29 @@ pub(super) fn find_path_through_adj(
                     new_comps.push(comp_id.clone());
 
                     let (new_pot_info, new_fixed_r) = if *is_pot {
-                        let pot_info =
-                            state.pot_info.clone().or(Some((comp_id.clone(), *max_r)));
-                        (pot_info, state.fixed_r)
+                        // When a path traverses BOTH halves of a 3-terminal pot
+                        // (X__aw + X__wb), the total a→b resistance is constant
+                        // (= max_r). This is NOT a variable pot — it's a fixed
+                        // resistor (e.g. Bluesbreaker Gain pot in ground leg:
+                        // neg → R3 → Gain__aw → Gain__wb → gnd).
+                        let this_base = comp_id.strip_suffix("__aw")
+                            .or_else(|| comp_id.strip_suffix("__wb"));
+                        let existing_base = state.pot_info.as_ref().and_then(|(id, _)| {
+                            id.strip_suffix("__aw").or_else(|| id.strip_suffix("__wb"))
+                        });
+                        if let (Some(tb), Some(eb)) = (this_base, existing_base) {
+                            if tb == eb {
+                                // Both halves of same pot → treat as fixed max_r
+                                (None, state.fixed_r + max_r)
+                            } else {
+                                // Different pot — keep the first
+                                (state.pot_info.clone(), state.fixed_r)
+                            }
+                        } else {
+                            let pot_info =
+                                state.pot_info.clone().or(Some((comp_id.clone(), *max_r)));
+                            (pot_info, state.fixed_r)
+                        }
                     } else {
                         (state.pot_info.clone(), state.fixed_r + r)
                     };
@@ -2673,6 +2713,34 @@ pub(super) fn find_path_through_adj(
 
     if all_paths.is_empty() {
         return None;
+    }
+
+    // Post-process: detect "full traversal" pots — paths that go through both
+    // halves (X__aw + X__wb) of a 3-terminal pot. The total a→b resistance is
+    // constant, so ANY reference to that pot as variable is spurious (even from
+    // other paths that only traverse one half via a circuitous route).
+    let mut full_traversal_pots: HashSet<String> = HashSet::new();
+    for (_r, comps, _pot_info) in &all_paths {
+        for c in comps {
+            if let Some(base) = c.strip_suffix("__aw") {
+                let wb = format!("{}__wb", base);
+                if comps.contains(&wb) {
+                    full_traversal_pots.insert(base.to_string());
+                }
+            }
+        }
+    }
+    if !full_traversal_pots.is_empty() {
+        for (_r, _comps, pot_info) in &mut all_paths {
+            if let Some((pot_id, _, _)) = pot_info {
+                let pot_base = pot_id.strip_suffix("__aw")
+                    .or_else(|| pot_id.strip_suffix("__wb"))
+                    .unwrap_or(pot_id.as_str());
+                if full_traversal_pots.contains(pot_base) {
+                    *pot_info = None;
+                }
+            }
+        }
     }
 
     if all_paths.len() == 1 {

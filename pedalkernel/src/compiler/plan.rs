@@ -2315,11 +2315,10 @@ fn plan_diode_bridge(
         all_diode_nodes.insert(edge.node_b);
     }
 
-    // Detect diode terminal nodes that are also opamp/active-device pins.
-    // These shared nodes (e.g. Blues: D2.b = IC1b.neg) must NOT be BFS
-    // starting points — otherwise BFS walks into the opamp's inter-stage
-    // network (R4→Gain→R3→IC1a.neg). Remove them from the starting set
-    // and use them as additional barriers instead.
+    // Collect active-device input pins (opamp neg/pos) that are NOT diode
+    // terminals. These become BFS barriers to prevent crawling into upstream
+    // opamp feedback networks (e.g. Blues IC1a.neg → R3 → Gain), and are
+    // excluded from injection node selection.
     let active_pin_nodes: HashSet<NodeId> = graph
         .active_edge_indices
         .iter()
@@ -2328,26 +2327,27 @@ fn plan_diode_bridge(
             [e.node_a, e.node_b]
         })
         .collect();
-    let shared_active_diode_nodes: HashSet<NodeId> = all_diode_nodes
-        .intersection(&active_pin_nodes)
+    let non_diode_active_input_pins: HashSet<NodeId> = active_pin_nodes
+        .iter()
         .copied()
-        .collect();
-    let bfs_start_nodes: HashSet<NodeId> = all_diode_nodes
-        .difference(&shared_active_diode_nodes)
-        .copied()
+        .filter(|n| {
+            !all_diode_nodes.contains(n) && !graph.output_pin_nodes.contains(n)
+        })
         .collect();
 
-    // BFS passive edges from non-active diode terminals, with skip_out_node=false
+    // BFS passive edges from ALL diode terminals, with skip_out_node=false
     // so that RC time constant edges touching out_node are collected.
-    // Active-shared diode nodes act as barriers via output_pin_nodes + extra.
-    let mut all_passive_edges = collect_passive_edges_from_nodes(
-        if bfs_start_nodes.is_empty() { &all_diode_nodes } else { &bfs_start_nodes },
+    // Non-diode active input pins (opamp neg) act as extra barriers to
+    // prevent BFS from crawling into upstream opamp ground legs.
+    let mut all_passive_edges = collect_passive_edges_from_nodes_with_extra_barriers(
+        &all_diode_nodes,
         graph,
         classified,
         false, // skip_out_node=false (bridge rectifier needs RC at output)
         pp_transformer_edges,
         &HashSet::new(),
         opamp_feedback_edges,
+        &non_diode_active_input_pins,
     );
 
     // Save original passive edges (before output tail) for injection node selection.
@@ -2364,9 +2364,14 @@ fn plan_diode_bridge(
     }
 
     // Find injection node — prefer diode terminal nodes.
-    // Use only pre-tail passive edges so output tail nodes (e.g. IC1a.pos via R_in)
-    // don't pull the injection point to the wrong side of the circuit.
-    let exclude: HashSet<NodeId> = [graph.out_node, graph.gnd_node].into_iter().collect();
+    // Exclude opamp input pins (IC1a.neg) — they are feedback nodes, not
+    // signal entry points. Their presence would drive the amplified signal
+    // at a virtual-ground node, causing incorrect attenuation.
+    let exclude: HashSet<NodeId> = {
+        let mut ex: HashSet<NodeId> = [graph.out_node, graph.gnd_node].into_iter().collect();
+        ex.extend(&non_diode_active_input_pins);
+        ex
+    };
     let injection_node = {
         let mut best = find_injection_node_multi_nl(
             &pre_tail_passive_edges,
@@ -2746,6 +2751,61 @@ fn collect_passive_edges_from_nodes(
     // Remove the group's own junction nodes so BFS can start from them.
     let mut output_barriers = graph.output_pin_nodes.clone();
     output_barriers.extend(&graph.transistor_input_nodes);
+    for &jn in junction_nodes {
+        output_barriers.remove(&jn);
+    }
+
+    let mut all_passive_edges: Vec<usize> = Vec::new();
+    for &jn in junction_nodes {
+        let edges = graph.bfs_passive_edges(
+            jn,
+            &excluded,
+            &graph.active_edge_indices,
+            true,
+            skip_out_node,
+            pp_transformer_edges,
+            &output_barriers,
+        );
+        extend_dedup(&mut all_passive_edges, &edges);
+    }
+    let xfmr_inject =
+        find_secondary_side_transformers(&all_passive_edges, graph, pp_transformer_edges);
+    extend_dedup(&mut all_passive_edges, &xfmr_inject);
+    all_passive_edges
+}
+
+/// Like `collect_passive_edges_from_nodes` but with additional barrier nodes.
+///
+/// Extra barriers prevent BFS from traversing through specific nodes
+/// (e.g., opamp input pins that connect to feedback networks).
+fn collect_passive_edges_from_nodes_with_extra_barriers(
+    junction_nodes: &HashSet<NodeId>,
+    graph: &CircuitGraph,
+    classified: &ClassifiedCircuit,
+    skip_out_node: bool,
+    pp_transformer_edges: &HashSet<usize>,
+    boundary_edges: &HashSet<usize>,
+    opamp_feedback_edges: &HashSet<usize>,
+    extra_barriers: &HashSet<NodeId>,
+) -> Vec<usize> {
+    let excluded: Vec<usize> = {
+        let mut excl = classified.all_nonlinear_edge_indices.clone();
+        for &be in boundary_edges {
+            if !excl.contains(&be) {
+                excl.push(be);
+            }
+        }
+        for &fe in opamp_feedback_edges {
+            if !excl.contains(&fe) {
+                excl.push(fe);
+            }
+        }
+        excl
+    };
+
+    let mut output_barriers = graph.output_pin_nodes.clone();
+    output_barriers.extend(&graph.transistor_input_nodes);
+    output_barriers.extend(extra_barriers);
     for &jn in junction_nodes {
         output_barriers.remove(&jn);
     }
