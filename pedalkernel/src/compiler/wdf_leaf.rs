@@ -307,7 +307,7 @@ impl WdfLeaf for WdfPot {
         {
             self.position = value;
             let tapered_pos = self.taper.apply(value);
-            self.rp = tapered_pos * self.max_resistance;
+            self.rp = (tapered_pos * self.max_resistance).max(1.0);
             true
         } else {
             false
