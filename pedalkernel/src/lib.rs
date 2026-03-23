@@ -73,6 +73,10 @@ pub trait PedalProcessor {
 
     /// Reset a passive component to its original value. Returns true if found.
     fn reset_passive(&mut self, _comp_id: &str) -> bool { false }
+
+    /// Debug: return current control state as (label, target_value, smoothed_value).
+    /// target_value is what the UI set; smoothed_value is what the engine is using.
+    fn control_debug_info(&self) -> Vec<(String, f64, f64)> { Vec::new() }
 }
 
 // ---------------------------------------------------------------------------
