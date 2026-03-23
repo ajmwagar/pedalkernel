@@ -2478,4 +2478,18 @@ impl PedalProcessor for CompiledPedal {
     fn reset_passive(&mut self, comp_id: &str) -> bool {
         self.reset_passive(comp_id)
     }
+
+    fn control_debug_info(&self) -> Vec<(String, f64, f64)> {
+        self.controls.iter().enumerate().map(|(i, ctrl)| {
+            let smoothed = self.pot_smoothers.iter()
+                .find(|s| s.control_idx == i)
+                .map(|s| s.current)
+                .unwrap_or(0.0);
+            let target = self.pot_smoothers.iter()
+                .find(|s| s.control_idx == i)
+                .map(|s| s.target)
+                .unwrap_or(0.0);
+            (ctrl.label.clone(), target, smoothed)
+        }).collect()
+    }
 }
