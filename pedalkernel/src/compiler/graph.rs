@@ -2601,14 +2601,23 @@ impl CircuitGraph {
                         .fold(0.0_f64, f64::max)
                         .max(1000.0); // minimum 1kΩ default
 
-                    // Check rf_pot: any pot in the feedback path
+                    // Check rf_pot: any pot in the feedback path.
+                    // Also sum any non-pot resistors in the feedback path as fixed_series_r
+                    // (e.g. RATKING has R5=560Ω in series with the Distortion pot).
+                    let reactive_fixed_series_r: f64 = reactive_fb_comps.iter()
+                        .filter_map(|id| {
+                            resistor_nodes.iter().find(|r| r.id == *id && !r.is_pot)
+                                .map(|r| r.resistance)
+                        })
+                        .sum();
+
                     let rf_pot_info: Option<(String, f64, f64, Option<f64>)> = reactive_fb_comps.iter()
                         .find_map(|id| {
                             let base = id.strip_suffix("__aw").or_else(|| id.strip_suffix("__wb")).unwrap_or(id);
                             pedal.components.iter().find(|c| c.id == base && c.kind.pot_taper().is_some())
                                 .map(|_| {
                                     resistor_nodes.iter().find(|r| r.id == *id && r.is_pot)
-                                        .map(|r| (base.to_string(), r.max_r, 0.0, None))
+                                        .map(|r| (base.to_string(), r.max_r, reactive_fixed_series_r, None))
                                 })
                                 .flatten()
                         });
