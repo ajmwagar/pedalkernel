@@ -332,6 +332,7 @@ pub(super) fn build_opamp_feedback_stages(
                         DiodeType::Silicon => 0.6,
                         DiodeType::Germanium => 0.3,
                         DiodeType::Led => 1.6,
+                        DiodeType::Schottky => 0.3,
                     };
                     root.set_soft_clip(diode_vf);
                 }
@@ -531,6 +532,7 @@ pub(super) fn build_opamp_feedback_stages(
                         DiodeType::Silicon => 0.6,
                         DiodeType::Germanium => 0.3,
                         DiodeType::Led => 1.6,
+                        DiodeType::Schottky => 0.3,
                     };
                     root.set_soft_clip(diode_vf);
                 }

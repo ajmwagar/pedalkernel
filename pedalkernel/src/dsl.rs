@@ -348,6 +348,7 @@ pub enum DiodeType {
     Silicon,
     Germanium,
     Led,
+    Schottky,
 }
 
 /// Capacitor dielectric types with different parasitic characteristics.
@@ -1001,6 +1002,7 @@ fn diode_type(input: &str) -> IResult<&str, DiodeType> {
         value(DiodeType::Silicon, tag("silicon")),
         value(DiodeType::Germanium, tag("germanium")),
         value(DiodeType::Led, tag("led")),
+        value(DiodeType::Schottky, tag("schottky")),
     ))(input)
 }
 
