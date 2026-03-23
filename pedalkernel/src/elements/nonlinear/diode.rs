@@ -110,6 +110,18 @@ impl DiodeModel {
         }
     }
 
+    /// Generic Schottky diode — low forward voltage (~0.3V), fast recovery.
+    /// Used in power protection, but also in boutique pedals for soft clipping
+    /// (germanium-like Vf without temperature instability).
+    pub fn schottky() -> Self {
+        // 1N5817/1N5818 family: Is ≈ 1µA, n ≈ 1.05, Rs ≈ 0.1Ω
+        Self {
+            is: 1e-6,
+            n_vt: 1.05 * 25.85e-3,
+            rs: 0.1,
+        }
+    }
+
     /// Red LED — Vf ≈ 1.7V, used in Klon Centaur and high-headroom clippers.
     pub fn led_red() -> Self {
         Self::led()

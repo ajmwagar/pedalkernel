@@ -10,6 +10,7 @@ pub(super) fn diode_model(dt: DiodeType) -> DiodeModel {
         DiodeType::Silicon => DiodeModel::silicon(),
         DiodeType::Germanium => DiodeModel::germanium(),
         DiodeType::Led => DiodeModel::led(),
+        DiodeType::Schottky => DiodeModel::schottky(),
     }
 }
 

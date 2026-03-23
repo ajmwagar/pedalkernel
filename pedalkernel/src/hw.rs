@@ -622,6 +622,12 @@ const LED_DIODE: DiodePart = DiodePart {
     breakdown: 5.0,
 };
 
+const SCHOTTKY_DIODE: DiodePart = DiodePart {
+    mouser_pn: "863-1N5818RLG",
+    description: "1N5818 Schottky Diode",
+    breakdown: 30.0,
+};
+
 /// Known transistor parts with specs.
 struct TransistorPart {
     mouser_pn: &'static str,
@@ -718,6 +724,7 @@ pub fn auto_populate_specs(pedal: &PedalDef, limits: &mut HardwareLimits) {
                         crate::dsl::DiodeType::Silicon => &SILICON_DIODE,
                         crate::dsl::DiodeType::Germanium => &GERMANIUM_DIODE,
                         crate::dsl::DiodeType::Led => &LED_DIODE,
+                        crate::dsl::DiodeType::Schottky => &SCHOTTKY_DIODE,
                     };
                     spec.breakdown = Some(dp.breakdown);
                 }
@@ -865,6 +872,7 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     DiodeType::Silicon => &SILICON_DIODE,
                     DiodeType::Germanium => &GERMANIUM_DIODE,
                     DiodeType::Led => &LED_DIODE,
+                    DiodeType::Schottky => &SCHOTTKY_DIODE,
                 };
                 let (pn, desc) = if let Some(part_name) = hw_part {
                     (None, part_name.to_string())
@@ -885,6 +893,7 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                     DiodeType::Silicon => &SILICON_DIODE,
                     DiodeType::Germanium => &GERMANIUM_DIODE,
                     DiodeType::Led => &LED_DIODE,
+                    DiodeType::Schottky => &SCHOTTKY_DIODE,
                 };
                 let (pn, desc) = if let Some(part_name) = hw_part {
                     (None, part_name.to_string())
