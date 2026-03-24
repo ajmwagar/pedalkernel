@@ -1498,6 +1498,12 @@ impl WdfStage {
         }
     }
 
+    /// Get the feedback pot ID for this stage (if any).
+    #[allow(dead_code)]
+    pub fn feedback_pot_id(&self) -> Option<&str> {
+        self.feedback_pot_id.as_deref()
+    }
+
     /// Get OpAmpRoot sample rate (for verifying oversampling propagation).
     pub fn opamp_sample_rate(&self) -> Option<f64> {
         match &self.root {
