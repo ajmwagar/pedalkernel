@@ -764,6 +764,23 @@ impl CompiledPedal {
         (stage_count, self.opamp_stages.len() as u32)
     }
 
+    /// Debug: return opamp gains and feedback pot IDs for all stages.
+    pub fn opamp_debug_info(&self) -> Vec<(usize, f64, Option<String>)> {
+        self.stages.iter().enumerate().filter_map(|(i, s)| {
+            s.opamp_gain().map(|g| {
+                let pot_id = s.feedback_pot_id().map(|s| s.to_string());
+                (i, g, pot_id)
+            })
+        }).collect()
+    }
+
+    /// Debug: return multi-NL stage scattering info.
+    pub fn multi_nl_debug_info(&self) -> Vec<(usize, usize, Vec<f64>, f64, Vec<f64>)> {
+        self.multi_nl_stages.iter().enumerate().map(|(i, s)| {
+            (i, s.n_nl, s.scattering.s_nl_adapted.clone(), s.compensation, s.nl_port_resistances.clone())
+        }).collect()
+    }
+
     /// Get the supply voltage.
     pub fn supply_voltage(&self) -> f64 {
         self.supply_voltage
@@ -2480,7 +2497,10 @@ impl PedalProcessor for CompiledPedal {
     }
 
     fn control_debug_info(&self) -> Vec<(String, f64, f64)> {
-        self.controls.iter().enumerate().map(|(i, ctrl)| {
+        let mut out = Vec::new();
+
+        // Named controls with smoother state
+        for (i, ctrl) in self.controls.iter().enumerate() {
             let smoothed = self.pot_smoothers.iter()
                 .find(|s| s.control_idx == i)
                 .map(|s| s.current)
@@ -2489,7 +2509,53 @@ impl PedalProcessor for CompiledPedal {
                 .find(|s| s.control_idx == i)
                 .map(|s| s.target)
                 .unwrap_or(0.0);
-            (ctrl.label.clone(), target, smoothed)
-        }).collect()
+            out.push((ctrl.label.clone(), target, smoothed));
+        }
+
+        // All pot leaves from WDF stages (includes ganged halves like __aw/__wb)
+        let mut seen = std::collections::HashSet::new();
+        for (si, stage) in self.stages.iter().enumerate() {
+            stage.tree.for_each_leaf(&mut |leaf| {
+                if leaf.type_tag() == "pot" {
+                    if let Some(id) = leaf.comp_id() {
+                        if seen.insert(format!("s{}:{}", si, id)) {
+                            let pos = leaf.pot_position().unwrap_or(0.0);
+                            let r = leaf.port_resistance();
+                            out.push((format!("[{}] {}", si, id), pos, r));
+                        }
+                    }
+                }
+            });
+        }
+        for (si, stage) in self.multi_nl_stages.iter().enumerate() {
+            for child in &stage.passive_children {
+                child.for_each_leaf(&mut |leaf| {
+                    if leaf.type_tag() == "pot" {
+                        if let Some(id) = leaf.comp_id() {
+                            if seen.insert(format!("m{}:{}", si, id)) {
+                                let pos = leaf.pot_position().unwrap_or(0.0);
+                                let r = leaf.port_resistance();
+                                out.push((format!("[m{}] {}", si, id), pos, r));
+                            }
+                        }
+                    }
+                });
+            }
+            for child in &stage.pot_children {
+                child.for_each_leaf(&mut |leaf| {
+                    if leaf.type_tag() == "pot" {
+                        if let Some(id) = leaf.comp_id() {
+                            if seen.insert(format!("m{}:{}", si, id)) {
+                                let pos = leaf.pot_position().unwrap_or(0.0);
+                                let r = leaf.port_resistance();
+                                out.push((format!("[m{}] {}", si, id), pos, r));
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        out
     }
 }
