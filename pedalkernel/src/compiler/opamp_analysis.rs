@@ -94,6 +94,7 @@ pub(super) struct DiodePairedOpAmp {
 /// Returns:
 /// - `Vec<WdfStage>`: standalone op-amp stages (gain-only, no shared NL junction)
 /// - `Vec<DiodePairedOpAmp>`: op-amps that should be paired with DiodePair stages
+/// - `HashSet<usize>`: edge indices consumed by opamp feedback stages (for global claiming)
 pub(super) fn build_opamp_feedback_stages(
     analysis: &OpAmpAnalysis,
     pedal: &PedalDef,
@@ -103,11 +104,21 @@ pub(super) fn build_opamp_feedback_stages(
     oversampling: crate::oversampling::OversamplingFactor,
     skip_feedback_tree: &HashSet<String>,
     nl_junction_nodes: &HashSet<NodeId>,
-) -> (Vec<WdfStage>, Vec<DiodePairedOpAmp>) {
+) -> (Vec<WdfStage>, Vec<DiodePairedOpAmp>, HashSet<usize>) {
     use super::stage::RootKind;
 
     let mut stages = Vec::new();
     let mut diode_paired = Vec::new();
+    let mut consumed_edges: HashSet<usize> = HashSet::new();
+
+    // Helper: map feedback_comp_ids to edge indices.
+    let comp_ids_to_edge_indices = |comp_ids: &[String]| -> Vec<usize> {
+        let id_set: HashSet<&str> = comp_ids.iter().map(|s| s.as_str()).collect();
+        graph.edges.iter().enumerate()
+            .filter(|(_, e)| id_set.contains(graph.components[e.comp_idx].id.as_str()))
+            .map(|(idx, _)| idx)
+            .collect()
+    };
 
     for info in &analysis.feedback_loops {
         match &info.feedback_kind {
@@ -202,6 +213,8 @@ pub(super) fn build_opamp_feedback_stages(
                     input_photocouplers: Vec::new(),
                 };
                 stage.balance_vs_impedance();
+                // InvertingShelving always claims its feedback edges.
+                consumed_edges.extend(comp_ids_to_edge_indices(&info.feedback_comp_ids));
                 stages.push(stage);
             }
             OpAmpFeedbackKind::BridgedTResonator { r1, r2, c1, c2, rf } => {
@@ -256,6 +269,8 @@ pub(super) fn build_opamp_feedback_stages(
                     input_photocouplers: Vec::new(),
                 };
                 stage.balance_vs_impedance();
+                // BridgedTResonator always claims its feedback edges.
+                consumed_edges.extend(comp_ids_to_edge_indices(&info.feedback_comp_ids));
                 stages.push(stage);
             }
             OpAmpFeedbackKind::Inverting {
@@ -336,19 +351,22 @@ pub(super) fn build_opamp_feedback_stages(
                     };
                     root.set_soft_clip(diode_vf);
                 }
-                let (tree, fb_pot_from_tree) =
+                let (tree, fb_pot_from_tree, fb_tree_edges) =
                     if skip_tree {
-                        (None, None)
+                        (None, None, vec![])
                     } else {
                         match build_feedback_tree(info, graph, pedal, sample_rate) {
-                            Some((t, pot_id)) => (Some(t), pot_id),
-                            None => (None, None),
+                            Some((t, pot_id, edges)) => (Some(t), pot_id, edges),
+                            None => (None, None, vec![]),
                         }
                     };
                 // Track whether graph_reduce built the tree (has reactive elements).
                 // If so, skip balance_vs_impedance — the VS must stay low-Rp so
                 // the capacitor's frequency-dependent scattering isn't swamped.
                 let has_complex_fb_tree = tree.is_some();
+                if !skip_tree {
+                    consumed_edges.extend(fb_tree_edges.iter().copied());
+                }
                 let (tree, fb_pot_from_tree) = match (tree, fb_pot_from_tree) {
                     (Some(t), pot_id) => (t, pot_id),
                     _ => {
@@ -464,6 +482,15 @@ pub(super) fn build_opamp_feedback_stages(
                 if !has_complex_fb_tree {
                     stage.balance_vs_impedance();
                 }
+                // Claim feedback edges when:
+                // - NOT skip_tree (normal inverting opamp, standalone stage), OR
+                // - skip_tree but no feedback diode (neg_is_barrier: neg used as BFS
+                //   barrier so NL BFS can't claim these edges; claim them here instead).
+                // Skip claiming when skip_tree AND feedback_diode exists (Tube Screamer,
+                // Bluesbreaker) — the NL BFS must traverse through neg to incorporate them.
+                if !skip_tree || feedback_diode.is_none() {
+                    consumed_edges.extend(comp_ids_to_edge_indices(&info.feedback_comp_ids));
+                }
                 stages.push(stage);
             }
             OpAmpFeedbackKind::NonInverting { rf, ri, feedback_diode, rf_pot, ri_pot } => {
@@ -536,16 +563,19 @@ pub(super) fn build_opamp_feedback_stages(
                     };
                     root.set_soft_clip(diode_vf);
                 }
-                let (tree, fb_pot_from_tree) =
+                let (tree, fb_pot_from_tree, fb_tree_edges_ni) =
                     if skip_tree {
-                        (None, None)
+                        (None, None, vec![])
                     } else {
                         match build_feedback_tree(info, graph, pedal, sample_rate) {
-                            Some((t, pot_id)) => (Some(t), pot_id),
-                            None => (None, None),
+                            Some((t, pot_id, edges)) => (Some(t), pot_id, edges),
+                            None => (None, None, vec![]),
                         }
                     };
                 let has_complex_fb_tree = tree.is_some();
+                if !skip_tree {
+                    consumed_edges.extend(fb_tree_edges_ni.iter().copied());
+                }
                 let (tree, fb_pot_from_tree) = match (tree, fb_pot_from_tree) {
                     (Some(t), pot_id) => (t, pot_id),
                     _ => {
@@ -620,6 +650,10 @@ pub(super) fn build_opamp_feedback_stages(
                 if !has_complex_fb_tree {
                     stage.balance_vs_impedance();
                 }
+                // Claim feedback edges: same logic as Inverting.
+                if !skip_tree || feedback_diode.is_none() {
+                    consumed_edges.extend(comp_ids_to_edge_indices(&info.feedback_comp_ids));
+                }
                 stages.push(stage);
             }
             OpAmpFeedbackKind::AllpassJfet { .. } => {
@@ -631,7 +665,7 @@ pub(super) fn build_opamp_feedback_stages(
         }
     }
 
-    (stages, diode_paired)
+    (stages, diode_paired, consumed_edges)
 }
 
 /// Build a queue of unity-gain op-amp roots for pairing with JFET stages.
@@ -720,14 +754,14 @@ pub(super) fn build_standalone_opamp_stages(
 }
 
 /// Try to build a WDF tree from the feedback network via SP reduction.
-/// Returns (tree, feedback_pot_id) or None if the network is too simple
-/// or SP reduction fails.
+/// Returns (tree, feedback_pot_id, feedback_edge_indices) or None if the
+/// network is too simple or SP reduction fails.
 fn build_feedback_tree(
     info: &OpAmpFeedbackInfo,
     graph: &CircuitGraph,
     pedal: &PedalDef,
     sample_rate: f64,
-) -> Option<(DynNode, Option<String>)> {
+) -> Option<(DynNode, Option<String>, Vec<usize>)> {
     if info.feedback_comp_ids.len() <= 1 {
         #[cfg(test)]
         eprintln!("[BUILD_FB_TREE] {} skipped: only {} feedback comps", info.comp_id, info.feedback_comp_ids.len());
@@ -822,7 +856,7 @@ fn build_feedback_tree(
                 .to_string()
         });
 
-    Some((tree, feedback_pot_id))
+    Some((tree, feedback_pot_id, feedback_edges))
 }
 
 /// Look up the taper of a potentiometer from the pedal definition.

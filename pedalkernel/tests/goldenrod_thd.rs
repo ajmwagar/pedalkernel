@@ -8,7 +8,7 @@ fn goldenrod_gain_affects_harmonics() {
     let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
     let sr = 48000.0;
     let freq = 440.0;
-    let amplitude = 0.1;
+    let amplitude = 0.03;
     let n_samples = 4096;
 
     let mut thd_values = Vec::new();

@@ -789,7 +789,9 @@ pub(super) fn plan_stages(
     graph: &CircuitGraph,
     sample_rate: f64,
     envelope_controlled_otas: &HashSet<String>,
-    opamp_feedback_edges: &HashSet<usize>,
+    claimed_edges: &mut HashSet<usize>,
+    opamp_input_nodes: &HashSet<NodeId>,
+    feedback_diode_neg_map: &HashMap<NodeId, NodeId>,
 ) -> (
     Vec<StagePlan>,
     Vec<PushPullPlan>,
@@ -949,7 +951,8 @@ pub(super) fn plan_stages(
                 true, // skip_out_node
                 &pp_transformer_edges,
                 &HashSet::new(),
-                opamp_feedback_edges,
+                claimed_edges,
+                opamp_input_nodes,
             );
 
             // Convert bjt_members to indices into bjt_terminals for bias detection.
@@ -1008,6 +1011,7 @@ pub(super) fn plan_stages(
                 graph,
                 &pp_transformer_edges,
             ) {
+                claimed_edges.extend(plan.passive_edge_indices.iter().copied());
                 multi_nl_plans.push(plan);
                 continue;
             }
@@ -1024,6 +1028,7 @@ pub(super) fn plan_stages(
                 &pp_transformer_edges,
                 &boundary_edges,
             ) {
+                claimed_edges.extend(plan.passive_edge_indices.iter().copied());
                 multi_nl_plans.push(plan);
                 continue;
             }
@@ -1037,6 +1042,7 @@ pub(super) fn plan_stages(
                 envelope_controlled_otas,
                 &pp_transformer_edges,
             ) {
+                claimed_edges.extend(plan.passive_edge_indices.iter().copied());
                 multi_nl_plans.push(plan);
                 continue;
             }
@@ -1051,8 +1057,11 @@ pub(super) fn plan_stages(
                 sample_rate,
                 &pp_transformer_edges,
                 &boundary_edges,
-                opamp_feedback_edges,
+                claimed_edges,
+                opamp_input_nodes,
+                feedback_diode_neg_map,
             ) {
+                claimed_edges.extend(plan.passive_idxs.iter().copied());
                 plans.push(plan);
             }
             source_node_offset += 1000;
@@ -1065,8 +1074,10 @@ pub(super) fn plan_stages(
                 &pp_transformer_edges,
                 &bjt_bias_analysis,
                 &boundary_edges,
-                opamp_feedback_edges,
+                claimed_edges,
+                opamp_input_nodes,
             ) {
+                claimed_edges.extend(plan.passive_edge_indices.iter().copied());
                 multi_nl_plans.push(plan);
             }
         }
@@ -1117,7 +1128,9 @@ fn plan_single_nl(
     sample_rate: f64,
     pp_transformer_edges: &HashSet<usize>,
     boundary_edges: &HashSet<usize>,
-    opamp_feedback_edges: &HashSet<usize>,
+    claimed_edges: &HashSet<usize>,
+    opamp_input_nodes: &HashSet<NodeId>,
+    feedback_diode_neg_map: &HashMap<NodeId, NodeId>,
 ) -> Option<StagePlan> {
     let is_two_junction = elem.junction_nodes.len() == 2;
 
@@ -1133,7 +1146,7 @@ fn plan_single_nl(
             boundary_edges,
         )
     } else {
-        plan_one_junction(elem, elem_idx, classified, graph, source_node_offset, pp_transformer_edges, boundary_edges, opamp_feedback_edges)
+        plan_one_junction(elem, elem_idx, classified, graph, source_node_offset, pp_transformer_edges, boundary_edges, claimed_edges, opamp_input_nodes, feedback_diode_neg_map)
     }
 }
 
@@ -1146,28 +1159,31 @@ fn plan_one_junction(
     source_node_offset: usize,
     _pp_transformer_edges: &HashSet<usize>,
     _boundary_edges: &HashSet<usize>,
-    opamp_feedback_edges: &HashSet<usize>,
+    claimed_edges: &HashSet<usize>,
+    opamp_input_nodes: &HashSet<NodeId>,
+    feedback_diode_neg_map: &HashMap<NodeId, NodeId>,
 ) -> Option<StagePlan> {
     let junction = elem.junction_nodes[0];
     let is_jfet = matches!(&elem.kind, NonlinearKind::Jfet { .. });
 
-    // Build exclusion set: NL edges + opamp feedback edges.
+    // Build exclusion set: NL edges + all globally claimed edges.
     // Boundary edges (coupling caps) are NOT excluded for 1-junction elements.
     // The diode BFS should traverse through coupling caps to reach the full
     // output chain (tone + volume). Active bridge barriers still prevent
     // crossing into adjacent active stages.
     let mut excluded: Vec<usize> = classified.all_nonlinear_edge_indices.clone();
-    excluded.extend(opamp_feedback_edges);
+    excluded.extend(claimed_edges.iter().copied());
 
     // Output-pin barrier nodes: Output pins of active/gain components
     // (opamp .out, BJT collector, triode plate, JFET drain) act as BFS
-    // barriers. Input pins (opamp neg/pos) are traversable, allowing BFS
-    // to reach feedback networks through them.
+    // barriers. Also include opamp neg/pos input pins (ALL opamps) to prevent
+    // BFS from wandering into adjacent opamp feedback networks.
     // Also include transistor input pins (JFET gate, BJT base) as barriers
     // to prevent gate/base bias resistors from being absorbed into this
     // stage's WDF tree (e.g. RAT R8 1MΩ gate bias masking Filter pot).
     let mut output_barriers = graph.output_pin_nodes.clone();
     output_barriers.extend(&graph.transistor_input_nodes);
+    output_barriers.extend(opamp_input_nodes);
     // The junction itself is reachable (we start there), so remove it.
     output_barriers.remove(&junction);
     // For diodes/MOSFETs: the NL element's other terminal is also traversable.
@@ -1176,6 +1192,22 @@ fn plan_one_junction(
     let nl_edge = &graph.edges[elem.edge_idx];
     let other_terminal = if nl_edge.node_a == junction { nl_edge.node_b } else { nl_edge.node_a };
     output_barriers.remove(&other_terminal);
+    // For feedback-diode opamps (Screamer, Blues Driver): the NL BFS for this
+    // specific diode must traverse through its PAIRED opamp's neg node to reach
+    // the opamp's feedback components (e.g. D1→U1.neg→R5/R6/C4 in Blues Driver).
+    // All OTHER feedback-diode opamp neg nodes are added as extra barriers to
+    // prevent cross-contamination (e.g., D1 walking through U2.neg → claiming
+    // R9/C6 that belong to D3/U2's stage).
+    //
+    // feedback_diode_neg_map: junction (opamp out_node) → opamp neg_node.
+    // The current element's paired neg node (if any) is NOT a barrier;
+    // all other feedback-diode opamp neg nodes ARE barriers.
+    let paired_neg: Option<NodeId> = feedback_diode_neg_map.get(&junction).copied();
+    for &neg_node in feedback_diode_neg_map.values() {
+        if Some(neg_node) != paired_neg {
+            output_barriers.insert(neg_node);
+        }
+    }
 
     // Multi-hop BFS from junction through passive edges with output-pin
     // barriers. Collects the full passive network: feedback components,
@@ -1210,11 +1242,31 @@ fn plan_one_junction(
             .map(|(idx, _)| idx)
             .collect();
 
-        let output_passives = graph.elements_at_junction(
-            graph.out_node,
-            &classified.all_nonlinear_edge_indices,
-            &graph.active_edge_indices,
-        );
+        // Check if junction_passives already reach out_node (e.g. RATKING:
+        // Q1.source → C9 → Volume → out). Only inspect junction_passives here
+        // (not output_passives) so that a common-source JFET whose drain
+        // connects to the next opamp stage is not incorrectly classified as a
+        // source follower merely because R_out (Level.w → out_node) exists.
+        let junction_reaches_output = !junction_to_output.is_empty()
+            || junction == graph.out_node
+            || junction_passives.iter().any(|&idx| {
+                let e = &graph.edges[idx];
+                e.node_a == graph.out_node || e.node_b == graph.out_node
+            });
+
+        // Only collect output-node passives (e.g. R_out) if the JFET's own
+        // junction passives already reach the output chain. For common-source
+        // JFETs (drain → coupling cap → next stage) this is false, so we skip
+        // output_passives and avoid stealing R14 from the Level/Tone chain.
+        let output_passives: Vec<usize> = if junction_reaches_output {
+            graph.elements_at_junction(
+                graph.out_node,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+            )
+        } else {
+            Vec::new()
+        };
 
         let mut passive_idxs = junction_passives;
         extend_dedup(&mut passive_idxs, &junction_to_output);
@@ -1782,7 +1834,8 @@ fn plan_multi_nl_group(
     pp_transformer_edges: &HashSet<usize>,
     _bjt_bias_analysis: &BjtBiasAnalysis,
     boundary_edges: &HashSet<usize>,
-    opamp_feedback_edges: &HashSet<usize>,
+    claimed_edges: &HashSet<usize>,
+    opamp_input_nodes: &HashSet<NodeId>,
 ) -> Option<MultiNlPlan> {
     if elem_indices.is_empty() {
         return None;
@@ -1797,7 +1850,7 @@ fn plan_multi_nl_group(
     });
 
     if all_diodes {
-        return plan_diode_bridge(elem_indices, classified, graph, pp_transformer_edges, opamp_feedback_edges);
+        return plan_diode_bridge(elem_indices, classified, graph, pp_transformer_edges, claimed_edges, opamp_input_nodes);
     }
 
     // Order by distance from input (signal-flow order).
@@ -1836,7 +1889,8 @@ fn plan_multi_nl_group(
         true, // skip_out_node
         pp_transformer_edges,
         boundary_edges,
-        opamp_feedback_edges,
+        claimed_edges,
+        opamp_input_nodes,
     );
 
     // Absorb output tail (coupling cap + volume pot, etc.) into this stage.
@@ -2036,6 +2090,7 @@ fn try_varimu_3port(
         pp_transformer_edges,
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
     );
 
     let exclude: HashSet<NodeId> =
@@ -2110,6 +2165,7 @@ fn try_bjt_two_port(
         true, // skip_out_node
         pp_transformer_edges,
         boundary_edges,
+        &HashSet::new(),
         &HashSet::new(),
     );
 
@@ -2258,6 +2314,7 @@ fn try_linearized_ota(
         pp_transformer_edges,
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
     );
 
     if all_passive_edges.is_empty() {
@@ -2305,7 +2362,8 @@ fn plan_diode_bridge(
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
     pp_transformer_edges: &HashSet<usize>,
-    opamp_feedback_edges: &HashSet<usize>,
+    claimed_edges: &HashSet<usize>,
+    opamp_input_nodes: &HashSet<NodeId>,
 ) -> Option<MultiNlPlan> {
     // Collect all terminal nodes from coupled diodes.
     let mut all_diode_nodes: HashSet<NodeId> = HashSet::new();
@@ -2337,8 +2395,13 @@ fn plan_diode_bridge(
 
     // BFS passive edges from ALL diode terminals, with skip_out_node=false
     // so that RC time constant edges touching out_node are collected.
-    // Non-diode active input pins (opamp neg) act as extra barriers to
-    // prevent BFS from crawling into upstream opamp ground legs.
+    // Non-diode active input pins (opamp neg) + opamp_input_nodes act as extra
+    // barriers to prevent BFS from crawling into upstream opamp ground legs.
+    let extra_barriers: HashSet<NodeId> = non_diode_active_input_pins
+        .iter()
+        .chain(opamp_input_nodes.iter())
+        .copied()
+        .collect();
     let mut all_passive_edges = collect_passive_edges_from_nodes_with_extra_barriers(
         &all_diode_nodes,
         graph,
@@ -2346,8 +2409,8 @@ fn plan_diode_bridge(
         false, // skip_out_node=false (bridge rectifier needs RC at output)
         pp_transformer_edges,
         &HashSet::new(),
-        opamp_feedback_edges,
-        &non_diode_active_input_pins,
+        claimed_edges,
+        &extra_barriers,
     );
 
     // Save original passive edges (before output tail) for injection node selection.
@@ -2726,9 +2789,10 @@ fn collect_passive_edges_from_nodes(
     skip_out_node: bool,
     pp_transformer_edges: &HashSet<usize>,
     boundary_edges: &HashSet<usize>,
-    opamp_feedback_edges: &HashSet<usize>,
+    claimed_edges: &HashSet<usize>,
+    opamp_input_nodes: &HashSet<NodeId>,
 ) -> Vec<usize> {
-    // Merge boundary edges and opamp feedback edges into the NL exclusion set
+    // Merge boundary edges and claimed edges into the NL exclusion set
     // so BFS won't cross them.
     let excluded: Vec<usize> = {
         let mut excl = classified.all_nonlinear_edge_indices.clone();
@@ -2737,7 +2801,7 @@ fn collect_passive_edges_from_nodes(
                 excl.push(be);
             }
         }
-        for &fe in opamp_feedback_edges {
+        for &fe in claimed_edges {
             if !excl.contains(&fe) {
                 excl.push(fe);
             }
@@ -2748,9 +2812,11 @@ fn collect_passive_edges_from_nodes(
     // Output-pin barriers prevent BFS from crossing into other active stages.
     // Also include transistor input pins to prevent bias resistors from
     // bleeding into this stage's WDF tree.
+    // Opamp neg/pos input pins of non-skip opamps act as additional barriers.
     // Remove the group's own junction nodes so BFS can start from them.
     let mut output_barriers = graph.output_pin_nodes.clone();
     output_barriers.extend(&graph.transistor_input_nodes);
+    output_barriers.extend(opamp_input_nodes);
     for &jn in junction_nodes {
         output_barriers.remove(&jn);
     }
@@ -2785,7 +2851,7 @@ fn collect_passive_edges_from_nodes_with_extra_barriers(
     skip_out_node: bool,
     pp_transformer_edges: &HashSet<usize>,
     boundary_edges: &HashSet<usize>,
-    opamp_feedback_edges: &HashSet<usize>,
+    claimed_edges: &HashSet<usize>,
     extra_barriers: &HashSet<NodeId>,
 ) -> Vec<usize> {
     let excluded: Vec<usize> = {
@@ -2795,7 +2861,7 @@ fn collect_passive_edges_from_nodes_with_extra_barriers(
                 excl.push(be);
             }
         }
-        for &fe in opamp_feedback_edges {
+        for &fe in claimed_edges {
             if !excl.contains(&fe) {
                 excl.push(fe);
             }
