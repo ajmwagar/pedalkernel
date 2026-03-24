@@ -3235,10 +3235,33 @@ pub(super) fn graph_reduce(
     // Pre-process: eliminate dead-end nodes once at the start
     // (same as old sp_reduce — NOT per-iteration, which incorrectly
     // reduces non-SP circuits like the RAT D1 diode stage).
-    // Output probe may be set here if the output_node is a dead-end
-    // (e.g. transistor input barrier node for tone filter extraction).
     let output_node = output_node.map(remap);
     let mut output_probe_comp_id: Option<String> = None;
+
+    // Before dead-end elimination: if output_node is degree-1 (a leaf in the
+    // passive network, e.g. R14 connecting Level.w to out_node), capture the
+    // probe component now. Dead-end elimination will collapse out_node into a
+    // terminal, and the main loop's series-reduction probe tracking won't fire
+    // for it. We must capture it here before the node disappears.
+    if let Some(on) = output_node {
+        if !terminals.contains(&on) {
+            let touching: Vec<usize> = edges.iter().enumerate()
+                .filter(|(_, e)| e.node_a == on || e.node_b == on)
+                .map(|(i, _)| i)
+                .collect();
+            if touching.len() == 1 {
+                let eidx = touching[0];
+                output_probe_comp_id = edges[eidx].tree.leaf_comp_id();
+                if output_probe_comp_id.is_none() {
+                    let tag = "__out_probe__".to_string();
+                    if edges[eidx].tree.tag_as_probe(&tag) {
+                        output_probe_comp_id = Some(tag);
+                    }
+                }
+            }
+        }
+    }
+
     eliminate_dead_ends(&mut edges, terminals);
 
     // 3. Main reduction loop.

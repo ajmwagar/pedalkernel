@@ -779,22 +779,210 @@ fn compile_goldenrod() {
     proc.set_control("Gain", 0.7);
     proc.set_control("Output", 0.5);
 
+    // Debug: show all stages and which ones contain the Output pot
+    for (i, s) in proc.stages.iter().enumerate() {
+        let mut pot_ids: Vec<String> = Vec::new();
+        super::helpers::collect_pot_ids(&s.tree, &mut pot_ids);
+        eprintln!("[goldenrod-debug] stage[{}] ff={} dist={} inj={} out={} pots={:?} root={} probe={:?}",
+            i, s.is_feedforward, s.signal_flow_distance, s.injection_node_id, s.output_node_id,
+            pot_ids, s.root_comp_id, s.output_probe);
+    }
+    eprintln!("[goldenrod-debug] stage_order={:?}", proc.stage_order);
+    // Dump Output pot stage WDF tree to understand Output pot structure
+    for (i, s) in proc.stages.iter().enumerate() {
+        let mut pot_ids: Vec<String> = Vec::new();
+        super::helpers::collect_pot_ids(&s.tree, &mut pot_ids);
+        if pot_ids.iter().any(|id| id.contains("Output")) {
+            eprintln!("[goldenrod-debug] stage[{i}] Output tree:");
+            dump_tree(&s.tree, 1);
+        }
+    }
+    // Debug compiled proc metadata
+    eprintln!("[goldenrod-debug] n_opamp_stages={} n_slew={} has_dc_block={} output_gain={:.3} supply_voltage={:.1}",
+        proc.opamp_stages.len(), proc.slew_limiters.len(),
+        proc.output_dc_block.is_some(), proc.output_gain, proc.supply_voltage);
+    // Debug controls to verify Output pot is bound correctly
+    for (ci, c) in proc.controls.iter().enumerate() {
+        eprintln!("[goldenrod-debug] control[{}] label={} target={:?}", ci, c.label, c.target);
+    }
+    // Also print node_signals after processing a sample to understand what's in them
+    {
+        proc.set_control("Output", 0.5);
+        for i in 0..100 {
+            let x = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            proc.process(x);
+        }
+        let x = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * 100.0 / 48000.0).sin();
+        // Can't easily inspect node_signals without modifying compiled.rs
+        // Instead, test Output pot sweep to see effect magnitude
+        proc.set_control("Output", 0.1);
+        let mut v1 = 0.0f64;
+        for _ in 0..100 {
+            v1 = proc.process(x);
+        }
+        proc.set_control("Output", 0.9);
+        let mut v2 = 0.0f64;
+        for _ in 0..100 {
+            v2 = proc.process(x);
+        }
+            eprintln!("[goldenrod-debug] Quick sweep: Out=0.1->{:.4e} Out=0.9->{:.4e} ratio={:.2}", v1, v2, v2.abs()/(v1.abs()+1e-10));
+        // Directly test Output stage (stage with Output pots) in isolation
+        for (i, _) in proc.stages.iter().enumerate() {
+            let mut pot_ids: Vec<String> = Vec::new();
+            super::helpers::collect_pot_ids(&proc.stages[i].tree, &mut pot_ids);
+            if pot_ids.iter().any(|id| id.contains("Output")) {
+                eprintln!("[goldenrod-debug] Output stage is stage[{i}]");
+                // Warm up with 100 samples
+                for k in 0..100 {
+                    let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * k as f64 / 48000.0).sin();
+                    proc.stages[i].process(s);
+                }
+                // Test at Out=0.1 (after taper+range: aw≈7710, wb≈2290)
+                proc.stages[i].tree.set_pot("Output__aw", 0.771); proc.stages[i].tree.recompute();
+                proc.stages[i].tree.set_pot("Output__wb", 0.229); proc.stages[i].tree.recompute();
+                let s_fixed = 0.3;
+                for _ in 0..50 { proc.stages[i].process(s_fixed); }
+                let v_lo = proc.stages[i].process(s_fixed);
+                eprintln!("[goldenrod-debug] Stage tree Rp (Out=0.1, aw=7710): {:.1}", proc.stages[i].tree.port_resistance());
+                // Test at Out=0.9 (after taper+range: aw≈288, wb≈9712)
+                proc.stages[i].tree.set_pot("Output__aw", 0.0288); proc.stages[i].tree.recompute();
+                proc.stages[i].tree.set_pot("Output__wb", 0.9712); proc.stages[i].tree.recompute();
+                for _ in 0..50 { proc.stages[i].process(s_fixed); }
+                let v_hi = proc.stages[i].process(s_fixed);
+                eprintln!("[goldenrod-debug] Stage tree Rp (Out=0.9, aw=288): {:.1}", proc.stages[i].tree.port_resistance());
+                eprintln!("[goldenrod-debug] Stage-isolated: Out=0.1(aw=7710)->v_lo={:.4e}  Out=0.9(aw=288)->v_hi={:.4e}  ratio={:.2}", v_lo, v_hi, v_hi.abs()/(v_lo.abs()+1e-10));
+                break;
+            }
+        }
+    }
+
     let input = sine(48000);
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     assert_finite(&output, "Goldenrod");
     let peak_mid = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
     assert!(peak_mid > 0.001, "Goldenrod should produce output: peak={peak_mid}");
 
-    // Verify Output pot affects level (use longer run for smoother convergence)
-    proc.set_control("Output", 0.1);
-    let long_input: Vec<f64> = (0..2048)
+    // Verify Output pot affects level: compile two separate instances at different Output settings.
+    // Using separate instances avoids smoother convergence issues and capacitor state contamination.
+    let long_input: Vec<f64> = (0..4800)
         .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
         .collect();
-    let output_lo: Vec<f64> = long_input.iter().map(|&s| proc.process(s)).collect();
-    let peak_lo = output_lo[1024..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
-    proc.set_control("Output", 0.9);
-    let output_hi: Vec<f64> = long_input.iter().map(|&s| proc.process(s)).collect();
-    let peak_hi = output_hi[1024..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    let peak_lo = {
+        let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+        p.set_control("Gain", 0.7);
+        p.set_control("Output", 0.1);
+        // Run enough samples for smoother to settle (5x TC = 5*480=2400 samples)
+        let output: Vec<f64> = long_input.iter().map(|&s| p.process(s)).collect();
+        eprintln!("[goldenrod-debug] lo-instance: output_gain={:.4} supply={:.1}", p.output_gain, p.supply_voltage);
+        output[2400..].iter().fold(0.0f64, |m, x| m.max(x.abs()))
+    };
+    let peak_hi = {
+        let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+        p.set_control("Gain", 0.7);
+        p.set_control("Output", 0.9);
+        let output: Vec<f64> = long_input.iter().map(|&s| p.process(s)).collect();
+        eprintln!("[goldenrod-debug] hi-instance: output_gain={:.4} supply={:.1}", p.output_gain, p.supply_voltage);
+        output[2400..].iter().fold(0.0f64, |m, x| m.max(x.abs()))
+    };
+    eprintln!("[goldenrod-debug] Long run: peak_lo(Out=0.1)={:.4e} peak_hi(Out=0.9)={:.4e} ratio={:.2}", peak_lo, peak_hi, peak_hi/peak_lo);
+    // Pre-output_gain values (using the separate instance output_gain values):
+    // These show what the rail_sat outputs (approximately, both have same output_gain)
+    let gain = 0.2763_f64;  // from above
+    eprintln!("[goldenrod-debug] Pre-output_gain: lo={:.4e} hi={:.4e}", peak_lo/gain, peak_hi/gain);
+    // Also measure with low amplitude input to check if rail saturation is causing compression
+    let low_amp_input: Vec<f64> = (0..4800)
+        .map(|i| 0.05 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let (peak_lo_low, peak_hi_low) = {
+        let lo = {
+            let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+            p.set_control("Gain", 0.7);
+            p.set_control("Output", 0.1);
+            let out: Vec<f64> = low_amp_input.iter().map(|&s| p.process(s)).collect();
+            out[2400..].iter().fold(0.0f64, |m, x| m.max(x.abs()))
+        };
+        let hi = {
+            let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+            p.set_control("Gain", 0.7);
+            p.set_control("Output", 0.9);
+            let out: Vec<f64> = low_amp_input.iter().map(|&s| p.process(s)).collect();
+            out[2400..].iter().fold(0.0f64, |m, x| m.max(x.abs()))
+        };
+        (lo, hi)
+    };
+    eprintln!("[goldenrod-debug] Low-amp (0.05) run: peak_lo={:.4e} peak_hi={:.4e} ratio={:.2}", peak_lo_low, peak_hi_low, peak_hi_low/peak_lo_low);
+    // Check: what signal does the Output stage receive in the full pipeline?
+    {
+        let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+        p.set_control("Gain", 0.7);
+        p.set_control("Output", 0.5);
+        // Find Output stage index
+        let out_si = (0..p.stages.len()).find(|&i| {
+            let mut pids = Vec::new();
+            super::helpers::collect_pot_ids(&p.stages[i].tree, &mut pids);
+            pids.iter().any(|id| id.contains("Output__aw"))
+        });
+        // Settle for 2400 samples
+        for i in 0..2400 {
+            let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            p.process(s);
+        }
+        // Trace the signal at sample 2400
+        let s_trace = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * 2400.0 / 48000.0).sin();
+        // Manually trace the pipeline
+        let mut signal = s_trace * p.pre_gain;
+        eprintln!("[goldenrod-debug] Pipeline trace: input={:.4e} pre_gain={:.3}", s_trace, p.pre_gain);
+        // We can't easily trace the pipeline without modifying compiled.rs
+        // But we can see what output the full pipeline gives vs raw stage
+        let full_out = p.process(s_trace);
+        eprintln!("[goldenrod-debug] full pipeline output at sample 2400: {:.4e}", full_out);
+        if let Some(si) = out_si {
+            eprintln!("[goldenrod-debug] Output stage[{si}] is ff={}", p.stages[si].is_feedforward);
+        }
+    }
+
+    // If ratio is low, check what the raw stage output is (before rail sat etc.)
+    // by running just the Output stage in isolation with settled pot:
+    {
+        let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+        p.set_control("Gain", 0.7);
+        p.set_control("Output", 0.5);
+        // Settle for 2400 samples
+        for i in 0..2400 {
+            let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            p.process(s);
+        }
+        // Find the Output stage index
+        let out_si = (0..p.stages.len()).find(|&i| {
+            let mut pids = Vec::new();
+            super::helpers::collect_pot_ids(&p.stages[i].tree, &mut pids);
+            pids.iter().any(|id| id.contains("Output__aw"))
+        });
+        if let Some(si) = out_si {
+            // Set pot directly to Out=0.1 settled value
+            p.stages[si].tree.set_pot("Output__aw", 0.771);
+            p.stages[si].tree.set_pot("Output__wb", 0.229);
+            p.stages[si].tree.recompute();
+            // Process 50 samples and get peak
+            let mut peak_lo_raw = 0.0f64;
+            for i in 2400..2450 {
+                let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+                let v = p.stages[si].process(s);
+                peak_lo_raw = peak_lo_raw.max(v.abs());
+            }
+            // Set pot directly to Out=0.9 settled value
+            p.stages[si].tree.set_pot("Output__aw", 0.0288);
+            p.stages[si].tree.set_pot("Output__wb", 0.9712);
+            p.stages[si].tree.recompute();
+            let mut peak_hi_raw = 0.0f64;
+            for i in 2450..2500 {
+                let s = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+                let v = p.stages[si].process(s);
+                peak_hi_raw = peak_hi_raw.max(v.abs());
+            }
+            eprintln!("[goldenrod-debug] Raw stage output: lo={:.4e} hi={:.4e} ratio={:.2}", peak_lo_raw, peak_hi_raw, peak_hi_raw/(peak_lo_raw+1e-10));
+        }
+    }
     assert!(peak_hi > peak_lo * 1.5, "Output pot should affect level: hi={peak_hi} lo={peak_lo}");
 }
 

@@ -704,47 +704,6 @@ fn rescue_orphan_output_pots(
     (Vec::new(), Vec::new())
 }
 
-/// Collect all edge indices that are claimed by existing stages.
-///
-/// Returns the union of edges used by NL stages, multi-NL stages, opamp feedback,
-/// active bridges, push-pull transformers, sidechain, and orphan output pots.
-fn collect_claimed_edges(
-    stage_plans: &[super::plan::StagePlan],
-    multi_nl_plans: &[super::plan::MultiNlPlan],
-    opamp_feedback_edges: &HashSet<usize>,
-    classified: &super::classify::ClassifiedCircuit,
-    graph: &CircuitGraph,
-    pp_transformer_edges: &HashSet<usize>,
-    orphan_output_edges: &[usize],
-    fallback_claimed_edges: &[usize],
-) -> HashSet<usize> {
-    let mut claimed = HashSet::new();
-
-    // NL stage passives
-    for plan in stage_plans {
-        claimed.extend(plan.passive_idxs.iter().copied());
-    }
-    // Multi-NL stage passives
-    for plan in multi_nl_plans {
-        claimed.extend(plan.passive_edge_indices.iter().copied());
-    }
-    // Opamp feedback components
-    claimed.extend(opamp_feedback_edges.iter().copied());
-    // Nonlinear device edges
-    claimed.extend(classified.all_nonlinear_edge_indices.iter().copied());
-    // Active bridge edges (opamp/BJT virtual edges)
-    claimed.extend(graph.active_edge_indices.iter().copied());
-    // Push-pull transformer edges
-    claimed.extend(pp_transformer_edges.iter().copied());
-    // Sidechain edges
-    claimed.extend(classified.sidechain_edge_set.iter().copied());
-    // Orphan output pot edges
-    claimed.extend(orphan_output_edges.iter().copied());
-    // Build-time fallback edges (diode/triode MNA fallback BFS)
-    claimed.extend(fallback_claimed_edges.iter().copied());
-
-    claimed
-}
 
 /// Build feedforward passive stages for orphaned subgraphs that bridge
 /// two active nodes (e.g., clean blend paths in the Klon Centaur).
@@ -817,16 +776,41 @@ fn build_feedforward_stages(
         }
     }
 
+    // Global reference nodes: GND, VCC, and any named supply rails.
+    // Edges that have one terminal at a global node are shunt-to-rail components
+    // (e.g. R_out1 to GND, R_bias2 to GND). We must NOT union across these
+    // global nodes or every passive sub-network in the circuit gets merged
+    // into one giant component (output chain ↔ gain-stage ground leg, etc.).
+    let global_junction_nodes: HashSet<NodeId> = {
+        let mut g = graph.supply_nodes.clone();
+        g.insert(graph.gnd_node);
+        g.insert(graph.vcc_node);
+        g
+    };
+
     for &eidx in &unclaimed {
         let e = &graph.edges[eidx];
-        union(&mut parent, e.node_a, e.node_b);
+        // Only union when NEITHER endpoint is a global node.
+        let a_is_global = global_junction_nodes.contains(&e.node_a);
+        let b_is_global = global_junction_nodes.contains(&e.node_b);
+        if !a_is_global && !b_is_global {
+            union(&mut parent, e.node_a, e.node_b);
+        }
     }
 
     // Group edges by their component root
     let mut components: HashMap<NodeId, Vec<usize>> = HashMap::new();
     for &eidx in &unclaimed {
         let e = &graph.edges[eidx];
-        let root = find(&mut parent, e.node_a);
+        // Assign each edge to the component root of its non-global node.
+        // For shunt-to-gnd/vcc edges, use the non-global side's root so the
+        // edge appears in the correct sub-network (not in a global-only group).
+        let root_node = if global_junction_nodes.contains(&e.node_a) {
+            e.node_b
+        } else {
+            e.node_a
+        };
+        let root = find(&mut parent, root_node);
         components.entry(root).or_default().push(eidx);
     }
 
@@ -868,6 +852,13 @@ fn build_feedforward_stages(
     let mut result = Vec::new();
 
     for edges in components.values() {
+        #[cfg(test)]
+        {
+            let edge_names: Vec<String> = edges.iter().map(|&eidx| {
+                graph.components[graph.edges[eidx].comp_idx].id.clone()
+            }).collect();
+            eprintln!("[ff-stages] component edges={:?}", edge_names);
+        }
         // Collect all nodes in this subgraph
         let mut subgraph_nodes: HashSet<NodeId> = HashSet::new();
         for &eidx in edges {
@@ -1591,7 +1582,7 @@ pub fn compile_pedal_with_options(
     // Build op-amp feedback stages (inverting, non-inverting).
     // Diode-paired opamps are returned separately for pairing with DiodePair stages.
     let mut stages: Vec<WdfStage> = Vec::new();
-    let (mut opamp_feedback_stages, diode_paired_opamps) = super::opamp_analysis::build_opamp_feedback_stages(
+    let (mut opamp_feedback_stages, diode_paired_opamps, opamp_consumed_edges) = super::opamp_analysis::build_opamp_feedback_stages(
         &opamp_analysis,
         pedal,
         &graph,
@@ -1601,6 +1592,7 @@ pub fn compile_pedal_with_options(
         &skip_feedback_tree_opamps,
         &nl_junction_nodes,
     );
+    let mut claimed_edges: HashSet<usize> = opamp_consumed_edges;
     // Apply oversampling rate to opamp feedback stages.
     // The OpAmpRoot GBW filter and slew rate limiter are initialized at base_rate
     // but run inside the oversampler at effective_rate. Without this correction,
@@ -1649,51 +1641,49 @@ pub fn compile_pedal_with_options(
     // Detect modulation-controlled elements before planning.
     let envelope_controlled_otas = detect_envelope_controlled_otas(pedal);
 
-    // Collect edge indices for opamp feedback path components so the
-    // multi-NL planner won't BFS through them (prevents pot duplication).
-    // Exclude opamps that share junctions with NL elements — their feedback
-    // components stay with the NL stage.
-    let opamp_feedback_edges: HashSet<usize> = {
-        let mut comp_ids: HashSet<String> = HashSet::new();
-        for info in &opamp_analysis.feedback_loops {
-            // Determine whether this opamp's feedback components must be claimed
-            // regardless of skip_feedback_tree status.
-            //
-            // Opamps whose feedback kind is independent of NL element pairing
-            // (Allpass, InvertingShelving, UnityGain) must always claim their
-            // feedback edges. If they are left unclaimed when the opamp is also
-            // in skip_feedback_tree_opamps (e.g. from a 1-hop NL-junction bridge),
-            // the NL BFS absorbs their feedback resistors/caps/pots into the
-            // multi-NL passive network, creating orphan feedforward stages that
-            // bypass downstream Volume/Tone pots.
-            //
-            // Inverting opamps that are in skip_feedback_tree_opamps are
-            // genuinely paired with an NL solver stage (Tube Screamer, Blues-
-            // breaker). Their feedback components (including gain pots like Drive)
-            // must remain unclaimed so the NL BFS can incorporate them.
-            let always_claim = matches!(
-                info.feedback_kind,
-                super::graph::OpAmpFeedbackKind::Allpass { .. }
-                    | super::graph::OpAmpFeedbackKind::InvertingShelving { .. }
-                    | super::graph::OpAmpFeedbackKind::BridgedTResonator { .. }
-                    | super::graph::OpAmpFeedbackKind::UnityGain
-            );
-            let skip = skip_feedback_tree_opamps.contains(&info.comp_id);
-            if always_claim || !skip {
-                comp_ids.extend(info.feedback_comp_ids.iter().cloned());
-            }
-        }
-        graph
-            .edges
+    // Opamp neg/pos input pins used as BFS barriers in plan_one_junction and
+    // collect_passive_edges_from_nodes. This prevents NL BFS from traversing
+    // into summing/feedforward networks at opamp inputs (e.g. Goldenrod
+    // R_ff1b, R_ff2, R_sum_fb attached to U3.neg).
+    //
+    // We add neg/pos as barriers for ALL opamps EXCEPT those where the opamp
+    // has a feedback_diode (i.e. diodes ARE in the neg→out feedback path).
+    // For feedback-diode opamps (Tube Screamer, Blues Driver, Klon/Bluesbreaker
+    // gain stages), the NL BFS must traverse through neg to find the feedback
+    // components — so their neg nodes must remain traversable.
+    //
+    // Opamps that are skip_tree due to 1-hop adjacency only (e.g. Goldenrod U3
+    // where R_clip bridges diode junction to U3.neg, but the diodes are NOT in
+    // U3's feedback path) still get barriers, preventing BFS from wandering
+    // into the summing/feedforward network at U3.neg.
+    // Non-feedback-diode opamp neg/pos nodes are BFS barriers. This prevents
+    // NL element BFS from traversing into opamp feedback networks (e.g.
+    // Goldenrod R_ff1b, R_ff2, R_sum_fb at U3.neg).
+    //
+    // Feedback-diode opamp neg nodes are handled per-call via
+    // feedback_diode_neg_map: each diode's BFS adds ALL OTHER feedback-diode
+    // opamp neg nodes as extra barriers, preventing cross-contamination
+    // (e.g., D1 in Blues Driver claiming R9/C6 that belong to U2/D3).
+    let opamp_input_nodes: HashSet<super::graph::NodeId> = opamp_analysis
+        .feedback_loops
+        .iter()
+        .filter(|info| !info.has_feedback_diode())
+        .flat_map(|info| [info.neg_node, info.pos_node])
+        .collect();
+
+    // Map: diode junction (= opamp out_node) → opamp neg_node.
+    // Used in plan_one_junction to add "foreign" feedback-diode opamp neg
+    // nodes as BFS barriers. Each feedback-diode BFS sees its own paired
+    // opamp's neg as traversable, but all other feedback-diode opamp neg
+    // nodes are barriers — preventing D1 from walking through U2.neg.
+    let feedback_diode_neg_map: HashMap<super::graph::NodeId, super::graph::NodeId> =
+        diode_paired_opamps
             .iter()
-            .enumerate()
-            .filter(|(_, e)| comp_ids.contains(&graph.components[e.comp_idx].id))
-            .map(|(idx, _)| idx)
-            .collect()
-    };
+            .map(|dp| (dp.out_node, dp.neg_node))
+            .collect();
 
     let (stage_plans, push_pull_plans, multi_nl_plans, pp_transformer_edges, _bjt_bias_analysis, node_island_depths) =
-        super::plan::plan_stages(&classified, &graph, sample_rate, &envelope_controlled_otas, &opamp_feedback_edges);
+        super::plan::plan_stages(&classified, &graph, sample_rate, &envelope_controlled_otas, &mut claimed_edges, &opamp_input_nodes, &feedback_diode_neg_map);
 
     // Now set signal_flow_distance on opamp feedback stages using island depths.
     // This must happen after plan_stages which computes node_island_depths.
@@ -1791,16 +1781,15 @@ pub fn compile_pedal_with_options(
 
     // ══ Orphan feedforward path compilation ═══════════════════════════
     if !stages.is_empty() || !multi_nl_stages.is_empty() {
-        let mut claimed_edges = collect_claimed_edges(
-            &stage_plans,
-            &multi_nl_plans,
-            &opamp_feedback_edges,
-            &classified,
-            &graph,
-            &pp_transformer_edges,
-            &orphan_output_edges,
-            &fallback_claimed_edges,
-        );
+        // claimed_edges already contains: opamp feedback edges (from build_opamp_feedback_stages)
+        // + StagePlan passive edges + MultiNlPlan passive edges (accumulated in plan_stages).
+        // Extend with the remaining fixed sets.
+        claimed_edges.extend(classified.all_nonlinear_edge_indices.iter().copied());
+        claimed_edges.extend(graph.active_edge_indices.iter().copied());
+        claimed_edges.extend(pp_transformer_edges.iter().copied());
+        claimed_edges.extend(classified.sidechain_edge_set.iter().copied());
+        claimed_edges.extend(orphan_output_edges.iter().copied());
+        claimed_edges.extend(fallback_claimed_edges.iter().copied());
 
         // Claim opamp input passives (coupling caps, bias resistors at
         // pos/neg pins). Only for non-inverting opamps where pos is the
