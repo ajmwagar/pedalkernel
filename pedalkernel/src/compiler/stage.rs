@@ -531,6 +531,18 @@ pub(super) struct InputPhotocoupler {
 }
 
 impl WdfStage {
+    /// Check if any DynNode tree in this stage contains a pot with the given ID.
+    pub(super) fn has_pot(&self, pot_id: &str) -> bool {
+        use super::helpers::has_pot;
+        if has_pot(&self.tree, pot_id) { return true; }
+        if let Some(ref zf) = self.zf_child { if has_pot(zf, pot_id) { return true; } }
+        if let Some(ref zg) = self.zg_child { if has_pot(zg, pot_id) { return true; } }
+        if let RootKind::PassiveRType { children, .. } = &self.root {
+            if children.iter().any(|c| has_pot(c, pot_id)) { return true; }
+        }
+        false
+    }
+
     /// Process one sample through the WDF tree with oversampling.
     ///
     /// The oversampler wraps the entire WDF scatter-up → root solve →
