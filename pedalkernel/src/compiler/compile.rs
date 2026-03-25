@@ -2649,8 +2649,12 @@ pub fn compile_pedal_with_options(
     };
     compiled.set_supply_voltage(initial_voltage);
 
-    // Auto-calibrate output level if requested by pedal definition
+    // Auto-calibrate input and output levels if requested by pedal definition
     if pedal.calibrate {
+        let input_atten = calibrate_input_level(&mut compiled);
+        compiled.pre_gain *= input_atten;
+        compiled.reset();
+
         let output_gain = calibrate_output_gain(&mut compiled);
         compiled.output_gain = output_gain;
         compiled.reset();
@@ -2801,8 +2805,22 @@ fn topological_refine_stage_order(
     result
 }
 
-/// Process a reference signal through the pedal and compute a gain scalar
-/// that normalizes output RMS to match input RMS.
+/// Input attenuation: map 0dBFS DAW signal to guitar pickup level.
+///
+/// Guitar pickups output ~100-200mV peak. Pedal circuits are designed
+/// for this range. We attenuate so 0dBFS (1.0) maps to 100mV (0.1).
+/// Output calibration then compensates to restore unity gain.
+///
+/// Returns attenuation factor to multiply pre_gain by.
+fn calibrate_input_level(_pedal: &mut CompiledPedal) -> f64 {
+    // Single-coil average: ~50-80mV RMS, peak ~100mV.
+    // But pedal circuits have internal gain stages (opamp, transistor)
+    // that amplify before nonlinear elements. To preserve the full
+    // dynamic range of the gain control, use a conservative level
+    // that keeps the circuit below saturation at minimum gain.
+    0.03
+}
+
 fn calibrate_output_gain(pedal: &mut CompiledPedal) -> f64 {
     use std::f64::consts::PI;
 
