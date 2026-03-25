@@ -548,6 +548,50 @@ impl WdfStage {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
 
+        // ── 3-port opamp adaptor path ──
+        // When zf_child + zg_child + opamp_adaptor are set, use the 3-port
+        // WDF adaptor instead of the standard single-tree path. This models
+        // both feedback (Zf) and ground-leg (Zg) impedance networks with
+        // proper frequency-dependent scattering.
+        if self.opamp_adaptor.is_some() {
+            let adaptor = self.opamp_adaptor.as_mut().unwrap();
+            let zf = self.zf_child.as_mut().unwrap();
+            let zg = self.zg_child.as_mut().unwrap();
+
+            // Up-sweep: get reflected waves from both subtrees
+            let b_f = zf.reflected();
+            let b_g = zg.reflected();
+
+            // Scatter to adapted port
+            let b_adapted = adaptor.scatter_up(&[b_f, b_g]);
+
+            // OpAmp root processes the adapted wave
+            let RootKind::OpAmp(ref mut op) = &mut self.root else {
+                unreachable!("3-port adaptor requires OpAmp root");
+            };
+            op.set_vp(input * self.compensation);
+            let rp = adaptor.port_resistance;
+            let a_adapted = op.process(b_adapted, rp);
+
+            // Down-sweep: distribute to children
+            let a_children = adaptor.scatter_down(a_adapted);
+            zf.set_incident(a_children[0]);
+            zg.set_incident(a_children[1]);
+
+            // Output = voltage at adapted port (out→gnd = V_out)
+            let mut output = (a_adapted + b_adapted) / 2.0;
+
+            // DC block (IIR highpass: y[n] = b0*(x[n]-x[n-1]) + a1*y[n-1])
+            if let Some((a1, b0, ref mut y_prev, ref mut x_prev)) = self.dc_block {
+                let y = b0 * (output - *x_prev) + a1 * *y_prev;
+                *x_prev = output;
+                *y_prev = flush_denormal(y);
+                return *y_prev;
+            }
+
+            return flush_denormal(output);
+        }
+
         // Borrow fields individually to satisfy the borrow checker
         let tree = &mut self.tree;
         let root = &mut self.root;

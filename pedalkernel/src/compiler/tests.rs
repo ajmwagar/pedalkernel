@@ -5371,6 +5371,7 @@ fn diag_ratking_pots() {
 
         let measure = |vol: f64| -> f64 {
             let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+            eprintln!("[RATKING] pre_gain={:.6} output_gain={:.6}", p.pre_gain, p.output_gain);
             p.set_control("Volume", vol);
             p.set_control("Distortion", 0.5);
             p.set_control("Filter", 0.5);

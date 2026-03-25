@@ -1155,14 +1155,18 @@ fn classify_opamp(
             } else {
                 ctx.find_ground_leg_path(neg_node, gnd_target)?
             };
-        // Collect ground-leg passive components too.
+        // Collect ground-leg passive components (neg → gnd), kept SEPARATE from Zf.
+        // feedback_comp_ids = Zf only (neg→out).  ground_leg_comp_ids = Zg only (neg→gnd).
+        // all_fb_comps BFS from neg→out also picks up Zg components because they
+        // share the neg node. Subtract ground-leg comps to get Zf-only.
         let gnd_leg_comps = ctx.collect_passive_comps_between(neg_node, gnd_target);
-        let mut fb_comps = all_fb_comps.clone();
-        for c in gnd_leg_comps {
-            if !fb_comps.contains(&c) {
-                fb_comps.push(c);
-            }
-        }
+        let gnd_leg_set: std::collections::HashSet<&str> =
+            gnd_leg_comps.iter().map(|s| s.as_str()).collect();
+        let fb_comps: Vec<String> = all_fb_comps
+            .iter()
+            .filter(|id| !gnd_leg_set.contains(id.as_str()))
+            .cloned()
+            .collect();
         return Some(OpAmpFeedbackInfo {
             comp_id: comp_id.to_string(),
             opamp_type,
@@ -1179,7 +1183,7 @@ fn classify_opamp(
             feedback_comp_ids: fb_comps,
             input_photocoupler_ids: Vec::new(),
             input_fixed_r: 0.0,
-            ground_leg_comp_ids: Vec::new(),
+            ground_leg_comp_ids: gnd_leg_comps,
         });
     }
 

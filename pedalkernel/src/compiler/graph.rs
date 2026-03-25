@@ -2413,8 +2413,18 @@ impl CircuitGraph {
                         // to another stage (e.g. Bluesbreaker Gain pot wiper → IC1b).
                         let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &pot_wiper_nodes);
                         // feedback_comp_ids = Zf only (neg→out).  ground_leg_comp_ids = Zg only (neg→gnd).
-                        // Both sets get claimed in consumed_edges so MultiNl BFS doesn't grab them.
-                        let fb_comps = all_fb_comps.clone();
+                        // all_fb_comps BFS from neg→out also picks up Zg components because they
+                        // share the neg node. Subtract ground-leg comps to get Zf-only.
+                        #[cfg(test)]
+                        eprintln!("[GRAPH_NI] all_fb={:?} gnd_leg={:?}", all_fb_comps, gnd_leg_comps);
+                        let gnd_leg_set: HashSet<&str> = gnd_leg_comps.iter().map(|s| s.as_str()).collect();
+                        let fb_comps: Vec<String> = all_fb_comps
+                            .iter()
+                            .filter(|id| !gnd_leg_set.contains(id.as_str()))
+                            .cloned()
+                            .collect();
+                        #[cfg(test)]
+                        eprintln!("[GRAPH_NI] fb_comps_zf_only={:?}", fb_comps);
                         // Check for feedback diodes (clipping in feedback path)
                         let feedback_diode = find_feedback_diode(neg_node, out_node);
 
@@ -2582,22 +2592,55 @@ impl CircuitGraph {
                                 };
                             let gnd_leg_barriers: HashSet<usize> = no_extra_fb.iter().chain(pot_wiper_nodes.iter()).copied().collect();
                             let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &gnd_leg_barriers);
+                            // Zf only = reactive_fb_comps minus Zg components.
+                            // reactive_fb_comps BFS from neg→out picks up Zg components
+                            // that also connect at neg (e.g. R4, C5, R5, C6 in the RAT).
+                            // Remove them so feedback_comp_ids is truly Zf-only.
+                            let gnd_leg_set: HashSet<&str> = gnd_leg_comps.iter().map(|s| s.as_str()).collect();
+                            let zf_comps: Vec<String> = reactive_fb_comps
+                                .iter()
+                                .filter(|id| !gnd_leg_set.contains(id.as_str()))
+                                .cloned()
+                                .collect();
+                            // Recompute rf_estimate and rf_pot_info from Zf-only components.
+                            let zf_rf_estimate = zf_comps.iter()
+                                .filter_map(|id| {
+                                    resistor_nodes.iter().find(|r| r.id == *id).map(|r| r.resistance)
+                                })
+                                .fold(0.0_f64, f64::max)
+                                .max(1000.0);
+                            let zf_fixed_series_r: f64 = zf_comps.iter()
+                                .filter_map(|id| {
+                                    resistor_nodes.iter().find(|r| r.id == *id && !r.is_pot)
+                                        .map(|r| r.resistance)
+                                })
+                                .sum();
+                            let zf_rf_pot_info: Option<(String, f64, f64, Option<f64>)> = zf_comps.iter()
+                                .find_map(|id| {
+                                    let base = id.strip_suffix("__aw").or_else(|| id.strip_suffix("__wb")).unwrap_or(id);
+                                    pedal.components.iter().find(|c| c.id == base && c.kind.pot_taper().is_some())
+                                        .map(|_| {
+                                            resistor_nodes.iter().find(|r| r.id == *id && r.is_pot)
+                                                .map(|r| (base.to_string(), r.max_r, zf_fixed_series_r, None))
+                                        })
+                                        .flatten()
+                                });
                             // Keep Zf (neg→out) and Zg (neg→gnd) separate for 3-port adaptor.
                             let feedback_diode = find_feedback_diode(neg_node, out_node);
                             results.push(OpAmpFeedbackInfo {
                                 comp_id: comp.id.clone(),
                                 opamp_type,
                                 feedback_kind: OpAmpFeedbackKind::NonInverting {
-                                    rf: rf_estimate,
+                                    rf: zf_rf_estimate,
                                     ri,
                                     feedback_diode,
-                                    rf_pot: rf_pot_info,
+                                    rf_pot: zf_rf_pot_info,
                                     ri_pot,
                                 },
                                 neg_node,
                                 pos_node,
                                 out_node,
-                                feedback_comp_ids: reactive_fb_comps.clone(),
+                                feedback_comp_ids: zf_comps,
                                 ground_leg_comp_ids: gnd_leg_comps,
                                 input_photocoupler_ids: Vec::new(),
                                 input_fixed_r: 0.0,
