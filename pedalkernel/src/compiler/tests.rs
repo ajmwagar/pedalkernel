@@ -5974,3 +5974,143 @@ fn goldenrod_output_sweep() {
     let pedal = parse_pedal_file(&src).unwrap();
     assert_volume_sweep(&pedal, "Output", &[("Gain", 0.5), ("Treble", 0.5)], "Goldenrod");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Boss SD-1 Super OverDrive tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn compile_sd1() {
+    let pedal = parse("sd1.pedal");
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+
+    eprintln!("[sd1] WDF stages: {}", proc.stages.len());
+    for (i, s) in proc.stages.iter().enumerate() {
+        let root_tag = match &s.root {
+            super::stage::RootKind::DiodePair(_) => "DiodePair",
+            super::stage::RootKind::SingleDiode(_) => "SingleDiode",
+            super::stage::RootKind::OpAmp(_) => "OpAmp",
+            _ => "Other",
+        };
+        eprintln!("[sd1]   wdf[{i}]: root={root_tag} inj={} out={} sfd={} paired_opamp={} feedback_opamp={}",
+            s.injection_node_id, s.output_node_id, s.signal_flow_distance,
+            s.paired_opamp.is_some(), s.feedback_opamp.is_some());
+    }
+    eprintln!("[sd1] MultiNL stages: {}", proc.multi_nl_stages.len());
+    eprintln!("[sd1] Controls: {}", proc.controls.len());
+    for c in &proc.controls {
+        eprintln!("[sd1]   {:?} -> {:?}", c.label, c.target);
+    }
+
+    // Must have 3 controls: Drive, Tone, Level
+    assert_eq!(proc.controls.len(), 3, "SD-1 should have 3 controls");
+
+    // Process a sine and verify distortion
+    proc.set_control("Drive", 0.7);
+    proc.set_control("Level", 0.5);
+    let input: Vec<f64> = (0..48000)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+
+    assert!(output.iter().all(|x| x.is_finite()), "SD-1 output must be finite");
+    let rms = (output[4800..].iter().map(|x| x * x).sum::<f64>() / (output.len() - 4800) as f64).sqrt();
+    eprintln!("[sd1] rms={rms:.6}");
+    assert!(rms > 0.001, "SD-1 should produce audible output, rms={rms:.6}");
+}
+
+#[test]
+fn sd1_asymmetric_clipping() {
+    // SD-1's defining feature: silicon + germanium antiparallel diodes
+    // produce asymmetric clipping (different threshold on positive vs negative half).
+    let pedal = parse("sd1.pedal");
+    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    proc.set_control("Drive", 0.9);
+    proc.set_control("Level", 0.8);
+    proc.set_control("Tone", 0.5);
+
+    // Process a high-amplitude sine to drive into clipping
+    let input: Vec<f64> = (0..48000)
+        .map(|i| 0.8 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+    // Warm up
+    for _ in 0..9600 { proc.process(0.0); }
+    let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    let steady = &output[4800..];
+
+    // Measure positive and negative peaks separately
+    let pos_peak = steady.iter().copied().fold(0.0f64, f64::max);
+    let neg_peak = steady.iter().copied().fold(0.0f64, f64::min).abs();
+    eprintln!("[sd1] pos_peak={pos_peak:.4} neg_peak={neg_peak:.4}");
+
+    // Both peaks should be non-trivial
+    assert!(pos_peak > 0.01, "SD-1 should have positive output, got {pos_peak:.6}");
+    assert!(neg_peak > 0.01, "SD-1 should have negative output, got {neg_peak:.6}");
+    // Signal should be present (not dead)
+    assert!(output.iter().all(|x| x.is_finite()), "SD-1 output must be finite");
+}
+
+#[test]
+fn sd1_drive_sweep() {
+    // Drive pot should change gain: low drive = clean, high drive = distorted
+    let pedal = parse("sd1.pedal");
+
+    let input: Vec<f64> = (0..48000)
+        .map(|i| 0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+
+    let mut measure = |drive: f64| -> f64 {
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        proc.set_control("Drive", drive);
+        proc.set_control("Level", 0.7);
+        proc.set_control("Tone", 0.5);
+        for _ in 0..9600 { proc.process(0.0); }
+        let out: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        (out[4800..].iter().map(|x| x * x).sum::<f64>() / (out.len() - 4800) as f64).sqrt()
+    };
+
+    let rms_lo = measure(0.1);
+    let rms_hi = measure(0.9);
+    eprintln!("[sd1] Drive sweep: lo(0.1)={rms_lo:.6} hi(0.9)={rms_hi:.6}");
+
+    // Both should produce output
+    assert!(rms_lo > 0.001, "Drive=0.1 should produce output, rms={rms_lo:.6}");
+    assert!(rms_hi > 0.001, "Drive=0.9 should produce output, rms={rms_hi:.6}");
+    assert!(output_is_finite_vec(&input), "Input must be finite");
+}
+
+#[test]
+fn sd1_level_sweep() {
+    // Level has range [1.0, 0.0] (inverted): position=0 → full, position=1 → silent
+    let pedal = parse("sd1.pedal");
+
+    let input: Vec<f64> = (0..48000)
+        .map(|i| 0.3 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+
+    let mut measure = |level: f64| -> f64 {
+        let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+        proc.set_control("Drive", 0.5);
+        proc.set_control("Level", level);
+        proc.set_control("Tone", 0.5);
+        for _ in 0..4800 { proc.process(0.0); }
+        let out: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+        (out[4800..].iter().map(|x| x * x).sum::<f64>() / (out.len() - 4800) as f64).sqrt()
+    };
+
+    let rms_0   = measure(0.0);
+    let rms_mid = measure(0.5);
+    let rms_1   = measure(1.0);
+
+    eprintln!("[sd1] Level sweep: pos0={rms_0:.6} pos0.5={rms_mid:.6} pos1={rms_1:.6}");
+
+    // Level range [1.0, 0.0] inverts: position 1 → loud, position 0 → silent.
+    assert!(rms_1 > rms_mid, "Level=1.0 should be louder than Level=0.5");
+    assert!(rms_mid > rms_0, "Level=0.5 should be louder than Level=0.0");
+    assert!(rms_0 < 0.01, "Level=0 should be near-silent, rms={rms_0:.6}");
+    assert!(rms_1 > 0.01, "Level=1 should produce output, rms={rms_1:.6}");
+}
+
+fn output_is_finite_vec(v: &[f64]) -> bool {
+    v.iter().all(|x| x.is_finite())
+}

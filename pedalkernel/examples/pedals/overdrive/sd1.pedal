@@ -1,0 +1,132 @@
+# Boss SD-1 Super OverDrive (1981)
+# JRC4558 asymmetric clipping stage — single silicon + single germanium diode
+# in antiparallel feedback. This asymmetry is the defining character difference
+# from the TS808: less compression, slightly higher output, warmer harmonic
+# content, more even-order distortion from the germanium half.
+#
+# Reference: Original Boss SD-1 schematic (MIT), R.G. Keen's analysis
+#
+# Key differences from TS808:
+#   - Asymmetric diode_pair -> diode(silicon) + diode(germanium) antiparallel
+#   - Minimum feedback R is 4.7k (vs 51k on TS808) — wider gain range
+#   - Feedback HF cap is 39pF (vs 47pF)
+#   - Tone stack is a simpler RC network (no gyrator), different character
+#   - No BJT input/output buffers — leaner signal path
+#   - C_hp is 47n same as TS808, bass rolloff identical
+
+pedal "SD-1" {
+  supply 9V
+
+  components {
+    # Bias network — 4.5V virtual ground
+    R_v1: resistor(10k)
+    R_v2: resistor(10k)
+    C_v:  cap(47u, electrolytic)
+
+    # Input coupling & impedance
+    Cin:  cap(47n)
+    R_in: resistor(470k)          # Input impedance to ground
+
+    # Clipping stage (non-inverting, 1st half of JRC4558)
+    C_c1:  cap(1u, electrolytic)  # Input coupling to opamp stage
+    R_b1:  resistor(10k)          # Bias resistor to Vbias
+    U1:    opamp(jrc4558)
+
+    # Feedback network
+    R_hp:   resistor(4.7k)        # High-pass in feedback (bass rolloff, same as TS808)
+    C_hp:   cap(47n)              # HP cap — identical rolloff point to TS808
+    Drive:  pot(500k, a)          # Variable feedback resistance (audio taper)
+    R_clip: resistor(4.7k)        # Minimum feedback R — lower than TS808 (51k),
+                                  # giving harder clipping at low Drive settings
+    D_si:   diode(silicon)        # 1N914 — forward voltage ~0.6V
+    D_ge:   diode(germanium)      # D9E or similar — forward voltage ~0.25V
+                                  # Antiparallel with D_si: asymmetric soft clip
+    C_clip: cap(39p)              # Feedback HF rolloff — 39pF (vs 47pF on TS808)
+
+    # Tone control (simpler RC network — no gyrator)
+    # Boss SD-1 tone is a passive treble-cut: R_t1 + C_t1 low-pass in series,
+    # blended against direct path via Tone pot. Less pronounced mid-hump than TS.
+    R_t1:  resistor(1k)
+    Tone:  pot(20k, b)            # Tone blend (linear taper, same value as TS808)
+    C_t1:  cap(220n)              # Bass path cap
+    R_t2:  resistor(1k)           # Treble path series resistor
+    C_t2:  cap(47n)               # Treble path cap (47n vs 100n in TS — brighter)
+
+    # Unity buffer (2nd half of JRC4558)
+    U2: opamp(jrc4558)
+
+    # Output volume & coupling
+    C_c2:    cap(1u, electrolytic)
+    Level:   pot(100k, a)         # Output volume (audio taper)
+    C_out:   cap(10u, electrolytic)
+
+    # Output network
+    R_out_s: resistor(1k)         # Series output resistor (1k vs 100R on TS808)
+    R_out_g: resistor(10k)        # Shunt to ground
+  }
+
+  nets {
+    # 1. Bias network (4.5V reference)
+    vcc -> R_v1.a
+    R_v1.b -> R_v2.a, C_v.a
+    R_v2.b -> gnd
+    C_v.b -> gnd
+    R_v1.b -> vb
+
+    # 2. Input coupling
+    in -> Cin.a
+    Cin.b -> R_in.a, C_c1.a
+    R_in.b -> gnd
+
+    # 3. Clipping stage (non-inverting)
+    C_c1.b -> U1.pos, R_b1.a
+    R_b1.b -> vb
+
+    # 4. Asymmetric feedback network
+    #    Silicon diode conducts positive half: higher threshold (~0.6V)
+    #    Germanium diode conducts negative half: lower threshold (~0.25V)
+    #    Result: asymmetric clipping, more even-order harmonics, warmer character
+    U1.neg -> R_hp.a
+    R_hp.b -> C_hp.a
+    C_hp.b -> gnd
+
+    U1.out -> Drive.a, D_si.a, C_clip.a
+    Drive.b -> R_clip.a
+    R_clip.b -> U1.neg
+
+    D_si.b -> U1.neg              # Silicon: pos half clips at ~0.6V
+    D_ge.a -> U1.neg              # Germanium: neg half clips at ~0.25V
+    D_ge.b -> U1.out              # (reversed polarity = antiparallel to D_si)
+
+    C_clip.b -> U1.neg
+
+    # 5. Tone control (passive RC blend)
+    U1.out -> R_t1.a
+    R_t1.b -> Tone.a, R_t2.a
+    Tone.w -> U2.pos
+    Tone.b -> C_t1.a
+    C_t1.b -> gnd
+    R_t2.b -> C_t2.a
+    C_t2.b -> gnd
+    U2.out -> U2.neg              # Unity-gain voltage follower
+
+    # 6. Volume & output coupling
+    U2.out -> C_c2.a
+    C_c2.b -> Level.a
+    Level.b -> gnd
+    Level.w -> C_out.a
+    C_out.b -> R_out_s.a
+
+    # 7. Output network
+    R_out_s.b -> R_out_g.a, out
+    R_out_g.b -> gnd
+  }
+
+  controls {
+    Drive.position -> "Drive" [0.0, 1.0] = 0.5
+    Tone.position  -> "Tone"  [0.0, 1.0] = 0.5
+    Level.position -> "Level" [1.0, 0.0] = 0.7
+  }
+
+  calibrate
+}
