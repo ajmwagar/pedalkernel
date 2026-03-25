@@ -1112,16 +1112,16 @@ impl CompiledPedal {
                         // taper internally) so aw + wb = max_R always.
                         let tapered = self.controls[i].taper.apply(value);
                         if let Some(stage) = self.stages.get_mut(stage_idx) {
-                            if !stage.tree.set_pot(&comp_id, value) {
+                            if !stage.set_pot_any(&comp_id, value) {
                                 stage.set_passive_rtype_pot(&comp_id, value);
                             }
-                            if !stage.tree.set_pot(&comp_id_aw, tapered) {
+                            if !stage.set_pot_any(&comp_id_aw, tapered) {
                                 stage.set_passive_rtype_pot(&comp_id_aw, tapered);
                             }
-                            if !stage.tree.set_pot(&comp_id_wb, 1.0 - tapered) {
+                            if !stage.set_pot_any(&comp_id_wb, 1.0 - tapered) {
                                 stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - tapered);
                             }
-                            stage.tree.recompute();
+                            stage.recompute_all();
                             stage.flush_passive_rtype_recompute();
                         }
                         self.notify_stage_pot_changed(stage_idx);
@@ -1338,16 +1338,16 @@ impl CompiledPedal {
                     ControlTarget::PotInStage(stage_idx) => {
                         let stage_idx = *stage_idx;
                         if let Some(stage) = self.stages.get_mut(stage_idx) {
-                            if !stage.tree.set_pot(&comp_id, value) {
+                            if !stage.set_pot_any(&comp_id, value) {
                                 stage.set_passive_rtype_pot(&comp_id, value);
                             }
-                            if !stage.tree.set_pot(&comp_id_aw, tapered) {
+                            if !stage.set_pot_any(&comp_id_aw, tapered) {
                                 stage.set_passive_rtype_pot(&comp_id_aw, tapered);
                             }
-                            if !stage.tree.set_pot(&comp_id_wb, 1.0 - tapered) {
+                            if !stage.set_pot_any(&comp_id_wb, 1.0 - tapered) {
                                 stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - tapered);
                             }
-                            stage.tree.recompute();
+                            stage.recompute_all();
                             stage.flush_passive_rtype_recompute();
                         }
                         // Also update the same pot in other WDF stages where it
@@ -1357,17 +1357,16 @@ impl CompiledPedal {
                                 continue;
                             }
                             let mut changed = false;
-                            changed |= stage.tree.set_pot(&comp_id, value);
-                            changed |= stage.tree.set_pot(&comp_id_aw, tapered);
-                            changed |= stage.tree.set_pot(&comp_id_wb, 1.0 - tapered);
+                            changed |= stage.set_pot_any(&comp_id, value);
+                            changed |= stage.set_pot_any(&comp_id_aw, tapered);
+                            changed |= stage.set_pot_any(&comp_id_wb, 1.0 - tapered);
                             if !changed {
-                                // Try PassiveRType children in this stage too.
                                 changed |= stage.set_passive_rtype_pot(&comp_id, value);
                                 changed |= stage.set_passive_rtype_pot(&comp_id_aw, tapered);
                                 changed |= stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - tapered);
                             }
                             if changed {
-                                stage.tree.recompute();
+                                stage.recompute_all();
                                 stage.flush_passive_rtype_recompute();
                             }
                         }
