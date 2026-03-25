@@ -175,6 +175,9 @@ pub(super) fn build_opamp_feedback_stages(
                     resonator_feedback: Some(res_fb),
                     negate_vs: false,
                     input_photocouplers: Vec::new(),
+                    zf_child: None,
+                    zg_child: None,
+                    opamp_adaptor: None,
                 };
                 stage.balance_vs_impedance();
                 // BridgedTResonator always claims its feedback edges.
@@ -358,6 +361,9 @@ pub(super) fn build_opamp_feedback_stages(
                     resonator_feedback: None,
                     negate_vs: false,
                     input_photocouplers: Vec::new(),
+                    zf_child: None,
+                    zg_child: None,
+                    opamp_adaptor: None,
                 };
 
                 // Create input-path photocoupler elements if present.
@@ -552,13 +558,17 @@ pub(super) fn build_opamp_feedback_stages(
                     resonator_feedback: None,
                     negate_vs: false,
                     input_photocouplers: Vec::new(),
+                    zf_child: None,
+                    zg_child: None,
+                    opamp_adaptor: None,
                 };
                 if !has_complex_fb_tree {
                     stage.balance_vs_impedance();
                 }
-                // Claim feedback edges: same logic as Inverting.
+                // Claim feedback edges (Zf) and ground-leg edges (Zg).
                 if !skip_tree || feedback_diode.is_none() {
                     consumed_edges.extend(comp_ids_to_edge_indices(&info.feedback_comp_ids));
+                    consumed_edges.extend(comp_ids_to_edge_indices(&info.ground_leg_comp_ids));
                 }
                 stages.push(stage);
             }

@@ -385,3 +385,91 @@ fn goldenrod_calibrated_pre_gain() {
         "After calibration, gain pot should still affect THD at 0dBFS: low={:.1}% high={:.1}%",
         thd_low, thd_high);
 }
+
+#[test]
+fn goldenrod_treble_topology_debug() {
+    let src = GOLDENROD;
+    let pedal = pedalkernel::dsl::parse_pedal_file(src).expect("parse");
+    let sr = 48000.0;
+    
+    // Compile and check what opamp stages were created
+    let engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
+    
+    eprintln!("=== Opamp stages ===");
+    for (si, g, pot_id) in engine.opamp_debug_info() {
+        eprintln!("  stage[{}]: gain={:.2} feedback_pot={:?}", si, g, pot_id);
+    }
+    
+    // The treble pot should be a feedback pot on one of the stages
+    let has_treble = engine.opamp_debug_info().iter().any(|(_, _, pot)| {
+        pot.as_ref().map_or(false, |p| p.contains("Treble"))
+    });
+    eprintln!("Has Treble feedback pot: {}", has_treble);
+    assert!(has_treble, "Treble pot should be detected as a feedback pot on U4's stage");
+}
+
+#[test]
+fn goldenrod_treble_changes_spectrum() {
+    let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
+    let sr = 48000.0;
+    let freq = 10000.0; // 10kHz — where shelving EQ should be most visible
+    let amplitude = 1.0;
+    let n_samples = 4096;
+
+    let rms_at = |treble: f64| -> f64 {
+        let mut engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
+        engine.set_control("Gain", 0.5);
+        engine.set_control("Treble", treble);
+        engine.set_control("Output", 0.7);
+        for i in 0..8192 {
+            let x = amplitude * (2.0 * PI * freq * i as f64 / sr).sin();
+            engine.process(x);
+        }
+        let mut sum_sq = 0.0;
+        for i in 0..n_samples {
+            let x = amplitude * (2.0 * PI * freq * (i as f64 + 8192.0) / sr).sin();
+            let y = engine.process(x);
+            sum_sq += y * y;
+        }
+        (sum_sq / n_samples as f64).sqrt()
+    };
+
+    let dark = rms_at(0.0);
+    let bright = rms_at(1.0);
+    let ratio_db = 20.0 * (bright / dark).log10();
+    eprintln!("Treble sweep at 10kHz: dark={:.6}, bright={:.6}, ratio={:.3}x, dB={:.2}",
+        dark, bright, bright / dark, ratio_db);
+    assert!(ratio_db.abs() > 1.0,
+        "Treble should affect 10kHz by ≥1dB, got {:.2}dB", ratio_db);
+}
+
+#[test]
+fn goldenrod_tone_iir_unit_test() {
+    // Directly test ToneFeedback IIR with known parameters
+    // Klon: rf=1.8k, ri=1.8k, c_tone=3.9nF, r_shelf=4.7k, max_pot_r=10k
+    use pedalkernel::compiler::stage_test_helpers::ToneFeedback;
+    
+    let sr = 48000.0;
+    let freq = 10000.0;
+    let n = 4096;
+    
+    for pot_pos in [0.0, 0.5, 1.0] {
+        let mut tf = ToneFeedback::new(1800.0, 1800.0, 3.9e-9, 4700.0, 10000.0, "Treble".into(), sr, pot_pos);
+        
+        // Warm up
+        for i in 0..1024 {
+            let x = 0.1 * (2.0 * PI * freq * i as f64 / sr).sin();
+            tf.process(x);
+        }
+        // Measure
+        let mut sum_sq = 0.0;
+        for i in 0..n {
+            let x = 0.1 * (2.0 * PI * freq * (i + 1024) as f64 / sr).sin();
+            let y = tf.process(x);
+            sum_sq += y * y;
+        }
+        let rms = (sum_sq / n as f64).sqrt();
+        eprintln!("ToneFeedback pot={:.1}: rms={:.6} b0={:.6} b1={:.6} a1={:.6} dc_gain={:.6}", 
+            pot_pos, rms, tf.b0, tf.b1, tf.a1, tf.dc_gain);
+    }
+}

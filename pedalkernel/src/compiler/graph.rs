@@ -2045,6 +2045,7 @@ impl CircuitGraph {
                         pos_node,
                         out_node,
                         feedback_comp_ids: Vec::new(),
+                        ground_leg_comp_ids: Vec::new(),
                         input_photocoupler_ids: Vec::new(),
                         input_fixed_r: 0.0,
                     });
@@ -2185,6 +2186,7 @@ impl CircuitGraph {
                                 pos_node,
                                 out_node,
                                 feedback_comp_ids: bt_comps,
+                                ground_leg_comp_ids: Vec::new(),
                                 input_photocoupler_ids: Vec::new(),
                                 input_fixed_r: 0.0,
                             });
@@ -2296,6 +2298,7 @@ impl CircuitGraph {
                                 pos_node,
                                 out_node,
                                 feedback_comp_ids: all_fb_comps,
+                                ground_leg_comp_ids: Vec::new(),
                                 input_photocoupler_ids: input_pc_ids,
                                 input_fixed_r,
                             });
@@ -2373,6 +2376,7 @@ impl CircuitGraph {
                                         pos_node,
                                         out_node,
                                         feedback_comp_ids: fb_comps,
+                                        ground_leg_comp_ids: Vec::new(),
                                         input_photocoupler_ids: Vec::new(),
                                         input_fixed_r: 0.0,
                                     });
@@ -2403,17 +2407,14 @@ impl CircuitGraph {
                             } else {
                                 find_ground_leg_path(neg_node, gnd_target).unwrap()
                             };
-                        // Collect ground-leg passive components too
+                        // Collect ground-leg passive components (neg → gnd), kept SEPARATE from Zf.
                         // Use pot wiper nodes as extra barriers for ground-leg BFS.
                         // This prevents traversing through a pot wiper that connects
                         // to another stage (e.g. Bluesbreaker Gain pot wiper → IC1b).
                         let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &pot_wiper_nodes);
-                        let mut fb_comps = all_fb_comps.clone();
-                        for c in gnd_leg_comps {
-                            if !fb_comps.contains(&c) {
-                                fb_comps.push(c);
-                            }
-                        }
+                        // feedback_comp_ids = Zf only (neg→out).  ground_leg_comp_ids = Zg only (neg→gnd).
+                        // Both sets get claimed in consumed_edges so MultiNl BFS doesn't grab them.
+                        let fb_comps = all_fb_comps.clone();
                         // Check for feedback diodes (clipping in feedback path)
                         let feedback_diode = find_feedback_diode(neg_node, out_node);
 
@@ -2425,6 +2426,7 @@ impl CircuitGraph {
                             pos_node,
                             out_node,
                             feedback_comp_ids: fb_comps,
+                            ground_leg_comp_ids: gnd_leg_comps,
                             input_photocoupler_ids: Vec::new(),
                             input_fixed_r: 0.0,
                         });
@@ -2476,6 +2478,7 @@ impl CircuitGraph {
                             pos_node,
                             out_node,
                             feedback_comp_ids: all_fb_comps.clone(),
+                            ground_leg_comp_ids: Vec::new(),
                             input_photocoupler_ids: Vec::new(),
                             input_fixed_r: 0.0,
                         });
@@ -2557,6 +2560,7 @@ impl CircuitGraph {
                                 pos_node,
                                 out_node,
                                 feedback_comp_ids: reactive_fb_comps,
+                                ground_leg_comp_ids: Vec::new(),
                                 input_photocoupler_ids: Vec::new(),
                                 input_fixed_r: 0.0,
                             });
@@ -2578,12 +2582,7 @@ impl CircuitGraph {
                                 };
                             let gnd_leg_barriers: HashSet<usize> = no_extra_fb.iter().chain(pot_wiper_nodes.iter()).copied().collect();
                             let gnd_leg_comps = collect_feedback_comps(neg_node, gnd_target, &gnd_leg_barriers);
-                            let mut fb_comps = reactive_fb_comps.clone();
-                            for c in gnd_leg_comps {
-                                if !fb_comps.contains(&c) {
-                                    fb_comps.push(c);
-                                }
-                            }
+                            // Keep Zf (neg→out) and Zg (neg→gnd) separate for 3-port adaptor.
                             let feedback_diode = find_feedback_diode(neg_node, out_node);
                             results.push(OpAmpFeedbackInfo {
                                 comp_id: comp.id.clone(),
@@ -2598,7 +2597,8 @@ impl CircuitGraph {
                                 neg_node,
                                 pos_node,
                                 out_node,
-                                feedback_comp_ids: fb_comps,
+                                feedback_comp_ids: reactive_fb_comps.clone(),
+                                ground_leg_comp_ids: gnd_leg_comps,
                                 input_photocoupler_ids: Vec::new(),
                                 input_fixed_r: 0.0,
                             });
@@ -2888,6 +2888,10 @@ pub(super) struct OpAmpFeedbackInfo {
     /// Component IDs of resistors/pots in the feedback path (Rf and Ri).
     /// Used to exclude these edges from MultiNl passive BFS.
     pub(super) feedback_comp_ids: Vec<String>,
+    /// Component IDs of components in the ground-leg path (neg → gnd), separate from Zf.
+    /// Non-empty only for NonInverting opamps where ground-leg has reactive components.
+    /// When non-empty, a 3-port WDF adaptor is built to model frequency-dependent Zg.
+    pub(super) ground_leg_comp_ids: Vec<String>,
     /// Photocoupler component IDs in the input path (between input and neg).
     /// These modulate the input impedance (Ri) for envelope-controlled filters.
     pub(super) input_photocoupler_ids: Vec<String>,
