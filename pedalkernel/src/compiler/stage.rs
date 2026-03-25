@@ -1375,7 +1375,11 @@ impl WdfStage {
     /// Checks both the OpAmp root (standalone) and feedback_opamp (DiodePair paired).
     pub(super) fn notify_pot_changed(&mut self) {
         if let Some(ref pot_id) = self.feedback_pot_id {
-            if let Some(pot_r) = self.tree.get_pot_resistance(pot_id) {
+            // Check main tree first, then opamp adaptor children (zf/zg)
+            let pot_r = self.tree.get_pot_resistance(pot_id)
+                .or_else(|| self.zf_child.as_ref().and_then(|c| c.get_pot_resistance(pot_id)))
+                .or_else(|| self.zg_child.as_ref().and_then(|c| c.get_pot_resistance(pot_id)));
+            if let Some(pot_r) = pot_r {
                 if let RootKind::OpAmp(ref mut oa) = self.root {
                     oa.set_feedback_pot_r(pot_r);
                 }
@@ -1384,6 +1388,27 @@ impl WdfStage {
                 }
             }
         }
+    }
+
+    /// Set a pot position in this stage, checking tree and opamp children (zf/zg).
+    pub(super) fn set_pot_any(&mut self, comp_id: &str, value: f64) -> bool {
+        if self.tree.set_pot(comp_id, value) {
+            return true;
+        }
+        if let Some(ref mut zf) = self.zf_child {
+            if zf.set_pot(comp_id, value) { return true; }
+        }
+        if let Some(ref mut zg) = self.zg_child {
+            if zg.set_pot(comp_id, value) { return true; }
+        }
+        false
+    }
+
+    /// Recompute all trees including opamp children.
+    pub(super) fn recompute_all(&mut self) {
+        self.tree.recompute();
+        if let Some(ref mut zf) = self.zf_child { zf.recompute(); }
+        if let Some(ref mut zg) = self.zg_child { zg.recompute(); }
     }
 
     /// Update an input-path photocoupler's LED drive and recompute opamp gain.
