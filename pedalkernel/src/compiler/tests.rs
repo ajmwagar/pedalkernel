@@ -5209,8 +5209,9 @@ fn goldenrod_treble_pot_sweeps_hf_gain() {
     // Verify that the Goldenrod (Klon Centaur) active tone control actually
     // changes output at 10kHz when the Treble pot moves from 0 → 1.
     //
-    // Pre-fix: ~1.4dB at 10kHz (ToneFeedback never instantiated → WDF fallback).
-    // Post-fix: ≥1.5dB at 10kHz (ToneFeedback IIR correctly models shelving EQ).
+    // The WDF compiler's normal Inverting path with build_feedback_tree() handles
+    // the cap+pot topology: Parallel(R_fb, Series(C_tone, Pot, R_shelf)).
+    // The pot modulates impedance through WDF scattering — no IIR approximation needed.
     let pro_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -5223,7 +5224,7 @@ fn goldenrod_treble_pot_sweeps_hf_gain() {
     let src = std::fs::read_to_string(&pro_path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
 
-    // Verify U4 is detected as InvertingShelving
+    // Verify U4 is detected as Inverting (WDF tree handles the cap+pot feedback)
     let graph = super::graph::CircuitGraph::from_pedal(&pedal);
     let (pre_classified, skip_ids) = super::topology::classify_topologies(&pedal, 48000.0);
     let analysis = super::opamp_analysis::analyze_opamps(&graph, &pedal, &pre_classified, &skip_ids);
@@ -5234,8 +5235,8 @@ fn goldenrod_treble_pot_sweeps_hf_gain() {
     );
     if let Some(u4) = u4_info {
         assert!(
-            matches!(u4.feedback_kind, super::graph::OpAmpFeedbackKind::InvertingShelving { .. }),
-            "U4 should be classified as InvertingShelving, got {:?}",
+            matches!(u4.feedback_kind, super::graph::OpAmpFeedbackKind::Inverting { .. }),
+            "U4 should be classified as Inverting (WDF tree builds feedback tree with cap+pot), got {:?}",
             u4.feedback_kind,
         );
     }
