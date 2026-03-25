@@ -286,6 +286,9 @@ fn build_passive_wdf_stage(
                 resonator_feedback: None,
                 negate_vs: false,
                 input_photocouplers: Vec::new(),
+                zf_child: None,
+                zg_child: None,
+                opamp_adaptor: None,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -633,6 +636,9 @@ fn build_passive_rtype_from_decomposed(
         resonator_feedback: None,
         negate_vs: false,
         input_photocouplers: Vec::new(),
+        zf_child: None,
+        zg_child: None,
+        opamp_adaptor: None,
     })
 }
 
@@ -1033,6 +1039,9 @@ fn build_feedforward_stages(
                     resonator_feedback: None,
                     negate_vs: false,
                     input_photocouplers: Vec::new(),
+                    zf_child: None,
+                    zg_child: None,
+                    opamp_adaptor: None,
                 }
             }
             Err(_) => {
@@ -1158,6 +1167,9 @@ fn build_output_rooted_stage(
         resonator_feedback: None,
         negate_vs: false,
         input_photocouplers: Vec::new(),
+        zf_child: None,
+        zg_child: None,
+        opamp_adaptor: None,
     })
 }
 

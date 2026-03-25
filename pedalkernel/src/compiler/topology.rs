@@ -920,6 +920,7 @@ fn classify_opamp(
             feedback_comp_ids: Vec::new(),
             input_photocoupler_ids: Vec::new(),
             input_fixed_r: 0.0,
+            ground_leg_comp_ids: Vec::new(),
         });
     }
 
@@ -1000,6 +1001,7 @@ fn classify_opamp(
                 pos_node,
                 out_node,
                 feedback_comp_ids: bt_comps,
+                ground_leg_comp_ids: Vec::new(),
                 input_photocoupler_ids: Vec::new(),
                 input_fixed_r: 0.0,
             });
@@ -1037,6 +1039,7 @@ fn classify_opamp(
                     pos_node,
                     out_node,
                     feedback_comp_ids: fb_comps,
+                    ground_leg_comp_ids: Vec::new(),
                     input_photocoupler_ids: Vec::new(),
                     input_fixed_r: 0.0,
                 });
@@ -1059,6 +1062,7 @@ fn classify_opamp(
                 pos_node,
                 out_node,
                 feedback_comp_ids: all_fb_comps,
+                ground_leg_comp_ids: Vec::new(),
                 input_photocoupler_ids: Vec::new(),
                 input_fixed_r: 0.0,
             });
@@ -1118,6 +1122,7 @@ fn classify_opamp(
                 pos_node,
                 out_node,
                 feedback_comp_ids: all_fb_comps,
+                ground_leg_comp_ids: Vec::new(),
                 input_photocoupler_ids: input_pc_ids,
                 input_fixed_r,
             });
@@ -1174,6 +1179,7 @@ fn classify_opamp(
             feedback_comp_ids: fb_comps,
             input_photocoupler_ids: Vec::new(),
             input_fixed_r: 0.0,
+            ground_leg_comp_ids: Vec::new(),
         });
     }
 

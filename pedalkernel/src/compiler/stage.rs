@@ -506,6 +506,16 @@ pub(super) struct WdfStage {
     /// opamp gain is updated: gain = Rf / (fixed_r + photocoupler_r).
     /// Used by Mu-Tron style envelope-controlled integrators.
     pub(super) input_photocouplers: Vec<InputPhotocoupler>,
+    /// Feedback (Zf) subtree for the 3-port linear opamp adaptor.
+    /// When set together with `zg_child` and `opamp_adaptor`, the stage uses
+    /// MNA-based R-type scattering instead of the standard single-tree path.
+    pub(super) zf_child: Option<DynNode>,
+    /// Ground-leg (Zg) subtree for the 3-port linear opamp adaptor.
+    pub(super) zg_child: Option<DynNode>,
+    /// 3-port R-type adaptor scattering matrix for NonInverting opamps with
+    /// reactive Zf AND reactive Zg (e.g. RAT: Zf = Distortion||C3||C4, Zg = R4+C5||R5+C6).
+    /// When Some, process() uses the 3-port path.
+    pub(super) opamp_adaptor: Option<crate::tree::RTypeAdaptor>,
 }
 
 /// A photocoupler in the input path of an inverting opamp stage.

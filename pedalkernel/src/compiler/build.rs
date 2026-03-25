@@ -631,6 +631,9 @@ pub(super) fn build_stages(
             resonator_feedback: None,
             negate_vs: false,
             input_photocouplers: Vec::new(),
+            zf_child: None,
+            zg_child: None,
+            opamp_adaptor: None,
         });
     }
 
@@ -2851,6 +2854,9 @@ fn build_vs_stage(
         resonator_feedback: None,
         negate_vs,
         input_photocouplers: Vec::new(),
+        zf_child: None,
+        zg_child: None,
+        opamp_adaptor: None,
     })
 }
 
@@ -2920,6 +2926,9 @@ fn build_source_follower_stage(
         resonator_feedback: None,
         negate_vs: false,
         input_photocouplers: Vec::new(),
+        zf_child: None,
+        zg_child: None,
+        opamp_adaptor: None,
     })
 }
 
