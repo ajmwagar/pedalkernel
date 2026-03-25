@@ -162,9 +162,9 @@ fn resolve_pot_target(
         return (target, false);
     }
 
-    // 2. Pot in WDF stage tree (includes op-amp feedback pots)
+    // 2. Pot in WDF stage (tree, opamp children, PassiveRType children)
     for (si, stage) in stages.iter().enumerate() {
-        if has_pot(&stage.tree, pot_id) {
+        if stage.has_pot(pot_id) {
             return (ControlTarget::PotInStage(si), false);
         }
     }
@@ -203,14 +203,7 @@ fn resolve_pot_target(
         return (ControlTarget::PotInStage(0), true);
     }
 
-    // 6. PassiveRType children (2-terminal pots in orphan MNA stages)
-    for (si, stage) in stages.iter().enumerate() {
-        if let RootKind::PassiveRType { children, .. } = &stage.root {
-            if children.iter().any(|c| has_pot(c, pot_id)) {
-                return (ControlTarget::PotInStage(si), false);
-            }
-        }
-    }
+    // 6. PassiveRType children — already covered by step 2's stage.has_pot()
 
     // 7. Fallback
     eprintln!(
