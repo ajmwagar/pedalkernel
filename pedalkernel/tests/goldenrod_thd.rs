@@ -8,7 +8,7 @@ fn goldenrod_gain_affects_harmonics() {
     let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
     let sr = 48000.0;
     let freq = 440.0;
-    let amplitude = 0.03;
+    let amplitude = 1.0; // 0dBFS — calibrate_input_level attenuates internally
     let n_samples = 4096;
 
     let mut thd_values = Vec::new();
@@ -201,4 +201,187 @@ fn goldenrod_gain_affects_harmonics() {
         "Gain pot should increase THD: low={:.1}%, high={:.1}%",
         thd_low, thd_high
     );
+}
+
+#[test]
+fn goldenrod_fft_spectrum() {
+    let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
+    let sr = 48000.0;
+    let freq = 440.0;
+    let amplitude = 0.03;
+    let n_samples = 8192;
+
+    for gain in [0.0, 0.5, 1.0] {
+        let mut engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
+        engine.set_control("Gain", gain);
+        engine.set_control("Output", 0.7);
+        engine.set_control("Treble", 0.5);
+
+        // Settle
+        for i in 0..8192 {
+            let x = amplitude * (2.0 * PI * freq * i as f64 / sr).sin();
+            engine.process(x);
+        }
+
+        // Capture
+        let mut output = vec![0.0f64; n_samples];
+        for i in 0..n_samples {
+            let x = amplitude * (2.0 * PI * freq * (i as f64 + 8192.0) / sr).sin();
+            output[i] = engine.process(x);
+        }
+
+        // DFT at all harmonics up to Nyquist
+        let fundamental_bin = (freq * n_samples as f64 / sr).round() as usize;
+        let max_harmonic = (sr / 2.0 / freq).floor() as usize;
+
+        eprintln!("\n=== Gain={:.1} — Harmonic spectrum (440Hz fundamental) ===", gain);
+        eprintln!("{:<6} {:<10} {:<10} {:<10}", "H#", "Freq(Hz)", "Mag", "dB");
+
+        let mut noise_floor = 0.0f64;
+        let mut harmonics_above_noise = 0usize;
+        let mut total_harmonic_power = 0.0f64;
+        let mut fundamental_mag = 0.0f64;
+
+        for h in 1..=max_harmonic.min(20) {
+            let bin = fundamental_bin * h;
+            if bin >= n_samples / 2 { break; }
+
+            let mut re = 0.0;
+            let mut im = 0.0;
+            for (i, &s) in output.iter().enumerate() {
+                let angle = 2.0 * PI * bin as f64 * i as f64 / n_samples as f64;
+                re += s * angle.cos();
+                im += s * angle.sin();
+            }
+            let mag = (re * re + im * im).sqrt() / n_samples as f64 * 2.0;
+            let db = if mag > 1e-12 { 20.0 * (mag).log10() } else { -240.0 };
+
+            if h == 1 {
+                fundamental_mag = mag;
+            } else {
+                total_harmonic_power += mag * mag;
+            }
+
+            // Count harmonics above -60dB relative to fundamental
+            let rel_db = if fundamental_mag > 1e-12 { 20.0 * (mag / fundamental_mag).log10() } else { -240.0 };
+            if h > 1 && rel_db > -60.0 {
+                harmonics_above_noise += 1;
+            }
+
+            if mag > 1e-6 {
+                eprintln!("{:<6} {:<10.0} {:<10.4e} {:<10.1}", 
+                    format!("H{}", h), h as f64 * freq, mag, db);
+            }
+        }
+
+        let thd = if fundamental_mag > 0.0 {
+            (total_harmonic_power / (fundamental_mag * fundamental_mag)).sqrt() * 100.0
+        } else { 0.0 };
+
+        eprintln!("--- Summary: {} harmonics above -60dB, THD={:.1}% ---", harmonics_above_noise, thd);
+    }
+}
+
+#[test]
+fn goldenrod_gain_at_different_input_levels() {
+    let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
+    let sr = 48000.0;
+    let freq = 440.0;
+    let n_samples = 4096;
+
+    eprintln!("\n=== Input level vs Gain pot THD response ===");
+    eprintln!("{:<12} {:<12} {:<12} {:<10}", "Input(dBFS)", "Gain=0 THD", "Gain=1 THD", "Ratio");
+
+    for db in [-40.0, -30.0, -20.0, -12.0, -6.0, 0.0] {
+        let amplitude = 10.0_f64.powf(db / 20.0);
+
+        let mut thd_at = |gain: f64| -> f64 {
+            let mut engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
+            engine.set_control("Gain", gain);
+            engine.set_control("Output", 0.7);
+            engine.set_control("Treble", 0.5);
+            for i in 0..8192 {
+                let x = amplitude * (2.0 * PI * freq * i as f64 / sr).sin();
+                engine.process(x);
+            }
+            let mut output = vec![0.0f64; n_samples];
+            for i in 0..n_samples {
+                let x = amplitude * (2.0 * PI * freq * (i as f64 + 8192.0) / sr).sin();
+                output[i] = engine.process(x);
+            }
+            let bin = (freq * n_samples as f64 / sr).round() as usize;
+            let mut h1_pow = 0.0;
+            let mut harm_pow = 0.0;
+            for h in 1..=8 {
+                let b = bin * h;
+                if b >= n_samples / 2 { break; }
+                let (mut re, mut im) = (0.0, 0.0);
+                for (i, &s) in output.iter().enumerate() {
+                    let a = 2.0 * PI * b as f64 * i as f64 / n_samples as f64;
+                    re += s * a.cos(); im += s * a.sin();
+                }
+                let mag = (re*re + im*im).sqrt() / n_samples as f64 * 2.0;
+                if h == 1 { h1_pow = mag*mag; } else { harm_pow += mag*mag; }
+            }
+            if h1_pow > 0.0 { (harm_pow/h1_pow).sqrt()*100.0 } else { 0.0 }
+        };
+
+        let thd_low = thd_at(0.0);
+        let thd_high = thd_at(1.0);
+        let ratio = if thd_low > 0.1 { thd_high / thd_low } else { f64::INFINITY };
+        eprintln!("{:<12.0} {:<12.1}% {:<12.1}% {:<10.1}x", db, thd_low, thd_high, ratio);
+    }
+}
+
+#[test]
+fn goldenrod_calibrated_pre_gain() {
+    let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
+    let sr = 48000.0;
+    let engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
+
+    // pre_gain and output_gain are pub(super) — check via control_debug_info proxy
+    // Instead, test the actual behavior: send 0dBFS and measure THD
+    let freq = 440.0;
+    let n_samples = 4096;
+
+    let mut thd_at = |gain_knob: f64| -> f64 {
+        let mut e = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
+        e.set_control("Gain", gain_knob);
+        e.set_control("Output", 0.7);
+        e.set_control("Treble", 0.5);
+        for i in 0..8192 {
+            // 0dBFS input — the calibration should attenuate internally
+            let x = 1.0 * (2.0 * PI * freq * i as f64 / sr).sin();
+            e.process(x);
+        }
+        let mut output = vec![0.0f64; n_samples];
+        for i in 0..n_samples {
+            let x = 1.0 * (2.0 * PI * freq * (i as f64 + 8192.0) / sr).sin();
+            output[i] = e.process(x);
+        }
+        let bin = (freq * n_samples as f64 / sr).round() as usize;
+        let mut h1_pow = 0.0;
+        let mut harm_pow = 0.0;
+        for h in 1..=8 {
+            let b = bin * h;
+            if b >= n_samples / 2 { break; }
+            let (mut re, mut im) = (0.0, 0.0);
+            for (i, &s) in output.iter().enumerate() {
+                let a = 2.0 * PI * b as f64 * i as f64 / n_samples as f64;
+                re += s * a.cos(); im += s * a.sin();
+            }
+            let mag = (re*re + im*im).sqrt() / n_samples as f64 * 2.0;
+            if h == 1 { h1_pow = mag*mag; } else { harm_pow += mag*mag; }
+        }
+        if h1_pow > 0.0 { (harm_pow/h1_pow).sqrt()*100.0 } else { 0.0 }
+    };
+
+    let thd_low = thd_at(0.0);
+    let thd_high = thd_at(1.0);
+    eprintln!("Calibrated @ 0dBFS: Gain=0 THD={:.1}%, Gain=1 THD={:.1}%, ratio={:.1}x",
+        thd_low, thd_high, thd_high / thd_low.max(0.1));
+
+    assert!(thd_high > thd_low * 2.0,
+        "After calibration, gain pot should still affect THD at 0dBFS: low={:.1}% high={:.1}%",
+        thd_low, thd_high);
 }
