@@ -290,102 +290,6 @@ pub(super) struct AllpassDirect {
     pub(super) y_prev: f64,
 }
 
-/// Models a frequency-dependent opamp feedback tone control where a resistive
-/// DC path (R_fb) is in parallel with a cap-series AC path (C + R_pot + R_shelf).
-///
-/// Transfer function: H(s) = -(R_fb/R_in) * (1 + s*C*R_ac) / (1 + s*C*(R_fb + R_ac))
-/// where R_ac = R_pot_current + R_shelf.
-///
-/// This is a first-order shelving filter whose transition frequency and HF gain
-/// depend on the pot position. DC gain = -R_fb/R_in (constant).
-/// HF gain = -(R_fb/R_in) * R_ac/(R_fb + R_ac) (varies with pot).
-///
-/// Bilinear-transformed IIR coefficients are recomputed when the pot changes.
-pub(super) struct ToneFeedback {
-    /// DC feedback resistance (R_fb), constant.
-    pub(super) r_fb: f64,
-    /// Input resistance (R_in), constant.
-    pub(super) r_in: f64,
-    /// Tone capacitance (C_tone), constant.
-    pub(super) c_tone: f64,
-    /// Fixed shelf resistance after the pot (R_shelf), constant.
-    pub(super) r_shelf: f64,
-    /// Maximum pot resistance (for computing current R_pot from position).
-    pub(super) max_pot_r: f64,
-    /// Pot component ID for tracking changes.
-    pub(super) pot_id: String,
-    /// Sample rate for bilinear transform.
-    pub(super) sample_rate: f64,
-    /// IIR numerator coefficient b0 (normalized).
-    pub(super) b0: f64,
-    /// IIR numerator coefficient b1 (normalized).
-    pub(super) b1: f64,
-    /// IIR denominator coefficient a1 (normalized).
-    pub(super) a1: f64,
-    /// DC gain = R_fb / R_in.
-    pub(super) dc_gain: f64,
-    /// Previous input sample.
-    pub(super) x_prev: f64,
-    /// Previous output sample.
-    pub(super) y_prev: f64,
-}
-
-impl ToneFeedback {
-    /// Create a new ToneFeedback with the given circuit parameters.
-    pub(super) fn new(
-        r_fb: f64,
-        r_in: f64,
-        c_tone: f64,
-        r_shelf: f64,
-        max_pot_r: f64,
-        pot_id: String,
-        sample_rate: f64,
-        initial_pot_position: f64,
-    ) -> Self {
-        let mut fb = ToneFeedback {
-            r_fb, r_in, c_tone, r_shelf, max_pot_r, pot_id, sample_rate,
-            b0: 0.0, b1: 0.0, a1: 0.0,
-            dc_gain: r_fb / r_in,
-            x_prev: 0.0, y_prev: 0.0,
-        };
-        fb.update_coefficients(initial_pot_position);
-        fb
-    }
-
-    /// Recompute IIR coefficients for a new pot position (0.0..1.0).
-    pub(super) fn update_coefficients(&mut self, pot_position: f64) {
-        let r_pot = (pot_position * self.max_pot_r).max(1.0);
-        let r_ac = r_pot + self.r_shelf;
-        let k = 2.0 * self.sample_rate * self.c_tone;
-
-        // Numerator: (1 + k*R_ac) + (k*R_ac - 1)*z^{-1}
-        let a_num = k * r_ac;
-        let num0 = 1.0 + a_num;
-        let num1 = a_num - 1.0;
-
-        // Denominator: (1 + k*(R_fb + R_ac)) + (k*(R_fb + R_ac) - 1)*z^{-1}
-        let b_den = k * (self.r_fb + r_ac);
-        let den0 = 1.0 + b_den;
-        let den1 = b_den - 1.0;
-
-        // Normalize by den0
-        self.b0 = num0 / den0;
-        self.b1 = num1 / den0;
-        self.a1 = den1 / den0;
-    }
-
-    /// Process one sample through the shelving IIR.
-    /// Returns the output voltage (already negated for inverting topology).
-    #[inline]
-    pub(super) fn process(&mut self, input: f64) -> f64 {
-        // y[n] = -dc_gain * (b0*x[n] + b1*x[n-1]) - a1*y[n-1]
-        let y = -self.dc_gain * (self.b0 * input + self.b1 * self.x_prev) - self.a1 * self.y_prev;
-        self.x_prev = input;
-        self.y_prev = flush_denormal(y);
-        self.y_prev
-    }
-}
-
 /// Models a bridged-T opamp resonator as a 2nd-order IIR bandpass.
 ///
 /// The analog transfer function from trigger injection to output is
@@ -587,11 +491,6 @@ pub(super) struct WdfStage {
     /// tree (through the coupling cap) so DC is naturally blocked. The cap's WDF
     /// state is used to extract Vgk instead of a software HPF.
     pub(super) coupling_cap_id: Option<String>,
-    /// IIR-based tone feedback for inverting opamps with a cap+pot in the
-    /// feedback path (e.g., Klon Centaur Treble).  When present, the stage
-    /// output is computed from this IIR instead of the WDF tree, giving the
-    /// correct frequency-dependent shelving behaviour.
-    pub(super) tone_feedback: Option<ToneFeedback>,
     /// Bridged-T resonator IIR for opamps with series R1→R2 path and
     /// C1/C2 shunt caps to ground. When present, the stage output is
     /// computed from this 2nd-order bandpass IIR instead of the WDF tree.
@@ -983,13 +882,6 @@ impl WdfStage {
             fb.x_prev = i_in;
             fb.y_prev = flush_denormal(v_fb);
             return -fb.y_prev;
-        }
-
-        // Tone feedback IIR (Klon-style cap+pot in inverting opamp feedback).
-        // Bypasses WDF output with a first-order shelving filter whose
-        // coefficients track the pot position.
-        if let Some(ref mut tf) = self.tone_feedback {
-            return flush_denormal(tf.process(input * self.compensation));
         }
 
         // Bridged-T resonator IIR (opamp with series R1-R2 and shunt C1/C2).
@@ -1427,9 +1319,6 @@ impl WdfStage {
     /// If this stage has a `feedback_pot_id`, reads the pot's current resistance
     /// and calls `OpAmpRoot::set_feedback_pot_r()` to recompute gain.
     /// Checks both the OpAmp root (standalone) and feedback_opamp (DiodePair paired).
-    ///
-    /// If `tone_feedback` is set (cap+pot in feedback path), updates the IIR
-    /// coefficients from the pot's current position.
     pub(super) fn notify_pot_changed(&mut self) {
         if let Some(ref pot_id) = self.feedback_pot_id {
             if let Some(pot_r) = self.tree.get_pot_resistance(pot_id) {
@@ -1439,12 +1328,6 @@ impl WdfStage {
                 if let Some(ref mut oa) = self.feedback_opamp {
                     oa.set_feedback_pot_r(pot_r);
                 }
-            }
-        }
-        // Update IIR coefficients for tone feedback (cap+pot in feedback path).
-        if let Some(ref mut tf) = self.tone_feedback {
-            if let Some(pot_pos) = self.tree.get_pot_position(&tf.pot_id) {
-                tf.update_coefficients(pot_pos);
             }
         }
     }
