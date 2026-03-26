@@ -305,6 +305,7 @@ pub(super) struct ToneFeedback {
     /// DC feedback resistance (R_fb), constant.
     pub(super) r_fb: f64,
     /// Input resistance (R_in), constant.
+    #[allow(dead_code)]
     pub(super) r_in: f64,
     /// Tone capacitance (C_tone), constant.
     pub(super) c_tone: f64,
@@ -414,7 +415,7 @@ impl ResonatorFeedback {
     ///
     /// Uses the Audio EQ Cookbook bandpass formula with bilinear pre-warping.
     pub(super) fn new(r1: f64, r2: f64, c1: f64, c2: f64, rf: f64, sample_rate: f64) -> Self {
-        use std::f64::consts::PI;
+        
 
         // Resonant angular frequency
         let omega_0 = 1.0 / (r1 * r2 * c1 * c2).sqrt();
@@ -1483,6 +1484,7 @@ impl WdfStage {
     ///
     /// Has no effect if the root is not an op-amp gain stage.
     #[inline]
+    #[allow(dead_code)]
     pub fn set_opamp_gain(&mut self, gain: f64) {
         if let RootKind::OpAmp(op) = &mut self.root {
             op.set_gain(gain);
@@ -1505,6 +1507,7 @@ impl WdfStage {
     }
 
     /// Get OpAmpRoot sample rate (for verifying oversampling propagation).
+    #[allow(dead_code)]
     pub fn opamp_sample_rate(&self) -> Option<f64> {
         match &self.root {
             RootKind::OpAmp(op) => Some(op.sample_rate()),
@@ -1513,6 +1516,7 @@ impl WdfStage {
     }
 
     /// Get OpAmpRoot GBW coefficient (for verifying oversampling propagation).
+    #[allow(dead_code)]
     pub fn opamp_gbw_coeff(&self) -> Option<f64> {
         match &self.root {
             RootKind::OpAmp(op) => Some(op.gbw_coeff()),
@@ -2019,7 +2023,7 @@ impl PushPullStage {
 // ═══════════════════════════════════════════════════════════════════════════
 
 use crate::elements::nonlinear::solver::{
-    multi_port_nr_solve, multi_port_nr_solve_grouped,
+    multi_port_nr_solve_grouped,
     multi_port_nr_solve_into, multi_port_nr_solve_grouped_into,
     NlDeviceGroupIv, NlDeviceIv,
 };
@@ -2043,7 +2047,7 @@ impl NlDeviceKind {
     ///
     /// `bias_offset` is an additional bias voltage from external controls
     /// (e.g., BJT bias pots). Zero for non-BJT devices.
-    pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
+    pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, _bias_offset: f64) {
         match self {
             NlDeviceKind::Triode(t) => {
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
@@ -3046,6 +3050,7 @@ impl MultiNlStage {
     ///
     /// Updates `feedback_scale` and `veb_bias_offset` which are applied during
     /// `set_control_voltage()` on BJT NL devices.
+    #[allow(dead_code)]
     pub fn set_feedback_from_pot(&mut self, position: f64, max_pot_r: f64) {
         let pot_r = position * max_pot_r;
         let emitter_r = self.bias_emitter_r;

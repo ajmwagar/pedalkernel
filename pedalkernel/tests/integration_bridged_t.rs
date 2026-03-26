@@ -280,6 +280,7 @@ fn bridged_t_impulse_response_shape() {
 
 /// Full sine_drum compilation (12 voices) — verifies the compiler handles
 /// the large circuit without crashing or producing NaN.
+#[cfg(feature = "pro-pedals")]
 #[test]
 fn sine_drum_full_compiles_and_produces_output() {
     let src = include_str!(
@@ -300,6 +301,7 @@ fn sine_drum_full_compiles_and_produces_output() {
 }
 
 /// Diagnostic: compare spectral content of sine_drum C3 vs expected 130 Hz.
+#[cfg(feature = "pro-pedals")]
 #[test]
 fn sine_drum_spectral_analysis() {
     let src = include_str!(

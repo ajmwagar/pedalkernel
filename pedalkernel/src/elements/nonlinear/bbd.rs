@@ -8,6 +8,34 @@ use super::delay::{DelayLine, Interpolation};
 // BBD (Bucket-Brigade Device) Delay Line
 // ---------------------------------------------------------------------------
 
+/// NE571/SA571 compander attack time constant (seconds).
+/// Per Signetics NE570/NE571 datasheet, the input rectifier has a fast
+/// attack (~1–5ms) for transient tracking.
+const COMPANDER_ATTACK_S: f64 = 0.005;
+
+/// NE571/SA571 compander release time constant (seconds).
+/// Slower release (~50ms) prevents audible distortion on decaying signals,
+/// but the mismatch with attack causes "breathing" artifacts.
+const COMPANDER_RELEASE_S: f64 = 0.050;
+
+/// Minimum envelope level to prevent infinite expansion gain.
+/// Real NE571 companders have finite noise that prevents division by zero.
+/// ~-60 dB below unity.
+const COMPANDER_NOISE_FLOOR: f64 = 0.001;
+
+/// Maximum compression/expansion gain (linear).
+/// Prevents runaway gain on very quiet signals.
+const COMPANDER_MAX_GAIN: f64 = 10.0;
+
+/// Maximum feedback coefficient. Values >= 1.0 cause instability.
+const MAX_FEEDBACK: f64 = 0.95;
+
+/// Safety clamp for leakage total loss fraction. Must be < 1.0.
+const MAX_LEAKAGE_LOSS: f64 = 0.99;
+
+/// Fraction of Nyquist used as maximum LPF cutoff clamp.
+const NYQUIST_SAFETY_RATIO: f64 = 0.45;
+
 /// BBD delay line model parameters.
 ///
 /// Bucket-brigade devices (MN3007, MN3207, MN3005) are analog delay lines
@@ -233,8 +261,8 @@ impl BbdDelayLine {
         // Compander: NE571-style attack/release time constants.
         // Attack ~5ms, release ~50ms (NE571 syllabic time constants).
         // The mismatch causes "breathing" artifacts.
-        let compander_attack = (-1.0 / (0.005 * sample_rate)).exp();
-        let compander_release = (-1.0 / (0.050 * sample_rate)).exp();
+        let compander_attack = (-1.0 / (COMPANDER_ATTACK_S * sample_rate)).exp();
+        let compander_release = (-1.0 / (COMPANDER_RELEASE_S * sample_rate)).exp();
 
         // Envelope delay buffer: sized for maximum BBD delay time.
         // This delays the compression envelope to match the audio delay.
@@ -274,14 +302,14 @@ impl BbdDelayLine {
     ///   fc_leakage = -ln(1 - leakage_per_stage × N) × fclk / (2π)
     /// Clamped to prevent the cutoff from exceeding Nyquist.
     fn compute_leakage_coef(model: &BbdModel, clock_freq: f64, sample_rate: f64) -> f64 {
-        let total_loss = (model.leakage_per_stage * model.num_stages as f64).min(0.99);
+        let total_loss = (model.leakage_per_stage * model.num_stages as f64).min(MAX_LEAKAGE_LOSS);
         // Map total charge retention to a LPF cutoff.
         // retention = 1 - total_loss = fraction of signal preserved.
         // Higher loss → lower cutoff → darker sound.
         let retention = 1.0 - total_loss;
         // Cutoff in Hz: scale with clock frequency (higher clock = shorter hold time = less leakage)
         let fc_leakage = -(retention.ln()) * clock_freq / (2.0 * std::f64::consts::PI);
-        let fc_clamped = fc_leakage.min(sample_rate * 0.45); // Never exceed Nyquist
+        let fc_clamped = fc_leakage.min(sample_rate * NYQUIST_SAFETY_RATIO);
         (-2.0 * std::f64::consts::PI * fc_clamped / sample_rate).exp()
     }
 
@@ -328,7 +356,7 @@ impl BbdDelayLine {
 
     /// Set feedback amount (0.0 = no feedback, <1.0 for stability).
     pub fn set_feedback(&mut self, feedback: f64) {
-        self.feedback = feedback.clamp(0.0, 0.95);
+        self.feedback = feedback.clamp(0.0, MAX_FEEDBACK);
     }
 
     /// Process one sample through the BBD delay line.
@@ -361,10 +389,8 @@ impl BbdDelayLine {
         };
         self.compander_env_in = coef_in * self.compander_env_in + (1.0 - coef_in) * abs_in;
 
-        // Model analog noise floor - prevents expansion from true zero which causes pops.
-        // Real NE571 companders have finite noise that prevents infinite expansion gain.
-        const ANALOG_NOISE_FLOOR: f64 = 0.001; // ~-60dB
-        self.compander_env_in = self.compander_env_in.max(ANALOG_NOISE_FLOOR);
+        // Clamp to analog noise floor — prevents infinite expansion gain.
+        self.compander_env_in = self.compander_env_in.max(COMPANDER_NOISE_FLOOR);
 
         // Store compression envelope in delay buffer for expander to use later.
         // Key insight: the expander needs the
@@ -375,12 +401,12 @@ impl BbdDelayLine {
 
         // Compress: reduce dynamic range by 2:1 (typical NE571 ratio).
         // gain = 1/sqrt(envelope) — louder signals get compressed more.
-        let comp_gain = if self.compander_env_in > 0.001 {
+        let comp_gain = if self.compander_env_in > COMPANDER_NOISE_FLOOR {
             1.0 / self.compander_env_in.sqrt()
         } else {
             1.0
         };
-        let compressed = input * comp_gain.min(10.0); // Limit expansion of quiet signals
+        let compressed = input * comp_gain.min(COMPANDER_MAX_GAIN);
 
         // ══════════════════════════════════════════════════════════════
         // BBD DELAY MEDIUM
@@ -433,7 +459,7 @@ impl BbdDelayLine {
 
         // Base expansion gain from delayed compression envelope.
         // This restores the original dynamic range (ideally cancels compression).
-        let base_exp_gain = if delayed_env > 0.001 {
+        let base_exp_gain = if delayed_env > COMPANDER_NOISE_FLOOR {
             delayed_env.sqrt()
         } else {
             1.0
@@ -758,7 +784,7 @@ mod tests {
         for i in 0..24000 {
             // 500ms of signal
             let t = i as f64 / SAMPLE_RATE;
-            let env = (1.0 - (-t * 20.0).exp()); // 50ms attack
+            let env = 1.0 - (-t * 20.0).exp(); // 50ms attack
             input.push(env * 0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin());
         }
         // Decay

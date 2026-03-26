@@ -21,7 +21,7 @@ use crate::tree::RTypeAdaptor;
 
 /// Binary adaptor kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BinaryKind {
+pub enum BinaryKind {
     Series,
     Parallel,
 }
@@ -30,7 +30,7 @@ pub(super) enum BinaryKind {
 ///
 /// Leaves are one-port elements (trait objects); internal nodes are
 /// series/parallel/transformer/R-type adaptors.
-pub(super) enum DynNode {
+pub enum DynNode {
     /// Terminal one-port element. Component-defined behavior.
     Leaf(Box<dyn WdfLeaf>),
 

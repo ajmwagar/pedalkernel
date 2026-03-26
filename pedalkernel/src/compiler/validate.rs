@@ -1127,7 +1127,6 @@ pub fn validate_pedal_files(paths: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::component::Component;
     use crate::compiler::components::*;
 
     /// Build a minimal valid pedal for testing.

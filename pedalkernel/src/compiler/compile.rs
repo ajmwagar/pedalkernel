@@ -767,7 +767,7 @@ fn build_feedforward_stages(
         .iter()
         .enumerate()
         .filter(|(eidx, e)| {
-            let comp = &graph.components[e.comp_idx];
+            let _comp = &graph.components[e.comp_idx];
             if claimed_edges.contains(eidx) {
                 return false;
             }

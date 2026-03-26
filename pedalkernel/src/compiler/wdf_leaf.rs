@@ -335,10 +335,13 @@ impl WdfLeaf for WdfPot {
 
 impl WdfPot {
     /// Read the pot's current resistance.
+    #[allow(dead_code)]
     pub fn get_resistance(&self) -> f64 { self.rp }
     /// Read the pot's current position.
+    #[allow(dead_code)]
     pub fn get_position(&self) -> f64 { self.position }
     /// Read the pot's max resistance.
+    #[allow(dead_code)]
     pub fn max_resistance(&self) -> f64 { self.max_resistance }
 }
 
@@ -423,7 +426,9 @@ impl WdfLeaf for WdfJfetVr {
 }
 
 impl WdfJfetVr {
+    #[allow(dead_code)]
     pub fn vgs(&self) -> f64 { self.inner.vgs() }
+    #[allow(dead_code)]
     pub fn rds(&self) -> f64 { self.inner.rds() }
 }
 
@@ -500,7 +505,9 @@ impl WdfLeaf for WdfUnitDelay {
 }
 
 impl WdfUnitDelay {
+    #[allow(dead_code)]
     pub fn get_state(&self) -> f64 { self.state }
+    #[allow(dead_code)]
     pub fn set_partner_state(&mut self, val: f64) { self.partner_state = val; }
 }
 

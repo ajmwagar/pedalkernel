@@ -159,6 +159,7 @@ pub(super) fn set_vs_rp(node: &mut DynNode, rp_val: f64) {
 }
 
 /// Collect all pot component IDs from a DynNode tree (for debugging).
+#[allow(dead_code)]
 pub(super) fn collect_pot_ids(node: &DynNode, out: &mut Vec<String>) {
     match node {
         DynNode::Leaf(leaf) if leaf.type_tag() == "pot" => {

@@ -1,4 +1,5 @@
-use pedalkernel::PedalProcessor;
+#![cfg(feature = "pro-pedals")]
+
 use std::f64::consts::PI;
 
 const GOLDENROD: &str = include_str!("/Users/ajmwagar/src/pedalkernel/pedalkernel-pro/pedals/legends/goldenrod.pedal");
@@ -172,7 +173,7 @@ fn goldenrod_gain_affects_harmonics() {
         engine.set_control("Output", 0.7);
         engine.set_control("Treble", 0.5);
         // Process and capture peak NR voltage
-        let mut max_v = 0.0f64;
+        let _max_v = 0.0f64;
         for i in 0..8192 {
             let x = amplitude * (2.0 * PI * freq * i as f64 / sr).sin();
             engine.process(x);

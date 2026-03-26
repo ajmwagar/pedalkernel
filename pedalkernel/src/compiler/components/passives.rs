@@ -342,7 +342,7 @@ impl Component for Potentiometer {
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
         let initial_pos = 0.5;
-        let tapered_pos = self.taper.apply(initial_pos);
+        let _tapered_pos = self.taper.apply(initial_pos);
         Some(DynNode::Pot(comp_id.to_string(), self.max_r, initial_pos, self.taper))
     }
 

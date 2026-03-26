@@ -600,7 +600,7 @@ impl CircuitGraph {
             let pot_comp = pedal.components[*_original_idx].kind.as_any()
                 .downcast_ref::<Potentiometer>()
                 .expect("deferred 3-term component must be a Potentiometer");
-            let (max_r, taper) = (pot_comp.max_r, pot_comp.taper);
+            let (max_r, _taper) = (pot_comp.max_r, pot_comp.taper);
 
             // Indices must be relative to all_components (which includes fork paths),
             // not pedal.components.
@@ -875,6 +875,7 @@ impl CircuitGraph {
     ///
     /// Returns the resolved kind if the edge was resolved during wiring resolution,
     /// otherwise falls back to the component's default edges().
+    #[allow(dead_code)]
     pub(super) fn effective_edge_kind(&self, edge_idx: usize) -> super::component::EdgeKind {
         if let Some(&kind) = self.resolved_edge_kinds.get(&edge_idx) {
             return kind;
@@ -2802,9 +2803,11 @@ pub(super) fn find_path_through_adj(
         if let Some(neighbors) = adj.get(&state.node) {
             for (next_node, r, comp_id, is_pot, max_r) in neighbors {
                 if !state.visited.contains(next_node) {
-                    let mut new_visited = state.visited.clone();
+                    let mut new_visited = HashSet::with_capacity(state.visited.len() + 1);
+                    new_visited.clone_from(&state.visited);
                     new_visited.insert(*next_node);
-                    let mut new_comps = state.path_comps.clone();
+                    let mut new_comps = Vec::with_capacity(state.path_comps.len() + 1);
+                    new_comps.extend_from_slice(&state.path_comps);
                     new_comps.push(comp_id.clone());
 
                     let (new_pot_info, new_fixed_r) = if *is_pot {
@@ -2826,10 +2829,10 @@ pub(super) fn find_path_through_adj(
                                 // Different pot — keep the first
                                 (state.pot_info.clone(), state.fixed_r)
                             }
+                        } else if state.pot_info.is_some() {
+                            (state.pot_info.clone(), state.fixed_r)
                         } else {
-                            let pot_info =
-                                state.pot_info.clone().or(Some((comp_id.clone(), *max_r)));
-                            (pot_info, state.fixed_r)
+                            (Some((comp_id.clone(), *max_r)), state.fixed_r)
                         }
                     } else {
                         (state.pot_info.clone(), state.fixed_r + r)
@@ -3097,8 +3100,10 @@ pub(super) enum OpAmpFeedbackKind {
     /// Paired with the JFET stage via `paired_opamp` (no standalone WDF stage).
     Allpass {
         /// Feedback resistor value (neg to out)
+        #[allow(dead_code)]
         rf: f64,
         /// Input resistor value (input to neg)
+        #[allow(dead_code)]
         ri: f64,
         /// Component ID of the JFET whose source/drain connects to pos
         jfet_id: String,

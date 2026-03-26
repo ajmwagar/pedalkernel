@@ -19,6 +19,7 @@ use super::components::Potentiometer;
 use super::graph::{CircuitGraph, NodeId};
 
 /// Result of BJT bias pot analysis.
+#[allow(dead_code)]
 pub(super) struct BjtBiasAnalysis {
     /// Pot component ID → info for binding.
     pub(super) bias_pot_map: HashMap<String, BjtBiasPotInfo>,
@@ -27,6 +28,7 @@ pub(super) struct BjtBiasAnalysis {
 }
 
 /// Info for a BJT bias pot binding.
+#[allow(dead_code)]
 pub(super) struct BjtBiasPotInfo {
     /// Maximum resistance of the pot (ohms).
     pub(super) max_pot_r: f64,

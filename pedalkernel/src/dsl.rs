@@ -2706,8 +2706,6 @@ pub fn parse_pedal_file(src: &str) -> Result<PedalDef, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::component::Component;
-    use crate::compiler::components::*;
 
     #[test]
     fn parse_eng_value_k() {

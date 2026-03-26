@@ -57,10 +57,12 @@ pub(super) struct StagePlan {
     /// correct collector-emitter load impedance.  At runtime, the NL solver
     /// uses `load_tree.port_resistance()` as rp instead of the signal tree's
     /// rp, giving the correct load-line slope for Sustain-style controls.
+    #[allow(dead_code)]
     pub(super) load_passive_idxs: Vec<usize>,
     /// Terminal nodes (collector, emitter) for the load tree.
     /// The load tree is built between these two nodes with the virtual Rce
     /// edge providing the BJT output resistance path.
+    #[allow(dead_code)]
     pub(super) load_terminals: Option<(NodeId, NodeId)>,
     /// Grid node for 3-port push-pull mode.
     /// When Some, the builder uses an R-type adaptor with grid as a WDF port
@@ -75,6 +77,7 @@ pub(super) struct VirtualEdge {
     pub(super) node_a: NodeId,
     pub(super) node_b: NodeId,
     pub(super) resistance: f64,
+    #[allow(dead_code)]
     pub(super) name: &'static str,
 }
 
@@ -130,6 +133,7 @@ pub(super) struct OtaVccsInfo {
     /// Output current node.
     pub(super) out_node: NodeId,
     /// Component index for looking up the OTA model.
+    #[allow(dead_code)]
     pub(super) comp_idx: usize,
 }
 
@@ -897,6 +901,7 @@ pub(super) fn plan_stages(
     // Collect BJT terminal info for bias pot analysis.
     struct BjtTerminals {
         elem_idx: usize,
+        #[allow(dead_code)]
         base_node: NodeId,
         collector_node: NodeId,
         emitter_node: NodeId,
@@ -1156,7 +1161,10 @@ fn plan_one_junction(
     // The diode BFS should traverse through coupling caps to reach the full
     // output chain (tone + volume). Active bridge barriers still prevent
     // crossing into adjacent active stages.
-    let mut excluded: Vec<usize> = classified.all_nonlinear_edge_indices.clone();
+    let mut excluded: Vec<usize> = Vec::with_capacity(
+        classified.all_nonlinear_edge_indices.len() + opamp_feedback_edges.len(),
+    );
+    excluded.extend_from_slice(&classified.all_nonlinear_edge_indices);
     excluded.extend(opamp_feedback_edges);
 
     // Output-pin barrier nodes: Output pins of active/gain components
@@ -1399,7 +1407,8 @@ fn plan_two_junction(
         NonlinearKind::BjtNpn { base_node, collector_node, emitter_node, .. }
         | NonlinearKind::BjtPnp { base_node, collector_node, emitter_node, .. } => {
             if *base_node != graph.gnd_node {
-                let exclude = classified.all_nonlinear_edge_indices.clone();
+                let mut exclude = Vec::with_capacity(classified.all_nonlinear_edge_indices.len());
+                exclude.extend_from_slice(&classified.all_nonlinear_edge_indices);
                 let mut base_barriers = graph.output_pin_nodes.clone();
                 // Remove own terminal nodes so BFS can start/traverse
                 base_barriers.remove(base_node);
@@ -1459,7 +1468,8 @@ fn plan_two_junction(
         )
     };
 
-    let mut passive_idxs = a_passives.clone();
+    let mut passive_idxs = Vec::with_capacity(a_passives.len() + a_supply_edges.len());
+    passive_idxs.extend_from_slice(&a_passives);
     extend_dedup(&mut passive_idxs, &a_supply_edges);
     extend_dedup(&mut passive_idxs, &b_passives);
     // Always include base/grid passives — the coupling cap (if any) is a real
@@ -1619,7 +1629,8 @@ fn plan_two_junction(
             // ALL BJTs get a load tree: collector passives + supply chain.
             // The load tree provides rp (collector load impedance) and b_load
             // (VCC Thevenin via +2*VCC superposition) for the two-domain NR solve.
-            let mut load_idxs = a_passives.clone();
+            let mut load_idxs = Vec::with_capacity(a_passives.len() + a_supply_edges.len());
+            load_idxs.extend_from_slice(&a_passives);
             extend_dedup(&mut load_idxs, &a_supply_edges);
             if !b_passives.is_empty() && *emitter_node != graph.gnd_node {
                 extend_dedup(&mut load_idxs, &b_passives);
@@ -2480,7 +2491,7 @@ pub(super) fn plan_push_pull_half(
     pp_transformer_edges: &HashSet<usize>,
 ) -> Option<StagePlan> {
     // Extract plate/cathode/grid nodes and model info for triodes and pentodes.
-    let (plate_node, cathode_node, virtual_rp, compensation, grid_node) = match &elem.kind {
+    let (plate_node, cathode_node, virtual_rp, compensation, _grid_node) = match &elem.kind {
         NonlinearKind::Triode {
             plate_node,
             cathode_node,
@@ -2533,7 +2544,8 @@ pub(super) fn plan_push_pull_half(
             &HashSet::new(),
         );
 
-        let mut passive_idxs = plate_passives.clone();
+        let mut passive_idxs = Vec::with_capacity(plate_passives.len() + cathode_passives.len());
+        passive_idxs.extend_from_slice(&plate_passives);
         extend_dedup(&mut passive_idxs, &cathode_passives);
 
         // Grid passives (coupling cap, grid stopper, grid leak) are NOT included.
@@ -2731,7 +2743,11 @@ fn collect_passive_edges_from_nodes(
     // Merge boundary edges and opamp feedback edges into the NL exclusion set
     // so BFS won't cross them.
     let excluded: Vec<usize> = {
-        let mut excl = classified.all_nonlinear_edge_indices.clone();
+        let cap = classified.all_nonlinear_edge_indices.len()
+            + boundary_edges.len()
+            + opamp_feedback_edges.len();
+        let mut excl = Vec::with_capacity(cap);
+        excl.extend_from_slice(&classified.all_nonlinear_edge_indices);
         for &be in boundary_edges {
             if !excl.contains(&be) {
                 excl.push(be);
@@ -2789,7 +2805,11 @@ fn collect_passive_edges_from_nodes_with_extra_barriers(
     extra_barriers: &HashSet<NodeId>,
 ) -> Vec<usize> {
     let excluded: Vec<usize> = {
-        let mut excl = classified.all_nonlinear_edge_indices.clone();
+        let cap = classified.all_nonlinear_edge_indices.len()
+            + boundary_edges.len()
+            + opamp_feedback_edges.len();
+        let mut excl = Vec::with_capacity(cap);
+        excl.extend_from_slice(&classified.all_nonlinear_edge_indices);
         for &be in boundary_edges {
             if !excl.contains(&be) {
                 excl.push(be);

@@ -635,6 +635,7 @@ pub(super) fn is_delay_feedback_label(label: &str) -> bool {
 }
 
 /// Wet/dry mix control labels.
+#[allow(dead_code)]
 pub(super) fn is_mix_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
@@ -1260,6 +1261,7 @@ impl CompiledPedal {
 
     /// Notify multi-NL stages that a pot changed and they should update
     /// bias from their bias_pot_id if it matches.
+    #[allow(dead_code)]
     fn notify_multi_nl_pot_changed(&mut self, comp_id: &str) {
         for stage in &mut self.multi_nl_stages {
             if stage.bias_pot_id.as_deref() == Some(comp_id) {
@@ -1839,7 +1841,7 @@ impl PedalProcessor for CompiledPedal {
             let abs_sagged = sagged_voltage.abs();
             let opamp_v_max = (abs_sagged / 2.0 - saturation_margin).max(1.0);
             let tube_v_max = abs_sagged;
-            let bjt_v_max = abs_sagged;
+            let _bjt_v_max = abs_sagged;
             for stage in &mut self.opamp_stages {
                 stage.opamp.set_v_max(opamp_v_max);
             }
@@ -2216,7 +2218,7 @@ impl PedalProcessor for CompiledPedal {
 
         // Process sidechains: tap the audio output and compute CV for next sample.
         // The 1-sample delay is inherent and correct for discrete-time feedback.
-        for (i, sc) in self.sidechains.iter_mut().enumerate() {
+        for (_i, sc) in self.sidechains.iter_mut().enumerate() {
             let cv = sc.process(signal);
             #[cfg(feature = "debug-trace")]
             if trace_on {

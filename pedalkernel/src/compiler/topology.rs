@@ -359,6 +359,7 @@ impl<'a> TopologyContext<'a> {
     }
 
     /// True if `node` is the ground node.
+    #[allow(dead_code)]
     pub fn is_grounded(&self, node: usize) -> bool {
         node == self.resolved.gnd_node
     }
@@ -600,7 +601,7 @@ impl<'a> TopologyContext<'a> {
         &self,
         neg_node: usize,
         out_node: usize,
-        default_ri: f64,
+        _default_ri: f64,
     ) -> (Vec<String>, f64) {
         use std::collections::{HashSet, VecDeque};
 

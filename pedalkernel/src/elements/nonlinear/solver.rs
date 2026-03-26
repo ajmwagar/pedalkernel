@@ -2128,8 +2128,8 @@ mod tests {
             rp: 50_000.0,
             v_max: 300.0,
         };
-        let groups: [&dyn NlDeviceGroupIv; 1] = [&triode];
-        let offsets = [0usize];
+        let _groups: [&dyn NlDeviceGroupIv; 1] = [&triode];
+        let _offsets = [0usize];
         let n_nl = 2;
 
         let s_nl = [0.1, 0.3, 0.3, 0.1];
@@ -2206,7 +2206,7 @@ mod tests {
     fn test_device_iv_derivative_accuracy() {
         use super::super::{
             DiodeModel, DiodePairRoot, DiodeRoot, PentodeModel,
-            PentodeRoot, TriodeModel, TriodeRoot, TriodeThreePort, VariMuModel, VariMuThreePort,
+            PentodeRoot, TriodeModel, TriodeRoot, VariMuModel,
             VariMuTriodeRoot,
         };
 

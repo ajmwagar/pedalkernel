@@ -290,7 +290,7 @@ pub(super) fn build_opamp_feedback_stages(
                 // Same guard as NonInverting: circuitous ground paths can find
                 // downstream pots that aren't part of the gain equation.
                 if rf_pot.is_none() {
-                    if let Some((pot_id, max_pot_r, fixed_series_r)) = ri_pot {
+                    if let Some((pot_id, _max_pot_r, fixed_series_r)) = ri_pot {
                         root.set_feedback_config(FeedbackConfig {
                             pot_comp_id: pot_id.clone(),
                             other_leg_r: *rf,

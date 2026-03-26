@@ -911,7 +911,7 @@ fn ratking_distortion_clips() {
     if !pro_path.exists() { return; }
     let src = std::fs::read_to_string(&pro_path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
-    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
 
     // Structure: opamp must be paired (feedback_opamp) or standalone
     assert!(proc.stages.iter().any(|s| s.feedback_opamp.is_some()
@@ -921,7 +921,7 @@ fn ratking_distortion_clips() {
     let input = sine(48000);
 
     // Distortion pot: increasing it should increase clipping (lower RMS/peak ratio)
-    let mut ratio = |dist: f64| -> f64 {
+    let ratio = |dist: f64| -> f64 {
         let mut p = compile_pedal(&pedal, 48000.0).unwrap();
         p.set_control("Distortion", dist);
         p.set_control("Filter", 0.5);
@@ -956,7 +956,7 @@ fn goldenrod_gain_drives_distortion() {
 
     let input = sine(48000);
 
-    let mut peak_at = |gain: f64| -> f64 {
+    let peak_at = |gain: f64| -> f64 {
         let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
         proc.set_control("Gain", gain);
         proc.set_control("Treble", 0.5);
@@ -1215,7 +1215,7 @@ pedal "Marshall Bluesbreaker" {
     eprintln!("[blues-driver] --- stage0 solo ---");
     proc.stages[0].reset();
     let mut s0_settled = 0.0;
-    for i in 0..20 { s0_settled = proc.stages[0].process(test_input); }
+    for _i in 0..20 { s0_settled = proc.stages[0].process(test_input); }
     eprintln!("[blues-driver]   stage0 settled: {s0_settled:.6e}");
 
     eprintln!("[blues-driver] --- mnl0 solo with input 0.1 ---");
@@ -2085,7 +2085,7 @@ fn big_muff_per_stage_signal_levels() {
         .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
         .collect();
 
-    let mut stage_peaks = vec![0.0f64; proc.stages.len()];
+    let _stage_peaks = vec![0.0f64; proc.stages.len()];
     let mut final_peaks = Vec::new();
     for &s in &input {
         let out = proc.process(s);
@@ -2424,6 +2424,7 @@ fn assert_finite(output: &[f64], name: &str) {
     );
 }
 
+#[allow(dead_code)]
 fn dump_tree(node: &super::dyn_node::DynNode, depth: usize) {
     use super::dyn_node::{DynNode, BinaryKind};
     let indent = "  ".repeat(depth);
@@ -4385,7 +4386,7 @@ equipment "Triode Named Supply" {
 }
 "#;
     let pedal = parse_pedal_file(src).unwrap();
-    let mut proc = compile_pedal(&pedal, 48000.0).unwrap();
+    let proc = compile_pedal(&pedal, 48000.0).unwrap();
 
     // Should compile to at least one stage (WDF or multi-NL fallback).
     let wdf = proc.stages.len();
