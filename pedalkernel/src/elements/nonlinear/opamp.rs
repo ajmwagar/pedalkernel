@@ -270,6 +270,13 @@ pub struct OpAmpRoot {
     /// GBW rolloff filter coefficient: g = 1 - exp(-2π·f_cl/fs).
     /// Recomputed when gain or sample rate changes.
     gbw_coeff: f64,
+    /// Actual closed-loop gain for GBW bandwidth calculation ONLY.
+    ///
+    /// In the 3-port adaptor path, the VCVS mode gain is set to 1.0 because
+    /// the scattering matrix handles the output impedance — but the GBW filter
+    /// still needs the true closed-loop gain to compute f_cl = GBW / gbw_gain.
+    /// For all other paths, gbw_gain == self.gain().
+    gbw_gain: f64,
     /// Feedback pot configuration. When set, the op-amp recomputes its own
     /// gain from the pot's resistance via `set_feedback_pot_r()`.
     feedback_config: Option<FeedbackConfig>,
@@ -309,6 +316,7 @@ impl OpAmpRoot {
             soft_clip_v: None,
             gbw_state: 0.0,
             gbw_coeff,
+            gbw_gain: 1.0,
             feedback_config: None,
         }
     }
@@ -331,6 +339,7 @@ impl OpAmpRoot {
             soft_clip_v: None,
             gbw_state: 0.0,
             gbw_coeff,
+            gbw_gain: g,
             feedback_config: None,
         }
     }
@@ -348,6 +357,7 @@ impl OpAmpRoot {
             soft_clip_v: None,
             gbw_state: 0.0,
             gbw_coeff,
+            gbw_gain: g,
             feedback_config: None,
         }
     }
@@ -375,7 +385,19 @@ impl OpAmpRoot {
             OpAmpMode::Inverting { gain: gv } => *gv = g,
             OpAmpMode::NonInverting { gain: gv } => *gv = g,
         }
+        self.gbw_gain = g;
         self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, g, self.sample_rate);
+    }
+
+    /// Set only the GBW gain used for bandwidth calculation, without changing the VCVS gain.
+    ///
+    /// Used by the 3-port adaptor path where the VCVS mode gain is 1.0 (the scattering
+    /// matrix handles port impedance), but the GBW rolloff filter must use the true
+    /// closed-loop gain to compute f_cl = GBW / gbw_gain correctly.
+    #[inline]
+    pub fn set_gbw_gain(&mut self, gbw_gain: f64) {
+        self.gbw_gain = gbw_gain.abs().max(1.0);
+        self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, self.gbw_gain, self.sample_rate);
     }
 
     /// Get the current gain.
@@ -412,7 +434,7 @@ impl OpAmpRoot {
     #[inline]
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         self.sample_rate = sample_rate;
-        self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, self.gain(), sample_rate);
+        self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, self.gbw_gain, sample_rate);
     }
 
     /// Get the current sample rate.
@@ -449,7 +471,9 @@ impl OpAmpRoot {
 
     /// Get the feedback pot component ID, if configured.
     pub fn feedback_pot_id(&self) -> Option<&str> {
-        self.feedback_config.as_ref().map(|c| c.pot_comp_id.as_str())
+        self.feedback_config
+            .as_ref()
+            .map(|c| c.pot_comp_id.as_str())
     }
 
     /// Recompute gain from the feedback pot's current resistance.
@@ -488,6 +512,7 @@ impl OpAmpRoot {
         #[cfg(test)]
         eprintln!("[OPAMP_DEBUG] set_feedback_pot_r: pot_r={pot_r:.1} pot_is_fb={} is_inv={} fixed_series={:.1} parallel_r={:?} other_leg={:.1} → gain={gain:.4}",
             cfg.pot_is_feedback, cfg.is_inverting, cfg.fixed_series_r, cfg.parallel_r, cfg.other_leg_r);
+        // set_gain updates both the VCVS mode gain and gbw_gain, then recomputes gbw_coeff.
         self.set_gain(gain);
     }
 
@@ -562,7 +587,8 @@ impl WdfRoot for OpAmpRoot {
 
         #[cfg(test)]
         {
-            static OPAMP_PROC_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            static OPAMP_PROC_TRACE: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let n = OPAMP_PROC_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // X4 oversampling: 4800 warmup × 4 = 19200 sub-samples before signal
             if n >= 19200 && n < 19220 {
