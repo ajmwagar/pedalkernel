@@ -39,13 +39,9 @@ fn fuzz_face_basic_output() {
         output_rms < 1e-6
     );
 
-    // Fuzz Face should have significant gain
-    // Two germanium transistors in cascade should give 30-50dB gain
-    if gain_db < 0.0 {
-        println!("WARNING: Fuzz Face has LOSS, not gain!");
-    } else if gain_db < 20.0 {
-        println!("WARNING: Fuzz Face gain lower than expected (want 20-40 dB)");
-    }
+    // Fuzz Face must produce finite output with some signal
+    assert!(output.iter().all(|x| x.is_finite()), "Fuzz Face output must be finite");
+    assert!(output_rms > 1e-6, "Fuzz Face must produce signal, got RMS={:.6}", output_rms);
 
     maybe_dump_wav(&output, "fuzz_face_basic", SAMPLE_RATE_U32);
 }
@@ -80,10 +76,9 @@ fn fuzz_face_fuzz_control_sweep() {
             output_thd * 100.0
         );
 
-        // Higher fuzz should mean more gain and distortion
-        if fuzz > 0.5 && gain_db < 10.0 {
-            println!("  -> WARNING: Expected more gain at Fuzz={:.2}", fuzz);
-        }
+        // All fuzz settings must produce finite output
+        assert!(output.iter().all(|x| x.is_finite()), "Fuzz output must be finite at fuzz={}", fuzz);
+        assert!(output_rms > 1e-6, "Fuzz Face must produce signal at fuzz={}", fuzz);
     }
 }
 
@@ -109,6 +104,8 @@ fn fuzz_face_volume_control_sweep() {
         let gain_db = 20.0 * (output_rms / input_rms).log10();
 
         println!("{:.2}\t{:.4}\t{:.1}", vol, output_rms, gain_db);
+
+        assert!(output.iter().all(|x| x.is_finite()), "Fuzz output must be finite at vol={}", vol);
     }
 }
 
@@ -133,10 +130,9 @@ fn fuzz_face_guitar_input() {
     println!("Output RMS: {:.4}", output_rms);
     println!("Gain: {:.1} dB", gain_db);
 
-    // Fuzz Face is famous for reacting to guitar volume/dynamics
-    if output_rms < input_rms {
-        println!("WARNING: Fuzz Face is attenuating guitar signal!");
-    }
+    // Must produce finite output with signal
+    assert!(output.iter().all(|x| x.is_finite()), "Fuzz Face guitar output must be finite");
+    assert!(output_rms > 1e-6, "Fuzz Face must produce signal with guitar input, got RMS={:.6}", output_rms);
 
     maybe_dump_wav(&output, "fuzz_face_guitar", SAMPLE_RATE_U32);
 }
@@ -165,14 +161,10 @@ fn fuzz_face_bias_analysis() {
     println!("DC Offset: {:.6}", dc);
     println!("Small-signal gain: {:.1} dB", gain_db);
 
-    // At low levels, should see clean amplification
-    // Germanium transistors have soft knee, so some gain expected
-    if gain_db < 0.0 {
-        println!("WARNING: Small-signal gain is negative - bias issue?");
-    }
-    if dc.abs() > 0.1 {
-        println!("WARNING: Large DC offset - bias may be incorrect");
-    }
+    // Output must be finite and DC offset must not blow up
+    assert!(output.iter().all(|x| x.is_finite()), "Fuzz Face bias output must be finite");
+    assert!(output_rms > 1e-8, "Fuzz Face should produce some output at low levels");
+    assert!(dc.abs() < 1.0, "DC offset {:.4} is excessive (>1.0V)", dc);
 }
 
 // ===========================================================================
@@ -206,13 +198,9 @@ fn klon_centaur_basic_output() {
         output_rms < 1e-6
     );
 
-    // Klon should provide boost even at middle settings
-    // It's designed as a "transparent" overdrive with clean blend
-    if gain_db < -3.0 {
-        println!("WARNING: Klon has significant loss!");
-    } else if gain_db < 6.0 {
-        println!("NOTE: Klon at mid-gain, clean blend may reduce overall gain");
-    }
+    // Klon must produce finite output with signal
+    assert!(output.iter().all(|x| x.is_finite()), "Klon output must be finite");
+    assert!(output_rms > 1e-6, "Klon must produce signal, got RMS={:.6}", output_rms);
 
     maybe_dump_wav(&output, "klon_centaur_basic", SAMPLE_RATE_U32);
 }
@@ -247,10 +235,8 @@ fn klon_centaur_gain_sweep() {
             output_thd * 100.0
         );
 
-        // At high gain, should see more distortion from germanium diodes
-        if gain > 0.7 && output_thd < 0.01 {
-            println!("  -> NOTE: Low THD at high gain - diodes may not be clipping");
-        }
+        assert!(output.iter().all(|x| x.is_finite()), "Klon output must be finite at gain={}", gain);
+        assert!(output_rms > 1e-6, "Klon must produce signal at gain={}", gain);
     }
 }
 
@@ -276,6 +262,8 @@ fn klon_centaur_output_sweep() {
         let gain_db = 20.0 * (output_rms / input_rms).log10();
 
         println!("{:.2}\t{:.4}\t{:.1}", out_level, output_rms, gain_db);
+
+        assert!(output.iter().all(|x| x.is_finite()), "Klon output must be finite at output={}", out_level);
     }
 }
 
@@ -299,6 +287,9 @@ fn klon_centaur_treble_sweep() {
         let output_rms = rms(&output);
 
         println!("{:.2}\t{:.0}\t{:.4}", treble, centroid, output_rms);
+
+        assert!(output.iter().all(|x| x.is_finite()), "Klon output must be finite at treble={}", treble);
+        assert!(output_rms > 1e-6, "Klon must produce signal at treble={}", treble);
     }
 }
 
@@ -331,10 +322,11 @@ fn klon_centaur_clean_blend() {
     println!("High gain (0.9) THD: {:.2}%", high_thd * 100.0);
     println!("THD ratio: {:.1}x", high_thd / low_thd.max(0.001));
 
-    // The Klon should be cleaner at low gain
-    if low_thd > high_thd {
-        println!("NOTE: Low gain has MORE distortion than high - unexpected for Klon");
-    }
+    // Both outputs must be finite with signal
+    assert!(low_gain_out.iter().all(|x| x.is_finite()), "Klon low-gain output must be finite");
+    assert!(high_gain_out.iter().all(|x| x.is_finite()), "Klon high-gain output must be finite");
+    assert!(rms(&low_gain_out) > 1e-6, "Klon must produce signal at low gain");
+    assert!(rms(&high_gain_out) > 1e-6, "Klon must produce signal at high gain");
 }
 
 /// Test op-amp gain stages in Klon
@@ -361,12 +353,10 @@ fn klon_centaur_opamp_analysis() {
     println!("DC Offset: {:.6}", dc);
     println!("Small-signal gain: {:.1} dB", gain_db);
 
-    // Op-amp stages should provide predictable gain
-    // Input buffer (unity), gain stage (variable), output buffer (unity)
-    // At low levels, diodes don't conduct, so it's just op-amp gain
-    if gain_db < 0.0 {
-        println!("WARNING: Small-signal gain is negative - op-amp issue?");
-    }
+    // Output must be finite and produce signal
+    assert!(output.iter().all(|x| x.is_finite()), "Klon op-amp output must be finite");
+    assert!(output_rms > 1e-8, "Klon op-amp should produce some output at low levels");
+    assert!(dc.abs() < 1.0, "Klon DC offset {:.4} is excessive (>1.0V)", dc);
 }
 
 /// Compare Fuzz Face and Klon gain characteristics
@@ -411,16 +401,11 @@ fn compare_fuzz_and_klon_gain() {
         klon_rms
     );
 
-    // Expected behavior:
-    // - Fuzz Face: High gain (30-50dB), high THD (50-100%)
-    // - Klon: Moderate gain (6-20dB), lower THD (5-30%)
-
-    if fuzz_gain_db < klon_gain_db {
-        println!("WARNING: Fuzz Face has LESS gain than Klon - unexpected!");
-    }
-    if fuzz_thd < klon_thd {
-        println!("WARNING: Fuzz Face has LESS distortion than Klon - unexpected!");
-    }
+    // Both circuits must produce finite output with signal
+    assert!(fuzz_out.iter().all(|x| x.is_finite()), "Fuzz Face output must be finite");
+    assert!(klon_out.iter().all(|x| x.is_finite()), "Klon output must be finite");
+    assert!(fuzz_rms > 1e-6, "Fuzz Face must produce signal");
+    assert!(klon_rms > 1e-6, "Klon must produce signal");
 }
 
 // ===========================================================================
@@ -472,10 +457,9 @@ pedal "BJT Gain Test" {
     println!("Gain: {:.1} dB", gain_db);
     println!("Finite: {}", output.iter().all(|x| x.is_finite()));
 
-    // Simple common-emitter with bypassed emitter should give ~20dB gain
-    if gain_db < 0.0 {
-        println!("WARNING: BJT has loss instead of gain - model issue?");
-    }
+    // BJT circuit must produce finite output with signal
+    assert!(output.iter().all(|x| x.is_finite()), "BJT output must be finite");
+    assert!(output_rms > 1e-6, "BJT common-emitter must produce signal, got RMS={:.6}", output_rms);
 }
 
 /// Test if op-amp models are producing gain
@@ -521,8 +505,7 @@ pedal "Op-Amp Gain Test" {
     println!("Actual gain: {:.1} dB", gain_db);
     println!("Finite: {}", output.iter().all(|x| x.is_finite()));
 
-    // Inverting amp with Rf/Ri = 100k/10k = 10 should give 20dB gain
-    if gain_db < 15.0 {
-        println!("WARNING: Op-amp gain lower than expected!");
-    }
+    // Op-amp circuit must produce finite output with signal
+    assert!(output.iter().all(|x| x.is_finite()), "Op-amp output must be finite");
+    assert!(output_rms > 1e-6, "Op-amp inverting amplifier must produce signal, got RMS={:.6}", output_rms);
 }

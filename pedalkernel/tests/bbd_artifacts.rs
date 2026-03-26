@@ -42,14 +42,13 @@ fn bbd_clock_feedthrough_with_silence() {
         output_rms, output_peak
     );
 
-    // ARTIFACT DETECTION: Flag if output is louder than expected noise floor
+    // Noise floor with silent input must stay below -40dB
     let noise_threshold = 0.01; // ~-40dB
-    if output_rms > noise_threshold {
-        println!(
-            "WARNING: Possible clock feedthrough detected: RMS {:.4} > {:.4} threshold",
-            output_rms, noise_threshold
-        );
-    }
+    assert!(
+        output_rms <= noise_threshold,
+        "Clock feedthrough detected: silence RMS {:.4} > {:.4} threshold",
+        output_rms, noise_threshold
+    );
 
     // Check for narrowband HF energy (clock feedthrough signature)
     // MN3005 clock range is 10kHz-100kHz; at long delay, clock ~ 10kHz
@@ -67,9 +66,11 @@ fn bbd_clock_feedthrough_with_silence() {
     if max_hf > 1e-8 && output_rms > 1e-6 {
         let hf_ratio = max_hf / (output_rms * output_rms);
         println!("HF/total ratio: {:.4}", hf_ratio);
-        if hf_ratio > 0.1 {
-            println!("WARNING: Dominant HF spike detected - possible clock feedthrough");
-        }
+        assert!(
+            hf_ratio <= 0.1,
+            "Dominant HF spike at clock frequency: HF/total ratio {:.4} (want <=0.1)",
+            hf_ratio
+        );
     }
 
     maybe_dump_wav(&output, "bbd_clock_feedthrough_silence", SAMPLE_RATE_U32);
@@ -95,13 +96,12 @@ fn bbd_clock_feedthrough_with_quiet_signal() {
         let snr_db = 10.0 * (signal_power / total_clock_noise).log10();
         println!("Signal-to-clock-noise ratio: {:.1} dB", snr_db);
 
-        // ARTIFACT DETECTION: SNR should be > 40dB for acceptable quality
-        if snr_db < 40.0 {
-            println!(
-                "WARNING: Poor signal-to-clock-noise ratio: {:.1} dB (want >40 dB)",
-                snr_db
-            );
-        }
+        // SNR must be > 40dB for acceptable quality
+        assert!(
+            snr_db >= 40.0,
+            "Poor signal-to-clock-noise ratio: {:.1} dB (want >=40 dB)",
+            snr_db
+        );
     }
 
     maybe_dump_wav(&output, "bbd_clock_feedthrough_quiet", SAMPLE_RATE_U32);
@@ -166,13 +166,12 @@ fn bbd_compander_breathing_on_transient() {
                 avg_jitter, max_jitter
             );
 
-            // ARTIFACT DETECTION: High jitter indicates compander breathing
-            if max_jitter > 0.5 {
-                println!(
-                    "WARNING: Compander breathing detected - envelope jitter {:.2} (want <0.5)",
-                    max_jitter
-                );
-            }
+            // Envelope jitter must stay below 0.5 (compander breathing threshold)
+            assert!(
+                max_jitter <= 0.5,
+                "Compander breathing detected: envelope jitter {:.2} (want <=0.5)",
+                max_jitter
+            );
         }
     }
 
@@ -220,13 +219,12 @@ fn bbd_compander_release_tail() {
             silence_rms, silence_peak
         );
 
-        // ARTIFACT DETECTION: Signal in "silent" region = compander tail
-        if silence_rms > 0.01 {
-            println!(
-                "WARNING: Compander release tail detected - silence RMS {:.4} (want <0.01)",
-                silence_rms
-            );
-        }
+        // Silence region must be quiet (no compander release tail)
+        assert!(
+            silence_rms <= 0.01,
+            "Compander release tail detected: silence RMS {:.4} (want <=0.01)",
+            silence_rms
+        );
     }
 
     maybe_dump_wav(&output, "bbd_compander_release", SAMPLE_RATE_U32);
@@ -290,11 +288,12 @@ fn bbd_aliasing_from_high_frequencies() {
     );
     println!("LF garbage: {:.2e}", lf_garbage);
 
-    // ARTIFACT DETECTION: Significant energy at non-input frequencies indicates aliasing
+    // Aliasing products must be <10% of input energy
     let input_energy = energy_8k + energy_10k;
-    if input_energy > 1e-10 && lf_garbage > input_energy * 0.1 {
-        println!(
-            "WARNING: Possible aliasing - LF garbage is {:.1}% of input energy",
+    if input_energy > 1e-10 {
+        assert!(
+            lf_garbage <= input_energy * 0.1,
+            "Aliasing detected: LF garbage is {:.1}% of input energy (want <=10%)",
             lf_garbage / input_energy * 100.0
         );
     }
@@ -333,10 +332,11 @@ fn bbd_zipper_noise_fast_modulation() {
         fundamental, harmonics, wideband_hf
     );
 
-    // ARTIFACT DETECTION: High wideband energy relative to signal indicates zipper noise
-    if wideband_hf > 0.1 && fundamental > 1e-6 {
-        println!(
-            "WARNING: Possible zipper noise - wideband HF is {:.1}% of total energy",
+    // Wideband HF energy must not dominate (zipper noise threshold)
+    if fundamental > 1e-6 {
+        assert!(
+            wideband_hf <= 0.1,
+            "Zipper noise detected: wideband HF is {:.1}% of total energy (want <=10%)",
             wideband_hf * 100.0
         );
     }
@@ -373,13 +373,12 @@ fn bbd_discontinuity_detection() {
         max_delta, discontinuity_count
     );
 
-    // ARTIFACT DETECTION: More than a few discontinuities indicates zipper noise
-    if discontinuity_count > 10 {
-        println!(
-            "WARNING: {} discontinuities detected (want <10) - possible zipper noise",
-            discontinuity_count
-        );
-    }
+    // No more than 10 sample-to-sample discontinuities allowed
+    assert!(
+        discontinuity_count <= 10,
+        "{} discontinuities detected (want <=10) - possible zipper noise",
+        discontinuity_count
+    );
 
     maybe_dump_wav(&output, "bbd_discontinuity", SAMPLE_RATE_U32);
 }
@@ -432,14 +431,12 @@ fn bbd_intermodulation_distortion() {
         let imd_db = 10.0 * imd_ratio.log10();
         println!("IMD ratio: {:.4} ({:.1} dB)", imd_ratio, imd_db);
 
-        // ARTIFACT DETECTION: High IMD indicates nonlinearity issues
-        if imd_ratio > 0.05 {
-            // >5% IMD
-            println!(
-                "WARNING: High IMD detected: {:.1}% (want <5%)",
-                imd_ratio * 100.0
-            );
-        }
+        // IMD must stay below 5%
+        assert!(
+            imd_ratio <= 0.05,
+            "High IMD detected: {:.1}% (want <=5%)",
+            imd_ratio * 100.0
+        );
     }
 
     maybe_dump_wav(&output, "bbd_imd", SAMPLE_RATE_U32);
@@ -473,13 +470,12 @@ fn bbd_dc_offset_accumulation() {
 
         println!("DC offset in silence: {:.6}", dc);
 
-        // ARTIFACT DETECTION: Significant DC offset indicates accumulation
-        if dc_abs > 0.01 {
-            println!(
-                "WARNING: DC offset accumulation detected: {:.4} (want <0.01)",
-                dc_abs
-            );
-        }
+        // DC offset must stay below 0.01
+        assert!(
+            dc_abs <= 0.01,
+            "DC offset accumulation detected: {:.4} (want <=0.01)",
+            dc_abs
+        );
     }
 
     // Also check for DC drift over time
@@ -492,9 +488,11 @@ fn bbd_dc_offset_accumulation() {
         early_dc, late_dc, dc_drift
     );
 
-    if dc_drift > 0.05 {
-        println!("WARNING: DC drift detected: {:.4} (want <0.05)", dc_drift);
-    }
+    assert!(
+        dc_drift <= 0.05,
+        "DC drift detected: {:.4} (want <=0.05)",
+        dc_drift
+    );
 
     maybe_dump_wav(&output, "bbd_dc_offset", SAMPLE_RATE_U32);
 }
@@ -544,12 +542,11 @@ fn bbd_noise_floor_consistency() {
 
         println!("Noise floor variation: {:.2}x", noise_variation);
 
-        if noise_variation > 10.0 {
-            println!(
-                "WARNING: Noise floor varies {:.1}x with input level (want <10x)",
-                noise_variation
-            );
-        }
+        assert!(
+            noise_variation <= 10.0,
+            "Noise floor varies {:.1}x with input level (want <=10x)",
+            noise_variation
+        );
     }
 }
 
@@ -616,14 +613,12 @@ fn bbd_soft_clipping_character() {
         thd_quiet * 100.0
     );
 
-    // ARTIFACT DETECTION: THD should increase gracefully with level
-    // Harsh clipping would cause very high THD
-    if thd_value > 0.3 {
-        println!(
-            "WARNING: High THD at hot input: {:.1}% (may indicate harsh clipping)",
-            thd_value * 100.0
-        );
-    }
+    // THD at hot levels must not exceed 30% (harsh clipping threshold)
+    assert!(
+        thd_value <= 0.3,
+        "Harsh clipping detected: THD {:.1}% at hot input (want <=30%)",
+        thd_value * 100.0
+    );
 
     maybe_dump_wav(&output, "bbd_clipping", SAMPLE_RATE_U32);
 }
@@ -652,13 +647,12 @@ fn mn3005_progressive_darkening() {
         input_centroid, output_centroid
     );
 
-    // MN3005 should darken the sound (lower centroid)
-    if output_centroid > input_centroid {
-        println!(
-            "NOTE: Output brighter than input - MN3005 should darken ({:.0} > {:.0})",
-            output_centroid, input_centroid
-        );
-    }
+    // MN3005 (4096 stages) must darken the sound (lower spectral centroid)
+    assert!(
+        output_centroid <= input_centroid,
+        "MN3005 should darken signal: output centroid {:.0}Hz > input {:.0}Hz",
+        output_centroid, input_centroid
+    );
 
     // Check HF energy ratio
     let input_hf = band_energy_ratio(&input, SAMPLE_RATE, 2000.0, 8000.0, 200.0);
@@ -714,13 +708,14 @@ fn bbd_feedback_artifact_accumulation() {
         }
     }
 
-    // ARTIFACT DETECTION: THD should not explode in later repeats
+    // THD must not explode through feedback repeats (max 3x increase)
     if thd_values.len() >= 2 {
         let first_thd = thd_values[0];
         let last_thd = thd_values[thd_values.len() - 1];
-        if last_thd > first_thd * 3.0 && first_thd > 0.01 {
-            println!(
-                "WARNING: THD accumulation through feedback: {:.1}x increase",
+        if first_thd > 0.01 {
+            assert!(
+                last_thd <= first_thd * 3.0,
+                "THD accumulation through feedback: {:.1}x increase (want <=3x)",
                 last_thd / first_thd
             );
         }
@@ -802,7 +797,12 @@ fn bbd_overall_quality_assessment() {
     }
     println!();
 
-    // The test passes even with artifacts - it's for detection, not gating
+    // Quality gate: fail if any issues detected
+    assert!(
+        issues.is_empty(),
+        "BBD quality issues detected: {}",
+        issues.join("; ")
+    );
 }
 
 // ===========================================================================
@@ -870,13 +870,14 @@ fn walrus_slo_cascade_artifacts() {
         }
     }
 
-    // ARTIFACT DETECTION: THD explosion in later repeats
+    // THD must not explode through cascade (max 5x increase)
     if thd_values.len() >= 3 {
         let early_thd = thd_values[0];
         let late_thd = thd_values.iter().skip(2).cloned().fold(0.0f64, f64::max);
-        if late_thd > early_thd * 5.0 && early_thd > 0.01 {
-            println!(
-                "WARNING: Slo THD accumulation: {:.1}x increase through cascade",
+        if early_thd > 0.01 {
+            assert!(
+                late_thd <= early_thd * 5.0,
+                "Slo THD accumulation: {:.1}x increase through cascade (want <=5x)",
                 late_thd / early_thd
             );
         }

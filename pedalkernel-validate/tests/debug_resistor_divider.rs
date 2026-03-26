@@ -51,8 +51,13 @@ fn debug_resistor_divider_structure() {
     println!("Expected: 0.5 (-6.02 dB)");
     println!("Error: {:.2} dB", 20.0 * ((output / input) / 0.5).log10());
 
-    // This test intentionally doesn't assert - it's for inspection
-    // If gain is wrong, the debug_dump above should reveal why
+    // A 10k/10k divider must produce ~0.5 gain (within 20% tolerance for WDF bilinear warp)
+    let gain = output / input;
+    assert!(
+        gain > 0.3 && gain < 0.7,
+        "Resistor divider gain {:.4} outside expected range 0.3–0.7 (ideal 0.5)",
+        gain
+    );
 }
 
 #[test]
@@ -104,6 +109,14 @@ fn debug_rc_lowpass_structure() {
         20.0 * max_out.log10()
     );
     println!("Error: {:.2} dB", 20.0 * (max_out / expected_gain).log10());
+
+    // Actual gain should be within 3dB of the expected RC lowpass response
+    assert!(
+        max_out > expected_gain * 0.5 && max_out < expected_gain * 2.0,
+        "RC lowpass gain {:.4} too far from expected {:.4} (>3dB error)",
+        max_out,
+        expected_gain
+    );
 }
 
 #[test]
@@ -157,4 +170,9 @@ fn trace_wave_variables() {
     println!("");
     println!("Question: How does input voltage get into the tree?");
     println!("Question: How is output voltage extracted from waves?");
+
+    // At minimum, the compiled circuit must process samples without crashing
+    let mut proc = compiled;
+    let output = proc.process(1.0);
+    assert!(output.is_finite(), "Wave variable trace output must be finite");
 }

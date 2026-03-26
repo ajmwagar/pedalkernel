@@ -20,11 +20,11 @@ fn value_str(kind: &dyn Component) -> String {
         return format!(
             "R_switched_{}-{}",
             format_eng(
-                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap(),
                 "Ω"
             ),
             format_eng(
-                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap(),
                 "Ω"
             )
         );
@@ -37,11 +37,11 @@ fn value_str(kind: &dyn Component) -> String {
         return format!(
             "C_switched_{}-{}",
             format_eng(
-                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap(),
                 "F"
             ),
             format_eng(
-                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap(),
                 "F"
             )
         );
@@ -54,11 +54,11 @@ fn value_str(kind: &dyn Component) -> String {
         return format!(
             "L_switched_{}-{}",
             format_eng(
-                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap(),
                 "H"
             ),
             format_eng(
-                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap(),
                 "H"
             )
         );
