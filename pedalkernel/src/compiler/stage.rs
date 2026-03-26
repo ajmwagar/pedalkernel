@@ -372,7 +372,8 @@ impl ResonatorFeedback {
     #[inline]
     pub(super) fn process(&mut self, input: f64) -> f64 {
         let y = self.b0 * input + self.b1 * self.x1 + self.b2 * self.x2
-              - self.a1 * self.y1 - self.a2 * self.y2;
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
         self.x2 = self.x1;
         self.x1 = input;
         self.y2 = self.y1;
@@ -506,16 +507,28 @@ pub(super) struct WdfStage {
     /// opamp gain is updated: gain = Rf / (fixed_r + photocoupler_r).
     /// Used by Mu-Tron style envelope-controlled integrators.
     pub(super) input_photocouplers: Vec<InputPhotocoupler>,
-    /// Feedback (Zf) subtree for the 3-port linear opamp adaptor.
-    /// When set together with `zg_child` and `opamp_adaptor`, the stage uses
-    /// MNA-based R-type scattering instead of the standard single-tree path.
+    /// Feedback (Zf) subtree for the 3-port linear opamp adaptor (NonInverting).
+    /// Used with `zg_child` + `opamp_adaptor` when Zf/Zg split cleanly (e.g. RAT).
     pub(super) zf_child: Option<DynNode>,
-    /// Ground-leg (Zg) subtree for the 3-port linear opamp adaptor.
+    /// Ground-leg (Zg) subtree for the 3-port linear opamp adaptor (NonInverting).
     pub(super) zg_child: Option<DynNode>,
-    /// 3-port R-type adaptor scattering matrix for NonInverting opamps with
-    /// reactive Zf AND reactive Zg (e.g. RAT: Zf = Distortion||C3||C4, Zg = R4+C5||R5+C6).
-    /// When Some, process() uses the 3-port path.
+    /// R-type adaptor scattering matrix. Used by BOTH the 3-port path (zf/zg)
+    /// and the MNA path (opamp_children). When Some, process() uses the adaptor.
     pub(super) opamp_adaptor: Option<crate::tree::RTypeAdaptor>,
+    /// MNA-based child ports for opamps with reactive feedback (Inverting).
+    /// Each child is a DynNode leaf (cap, inductor, or pot). Fixed resistors
+    /// are stamped into the MNA. Used when build_feedback_tree + scalar gain
+    /// can't model frequency-dependent feedback (e.g. Goldenrod Treble).
+    pub(super) opamp_children: Vec<DynNode>,
+    /// Stored MNA + port pairs for scattering recompute on pot change.
+    pub(super) opamp_recompute: Option<OpAmpRecomputeData>,
+}
+
+/// Stored data for recomputing opamp adaptor scattering when pots change.
+pub(super) struct OpAmpRecomputeData {
+    pub(super) mna: crate::tree::MnaSystem,
+    pub(super) port_pairs: Vec<(Option<usize>, Option<usize>)>,
+    pub(super) port_resistances: Vec<f64>,
 }
 
 /// A photocoupler in the input path of an inverting opamp stage.
@@ -534,11 +547,28 @@ impl WdfStage {
     /// Check if any DynNode tree in this stage contains a pot with the given ID.
     pub(super) fn has_pot(&self, pot_id: &str) -> bool {
         use super::helpers::has_pot;
-        if has_pot(&self.tree, pot_id) { return true; }
-        if let Some(ref zf) = self.zf_child { if has_pot(zf, pot_id) { return true; } }
-        if let Some(ref zg) = self.zg_child { if has_pot(zg, pot_id) { return true; } }
+        if has_pot(&self.tree, pot_id) {
+            return true;
+        }
+        if let Some(ref zf) = self.zf_child {
+            if has_pot(zf, pot_id) {
+                return true;
+            }
+        }
+        if let Some(ref zg) = self.zg_child {
+            if has_pot(zg, pot_id) {
+                return true;
+            }
+        }
+        for child in &self.opamp_children {
+            if has_pot(child, pot_id) {
+                return true;
+            }
+        }
         if let RootKind::PassiveRType { children, .. } = &self.root {
-            if children.iter().any(|c| has_pot(c, pot_id)) { return true; }
+            if children.iter().any(|c| has_pot(c, pot_id)) {
+                return true;
+            }
         }
         false
     }
@@ -560,26 +590,33 @@ impl WdfStage {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
 
-        // ── 3-port opamp adaptor path ──
-        // When zf_child + zg_child + opamp_adaptor are set, use the 3-port
-        // WDF adaptor instead of the standard single-tree path. This models
-        // both feedback (Zf) and ground-leg (Zg) impedance networks with
-        // proper frequency-dependent scattering.
+        // ── Opamp adaptor path (3-port subtrees OR MNA children) ──
+        // Both paths use RTypeAdaptor scattering. The 3-port path has
+        // graph_reduce subtrees (zf/zg); the MNA path has individual
+        // component leaves (caps, pots) with resistors in the MNA.
         if self.opamp_adaptor.is_some() {
             let adaptor = self.opamp_adaptor.as_mut().unwrap();
-            let zf = self.zf_child.as_mut().unwrap();
-            let zg = self.zg_child.as_mut().unwrap();
 
-            // Up-sweep: get reflected waves from both subtrees
-            let b_f = zf.reflected();
-            let b_g = zg.reflected();
+            // Collect reflected waves from children (3-port or MNA)
+            let (b_children, use_mna) = if !self.opamp_children.is_empty() {
+                let b: Vec<f64> = self
+                    .opamp_children
+                    .iter_mut()
+                    .map(|c| c.reflected())
+                    .collect();
+                (b, true)
+            } else if let (Some(zf), Some(zg)) = (self.zf_child.as_mut(), self.zg_child.as_mut()) {
+                (vec![zf.reflected(), zg.reflected()], false)
+            } else {
+                unreachable!("opamp adaptor requires children");
+            };
 
             // Scatter to adapted port
-            let b_adapted = adaptor.scatter_up(&[b_f, b_g]);
+            let b_adapted = adaptor.scatter_up(&b_children);
 
             // OpAmp root processes the adapted wave
             let RootKind::OpAmp(ref mut op) = &mut self.root else {
-                unreachable!("3-port adaptor requires OpAmp root");
+                unreachable!("opamp adaptor requires OpAmp root");
             };
             op.set_vp(input * self.compensation);
             let rp = adaptor.port_resistance;
@@ -587,8 +624,14 @@ impl WdfStage {
 
             // Down-sweep: distribute to children
             let a_children = adaptor.scatter_down(a_adapted);
-            zf.set_incident(a_children[0]);
-            zg.set_incident(a_children[1]);
+            if use_mna {
+                for (i, child) in self.opamp_children.iter_mut().enumerate() {
+                    child.set_incident(a_children[i]);
+                }
+            } else {
+                self.zf_child.as_mut().unwrap().set_incident(a_children[0]);
+                self.zg_child.as_mut().unwrap().set_incident(a_children[1]);
+            }
 
             // Output = voltage at adapted port (out→gnd = V_out)
             let mut output = (a_adapted + b_adapted) / 2.0;
@@ -783,12 +826,8 @@ impl WdfStage {
                         j.process(b_tree, rp)
                     }
                 }
-                RootKind::JfetVr(j) => {
-                    j.process_root(b_tree, rp)
-                }
-                RootKind::Triode(t) => {
-                    t.process(b_tree, rp)
-                }
+                RootKind::JfetVr(j) => j.process_root(b_tree, rp),
+                RootKind::Triode(t) => t.process(b_tree, rp),
                 RootKind::VariMu(t) => t.process(b_tree, rp),
                 RootKind::Pentode(p) => p.process(b_tree, rp),
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
@@ -900,8 +939,7 @@ impl WdfStage {
                     let vs_voltage = sample * compensation;
                     let n = *n_ports;
                     // 1. Collect reflected waves from children
-                    let b_children: Vec<f64> =
-                        children.iter_mut().map(|c| c.reflected()).collect();
+                    let b_children: Vec<f64> = children.iter_mut().map(|c| c.reflected()).collect();
                     // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
                     let mut a_children = vec![0.0; n];
                     for i in 0..n {
@@ -912,8 +950,7 @@ impl WdfStage {
                         a_children[i] = a_i;
                     }
                     // 3. Set incident waves on children
-                    for (child, &a_i) in children.iter_mut().zip(a_children.iter())
-                    {
+                    for (child, &a_i) in children.iter_mut().zip(a_children.iter()) {
                         child.set_incident(a_i);
                     }
                     // 4. Output voltage at probe port
@@ -1048,9 +1085,7 @@ impl WdfStage {
             } => {
                 *rp = 1.0 / (2.0 * effective_rate * *capacitance);
             }
-            RootKind::InductorRoot {
-                inductance, rp, ..
-            } => {
+            RootKind::InductorRoot { inductance, rp, .. } => {
                 *rp = 2.0 * effective_rate * *inductance;
             }
             RootKind::PassiveRType { .. } => {
@@ -1387,10 +1422,25 @@ impl WdfStage {
     /// Checks both the OpAmp root (standalone) and feedback_opamp (DiodePair paired).
     pub(super) fn notify_pot_changed(&mut self) {
         if let Some(ref pot_id) = self.feedback_pot_id {
-            // Check main tree first, then opamp adaptor children (zf/zg)
-            let pot_r = self.tree.get_pot_resistance(pot_id)
-                .or_else(|| self.zf_child.as_ref().and_then(|c| c.get_pot_resistance(pot_id)))
-                .or_else(|| self.zg_child.as_ref().and_then(|c| c.get_pot_resistance(pot_id)));
+            // Check main tree, then 3-port children, then MNA children
+            let pot_r = self
+                .tree
+                .get_pot_resistance(pot_id)
+                .or_else(|| {
+                    self.zf_child
+                        .as_ref()
+                        .and_then(|c| c.get_pot_resistance(pot_id))
+                })
+                .or_else(|| {
+                    self.zg_child
+                        .as_ref()
+                        .and_then(|c| c.get_pot_resistance(pot_id))
+                })
+                .or_else(|| {
+                    self.opamp_children
+                        .iter()
+                        .find_map(|c| c.get_pot_resistance(pot_id))
+                });
             if let Some(pot_r) = pot_r {
                 if let RootKind::OpAmp(ref mut oa) = self.root {
                     oa.set_feedback_pot_r(pot_r);
@@ -1402,16 +1452,25 @@ impl WdfStage {
         }
     }
 
-    /// Set a pot position in this stage, checking tree and opamp children (zf/zg).
+    /// Set a pot position in this stage, checking tree + all opamp children.
     pub(super) fn set_pot_any(&mut self, comp_id: &str, value: f64) -> bool {
         if self.tree.set_pot(comp_id, value) {
             return true;
         }
         if let Some(ref mut zf) = self.zf_child {
-            if zf.set_pot(comp_id, value) { return true; }
+            if zf.set_pot(comp_id, value) {
+                return true;
+            }
         }
         if let Some(ref mut zg) = self.zg_child {
-            if zg.set_pot(comp_id, value) { return true; }
+            if zg.set_pot(comp_id, value) {
+                return true;
+            }
+        }
+        for child in &mut self.opamp_children {
+            if child.set_pot(comp_id, value) {
+                return true;
+            }
         }
         false
     }
@@ -1419,8 +1478,72 @@ impl WdfStage {
     /// Recompute all trees including opamp children.
     pub(super) fn recompute_all(&mut self) {
         self.tree.recompute();
-        if let Some(ref mut zf) = self.zf_child { zf.recompute(); }
-        if let Some(ref mut zg) = self.zg_child { zg.recompute(); }
+        if let Some(ref mut zf) = self.zf_child {
+            zf.recompute();
+        }
+        if let Some(ref mut zg) = self.zg_child {
+            zg.recompute();
+        }
+        for child in &mut self.opamp_children {
+            child.recompute();
+        }
+    }
+
+    /// Recompute the MNA opamp adaptor scattering matrix after pot changes.
+    /// Pots are NOT in the MNA G matrix — they're WDF ports only.
+    /// Re-derives scattering with current port resistances.
+    pub(super) fn flush_opamp_adaptor_recompute(&mut self) {
+        let recompute = match &self.opamp_recompute {
+            Some(r) => r,
+            None => return,
+        };
+
+        // Determine whether this is the MNA path (opamp_children) or the 3-port path (zf/zg).
+        let port_resistances: Vec<f64> = if !self.opamp_children.is_empty() {
+            // MNA path: rebuild port resistances from children (all but last) + stored adapted R.
+            let n_ports = recompute.port_pairs.len();
+            let mut pr = Vec::with_capacity(n_ports);
+            for (i, child) in self.opamp_children.iter().enumerate() {
+                if i < n_ports - 1 {
+                    pr.push(child.port_resistance());
+                }
+            }
+            // Adapted port resistance (last port) — fixed (not a WDF child).
+            pr.push(recompute.port_resistances.last().copied().unwrap_or(1000.0));
+            pr
+        } else if self.zf_child.is_some() && self.zg_child.is_some() {
+            // 3-port path: zf and zg resistances change when reactive children update.
+            let r_f = self.zf_child.as_ref().unwrap().port_resistance();
+            let r_g = self.zg_child.as_ref().unwrap().port_resistance();
+            // Adapted port: parallel combination of Zf and Zg.
+            let r_adapted = if r_f + r_g > 0.0 {
+                (r_f * r_g) / (r_f + r_g)
+            } else {
+                1000.0
+            };
+            vec![r_f, r_g, r_adapted]
+        } else {
+            return; // No children to rebuild from.
+        };
+
+        // Build WdfPorts and re-derive scattering
+        let ports: Vec<crate::tree::WdfPort> = recompute
+            .port_pairs
+            .iter()
+            .zip(port_resistances.iter())
+            .map(|(&(pos, neg), &r)| crate::tree::WdfPort {
+                node_pos: pos,
+                node_neg: neg,
+                resistance: r,
+            })
+            .collect();
+        let scattering = recompute.mna.derive_scattering_matrix_general(&ports);
+        if scattering.iter().all(|s| s.is_finite()) {
+            self.opamp_adaptor = Some(crate::tree::RTypeAdaptor::new(
+                scattering,
+                &port_resistances,
+            ));
+        }
     }
 
     /// Update an input-path photocoupler's LED drive and recompute opamp gain.
@@ -1750,7 +1873,10 @@ impl PushPullStage {
             let a = self.push_root.process(b, rp);
             self.push_tree.set_incident(a);
             #[cfg(feature = "debug-trace")]
-            { push_b.set(b); push_a.set(a); }
+            {
+                push_b.set(b);
+                push_a.set(a);
+            }
             (a + b) / 2.0
         });
 
@@ -1782,7 +1908,11 @@ impl PushPullStage {
         // The push-pull stage generates DC from plate bias voltages;
         // the real output transformer provides AC coupling, so we model
         // that with a DC blocking filter.
-        let x0 = if raw_output.is_finite() { raw_output } else { 0.0 };
+        let x0 = if raw_output.is_finite() {
+            raw_output
+        } else {
+            0.0
+        };
         let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
         self.dc_blocker_x1 = x0;
         self.dc_blocker_y1 = if y0.is_finite() { y0 } else { 0.0 };
@@ -1832,7 +1962,11 @@ impl PushPullStage {
         let raw_output = diff / self.turns_ratio;
 
         // DC blocker
-        let x0 = if raw_output.is_finite() { raw_output } else { 0.0 };
+        let x0 = if raw_output.is_finite() {
+            raw_output
+        } else {
+            0.0
+        };
         let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
         self.dc_blocker_x1 = x0;
         self.dc_blocker_y1 = if y0.is_finite() { y0 } else { 0.0 };
@@ -1932,7 +2066,11 @@ impl PushPullStage {
     }
 
     pub fn debug_dump(&self) -> String {
-        let mode = if self.push_adaptor.is_some() { "3-port" } else { "WDF" };
+        let mode = if self.push_adaptor.is_some() {
+            "3-port"
+        } else {
+            "WDF"
+        };
         format!(
             "PushPullStage(mode={}, ratio={:.1}:1, bias={:.1}V, push_par={}, pull_par={}, comp={:.4})\n  Push: rp={:.1}Ω, nodes={}\n  Pull: rp={:.1}Ω, nodes={}",
             mode,
@@ -1993,9 +2131,8 @@ impl PushPullStage {
 // ═══════════════════════════════════════════════════════════════════════════
 
 use crate::elements::nonlinear::solver::{
-    multi_port_nr_solve, multi_port_nr_solve_grouped,
-    multi_port_nr_solve_into, multi_port_nr_solve_grouped_into,
-    NlDeviceGroupIv, NlDeviceIv,
+    multi_port_nr_solve, multi_port_nr_solve_grouped, multi_port_nr_solve_grouped_into,
+    multi_port_nr_solve_into, NlDeviceGroupIv, NlDeviceIv,
 };
 use crate::elements::nonlinear::{PentodeThreePort, VariMuThreePort};
 
@@ -2110,7 +2247,11 @@ impl NlDeviceGroupKind {
             NlDeviceGroupKind::TriodeThreePort(_) => "TriodeThreePort",
             NlDeviceGroupKind::PentodeThreePort(_) => "PentodeThreePort",
             NlDeviceGroupKind::BjtTwoPort(b) => {
-                if b.is_pnp { "BjtPnp2P" } else { "BjtNpn2P" }
+                if b.is_pnp {
+                    "BjtPnp2P"
+                } else {
+                    "BjtNpn2P"
+                }
             }
             NlDeviceGroupKind::SinglePort(d) => d.debug_name(),
         }
@@ -2185,11 +2326,7 @@ impl MultiNlScattering {
     /// `n_total` is inferred from the scattering matrix size, so extra ports
     /// (like VCC) are handled automatically — only the first `n_nl` rows and
     /// the NL, passive, and last (adapted) columns are extracted.
-    pub(super) fn from_full_matrix(
-        scattering: &[f64],
-        n_nl: usize,
-        n_passive: usize,
-    ) -> Self {
+    pub(super) fn from_full_matrix(scattering: &[f64], n_nl: usize, n_passive: usize) -> Self {
         let n_total = if scattering.is_empty() {
             n_nl + n_passive + 1
         } else {
@@ -2512,7 +2649,6 @@ impl MultiNlStage {
         self.iteration_budget_remaining = NR_ITERATION_BUDGET;
         let adaptive_x2 = self.adaptive_x2;
 
-
         // Linear extrapolation warm-start for NR solver (first sub-sample only).
         // v_prev holds v[n-1]; v_prev_2 holds v[n-2].
         // Extrapolated guess: v[n] ~= 2*v[n-1] - v[n-2].
@@ -2726,9 +2862,8 @@ impl MultiNlStage {
         // Update adaptive oversampling for next base sample:
         // If all sub-samples converged via frozen Newton (zero failures),
         // the signal is slowly varying → X2 NR rate suffices next sample.
-        self.adaptive_x2 = self.nr_workspace.frozen_failures == 0
-            && self.nr_workspace.has_cached_jac
-            && n_nl > 0;
+        self.adaptive_x2 =
+            self.nr_workspace.frozen_failures == 0 && self.nr_workspace.has_cached_jac && n_nl > 0;
 
         #[cfg(feature = "debug-trace")]
         if input.abs() > 1e-10 {
@@ -3123,7 +3258,8 @@ impl MultiNlStage {
                         for i in 0..n_nl.min(new_vs.len()) {
                             self.dc_bias[i] = new_vs[i] * self.supply_voltage;
                         }
-                        self.vcc_bias_all = new_vs.iter().map(|&k| k * self.supply_voltage).collect();
+                        self.vcc_bias_all =
+                            new_vs.iter().map(|&k| k * self.supply_voltage).collect();
                     }
 
                     // Rebuild port_resistances for RTypeAdaptor
@@ -3189,7 +3325,11 @@ impl MultiNlStage {
         let n_passive = self.passive_children.len();
         let use_vs = recompute.vs_source_index.is_some();
         let _has_vcc_vs = recompute.vcc_vs_index.is_some();
-        let n_total = if use_vs { n_nl + n_passive } else { n_nl + n_passive + 1 };
+        let n_total = if use_vs {
+            n_nl + n_passive
+        } else {
+            n_nl + n_passive + 1
+        };
 
         // Rebuild ports with current resistances (reactive elements only, no pots).
         let mut ports: Vec<WdfPort> = Vec::with_capacity(n_total);
@@ -3218,8 +3358,9 @@ impl MultiNlStage {
         if use_vs {
             // VS injection mode (OTA): derive scattering + injection vector (no adapted port).
             let vs_idx = recompute.vs_source_index.unwrap();
-            let (scattering, vs_inj) =
-                recompute.mna.derive_scattering_and_vs_injection(&ports, vs_idx);
+            let (scattering, vs_inj) = recompute
+                .mna
+                .derive_scattering_and_vs_injection(&ports, vs_idx);
 
             if scattering.iter().any(|&s| !s.is_finite()) {
                 return;
@@ -3232,8 +3373,9 @@ impl MultiNlStage {
 
             // Recompute extraction coefficients if used.
             if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
-                let (coeffs, vs_coeff) =
-                    recompute.mna.derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
+                let (coeffs, vs_coeff) = recompute
+                    .mna
+                    .derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
                 self.extract_coeffs = Some(coeffs);
                 self.extract_vs = vs_coeff;
             }
@@ -3249,8 +3391,9 @@ impl MultiNlStage {
 
             if let Some(vcc_idx) = recompute.vcc_vs_index {
                 // VCC as ideal VS: derive scattering + VCC injection vector
-                let (scattering, vcc_inj) =
-                    recompute.mna.derive_scattering_and_vs_injection(&ports, vcc_idx);
+                let (scattering, vcc_inj) = recompute
+                    .mna
+                    .derive_scattering_and_vs_injection(&ports, vcc_idx);
 
                 if scattering.iter().any(|&s| !s.is_finite()) {
                     return;
