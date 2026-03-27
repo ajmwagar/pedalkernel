@@ -1628,6 +1628,40 @@ pub fn compile_pedal_with_options(
     );
     let opamp_feedback_gain = 1.0_f64;
 
+    // ── Short unity-gain opamp pos→out in the graph ────────────────────
+    // Unity-gain buffers (neg=out) are transparent wires. Their pos→out
+    // connection is active (not modeled in MNA). If passive edges exist on
+    // both sides of the buffer (e.g., tone pot → U2.pos, U2.out → C_out),
+    // the MNA sees a dead end at pos. Merging pos_node into out_node makes
+    // the passive path continuous through the buffer.
+    for info in &opamp_analysis.feedback_loops {
+        if matches!(info.feedback_kind, super::graph::OpAmpFeedbackKind::UnityGain) {
+            let pos = info.pos_node;
+            let out = info.out_node;
+            if pos != out {
+                // Replace all pos_node references with out_node in edges.
+                for edge in &mut graph.edges {
+                    if edge.node_a == pos {
+                        edge.node_a = out;
+                    }
+                    if edge.node_b == pos {
+                        edge.node_b = out;
+                    }
+                }
+                // Update global node sets.
+                if graph.output_pin_nodes.remove(&pos) {
+                    graph.output_pin_nodes.insert(out);
+                }
+                if graph.in_node == pos {
+                    graph.in_node = out;
+                }
+                if graph.out_node == pos {
+                    graph.out_node = out;
+                }
+            }
+        }
+    }
+
     // Detect opamps whose feedback components share a graph node with
     // nonlinear element junctions. For these opamps, skip build_feedback_tree
     // so the NL stage keeps the feedback components (avoids double-counting
