@@ -185,6 +185,31 @@ pedal "GoldenrodTreble" {
 }
 "#;
 
+// ---------------------------------------------------------------------------
+// Test 4: Screamer Drive pot (feedback diode opamp, was DiodePairedOpAmp)
+// ---------------------------------------------------------------------------
+
+const SCREAMER_PEDAL: &str = include_str!("../examples/pedals/overdrive/tube_screamer.pedal");
+
+#[test]
+fn screamer_drive_pot_changes_output() {
+    let input = sine_at(1000.0, 0.1, 0.15, SAMPLE_RATE);
+    let low = compile_and_process(SCREAMER_PEDAL, &input, SAMPLE_RATE, &[("Drive", 0.0), ("Tone", 0.5), ("Level", 0.5)]);
+    let high = compile_and_process(SCREAMER_PEDAL, &input, SAMPLE_RATE, &[("Drive", 1.0), ("Tone", 0.5), ("Level", 0.5)]);
+
+    let db = rms_db_change(&low, &high).abs();
+    eprintln!("[screamer_drive] dB change: {db:.2}");
+
+    assert!(
+        db > 0.5,
+        "Screamer Drive pot must affect output: dB change = {db:.4} (expected > 0.5 dB)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: Goldenrod Treble (MNA adaptor recompute — separate bug)
+// ---------------------------------------------------------------------------
+
 #[test]
 #[ignore] // Known bug: inverting MNA adaptor scattering not recomputed on pot change
 fn goldenrod_treble_pot_changes_spectrum() {

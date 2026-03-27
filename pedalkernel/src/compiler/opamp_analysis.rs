@@ -238,13 +238,16 @@ pub(super) fn build_opamp_feedback_stages(
                 // The NL stage handles the full passive set including feedback components.
                 let skip_tree = skip_feedback_tree.contains(&info.comp_id);
 
-                // Pair this opamp with the DiodePair/SingleDiode stage when:
-                // - feedback_diode: diodes ARE in feedback (Tube Screamer, Klon)
-                // - output IS diode junction: diodes shunt opamp output to ground (RAT)
-                // In both cases the NR solver does accurate clipping; opamp just provides gain.
-                // Don't set soft_clip — the NR solver handles it.
+                // Pair this opamp with the diode stage when the opamp output IS a
+                // diode junction (shunt diodes to ground, e.g. RAT). The NR solver
+                // handles clipping; opamp just provides gain.
+                //
+                // Do NOT pair for feedback diodes (Screamer, Klon) — feedback diodes
+                // are modeled by OpAmpRoot soft_clip and the Drive pot must remain in
+                // the opamp's own feedback tree / MNA adaptor to respond to control
+                // changes. The DiodePairedOpAmp path loses pot responsiveness.
                 let output_is_nl_junction = nl_junction_nodes.contains(&info.out_node);
-                if skip_tree && (feedback_diode.is_some() || output_is_nl_junction) {
+                if skip_tree && output_is_nl_junction {
                     diode_paired.push(DiodePairedOpAmp {
                         neg_node: info.neg_node,
                         out_node: info.out_node,
@@ -567,10 +570,10 @@ pub(super) fn build_opamp_feedback_stages(
 
                 let skip_tree = skip_feedback_tree.contains(&info.comp_id);
 
-                // Pair this opamp with DiodePair/SingleDiode stage when feedback
-                // diodes exist (e.g. Bluesbreaker classified as NonInverting).
+                // Pair with diode stage only for shunt diodes (output IS diode junction).
+                // Feedback diodes use OpAmpRoot soft_clip instead — preserves pot binding.
                 let output_is_nl_junction = nl_junction_nodes.contains(&info.out_node);
-                if skip_tree && (feedback_diode.is_some() || output_is_nl_junction) {
+                if skip_tree && output_is_nl_junction {
                     diode_paired.push(DiodePairedOpAmp {
                         neg_node: info.neg_node,
                         out_node: info.out_node,
