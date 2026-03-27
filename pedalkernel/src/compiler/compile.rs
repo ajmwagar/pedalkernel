@@ -290,6 +290,7 @@ fn build_passive_wdf_stage(
                 opamp_children: Vec::new(),
 
                 opamp_recompute: None,
+                opamp_input_child_idx: None,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -644,6 +645,7 @@ fn build_passive_rtype_from_decomposed(
         opamp_adaptor: None,
         opamp_children: Vec::new(),
         opamp_recompute: None,
+        opamp_input_child_idx: None,
     })
 }
 
@@ -1089,6 +1091,7 @@ fn build_feedforward_stages(
                 opamp_children: Vec::new(),
 
                 opamp_recompute: None,
+                opamp_input_child_idx: None,
             },
             Err(_) => {
                 // SP reduction failed → fall back to PassiveRType MNA
@@ -1234,6 +1237,7 @@ fn build_output_rooted_stage(
         opamp_adaptor: None,
         opamp_children: Vec::new(),
         opamp_recompute: None,
+        opamp_input_child_idx: None,
     })
 }
 

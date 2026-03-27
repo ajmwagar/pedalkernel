@@ -522,6 +522,12 @@ pub(super) struct WdfStage {
     pub(super) opamp_children: Vec<DynNode>,
     /// Stored MNA + port pairs for scattering recompute on pot change.
     pub(super) opamp_recompute: Option<OpAmpRecomputeData>,
+    /// Index of the VoltageSource child in `opamp_children` that models R_in.
+    /// When `Some(i)`, the stage drives `opamp_children[i]` with the input signal
+    /// each sample before scatter_up. This is the R_in port of the MNA adaptor
+    /// for Inverting opamps — the scattering matrix encodes the full Rf/Ri gain
+    /// so the OpAmpRoot gain is set to 1.0 and gain comes from impedance ratios.
+    pub(super) opamp_input_child_idx: Option<usize>,
 }
 
 /// Stored data for recomputing opamp adaptor scattering when pots change.
@@ -599,6 +605,13 @@ impl WdfStage {
 
             // Collect reflected waves from children (3-port or MNA)
             let (b_children, use_mna) = if !self.opamp_children.is_empty() {
+                // Drive the input VoltageSource child with the stage input signal
+                // before collecting reflected waves. This is the R_in port for the
+                // Inverting MNA adaptor — the VS injects signal into the neg node
+                // via the scattering matrix, which encodes the full Rf/Ri topology.
+                if let Some(idx) = self.opamp_input_child_idx {
+                    self.opamp_children[idx].set_voltage(input * self.compensation);
+                }
                 let b: Vec<f64> = self
                     .opamp_children
                     .iter_mut()
