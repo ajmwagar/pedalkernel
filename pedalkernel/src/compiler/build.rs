@@ -680,6 +680,7 @@ pub(super) fn build_stages(
             opamp_children: Vec::new(),
 
             opamp_recompute: None,
+            opamp_input_child_idx: None,
         });
     }
 
@@ -3019,6 +3020,7 @@ fn build_vs_stage(
         opamp_adaptor: None,
         opamp_children: Vec::new(),
         opamp_recompute: None,
+        opamp_input_child_idx: None,
     })
 }
 
@@ -3098,6 +3100,7 @@ fn build_source_follower_stage(
         opamp_adaptor: None,
         opamp_children: Vec::new(),
         opamp_recompute: None,
+        opamp_input_child_idx: None,
     })
 }
 
