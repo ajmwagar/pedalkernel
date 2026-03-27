@@ -1784,7 +1784,13 @@ pub fn compile_pedal_with_options(
     let opamp_input_nodes: HashSet<super::graph::NodeId> = opamp_analysis
         .feedback_loops
         .iter()
-        .filter(|info| !info.has_feedback_diode())
+        .filter(|info| {
+            !info.has_feedback_diode()
+                && !matches!(
+                    info.feedback_kind,
+                    super::graph::OpAmpFeedbackKind::UnityGain
+                )
+        })
         .flat_map(|info| [info.neg_node, info.pos_node])
         .collect();
 
