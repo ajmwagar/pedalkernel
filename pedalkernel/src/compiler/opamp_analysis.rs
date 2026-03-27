@@ -178,6 +178,7 @@ pub(super) fn build_opamp_feedback_stages(
                     opamp_adaptor: None,
                     opamp_children: Vec::new(),
                     opamp_recompute: None,
+                    opamp_input_child_idx: None,
                 };
                 stage.balance_vs_impedance();
                 // BridgedTResonator always claims its feedback edges.
@@ -276,11 +277,26 @@ pub(super) fn build_opamp_feedback_stages(
                     || is_pot_component(id, pedal)
                 });
                 if has_reactive_fb {
-                    if let Some((children, adaptor, recompute_data, adaptor_pot_id)) =
-                        build_opamp_adaptor(info, graph, pedal, sample_rate)
+                    if let Some((
+                        children,
+                        adaptor,
+                        recompute_data,
+                        adaptor_pot_id,
+                        input_child_idx,
+                    )) = build_opamp_adaptor(info, graph, pedal, sample_rate)
                     {
                         if let Some(ref pid) = adaptor_pot_id {
                             feedback_pot_id = Some(pid.clone());
+                        }
+                        // When R_in is modelled as a VoltageSource MNA port, the
+                        // scattering matrix encodes the full Rf/Ri inverting topology.
+                        // Set VCVS gain = 1.0 so the OpAmpRoot does not double-apply gain.
+                        // The true gain lives in gbw_gain for bandwidth calculation only.
+                        if input_child_idx.is_some() {
+                            let true_gain = root.gain();
+                            root.set_gain(1.0);
+                            // Preserve gbw_gain so bandwidth rolloff is correct.
+                            root.set_gbw_gain(true_gain);
                         }
                         let vs = DynNode::VoltageSource(0.0, 10_000.0);
                         let mut stage = WdfStage {
@@ -318,8 +334,8 @@ pub(super) fn build_opamp_feedback_stages(
                             zg_child: None,
                             opamp_adaptor: Some(adaptor),
                             opamp_children: children,
-
                             opamp_recompute: Some(recompute_data),
+                            opamp_input_child_idx: input_child_idx,
                         };
                         // Populate input-path photocouplers for inverting opamps (e.g. Mu-Tron).
                         // Must happen regardless of which path (MNA or fallback) is taken.
@@ -352,6 +368,7 @@ pub(super) fn build_opamp_feedback_stages(
                         }
                         consumed_edges.extend(comp_ids_to_edge_indices(&info.feedback_comp_ids));
                         consumed_edges.extend(comp_ids_to_edge_indices(&info.ground_leg_comp_ids));
+                        consumed_edges.extend(comp_ids_to_edge_indices(&info.input_comp_ids));
                         stages.push(stage);
                         continue;
                     }
@@ -449,6 +466,7 @@ pub(super) fn build_opamp_feedback_stages(
                     opamp_adaptor: None,
                     opamp_children: Vec::new(),
                     opamp_recompute: None,
+                    opamp_input_child_idx: None,
                 };
 
                 // Create input-path photocoupler elements if present.
@@ -640,8 +658,8 @@ pub(super) fn build_opamp_feedback_stages(
                         zg_child: Some(zg_tree),
                         opamp_adaptor: Some(adaptor),
                         opamp_children: Vec::new(),
-
                         opamp_recompute: Some(recompute_data),
+                        opamp_input_child_idx: None,
                     };
                     // Don't balance VS — the 3-port adaptor handles impedance matching
                     consumed_edges.extend(comp_ids_to_edge_indices(&info.feedback_comp_ids));
@@ -730,6 +748,7 @@ pub(super) fn build_opamp_feedback_stages(
                     opamp_adaptor: None,
                     opamp_children: Vec::new(),
                     opamp_recompute: None,
+                    opamp_input_child_idx: None,
                 };
                 if !has_complex_fb_tree {
                     stage.balance_vs_impedance();
@@ -1227,7 +1246,14 @@ fn is_pot_component(comp_id: &str, pedal: &PedalDef) -> bool {
 /// a WDF leaf child port. The scattering matrix captures frequency-dependent
 /// impedance relationships that the scalar OpAmpRoot gain cannot model.
 ///
-/// Returns (children, adaptor, recompute_data, feedback_pot_id).
+/// When `info.input_comp_ids` is non-empty, R_in (input→neg) is added as an
+/// additional VoltageSource port so the full inverting topology (Rf/Ri) is
+/// captured in the scattering matrix. Signal enters via this VoltageSource child
+/// each sample — the stage must set its voltage to `input` before scatter_up.
+///
+/// Returns (children, adaptor, recompute_data, feedback_pot_id, input_child_idx).
+/// `input_child_idx` is `Some(i)` when an input VoltageSource child was added at
+/// index `i` in `children`. The caller must drive this child each sample.
 fn build_opamp_adaptor(
     info: &OpAmpFeedbackInfo,
     graph: &CircuitGraph,
@@ -1238,15 +1264,17 @@ fn build_opamp_adaptor(
     crate::tree::RTypeAdaptor,
     super::stage::OpAmpRecomputeData,
     Option<String>,
+    Option<usize>,
 )> {
     use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
     use std::collections::HashMap;
 
-    // Collect ALL feedback + ground-leg component IDs
+    // Collect ALL feedback + ground-leg + input component IDs
     let all_ids: HashSet<&str> = info
         .feedback_comp_ids
         .iter()
         .chain(info.ground_leg_comp_ids.iter())
+        .chain(info.input_comp_ids.iter())
         .map(|s| s.as_str())
         .collect();
 
@@ -1280,6 +1308,10 @@ fn build_opamp_adaptor(
     if info.out_node != gnd {
         node_set.insert(info.out_node);
     }
+    // Include input node so it participates in the MNA system.
+    if !info.input_comp_ids.is_empty() && info.input_node != gnd {
+        node_set.insert(info.input_node);
+    }
 
     let nodes: Vec<NodeId> = node_set.into_iter().collect();
     let node_map: HashMap<NodeId, usize> = nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
@@ -1300,14 +1332,29 @@ fn build_opamp_adaptor(
     let mut feedback_pot_id: Option<String> = None;
     let mut processed: HashSet<usize> = HashSet::new();
 
+    // Separate input edges from feedback/ground-leg edges so they are handled differently.
+    let input_ids_set: HashSet<&str> = info.input_comp_ids.iter().map(|s| s.as_str()).collect();
+
     for &edge_idx in &edges {
         if !processed.insert(edge_idx) {
             continue;
         }
         let e = &graph.edges[edge_idx];
+        let comp = &graph.components[e.comp_idx];
+
+        // Input-path edges: stamp into MNA as conductances (fixed resistors only).
+        // They will be driven by the VoltageSource port added below.
+        if input_ids_set.contains(comp.id.as_str()) {
+            if let Some(res) = comp.kind.resistance() {
+                let na = to_mna(e.node_a);
+                let nb = to_mna(e.node_b);
+                mna.stamp_resistor(na, nb, res);
+            }
+            continue;
+        }
+
         #[cfg(test)]
         {
-            let comp = &graph.components[e.comp_idx];
             let is_pot = lookup_pot_info(&comp.id, pedal).is_some();
             let is_cap = comp.kind.capacitance().is_some();
             let is_res = comp.kind.resistance().is_some();
@@ -1316,7 +1363,6 @@ fn build_opamp_adaptor(
                 comp.id, is_pot, is_cap, is_res, e.node_a, e.node_b
             );
         }
-        let comp = &graph.components[e.comp_idx];
         let na = to_mna(e.node_a);
         let nb = to_mna(e.node_b);
 
@@ -1354,6 +1400,43 @@ fn build_opamp_adaptor(
         return None; // No reactive/variable elements — scalar gain path handles this
     }
 
+    // Add R_in as a VoltageSource port when input path is known.
+    // The port connects input_node → neg_node. The WDF convention for a VS:
+    //   reflected b = 2*V, port resistance = Ri.
+    // We pick Ri from the input comp edges (use the first resistor found).
+    let input_child_idx: Option<usize> = if !info.input_comp_ids.is_empty() {
+        // Compute R_in from the graph edges in the input path.
+        let ri_val: f64 = info
+            .input_comp_ids
+            .iter()
+            .filter_map(|id| {
+                graph
+                    .edges
+                    .iter()
+                    .find(|e| graph.components[e.comp_idx].id == *id)
+                    .and_then(|e| graph.components[e.comp_idx].kind.resistance())
+            })
+            .sum::<f64>()
+            .max(1.0);
+        let inp_mna = to_mna(info.input_node);
+        let neg_mna = to_mna(info.neg_node);
+        let idx = children.len();
+        children.push(DynNode::VoltageSource(0.0, ri_val));
+        child_ports.push(WdfPort {
+            node_pos: inp_mna,
+            node_neg: neg_mna,
+            resistance: ri_val,
+        });
+        #[cfg(test)]
+        eprintln!(
+            "[MNA_INPUT_PORT] R_in={:.1} inp_node={:?} neg_node={:?} idx={}",
+            ri_val, inp_mna, neg_mna, idx
+        );
+        Some(idx)
+    } else {
+        None
+    };
+
     // Adapted port: out→gnd (the opamp output node)
     let out_mna = to_mna(info.out_node);
     let r_adapted = {
@@ -1380,11 +1463,12 @@ fn build_opamp_adaptor(
     #[cfg(test)]
     {
         eprintln!(
-            "[MNA_OPAMP] {} n_nodes={} n_children={} R_adapted={:.1}",
+            "[MNA_OPAMP] {} n_nodes={} n_children={} R_adapted={:.1} input_child={:?}",
             info.comp_id,
             n_nodes,
             children.len(),
-            r_adapted
+            r_adapted,
+            input_child_idx,
         );
     }
 
@@ -1397,7 +1481,13 @@ fn build_opamp_adaptor(
         port_resistances: all_r,
     };
 
-    Some((children, adaptor, recompute_data, feedback_pot_id))
+    Some((
+        children,
+        adaptor,
+        recompute_data,
+        feedback_pot_id,
+        input_child_idx,
+    ))
 }
 
 /// Look up the taper of a potentiometer from the pedal definition.

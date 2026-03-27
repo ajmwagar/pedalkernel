@@ -117,8 +117,7 @@ impl<'a> ResolvedTopology<'a> {
         }
 
         // Build resistor adjacency map.
-        let mut resistor_adj: HashMap<usize, Vec<(usize, f64, String, bool, f64)>> =
-            HashMap::new();
+        let mut resistor_adj: HashMap<usize, Vec<(usize, f64, String, bool, f64)>> = HashMap::new();
         for comp in &pedal.components {
             let (resistance, is_pot, max_r) =
                 if let Some(pot) = comp.kind.as_any().downcast_ref::<Potentiometer>() {
@@ -149,35 +148,53 @@ impl<'a> ResolvedTopology<'a> {
                             let w_node = uf.find(w_id);
                             let aw_id = format!("{}__aw", comp.id);
                             let wb_id = format!("{}__wb", comp.id);
-                            resistor_adj
-                                .entry(a_node)
-                                .or_default()
-                                .push((w_node, max_r * 0.5, aw_id.clone(), true, max_r));
-                            resistor_adj
-                                .entry(w_node)
-                                .or_default()
-                                .push((a_node, max_r * 0.5, aw_id, true, max_r));
-                            resistor_adj
-                                .entry(w_node)
-                                .or_default()
-                                .push((b_node, max_r * 0.5, wb_id.clone(), true, max_r));
-                            resistor_adj
-                                .entry(b_node)
-                                .or_default()
-                                .push((w_node, max_r * 0.5, wb_id, true, max_r));
+                            resistor_adj.entry(a_node).or_default().push((
+                                w_node,
+                                max_r * 0.5,
+                                aw_id.clone(),
+                                true,
+                                max_r,
+                            ));
+                            resistor_adj.entry(w_node).or_default().push((
+                                a_node,
+                                max_r * 0.5,
+                                aw_id,
+                                true,
+                                max_r,
+                            ));
+                            resistor_adj.entry(w_node).or_default().push((
+                                b_node,
+                                max_r * 0.5,
+                                wb_id.clone(),
+                                true,
+                                max_r,
+                            ));
+                            resistor_adj.entry(b_node).or_default().push((
+                                w_node,
+                                max_r * 0.5,
+                                wb_id,
+                                true,
+                                max_r,
+                            ));
                             continue;
                         }
                     }
 
                     // 2-terminal.
-                    resistor_adj
-                        .entry(a_node)
-                        .or_default()
-                        .push((b_node, r, comp.id.clone(), is_pot, max_r));
-                    resistor_adj
-                        .entry(b_node)
-                        .or_default()
-                        .push((a_node, r, comp.id.clone(), is_pot, max_r));
+                    resistor_adj.entry(a_node).or_default().push((
+                        b_node,
+                        r,
+                        comp.id.clone(),
+                        is_pot,
+                        max_r,
+                    ));
+                    resistor_adj.entry(b_node).or_default().push((
+                        a_node,
+                        r,
+                        comp.id.clone(),
+                        is_pot,
+                        max_r,
+                    ));
                 }
             }
         }
@@ -193,14 +210,20 @@ impl<'a> ResolvedTopology<'a> {
                 if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
                     let a_node = uf.find(a_id);
                     let b_node = uf.find(b_id);
-                    ground_leg_adj
-                        .entry(a_node)
-                        .or_default()
-                        .push((b_node, 0.0, comp.id.clone(), false, 0.0));
-                    ground_leg_adj
-                        .entry(b_node)
-                        .or_default()
-                        .push((a_node, 0.0, comp.id.clone(), false, 0.0));
+                    ground_leg_adj.entry(a_node).or_default().push((
+                        b_node,
+                        0.0,
+                        comp.id.clone(),
+                        false,
+                        0.0,
+                    ));
+                    ground_leg_adj.entry(b_node).or_default().push((
+                        a_node,
+                        0.0,
+                        comp.id.clone(),
+                        false,
+                        0.0,
+                    ));
                 }
             }
         }
@@ -231,7 +254,11 @@ impl<'a> ResolvedTopology<'a> {
             let is_simple_passive = comp.kind.as_any().downcast_ref::<Resistor>().is_some()
                 || comp.kind.as_any().downcast_ref::<Capacitor>().is_some()
                 || comp.kind.as_any().downcast_ref::<Inductor>().is_some()
-                || comp.kind.as_any().downcast_ref::<PhotocouplerComp>().is_some();
+                || comp
+                    .kind
+                    .as_any()
+                    .downcast_ref::<PhotocouplerComp>()
+                    .is_some();
             if is_simple_passive {
                 let pa = format!("{}.a", comp.id);
                 let pb = format!("{}.b", comp.id);
@@ -263,10 +290,7 @@ impl<'a> ResolvedTopology<'a> {
                             .entry(a_node)
                             .or_default()
                             .push((w_node, aw_id.clone()));
-                        passive_adj
-                            .entry(w_node)
-                            .or_default()
-                            .push((a_node, aw_id));
+                        passive_adj.entry(w_node).or_default().push((a_node, aw_id));
                     }
                     if let Some(&b_id) = pin_ids.get(&pb) {
                         let b_node = uf.find(b_id);
@@ -276,10 +300,7 @@ impl<'a> ResolvedTopology<'a> {
                             .entry(w_node)
                             .or_default()
                             .push((b_node, wb_id.clone()));
-                        passive_adj
-                            .entry(b_node)
-                            .or_default()
-                            .push((w_node, wb_id));
+                        passive_adj.entry(b_node).or_default().push((w_node, wb_id));
                     }
                 } else {
                     if let (Some(&a_id), Some(&b_id)) = (pin_ids.get(&pa), pin_ids.get(&pb)) {
@@ -401,23 +422,34 @@ impl<'a> TopologyContext<'a> {
     /// Returns `(ri, Option<(pot_comp_id, max_r, fixed_series_r)>)`.
     /// `fixed_series_r` is the sum of fixed resistors in series with the pot in the input path.
     pub fn find_input_resistor_with_pot(
-        &self, neg_node: usize, out_node: usize,
+        &self,
+        neg_node: usize,
+        out_node: usize,
     ) -> Option<(f64, Option<(String, f64, f64)>)> {
         if let Some(neighbors) = self.resolved.resistor_adj.get(&neg_node) {
             for &(next, r, ref id, is_pot, max_r) in neighbors {
-                if next == out_node { continue; }
-                if self.is_ac_grounded(next) { continue; }
+                if next == out_node {
+                    continue;
+                }
+                if self.is_ac_grounded(next) {
+                    continue;
+                }
                 if is_pot {
                     // Found a pot in the input path. Check for fixed series R beyond it.
                     let mut fixed_r = 0.0;
                     if let Some(beyond) = self.resolved.resistor_adj.get(&next) {
                         for &(nn, rr, _, ip, _) in beyond {
-                            if nn == neg_node { continue; }
-                            if !ip { fixed_r += rr; }
+                            if nn == neg_node {
+                                continue;
+                            }
+                            if !ip {
+                                fixed_r += rr;
+                            }
                         }
                     }
                     // Strip __aw/__wb suffix to get the original pot comp_id
-                    let pot_id = id.strip_suffix("__aw")
+                    let pot_id = id
+                        .strip_suffix("__aw")
                         .or_else(|| id.strip_suffix("__wb"))
                         .unwrap_or(id)
                         .to_string();
@@ -681,7 +713,11 @@ impl<'a> TopologyContext<'a> {
             let is_passive = comp.kind.as_any().downcast_ref::<Resistor>().is_some()
                 || comp.kind.as_any().downcast_ref::<Capacitor>().is_some()
                 || comp.kind.as_any().downcast_ref::<Inductor>().is_some()
-                || comp.kind.as_any().downcast_ref::<PhotocouplerComp>().is_some();
+                || comp
+                    .kind
+                    .as_any()
+                    .downcast_ref::<PhotocouplerComp>()
+                    .is_some();
             if !is_passive {
                 if let Some(_pot) = comp.kind.as_any().downcast_ref::<Potentiometer>() {
                     // Handle 3-terminal pots.
@@ -701,10 +737,7 @@ impl<'a> TopologyContext<'a> {
                                 .entry(a_node)
                                 .or_default()
                                 .push((w_node, aw_id.clone()));
-                            passive_adj
-                                .entry(w_node)
-                                .or_default()
-                                .push((a_node, aw_id));
+                            passive_adj.entry(w_node).or_default().push((a_node, aw_id));
                         }
                         if let Some(&b_node) = self.resolved.pin_to_node.get(&pb) {
                             let wb_id = format!("{}__wb", comp.id);
@@ -712,10 +745,7 @@ impl<'a> TopologyContext<'a> {
                                 .entry(w_node)
                                 .or_default()
                                 .push((b_node, wb_id.clone()));
-                            passive_adj
-                                .entry(b_node)
-                                .or_default()
-                                .push((w_node, wb_id));
+                            passive_adj.entry(b_node).or_default().push((w_node, wb_id));
                         }
                     } else {
                         // 2-terminal pot.
@@ -878,11 +908,7 @@ pub(super) fn classify_topologies(
             _ => continue,
         };
 
-        let ctx = TopologyContext::for_component(
-            &resolved,
-            &comp.id,
-            &["neg", "pos", "out"],
-        );
+        let ctx = TopologyContext::for_component(&resolved, &comp.id, &["neg", "pos", "out"]);
 
         if let Some(info) = classify_opamp(&ctx, &comp.id, opamp_type) {
             classified_ids.insert(comp.id.clone());
@@ -918,9 +944,11 @@ fn classify_opamp(
             pos_node,
             out_node,
             feedback_comp_ids: Vec::new(),
+            ground_leg_comp_ids: Vec::new(),
             input_photocoupler_ids: Vec::new(),
             input_fixed_r: 0.0,
-            ground_leg_comp_ids: Vec::new(),
+            input_comp_ids: Vec::new(),
+            input_node: 0,
         });
     }
 
@@ -939,9 +967,15 @@ fn classify_opamp(
             // Find R1: resistor from neg to an interior junction node
             let r1_info = if let Some(neighbors) = ctx.resolved.resistor_adj.get(&neg_node) {
                 neighbors.iter().find_map(|&(next, r, ref id, is_pot, _)| {
-                    if is_pot { return None; }
-                    if next == out_node { return None; }
-                    if ctx.is_ac_grounded(next) { return None; }
+                    if is_pot {
+                        return None;
+                    }
+                    if next == out_node {
+                        return None;
+                    }
+                    if ctx.is_ac_grounded(next) {
+                        return None;
+                    }
                     Some((r, next, id.clone()))
                 })
             } else {
@@ -955,8 +989,12 @@ fn classify_opamp(
             // Find R2: resistor from junction to out_node
             let r2_info = if let Some(neighbors) = ctx.resolved.resistor_adj.get(&junction) {
                 neighbors.iter().find_map(|&(next, r, ref id, is_pot, _)| {
-                    if is_pot { return None; }
-                    if next != out_node { return None; }
+                    if is_pot {
+                        return None;
+                    }
+                    if next != out_node {
+                        return None;
+                    }
                     Some((r, id.clone()))
                 })
             } else {
@@ -994,9 +1032,7 @@ fn classify_opamp(
             return Some(OpAmpFeedbackInfo {
                 comp_id: comp_id.to_string(),
                 opamp_type,
-                feedback_kind: OpAmpFeedbackKind::BridgedTResonator {
-                    r1, r2, c1, c2, rf,
-                },
+                feedback_kind: OpAmpFeedbackKind::BridgedTResonator { r1, r2, c1, c2, rf },
                 neg_node,
                 pos_node,
                 out_node,
@@ -1004,6 +1040,8 @@ fn classify_opamp(
                 ground_leg_comp_ids: Vec::new(),
                 input_photocoupler_ids: Vec::new(),
                 input_fixed_r: 0.0,
+                input_comp_ids: Vec::new(),
+                input_node: 0,
             });
         }
     }
@@ -1042,6 +1080,8 @@ fn classify_opamp(
                     ground_leg_comp_ids: Vec::new(),
                     input_photocoupler_ids: Vec::new(),
                     input_fixed_r: 0.0,
+                    input_comp_ids: Vec::new(),
+                    input_node: 0,
                 });
             }
         }
@@ -1053,11 +1093,7 @@ fn classify_opamp(
             return Some(OpAmpFeedbackInfo {
                 comp_id: comp_id.to_string(),
                 opamp_type,
-                feedback_kind: OpAmpFeedbackKind::AllpassJfet {
-                    rf,
-                    cf,
-                    jfet_id,
-                },
+                feedback_kind: OpAmpFeedbackKind::AllpassJfet { rf, cf, jfet_id },
                 neg_node,
                 pos_node,
                 out_node,
@@ -1065,6 +1101,8 @@ fn classify_opamp(
                 ground_leg_comp_ids: Vec::new(),
                 input_photocoupler_ids: Vec::new(),
                 input_fixed_r: 0.0,
+                input_comp_ids: Vec::new(),
+                input_node: 0,
             });
         }
     }
@@ -1082,7 +1120,9 @@ fn classify_opamp(
     //     ground leg (e.g. RAT: neg→R4→C5→gnd = ground leg = non-inverting).
     let pos_directly_ac_ground = ctx.is_ac_grounded(pos_node);
     let pos_grounded_via_resistor = !pos_directly_ac_ground
-        && (ctx.find_resistive_path(pos_node, ctx.resolved.gnd_node).is_some()
+        && (ctx
+            .find_resistive_path(pos_node, ctx.resolved.gnd_node)
+            .is_some()
             || ctx
                 .resolved
                 .ac_ground_nodes
@@ -1094,19 +1134,15 @@ fn classify_opamp(
         let check = |target: usize| -> bool {
             has_short_path_excluding(neg_node, target, &ctx.resolved.ground_leg_adj, out_node, 4)
         };
-        check(ctx.resolved.gnd_node)
-            || ctx
-                .resolved
-                .ac_ground_nodes
-                .iter()
-                .any(|&ag| check(ag))
+        check(ctx.resolved.gnd_node) || ctx.resolved.ac_ground_nodes.iter().any(|&ag| check(ag))
     };
     if (pos_directly_ac_ground || pos_grounded_via_resistor) && !neg_has_independent_ground_leg {
         if let Some((ri, ri_pot_info)) = ctx.find_input_resistor_with_pot(neg_node, out_node) {
             let feedback_diode = ctx.find_feedback_diode(neg_node, out_node);
 
             // Collect input-path photocouplers at neg_node.
-            let (input_pc_ids, input_fixed_r) = ctx.collect_input_photocouplers(neg_node, out_node, ri);
+            let (input_pc_ids, input_fixed_r) =
+                ctx.collect_input_photocouplers(neg_node, out_node, ri);
 
             return Some(OpAmpFeedbackInfo {
                 comp_id: comp_id.to_string(),
@@ -1125,6 +1161,8 @@ fn classify_opamp(
                 ground_leg_comp_ids: Vec::new(),
                 input_photocoupler_ids: input_pc_ids,
                 input_fixed_r,
+                input_comp_ids: Vec::new(),
+                input_node: 0,
             });
         }
     }
@@ -1136,7 +1174,10 @@ fn classify_opamp(
     // ── Non-inverting amplifier ──────────────────────────────────────────
     // Ri path from neg to ground (or AC ground). Pos is not grounded.
     // Use ground_leg_path to traverse R+C series paths (e.g., RAT R4→C5→gnd).
-    let ni_gnd_node = if ctx.find_ground_leg_path(neg_node, ctx.resolved.gnd_node).is_some() {
+    let ni_gnd_node = if ctx
+        .find_ground_leg_path(neg_node, ctx.resolved.gnd_node)
+        .is_some()
+    {
         Some(ctx.resolved.gnd_node)
     } else {
         ctx.resolved
@@ -1181,9 +1222,11 @@ fn classify_opamp(
             pos_node,
             out_node,
             feedback_comp_ids: fb_comps,
+            ground_leg_comp_ids: gnd_leg_comps,
             input_photocoupler_ids: Vec::new(),
             input_fixed_r: 0.0,
-            ground_leg_comp_ids: gnd_leg_comps,
+            input_comp_ids: Vec::new(),
+            input_node: 0,
         });
     }
 
@@ -1201,9 +1244,7 @@ struct UnionFind {
 
 impl UnionFind {
     fn new() -> Self {
-        Self {
-            parent: Vec::new(),
-        }
+        Self { parent: Vec::new() }
     }
     fn ensure(&mut self, id: usize) {
         while self.parent.len() <= id {
