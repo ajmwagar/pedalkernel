@@ -61,12 +61,13 @@ pedal "Tube Screamer" subtitle "TS-808 — JRC4558 overdrive" {
     U2.neg -> D2.b
     D2.a -> U2.out
 
-    # Tone control
+    # Tone control (passive blend: wiper taps between bass and treble paths)
     U2.out -> R5.a
     R5.b -> Tone.a
+    Tone.w -> R6.a
     Tone.b -> C4.a, C5.a
-    C4.b -> R6.a
-    C5.b -> R6.a
+    C4.b -> gnd
+    C5.b -> gnd
     R6.b -> C6.a
 
     # Output
