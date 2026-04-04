@@ -1466,26 +1466,41 @@ impl WdfStage {
     }
 
     /// Set a pot position in this stage, checking tree + all opamp children.
-    pub(super) fn set_pot_any(&mut self, comp_id: &str, value: f64) -> bool {
+    ///
+    /// Uses accumulator pattern (not early return) so split pots (__aw/__wb)
+    /// that appear in multiple locations all get updated. Triggers
+    /// recompute_all + notify_pot_changed when any pot is found.
+    pub(super) fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
+        let mut found = false;
+        // Tree + zf/zg + opamp children (pots may exist in both main tree
+        // as dummy placeholder and in opamp_children for MNA adaptor).
         if self.tree.set_pot(comp_id, value) {
-            return true;
+            found = true;
         }
         if let Some(ref mut zf) = self.zf_child {
             if zf.set_pot(comp_id, value) {
-                return true;
+                found = true;
             }
         }
         if let Some(ref mut zg) = self.zg_child {
             if zg.set_pot(comp_id, value) {
-                return true;
+                found = true;
             }
         }
-        for child in &mut self.opamp_children {
+        for child in self.opamp_children.iter_mut() {
             if child.set_pot(comp_id, value) {
-                return true;
+                found = true;
             }
         }
-        false
+        // Passive RType children
+        if self.set_passive_rtype_pot(comp_id, value) {
+            found = true;
+        }
+        if found {
+            self.recompute_all();
+            self.notify_pot_changed();
+        }
+        found
     }
 
     /// Recompute all trees including opamp children.
@@ -1557,6 +1572,13 @@ impl WdfStage {
                 &port_resistances,
             ));
         }
+    }
+
+    /// Rebuild scattering/state matrices after pot changes.
+    /// Flushes both passive RType and opamp adaptor recomputes.
+    pub(super) fn flush_recompute(&mut self) {
+        self.flush_passive_rtype_recompute();
+        self.flush_opamp_adaptor_recompute();
     }
 
     /// Update an input-path photocoupler's LED drive and recompute opamp gain.
