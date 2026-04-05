@@ -644,44 +644,10 @@ pub(super) fn build_stages(
             .unwrap_or(usize::MAX);
         let tree = DynNode::VoltageSource(0.0, 10_000.0);
         stages.push(WdfStage {
-            tree,
-            root: RootKind::OpAmp(opamp),
-            compensation: 1.0,
-            oversampler: Oversampler::new(oversampling),
-            base_diode_model: None,
-            paired_opamp: None,
-            allpass_feedback: None,
-            allpass_direct: None,
-            dc_block: None,
-            grid_dc_blocker: None,
-            is_source_follower: false,
-            prev_source_voltage: 0.0,
             signal_flow_distance: sfd,
-            transformer_gain: 1.0,
             injection_node_id: out_node.unwrap_or(usize::MAX),
             output_node_id: out_node.unwrap_or(usize::MAX),
-            is_trigger_voice: false,
-            voice_active: false,
-            is_feedforward: false,
-            sample_counter: 0,
-            root_comp_id: String::new(),
-            feedback_pot_id: None,
-            output_probe: None,
-            feedback_opamp: None,
-            vcc_injection_coeff: 0.0,
-            vcc_dc_ramp: 0,
-            coupling_cap_id: None,
-            resonator_feedback: None,
-            negate_vs: false,
-            input_photocouplers: Vec::new(),
-            zf_child: None,
-            zg_child: None,
-            opamp_adaptor: None,
-            opamp_children: Vec::new(),
-
-            opamp_recompute: None,
-            opamp_input_child_idx: None,
-            opamp_wdf_adaptor: None,
+            ..WdfStage::new(tree, RootKind::OpAmp(opamp), Oversampler::new(oversampling))
         });
     }
 
@@ -2982,47 +2948,20 @@ fn build_vs_stage(
     };
 
     Some(WdfStage {
-        tree,
-        root,
         compensation: plan.compensation,
-        oversampler: Oversampler::new(oversampling),
         base_diode_model,
-        paired_opamp: None,
-        allpass_feedback: None,
-        allpass_direct: None,
         dc_block: plan.dc_block,
-        grid_dc_blocker: None,
-        is_source_follower: false,
-        prev_source_voltage: 0.0,
-        signal_flow_distance: 0, // set by caller
-        transformer_gain: 1.0,   // set by caller
         injection_node_id: plan.injection_node,
         output_node_id: elem
             .junction_nodes
             .first()
             .copied()
             .unwrap_or(plan.injection_node),
-        is_trigger_voice: false,
-        voice_active: false,
-        is_feedforward: false,
-        sample_counter: 0,
-        root_comp_id: String::new(),
-        feedback_pot_id: None,
         output_probe,
-        feedback_opamp: None,
         vcc_injection_coeff,
-        vcc_dc_ramp: 0,
         coupling_cap_id,
-        resonator_feedback: None,
         negate_vs,
-        input_photocouplers: Vec::new(),
-        zf_child: None,
-        zg_child: None,
-        opamp_adaptor: None,
-        opamp_children: Vec::new(),
-        opamp_recompute: None,
-        opamp_input_child_idx: None,
-        opamp_wdf_adaptor: None,
+        ..WdfStage::new(tree, root, Oversampler::new(oversampling))
     })
 }
 
@@ -3063,47 +3002,15 @@ fn build_source_follower_stage(
     };
 
     Some(WdfStage {
-        tree,
-        root,
-        compensation: 1.0,
-        oversampler: Oversampler::new(oversampling),
-        base_diode_model: None,
-        paired_opamp: None,
-        allpass_feedback: None,
-        allpass_direct: None,
-        dc_block: None,
-        grid_dc_blocker: None,
         is_source_follower: is_sf,
-        prev_source_voltage: 0.0,
-        signal_flow_distance: 0, // set by caller
-        transformer_gain: 1.0,   // set by caller
         injection_node_id: plan.injection_node,
         output_node_id: elem
             .junction_nodes
             .first()
             .copied()
             .unwrap_or(plan.injection_node),
-        is_trigger_voice: false,
-        voice_active: false,
-        is_feedforward: false,
-        sample_counter: 0,
-        root_comp_id: String::new(),
-        feedback_pot_id: None,
         output_probe,
-        feedback_opamp: None,
-        vcc_injection_coeff: 0.0,
-        vcc_dc_ramp: 0,
-        coupling_cap_id: None,
-        resonator_feedback: None,
-        negate_vs: false,
-        input_photocouplers: Vec::new(),
-        zf_child: None,
-        zg_child: None,
-        opamp_adaptor: None,
-        opamp_children: Vec::new(),
-        opamp_recompute: None,
-        opamp_input_child_idx: None,
-        opamp_wdf_adaptor: None,
+        ..WdfStage::new(tree, root, Oversampler::new(oversampling))
     })
 }
 

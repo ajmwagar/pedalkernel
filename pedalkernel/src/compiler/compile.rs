@@ -253,46 +253,8 @@ fn build_passive_wdf_stage(
         None,
     ) {
         Ok((tree, _)) => {
-            let mut stage = WdfStage {
-                tree,
-                root: RootKind::ShortCircuit,
-                compensation: 1.0,
-                oversampler: Oversampler::new(oversampling),
-                base_diode_model: None,
-                paired_opamp: None,
-                allpass_feedback: None,
-                allpass_direct: None,
-                dc_block: None,
-                grid_dc_blocker: None,
-                is_source_follower: false,
-                prev_source_voltage: 0.0,
-                signal_flow_distance: 0,
-                transformer_gain: 1.0,
-                injection_node_id: usize::MAX,
-                output_node_id: usize::MAX,
-                is_trigger_voice: false,
-                voice_active: false,
-                is_feedforward: false,
-                sample_counter: 0,
-                root_comp_id: String::new(),
-                feedback_pot_id: None,
-                output_probe: None,
-                feedback_opamp: None,
-                vcc_injection_coeff: 0.0,
-                vcc_dc_ramp: 0,
-                coupling_cap_id: None,
-                resonator_feedback: None,
-                negate_vs: false,
-                input_photocouplers: Vec::new(),
-                zf_child: None,
-                zg_child: None,
-                opamp_adaptor: None,
-                opamp_children: Vec::new(),
-
-                opamp_recompute: None,
-                opamp_input_child_idx: None,
-                opamp_wdf_adaptor: None,
-            };
+            let mut stage =
+                WdfStage::new(tree, RootKind::ShortCircuit, Oversampler::new(oversampling));
             stage.balance_vs_impedance();
             Some(stage)
         }
@@ -599,9 +561,9 @@ fn build_passive_rtype_from_decomposed(
         None
     };
 
-    Some(WdfStage {
-        tree: dummy_tree,
-        root: super::stage::RootKind::PassiveRType {
+    Some(WdfStage::new(
+        dummy_tree,
+        super::stage::RootKind::PassiveRType {
             scattering,
             vs_injection,
             n_ports,
@@ -613,42 +575,8 @@ fn build_passive_rtype_from_decomposed(
             needs_recompute: false,
             interp_table,
         },
-        compensation: 1.0,
-        oversampler: Oversampler::new(OversamplingFactor::X1),
-        base_diode_model: None,
-        paired_opamp: None,
-        allpass_feedback: None,
-        allpass_direct: None,
-        dc_block: None,
-        grid_dc_blocker: None,
-        is_source_follower: false,
-        prev_source_voltage: 0.0,
-        signal_flow_distance: 0,
-        transformer_gain: 1.0,
-        injection_node_id: usize::MAX,
-        output_node_id: usize::MAX,
-        is_trigger_voice: false,
-        voice_active: false,
-        is_feedforward: false,
-        sample_counter: 0,
-        root_comp_id: String::new(),
-        feedback_pot_id: None,
-        output_probe: None,
-        feedback_opamp: None,
-        vcc_injection_coeff: 0.0,
-        vcc_dc_ramp: 0,
-        coupling_cap_id: None,
-        resonator_feedback: None,
-        negate_vs: false,
-        input_photocouplers: Vec::new(),
-        zf_child: None,
-        zg_child: None,
-        opamp_adaptor: None,
-        opamp_children: Vec::new(),
-        opamp_recompute: None,
-        opamp_input_child_idx: None,
-        opamp_wdf_adaptor: None,
-    })
+        Oversampler::new(OversamplingFactor::X1),
+    ))
 }
 
 /// Diagnostic-only check for orphan output pots.
@@ -1057,44 +985,15 @@ fn build_feedforward_stages(
             Some(output_node),
         ) {
             Ok((tree, output_probe)) => WdfStage {
-                tree,
-                root: RootKind::VoltageSourceDriver,
-                compensation: 1.0,
-                oversampler: Oversampler::new(OversamplingFactor::X1),
-                base_diode_model: None,
-                paired_opamp: None,
-                allpass_feedback: None,
-                allpass_direct: None,
-                dc_block: None,
-                grid_dc_blocker: None,
-                is_source_follower: false,
-                prev_source_voltage: 0.0,
-                signal_flow_distance: 0,
-                transformer_gain: 1.0,
                 injection_node_id: injection_node,
                 output_node_id: output_node,
-                is_trigger_voice: false,
-                voice_active: false,
                 is_feedforward: true,
-                sample_counter: 0,
-                root_comp_id: String::new(),
-                feedback_pot_id: None,
                 output_probe,
-                feedback_opamp: None,
-                vcc_injection_coeff: 0.0,
-                vcc_dc_ramp: 0,
-                coupling_cap_id: None,
-                resonator_feedback: None,
-                negate_vs: false,
-                input_photocouplers: Vec::new(),
-                zf_child: None,
-                zg_child: None,
-                opamp_adaptor: None,
-                opamp_children: Vec::new(),
-
-                opamp_recompute: None,
-                opamp_input_child_idx: None,
-                opamp_wdf_adaptor: None,
+                ..WdfStage::new(
+                    tree,
+                    RootKind::VoltageSourceDriver,
+                    Oversampler::new(OversamplingFactor::X1),
+                )
             },
             Err(_) => {
                 // SP reduction failed → fall back to PassiveRType MNA
@@ -1202,47 +1101,13 @@ fn build_output_rooted_stage(
     let load_dyn = make_leaf(load_edge.comp_idx, load_comp, None, sample_rate);
     let tree = DynNode::Series(Box::new(source_dyn), Box::new(load_dyn));
 
-    Some(WdfStage {
+    // Linear passive stage — no nonlinearity means no aliasing,
+    // so X1 avoids double-counting the oversampling the runner already applied.
+    Some(WdfStage::new(
         tree,
-        root: RootKind::VoltageSourceDriver,
-        compensation: 1.0,
-        // Linear passive stage — no nonlinearity means no aliasing,
-        // so X1 avoids double-counting the oversampling the runner already applied.
-        oversampler: Oversampler::new(OversamplingFactor::X1),
-        base_diode_model: None,
-        paired_opamp: None,
-        allpass_feedback: None,
-        allpass_direct: None,
-        dc_block: None,
-        grid_dc_blocker: None,
-        is_source_follower: false,
-        prev_source_voltage: 0.0,
-        signal_flow_distance: 0,
-        transformer_gain: 1.0,
-        injection_node_id: usize::MAX,
-        output_node_id: usize::MAX,
-        is_trigger_voice: false,
-        voice_active: false,
-        is_feedforward: false,
-        sample_counter: 0,
-        root_comp_id: String::new(),
-        feedback_pot_id: None,
-        output_probe: None,
-        feedback_opamp: None,
-        vcc_injection_coeff: 0.0,
-        vcc_dc_ramp: 0,
-        coupling_cap_id: None,
-        resonator_feedback: None,
-        negate_vs: false,
-        input_photocouplers: Vec::new(),
-        zf_child: None,
-        zg_child: None,
-        opamp_adaptor: None,
-        opamp_children: Vec::new(),
-        opamp_recompute: None,
-        opamp_input_child_idx: None,
-        opamp_wdf_adaptor: None,
-    })
+        RootKind::VoltageSourceDriver,
+        Oversampler::new(OversamplingFactor::X1),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
