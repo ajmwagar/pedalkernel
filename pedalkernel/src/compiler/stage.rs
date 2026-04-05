@@ -647,6 +647,61 @@ pub(super) struct WdfStage {
     pub(super) opamp_wdf_adaptor: Option<OpAmpWdfAdaptor>,
 }
 
+impl WdfStage {
+    /// Create a new WdfStage with the given tree, root, and oversampling.
+    /// All optional fields default to None/zero/false.
+    ///
+    /// Use struct update syntax to override specific fields:
+    /// ```ignore
+    /// WdfStage { feedback_pot_id: Some("Gain".into()), ..WdfStage::new(tree, root, os) }
+    /// ```
+    pub(super) fn new(
+        tree: DynNode,
+        root: RootKind,
+        oversampler: crate::oversampling::Oversampler,
+    ) -> Self {
+        Self {
+            tree,
+            root,
+            compensation: 1.0,
+            oversampler,
+            base_diode_model: None,
+            paired_opamp: None,
+            allpass_feedback: None,
+            allpass_direct: None,
+            dc_block: None,
+            grid_dc_blocker: None,
+            is_source_follower: false,
+            prev_source_voltage: 0.0,
+            signal_flow_distance: 0,
+            transformer_gain: 1.0,
+            injection_node_id: usize::MAX,
+            output_node_id: usize::MAX,
+            is_trigger_voice: false,
+            voice_active: false,
+            is_feedforward: false,
+            sample_counter: 0,
+            root_comp_id: String::new(),
+            feedback_pot_id: None,
+            output_probe: None,
+            feedback_opamp: None,
+            vcc_injection_coeff: 0.0,
+            vcc_dc_ramp: 0,
+            coupling_cap_id: None,
+            resonator_feedback: None,
+            negate_vs: false,
+            input_photocouplers: Vec::new(),
+            zf_child: None,
+            zg_child: None,
+            opamp_adaptor: None,
+            opamp_children: Vec::new(),
+            opamp_recompute: None,
+            opamp_input_child_idx: None,
+            opamp_wdf_adaptor: None,
+        }
+    }
+}
+
 /// Stored data for recomputing opamp adaptor scattering when pots change.
 pub(super) struct OpAmpRecomputeData {
     pub(super) mna: crate::tree::MnaSystem,
