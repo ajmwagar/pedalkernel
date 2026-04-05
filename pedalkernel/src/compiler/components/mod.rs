@@ -3,25 +3,25 @@
 //! Each struct holds the data for one circuit component type and implements
 //! the full `Component` trait.
 
-mod passives;
+mod active_ics;
+mod delay;
 mod diodes;
+mod modulation;
+mod passives;
+mod switches;
+mod transformer;
 mod transistors;
 mod tubes;
-mod active_ics;
-mod modulation;
-mod delay;
-mod transformer;
-mod switches;
 
-pub use passives::*;
+pub use active_ics::*;
+pub use delay::*;
 pub use diodes::*;
+pub use modulation::*;
+pub use passives::*;
+pub use switches::*;
+pub use transformer::*;
 pub use transistors::*;
 pub use tubes::*;
-pub use active_ics::*;
-pub use modulation::*;
-pub use delay::*;
-pub use transformer::*;
-pub use switches::*;
 
 /// Macro to implement the three trait-object support methods (clone_box, as_any, dyn_eq)
 /// that every `Component` implementor needs. Requires the struct to derive Clone + PartialEq.
@@ -45,4 +45,3 @@ macro_rules! impl_component_dyn {
     };
 }
 pub(crate) use impl_component_dyn;
-

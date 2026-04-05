@@ -59,7 +59,10 @@ fn main() {
     }
     let rms = (rms / num_samples as f64).sqrt();
     let _ = rp; // kept for context
-    println!("Ic RMS over 10 cycles of 1 kHz at Vce={vce} V: {:.4} mA", rms * 1000.0);
+    println!(
+        "Ic RMS over 10 cycles of 1 kHz at Vce={vce} V: {:.4} mA",
+        rms * 1000.0
+    );
 
     println!("\n=== Summary ===");
     println!("- Gummel-Poon: Full SPICE model (~15 params)");

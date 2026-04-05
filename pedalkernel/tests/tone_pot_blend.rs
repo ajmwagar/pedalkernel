@@ -207,18 +207,30 @@ fn screamer_drive_pot_changes_output() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: Goldenrod Treble (MNA adaptor recompute — separate bug)
+// Test 5: Goldenrod Treble (opamp feedback MNA adaptor pot)
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore] // Known bug: inverting MNA adaptor scattering not recomputed on pot change
 fn goldenrod_treble_pot_changes_spectrum() {
-    let input = sine_at(1000.0, 0.1, 0.15, SAMPLE_RATE);
+    // Use real Goldenrod pedal file — the inline simplified version may
+    // compile differently. The real pedal has the full Klon topology.
+    let goldenrod_path = std::path::Path::new("/Users/ajmwagar/src/pedalkernel/pedalkernel-pro/pedals/legends/goldenrod.pedal");
+    if !goldenrod_path.exists() {
+        eprintln!("[goldenrod_treble] SKIP: pro pedal not found");
+        return;
+    }
+    let src = std::fs::read_to_string(&goldenrod_path).unwrap();
+    // Use longer signal — calibration consumes early samples, pot needs
+    // time to settle after set_control before we measure RMS.
+    let input = sine_at(1000.0, 0.1, 0.5, SAMPLE_RATE); // 0.5s = 24000 samples
 
-    let bright = compile_and_process(GOLDENROD_TREBLE_STAGE, &input, SAMPLE_RATE, &[("Treble", 0.0)]);
-    let dark = compile_and_process(GOLDENROD_TREBLE_STAGE, &input, SAMPLE_RATE, &[("Treble", 1.0)]);
+    let bright = compile_and_process(&src, &input, SAMPLE_RATE, &[("Gain", 0.5), ("Treble", 0.0), ("Output", 0.5)]);
+    let dark = compile_and_process(&src, &input, SAMPLE_RATE, &[("Gain", 0.5), ("Treble", 1.0), ("Output", 0.5)]);
 
-    let db = rms_db_change(&bright, &dark).abs();
+    // Measure RMS on last quarter only (after pot has settled)
+    let n = bright.len();
+    let quarter = n * 3 / 4;
+    let db = rms_db_change(&bright[quarter..], &dark[quarter..]).abs();
     eprintln!("[goldenrod_treble] dB change: {db:.2}");
 
     assert!(

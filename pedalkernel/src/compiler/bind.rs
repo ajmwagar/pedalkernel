@@ -56,11 +56,17 @@ pub(super) fn build_controls(
                 }
             }
             Some(ControlParamKind::LfoRate) => {
-                let idx = lfo_ids.iter().position(|id| id == &ctrl.component).unwrap_or(0);
+                let idx = lfo_ids
+                    .iter()
+                    .position(|id| id == &ctrl.component)
+                    .unwrap_or(0);
                 ControlTarget::LfoRate(idx)
             }
             Some(ControlParamKind::LfoDepth) => {
-                let idx = lfo_ids.iter().position(|id| id == &ctrl.component).unwrap_or(0);
+                let idx = lfo_ids
+                    .iter()
+                    .position(|id| id == &ctrl.component)
+                    .unwrap_or(0);
                 ControlTarget::LfoDepth(idx)
             }
             Some(ControlParamKind::BbdClockRate) => {
@@ -108,13 +114,9 @@ pub(super) fn build_controls(
             }
         };
 
-        let max_r = comp
-            .and_then(|c| c.kind.resistance())
-            .unwrap_or(100_000.0);
+        let max_r = comp.and_then(|c| c.kind.resistance()).unwrap_or(100_000.0);
 
-        let taper = comp
-            .and_then(|c| c.kind.pot_taper())
-            .unwrap_or(PotTaper::B);
+        let taper = comp.and_then(|c| c.kind.pot_taper()).unwrap_or(PotTaper::B);
 
         controls.push(ControlBinding {
             label: ctrl.label.clone(),
@@ -206,9 +208,7 @@ fn resolve_pot_target(
     // 6. PassiveRType children — already covered by step 2's stage.has_pot()
 
     // 7. Fallback
-    eprintln!(
-        "WARNING: pot '{pot_id}' not bound to any audio stage — control will have no effect"
-    );
+    eprintln!("WARNING: pot '{pot_id}' not bound to any audio stage — control will have no effect");
     (ControlTarget::PotInStage(0), false)
 }
 
@@ -424,7 +424,11 @@ pub(super) fn build_lfo_bindings(
     let mut lfos = Vec::new();
 
     for comp in &pedal.components {
-        if let Some(lfo) = comp.kind.as_any().downcast_ref::<crate::compiler::components::Lfo>() {
+        if let Some(lfo) = comp
+            .kind
+            .as_any()
+            .downcast_ref::<crate::compiler::components::Lfo>()
+        {
             let waveform = match lfo.waveform {
                 LfoWaveformDsl::Sine => crate::elements::LfoWaveform::Sine,
                 LfoWaveformDsl::Triangle => crate::elements::LfoWaveform::Triangle,
@@ -515,7 +519,11 @@ pub(super) fn build_envelope_bindings(
     let mut envelopes = Vec::new();
 
     for comp in &pedal.components {
-        if let Some(ef) = comp.kind.as_any().downcast_ref::<crate::compiler::components::EnvelopeFollower>() {
+        if let Some(ef) = comp
+            .kind
+            .as_any()
+            .downcast_ref::<crate::compiler::components::EnvelopeFollower>()
+        {
             let envelope = crate::elements::EnvelopeFollower::from_rc(
                 ef.attack_r,
                 ef.attack_c,
@@ -701,7 +709,11 @@ fn resolve_modulation_target(
     use super::component::ModulationSinkKind;
 
     // Look up the component and ask for its modulation sink.
-    let comp_kind = pedal.components.iter().find(|c| c.id == target_comp).map(|c| &c.kind);
+    let comp_kind = pedal
+        .components
+        .iter()
+        .find(|c| c.id == target_comp)
+        .map(|c| &c.kind);
     let sink = comp_kind?.modulation_sink(target_pin)?;
 
     let target = match sink.target_kind {
@@ -711,7 +723,9 @@ fn resolve_modulation_target(
                 .filter(|s| matches!(&s.root, RootKind::Jfet(_) | RootKind::JfetVr(_)))
                 .count();
             if jfet_count > 1 {
-                if *created_all_jfet_binding { return None; }
+                if *created_all_jfet_binding {
+                    return None;
+                }
                 *created_all_jfet_binding = true;
                 ModulationTarget::AllJfetVgs
             } else if let Some(stage_idx) = stages
@@ -735,9 +749,15 @@ fn resolve_modulation_target(
             let stage_idx = stages
                 .iter()
                 .position(|s| {
-                    s.tree.find_leaf(&|leaf| {
-                        if leaf.comp_id() == Some(tc) { Some(()) } else { None }
-                    }).is_some()
+                    s.tree
+                        .find_leaf(&|leaf| {
+                            if leaf.comp_id() == Some(tc) {
+                                Some(())
+                            } else {
+                                None
+                            }
+                        })
+                        .is_some()
                         || s.input_photocouplers.iter().any(|pc| pc.comp_id == tc)
                 })
                 .unwrap_or(0);
@@ -782,9 +802,7 @@ fn resolve_modulation_target(
             ModulationTarget::MosfetVgs { stage_idx }
         }
         ModulationSinkKind::OtaIabc => {
-            if let Some(multi_nl_idx) = multi_nl_stages
-                .iter()
-                .position(|s| s.has_linearized_ota())
+            if let Some(multi_nl_idx) = multi_nl_stages.iter().position(|s| s.has_linearized_ota())
             {
                 ModulationTarget::OtaIabcLinear { multi_nl_idx }
             } else {

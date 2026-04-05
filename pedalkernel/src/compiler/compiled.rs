@@ -766,19 +766,33 @@ impl CompiledPedal {
 
     /// Debug: return opamp gains and feedback pot IDs for all stages.
     pub fn opamp_debug_info(&self) -> Vec<(usize, f64, Option<String>)> {
-        self.stages.iter().enumerate().filter_map(|(i, s)| {
-            s.opamp_gain().map(|g| {
-                let pot_id = s.feedback_pot_id().map(|s| s.to_string());
-                (i, g, pot_id)
+        self.stages
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                s.opamp_gain().map(|g| {
+                    let pot_id = s.feedback_pot_id().map(|s| s.to_string());
+                    (i, g, pot_id)
+                })
             })
-        }).collect()
+            .collect()
     }
 
     /// Debug: return multi-NL stage scattering info.
     pub fn multi_nl_debug_info(&self) -> Vec<(usize, usize, Vec<f64>, f64, Vec<f64>)> {
-        self.multi_nl_stages.iter().enumerate().map(|(i, s)| {
-            (i, s.n_nl, s.scattering.s_nl_adapted.clone(), s.compensation, s.nl_port_resistances.clone())
-        }).collect()
+        self.multi_nl_stages
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                (
+                    i,
+                    s.n_nl,
+                    s.scattering.s_nl_adapted.clone(),
+                    s.compensation,
+                    s.nl_port_resistances.clone(),
+                )
+            })
+            .collect()
     }
 
     /// Get the supply voltage.
@@ -1077,7 +1091,9 @@ impl CompiledPedal {
     /// Should be called once after compilation is complete.
     pub fn snapshot_original_values(&mut self) {
         for (id, kind, value) in self.list_editable_components() {
-            self.original_passive_values.entry(id).or_insert((kind, value));
+            self.original_passive_values
+                .entry(id)
+                .or_insert((kind, value));
         }
     }
 
@@ -1094,54 +1110,31 @@ impl CompiledPedal {
             let (r0, r1) = self.controls[i].range;
             let value = (r0 + value * (r1 - r0)).clamp(0.0, 1.0);
             match &self.controls[i].target {
-                ControlTarget::PotInStage(_stage_idx) => {
-                    // Use smoothing for pot changes to avoid zipper noise / clicks.
-                    // Find the smoother for this control and set the target.
-                    // The actual pot update happens in advance_smoothers().
+                ControlTarget::PotInStage(_) | ControlTarget::PotInMultiNlStage(_, _) => {
                     if let Some(smoother) =
                         self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
                     {
                         smoother.set_target(value);
                     } else {
                         // Fallback: no smoother (shouldn't happen), update immediately.
-                        let stage_idx = *_stage_idx;
                         let comp_id = self.controls[i].component_id.clone();
                         let comp_id_aw = self.controls[i].component_id_aw.clone();
                         let comp_id_wb = self.controls[i].component_id_wb.clone();
-                        // Pre-apply taper once for split halves (aw/wb use Linear
-                        // taper internally) so aw + wb = max_R always.
                         let tapered = self.controls[i].taper.apply(value);
-                        if let Some(stage) = self.stages.get_mut(stage_idx) {
-                            if !stage.set_pot_any(&comp_id, value) {
-                                stage.set_passive_rtype_pot(&comp_id, value);
-                            }
-                            if !stage.set_pot_any(&comp_id_aw, tapered) {
-                                stage.set_passive_rtype_pot(&comp_id_aw, tapered);
-                            }
-                            if !stage.set_pot_any(&comp_id_wb, 1.0 - tapered) {
-                                stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - tapered);
-                            }
-                            stage.recompute_all();
-                            stage.flush_passive_rtype_recompute();
+                        for stage in &mut self.stages {
+                            stage.set_pot(&comp_id, value);
+                            stage.set_pot(&comp_id_aw, tapered);
+                            stage.set_pot(&comp_id_wb, 1.0 - tapered);
+                            stage.flush_recompute();
                         }
-                        self.notify_stage_pot_changed(stage_idx);
+                        for stage in &mut self.multi_nl_stages {
+                            stage.set_pot(&comp_id, value);
+                            stage.flush_recompute();
+                        }
                         if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
                             self.bbd_wet_mix = value;
                         }
                         self.apply_pot_mirrors(&comp_id, value);
-                    }
-                }
-                ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
-                    if let Some(smoother) =
-                        self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
-                    {
-                        smoother.set_target(value);
-                    } else {
-                        let stage_idx = *stage_idx;
-                        let comp_id = &self.controls[i].component_id;
-                        if let Some(stage) = self.multi_nl_stages.get_mut(stage_idx) {
-                            stage.set_pot(comp_id, value);
-                        }
                     }
                 }
                 ControlTarget::SidechainControl(sc_idx) => {
@@ -1234,7 +1227,11 @@ impl CompiledPedal {
     pub fn note_on(&mut self, note: u8, _velocity: u8) {
         if self.midi_trigger_map.is_empty() {
             #[cfg(debug_assertions)]
-            eprintln!("[CompiledPedal] note_on({}) → firing ALL {} triggers", note, self.triggers.len());
+            eprintln!(
+                "[CompiledPedal] note_on({}) → firing ALL {} triggers",
+                note,
+                self.triggers.len()
+            );
             for trig in &mut self.triggers {
                 trig.fire();
             }
@@ -1250,31 +1247,6 @@ impl CompiledPedal {
         }
     }
 
-    /// Notify a WDF stage that a pot changed and it should update
-    /// component-owned behaviors (e.g., OpAmpRoot gain from feedback pot).
-    fn notify_stage_pot_changed(&mut self, stage_idx: usize) {
-        if let Some(stage) = self.stages.get_mut(stage_idx) {
-            stage.notify_pot_changed();
-        }
-    }
-
-    /// Notify multi-NL stages that a pot changed and they should update
-    /// bias from their bias_pot_id if it matches.
-    fn notify_multi_nl_pot_changed(&mut self, comp_id: &str) {
-        for stage in &mut self.multi_nl_stages {
-            if stage.bias_pot_id.as_deref() == Some(comp_id) {
-                stage.update_bias_from_pot();
-            }
-            // Update feedback opamp gain when its controlling pot changes.
-            if stage.feedback_pot_id.as_deref() == Some(comp_id) {
-                let pot_r = stage.pot_children.iter()
-                    .find_map(|p| p.get_pot_resistance(comp_id));
-                if let (Some(pot_r), Some(ref mut oa)) = (pot_r, &mut stage.feedback_opamp) {
-                    oa.set_feedback_pot_r(pot_r);
-                }
-            }
-        }
-    }
 
     /// Update mirrored pots (position = 1.0 - source) across all stages.
     fn apply_pot_mirrors(&mut self, comp_id: &str, value: f64) {
@@ -1290,17 +1262,9 @@ impl CompiledPedal {
             let inv = 1.0 - value;
             for (id, id_aw, id_wb) in &mirrors {
                 for stage in &mut self.stages {
-                    if !stage.tree.set_pot(id, inv) {
-                        stage.set_passive_rtype_pot(id, inv);
-                    }
-                    if !stage.tree.set_pot(id_aw, inv) {
-                        stage.set_passive_rtype_pot(id_aw, inv);
-                    }
-                    if !stage.tree.set_pot(id_wb, 1.0 - inv) {
-                        stage.set_passive_rtype_pot(id_wb, 1.0 - inv);
-                    }
-                    stage.tree.recompute();
-                    stage.flush_passive_rtype_recompute();
+                    stage.set_pot(id, inv);
+                    stage.set_pot(id_aw, inv);
+                    stage.set_pot(id_wb, 1.0 - inv);
                 }
             }
         }
@@ -1323,112 +1287,51 @@ impl CompiledPedal {
                 continue;
             }
             if self.pot_smoothers[si].advance() {
-                // Value changed, update the actual pot.
-                // Clone control info to avoid borrow conflict with &mut self methods.
                 let ctrl_idx = self.pot_smoothers[si].control_idx;
                 let value = self.pot_smoothers[si].current;
                 let comp_id = self.controls[ctrl_idx].component_id.clone();
                 let comp_id_aw = self.controls[ctrl_idx].component_id_aw.clone();
                 let comp_id_wb = self.controls[ctrl_idx].component_id_wb.clone();
-                let max_r = self.controls[ctrl_idx].max_resistance;
                 // Pre-apply taper once for split halves (aw/wb use Linear
                 // taper internally) so aw + wb = max_R always.
                 let tapered = self.controls[ctrl_idx].taper.apply(value);
-                match &self.controls[ctrl_idx].target {
-                    ControlTarget::PotInStage(stage_idx) => {
-                        let stage_idx = *stage_idx;
-                        if let Some(stage) = self.stages.get_mut(stage_idx) {
-                            if !stage.set_pot_any(&comp_id, value) {
-                                stage.set_passive_rtype_pot(&comp_id, value);
-                            }
-                            if !stage.set_pot_any(&comp_id_aw, tapered) {
-                                stage.set_passive_rtype_pot(&comp_id_aw, tapered);
-                            }
-                            if !stage.set_pot_any(&comp_id_wb, 1.0 - tapered) {
-                                stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - tapered);
-                            }
-                            stage.recompute_all();
-                            stage.flush_passive_rtype_recompute();
-                        }
-                        // Also update the same pot in other WDF stages where it
-                        // may appear (e.g., opamp feedback pot also in diode stage).
-                        for (oi, stage) in self.stages.iter_mut().enumerate() {
-                            if oi == stage_idx {
-                                continue;
-                            }
-                            let mut changed = false;
-                            changed |= stage.set_pot_any(&comp_id, value);
-                            changed |= stage.set_pot_any(&comp_id_aw, tapered);
-                            changed |= stage.set_pot_any(&comp_id_wb, 1.0 - tapered);
-                            if !changed {
-                                changed |= stage.set_passive_rtype_pot(&comp_id, value);
-                                changed |= stage.set_passive_rtype_pot(&comp_id_aw, tapered);
-                                changed |= stage.set_passive_rtype_pot(&comp_id_wb, 1.0 - tapered);
-                            }
-                            if changed {
-                                stage.recompute_all();
-                                stage.flush_passive_rtype_recompute();
-                            }
-                        }
-                        // Component-driven updates: OpAmpRoot gain, BBD mix.
-                        // Notify the primary stage AND any secondary stages that
-                        // contain this pot. Split pots (3-terminal) can span multiple
-                        // stages — e.g., a feedback pot's aw half in the opamp stage
-                        // and wb half in the diode stage.
-                        self.notify_stage_pot_changed(stage_idx);
-                        for (oi, stage) in self.stages.iter_mut().enumerate() {
-                            if oi == stage_idx {
-                                continue;
-                            }
-                            // Only notify if this stage's feedback_pot_id matches
-                            // the pot we just changed (base name or split halves).
-                            let should_notify = stage.feedback_pot_id.as_ref().map_or(false, |fb_id| {
-                                fb_id == &comp_id || fb_id == &comp_id_aw || fb_id == &comp_id_wb
-                            });
-                            if should_notify {
-                                stage.notify_pot_changed();
-                            }
-                        }
-                        if self.bbd_mix_pot_id.as_deref() == Some(&comp_id) {
-                            self.bbd_wet_mix = value;
-                        }
-                        self.apply_pot_mirrors(&comp_id, value);
-                    }
-                    ControlTarget::PotInMultiNlStage(stage_idx, _child_idx) => {
-                        let stage_idx = *stage_idx;
-                        if let Some(stage) = self.multi_nl_stages.get_mut(stage_idx) {
-                            stage.set_pot(&comp_id, value);
-                            stage.update_bias_from_pot();
-                            // Table lookup is cheap enough for per-sample recompute
-                            if max_r < 5_000.0 || stage.interp_table.is_some() {
-                                stage.flush_recompute();
-                            }
-                        }
-                    }
-                    _ => {}
+
+                // Update all WDF stages — each stage ignores pots it doesn't own.
+                for stage in &mut self.stages {
+                    stage.set_pot(&comp_id, value);
+                    stage.set_pot(&comp_id_aw, tapered);
+                    stage.set_pot(&comp_id_wb, 1.0 - tapered);
                 }
+                // Update all multi-NL stages (handles __aw/__wb internally).
+                for stage in &mut self.multi_nl_stages {
+                    stage.set_pot(&comp_id, value);
+                }
+
+                if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
+                    self.bbd_wet_mix = value;
+                }
+                self.apply_pot_mirrors(&comp_id, value);
             }
         }
 
-        // Immediately flush table-based PassiveRType stages (lookup is cheap).
+        // Per-sample flush for table-based stages (O(1) lookup).
         for stage in &mut self.stages {
             if stage.has_interp_table() {
-                stage.flush_passive_rtype_recompute();
+                stage.flush_recompute();
             }
         }
 
-        // Throttle scattering recomputes to every 32 samples.
-        // The pot resistance in the DynNode is updated per-sample above,
-        // but the expensive matrix re-derivation is batched here.
+        // Throttle expensive scattering recomputes to every 32 samples.
+        // Pot resistances in DynNodes are updated per-sample above;
+        // the O(n³) matrix re-derivation is batched here.
         self.multi_nl_recompute_counter += 1;
         if self.multi_nl_recompute_counter >= 32 {
             self.multi_nl_recompute_counter = 0;
             for stage in &mut self.multi_nl_stages {
                 stage.flush_recompute();
             }
-            // Also flush PassiveRType stages with dirty pot changes (non-table stages)
             for stage in &mut self.stages {
-                stage.flush_passive_rtype_recompute();
+                stage.flush_recompute();
             }
         }
     }
@@ -1537,7 +1440,11 @@ impl CompiledPedal {
             for (i, vco) in self.vcos.iter().enumerate() {
                 s.push_str(&format!(
                     "  [{}] {} - freq={:.1}Hz, waveform={:?}, out_node={}\n",
-                    i, vco.comp_id, vco.vco.frequency(), vco.waveform, vco.output_node_id
+                    i,
+                    vco.comp_id,
+                    vco.vco.frequency(),
+                    vco.waveform,
+                    vco.output_node_id
                 ));
             }
         }
@@ -1605,7 +1512,11 @@ impl PedalProcessor for CompiledPedal {
                 }
             }
         }
-        let input = if global_trigger != 0.0 { global_trigger } else { input };
+        let input = if global_trigger != 0.0 {
+            global_trigger
+        } else {
+            input
+        };
 
         // Advance pot smoothers — smoothly interpolate pot values toward targets.
         // This eliminates zipper noise and clicks when knobs are turned.
@@ -1934,7 +1845,8 @@ impl PedalProcessor for CompiledPedal {
                     // Regular stages (triodes, BJTs, etc.) use serial chain even
                     // if they have injection_node_id set for other purposes.
                     let stage_input = if stage.is_trigger_voice {
-                        let impulse: f64 = self.node_signals
+                        let impulse: f64 = self
+                            .node_signals
                             .iter()
                             .rev()
                             .filter(|(nid, _)| *nid == stage.injection_node_id)
@@ -2002,7 +1914,9 @@ impl PedalProcessor for CompiledPedal {
                         // Feedforward: additive blend into serial chain
                         signal += stage_output;
                     } else if stage.is_trigger_voice && stage.output_node_id != usize::MAX {
-                        if let Some(entry) = self.node_signals.iter_mut()
+                        if let Some(entry) = self
+                            .node_signals
+                            .iter_mut()
                             .find(|(nid, _)| *nid == stage.output_node_id)
                         {
                             entry.1 += stage_output;
@@ -2010,7 +1924,8 @@ impl PedalProcessor for CompiledPedal {
                             self.node_signals.push((stage.output_node_id, stage_output));
                         }
                         // Use accumulated value at output node as the serial chain signal.
-                        signal = self.node_signals
+                        signal = self
+                            .node_signals
                             .iter()
                             .rev()
                             .find(|(nid, _)| *nid == stage.output_node_id)
@@ -2063,9 +1978,17 @@ impl PedalProcessor for CompiledPedal {
                         let n = NAN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if n < 10 || n % 48000 == 0 {
                             let devices: String = if let Some(ref dg) = mnl.device_groups {
-                                dg.groups.iter().map(|g| g.debug_name()).collect::<Vec<_>>().join(",")
+                                dg.groups
+                                    .iter()
+                                    .map(|g| g.debug_name())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
                             } else {
-                                mnl.nl_devices.iter().map(|d| d.debug_name()).collect::<Vec<_>>().join(",")
+                                mnl.nl_devices
+                                    .iter()
+                                    .map(|d| d.debug_name())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
                             };
                             tracing::warn!(
                                 "NaN/Inf in MultiNL stage {} [{}]: input={:.6e} output={:.6e} v_prev={:.4?}",
@@ -2113,8 +2036,10 @@ impl PedalProcessor for CompiledPedal {
         if trace_on {
             eprintln!(
                 "  [PRE-PP] signal={signal:.6e} n_pp={} n_sc={} stage_order={}(wdf={}, mnl={})",
-                self.push_pull_stages.len(), self.sidechains.len(),
-                self.stage_order.len(), self.stages.len(),
+                self.push_pull_stages.len(),
+                self.sidechains.len(),
+                self.stage_order.len(),
+                self.stages.len(),
                 self.multi_nl_stages.len()
             );
         }
@@ -2149,7 +2074,10 @@ impl PedalProcessor for CompiledPedal {
             vca_binding.vca.set_gain(env_val);
 
             // Read audio from input node (sum all signals at that node)
-            let vca_input = self.node_signals.iter().rev()
+            let vca_input = self
+                .node_signals
+                .iter()
+                .rev()
                 .filter(|(nid, _)| *nid == vca_binding.input_node_id)
                 .map(|(_, v)| *v)
                 .sum::<f64>();
@@ -2172,7 +2100,10 @@ impl PedalProcessor for CompiledPedal {
         // directly into the signal chain. This handles VCO→out circuits without a VCA.
         if !self.vcos.is_empty() && self.vcas.is_empty() {
             for vco_binding in &self.vcos {
-                if let Some((_, val)) = self.node_signals.iter().rev()
+                if let Some((_, val)) = self
+                    .node_signals
+                    .iter()
+                    .rev()
                     .find(|(nid, _)| *nid == vco_binding.output_node_id)
                 {
                     signal += *val;
@@ -2263,9 +2194,9 @@ impl PedalProcessor for CompiledPedal {
         if !signal.is_finite() {
             signal = 0.0;
         }
-        signal = self.rail_sat_oversampler.process(signal, |s| {
-            self.rail_saturation.process(s, headroom)
-        });
+        signal = self
+            .rail_sat_oversampler
+            .process(signal, |s| self.rail_saturation.process(s, headroom));
 
         // Process through BBD delay lines (wet signal mixed with dry).
         for bbd in &mut self.bbds {
@@ -2500,11 +2431,15 @@ impl PedalProcessor for CompiledPedal {
 
         // Named controls with smoother state
         for (i, ctrl) in self.controls.iter().enumerate() {
-            let smoothed = self.pot_smoothers.iter()
+            let smoothed = self
+                .pot_smoothers
+                .iter()
                 .find(|s| s.control_idx == i)
                 .map(|s| s.current)
                 .unwrap_or(0.0);
-            let target = self.pot_smoothers.iter()
+            let target = self
+                .pot_smoothers
+                .iter()
                 .find(|s| s.control_idx == i)
                 .map(|s| s.target)
                 .unwrap_or(0.0);

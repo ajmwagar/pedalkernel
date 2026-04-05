@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
-use crate::compiler::component::{Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, PinDirection, StampResult};
+use crate::compiler::component::{
+    Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, PinDirection, StampResult,
+};
 use crate::compiler::graph::NodeId;
 use crate::compiler::validate::Severity;
 use crate::dsl::{DiodeType, NeonType};
@@ -23,11 +25,17 @@ pub struct Diode {
 impl Component for Diode {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "diode" }
+    fn type_tag(&self) -> &'static str {
+        "diode"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -37,7 +45,10 @@ impl Component for Diode {
     }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::Edge { pin_a: "a", pin_b: "b" }
+        GraphRole::Edge {
+            pin_a: "a",
+            pin_b: "b",
+        }
     }
 
     fn stamp_mna(
@@ -52,7 +63,12 @@ impl Component for Diode {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "a",
+            pin_b: "b",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn classify_nonlinear(
@@ -63,7 +79,13 @@ impl Component for Diode {
         gnd_node: NodeId,
         _node_names: &HashMap<String, NodeId>,
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
-        let diode_jn = if node_b == gnd_node { node_a } else if node_a == gnd_node { node_b } else { node_a };
+        let diode_jn = if node_b == gnd_node {
+            node_a
+        } else if node_a == gnd_node {
+            node_b
+        } else {
+            node_a
+        };
         Some((NonlinearKind::SingleDiode(self.diode_type), vec![diode_jn]))
     }
 
@@ -71,8 +93,12 @@ impl Component for Diode {
         ("Device:D", "D")
     }
 
-    fn symbol_name(&self) -> &'static str { "diode" }
-    fn layout_class(&self) -> &'static str { "diode" }
+    fn symbol_name(&self) -> &'static str {
+        "diode"
+    }
+    fn layout_class(&self) -> &'static str {
+        "diode"
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -82,8 +108,12 @@ impl Component for Diode {
         }
     }
 
-    fn is_diode_family(&self) -> bool { true }
-    fn diode_type(&self) -> Option<DiodeType> { Some(self.diode_type) }
+    fn is_diode_family(&self) -> bool {
+        true
+    }
+    fn diode_type(&self) -> Option<DiodeType> {
+        Some(self.diode_type)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -98,11 +128,17 @@ pub struct DiodePair {
 impl Component for DiodePair {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "diode pair" }
+    fn type_tag(&self) -> &'static str {
+        "diode pair"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -112,7 +148,10 @@ impl Component for DiodePair {
     }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::Edge { pin_a: "a", pin_b: "b" }
+        GraphRole::Edge {
+            pin_a: "a",
+            pin_b: "b",
+        }
     }
 
     fn stamp_mna(
@@ -127,7 +166,12 @@ impl Component for DiodePair {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "a",
+            pin_b: "b",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn classify_nonlinear(
@@ -138,7 +182,13 @@ impl Component for DiodePair {
         gnd_node: NodeId,
         _node_names: &HashMap<String, NodeId>,
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
-        let diode_jn = if node_b == gnd_node { node_a } else if node_a == gnd_node { node_b } else { node_a };
+        let diode_jn = if node_b == gnd_node {
+            node_a
+        } else if node_a == gnd_node {
+            node_b
+        } else {
+            node_a
+        };
         Some((NonlinearKind::DiodePair(self.diode_type), vec![diode_jn]))
     }
 
@@ -146,8 +196,12 @@ impl Component for DiodePair {
         ("Device:D", "D")
     }
 
-    fn symbol_name(&self) -> &'static str { "diode" }
-    fn layout_class(&self) -> &'static str { "diode_pair" }
+    fn symbol_name(&self) -> &'static str {
+        "diode"
+    }
+    fn layout_class(&self) -> &'static str {
+        "diode_pair"
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -157,8 +211,12 @@ impl Component for DiodePair {
         }
     }
 
-    fn is_diode_family(&self) -> bool { true }
-    fn diode_type(&self) -> Option<DiodeType> { Some(self.diode_type) }
+    fn is_diode_family(&self) -> bool {
+        true
+    }
+    fn diode_type(&self) -> Option<DiodeType> {
+        Some(self.diode_type)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -173,11 +231,17 @@ pub struct Zener {
 impl Component for Zener {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "zener diode" }
+    fn type_tag(&self) -> &'static str {
+        "zener diode"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -187,7 +251,10 @@ impl Component for Zener {
     }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::Edge { pin_a: "a", pin_b: "b" }
+        GraphRole::Edge {
+            pin_a: "a",
+            pin_b: "b",
+        }
     }
 
     fn stamp_mna(
@@ -216,7 +283,12 @@ impl Component for Zener {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "a",
+            pin_b: "b",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn classify_nonlinear(
@@ -228,16 +300,27 @@ impl Component for Zener {
         _node_names: &HashMap<String, NodeId>,
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
         let jn = if node_b == gnd_node { _node_a } else { node_b };
-        Some((NonlinearKind::Zener { voltage: self.breakdown_voltage }, vec![jn]))
+        Some((
+            NonlinearKind::Zener {
+                voltage: self.breakdown_voltage,
+            },
+            vec![jn],
+        ))
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Device:D_Zener", "D")
     }
 
-    fn symbol_name(&self) -> &'static str { "zener" }
-    fn layout_class(&self) -> &'static str { "zener" }
-    fn display_value(&self) -> Option<String> { Some(format!("{}V", self.breakdown_voltage)) }
+    fn symbol_name(&self) -> &'static str {
+        "zener"
+    }
+    fn layout_class(&self) -> &'static str {
+        "zener"
+    }
+    fn display_value(&self) -> Option<String> {
+        Some(format!("{}V", self.breakdown_voltage))
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -247,7 +330,9 @@ impl Component for Zener {
         }
     }
 
-    fn is_diode_family(&self) -> bool { true }
+    fn is_diode_family(&self) -> bool {
+        true
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -262,11 +347,17 @@ pub struct Neon {
 impl Component for Neon {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "neon bulb" }
+    fn type_tag(&self) -> &'static str {
+        "neon bulb"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -276,7 +367,10 @@ impl Component for Neon {
     }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::Edge { pin_a: "a", pin_b: "b" }
+        GraphRole::Edge {
+            pin_a: "a",
+            pin_b: "b",
+        }
     }
 
     fn stamp_mna(
@@ -291,7 +385,12 @@ impl Component for Neon {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "a",
+            pin_b: "b",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {
@@ -300,6 +399,10 @@ impl Component for Neon {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "neon" }
-    fn layout_class(&self) -> &'static str { "neon" }
+    fn symbol_name(&self) -> &'static str {
+        "neon"
+    }
+    fn layout_class(&self) -> &'static str {
+        "neon"
+    }
 }

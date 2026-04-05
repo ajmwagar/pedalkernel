@@ -174,12 +174,12 @@ mod tests {
         let tmp = std::env::temp_dir().join("pedalkernel_test_render.wav");
         let input = sine_wave(440.0, 0.1, 48000);
         // Compile a real pedal from DSL
-        let pedal = crate::dsl::parse_pedal_file(
-            include_str!("../examples/pedals/distortion/proco_rat.pedal"),
-        )
+        let pedal = crate::dsl::parse_pedal_file(include_str!(
+            "../examples/pedals/distortion/proco_rat.pedal"
+        ))
         .expect("should parse RAT pedal");
-        let mut compiled = crate::compiler::compile_pedal(&pedal, 48000.0)
-            .expect("should compile RAT pedal");
+        let mut compiled =
+            crate::compiler::compile_pedal(&pedal, 48000.0).expect("should compile RAT pedal");
         render_to_wav(&mut compiled, &input, &tmp, 48000).unwrap();
 
         // Verify the file was created and has correct length

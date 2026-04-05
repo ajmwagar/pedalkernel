@@ -109,12 +109,12 @@ fn ratking_min_distortion_not_silent() {
     // a clear fraction of the input level.
     let output = process_ratking(&[
         ("Distortion", 0.0),
-        ("Filter", 0.0),   // bright — keeps highs
-        ("Volume", 0.0),   // max volume (control range is [1.0, 0.0])
+        ("Filter", 0.0), // bright — keeps highs
+        ("Volume", 0.0), // max volume (control range is [1.0, 0.0])
     ]);
 
     let output_peak = peak(&output);
-    let input_amp   = 0.1;
+    let input_amp = 0.1;
 
     // Allow settling transient and diode loading to push us below the
     // theoretical 0.56x, but output must be at least 5% of input peak.
@@ -142,7 +142,7 @@ fn ratking_distortion_sweep_increases_thd() {
     for &d in &steps {
         let output = process_ratking(&[
             ("Distortion", d),
-            ("Filter", 0.0),  // bright to keep harmonics measurable
+            ("Filter", 0.0), // bright to keep harmonics measurable
             ("Volume", 0.5),
         ]);
         let t = thd(&output, SAMPLE_RATE, 440.0);
@@ -154,7 +154,7 @@ fn ratking_distortion_sweep_increases_thd() {
     // At max distortion (massive gain + diode clipping) THD is very high.
     // At min distortion it should be low (clean amp at 0.56x gain).
     let first = thd_values.first().copied().unwrap_or(0.0);
-    let last  = thd_values.last().copied().unwrap_or(0.0);
+    let last = thd_values.last().copied().unwrap_or(0.0);
     assert!(
         last > first * 2.0,
         "RATKING Distortion sweep: max-distortion THD should be notably higher than \
@@ -180,21 +180,23 @@ fn ratking_filter_pot_reduces_high_freq() {
     // Use high distortion so there are plenty of harmonics to filter.
     let bright = process_ratking(&[
         ("Distortion", 0.7),
-        ("Filter", 0.0),  // bright
+        ("Filter", 0.0), // bright
         ("Volume", 0.5),
     ]);
     let dark = process_ratking(&[
         ("Distortion", 0.7),
-        ("Filter", 1.0),  // dark / maximum filtering
+        ("Filter", 1.0), // dark / maximum filtering
         ("Volume", 0.5),
     ]);
 
     // Sum harmonic energy at 880, 1320, 1760, 2200, 2640, 3080, 3520 Hz.
     let harmonics: &[f64] = &[880.0, 1320.0, 1760.0, 2200.0, 2640.0, 3080.0, 3520.0];
-    let bright_hi: f64 = harmonics.iter()
+    let bright_hi: f64 = harmonics
+        .iter()
         .map(|&f| goertzel_power(&bright, SAMPLE_RATE, f))
         .sum();
-    let dark_hi: f64 = harmonics.iter()
+    let dark_hi: f64 = harmonics
+        .iter()
         .map(|&f| goertzel_power(&dark, SAMPLE_RATE, f))
         .sum();
 
@@ -233,8 +235,7 @@ fn ratking_external_pedal_file_if_present() {
         return;
     }
 
-    let src = std::fs::read_to_string(path)
-        .expect("failed to read ratking.pedal");
+    let src = std::fs::read_to_string(path).expect("failed to read ratking.pedal");
     let pedal = parse_pedal_file(&src).expect("parse ratking.pedal");
     let mut proc = compile_pedal(&pedal, SAMPLE_RATE).expect("compile ratking.pedal");
 
@@ -258,7 +259,8 @@ fn ratking_external_pedal_file_if_present() {
     let thd_max = thd(&out_max, SAMPLE_RATE, 440.0);
     eprintln!(
         "[ratking_external] thd_min={thd_min:.4}, thd_max={thd_max:.4}, \
-         peak_min={out_min_peak:.6}, peak_max={:.6}", peak(&out_max)
+         peak_min={out_min_peak:.6}, peak_max={:.6}",
+        peak(&out_max)
     );
     assert!(
         thd_max > thd_min,

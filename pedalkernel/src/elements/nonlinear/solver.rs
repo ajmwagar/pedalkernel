@@ -13,11 +13,11 @@ pub const NR_MAX_ITER: usize = 24;
 pub struct NrWorkspace {
     // Independent solver buffers
     pub(crate) f_vec: Vec<f64>,
-    pub(crate) jacobian: Vec<f64>,    // n_nl * n_nl
+    pub(crate) jacobian: Vec<f64>, // n_nl * n_nl
     pub(crate) currents: Vec<f64>,
     pub(crate) derivatives: Vec<f64>, // independent solver only
     pub(crate) rhs: Vec<f64>,
-    pub(crate) jac_copy: Vec<f64>,    // n_nl * n_nl
+    pub(crate) jac_copy: Vec<f64>, // n_nl * n_nl
     pub(crate) b_nl: Vec<f64>,
 
     // Grouped solver additional buffers
@@ -29,7 +29,7 @@ pub struct NrWorkspace {
     // Frozen Newton cache: reuse previous sample's system Jacobian and currents
     // for a first "frozen" step that skips device eval entirely.
     // If that step converges, we save all device evals for this sample.
-    pub(crate) cached_sys_jac: Vec<f64>, // n_nl * n_nl
+    pub(crate) cached_sys_jac: Vec<f64>,  // n_nl * n_nl
     pub(crate) cached_currents: Vec<f64>, // n_nl
     pub(crate) has_cached_jac: bool,
 
@@ -468,7 +468,17 @@ pub(crate) fn multi_port_nr_solve(
     tolerance: f64,
 ) -> Vec<f64> {
     let mut ws = NrWorkspace::new(n_nl);
-    multi_port_nr_solve_into(n_nl, s_nl, known_a, port_resistances, devices, v_guess, max_iter, tolerance, &mut ws);
+    multi_port_nr_solve_into(
+        n_nl,
+        s_nl,
+        known_a,
+        port_resistances,
+        devices,
+        v_guess,
+        max_iter,
+        tolerance,
+        &mut ws,
+    );
     ws.b_nl
 }
 
@@ -555,7 +565,8 @@ pub(crate) fn multi_port_nr_solve_into(
                 let sij = s_nl[i * n_nl + j];
                 let term = sij * (1.0 - port_resistances[j] * ws.derivatives[j]);
                 if i == j {
-                    ws.jacobian[i * n_nl + j] = term - 1.0 - port_resistances[i] * ws.derivatives[i];
+                    ws.jacobian[i * n_nl + j] =
+                        term - 1.0 - port_resistances[i] * ws.derivatives[i];
                 } else {
                     ws.jacobian[i * n_nl + j] = term;
                 }
@@ -580,7 +591,9 @@ pub(crate) fn multi_port_nr_solve_into(
         for i in 0..n_nl {
             let mut dv = ws.rhs[i];
             #[cfg(feature = "fault-injection")]
-            let skip_damp = crate::fault_injection::is_active(crate::fault_injection::Fault::DisableStepDamping);
+            let skip_damp = crate::fault_injection::is_active(
+                crate::fault_injection::Fault::DisableStepDamping,
+            );
             #[cfg(not(feature = "fault-injection"))]
             let skip_damp = false;
             if dv.abs() > 5.0 && !skip_damp {
@@ -717,7 +730,18 @@ pub(crate) fn multi_port_nr_solve_grouped(
 ) -> Vec<f64> {
     let max_group_ports = device_groups.iter().map(|d| d.n_ports()).max().unwrap_or(1);
     let mut ws = NrWorkspace::new_grouped(n_nl, max_group_ports);
-    multi_port_nr_solve_grouped_into(n_nl, s_nl, known_a, port_resistances, device_groups, group_port_offsets, v_guess, max_iter, tolerance, &mut ws);
+    multi_port_nr_solve_grouped_into(
+        n_nl,
+        s_nl,
+        known_a,
+        port_resistances,
+        device_groups,
+        group_port_offsets,
+        v_guess,
+        max_iter,
+        tolerance,
+        &mut ws,
+    );
     ws.b_nl
 }
 
@@ -774,7 +798,8 @@ pub(crate) fn multi_port_nr_solve_grouped_into(
         for i in 0..n_nl {
             let mut fi = known_a[i] - v_guess[i] - port_resistances[i] * ws.cached_currents[i];
             for j in 0..n_nl {
-                fi += s_nl[i * n_nl + j] * (v_guess[j] - port_resistances[j] * ws.cached_currents[j]);
+                fi +=
+                    s_nl[i * n_nl + j] * (v_guess[j] - port_resistances[j] * ws.cached_currents[j]);
             }
             ws.f_vec[i] = fi;
             max_f = max_f.max(fi.abs());
@@ -809,169 +834,174 @@ pub(crate) fn multi_port_nr_solve_grouped_into(
     if converged_on_residual {
         // Skip NR loop entirely — frozen step was sufficient
     } else {
+        // Frozen Newton failed — signal changed enough to need full NR
+        ws.frozen_failures = ws.frozen_failures.saturating_add(1);
 
-    // Frozen Newton failed — signal changed enough to need full NR
-    ws.frozen_failures = ws.frozen_failures.saturating_add(1);
-
-    for iter in 0..max_iter {
-        ws.iters_used = iter + 1;
-        if let Some(entry) = stats_entry.as_mut() {
-            entry.iterations = iter as u32 + 1;
-        }
-        // Clamp voltages
-        for i in 0..n_nl {
-            let (g, lp) = ws.port_group[i];
-            let (lo, hi) = device_groups[g].v_clamp_port(lp);
-            let clamped = v_guess[i].clamp(lo, hi);
-            if clamped != v_guess[i] {
-                clamp_hit = true;
+        for iter in 0..max_iter {
+            ws.iters_used = iter + 1;
+            if let Some(entry) = stats_entry.as_mut() {
+                entry.iterations = iter as u32 + 1;
             }
-            v_guess[i] = clamped;
-        }
-
-        // Evaluate all device groups
-        ws.full_dev_jac[..n_nl * n_nl].fill(0.0);
-        for g in 0..n_groups {
-            let np = device_groups[g].n_ports();
-            let offset = group_port_offsets[g];
-
-            // Extract voltages for this group
-            let v_group = &v_guess[offset..offset + np];
-            device_groups[g].eval(
-                v_group,
-                &mut ws.dev_currents[..np],
-                &mut ws.dev_jacobian[..np * np],
-            );
-
-            // Copy to global arrays
-            for lp in 0..np {
-                ws.currents[offset + lp] = ws.dev_currents[lp];
-                for lq in 0..np {
-                    ws.full_dev_jac[(offset + lp) * n_nl + (offset + lq)] = ws.dev_jacobian[lp * np + lq];
+            // Clamp voltages
+            for i in 0..n_nl {
+                let (g, lp) = ws.port_group[i];
+                let (lo, hi) = device_groups[g].v_clamp_port(lp);
+                let clamped = v_guess[i].clamp(lo, hi);
+                if clamped != v_guess[i] {
+                    clamp_hit = true;
                 }
+                v_guess[i] = clamped;
             }
-        }
 
-        // Compute residual F_i
-        let mut max_f = 0.0_f64;
-        for i in 0..n_nl {
-            let mut fi = known_a[i] - v_guess[i] - port_resistances[i] * ws.currents[i];
-            for j in 0..n_nl {
-                fi += s_nl[i * n_nl + j] * (v_guess[j] - port_resistances[j] * ws.currents[j]);
-            }
-            ws.f_vec[i] = fi;
-            max_f = max_f.max(fi.abs());
-        }
-        last_residual = max_f;
+            // Evaluate all device groups
+            ws.full_dev_jac[..n_nl * n_nl].fill(0.0);
+            for g in 0..n_groups {
+                let np = device_groups[g].n_ports();
+                let offset = group_port_offsets[g];
 
-        // Debug: print diagnostics for diverging solves (debug-trace feature only)
-        #[cfg(feature = "debug-trace")]
-        {
-            use std::sync::atomic::{AtomicU32, Ordering as AO};
-            static DBG_CTR: AtomicU32 = AtomicU32::new(0);
-            if iter == 0 && max_f > 100.0 && n_nl >= 4 && DBG_CTR.load(AO::Relaxed) < 5 {
-                DBG_CTR.fetch_add(1, AO::Relaxed);
-                eprintln!("[NR-diag] n_nl={} iter0_residual={:.4e} known_a={:?} port_R={:?} v={:?}",
-                    n_nl, max_f, known_a, port_resistances, &v_guess[..n_nl]);
-            }
-        }
+                // Extract voltages for this group
+                let v_group = &v_guess[offset..offset + np];
+                device_groups[g].eval(
+                    v_group,
+                    &mut ws.dev_currents[..np],
+                    &mut ws.dev_jacobian[..np * np],
+                );
 
-        if max_f < tolerance {
-            converged_on_residual = true;
-            break;
-        }
-
-        // Build system Jacobian
-        for i in 0..n_nl {
-            for k in 0..n_nl {
-                let mut val = s_nl[i * n_nl + k];
-                if i == k {
-                    val -= 1.0;
-                }
-
-                let dii_dvk = ws.full_dev_jac[i * n_nl + k];
-                val -= port_resistances[i] * dii_dvk;
-
-                let (gk, _) = ws.port_group[k];
-                let gk_offset = group_port_offsets[gk];
-                let gk_np = device_groups[gk].n_ports();
-                for lj in 0..gk_np {
-                    let j = gk_offset + lj;
-                    let dij_dvk = ws.full_dev_jac[j * n_nl + k];
-                    if dij_dvk != 0.0 {
-                        val -= s_nl[i * n_nl + j] * port_resistances[j] * dij_dvk;
+                // Copy to global arrays
+                for lp in 0..np {
+                    ws.currents[offset + lp] = ws.dev_currents[lp];
+                    for lq in 0..np {
+                        ws.full_dev_jac[(offset + lp) * n_nl + (offset + lq)] =
+                            ws.dev_jacobian[lp * np + lq];
                     }
                 }
+            }
 
-                ws.jacobian[i * n_nl + k] = val;
+            // Compute residual F_i
+            let mut max_f = 0.0_f64;
+            for i in 0..n_nl {
+                let mut fi = known_a[i] - v_guess[i] - port_resistances[i] * ws.currents[i];
+                for j in 0..n_nl {
+                    fi += s_nl[i * n_nl + j] * (v_guess[j] - port_resistances[j] * ws.currents[j]);
+                }
+                ws.f_vec[i] = fi;
+                max_f = max_f.max(fi.abs());
+            }
+            last_residual = max_f;
+
+            // Debug: print diagnostics for diverging solves (debug-trace feature only)
+            #[cfg(feature = "debug-trace")]
+            {
+                use std::sync::atomic::{AtomicU32, Ordering as AO};
+                static DBG_CTR: AtomicU32 = AtomicU32::new(0);
+                if iter == 0 && max_f > 100.0 && n_nl >= 4 && DBG_CTR.load(AO::Relaxed) < 5 {
+                    DBG_CTR.fetch_add(1, AO::Relaxed);
+                    eprintln!(
+                        "[NR-diag] n_nl={} iter0_residual={:.4e} known_a={:?} port_R={:?} v={:?}",
+                        n_nl,
+                        max_f,
+                        known_a,
+                        port_resistances,
+                        &v_guess[..n_nl]
+                    );
+                }
+            }
+
+            if max_f < tolerance {
+                converged_on_residual = true;
+                break;
+            }
+
+            // Build system Jacobian
+            for i in 0..n_nl {
+                for k in 0..n_nl {
+                    let mut val = s_nl[i * n_nl + k];
+                    if i == k {
+                        val -= 1.0;
+                    }
+
+                    let dii_dvk = ws.full_dev_jac[i * n_nl + k];
+                    val -= port_resistances[i] * dii_dvk;
+
+                    let (gk, _) = ws.port_group[k];
+                    let gk_offset = group_port_offsets[gk];
+                    let gk_np = device_groups[gk].n_ports();
+                    for lj in 0..gk_np {
+                        let j = gk_offset + lj;
+                        let dij_dvk = ws.full_dev_jac[j * n_nl + k];
+                        if dij_dvk != 0.0 {
+                            val -= s_nl[i * n_nl + j] * port_resistances[j] * dij_dvk;
+                        }
+                    }
+
+                    ws.jacobian[i * n_nl + k] = val;
+                }
+            }
+
+            // Solve J·delta = F, then v -= delta
+            ws.rhs[..n_nl].copy_from_slice(&ws.f_vec[..n_nl]);
+            ws.jac_copy[..n_nl * n_nl].copy_from_slice(&ws.jacobian[..n_nl * n_nl]);
+
+            if !solve_small_linear(n_nl, &mut ws.jac_copy[..n_nl * n_nl], &mut ws.rhs[..n_nl]) {
+                break; // Singular
+            }
+
+            // Bail out if the linear solve produced NaN (near-singular Jacobian)
+            if ws.rhs[..n_nl].iter().any(|v| !v.is_finite()) {
+                break;
+            }
+
+            // Apply damped Newton step
+            let mut max_dv = 0.0_f64;
+            for i in 0..n_nl {
+                let mut dv = ws.rhs[i];
+                if dv.abs() > 5.0 {
+                    dv *= 0.5;
+                    step_limited = true;
+                }
+                v_guess[i] -= dv;
+                let (g, lp) = ws.port_group[i];
+                let (lo, hi) = device_groups[g].v_clamp_port(lp);
+                let clamped = v_guess[i].clamp(lo, hi);
+                if clamped != v_guess[i] {
+                    clamp_hit = true;
+                }
+                v_guess[i] = clamped;
+                max_dv = max_dv.max(dv.abs());
+            }
+
+            if max_dv < tolerance {
+                break;
             }
         }
 
-        // Solve J·delta = F, then v -= delta
-        ws.rhs[..n_nl].copy_from_slice(&ws.f_vec[..n_nl]);
-        ws.jac_copy[..n_nl * n_nl].copy_from_slice(&ws.jacobian[..n_nl * n_nl]);
-
-        if !solve_small_linear(n_nl, &mut ws.jac_copy[..n_nl * n_nl], &mut ws.rhs[..n_nl]) {
-            break; // Singular
-        }
-
-        // Bail out if the linear solve produced NaN (near-singular Jacobian)
-        if ws.rhs[..n_nl].iter().any(|v| !v.is_finite()) {
-            break;
-        }
-
-        // Apply damped Newton step
-        let mut max_dv = 0.0_f64;
+        // Ensure v_guess is clean: if NaN leaked through, reset to midpoint of clamp range
         for i in 0..n_nl {
-            let mut dv = ws.rhs[i];
-            if dv.abs() > 5.0 {
-                dv *= 0.5;
-                step_limited = true;
-            }
-            v_guess[i] -= dv;
-            let (g, lp) = ws.port_group[i];
-            let (lo, hi) = device_groups[g].v_clamp_port(lp);
-            let clamped = v_guess[i].clamp(lo, hi);
-            if clamped != v_guess[i] {
-                clamp_hit = true;
-            }
-            v_guess[i] = clamped;
-            max_dv = max_dv.max(dv.abs());
-        }
-
-        if max_dv < tolerance {
-            break;
-        }
-    }
-
-    // Ensure v_guess is clean: if NaN leaked through, reset to midpoint of clamp range
-    for i in 0..n_nl {
-        if !v_guess[i].is_finite() {
-            let (g, lp) = ws.port_group[i];
-            let (lo, hi) = device_groups[g].v_clamp_port(lp);
-            v_guess[i] = (lo + hi) * 0.5;
-        }
-    }
-
-    // Compute final reflected waves: b_i = v_i - R_i·i_i(v_i)
-    // If we converged on residual, ws.currents already matches v_guess — skip re-eval.
-    // Otherwise (step-size exit or max iters), v_guess was updated after last eval.
-    if !converged_on_residual {
-        for g in 0..n_groups {
-            let np = device_groups[g].n_ports();
-            let offset = group_port_offsets[g];
-            let v_group = &v_guess[offset..offset + np];
-            device_groups[g].eval(
-                v_group,
-                &mut ws.dev_currents[..np],
-                &mut ws.dev_jacobian[..np * np],
-            );
-            for lp in 0..np {
-                ws.currents[offset + lp] = ws.dev_currents[lp];
+            if !v_guess[i].is_finite() {
+                let (g, lp) = ws.port_group[i];
+                let (lo, hi) = device_groups[g].v_clamp_port(lp);
+                v_guess[i] = (lo + hi) * 0.5;
             }
         }
-    }
 
+        // Compute final reflected waves: b_i = v_i - R_i·i_i(v_i)
+        // If we converged on residual, ws.currents already matches v_guess — skip re-eval.
+        // Otherwise (step-size exit or max iters), v_guess was updated after last eval.
+        if !converged_on_residual {
+            for g in 0..n_groups {
+                let np = device_groups[g].n_ports();
+                let offset = group_port_offsets[g];
+                let v_group = &v_guess[offset..offset + np];
+                device_groups[g].eval(
+                    v_group,
+                    &mut ws.dev_currents[..np],
+                    &mut ws.dev_jacobian[..np * np],
+                );
+                for lp in 0..np {
+                    ws.currents[offset + lp] = ws.dev_currents[lp];
+                }
+            }
+        }
     } // end else (frozen Newton didn't converge — ran full NR loop)
 
     // Cache system Jacobian + currents for next sample's frozen Newton attempt
@@ -1851,10 +1881,8 @@ mod tests {
         for i in 0..n_nl {
             let (current, _) = devices[i].iv(v[i]);
             let a_device = v[i] + port_resistances[i] * current;
-            let a_scatter: f64 = known_a[i]
-                + (0..n_nl)
-                    .map(|j| s_nl[i * n_nl + j] * b[j])
-                    .sum::<f64>();
+            let a_scatter: f64 =
+                known_a[i] + (0..n_nl).map(|j| s_nl[i * n_nl + j] * b[j]).sum::<f64>();
             let err = (a_device - a_scatter).abs();
             assert!(
                 err < tolerance,
@@ -1920,8 +1948,25 @@ mod tests {
             1e-10,
         );
 
-        verify_embedding_constraint(2, &s_nl, &known_a, &port_resistances, &v_guess, &b, &devices, 1e-8);
-        verify_device_residuals(2, &s_nl, &known_a, &port_resistances, &v_guess, &devices, 1e-8);
+        verify_embedding_constraint(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &v_guess,
+            &b,
+            &devices,
+            1e-8,
+        );
+        verify_device_residuals(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &v_guess,
+            &devices,
+            1e-8,
+        );
     }
 
     #[test]
@@ -1951,8 +1996,25 @@ mod tests {
             1e-10,
         );
 
-        verify_embedding_constraint(2, &s_nl, &known_a, &port_resistances, &v_guess, &b, &devices, 1e-8);
-        verify_device_residuals(2, &s_nl, &known_a, &port_resistances, &v_guess, &devices, 1e-8);
+        verify_embedding_constraint(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &v_guess,
+            &b,
+            &devices,
+            1e-8,
+        );
+        verify_device_residuals(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &v_guess,
+            &devices,
+            1e-8,
+        );
     }
 
     #[test]
@@ -1982,8 +2044,25 @@ mod tests {
             1e-10,
         );
 
-        verify_embedding_constraint(2, &s_nl, &known_a, &port_resistances, &v_guess, &b, &devices, 1e-4);
-        verify_device_residuals(2, &s_nl, &known_a, &port_resistances, &v_guess, &devices, 1e-4);
+        verify_embedding_constraint(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &v_guess,
+            &b,
+            &devices,
+            1e-4,
+        );
+        verify_device_residuals(
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &v_guess,
+            &devices,
+            1e-4,
+        );
     }
 
     #[test]
@@ -2205,9 +2284,8 @@ mod tests {
     #[test]
     fn test_device_iv_derivative_accuracy() {
         use super::super::{
-            DiodeModel, DiodePairRoot, DiodeRoot, PentodeModel,
-            PentodeRoot, TriodeModel, TriodeRoot, TriodeThreePort, VariMuModel, VariMuThreePort,
-            VariMuTriodeRoot,
+            DiodeModel, DiodePairRoot, DiodeRoot, PentodeModel, PentodeRoot, TriodeModel,
+            TriodeRoot, TriodeThreePort, VariMuModel, VariMuThreePort, VariMuTriodeRoot,
         };
 
         struct TestCase {
@@ -2562,10 +2640,8 @@ mod tests {
 
         for i in 0..n_nl {
             let a_device = v[i] + port_resistances[i] * all_currents[i];
-            let a_scatter: f64 = known_a[i]
-                + (0..n_nl)
-                    .map(|j| s_nl[i * n_nl + j] * b[j])
-                    .sum::<f64>();
+            let a_scatter: f64 =
+                known_a[i] + (0..n_nl).map(|j| s_nl[i * n_nl + j] * b[j]).sum::<f64>();
             let err = (a_device - a_scatter).abs();
             assert!(
                 err < tolerance,
@@ -2604,11 +2680,7 @@ mod tests {
         // (finite values, consistent b/v relationship) rather than tight embedding
         for i in 0..2 {
             assert!(b[i].is_finite(), "b[{i}] not finite: {}", b[i]);
-            assert!(
-                v_guess[i].is_finite(),
-                "v[{i}] not finite: {}",
-                v_guess[i]
-            );
+            assert!(v_guess[i].is_finite(), "v[{i}] not finite: {}", v_guess[i]);
         }
 
         // Verify b = v - R*i consistency (this is computed inside the solver)
@@ -2876,8 +2948,10 @@ mod tests {
             let mut vm = v;
             vp[k] += eps;
             vm[k] -= eps;
-            let fp = compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vp);
-            let fm = compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vm);
+            let fp =
+                compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vp);
+            let fm =
+                compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vm);
             for i in 0..n_nl {
                 let fd = (fp[i] - fm[i]) / (2.0 * eps);
                 let analytic = jac[i * n_nl + k];
@@ -2933,10 +3007,22 @@ mod tests {
             vp[k] += eps;
             vm[k] -= eps;
             let fp = compute_residual_grouped(
-                n_nl, &s_nl, &known_a, &port_resistances, &groups, &offsets, &vp,
+                n_nl,
+                &s_nl,
+                &known_a,
+                &port_resistances,
+                &groups,
+                &offsets,
+                &vp,
             );
             let fm = compute_residual_grouped(
-                n_nl, &s_nl, &known_a, &port_resistances, &groups, &offsets, &vm,
+                n_nl,
+                &s_nl,
+                &known_a,
+                &port_resistances,
+                &groups,
+                &offsets,
+                &vm,
             );
             for i in 0..n_nl {
                 let fd = (fp[i] - fm[i]) / (2.0 * eps);
@@ -2990,10 +3076,22 @@ mod tests {
             vp[k] += eps;
             vm[k] -= eps;
             let fp = compute_residual_grouped(
-                n_nl, &s_nl, &known_a, &port_resistances, &groups, &offsets, &vp,
+                n_nl,
+                &s_nl,
+                &known_a,
+                &port_resistances,
+                &groups,
+                &offsets,
+                &vp,
             );
             let fm = compute_residual_grouped(
-                n_nl, &s_nl, &known_a, &port_resistances, &groups, &offsets, &vm,
+                n_nl,
+                &s_nl,
+                &known_a,
+                &port_resistances,
+                &groups,
+                &offsets,
+                &vm,
             );
             for i in 0..n_nl {
                 let fd = (fp[i] - fm[i]) / (2.0 * eps);
@@ -3049,8 +3147,10 @@ mod tests {
             let mut vm = v;
             vp[k] += eps;
             vm[k] -= eps;
-            let fp = compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vp);
-            let fm = compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vm);
+            let fp =
+                compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vp);
+            let fm =
+                compute_residual_ungrouped(n_nl, &s_nl, &known_a, &port_resistances, &devices, &vm);
             for i in 0..n_nl {
                 let fd = (fp[i] - fm[i]) / (2.0 * eps);
                 let analytic = jac[i * n_nl + k];

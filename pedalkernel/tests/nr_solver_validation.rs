@@ -12,16 +12,13 @@
 
 mod audio_analysis;
 
-use pedalkernel::elements::{
-    reset_solver_stats, solver_stats_snapshot,
-    DiodeModel, DiodePairRoot, DiodeRoot, JfetModel, JfetRoot, SolverStatsSnapshot,
-    TriodeModel, TriodeRoot, WdfRoot, ZenerModel, ZenerRoot,
-};
 use pedalkernel::elements::GummelPoonModel;
-
-use audio_analysis::{
-    compile_and_process, dc_offset, peak, rms, sine_at, SAMPLE_RATE,
+use pedalkernel::elements::{
+    reset_solver_stats, solver_stats_snapshot, DiodeModel, DiodePairRoot, DiodeRoot, JfetModel,
+    JfetRoot, SolverStatsSnapshot, TriodeModel, TriodeRoot, WdfRoot, ZenerModel, ZenerRoot,
 };
+
+use audio_analysis::{compile_and_process, dc_offset, peak, rms, sine_at, SAMPLE_RATE};
 
 // ============================================================================
 // Diagnostic helper
@@ -382,9 +379,21 @@ fn nr_l0j_solver_convergence_stats() {
         max_max_iter: u32,
     }
     let tests = [
-        DeviceTest { name: "DiodePairRoot", max_avg_iter: 5.0, max_max_iter: 16 },
-        DeviceTest { name: "DiodeRoot", max_avg_iter: 5.0, max_max_iter: 16 },
-        DeviceTest { name: "ZenerRoot", max_avg_iter: 6.0, max_max_iter: 16 },
+        DeviceTest {
+            name: "DiodePairRoot",
+            max_avg_iter: 5.0,
+            max_max_iter: 16,
+        },
+        DeviceTest {
+            name: "DiodeRoot",
+            max_avg_iter: 5.0,
+            max_max_iter: 16,
+        },
+        DeviceTest {
+            name: "ZenerRoot",
+            max_avg_iter: 6.0,
+            max_max_iter: 16,
+        },
     ];
 
     for test in &tests {
@@ -429,19 +438,23 @@ fn nr_l0j_solver_convergence_stats() {
         assert!(
             avg_iter < test.max_avg_iter,
             "{}: avg iterations {avg_iter:.1} exceeds limit {}",
-            test.name, test.max_avg_iter
+            test.name,
+            test.max_avg_iter
         );
 
         assert!(
             stats.max_iterations <= test.max_max_iter,
             "{}: max iterations {} exceeds limit {}",
-            test.name, stats.max_iterations, test.max_max_iter
+            test.name,
+            stats.max_iterations,
+            test.max_max_iter
         );
 
         assert!(
             stats.max_residual < 1e-4,
             "{}: max residual {:.2e} exceeds 1e-4",
-            test.name, stats.max_residual
+            test.name,
+            stats.max_residual
         );
 
         eprintln!(
@@ -584,10 +597,7 @@ fn nr_l1b_diode_clipper_threshold() {
     // LED: clips higher — output peak should be larger than silicon
     let out_led = compile_and_process(HARD_CLIPPER_LED, &input, SAMPLE_RATE, &[]);
     let p_led = peak(&out_led);
-    assert!(
-        p_led < 2.5,
-        "LED clipper: peak {p_led:.4} should be < 2.5V"
-    );
+    assert!(p_led < 2.5, "LED clipper: peak {p_led:.4} should be < 2.5V");
     assert!(
         p_led > p_si,
         "LED ({p_led:.4}) should clip higher than Si ({p_si:.4})"
@@ -920,13 +930,8 @@ fn nr_l4b_triode_gain_reasonable() {
         // 12AX7 with 100k plate load, 1.5k cathode (bypassed): gain ≈ mu * Rp/(Rp+rp)
         // mu=100, rp=62.5k → gain ≈ 100 * 100k/(100k+62.5k) ≈ 62
         // Allow wide range since WDF modeling introduces some deviation
-        eprintln!(
-            "[L4 12AX7] gain={gain:.1}x (in={p_in:.6}, out={p_out:.6})"
-        );
-        assert!(
-            gain > 5.0,
-            "12AX7 gain should be > 5x, got {gain:.1}x"
-        );
+        eprintln!("[L4 12AX7] gain={gain:.1}x (in={p_in:.6}, out={p_out:.6})");
+        assert!(gain > 5.0, "12AX7 gain should be > 5x, got {gain:.1}x");
     }
 }
 
@@ -1176,9 +1181,7 @@ fn nr_l4g_partial_bypass_frequency_dependent_gain() {
     let gain_lo = peak(&out_lo[skip..]) / peak(&input_lo[skip..]);
     let gain_hi = peak(&out_hi[skip..]) / peak(&input_hi[skip..]);
 
-    eprintln!(
-        "[L4g partial bypass] gain@100Hz={gain_lo:.1}x, gain@5kHz={gain_hi:.1}x"
-    );
+    eprintln!("[L4g partial bypass] gain@100Hz={gain_lo:.1}x, gain@5kHz={gain_hi:.1}x");
 
     // With 680pF bypass, high frequency should have more gain than low
     // (bypass cap shorts out cathode R at high freq → less degeneration)
@@ -1217,10 +1220,14 @@ fn nr_l4h_cathode_bypass_warm_start_efficiency() {
 
     let avg_bp = if stats_bp.solves > 0 {
         stats_bp.total_iterations as f64 / stats_bp.solves as f64
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     let avg_ub = if stats_ub.solves > 0 {
         stats_ub.total_iterations as f64 / stats_ub.solves as f64
-    } else { 0.0 };
+    } else {
+        0.0
+    };
 
     eprintln!(
         "[L4h warm-start] bypassed: avg={avg_bp:.2}, max={}, cap_hits={} | unbypassed: avg={avg_ub:.2}, max={}, cap_hits={}",
@@ -1280,7 +1287,10 @@ fn nr_l4i_cathode_bypass_no_gain_compression_artifact() {
         let output = compile_and_process(TRIODE_PREAMP, &input, SAMPLE_RATE, &[]);
         let trimmed = &output[skip..];
         let dc = dc_offset(trimmed);
-        let ac_peak = trimmed.iter().map(|&s| (s - dc).abs()).fold(0.0f64, f64::max);
+        let ac_peak = trimmed
+            .iter()
+            .map(|&s| (s - dc).abs())
+            .fold(0.0f64, f64::max);
         ac_peak / amp
     };
 

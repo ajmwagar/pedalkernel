@@ -22,8 +22,6 @@ pub mod dsl;
 pub mod elements;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
-#[cfg(feature = "runtime-warnings")]
-pub mod runtime_warnings;
 #[cfg(feature = "hardware")]
 pub mod hw;
 pub mod kicad;
@@ -33,6 +31,8 @@ pub mod models;
 pub mod oversampling;
 pub mod pedalboard;
 pub mod pedals;
+#[cfg(feature = "runtime-warnings")]
+pub mod runtime_warnings;
 pub mod thermal;
 pub mod tolerance;
 pub mod tree;
@@ -65,18 +65,26 @@ pub trait PedalProcessor {
 
     /// List all editable passive components (R, C, L with comp_ids).
     /// Returns (comp_id, kind_str, current_value) for each editable leaf.
-    fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> { Vec::new() }
+    fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> {
+        Vec::new()
+    }
 
     /// Set a passive component's value by comp_id. Returns true if found.
     /// For resistors: value is in ohms. For capacitors: farads. For inductors: henries.
-    fn set_passive(&mut self, _comp_id: &str, _value: f64) -> bool { false }
+    fn set_passive(&mut self, _comp_id: &str, _value: f64) -> bool {
+        false
+    }
 
     /// Reset a passive component to its original value. Returns true if found.
-    fn reset_passive(&mut self, _comp_id: &str) -> bool { false }
+    fn reset_passive(&mut self, _comp_id: &str) -> bool {
+        false
+    }
 
     /// Debug: return current control state as (label, target_value, smoothed_value).
     /// target_value is what the UI set; smoothed_value is what the engine is using.
-    fn control_debug_info(&self) -> Vec<(String, f64, f64)> { Vec::new() }
+    fn control_debug_info(&self) -> Vec<(String, f64, f64)> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -618,12 +626,12 @@ pedal "Test Pedal" {
     #[test]
     fn compiled_pedal_pipeline() {
         // Compile a .pedal file and verify it produces output
-        let pedal = dsl::parse_pedal_file(
-            include_str!("../examples/pedals/distortion/proco_rat.pedal"),
-        )
+        let pedal = dsl::parse_pedal_file(include_str!(
+            "../examples/pedals/distortion/proco_rat.pedal"
+        ))
         .expect("should parse RAT pedal");
-        let mut compiled = compiler::compile_pedal(&pedal, 48000.0)
-            .expect("should compile RAT pedal");
+        let mut compiled =
+            compiler::compile_pedal(&pedal, 48000.0).expect("should compile RAT pedal");
 
         let input = wav::sine_wave(440.0, 0.1, 48000);
         let output: Vec<f64> = input.iter().map(|&s| compiled.process(s)).collect();
@@ -680,10 +688,8 @@ pedal "Test Pedal" {
             .filter(|c| c.kind.op_amp_type() == Some(dsl::OpAmpType::Jrc4558))
             .count();
         assert_eq!(opamp_count, 2, "TS808 uses dual JRC4558D");
-        assert!(p
-            .components
-            .iter()
-            .any(|c| c.kind.type_tag() == "diode" && c.kind.diode_type() == Some(dsl::DiodeType::Silicon)));
+        assert!(p.components.iter().any(|c| c.kind.type_tag() == "diode"
+            && c.kind.diode_type() == Some(dsl::DiodeType::Silicon)));
     }
 
     #[test]
@@ -734,10 +740,7 @@ pedal "Test Pedal" {
         assert!(labels.contains(&"Sensitivity"));
         assert!(labels.contains(&"Output"));
         // Verify opamp is present (OTA topology)
-        assert!(p
-            .components
-            .iter()
-            .any(|c| c.kind.op_amp_type().is_some()));
+        assert!(p.components.iter().any(|c| c.kind.op_amp_type().is_some()));
     }
 
     #[test]
@@ -759,7 +762,9 @@ pedal "Test Pedal" {
         let diode_count = p
             .components
             .iter()
-            .filter(|c| c.kind.type_tag() == "diode" && c.kind.diode_type() == Some(dsl::DiodeType::Silicon))
+            .filter(|c| {
+                c.kind.type_tag() == "diode" && c.kind.diode_type() == Some(dsl::DiodeType::Silicon)
+            })
             .count();
         assert_eq!(diode_count, 2, "RAT uses 2 silicon clipping diodes");
     }
@@ -789,7 +794,9 @@ pedal "Test Pedal" {
         let diode_count = p
             .components
             .iter()
-            .filter(|c| c.kind.type_tag() == "diode" && c.kind.diode_type() == Some(dsl::DiodeType::Silicon))
+            .filter(|c| {
+                c.kind.type_tag() == "diode" && c.kind.diode_type() == Some(dsl::DiodeType::Silicon)
+            })
             .count();
         assert_eq!(
             diode_count, 3,
@@ -821,7 +828,10 @@ pedal "Test Pedal" {
         let ge_diode_count = p
             .components
             .iter()
-            .filter(|c| c.kind.type_tag() == "diode" && c.kind.diode_type() == Some(dsl::DiodeType::Germanium))
+            .filter(|c| {
+                c.kind.type_tag() == "diode"
+                    && c.kind.diode_type() == Some(dsl::DiodeType::Germanium)
+            })
             .count();
         assert_eq!(
             ge_diode_count, 2,
@@ -859,11 +869,11 @@ pedal "Test Pedal" {
         assert!(labels.contains(&"Rate"));
         assert!(labels.contains(&"Depth"));
         // Verify BBD delay line component
-        assert!(p
-            .components
-            .iter()
-            .any(|c| c.kind.as_any().downcast_ref::<crate::compiler::components::Bbd>()
-                .map_or(false, |b| b.bbd_type == dsl::BbdType::Mn3207)));
+        assert!(p.components.iter().any(|c| c
+            .kind
+            .as_any()
+            .downcast_ref::<crate::compiler::components::Bbd>()
+            .map_or(false, |b| b.bbd_type == dsl::BbdType::Mn3207)));
         // Verify LFO for chorus modulation
         assert!(p
             .components
@@ -934,14 +944,8 @@ pedal "Test Pedal" {
             "TS808: 3 pots (Drive, Tone, Level)"
         );
         // Verify NO MOSFETs, NO transistors, NO JFETs — pure op-amp circuit
-        assert_eq!(
-            count_kind(&p, |k| k.is_bjt()),
-            0
-        );
-        assert_eq!(
-            count_kind(&p, |k| k.is_jfet()),
-            0
-        );
+        assert_eq!(count_kind(&p, |k| k.is_bjt()), 0);
+        assert_eq!(count_kind(&p, |k| k.is_jfet()), 0);
         assert_eq!(
             count_kind(&p, |k| k.is_mosfet() && k.type_tag() == "N-channel MOSFET"),
             0
@@ -964,12 +968,10 @@ pedal "Test Pedal" {
             "Fuzz Face: 2 pots (Fuzz, Volume)"
         );
         // No op-amps or diodes in a Fuzz Face
+        assert_eq!(count_kind(&p, |k| k.op_amp_type().is_some()), 0);
         assert_eq!(
-            count_kind(&p, |k| k.op_amp_type().is_some()),
-            0
-        );
-        assert_eq!(
-            count_kind(&p, |k| k.type_tag() == "diode" || k.type_tag() == "diode pair"),
+            count_kind(&p, |k| k.type_tag() == "diode"
+                || k.type_tag() == "diode pair"),
             0
         );
     }
@@ -994,10 +996,7 @@ pedal "Test Pedal" {
             "Big Muff: 3 pots (Sustain, Tone, Volume)"
         );
         // No op-amps in a Big Muff — all discrete
-        assert_eq!(
-            count_kind(&p, |k| k.op_amp_type().is_some()),
-            0
-        );
+        assert_eq!(count_kind(&p, |k| k.op_amp_type().is_some()), 0);
     }
 
     /// ProCo RAT: LM308 op-amp (unique slow slew rate), 2 silicon diodes
@@ -1066,10 +1065,7 @@ pedal "Test Pedal" {
             "Klon: 3 pots (Gain, Treble, Output)"
         );
         // No transistors — pure op-amp design
-        assert_eq!(
-            count_kind(&p, |k| k.is_bjt()),
-            0
-        );
+        assert_eq!(count_kind(&p, |k| k.is_bjt()), 0);
     }
 
     /// OCD: 2 NMOS MOSFETs (2N7000) + 1 TL072 op-amp — NO silicon diodes.
@@ -1115,7 +1111,9 @@ pedal "Test Pedal" {
     fn schematic_ce2_component_types() {
         let p = parse_example("boss_ce2.pedal");
         assert_eq!(
-            count_kind(&p, |k| k.as_any().downcast_ref::<crate::compiler::components::Bbd>()
+            count_kind(&p, |k| k
+                .as_any()
+                .downcast_ref::<crate::compiler::components::Bbd>()
                 .map_or(false, |b| b.bbd_type == dsl::BbdType::Mn3207)),
             1,
             "CE-2: 1x MN3207 BBD (1024 stages for chorus delay)"

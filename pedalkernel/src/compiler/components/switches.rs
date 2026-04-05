@@ -1,6 +1,8 @@
 //! Switch component structs: Switch, RotarySwitch, TriggerInputComp.
 
-use crate::compiler::component::{Component, ControlParam, ControlParamKind, GraphRole, PinConfig, StampResult};
+use crate::compiler::component::{
+    Component, ControlParam, ControlParamKind, GraphRole, PinConfig, StampResult,
+};
 use crate::compiler::validate::Severity;
 use crate::tree::MnaSystem;
 
@@ -18,11 +20,17 @@ pub struct Switch {
 impl Component for Switch {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "switch" }
+    fn type_tag(&self) -> &'static str {
+        "switch"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_control_only(&self) -> bool { true }
+    fn is_control_only(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -63,7 +71,9 @@ impl Component for Switch {
     fn controls(&self) -> Vec<ControlParam> {
         vec![ControlParam {
             name: "position",
-            kind: ControlParamKind::SwitchPosition { num_positions: self.positions },
+            kind: ControlParamKind::SwitchPosition {
+                num_positions: self.positions,
+            },
         }]
     }
 
@@ -75,8 +85,12 @@ impl Component for Switch {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "switch" }
-    fn layout_class(&self) -> &'static str { "switch" }
+    fn symbol_name(&self) -> &'static str {
+        "switch"
+    }
+    fn layout_class(&self) -> &'static str {
+        "switch"
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -91,11 +105,17 @@ pub struct RotarySwitch {
 impl Component for RotarySwitch {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "rotary switch" }
+    fn type_tag(&self) -> &'static str {
+        "rotary switch"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_control_only(&self) -> bool { true }
+    fn is_control_only(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -122,7 +142,9 @@ impl Component for RotarySwitch {
     fn controls(&self) -> Vec<ControlParam> {
         vec![ControlParam {
             name: "position",
-            kind: ControlParamKind::SwitchPosition { num_positions: self.linked_ids.len() },
+            kind: ControlParamKind::SwitchPosition {
+                num_positions: self.linked_ids.len(),
+            },
         }]
     }
 
@@ -136,8 +158,12 @@ impl Component for RotarySwitch {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "switch" }
-    fn layout_class(&self) -> &'static str { "rotary_switch" }
+    fn symbol_name(&self) -> &'static str {
+        "switch"
+    }
+    fn layout_class(&self) -> &'static str {
+        "rotary_switch"
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -150,11 +176,17 @@ pub struct TriggerInputComp;
 impl Component for TriggerInputComp {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "trigger_input" }
+    fn type_tag(&self) -> &'static str {
+        "trigger_input"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_control_only(&self) -> bool { true }
+    fn is_control_only(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -179,15 +211,24 @@ impl Component for TriggerInputComp {
     }
 
     fn controls(&self) -> Vec<ControlParam> {
-        vec![ControlParam { name: "trigger", kind: ControlParamKind::Trigger }]
+        vec![ControlParam {
+            name: "trigger",
+            kind: ControlParamKind::Trigger,
+        }]
     }
 
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         ("Connector:TestPoint", "TP")
     }
 
-    fn symbol_name(&self) -> &'static str { "switch" }
-    fn layout_class(&self) -> &'static str { "trigger_input" }
+    fn symbol_name(&self) -> &'static str {
+        "switch"
+    }
+    fn layout_class(&self) -> &'static str {
+        "trigger_input"
+    }
 
-    fn is_trigger(&self) -> bool { true }
+    fn is_trigger(&self) -> bool {
+        true
+    }
 }

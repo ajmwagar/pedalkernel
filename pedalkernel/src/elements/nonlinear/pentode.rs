@@ -438,8 +438,7 @@ impl PentodeThreePort {
             exp_e1 / (1.0 + exp_e1)
         };
 
-        let dip_dvg1k = (m.ex * base.powf(m.ex - 1.0) * sigmoid_e1 / m.kg1)
-            * plate_factor.max(0.0);
+        let dip_dvg1k = (m.ex * base.powf(m.ex - 1.0) * sigmoid_e1 / m.kg1) * plate_factor.max(0.0);
 
         (ip, dip_dvpk, dip_dvg1k)
     }
@@ -462,13 +461,13 @@ impl NlDeviceGroupIv for PentodeThreePort {
         let (ig, dig_dvg1k) = self.grid_iv(vg1k);
         currents[0] = ig;
         jacobian[0] = dig_dvg1k; // ∂ig/∂vg1k
-        jacobian[1] = 0.0;       // ∂ig/∂vpk (grid current independent of plate voltage)
+        jacobian[1] = 0.0; // ∂ig/∂vpk (grid current independent of plate voltage)
 
         // Plate current (Koren pentode model with cross-coupling)
         let (ip, dip_dvpk, dip_dvg1k) = self.plate_iv(vg1k, vpk);
         currents[1] = ip;
         jacobian[2] = dip_dvg1k; // ∂ip/∂vg1k (transconductance — cross-coupling)
-        jacobian[3] = dip_dvpk;  // ∂ip/∂vpk
+        jacobian[3] = dip_dvpk; // ∂ip/∂vpk
     }
 
     fn v_clamp_port(&self, port: usize) -> (f64, f64) {
@@ -480,7 +479,7 @@ impl NlDeviceGroupIv for PentodeThreePort {
             // tube latches in cutoff. At deep cutoff (Vgk << 0), Ig=Ip=0, so
             // the wide range is safe (no overflow in the current model).
             0 => (-500.0, 10.0),
-            _ => (-self.v_max, 10.0),   // Plate: WDF range [-V_supply, ~0] (maps to actual [0, V_supply])
+            _ => (-self.v_max, 10.0), // Plate: WDF range [-V_supply, ~0] (maps to actual [0, V_supply])
         }
     }
 }

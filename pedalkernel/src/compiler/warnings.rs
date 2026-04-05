@@ -122,7 +122,9 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                         message: format!(
                             "Electrolytic cap {} ({:.0}uF) may exceed voltage rating at {:.0}V \
                              — common ratings are 10V, 16V, 25V",
-                            comp.id, farads * 1e6, voltage
+                            comp.id,
+                            farads * 1e6,
+                            voltage
                         ),
                     });
                 } else if voltage > 12.0 {
@@ -181,17 +183,16 @@ pub fn check_voltage_compatibility(pedal: &PedalDef, voltage: f64) -> Vec<Voltag
                     ),
                 });
             }
-        } else if tag == "analog switch"
-            && voltage > 20.0 {
-                warnings.push(VoltageWarning {
-                    component_id: comp.id.clone(),
-                    severity: WarningSeverity::Danger,
-                    message: format!(
-                        "Analog switch {} exceeds max supply at {:.0}V — CD4066/DG411 rated 20V max",
-                        comp.id, voltage
-                    ),
-                });
-            }
+        } else if tag == "analog switch" && voltage > 20.0 {
+            warnings.push(VoltageWarning {
+                component_id: comp.id.clone(),
+                severity: WarningSeverity::Danger,
+                message: format!(
+                    "Analog switch {} exceeds max supply at {:.0}V — CD4066/DG411 rated 20V max",
+                    comp.id, voltage
+                ),
+            });
+        }
         // Resistors, inductors, Si/LED diodes, pots, VCA, comparator, matched
         // transistors, tempco: no voltage concerns within the 5-24V range
         // (or handled by supply_max spec if provided).

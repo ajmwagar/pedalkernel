@@ -279,7 +279,8 @@ fn default_compile_has_less_aliasing_than_x1() {
     );
 
     // Default compile (should now be X2)
-    let out_default = compile_test_pedal_and_process("clip_silicon.pedal", &input, sample_rate, &[]);
+    let out_default =
+        compile_test_pedal_and_process("clip_silicon.pedal", &input, sample_rate, &[]);
 
     let alias_x1 = alias_energy_summary(&out_x1, sample_rate, 5000.0, 50.0);
     let alias_default = alias_energy_summary(&out_default, sample_rate, 5000.0, 50.0);
@@ -315,8 +316,7 @@ fn solver_warm_start_low_iteration_count() {
     let input = sine_at(440.0, 0.5, 0.2, sample_rate);
 
     reset_solver_stats();
-    let output =
-        compile_test_pedal_and_process("clip_silicon.pedal", &input, sample_rate, &[]);
+    let output = compile_test_pedal_and_process("clip_silicon.pedal", &input, sample_rate, &[]);
     let stats = solver_stats_snapshot();
 
     assert_healthy(&output, "clip warm-start", 50.0);
@@ -434,8 +434,7 @@ fn no_denormals_in_silence_tail_triode() {
     let mut input = guitar_pluck(220.0, 0.2, SAMPLE_RATE);
     input.extend(vec![0.0; (0.5 * SAMPLE_RATE) as usize]);
 
-    let output =
-        compile_test_pedal_and_process("triode_clean.pedal", &input, SAMPLE_RATE, &[]);
+    let output = compile_test_pedal_and_process("triode_clean.pedal", &input, SAMPLE_RATE, &[]);
 
     let tail_start = (0.2 * SAMPLE_RATE) as usize;
     let tail = &output[tail_start..];

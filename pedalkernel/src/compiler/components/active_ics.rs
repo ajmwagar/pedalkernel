@@ -10,8 +10,8 @@ use crate::compiler::component::{
 };
 use crate::compiler::graph::NodeId;
 use crate::dsl::{
-    AnalogSwitchType, ComparatorType, MatchedTransistorType, OpAmpType, VcaType, VcfType,
-    VcoType, VcoWaveformDsl,
+    AnalogSwitchType, ComparatorType, MatchedTransistorType, OpAmpType, VcaType, VcfType, VcoType,
+    VcoWaveformDsl,
 };
 use crate::tree::MnaSystem;
 
@@ -30,10 +30,16 @@ impl Component for OpAmp {
     impl_component_dyn!();
 
     fn type_tag(&self) -> &'static str {
-        if self.op_type.is_ota() { "OTA" } else { "op-amp" }
+        if self.op_type.is_ota() {
+            "OTA"
+        } else {
+            "op-amp"
+        }
     }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
     fn is_nonlinear(&self) -> bool {
         self.op_type.is_ota()
@@ -51,12 +57,19 @@ impl Component for OpAmp {
     }
 
     fn modulation_pins(&self) -> &'static [&'static str] {
-        if self.op_type == OpAmpType::Ca3080 { &["iabc"] } else { &[] }
+        if self.op_type == OpAmpType::Ca3080 {
+            &["iabc"]
+        } else {
+            &[]
+        }
     }
 
     fn graph_role(&self) -> GraphRole {
         if self.op_type.is_ota() {
-            GraphRole::Edge { pin_a: "pos", pin_b: "neg" }
+            GraphRole::Edge {
+                pin_a: "pos",
+                pin_b: "neg",
+            }
         } else {
             GraphRole::ActiveIc
         }
@@ -75,7 +88,12 @@ impl Component for OpAmp {
 
     fn edges(&self) -> Vec<ComponentEdge> {
         if self.op_type.is_ota() {
-            vec![ComponentEdge { pin_a: "pos", pin_b: "neg", kind: EdgeKind::Nonlinear, port_group: None }]
+            vec![ComponentEdge {
+                pin_a: "pos",
+                pin_b: "neg",
+                kind: EdgeKind::Nonlinear,
+                port_group: None,
+            }]
         } else {
             vec![]
         }
@@ -83,7 +101,12 @@ impl Component for OpAmp {
 
     fn resolve_edges(&self, ctx: &ResolveContext) -> Option<Vec<ComponentEdge>> {
         if self.op_type.is_ota() && ctx.control_pin_is_modulated {
-            Some(vec![ComponentEdge { pin_a: "pos", pin_b: "neg", kind: EdgeKind::Vccs, port_group: None }])
+            Some(vec![ComponentEdge {
+                pin_a: "pos",
+                pin_b: "neg",
+                kind: EdgeKind::Vccs,
+                port_group: None,
+            }])
         } else {
             None
         }
@@ -136,8 +159,12 @@ impl Component for OpAmp {
         (lib, "U")
     }
 
-    fn symbol_name(&self) -> &'static str { "opamp" }
-    fn layout_class(&self) -> &'static str { "opamp" }
+    fn symbol_name(&self) -> &'static str {
+        "opamp"
+    }
+    fn layout_class(&self) -> &'static str {
+        "opamp"
+    }
 
     fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
         vec![("pos", "out"), ("neg", "out")]
@@ -151,7 +178,9 @@ impl Component for OpAmp {
         }
     }
 
-    fn op_amp_type(&self) -> Option<OpAmpType> { Some(self.op_type) }
+    fn op_amp_type(&self) -> Option<OpAmpType> {
+        Some(self.op_type)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -170,11 +199,17 @@ pub struct Vco {
 impl Component for Vco {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "VCO" }
+    fn type_tag(&self) -> &'static str {
+        "VCO"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_active_ic(&self) -> bool { false }
+    fn is_active_ic(&self) -> bool {
+        false
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -183,7 +218,9 @@ impl Component for Vco {
         }
     }
 
-    fn graph_role(&self) -> GraphRole { GraphRole::Virtual }
+    fn graph_role(&self) -> GraphRole {
+        GraphRole::Virtual
+    }
 
     fn stamp_mna(
         &self,
@@ -204,8 +241,12 @@ impl Component for Vco {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "ic_chip" }
-    fn layout_class(&self) -> &'static str { "vco" }
+    fn symbol_name(&self) -> &'static str {
+        "ic_chip"
+    }
+    fn layout_class(&self) -> &'static str {
+        "vco"
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -220,11 +261,17 @@ pub struct Vcf {
 impl Component for Vcf {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "VCF" }
+    fn type_tag(&self) -> &'static str {
+        "VCF"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_active_ic(&self) -> bool { true }
+    fn is_active_ic(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -233,7 +280,9 @@ impl Component for Vcf {
         }
     }
 
-    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+    fn graph_role(&self) -> GraphRole {
+        GraphRole::ActiveIc
+    }
 
     fn stamp_mna(
         &self,
@@ -253,8 +302,12 @@ impl Component for Vcf {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "ic_chip" }
-    fn layout_class(&self) -> &'static str { "vcf" }
+    fn symbol_name(&self) -> &'static str {
+        "ic_chip"
+    }
+    fn layout_class(&self) -> &'static str {
+        "vcf"
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -269,24 +322,31 @@ pub struct Vca {
 impl Component for Vca {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "VCA" }
+    fn type_tag(&self) -> &'static str {
+        "VCA"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_active_ic(&self) -> bool { false }
+    fn is_active_ic(&self) -> bool {
+        false
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
             valid_pins: &[
-                "in", "input", "out", "output", "cv",
-                "in1", "out1", "cv1", "in2", "out2", "cv2",
+                "in", "input", "out", "output", "cv", "in1", "out1", "cv1", "in2", "out2", "cv2",
                 "in3", "out3", "cv3", "in4", "out4", "cv4",
             ],
             aliases: &[("in", "input"), ("out", "output")],
         }
     }
 
-    fn graph_role(&self) -> GraphRole { GraphRole::Virtual }
+    fn graph_role(&self) -> GraphRole {
+        GraphRole::Virtual
+    }
 
     fn stamp_mna(
         &self,
@@ -306,8 +366,12 @@ impl Component for Vca {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "ic_chip" }
-    fn layout_class(&self) -> &'static str { "vca" }
+    fn symbol_name(&self) -> &'static str {
+        "ic_chip"
+    }
+    fn layout_class(&self) -> &'static str {
+        "vca"
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -322,11 +386,17 @@ pub struct Comparator {
 impl Component for Comparator {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "comparator" }
+    fn type_tag(&self) -> &'static str {
+        "comparator"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_active_ic(&self) -> bool { true }
+    fn is_active_ic(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -335,7 +405,9 @@ impl Component for Comparator {
         }
     }
 
-    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+    fn graph_role(&self) -> GraphRole {
+        GraphRole::ActiveIc
+    }
 
     fn stamp_mna(
         &self,
@@ -355,8 +427,12 @@ impl Component for Comparator {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "ic_chip" }
-    fn layout_class(&self) -> &'static str { "comparator" }
+    fn symbol_name(&self) -> &'static str {
+        "ic_chip"
+    }
+    fn layout_class(&self) -> &'static str {
+        "comparator"
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -379,23 +455,31 @@ pub struct AnalogSwitch {
 impl Component for AnalogSwitch {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "analog switch" }
+    fn type_tag(&self) -> &'static str {
+        "analog switch"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_active_ic(&self) -> bool { true }
+    fn is_active_ic(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
             valid_pins: &[
-                "in1", "out1", "ctrl1", "in2", "out2", "ctrl2",
-                "in3", "out3", "ctrl3", "in4", "out4", "ctrl4",
+                "in1", "out1", "ctrl1", "in2", "out2", "ctrl2", "in3", "out3", "ctrl3", "in4",
+                "out4", "ctrl4",
             ],
             aliases: &[],
         }
     }
 
-    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+    fn graph_role(&self) -> GraphRole {
+        GraphRole::ActiveIc
+    }
 
     fn stamp_mna(
         &self,
@@ -415,8 +499,12 @@ impl Component for AnalogSwitch {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "ic_chip" }
-    fn layout_class(&self) -> &'static str { "analog_switch" }
+    fn symbol_name(&self) -> &'static str {
+        "ic_chip"
+    }
+    fn layout_class(&self) -> &'static str {
+        "analog_switch"
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -431,24 +519,38 @@ pub struct MatchedNpn {
 impl Component for MatchedNpn {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "matched NPN pair" }
+    fn type_tag(&self) -> &'static str {
+        "matched NPN pair"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_active_ic(&self) -> bool { true }
+    fn is_active_ic(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
             valid_pins: &[
-                "base", "collector", "emitter",
-                "base1", "base2", "collector1", "collector2",
-                "emitter1", "emitter2",
+                "base",
+                "collector",
+                "emitter",
+                "base1",
+                "base2",
+                "collector1",
+                "collector2",
+                "emitter1",
+                "emitter2",
             ],
             aliases: &[],
         }
     }
 
-    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+    fn graph_role(&self) -> GraphRole {
+        GraphRole::ActiveIc
+    }
 
     fn stamp_mna(
         &self,
@@ -470,8 +572,12 @@ impl Component for MatchedNpn {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "npn_bjt" }
-    fn layout_class(&self) -> &'static str { "matched_npn" }
+    fn symbol_name(&self) -> &'static str {
+        "npn_bjt"
+    }
+    fn layout_class(&self) -> &'static str {
+        "matched_npn"
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -486,24 +592,38 @@ pub struct MatchedPnp {
 impl Component for MatchedPnp {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "matched PNP pair" }
+    fn type_tag(&self) -> &'static str {
+        "matched PNP pair"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_active_ic(&self) -> bool { true }
+    fn is_active_ic(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
             valid_pins: &[
-                "base", "collector", "emitter",
-                "base1", "base2", "collector1", "collector2",
-                "emitter1", "emitter2",
+                "base",
+                "collector",
+                "emitter",
+                "base1",
+                "base2",
+                "collector1",
+                "collector2",
+                "emitter1",
+                "emitter2",
             ],
             aliases: &[],
         }
     }
 
-    fn graph_role(&self) -> GraphRole { GraphRole::ActiveIc }
+    fn graph_role(&self) -> GraphRole {
+        GraphRole::ActiveIc
+    }
 
     fn stamp_mna(
         &self,
@@ -525,6 +645,10 @@ impl Component for MatchedPnp {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "pnp_bjt" }
-    fn layout_class(&self) -> &'static str { "matched_pnp" }
+    fn symbol_name(&self) -> &'static str {
+        "pnp_bjt"
+    }
+    fn layout_class(&self) -> &'static str {
+        "matched_pnp"
+    }
 }
