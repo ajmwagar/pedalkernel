@@ -405,21 +405,21 @@ impl ResonatorFeedback {
 /// a₂ = b₂ − 2·R₂·(V+ − b₁) / R₁
 /// V_out = V+ + R₂·(V+ − b₁) / R₁ − b₂
 /// ```
-pub(super) struct OpAmpWdfAdaptor {
+pub(crate) struct OpAmpWdfAdaptor {
     /// Zi subtree (input network for inverting, ground-leg for non-inverting).
-    pub(super) zi: DynNode,
+    pub(crate) zi: DynNode,
     /// Zf subtree (feedback network: caps, pots, resistors between neg and output).
-    pub(super) zf: DynNode,
+    pub(crate) zf: DynNode,
     /// True for inverting topology, false for non-inverting.
-    pub(super) is_inverting: bool,
+    pub(crate) is_inverting: bool,
     /// Op-amp model for GBW rolloff and slew rate limiting.
-    pub(super) opamp: OpAmpRoot,
+    pub(crate) opamp: OpAmpRoot,
     /// GBW rolloff filter state (single-pole LPF on output).
-    pub(super) gbw_state: f64,
+    pub(crate) gbw_state: f64,
     /// Previous output for slew rate limiting.
-    pub(super) prev_out: f64,
+    pub(crate) prev_out: f64,
     /// Feedback pot ID (if any pot in Zf subtree responds to control changes).
-    pub(super) feedback_pot_id: Option<String>,
+    pub(crate) feedback_pot_id: Option<String>,
 }
 
 impl OpAmpWdfAdaptor {
@@ -428,7 +428,7 @@ impl OpAmpWdfAdaptor {
     /// `v_plus`: non-inverting input voltage (bias for inverting, signal for non-inv).
     /// `v_in`: far-end voltage of Zi (signal for inverting, 0 for non-inverting).
     #[inline]
-    pub(super) fn process(&mut self, v_plus: f64, v_in: f64) -> f64 {
+    pub(crate) fn process(&mut self, v_plus: f64, v_in: f64) -> f64 {
         // Up-sweep: get reflected waves from both subtrees
         let b1 = self.zi.reflected();
         let b2 = self.zf.reflected();

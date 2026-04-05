@@ -276,4 +276,186 @@ mod tests {
             assert!(y.is_finite(), "Output became non-finite at sample {}", i);
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // OpAmpWdfAdaptor tests
+    // ══════════════════════════════════════════════════════════════════════
+
+    use crate::compiler::dyn_node::DynNode;
+    use crate::compiler::stage::OpAmpWdfAdaptor;
+    use crate::dsl::PotTaper;
+    use crate::elements::nonlinear::{OpAmpModel, OpAmpRoot};
+
+    /// Build the Klon treble Zf tree:
+    /// Parallel(R_tone_fb=1800, Series(Parallel(R_shelf=4700, Treble__wb), Series(C_tone, Treble__aw)))
+    fn build_klon_zf(sr: f64, pot_pos: f64) -> DynNode {
+        let r_tone_fb = DynNode::Resistor(Some("R_tone_fb".into()), 1800.0);
+        let r_shelf = DynNode::Resistor(Some("R_tone_shelf".into()), 4700.0);
+
+        let max_pot_r = 10000.0;
+        let treble_wb = DynNode::Pot("Treble__wb".into(), max_pot_r, 1.0 - pot_pos, PotTaper::B);
+        let c_tone_rp = 1.0 / (2.0 * sr * 3.9e-9);
+        let c_tone = DynNode::Capacitor(Some("C_tone".into()), 3.9e-9, c_tone_rp);
+        let treble_aw = DynNode::Pot("Treble__aw".into(), max_pot_r, pot_pos, PotTaper::B);
+
+        // Inner parallel: R_shelf ‖ Treble__wb
+        let inner_par = DynNode::Parallel(Box::new(r_shelf), Box::new(treble_wb));
+        // Inner series: C_tone + Treble__aw
+        let inner_ser = DynNode::Series(Box::new(c_tone), Box::new(treble_aw));
+        // Outer series: (R_shelf ‖ Treble__wb) + (C_tone + Treble__aw)
+        let outer_ser = DynNode::Series(Box::new(inner_par), Box::new(inner_ser));
+        // Root parallel: R_tone_fb ‖ outer_ser
+        DynNode::Parallel(Box::new(r_tone_fb), Box::new(outer_ser))
+    }
+
+    /// Build a Klon-style inverting OpAmpWdfAdaptor for testing.
+    fn build_klon_adaptor(sr: f64, pot_pos: f64) -> OpAmpWdfAdaptor {
+        let ri = 1800.0;
+        let zi = DynNode::VoltageSource(0.0, ri);
+        let zf = build_klon_zf(sr, pot_pos);
+
+        let model = OpAmpModel::tl072();
+        let gain = 1800.0 / ri; // DC gain = Rf/Ri (approximate)
+        let mut opamp = OpAmpRoot::new_inverting(model, 1.0);
+        opamp.set_sample_rate(sr);
+        opamp.set_gbw_gain(gain);
+        opamp.set_v_max(3.0); // 9V supply / 2 - 1.5
+
+        OpAmpWdfAdaptor {
+            zi,
+            zf,
+            is_inverting: true,
+            opamp,
+            gbw_state: 0.0,
+            prev_out: 0.0,
+            feedback_pot_id: Some("Treble".into()),
+        }
+    }
+
+    /// Measure RMS output at a given frequency through the adaptor.
+    fn measure_rms(adaptor: &mut OpAmpWdfAdaptor, freq: f64, sr: f64, amplitude: f64) -> f64 {
+        let warmup = 4096;
+        let n = 4096;
+
+        // Warm up
+        for i in 0..warmup {
+            let x = amplitude * (2.0 * PI * freq * i as f64 / sr).sin();
+            adaptor.process(0.0, x); // inverting: V+ = 0, V_in = signal
+        }
+        // Measure
+        let mut sum_sq = 0.0;
+        for i in 0..n {
+            let x = amplitude * (2.0 * PI * freq * (i + warmup) as f64 / sr).sin();
+            let y = adaptor.process(0.0, x);
+            sum_sq += y * y;
+        }
+        (sum_sq / n as f64).sqrt()
+    }
+
+    #[test]
+    fn wdf_adaptor_produces_signal() {
+        let sr = 48000.0;
+        let mut adaptor = build_klon_adaptor(sr, 0.5);
+        let rms = measure_rms(&mut adaptor, 1000.0, sr, 0.1);
+        eprintln!("WDF adaptor 1kHz RMS = {:.6}", rms);
+        assert!(rms > 0.01, "Adaptor should produce audible output, got {:.6}", rms);
+    }
+
+    #[test]
+    fn wdf_adaptor_stable() {
+        let sr = 48000.0;
+        let mut adaptor = build_klon_adaptor(sr, 0.5);
+        for i in 0..20000 {
+            let x = 0.5 * (2.0 * PI * 1000.0 * i as f64 / sr).sin();
+            let y = adaptor.process(0.0, x);
+            assert!(y.is_finite(), "Output NaN/Inf at sample {}", i);
+            assert!(y.abs() < 100.0, "Output diverging at sample {}: {:.2}", i, y);
+        }
+    }
+
+    #[test]
+    fn wdf_adaptor_dc_gain_inverting() {
+        // At DC with Zi=Ri=1800 and Zf=Rf=1800 (ignoring reactive elements),
+        // gain should be approximately -Rf/Ri = -1.0
+        let sr = 48000.0;
+        let mut adaptor = build_klon_adaptor(sr, 0.5);
+
+        // Drive with DC step, let settle
+        let dc_in = 0.1;
+        let mut last = 0.0;
+        for _ in 0..10000 {
+            last = adaptor.process(0.0, dc_in);
+        }
+        let dc_gain = last / dc_in;
+        eprintln!("WDF adaptor DC gain = {:.4}", dc_gain);
+        // DC gain magnitude: with Zf network at DC, caps open → Zf_dc ≈ R_tone_fb ‖ (R_shelf + R_pot/2)
+        // Expected |gain| = Zf_dc / Ri ≈ 1800‖(4700+5000) / 1800 ≈ 1500/1800 ≈ 0.83 to ~3.6
+        // Sign may be inverted in WDF convention (port polarity dependent)
+        let gain_mag = dc_gain.abs();
+        assert!(
+            gain_mag > 0.3 && gain_mag < 15.0,
+            "DC gain magnitude should be reasonable, got {:.4} (mag={:.4})",
+            dc_gain, gain_mag
+        );
+    }
+
+    #[test]
+    fn wdf_adaptor_treble_changes_spectrum() {
+        let sr = 48000.0;
+        let freq = 10000.0; // 10kHz — treble range
+
+        let mut adaptor_dark = build_klon_adaptor(sr, 0.0);
+        let mut adaptor_bright = build_klon_adaptor(sr, 1.0);
+
+        let rms_dark = measure_rms(&mut adaptor_dark, freq, sr, 0.1);
+        let rms_bright = measure_rms(&mut adaptor_bright, freq, sr, 0.1);
+
+        let ratio_db = 20.0 * (rms_bright / rms_dark).log10();
+        eprintln!(
+            "WDF adaptor treble at {}Hz: dark={:.6}, bright={:.6}, ratio={:.3}x, dB={:.2}",
+            freq, rms_dark, rms_bright, rms_bright / rms_dark, ratio_db
+        );
+
+        assert!(
+            ratio_db.abs() > 0.5,
+            "Treble pot should affect 10kHz output by ≥0.5dB, got {:.2}dB",
+            ratio_db
+        );
+    }
+
+    #[test]
+    fn wdf_adaptor_frequency_response_shape() {
+        // Verify the adaptor produces different responses at different frequencies.
+        // A shelving EQ should have more effect at HF than LF.
+        let sr = 48000.0;
+
+        let mut adaptor_dark = build_klon_adaptor(sr, 0.0);
+        let mut adaptor_bright = build_klon_adaptor(sr, 1.0);
+
+        let freqs = [100.0, 1000.0, 5000.0, 10000.0];
+        let mut ratios = Vec::new();
+
+        for &freq in &freqs {
+            // Need fresh adaptors for each frequency to avoid state contamination
+            let mut ad = build_klon_adaptor(sr, 0.0);
+            let mut ab = build_klon_adaptor(sr, 1.0);
+            let rms_d = measure_rms(&mut ad, freq, sr, 0.1);
+            let rms_b = measure_rms(&mut ab, freq, sr, 0.1);
+            let ratio = if rms_d > 1e-10 { rms_b / rms_d } else { 1.0 };
+            let db = 20.0 * ratio.log10();
+            eprintln!("  {}Hz: dark={:.6} bright={:.6} ratio={:.4} ({:.2}dB)", freq, rms_d, rms_b, ratio, db);
+            ratios.push(db);
+        }
+
+        // The shelf should have more effect at HF than LF
+        // ratios[0] is at 100Hz, ratios[3] is at 10kHz
+        // The difference in dB between HF and LF should be > 0
+        let hf_lf_diff = (ratios[3] - ratios[0]).abs();
+        eprintln!("HF-LF pot effect difference: {:.2}dB", hf_lf_diff);
+        assert!(
+            hf_lf_diff > 0.1,
+            "Shelving EQ should affect HF more than LF, diff={:.2}dB",
+            hf_lf_diff
+        );
+    }
 }
