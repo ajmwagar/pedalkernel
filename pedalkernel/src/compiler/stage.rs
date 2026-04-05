@@ -748,6 +748,12 @@ impl WdfStage {
                 return true;
             }
         }
+        // WDF constraint adaptor subtrees
+        if let Some(ref adaptor) = self.opamp_wdf_adaptor {
+            if has_pot(&adaptor.zi, pot_id) || has_pot(&adaptor.zf, pot_id) {
+                return true;
+            }
+        }
         false
     }
 

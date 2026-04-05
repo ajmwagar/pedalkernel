@@ -247,9 +247,11 @@ pub(super) fn build_opamp_feedback_stages(
                     pedal.components.iter().any(|c| c.id == *id && c.kind.capacitance().is_some())
                     || is_pot_component(id, pedal)
                 });
+                #[cfg(test)]
                 eprintln!("[OPAMP_WDF] {} has_reactive_fb={} skip_tree={}", info.comp_id, has_reactive_fb, skip_tree);
                 if has_reactive_fb {
                     let wdf_result = build_opamp_wdf_adaptor(info, graph, pedal, sample_rate, *ri);
+                    #[cfg(test)]
                     eprintln!("[OPAMP_WDF] {} build_opamp_wdf_adaptor → {}", info.comp_id, wdf_result.is_some());
                     if let Some((zi_tree, zf_tree, wdf_pot_id, wdf_edges)) = wdf_result
                     {
@@ -519,6 +521,7 @@ pub(super) fn build_opamp_feedback_stages(
                         || is_pot_component(id, pedal)
                     })
                 );
+                #[cfg(test)]
                 eprintln!("[OPAMP_WDF_NI] {} has_reactive_ni={}", info.comp_id, has_reactive_ni);
                 if has_reactive_ni {
                     if let Some((zi_tree, zf_tree, wdf_pot_id, wdf_edges)) =
@@ -1427,10 +1430,12 @@ fn build_opamp_wdf_adaptor(
         .map(|(i, _)| i)
         .collect();
 
+    #[cfg(test)]
     eprintln!("[WDF_OPAMP_BUILD] {} fb_comp_ids={:?} fb_edges={} input_comp_ids={:?}",
         info.comp_id, info.feedback_comp_ids, fb_edges.len(), info.input_comp_ids);
 
     if fb_edges.is_empty() {
+        #[cfg(test)]
         eprintln!("[WDF_OPAMP_BUILD] {} BAIL: no feedback edges", info.comp_id);
         return None;
     }
@@ -1456,8 +1461,10 @@ fn build_opamp_wdf_adaptor(
     fb_border.sort();
     fb_border.dedup();
 
+    #[cfg(test)]
     eprintln!("[WDF_OPAMP_BUILD] {} Zf fb_border={:?}", info.comp_id, fb_border);
     if fb_border.len() != 2 {
+        #[cfg(test)]
         eprintln!("[WDF_OPAMP_BUILD] {} BAIL: Zf border len={} (need 2)", info.comp_id, fb_border.len());
         return None;
     }
@@ -1474,6 +1481,9 @@ fn build_opamp_wdf_adaptor(
     )
     .ok()?
     .0;
+
+    #[cfg(test)]
+    eprintln!("[WDF_OPAMP_BUILD] {} Zf tree:\n{}", info.comp_id, dump_tree(&zf_tree, 1));
 
     // ── Build Zi (input: input_node → neg) ──
     let input_set: HashSet<&str> = info.input_comp_ids.iter().map(|s| s.as_str()).collect();
@@ -1543,6 +1553,7 @@ fn build_opamp_wdf_adaptor(
     } else {
         // No input edges identified by opamp analysis — use ri_fallback as VS port resistance.
         // This handles cases where the input resistor wasn't tracked (e.g., Klon U4).
+        #[cfg(test)]
         eprintln!("[WDF_OPAMP_BUILD] {} no input edges, using ri_fallback={:.1}", info.comp_id, ri_fallback);
         DynNode::VoltageSource(0.0, ri_fallback)
     };
@@ -1600,6 +1611,7 @@ fn build_opamp_wdf_adaptor_ni(
         .map(|(i, _)| i)
         .collect();
 
+    #[cfg(test)]
     eprintln!("[WDF_NI_BUILD] {} fb_edges={} gl_comp_ids={:?}", info.comp_id, fb_edges.len(), info.ground_leg_comp_ids);
 
     if fb_edges.is_empty() {
@@ -1624,6 +1636,7 @@ fn build_opamp_wdf_adaptor_ni(
     fb_border.dedup();
 
     if fb_border.len() != 2 {
+        #[cfg(test)]
         eprintln!("[WDF_NI_BUILD] {} Zf border={:?} (need 2)", info.comp_id, fb_border);
         return None;
     }
@@ -1703,10 +1716,33 @@ fn build_opamp_wdf_adaptor_ni(
     let mut consumed = fb_edges;
     consumed.extend(gl_edges);
 
+    #[cfg(test)]
     eprintln!("[WDF_NI_BUILD] {} built: Zi R={:.1}, Zf R={:.1}, pot={:?}",
         info.comp_id, zi_tree.port_resistance(), zf_tree.port_resistance(), feedback_pot_id);
 
     Some((zi_tree, zf_tree, feedback_pot_id, consumed))
+}
+
+/// Quick recursive tree dumper for diagnostics.
+fn dump_tree(node: &DynNode, depth: usize) -> String {
+    let indent = "  ".repeat(depth);
+    match node {
+        DynNode::Leaf(leaf) => {
+            let id = leaf.comp_id().unwrap_or("?");
+            format!("{}Leaf({} '{}', R={:.1})", indent, leaf.type_tag(), id,
+                leaf.port_resistance())
+        }
+        DynNode::Binary { kind, left, right, gamma, .. } => {
+            let kind_str = match kind {
+                super::dyn_node::BinaryKind::Series => "Series",
+                super::dyn_node::BinaryKind::Parallel => "Parallel",
+            };
+            format!("{}{kind_str}(γ={gamma:.4}, R={:.1})\n{}\n{}",
+                indent, node.port_resistance(),
+                dump_tree(left, depth+1), dump_tree(right, depth+1))
+        }
+        _ => format!("{}Other(R={:.1})", indent, node.port_resistance()),
+    }
 }
 
 /// Look up the taper of a potentiometer from the pedal definition.
