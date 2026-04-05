@@ -179,6 +179,7 @@ pub(super) fn build_opamp_feedback_stages(
                     opamp_children: Vec::new(),
                     opamp_recompute: None,
                     opamp_input_child_idx: None,
+                    opamp_wdf_adaptor: None,
                 };
                 stage.balance_vs_impedance();
                 // BridgedTResonator always claims its feedback edges.
@@ -266,41 +267,44 @@ pub(super) fn build_opamp_feedback_stages(
                     };
                     root.set_soft_clip(diode_vf);
                 }
-                // Try MNA adaptor for Inverting with reactive feedback components.
-                // This handles frequency-dependent feedback (caps, pots) that the
-                // scalar OpAmpRoot gain can't model via the standard tree path.
-                // Skip if there are input photocouplers — the MNA path doesn't model
-                // photocoupler resistance modulation, so the fallback path must handle them.
+                // ── Try WDF constraint adaptor for Inverting with reactive feedback ──
+                // Uses V_neg = V+ closed-form scattering. Gain emerges from Zf/Zi
+                // impedance ratios — caps and pots handled naturally via WDF state.
                 let has_reactive_fb = !skip_tree
                     && info.input_photocoupler_ids.is_empty()
                     && info.feedback_comp_ids.iter().any(|id| {
-                    // Check for caps in pedal components
                     pedal.components.iter().any(|c| c.id == *id && c.kind.capacitance().is_some())
-                    // Check for pots (including split halves __aw/__wb)
                     || is_pot_component(id, pedal)
                 });
+                eprintln!("[OPAMP_WDF] {} has_reactive_fb={} skip_tree={}", info.comp_id, has_reactive_fb, skip_tree);
                 if has_reactive_fb {
-                    if let Some((
-                        children,
-                        adaptor,
-                        recompute_data,
-                        adaptor_pot_id,
-                        input_child_idx,
-                    )) = build_opamp_adaptor(info, graph, pedal, sample_rate)
+                    let wdf_result = build_opamp_wdf_adaptor(info, graph, pedal, sample_rate, *ri);
+                    eprintln!("[OPAMP_WDF] {} build_opamp_wdf_adaptor → {}", info.comp_id, wdf_result.is_some());
+                    if let Some((zi_tree, zf_tree, wdf_pot_id, wdf_edges)) = wdf_result
                     {
-                        if let Some(ref pid) = adaptor_pot_id {
+                        if let Some(ref pid) = wdf_pot_id {
                             feedback_pot_id = Some(pid.clone());
                         }
-                        // When R_in is modelled as a VoltageSource MNA port, the
-                        // scattering matrix encodes the full Rf/Ri inverting topology.
-                        // Set VCVS gain = 1.0 so the OpAmpRoot does not double-apply gain.
-                        // The true gain lives in gbw_gain for bandwidth calculation only.
-                        if input_child_idx.is_some() {
-                            let true_gain = root.gain();
-                            root.set_gain(1.0);
-                            // Preserve gbw_gain so bandwidth rolloff is correct.
-                            root.set_gbw_gain(true_gain);
-                        }
+                        // Set GBW gain from the DC gain for bandwidth rolloff
+                        let gain = rf / ri;
+                        root.set_gain(1.0); // WDF adaptor handles gain
+                        root.set_gbw_gain(gain);
+                        root.set_sample_rate(sample_rate);
+
+                        let default_supply = 9.0_f64;
+                        let v_max = (default_supply / 2.0 - 1.5).max(0.5);
+                        root.set_v_max(v_max);
+
+                        let wdf_adaptor = super::stage::OpAmpWdfAdaptor {
+                            zi: zi_tree,
+                            zf: zf_tree,
+                            is_inverting: true,
+                            opamp: root.clone(),
+                            gbw_state: 0.0,
+                            prev_out: 0.0,
+                            feedback_pot_id: feedback_pot_id.clone(),
+                        };
+
                         let vs = DynNode::VoltageSource(0.0, 10_000.0);
                         let mut stage = WdfStage {
                             tree: vs,
@@ -335,10 +339,11 @@ pub(super) fn build_opamp_feedback_stages(
                             input_photocouplers: Vec::new(),
                             zf_child: None,
                             zg_child: None,
-                            opamp_adaptor: Some(adaptor),
-                            opamp_children: children,
-                            opamp_recompute: Some(recompute_data),
-                            opamp_input_child_idx: input_child_idx,
+                            opamp_adaptor: None,
+                            opamp_children: Vec::new(),
+                            opamp_recompute: None,
+                            opamp_input_child_idx: None,
+                            opamp_wdf_adaptor: Some(wdf_adaptor),
                         };
                         // Populate input-path photocouplers for inverting opamps (e.g. Mu-Tron).
                         // Must happen regardless of which path (MNA or fallback) is taken.
@@ -470,6 +475,7 @@ pub(super) fn build_opamp_feedback_stages(
                     opamp_children: Vec::new(),
                     opamp_recompute: None,
                     opamp_input_child_idx: None,
+                    opamp_wdf_adaptor: None,
                 };
 
                 // Create input-path photocoupler elements if present.
@@ -592,6 +598,86 @@ pub(super) fn build_opamp_feedback_stages(
                     };
                     root.set_soft_clip(diode_vf);
                 }
+                // ── Try WDF constraint adaptor for NonInverting ──
+                let has_reactive_ni = !skip_tree && (
+                    info.feedback_comp_ids.iter().any(|id| {
+                        pedal.components.iter().any(|c| c.id == *id && c.kind.capacitance().is_some())
+                        || is_pot_component(id, pedal)
+                    })
+                    || info.ground_leg_comp_ids.iter().any(|id| {
+                        pedal.components.iter().any(|c| c.id == *id && c.kind.capacitance().is_some())
+                        || is_pot_component(id, pedal)
+                    })
+                );
+                eprintln!("[OPAMP_WDF_NI] {} has_reactive_ni={}", info.comp_id, has_reactive_ni);
+                if has_reactive_ni {
+                    if let Some((zi_tree, zf_tree, wdf_pot_id, wdf_edges)) =
+                        build_opamp_wdf_adaptor_ni(info, graph, pedal, sample_rate)
+                    {
+                        if let Some(ref pid) = wdf_pot_id {
+                            feedback_pot_id = Some(pid.clone());
+                        }
+                        let gain = 1.0 + rf / ri;
+                        root.set_gain(1.0);
+                        root.set_gbw_gain(gain);
+
+                        let wdf_adaptor = super::stage::OpAmpWdfAdaptor {
+                            zi: zi_tree,
+                            zf: zf_tree,
+                            is_inverting: false,
+                            opamp: root.clone(),
+                            gbw_state: 0.0,
+                            prev_out: 0.0,
+                            feedback_pot_id: feedback_pot_id.clone(),
+                        };
+
+                        let vs = DynNode::VoltageSource(0.0, 10_000.0);
+                        let stage = WdfStage {
+                            tree: vs,
+                            root: RootKind::OpAmp(root),
+                            compensation: 1.0,
+                            oversampler: crate::oversampling::Oversampler::new(oversampling),
+                            base_diode_model: None,
+                            paired_opamp: None,
+                            allpass_feedback: None,
+                            allpass_direct: None,
+                            dc_block: None,
+                            grid_dc_blocker: None,
+                            is_source_follower: false,
+                            prev_source_voltage: 0.0,
+                            signal_flow_distance: 0,
+                            transformer_gain: 1.0,
+                            injection_node_id: usize::MAX,
+                            output_node_id: usize::MAX,
+                            is_trigger_voice: false,
+                            voice_active: false,
+                            is_feedforward: false,
+                            sample_counter: 0,
+                            root_comp_id: String::new(),
+                            feedback_pot_id,
+                            output_probe: None,
+                            feedback_opamp: None,
+                            vcc_injection_coeff: 0.0,
+                            vcc_dc_ramp: 0,
+                            coupling_cap_id: None,
+                            resonator_feedback: None,
+                            negate_vs: false,
+                            input_photocouplers: Vec::new(),
+                            zf_child: None,
+                            zg_child: None,
+                            opamp_adaptor: None,
+                            opamp_children: Vec::new(),
+                            opamp_recompute: None,
+                            opamp_input_child_idx: None,
+                            opamp_wdf_adaptor: Some(wdf_adaptor),
+                        };
+                        consumed_edges.extend(comp_ids_to_edge_indices(&info.feedback_comp_ids));
+                        consumed_edges.extend(comp_ids_to_edge_indices(&info.ground_leg_comp_ids));
+                        stages.push(stage);
+                        continue;
+                    }
+                }
+
                 // Try 3-port adaptor when ground leg has reactive components
                 let has_reactive_gnd = !skip_tree
                     && !info.ground_leg_comp_ids.is_empty()
@@ -663,6 +749,7 @@ pub(super) fn build_opamp_feedback_stages(
                         opamp_children: Vec::new(),
                         opamp_recompute: Some(recompute_data),
                         opamp_input_child_idx: None,
+                        opamp_wdf_adaptor: None,
                     };
                     // Don't balance VS — the 3-port adaptor handles impedance matching
                     consumed_edges.extend(comp_ids_to_edge_indices(&info.feedback_comp_ids));
@@ -752,6 +839,7 @@ pub(super) fn build_opamp_feedback_stages(
                     opamp_children: Vec::new(),
                     opamp_recompute: None,
                     opamp_input_child_idx: None,
+                    opamp_wdf_adaptor: None,
                 };
                 if !has_complex_fb_tree {
                     stage.balance_vs_impedance();
@@ -1491,6 +1579,312 @@ fn build_opamp_adaptor(
         feedback_pot_id,
         input_child_idx,
     ))
+}
+
+/// Build a WDF constraint adaptor for an inverting opamp with reactive feedback.
+///
+/// Returns (zi_tree, zf_tree, feedback_pot_id, consumed_edge_indices) or None
+/// if the subtrees can't be built (e.g., not enough edges, SP decomposition fails).
+///
+/// Zi = input network (from input node to neg node).
+/// Zf = feedback network (from neg node to output node).
+fn build_opamp_wdf_adaptor(
+    info: &OpAmpFeedbackInfo,
+    graph: &CircuitGraph,
+    pedal: &PedalDef,
+    sample_rate: f64,
+    ri_fallback: f64,
+) -> Option<(DynNode, DynNode, Option<String>, Vec<usize>)> {
+    // ── Build Zf (feedback: neg → out) ──
+    let fb_set: HashSet<&str> = info.feedback_comp_ids.iter().map(|s| s.as_str()).collect();
+    let fb_edges: Vec<usize> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| fb_set.contains(graph.components[e.comp_idx].id.as_str()))
+        .map(|(i, _)| i)
+        .collect();
+
+    eprintln!("[WDF_OPAMP_BUILD] {} fb_comp_ids={:?} fb_edges={} input_comp_ids={:?}",
+        info.comp_id, info.feedback_comp_ids, fb_edges.len(), info.input_comp_ids);
+
+    if fb_edges.is_empty() {
+        eprintln!("[WDF_OPAMP_BUILD] {} BAIL: no feedback edges", info.comp_id);
+        return None;
+    }
+
+    // Find border nodes for Zf
+    let fb_nodes: HashSet<NodeId> = fb_edges
+        .iter()
+        .flat_map(|&i| {
+            let e = &graph.edges[i];
+            [e.node_a, e.node_b]
+        })
+        .collect();
+    let mut fb_border: Vec<NodeId> = fb_nodes
+        .iter()
+        .filter(|&&n| {
+            graph.edges.iter().any(|e| {
+                (e.node_a == n || e.node_b == n)
+                    && !fb_set.contains(graph.components[e.comp_idx].id.as_str())
+            })
+        })
+        .copied()
+        .collect();
+    fb_border.sort();
+    fb_border.dedup();
+
+    eprintln!("[WDF_OPAMP_BUILD] {} Zf fb_border={:?}", info.comp_id, fb_border);
+    if fb_border.len() != 2 {
+        eprintln!("[WDF_OPAMP_BUILD] {} BAIL: Zf border len={} (need 2)", info.comp_id, fb_border.len());
+        return None;
+    }
+
+    let zf_tree = super::graph::graph_reduce(
+        &fb_edges,
+        &[],
+        &fb_border,
+        graph,
+        sample_rate,
+        &std::collections::HashMap::new(),
+        |n| n,
+        None,
+    )
+    .ok()?
+    .0;
+
+    // ── Build Zi (input: input_node → neg) ──
+    let input_set: HashSet<&str> = info.input_comp_ids.iter().map(|s| s.as_str()).collect();
+    let input_edges: Vec<usize> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| input_set.contains(graph.components[e.comp_idx].id.as_str()))
+        .map(|(i, _)| i)
+        .collect();
+
+    // For the Zi tree: if there's only one input component (typical: just Ri),
+    // create a simple resistor leaf. Otherwise, try graph_reduce.
+    let zi_tree = if input_edges.len() == 1 {
+        let e = &graph.edges[input_edges[0]];
+        let comp = &graph.components[e.comp_idx];
+        if let Some(res) = comp.kind.resistance() {
+            // Zi = Series(VS, Ri) — voltage source drives through input resistor
+            let vs = DynNode::VoltageSource(0.0, res);
+            vs
+        } else {
+            return None;
+        }
+    } else if input_edges.len() > 1 {
+        // Multi-component input path — try graph_reduce
+        let input_nodes: HashSet<NodeId> = input_edges
+            .iter()
+            .flat_map(|&i| {
+                let e = &graph.edges[i];
+                [e.node_a, e.node_b]
+            })
+            .collect();
+        let mut input_border: Vec<NodeId> = input_nodes
+            .iter()
+            .filter(|&&n| {
+                graph.edges.iter().any(|e| {
+                    (e.node_a == n || e.node_b == n)
+                        && !input_set.contains(graph.components[e.comp_idx].id.as_str())
+                })
+            })
+            .copied()
+            .collect();
+        input_border.sort();
+        input_border.dedup();
+
+        if input_border.len() != 2 {
+            return None;
+        }
+
+        let zi_reduced = super::graph::graph_reduce(
+            &input_edges,
+            &[],
+            &input_border,
+            graph,
+            sample_rate,
+            &std::collections::HashMap::new(),
+            |n| n,
+            None,
+        )
+        .ok()?
+        .0;
+
+        // Wrap in Series(VS, zi_reduced) for signal injection
+        let rp = zi_reduced.port_resistance();
+        let vs = DynNode::VoltageSource(0.0, rp);
+        DynNode::Series(Box::new(vs), Box::new(zi_reduced))
+    } else {
+        // No input edges identified by opamp analysis — use ri_fallback as VS port resistance.
+        // This handles cases where the input resistor wasn't tracked (e.g., Klon U4).
+        eprintln!("[WDF_OPAMP_BUILD] {} no input edges, using ri_fallback={:.1}", info.comp_id, ri_fallback);
+        DynNode::VoltageSource(0.0, ri_fallback)
+    };
+
+    // Find feedback pot ID
+    let feedback_pot_id = info.feedback_comp_ids.iter().find_map(|id| {
+        let base = id
+            .strip_suffix("__aw")
+            .or_else(|| id.strip_suffix("__wb"))
+            .unwrap_or(id);
+        if pedal
+            .components
+            .iter()
+            .any(|c| c.id == base && c.kind.pot_taper().is_some())
+        {
+            Some(base.to_string())
+        } else {
+            None
+        }
+    });
+
+    let mut consumed = fb_edges;
+    consumed.extend(input_edges);
+
+    #[cfg(test)]
+    eprintln!(
+        "[WDF_OPAMP] {} built: Zi R={:.1}, Zf R={:.1}, pot={:?}, edges={}",
+        info.comp_id,
+        zi_tree.port_resistance(),
+        zf_tree.port_resistance(),
+        feedback_pot_id,
+        consumed.len(),
+    );
+
+    Some((zi_tree, zf_tree, feedback_pot_id, consumed))
+}
+
+/// Build a WDF constraint adaptor for a non-inverting opamp.
+///
+/// Zi = ground leg (neg → gnd through Rg).
+/// Zf = feedback network (neg → out through Rf, caps, pots).
+fn build_opamp_wdf_adaptor_ni(
+    info: &OpAmpFeedbackInfo,
+    graph: &CircuitGraph,
+    pedal: &PedalDef,
+    sample_rate: f64,
+) -> Option<(DynNode, DynNode, Option<String>, Vec<usize>)> {
+    // ── Build Zf (feedback: neg → out) ──
+    let fb_set: HashSet<&str> = info.feedback_comp_ids.iter().map(|s| s.as_str()).collect();
+    let fb_edges: Vec<usize> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| fb_set.contains(graph.components[e.comp_idx].id.as_str()))
+        .map(|(i, _)| i)
+        .collect();
+
+    eprintln!("[WDF_NI_BUILD] {} fb_edges={} gl_comp_ids={:?}", info.comp_id, fb_edges.len(), info.ground_leg_comp_ids);
+
+    if fb_edges.is_empty() {
+        return None;
+    }
+
+    let fb_nodes: HashSet<NodeId> = fb_edges
+        .iter()
+        .flat_map(|&i| { let e = &graph.edges[i]; [e.node_a, e.node_b] })
+        .collect();
+    let mut fb_border: Vec<NodeId> = fb_nodes
+        .iter()
+        .filter(|&&n| {
+            graph.edges.iter().any(|e| {
+                (e.node_a == n || e.node_b == n)
+                    && !fb_set.contains(graph.components[e.comp_idx].id.as_str())
+            })
+        })
+        .copied()
+        .collect();
+    fb_border.sort();
+    fb_border.dedup();
+
+    if fb_border.len() != 2 {
+        eprintln!("[WDF_NI_BUILD] {} Zf border={:?} (need 2)", info.comp_id, fb_border);
+        return None;
+    }
+
+    let zf_tree = super::graph::graph_reduce(
+        &fb_edges, &[], &fb_border, graph, sample_rate,
+        &std::collections::HashMap::new(), |n| n, None,
+    ).ok()?.0;
+
+    // ── Build Zi (ground leg: neg → gnd) ──
+    let gl_set: HashSet<&str> = info.ground_leg_comp_ids.iter().map(|s| s.as_str()).collect();
+    let gl_edges: Vec<usize> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| gl_set.contains(graph.components[e.comp_idx].id.as_str()))
+        .map(|(i, _)| i)
+        .collect();
+
+    let zi_tree = if gl_edges.len() == 1 {
+        // Single ground-leg component (typical: just Rg)
+        let e = &graph.edges[gl_edges[0]];
+        let comp = &graph.components[e.comp_idx];
+        if let Some(res) = comp.kind.resistance() {
+            DynNode::Resistor(Some(comp.id.clone()), res)
+        } else if let Some(cap) = comp.kind.capacitance() {
+            let rp = 1.0 / (2.0 * sample_rate * cap);
+            DynNode::Capacitor(Some(comp.id.clone()), cap, rp)
+        } else {
+            return None;
+        }
+    } else if gl_edges.len() > 1 {
+        let gl_nodes: HashSet<NodeId> = gl_edges
+            .iter()
+            .flat_map(|&i| { let e = &graph.edges[i]; [e.node_a, e.node_b] })
+            .collect();
+        let mut gl_border: Vec<NodeId> = gl_nodes
+            .iter()
+            .filter(|&&n| {
+                graph.edges.iter().any(|e| {
+                    (e.node_a == n || e.node_b == n)
+                        && !gl_set.contains(graph.components[e.comp_idx].id.as_str())
+                })
+            })
+            .copied()
+            .collect();
+        gl_border.sort();
+        gl_border.dedup();
+
+        if gl_border.len() != 2 {
+            return None;
+        }
+
+        super::graph::graph_reduce(
+            &gl_edges, &[], &gl_border, graph, sample_rate,
+            &std::collections::HashMap::new(), |n| n, None,
+        ).ok()?.0
+    } else {
+        // No ground-leg edges — can't build Zi
+        return None;
+    };
+
+    // Find feedback pot ID
+    let feedback_pot_id = info.feedback_comp_ids.iter()
+        .chain(info.ground_leg_comp_ids.iter())
+        .find_map(|id| {
+            let base = id.strip_suffix("__aw")
+                .or_else(|| id.strip_suffix("__wb"))
+                .unwrap_or(id);
+            if pedal.components.iter().any(|c| c.id == base && c.kind.pot_taper().is_some()) {
+                Some(base.to_string())
+            } else {
+                None
+            }
+        });
+
+    let mut consumed = fb_edges;
+    consumed.extend(gl_edges);
+
+    eprintln!("[WDF_NI_BUILD] {} built: Zi R={:.1}, Zf R={:.1}, pot={:?}",
+        info.comp_id, zi_tree.port_resistance(), zf_tree.port_resistance(), feedback_pot_id);
+
+    Some((zi_tree, zf_tree, feedback_pot_id, consumed))
 }
 
 /// Look up the taper of a potentiometer from the pedal definition.

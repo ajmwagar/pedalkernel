@@ -382,6 +382,118 @@ impl ResonatorFeedback {
     }
 }
 
+/// Custom 2-port WDF adaptor for ideal op-amp circuits.
+///
+/// Enforces V_neg = V+ at the internal junction of two subtrees (Zi and Zf)
+/// using the closed-form scattering equations derived from KCL + op-amp constraint.
+/// The gain emerges from the impedance ratio Zf/Zi — no precomputed scalar.
+///
+/// # Scattering equations (inverting)
+///
+/// ```text
+/// i₁ = (V_in − b₁ − V+) / R₁
+/// a₁ = 2·V_in − 2·V+ − b₁
+/// a₂ = b₂ − 2·R₂·(V_in − b₁ − V+) / R₁
+/// V_out = V+ + R₂·(V_in − b₁ − V+) / R₁ − b₂
+/// ```
+///
+/// # Scattering equations (non-inverting)
+///
+/// ```text
+/// i₁ = (V+ − b₁) / R₁
+/// a₁ = 2·V+ − b₁
+/// a₂ = b₂ − 2·R₂·(V+ − b₁) / R₁
+/// V_out = V+ + R₂·(V+ − b₁) / R₁ − b₂
+/// ```
+pub(super) struct OpAmpWdfAdaptor {
+    /// Zi subtree (input network for inverting, ground-leg for non-inverting).
+    pub(super) zi: DynNode,
+    /// Zf subtree (feedback network: caps, pots, resistors between neg and output).
+    pub(super) zf: DynNode,
+    /// True for inverting topology, false for non-inverting.
+    pub(super) is_inverting: bool,
+    /// Op-amp model for GBW rolloff and slew rate limiting.
+    pub(super) opamp: OpAmpRoot,
+    /// GBW rolloff filter state (single-pole LPF on output).
+    pub(super) gbw_state: f64,
+    /// Previous output for slew rate limiting.
+    pub(super) prev_out: f64,
+    /// Feedback pot ID (if any pot in Zf subtree responds to control changes).
+    pub(super) feedback_pot_id: Option<String>,
+}
+
+impl OpAmpWdfAdaptor {
+    /// Process one sample through the op-amp adaptor.
+    ///
+    /// `v_plus`: non-inverting input voltage (bias for inverting, signal for non-inv).
+    /// `v_in`: far-end voltage of Zi (signal for inverting, 0 for non-inverting).
+    #[inline]
+    pub(super) fn process(&mut self, v_plus: f64, v_in: f64) -> f64 {
+        // Up-sweep: get reflected waves from both subtrees
+        let b1 = self.zi.reflected();
+        let b2 = self.zf.reflected();
+        let r1 = self.zi.port_resistance();
+        let r2 = self.zf.port_resistance();
+
+        // Scattering from V_neg = V+ constraint + KCL at neg
+        let (a1, a2, v_out) = if self.is_inverting {
+            // Inverting: Port 1 + at V_in, - at V_neg
+            // V_neg = V_in - v1 = V_in - b1 - R1·i1
+            let drive = v_in - b1 - v_plus;
+            let a1 = 2.0 * v_in - 2.0 * v_plus - b1;
+            let a2 = b2 - 2.0 * r2 * drive / r1;
+            let v_out = v_plus + r2 * drive / r1 - b2;
+            (a1, a2, v_out)
+        } else {
+            // Non-inverting: Port 1 + at V_neg, - at ground
+            // V_neg = b1 + R1·i1 = V+
+            let drive = v_plus - b1;
+            let a1 = 2.0 * v_plus - b1;
+            let a2 = b2 - 2.0 * r2 * drive / r1;
+            let v_out = v_plus + r2 * drive / r1 - b2;
+            (a1, a2, v_out)
+        };
+
+        // Down-sweep: send incident waves back into subtrees (state update)
+        self.zi.set_incident(a1);
+        self.zf.set_incident(a2);
+
+        // Apply op-amp non-idealities: GBW rolloff + slew rate + rail clipping
+        let v_max = self.opamp.v_max();
+        let gbw_coeff = self.opamp.gbw_coeff();
+
+        // GBW rolloff: single-pole LPF at f_cl = GBW / gain
+        let mut out = gbw_coeff * v_out + (1.0 - gbw_coeff) * self.gbw_state;
+        self.gbw_state = out;
+
+        // Hard clip at supply rails
+        out = out.clamp(-v_max, v_max);
+
+        // Slew rate limiting
+        let sr = self.opamp.model.slew_rate;
+        let fs = self.opamp.sample_rate();
+        let max_dv = sr * 1e6 / fs;
+        let dv = out - self.prev_out;
+        if dv > max_dv {
+            out = self.prev_out + max_dv;
+        } else if dv < -max_dv {
+            out = self.prev_out - max_dv;
+        }
+        self.prev_out = out;
+
+        flush_denormal(out)
+    }
+
+    /// Reset internal state.
+    pub(super) fn reset(&mut self) {
+        self.gbw_state = 0.0;
+        self.prev_out = 0.0;
+        self.zi.reset();
+        self.zf.reset();
+        self.opamp.reset();
+    }
+}
+
 pub(super) struct WdfStage {
     pub(super) tree: DynNode,
     pub(super) root: RootKind,
@@ -528,6 +640,11 @@ pub(super) struct WdfStage {
     /// for Inverting opamps — the scattering matrix encodes the full Rf/Ri gain
     /// so the OpAmpRoot gain is set to 1.0 and gain comes from impedance ratios.
     pub(super) opamp_input_child_idx: Option<usize>,
+    /// Custom WDF adaptor for op-amp circuits with reactive feedback.
+    /// When `Some`, the stage uses the V_neg = V+ constraint-based scattering
+    /// instead of the MNA/RType adaptor or precomputed scalar gain.
+    /// The gain emerges from Zf/Zi impedance ratios in the wave propagation.
+    pub(super) opamp_wdf_adaptor: Option<OpAmpWdfAdaptor>,
 }
 
 /// Stored data for recomputing opamp adaptor scattering when pots change.
@@ -595,6 +712,33 @@ impl WdfStage {
     pub fn process(&mut self, input: f64) -> f64 {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
+
+        // ── OpAmp WDF adaptor path (V_neg = V+ constraint scattering) ──
+        // Uses closed-form scattering from the op-amp constraint. Gain emerges
+        // from Zf/Zi impedance ratios — no precomputed scalar, reactive feedback
+        // handled naturally through cap/inductor state updates in the subtrees.
+        if let Some(ref mut adaptor) = self.opamp_wdf_adaptor {
+            let compensation = self.compensation;
+            let (v_plus, v_in) = if adaptor.is_inverting {
+                // Inverting: V+ = 0 (or bias), V_in = stage input
+                (0.0, input * compensation)
+            } else {
+                // Non-inverting: V+ = stage input, V_in = 0 (ground through Rg)
+                (input * compensation, 0.0)
+            };
+
+            let mut output = adaptor.process(v_plus, v_in);
+
+            // DC block
+            if let Some((a1, b0, ref mut y_prev, ref mut x_prev)) = self.dc_block {
+                let y = b0 * (output - *x_prev) + a1 * *y_prev;
+                *x_prev = output;
+                *y_prev = flush_denormal(y);
+                return *y_prev;
+            }
+
+            return flush_denormal(output);
+        }
 
         // ── Opamp adaptor path (3-port subtrees OR MNA children) ──
         // Both paths use RTypeAdaptor scattering. The 3-port path has
@@ -1489,6 +1633,17 @@ impl WdfStage {
         }
         for child in self.opamp_children.iter_mut() {
             if child.set_pot(comp_id, value) {
+                found = true;
+            }
+        }
+        // WDF constraint adaptor subtrees
+        if let Some(ref mut adaptor) = self.opamp_wdf_adaptor {
+            if adaptor.zi.set_pot(comp_id, value) {
+                adaptor.zi.recompute();
+                found = true;
+            }
+            if adaptor.zf.set_pot(comp_id, value) {
+                adaptor.zf.recompute();
                 found = true;
             }
         }

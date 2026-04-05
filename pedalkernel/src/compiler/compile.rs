@@ -291,6 +291,7 @@ fn build_passive_wdf_stage(
 
                 opamp_recompute: None,
                 opamp_input_child_idx: None,
+                opamp_wdf_adaptor: None,
             };
             stage.balance_vs_impedance();
             Some(stage)
@@ -646,6 +647,7 @@ fn build_passive_rtype_from_decomposed(
         opamp_children: Vec::new(),
         opamp_recompute: None,
         opamp_input_child_idx: None,
+        opamp_wdf_adaptor: None,
     })
 }
 
@@ -1092,6 +1094,7 @@ fn build_feedforward_stages(
 
                 opamp_recompute: None,
                 opamp_input_child_idx: None,
+                opamp_wdf_adaptor: None,
             },
             Err(_) => {
                 // SP reduction failed → fall back to PassiveRType MNA
@@ -1238,6 +1241,7 @@ fn build_output_rooted_stage(
         opamp_children: Vec::new(),
         opamp_recompute: None,
         opamp_input_child_idx: None,
+        opamp_wdf_adaptor: None,
     })
 }
 
@@ -1728,7 +1732,6 @@ pub fn compile_pedal_with_options(
         })
         .map(|info| info.comp_id.clone())
         .collect();
-
     // Build op-amp feedback stages (inverting, non-inverting).
     // Diode-paired opamps are returned separately for pairing with DiodePair stages.
     let mut stages: Vec<WdfStage> = Vec::new();
