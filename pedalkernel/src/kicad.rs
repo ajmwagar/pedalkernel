@@ -370,6 +370,7 @@ fn pin_to_string(pin: &Pin) -> String {
             let dests: Vec<_> = destinations.iter().map(pin_to_string).collect();
             format!("fork({}, [{}])", switch, dests.join(", "))
         }
+        Pin::SubcircuitPort { subcircuit, port } => format!("{subcircuit}.{port}"),
     }
 }
 
@@ -547,6 +548,7 @@ mod tests {
             mirrors: std::collections::HashMap::new(),
             midi_bindings: vec![],
             calibrate: false,
+            subcircuits: vec![],
         };
 
         let netlist = export_kicad_netlist(&pedal);

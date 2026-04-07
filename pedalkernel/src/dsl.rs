@@ -164,6 +164,35 @@ pub struct PedalDef {
     pub midi_bindings: Vec<MidiBinding>,
     /// When true, auto-calibrate output level at compile time.
     pub calibrate: bool,
+    /// Subcircuit definitions. When non-empty, the top-level `components` and
+    /// `nets` become the routing layer connecting subcircuits.
+    pub subcircuits: Vec<SubcircuitDef>,
+}
+
+/// A subcircuit block within a pedal/equipment definition.
+/// Subcircuits partition a circuit into named sub-networks that can have
+/// independent rate domains (e.g., audio path vs. sidechain).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubcircuitDef {
+    /// Name of the subcircuit (e.g., "sidechain", "audio").
+    pub name: String,
+    /// Optional decimation factor (power of 2). None = full audio rate.
+    pub rate: Option<u32>,
+    /// Components local to this subcircuit.
+    pub components: Vec<ComponentDef>,
+    /// Internal nets. Node names not resolving to component pins or reserved
+    /// nodes (gnd, vcc, supply rails) become implicit ports.
+    pub nets: Vec<NetDef>,
+    /// Controls scoped to this subcircuit.
+    pub controls: Vec<ControlDef>,
+    /// Trims scoped to this subcircuit.
+    pub trims: Vec<ControlDef>,
+    /// Monitor definitions scoped to this subcircuit.
+    pub monitors: Vec<MonitorDef>,
+    /// Mirrored pot mappings within this subcircuit.
+    pub mirrors: std::collections::HashMap<String, String>,
+    /// MIDI bindings within this subcircuit.
+    pub midi_bindings: Vec<MidiBinding>,
 }
 
 impl PedalDef {
@@ -727,6 +756,12 @@ pub enum Pin {
         switch: String,
         /// Destination pins for each switch position
         destinations: Vec<Pin>,
+    },
+    /// Reference to a subcircuit port from the parent scope.
+    /// `audio.ctrl` → SubcircuitPort { subcircuit: "audio", port: "ctrl" }
+    SubcircuitPort {
+        subcircuit: String,
+        port: String,
     },
 }
 
@@ -2657,6 +2692,110 @@ fn supplies_section(input: &str) -> IResult<&str, Vec<NamedSupply>> {
     Ok((input, supplies))
 }
 
+// ---------------------------------------------------------------------------
+// Subcircuit section
+// ---------------------------------------------------------------------------
+
+/// Parse a `rate: 1/N` declaration where N must be a power of two.
+fn parse_rate(input: &str) -> IResult<&str, u32> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("rate")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("1")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('/')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, divisor) = nom::character::complete::u32(input)?;
+    // Validate power of two
+    if divisor == 0 || (divisor & (divisor - 1)) != 0 {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((input, divisor))
+}
+
+/// Parse a single `subcircuit name { ... }` block.
+fn subcircuit_block(input: &str) -> IResult<&str, SubcircuitDef> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("subcircuit")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, name) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+
+    // Optional rate declaration
+    let (input, rate) = opt(parse_rate)(input)?;
+
+    // Parse inner sections (same as parse_pedal internals)
+    let (input, (components, mirrors)) = components_section(input)?;
+    let (input, nets) = nets_section(input)?;
+    let (input, controls_and_midi) = opt(controls_section)(input)?;
+    let (controls, midi_bindings) = controls_and_midi.unwrap_or_default();
+    let (input, trims) = opt(trims_section)(input)?;
+    let (input, monitors) = opt(monitors_section)(input)?;
+
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+
+    Ok((
+        input,
+        SubcircuitDef {
+            name: name.to_string(),
+            rate,
+            components,
+            nets,
+            controls,
+            trims: trims.unwrap_or_default(),
+            monitors: monitors.unwrap_or_default(),
+            mirrors,
+            midi_bindings,
+        },
+    ))
+}
+
+/// Reclassify `ComponentPin` references in top-level nets where the "component"
+/// name matches a declared subcircuit. `audio.ctrl` parsed as `ComponentPin`
+/// becomes `SubcircuitPort { subcircuit: "audio", port: "ctrl" }`.
+fn resolve_subcircuit_pins(pedal: &mut PedalDef) {
+    use std::collections::HashSet;
+    let sc_names: HashSet<&str> = pedal.subcircuits.iter().map(|s| s.name.as_str()).collect();
+    if sc_names.is_empty() {
+        return;
+    }
+
+    fn resolve_pin(pin: &Pin, sc_names: &std::collections::HashSet<&str>) -> Pin {
+        match pin {
+            Pin::ComponentPin {
+                component,
+                pin: port,
+            } if sc_names.contains(component.as_str()) => Pin::SubcircuitPort {
+                subcircuit: component.clone(),
+                port: port.clone(),
+            },
+            Pin::Fork {
+                switch,
+                destinations,
+            } => Pin::Fork {
+                switch: switch.clone(),
+                destinations: destinations
+                    .iter()
+                    .map(|d| resolve_pin(d, sc_names))
+                    .collect(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    for net in &mut pedal.nets {
+        net.from = resolve_pin(&net.from, &sc_names);
+        net.to = net.to.iter().map(|p| resolve_pin(p, &sc_names)).collect();
+    }
+}
+
 fn parse_subtitle(input: &str) -> IResult<&str, String> {
     let (input, _) = tag("subtitle")(input)?;
     let (input, _) = ws_comments(input)?;
@@ -2701,8 +2840,25 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
         (input, Vec::new())
     };
 
-    let (input, (components, mirrors)) = components_section(input)?;
-    let (input, nets) = nets_section(input)?;
+    // Parse optional subcircuit blocks (zero or more, before components)
+    let (input, subcircuits) = many0(subcircuit_block)(input)?;
+
+    // When subcircuits are present, the top-level components/nets become
+    // an optional routing layer. When absent, keep existing required behavior.
+    let (input, (components, mirrors)) = if subcircuits.is_empty() {
+        components_section(input)?
+    } else if let Ok((rest, result)) = components_section(input) {
+        (rest, result)
+    } else {
+        (input, (Vec::new(), std::collections::HashMap::new()))
+    };
+    let (input, nets) = if subcircuits.is_empty() {
+        nets_section(input)?
+    } else if let Ok((rest, result)) = nets_section(input) {
+        (rest, result)
+    } else {
+        (input, Vec::new())
+    };
     let (input, controls_result) = opt(controls_section)(input)?;
     let (controls, midi_bindings) = controls_result.unwrap_or_default();
     let (input, trims) = opt(trims_section)(input)?;
@@ -2714,23 +2870,23 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, _) = char('}')(input)?;
     let (input, _) = ws_comments(input)?;
 
-    Ok((
-        input,
-        PedalDef {
-            name: name.to_string(),
-            subtitle,
-            supplies,
-            components,
-            nets,
-            controls,
-            trims: trims.unwrap_or_default(),
-            monitors: monitors.unwrap_or_default(),
-            sidechains: sidechains.unwrap_or_default(),
-            mirrors,
-            midi_bindings,
-            calibrate: calibrate.is_some(),
-        },
-    ))
+    let mut pedal = PedalDef {
+        name: name.to_string(),
+        subtitle,
+        supplies,
+        components,
+        nets,
+        controls,
+        trims: trims.unwrap_or_default(),
+        monitors: monitors.unwrap_or_default(),
+        sidechains: sidechains.unwrap_or_default(),
+        mirrors,
+        midi_bindings,
+        calibrate: calibrate.is_some(),
+        subcircuits,
+    };
+    resolve_subcircuit_pins(&mut pedal);
+    Ok((input, pedal))
 }
 
 /// Convenience wrapper that returns `Result`.
@@ -5177,5 +5333,130 @@ pedal "Shorthand Test" {
 "#;
         let def = parse_pedal_file(src).unwrap();
         assert_eq!(def.components.len(), 6);
+    }
+
+    #[test]
+    fn parse_subcircuit_basic() {
+        let src = r#"
+equipment "Test Compressor" {
+    supply 30V
+
+    subcircuit sidechain {
+        rate: 1/64
+
+        components {
+            R1: resistor(10k)
+            C1: cap(1u)
+        }
+        nets {
+            in -> R1.a
+            R1.b -> C1.a, out
+            C1.b -> gnd
+        }
+    }
+
+    subcircuit audio {
+        components {
+            R2: resistor(1k)
+        }
+        nets {
+            in -> R2.a
+            R2.b -> out
+        }
+    }
+
+    nets {
+        in -> audio.in, sidechain.in
+        sidechain.out -> audio.ctrl
+        audio.out -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.subcircuits.len(), 2);
+        assert_eq!(def.subcircuits[0].name, "sidechain");
+        assert_eq!(def.subcircuits[0].rate, Some(64));
+        assert_eq!(def.subcircuits[1].name, "audio");
+        assert_eq!(def.subcircuits[1].rate, None);
+
+        // Top-level nets should have SubcircuitPort pins after resolution
+        let has_sc_port = def.nets.iter().any(|n| {
+            n.to.iter().any(
+                |p| matches!(p, Pin::SubcircuitPort { subcircuit, .. } if subcircuit == "audio"),
+            )
+        });
+        assert!(
+            has_sc_port,
+            "top-level nets should contain SubcircuitPort after resolution"
+        );
+    }
+
+    #[test]
+    fn parse_subcircuit_with_controls() {
+        let src = r#"
+equipment "Test" {
+    supply 9V
+
+    subcircuit main {
+        components {
+            Vol: pot(100k, a)
+            R1: resistor(1k)
+        }
+        nets {
+            in -> R1.a
+            R1.b -> Vol.a
+            Vol.w -> out
+            Vol.b -> gnd
+        }
+        controls {
+            Vol.position -> "Volume" [0.0, 1.0] = 0.5
+        }
+    }
+
+    nets {
+        in -> main.in
+        main.out -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.subcircuits.len(), 1);
+        assert_eq!(def.subcircuits[0].controls.len(), 1);
+        assert_eq!(def.subcircuits[0].controls[0].label, "Volume");
+    }
+
+    #[test]
+    fn parse_rate_power_of_two() {
+        // Valid rates
+        for rate_str in &[
+            "1/2", "1/4", "1/8", "1/16", "1/32", "1/64", "1/128", "1/256",
+        ] {
+            let src = format!("rate: {}", rate_str);
+            assert!(
+                parse_rate(&src).is_ok(),
+                "rate {} should be valid",
+                rate_str
+            );
+        }
+    }
+
+    #[test]
+    fn parse_no_subcircuits_backward_compat() {
+        // Existing flat pedal syntax should still work
+        let src = r#"
+pedal "Simple" {
+    supply 9V
+    components {
+        R1: resistor(1k)
+    }
+    nets {
+        in -> R1.a
+        R1.b -> out
+    }
+}
+"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert!(def.subcircuits.is_empty());
+        assert_eq!(def.components.len(), 1);
     }
 }

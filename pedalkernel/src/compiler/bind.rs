@@ -985,6 +985,7 @@ fn extract_sidechain_def(
                 }
                 Pin::ComponentPin { component, .. } => component_ids.contains(component),
                 Pin::Fork { switch, .. } => component_ids.contains(switch),
+                Pin::SubcircuitPort { .. } => false,
             };
 
             let has_local_component = std::iter::once(&from).chain(to.iter()).any(|p| {
@@ -1040,6 +1041,7 @@ fn extract_sidechain_def(
         mirrors: std::collections::HashMap::new(),
         midi_bindings: vec![],
         calibrate: false,
+        subcircuits: vec![],
     }
 }
 

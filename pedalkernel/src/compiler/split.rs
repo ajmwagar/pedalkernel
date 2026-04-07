@@ -15,6 +15,8 @@ fn pin_node_name(pin: &Pin) -> String {
         Pin::ComponentPin { component, .. } => component.clone(),
         // For Fork, we use the switch component as the node
         Pin::Fork { switch, .. } => switch.clone(),
+        // SubcircuitPort references are resolved before split
+        Pin::SubcircuitPort { subcircuit, .. } => subcircuit.clone(),
     }
 }
 
@@ -144,6 +146,7 @@ fn build_half(
                             _ => false,
                         })
                 }
+                Pin::SubcircuitPort { .. } => false,
             };
 
             // A pin "belongs" to this half — only component pins in our set.
@@ -151,6 +154,7 @@ fn build_half(
                 Pin::Reserved(_) => true,
                 Pin::ComponentPin { component, .. } => component_ids.contains(component),
                 Pin::Fork { switch, .. } => component_ids.contains(switch),
+                Pin::SubcircuitPort { .. } => false,
             };
 
             // Keep this net only if at least one component pin belongs to this half.
@@ -224,6 +228,7 @@ fn build_half(
         mirrors,
         midi_bindings: vec![],
         calibrate: false,
+        subcircuits: vec![],
     }
 }
 

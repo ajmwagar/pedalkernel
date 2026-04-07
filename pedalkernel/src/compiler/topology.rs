@@ -1274,5 +1274,7 @@ fn pin_key(pin: &Pin) -> String {
         Pin::Reserved(s) => s.clone(),
         Pin::ComponentPin { component, pin } => format!("{}.{}", component, pin),
         Pin::Fork { switch, .. } => format!("__fork_{}", switch),
+        // SubcircuitPort references are resolved before topology analysis
+        Pin::SubcircuitPort { subcircuit, port } => format!("{}.{}", subcircuit, port),
     }
 }

@@ -142,6 +142,8 @@ fn pin_key(pin: &Pin) -> String {
         Pin::ComponentPin { component, pin } => format!("{}.{}", component, pin),
         // Fork destinations are handled specially in graph building
         Pin::Fork { switch, .. } => format!("__fork_{}", switch),
+        // SubcircuitPort references are resolved before graph building
+        Pin::SubcircuitPort { subcircuit, port } => format!("{}.{}", subcircuit, port),
     }
 }
 

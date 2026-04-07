@@ -196,6 +196,8 @@ fn check_net_references(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                     check_pin_ref(dest, comp_ids, reserved, supply_names, supply_list, w);
                 }
             }
+            // SubcircuitPort pins are inter-subcircuit connections; validated separately
+            Pin::SubcircuitPort { .. } => {}
         }
     }
 
@@ -390,6 +392,8 @@ fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 }
             }
             Pin::Reserved(_) => {}
+            // SubcircuitPort pins reference subcircuits, not components
+            Pin::SubcircuitPort { .. } => {}
         }
     }
 
@@ -443,6 +447,7 @@ fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
             Pin::Reserved(s) => s.clone(),
             Pin::ComponentPin { component, pin } => format!("{}.{}", component, pin),
             Pin::Fork { switch, .. } => format!("__fork_{}", switch),
+            Pin::SubcircuitPort { subcircuit, port } => format!("{}.{}", subcircuit, port),
         }
     };
 
@@ -1157,6 +1162,7 @@ mod tests {
             mirrors: std::collections::HashMap::new(),
             midi_bindings: vec![],
             calibrate: false,
+            subcircuits: vec![],
         }
     }
 
@@ -1299,6 +1305,7 @@ mod tests {
             mirrors: std::collections::HashMap::new(),
             midi_bindings: vec![],
             calibrate: false,
+            subcircuits: vec![],
         };
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "no-signal-path"));
@@ -2080,6 +2087,7 @@ mod tests {
             mirrors: std::collections::HashMap::new(),
             midi_bindings: vec![],
             calibrate: false,
+            subcircuits: vec![],
         }
     }
 
