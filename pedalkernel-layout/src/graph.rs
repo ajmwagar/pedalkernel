@@ -216,6 +216,8 @@ fn pin_component_id(pin: &Pin) -> Option<String> {
         Pin::ComponentPin { component, .. } => Some(component.clone()),
         // For Fork, use the switch component as the main reference
         Pin::Fork { switch, .. } => Some(switch.clone()),
+        // SubcircuitPort references are resolved before layout
+        Pin::SubcircuitPort { subcircuit, .. } => Some(subcircuit.clone()),
     }
 }
 
