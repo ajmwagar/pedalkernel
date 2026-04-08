@@ -22,10 +22,11 @@ mod opamp_analysis;
 mod plan;
 mod split;
 mod stage;
+pub mod stage_test_helpers;
+pub(crate) mod subcircuit;
 mod topology;
 pub mod validate;
 mod warnings;
-pub mod stage_test_helpers;
 pub(crate) mod wdf_leaf;
 
 pub use compile::{compile_pedal, compile_pedal_with_options, CompileOptions};

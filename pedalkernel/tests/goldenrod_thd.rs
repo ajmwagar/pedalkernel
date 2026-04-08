@@ -549,7 +549,11 @@ fn goldenrod_treble_changes_spectrum() {
         };
         eprintln!(
             "Treble sweep at {}Hz: dark={:.6}, bright={:.6}, ratio={:.3}x, dB={:.2}",
-            freq, dark, bright, bright / dark, ratio_db
+            freq,
+            dark,
+            bright,
+            bright / dark,
+            ratio_db
         );
         if ratio_db.abs() > max_effect_db.abs() {
             max_effect_db = ratio_db;

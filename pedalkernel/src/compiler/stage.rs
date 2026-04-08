@@ -3716,3 +3716,71 @@ impl SidechainProcessor {
         self.circuit.reset();
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SubcircuitProcessor
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A compiled subcircuit with its own [`CompiledPedal`] and optional rate domain.
+///
+/// Subcircuits partition an equipment definition into named sub-networks that
+/// are each compiled via the full WDF pipeline.  Rate-reduced subcircuits
+/// (e.g. `rate: 1/64` sidechain detectors) process one sample every
+/// `rate_divisor` input samples and use linear interpolation to fill gaps.
+pub(super) struct SubcircuitProcessor {
+    /// The compiled sub-circuit.
+    pub(super) circuit: super::compiled::CompiledPedal,
+    /// Subcircuit name (for debug and control routing).
+    #[allow(dead_code)]
+    pub(super) name: String,
+    /// Decimation factor (1 = full rate, 64 = process every 64th sample).
+    pub(super) rate_divisor: u32,
+    /// Countdown to next processing tick (decrements each sample, resets to `rate_divisor`).
+    pub(super) rate_counter: u32,
+    /// Last computed output value (held between decimated samples).
+    pub(super) held_output: f64,
+    /// Output from one `rate_divisor` period ago (for linear interpolation).
+    pub(super) prev_output: f64,
+}
+
+impl SubcircuitProcessor {
+    /// Process one input sample.
+    ///
+    /// For full-rate subcircuits (`rate_divisor == 1`) this is a direct call to
+    /// the inner [`CompiledPedal::process`].  For rate-reduced subcircuits the
+    /// inner circuit is only called every `rate_divisor` samples; between calls
+    /// the output is linearly interpolated from the previous to the current value.
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        if self.rate_divisor <= 1 {
+            self.held_output = self.circuit.process(input);
+            return self.held_output;
+        }
+
+        self.rate_counter -= 1;
+        if self.rate_counter == 0 {
+            self.rate_counter = self.rate_divisor;
+            self.prev_output = self.held_output;
+            self.held_output = self.circuit.process(input);
+        }
+
+        // Linear interpolation between prev_output and held_output.
+        // t = 1.0 when we just computed a new value, 0.0 when counter is back to rate_divisor.
+        let t = 1.0 - (self.rate_counter as f64 / self.rate_divisor as f64);
+        self.prev_output + t * (self.held_output - self.prev_output)
+    }
+
+    /// Forward a control change to the subcircuit's inner processor.
+    pub fn set_control(&mut self, label: &str, value: f64) {
+        self.circuit.set_control(label, value);
+    }
+
+    /// Reset subcircuit state (e.g., between songs / on silence detection).
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.held_output = 0.0;
+        self.prev_output = 0.0;
+        self.rate_counter = self.rate_divisor;
+        self.circuit.reset();
+    }
+}

@@ -188,14 +188,21 @@ mod tests {
     #[test]
     fn dc_gain_matches_analytical() {
         let tf = ToneFeedback::new(
-            1800.0, 1800.0, 3.9e-9, 4700.0, 10000.0,
-            "Treble".into(), 48000.0, 0.5,
+            1800.0,
+            1800.0,
+            3.9e-9,
+            4700.0,
+            10000.0,
+            "Treble".into(),
+            48000.0,
+            0.5,
         );
         let expected_dc = -(1800.0 + 4700.0) / 1800.0;
         assert!(
             (tf.dc_gain - expected_dc).abs() < 1e-10,
             "DC gain mismatch: got {}, expected {}",
-            tf.dc_gain, expected_dc
+            tf.dc_gain,
+            expected_dc
         );
     }
 
@@ -203,12 +210,24 @@ mod tests {
     #[test]
     fn coefficients_vary_with_pot() {
         let tf0 = ToneFeedback::new(
-            1800.0, 1800.0, 3.9e-9, 4700.0, 10000.0,
-            "Treble".into(), 48000.0, 0.0,
+            1800.0,
+            1800.0,
+            3.9e-9,
+            4700.0,
+            10000.0,
+            "Treble".into(),
+            48000.0,
+            0.0,
         );
         let tf1 = ToneFeedback::new(
-            1800.0, 1800.0, 3.9e-9, 4700.0, 10000.0,
-            "Treble".into(), 48000.0, 1.0,
+            1800.0,
+            1800.0,
+            3.9e-9,
+            4700.0,
+            10000.0,
+            "Treble".into(),
+            48000.0,
+            1.0,
         );
 
         // DC gain is pot-independent (shelf resistor dominates at DC)
@@ -218,7 +237,8 @@ mod tests {
         assert!(
             (tf0.b0 - tf1.b0).abs() > 1e-6,
             "b0 should differ: {} vs {}",
-            tf0.b0, tf1.b0
+            tf0.b0,
+            tf1.b0
         );
     }
 
@@ -233,8 +253,14 @@ mod tests {
 
         for &pos in &[0.0, 0.5, 1.0] {
             let mut tf = ToneFeedback::new(
-                1800.0, 1800.0, 3.9e-9, 4700.0, 10000.0,
-                "Treble".into(), sr, pos,
+                1800.0,
+                1800.0,
+                3.9e-9,
+                4700.0,
+                10000.0,
+                "Treble".into(),
+                sr,
+                pos,
             );
 
             // Warm up to reach steady state
@@ -258,7 +284,8 @@ mod tests {
         assert!(
             rms_by_pos[0] < rms_by_pos[2],
             "Treble pot should boost HF: pos=0 rms={:.6}, pos=1 rms={:.6}",
-            rms_by_pos[0], rms_by_pos[2]
+            rms_by_pos[0],
+            rms_by_pos[2]
         );
     }
 
@@ -266,8 +293,14 @@ mod tests {
     #[test]
     fn stability() {
         let mut tf = ToneFeedback::new(
-            1800.0, 1800.0, 3.9e-9, 4700.0, 10000.0,
-            "Treble".into(), 48000.0, 0.5,
+            1800.0,
+            1800.0,
+            3.9e-9,
+            4700.0,
+            10000.0,
+            "Treble".into(),
+            48000.0,
+            0.5,
         );
 
         for i in 0..10000 {
@@ -358,7 +391,11 @@ mod tests {
         let mut adaptor = build_klon_adaptor(sr, 0.5);
         let rms = measure_rms(&mut adaptor, 1000.0, sr, 0.1);
         eprintln!("WDF adaptor 1kHz RMS = {:.6}", rms);
-        assert!(rms > 0.01, "Adaptor should produce audible output, got {:.6}", rms);
+        assert!(
+            rms > 0.01,
+            "Adaptor should produce audible output, got {:.6}",
+            rms
+        );
     }
 
     #[test]
@@ -369,7 +406,12 @@ mod tests {
             let x = 0.5 * (2.0 * PI * 1000.0 * i as f64 / sr).sin();
             let y = adaptor.process(0.0, x);
             assert!(y.is_finite(), "Output NaN/Inf at sample {}", i);
-            assert!(y.abs() < 100.0, "Output diverging at sample {}: {:.2}", i, y);
+            assert!(
+                y.abs() < 100.0,
+                "Output diverging at sample {}: {:.2}",
+                i,
+                y
+            );
         }
     }
 
@@ -395,7 +437,8 @@ mod tests {
         assert!(
             gain_mag > 0.3 && gain_mag < 15.0,
             "DC gain magnitude should be reasonable, got {:.4} (mag={:.4})",
-            dc_gain, gain_mag
+            dc_gain,
+            gain_mag
         );
     }
 
@@ -413,7 +456,11 @@ mod tests {
         let ratio_db = 20.0 * (rms_bright / rms_dark).log10();
         eprintln!(
             "WDF adaptor treble at {}Hz: dark={:.6}, bright={:.6}, ratio={:.3}x, dB={:.2}",
-            freq, rms_dark, rms_bright, rms_bright / rms_dark, ratio_db
+            freq,
+            rms_dark,
+            rms_bright,
+            rms_bright / rms_dark,
+            ratio_db
         );
 
         assert!(
@@ -443,7 +490,10 @@ mod tests {
             let rms_b = measure_rms(&mut ab, freq, sr, 0.1);
             let ratio = if rms_d > 1e-10 { rms_b / rms_d } else { 1.0 };
             let db = 20.0 * ratio.log10();
-            eprintln!("  {}Hz: dark={:.6} bright={:.6} ratio={:.4} ({:.2}dB)", freq, rms_d, rms_b, ratio, db);
+            eprintln!(
+                "  {}Hz: dark={:.6} bright={:.6} ratio={:.4} ({:.2}dB)",
+                freq, rms_d, rms_b, ratio, db
+            );
             ratios.push(db);
         }
 

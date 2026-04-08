@@ -2476,8 +2476,7 @@ fn plan_diode_bridge(
         .filter(|n| {
             !all_diode_nodes.contains(n)
                 && !graph.output_pin_nodes.contains(n)
-                && (opamp_input_nodes.contains(n)
-                    || graph.transistor_input_nodes.contains(n))
+                && (opamp_input_nodes.contains(n) || graph.transistor_input_nodes.contains(n))
         })
         .collect();
 

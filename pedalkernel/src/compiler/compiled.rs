@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::stage::{
     MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind, SidechainProcessor,
-    WdfStage,
+    SubcircuitProcessor, WdfStage,
 };
 
 /// Reference to a stage by type and index, for topological ordering.
@@ -75,6 +75,8 @@ pub(super) enum ControlTarget {
     /// The sidechain's own CompiledPedal handles the pot lookup and
     /// scattering matrix recomputation internally.
     SidechainControl(usize),
+    /// Forward a control change to a subcircuit's inner processor.
+    SubcircuitControl { subcircuit_idx: usize },
     /// Modify an LFO's rate (index into lfos vector).
     LfoRate(usize),
     /// Modify an LFO's depth/amplitude (index into lfos vector).
@@ -544,6 +546,16 @@ pub struct CompiledPedal {
     /// the push-pull grid bias. Multiple sidechains are supported
     /// (e.g., one per channel in a stereo compressor like the 670).
     pub(super) sidechains: Vec<SidechainProcessor>,
+    /// Subcircuit processors (for equipment with subcircuit blocks).
+    /// When non-empty, `process()` delegates to `process_subcircuits()` and
+    /// the normal WDF stage pipeline is bypassed.
+    pub(super) subcircuit_processors: Vec<SubcircuitProcessor>,
+    /// Routing steps defining signal flow between subcircuits (topological order).
+    pub(super) subcircuit_routing: Vec<super::subcircuit::RoutingStep>,
+    /// Index of the subcircuit whose output is the equipment output.
+    pub(super) subcircuit_output_idx: Option<usize>,
+    /// Per-subcircuit output buffer (indexed by subcircuit_idx).
+    pub(super) subcircuit_outputs: Vec<f64>,
     /// Smoothed parameters for zipper-free pot control.
     /// One per pot in the circuit that needs smoothing.
     pub(super) pot_smoothers: Vec<SmoothedParam>,
@@ -1143,6 +1155,12 @@ impl CompiledPedal {
                         sc.set_control(label, value);
                     }
                 }
+                ControlTarget::SubcircuitControl { subcircuit_idx } => {
+                    let sc_idx = *subcircuit_idx;
+                    if let Some(sc) = self.subcircuit_processors.get_mut(sc_idx) {
+                        sc.set_control(label, value);
+                    }
+                }
                 ControlTarget::LfoRate(lfo_idx) => {
                     let lfo_idx = *lfo_idx;
                     if let Some(binding) = self.lfos.get_mut(lfo_idx) {
@@ -1246,7 +1264,6 @@ impl CompiledPedal {
             eprintln!("[CompiledPedal] note_on({}) → no trigger mapped", note);
         }
     }
-
 
     /// Update mirrored pots (position = 1.0 - source) across all stages.
     fn apply_pot_mirrors(&mut self, comp_id: &str, value: f64) {
@@ -1494,8 +1511,72 @@ impl CompiledPedal {
     }
 }
 
+impl CompiledPedal {
+    /// Process one sample through the subcircuit routing graph.
+    ///
+    /// Called when `subcircuit_processors` is non-empty. Iterates the
+    /// topologically-sorted routing steps, resolving signal sources and
+    /// forwarding samples to each subcircuit's inner processor.
+    fn process_subcircuits(&mut self, input: f64) -> f64 {
+        // Reset per-sample output buffer
+        for v in &mut self.subcircuit_outputs {
+            *v = 0.0;
+        }
+
+        // Walk routing steps in topological order (stored as indices to avoid clone)
+        for step_idx in 0..self.subcircuit_routing.len() {
+            let (sc_idx, sig) = match &self.subcircuit_routing[step_idx] {
+                super::subcircuit::RoutingStep::ProcessSubcircuit {
+                    subcircuit_idx,
+                    input_source,
+                } => {
+                    let idx = *subcircuit_idx;
+                    let sig =
+                        Self::resolve_signal_static(input, input_source, &self.subcircuit_outputs);
+                    (idx, sig)
+                }
+            };
+            let output = self.subcircuit_processors[sc_idx].process(sig);
+            self.subcircuit_outputs[sc_idx] = output;
+        }
+
+        // Return the designated output subcircuit's signal
+        if let Some(out_idx) = self.subcircuit_output_idx {
+            self.subcircuit_outputs.get(out_idx).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Resolve a `SignalSource` to a concrete `f64` sample value.
+    ///
+    /// Static version (no `&self`) so it can be called while `subcircuit_processors`
+    /// is borrowed mutably.
+    fn resolve_signal_static(
+        input: f64,
+        source: &super::subcircuit::SignalSource,
+        outputs: &[f64],
+    ) -> f64 {
+        use super::subcircuit::SignalSource;
+        match source {
+            SignalSource::EquipmentInput => input,
+            SignalSource::SubcircuitOutput(idx) => outputs.get(*idx).copied().unwrap_or(0.0),
+            SignalSource::Sum(sources) => sources
+                .iter()
+                .map(|s| Self::resolve_signal_static(input, s, outputs))
+                .sum(),
+        }
+    }
+}
+
 impl PedalProcessor for CompiledPedal {
     fn process(&mut self, input: f64) -> f64 {
+        // Subcircuit routing mode: process inter-subcircuit signal graph.
+        // When subcircuits are present, the normal WDF stage pipeline is bypassed.
+        if !self.subcircuit_processors.is_empty() {
+            return self.process_subcircuits(input);
+        }
+
         // Fire any pending triggers.
         // Triggers with explicit injection nodes route through node_signals
         // for per-voice WDF stage routing. Triggers without (injection_node == MAX)

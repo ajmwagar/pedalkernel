@@ -194,8 +194,18 @@ const SCREAMER_PEDAL: &str = include_str!("../examples/pedals/overdrive/tube_scr
 #[test]
 fn screamer_drive_pot_changes_output() {
     let input = sine_at(1000.0, 0.1, 0.15, SAMPLE_RATE);
-    let low = compile_and_process(SCREAMER_PEDAL, &input, SAMPLE_RATE, &[("Drive", 0.0), ("Tone", 0.5), ("Level", 0.5)]);
-    let high = compile_and_process(SCREAMER_PEDAL, &input, SAMPLE_RATE, &[("Drive", 1.0), ("Tone", 0.5), ("Level", 0.5)]);
+    let low = compile_and_process(
+        SCREAMER_PEDAL,
+        &input,
+        SAMPLE_RATE,
+        &[("Drive", 0.0), ("Tone", 0.5), ("Level", 0.5)],
+    );
+    let high = compile_and_process(
+        SCREAMER_PEDAL,
+        &input,
+        SAMPLE_RATE,
+        &[("Drive", 1.0), ("Tone", 0.5), ("Level", 0.5)],
+    );
 
     let db = rms_db_change(&low, &high).abs();
     eprintln!("[screamer_drive] dB change: {db:.2}");
@@ -214,7 +224,9 @@ fn screamer_drive_pot_changes_output() {
 fn goldenrod_treble_pot_changes_spectrum() {
     // Use real Goldenrod pedal file — the inline simplified version may
     // compile differently. The real pedal has the full Klon topology.
-    let goldenrod_path = std::path::Path::new("/Users/ajmwagar/src/pedalkernel/pedalkernel-pro/pedals/legends/goldenrod.pedal");
+    let goldenrod_path = std::path::Path::new(
+        "/Users/ajmwagar/src/pedalkernel/pedalkernel-pro/pedals/legends/goldenrod.pedal",
+    );
     if !goldenrod_path.exists() {
         eprintln!("[goldenrod_treble] SKIP: pro pedal not found");
         return;
@@ -224,8 +236,18 @@ fn goldenrod_treble_pot_changes_spectrum() {
     // time to settle after set_control before we measure RMS.
     let input = sine_at(1000.0, 0.1, 0.5, SAMPLE_RATE); // 0.5s = 24000 samples
 
-    let bright = compile_and_process(&src, &input, SAMPLE_RATE, &[("Gain", 0.5), ("Treble", 0.0), ("Output", 0.5)]);
-    let dark = compile_and_process(&src, &input, SAMPLE_RATE, &[("Gain", 0.5), ("Treble", 1.0), ("Output", 0.5)]);
+    let bright = compile_and_process(
+        &src,
+        &input,
+        SAMPLE_RATE,
+        &[("Gain", 0.5), ("Treble", 0.0), ("Output", 0.5)],
+    );
+    let dark = compile_and_process(
+        &src,
+        &input,
+        SAMPLE_RATE,
+        &[("Gain", 0.5), ("Treble", 1.0), ("Output", 0.5)],
+    );
 
     // Measure RMS on last quarter only (after pot has settled)
     let n = bright.len();

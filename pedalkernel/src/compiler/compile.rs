@@ -1419,6 +1419,112 @@ pub fn compile_pedal(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal
     compile_pedal_with_options(pedal, sample_rate, CompileOptions::default())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Subcircuit equipment compiler
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Compile an equipment definition that uses subcircuit blocks.
+///
+/// Each subcircuit is compiled independently via `compile_pedal_with_options()`
+/// (potentially at a reduced sample rate) and wired together via the routing
+/// graph produced by `subcircuit::build_routing()`.
+///
+/// When all components live inside subcircuits (`pedal.components.is_empty()`),
+/// the caller's normal 6-pass pipeline is entirely replaced by this function.
+fn compile_subcircuit_equipment(
+    pedal: &PedalDef,
+    sample_rate: f64,
+    _options: &CompileOptions,
+) -> Result<CompiledPedal, String> {
+    use super::stage::SubcircuitProcessor;
+    use super::subcircuit;
+
+    // 1. Resolve subcircuits to compilable sub-PedalDefs
+    let resolved = subcircuit::resolve_subcircuits(pedal)
+        .map_err(|e| format!("subcircuit resolution: {e}"))?;
+
+    // 2. Compile each subcircuit
+    let mut processors: Vec<SubcircuitProcessor> = Vec::with_capacity(resolved.len());
+    for r in &resolved {
+        let sc_rate = sample_rate / r.rate_divisor as f64;
+        // Subcircuits use no oversampling by default to avoid N × M sample rate blowup.
+        // Individual sub-circuits can opt into oversampling via their own options later.
+        let sc_options = CompileOptions {
+            collapse_nl: false,
+            oversampling: crate::oversampling::OversamplingFactor::X1,
+            ..CompileOptions::default()
+        };
+        let compiled = compile_pedal_with_options(&r.pedal_def, sc_rate, sc_options)
+            .map_err(|e| format!("subcircuit '{}': {e}", r.name))?;
+        processors.push(SubcircuitProcessor {
+            circuit: compiled,
+            name: r.name.clone(),
+            rate_divisor: r.rate_divisor,
+            rate_counter: r.rate_divisor.max(1),
+            held_output: 0.0,
+            prev_output: 0.0,
+        });
+    }
+
+    // 3. Build routing graph
+    let (routing, output_idx) = subcircuit::build_routing(pedal, &resolved)
+        .map_err(|e| format!("subcircuit routing: {e}"))?;
+
+    let n = processors.len();
+
+    // 4. Assemble routing-only CompiledPedal shell
+    Ok(CompiledPedal {
+        stages: Vec::new(),
+        push_pull_stages: Vec::new(),
+        multi_nl_stages: Vec::new(),
+        pre_gain: 1.0,
+        output_gain: 1.0,
+        rail_saturation: super::compiled::RailSaturation::None,
+        rail_sat_oversampler: crate::oversampling::Oversampler::new(
+            crate::oversampling::OversamplingFactor::X1,
+        ),
+        sample_rate,
+        controls: Vec::new(),
+        gain_range: (1.0, 1.0),
+        supply_voltage: pedal.supplies.first().map_or(9.0, |s| s.config.voltage),
+        lfos: Vec::new(),
+        envelopes: Vec::new(),
+        slew_limiters: Vec::new(),
+        bbds: Vec::new(),
+        delay_lines: Vec::new(),
+        vcos: Vec::new(),
+        vcas: Vec::new(),
+        thermal: None,
+        tolerance_seed: 0,
+        oversampling: crate::oversampling::OversamplingFactor::X1,
+        opamp_stages: Vec::new(),
+        power_supply: None,
+        #[cfg(debug_assertions)]
+        debug_stats: None,
+        metrics_accumulator: None,
+        metrics_buffer: None,
+        input_loading: None,
+        output_loading: None,
+        output_dc_block: None,
+        sidechains: Vec::new(),
+        subcircuit_processors: processors,
+        subcircuit_routing: routing,
+        subcircuit_output_idx: Some(output_idx),
+        subcircuit_outputs: vec![0.0; n],
+        pot_smoothers: Vec::new(),
+        pot_mirrors: std::collections::HashMap::new(),
+        base_grid_bias: 0.0,
+        multi_nl_recompute_counter: 0,
+        stage_order: Vec::new(),
+        node_signals: Vec::new(),
+        bbd_wet_mix: 0.5,
+        bbd_mix_pot_id: None,
+        triggers: Vec::new(),
+        midi_trigger_map: std::collections::HashMap::new(),
+        original_passive_values: std::collections::HashMap::new(),
+    })
+}
+
 /// Compile a pedal definition with custom options.
 ///
 /// Orchestrates the 6-pass compilation pipeline:
@@ -1433,6 +1539,16 @@ pub fn compile_pedal_with_options(
     sample_rate: f64,
     options: CompileOptions,
 ) -> Result<CompiledPedal, String> {
+    // ══ Subcircuit pre-pass: compile & route subcircuits ═════════════
+    // When the equipment has subcircuit blocks, each block is compiled as an
+    // independent sub-PedalDef (potentially at a different sample rate) and
+    // wired together via the routing graph.  When all components live in
+    // subcircuits, the passes below are skipped and a routing-only shell is
+    // returned immediately.
+    if !pedal.subcircuits.is_empty() {
+        return compile_subcircuit_equipment(pedal, sample_rate, &options);
+    }
+
     let oversampling = options.oversampling;
     let tolerance = options.tolerance;
     let enable_thermal = options.thermal;
@@ -1504,7 +1620,10 @@ pub fn compile_pedal_with_options(
     // the MNA sees a dead end at pos. Merging pos_node into out_node makes
     // the passive path continuous through the buffer.
     for info in &opamp_analysis.feedback_loops {
-        if matches!(info.feedback_kind, super::graph::OpAmpFeedbackKind::UnityGain) {
+        if matches!(
+            info.feedback_kind,
+            super::graph::OpAmpFeedbackKind::UnityGain
+        ) {
             let pos = info.pos_node;
             let out = info.out_node;
             if pos != out {
@@ -2603,6 +2722,11 @@ pub fn compile_pedal_with_options(
         output_loading: None,
         output_dc_block: None,
         sidechains,
+        // Normal (non-subcircuit) pedals have no subcircuit routing
+        subcircuit_processors: Vec::new(),
+        subcircuit_routing: Vec::new(),
+        subcircuit_output_idx: None,
+        subcircuit_outputs: Vec::new(),
         pot_smoothers,
         pot_mirrors: {
             // Build reverse mapping: source_id → [mirrored_ids]

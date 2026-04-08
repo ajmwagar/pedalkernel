@@ -244,17 +244,26 @@ pub(super) fn build_opamp_feedback_stages(
                 let has_reactive_fb = !skip_tree
                     && info.input_photocoupler_ids.is_empty()
                     && info.feedback_comp_ids.iter().any(|id| {
-                    pedal.components.iter().any(|c| c.id == *id && c.kind.capacitance().is_some())
-                    || is_pot_component(id, pedal)
-                });
+                        pedal
+                            .components
+                            .iter()
+                            .any(|c| c.id == *id && c.kind.capacitance().is_some())
+                            || is_pot_component(id, pedal)
+                    });
                 #[cfg(test)]
-                eprintln!("[OPAMP_WDF] {} has_reactive_fb={} skip_tree={}", info.comp_id, has_reactive_fb, skip_tree);
+                eprintln!(
+                    "[OPAMP_WDF] {} has_reactive_fb={} skip_tree={}",
+                    info.comp_id, has_reactive_fb, skip_tree
+                );
                 if has_reactive_fb {
                     let wdf_result = build_opamp_wdf_adaptor(info, graph, pedal, sample_rate, *ri);
                     #[cfg(test)]
-                    eprintln!("[OPAMP_WDF] {} build_opamp_wdf_adaptor → {}", info.comp_id, wdf_result.is_some());
-                    if let Some((zi_tree, zf_tree, wdf_pot_id, wdf_edges)) = wdf_result
-                    {
+                    eprintln!(
+                        "[OPAMP_WDF] {} build_opamp_wdf_adaptor → {}",
+                        info.comp_id,
+                        wdf_result.is_some()
+                    );
+                    if let Some((zi_tree, zf_tree, wdf_pot_id, wdf_edges)) = wdf_result {
                         if let Some(ref pid) = wdf_pot_id {
                             feedback_pot_id = Some(pid.clone());
                         }
@@ -511,18 +520,25 @@ pub(super) fn build_opamp_feedback_stages(
                     root.set_soft_clip(diode_vf);
                 }
                 // ── Try WDF constraint adaptor for NonInverting ──
-                let has_reactive_ni = !skip_tree && (
-                    info.feedback_comp_ids.iter().any(|id| {
-                        pedal.components.iter().any(|c| c.id == *id && c.kind.capacitance().is_some())
-                        || is_pot_component(id, pedal)
-                    })
-                    || info.ground_leg_comp_ids.iter().any(|id| {
-                        pedal.components.iter().any(|c| c.id == *id && c.kind.capacitance().is_some())
-                        || is_pot_component(id, pedal)
-                    })
-                );
+                let has_reactive_ni = !skip_tree
+                    && (info.feedback_comp_ids.iter().any(|id| {
+                        pedal
+                            .components
+                            .iter()
+                            .any(|c| c.id == *id && c.kind.capacitance().is_some())
+                            || is_pot_component(id, pedal)
+                    }) || info.ground_leg_comp_ids.iter().any(|id| {
+                        pedal
+                            .components
+                            .iter()
+                            .any(|c| c.id == *id && c.kind.capacitance().is_some())
+                            || is_pot_component(id, pedal)
+                    }));
                 #[cfg(test)]
-                eprintln!("[OPAMP_WDF_NI] {} has_reactive_ni={}", info.comp_id, has_reactive_ni);
+                eprintln!(
+                    "[OPAMP_WDF_NI] {} has_reactive_ni={}",
+                    info.comp_id, has_reactive_ni
+                );
                 if has_reactive_ni {
                     if let Some((zi_tree, zf_tree, wdf_pot_id, wdf_edges)) =
                         build_opamp_wdf_adaptor_ni(info, graph, pedal, sample_rate)
@@ -1431,8 +1447,13 @@ fn build_opamp_wdf_adaptor(
         .collect();
 
     #[cfg(test)]
-    eprintln!("[WDF_OPAMP_BUILD] {} fb_comp_ids={:?} fb_edges={} input_comp_ids={:?}",
-        info.comp_id, info.feedback_comp_ids, fb_edges.len(), info.input_comp_ids);
+    eprintln!(
+        "[WDF_OPAMP_BUILD] {} fb_comp_ids={:?} fb_edges={} input_comp_ids={:?}",
+        info.comp_id,
+        info.feedback_comp_ids,
+        fb_edges.len(),
+        info.input_comp_ids
+    );
 
     if fb_edges.is_empty() {
         #[cfg(test)]
@@ -1462,10 +1483,17 @@ fn build_opamp_wdf_adaptor(
     fb_border.dedup();
 
     #[cfg(test)]
-    eprintln!("[WDF_OPAMP_BUILD] {} Zf fb_border={:?}", info.comp_id, fb_border);
+    eprintln!(
+        "[WDF_OPAMP_BUILD] {} Zf fb_border={:?}",
+        info.comp_id, fb_border
+    );
     if fb_border.len() != 2 {
         #[cfg(test)]
-        eprintln!("[WDF_OPAMP_BUILD] {} BAIL: Zf border len={} (need 2)", info.comp_id, fb_border.len());
+        eprintln!(
+            "[WDF_OPAMP_BUILD] {} BAIL: Zf border len={} (need 2)",
+            info.comp_id,
+            fb_border.len()
+        );
         return None;
     }
 
@@ -1483,7 +1511,11 @@ fn build_opamp_wdf_adaptor(
     .0;
 
     #[cfg(test)]
-    eprintln!("[WDF_OPAMP_BUILD] {} Zf tree:\n{}", info.comp_id, dump_tree(&zf_tree, 1));
+    eprintln!(
+        "[WDF_OPAMP_BUILD] {} Zf tree:\n{}",
+        info.comp_id,
+        dump_tree(&zf_tree, 1)
+    );
 
     // ── Build Zi (input: input_node → neg) ──
     let input_set: HashSet<&str> = info.input_comp_ids.iter().map(|s| s.as_str()).collect();
@@ -1554,7 +1586,10 @@ fn build_opamp_wdf_adaptor(
         // No input edges identified by opamp analysis — use ri_fallback as VS port resistance.
         // This handles cases where the input resistor wasn't tracked (e.g., Klon U4).
         #[cfg(test)]
-        eprintln!("[WDF_OPAMP_BUILD] {} no input edges, using ri_fallback={:.1}", info.comp_id, ri_fallback);
+        eprintln!(
+            "[WDF_OPAMP_BUILD] {} no input edges, using ri_fallback={:.1}",
+            info.comp_id, ri_fallback
+        );
         DynNode::VoltageSource(0.0, ri_fallback)
     };
 
@@ -1612,7 +1647,12 @@ fn build_opamp_wdf_adaptor_ni(
         .collect();
 
     #[cfg(test)]
-    eprintln!("[WDF_NI_BUILD] {} fb_edges={} gl_comp_ids={:?}", info.comp_id, fb_edges.len(), info.ground_leg_comp_ids);
+    eprintln!(
+        "[WDF_NI_BUILD] {} fb_edges={} gl_comp_ids={:?}",
+        info.comp_id,
+        fb_edges.len(),
+        info.ground_leg_comp_ids
+    );
 
     if fb_edges.is_empty() {
         return None;
@@ -1620,7 +1660,10 @@ fn build_opamp_wdf_adaptor_ni(
 
     let fb_nodes: HashSet<NodeId> = fb_edges
         .iter()
-        .flat_map(|&i| { let e = &graph.edges[i]; [e.node_a, e.node_b] })
+        .flat_map(|&i| {
+            let e = &graph.edges[i];
+            [e.node_a, e.node_b]
+        })
         .collect();
     let mut fb_border: Vec<NodeId> = fb_nodes
         .iter()
@@ -1637,17 +1680,32 @@ fn build_opamp_wdf_adaptor_ni(
 
     if fb_border.len() != 2 {
         #[cfg(test)]
-        eprintln!("[WDF_NI_BUILD] {} Zf border={:?} (need 2)", info.comp_id, fb_border);
+        eprintln!(
+            "[WDF_NI_BUILD] {} Zf border={:?} (need 2)",
+            info.comp_id, fb_border
+        );
         return None;
     }
 
     let zf_tree = super::graph::graph_reduce(
-        &fb_edges, &[], &fb_border, graph, sample_rate,
-        &std::collections::HashMap::new(), |n| n, None,
-    ).ok()?.0;
+        &fb_edges,
+        &[],
+        &fb_border,
+        graph,
+        sample_rate,
+        &std::collections::HashMap::new(),
+        |n| n,
+        None,
+    )
+    .ok()?
+    .0;
 
     // ── Build Zi (ground leg: neg → gnd) ──
-    let gl_set: HashSet<&str> = info.ground_leg_comp_ids.iter().map(|s| s.as_str()).collect();
+    let gl_set: HashSet<&str> = info
+        .ground_leg_comp_ids
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
     let gl_edges: Vec<usize> = graph
         .edges
         .iter()
@@ -1671,7 +1729,10 @@ fn build_opamp_wdf_adaptor_ni(
     } else if gl_edges.len() > 1 {
         let gl_nodes: HashSet<NodeId> = gl_edges
             .iter()
-            .flat_map(|&i| { let e = &graph.edges[i]; [e.node_a, e.node_b] })
+            .flat_map(|&i| {
+                let e = &graph.edges[i];
+                [e.node_a, e.node_b]
+            })
             .collect();
         let mut gl_border: Vec<NodeId> = gl_nodes
             .iter()
@@ -1691,22 +1752,37 @@ fn build_opamp_wdf_adaptor_ni(
         }
 
         super::graph::graph_reduce(
-            &gl_edges, &[], &gl_border, graph, sample_rate,
-            &std::collections::HashMap::new(), |n| n, None,
-        ).ok()?.0
+            &gl_edges,
+            &[],
+            &gl_border,
+            graph,
+            sample_rate,
+            &std::collections::HashMap::new(),
+            |n| n,
+            None,
+        )
+        .ok()?
+        .0
     } else {
         // No ground-leg edges — can't build Zi
         return None;
     };
 
     // Find feedback pot ID
-    let feedback_pot_id = info.feedback_comp_ids.iter()
+    let feedback_pot_id = info
+        .feedback_comp_ids
+        .iter()
         .chain(info.ground_leg_comp_ids.iter())
         .find_map(|id| {
-            let base = id.strip_suffix("__aw")
+            let base = id
+                .strip_suffix("__aw")
                 .or_else(|| id.strip_suffix("__wb"))
                 .unwrap_or(id);
-            if pedal.components.iter().any(|c| c.id == base && c.kind.pot_taper().is_some()) {
+            if pedal
+                .components
+                .iter()
+                .any(|c| c.id == base && c.kind.pot_taper().is_some())
+            {
                 Some(base.to_string())
             } else {
                 None
@@ -1717,8 +1793,13 @@ fn build_opamp_wdf_adaptor_ni(
     consumed.extend(gl_edges);
 
     #[cfg(test)]
-    eprintln!("[WDF_NI_BUILD] {} built: Zi R={:.1}, Zf R={:.1}, pot={:?}",
-        info.comp_id, zi_tree.port_resistance(), zf_tree.port_resistance(), feedback_pot_id);
+    eprintln!(
+        "[WDF_NI_BUILD] {} built: Zi R={:.1}, Zf R={:.1}, pot={:?}",
+        info.comp_id,
+        zi_tree.port_resistance(),
+        zf_tree.port_resistance(),
+        feedback_pot_id
+    );
 
     Some((zi_tree, zf_tree, feedback_pot_id, consumed))
 }
@@ -1729,17 +1810,32 @@ fn dump_tree(node: &DynNode, depth: usize) -> String {
     match node {
         DynNode::Leaf(leaf) => {
             let id = leaf.comp_id().unwrap_or("?");
-            format!("{}Leaf({} '{}', R={:.1})", indent, leaf.type_tag(), id,
-                leaf.port_resistance())
+            format!(
+                "{}Leaf({} '{}', R={:.1})",
+                indent,
+                leaf.type_tag(),
+                id,
+                leaf.port_resistance()
+            )
         }
-        DynNode::Binary { kind, left, right, gamma, .. } => {
+        DynNode::Binary {
+            kind,
+            left,
+            right,
+            gamma,
+            ..
+        } => {
             let kind_str = match kind {
                 super::dyn_node::BinaryKind::Series => "Series",
                 super::dyn_node::BinaryKind::Parallel => "Parallel",
             };
-            format!("{}{kind_str}(γ={gamma:.4}, R={:.1})\n{}\n{}",
-                indent, node.port_resistance(),
-                dump_tree(left, depth+1), dump_tree(right, depth+1))
+            format!(
+                "{}{kind_str}(γ={gamma:.4}, R={:.1})\n{}\n{}",
+                indent,
+                node.port_resistance(),
+                dump_tree(left, depth + 1),
+                dump_tree(right, depth + 1)
+            )
         }
         _ => format!("{}Other(R={:.1})", indent, node.port_resistance()),
     }
