@@ -1118,9 +1118,14 @@ impl CompiledPedal {
                 continue;
             }
             found = true;
-            // Map through range: (0,1)→identity, (1,0)→invert (dual-gang).
+            // Apply taper FIRST (on raw knob position), then map through range.
+            // Range inversion after taper preserves the taper curve shape.
+            // Previous order (range then taper) caused audio-taper pots with
+            // inverted range [1.0, 0.0] to compress the usable range into the
+            // first ~8% of knob travel.
             let (r0, r1) = self.controls[i].range;
-            let value = (r0 + value * (r1 - r0)).clamp(0.0, 1.0);
+            let tapered_pos = self.controls[i].taper.apply(value);
+            let value = (r0 + tapered_pos * (r1 - r0)).clamp(0.0, 1.0);
             match &self.controls[i].target {
                 ControlTarget::PotInStage(_) | ControlTarget::PotInMultiNlStage(_, _) => {
                     if let Some(smoother) =
@@ -1129,14 +1134,14 @@ impl CompiledPedal {
                         smoother.set_target(value);
                     } else {
                         // Fallback: no smoother (shouldn't happen), update immediately.
+                        // `value` is already tapered+ranged from above.
                         let comp_id = self.controls[i].component_id.clone();
                         let comp_id_aw = self.controls[i].component_id_aw.clone();
                         let comp_id_wb = self.controls[i].component_id_wb.clone();
-                        let tapered = self.controls[i].taper.apply(value);
                         for stage in &mut self.stages {
                             stage.set_pot(&comp_id, value);
-                            stage.set_pot(&comp_id_aw, tapered);
-                            stage.set_pot(&comp_id_wb, 1.0 - tapered);
+                            stage.set_pot(&comp_id_aw, value);
+                            stage.set_pot(&comp_id_wb, 1.0 - value);
                             stage.flush_recompute();
                         }
                         for stage in &mut self.multi_nl_stages {
@@ -1309,15 +1314,15 @@ impl CompiledPedal {
                 let comp_id = self.controls[ctrl_idx].component_id.clone();
                 let comp_id_aw = self.controls[ctrl_idx].component_id_aw.clone();
                 let comp_id_wb = self.controls[ctrl_idx].component_id_wb.clone();
-                // Pre-apply taper once for split halves (aw/wb use Linear
-                // taper internally) so aw + wb = max_R always.
-                let tapered = self.controls[ctrl_idx].taper.apply(value);
+                // Taper is already applied in set_control() before the smoother
+                // stores the target. The smoothed value is tapered+ranged, so
+                // aw/wb split uses it directly (aw + wb = max_R always).
 
                 // Update all WDF stages — each stage ignores pots it doesn't own.
                 for stage in &mut self.stages {
                     stage.set_pot(&comp_id, value);
-                    stage.set_pot(&comp_id_aw, tapered);
-                    stage.set_pot(&comp_id_wb, 1.0 - tapered);
+                    stage.set_pot(&comp_id_aw, value);
+                    stage.set_pot(&comp_id_wb, 1.0 - value);
                 }
                 // Update all multi-NL stages (handles __aw/__wb internally).
                 for stage in &mut self.multi_nl_stages {

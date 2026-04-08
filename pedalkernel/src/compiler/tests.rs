@@ -7070,3 +7070,165 @@ fn diag_tone_pots_freq_response() {
         "Screamer Tone should affect 5kHz, ratio={ts_tone_ratio_5k:.2}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Pot taper + range inversion tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Regression test: audio-taper pots with inverted range [1.0, 0.0] must
+/// spread the usable volume across the full knob travel, not compress it
+/// into the first ~8%.
+#[test]
+fn pot_taper_inverted_range_spreads_evenly() {
+    use crate::dsl::PotTaper;
+
+    // Simulate what set_control does: taper first, then range map.
+    let taper = PotTaper::A;
+    let range = (1.0_f64, 0.0_f64); // inverted
+
+    let map = |knob: f64| -> f64 {
+        let tapered = taper.apply(knob);
+        (range.0 + tapered * (range.1 - range.0)).clamp(0.0, 1.0)
+    };
+
+    // knob=0 should give max resistance (1.0), knob=1 should give min (0.0)
+    let at_0 = map(0.0);
+    let at_1 = map(1.0);
+    assert!((at_0 - 1.0).abs() < 0.001, "knob=0 should map to 1.0, got {at_0}");
+    assert!(at_1.abs() < 0.001, "knob=1 should map to 0.0, got {at_1}");
+
+    // Critical: at 10% knob travel, the value should NOT have dropped to near-zero.
+    // With the old bug (range then taper), 8% travel → taper(0.92)=0.86 → near max.
+    // The useful range was 0-8%, then flat. Now it should be gradual.
+    let at_10pct = map(0.1);
+    assert!(
+        at_10pct > 0.9,
+        "knob=0.1 with inverted audio taper should still be >0.9 (gradual), got {at_10pct:.4}"
+    );
+
+    let at_50pct = map(0.5);
+    assert!(
+        at_50pct > 0.5 && at_50pct < 0.9,
+        "knob=0.5 with inverted audio taper should be ~0.75 (midrange), got {at_50pct:.4}"
+    );
+
+    let at_90pct = map(0.9);
+    assert!(
+        at_90pct < 0.25,
+        "knob=0.9 with inverted audio taper should be <0.25, got {at_90pct:.4}"
+    );
+
+    // Verify monotonic decrease
+    let positions: Vec<f64> = (0..=10).map(|i| i as f64 / 10.0).collect();
+    let values: Vec<f64> = positions.iter().map(|&p| map(p)).collect();
+    for i in 1..values.len() {
+        assert!(
+            values[i] <= values[i - 1] + 0.001,
+            "Inverted pot must be monotonically decreasing: knob={:.1} val={:.4} > knob={:.1} val={:.4}",
+            positions[i], values[i], positions[i - 1], values[i - 1]
+        );
+    }
+}
+
+/// Verify non-inverted audio taper [0.0, 1.0] still works correctly.
+#[test]
+fn pot_taper_normal_range_unchanged() {
+    use crate::dsl::PotTaper;
+
+    let taper = PotTaper::A;
+    let range = (0.0_f64, 1.0_f64); // normal
+
+    let map = |knob: f64| -> f64 {
+        let tapered = taper.apply(knob);
+        (range.0 + tapered * (range.1 - range.0)).clamp(0.0, 1.0)
+    };
+
+    // Should just be the taper curve directly
+    assert!((map(0.0)).abs() < 0.001);
+    assert!((map(1.0) - 1.0).abs() < 0.001);
+
+    // Audio taper: 50% rotation ≈ 25% output (slow start)
+    let mid = map(0.5);
+    assert!(
+        mid > 0.15 && mid < 0.35,
+        "Audio taper at 50% should be ~0.25, got {mid:.4}"
+    );
+}
+
+/// Volume pot with inverted range should have usable range beyond 10% knob travel.
+/// This is the end-to-end regression test for the RATKING Volume pot bug.
+#[test]
+fn ratking_volume_inverted_range_gradual() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("ratking_non_invert_v1a.pedal"),
+    )
+    .unwrap();
+    let pedal = parse_pedal_file(&src).unwrap();
+
+    let input: Vec<f64> = (0..48000)
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        .collect();
+
+    // Test that volume at 50% is meaningfully different from volume at 10%
+    let mut peaks = Vec::new();
+    for &vol in &[0.0, 0.1, 0.25, 0.5, 0.75, 1.0] {
+        let mut p = compile_pedal(&pedal, 48000.0).unwrap();
+        p.set_control("Distortion", 0.5);
+        p.set_control("Filter", 0.5);
+        p.set_control("Volume", vol);
+        // Warm up
+        for _ in 0..9600 {
+            p.process(0.0);
+        }
+        let out: Vec<f64> = input.iter().map(|&s| p.process(s)).collect();
+        let peak = out[4800..].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        peaks.push((vol, peak));
+    }
+
+    eprintln!(
+        "[RATKING] Volume taper test: {}",
+        peaks
+            .iter()
+            .map(|(p, v)| format!("{p:.2}={v:.4}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // RATKING Volume has range [1.0, 0.0] — knob=0 is loudest, knob=1 is silent.
+    // The bug was: 0% = silent, 8% = full volume, 9-100% = no change.
+    // After fix: volume should decrease gradually across the full knob travel.
+    let peak_0 = peaks.iter().find(|(v, _)| *v == 0.0).unwrap().1;
+    let peak_25 = peaks.iter().find(|(v, _)| *v == 0.25).unwrap().1;
+    let peak_50 = peaks.iter().find(|(v, _)| *v == 0.5).unwrap().1;
+    let peak_75 = peaks.iter().find(|(v, _)| *v == 0.75).unwrap().1;
+    let peak_100 = peaks.iter().find(|(v, _)| *v == 1.0).unwrap().1;
+
+    // knob=1 should be near-silent
+    assert!(
+        peak_100 < 0.01,
+        "Volume at knob=1.0 (range-inverted) should be near-silent, got {peak_100:.4}"
+    );
+
+    // Volume should decrease gradually: each step noticeably less than the previous.
+    // The bug compressed the entire range into 0-8% travel. After fix, 50% should
+    // be meaningfully less than 0% (the loudest setting).
+    if peak_0 > 0.01 {
+        let ratio_50_to_0 = peak_50 / peak_0;
+        assert!(
+            ratio_50_to_0 < 0.95,
+            "Volume at 50% should be noticeably less than 0% (loudest): ratio={ratio_50_to_0:.3}"
+        );
+    }
+
+    // 75% should be noticeably less than 25%
+    if peak_25 > 0.01 {
+        let ratio_75_to_25 = peak_75 / peak_25;
+        assert!(
+            ratio_75_to_25 < 0.85,
+            "Volume at 75% should be much less than 25%: ratio={ratio_75_to_25:.3}"
+        );
+    }
+}
