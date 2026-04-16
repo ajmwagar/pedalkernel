@@ -1763,6 +1763,7 @@ fn build_rtype_stage(
             feedback_scale: 0.1,
             feedback_opamp: None,
             feedback_pot_id: None,
+            opamp_post_fx: None,
             linearized_ota: linearized_ota_data,
             vs_injection: None,
             extract_coeffs: None,
@@ -2610,6 +2611,37 @@ fn build_rtype_stage(
         feedback_scale: 0.1,
         feedback_opamp: None,
         feedback_pot_id: None,
+        // Attach OpAmpPostFx if any in-stage op-amp's output node matches
+        // this stage's output node — that op-amp is the one driving the
+        // stage's audio output, so its slew + rails should post-process
+        // the extracted voltage.
+        opamp_post_fx: {
+            let out_node = plan.output_node;
+            in_stage_nullors
+                .iter()
+                .find(|n| {
+                    out_node
+                        .and_then(|o| node_to_mna(o))
+                        .map(|m| n.out_mna == Some(m))
+                        .unwrap_or(false)
+                })
+                .and_then(|n| {
+                    let comp = &graph.components[
+                        graph.nullor_pins
+                            .iter()
+                            .find(|r| r.comp_idx < graph.components.len()
+                                && n.comp_id == graph.components[r.comp_idx].id)
+                            .map(|r| r.comp_idx)
+                            .unwrap_or(0)
+                    ];
+                    comp.kind.op_amp_type().map(|ot| {
+                        crate::elements::OpAmpPostFx::new(
+                            OpAmpModel::from_opamp_type(&ot),
+                            sample_rate * oversampling.ratio() as f64,
+                        )
+                    })
+                })
+        },
         linearized_ota: linearized_ota_data,
         vs_injection: vs_injection_vec,
         extract_coeffs,

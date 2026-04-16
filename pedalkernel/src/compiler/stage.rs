@@ -2672,6 +2672,12 @@ pub(super) struct MultiNlStage {
     pub(super) feedback_opamp: Option<OpAmpRoot>,
     /// Pot ID that controls feedback opamp gain (if any).
     pub(super) feedback_pot_id: Option<String>,
+    /// Post-scattering non-ideality filter for op-amps absorbed via nullor
+    /// stamps. Applies supply rail clamping and slew rate limiting to the
+    /// extracted output node voltage. `None` for stages whose output is
+    /// not dominated by an op-amp, or stages where we cannot identify a
+    /// specific op-amp as the audio output source.
+    pub(super) opamp_post_fx: Option<crate::elements::OpAmpPostFx>,
     /// Linearized OTA data for gm-based scattering recompute.
     /// When Some, the OTA's transconductance is stamped into the MNA as a linear
     /// conductance. When the envelope changes gain, we delta-update the MNA and
@@ -3082,6 +3088,16 @@ impl MultiNlStage {
                     b_passive[output_port - n_nl]
                 };
                 (a_out + b_out) / 2.0
+            };
+
+            // 6b. Apply op-amp post-FX (supply rail clamp + slew rate).
+            // The VCVS stamp in MNA already captured Aol and Ro; rails and
+            // slew are the non-LTI behaviours that must live outside the
+            // scattering matrix.
+            let raw_out = if let Some(ref mut post_fx) = self.opamp_post_fx {
+                post_fx.process(raw_out)
+            } else {
+                raw_out
             };
 
             // 7. DC blocker for stages with VCC supply injection.

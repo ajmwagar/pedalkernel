@@ -238,6 +238,61 @@ pub enum OpAmpMode {
 
 /// Unified op-amp root for WDF trees.
 ///
+/// Post-scattering non-ideality filter for op-amps absorbed into R-type
+/// adaptors via `MnaSystem::stamp_vcvs`.
+///
+/// The VCVS stamp inside the MNA already captures the frequency-independent
+/// gain (Aol) and output impedance (Ro). The genuinely non-linear-time-
+/// invariant behaviours — supply rail clamping and slew rate limiting —
+/// cannot live in the linear scattering matrix, so they run as a tiny
+/// per-sample filter on the extracted output node voltage.
+///
+/// This replaces the `feedback_opamp: Option<OpAmpRoot>` field that diode-
+/// paired stages used in the legacy topology-detection path. With the
+/// unified nullor pipeline, any op-amp whose output is the stage's
+/// audio output gets an `OpAmpPostFx` attached.
+#[derive(Debug, Clone)]
+pub struct OpAmpPostFx {
+    /// Datasheet parameters (slew_rate, v_max).
+    pub model: OpAmpModel,
+    /// Sample rate for slew-per-sample conversion.
+    pub sample_rate: f64,
+    /// Previous output voltage for slew-rate limiting.
+    prev_out: f64,
+}
+
+impl OpAmpPostFx {
+    /// Create with model parameters and sample rate.
+    pub fn new(model: OpAmpModel, sample_rate: f64) -> Self {
+        Self {
+            model,
+            sample_rate,
+            prev_out: 0.0,
+        }
+    }
+
+    /// Apply rail clamping then slew-rate limiting in that order.
+    ///
+    /// Rail clamping first so the slew limiter is bounded by the clamped
+    /// target. This matches SPICE behaviour where the op-amp can't exceed
+    /// the supply rails regardless of input rate of change.
+    pub fn process(&mut self, v_raw: f64) -> f64 {
+        let v_max = self.model.v_max;
+        let v_clip = v_raw.clamp(-v_max, v_max);
+        // slew_rate is V/µs in the datasheet. Convert to V/sample.
+        let slew_max = self.model.slew_rate * 1e6 / self.sample_rate;
+        let delta = (v_clip - self.prev_out).clamp(-slew_max, slew_max);
+        let v_out = self.prev_out + delta;
+        self.prev_out = v_out;
+        v_out
+    }
+
+    /// Reset state (typically on stage reset / sample rate change).
+    pub fn reset(&mut self) {
+        self.prev_out = 0.0;
+    }
+}
+
 /// Models op-amp behavior in two topologies:
 /// - **Inverting**: Vout = -(Rf/Ri) * Vin, input from WDF wave (virtual ground)
 /// - **Non-inverting**: Vout = (1 + Rf/Ri) * Vp, input via `set_vp()`
