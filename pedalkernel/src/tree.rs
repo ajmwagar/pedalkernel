@@ -630,6 +630,71 @@ impl MnaSystem {
         }
     }
 
+    /// Add a finite-gain VCVS (Voltage-Controlled Voltage Source) stamp for
+    /// modelling an op-amp as `V_out = Aol·(V_pos − V_neg) − Ro·i_vsrc`.
+    ///
+    /// This is the nullor (Werner 2016) generalised to finite open-loop gain
+    /// and non-zero output impedance. With `Aol → ∞, Ro → 0` it becomes a
+    /// pure nullor (infinite-gain ideal op-amp). Typical datasheet values for
+    /// audio op-amps: `Aol ∈ [50k, 400k]`, `Ro ∈ [50, 200]Ω`.
+    ///
+    /// Reserves one auxiliary MNA row/column (the norator branch current
+    /// `i_vsrc`). The constraint equation written into row `vsrc_idx` is:
+    ///
+    /// ```text
+    /// v(out_pos) − v(out_neg) − Aol·v(pos) + Aol·v(neg) + Ro·i_vsrc = 0
+    /// ```
+    ///
+    /// Stamp:
+    /// * `B[out_pos, vsrc] += +1`, `B[out_neg, vsrc] += −1` — branch current
+    ///   i_vsrc is injected into the out_pos/out_neg node pair
+    /// * `C[vsrc, out_pos] += +1`, `C[vsrc, out_neg] += −1` — output voltage
+    /// * `C[vsrc, pos] += −Aol`, `C[vsrc, neg] += +Aol` — controlling voltage
+    /// * `D[vsrc, vsrc] += Ro` — finite output impedance
+    ///
+    /// Inputs at `pos`/`neg` draw zero current (nullator / infinite input
+    /// impedance).
+    ///
+    /// * `pos`, `neg` — non-inverting and inverting input nodes (None = gnd)
+    /// * `out_pos`, `out_neg` — output node pair (None = gnd)
+    /// * `aol` — open-loop voltage gain (dimensionless)
+    /// * `ro` — output resistance in Ohms (use 0.0 for ideal nullor)
+    /// * `vsrc_idx` — auxiliary MNA branch index (must be < num_vsources)
+    pub fn stamp_vcvs(
+        &mut self,
+        pos: Option<usize>,
+        neg: Option<usize>,
+        out_pos: Option<usize>,
+        out_neg: Option<usize>,
+        aol: f64,
+        ro: f64,
+        vsrc_idx: usize,
+    ) {
+        // B: branch current i_vsrc appears in KCL at out_pos / out_neg
+        if let Some(i) = out_pos {
+            self.b_matrix[i * self.num_vsources + vsrc_idx] += 1.0;
+        }
+        if let Some(i) = out_neg {
+            self.b_matrix[i * self.num_vsources + vsrc_idx] += -1.0;
+        }
+        // C: voltage constraint row
+        //   v(out_pos) − v(out_neg) − Aol·v(pos) + Aol·v(neg) + Ro·i = 0
+        if let Some(i) = out_pos {
+            self.c_matrix[vsrc_idx * self.num_nodes + i] += 1.0;
+        }
+        if let Some(i) = out_neg {
+            self.c_matrix[vsrc_idx * self.num_nodes + i] += -1.0;
+        }
+        if let Some(i) = pos {
+            self.c_matrix[vsrc_idx * self.num_nodes + i] += -aol;
+        }
+        if let Some(i) = neg {
+            self.c_matrix[vsrc_idx * self.num_nodes + i] += aol;
+        }
+        // D: finite output impedance on the branch
+        self.d_matrix[vsrc_idx * self.num_vsources + vsrc_idx] += ro;
+    }
+
     /// Derive the scattering matrix for WDF ports.
     ///
     /// Each port corresponds to a Thévenin equivalent at a node pair.
@@ -1952,6 +2017,167 @@ mod tests {
         assert!((inv[1] - (-1.0)).abs() < 1e-10);
         assert!((inv[2] - (-1.0)).abs() < 1e-10);
         assert!((inv[3] - 2.0).abs() < 1e-10);
+    }
+
+    // -------------------------------------------------------------------------
+    // VCVS (finite-gain op-amp nullor) tests
+    // -------------------------------------------------------------------------
+
+    /// Solve an MNA system for DC operating point.
+    ///
+    /// Builds the augmented X matrix `[[G, B], [C, D]]` and solves
+    /// `X · z = rhs` where `z = [v_nodes; i_vsources]` and `rhs` has the
+    /// voltage-source values in the lower partition.
+    ///
+    /// Returns node voltages `v[0..num_nodes]`.
+    fn mna_solve_dc(mna: &MnaSystem, vs_values: &[f64]) -> Vec<f64> {
+        let n = mna.num_nodes;
+        let m = mna.num_vsources;
+        let nt = n + m;
+        let mut x = vec![0.0; nt * nt];
+        for i in 0..n {
+            for j in 0..n {
+                x[i * nt + j] = mna.g_matrix[i * n + j];
+            }
+        }
+        for i in 0..n {
+            for j in 0..m {
+                x[i * nt + (n + j)] = mna.b_matrix[i * m + j];
+            }
+        }
+        for i in 0..m {
+            for j in 0..n {
+                x[(n + i) * nt + j] = mna.c_matrix[i * n + j];
+            }
+        }
+        for i in 0..m {
+            for j in 0..m {
+                x[(n + i) * nt + (n + j)] = mna.d_matrix[i * m + j];
+            }
+        }
+        let x_inv = invert_matrix(&x, nt);
+        let mut rhs = vec![0.0; nt];
+        for (k, &v) in vs_values.iter().enumerate() {
+            rhs[n + k] = v;
+        }
+        let mut z = vec![0.0; nt];
+        for i in 0..nt {
+            let mut s = 0.0;
+            for j in 0..nt {
+                s += x_inv[i * nt + j] * rhs[j];
+            }
+            z[i] = s;
+        }
+        z[..n].to_vec()
+    }
+
+    #[test]
+    fn mna_vcvs_unity_buffer() {
+        // Unity-gain voltage follower: pos=in, neg=out, out=out.
+        // Expect V_out ≈ V_in to within ~1/Aol.
+        //   Nodes: 0 = in, 1 = out
+        //   vs 0: input source at node 0
+        //   vs 1: op-amp VCVS (pos=0, neg=1, out_pos=1, out_neg=gnd)
+        let mut mna = MnaSystem::new(2, 2);
+        mna.stamp_voltage_source(Some(0), None, 0);
+        mna.stamp_vcvs(Some(0), Some(1), Some(1), None, 200_000.0, 75.0, 1);
+        let v_in = 1.0;
+        let v = mna_solve_dc(&mna, &[v_in, 0.0]);
+        assert!(
+            (v[1] - v_in).abs() < 1e-3,
+            "unity buffer: V_out={} expected ~{}",
+            v[1],
+            v_in
+        );
+    }
+
+    #[test]
+    fn mna_vcvs_inverting_x10() {
+        // Inverting amp: pos=gnd, neg=vnode, out drives node_out via Rf.
+        //   Nodes: 0 = V_in, 1 = V_neg (virtual gnd), 2 = V_out
+        //   Ri (10k) between node 0 and node 1
+        //   Rf (100k) between node 1 and node 2
+        //   vs 0: input VS at node 0
+        //   vs 1: op-amp VCVS (pos=gnd, neg=1, out_pos=2, out_neg=gnd)
+        let mut mna = MnaSystem::new(3, 2);
+        mna.stamp_voltage_source(Some(0), None, 0);
+        mna.stamp_resistor(Some(0), Some(1), 10_000.0);
+        mna.stamp_resistor(Some(1), Some(2), 100_000.0);
+        mna.stamp_vcvs(None, Some(1), Some(2), None, 200_000.0, 75.0, 1);
+        let v = mna_solve_dc(&mna, &[1.0, 0.0]);
+        // Ideal gain = -Rf/Ri = -10. Finite-Aol correction: small, < 0.01%.
+        assert!(
+            (v[2] - (-10.0)).abs() < 0.01,
+            "inverting x10: V_out={} expected ≈-10",
+            v[2]
+        );
+    }
+
+    #[test]
+    fn mna_vcvs_noninverting_x10() {
+        // Non-inverting amp gain = 1 + Rf/Ri = 10 with Rf=90k, Ri=10k.
+        //   Nodes: 0 = V_in (= V_pos), 1 = V_neg, 2 = V_out
+        //   Ri (10k) between node 1 and gnd
+        //   Rf (90k) between node 1 and node 2
+        //   vs 0: input VS at node 0
+        //   vs 1: op-amp VCVS (pos=0, neg=1, out_pos=2, out_neg=gnd)
+        let mut mna = MnaSystem::new(3, 2);
+        mna.stamp_voltage_source(Some(0), None, 0);
+        mna.stamp_resistor(Some(1), None, 10_000.0);
+        mna.stamp_resistor(Some(1), Some(2), 90_000.0);
+        mna.stamp_vcvs(Some(0), Some(1), Some(2), None, 200_000.0, 75.0, 1);
+        let v = mna_solve_dc(&mna, &[1.0, 0.0]);
+        assert!(
+            (v[2] - 10.0).abs() < 0.01,
+            "non-inverting x10: V_out={} expected ≈10",
+            v[2]
+        );
+    }
+
+    #[test]
+    fn mna_vcvs_finite_aol_correction() {
+        // Verify closed-loop gain deviates from ideal by expected 1/Aol amount.
+        // Ideal inverting: G = -Rf/Ri. With finite Aol:
+        //   G = -(Rf/Ri) · 1 / (1 + (1 + Rf/Ri)/Aol)
+        // For Rf=100k, Ri=10k, Aol=100k (JRC4558):
+        //   G = -10 · 1/(1 + 11/100000) ≈ -10 · 0.99989 ≈ -9.9989
+        let mut mna = MnaSystem::new(3, 2);
+        mna.stamp_voltage_source(Some(0), None, 0);
+        mna.stamp_resistor(Some(0), Some(1), 10_000.0);
+        mna.stamp_resistor(Some(1), Some(2), 100_000.0);
+        mna.stamp_vcvs(None, Some(1), Some(2), None, 100_000.0, 75.0, 1);
+        let v = mna_solve_dc(&mna, &[1.0, 0.0]);
+        let g_ideal = -10.0;
+        let g_expected = g_ideal / (1.0 + 11.0 / 100_000.0);
+        assert!(
+            (v[2] - g_expected).abs() < 1e-4,
+            "finite-Aol correction: V_out={} expected ≈{}",
+            v[2],
+            g_expected
+        );
+        // And confirm it's measurably different from ideal (i.e. correction is real)
+        assert!(
+            (v[2] - g_ideal).abs() > 1e-5,
+            "expected finite-Aol deviation from ideal, but got V_out={}",
+            v[2]
+        );
+    }
+
+    #[test]
+    fn mna_vcvs_nullor_stamp_matrix_entries() {
+        // Direct test that the stamp places the expected entries.
+        let mut mna = MnaSystem::new(3, 1);
+        mna.stamp_vcvs(Some(0), Some(1), Some(2), None, 200_000.0, 75.0, 0);
+        let m = mna.num_vsources;
+        let n = mna.num_nodes;
+        // B column 0 (branch current into output)
+        assert!((mna.b_matrix[2 * m + 0] - 1.0).abs() < 1e-12); // out_pos
+                                                                // C row 0: +1 at out_pos, -Aol at pos, +Aol at neg
+        assert!((mna.c_matrix[0 * n + 2] - 1.0).abs() < 1e-12);
+        assert!((mna.c_matrix[0 * n + 0] - (-200_000.0)).abs() < 1e-6);
+        assert!((mna.c_matrix[0 * n + 1] - 200_000.0).abs() < 1e-6);
+        // D: Ro on the branch diagonal
+        assert!((mna.d_matrix[0 * m + 0] - 75.0).abs() < 1e-12);
     }
 
     // -------------------------------------------------------------------------
