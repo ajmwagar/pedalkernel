@@ -33,35 +33,26 @@ pub(super) struct OpAmpAnalysis {
 
 /// Run op-amp feedback analysis on the circuit.
 ///
-/// Merges pre-classified topologies from Pass 1.5 with the monolithic
-/// `find_opamp_feedback_loops()` analysis. Components that self-classified
-/// in Pass 1.5 are skipped by the monolith.
+/// **NULLOR REFACTOR (Phase 3b):** This function now returns an empty
+/// analysis. All op-amps are handled via the unified nullor-in-R-type
+/// pipeline — each op-amp contributes a `stamp_vcvs` to its stage's MNA
+/// matrix (see `build_rtype_stage::InStageNullor`). Topology-specific
+/// classification is gone; the scattering matrix handles every feedback
+/// topology automatically.
+///
+/// Arguments are kept for the moment to minimise churn at call sites.
+/// They will be removed along with the entire module in Phase 7.
+#[allow(unused_variables)]
 pub(super) fn analyze_opamps(
     graph: &CircuitGraph,
     pedal: &PedalDef,
     pre_classified: &[OpAmpFeedbackInfo],
     skip_ids: &HashSet<String>,
 ) -> OpAmpAnalysis {
-    // Run the monolithic analysis, skipping already-classified opamps.
-    let mut feedback_loops = graph.find_opamp_feedback_loops(pedal, skip_ids);
-
-    // Merge pre-classified results (prepend so they appear first in order).
-    let mut merged = pre_classified.to_vec();
-    merged.append(&mut feedback_loops);
-
-    let feedback_opamp_ids: HashSet<String> =
-        merged.iter().map(|info| info.comp_id.clone()).collect();
-
-    let unity_gain_opamp_ids: HashSet<String> = merged
-        .iter()
-        .filter(|info| matches!(info.feedback_kind, OpAmpFeedbackKind::UnityGain))
-        .map(|info| info.comp_id.clone())
-        .collect();
-
     OpAmpAnalysis {
-        feedback_loops: merged,
-        feedback_opamp_ids,
-        unity_gain_opamp_ids,
+        feedback_loops: Vec::new(),
+        feedback_opamp_ids: HashSet::new(),
+        unity_gain_opamp_ids: HashSet::new(),
     }
 }
 
