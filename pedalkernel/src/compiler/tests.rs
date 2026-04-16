@@ -1896,6 +1896,7 @@ fn compile_phase90() {
 }
 
 #[test]
+#[ignore = "Phase 7: classifier gutted; tests pending deletion"]
 fn topology_classify_phase90_allpass() {
     // Verify that classify_topologies detects AllpassJfet topologies
     // in the Phase 90 circuit (4 JFET all-pass stages with opamps).
@@ -1945,6 +1946,7 @@ fn topology_classify_phase90_allpass() {
 }
 
 #[test]
+#[ignore = "Phase 7: classifier gutted; tests pending deletion"]
 fn topology_classify_unity_gain_buffer() {
     // A pedal with a unity-gain buffer (neg tied to out) should be classified.
     let src = r#"
@@ -1983,6 +1985,7 @@ pedal "unity_gain_test" subtitle "test" {
 // -----------------------------------------------------------------------
 
 #[test]
+#[ignore = "Phase 7: classifier gutted; tests pending deletion"]
 fn topology_classify_simple_inverting() {
     // Simple inverting amplifier: pos→gnd, Rf from neg→out, Ri from in→neg.
     // classify_topologies should detect this as Inverting.
@@ -2039,6 +2042,7 @@ pedal "Inverting Test" subtitle "test" {
 }
 
 #[test]
+#[ignore = "Phase 7: classifier gutted; tests pending deletion"]
 fn topology_classify_simple_noninverting() {
     // Simple non-inverting amplifier: in→pos, Ri from neg→gnd, Rf from neg→out.
     // classify_topologies should detect this as NonInverting.
@@ -2094,6 +2098,7 @@ pedal "NonInverting Test" subtitle "test" {
 }
 
 #[test]
+#[ignore = "Phase 7: classifier gutted; tests pending deletion"]
 fn topology_classify_inverting_with_feedback_diodes() {
     // Tube Screamer U2: inverting with silicon diodes in feedback (soft clipping).
     // Should detect Inverting with feedback_diode = Some(Silicon).
@@ -2150,6 +2155,7 @@ fn topology_classify_inverting_with_feedback_diodes() {
 }
 
 #[test]
+#[ignore = "Phase 7: classifier gutted; tests pending deletion"]
 fn topology_classify_klon_centaur_mixed() {
     // Klon: U1 = unity buffer, U2 = inverting with germanium diodes, U3 = unity buffer.
     let pedal = parse("klon_centaur.pedal");
@@ -2201,6 +2207,7 @@ fn topology_classify_klon_centaur_mixed() {
 }
 
 #[test]
+#[ignore = "Phase 7: classifier gutted; tests pending deletion"]
 fn topology_classify_cascaded_inverting() {
     // Two cascaded inverting amplifiers: U1 → U2, each with known Rf/Ri.
     let src = r#"
@@ -2258,6 +2265,7 @@ pedal "Cascaded Inverting" subtitle "test" {
 }
 
 #[test]
+#[ignore = "Phase 7: classifier gutted; tests pending deletion"]
 fn topology_classify_noninverting_with_ac_ground() {
     // Non-inverting with Ri going to AC ground (bias point via voltage divider).
     // Large bypass cap (100µF) at bias node makes it AC ground equivalent.
@@ -2316,6 +2324,7 @@ pedal "NonInverting AC Ground" subtitle "test" {
 }
 
 #[test]
+#[ignore = "Phase 7: classifier gutted; tests pending deletion"]
 fn topology_classify_inverting_pos_ac_grounded() {
     // Inverting with pos connected to AC ground (bias point via voltage divider).
     // Large bypass cap makes bias node AC ground equivalent.
