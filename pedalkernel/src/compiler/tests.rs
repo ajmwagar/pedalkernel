@@ -7232,3 +7232,111 @@ fn ratking_volume_inverted_range_gradual() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GraphRole::VcvsEdge + CircuitGraph::nullor_pins population (Phase 2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn nullor_pins_populated_for_inverting_amp() {
+    // Simple inverting x10: in→Ri→neg, Rf neg→out, pos→gnd.
+    let src = r#"
+pedal "Nullor Pins Inv" subtitle "test" {
+  components {
+    Ri: resistor(10k)
+    Rf: resistor(100k)
+    U1: opamp(tl072)
+    R_load: resistor(10k)
+  }
+  nets {
+    in -> Ri.a
+    Ri.b -> U1.neg
+    U1.pos -> gnd
+    U1.neg -> Rf.a
+    Rf.b -> U1.out
+    U1.out -> R_load.a
+    R_load.b -> out
+  }
+  controls {}
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+
+    assert_eq!(graph.nullor_pins.len(), 1, "expected exactly one nullor");
+    let rec = &graph.nullor_pins[0];
+    // The 3 pins must all resolve to distinct nodes (none merged with each other).
+    assert_ne!(rec.pos_node, rec.neg_node, "pos/neg must be distinct");
+    assert_ne!(rec.neg_node, rec.out_node, "neg/out must be distinct");
+    assert_ne!(rec.pos_node, rec.out_node, "pos/out must be distinct");
+    // pos is grounded in this topology.
+    assert_eq!(rec.pos_node, graph.gnd_node, "pos should be tied to gnd");
+    // neg is NOT ground and NOT out (finite Aol keeps them separable).
+    assert_ne!(rec.neg_node, graph.gnd_node);
+    assert_ne!(rec.out_node, graph.gnd_node);
+    // out appears in output_pin_nodes (acts as BFS barrier).
+    assert!(
+        graph.output_pin_nodes.contains(&rec.out_node),
+        "out node should be in output_pin_nodes set"
+    );
+}
+
+#[test]
+fn nullor_pins_populated_for_unity_buffer() {
+    // Unity-gain buffer: pos=in, neg=out direct.
+    let src = r#"
+pedal "Nullor Pins Unity" subtitle "test" {
+  components {
+    U1: opamp(tl072)
+    R_load: resistor(10k)
+  }
+  nets {
+    in -> U1.pos
+    U1.neg -> U1.out
+    U1.out -> R_load.a
+    R_load.b -> out
+  }
+  controls {}
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+
+    assert_eq!(graph.nullor_pins.len(), 1, "expected exactly one nullor");
+    let rec = &graph.nullor_pins[0];
+    // In a unity buffer, neg and out are net-tied, so they share a union-find root.
+    assert_eq!(
+        rec.neg_node, rec.out_node,
+        "unity buffer: neg and out must share a node"
+    );
+    // pos is driven by the input, not grounded.
+    assert_ne!(rec.pos_node, graph.gnd_node, "pos should be driven by input");
+}
+
+#[test]
+fn nullor_pins_empty_for_ota_only() {
+    // CA3080 (OTA) is NOT a nullor — it stays as Edge{pos,neg} and should
+    // NOT appear in nullor_pins.
+    let src = r#"
+pedal "OTA Only" subtitle "test" {
+  components {
+    U1: opamp(ca3080)
+    R_load: resistor(10k)
+  }
+  nets {
+    in -> U1.pos
+    U1.neg -> gnd
+    U1.out -> R_load.a
+    R_load.b -> out
+  }
+  controls {}
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    assert!(
+        graph.nullor_pins.is_empty(),
+        "OTA should not appear in nullor_pins, got {:?}",
+        graph.nullor_pins
+    );
+}

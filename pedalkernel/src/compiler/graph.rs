@@ -83,6 +83,23 @@ pub(super) struct CircuitGraph {
     /// bypassed to ground through large capacitors (≥10µF).
     /// Used as BFS barriers to prevent claiming components through bias nodes.
     pub(super) ac_ground_nodes: HashSet<NodeId>,
+    /// Op-amp nullor records: `(comp_idx, pos_node, neg_node, out_node)`.
+    /// Populated from `GraphRole::VcvsEdge`. The R-type stage builder uses
+    /// these to emit one `MnaSystem::stamp_vcvs` per op-amp with datasheet
+    /// Aol/Ro. The three pin nodes also become junction barriers in
+    /// `sp_decompose` so the feedback network stays in the residual MNA
+    /// stage rather than collapsing into a WDF subtree that can't see
+    /// the op-amp.
+    pub(super) nullor_pins: Vec<NullorPinRecord>,
+}
+
+/// Per-op-amp record of the three pin nodes used by the VCVS stamp.
+#[derive(Clone, Debug)]
+pub(super) struct NullorPinRecord {
+    pub(super) comp_idx: usize,
+    pub(super) pos_node: NodeId,
+    pub(super) neg_node: NodeId,
+    pub(super) out_node: NodeId,
 }
 
 /// Identifies which transformer winding a node belongs to.
@@ -364,6 +381,7 @@ impl CircuitGraph {
         let mut deferred_3term: Vec<(usize, String)> = Vec::new();
         let mut coupled_nodes: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         let mut transformer_info: HashMap<NodeId, TransformerNodeInfo> = HashMap::new();
+        let mut nullor_pin_records: Vec<NullorPinRecord> = Vec::new();
 
         for (idx, comp) in all_components.iter().enumerate() {
             match comp.kind.graph_role() {
@@ -571,6 +589,27 @@ impl CircuitGraph {
                 GraphRole::ActiveIc => {
                     num_active += 1;
                 }
+                GraphRole::VcvsEdge {
+                    pin_pos,
+                    pin_neg,
+                    pin_out,
+                } => {
+                    num_active += 1;
+                    let key_pos = format!("{}.{}", comp.id, pin_pos);
+                    let key_neg = format!("{}.{}", comp.id, pin_neg);
+                    let key_out = format!("{}.{}", comp.id, pin_out);
+                    let id_pos = get_id(&key_pos, &mut uf);
+                    let id_neg = get_id(&key_neg, &mut uf);
+                    let id_out = get_id(&key_out, &mut uf);
+                    // Record initial UF roots; re-resolve at the end after
+                    // all unions (incl. transformer aliasing) have settled.
+                    nullor_pin_records.push(NullorPinRecord {
+                        comp_idx: idx,
+                        pos_node: uf.find(id_pos),
+                        neg_node: uf.find(id_neg),
+                        out_node: uf.find(id_out),
+                    });
+                }
             }
         }
 
@@ -699,6 +738,13 @@ impl CircuitGraph {
             edge.node_b = uf.find(edge.node_b);
         }
 
+        // Same re-resolution for op-amp nullor pin triples.
+        for rec in &mut nullor_pin_records {
+            rec.pos_node = uf.find(rec.pos_node);
+            rec.neg_node = uf.find(rec.neg_node);
+            rec.out_node = uf.find(rec.out_node);
+        }
+
         // Re-resolve transformer_info and coupled_nodes through final UF state.
         // These were recorded during component processing, before all unions
         // were complete. Without re-resolution, transformer secondary nodes
@@ -819,6 +865,7 @@ impl CircuitGraph {
             resolved_edge_kinds: HashMap::new(),
             trigger_nodes,
             ac_ground_nodes: HashSet::new(),
+            nullor_pins: nullor_pin_records,
         }
     }
 

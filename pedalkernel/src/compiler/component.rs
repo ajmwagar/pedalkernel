@@ -188,6 +188,19 @@ pub enum GraphRole {
     Virtual,
     /// No circuit edge, but counts as active (OpAmp, VCO, VCF, etc.).
     ActiveIc,
+    /// Op-amp / finite-gain VCVS: three pins (pos, neg, out) participate in
+    /// the circuit graph as junction nodes. Produces no WDF-tree edge but is
+    /// absorbed as a VCVS stamp into the MNA matrix of its containing R-type
+    /// adaptor (Werner 2016 nullor, generalised to finite Aol and Ro).
+    ///
+    /// The three pins are registered in `CircuitGraph::nullor_pins` so the
+    /// R-type stage builder can emit one `MnaSystem::stamp_vcvs` per op-amp
+    /// with the appropriate datasheet parameters.
+    VcvsEdge {
+        pin_pos: &'static str,
+        pin_neg: &'static str,
+        pin_out: &'static str,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
