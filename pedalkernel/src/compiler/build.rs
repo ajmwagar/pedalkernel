@@ -923,6 +923,7 @@ fn stage_plan_to_multi_nl(
         output_node: None,
         ota_vccs: Vec::new(),
         signal_chain_depth: plan.signal_chain_depth,
+        nullor_comp_indices: Vec::new(),
     }
 }
 
@@ -1277,6 +1278,7 @@ fn build_rtype_stage(
 ) -> Option<MultiNlStage> {
     let n_nl = plan.nl_terminals.len();
     let has_linearized_ota = !plan.ota_vccs.is_empty();
+    let has_nullor = !plan.nullor_comp_indices.is_empty();
 
     // Compute effective sample rate accounting for oversampling.
     // All DynNodes (caps, inductors) must be created at this rate so that
@@ -1285,11 +1287,11 @@ fn build_rtype_stage(
     // causing a mismatch between port R and the S matrix.
     let effective_rate = sample_rate * oversampling.ratio() as f64;
 
-    // Need either NL ports or linearized OTA, and at least some passive content.
-    if n_nl == 0 && !has_linearized_ota {
+    // Need at least one of: NL ports, linearized OTA, or nullor (op-amp).
+    if n_nl == 0 && !has_linearized_ota && !has_nullor {
         return None;
     }
-    if decomposed.residual_edges.is_empty() && decomposed.wdf_subtrees.is_empty() {
+    if decomposed.residual_edges.is_empty() && decomposed.wdf_subtrees.is_empty() && !has_nullor {
         return None;
     }
 
@@ -2635,7 +2637,15 @@ fn try_build_multi_nl_stage(
 ) -> Option<MultiNlStage> {
     let n_nl = plan.nl_terminals.len();
     let has_linearized_ota = !plan.ota_vccs.is_empty();
-    if (n_nl == 0 && !has_linearized_ota) || plan.passive_edge_indices.is_empty() {
+    let has_nullor = !plan.nullor_comp_indices.is_empty();
+    // Plan must have at least one of: NL terminals, linearized OTA, or nullor
+    // (op-amp VCVS stamp). Nullor-only plans represent pure-linear op-amp
+    // circuits (unity buffer, inverting x10, integrator, …) that are
+    // absorbed into the R-type adaptor via `stamp_vcvs`.
+    if n_nl == 0 && !has_linearized_ota && !has_nullor {
+        return None;
+    }
+    if plan.passive_edge_indices.is_empty() && !has_nullor {
         return None;
     }
 
@@ -2651,6 +2661,18 @@ fn try_build_multi_nl_stage(
     }
     if !junction_nodes.contains(&plan.injection_node) {
         junction_nodes.push(plan.injection_node);
+    }
+    // Op-amp pin nodes become junction barriers so the feedback network
+    // stays in the MNA residual (not SP-reduced into a WDF subtree that
+    // can't see the nullor stamp).
+    for &comp_idx in &plan.nullor_comp_indices {
+        if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == comp_idx) {
+            for &n in &[rec.pos_node, rec.neg_node, rec.out_node] {
+                if !junction_nodes.contains(&n) {
+                    junction_nodes.push(n);
+                }
+            }
+        }
     }
     // Add output node as junction so output tail edges stay in MNA residual
     // (not SP-reduced into WDF subtrees, which would hide pots from pot_children).

@@ -119,6 +119,12 @@ pub(super) struct MultiNlPlan {
     pub(super) ota_vccs: Vec<OtaVccsInfo>,
     /// Signal chain depth (boundary crossings from input). Used for stage ordering.
     pub(super) signal_chain_depth: Option<usize>,
+    /// Component indices for op-amps (nullors) absorbed into this stage's MNA.
+    /// Empty for legacy plans; populated for synthetic op-amp-only plans and
+    /// for multi-NL plans that contain op-amp feedback networks. When
+    /// non-empty, `try_build_multi_nl_stage` allows `n_nl == 0` plans
+    /// through the gate so op-amp-only circuits produce R-type stages.
+    pub(super) nullor_comp_indices: Vec<usize>,
 }
 
 /// Info for stamping a linearized OTA as a VCCS in the MNA.
@@ -2087,6 +2093,7 @@ fn plan_multi_nl_group(
         ota_vccs: Vec::new(),
 
         signal_chain_depth: None,
+        nullor_comp_indices: Vec::new(),
     })
 }
 
@@ -2178,6 +2185,7 @@ fn try_varimu_3port(
         ota_vccs: Vec::new(),
 
         signal_chain_depth: None,
+        nullor_comp_indices: Vec::new(),
     })
 }
 
@@ -2343,6 +2351,7 @@ fn try_bjt_two_port(
         output_node: None,
         ota_vccs: Vec::new(),
         signal_chain_depth: None,
+        nullor_comp_indices: Vec::new(),
     })
 }
 
@@ -2426,6 +2435,7 @@ fn try_linearized_ota(
         }],
 
         signal_chain_depth: None,
+        nullor_comp_indices: Vec::new(),
     })
 }
 
@@ -2615,6 +2625,7 @@ fn plan_diode_bridge(
         ota_vccs: Vec::new(),
 
         signal_chain_depth: None,
+        nullor_comp_indices: Vec::new(),
     })
 }
 

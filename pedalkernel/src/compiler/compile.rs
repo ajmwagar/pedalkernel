@@ -1829,7 +1829,7 @@ pub fn compile_pedal_with_options(
     let (
         stage_plans,
         push_pull_plans,
-        multi_nl_plans,
+        mut multi_nl_plans,
         pp_transformer_edges,
         _bjt_bias_analysis,
         node_island_depths,
@@ -1842,6 +1842,112 @@ pub fn compile_pedal_with_options(
         &opamp_input_nodes,
         &feedback_diode_neg_map,
     );
+
+    // ══ Synthesize op-amp-only plans (Phase 3c) ═══════════════════════════
+    // For every op-amp whose pins are NOT already covered by an existing
+    // multi_nl plan, generate a synthetic plan that carries a nullor VCVS
+    // stamp. This allows pure-linear op-amp circuits (unity buffer,
+    // inverting x10, integrator, …) to flow through `build_rtype_stage`
+    // and produce R-type stages via the unified nullor path.
+    {
+        // Nodes already covered by existing multi_nl plans.
+        let mut covered_nodes: HashSet<super::graph::NodeId> = HashSet::new();
+        for p in &multi_nl_plans {
+            for &(pos, neg) in &p.nl_terminals {
+                covered_nodes.insert(pos);
+                covered_nodes.insert(neg);
+            }
+            for &eidx in &p.passive_edge_indices {
+                let e = &graph.edges[eidx];
+                covered_nodes.insert(e.node_a);
+                covered_nodes.insert(e.node_b);
+            }
+        }
+        for rec in &graph.nullor_pins {
+            // Skip op-amps that share a junction with an existing plan —
+            // they're already part of an R-type stage and will pick up the
+            // VCVS stamp via in_stage_nullors in build_rtype_stage.
+            let pins_covered = [rec.pos_node, rec.neg_node, rec.out_node]
+                .iter()
+                .any(|n| covered_nodes.contains(n));
+            if pins_covered {
+                continue;
+            }
+            // Gather all unclaimed passive edges that touch any of this
+            // op-amp's pins transitively (simple BFS through passive edges).
+            let mut pin_nodes: HashSet<super::graph::NodeId> =
+                [rec.pos_node, rec.neg_node, rec.out_node]
+                    .iter()
+                    .copied()
+                    .collect();
+            // Expand to include input and output nodes so the synthetic
+            // plan's injection path (in → Ri → neg) is visible.
+            pin_nodes.insert(graph.in_node);
+            pin_nodes.insert(graph.out_node);
+
+            // Collect unclaimed passive edges between these nodes and
+            // expand the node set by BFS through passive connectivity.
+            let mut frontier: Vec<super::graph::NodeId> = pin_nodes.iter().copied().collect();
+            let mut passive_edges: Vec<usize> = Vec::new();
+            let mut seen_edges: HashSet<usize> = HashSet::new();
+            while let Some(n) = frontier.pop() {
+                for (eidx, e) in graph.edges.iter().enumerate() {
+                    if seen_edges.contains(&eidx) || claimed_edges.contains(&eidx) {
+                        continue;
+                    }
+                    if graph.active_edge_indices.contains(&eidx) {
+                        continue; // skip virtual active-bridge edges
+                    }
+                    if e.node_a != n && e.node_b != n {
+                        continue;
+                    }
+                    // Skip non-passive edges.
+                    let comp = &graph.components[e.comp_idx];
+                    if !comp.kind.is_passive() {
+                        continue;
+                    }
+                    seen_edges.insert(eidx);
+                    passive_edges.push(eidx);
+                    // Expand frontier through the other endpoint.
+                    let other = if e.node_a == n { e.node_b } else { e.node_a };
+                    if pin_nodes.insert(other) {
+                        frontier.push(other);
+                    }
+                }
+            }
+
+            // Build a synthetic plan. injection_node = graph.in_node,
+            // output_node = graph.out_node (typical for single-stage
+            // op-amp pedals).
+            if !passive_edges.is_empty() {
+                // Mark these edges as claimed so other plan passes don't
+                // re-claim them.
+                for &eidx in &passive_edges {
+                    claimed_edges.insert(eidx);
+                }
+                eprintln!(
+                    "[synthetic-nullor-plan] opamp={} pins=({},{},{}) edges={}",
+                    graph.components[rec.comp_idx].id,
+                    rec.pos_node,
+                    rec.neg_node,
+                    rec.out_node,
+                    passive_edges.len()
+                );
+                multi_nl_plans.push(super::plan::MultiNlPlan {
+                    nl_element_indices: Vec::new(),
+                    output_element_idx: 0, // unused when n_nl == 0
+                    passive_edge_indices: passive_edges,
+                    injection_node: graph.in_node,
+                    nl_terminals: Vec::new(),
+                    compensation: 1.0,
+                    output_node: Some(graph.out_node),
+                    ota_vccs: Vec::new(),
+                    signal_chain_depth: Some(0),
+                    nullor_comp_indices: vec![rec.comp_idx],
+                });
+            }
+        }
+    }
 
     // Now set signal_flow_distance on opamp feedback stages using island depths.
     // This must happen after plan_stages which computes node_island_depths.
