@@ -1279,6 +1279,10 @@ fn build_rtype_stage(
     let n_nl = plan.nl_terminals.len();
     let has_linearized_ota = !plan.ota_vccs.is_empty();
     let has_nullor = !plan.nullor_comp_indices.is_empty();
+    // Pure op-amp stage: no NL ports, no OTA, but has nullor(s). Input is
+    // stamped as a VS in the MNA, output is read via a high-impedance probe
+    // port and extract_coeffs. Same machinery as linearized-OTA stages.
+    let nullor_only_vs = has_nullor && n_nl == 0 && !has_linearized_ota;
 
     // Compute effective sample rate accounting for oversampling.
     // All DynNodes (caps, inductors) must be created at this rate so that
@@ -1494,6 +1498,15 @@ fn build_rtype_stage(
             ro: 75.0, // typical op-amp output impedance; TODO: datasheet per-model
             vsrc_idx,
         });
+    }
+
+    // Reserve extra vsource for nullor-only input VS injection.
+    let n_nl_for_nullor_check = plan.nl_terminals.len();
+    let nullor_only_extra_vs = !in_stage_nullors.is_empty()
+        && n_nl_for_nullor_check == 0
+        && plan.ota_vccs.is_empty();
+    if nullor_only_extra_vs {
+        num_vsources += 1;
     }
 
     // ── Step 2: Build MNA — stamp only residual (bridging) edges ────────
@@ -1868,7 +1881,7 @@ fn build_rtype_stage(
     // pot_children change, so Tone/Volume pots correctly affect V(out_node).
     const R_PROBE: f64 = 1e9; // 1 GΩ — matches GMIN regularization level
     let probe_port_idx: Option<usize> =
-        if n_nl > 0 && plan.output_node.is_some() && !has_linearized_ota {
+        if (n_nl > 0 || nullor_only_vs) && plan.output_node.is_some() && !has_linearized_ota {
             let out_node = plan.output_node.unwrap();
             let out_pos_mna = node_to_mna(out_node);
             if let Some(_out_pos) = out_pos_mna {
@@ -1915,7 +1928,20 @@ fn build_rtype_stage(
     let mut r_adapted = 1000.0;
     let mut vs_injection_vec: Option<Vec<f64>> = None;
 
+    // Nullor-only stages use VS injection (not a WDF port) so that
+    // `derive_scattering_and_vs_injection` can compute both the
+    // scattering matrix and the injection vector used by extract_coeffs.
+    // (`nullor_only_vs` is defined at the top of this function.)
+
     if has_linearized_ota && n_nl == 0 {
+        let vs_idx = num_vsources - 1;
+        mna.stamp_voltage_source(injection_mna, None, vs_idx);
+    } else if nullor_only_vs {
+        // The injection VS uses the nullor-reserved vsource slot 0 (nullor
+        // stamps occupied indices starting after coupled transformers and
+        // VCC; we co-opt the last reserved slot for the input VS). See
+        // note where num_vsources is computed — an extra slot is reserved
+        // for this case.
         let vs_idx = num_vsources - 1;
         mna.stamp_voltage_source(injection_mna, None, vs_idx);
     } else {
@@ -1931,6 +1957,16 @@ fn build_rtype_stage(
     let mut vcc_injection_vec: Option<Vec<f64>> = None;
     let mut scattering = if has_linearized_ota && n_nl == 0 {
         // OTA stage: signal input as VS
+        let vs_idx = num_vsources - 1;
+        let (s, vs_inj) = mna.derive_scattering_and_vs_injection(&ports, vs_idx);
+        if s.iter().any(|&sv| !sv.is_finite()) {
+            return None;
+        }
+        vs_injection_vec = Some(vs_inj);
+        s
+    } else if nullor_only_vs {
+        // Nullor-only stage: signal input is a VS, scattering derivation
+        // produces both the S matrix and the injection vector k[i].
         let vs_idx = num_vsources - 1;
         let (s, vs_inj) = mna.derive_scattering_and_vs_injection(&ports, vs_idx);
         if s.iter().any(|&sv| !sv.is_finite()) {
@@ -2366,7 +2402,10 @@ fn build_rtype_stage(
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
     let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
 
-    // Node-voltage extraction for linearized OTA.
+    // Node-voltage extraction for linearized-OTA OR nullor-only stages.
+    // Both paths have n_nl == 0 so the standard WDF port-based output path
+    // would index into empty arrays. Direct node-voltage extraction is
+    // used instead.
     let (extract_coeffs, extract_vs, extract_output_nodes) =
         if has_linearized_ota && n_nl == 0 && vs_injection_vec.is_some() {
             let vs_idx = num_vsources - 1;
@@ -2376,6 +2415,23 @@ fn build_rtype_stage(
             let out_neg = None;
             let (coeffs, vs_coeff) = mna.derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
             (Some(coeffs), vs_coeff, Some((out_pos, out_neg)))
+        } else if nullor_only_vs && vs_injection_vec.is_some() {
+            // Pure op-amp stage: extract voltage at plan.output_node (the
+            // op-amp's out pin, typically graph.out_node). Input VS is
+            // stamped at injection_node; scattering was derived with VS
+            // injection so extract_coeffs uses the same vs_idx.
+            let vs_idx = num_vsources - 1;
+            let out_circuit = plan.output_node.unwrap_or(graph.out_node);
+            let out_mna = node_to_mna(out_circuit);
+            if out_mna.is_some() {
+                let out_pos = out_mna;
+                let out_neg = None;
+                let (coeffs, vs_coeff) =
+                    mna.derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
+                (Some(coeffs), vs_coeff, Some((out_pos, out_neg)))
+            } else {
+                (None, 0.0, None)
+            }
         } else {
             (None, 0.0, None)
         };
