@@ -1279,10 +1279,12 @@ fn build_rtype_stage(
     let n_nl = plan.nl_terminals.len();
     let has_linearized_ota = !plan.ota_vccs.is_empty();
     let has_nullor = !plan.nullor_comp_indices.is_empty();
-    // Pure op-amp stage: no NL ports, no OTA, but has nullor(s). Input is
-    // stamped as a VS in the MNA, output is read via a high-impedance probe
-    // port and extract_coeffs. Same machinery as linearized-OTA stages.
-    let nullor_only_vs = has_nullor && n_nl == 0 && !has_linearized_ota;
+    // `nullor_only_vs` is the runtime flag that selects the VS-injection
+    // + probe-port + extract_coeffs path. It must also be true only when
+    // the stage's MNA actually contains at least one op-amp — otherwise
+    // the vsource budget is wrong. Recomputed below after the real
+    // `in_stage_nullors` list is built.
+    let mut nullor_only_vs = has_nullor && n_nl == 0 && !has_linearized_ota;
 
     // Compute effective sample rate accounting for oversampling.
     // All DynNodes (caps, inductors) must be created at this rate so that
@@ -1507,6 +1509,16 @@ fn build_rtype_stage(
         && plan.ota_vccs.is_empty();
     if nullor_only_extra_vs {
         num_vsources += 1;
+    }
+    // Only fire the VS-injection path when there are actually in-stage
+    // nullors to stamp. A synthetic plan may declare a nullor that
+    // belongs to a different stage (no pins in this stage's node_set);
+    // for such plans the stage has no linear content and should be skipped.
+    nullor_only_vs = nullor_only_vs && !in_stage_nullors.is_empty();
+    if has_nullor && in_stage_nullors.is_empty() && n_nl == 0 && !has_linearized_ota {
+        // Synthetic plan whose op-amps aren't in this stage's MNA —
+        // nothing to build.
+        return None;
     }
 
     // ── Step 2: Build MNA — stamp only residual (bridging) edges ────────
