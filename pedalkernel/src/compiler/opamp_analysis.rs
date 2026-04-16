@@ -754,25 +754,15 @@ pub(super) fn build_allpass_queue(
 
 /// Build standalone op-amp stages (no feedback detected).
 pub(super) fn build_standalone_opamp_stages(
-    pedal: &PedalDef,
-    feedback_opamp_ids: &HashSet<String>,
-    sample_rate: f64,
+    _pedal: &PedalDef,
+    _feedback_opamp_ids: &HashSet<String>,
+    _sample_rate: f64,
 ) -> Vec<super::compiled::OpAmpStage> {
-    let mut opamp_stages = Vec::new();
-    for comp in &pedal.components {
-        if let Some(ot) = comp.kind.op_amp_type() {
-            if !ot.is_ota() && !feedback_opamp_ids.contains(&comp.id) {
-                let model = OpAmpModel::from_opamp_type(&ot);
-                let mut opamp = OpAmpRoot::new(model);
-                opamp.set_sample_rate(sample_rate);
-                opamp_stages.push(super::compiled::OpAmpStage {
-                    opamp,
-                    comp_id: comp.id.clone(),
-                });
-            }
-        }
-    }
-    opamp_stages
+    // NULLOR REFACTOR (Phase 3b extension): returns empty. With the
+    // unified pipeline, every op-amp is absorbed into an R-type stage
+    // via `stamp_vcvs`; standalone unity-gain OpAmpRoot stages would
+    // double-process the signal.
+    Vec::new()
 }
 
 /// Try to build a WDF tree from the feedback network via SP reduction.
