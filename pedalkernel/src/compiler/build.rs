@@ -1250,6 +1250,22 @@ fn stamp_passive_edge(
 ///
 /// Returns `None` if MNA construction fails (e.g., singular matrix).
 #[allow(dead_code)]
+/// Per-op-amp nullor parameters gathered during `build_rtype_stage`.
+///
+/// The VCVS stamp in MNA enforces `V_out = Aol·(V_pos − V_neg) − Ro·i_vsrc`,
+/// absorbing the op-amp into the R-type adaptor's scattering matrix. When
+/// `Aol → ∞` and `Ro → 0` this is Werner's nullor.
+struct InStageNullor {
+    #[allow(dead_code)]
+    comp_id: String,
+    pos_mna: Option<usize>,
+    neg_mna: Option<usize>,
+    out_mna: Option<usize>,
+    aol: f64,
+    ro: f64,
+    vsrc_idx: usize,
+}
+
 fn build_rtype_stage(
     decomposed: &super::graph::DecomposedCircuit,
     plan: &MultiNlPlan,
@@ -1444,6 +1460,40 @@ fn build_rtype_stage(
         }
     };
 
+    // ── Collect in-stage op-amp nullors (VCVS stamps) ───────────────────
+    // For each op-amp whose pos/neg/out pins include at least one node in
+    // this stage's MNA (i.e. its feedback network is in the residual),
+    // reserve one auxiliary vsource and remember the stamp parameters.
+    let mut in_stage_nullors: Vec<InStageNullor> = Vec::new();
+    for rec in &graph.nullor_pins {
+        let any_in_stage = [rec.pos_node, rec.neg_node, rec.out_node]
+            .iter()
+            .any(|&n| node_set.contains(&n));
+        if !any_in_stage {
+            continue;
+        }
+        let pos_mna = node_to_mna(rec.pos_node);
+        let neg_mna = node_to_mna(rec.neg_node);
+        let out_mna = node_to_mna(rec.out_node);
+        let comp = &graph.components[rec.comp_idx];
+        let op_type = comp
+            .kind
+            .op_amp_type()
+            .unwrap_or(crate::dsl::OpAmpType::Tl072);
+        let model = OpAmpModel::from_opamp_type(&op_type);
+        let vsrc_idx = num_vsources;
+        num_vsources += 1;
+        in_stage_nullors.push(InStageNullor {
+            comp_id: comp.id.clone(),
+            pos_mna,
+            neg_mna,
+            out_mna,
+            aol: model.open_loop_gain,
+            ro: 75.0, // typical op-amp output impedance; TODO: datasheet per-model
+            vsrc_idx,
+        });
+    }
+
     // ── Step 2: Build MNA — stamp only residual (bridging) edges ────────
     let mut reactive_edges: Vec<(usize, DynNode)> = Vec::new();
     let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
@@ -1538,6 +1588,25 @@ fn build_rtype_stage(
     if let Some(vcc_idx) = vcc_vs_idx {
         let vcc_mna = node_to_mna(graph.vcc_node);
         mna.stamp_voltage_source(vcc_mna, None, vcc_idx);
+    }
+
+    // ── Stamp in-stage op-amp VCVS constraints (nullors) ────────────────
+    // Each op-amp contributes one auxiliary vsrc and an MNA constraint
+    //   v(out) − Aol·(v(pos) − v(neg)) + Ro·i = 0
+    // that absorbs the op-amp into the R-type adaptor. Combined with the
+    // passive feedback network already in the residual, the scattering
+    // matrix handles every feedback topology automatically — no
+    // topology-specific code paths required.
+    for nullor in &in_stage_nullors {
+        mna.stamp_vcvs(
+            nullor.pos_mna,
+            nullor.neg_mna,
+            nullor.out_mna,
+            None,
+            nullor.aol,
+            nullor.ro,
+            nullor.vsrc_idx,
+        );
     }
 
     // ── Stamp linearized OTA VCCS ──────────────────────────────────────
