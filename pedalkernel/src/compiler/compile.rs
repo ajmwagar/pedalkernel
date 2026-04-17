@@ -1598,20 +1598,10 @@ pub fn compile_pedal_with_options(
     // ══ Pass 1: Element classification ════════════════════════════════
     let classified = super::classify::classify_circuit(&graph, pedal);
 
-    // ══ Pass 1.5: Component self-classification ═══════════════════════
-    // Components inspect their neighborhood and self-classify topologies.
-    // Pre-classified opamps are skipped by the monolithic find_opamp_feedback_loops.
-    let (topology_classified, topology_classified_ids) =
-        super::topology::classify_topologies(pedal, sample_rate);
-
-    // ══ Pass 2: Op-amp analysis ═══════════════════════════════════════
-    let opamp_analysis = super::opamp_analysis::analyze_opamps(
-        &graph,
-        pedal,
-        &topology_classified,
-        &topology_classified_ids,
-    );
-    let opamp_feedback_gain = 1.0_f64;
+    // ══ Pass 1.5 + 2 removed (nullor refactor) ═════════════════════════
+    // Op-amp topology classification and feedback analysis are gone.
+    // All op-amps are absorbed into R-type adaptors via VCVS stamps.
+    // See Phase 1–6 commits on refactor/opamp-nullor.
 
     // ── Short unity-gain opamp pos→out in the graph ────────────────────
     // ── Unity-gain buffer pos→out merge ────────────────────────────────
@@ -1699,181 +1689,21 @@ pub fn compile_pedal_with_options(
         }
     }
 
-    // Detect opamps whose feedback components share a graph node with
-    // nonlinear element junctions. For these opamps, skip build_feedback_tree
-    // so the NL stage keeps the feedback components (avoids double-counting
-    // that kills signal level in circuits like RAT, Tube Screamer, etc.).
-    let nl_junction_nodes: HashSet<super::graph::NodeId> = classified
-        .nonlinear_elements
-        .iter()
-        .flat_map(|e| e.junction_nodes.iter().copied())
-        .collect();
-
-    let skip_feedback_tree_opamps: HashSet<String> = opamp_analysis
-        .feedback_loops
-        .iter()
-        .filter(|info| {
-            // If find_feedback_diode already detected diodes between neg and out,
-            // skip the feedback tree so the opamp can be paired with the DiodePair
-            // WDF stage for proper NR solver clipping (Bluesbreaker, Tube Screamer).
-            // The diode chain may traverse nodes not in passive_adj (diodes are NL),
-            // so the BFS-based check below can miss multi-hop feedback paths like
-            // IC1b.out -> R_clip -> D1 -> D2 -> IC1b.neg.
-            if info.has_feedback_diode() {
-                #[cfg(test)]
-                eprintln!("[SKIP_FB_TREE] {} has feedback_diode → skip", info.comp_id);
-                return true;
-            }
-
-            // Skip feedback tree if the opamp's neg or out node directly
-            // touches an NL junction, or a single passive edge bridges from
-            // neg/out to an NL junction.
-            // - Direct: RAT feedback pot IS at diode junction (neg = NL node)
-            // - 1-hop: Klon R_clip bridges diode junction to U3.neg
-            //
-            // We only check the opamp's own neg/out pins — NOT intermediate
-            // nodes deep in the ground leg (e.g. pot wipers). This prevents
-            // false positives where a ground-leg pot wiper coincidentally
-            // connects to another stage's NL junction (Bluesbreaker Gain pot
-            // wiper → R4 → IC1b.neg with diodes).
-            if nl_junction_nodes.contains(&info.neg_node)
-                || nl_junction_nodes.contains(&info.out_node)
-            {
-                return true;
-            }
-            let is_global = |n: super::graph::NodeId| {
-                n == graph.gnd_node
-                    || n == graph.vcc_node
-                    || n == graph.in_node
-                    || n == graph.out_node
-            };
-            graph.edges.iter().enumerate().any(|(idx, e)| {
-                if classified.all_nonlinear_edge_indices.contains(&idx)
-                    || graph.active_edge_indices.contains(&idx)
-                {
-                    return false;
-                }
-                let at_opamp_pin =
-                    |n: super::graph::NodeId| n == info.neg_node || n == info.out_node;
-                (at_opamp_pin(e.node_a)
-                    && nl_junction_nodes.contains(&e.node_b)
-                    && !is_global(e.node_b))
-                    || (at_opamp_pin(e.node_b)
-                        && nl_junction_nodes.contains(&e.node_a)
-                        && !is_global(e.node_a))
-            })
-        })
-        .map(|info| info.comp_id.clone())
-        .collect();
-    // Build op-amp feedback stages (inverting, non-inverting).
-    // Diode-paired opamps are returned separately for pairing with DiodePair stages.
     let mut stages: Vec<WdfStage> = Vec::new();
-    let (mut opamp_feedback_stages, diode_paired_opamps, opamp_consumed_edges) =
-        super::opamp_analysis::build_opamp_feedback_stages(
-            &opamp_analysis,
-            pedal,
-            &graph,
-            stages.len(),
-            sample_rate,
-            oversampling,
-            &skip_feedback_tree_opamps,
-            &nl_junction_nodes,
-        );
-    let mut claimed_edges: HashSet<usize> = opamp_consumed_edges;
-    // Apply oversampling rate to opamp feedback stages.
-    // The OpAmpRoot GBW filter and slew rate limiter are initialized at base_rate
-    // but run inside the oversampler at effective_rate. Without this correction,
-    // both are N× too gentle (e.g. 4× at X4 oversampling).
-    for stage in &mut opamp_feedback_stages {
-        stage.apply_oversampling_rate(sample_rate);
-    }
-    stages.extend(opamp_feedback_stages);
-
-    // Set output_node_id and injection_node_id on opamp feedback stages.
-    // signal_flow_distance is set later (after plan_stages) using island depths.
-    // Skip diode-paired opamps (they don't produce standalone stages).
-    {
-        let mut stage_idx = 0;
-        for info in &opamp_analysis.feedback_loops {
-            match &info.feedback_kind {
-                super::graph::OpAmpFeedbackKind::UnityGain
-                | super::graph::OpAmpFeedbackKind::AllpassJfet { .. }
-                | super::graph::OpAmpFeedbackKind::Allpass { .. } => continue,
-                super::graph::OpAmpFeedbackKind::Inverting { feedback_diode, .. }
-                    if skip_feedback_tree_opamps.contains(&info.comp_id)
-                        && (feedback_diode.is_some()
-                            || nl_junction_nodes.contains(&info.out_node)) =>
-                {
-                    // This opamp was routed to diode_paired_opamps, not stages.
-                    continue;
-                }
-                _ => {}
-            }
-            if stage_idx < stages.len() {
-                stages[stage_idx].output_node_id = info.out_node;
-                stages[stage_idx].injection_node_id = info.neg_node;
-            }
-            stage_idx += 1;
-        }
-    }
-
-    // Build standalone op-amp stages (no feedback).
-    let opamp_stages = super::opamp_analysis::build_standalone_opamp_stages(
-        pedal,
-        &opamp_analysis.feedback_opamp_ids,
-        sample_rate,
-    );
+    let mut claimed_edges: HashSet<usize> = HashSet::new();
+    // Op-amp stages are now compiled via the nullor/VCVS path in build_rtype_stage.
+    let opamp_stages: Vec<super::compiled::OpAmpStage> = Vec::new();
 
     // ══ Pass 3: Stage planning ════════════════════════════════════════
     // Detect modulation-controlled elements before planning.
     let envelope_controlled_otas = detect_envelope_controlled_otas(pedal);
 
-    // Opamp neg/pos input pins used as BFS barriers in plan_one_junction and
-    // collect_passive_edges_from_nodes. This prevents NL BFS from traversing
-    // into summing/feedforward networks at opamp inputs (e.g. Goldenrod
-    // R_ff1b, R_ff2, R_sum_fb attached to U3.neg).
-    //
-    // We add neg/pos as barriers for ALL opamps EXCEPT those where the opamp
-    // has a feedback_diode (i.e. diodes ARE in the neg→out feedback path).
-    // For feedback-diode opamps (Tube Screamer, Blues Driver, Klon/Bluesbreaker
-    // gain stages), the NL BFS must traverse through neg to find the feedback
-    // components — so their neg nodes must remain traversable.
-    //
-    // Opamps that are skip_tree due to 1-hop adjacency only (e.g. Goldenrod U3
-    // where R_clip bridges diode junction to U3.neg, but the diodes are NOT in
-    // U3's feedback path) still get barriers, preventing BFS from wandering
-    // into the summing/feedforward network at U3.neg.
-    // Non-feedback-diode opamp neg/pos nodes are BFS barriers. This prevents
-    // NL element BFS from traversing into opamp feedback networks (e.g.
-    // Goldenrod R_ff1b, R_ff2, R_sum_fb at U3.neg).
-    //
-    // Feedback-diode opamp neg nodes are handled per-call via
-    // feedback_diode_neg_map: each diode's BFS adds ALL OTHER feedback-diode
-    // opamp neg nodes as extra barriers, preventing cross-contamination
-    // (e.g., D1 in Blues Driver claiming R9/C6 that belong to U2/D3).
-    let opamp_input_nodes: HashSet<super::graph::NodeId> = opamp_analysis
-        .feedback_loops
-        .iter()
-        .filter(|info| {
-            !info.has_feedback_diode()
-                && !matches!(
-                    info.feedback_kind,
-                    super::graph::OpAmpFeedbackKind::UnityGain
-                )
-        })
-        .flat_map(|info| [info.neg_node, info.pos_node])
-        .collect();
-
-    // Map: diode junction (= opamp out_node) → opamp neg_node.
-    // Used in plan_one_junction to add "foreign" feedback-diode opamp neg
-    // nodes as BFS barriers. Each feedback-diode BFS sees its own paired
-    // opamp's neg as traversable, but all other feedback-diode opamp neg
-    // nodes are barriers — preventing D1 from walking through U2.neg.
+    // Op-amp BFS barriers: these were populated from opamp_analysis (now deleted).
+    // The nullor path handles op-amps directly via stamp_vcvs; BFS barriers
+    // are no longer needed for op-amp feedback networks.
+    let opamp_input_nodes: HashSet<super::graph::NodeId> = HashSet::new();
     let feedback_diode_neg_map: HashMap<super::graph::NodeId, super::graph::NodeId> =
-        diode_paired_opamps
-            .iter()
-            .map(|dp| (dp.out_node, dp.neg_node))
-            .collect();
+        HashMap::new();
 
     let (
         stage_plans,
@@ -2005,41 +1835,6 @@ pub fn compile_pedal_with_options(
         }
     }
 
-    // Now set signal_flow_distance on opamp feedback stages using island depths.
-    // This must happen after plan_stages which computes node_island_depths.
-    {
-        let mut stage_idx = 0;
-        for info in &opamp_analysis.feedback_loops {
-            match &info.feedback_kind {
-                super::graph::OpAmpFeedbackKind::UnityGain
-                | super::graph::OpAmpFeedbackKind::AllpassJfet { .. }
-                | super::graph::OpAmpFeedbackKind::Allpass { .. } => continue,
-                super::graph::OpAmpFeedbackKind::Inverting { feedback_diode, .. }
-                    if skip_feedback_tree_opamps.contains(&info.comp_id)
-                        && (feedback_diode.is_some()
-                            || nl_junction_nodes.contains(&info.out_node)) =>
-                {
-                    continue;
-                }
-                _ => {}
-            }
-            if stage_idx < stages.len() {
-                stages[stage_idx].signal_flow_distance = node_island_depths
-                    .get(&info.neg_node)
-                    .or_else(|| node_island_depths.get(&info.out_node))
-                    .copied()
-                    .unwrap_or_else(|| {
-                        classified
-                            .dist_from_in
-                            .get(&info.neg_node)
-                            .copied()
-                            .unwrap_or(0)
-                    });
-            }
-            stage_idx += 1;
-        }
-    }
-
     // ══ Pass 4: Tree building ═════════════════════════════════════════
     // Detect JFETs that are LFO-controlled so they use variable-resistance mode
     // instead of full nonlinear NR solving.
@@ -2052,14 +1847,12 @@ pub fn compile_pedal_with_options(
             &stage_plans,
             &classified,
             &graph,
-            &opamp_analysis,
             sample_rate,
             oversampling,
             &pp_transformer_edges,
             &lfo_controlled_jfets,
             supply_voltage,
             &node_island_depths,
-            &diode_paired_opamps,
         );
     stages.extend(nonlinear_stages);
 
@@ -2082,7 +1875,6 @@ pub fn compile_pedal_with_options(
         sample_rate,
         oversampling,
         supply_voltage,
-        &diode_paired_opamps,
     );
 
     // Add triode fallback stages (SP-failed triodes built as single-NL MNA).
@@ -2114,42 +1906,6 @@ pub fn compile_pedal_with_options(
         claimed_edges.extend(classified.sidechain_edge_set.iter().copied());
         claimed_edges.extend(orphan_output_edges.iter().copied());
         claimed_edges.extend(fallback_claimed_edges.iter().copied());
-
-        // Claim opamp input passives (coupling caps, bias resistors at
-        // pos/neg pins). Only for non-inverting opamps where pos is the
-        // signal input — inverting opamps have pos at AC ground (Vref),
-        // and BFS from Vref would over-claim tone/volume sections.
-        // Use output-pin barriers AND AC-ground barriers to prevent the
-        // BFS from leaking through shared bias nodes (e.g. Vref) into
-        // unrelated circuit sections (tone/volume networks).
-        let mut input_bfs_barriers = graph.output_pin_nodes.clone();
-        // Add AC ground nodes as barriers: these are bias reference points
-        // shared by many circuit branches (bypass-capped supply dividers).
-        // BFS from the signal input should stop at these nodes to avoid
-        // over-claiming downstream passive sections.
-        for &ag_node in &graph.ac_ground_nodes {
-            input_bfs_barriers.insert(ag_node);
-        }
-        for info in &opamp_analysis.feedback_loops {
-            let skip = matches!(
-                info.feedback_kind,
-                super::graph::OpAmpFeedbackKind::Inverting { .. }
-                    | super::graph::OpAmpFeedbackKind::UnityGain
-            );
-            if skip {
-                continue;
-            }
-            let input_passives = graph.bfs_passive_edges(
-                info.pos_node,
-                &classified.all_nonlinear_edge_indices,
-                &graph.active_edge_indices,
-                false,
-                true,
-                &pp_transformer_edges,
-                &input_bfs_barriers,
-            );
-            claimed_edges.extend(input_passives.iter().copied());
-        }
 
         let feedforward_stages =
             build_feedforward_stages(&graph, &classified, &claimed_edges, sample_rate);
@@ -2628,7 +2384,7 @@ pub fn compile_pedal_with_options(
         &trigger_id_to_idx,
     );
 
-    let physical_gain = opamp_feedback_gain * passive_attenuation * transformer_gain;
+    let physical_gain = passive_attenuation * transformer_gain;
     // Gain range for initial pre-gain computation.
     // Maps the physical gain to a useful input-level sweep.
     let gain_range_final = (physical_gain.max(0.1), physical_gain.max(0.1) * 10.0);

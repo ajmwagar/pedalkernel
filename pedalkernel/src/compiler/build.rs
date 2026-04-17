@@ -23,7 +23,6 @@ use super::components::{CapSwitched, Capacitor as CapacitorComp, Potentiometer a
 use super::dyn_node::{BinaryKind, DynNode};
 use super::graph::{graph_reduce, sp_decompose, CircuitGraph, ExtraEdge, NodeId};
 use super::helpers::*;
-use super::opamp_analysis::OpAmpAnalysis;
 use super::plan::{MultiNlPlan, PushPullPlan, StagePlan};
 use super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
@@ -370,36 +369,15 @@ pub(super) fn build_stages(
     plans: &[StagePlan],
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
-    opamp_analysis: &OpAmpAnalysis,
     sample_rate: f64,
     oversampling: OversamplingFactor,
     pp_transformer_edges: &HashSet<usize>,
     lfo_controlled_jfets: &HashSet<String>,
     supply_voltage: f64,
-    node_island_depths: &HashMap<super::graph::NodeId, usize>,
-    diode_paired_opamps: &[super::opamp_analysis::DiodePairedOpAmp],
+    _node_island_depths: &HashMap<super::graph::NodeId, usize>,
 ) -> (Vec<WdfStage>, Vec<MultiNlStage>, Vec<usize>) {
-    // Build unity-gain feedback op-amp queue for JFET pairing.
-    // Also collect their out_nodes for signal_flow_distance.
-    let mut feedback_opamp_queue =
-        super::opamp_analysis::build_unity_gain_queue(opamp_analysis, sample_rate);
-    let unity_gain_out_nodes: Vec<super::graph::NodeId> = opamp_analysis
-        .feedback_loops
-        .iter()
-        .filter(|info| {
-            matches!(
-                info.feedback_kind,
-                super::graph::OpAmpFeedbackKind::UnityGain
-            )
-        })
-        .map(|info| info.out_node)
-        .collect();
-
-    // Build AllpassJfet map: JFET comp_id → (rf, cf) for inverting all-pass stages.
-    let allpass_jfet_map = super::opamp_analysis::build_allpass_jfet_map(opamp_analysis);
-
-    // Build Allpass queue: JFET comp_id → OpAmpRoot for gain-of-2 style all-pass.
-    let mut allpass_queue = super::opamp_analysis::build_allpass_queue(opamp_analysis, sample_rate);
+    // Op-amp feedback stages are now built via the nullor/VCVS path in
+    // build_rtype_stage; the old opamp_analysis-derived queues are gone.
 
     let mut stages: Vec<WdfStage> = Vec::new();
     let mut fallback_multi_nl: Vec<MultiNlStage> = Vec::new();
@@ -479,72 +457,6 @@ pub(super) fn build_stages(
                 );
             }
 
-            // Pair JFET stages with all-pass feedback or unity-gain op-amp buffers.
-            if matches!(&elem.kind, NonlinearKind::Jfet { .. }) {
-                let comp_id = &graph.components[graph.edges[elem.edge_idx].comp_idx].id;
-                if let Some(&(rf, cf)) = allpass_jfet_map.get(comp_id) {
-                    // Phase 90 inverting all-pass: build AllpassFeedback IIR.
-                    let r_ap = plan
-                        .passive_idxs
-                        .iter()
-                        .filter_map(|&idx| {
-                            graph.components[graph.edges[idx].comp_idx]
-                                .kind
-                                .resistance()
-                        })
-                        .next()
-                        .unwrap_or(22_000.0);
-                    let k = 2.0 * sample_rate * rf * cf;
-                    stage.allpass_feedback = Some(super::stage::AllpassFeedback {
-                        r_ap,
-                        b0: rf / (1.0 + k),
-                        a1: (k - 1.0) / (k + 1.0),
-                        x_prev: 0.0,
-                        y_prev: 0.0,
-                    });
-                } else if let Some(pairing) = allpass_queue.remove(comp_id) {
-                    // Allpass: direct IIR using JFET Rds and C_ap.
-                    stage.allpass_direct = Some(super::stage::AllpassDirect {
-                        cap: pairing.cap,
-                        sample_rate: pairing.sample_rate,
-                        x_prev: 0.0,
-                        y_prev: 0.0,
-                    });
-                } else if !feedback_opamp_queue.is_empty() {
-                    stage.paired_opamp = Some(feedback_opamp_queue.remove(0));
-                }
-            }
-
-            // Pair DiodePair/SingleDiode stages with feedback opamps.
-            // Match by junction node: either direct overlap or 1-hop passive adjacency.
-            if matches!(
-                &elem.kind,
-                NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)
-            ) {
-                let junction_nodes = &elem.junction_nodes;
-                if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
-                    // Direct: opamp neg/out matches diode junction node
-                    junction_nodes.iter().any(|&jn| jn == dp.neg_node || jn == dp.out_node)
-                        // 1-hop: passive edge connects opamp neg to diode junction (Klon R6)
-                        || junction_nodes.iter().any(|&jn| {
-                            graph.edges.iter().any(|e| {
-                                let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
-                                    || graph.components[e.comp_idx].kind.pot_taper().is_some();
-                                is_passive
-                                    && ((e.node_a == dp.neg_node && e.node_b == jn)
-                                        || (e.node_b == dp.neg_node && e.node_a == jn)
-                                        || (e.node_a == dp.out_node && e.node_b == jn)
-                                        || (e.node_b == dp.out_node && e.node_a == jn))
-                            })
-                        })
-                }) {
-                    stage.feedback_opamp = Some(dp.opamp_root.clone());
-                    if dp.feedback_pot_id.is_some() {
-                        stage.feedback_pot_id = dp.feedback_pot_id.clone();
-                    }
-                }
-            }
-
             stage.signal_flow_distance = if let Some(depth) = plan.signal_chain_depth {
                 depth
             } else {
@@ -599,56 +511,10 @@ pub(super) fn build_stages(
                 multi_nl.transformer_gain =
                     compute_transformer_gain(&plan.passive_idxs, graph, &transformer_subtrees);
                 multi_nl.signal_flow_distance = plan.signal_chain_depth.unwrap_or(elem.distance);
-
-                // Pair with feedback opamp (Bluesbreaker, Tube Screamer fallback).
-                // Same matching logic as the WdfStage path: junction node overlap
-                // or 1-hop passive adjacency to opamp neg/out.
-                let junction_nodes = &elem.junction_nodes;
-                if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
-                    junction_nodes
-                        .iter()
-                        .any(|&jn| jn == dp.neg_node || jn == dp.out_node)
-                        || junction_nodes.iter().any(|&jn| {
-                            graph.edges.iter().any(|e| {
-                                let is_passive =
-                                    graph.components[e.comp_idx].kind.resistance().is_some()
-                                        || graph.components[e.comp_idx].kind.pot_taper().is_some();
-                                is_passive
-                                    && ((e.node_a == dp.neg_node && e.node_b == jn)
-                                        || (e.node_b == dp.neg_node && e.node_a == jn)
-                                        || (e.node_a == dp.out_node && e.node_b == jn)
-                                        || (e.node_b == dp.out_node && e.node_a == jn))
-                            })
-                        })
-                }) {
-                    multi_nl.feedback_opamp = Some(dp.opamp_root.clone());
-                    if dp.feedback_pot_id.is_some() {
-                        multi_nl.feedback_pot_id = dp.feedback_pot_id.clone();
-                    }
-                }
-
                 fallback_multi_nl.push(multi_nl);
                 fallback_claimed_edges.extend(&plan.passive_idxs);
             }
         }
-    }
-
-    // Handle remaining unity-gain op-amps that weren't paired with JFETs.
-    // Track which unity gain opamp we're consuming from the parallel list.
-    let consumed_count = unity_gain_out_nodes.len() - feedback_opamp_queue.len();
-    for (qi, opamp) in feedback_opamp_queue.drain(..).enumerate() {
-        let out_node_idx = consumed_count + qi;
-        let out_node = unity_gain_out_nodes.get(out_node_idx).copied();
-        let sfd = out_node
-            .and_then(|n| node_island_depths.get(&n).copied())
-            .unwrap_or(usize::MAX);
-        let tree = DynNode::VoltageSource(0.0, 10_000.0);
-        stages.push(WdfStage {
-            signal_flow_distance: sfd,
-            injection_node_id: out_node.unwrap_or(usize::MAX),
-            output_node_id: out_node.unwrap_or(usize::MAX),
-            ..WdfStage::new(tree, RootKind::OpAmp(opamp), Oversampler::new(oversampling))
-        });
     }
 
     // Balance voltage source impedance in each stage.
@@ -1105,7 +971,6 @@ pub(super) fn build_multi_nl_stages(
     sample_rate: f64,
     oversampling: OversamplingFactor,
     supply_voltage: f64,
-    diode_paired_opamps: &[super::opamp_analysis::DiodePairedOpAmp],
 ) -> Vec<MultiNlStage> {
     let mut multi_nl_stages = Vec::new();
 
@@ -1122,48 +987,6 @@ pub(super) fn build_multi_nl_stages(
                 let empty_subtrees = HashMap::new();
                 stage.transformer_gain =
                     compute_transformer_gain(&plan.passive_edge_indices, graph, &empty_subtrees);
-
-                // Pair DiodePair/SingleDiode MultiNl stages with feedback opamps.
-                // Collect all junction nodes from all NL elements in this plan.
-                let has_diode = plan.nl_element_indices.iter().any(|&idx| {
-                    matches!(
-                        &classified.nonlinear_elements[idx].kind,
-                        NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)
-                    )
-                });
-                if has_diode {
-                    let all_junction_nodes: Vec<super::graph::NodeId> = plan
-                        .nl_element_indices
-                        .iter()
-                        .flat_map(|&idx| {
-                            classified.nonlinear_elements[idx]
-                                .junction_nodes
-                                .iter()
-                                .copied()
-                        })
-                        .collect();
-                    if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
-                        // Direct: opamp neg/out matches any diode junction node
-                        all_junction_nodes.iter().any(|&jn| jn == dp.neg_node || jn == dp.out_node)
-                            // 1-hop: passive edge connects opamp neg/out to diode junction
-                            || all_junction_nodes.iter().any(|&jn| {
-                                graph.edges.iter().any(|e| {
-                                    let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
-                                        || graph.components[e.comp_idx].kind.pot_taper().is_some();
-                                    is_passive
-                                        && ((e.node_a == dp.neg_node && e.node_b == jn)
-                                            || (e.node_b == dp.neg_node && e.node_a == jn)
-                                            || (e.node_a == dp.out_node && e.node_b == jn)
-                                            || (e.node_b == dp.out_node && e.node_a == jn))
-                                })
-                            })
-                    }) {
-                        stage.feedback_opamp = Some(dp.opamp_root.clone());
-                        if dp.feedback_pot_id.is_some() {
-                            stage.feedback_pot_id = dp.feedback_pot_id.clone();
-                        }
-                    }
-                }
 
                 multi_nl_stages.push(stage);
             }
