@@ -2449,7 +2449,7 @@ fn build_rtype_stage(
             (None, 0.0, None)
         };
 
-    let vs_source_index = if has_linearized_ota && n_nl == 0 {
+    let vs_source_index = if (has_linearized_ota && n_nl == 0) || nullor_only_vs {
         Some(num_vsources - 1)
     } else {
         None
