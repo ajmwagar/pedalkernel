@@ -1622,36 +1622,79 @@ pub fn compile_pedal_with_options(
     // In pure-linear circuits (standalone unity buffer), do NOT merge —
     // the synthetic plan picks up both sides and the VCVS stamp provides
     // the current sourcing that a passive wire can't.
+    // Only merge unity buffers whose pos is in the SIGNAL path (reachable
+    // from graph.in_node via passive edges). Buffers whose pos is on a
+    // bias network (vref divider, gate bias) must NOT be merged — they'd
+    // collapse bias nodes into the signal output. This distinguishes:
+    //   Klon U1/U3 (pos on signal path) → merge ✓
+    //   JFET allpass U1 (pos on vref) → don't merge ✗
     let has_nl_elements = !classified.nonlinear_elements.is_empty();
     if has_nl_elements {
+        // Quick BFS from in_node through passive edges to find signal-path nodes.
+        let active_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
+        let mut signal_reachable: HashSet<super::graph::NodeId> = HashSet::new();
+        signal_reachable.insert(graph.in_node);
+        let mut frontier = vec![graph.in_node];
+        while let Some(n) = frontier.pop() {
+            for (eidx, e) in graph.edges.iter().enumerate() {
+                if active_set.contains(&eidx) {
+                    continue;
+                }
+                if !graph.components[e.comp_idx].kind.is_passive() {
+                    continue;
+                }
+                let other = if e.node_a == n {
+                    e.node_b
+                } else if e.node_b == n {
+                    e.node_a
+                } else {
+                    continue;
+                };
+                if signal_reachable.insert(other) {
+                    frontier.push(other);
+                }
+            }
+        }
         for rec in &graph.nullor_pins {
             if rec.neg_node == rec.out_node {
                 let pos = rec.pos_node;
                 let out = rec.out_node;
-                if pos != out {
-                    for edge in &mut graph.edges {
-                        if edge.node_a == pos {
-                            edge.node_a = out;
-                        }
-                        if edge.node_b == pos {
-                            edge.node_b = out;
-                        }
+                if pos == out {
+                    continue;
+                }
+                // Only merge if pos is on the signal path.
+                if !signal_reachable.contains(&pos) {
+                    continue;
+                }
+                for edge in &mut graph.edges {
+                    if edge.node_a == pos {
+                        edge.node_a = out;
                     }
-                    if graph.output_pin_nodes.remove(&pos) {
-                        graph.output_pin_nodes.insert(out);
+                    if edge.node_b == pos {
+                        edge.node_b = out;
                     }
-                    if graph.in_node == pos {
-                        graph.in_node = out;
-                    }
-                    if graph.out_node == pos {
-                        graph.out_node = out;
-                    }
+                }
+                if graph.output_pin_nodes.remove(&pos) {
+                    graph.output_pin_nodes.insert(out);
+                }
+                if graph.in_node == pos {
+                    graph.in_node = out;
+                }
+                if graph.out_node == pos {
+                    graph.out_node = out;
                 }
             }
         }
         for rec in &mut graph.nullor_pins {
             if rec.neg_node == rec.out_node && rec.pos_node != rec.out_node {
-                rec.pos_node = rec.out_node;
+                // Check if this rec was actually merged (pos changed).
+                // Simple: if pos isn't in any edge, it was merged.
+                let pos_still_exists = graph.edges.iter().any(|e| {
+                    e.node_a == rec.pos_node || e.node_b == rec.pos_node
+                });
+                if !pos_still_exists {
+                    rec.pos_node = rec.out_node;
+                }
             }
         }
     }
