@@ -1643,14 +1643,16 @@ pedal "Marshall Bluesbreaker" {
 
     // Run 100 samples of 0.1 through the full pipeline to allow oversampler to settle
     let test_input = 0.1;
-    // Check oversampler factor indirectly
-    if let super::stage::RootKind::OpAmp(ref op) = proc.stages[0].root {
-        eprintln!(
-            "[blues-driver] stage0 opamp: gain={:.4} v_max={:.2} is_non_inv={}",
-            op.gain(),
-            op.v_max(),
-            op.is_non_inverting()
-        );
+    // Check oversampler factor indirectly (guard: stages may be empty under nullor path)
+    if let Some(s0) = proc.stages.first() {
+        if let super::stage::RootKind::OpAmp(ref op) = s0.root {
+            eprintln!(
+                "[blues-driver] stage0 opamp: gain={:.4} v_max={:.2} is_non_inv={}",
+                op.gain(),
+                op.v_max(),
+                op.is_non_inverting()
+            );
+        }
     }
     for sample_idx in 0..100 {
         let out = proc.process(test_input);
@@ -1658,20 +1660,24 @@ pedal "Marshall Bluesbreaker" {
             eprintln!("[blues-driver] sample {sample_idx}: out={out:.6e}");
         }
     }
-    // Test each stage independently with significant input
-    eprintln!("[blues-driver] --- stage0 solo ---");
-    proc.stages[0].reset();
-    let mut s0_settled = 0.0;
-    for i in 0..20 {
-        s0_settled = proc.stages[0].process(test_input);
+    // Test each stage independently with significant input (guard for nullor path)
+    if let Some(s0) = proc.stages.first_mut() {
+        eprintln!("[blues-driver] --- stage0 solo ---");
+        s0.reset();
+        let mut s0_settled = 0.0;
+        for _i in 0..20 {
+            s0_settled = s0.process(test_input);
+        }
+        eprintln!("[blues-driver]   stage0 settled: {s0_settled:.6e}");
     }
-    eprintln!("[blues-driver]   stage0 settled: {s0_settled:.6e}");
 
-    eprintln!("[blues-driver] --- mnl0 solo with input 0.1 ---");
-    for i in 0..20 {
-        let m0 = proc.multi_nl_stages[0].process(test_input);
-        if i < 5 || i == 19 {
-            eprintln!("[blues-driver]   mnl0[{i}]: {m0:.6e}");
+    if let Some(mnl0) = proc.multi_nl_stages.first_mut() {
+        eprintln!("[blues-driver] --- mnl0 solo with input 0.1 ---");
+        for i in 0..20 {
+            let m0 = mnl0.process(test_input);
+            if i < 5 || i == 19 {
+                eprintln!("[blues-driver]   mnl0[{i}]: {m0:.6e}");
+            }
         }
     }
 
