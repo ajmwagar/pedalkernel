@@ -1614,72 +1614,9 @@ pub fn compile_pedal_with_options(
     let opamp_feedback_gain = 1.0_f64;
 
     // ── Short unity-gain opamp pos→out in the graph ────────────────────
-    // ── Unity-gain buffer pos→out merge (cross-plan only) ──────────────
-    // Unity-gain buffers (neg==out) that STRADDLE plans (pos in one plan's
-    // coverage, out in another's) can't be modeled as VCVS stamps because
-    // neither plan sees both pins. For these, merge pos→out to make the
-    // passive path continuous through the buffer.
-    //
-    // Buffers whose pos and out are in the SAME unclaimed island (simple
-    // unity buffer pedals) are NOT merged — the synthetic plan generator
-    // picks up both sides and the VCVS stamp handles them.
-    //
-    // Heuristic: merge if pos_node has NO unclaimed passive edges touching
-    // it (all edges were claimed by earlier plan_stages). If pos has
-    // unclaimed edges, the synthetic plan BFS will reach both pos and out.
-    {
-        let active_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
-        let mut merge_targets: Vec<(super::graph::NodeId, super::graph::NodeId)> = Vec::new();
-        for rec in &graph.nullor_pins {
-            if rec.neg_node != rec.out_node {
-                continue; // not a unity buffer
-            }
-            let pos = rec.pos_node;
-            let out = rec.out_node;
-            if pos == out {
-                continue; // already same node
-            }
-            // Check if pos has any unclaimed passive edge (indicating it can
-            // be reached by the synthetic plan's BFS from out).
-            let pos_has_unclaimed = graph.edges.iter().enumerate().any(|(eidx, e)| {
-                !active_set.contains(&eidx)
-                    && graph.components[e.comp_idx].kind.is_passive()
-                    && (e.node_a == pos || e.node_b == pos)
-            });
-            // Only merge if pos is fully claimed (straddles plan boundary).
-            if !pos_has_unclaimed {
-                merge_targets.push((pos, out));
-            }
-        }
-        for (pos, out) in &merge_targets {
-            eprintln!("[unity-merge] pos={pos} → out={out}");
-            for edge in &mut graph.edges {
-                if edge.node_a == *pos {
-                    edge.node_a = *out;
-                }
-                if edge.node_b == *pos {
-                    edge.node_b = *out;
-                }
-            }
-            if graph.output_pin_nodes.remove(pos) {
-                graph.output_pin_nodes.insert(*out);
-            }
-            if graph.in_node == *pos {
-                graph.in_node = *out;
-            }
-            if graph.out_node == *pos {
-                graph.out_node = *out;
-            }
-        }
-        // Update nullor_pins records after merges.
-        for rec in &mut graph.nullor_pins {
-            if rec.neg_node == rec.out_node && rec.pos_node != rec.out_node {
-                if merge_targets.iter().any(|(p, _)| *p == rec.pos_node) {
-                    rec.pos_node = rec.out_node;
-                }
-            }
-        }
-    }
+    // Unity-gain buffer pos→out merge is deferred until after plan_stages
+    // so we can check which edges are actually claimed by NL plans. See
+    // the "Unity-gain buffer pos→out merge" block below.
 
     // Detect opamps whose feedback components share a graph node with
     // nonlinear element junctions. For these opamps, skip build_feedback_tree
@@ -1873,6 +1810,77 @@ pub fn compile_pedal_with_options(
         &opamp_input_nodes,
         &feedback_diode_neg_map,
     );
+
+    // ── Unity-gain buffer pos→out merge (cross-plan only) ──────────────
+    // Now that plan_stages has populated claimed_edges, we can detect
+    // unity buffers that straddle plans: pos-side edges are claimed by an
+    // NL plan, out-side edges are unclaimed. These buffers can't be
+    // modeled as VCVS stamps (neither plan sees both pins). Merge pos→out
+    // to make the passive path continuous.
+    //
+    // Simple unity buffers (ALL edges unclaimed → synthetic plan picks up
+    // both sides) are NOT merged — the VCVS stamp handles them.
+    {
+        let active_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
+        let mut merge_targets: Vec<(super::graph::NodeId, super::graph::NodeId)> = Vec::new();
+        for rec in &graph.nullor_pins {
+            if rec.neg_node != rec.out_node {
+                continue; // not a unity buffer
+            }
+            let pos = rec.pos_node;
+            let out = rec.out_node;
+            if pos == out {
+                continue;
+            }
+            // Check if ALL passive edges touching pos are already claimed.
+            // If so, the synthetic plan BFS from out can't reach pos →
+            // merge is required.
+            let pos_passive_edges: Vec<usize> = graph
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(eidx, e)| {
+                    !active_set.contains(eidx)
+                        && graph.components[e.comp_idx].kind.is_passive()
+                        && (e.node_a == pos || e.node_b == pos)
+                })
+                .map(|(eidx, _)| eidx)
+                .collect();
+            let all_pos_claimed = !pos_passive_edges.is_empty()
+                && pos_passive_edges
+                    .iter()
+                    .all(|eidx| claimed_edges.contains(eidx));
+            if all_pos_claimed {
+                merge_targets.push((pos, out));
+            }
+        }
+        for (pos, out) in &merge_targets {
+            for edge in &mut graph.edges {
+                if edge.node_a == *pos {
+                    edge.node_a = *out;
+                }
+                if edge.node_b == *pos {
+                    edge.node_b = *out;
+                }
+            }
+            if graph.output_pin_nodes.remove(pos) {
+                graph.output_pin_nodes.insert(*out);
+            }
+            if graph.in_node == *pos {
+                graph.in_node = *out;
+            }
+            if graph.out_node == *pos {
+                graph.out_node = *out;
+            }
+        }
+        for rec in &mut graph.nullor_pins {
+            if rec.neg_node == rec.out_node && rec.pos_node != rec.out_node {
+                if merge_targets.iter().any(|(p, _)| *p == rec.pos_node) {
+                    rec.pos_node = rec.out_node;
+                }
+            }
+        }
+    }
 
     // ══ Synthesize op-amp-only plans (Phase 3c) ═══════════════════════════
     // For every op-amp whose pins are NOT already covered by an existing
