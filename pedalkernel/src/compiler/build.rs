@@ -1469,15 +1469,31 @@ fn build_rtype_stage(
     };
 
     // ── Collect in-stage op-amp nullors (VCVS stamps) ───────────────────
-    // For each op-amp whose pos/neg/out pins include at least one node in
-    // this stage's MNA (i.e. its feedback network is in the residual),
-    // reserve one auxiliary vsource and remember the stamp parameters.
+    // For each op-amp whose output pin is in this stage's MNA node_set,
+    // reserve one auxiliary vsource and stamp a VCVS. The output node
+    // MUST be in node_set (not grounded) — otherwise `node_to_mna`
+    // returns None for the output, and the VCVS constraint becomes
+    // `V(gnd) = Aol · V_in` which forces the input to zero, killing
+    // the signal (Klon U3 unity buffer bug).
+    //
+    // Input pins (pos/neg) may legitimately be grounded (inverting amp
+    // with pos → gnd), so we don't require them to be in node_set.
     let mut in_stage_nullors: Vec<InStageNullor> = Vec::new();
     for rec in &graph.nullor_pins {
-        let any_in_stage = [rec.pos_node, rec.neg_node, rec.out_node]
-            .iter()
-            .any(|&n| node_set.contains(&n));
-        if !any_in_stage {
+        // Output must be in this stage's MNA for the stamp to work.
+        let out_in_stage = node_set.contains(&rec.out_node)
+            || rec.out_node == graph.gnd_node
+            || graph.supply_nodes.contains(&rec.out_node);
+        if !out_in_stage {
+            continue;
+        }
+        // At least one input pin must also be in-stage or grounded
+        // (otherwise the op-amp has no connection to this stage).
+        let any_input_in_stage = node_set.contains(&rec.pos_node)
+            || node_set.contains(&rec.neg_node)
+            || rec.pos_node == graph.gnd_node
+            || rec.neg_node == graph.gnd_node;
+        if !any_input_in_stage {
             continue;
         }
         let pos_mna = node_to_mna(rec.pos_node);
