@@ -2764,9 +2764,22 @@ fn try_build_multi_nl_stage(
     }
     // Op-amp pin nodes become junction barriers so the feedback network
     // stays in the MNA residual (not SP-reduced into a WDF subtree that
-    // can't see the nullor stamp).
-    for &comp_idx in &plan.nullor_comp_indices {
-        if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == comp_idx) {
+    // can't see the nullor stamp). Check ALL nullor_pins — not just the
+    // plan's nullor_comp_indices — because NL+opamp stages (Klon, TS808,
+    // Blues Driver) have op-amps whose pins need to be junctions even
+    // though the plan was created for NL elements, not op-amps.
+    for rec in &graph.nullor_pins {
+        // Only add pins that touch this plan's passive edges.
+        let touches_plan = plan.passive_edge_indices.iter().any(|&eidx| {
+            let e = &graph.edges[eidx];
+            e.node_a == rec.pos_node
+                || e.node_b == rec.pos_node
+                || e.node_a == rec.neg_node
+                || e.node_b == rec.neg_node
+                || e.node_a == rec.out_node
+                || e.node_b == rec.out_node
+        });
+        if touches_plan {
             for &n in &[rec.pos_node, rec.neg_node, rec.out_node] {
                 if !junction_nodes.contains(&n) {
                     junction_nodes.push(n);
