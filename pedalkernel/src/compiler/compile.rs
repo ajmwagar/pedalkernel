@@ -1614,9 +1614,47 @@ pub fn compile_pedal_with_options(
     let opamp_feedback_gain = 1.0_f64;
 
     // ── Short unity-gain opamp pos→out in the graph ────────────────────
-    // Unity-gain buffer pos→out merge is deferred until after plan_stages
-    // so we can check which edges are actually claimed by NL plans. See
-    // the "Unity-gain buffer pos→out merge" block below.
+    // ── Unity-gain buffer pos→out merge ────────────────────────────────
+    // Unity-gain buffers (neg==out) are transparent wires. In circuits
+    // with NL elements (Klon, TS808), merge pos→out so NL plans see the
+    // merged topology and collect output-tail edges through the buffer.
+    //
+    // In pure-linear circuits (standalone unity buffer), do NOT merge —
+    // the synthetic plan picks up both sides and the VCVS stamp provides
+    // the current sourcing that a passive wire can't.
+    let has_nl_elements = !classified.nonlinear_elements.is_empty();
+    if has_nl_elements {
+        for rec in &graph.nullor_pins {
+            if rec.neg_node == rec.out_node {
+                let pos = rec.pos_node;
+                let out = rec.out_node;
+                if pos != out {
+                    for edge in &mut graph.edges {
+                        if edge.node_a == pos {
+                            edge.node_a = out;
+                        }
+                        if edge.node_b == pos {
+                            edge.node_b = out;
+                        }
+                    }
+                    if graph.output_pin_nodes.remove(&pos) {
+                        graph.output_pin_nodes.insert(out);
+                    }
+                    if graph.in_node == pos {
+                        graph.in_node = out;
+                    }
+                    if graph.out_node == pos {
+                        graph.out_node = out;
+                    }
+                }
+            }
+        }
+        for rec in &mut graph.nullor_pins {
+            if rec.neg_node == rec.out_node && rec.pos_node != rec.out_node {
+                rec.pos_node = rec.out_node;
+            }
+        }
+    }
 
     // Detect opamps whose feedback components share a graph node with
     // nonlinear element junctions. For these opamps, skip build_feedback_tree
@@ -1811,77 +1849,6 @@ pub fn compile_pedal_with_options(
         &feedback_diode_neg_map,
     );
 
-    // ── Unity-gain buffer pos→out merge (cross-plan only) ──────────────
-    // Now that plan_stages has populated claimed_edges, we can detect
-    // unity buffers that straddle plans: pos-side edges are claimed by an
-    // NL plan, out-side edges are unclaimed. These buffers can't be
-    // modeled as VCVS stamps (neither plan sees both pins). Merge pos→out
-    // to make the passive path continuous.
-    //
-    // Simple unity buffers (ALL edges unclaimed → synthetic plan picks up
-    // both sides) are NOT merged — the VCVS stamp handles them.
-    {
-        let active_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
-        let mut merge_targets: Vec<(super::graph::NodeId, super::graph::NodeId)> = Vec::new();
-        for rec in &graph.nullor_pins {
-            if rec.neg_node != rec.out_node {
-                continue; // not a unity buffer
-            }
-            let pos = rec.pos_node;
-            let out = rec.out_node;
-            if pos == out {
-                continue;
-            }
-            // Check if ALL passive edges touching pos are already claimed.
-            // If so, the synthetic plan BFS from out can't reach pos →
-            // merge is required.
-            let pos_passive_edges: Vec<usize> = graph
-                .edges
-                .iter()
-                .enumerate()
-                .filter(|(eidx, e)| {
-                    !active_set.contains(eidx)
-                        && graph.components[e.comp_idx].kind.is_passive()
-                        && (e.node_a == pos || e.node_b == pos)
-                })
-                .map(|(eidx, _)| eidx)
-                .collect();
-            let all_pos_claimed = !pos_passive_edges.is_empty()
-                && pos_passive_edges
-                    .iter()
-                    .all(|eidx| claimed_edges.contains(eidx));
-            if all_pos_claimed {
-                merge_targets.push((pos, out));
-            }
-        }
-        for (pos, out) in &merge_targets {
-            for edge in &mut graph.edges {
-                if edge.node_a == *pos {
-                    edge.node_a = *out;
-                }
-                if edge.node_b == *pos {
-                    edge.node_b = *out;
-                }
-            }
-            if graph.output_pin_nodes.remove(pos) {
-                graph.output_pin_nodes.insert(*out);
-            }
-            if graph.in_node == *pos {
-                graph.in_node = *out;
-            }
-            if graph.out_node == *pos {
-                graph.out_node = *out;
-            }
-        }
-        for rec in &mut graph.nullor_pins {
-            if rec.neg_node == rec.out_node && rec.pos_node != rec.out_node {
-                if merge_targets.iter().any(|(p, _)| *p == rec.pos_node) {
-                    rec.pos_node = rec.out_node;
-                }
-            }
-        }
-    }
-
     // ══ Synthesize op-amp-only plans (Phase 3c) ═══════════════════════════
     // For every op-amp whose pins are NOT already covered by an existing
     // multi_nl plan, generate a synthetic plan that carries a nullor VCVS
@@ -1925,10 +1892,11 @@ pub fn compile_pedal_with_options(
                     .iter()
                     .copied()
                     .collect();
-            // Expand to include input and output nodes so the synthetic
-            // plan's injection path (in → Ri → neg) is visible.
-            pin_nodes.insert(graph.in_node);
-            pin_nodes.insert(graph.out_node);
+            // BFS seeds from the op-amp's 3 pins ONLY — do NOT add
+            // graph.in_node or graph.out_node. Adding global I/O nodes
+            // causes greedy BFS to claim edges belonging to other op-amps
+            // (e.g., Klon U1 grabbing R11/Output from U3's territory).
+            // The in/out connection happens via stage chaining instead.
 
             // Collect unclaimed passive edges between these nodes and
             // expand the node set by BFS through passive connectivity.
