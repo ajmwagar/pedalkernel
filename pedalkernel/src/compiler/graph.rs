@@ -819,16 +819,28 @@ impl CircuitGraph {
             .collect();
 
         // Compute output-pin barrier nodes from active/gain components.
-        // Only Output pins of opamps, BJTs, tubes, JFETs, and MOSFETs are
-        // included — passive component pins (diode .b, pot .wiper) are excluded.
+        // Only Output pins of transistors (BJTs, tubes, JFETs, MOSFETs) are
+        // included. Op-amp output pins are EXCLUDED because op-amps are now
+        // absorbed into R-type adaptors via VCVS stamps — their output nodes
+        // must be traversable by BFS so that the NL plan collects feedback
+        // edges on both sides of the op-amp (Rf/Ri between neg and out).
         let mut output_pin_nodes = HashSet::new();
         let mut transistor_input_nodes = HashSet::new();
         for comp in &components {
             if comp.kind.is_gain_device() || comp.kind.op_amp_type().is_some() {
                 let is_opamp = comp.kind.op_amp_type().is_some();
+                let is_ota = comp
+                    .kind
+                    .op_amp_type()
+                    .map(|ot| ot.is_ota())
+                    .unwrap_or(false);
                 for pin_name in comp.kind.pin_config().valid_pins {
                     let dir = comp.kind.pin_direction(pin_name);
-                    if dir == super::component::PinDirection::Output {
+                    // Op-amp output pins are NOT barriers (nullor refactor).
+                    // OTA output pins still are (OTA is a separate VCCS path).
+                    if dir == super::component::PinDirection::Output
+                        && (!is_opamp || is_ota)
+                    {
                         let key = format!("{}.{}", comp.id, pin_name);
                         if let Some(&raw_id) = pin_ids.get(&key) {
                             output_pin_nodes.insert(uf.find(raw_id));

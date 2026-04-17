@@ -7289,10 +7289,11 @@ pedal "Nullor Pins Inv" subtitle "test" {
     // neg is NOT ground and NOT out (finite Aol keeps them separable).
     assert_ne!(rec.neg_node, graph.gnd_node);
     assert_ne!(rec.out_node, graph.gnd_node);
-    // out appears in output_pin_nodes (acts as BFS barrier).
+    // Op-amp .out is NOT in output_pin_nodes (nullor refactor: op-amps are
+    // absorbed into R-type, their output nodes must be BFS-traversable).
     assert!(
-        graph.output_pin_nodes.contains(&rec.out_node),
-        "out node should be in output_pin_nodes set"
+        !graph.output_pin_nodes.contains(&rec.out_node),
+        "op-amp out node should NOT be in output_pin_nodes (nullor path)"
     );
 }
 
