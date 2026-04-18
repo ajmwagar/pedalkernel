@@ -645,6 +645,342 @@ fn rescue_orphan_output_pots(
     (Vec::new(), Vec::new())
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Op-amp fast path: SP-decomposable Rf/Ri feedback → OpAmpWdfAdaptor
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Result from the op-amp fast path builder.
+struct OpAmpFastPathResult {
+    stage: WdfStage,
+    /// Edge indices consumed by this stage (must be claimed).
+    claimed: Vec<usize>,
+}
+
+/// Try to build a cheap `OpAmpWdfAdaptor`-based `WdfStage` for a simple
+/// inverting op-amp feedback network.
+///
+/// Returns `Some` when:
+/// - The op-amp is inverting (V+ grounded or AC-grounded)
+/// - The Zf feedback network (neg↔out) is SP-reducible via `graph_reduce`
+/// - The Zi input network (injection↔neg) is SP-reducible via `graph_reduce`
+///
+/// Returns `None` when the topology is too complex for the fast path
+/// (non-SP feedback, reactive-dominant, or non-inverting). The caller
+/// falls back to the MNA nullor path which handles complex/rigid topologies.
+///
+/// # Performance
+///
+/// `OpAmpWdfAdaptor::process()` costs ~20 ops/sample (2 up-sweeps + 3 mults +
+/// GBW/slew). The MNA nullor path costs O(N²) for N ports (~100× slower for
+/// simple Rf/Ri circuits that end up with 10+ MNA ports).
+fn try_build_opamp_fast_path(
+    rec: &super::graph::NullorPinRecord,
+    graph: &CircuitGraph,
+    claimed_edges: &HashSet<usize>,
+    sample_rate: f64,
+    oversampling: OversamplingFactor,
+    supply_voltage: f64,
+) -> Option<OpAmpFastPathResult> {
+    use super::graph::{graph_reduce, ExtraEdge, NodeId};
+    use super::stage::OpAmpWdfAdaptor;
+    use crate::elements::nonlinear::{FeedbackConfig, OpAmpModel, OpAmpRoot};
+
+    let neg_node = rec.neg_node;
+    let out_node = rec.out_node;
+    let pos_node = rec.pos_node;
+
+    // Unity-gain buffers (neg == out) are not for this path.
+    if neg_node == out_node {
+        return None;
+    }
+
+    // ── Detect topology ─────────────────────────────────────────────────
+    // Inverting: V+ is grounded (== gnd_node or an AC-ground node)
+    let is_inverting = pos_node == graph.gnd_node || graph.ac_ground_nodes.contains(&pos_node);
+
+    // For now only implement the inverting fast path.
+    // Non-inverting requires a different Zi (neg→gnd) split.
+    if !is_inverting {
+        return None;
+    }
+
+    let injection_node = graph.in_node; // main signal injection
+
+    // ── Collect Zf edges (neg ↔ out sub-network, feedback path) ─────────
+    //
+    // BFS from neg_node. Stop expansion at boundary nodes:
+    // out_node, injection_node, gnd_node, graph.out_node.
+    // This ensures load resistors and output-side elements are NOT included.
+    let zf_edges: Vec<usize> = {
+        let zf_stop_nodes: HashSet<NodeId> =
+            [out_node, injection_node, graph.gnd_node, graph.out_node]
+                .iter()
+                .copied()
+                .collect();
+
+        let mut zf_nodes: HashSet<NodeId> = [neg_node, out_node].iter().copied().collect();
+        let mut frontier = vec![neg_node];
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut found: Vec<usize> = Vec::new();
+        while let Some(n) = frontier.pop() {
+            for (eidx, e) in graph.edges.iter().enumerate() {
+                if seen.contains(&eidx) || claimed_edges.contains(&eidx) {
+                    continue;
+                }
+                if graph.active_edge_indices.contains(&eidx) {
+                    continue;
+                }
+                let comp = &graph.components[e.comp_idx];
+                if !comp.kind.is_passive() {
+                    continue;
+                }
+                if graph.supply_nodes.contains(&e.node_a) || graph.supply_nodes.contains(&e.node_b)
+                {
+                    continue;
+                }
+                let other = if e.node_a == n {
+                    e.node_b
+                } else if e.node_b == n {
+                    e.node_a
+                } else {
+                    continue;
+                };
+                seen.insert(eidx);
+                found.push(eidx);
+                // Expand only through non-boundary interior nodes.
+                if zf_nodes.insert(other) && !zf_stop_nodes.contains(&other) {
+                    frontier.push(other);
+                }
+            }
+        }
+        found
+    };
+
+    if zf_edges.is_empty() {
+        return None;
+    }
+
+    // Try SP reduction of the Zf sub-network with terminals [neg_node, out_node].
+    let zf_terminals = vec![neg_node, out_node];
+    let zf_tree = graph_reduce(
+        &zf_edges,
+        &[],
+        &zf_terminals,
+        graph,
+        sample_rate,
+        &HashMap::new(),
+        |n| n,
+        None,
+    )
+    .ok()
+    .map(|(t, _)| t)?;
+
+    let zf_r = zf_tree.port_resistance();
+    if zf_r <= 0.0 || !zf_r.is_finite() {
+        return None;
+    }
+
+    // ── Collect Zi edges (injection → neg sub-network, input path) ──────
+    //
+    // BFS from injection_node, stopping at neg_node.
+    // Exclude Zf edges to avoid cross-contamination.
+    let zi_edges: Vec<usize> = {
+        let zf_set: HashSet<usize> = zf_edges.iter().copied().collect();
+        let zi_stop_nodes: HashSet<NodeId> = [neg_node, out_node, graph.gnd_node, graph.out_node]
+            .iter()
+            .copied()
+            .collect();
+
+        let mut zi_nodes: HashSet<NodeId> = [injection_node, neg_node].iter().copied().collect();
+        let mut frontier = vec![injection_node];
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut found: Vec<usize> = Vec::new();
+        while let Some(n) = frontier.pop() {
+            for (eidx, e) in graph.edges.iter().enumerate() {
+                if seen.contains(&eidx) || claimed_edges.contains(&eidx) || zf_set.contains(&eidx) {
+                    continue;
+                }
+                if graph.active_edge_indices.contains(&eidx) {
+                    continue;
+                }
+                let comp = &graph.components[e.comp_idx];
+                if !comp.kind.is_passive() {
+                    continue;
+                }
+                if graph.supply_nodes.contains(&e.node_a) || graph.supply_nodes.contains(&e.node_b)
+                {
+                    continue;
+                }
+                let other = if e.node_a == n {
+                    e.node_b
+                } else if e.node_b == n {
+                    e.node_a
+                } else {
+                    continue;
+                };
+                seen.insert(eidx);
+                found.push(eidx);
+                if zi_nodes.insert(other) && !zi_stop_nodes.contains(&other) {
+                    frontier.push(other);
+                }
+            }
+        }
+        found
+    };
+
+    if zi_edges.is_empty() {
+        return None;
+    }
+
+    // Try SP reduction of the Zi sub-network.
+    // Use a synthetic source node so graph_reduce can anchor the VS.
+    let vs_syn_node = graph.edges.len() + 8000 + rec.comp_idx;
+    let zi_extra = vec![ExtraEdge {
+        node_a: vs_syn_node,
+        node_b: injection_node,
+        tree: DynNode::VoltageSource(0.0, 1.0),
+    }];
+    let zi_terminals_ext = vec![vs_syn_node, neg_node];
+
+    let zi_tree = graph_reduce(
+        &zi_edges,
+        &zi_extra,
+        &zi_terminals_ext,
+        graph,
+        sample_rate,
+        &HashMap::new(),
+        |n| n,
+        None,
+    )
+    .ok()
+    .map(|(t, _)| t)?;
+
+    let zi_r = zi_tree.port_resistance();
+    if zi_r <= 0.0 || !zi_r.is_finite() {
+        return None;
+    }
+
+    // ── DC gain and feedback pot detection ───────────────────────────────
+    let dc_gain = (zf_r / zi_r).max(0.01);
+
+    let zf_pot_id: Option<String> = zf_edges.iter().find_map(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if comp.kind.is_pot() {
+            Some(comp.id.clone())
+        } else {
+            None
+        }
+    });
+    let zi_pot_id: Option<String> = zi_edges.iter().find_map(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if comp.kind.is_pot() {
+            Some(comp.id.clone())
+        } else {
+            None
+        }
+    });
+
+    let feedback_config: Option<FeedbackConfig> = if let Some(ref pot_id) = zf_pot_id {
+        let fixed_series_r = zf_edges
+            .iter()
+            .filter_map(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                if !comp.kind.is_pot() {
+                    comp.kind.resistance()
+                } else {
+                    None
+                }
+            })
+            .sum::<f64>();
+        Some(FeedbackConfig {
+            pot_comp_id: pot_id.clone(),
+            other_leg_r: zi_r,
+            fixed_series_r,
+            parallel_r: None,
+            pot_is_feedback: true,
+            is_inverting: true,
+        })
+    } else if let Some(ref pot_id) = zi_pot_id {
+        let fixed_series_r = zi_edges
+            .iter()
+            .filter_map(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                if !comp.kind.is_pot() {
+                    comp.kind.resistance()
+                } else {
+                    None
+                }
+            })
+            .sum::<f64>();
+        Some(FeedbackConfig {
+            pot_comp_id: pot_id.clone(),
+            other_leg_r: zf_r,
+            fixed_series_r,
+            parallel_r: None,
+            pot_is_feedback: false,
+            is_inverting: true,
+        })
+    } else {
+        None
+    };
+
+    // ── Build OpAmpRoot ───────────────────────────────────────────────────
+    let opamp_comp = &graph.components[rec.comp_idx];
+    let opamp_type = opamp_comp
+        .kind
+        .op_amp_type()
+        .unwrap_or(crate::dsl::OpAmpType::Generic);
+    let model = OpAmpModel::from_opamp_type(&opamp_type);
+
+    let mut opamp = OpAmpRoot::new_inverting(model, dc_gain);
+    opamp.set_sample_rate(sample_rate);
+    let v_max = (supply_voltage / 2.0 - 1.5).max(0.5);
+    opamp.set_v_max(v_max);
+    opamp.set_gbw_gain(dc_gain);
+    if let Some(cfg) = feedback_config {
+        opamp.set_feedback_config(cfg);
+    }
+
+    // ── Build WdfStage with OpAmpWdfAdaptor ───────────────────────────────
+    let feedback_pot_id = zf_pot_id.or(zi_pot_id);
+
+    let adaptor = OpAmpWdfAdaptor {
+        zi: zi_tree,
+        zf: zf_tree,
+        is_inverting: true,
+        opamp,
+        gbw_state: 0.0,
+        prev_out: 0.0,
+        feedback_pot_id: feedback_pot_id.clone(),
+    };
+
+    // Dummy tree — not used when opamp_wdf_adaptor is Some.
+    let dummy_tree = DynNode::VoltageSource(0.0, 1.0);
+
+    let mut stage = WdfStage::new(
+        dummy_tree,
+        super::stage::RootKind::OpAmp(OpAmpRoot::new_inverting(
+            OpAmpModel::from_opamp_type(&opamp_type),
+            dc_gain,
+        )),
+        Oversampler::new(oversampling),
+    );
+    stage.opamp_wdf_adaptor = Some(adaptor);
+    stage.feedback_pot_id = feedback_pot_id;
+    stage.injection_node_id = injection_node;
+    stage.output_node_id = out_node;
+    stage.signal_flow_distance = 0;
+    stage.root_comp_id = opamp_comp.id.clone();
+
+    let mut all_claimed: Vec<usize> = zf_edges.clone();
+    all_claimed.extend_from_slice(&zi_edges);
+
+    Some(OpAmpFastPathResult {
+        stage,
+        claimed: all_claimed,
+    })
+}
+
 /// Build feedforward passive stages for orphaned subgraphs that bridge
 /// two active nodes (e.g., clean blend paths in the Klon Centaur).
 fn build_feedforward_stages(
@@ -1762,6 +2098,31 @@ pub fn compile_pedal_with_options(
             if out_covered {
                 continue;
             }
+
+            // ── FAST PATH: try SP-reduction for simple Rf/Ri topologies ──
+            // Attempt OpAmpWdfAdaptor for inverting op-amps where both the
+            // Zf (neg↔out) and Zi (injection↔neg) networks are SP-reducible.
+            // Falls back to the MNA nullor slow path on failure.
+            if let Some(fast) = try_build_opamp_fast_path(
+                rec,
+                &graph,
+                &claimed_edges,
+                sample_rate,
+                oversampling,
+                supply_voltage,
+            ) {
+                eprintln!(
+                    "[opamp-fast-path] opamp={} using OpAmpWdfAdaptor (O(1) scatter)",
+                    graph.components[rec.comp_idx].id,
+                );
+                for &eidx in &fast.claimed {
+                    claimed_edges.insert(eidx);
+                }
+                stages.push(fast.stage);
+                continue; // skip MNA nullor plan for this op-amp
+            }
+
+            // ── SLOW PATH: MNA nullor (fallback) ──────────────────────────
             // Gather all unclaimed passive edges that touch any of this
             // op-amp's pins transitively (simple BFS through passive edges).
             let mut pin_nodes: HashSet<super::graph::NodeId> =
