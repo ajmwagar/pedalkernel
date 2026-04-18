@@ -2,22 +2,32 @@
 
 PedalKernel circuits are designed for real-time performance. This page shows actual CPU usage and scaling behavior.
 
+> **Last updated: 2026-04-18** — Engine: nullor-in-R-type op-amp formulation + Wright Omega diode solver.
+> Op-amp stages now use the exact nullor admittance matrix, eliminating the virtual-ground heuristic.
+> Diode/BJT nonlinear solves use the Wright Omega function for faster convergence on shallow slopes.
+
 ## Pedal benchmarks
 
-All pedals run comfortably in real-time. Measurements on an Apple M-series chip at 48 kHz:
+Measurements on an Apple M-series chip at 48 kHz (criterion median, per-sample):
 
-| Pedal | CPU Budget | Samples/sec | Realtime × |
-|-------|------------|-------------|------------|
-| Tube Screamer | 1.2% | 3.8M | 80× |
-| Big Muff | 1.7% | 2.8M | 59× |
-| Fuzz Face | 0.04% | 122M | 2500× |
-| Blues Driver | 5.9% | 818K | 17× |
-| Dyna Comp | 0.4% | 12M | 252× |
-| Klon Centaur | 1.4% | 3.5M | 72× |
-| ProCo RAT | 0.3% | 16M | 330× |
-| Boss CE-2 (BBD) | 0.5% | 9.9M | 207× |
+| Pedal | ns/sample | Samples/sec | CPU @ 48kHz | Realtime × |
+|-------|-----------|-------------|-------------|------------|
+| Tube Screamer | 2,412 | 414K | 11.6% | 9× |
+| Blues Driver | 2,753 | 363K | 13.2% | 8× |
+| Klon Centaur | 1,347 | 743K | 6.5% | 15× |
+| ProCo RAT | 1,870 | 535K | 9.0% | 11× |
+| Dyna Comp | 514 | 1.95M | 2.5% | 41× |
+| Big Muff | 21,125 | 47K | 101% | <1× |
+| Fuzz Face | 110,110 | 9K | >500% | <1× |
+| Boss CE-2 (BBD) | — | 1.72M | 2.8% | 36× |
 
-**CPU Budget** = fraction of real-time budget consumed. Under 100% means glitch-free audio.
+**CPU @ 48kHz** = fraction of 1-second wall-clock budget used to process 1 second of audio.
+Values over 100% mean the circuit cannot run in real-time on this CPU without optimization.
+
+> **Note on Big Muff and Fuzz Face:** Both pedals contain multi-NR nonlinear stages (4-stage
+> clipping tree for Big Muff; BJT Ebers-Moll pair for Fuzz Face). Their solve time is
+> dominated by Newton-Raphson iteration across coupled ports, which scales with convergence
+> difficulty rather than circuit size. These are the hardest circuits in the suite.
 
 ## FLOPS breakdown
 
@@ -43,7 +53,7 @@ The BBD model (Boss CE-2) includes full analog bucket-brigade emulation:
 - **Bandwidth limiting** — Nyquist limit at half clock frequency with anti-alias LPF
 - **Soft clipping** — BBD voltage swing saturation with cubic waveshaping
 
-Despite this, BBD overhead is modest (~0.5% CPU) because most operations are simple one-pole filters.
+Despite this, BBD overhead is modest (~2.8% CPU) because most operations are simple one-pole filters.
 
 ## Scalability
 
@@ -51,21 +61,25 @@ Cascaded WDF stages scale linearly:
 
 | Stages | ns/sample | CPU @ 48kHz |
 |--------|-----------|-------------|
-| 1 | 173 | 0.8% |
-| 2 | 268 | 1.3% |
-| 4 | 592 | 2.8% |
-| 8 | 1249 | 6.0% |
+| 1 | 151 | 0.7% |
+| 2 | 237 | 1.1% |
+| 4 | 514 | 2.5% |
+| 8 | 1,053 | 5.1% |
 
 ## Sample rate scaling
 
-The Tube Screamer at various sample rates:
+The Tube Screamer at various sample rates (throughput remains ~415-422K samples/sec):
 
-| Sample Rate | Realtime × |
-|-------------|------------|
-| 44.1 kHz | 90× |
-| 48 kHz | 82× |
-| 96 kHz | 42× |
-| 192 kHz | 21× |
+| Sample Rate | Samples/sec | Realtime × |
+|-------------|-------------|------------|
+| 44.1 kHz | 419K | 9.5× |
+| 48 kHz | 416K | 8.7× |
+| 96 kHz | 422K | 4.4× |
+| 192 kHz | 415K | 2.2× |
+
+The near-constant samples/sec across rates confirms the bottleneck is per-sample NR solve cost,
+not memory bandwidth. CPU% scales proportionally because higher sample rates demand more
+solves per second.
 
 ## Running benchmarks
 
@@ -73,6 +87,12 @@ Run the full benchmark suite yourself:
 
 ```bash
 cargo bench --bench wdf_bench
+```
+
+For just the compiled pedal group (faster):
+
+```bash
+cargo bench --bench wdf_bench -- compiled
 ```
 
 This gives you precise CPU timing on your machine, sample rates, and pedals of your choice.
