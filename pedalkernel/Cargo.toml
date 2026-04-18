@@ -18,6 +18,10 @@ cli = ["dep:clap"]
 hardware = []
 # Advanced BJT model with base charge modulation, junction capacitances
 gummel-poon = []
+# Use simplified Ebers-Moll BJT model instead of Gummel-Poon.
+# Omits Early effect, high-injection, leakage, and parasitic resistances.
+# Approximately 3x faster per NR iteration. Suitable for clean amplifier stages.
+ebers-moll = []
 # Enable detailed signal-level tracing for debugging WDF pipeline.
 # Zero-cost when disabled (tracing macros are no-ops without a subscriber).
 debug-trace = []

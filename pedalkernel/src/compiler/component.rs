@@ -224,6 +224,20 @@ pub enum SolverMethod {
     /// Wright Omega explicit solver (closed-form, no outer NR loop).
     /// Faster than NR for diodes; equivalent audio quality.
     WrightOmega,
+    /// Simplified Ebers-Moll BJT model (fast alternative to Gummel-Poon).
+    ///
+    /// Omits Early effect, high-injection knee currents, leakage, and
+    /// parasitic resistances. Uses only IS, BF, BR, NF, NR from the model.
+    /// Approximately 3× faster per NR iteration than GummelPoon.
+    ///
+    /// Suitable for clean amplifier stages where GP advanced effects are
+    /// negligible at the operating point.
+    EbersMoll,
+    /// Full Gummel-Poon BJT model (default for BJTs).
+    ///
+    /// Includes Early effect, high-injection, leakage, and parasitic
+    /// resistances. More accurate but more expensive per NR iteration.
+    GummelPoon,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -2508,6 +2508,12 @@ pub(super) enum NlDeviceGroupKind {
     PentodeThreePort(PentodeThreePort),
     /// 2-port BJT (base-emitter + collector-emitter) using Gummel-Poon.
     BjtTwoPort(BjtTwoPort),
+    /// 2-port BJT using simplified Ebers-Moll model (faster alternative).
+    ///
+    /// Enabled when the `ebers-moll` feature is active. Omits Early effect,
+    /// high-injection, leakage, and parasitic resistances for reduced per-iteration
+    /// cost (~3× fewer exp() calls vs Gummel-Poon).
+    EbersMollTwoPort(EbersMollTwoPort),
     /// Single-port NL device adapted as a 1-port device group.
     /// Used for mixed-device collapsed stages (e.g., sidechain with
     /// triodes + pentodes + diodes in one MultiNlStage).
@@ -2521,6 +2527,7 @@ impl NlDeviceGroupKind {
             NlDeviceGroupKind::TriodeThreePort(t) => t,
             NlDeviceGroupKind::PentodeThreePort(p) => p,
             NlDeviceGroupKind::BjtTwoPort(b) => b,
+            NlDeviceGroupKind::EbersMollTwoPort(e) => e,
             NlDeviceGroupKind::SinglePort(d) => d,
         }
     }
@@ -2537,6 +2544,13 @@ impl NlDeviceGroupKind {
                     "BjtNpn2P"
                 }
             }
+            NlDeviceGroupKind::EbersMollTwoPort(e) => {
+                if e.is_pnp() {
+                    "EmPnp2P"
+                } else {
+                    "EmNpn2P"
+                }
+            }
             NlDeviceGroupKind::SinglePort(d) => d.debug_name(),
         }
     }
@@ -2547,6 +2561,7 @@ impl NlDeviceGroupKind {
             NlDeviceGroupKind::TriodeThreePort(_) => 2,
             NlDeviceGroupKind::PentodeThreePort(_) => 2,
             NlDeviceGroupKind::BjtTwoPort(_) => 2,
+            NlDeviceGroupKind::EbersMollTwoPort(_) => 2,
             NlDeviceGroupKind::SinglePort(_) => 1,
         }
     }
