@@ -721,7 +721,10 @@ impl CompiledPedal {
                     NlDeviceKind::Triode(t) => t.set_v_max(tube_v_max),
                     NlDeviceKind::Pentode(p) => p.set_v_max(tube_v_max),
                     NlDeviceKind::VariMu(t) => t.set_v_max(tube_v_max),
-                    NlDeviceKind::Diode(_) | NlDeviceKind::DiodePair(_) => {}
+                    NlDeviceKind::Diode(_)
+                    | NlDeviceKind::DiodePair(_)
+                    | NlDeviceKind::ExplicitDiode(_)
+                    | NlDeviceKind::ExplicitDiodePair(_) => {}
                 }
             }
             // Propagate to grouped devices (TriodeThreePort, VariMuThreePort)
@@ -736,7 +739,10 @@ impl CompiledPedal {
                             NlDeviceKind::Triode(t) => t.set_v_max(tube_v_max),
                             NlDeviceKind::Pentode(p) => p.set_v_max(tube_v_max),
                             NlDeviceKind::VariMu(t) => t.set_v_max(tube_v_max),
-                            NlDeviceKind::Diode(_) | NlDeviceKind::DiodePair(_) => {}
+                            NlDeviceKind::Diode(_)
+                            | NlDeviceKind::DiodePair(_)
+                            | NlDeviceKind::ExplicitDiode(_)
+                            | NlDeviceKind::ExplicitDiodePair(_) => {}
                         },
                     }
                 }

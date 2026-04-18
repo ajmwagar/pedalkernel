@@ -204,6 +204,29 @@ pub enum GraphRole {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Solver method hint
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Preferred nonlinear solver method for a component.
+///
+/// Components that support explicit (closed-form) solvers return
+/// `SolverMethod::WrightOmega` from `solver_hint()`.  The compiler build pass
+/// uses this hint to select the appropriate root type.
+///
+/// `NewtonRaphson` is available as an explicit override for debugging or for
+/// circuits where the explicit solver needs to be compared against the iterative
+/// solver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SolverMethod {
+    /// Newton-Raphson iterative solver (default for all nonlinear devices).
+    #[default]
+    NewtonRaphson,
+    /// Wright Omega explicit solver (closed-form, no outer NR loop).
+    /// Faster than NR for diodes; equivalent audio quality.
+    WrightOmega,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Component trait
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -232,6 +255,20 @@ pub trait Component: std::fmt::Debug {
 
     /// Human-readable type name (e.g. "resistor", "NPN transistor").
     fn type_tag(&self) -> &'static str;
+
+    // ── Solver Hint ───────────────────────────────────────────────────────
+
+    /// Return the preferred nonlinear solver method for this component.
+    ///
+    /// Returns `None` to accept the global default (Newton-Raphson).
+    /// Returns `Some(SolverMethod::WrightOmega)` to request the explicit
+    /// closed-form Wright Omega solver (diodes only).
+    ///
+    /// The build pass uses this to choose between `DiodePairRoot`/`DiodeRoot`
+    /// (NR) and `ExplicitDiodePairRoot`/`ExplicitDiodeRoot` (WO).
+    fn solver_hint(&self) -> Option<SolverMethod> {
+        None
+    }
 
     // ── Classification ────────────────────────────────────────────────────
 

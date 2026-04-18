@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
-    Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, PinDirection, StampResult,
+    Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, PinDirection, SolverMethod,
+    StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::compiler::validate::Severity;
@@ -108,6 +109,10 @@ impl Component for Diode {
         }
     }
 
+    fn solver_hint(&self) -> Option<SolverMethod> {
+        Some(SolverMethod::WrightOmega)
+    }
+
     fn is_diode_family(&self) -> bool {
         true
     }
@@ -209,6 +214,10 @@ impl Component for DiodePair {
             "b" => PinDirection::Output,
             _ => PinDirection::Bidirectional,
         }
+    }
+
+    fn solver_hint(&self) -> Option<SolverMethod> {
+        Some(SolverMethod::WrightOmega)
     }
 
     fn is_diode_family(&self) -> bool {

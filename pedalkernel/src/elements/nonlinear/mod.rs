@@ -36,6 +36,7 @@ pub use triode::*;
 pub use vari_mu::*;
 
 pub use solver::{
-    disable_solver_trace, enable_solver_trace, reset_solver_stats, solver_stats_snapshot,
-    SolverStatsSnapshot, SolverTraceEntry,
+    clear_diode_solver_override, disable_solver_trace, enable_solver_trace,
+    get_diode_solver_override, reset_solver_stats, set_diode_solver, solver_stats_snapshot,
+    SolverMethod as DiodeSolverMethod, SolverStatsSnapshot, SolverTraceEntry,
 };
