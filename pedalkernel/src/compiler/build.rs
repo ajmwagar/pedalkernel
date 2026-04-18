@@ -11,14 +11,15 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
 use crate::elements::nonlinear::solver::{
-    multi_port_nr_solve, multi_port_nr_solve_grouped, NlDeviceGroupIv, NlDeviceIv,
+    get_diode_solver_override, multi_port_nr_solve, multi_port_nr_solve_grouped, NlDeviceGroupIv,
+    NlDeviceIv, SolverMethod,
 };
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort};
 
 use super::classify::{ClassifiedCircuit, NonlinearKind};
-use super::component::StampResult;
+use super::component::{SolverMethod as ComponentSolverMethod, StampResult};
 use super::components::{CapSwitched, Capacitor as CapacitorComp, Potentiometer as PotComp};
 use super::dyn_node::{BinaryKind, DynNode};
 use super::graph::{graph_reduce, sp_decompose, CircuitGraph, ExtraEdge, NodeId};
@@ -1343,9 +1344,8 @@ fn build_rtype_stage(
 
     // Reserve extra vsource for nullor-only input VS injection.
     let n_nl_for_nullor_check = plan.nl_terminals.len();
-    let nullor_only_extra_vs = !in_stage_nullors.is_empty()
-        && n_nl_for_nullor_check == 0
-        && plan.ota_vccs.is_empty();
+    let nullor_only_extra_vs =
+        !in_stage_nullors.is_empty() && n_nl_for_nullor_check == 0 && plan.ota_vccs.is_empty();
     if nullor_only_extra_vs {
         num_vsources += 1;
     }
@@ -2465,14 +2465,15 @@ fn build_rtype_stage(
                         .unwrap_or(false)
                 })
                 .and_then(|n| {
-                    let comp = &graph.components[
-                        graph.nullor_pins
-                            .iter()
-                            .find(|r| r.comp_idx < graph.components.len()
-                                && n.comp_id == graph.components[r.comp_idx].id)
-                            .map(|r| r.comp_idx)
-                            .unwrap_or(0)
-                    ];
+                    let comp = &graph.components[graph
+                        .nullor_pins
+                        .iter()
+                        .find(|r| {
+                            r.comp_idx < graph.components.len()
+                                && n.comp_id == graph.components[r.comp_idx].id
+                        })
+                        .map(|r| r.comp_idx)
+                        .unwrap_or(0)];
                     comp.kind.op_amp_type().map(|ot| {
                         crate::elements::OpAmpPostFx::new(
                             OpAmpModel::from_opamp_type(&ot),
@@ -2767,11 +2768,25 @@ fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
         }
         NonlinearKind::SingleDiode(dt) => {
             let model = diode_model(*dt);
-            Some(NlDeviceKind::Diode(DiodeRoot::new(model)))
+            let solver = resolve_diode_solver(ComponentSolverMethod::WrightOmega);
+            match solver {
+                SolverMethod::WrightOmega => {
+                    Some(NlDeviceKind::ExplicitDiode(ExplicitDiodeRoot::new(model)))
+                }
+                SolverMethod::NewtonRaphson => Some(NlDeviceKind::Diode(DiodeRoot::new(model))),
+            }
         }
         NonlinearKind::DiodePair(dt) => {
             let model = diode_model(*dt);
-            Some(NlDeviceKind::DiodePair(DiodePairRoot::new(model)))
+            let solver = resolve_diode_solver(ComponentSolverMethod::WrightOmega);
+            match solver {
+                SolverMethod::WrightOmega => Some(NlDeviceKind::ExplicitDiodePair(
+                    ExplicitDiodePairRoot::new(model),
+                )),
+                SolverMethod::NewtonRaphson => {
+                    Some(NlDeviceKind::DiodePair(DiodePairRoot::new(model)))
+                }
+            }
         }
         NonlinearKind::Pentode { model_name, .. } => {
             let model = pentode_model(model_name);
@@ -3524,20 +3539,59 @@ fn wrap_with_transformer_load(
 // Root creation factory
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Resolve the effective diode solver method.
+///
+/// Checks the global process-wide override first.  If unset, returns the
+/// provided `component_hint` (from `Component::solver_hint()`).  For diodes,
+/// the component hint defaults to `WrightOmega`.
+fn resolve_diode_solver(component_hint: ComponentSolverMethod) -> SolverMethod {
+    match get_diode_solver_override() {
+        Some(SolverMethod::NewtonRaphson) => SolverMethod::NewtonRaphson,
+        Some(SolverMethod::WrightOmega) => SolverMethod::WrightOmega,
+        None => {
+            // No global override — use per-component hint.
+            match component_hint {
+                ComponentSolverMethod::WrightOmega => SolverMethod::WrightOmega,
+                ComponentSolverMethod::NewtonRaphson => SolverMethod::NewtonRaphson,
+            }
+        }
+    }
+}
+
 /// Create the RootKind for a nonlinear element.
 /// Returns (root, base_diode_model) — diode stages store their model.
 ///
 /// `use_jfet_vr` overrides JFET creation: when true, builds a
 /// `JfetVr` (variable resistance, no NR) instead of `Jfet` (full NR solver).
+///
+/// For `DiodePair` and `SingleDiode` kinds the solver defaults to Wright Omega
+/// (the per-component hint from `Diode`/`DiodePair` components).  The global
+/// override from `set_diode_solver()` takes precedence.
 fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<DiodeModel>) {
     match kind {
         NonlinearKind::DiodePair(dt) => {
             let model = diode_model(*dt);
-            (RootKind::DiodePair(DiodePairRoot::new(model)), Some(model))
+            // Default: WrightOmega (per Diode/DiodePair component solver_hint)
+            let solver = resolve_diode_solver(ComponentSolverMethod::WrightOmega);
+            let root = match solver {
+                SolverMethod::WrightOmega => {
+                    RootKind::ExplicitDiodePair(ExplicitDiodePairRoot::new(model))
+                }
+                SolverMethod::NewtonRaphson => RootKind::DiodePair(DiodePairRoot::new(model)),
+            };
+            (root, Some(model))
         }
         NonlinearKind::SingleDiode(dt) => {
             let model = diode_model(*dt);
-            (RootKind::SingleDiode(DiodeRoot::new(model)), Some(model))
+            // Default: WrightOmega (per Diode/DiodePair component solver_hint)
+            let solver = resolve_diode_solver(ComponentSolverMethod::WrightOmega);
+            let root = match solver {
+                SolverMethod::WrightOmega => {
+                    RootKind::ExplicitSingleDiode(ExplicitDiodeRoot::new(model))
+                }
+                SolverMethod::NewtonRaphson => RootKind::SingleDiode(DiodeRoot::new(model)),
+            };
+            (root, Some(model))
         }
         NonlinearKind::Jfet {
             model_name,

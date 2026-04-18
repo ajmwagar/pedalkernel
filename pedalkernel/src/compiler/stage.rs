@@ -90,6 +90,10 @@ const MAX_TRACE_MNL: u64 = 20;
 pub(super) enum RootKind {
     DiodePair(DiodePairRoot),
     SingleDiode(DiodeRoot),
+    /// Wright Omega–based explicit anti-parallel diode pair root.
+    ExplicitDiodePair(ExplicitDiodePairRoot),
+    /// Wright Omega–based explicit single diode root.
+    ExplicitSingleDiode(ExplicitDiodeRoot),
     Zener(ZenerRoot),
     Jfet(JfetRoot),
     /// JFET operating as a voltage-controlled variable resistor.
@@ -226,7 +230,11 @@ impl RootKind {
     pub(super) fn is_clipping_stage(&self) -> bool {
         matches!(
             self,
-            RootKind::DiodePair(_) | RootKind::SingleDiode(_) | RootKind::Zener(_)
+            RootKind::DiodePair(_)
+                | RootKind::SingleDiode(_)
+                | RootKind::ExplicitDiodePair(_)
+                | RootKind::ExplicitSingleDiode(_)
+                | RootKind::Zener(_)
         )
     }
 
@@ -985,9 +993,11 @@ impl WdfStage {
             // b = -(b1+b2) negates the VS contribution, which phase-inverting
             // devices like triodes/BJTs cancel naturally, but diodes/zeners don't)
             let vs_voltage = match root {
-                RootKind::DiodePair(_) | RootKind::SingleDiode(_) | RootKind::Zener(_) => {
-                    -vs_voltage
-                }
+                RootKind::DiodePair(_)
+                | RootKind::SingleDiode(_)
+                | RootKind::ExplicitDiodePair(_)
+                | RootKind::ExplicitSingleDiode(_)
+                | RootKind::Zener(_) => -vs_voltage,
                 _ => vs_voltage,
             };
             // Apply tree-topology sign correction (detected during construction).
@@ -1036,6 +1046,8 @@ impl WdfStage {
             let a_root = match root {
                 RootKind::DiodePair(dp) => dp.process(b_tree, rp),
                 RootKind::SingleDiode(d) => d.process(b_tree, rp),
+                RootKind::ExplicitDiodePair(dp) => dp.process(b_tree, rp),
+                RootKind::ExplicitSingleDiode(d) => d.process(b_tree, rp),
                 RootKind::Zener(z) => z.process(b_tree, rp),
                 RootKind::Jfet(j) => {
                     if is_sf {
@@ -1450,6 +1462,14 @@ impl WdfStage {
                     dp.model.n_vt = ideality_ratio * state.vt;
                 }
                 RootKind::SingleDiode(d) => {
+                    d.model.is = base.is * state.is_multiplier;
+                    d.model.n_vt = ideality_ratio * state.vt;
+                }
+                RootKind::ExplicitDiodePair(dp) => {
+                    dp.model.is = base.is * state.is_multiplier;
+                    dp.model.n_vt = ideality_ratio * state.vt;
+                }
+                RootKind::ExplicitSingleDiode(d) => {
                     d.model.is = base.is * state.is_multiplier;
                     d.model.n_vt = ideality_ratio * state.vt;
                 }
@@ -1879,6 +1899,8 @@ impl WdfStage {
         let root_name = match &self.root {
             RootKind::DiodePair(_) => "DiodePair",
             RootKind::SingleDiode(_) => "SingleDiode",
+            RootKind::ExplicitDiodePair(_) => "ExplicitDiodePair",
+            RootKind::ExplicitSingleDiode(_) => "ExplicitSingleDiode",
             RootKind::Zener(_) => "Zener",
             RootKind::Jfet(_) => "Jfet",
             RootKind::JfetVr(_) => "JfetVr",
@@ -2398,6 +2420,10 @@ pub(super) enum NlDeviceKind {
     Pentode(PentodeRoot),
     Diode(DiodeRoot),
     DiodePair(DiodePairRoot),
+    /// Wright Omega explicit single diode (multi-NL context).
+    ExplicitDiode(ExplicitDiodeRoot),
+    /// Wright Omega explicit anti-parallel diode pair (multi-NL context).
+    ExplicitDiodePair(ExplicitDiodePairRoot),
 }
 
 impl NlDeviceKind {
@@ -2416,7 +2442,10 @@ impl NlDeviceKind {
             NlDeviceKind::Pentode(p) => {
                 p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
             }
-            NlDeviceKind::Diode(_) | NlDeviceKind::DiodePair(_) => {}
+            NlDeviceKind::Diode(_)
+            | NlDeviceKind::DiodePair(_)
+            | NlDeviceKind::ExplicitDiode(_)
+            | NlDeviceKind::ExplicitDiodePair(_) => {}
         }
     }
 
@@ -2428,6 +2457,8 @@ impl NlDeviceKind {
             NlDeviceKind::Pentode(p) => p,
             NlDeviceKind::Diode(d) => d,
             NlDeviceKind::DiodePair(d) => d,
+            NlDeviceKind::ExplicitDiode(d) => d,
+            NlDeviceKind::ExplicitDiodePair(d) => d,
         }
     }
 
@@ -2438,6 +2469,8 @@ impl NlDeviceKind {
             NlDeviceKind::Pentode(_) => "Pentode",
             NlDeviceKind::Diode(_) => "Diode",
             NlDeviceKind::DiodePair(_) => "DiodePair",
+            NlDeviceKind::ExplicitDiode(_) => "ExplicitDiode",
+            NlDeviceKind::ExplicitDiodePair(_) => "ExplicitDiodePair",
         }
     }
 }

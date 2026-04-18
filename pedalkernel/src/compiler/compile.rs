@@ -1679,9 +1679,10 @@ pub fn compile_pedal_with_options(
             if rec.neg_node == rec.out_node && rec.pos_node != rec.out_node {
                 // Check if this rec was actually merged (pos changed).
                 // Simple: if pos isn't in any edge, it was merged.
-                let pos_still_exists = graph.edges.iter().any(|e| {
-                    e.node_a == rec.pos_node || e.node_b == rec.pos_node
-                });
+                let pos_still_exists = graph
+                    .edges
+                    .iter()
+                    .any(|e| e.node_a == rec.pos_node || e.node_b == rec.pos_node);
                 if !pos_still_exists {
                     rec.pos_node = rec.out_node;
                 }
@@ -1753,7 +1754,10 @@ pub fn compile_pedal_with_options(
             eprintln!(
                 "[nullor-check] opamp={} pos={} neg={} out={} out_covered={}",
                 graph.components[rec.comp_idx].id,
-                rec.pos_node, rec.neg_node, rec.out_node, out_covered
+                rec.pos_node,
+                rec.neg_node,
+                rec.out_node,
+                out_covered
             );
             if out_covered {
                 continue;

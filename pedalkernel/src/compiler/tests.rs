@@ -1901,7 +1901,6 @@ fn compile_phase90() {
     );
 }
 
-
 #[test]
 fn compile_tweed_deluxe_5e3() {
     let pedal = parse("tweed_deluxe_5e3.pedal");
@@ -6609,7 +6608,10 @@ fn pot_taper_inverted_range_spreads_evenly() {
     // knob=0 should give max resistance (1.0), knob=1 should give min (0.0)
     let at_0 = map(0.0);
     let at_1 = map(1.0);
-    assert!((at_0 - 1.0).abs() < 0.001, "knob=0 should map to 1.0, got {at_0}");
+    assert!(
+        (at_0 - 1.0).abs() < 0.001,
+        "knob=0 should map to 1.0, got {at_0}"
+    );
     assert!(at_1.abs() < 0.001, "knob=1 should map to 0.0, got {at_1}");
 
     // Critical: at 10% knob travel, the value should NOT have dropped to near-zero.
@@ -6826,7 +6828,10 @@ pedal "Nullor Pins Unity" subtitle "test" {
         "unity buffer: neg and out must share a node"
     );
     // pos is driven by the input, not grounded.
-    assert_ne!(rec.pos_node, graph.gnd_node, "pos should be driven by input");
+    assert_ne!(
+        rec.pos_node, graph.gnd_node,
+        "pos should be driven by input"
+    );
 }
 
 #[test]

@@ -1,6 +1,54 @@
 //! Shared Newton-Raphson solver and numerical utilities for nonlinear WDF roots.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+// ---------------------------------------------------------------------------
+// Global diode solver override
+// ---------------------------------------------------------------------------
+
+/// Diode solver method selector, mirroring `compiler::component::SolverMethod`.
+///
+/// Re-declared here to avoid a circular dependency between the `elements` and
+/// `compiler` crates.  Values must match the encoding used by
+/// `DIODE_SOLVER_OVERRIDE`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolverMethod {
+    /// Newton-Raphson iterative solver (default).
+    NewtonRaphson = 1,
+    /// Wright Omega explicit closed-form solver.
+    WrightOmega = 2,
+}
+
+/// Process-wide override for the diode solver method.
+///
+/// `0` = no override (use per-component hint).
+/// `1` = force Newton-Raphson.
+/// `2` = force Wright Omega.
+static DIODE_SOLVER_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+/// Override the diode solver method process-wide.
+///
+/// Useful for A/B testing and benchmarking.
+/// Call with the desired [`SolverMethod`].
+pub fn set_diode_solver(method: SolverMethod) {
+    DIODE_SOLVER_OVERRIDE.store(method as u8, Ordering::Relaxed);
+}
+
+/// Clear the process-wide diode solver override (revert to per-component hint).
+pub fn clear_diode_solver_override() {
+    DIODE_SOLVER_OVERRIDE.store(0, Ordering::Relaxed);
+}
+
+/// Return the current process-wide diode solver override, or `None` if unset.
+pub fn get_diode_solver_override() -> Option<SolverMethod> {
+    match DIODE_SOLVER_OVERRIDE.load(Ordering::Relaxed) {
+        1 => Some(SolverMethod::NewtonRaphson),
+        2 => Some(SolverMethod::WrightOmega),
+        _ => None,
+    }
+}
 
 /// Default maximum Newton-Raphson iterations for nonlinear device solvers.
 /// Higher values reduce convergence failures (waveform discontinuities)
