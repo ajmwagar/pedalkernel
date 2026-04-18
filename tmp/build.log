@@ -1,0 +1,921 @@
+   Compiling pedalkernel v0.1.0 (/Users/ajmwagar/src/pedalkernel/pedalkernel/.worktrees/refactor-opamp-nullor/pedalkernel)
+warning: unused import: `std::f64::consts::PI`
+   --> pedalkernel/src/compiler/stage.rs:321:13
+    |
+321 |         use std::f64::consts::PI;
+    |             ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `multi_port_nr_solve`
+    --> pedalkernel/src/compiler/stage.rs:2385:5
+     |
+2385 |     multi_port_nr_solve, multi_port_nr_solve_grouped, multi_port_nr_solve_grouped_into,
+     |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `comp`
+   --> pedalkernel/src/compiler/compile.rs:669:17
+    |
+669 |             let comp = &graph.components[e.comp_idx];
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_comp`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `bjt_v_max`
+    --> pedalkernel/src/compiler/compiled.rs:1838:17
+     |
+1838 |             let bjt_v_max = abs_sagged;
+     |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bjt_v_max`
+
+warning: unused variable: `i`
+    --> pedalkernel/src/compiler/compiled.rs:2235:14
+     |
+2235 |         for (i, sc) in self.sidechains.iter_mut().enumerate() {
+     |              ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `tapered_pos`
+   --> pedalkernel/src/compiler/components/passives.rs:434:13
+    |
+434 |         let tapered_pos = self.taper.apply(initial_pos);
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tapered_pos`
+
+warning: unused variable: `taper`
+   --> pedalkernel/src/compiler/graph.rs:627:25
+    |
+627 |             let (max_r, taper) = (pot_comp.max_r, pot_comp.taper);
+    |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_taper`
+
+warning: unused variable: `grid_node`
+    --> pedalkernel/src/compiler/plan.rs:2644:62
+     |
+2644 |     let (plate_node, cathode_node, virtual_rp, compensation, grid_node) = match &elem.kind {
+     |                                                              ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_grid_node`
+
+warning: variable does not need to be mutable
+   --> pedalkernel/src/compiler/stage.rs:791:17
+    |
+791 |             let mut output = adaptor.process(v_plus, v_in);
+    |                 ----^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> pedalkernel/src/compiler/stage.rs:855:17
+    |
+855 |             let mut output = (a_adapted + b_adapted) / 2.0;
+    |                 ----^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: unused variable: `bias_offset`
+    --> pedalkernel/src/compiler/stage.rs:2408:81
+     |
+2408 |     pub(super) fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
+     |                                                                                 ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bias_offset`
+
+warning: unused variable: `default_ri`
+   --> pedalkernel/src/compiler/topology.rs:635:9
+    |
+635 |         default_ri: f64,
+    |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_default_ri`
+
+warning: type `DynNode` is more private than the item `StampResult::Reactive::dyn_node`
+  --> pedalkernel/src/compiler/component.rs:29:16
+   |
+29 |     Reactive { dyn_node: DynNode, rp: f64 },
+   |                ^^^^^^^^^^^^^^^^^ field `StampResult::Reactive::dyn_node` is reachable at visibility `pub`
+   |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+  --> pedalkernel/src/compiler/dyn_node.rs:32:1
+   |
+32 | pub(super) enum DynNode {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `DynNode` is more private than the item `StampResult::Pot::dyn_node`
+  --> pedalkernel/src/compiler/component.rs:32:9
+   |
+32 |         dyn_node: DynNode,
+   |         ^^^^^^^^^^^^^^^^^ field `StampResult::Pot::dyn_node` is reachable at visibility `pub`
+   |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+  --> pedalkernel/src/compiler/dyn_node.rs:32:1
+   |
+32 | pub(super) enum DynNode {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DynNode` is more private than the item `component::Component::make_leaf`
+   --> pedalkernel/src/compiler/component.rs:345:5
+    |
+345 |     fn make_leaf(&self, _comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `component::Component::make_leaf` is reachable at visibility `pub`
+    |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/dyn_node.rs:32:1
+    |
+ 32 | pub(super) enum DynNode {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `component::Component::classify_nonlinear`
+   --> pedalkernel/src/compiler/component.rs:378:5
+    |
+378 | /     fn classify_nonlinear(
+379 | |         &self,
+380 | |         _comp_id: &str,
+381 | |         _node_a: NodeId,
+...   |
+384 | |         _node_names: &HashMap<String, NodeId>,
+385 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `component::Component::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<active_ics::OpAmp as component::Component>::classify_nonlinear`
+   --> pedalkernel/src/compiler/components/active_ics.rs:125:5
+    |
+125 | /     fn classify_nonlinear(
+126 | |         &self,
+127 | |         _comp_id: &str,
+128 | |         _node_a: NodeId,
+...   |
+131 | |         _node_names: &HashMap<String, NodeId>,
+132 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `<active_ics::OpAmp as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<diodes::Diode as component::Component>::classify_nonlinear`
+  --> pedalkernel/src/compiler/components/diodes.rs:74:5
+   |
+74 | /     fn classify_nonlinear(
+75 | |         &self,
+76 | |         _comp_id: &str,
+77 | |         node_a: NodeId,
+...  |
+80 | |         _node_names: &HashMap<String, NodeId>,
+81 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+   | |_____________________________________________^ method `<diodes::Diode as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+   |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+  --> pedalkernel/src/compiler/classify.rs:19:1
+   |
+19 | pub(super) enum NonlinearKind {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<diodes::DiodePair as component::Component>::classify_nonlinear`
+   --> pedalkernel/src/compiler/components/diodes.rs:177:5
+    |
+177 | /     fn classify_nonlinear(
+178 | |         &self,
+179 | |         _comp_id: &str,
+180 | |         node_a: NodeId,
+...   |
+183 | |         _node_names: &HashMap<String, NodeId>,
+184 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `<diodes::DiodePair as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<diodes::Zener as component::Component>::classify_nonlinear`
+   --> pedalkernel/src/compiler/components/diodes.rs:294:5
+    |
+294 | /     fn classify_nonlinear(
+295 | |         &self,
+296 | |         _comp_id: &str,
+297 | |         _node_a: NodeId,
+...   |
+300 | |         _node_names: &HashMap<String, NodeId>,
+301 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `<diodes::Zener as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DynNode` is more private than the item `<components::modulation::PhotocouplerComp as component::Component>::make_leaf`
+   --> pedalkernel/src/compiler/components/modulation.rs:242:5
+    |
+242 |     fn make_leaf(&self, comp_id: &str, sample_rate: f64) -> Option<DynNode> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `<components::modulation::PhotocouplerComp as component::Component>::make_leaf` is reachable at visibility `pub`
+    |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/dyn_node.rs:32:1
+    |
+ 32 | pub(super) enum DynNode {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DynNode` is more private than the item `<passives::Resistor as component::Component>::make_leaf`
+  --> pedalkernel/src/compiler/components/passives.rs:61:5
+   |
+61 |     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `<passives::Resistor as component::Component>::make_leaf` is reachable at visibility `pub`
+   |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+  --> pedalkernel/src/compiler/dyn_node.rs:32:1
+   |
+32 | pub(super) enum DynNode {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DynNode` is more private than the item `<passives::Capacitor as component::Component>::make_leaf`
+   --> pedalkernel/src/compiler/components/passives.rs:177:5
+    |
+177 |     fn make_leaf(&self, comp_id: &str, sample_rate: f64) -> Option<DynNode> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `<passives::Capacitor as component::Component>::make_leaf` is reachable at visibility `pub`
+    |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/dyn_node.rs:32:1
+    |
+ 32 | pub(super) enum DynNode {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DynNode` is more private than the item `<passives::Inductor as component::Component>::make_leaf`
+   --> pedalkernel/src/compiler/components/passives.rs:332:5
+    |
+332 |     fn make_leaf(&self, comp_id: &str, sample_rate: f64) -> Option<DynNode> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `<passives::Inductor as component::Component>::make_leaf` is reachable at visibility `pub`
+    |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/dyn_node.rs:32:1
+    |
+ 32 | pub(super) enum DynNode {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DynNode` is more private than the item `<passives::Potentiometer as component::Component>::make_leaf`
+   --> pedalkernel/src/compiler/components/passives.rs:432:5
+    |
+432 |     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `<passives::Potentiometer as component::Component>::make_leaf` is reachable at visibility `pub`
+    |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/dyn_node.rs:32:1
+    |
+ 32 | pub(super) enum DynNode {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DynNode` is more private than the item `<passives::Tempco as component::Component>::make_leaf`
+   --> pedalkernel/src/compiler/components/passives.rs:568:5
+    |
+568 |     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `<passives::Tempco as component::Component>::make_leaf` is reachable at visibility `pub`
+    |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/dyn_node.rs:32:1
+    |
+ 32 | pub(super) enum DynNode {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DynNode` is more private than the item `<transformer::TransformerComp as component::Component>::make_leaf`
+  --> pedalkernel/src/compiler/components/transformer.rs:86:5
+   |
+86 |     fn make_leaf(&self, _comp_id: &str, sample_rate: f64) -> Option<DynNode> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `<transformer::TransformerComp as component::Component>::make_leaf` is reachable at visibility `pub`
+   |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+  --> pedalkernel/src/compiler/dyn_node.rs:32:1
+   |
+32 | pub(super) enum DynNode {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<transistors::Npn as component::Component>::classify_nonlinear`
+  --> pedalkernel/src/compiler/components/transistors.rs:76:5
+   |
+76 | /     fn classify_nonlinear(
+77 | |         &self,
+78 | |         comp_id: &str,
+79 | |         node_a: NodeId,
+...  |
+82 | |         node_names: &HashMap<String, NodeId>,
+83 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+   | |_____________________________________________^ method `<transistors::Npn as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+   |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+  --> pedalkernel/src/compiler/classify.rs:19:1
+   |
+19 | pub(super) enum NonlinearKind {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<transistors::Pnp as component::Component>::classify_nonlinear`
+   --> pedalkernel/src/compiler/components/transistors.rs:204:5
+    |
+204 | /     fn classify_nonlinear(
+205 | |         &self,
+206 | |         comp_id: &str,
+207 | |         node_a: NodeId,
+...   |
+210 | |         node_names: &HashMap<String, NodeId>,
+211 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `<transistors::Pnp as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DynNode` is more private than the item `<transistors::NJfet as component::Component>::make_leaf`
+   --> pedalkernel/src/compiler/components/transistors.rs:327:5
+    |
+327 |     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `<transistors::NJfet as component::Component>::make_leaf` is reachable at visibility `pub`
+    |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/dyn_node.rs:32:1
+    |
+ 32 | pub(super) enum DynNode {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<transistors::NJfet as component::Component>::classify_nonlinear`
+   --> pedalkernel/src/compiler/components/transistors.rs:361:5
+    |
+361 | /     fn classify_nonlinear(
+362 | |         &self,
+363 | |         _comp_id: &str,
+364 | |         _node_a: NodeId,
+...   |
+367 | |         _node_names: &HashMap<String, NodeId>,
+368 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `<transistors::NJfet as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `DynNode` is more private than the item `<transistors::PJfet as component::Component>::make_leaf`
+   --> pedalkernel/src/compiler/components/transistors.rs:474:5
+    |
+474 |     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `<transistors::PJfet as component::Component>::make_leaf` is reachable at visibility `pub`
+    |
+note: but type `DynNode` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/dyn_node.rs:32:1
+    |
+ 32 | pub(super) enum DynNode {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<transistors::PJfet as component::Component>::classify_nonlinear`
+   --> pedalkernel/src/compiler/components/transistors.rs:508:5
+    |
+508 | /     fn classify_nonlinear(
+509 | |         &self,
+510 | |         _comp_id: &str,
+511 | |         _node_a: NodeId,
+...   |
+514 | |         _node_names: &HashMap<String, NodeId>,
+515 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `<transistors::PJfet as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<transistors::Nmos as component::Component>::classify_nonlinear`
+   --> pedalkernel/src/compiler/components/transistors.rs:630:5
+    |
+630 | /     fn classify_nonlinear(
+631 | |         &self,
+632 | |         _comp_id: &str,
+633 | |         _node_a: NodeId,
+...   |
+636 | |         _node_names: &HashMap<String, NodeId>,
+637 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `<transistors::Nmos as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<transistors::Pmos as component::Component>::classify_nonlinear`
+   --> pedalkernel/src/compiler/components/transistors.rs:749:5
+    |
+749 | /     fn classify_nonlinear(
+750 | |         &self,
+751 | |         _comp_id: &str,
+752 | |         _node_a: NodeId,
+...   |
+755 | |         _node_names: &HashMap<String, NodeId>,
+756 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `<transistors::Pmos as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<tubes::Triode as component::Component>::classify_nonlinear`
+  --> pedalkernel/src/compiler/components/tubes.rs:78:5
+   |
+78 | /     fn classify_nonlinear(
+79 | |         &self,
+80 | |         comp_id: &str,
+81 | |         node_a: NodeId,
+...  |
+84 | |         node_names: &HashMap<String, NodeId>,
+85 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+   | |_____________________________________________^ method `<tubes::Triode as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+   |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+  --> pedalkernel/src/compiler/classify.rs:19:1
+   |
+19 | pub(super) enum NonlinearKind {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<tubes::Pentode as component::Component>::classify_nonlinear`
+   --> pedalkernel/src/compiler/components/tubes.rs:205:5
+    |
+205 | /     fn classify_nonlinear(
+206 | |         &self,
+207 | |         comp_id: &str,
+208 | |         node_a: NodeId,
+...   |
+211 | |         node_names: &HashMap<String, NodeId>,
+212 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `<tubes::Pentode as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `NonlinearKind` is more private than the item `<tubes::VariMu as component::Component>::classify_nonlinear`
+   --> pedalkernel/src/compiler/components/tubes.rs:334:5
+    |
+334 | /     fn classify_nonlinear(
+335 | |         &self,
+336 | |         comp_id: &str,
+337 | |         node_a: NodeId,
+...   |
+340 | |         node_names: &HashMap<String, NodeId>,
+341 | |     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
+    | |_____________________________________________^ method `<tubes::VariMu as component::Component>::classify_nonlinear` is reachable at visibility `pub`
+    |
+note: but type `NonlinearKind` is only usable at visibility `pub(in crate::compiler)`
+   --> pedalkernel/src/compiler/classify.rs:19:1
+    |
+ 19 | pub(super) enum NonlinearKind {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `bias_pot_map` and `bias_pot_edge_indices` are never read
+  --> pedalkernel/src/compiler/bjt_bias_analysis.rs:24:16
+   |
+22 | pub(super) struct BjtBiasAnalysis {
+   |                   --------------- fields in this struct
+23 |     /// Pot component ID → info for binding.
+24 |     pub(super) bias_pot_map: HashMap<String, BjtBiasPotInfo>,
+   |                ^^^^^^^^^^^^
+25 |     /// Edge indices of bias pots (to exclude from passive collection).
+26 |     pub(super) bias_pot_edge_indices: HashSet<usize>,
+   |                ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: fields `max_pot_r` and `taper` are never read
+  --> pedalkernel/src/compiler/bjt_bias_analysis.rs:32:16
+   |
+30 | pub(super) struct BjtBiasPotInfo {
+   |                   -------------- fields in this struct
+31 |     /// Maximum resistance of the pot (ohms).
+32 |     pub(super) max_pot_r: f64,
+   |                ^^^^^^^^^
+33 |     /// Taper type.
+34 |     pub(super) taper: PotTaper,
+   |                ^^^^^
+
+warning: field `comp_idx` is never read
+    --> pedalkernel/src/compiler/build.rs:1193:9
+     |
+1192 |     struct CoupledXfmr {
+     |            ----------- field in this struct
+1193 |         comp_idx: usize,
+     |         ^^^^^^^^
+
+warning: field `0` is never read
+  --> pedalkernel/src/compiler/compiled.rs:70:16
+   |
+70 |     PotInStage(usize),
+   |     ---------- ^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `ControlTarget` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+70 -     PotInStage(usize),
+70 +     PotInStage(()),
+   |
+
+warning: fields `0` and `1` are never read
+  --> pedalkernel/src/compiler/compiled.rs:73:23
+   |
+73 |     PotInMultiNlStage(usize, usize),
+   |     ----------------- ^^^^^  ^^^^^
+   |     |
+   |     fields in this variant
+   |
+   = note: `ControlTarget` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+help: consider changing the fields to be of unit type to suppress this warning while preserving the field numbering, or remove the fields
+   |
+73 -     PotInMultiNlStage(usize, usize),
+73 +     PotInMultiNlStage((), ()),
+   |
+
+warning: variant `SubcircuitControl` is never constructed
+  --> pedalkernel/src/compiler/compiled.rs:79:5
+   |
+68 | pub(super) enum ControlTarget {
+   |                 ------------- variant in this enum
+...
+79 |     SubcircuitControl { subcircuit_idx: usize },
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `ControlTarget` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: function `is_mix_label` is never used
+   --> pedalkernel/src/compiler/compiled.rs:650:15
+    |
+650 | pub(super) fn is_mix_label(label: &str) -> bool {
+    |               ^^^^^^^^^^^^
+
+warning: associated function `UnitDelay` is never used
+   --> pedalkernel/src/compiler/dyn_node.rs:172:12
+    |
+107 | impl DynNode {
+    | ------------ associated function in this implementation
+...
+172 |     pub fn UnitDelay(rp: f64) -> Self {
+    |            ^^^^^^^^^
+
+warning: methods `is_series_root`, `find_cap_state`, `get_pot_position`, and `set_jfet_vr_vgs` are never used
+   --> pedalkernel/src/compiler/dyn_node.rs:352:12
+    |
+337 | impl DynNode {
+    | ------------ methods in this implementation
+...
+352 |     pub fn is_series_root(&self) -> bool {
+    |            ^^^^^^^^^^^^^^
+...
+364 |     pub fn find_cap_state(&self, target_id: &str) -> Option<f64> {
+    |            ^^^^^^^^^^^^^^
+...
+537 |     pub fn get_pot_position(&self, target_id: &str) -> Option<f64> {
+    |            ^^^^^^^^^^^^^^^^
+...
+912 |     pub fn set_jfet_vr_vgs(&mut self, target_id: &str, vgs: f64) -> bool {
+    |            ^^^^^^^^^^^^^^^
+
+warning: methods `effective_edge_kind` and `find_opamp_feedback_loops` are never used
+    --> pedalkernel/src/compiler/graph.rs:935:19
+     |
+ 255 | impl CircuitGraph {
+     | ----------------- methods in this implementation
+...
+ 935 |     pub(super) fn effective_edge_kind(&self, edge_idx: usize) -> super::component::EdgeKind {
+     |                   ^^^^^^^^^^^^^^^^^^^
+...
+1572 |     pub(super) fn find_opamp_feedback_loops(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `has_short_path_excluding` is never used
+    --> pedalkernel/src/compiler/graph.rs:2908:4
+     |
+2908 | fn has_short_path_excluding(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_path_through_adj` is never used
+    --> pedalkernel/src/compiler/graph.rs:2953:15
+     |
+2953 | pub(super) fn find_path_through_adj(
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `OpAmpFeedbackInfo` is never constructed
+    --> pedalkernel/src/compiler/graph.rs:3159:19
+     |
+3159 | pub(super) struct OpAmpFeedbackInfo {
+     |                   ^^^^^^^^^^^^^^^^^
+
+warning: method `has_feedback_diode` is never used
+    --> pedalkernel/src/compiler/graph.rs:3197:19
+     |
+3195 | impl OpAmpFeedbackInfo {
+     | ---------------------- method in this implementation
+3196 |     /// Returns true if the feedback topology includes diodes (e.g., Inverting with clipping).
+3197 |     pub(super) fn has_feedback_diode(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^
+
+warning: enum `OpAmpFeedbackKind` is never used
+    --> pedalkernel/src/compiler/graph.rs:3213:17
+     |
+3213 | pub(super) enum OpAmpFeedbackKind {
+     |                 ^^^^^^^^^^^^^^^^^
+
+warning: function `collect_pot_ids` is never used
+   --> pedalkernel/src/compiler/helpers.rs:170:15
+    |
+170 | pub(super) fn collect_pot_ids(node: &DynNode, out: &mut Vec<String>) {
+    |               ^^^^^^^^^^^^^^^
+
+warning: fields `load_passive_idxs` and `load_terminals` are never read
+  --> pedalkernel/src/compiler/plan.rs:60:16
+   |
+30 | pub(super) struct StagePlan {
+   |                   --------- fields in this struct
+...
+60 |     pub(super) load_passive_idxs: Vec<usize>,
+   |                ^^^^^^^^^^^^^^^^^
+...
+64 |     pub(super) load_terminals: Option<(NodeId, NodeId)>,
+   |                ^^^^^^^^^^^^^^
+
+warning: field `name` is never read
+  --> pedalkernel/src/compiler/plan.rs:78:16
+   |
+74 | pub(super) struct VirtualEdge {
+   |                   ----------- field in this struct
+...
+78 |     pub(super) name: &'static str,
+   |                ^^^^
+
+warning: field `comp_idx` is never read
+   --> pedalkernel/src/compiler/plan.rs:139:16
+    |
+131 | pub(super) struct OtaVccsInfo {
+    |                   ----------- field in this struct
+...
+139 |     pub(super) comp_idx: usize,
+    |                ^^^^^^^^
+
+warning: field `base_node` is never read
+   --> pedalkernel/src/compiler/plan.rs:918:9
+    |
+916 |     struct BjtTerminals {
+    |            ------------ field in this struct
+917 |         elem_idx: usize,
+918 |         base_node: NodeId,
+    |         ^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> pedalkernel/src/compiler/stage.rs:320:19
+    |
+316 | impl ResonatorFeedback {
+    | ---------------------- associated function in this implementation
+...
+320 |     pub(super) fn new(r1: f64, r2: f64, c1: f64, c2: f64, rf: f64, sample_rate: f64) -> Self {
+    |                   ^^^
+
+warning: field `feedback_pot_id` is never read
+   --> pedalkernel/src/compiler/stage.rs:422:16
+    |
+408 | pub(crate) struct OpAmpWdfAdaptor {
+    |                   --------------- field in this struct
+...
+422 |     pub(crate) feedback_pot_id: Option<String>,
+    |                ^^^^^^^^^^^^^^^
+
+warning: method `reset` is never used
+   --> pedalkernel/src/compiler/stage.rs:488:19
+    |
+425 | impl OpAmpWdfAdaptor {
+    | -------------------- method in this implementation
+...
+488 |     pub(super) fn reset(&mut self) {
+    |                   ^^^^^
+
+warning: methods `set_opamp_gain`, `opamp_sample_rate`, and `opamp_gbw_coeff` are never used
+    --> pedalkernel/src/compiler/stage.rs:1834:12
+     |
+ 724 | impl WdfStage {
+     | ------------- methods in this implementation
+...
+1834 |     pub fn set_opamp_gain(&mut self, gain: f64) {
+     |            ^^^^^^^^^^^^^^
+...
+1856 |     pub fn opamp_sample_rate(&self) -> Option<f64> {
+     |            ^^^^^^^^^^^^^^^^^
+...
+1864 |     pub fn opamp_gbw_coeff(&self) -> Option<f64> {
+     |            ^^^^^^^^^^^^^^^
+
+warning: fields `feedback_scale`, `feedback_pot_id`, `bias_pot_id`, and `bias_emitter_r` are never read
+    --> pedalkernel/src/compiler/stage.rs:2669:16
+     |
+2624 | pub(super) struct MultiNlStage {
+     |                   ------------ fields in this struct
+...
+2669 |     pub(super) feedback_scale: f64,
+     |                ^^^^^^^^^^^^^^
+...
+2674 |     pub(super) feedback_pot_id: Option<String>,
+     |                ^^^^^^^^^^^^^^^
+...
+2700 |     pub(super) bias_pot_id: Option<String>,
+     |                ^^^^^^^^^^^
+2701 |     /// Emitter resistance for bias pot computation (default 470Ω).
+2702 |     pub(super) bias_emitter_r: f64,
+     |                ^^^^^^^^^^^^^^
+
+warning: methods `set_feedback_from_pot`, `update_bias_from_pot`, and `get_pot_child_resistance` are never used
+    --> pedalkernel/src/compiler/stage.rs:3425:12
+     |
+2818 | impl MultiNlStage {
+     | ----------------- methods in this implementation
+...
+3425 |     pub fn set_feedback_from_pot(&mut self, position: f64, max_pot_r: f64) {
+     |            ^^^^^^^^^^^^^^^^^^^^^
+...
+3437 |     pub fn update_bias_from_pot(&mut self) {
+     |            ^^^^^^^^^^^^^^^^^^^^
+...
+3448 |     fn get_pot_child_resistance(&self, pot_id: &str) -> Option<f64> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ResolvedTopology` is never constructed
+  --> pedalkernel/src/compiler/topology.rs:26:19
+   |
+26 | pub(super) struct ResolvedTopology<'a> {
+   |                   ^^^^^^^^^^^^^^^^
+
+warning: associated function `from_pedal` is never used
+  --> pedalkernel/src/compiler/topology.rs:53:19
+   |
+48 | impl<'a> ResolvedTopology<'a> {
+   | ----------------------------- associated function in this implementation
+...
+53 |     pub(super) fn from_pedal(pedal: &'a PedalDef) -> Self {
+   |                   ^^^^^^^^^^
+
+warning: struct `TopologyContext` is never constructed
+   --> pedalkernel/src/compiler/topology.rs:350:19
+    |
+350 | pub(super) struct TopologyContext<'a> {
+    |                   ^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> pedalkernel/src/compiler/topology.rs:359:19
+    |
+357 | impl<'a> TopologyContext<'a> {
+    | ---------------------------- associated items in this implementation
+358 |     /// Build a TopologyContext for a component with the given ID.
+359 |     pub(super) fn for_component(
+    |                   ^^^^^^^^^^^^^
+...
+378 |     pub fn pin_node(&self, pin: &str) -> Option<usize> {
+    |            ^^^^^^^^
+...
+383 |     pub fn is_grounded(&self, node: usize) -> bool {
+    |            ^^^^^^^^^^^
+...
+388 |     pub fn is_ac_grounded(&self, node: usize) -> bool {
+    |            ^^^^^^^^^^^^^^
+...
+395 |     pub fn find_resistive_path(
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+404 |     pub fn find_input_resistor(&self, neg_node: usize, out_node: usize) -> Option<f64> {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+424 |     pub fn find_input_resistor_with_pot(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+467 |     pub fn find_jfet_at(&self, node: usize) -> Option<String> {
+    |            ^^^^^^^^^^^^
+...
+485 |     pub fn find_jfet_drain_at(&self, node: usize) -> Option<String> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+501 |     pub fn find_cap_to_ground(&self, node: usize) -> Option<(f64, String)> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+526 |     pub fn find_cap_at(&self, node: usize) -> Option<f64> {
+    |            ^^^^^^^^^^^
+...
+544 |     pub fn find_cap_between(&self, node_a: usize, node_b: usize) -> Option<f64> {
+    |            ^^^^^^^^^^^^^^^^
+...
+566 |     pub fn find_ground_leg_path(
+    |            ^^^^^^^^^^^^^^^^^^^^
+...
+578 |     pub fn find_feedback_diode(&self, node_a: usize, node_b: usize) -> Option<DiodeType> {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+631 |     pub fn collect_input_photocouplers(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+707 |     pub fn collect_passive_comps_between(&self, start: usize, end: usize) -> Vec<String> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `has_short_path_excluding` is never used
+   --> pedalkernel/src/compiler/topology.rs:859:4
+    |
+859 | fn has_short_path_excluding(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `classify_topologies` is never used
+   --> pedalkernel/src/compiler/topology.rs:896:15
+    |
+896 | pub(super) fn classify_topologies(
+    |               ^^^^^^^^^^^^^^^^^^^
+
+warning: function `classify_opamp` is never used
+   --> pedalkernel/src/compiler/topology.rs:928:4
+    |
+928 | fn classify_opamp(
+    |    ^^^^^^^^^^^^^^
+
+warning: struct `UnionFind` is never constructed
+    --> pedalkernel/src/compiler/topology.rs:1241:8
+     |
+1241 | struct UnionFind {
+     |        ^^^^^^^^^
+
+warning: associated items `new`, `ensure`, `find`, and `union` are never used
+    --> pedalkernel/src/compiler/topology.rs:1246:8
+     |
+1245 | impl UnionFind {
+     | -------------- associated items in this implementation
+1246 |     fn new() -> Self {
+     |        ^^^
+...
+1249 |     fn ensure(&mut self, id: usize) {
+     |        ^^^^^^
+...
+1255 |     fn find(&mut self, mut x: usize) -> usize {
+     |        ^^^^
+...
+1262 |     fn union(&mut self, a: usize, b: usize) {
+     |        ^^^^^
+
+warning: function `pin_key` is never used
+    --> pedalkernel/src/compiler/topology.rs:1272:4
+     |
+1272 | fn pin_key(pin: &Pin) -> String {
+     |    ^^^^^^^
+
+warning: methods `get_resistance`, `get_position`, and `max_resistance` are never used
+   --> pedalkernel/src/compiler/wdf_leaf.rs:489:12
+    |
+487 | impl WdfPot {
+    | ----------- methods in this implementation
+488 |     /// Read the pot's current resistance.
+489 |     pub fn get_resistance(&self) -> f64 {
+    |            ^^^^^^^^^^^^^^
+...
+493 |     pub fn get_position(&self) -> f64 {
+    |            ^^^^^^^^^^^^
+...
+497 |     pub fn max_resistance(&self) -> f64 {
+    |            ^^^^^^^^^^^^^^
+
+warning: methods `vgs` and `rds` are never used
+   --> pedalkernel/src/compiler/wdf_leaf.rs:616:12
+    |
+615 | impl WdfJfetVr {
+    | -------------- methods in this implementation
+616 |     pub fn vgs(&self) -> f64 {
+    |            ^^^
+...
+619 |     pub fn rds(&self) -> f64 {
+    |            ^^^
+
+warning: struct `WdfUnitDelay` is never constructed
+   --> pedalkernel/src/compiler/wdf_leaf.rs:692:12
+    |
+692 | pub struct WdfUnitDelay {
+    |            ^^^^^^^^^^^^
+
+warning: methods `get_state` and `set_partner_state` are never used
+   --> pedalkernel/src/compiler/wdf_leaf.rs:734:12
+    |
+733 | impl WdfUnitDelay {
+    | ----------------- methods in this implementation
+734 |     pub fn get_state(&self) -> f64 {
+    |            ^^^^^^^^^
+...
+737 |     pub fn set_partner_state(&mut self, val: f64) {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: `pedalkernel` (lib) generated 78 warnings (run `cargo fix --lib -p pedalkernel` to apply 12 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.79s
+exit=0

@@ -1,0 +1,13 @@
+
+running 7 tests
+test elements::tests::opamp_unity_gain_buffer ... ok
+test compiler::tests::opamp_inverting_amplifier_gain ... ok
+test compiler::tests::opamp_unity_gain_buffer ... ok
+test compiler::tests::proco_rat_distortion_affects_gain ... ok
+test compiler::tests::compile_phase90 ... ok
+test compiler::tests::tube_screamer_min_drive ... ok
+test compiler::tests::compile_klon_centaur ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 780 filtered out; finished in 0.59s
+
+exit=0

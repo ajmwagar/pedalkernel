@@ -226,10 +226,7 @@ mod tests {
     #[test]
     fn exp_lut_zero() {
         let y = fast_exp_lut(0.0);
-        assert!(
-            (y - 1.0).abs() < 0.01,
-            "exp(0) should be ~1.0, got {y}"
-        );
+        assert!((y - 1.0).abs() < 0.01, "exp(0) should be ~1.0, got {y}");
     }
 
     #[test]
@@ -295,10 +292,7 @@ mod tests {
     #[test]
     fn tanh_lut_zero() {
         let y = fast_tanh_lut(0.0);
-        assert!(
-            y.abs() < 0.01,
-            "tanh(0) should be ~0.0, got {y}"
-        );
+        assert!(y.abs() < 0.01, "tanh(0) should be ~0.0, got {y}");
     }
 
     #[test]
