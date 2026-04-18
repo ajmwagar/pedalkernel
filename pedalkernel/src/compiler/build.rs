@@ -2075,11 +2075,21 @@ fn build_rtype_stage(
             match &elem.kind {
                 NonlinearKind::BjtNpn { model_name, .. } => {
                     let gp_model = gummel_poon_model(model_name);
+                    #[cfg(feature = "ebers-moll")]
+                    groups.push(NlDeviceGroupKind::EbersMollTwoPort(
+                        EbersMollTwoPort::from_gp(&gp_model),
+                    ));
+                    #[cfg(not(feature = "ebers-moll"))]
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(gp_model)));
                     offset += 2;
                 }
                 NonlinearKind::BjtPnp { model_name, .. } => {
                     let gp_model = gummel_poon_model(model_name);
+                    #[cfg(feature = "ebers-moll")]
+                    groups.push(NlDeviceGroupKind::EbersMollTwoPort(
+                        EbersMollTwoPort::from_gp_pnp(&gp_model),
+                    ));
+                    #[cfg(not(feature = "ebers-moll"))]
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new_pnp(gp_model)));
                     offset += 2;
                 }
@@ -2123,11 +2133,21 @@ fn build_rtype_stage(
                 }
                 NonlinearKind::BjtNpn { model_name, .. } => {
                     let gp_model = gummel_poon_model(model_name);
+                    #[cfg(feature = "ebers-moll")]
+                    groups.push(NlDeviceGroupKind::EbersMollTwoPort(
+                        EbersMollTwoPort::from_gp(&gp_model),
+                    ));
+                    #[cfg(not(feature = "ebers-moll"))]
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(gp_model)));
                     offset += 2;
                 }
                 NonlinearKind::BjtPnp { model_name, .. } => {
                     let gp_model = gummel_poon_model(model_name);
+                    #[cfg(feature = "ebers-moll")]
+                    groups.push(NlDeviceGroupKind::EbersMollTwoPort(
+                        EbersMollTwoPort::from_gp_pnp(&gp_model),
+                    ));
+                    #[cfg(not(feature = "ebers-moll"))]
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new_pnp(gp_model)));
                     offset += 2;
                 }
@@ -2535,6 +2555,17 @@ fn compute_initial_v_prev(
                     }
                     // Port 1: collector-emitter — mid-supply for active region
                     // PNP: Vce_port < 0 (collector below emitter), NPN: > 0
+                    if offset + 1 < n_nl {
+                        v_prev[offset + 1] = sign * supply_voltage * 0.5;
+                    }
+                }
+                NlDeviceGroupKind::EbersMollTwoPort(em) => {
+                    let sign = if em.is_pnp() { -1.0 } else { 1.0 };
+                    // Same warm-start as BjtTwoPort: IS-dependent Vbe estimate
+                    if offset < n_nl {
+                        let vbe = em.nf_vt * (1.0e-3_f64 / em.is).ln();
+                        v_prev[offset] = sign * vbe.clamp(0.1, 0.8);
+                    }
                     if offset + 1 < n_nl {
                         v_prev[offset + 1] = sign * supply_voltage * 0.5;
                     }
@@ -3553,6 +3584,11 @@ fn resolve_diode_solver(component_hint: ComponentSolverMethod) -> SolverMethod {
             match component_hint {
                 ComponentSolverMethod::WrightOmega => SolverMethod::WrightOmega,
                 ComponentSolverMethod::NewtonRaphson => SolverMethod::NewtonRaphson,
+                // EbersMoll and GummelPoon are BJT-level hints; the diode solver
+                // path doesn't apply, fall back to Newton-Raphson.
+                ComponentSolverMethod::EbersMoll | ComponentSolverMethod::GummelPoon => {
+                    SolverMethod::NewtonRaphson
+                }
             }
         }
     }

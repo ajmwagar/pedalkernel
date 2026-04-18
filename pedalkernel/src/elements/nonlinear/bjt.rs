@@ -1043,6 +1043,177 @@ impl NlDeviceGroupIv for BjtTwoPort {
 }
 
 // ---------------------------------------------------------------------------
+// EbersMollTwoPort — fast simplified BJT model
+// ---------------------------------------------------------------------------
+
+/// Simplified Ebers-Moll BJT model for deterministic-cost NR evaluation.
+///
+/// This model is Gummel-Poon with all advanced effects disabled:
+/// - No Early effect (Qb = 1, no base-width modulation via VAF/VAR)
+/// - No high-injection (no IKF/IKR knee currents)
+/// - No leakage (no ISE/ISC terms)
+/// - No parasitic resistances (RB/RE/RC are zero)
+/// - No junction/diffusion capacitances
+///
+/// The simplified IV equations are:
+/// ```text
+/// Ic = IS * (exp(Vbe / NF*VT) - 1) - (IS/BR) * (exp(Vbc / NR*VT) - 1)
+/// Ib = (IS/BF) * (exp(Vbe / NF*VT) - 1) + (IS/BR) * (exp(Vbc / NR*VT) - 1)
+/// ```
+///
+/// The Jacobian requires only 2 `exp()` calls and 4 multiplications
+/// (vs 10+ `exp()` calls and full Qb chain-rule for Gummel-Poon).
+///
+/// # When to use
+/// Suitable for clean amplifier stages where GP advanced effects are
+/// negligible at the operating point (Vbe near turn-on, Vce >> Vce_sat,
+/// small-signal regime). Enable via `--features ebers-moll`.
+#[derive(Debug, Clone)]
+pub struct EbersMollTwoPort {
+    /// Saturation current (A). Typically 1e-15 to 1e-12.
+    pub is: f64,
+    /// Forward current gain (beta_F, hFE). Typically 100-500.
+    pub bf: f64,
+    /// Reverse current gain (beta_R). Typically 1-20.
+    pub br: f64,
+    /// NF * VT — forward thermal voltage denominator.
+    pub nf_vt: f64,
+    /// NR * VT — reverse thermal voltage denominator.
+    pub nr_vt: f64,
+    /// Whether this is a PNP (vs NPN) transistor.
+    pub is_pnp: bool,
+    /// IS-dependent Vbe clamp: prevents exp blow-up at forward bias.
+    /// Same logic as `BjtTwoPort::compute_vbe_max`.
+    vbe_max: f64,
+    /// Vce/Vbc swing limit.
+    v_max: f64,
+}
+
+impl EbersMollTwoPort {
+    /// Compute the IS-dependent Vbe clamp (same logic as `BjtTwoPort`).
+    fn compute_vbe_max(is: f64, nf: f64, vt: f64) -> f64 {
+        let i_max = 0.1; // 100 mA generous bound
+        let vbe_max = nf * vt * (i_max / is).ln();
+        vbe_max.clamp(0.3, 1.0)
+    }
+
+    /// Create an `EbersMollTwoPort` from a `GummelPoonModel` (NPN polarity).
+    ///
+    /// Only IS, BF, BR, NF, NR, and VT are used; all advanced parameters are
+    /// discarded.
+    pub fn from_gp(gp: &GummelPoonModel) -> Self {
+        Self {
+            is: gp.is,
+            bf: gp.bf,
+            br: gp.br,
+            nf_vt: gp.nf * gp.vt,
+            nr_vt: gp.nr * gp.vt,
+            is_pnp: false,
+            vbe_max: Self::compute_vbe_max(gp.is, gp.nf, gp.vt),
+            v_max: 50.0,
+        }
+    }
+
+    /// Create an `EbersMollTwoPort` from a `GummelPoonModel` (PNP polarity).
+    pub fn from_gp_pnp(gp: &GummelPoonModel) -> Self {
+        Self {
+            is_pnp: true,
+            ..Self::from_gp(gp)
+        }
+    }
+
+    /// Set the maximum Vce (supply voltage).
+    #[inline]
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0);
+    }
+
+    /// `true` if this is a PNP device.
+    #[inline]
+    pub fn is_pnp(&self) -> bool {
+        self.is_pnp
+    }
+}
+
+impl NlDeviceGroupIv for EbersMollTwoPort {
+    fn n_ports(&self) -> usize {
+        2
+    }
+
+    /// Evaluate Ebers-Moll currents and 2×2 Jacobian.
+    ///
+    /// Port ordering matches `BjtTwoPort`:
+    /// - Port 0: Vbe (base-emitter) → Ib
+    /// - Port 1: Vce (collector-emitter) → Ic
+    ///
+    /// PNP devices negate all voltages before evaluation and negate
+    /// currents before writing back.
+    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+        let sign = if self.is_pnp { -1.0 } else { 1.0 };
+        let vbe = sign * v[0];
+        let vce = sign * v[1];
+
+        // Clamp Vbc to prevent catastrophic BC junction forward bias.
+        const VBC_MAX: f64 = 0.4;
+        let vbc_raw = vbe - vce;
+        let vbc_was_clamped = vbc_raw > VBC_MAX;
+        let vbc = vbc_raw.min(VBC_MAX);
+
+        // Clamp exponential arguments to prevent overflow (same limit as GP).
+        let arg_be = (vbe / self.nf_vt).min(40.0);
+        let arg_bc = (vbc / self.nr_vt).min(40.0);
+        let exp_be = arg_be.exp();
+        let exp_bc = arg_bc.exp();
+        let be_clamped = arg_be >= 40.0;
+        let bc_clamped = arg_bc >= 40.0;
+
+        // Currents
+        let ef = self.is * (exp_be - 1.0);
+        let er = self.is * (exp_bc - 1.0);
+        let ic = ef - er / self.br;
+        let ib = ef / self.bf + er / self.br;
+
+        currents[0] = sign * ib;
+        currents[1] = sign * ic;
+
+        // Jacobian in (vbe, vbe-vce) = (vbe, vbc) space.
+        // d(ef)/d(vbe) = IS * exp_be / nf_vt  (zero when clamped)
+        // d(er)/d(vbc) = IS * exp_bc / nr_vt  (zero when clamped)
+        let def_dvbe = if be_clamped {
+            0.0
+        } else {
+            self.is * exp_be / self.nf_vt
+        };
+        let der_dvbc = if bc_clamped {
+            0.0
+        } else {
+            self.is * exp_bc / self.nr_vt
+        };
+
+        // Chain-rule: vbc = vbe - vce (when unclamped)
+        // ∂vbc/∂vbe = 1, ∂vbc/∂vce = -1; both 0 when clamped.
+        let dvbc_dvbe = if vbc_was_clamped { 0.0 } else { 1.0 };
+        let dvbc_dvce = if vbc_was_clamped { 0.0 } else { -1.0 };
+
+        // ∂Ib/∂Vbe = def_dvbe/bf + der_dvbc * dvbc_dvbe / br
+        // ∂Ib/∂Vce =              + der_dvbc * dvbc_dvce / br
+        // ∂Ic/∂Vbe = def_dvbe    - der_dvbc * dvbc_dvbe / br
+        // ∂Ic/∂Vce =             - der_dvbc * dvbc_dvce / br
+        jacobian[0] = def_dvbe / self.bf + der_dvbc * dvbc_dvbe / self.br; // ∂Ib/∂Vbe
+        jacobian[1] = der_dvbc * dvbc_dvce / self.br; // ∂Ib/∂Vce
+        jacobian[2] = def_dvbe - der_dvbc * dvbc_dvbe / self.br; // ∂Ic/∂Vbe
+        jacobian[3] = -der_dvbc * dvbc_dvce / self.br; // ∂Ic/∂Vce
+    }
+
+    fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+        match port {
+            0 => (-self.vbe_max, self.vbe_max), // Vbe: IS-dependent
+            _ => (-self.v_max, self.v_max),     // Vce: full swing
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1601,5 +1772,308 @@ mod gummel_poon_tests {
             v_guess2[0],
             v_guess[0]
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EbersMollTwoPort tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod ebers_moll_tests {
+    use super::*;
+    use crate::elements::nonlinear::solver::NlDeviceGroupIv;
+
+    /// Build an EbersMollTwoPort from 2N3904 GP parameters.
+    fn em_2n3904() -> EbersMollTwoPort {
+        let gp = GummelPoonModel::by_name("2N3904");
+        EbersMollTwoPort::from_gp(&gp)
+    }
+
+    /// Build an EbersMollTwoPort from 2N3906 PNP GP parameters.
+    fn em_2n3906_pnp() -> EbersMollTwoPort {
+        let gp = GummelPoonModel::by_name("2N3906");
+        EbersMollTwoPort::from_gp_pnp(&gp)
+    }
+
+    // -----------------------------------------------------------------------
+    // Basic operating point checks
+    // -----------------------------------------------------------------------
+
+    /// At a typical NPN forward-active operating point (Vbe=0.65V, Vce=5V),
+    /// EM should give positive Ic > 0 and positive Ib > 0 with reasonable beta.
+    #[test]
+    fn ebers_moll_npn_forward_active_operating_point() {
+        let em = em_2n3904();
+        let mut currents = [0.0; 2];
+        let mut jac = [0.0; 4];
+        em.eval(&[0.65, 5.0], &mut currents, &mut jac);
+
+        let ib = currents[0];
+        let ic = currents[1];
+
+        assert!(
+            ib > 0.0,
+            "Ib should be positive in forward-active: {ib:.3e}"
+        );
+        assert!(
+            ic > 0.0,
+            "Ic should be positive in forward-active: {ic:.3e}"
+        );
+
+        let beta = ic / ib;
+        assert!(
+            beta > 50.0 && beta < 1000.0,
+            "Beta={beta:.1} should be in reasonable range"
+        );
+    }
+
+    /// At cutoff (Vbe < 0), Ic and Ib should be very small.
+    #[test]
+    fn ebers_moll_npn_cutoff() {
+        let em = em_2n3904();
+        let mut currents = [0.0; 2];
+        let mut jac = [0.0; 4];
+        em.eval(&[-0.5, 5.0], &mut currents, &mut jac);
+
+        assert!(
+            currents[0].abs() < 1e-9,
+            "Ib should be ~0 in cutoff: {:.3e}",
+            currents[0]
+        );
+        assert!(
+            currents[1].abs() < 1e-9,
+            "Ic should be ~0 in cutoff: {:.3e}",
+            currents[1]
+        );
+    }
+
+    /// PNP EM: at negative voltages, should give negative currents (PNP polarity).
+    #[test]
+    fn ebers_moll_pnp_forward_active() {
+        let em = em_2n3906_pnp();
+        let mut currents = [0.0; 2];
+        let mut jac = [0.0; 4];
+        // PNP: Vbe=-0.65V (emitter above base), Vce=-5V (emitter above collector)
+        em.eval(&[-0.65, -5.0], &mut currents, &mut jac);
+
+        let ib = currents[0];
+        let ic = currents[1];
+
+        // PNP currents flow in opposite direction
+        assert!(ib < 0.0, "PNP Ib should be negative: {ib:.3e}");
+        assert!(ic < 0.0, "PNP Ic should be negative: {ic:.3e}");
+
+        let beta = ic.abs() / ib.abs();
+        assert!(
+            beta > 50.0 && beta < 1000.0,
+            "PNP beta={beta:.1} should be reasonable"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Jacobian correctness via finite differences
+    // -----------------------------------------------------------------------
+
+    /// Verify the analytical Jacobian matches central-difference numerical
+    /// derivatives at multiple operating points.
+    #[test]
+    fn ebers_moll_jacobian_matches_numerical() {
+        let em = em_2n3904();
+        let test_points: &[[f64; 2]] = &[
+            [0.0, 0.0],   // zero bias
+            [0.6, 5.0],   // forward active
+            [0.65, 10.0], // high Vce
+            [0.3, 1.0],   // low bias
+            [0.5, 0.3],   // near saturation
+            [-0.5, 5.0],  // cutoff
+        ];
+
+        let delta = 1e-7;
+        for v in test_points {
+            let mut c = [0.0; 2];
+            let mut jac_a = [0.0; 4];
+            em.eval(v, &mut c, &mut jac_a);
+
+            // Numerical Jacobian via central differences
+            let mut c_p = [0.0; 2];
+            let mut c_m = [0.0; 2];
+            let mut j_dummy = [0.0; 4];
+
+            em.eval(&[v[0] + delta, v[1]], &mut c_p, &mut j_dummy);
+            em.eval(&[v[0] - delta, v[1]], &mut c_m, &mut j_dummy);
+            let dib_dvbe = (c_p[0] - c_m[0]) / (2.0 * delta);
+            let dic_dvbe = (c_p[1] - c_m[1]) / (2.0 * delta);
+
+            em.eval(&[v[0], v[1] + delta], &mut c_p, &mut j_dummy);
+            em.eval(&[v[0], v[1] - delta], &mut c_m, &mut j_dummy);
+            let dib_dvce = (c_p[0] - c_m[0]) / (2.0 * delta);
+            let dic_dvce = (c_p[1] - c_m[1]) / (2.0 * delta);
+
+            let jac_n = [dib_dvbe, dib_dvce, dic_dvbe, dic_dvce];
+            let names = ["∂Ib/∂Vbe", "∂Ib/∂Vce", "∂Ic/∂Vbe", "∂Ic/∂Vce"];
+
+            for (i, name) in names.iter().enumerate() {
+                let a = jac_a[i];
+                let n = jac_n[i];
+                let abs_err = (a - n).abs();
+                let rel_err = if n.abs() > 1e-20 {
+                    abs_err / n.abs()
+                } else {
+                    abs_err
+                };
+                assert!(
+                    rel_err < 1e-4 || abs_err < 1e-15,
+                    "EM Jacobian {name} mismatch at v={v:?}: analytical={a:.6e}, numerical={n:.6e}, rel_err={rel_err:.2e}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // GP equivalence when advanced params are zeroed
+    // -----------------------------------------------------------------------
+
+    /// When GP advanced parameters are disabled (VAF=∞, IKF=∞, ISE=0, RB=0, RE=0, RC=0),
+    /// EM and GP should give identical currents and Jacobians.
+    #[test]
+    fn ebers_moll_matches_gp_when_advanced_params_zeroed() {
+        // Build a GP model with all advanced effects disabled
+        let mut gp = GummelPoonModel::by_name("2N3904");
+        gp.vaf = f64::INFINITY;
+        gp.var = f64::INFINITY;
+        gp.ikf = f64::INFINITY;
+        gp.ikr = f64::INFINITY;
+        gp.ise = 0.0;
+        gp.isc = 0.0;
+        gp.rb = 0.0;
+        gp.re = 0.0;
+        gp.rc = 0.0;
+
+        let bjt_gp = BjtTwoPort::new(gp);
+        let em = EbersMollTwoPort::from_gp(&gp);
+
+        let test_points: &[[f64; 2]] =
+            &[[0.6, 5.0], [0.65, 10.0], [0.3, 1.0], [0.0, 5.0], [0.5, 0.3]];
+
+        for v in test_points {
+            let mut c_gp = [0.0; 2];
+            let mut j_gp = [0.0; 4];
+            bjt_gp.eval(v, &mut c_gp, &mut j_gp);
+
+            let mut c_em = [0.0; 2];
+            let mut j_em = [0.0; 4];
+            em.eval(v, &mut c_em, &mut j_em);
+
+            let names_c = ["Ib", "Ic"];
+            for (i, name) in names_c.iter().enumerate() {
+                let abs_err = (c_gp[i] - c_em[i]).abs();
+                let rel_err = if c_gp[i].abs() > 1e-20 {
+                    abs_err / c_gp[i].abs()
+                } else {
+                    abs_err
+                };
+                assert!(
+                    rel_err < 1e-6 || abs_err < 1e-20,
+                    "EM {name} differs from GP at v={v:?}: GP={:.6e}, EM={:.6e}, rel_err={rel_err:.2e}",
+                    c_gp[i],
+                    c_em[i]
+                );
+            }
+
+            let names_j = ["∂Ib/∂Vbe", "∂Ib/∂Vce", "∂Ic/∂Vbe", "∂Ic/∂Vce"];
+            for (i, name) in names_j.iter().enumerate() {
+                let abs_err = (j_gp[i] - j_em[i]).abs();
+                let rel_err = if j_gp[i].abs() > 1e-20 {
+                    abs_err / j_gp[i].abs()
+                } else {
+                    abs_err
+                };
+                assert!(
+                    rel_err < 1e-4 || abs_err < 1e-15,
+                    "EM Jacobian {name} differs from GP at v={v:?}: GP={:.6e}, EM={:.6e}, rel_err={rel_err:.2e}",
+                    j_gp[i],
+                    j_em[i]
+                );
+            }
+        }
+    }
+
+    /// The `from_gp` constructor preserves IS, BF, BR, and computes
+    /// nf_vt = NF * VT correctly.
+    #[test]
+    fn ebers_moll_from_gp_preserves_key_params() {
+        let gp = GummelPoonModel::by_name("2N3904");
+        let em = EbersMollTwoPort::from_gp(&gp);
+
+        assert_eq!(em.is, gp.is, "IS must match");
+        assert_eq!(em.bf, gp.bf, "BF must match");
+        assert_eq!(em.br, gp.br, "BR must match");
+        assert!(
+            (em.nf_vt - gp.nf * gp.vt).abs() < 1e-12,
+            "nf_vt={} should equal NF*VT={}",
+            em.nf_vt,
+            gp.nf * gp.vt
+        );
+        assert!(
+            (em.nr_vt - gp.nr * gp.vt).abs() < 1e-12,
+            "nr_vt={} should equal NR*VT={}",
+            em.nr_vt,
+            gp.nr * gp.vt
+        );
+        assert!(!em.is_pnp, "from_gp should produce NPN");
+    }
+
+    /// from_gp_pnp sets the PNP flag.
+    #[test]
+    fn ebers_moll_from_gp_pnp_sets_pnp_flag() {
+        let gp = GummelPoonModel::by_name("2N3906");
+        let em_pnp = EbersMollTwoPort::from_gp_pnp(&gp);
+        assert!(em_pnp.is_pnp, "from_gp_pnp should produce PNP");
+    }
+
+    /// eval() output should be finite (no NaN/Inf) for all standard bias points.
+    #[test]
+    fn ebers_moll_eval_all_finite() {
+        let em = em_2n3904();
+        let test_points: &[[f64; 2]] = &[
+            [0.0, 0.0],
+            [0.7, 15.0],
+            [-1.0, -1.0],
+            [0.65, 0.0],
+            [1.0, 50.0], // extreme forward — clamped
+        ];
+        for v in test_points {
+            let mut c = [0.0; 2];
+            let mut j = [0.0; 4];
+            em.eval(v, &mut c, &mut j);
+            assert!(c[0].is_finite(), "Ib not finite at {v:?}: {}", c[0]);
+            assert!(c[1].is_finite(), "Ic not finite at {v:?}: {}", c[1]);
+            for (k, &jv) in j.iter().enumerate() {
+                assert!(jv.is_finite(), "J[{k}] not finite at {v:?}: {jv}");
+            }
+        }
+    }
+
+    /// n_ports() must return 2 (same as BjtTwoPort).
+    #[test]
+    fn ebers_moll_n_ports_is_2() {
+        let em = em_2n3904();
+        assert_eq!(em.n_ports(), 2);
+    }
+
+    /// v_clamp_port returns asymmetric bounds: IS-dependent for port 0 (Vbe),
+    /// symmetric large range for port 1 (Vce).
+    #[test]
+    fn ebers_moll_v_clamp_port_bounds() {
+        let em = em_2n3904();
+        let (lo, hi) = em.v_clamp_port(0);
+        assert!(lo < 0.0, "Vbe lower clamp should be negative");
+        assert!(hi > 0.0, "Vbe upper clamp should be positive");
+        assert!(hi <= 1.0, "Vbe clamp should not exceed 1.0V");
+
+        let (lo2, hi2) = em.v_clamp_port(1);
+        assert!(lo2 < -10.0, "Vce lower clamp should be large negative");
+        assert!(hi2 > 10.0, "Vce upper clamp should be large positive");
     }
 }
