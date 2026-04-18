@@ -94,7 +94,11 @@ pub(crate) fn wright_omega(x: f64) -> f64 {
         //      = 2r·w·w1 / (2w1² − r)
         let delta = 2.0 * r * w * w1 / (2.0 * w1 * w1 - r);
         let w_new = w + delta;
-        if w_new <= 0.0 { w } else { w_new }
+        if w_new <= 0.0 {
+            w
+        } else {
+            w_new
+        }
     }
 
     let w = halley(w0, x);

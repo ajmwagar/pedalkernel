@@ -838,9 +838,7 @@ impl CircuitGraph {
                     let dir = comp.kind.pin_direction(pin_name);
                     // Op-amp output pins are NOT barriers (nullor refactor).
                     // OTA output pins still are (OTA is a separate VCCS path).
-                    if dir == super::component::PinDirection::Output
-                        && (!is_opamp || is_ota)
-                    {
+                    if dir == super::component::PinDirection::Output && (!is_opamp || is_ota) {
                         let key = format!("{}.{}", comp.id, pin_name);
                         if let Some(&raw_id) = pin_ids.get(&key) {
                             output_pin_nodes.insert(uf.find(raw_id));
