@@ -20,6 +20,7 @@ pub mod compiler;
 pub mod debug;
 pub mod dsl;
 pub mod elements;
+pub mod fast_math;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
 #[cfg(feature = "hardware")]
