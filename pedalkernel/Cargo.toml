@@ -8,7 +8,7 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/ajmwagar/pedalkernel"
 keywords = ["audio", "dsp", "wdf", "guitar", "effects"]
 categories = ["multimedia::audio"]
-rust-version = "1.75"
+rust-version = "1.80"
 
 [features]
 default = ["jack-rt", "tui", "cli", "gummel-poon"]

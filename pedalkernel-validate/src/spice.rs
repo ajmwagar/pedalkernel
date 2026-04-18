@@ -393,5 +393,4 @@ mod tests {
         assert!((runner.interpolate(&data, 0.5) - 5.0).abs() < 1e-10);
         assert!((runner.interpolate(&data, 1.5) - 15.0).abs() < 1e-10);
     }
-
 }

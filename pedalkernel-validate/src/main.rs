@@ -1,3 +1,5 @@
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::needless_borrows_for_generic_args)]
 //! PedalKernel SPICE Validation CLI
 //!
 //! Compare WDF engine output against ngspice golden references.
@@ -521,10 +523,7 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
 
     // Resistor Divider: 10k/10k = 0.5 gain (frequency-independent)
     {
-        println!(
-            "\n{} Resistor Divider (10k/10k, gain=0.5)",
-            "•".green(),
-        );
+        println!("\n{} Resistor Divider (10k/10k, gain=0.5)", "•".green(),);
 
         std::fs::create_dir_all(cli.golden.join("linear/resistor_divider"))?;
 
@@ -642,8 +641,14 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
 
         let n = (0.1 * sample_rate) as usize;
         let impulse_input: Vec<f64> = (0..n).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
-        let impulse_golden =
-            analytical::rlc_bandpass_filter(&impulse_input, r_rlc, l_rlc, c_rlc, rl_rlc, sample_rate);
+        let impulse_golden = analytical::rlc_bandpass_filter(
+            &impulse_input,
+            r_rlc,
+            l_rlc,
+            c_rlc,
+            rl_rlc,
+            sample_rate,
+        );
         let impulse_path = cli.golden.join("canonical/series_rlc/impulse.npy");
         npy::write_f64(&impulse_path, &impulse_golden)?;
         println!("  {} impulse → {}", "✓".green(), impulse_path.display());
@@ -677,7 +682,8 @@ fn generate_linear_golden(cli: &Cli) -> anyhow::Result<()> {
 
         let n = (0.1 * sample_rate) as usize;
         let impulse_input: Vec<f64> = (0..n).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
-        let impulse_golden = analytical::twin_t_notch_filter(&impulse_input, r_tt, c_tt, sample_rate);
+        let impulse_golden =
+            analytical::twin_t_notch_filter(&impulse_input, r_tt, c_tt, sample_rate);
         let impulse_path = cli.golden.join("canonical/twin_t_notch/impulse.npy");
         npy::write_f64(&impulse_path, &impulse_golden)?;
         println!("  {} impulse → {}", "✓".green(), impulse_path.display());

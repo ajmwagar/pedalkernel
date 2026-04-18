@@ -195,8 +195,7 @@ fn route_wire_with_obstacles(start: Point, end: Point, obstacles: &[(f32, f32)])
     let corner = &basic[1];
     let corner_blocked = obstacles.iter().any(|&(ox, oy)| {
         // Don't count start/end positions as obstacles
-        let is_endpoint =
-            ((ox - start.x).abs() < 1.0 && (oy - start.y).abs() < 1.0)
+        let is_endpoint = ((ox - start.x).abs() < 1.0 && (oy - start.y).abs() < 1.0)
             || ((ox - end.x).abs() < 1.0 && (oy - end.y).abs() < 1.0);
         if is_endpoint {
             return false;

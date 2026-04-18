@@ -589,7 +589,7 @@ impl<'a> TopologyContext<'a> {
                 // 2-hop: passive → diode → diode → node_b
                 if let Some(diode_neighbors) = self.resolved.diode_adj.get(&mid) {
                     for &(mid2, dt) in diode_neighbors {
-                        if self.resolved.diode_map.get(&(mid2, node_b)).is_some() {
+                        if self.resolved.diode_map.contains_key(&(mid2, node_b)) {
                             return Some(dt);
                         }
                     }
@@ -605,7 +605,7 @@ impl<'a> TopologyContext<'a> {
                 // 2-hop: node_a → diode → diode → passive → node_b
                 if let Some(diode_neighbors) = self.resolved.diode_adj.get(&mid) {
                     for &(mid2, dt) in diode_neighbors {
-                        if self.resolved.diode_map.get(&(node_a, mid2)).is_some() {
+                        if self.resolved.diode_map.contains_key(&(node_a, mid2)) {
                             return Some(dt);
                         }
                     }
@@ -615,7 +615,7 @@ impl<'a> TopologyContext<'a> {
         // Direct chain: node_a → diode → diode → node_b
         if let Some(diode_neighbors) = self.resolved.diode_adj.get(&node_a) {
             for &(mid, dt) in diode_neighbors {
-                if self.resolved.diode_map.get(&(mid, node_b)).is_some() {
+                if self.resolved.diode_map.contains_key(&(mid, node_b)) {
                     return Some(dt);
                 }
             }

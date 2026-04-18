@@ -495,9 +495,7 @@ fn compute_signal_path_order(placed: &[PlacedComponent], graph: &LayoutGraph) ->
     }
 
     // Append any unreached components at the end (sorted by x as fallback)
-    let mut remaining: Vec<usize> = (0..placed.len())
-        .filter(|i| !used.contains(i))
-        .collect();
+    let mut remaining: Vec<usize> = (0..placed.len()).filter(|i| !used.contains(i)).collect();
     remaining.sort_by(|&a, &b| {
         placed[a]
             .x

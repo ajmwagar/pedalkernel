@@ -279,7 +279,9 @@ mod tests {
             components: vec![
                 ComponentDef {
                     id: "C1".into(),
-                    kind: Box::new(Capacitor { config: CapConfig::new(100e-9) }),
+                    kind: Box::new(Capacitor {
+                        config: CapConfig::new(100e-9),
+                    }),
                 },
                 ComponentDef {
                     id: "R1".into(),
@@ -287,7 +289,9 @@ mod tests {
                 },
                 ComponentDef {
                     id: "V1".into(),
-                    kind: Box::new(Triode { model: "12AX7".into() }),
+                    kind: Box::new(Triode {
+                        model: "12AX7".into(),
+                    }),
                 },
                 ComponentDef {
                     id: "R2".into(),
@@ -358,6 +362,7 @@ mod tests {
             subtitle: None,
             midi_bindings: vec![],
             calibrate: false,
+            subcircuits: vec![],
         };
 
         let graph = LayoutGraph::from_pedal(&pedal);

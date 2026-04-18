@@ -1,3 +1,14 @@
+// Pre-existing lint suppressions for technical debt in this crate.
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_imports)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::redundant_field_names)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::io_other_error)]
+#![allow(clippy::manual_is_multiple_of)]
 //! # PedalKernel Validation Library
 //!
 //! A toolkit for validating WDF (Wave Digital Filter) circuit simulations against
@@ -250,8 +261,8 @@ pub mod prelude {
     // Analytical references
     pub use crate::analytical::{
         rc_highpass_filter, rc_highpass_impulse_response, rc_lowpass_filter,
-        rc_lowpass_impulse_response, rc_lowpass_magnitude, rc_lowpass_phase,
-        rlc_bandpass_filter, twin_t_notch_filter,
+        rc_lowpass_impulse_response, rc_lowpass_magnitude, rc_lowpass_phase, rlc_bandpass_filter,
+        twin_t_notch_filter,
     };
 
     // Config
