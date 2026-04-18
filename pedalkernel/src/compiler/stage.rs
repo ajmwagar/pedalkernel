@@ -3722,6 +3722,35 @@ impl MultiNlStage {
             }
         }
     }
+
+    // ── Precompute accessors ─────────────────────────────────────────────
+    // Minimal read-only accessors for `precompute::extract_precomputed`.
+
+    /// The R-type adaptor containing the scattering matrix and port data.
+    pub(crate) fn adaptor(&self) -> &RTypeAdaptor {
+        &self.adaptor
+    }
+
+    /// VS injection vector (present when driven by an ideal voltage source).
+    pub(crate) fn vs_injection(&self) -> Option<&Vec<f64>> {
+        self.vs_injection.as_ref()
+    }
+
+    /// Node-voltage extraction coefficients (present when output is read from
+    /// MNA node voltages directly rather than WDF port waves).
+    pub(crate) fn extract_coeffs(&self) -> Option<&Vec<f64>> {
+        self.extract_coeffs.as_ref()
+    }
+
+    /// VS component of the extraction formula.
+    pub(crate) fn extract_vs(&self) -> f64 {
+        self.extract_vs
+    }
+
+    /// Pot interpolation table (present for single-pot stages).
+    pub(crate) fn interp_table(&self) -> Option<&crate::tree::ScatteringInterpolationTable> {
+        self.interp_table.as_ref()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

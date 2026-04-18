@@ -29,6 +29,7 @@ mod warnings;
 pub(crate) mod wdf_leaf;
 
 pub use compile::{compile_pedal, compile_pedal_with_options, CompileOptions};
+pub(crate) use compiled::extract_precomputed_from_compiled;
 pub use compiled::CompiledPedal;
 pub use component::{Component, PinDirection};
 pub use split::{compile_split_pedal, SplitCompiledPedal};

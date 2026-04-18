@@ -447,6 +447,33 @@ impl RTypeAdaptor {
             *b = 0.0;
         }
     }
+
+    // ── Precompute accessors ─────────────────────────────────────────────
+    // Minimal read-only accessors used by `precompute::extract_precomputed`.
+    // They expose only what the extractor needs and nothing more.
+
+    /// Return the power-normalized scattering matrix S̅ (row-major).
+    ///
+    /// `S̅[i][j] = S[i][j] · √(R_j / R_i)`.  For passive networks all entries
+    /// are bounded `[-1, 1]`.
+    #[must_use]
+    pub fn power_scattering(&self) -> &[f64] {
+        &self.power_scattering
+    }
+
+    /// Number of ports (children + 1 adapted parent port).
+    #[must_use]
+    pub fn num_ports(&self) -> usize {
+        self.num_ports
+    }
+
+    /// Port resistances in port order (last entry is the adapted parent port).
+    ///
+    /// Reconstructed from `√R_i` values stored internally as `R_i = (√R_i)²`.
+    #[must_use]
+    pub fn port_resistances(&self) -> Vec<f64> {
+        self.sqrt_r.iter().map(|sr| sr * sr).collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1548,6 +1575,34 @@ impl ScatteringInterpolationTable {
         }
 
         (scat, vs)
+    }
+
+    // ── Precompute accessors ─────────────────────────────────────────────
+
+    /// Returns `true` when VS injection vectors are non-trivial (any entry != 0).
+    #[must_use]
+    pub fn has_vs_injection(&self) -> bool {
+        self.vs_injection_vectors
+            .iter()
+            .any(|v| v.iter().any(|&x| x != 0.0))
+    }
+
+    /// Log-spaced resistance samples (ascending).
+    #[must_use]
+    pub fn resistances(&self) -> &[f64] {
+        &self.resistances
+    }
+
+    /// Scattering matrices, one per resistance sample, each `n_ports²` entries.
+    #[must_use]
+    pub fn matrices(&self) -> &[Vec<f64>] {
+        &self.scattering_matrices
+    }
+
+    /// VS injection vectors, one per resistance sample, each `n_ports` entries.
+    #[must_use]
+    pub fn injections(&self) -> &[Vec<f64>] {
+        &self.vs_injection_vectors
     }
 }
 
