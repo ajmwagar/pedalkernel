@@ -71,7 +71,13 @@ impl Component for OpAmp {
                 pin_b: "neg",
             }
         } else {
-            GraphRole::ActiveIc
+            // Non-OTA op-amps participate in the graph as three-pin nullors
+            // (pos, neg, out). The R-type stage builder emits a VCVS stamp.
+            GraphRole::VcvsEdge {
+                pin_pos: "pos",
+                pin_neg: "neg",
+                pin_out: "out",
+            }
         }
     }
 
@@ -83,6 +89,10 @@ impl Component for OpAmp {
         _mna: &mut MnaSystem,
         _sample_rate: f64,
     ) -> StampResult {
+        // Op-amps are not stamped as two-terminal elements. Instead they are
+        // absorbed into the R-type adaptor's MNA matrix via the nullor_pins
+        // registration in the circuit graph, and stamped via stamp_vcvs in
+        // build_rtype_stage. See GraphRole::VcvsEdge and CircuitGraph::nullor_pins.
         StampResult::Skip
     }
 

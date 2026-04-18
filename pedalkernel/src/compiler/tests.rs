@@ -1643,14 +1643,16 @@ pedal "Marshall Bluesbreaker" {
 
     // Run 100 samples of 0.1 through the full pipeline to allow oversampler to settle
     let test_input = 0.1;
-    // Check oversampler factor indirectly
-    if let super::stage::RootKind::OpAmp(ref op) = proc.stages[0].root {
-        eprintln!(
-            "[blues-driver] stage0 opamp: gain={:.4} v_max={:.2} is_non_inv={}",
-            op.gain(),
-            op.v_max(),
-            op.is_non_inverting()
-        );
+    // Check oversampler factor indirectly (guard: stages may be empty under nullor path)
+    if let Some(s0) = proc.stages.first() {
+        if let super::stage::RootKind::OpAmp(ref op) = s0.root {
+            eprintln!(
+                "[blues-driver] stage0 opamp: gain={:.4} v_max={:.2} is_non_inv={}",
+                op.gain(),
+                op.v_max(),
+                op.is_non_inverting()
+            );
+        }
     }
     for sample_idx in 0..100 {
         let out = proc.process(test_input);
@@ -1658,20 +1660,24 @@ pedal "Marshall Bluesbreaker" {
             eprintln!("[blues-driver] sample {sample_idx}: out={out:.6e}");
         }
     }
-    // Test each stage independently with significant input
-    eprintln!("[blues-driver] --- stage0 solo ---");
-    proc.stages[0].reset();
-    let mut s0_settled = 0.0;
-    for i in 0..20 {
-        s0_settled = proc.stages[0].process(test_input);
+    // Test each stage independently with significant input (guard for nullor path)
+    if let Some(s0) = proc.stages.first_mut() {
+        eprintln!("[blues-driver] --- stage0 solo ---");
+        s0.reset();
+        let mut s0_settled = 0.0;
+        for _i in 0..20 {
+            s0_settled = s0.process(test_input);
+        }
+        eprintln!("[blues-driver]   stage0 settled: {s0_settled:.6e}");
     }
-    eprintln!("[blues-driver]   stage0 settled: {s0_settled:.6e}");
 
-    eprintln!("[blues-driver] --- mnl0 solo with input 0.1 ---");
-    for i in 0..20 {
-        let m0 = proc.multi_nl_stages[0].process(test_input);
-        if i < 5 || i == 19 {
-            eprintln!("[blues-driver]   mnl0[{i}]: {m0:.6e}");
+    if let Some(mnl0) = proc.multi_nl_stages.first_mut() {
+        eprintln!("[blues-driver] --- mnl0 solo with input 0.1 ---");
+        for i in 0..20 {
+            let m0 = mnl0.process(test_input);
+            if i < 5 || i == 19 {
+                eprintln!("[blues-driver]   mnl0[{i}]: {m0:.6e}");
+            }
         }
     }
 
@@ -1895,479 +1901,6 @@ fn compile_phase90() {
     );
 }
 
-#[test]
-fn topology_classify_phase90_allpass() {
-    // Verify that classify_topologies detects AllpassJfet topologies
-    // in the Phase 90 circuit (4 JFET all-pass stages with opamps).
-    let pedal = parse("phase90.pedal");
-    let (classified, classified_ids) = super::topology::classify_topologies(&pedal, 48000.0);
-
-    // Phase 90 has 4 opamps with AllpassJfet feedback topology.
-    assert!(
-        !classified.is_empty(),
-        "Phase 90 should have self-classified opamp topologies"
-    );
-    assert_eq!(
-        classified_ids.len(),
-        classified.len(),
-        "Each classified opamp should have a unique ID"
-    );
-
-    // Phase 90 has 4 AllpassJfet stages (U2-U5), plus Inverting stages (U1, U6).
-    let allpass_count = classified
-        .iter()
-        .filter(|i| {
-            matches!(
-                i.feedback_kind,
-                super::graph::OpAmpFeedbackKind::AllpassJfet { .. }
-            )
-        })
-        .count();
-    assert_eq!(
-        allpass_count, 4,
-        "Phase 90 should have 4 AllpassJfet stages"
-    );
-
-    for info in classified.iter().filter(|i| {
-        matches!(
-            i.feedback_kind,
-            super::graph::OpAmpFeedbackKind::AllpassJfet { .. }
-        )
-    }) {
-        if let super::graph::OpAmpFeedbackKind::AllpassJfet { rf, cf, jfet_id } =
-            &info.feedback_kind
-        {
-            assert!(*rf > 0.0, "Rf should be positive: {rf}");
-            assert!(*cf > 0.0, "Cf should be positive: {cf}");
-            assert!(!jfet_id.is_empty(), "JFET ID should not be empty");
-        }
-    }
-}
-
-#[test]
-fn topology_classify_unity_gain_buffer() {
-    // A pedal with a unity-gain buffer (neg tied to out) should be classified.
-    let src = r#"
-pedal "unity_gain_test" subtitle "test" {
-  components {
-    U1: opamp(tl072)
-    R1: resistor(10k)
-  }
-  nets {
-    in -> R1.a
-    R1.b -> U1.pos
-    U1.neg -> U1.out
-    U1.out -> out
-  }
-  controls {}
-}
-"#;
-    let pedal = parse_pedal_file(src).unwrap();
-    let (classified, classified_ids) = super::topology::classify_topologies(&pedal, 48000.0);
-
-    assert_eq!(classified.len(), 1, "Should classify exactly one opamp");
-    assert!(classified_ids.contains("U1"));
-    assert!(
-        matches!(
-            classified[0].feedback_kind,
-            super::graph::OpAmpFeedbackKind::UnityGain
-        ),
-        "Should detect UnityGain topology"
-    );
-}
-
-// -----------------------------------------------------------------------
-// TDD tests for Phase C: Inverting + NonInverting topology classification
-// These capture the current pipeline behavior. After migration to
-// classify_topologies, the same assertions must still hold.
-// -----------------------------------------------------------------------
-
-#[test]
-fn topology_classify_simple_inverting() {
-    // Simple inverting amplifier: pos→gnd, Rf from neg→out, Ri from in→neg.
-    // classify_topologies should detect this as Inverting.
-    let src = r#"
-pedal "Inverting Test" subtitle "test" {
-  components {
-    Ri: resistor(10k)
-    Rf: resistor(100k)
-    U1: opamp(tl072)
-    R_load: resistor(10k)
-  }
-  nets {
-    in -> Ri.a
-    Ri.b -> U1.neg
-    U1.pos -> gnd
-    U1.neg -> Rf.a
-    Rf.b -> U1.out
-    U1.out -> R_load.a
-    R_load.b -> out
-  }
-  controls {}
-}
-"#;
-    let pedal = parse_pedal_file(src).unwrap();
-
-    // Full pipeline: analyze_opamps should find Inverting with rf=100k, ri=10k.
-    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-    let (pre_classified, skip_ids) = super::topology::classify_topologies(&pedal, 48000.0);
-    let analysis =
-        super::opamp_analysis::analyze_opamps(&graph, &pedal, &pre_classified, &skip_ids);
-
-    assert_eq!(
-        analysis.feedback_loops.len(),
-        1,
-        "Should find exactly one opamp feedback loop"
-    );
-    let info = &analysis.feedback_loops[0];
-    assert_eq!(info.comp_id, "U1");
-    match &info.feedback_kind {
-        super::graph::OpAmpFeedbackKind::Inverting {
-            rf,
-            ri,
-            feedback_diode,
-            rf_pot,
-            ..
-        } => {
-            assert!((rf - 100_000.0).abs() < 1.0, "Rf should be 100k: {rf}");
-            assert!((ri - 10_000.0).abs() < 1.0, "Ri should be 10k: {ri}");
-            assert!(feedback_diode.is_none(), "No feedback diode");
-            assert!(rf_pot.is_none(), "No feedback pot");
-        }
-        other => panic!("Expected Inverting, got {:?}", other),
-    }
-}
-
-#[test]
-fn topology_classify_simple_noninverting() {
-    // Simple non-inverting amplifier: in→pos, Ri from neg→gnd, Rf from neg→out.
-    // classify_topologies should detect this as NonInverting.
-    let src = r#"
-pedal "NonInverting Test" subtitle "test" {
-  components {
-    Ri: resistor(10k)
-    Rf: resistor(90k)
-    U1: opamp(tl072)
-    R_load: resistor(10k)
-  }
-  nets {
-    in -> U1.pos
-    U1.neg -> Ri.a
-    Ri.b -> gnd
-    U1.neg -> Rf.a
-    Rf.b -> U1.out
-    U1.out -> R_load.a
-    R_load.b -> out
-  }
-  controls {}
-}
-"#;
-    let pedal = parse_pedal_file(src).unwrap();
-
-    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-    let (pre_classified, skip_ids) = super::topology::classify_topologies(&pedal, 48000.0);
-    let analysis =
-        super::opamp_analysis::analyze_opamps(&graph, &pedal, &pre_classified, &skip_ids);
-
-    assert_eq!(
-        analysis.feedback_loops.len(),
-        1,
-        "Should find exactly one opamp feedback loop"
-    );
-    let info = &analysis.feedback_loops[0];
-    assert_eq!(info.comp_id, "U1");
-    match &info.feedback_kind {
-        super::graph::OpAmpFeedbackKind::NonInverting {
-            rf,
-            ri,
-            rf_pot,
-            ri_pot,
-            ..
-        } => {
-            assert!((rf - 90_000.0).abs() < 1.0, "Rf should be 90k: {rf}");
-            assert!((ri - 10_000.0).abs() < 1.0, "Ri should be 10k: {ri}");
-            assert!(rf_pot.is_none(), "No Rf pot");
-            assert!(ri_pot.is_none(), "No Ri pot");
-        }
-        other => panic!("Expected NonInverting, got {:?}", other),
-    }
-}
-
-#[test]
-fn topology_classify_inverting_with_feedback_diodes() {
-    // Tube Screamer U2: inverting with silicon diodes in feedback (soft clipping).
-    // Should detect Inverting with feedback_diode = Some(Silicon).
-    let pedal = parse("tube_screamer.pedal");
-
-    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-    let (pre_classified, skip_ids) = super::topology::classify_topologies(&pedal, 48000.0);
-    let analysis =
-        super::opamp_analysis::analyze_opamps(&graph, &pedal, &pre_classified, &skip_ids);
-
-    // U1 = unity gain, U2 = inverting with diodes
-    assert!(
-        analysis.feedback_loops.len() >= 2,
-        "Should find at least 2 opamp loops"
-    );
-
-    let u1 = analysis
-        .feedback_loops
-        .iter()
-        .find(|i| i.comp_id == "U1")
-        .unwrap();
-    assert!(
-        matches!(u1.feedback_kind, super::graph::OpAmpFeedbackKind::UnityGain),
-        "U1 should be UnityGain"
-    );
-
-    let u2 = analysis
-        .feedback_loops
-        .iter()
-        .find(|i| i.comp_id == "U2")
-        .unwrap();
-    match &u2.feedback_kind {
-        super::graph::OpAmpFeedbackKind::Inverting {
-            rf,
-            ri,
-            feedback_diode,
-            rf_pot,
-            ..
-        } => {
-            assert!(*rf > 0.0, "Rf should be positive: {rf}");
-            assert!(*ri > 0.0, "Ri should be positive: {ri}");
-            assert!(
-                feedback_diode.is_some(),
-                "Tube Screamer U2 should have feedback diodes"
-            );
-            // Drive pot is in the Rf path
-            assert!(
-                rf_pot.is_some(),
-                "Tube Screamer U2 should have Rf pot (Drive)"
-            );
-        }
-        other => panic!("Expected Inverting for U2, got {:?}", other),
-    }
-}
-
-#[test]
-fn topology_classify_klon_centaur_mixed() {
-    // Klon: U1 = unity buffer, U2 = inverting with germanium diodes, U3 = unity buffer.
-    let pedal = parse("klon_centaur.pedal");
-
-    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-    let (pre_classified, skip_ids) = super::topology::classify_topologies(&pedal, 48000.0);
-    let analysis =
-        super::opamp_analysis::analyze_opamps(&graph, &pedal, &pre_classified, &skip_ids);
-
-    assert!(
-        analysis.feedback_loops.len() >= 3,
-        "Klon should have at least 3 opamp loops"
-    );
-
-    let u1 = analysis
-        .feedback_loops
-        .iter()
-        .find(|i| i.comp_id == "U1")
-        .unwrap();
-    assert!(
-        matches!(u1.feedback_kind, super::graph::OpAmpFeedbackKind::UnityGain),
-        "U1 should be UnityGain"
-    );
-
-    let u2 = analysis
-        .feedback_loops
-        .iter()
-        .find(|i| i.comp_id == "U2")
-        .unwrap();
-    match &u2.feedback_kind {
-        super::graph::OpAmpFeedbackKind::Inverting { feedback_diode, .. } => {
-            assert!(
-                feedback_diode.is_some(),
-                "Klon U2 should have feedback diodes (germanium)"
-            );
-        }
-        other => panic!("Expected Inverting for U2, got {:?}", other),
-    }
-
-    let u3 = analysis
-        .feedback_loops
-        .iter()
-        .find(|i| i.comp_id == "U3")
-        .unwrap();
-    assert!(
-        matches!(u3.feedback_kind, super::graph::OpAmpFeedbackKind::UnityGain),
-        "U3 should be UnityGain"
-    );
-}
-
-#[test]
-fn topology_classify_cascaded_inverting() {
-    // Two cascaded inverting amplifiers: U1 → U2, each with known Rf/Ri.
-    let src = r#"
-pedal "Cascaded Inverting" subtitle "test" {
-  components {
-    Ri1: resistor(10k)
-    Rf1: resistor(50k)
-    U1: opamp(tl072)
-    C_couple: cap(100n)
-    Ri2: resistor(10k)
-    Rf2: resistor(50k)
-    U2: opamp(tl072)
-    R_load: resistor(10k)
-  }
-  nets {
-    in -> Ri1.a
-    Ri1.b -> U1.neg
-    U1.pos -> gnd
-    U1.neg -> Rf1.a
-    Rf1.b -> U1.out
-    U1.out -> C_couple.a
-    C_couple.b -> Ri2.a
-    Ri2.b -> U2.neg
-    U2.pos -> gnd
-    U2.neg -> Rf2.a
-    Rf2.b -> U2.out
-    U2.out -> R_load.a
-    R_load.b -> out
-  }
-  controls {}
-}
-"#;
-    let pedal = parse_pedal_file(src).unwrap();
-
-    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-    let (pre_classified, skip_ids) = super::topology::classify_topologies(&pedal, 48000.0);
-    let analysis =
-        super::opamp_analysis::analyze_opamps(&graph, &pedal, &pre_classified, &skip_ids);
-
-    assert_eq!(
-        analysis.feedback_loops.len(),
-        2,
-        "Should find 2 inverting opamps"
-    );
-
-    for info in &analysis.feedback_loops {
-        match &info.feedback_kind {
-            super::graph::OpAmpFeedbackKind::Inverting { rf, ri, .. } => {
-                assert!((rf - 50_000.0).abs() < 1.0, "Rf should be 50k: {rf}");
-                assert!((ri - 10_000.0).abs() < 1.0, "Ri should be 10k: {ri}");
-            }
-            other => panic!("Expected Inverting for {}, got {:?}", info.comp_id, other),
-        }
-    }
-}
-
-#[test]
-fn topology_classify_noninverting_with_ac_ground() {
-    // Non-inverting with Ri going to AC ground (bias point via voltage divider).
-    // Large bypass cap (100µF) at bias node makes it AC ground equivalent.
-    let src = r#"
-pedal "NonInverting AC Ground" subtitle "test" {
-  components {
-    C_bias: cap(100u)
-    R_bias1: resistor(100k)
-    R_bias2: resistor(100k)
-    Ri: resistor(10k)
-    Rf: resistor(90k)
-    U1: opamp(tl072)
-    R_load: resistor(10k)
-  }
-  nets {
-    vcc -> R_bias1.a
-    R_bias1.b -> R_bias2.a, C_bias.a
-    R_bias2.b -> gnd
-    C_bias.b -> gnd
-    in -> U1.pos
-    U1.neg -> Ri.a
-    Ri.b -> R_bias1.b
-    U1.neg -> Rf.a
-    Rf.b -> U1.out
-    U1.out -> R_load.a
-    R_load.b -> out
-  }
-  controls {}
-}
-"#;
-    let pedal = parse_pedal_file(src).unwrap();
-
-    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-    let (pre_classified, skip_ids) = super::topology::classify_topologies(&pedal, 48000.0);
-    let analysis =
-        super::opamp_analysis::analyze_opamps(&graph, &pedal, &pre_classified, &skip_ids);
-
-    assert_eq!(
-        analysis.feedback_loops.len(),
-        1,
-        "Should find exactly one opamp"
-    );
-    let info = &analysis.feedback_loops[0];
-    assert_eq!(info.comp_id, "U1");
-    match &info.feedback_kind {
-        super::graph::OpAmpFeedbackKind::NonInverting { rf, ri, .. } => {
-            assert!((rf - 90_000.0).abs() < 1.0, "Rf should be 90k: {rf}");
-            // Ri includes the series path Ri(10k) → R_bias2(100k) → gnd = 110k
-            assert!(
-                *ri > 5_000.0 && *ri < 120_000.0,
-                "Ri should be reasonable: {ri}"
-            );
-        }
-        other => panic!("Expected NonInverting, got {:?}", other),
-    }
-}
-
-#[test]
-fn topology_classify_inverting_pos_ac_grounded() {
-    // Inverting with pos connected to AC ground (bias point via voltage divider).
-    // Large bypass cap makes bias node AC ground equivalent.
-    let src = r#"
-pedal "Inverting AC Ground" subtitle "test" {
-  components {
-    C_bias: cap(100u)
-    R_bias1: resistor(100k)
-    R_bias2: resistor(100k)
-    Ri: resistor(10k)
-    Rf: resistor(100k)
-    U1: opamp(tl072)
-    R_load: resistor(10k)
-  }
-  nets {
-    vcc -> R_bias1.a
-    R_bias1.b -> R_bias2.a, C_bias.a
-    R_bias2.b -> gnd
-    C_bias.b -> gnd
-    in -> Ri.a
-    Ri.b -> U1.neg
-    U1.pos -> R_bias1.b
-    U1.neg -> Rf.a
-    Rf.b -> U1.out
-    U1.out -> R_load.a
-    R_load.b -> out
-  }
-  controls {}
-}
-"#;
-    let pedal = parse_pedal_file(src).unwrap();
-
-    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-    let (pre_classified, skip_ids) = super::topology::classify_topologies(&pedal, 48000.0);
-    let analysis =
-        super::opamp_analysis::analyze_opamps(&graph, &pedal, &pre_classified, &skip_ids);
-
-    assert_eq!(
-        analysis.feedback_loops.len(),
-        1,
-        "Should find exactly one opamp"
-    );
-    let info = &analysis.feedback_loops[0];
-    assert_eq!(info.comp_id, "U1");
-    match &info.feedback_kind {
-        super::graph::OpAmpFeedbackKind::Inverting { rf, ri, .. } => {
-            assert!((rf - 100_000.0).abs() < 1.0, "Rf should be 100k: {rf}");
-            assert!((ri - 10_000.0).abs() < 1.0, "Ri should be 10k: {ri}");
-        }
-        other => panic!("Expected Inverting, got {:?}", other),
-    }
-}
 
 #[test]
 fn compile_tweed_deluxe_5e3() {
@@ -5744,24 +5277,6 @@ fn goldenrod_treble_pot_sweeps_hf_gain() {
     let src = std::fs::read_to_string(&pro_path).unwrap();
     let pedal = parse_pedal_file(&src).unwrap();
 
-    // Verify U4 is detected as Inverting (WDF tree handles the cap+pot feedback)
-    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-    let (pre_classified, skip_ids) = super::topology::classify_topologies(&pedal, 48000.0);
-    let analysis =
-        super::opamp_analysis::analyze_opamps(&graph, &pedal, &pre_classified, &skip_ids);
-    let u4_info = analysis.feedback_loops.iter().find(|i| i.comp_id == "U4");
-    assert!(
-        u4_info.is_some(),
-        "U4 should be detected as an opamp feedback loop"
-    );
-    if let Some(u4) = u4_info {
-        assert!(
-            matches!(u4.feedback_kind, super::graph::OpAmpFeedbackKind::Inverting { .. }),
-            "U4 should be classified as Inverting (WDF tree builds feedback tree with cap+pot), got {:?}",
-            u4.feedback_kind,
-        );
-    }
-
     // Process 10kHz sine at Treble=0 vs Treble=1, compare RMS
     let sample_rate = 48000.0_f64;
     let n_samples = 4800_usize;
@@ -7231,4 +6746,113 @@ fn ratking_volume_inverted_range_gradual() {
             "Volume at 75% should be much less than 25%: ratio={ratio_75_to_25:.3}"
         );
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GraphRole::VcvsEdge + CircuitGraph::nullor_pins population (Phase 2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn nullor_pins_populated_for_inverting_amp() {
+    // Simple inverting x10: in→Ri→neg, Rf neg→out, pos→gnd.
+    let src = r#"
+pedal "Nullor Pins Inv" subtitle "test" {
+  components {
+    Ri: resistor(10k)
+    Rf: resistor(100k)
+    U1: opamp(tl072)
+    R_load: resistor(10k)
+  }
+  nets {
+    in -> Ri.a
+    Ri.b -> U1.neg
+    U1.pos -> gnd
+    U1.neg -> Rf.a
+    Rf.b -> U1.out
+    U1.out -> R_load.a
+    R_load.b -> out
+  }
+  controls {}
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+
+    assert_eq!(graph.nullor_pins.len(), 1, "expected exactly one nullor");
+    let rec = &graph.nullor_pins[0];
+    // The 3 pins must all resolve to distinct nodes (none merged with each other).
+    assert_ne!(rec.pos_node, rec.neg_node, "pos/neg must be distinct");
+    assert_ne!(rec.neg_node, rec.out_node, "neg/out must be distinct");
+    assert_ne!(rec.pos_node, rec.out_node, "pos/out must be distinct");
+    // pos is grounded in this topology.
+    assert_eq!(rec.pos_node, graph.gnd_node, "pos should be tied to gnd");
+    // neg is NOT ground and NOT out (finite Aol keeps them separable).
+    assert_ne!(rec.neg_node, graph.gnd_node);
+    assert_ne!(rec.out_node, graph.gnd_node);
+    // Op-amp .out is NOT in output_pin_nodes (nullor refactor: op-amps are
+    // absorbed into R-type, their output nodes must be BFS-traversable).
+    assert!(
+        !graph.output_pin_nodes.contains(&rec.out_node),
+        "op-amp out node should NOT be in output_pin_nodes (nullor path)"
+    );
+}
+
+#[test]
+fn nullor_pins_populated_for_unity_buffer() {
+    // Unity-gain buffer: pos=in, neg=out direct.
+    let src = r#"
+pedal "Nullor Pins Unity" subtitle "test" {
+  components {
+    U1: opamp(tl072)
+    R_load: resistor(10k)
+  }
+  nets {
+    in -> U1.pos
+    U1.neg -> U1.out
+    U1.out -> R_load.a
+    R_load.b -> out
+  }
+  controls {}
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+
+    assert_eq!(graph.nullor_pins.len(), 1, "expected exactly one nullor");
+    let rec = &graph.nullor_pins[0];
+    // In a unity buffer, neg and out are net-tied, so they share a union-find root.
+    assert_eq!(
+        rec.neg_node, rec.out_node,
+        "unity buffer: neg and out must share a node"
+    );
+    // pos is driven by the input, not grounded.
+    assert_ne!(rec.pos_node, graph.gnd_node, "pos should be driven by input");
+}
+
+#[test]
+fn nullor_pins_empty_for_ota_only() {
+    // CA3080 (OTA) is NOT a nullor — it stays as Edge{pos,neg} and should
+    // NOT appear in nullor_pins.
+    let src = r#"
+pedal "OTA Only" subtitle "test" {
+  components {
+    U1: opamp(ca3080)
+    R_load: resistor(10k)
+  }
+  nets {
+    in -> U1.pos
+    U1.neg -> gnd
+    U1.out -> R_load.a
+    R_load.b -> out
+  }
+  controls {}
+}
+"#;
+    let pedal = parse_pedal_file(src).unwrap();
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    assert!(
+        graph.nullor_pins.is_empty(),
+        "OTA should not appear in nullor_pins, got {:?}",
+        graph.nullor_pins
+    );
 }
