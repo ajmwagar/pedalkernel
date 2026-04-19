@@ -11,19 +11,19 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
 use crate::elements::nonlinear::solver::{
-    get_diode_solver_override, multi_port_nr_solve, multi_port_nr_solve_grouped, NlDeviceGroupIv,
-    NlDeviceIv, SolverMethod,
+    multi_port_nr_solve, multi_port_nr_solve_grouped, NlDeviceGroupIv, NlDeviceIv,
 };
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort};
 
 use super::classify::{ClassifiedCircuit, NonlinearKind};
-use super::component::{SolverMethod as ComponentSolverMethod, StampResult};
+use super::component::StampResult;
 use super::components::{CapSwitched, Capacitor as CapacitorComp, Potentiometer as PotComp};
 use super::dyn_node::{BinaryKind, DynNode};
 use super::graph::{graph_reduce, sp_decompose, CircuitGraph, ExtraEdge, NodeId};
 use super::helpers::*;
+use super::opamp_analysis::OpAmpAnalysis;
 use super::plan::{MultiNlPlan, PushPullPlan, StagePlan};
 use super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
@@ -370,15 +370,36 @@ pub(super) fn build_stages(
     plans: &[StagePlan],
     classified: &ClassifiedCircuit,
     graph: &CircuitGraph,
+    opamp_analysis: &OpAmpAnalysis,
     sample_rate: f64,
     oversampling: OversamplingFactor,
     pp_transformer_edges: &HashSet<usize>,
     lfo_controlled_jfets: &HashSet<String>,
     supply_voltage: f64,
-    _node_island_depths: &HashMap<super::graph::NodeId, usize>,
+    node_island_depths: &HashMap<super::graph::NodeId, usize>,
+    diode_paired_opamps: &[super::opamp_analysis::DiodePairedOpAmp],
 ) -> (Vec<WdfStage>, Vec<MultiNlStage>, Vec<usize>) {
-    // Op-amp feedback stages are now built via the nullor/VCVS path in
-    // build_rtype_stage; the old opamp_analysis-derived queues are gone.
+    // Build unity-gain feedback op-amp queue for JFET pairing.
+    // Also collect their out_nodes for signal_flow_distance.
+    let mut feedback_opamp_queue =
+        super::opamp_analysis::build_unity_gain_queue(opamp_analysis, sample_rate);
+    let unity_gain_out_nodes: Vec<super::graph::NodeId> = opamp_analysis
+        .feedback_loops
+        .iter()
+        .filter(|info| {
+            matches!(
+                info.feedback_kind,
+                super::graph::OpAmpFeedbackKind::UnityGain
+            )
+        })
+        .map(|info| info.out_node)
+        .collect();
+
+    // Build AllpassJfet map: JFET comp_id → (rf, cf) for inverting all-pass stages.
+    let allpass_jfet_map = super::opamp_analysis::build_allpass_jfet_map(opamp_analysis);
+
+    // Build Allpass queue: JFET comp_id → OpAmpRoot for gain-of-2 style all-pass.
+    let mut allpass_queue = super::opamp_analysis::build_allpass_queue(opamp_analysis, sample_rate);
 
     let mut stages: Vec<WdfStage> = Vec::new();
     let mut fallback_multi_nl: Vec<MultiNlStage> = Vec::new();
@@ -458,6 +479,72 @@ pub(super) fn build_stages(
                 );
             }
 
+            // Pair JFET stages with all-pass feedback or unity-gain op-amp buffers.
+            if matches!(&elem.kind, NonlinearKind::Jfet { .. }) {
+                let comp_id = &graph.components[graph.edges[elem.edge_idx].comp_idx].id;
+                if let Some(&(rf, cf)) = allpass_jfet_map.get(comp_id) {
+                    // Phase 90 inverting all-pass: build AllpassFeedback IIR.
+                    let r_ap = plan
+                        .passive_idxs
+                        .iter()
+                        .filter_map(|&idx| {
+                            graph.components[graph.edges[idx].comp_idx]
+                                .kind
+                                .resistance()
+                        })
+                        .next()
+                        .unwrap_or(22_000.0);
+                    let k = 2.0 * sample_rate * rf * cf;
+                    stage.allpass_feedback = Some(super::stage::AllpassFeedback {
+                        r_ap,
+                        b0: rf / (1.0 + k),
+                        a1: (k - 1.0) / (k + 1.0),
+                        x_prev: 0.0,
+                        y_prev: 0.0,
+                    });
+                } else if let Some(pairing) = allpass_queue.remove(comp_id) {
+                    // Allpass: direct IIR using JFET Rds and C_ap.
+                    stage.allpass_direct = Some(super::stage::AllpassDirect {
+                        cap: pairing.cap,
+                        sample_rate: pairing.sample_rate,
+                        x_prev: 0.0,
+                        y_prev: 0.0,
+                    });
+                } else if !feedback_opamp_queue.is_empty() {
+                    stage.paired_opamp = Some(feedback_opamp_queue.remove(0));
+                }
+            }
+
+            // Pair DiodePair/SingleDiode stages with feedback opamps.
+            // Match by junction node: either direct overlap or 1-hop passive adjacency.
+            if matches!(
+                &elem.kind,
+                NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)
+            ) {
+                let junction_nodes = &elem.junction_nodes;
+                if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
+                    // Direct: opamp neg/out matches diode junction node
+                    junction_nodes.iter().any(|&jn| jn == dp.neg_node || jn == dp.out_node)
+                        // 1-hop: passive edge connects opamp neg to diode junction (Klon R6)
+                        || junction_nodes.iter().any(|&jn| {
+                            graph.edges.iter().any(|e| {
+                                let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
+                                    || graph.components[e.comp_idx].kind.pot_taper().is_some();
+                                is_passive
+                                    && ((e.node_a == dp.neg_node && e.node_b == jn)
+                                        || (e.node_b == dp.neg_node && e.node_a == jn)
+                                        || (e.node_a == dp.out_node && e.node_b == jn)
+                                        || (e.node_b == dp.out_node && e.node_a == jn))
+                            })
+                        })
+                }) {
+                    stage.feedback_opamp = Some(dp.opamp_root.clone());
+                    if dp.feedback_pot_id.is_some() {
+                        stage.feedback_pot_id = dp.feedback_pot_id.clone();
+                    }
+                }
+            }
+
             stage.signal_flow_distance = if let Some(depth) = plan.signal_chain_depth {
                 depth
             } else {
@@ -512,10 +599,56 @@ pub(super) fn build_stages(
                 multi_nl.transformer_gain =
                     compute_transformer_gain(&plan.passive_idxs, graph, &transformer_subtrees);
                 multi_nl.signal_flow_distance = plan.signal_chain_depth.unwrap_or(elem.distance);
+
+                // Pair with feedback opamp (Bluesbreaker, Tube Screamer fallback).
+                // Same matching logic as the WdfStage path: junction node overlap
+                // or 1-hop passive adjacency to opamp neg/out.
+                let junction_nodes = &elem.junction_nodes;
+                if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
+                    junction_nodes
+                        .iter()
+                        .any(|&jn| jn == dp.neg_node || jn == dp.out_node)
+                        || junction_nodes.iter().any(|&jn| {
+                            graph.edges.iter().any(|e| {
+                                let is_passive =
+                                    graph.components[e.comp_idx].kind.resistance().is_some()
+                                        || graph.components[e.comp_idx].kind.pot_taper().is_some();
+                                is_passive
+                                    && ((e.node_a == dp.neg_node && e.node_b == jn)
+                                        || (e.node_b == dp.neg_node && e.node_a == jn)
+                                        || (e.node_a == dp.out_node && e.node_b == jn)
+                                        || (e.node_b == dp.out_node && e.node_a == jn))
+                            })
+                        })
+                }) {
+                    multi_nl.feedback_opamp = Some(dp.opamp_root.clone());
+                    if dp.feedback_pot_id.is_some() {
+                        multi_nl.feedback_pot_id = dp.feedback_pot_id.clone();
+                    }
+                }
+
                 fallback_multi_nl.push(multi_nl);
                 fallback_claimed_edges.extend(&plan.passive_idxs);
             }
         }
+    }
+
+    // Handle remaining unity-gain op-amps that weren't paired with JFETs.
+    // Track which unity gain opamp we're consuming from the parallel list.
+    let consumed_count = unity_gain_out_nodes.len() - feedback_opamp_queue.len();
+    for (qi, opamp) in feedback_opamp_queue.drain(..).enumerate() {
+        let out_node_idx = consumed_count + qi;
+        let out_node = unity_gain_out_nodes.get(out_node_idx).copied();
+        let sfd = out_node
+            .and_then(|n| node_island_depths.get(&n).copied())
+            .unwrap_or(usize::MAX);
+        let tree = DynNode::VoltageSource(0.0, 10_000.0);
+        stages.push(WdfStage {
+            signal_flow_distance: sfd,
+            injection_node_id: out_node.unwrap_or(usize::MAX),
+            output_node_id: out_node.unwrap_or(usize::MAX),
+            ..WdfStage::new(tree, RootKind::OpAmp(opamp), Oversampler::new(oversampling))
+        });
     }
 
     // Balance voltage source impedance in each stage.
@@ -972,6 +1105,7 @@ pub(super) fn build_multi_nl_stages(
     sample_rate: f64,
     oversampling: OversamplingFactor,
     supply_voltage: f64,
+    diode_paired_opamps: &[super::opamp_analysis::DiodePairedOpAmp],
 ) -> Vec<MultiNlStage> {
     let mut multi_nl_stages = Vec::new();
 
@@ -988,6 +1122,48 @@ pub(super) fn build_multi_nl_stages(
                 let empty_subtrees = HashMap::new();
                 stage.transformer_gain =
                     compute_transformer_gain(&plan.passive_edge_indices, graph, &empty_subtrees);
+
+                // Pair DiodePair/SingleDiode MultiNl stages with feedback opamps.
+                // Collect all junction nodes from all NL elements in this plan.
+                let has_diode = plan.nl_element_indices.iter().any(|&idx| {
+                    matches!(
+                        &classified.nonlinear_elements[idx].kind,
+                        NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)
+                    )
+                });
+                if has_diode {
+                    let all_junction_nodes: Vec<super::graph::NodeId> = plan
+                        .nl_element_indices
+                        .iter()
+                        .flat_map(|&idx| {
+                            classified.nonlinear_elements[idx]
+                                .junction_nodes
+                                .iter()
+                                .copied()
+                        })
+                        .collect();
+                    if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
+                        // Direct: opamp neg/out matches any diode junction node
+                        all_junction_nodes.iter().any(|&jn| jn == dp.neg_node || jn == dp.out_node)
+                            // 1-hop: passive edge connects opamp neg/out to diode junction
+                            || all_junction_nodes.iter().any(|&jn| {
+                                graph.edges.iter().any(|e| {
+                                    let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
+                                        || graph.components[e.comp_idx].kind.pot_taper().is_some();
+                                    is_passive
+                                        && ((e.node_a == dp.neg_node && e.node_b == jn)
+                                            || (e.node_b == dp.neg_node && e.node_a == jn)
+                                            || (e.node_a == dp.out_node && e.node_b == jn)
+                                            || (e.node_b == dp.out_node && e.node_a == jn))
+                                })
+                            })
+                    }) {
+                        stage.feedback_opamp = Some(dp.opamp_root.clone());
+                        if dp.feedback_pot_id.is_some() {
+                            stage.feedback_pot_id = dp.feedback_pot_id.clone();
+                        }
+                    }
+                }
 
                 multi_nl_stages.push(stage);
             }
@@ -1075,22 +1251,6 @@ fn stamp_passive_edge(
 ///
 /// Returns `None` if MNA construction fails (e.g., singular matrix).
 #[allow(dead_code)]
-/// Per-op-amp nullor parameters gathered during `build_rtype_stage`.
-///
-/// The VCVS stamp in MNA enforces `V_out = Aol·(V_pos − V_neg) − Ro·i_vsrc`,
-/// absorbing the op-amp into the R-type adaptor's scattering matrix. When
-/// `Aol → ∞` and `Ro → 0` this is Werner's nullor.
-struct InStageNullor {
-    #[allow(dead_code)]
-    comp_id: String,
-    pos_mna: Option<usize>,
-    neg_mna: Option<usize>,
-    out_mna: Option<usize>,
-    aol: f64,
-    ro: f64,
-    vsrc_idx: usize,
-}
-
 fn build_rtype_stage(
     decomposed: &super::graph::DecomposedCircuit,
     plan: &MultiNlPlan,
@@ -1102,13 +1262,6 @@ fn build_rtype_stage(
 ) -> Option<MultiNlStage> {
     let n_nl = plan.nl_terminals.len();
     let has_linearized_ota = !plan.ota_vccs.is_empty();
-    let has_nullor = !plan.nullor_comp_indices.is_empty();
-    // `nullor_only_vs` is the runtime flag that selects the VS-injection
-    // + probe-port + extract_coeffs path. It must also be true only when
-    // the stage's MNA actually contains at least one op-amp — otherwise
-    // the vsource budget is wrong. Recomputed below after the real
-    // `in_stage_nullors` list is built.
-    let mut nullor_only_vs = has_nullor && n_nl == 0 && !has_linearized_ota;
 
     // Compute effective sample rate accounting for oversampling.
     // All DynNodes (caps, inductors) must be created at this rate so that
@@ -1117,11 +1270,11 @@ fn build_rtype_stage(
     // causing a mismatch between port R and the S matrix.
     let effective_rate = sample_rate * oversampling.ratio() as f64;
 
-    // Need at least one of: NL ports, linearized OTA, or nullor (op-amp).
-    if n_nl == 0 && !has_linearized_ota && !has_nullor {
+    // Need either NL ports or linearized OTA, and at least some passive content.
+    if n_nl == 0 && !has_linearized_ota {
         return None;
     }
-    if decomposed.residual_edges.is_empty() && decomposed.wdf_subtrees.is_empty() && !has_nullor {
+    if decomposed.residual_edges.is_empty() && decomposed.wdf_subtrees.is_empty() {
         return None;
     }
 
@@ -1292,74 +1445,6 @@ fn build_rtype_stage(
         }
     };
 
-    // ── Collect in-stage op-amp nullors (VCVS stamps) ───────────────────
-    // For each op-amp whose output pin is in this stage's MNA node_set,
-    // reserve one auxiliary vsource and stamp a VCVS. The output node
-    // MUST be in node_set (not grounded) — otherwise `node_to_mna`
-    // returns None for the output, and the VCVS constraint becomes
-    // `V(gnd) = Aol · V_in` which forces the input to zero, killing
-    // the signal (Klon U3 unity buffer bug).
-    //
-    // Input pins (pos/neg) may legitimately be grounded (inverting amp
-    // with pos → gnd), so we don't require them to be in node_set.
-    let mut in_stage_nullors: Vec<InStageNullor> = Vec::new();
-    for rec in &graph.nullor_pins {
-        // Output must be in this stage's MNA for the stamp to work.
-        let out_in_stage = node_set.contains(&rec.out_node)
-            || rec.out_node == graph.gnd_node
-            || graph.supply_nodes.contains(&rec.out_node);
-        if !out_in_stage {
-            continue;
-        }
-        // At least one input pin must also be in-stage or grounded
-        // (otherwise the op-amp has no connection to this stage).
-        let any_input_in_stage = node_set.contains(&rec.pos_node)
-            || node_set.contains(&rec.neg_node)
-            || rec.pos_node == graph.gnd_node
-            || rec.neg_node == graph.gnd_node;
-        if !any_input_in_stage {
-            continue;
-        }
-        let pos_mna = node_to_mna(rec.pos_node);
-        let neg_mna = node_to_mna(rec.neg_node);
-        let out_mna = node_to_mna(rec.out_node);
-        let comp = &graph.components[rec.comp_idx];
-        let op_type = comp
-            .kind
-            .op_amp_type()
-            .unwrap_or(crate::dsl::OpAmpType::Tl072);
-        let model = OpAmpModel::from_opamp_type(&op_type);
-        let vsrc_idx = num_vsources;
-        num_vsources += 1;
-        in_stage_nullors.push(InStageNullor {
-            comp_id: comp.id.clone(),
-            pos_mna,
-            neg_mna,
-            out_mna,
-            aol: model.open_loop_gain,
-            ro: 75.0, // typical op-amp output impedance; TODO: datasheet per-model
-            vsrc_idx,
-        });
-    }
-
-    // Reserve extra vsource for nullor-only input VS injection.
-    let n_nl_for_nullor_check = plan.nl_terminals.len();
-    let nullor_only_extra_vs =
-        !in_stage_nullors.is_empty() && n_nl_for_nullor_check == 0 && plan.ota_vccs.is_empty();
-    if nullor_only_extra_vs {
-        num_vsources += 1;
-    }
-    // Only fire the VS-injection path when there are actually in-stage
-    // nullors to stamp. A synthetic plan may declare a nullor that
-    // belongs to a different stage (no pins in this stage's node_set);
-    // for such plans the stage has no linear content and should be skipped.
-    nullor_only_vs = nullor_only_vs && !in_stage_nullors.is_empty();
-    if has_nullor && in_stage_nullors.is_empty() && n_nl == 0 && !has_linearized_ota {
-        // Synthetic plan whose op-amps aren't in this stage's MNA —
-        // nothing to build.
-        return None;
-    }
-
     // ── Step 2: Build MNA — stamp only residual (bridging) edges ────────
     let mut reactive_edges: Vec<(usize, DynNode)> = Vec::new();
     let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
@@ -1454,25 +1539,6 @@ fn build_rtype_stage(
     if let Some(vcc_idx) = vcc_vs_idx {
         let vcc_mna = node_to_mna(graph.vcc_node);
         mna.stamp_voltage_source(vcc_mna, None, vcc_idx);
-    }
-
-    // ── Stamp in-stage op-amp VCVS constraints (nullors) ────────────────
-    // Each op-amp contributes one auxiliary vsrc and an MNA constraint
-    //   v(out) − Aol·(v(pos) − v(neg)) + Ro·i = 0
-    // that absorbs the op-amp into the R-type adaptor. Combined with the
-    // passive feedback network already in the residual, the scattering
-    // matrix handles every feedback topology automatically — no
-    // topology-specific code paths required.
-    for nullor in &in_stage_nullors {
-        mna.stamp_vcvs(
-            nullor.pos_mna,
-            nullor.neg_mna,
-            nullor.out_mna,
-            None,
-            nullor.aol,
-            nullor.ro,
-            nullor.vsrc_idx,
-        );
     }
 
     // ── Stamp linearized OTA VCCS ──────────────────────────────────────
@@ -1602,7 +1668,6 @@ fn build_rtype_stage(
             feedback_scale: 0.1,
             feedback_opamp: None,
             feedback_pot_id: None,
-            opamp_post_fx: None,
             linearized_ota: linearized_ota_data,
             vs_injection: None,
             extract_coeffs: None,
@@ -1629,6 +1694,7 @@ fn build_rtype_stage(
             subsample_counter: 0,
             iteration_budget_remaining: super::stage::NR_ITERATION_BUDGET,
             prev_input: 0.0,
+            opamp_post_fx: None,
         });
     }
 
@@ -1733,7 +1799,7 @@ fn build_rtype_stage(
     // pot_children change, so Tone/Volume pots correctly affect V(out_node).
     const R_PROBE: f64 = 1e9; // 1 GΩ — matches GMIN regularization level
     let probe_port_idx: Option<usize> =
-        if (n_nl > 0 || nullor_only_vs) && plan.output_node.is_some() && !has_linearized_ota {
+        if n_nl > 0 && plan.output_node.is_some() && !has_linearized_ota {
             let out_node = plan.output_node.unwrap();
             let out_pos_mna = node_to_mna(out_node);
             if let Some(_out_pos) = out_pos_mna {
@@ -1780,20 +1846,7 @@ fn build_rtype_stage(
     let mut r_adapted = 1000.0;
     let mut vs_injection_vec: Option<Vec<f64>> = None;
 
-    // Nullor-only stages use VS injection (not a WDF port) so that
-    // `derive_scattering_and_vs_injection` can compute both the
-    // scattering matrix and the injection vector used by extract_coeffs.
-    // (`nullor_only_vs` is defined at the top of this function.)
-
     if has_linearized_ota && n_nl == 0 {
-        let vs_idx = num_vsources - 1;
-        mna.stamp_voltage_source(injection_mna, None, vs_idx);
-    } else if nullor_only_vs {
-        // The injection VS uses the nullor-reserved vsource slot 0 (nullor
-        // stamps occupied indices starting after coupled transformers and
-        // VCC; we co-opt the last reserved slot for the input VS). See
-        // note where num_vsources is computed — an extra slot is reserved
-        // for this case.
         let vs_idx = num_vsources - 1;
         mna.stamp_voltage_source(injection_mna, None, vs_idx);
     } else {
@@ -1809,16 +1862,6 @@ fn build_rtype_stage(
     let mut vcc_injection_vec: Option<Vec<f64>> = None;
     let mut scattering = if has_linearized_ota && n_nl == 0 {
         // OTA stage: signal input as VS
-        let vs_idx = num_vsources - 1;
-        let (s, vs_inj) = mna.derive_scattering_and_vs_injection(&ports, vs_idx);
-        if s.iter().any(|&sv| !sv.is_finite()) {
-            return None;
-        }
-        vs_injection_vec = Some(vs_inj);
-        s
-    } else if nullor_only_vs {
-        // Nullor-only stage: signal input is a VS, scattering derivation
-        // produces both the S matrix and the injection vector k[i].
         let vs_idx = num_vsources - 1;
         let (s, vs_inj) = mna.derive_scattering_and_vs_injection(&ports, vs_idx);
         if s.iter().any(|&sv| !sv.is_finite()) {
@@ -2075,21 +2118,11 @@ fn build_rtype_stage(
             match &elem.kind {
                 NonlinearKind::BjtNpn { model_name, .. } => {
                     let gp_model = gummel_poon_model(model_name);
-                    #[cfg(feature = "ebers-moll")]
-                    groups.push(NlDeviceGroupKind::EbersMollTwoPort(
-                        EbersMollTwoPort::from_gp(&gp_model),
-                    ));
-                    #[cfg(not(feature = "ebers-moll"))]
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(gp_model)));
                     offset += 2;
                 }
                 NonlinearKind::BjtPnp { model_name, .. } => {
                     let gp_model = gummel_poon_model(model_name);
-                    #[cfg(feature = "ebers-moll")]
-                    groups.push(NlDeviceGroupKind::EbersMollTwoPort(
-                        EbersMollTwoPort::from_gp_pnp(&gp_model),
-                    ));
-                    #[cfg(not(feature = "ebers-moll"))]
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new_pnp(gp_model)));
                     offset += 2;
                 }
@@ -2133,21 +2166,11 @@ fn build_rtype_stage(
                 }
                 NonlinearKind::BjtNpn { model_name, .. } => {
                     let gp_model = gummel_poon_model(model_name);
-                    #[cfg(feature = "ebers-moll")]
-                    groups.push(NlDeviceGroupKind::EbersMollTwoPort(
-                        EbersMollTwoPort::from_gp(&gp_model),
-                    ));
-                    #[cfg(not(feature = "ebers-moll"))]
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(gp_model)));
                     offset += 2;
                 }
                 NonlinearKind::BjtPnp { model_name, .. } => {
                     let gp_model = gummel_poon_model(model_name);
-                    #[cfg(feature = "ebers-moll")]
-                    groups.push(NlDeviceGroupKind::EbersMollTwoPort(
-                        EbersMollTwoPort::from_gp_pnp(&gp_model),
-                    ));
-                    #[cfg(not(feature = "ebers-moll"))]
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new_pnp(gp_model)));
                     offset += 2;
                 }
@@ -2274,10 +2297,7 @@ fn build_rtype_stage(
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
     let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
 
-    // Node-voltage extraction for linearized-OTA OR nullor-only stages.
-    // Both paths have n_nl == 0 so the standard WDF port-based output path
-    // would index into empty arrays. Direct node-voltage extraction is
-    // used instead.
+    // Node-voltage extraction for linearized OTA.
     let (extract_coeffs, extract_vs, extract_output_nodes) =
         if has_linearized_ota && n_nl == 0 && vs_injection_vec.is_some() {
             let vs_idx = num_vsources - 1;
@@ -2287,28 +2307,11 @@ fn build_rtype_stage(
             let out_neg = None;
             let (coeffs, vs_coeff) = mna.derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
             (Some(coeffs), vs_coeff, Some((out_pos, out_neg)))
-        } else if nullor_only_vs && vs_injection_vec.is_some() {
-            // Pure op-amp stage: extract voltage at plan.output_node (the
-            // op-amp's out pin, typically graph.out_node). Input VS is
-            // stamped at injection_node; scattering was derived with VS
-            // injection so extract_coeffs uses the same vs_idx.
-            let vs_idx = num_vsources - 1;
-            let out_circuit = plan.output_node.unwrap_or(graph.out_node);
-            let out_mna = node_to_mna(out_circuit);
-            if out_mna.is_some() {
-                let out_pos = out_mna;
-                let out_neg = None;
-                let (coeffs, vs_coeff) =
-                    mna.derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
-                (Some(coeffs), vs_coeff, Some((out_pos, out_neg)))
-            } else {
-                (None, 0.0, None)
-            }
         } else {
             (None, 0.0, None)
         };
 
-    let vs_source_index = if (has_linearized_ota && n_nl == 0) || nullor_only_vs {
+    let vs_source_index = if has_linearized_ota && n_nl == 0 {
         Some(num_vsources - 1)
     } else {
         None
@@ -2470,38 +2473,6 @@ fn build_rtype_stage(
         feedback_scale: 0.1,
         feedback_opamp: None,
         feedback_pot_id: None,
-        // Attach OpAmpPostFx if any in-stage op-amp's output node matches
-        // this stage's output node — that op-amp is the one driving the
-        // stage's audio output, so its slew + rails should post-process
-        // the extracted voltage.
-        opamp_post_fx: {
-            let out_node = plan.output_node;
-            in_stage_nullors
-                .iter()
-                .find(|n| {
-                    out_node
-                        .and_then(|o| node_to_mna(o))
-                        .map(|m| n.out_mna == Some(m))
-                        .unwrap_or(false)
-                })
-                .and_then(|n| {
-                    let comp = &graph.components[graph
-                        .nullor_pins
-                        .iter()
-                        .find(|r| {
-                            r.comp_idx < graph.components.len()
-                                && n.comp_id == graph.components[r.comp_idx].id
-                        })
-                        .map(|r| r.comp_idx)
-                        .unwrap_or(0)];
-                    comp.kind.op_amp_type().map(|ot| {
-                        crate::elements::OpAmpPostFx::new(
-                            OpAmpModel::from_opamp_type(&ot),
-                            sample_rate * oversampling.ratio() as f64,
-                        )
-                    })
-                })
-        },
         linearized_ota: linearized_ota_data,
         vs_injection: vs_injection_vec,
         extract_coeffs,
@@ -2528,6 +2499,7 @@ fn build_rtype_stage(
         subsample_counter: 0,
         iteration_budget_remaining: super::stage::NR_ITERATION_BUDGET,
         prev_input: 0.0,
+        opamp_post_fx: None,
     })
 }
 
@@ -2559,17 +2531,6 @@ fn compute_initial_v_prev(
                         v_prev[offset + 1] = sign * supply_voltage * 0.5;
                     }
                 }
-                NlDeviceGroupKind::EbersMollTwoPort(em) => {
-                    let sign = if em.is_pnp() { -1.0 } else { 1.0 };
-                    // Same warm-start as BjtTwoPort: IS-dependent Vbe estimate
-                    if offset < n_nl {
-                        let vbe = em.nf_vt * (1.0e-3_f64 / em.is).ln();
-                        v_prev[offset] = sign * vbe.clamp(0.1, 0.8);
-                    }
-                    if offset + 1 < n_nl {
-                        v_prev[offset + 1] = sign * supply_voltage * 0.5;
-                    }
-                }
                 NlDeviceGroupKind::TriodeThreePort(_)
                 | NlDeviceGroupKind::VariMuThreePort(_)
                 | NlDeviceGroupKind::PentodeThreePort(_) => {
@@ -2580,6 +2541,15 @@ fn compute_initial_v_prev(
                     // Port 1: plate-cathode — mid-supply
                     if offset + 1 < n_nl {
                         v_prev[offset + 1] = supply_voltage * 0.5;
+                    }
+                }
+                NlDeviceGroupKind::EbersMollTwoPort(em) => {
+                    let sign = if em.is_pnp { -1.0 } else { 1.0 };
+                    if offset < n_nl {
+                        v_prev[offset] = sign * 0.6; // Vbe ~ 0.6V
+                    }
+                    if offset + 1 < n_nl {
+                        v_prev[offset + 1] = sign * supply_voltage * 0.5;
                     }
                 }
                 NlDeviceGroupKind::SinglePort(_) => {
@@ -2608,15 +2578,7 @@ fn try_build_multi_nl_stage(
 ) -> Option<MultiNlStage> {
     let n_nl = plan.nl_terminals.len();
     let has_linearized_ota = !plan.ota_vccs.is_empty();
-    let has_nullor = !plan.nullor_comp_indices.is_empty();
-    // Plan must have at least one of: NL terminals, linearized OTA, or nullor
-    // (op-amp VCVS stamp). Nullor-only plans represent pure-linear op-amp
-    // circuits (unity buffer, inverting x10, integrator, …) that are
-    // absorbed into the R-type adaptor via `stamp_vcvs`.
-    if n_nl == 0 && !has_linearized_ota && !has_nullor {
-        return None;
-    }
-    if plan.passive_edge_indices.is_empty() && !has_nullor {
+    if (n_nl == 0 && !has_linearized_ota) || plan.passive_edge_indices.is_empty() {
         return None;
     }
 
@@ -2632,31 +2594,6 @@ fn try_build_multi_nl_stage(
     }
     if !junction_nodes.contains(&plan.injection_node) {
         junction_nodes.push(plan.injection_node);
-    }
-    // Op-amp pin nodes become junction barriers so the feedback network
-    // stays in the MNA residual (not SP-reduced into a WDF subtree that
-    // can't see the nullor stamp). Check ALL nullor_pins — not just the
-    // plan's nullor_comp_indices — because NL+opamp stages (Klon, TS808,
-    // Blues Driver) have op-amps whose pins need to be junctions even
-    // though the plan was created for NL elements, not op-amps.
-    for rec in &graph.nullor_pins {
-        // Only add pins that touch this plan's passive edges.
-        let touches_plan = plan.passive_edge_indices.iter().any(|&eidx| {
-            let e = &graph.edges[eidx];
-            e.node_a == rec.pos_node
-                || e.node_b == rec.pos_node
-                || e.node_a == rec.neg_node
-                || e.node_b == rec.neg_node
-                || e.node_a == rec.out_node
-                || e.node_b == rec.out_node
-        });
-        if touches_plan {
-            for &n in &[rec.pos_node, rec.neg_node, rec.out_node] {
-                if !junction_nodes.contains(&n) {
-                    junction_nodes.push(n);
-                }
-            }
-        }
     }
     // Add output node as junction so output tail edges stay in MNA residual
     // (not SP-reduced into WDF subtrees, which would hide pots from pot_children).
@@ -2799,25 +2736,11 @@ fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
         }
         NonlinearKind::SingleDiode(dt) => {
             let model = diode_model(*dt);
-            let solver = resolve_diode_solver(ComponentSolverMethod::WrightOmega);
-            match solver {
-                SolverMethod::WrightOmega => {
-                    Some(NlDeviceKind::ExplicitDiode(ExplicitDiodeRoot::new(model)))
-                }
-                SolverMethod::NewtonRaphson => Some(NlDeviceKind::Diode(DiodeRoot::new(model))),
-            }
+            Some(NlDeviceKind::Diode(DiodeRoot::new(model)))
         }
         NonlinearKind::DiodePair(dt) => {
             let model = diode_model(*dt);
-            let solver = resolve_diode_solver(ComponentSolverMethod::WrightOmega);
-            match solver {
-                SolverMethod::WrightOmega => Some(NlDeviceKind::ExplicitDiodePair(
-                    ExplicitDiodePairRoot::new(model),
-                )),
-                SolverMethod::NewtonRaphson => {
-                    Some(NlDeviceKind::DiodePair(DiodePairRoot::new(model)))
-                }
-            }
+            Some(NlDeviceKind::DiodePair(DiodePairRoot::new(model)))
         }
         NonlinearKind::Pentode { model_name, .. } => {
             let model = pentode_model(model_name);
@@ -3570,64 +3493,20 @@ fn wrap_with_transformer_load(
 // Root creation factory
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Resolve the effective diode solver method.
-///
-/// Checks the global process-wide override first.  If unset, returns the
-/// provided `component_hint` (from `Component::solver_hint()`).  For diodes,
-/// the component hint defaults to `WrightOmega`.
-fn resolve_diode_solver(component_hint: ComponentSolverMethod) -> SolverMethod {
-    match get_diode_solver_override() {
-        Some(SolverMethod::NewtonRaphson) => SolverMethod::NewtonRaphson,
-        Some(SolverMethod::WrightOmega) => SolverMethod::WrightOmega,
-        None => {
-            // No global override — use per-component hint.
-            match component_hint {
-                ComponentSolverMethod::WrightOmega => SolverMethod::WrightOmega,
-                ComponentSolverMethod::NewtonRaphson => SolverMethod::NewtonRaphson,
-                // EbersMoll and GummelPoon are BJT-level hints; the diode solver
-                // path doesn't apply, fall back to Newton-Raphson.
-                ComponentSolverMethod::EbersMoll | ComponentSolverMethod::GummelPoon => {
-                    SolverMethod::NewtonRaphson
-                }
-            }
-        }
-    }
-}
-
 /// Create the RootKind for a nonlinear element.
 /// Returns (root, base_diode_model) — diode stages store their model.
 ///
 /// `use_jfet_vr` overrides JFET creation: when true, builds a
 /// `JfetVr` (variable resistance, no NR) instead of `Jfet` (full NR solver).
-///
-/// For `DiodePair` and `SingleDiode` kinds the solver defaults to Wright Omega
-/// (the per-component hint from `Diode`/`DiodePair` components).  The global
-/// override from `set_diode_solver()` takes precedence.
 fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<DiodeModel>) {
     match kind {
         NonlinearKind::DiodePair(dt) => {
             let model = diode_model(*dt);
-            // Default: WrightOmega (per Diode/DiodePair component solver_hint)
-            let solver = resolve_diode_solver(ComponentSolverMethod::WrightOmega);
-            let root = match solver {
-                SolverMethod::WrightOmega => {
-                    RootKind::ExplicitDiodePair(ExplicitDiodePairRoot::new(model))
-                }
-                SolverMethod::NewtonRaphson => RootKind::DiodePair(DiodePairRoot::new(model)),
-            };
-            (root, Some(model))
+            (RootKind::DiodePair(DiodePairRoot::new(model)), Some(model))
         }
         NonlinearKind::SingleDiode(dt) => {
             let model = diode_model(*dt);
-            // Default: WrightOmega (per Diode/DiodePair component solver_hint)
-            let solver = resolve_diode_solver(ComponentSolverMethod::WrightOmega);
-            let root = match solver {
-                SolverMethod::WrightOmega => {
-                    RootKind::ExplicitSingleDiode(ExplicitDiodeRoot::new(model))
-                }
-                SolverMethod::NewtonRaphson => RootKind::SingleDiode(DiodeRoot::new(model)),
-            };
-            (root, Some(model))
+            (RootKind::SingleDiode(DiodeRoot::new(model)), Some(model))
         }
         NonlinearKind::Jfet {
             model_name,
