@@ -1270,8 +1270,10 @@ fn build_rtype_stage(
     // causing a mismatch between port R and the S matrix.
     let effective_rate = sample_rate * oversampling.ratio() as f64;
 
-    // Need either NL ports or linearized OTA, and at least some passive content.
-    if n_nl == 0 && !has_linearized_ota {
+    let has_nullor = !plan.nullor_comp_indices.is_empty();
+
+    // Need either NL ports, linearized OTA, or nullor op-amps.
+    if n_nl == 0 && !has_linearized_ota && !has_nullor {
         return None;
     }
     if decomposed.residual_edges.is_empty() && decomposed.wdf_subtrees.is_empty() {
@@ -1429,6 +1431,26 @@ fn build_rtype_stage(
     } else {
         None
     };
+
+    // Collect nullor op-amps whose pins are in this stage's node set.
+    // Pre-computed once; reused for both vsource allocation and VCVS stamping.
+    let nullor_records: Vec<&super::graph::NullorPinRecord> = plan
+        .nullor_comp_indices
+        .iter()
+        .filter_map(|&ci| graph.nullor_pins.iter().find(|r| r.comp_idx == ci))
+        .filter(|rec| {
+            let out_in = node_set.contains(&rec.out_node)
+                || rec.out_node == graph.gnd_node
+                || graph.supply_nodes.contains(&rec.out_node);
+            let any_in = node_set.contains(&rec.pos_node)
+                || node_set.contains(&rec.neg_node)
+                || rec.pos_node == graph.gnd_node
+                || rec.neg_node == graph.gnd_node;
+            out_in && any_in
+        })
+        .collect();
+    let nullor_vs_start = num_vsources;
+    num_vsources += nullor_records.len();
 
     let num_mna_nodes = node_set.len();
     if num_mna_nodes == 0 {
@@ -1696,6 +1718,31 @@ fn build_rtype_stage(
             prev_input: 0.0,
             opamp_post_fx: None,
         });
+    }
+
+    // ── Step 2b: Stamp VCVS for nullor op-amps (R-node fallback) ───────
+    // Op-amps not handled by OpAmpRoot get absorbed as finite-gain VCVS
+    // constraints in the MNA. This is the R-node path in SPQR decomposition.
+    let mut nullor_only_vs = has_nullor && n_nl == 0 && !has_linearized_ota;
+    for (i, rec) in nullor_records.iter().enumerate() {
+        let pos_mna = node_to_mna(rec.pos_node);
+        let neg_mna = node_to_mna(rec.neg_node);
+        let out_mna = node_to_mna(rec.out_node);
+        let comp = &graph.components[rec.comp_idx];
+        let (aol, ro) = if let Some(ot) = comp.kind.op_amp_type() {
+            let model = crate::elements::OpAmpModel::from_opamp_type(&ot);
+            (model.open_loop_gain, 75.0) // TODO: add ro to OpAmpModel
+        } else {
+            (200_000.0, 75.0)
+        };
+        let vsrc_idx = nullor_vs_start + i;
+        let vs_input = if nullor_only_vs {
+            nullor_only_vs = false;
+            Some(vsrc_idx)
+        } else {
+            None
+        };
+        mna.stamp_vcvs(pos_mna, neg_mna, out_mna, vs_input, aol, ro, vsrc_idx);
     }
 
     // ── Step 3: Build WDF ports ─────────────────────────────────────────
@@ -2578,7 +2625,8 @@ fn try_build_multi_nl_stage(
 ) -> Option<MultiNlStage> {
     let n_nl = plan.nl_terminals.len();
     let has_linearized_ota = !plan.ota_vccs.is_empty();
-    if (n_nl == 0 && !has_linearized_ota) || plan.passive_edge_indices.is_empty() {
+    let has_nullor = !plan.nullor_comp_indices.is_empty();
+    if (n_nl == 0 && !has_linearized_ota && !has_nullor) || plan.passive_edge_indices.is_empty() {
         return None;
     }
 
@@ -2622,6 +2670,19 @@ fn try_build_multi_nl_stage(
         for &n in &[ota.in_pos, ota.in_neg, ota.out_node] {
             if !junction_nodes.contains(&n) {
                 junction_nodes.push(n);
+            }
+        }
+    }
+
+    // Add nullor op-amp pins as junctions so feedback edges stay in
+    // the R-node residual (not SP-reduced into subtrees that can't
+    // see the VCVS constraint).
+    for &comp_idx in &plan.nullor_comp_indices {
+        if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == comp_idx) {
+            for &n in &[rec.pos_node, rec.neg_node, rec.out_node] {
+                if !junction_nodes.contains(&n) {
+                    junction_nodes.push(n);
+                }
             }
         }
     }
