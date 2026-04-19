@@ -1224,8 +1224,20 @@ fn stamp_passive_edge(
         return;
     }
 
-    // All other passives: delegate to Component trait.
-    match comp.kind.stamp_mna(&comp.id, n1, n2, mna, sample_rate) {
+    // All other passives: delegate to Component trait via stamp_mna_multi.
+    let pin_fn = |pin: &str| -> Option<usize> {
+        match pin {
+            "a" => n1,
+            "b" => n2,
+            _ => None,
+        }
+    };
+    let ctx = super::component::StampContext {
+        pin_to_mna: &pin_fn,
+        vsrc_base: 0,
+        sample_rate,
+    };
+    match comp.kind.stamp_mna_multi(&comp.id, &ctx, mna) {
         StampResult::Stamped => {}
         StampResult::Reactive { dyn_node, .. } => {
             reactive_edges.push((eidx, dyn_node));
@@ -1432,13 +1444,11 @@ fn build_rtype_stage(
         None
     };
 
-    // Collect nullor op-amps whose pins are in this stage's node set.
-    // Pre-computed once; reused for both vsource allocation and VCVS stamping.
-    let nullor_records: Vec<&super::graph::NullorPinRecord> = plan
-        .nullor_comp_indices
-        .iter()
-        .filter_map(|&ci| graph.nullor_pins.iter().find(|r| r.comp_idx == ci))
-        .filter(|rec| {
+    // Count vsources needed by multi-terminal components (op-amp VCVS).
+    // Each component declares how many via mna_vsource_count().
+    let mut comp_vsrc_map: Vec<(usize, usize)> = Vec::new(); // (comp_idx, vsrc_base)
+    for &ci in &plan.nullor_comp_indices {
+        if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == ci) {
             let out_in = node_set.contains(&rec.out_node)
                 || rec.out_node == graph.gnd_node
                 || graph.supply_nodes.contains(&rec.out_node);
@@ -1446,11 +1456,15 @@ fn build_rtype_stage(
                 || node_set.contains(&rec.neg_node)
                 || rec.pos_node == graph.gnd_node
                 || rec.neg_node == graph.gnd_node;
-            out_in && any_in
-        })
-        .collect();
-    let nullor_vs_start = num_vsources;
-    num_vsources += nullor_records.len();
+            if out_in && any_in {
+                let count = graph.components[ci].kind.mna_vsource_count();
+                if count > 0 {
+                    comp_vsrc_map.push((ci, num_vsources));
+                    num_vsources += count;
+                }
+            }
+        }
+    }
 
     let num_mna_nodes = node_set.len();
     if num_mna_nodes == 0 {
@@ -1720,29 +1734,28 @@ fn build_rtype_stage(
         });
     }
 
-    // ── Step 2b: Stamp VCVS for nullor op-amps (R-node fallback) ───────
-    // Op-amps not handled by OpAmpRoot get absorbed as finite-gain VCVS
-    // constraints in the MNA. This is the R-node path in SPQR decomposition.
-    let mut nullor_only_vs = has_nullor && n_nl == 0 && !has_linearized_ota;
-    for (i, rec) in nullor_records.iter().enumerate() {
-        let pos_mna = node_to_mna(rec.pos_node);
-        let neg_mna = node_to_mna(rec.neg_node);
-        let out_mna = node_to_mna(rec.out_node);
-        let comp = &graph.components[rec.comp_idx];
-        let (aol, ro) = if let Some(ot) = comp.kind.op_amp_type() {
-            let model = crate::elements::OpAmpModel::from_opamp_type(&ot);
-            (model.open_loop_gain, 75.0) // TODO: add ro to OpAmpModel
-        } else {
-            (200_000.0, 75.0)
-        };
-        let vsrc_idx = nullor_vs_start + i;
-        let vs_input = if nullor_only_vs {
-            nullor_only_vs = false;
-            Some(vsrc_idx)
-        } else {
-            None
-        };
-        mna.stamp_vcvs(pos_mna, neg_mna, out_mna, vs_input, aol, ro, vsrc_idx);
+    // ── Step 2b: Stamp multi-terminal components via Component trait ────
+    // Each component stamps itself into the MNA through stamp_mna_multi().
+    // The pin_to_mna closure resolves pin names to MNA indices using the
+    // NullorPinRecord. This is the R-node path in SPQR decomposition.
+    for &(comp_idx, vsrc_base) in &comp_vsrc_map {
+        if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == comp_idx) {
+            let pin_fn = |pin: &str| -> Option<usize> {
+                match pin {
+                    "pos" => node_to_mna(rec.pos_node),
+                    "neg" => node_to_mna(rec.neg_node),
+                    "out" => node_to_mna(rec.out_node),
+                    _ => None,
+                }
+            };
+            let ctx = super::component::StampContext {
+                pin_to_mna: &pin_fn,
+                vsrc_base,
+                sample_rate: effective_rate,
+            };
+            let comp = &graph.components[comp_idx];
+            comp.kind.stamp_mna_multi(&comp.id, &ctx, &mut mna);
+        }
     }
 
     // ── Step 3: Build WDF ports ─────────────────────────────────────────

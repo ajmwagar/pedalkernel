@@ -36,6 +36,22 @@ pub enum StampResult {
     Skip,
 }
 
+/// Context for multi-terminal MNA stamping.
+///
+/// Provides pin-to-MNA-index resolution and pre-allocated vsource indices
+/// so components can stamp themselves into the MNA without knowing graph details.
+pub struct StampContext<'a> {
+    /// Resolve a pin name (e.g., "pos", "neg", "out") to its MNA node index.
+    /// Returns `None` for pins connected to ground or supply rails.
+    pub pin_to_mna: &'a dyn Fn(&str) -> Option<usize>,
+    /// Starting vsource index allocated for this component.
+    /// Components that declared `mna_vsource_count() > 0` get indices
+    /// `[vsrc_base .. vsrc_base + mna_vsource_count())`.
+    pub vsrc_base: usize,
+    /// Sample rate in Hz.
+    pub sample_rate: f64,
+}
+
 /// Pin configuration for validation and graph construction.
 pub struct PinConfig {
     /// Valid pin names for this component type.
@@ -388,6 +404,28 @@ pub trait Component: std::fmt::Debug {
         mna: &mut MnaSystem,
         sample_rate: f64,
     ) -> StampResult;
+
+    /// Number of MNA voltage sources this component needs when stamped
+    /// into an R-node. Default: 0. Op-amps return 1 (for the VCVS constraint).
+    fn mna_vsource_count(&self) -> usize {
+        0
+    }
+
+    /// Stamp this component into an MNA system using multi-terminal pin resolution.
+    ///
+    /// Default implementation resolves pins "a" and "b" and delegates to
+    /// `stamp_mna()`. Multi-terminal components (op-amps) override this to
+    /// resolve all their pins and stamp directly.
+    fn stamp_mna_multi(
+        &self,
+        comp_id: &str,
+        ctx: &StampContext,
+        mna: &mut MnaSystem,
+    ) -> StampResult {
+        let n1 = (ctx.pin_to_mna)("a");
+        let n2 = (ctx.pin_to_mna)("b");
+        self.stamp_mna(comp_id, n1, n2, mna, ctx.sample_rate)
+    }
 
     // ── WDF Leaf Creation ─────────────────────────────────────────────────
 

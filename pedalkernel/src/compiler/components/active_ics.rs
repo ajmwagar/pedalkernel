@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    PinDirection, ResolveContext, StampResult,
+    PinDirection, ResolveContext, StampContext, StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::dsl::{
@@ -89,11 +89,34 @@ impl Component for OpAmp {
         _mna: &mut MnaSystem,
         _sample_rate: f64,
     ) -> StampResult {
-        // Op-amps are not stamped as two-terminal elements. Instead they are
-        // absorbed into the R-type adaptor's MNA matrix via the nullor_pins
-        // registration in the circuit graph, and stamped via stamp_vcvs in
-        // build_rtype_stage. See GraphRole::VcvsEdge and CircuitGraph::nullor_pins.
+        // Two-terminal path unused for op-amps. Use stamp_mna_multi.
         StampResult::Skip
+    }
+
+    fn mna_vsource_count(&self) -> usize {
+        if self.op_type.is_ota() { 0 } else { 1 }
+    }
+
+    fn stamp_mna_multi(
+        &self,
+        _comp_id: &str,
+        ctx: &StampContext,
+        mna: &mut MnaSystem,
+    ) -> StampResult {
+        if self.op_type.is_ota() {
+            return StampResult::Skip;
+        }
+        let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
+        mna.stamp_vcvs(
+            (ctx.pin_to_mna)("pos"),
+            (ctx.pin_to_mna)("neg"),
+            (ctx.pin_to_mna)("out"),
+            None,
+            model.open_loop_gain,
+            75.0, // TODO: add output_impedance to OpAmpModel
+            ctx.vsrc_base,
+        );
+        StampResult::Stamped
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
