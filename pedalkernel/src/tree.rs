@@ -1305,35 +1305,84 @@ impl MnaSystem {
         // Invert M with equilibration for numerical conditioning
         let m_inv = invert_matrix_equilibrated(&m_matrix, n_aug);
 
-        // A_d = M⁻¹ · N  (state transition matrix)
-        let mut a_d = vec![0.0; n_aug * n_aug];
+        // Full augmented system: A_full = M⁻¹·N, b_full = M⁻¹·F, c_full
+        let mut a_full = vec![0.0; n_aug * n_aug];
         for i in 0..n_aug {
             for j in 0..n_aug {
                 let mut sum = 0.0;
                 for k in 0..n_aug {
                     sum += m_inv[i * n_aug + k] * n_matrix[k * n_aug + j];
                 }
-                a_d[i * n_aug + j] = sum;
+                a_full[i * n_aug + j] = sum;
             }
         }
 
-        // b_d = M⁻¹ · F  where F has 1.0 at row (n_nodes + vs_idx)
         let vs_row = n_nodes + vs_idx;
-        let mut b_d = vec![0.0; n_aug];
+        let mut b_full = vec![0.0; n_aug];
         for i in 0..n_aug {
-            b_d[i] = m_inv[i * n_aug + vs_row];
+            b_full[i] = m_inv[i * n_aug + vs_row];
         }
 
-        // c_out: extraction vector for output node voltage
-        let mut c_out = vec![0.0; n_aug];
+        let mut c_full = vec![0.0; n_aug];
         if let Some(p) = output_pos {
-            c_out[p] = 1.0;
+            c_full[p] = 1.0;
         }
         if let Some(n) = output_neg {
-            c_out[n] -= 1.0;
+            c_full[n] -= 1.0;
         }
 
-        (a_d, b_d, c_out, n_aug)
+        // ── Reduce to capacitor-only states ──────────────────────────────
+        // The augmented system has parasitic eigenvalues at -1 (Nyquist)
+        // from algebraic VCVS constraints. Identify capacitor nodes and
+        // extract the reduced A, b, c for those states only.
+        //
+        // Capacitor nodes: nodes that have nonzero C_cap diagonal entries.
+        // All other states (non-cap nodes, vsource currents) are algebraic.
+        let cap_node_indices: Vec<usize> = (0..n_nodes)
+            .filter(|&i| c_cap[i * n_nodes + i].abs() > 1e-30)
+            .collect();
+        let n_caps = cap_node_indices.len();
+
+        if n_caps > 0 && n_caps < n_aug {
+            // Extract reduced matrices by selecting cap rows/columns from
+            // the full system. The full A_d already encodes the coupling
+            // between cap states through the algebraic elimination in M⁻¹.
+            let mut a_d = vec![0.0; n_caps * n_caps];
+            for (ri, &row) in cap_node_indices.iter().enumerate() {
+                for (ci, &col) in cap_node_indices.iter().enumerate() {
+                    a_d[ri * n_caps + ci] = a_full[row * n_aug + col];
+                }
+            }
+            let mut b_d = vec![0.0; n_caps];
+            for (ri, &row) in cap_node_indices.iter().enumerate() {
+                b_d[ri] = b_full[row];
+            }
+            // Output: c_full already selects the output node. We need to
+            // express V_out in terms of cap states. Use the M⁻¹ relationship:
+            // V_all = M⁻¹ · (N · x_cap_prev + F · u)
+            // The c_full · A_full gives the output's dependence on all states.
+            // Restricting to cap columns gives c_reduced.
+            let mut c_d = vec![0.0; n_caps];
+            for (ci, &col) in cap_node_indices.iter().enumerate() {
+                c_d[ci] = c_full[col];
+            }
+            // If c_d is all zeros (output node is not a cap node), compute
+            // indirect output via c_full · A_full restricted to cap columns.
+            if c_d.iter().all(|v| (*v as f64).abs() < 1e-30) {
+                for (ci, &col) in cap_node_indices.iter().enumerate() {
+                    let mut sum = 0.0;
+                    for i in 0..n_aug {
+                        sum += c_full[i] * a_full[i * n_aug + col];
+                    }
+                    c_d[ci] = sum;
+                }
+            }
+
+            (a_d, b_d, c_d, n_caps)
+        } else {
+            // No reduction possible — return full system
+            (a_full, b_full, c_full, n_aug)
+        }
     }
 }
 

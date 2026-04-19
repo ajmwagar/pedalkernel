@@ -109,8 +109,7 @@ impl Component for OpAmp {
         let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
         let ro = 75.0; // TODO: add output_impedance to OpAmpModel
 
-        // DEBUG: try small Aol to avoid stiff eigenvalues
-        let aol_eff = 10.0;
+        let aol_eff = model.open_loop_gain;
 
         mna.stamp_vcvs(
             (ctx.pin_to_mna)("pos"),
