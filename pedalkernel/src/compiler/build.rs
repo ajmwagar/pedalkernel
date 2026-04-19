@@ -1634,6 +1634,9 @@ fn build_rtype_stage(
         }
     }
 
+    // (GBW compensation is handled inside stamp_mna_multi via the
+    //  2-stage macromodel: internal node + comp cap. See OpAmpComp.)
+
     // ── State-space path (same as try_build_multi_nl_stage) ─────────────
     if use_state_space {
         let vs_idx = num_vsources - 1;

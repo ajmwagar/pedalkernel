@@ -107,13 +107,26 @@ impl Component for OpAmp {
             return StampResult::Skip;
         }
         let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
+        let ro = 75.0; // TODO: add output_impedance to OpAmpModel
+
+        // Use GBW-limited effective gain for state-space MNA.
+        // The dominant pole is at f_pole = GBW / Aol_dc (e.g., 15 Hz for TL072).
+        // At the Nyquist-equivalent operating frequency, the effective Aol
+        // is much lower than DC, which is essential for resonant circuits
+        // (bridged-T) where finite GBW sets the Q factor.
+        // Estimate: Aol_eff = GBW / f_audio where f_audio ~ sample_rate/370
+        // (typical audio fundamental). This gives the right order of magnitude
+        // for the feedback loop gain without needing an internal node.
+        let f_audio = (ctx.sample_rate / 370.0).max(100.0);
+        let aol_eff = (model.gbw / f_audio).min(model.open_loop_gain);
+
         mna.stamp_vcvs(
             (ctx.pin_to_mna)("pos"),
             (ctx.pin_to_mna)("neg"),
             (ctx.pin_to_mna)("out"),
             None,
-            model.open_loop_gain,
-            75.0, // TODO: add output_impedance to OpAmpModel
+            aol_eff,
+            ro,
             ctx.vsrc_base,
         );
         StampResult::Stamped
