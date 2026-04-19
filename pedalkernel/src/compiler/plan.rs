@@ -1175,14 +1175,30 @@ pub(super) fn plan_stages(
             if feedback_opamp_ids.contains(comp_id) {
                 continue;
             }
-            // BFS from op-amp pins through unclaimed passive edges
+            // BFS from neg and out only — NOT pos. The pos input is
+            // typically a DC reference (bias divider) that shouldn't be
+            // in the signal-path MNA. When pos isn't in the MNA,
+            // node_to_mna returns None → VCVS treats it as ground →
+            // correct inverting behavior.
             let mut passive_edges: HashSet<usize> = HashSet::new();
             let mut visited: HashSet<super::graph::NodeId> = HashSet::new();
-            let mut frontier = vec![rec.pos_node, rec.neg_node, rec.out_node];
+            let mut frontier = vec![rec.neg_node, rec.out_node];
             for &n in &frontier {
                 visited.insert(n);
             }
             while let Some(node) = frontier.pop() {
+                // Don't expand through ground, supply, or AC-ground nodes.
+                // These are shared bus nodes — expanding through them pulls
+                // in bias networks, decoupling caps, and other circuits.
+                // Edges TO these nodes are still collected (C1→gnd is valid)
+                // but we don't traverse FROM them to find more edges.
+                if node == graph.gnd_node
+                    || node == graph.vcc_node
+                    || graph.supply_nodes.contains(&node)
+                    || graph.ac_ground_nodes.contains(&node)
+                {
+                    continue;
+                }
                 if let Some(neighbors) = adj.get(&node) {
                     for &(eidx, other) in neighbors {
                         if claimed_edges.contains(&eidx) {

@@ -1517,7 +1517,13 @@ fn build_rtype_stage(
 
     // State-space mode: caps as bilinear companion models in MNA.
     // Used for linearized OTA and nullor-only stages (bridged-T resonator).
+    // For nullor-only stages, force 1× rate — no NL elements to oversample.
     let use_state_space = (has_linearized_ota || has_nullor) && n_nl == 0;
+    let effective_rate_ss = if has_nullor && !has_linearized_ota {
+        sample_rate // no oversampling for linear nullor stages
+    } else {
+        effective_rate
+    };
     let mut cap_stamps: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
     let mut pot_entries: Vec<(usize, DynNode, Option<usize>, Option<usize>, f64)> = Vec::new();
 
@@ -1652,8 +1658,30 @@ fn build_rtype_stage(
         });
         let out_mna = node_to_mna(out_circuit);
 
+        eprintln!("[state-space] n_nodes={} n_vs={} n_caps={} rate={} injection={:?} output={:?}",
+            mna.num_nodes, mna.num_vsources, cap_stamps.len(), effective_rate_ss, injection_mna, out_mna);
+        for (i, &(p, n, c)) in cap_stamps.iter().enumerate() {
+            eprintln!("[state-space] cap[{}]: pos={:?} neg={:?} C={:.3e}", i, p, n, c);
+        }
+        // Debug: print G matrix diagonal to verify resistor stamps
+        for i in 0..mna.num_nodes {
+            let g = mna.g_matrix[i * mna.num_nodes + i];
+            if g.abs() > 1e-15 {
+                eprintln!("[state-space] G[{i},{i}] = {g:.6e}");
+            }
+        }
         let (a_d, b_d, c_out, n_states) =
-            mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, effective_rate);
+            mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, effective_rate_ss);
+        // Debug: print A_d matrix for eigenvalue analysis
+        eprintln!("[state-space] A_d ({n_states}×{n_states}):");
+        for i in 0..n_states.min(7) {
+            let row: Vec<String> = (0..n_states.min(7))
+                .map(|j| format!("{:+.6e}", a_d[i * n_states + j]))
+                .collect();
+            eprintln!("  [{}]", row.join(", "));
+        }
+        eprintln!("[state-space] b_d: {:?}", &b_d[..n_states.min(7)]);
+        eprintln!("[state-space] c_out: {:?}", &c_out[..n_states.min(7)]);
 
         if a_d.iter().any(|v| !v.is_finite()) || b_d.iter().any(|v| !v.is_finite()) {
             return None;
