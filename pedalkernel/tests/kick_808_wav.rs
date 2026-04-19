@@ -30,24 +30,20 @@ fn bridged_t_kick_produces_wav() {
         proc.process(0.0);
     }
 
-    // Fire trigger at sample 0
-    proc.set_control("T1.trigger", 1.0);
-    // Also try firing via note_on in case MIDI binding is needed
-    proc.note_on(48, 127);
-
-    // Process and collect output
+    // The trigger is just an input signal — a short voltage impulse.
+    // No special routing needed. process(impulse) → MNA → output.
     for i in 0..num_samples {
-        let sample = proc.process(0.0);
+        // Impulse at sample 0 and at 1 second
+        let input = if i == 0 || i == (SAMPLE_RATE as usize) {
+            1.0 // voltage impulse
+        } else {
+            0.0
+        };
+        let sample = proc.process(input);
         output.push(sample);
 
-        // Debug first 10 samples
-        if i < 10 {
+        if i < 30 {
             eprintln!("  sample[{i}] = {sample:.10}")
-        }
-
-        // Fire another trigger at 1 second for a second hit
-        if i == (SAMPLE_RATE as usize) {
-            proc.set_control("T1.trigger", 1.0);
         }
     }
 

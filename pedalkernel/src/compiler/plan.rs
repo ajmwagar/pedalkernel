@@ -1197,6 +1197,12 @@ pub(super) fn plan_stages(
                 }
             }
             if !passive_edges.is_empty() {
+                let edge_names: Vec<String> = passive_edges.iter().map(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    format!("{}({}→{})", graph.components[e.comp_idx].id, e.node_a, e.node_b)
+                }).collect();
+                eprintln!("[nullor-plan] synthetic plan for comp_idx={}: {} edges: {:?}",
+                    rec.comp_idx, passive_edges.len(), edge_names);
                 let edges_vec: Vec<usize> = passive_edges.iter().copied().collect();
                 claimed_edges.extend(&edges_vec);
                 claimed_nullors.insert(rec.comp_idx);

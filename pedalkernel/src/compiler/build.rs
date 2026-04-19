@@ -1738,6 +1738,10 @@ fn build_rtype_stage(
     // Each component stamps itself into the MNA through stamp_mna_multi().
     // The pin_to_mna closure resolves pin names to MNA indices using the
     // NullorPinRecord. This is the R-node path in SPQR decomposition.
+    if !comp_vsrc_map.is_empty() {
+        eprintln!("[nullor-stamp] stamping {} op-amps into MNA ({} nodes, {} vsources)",
+            comp_vsrc_map.len(), num_mna_nodes, num_vsources);
+    }
     for &(comp_idx, vsrc_base) in &comp_vsrc_map {
         if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == comp_idx) {
             let pin_fn = |pin: &str| -> Option<usize> {

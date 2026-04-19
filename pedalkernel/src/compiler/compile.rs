@@ -1810,6 +1810,7 @@ pub fn compile_pedal_with_options(
                 && !matches!(
                     info.feedback_kind,
                     super::graph::OpAmpFeedbackKind::UnityGain
+                        | super::graph::OpAmpFeedbackKind::BridgedTResonator { .. }
                 )
         })
         .flat_map(|info| [info.neg_node, info.pos_node])

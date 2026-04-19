@@ -49,8 +49,11 @@ pub(super) fn analyze_opamps(
     let mut merged = pre_classified.to_vec();
     merged.append(&mut feedback_loops);
 
-    let feedback_opamp_ids: HashSet<String> =
-        merged.iter().map(|info| info.comp_id.clone()).collect();
+    let feedback_opamp_ids: HashSet<String> = merged
+        .iter()
+        .filter(|info| !matches!(info.feedback_kind, OpAmpFeedbackKind::BridgedTResonator { .. }))
+        .map(|info| info.comp_id.clone())
+        .collect();
 
     let unity_gain_opamp_ids: HashSet<String> = merged
         .iter()
@@ -125,37 +128,11 @@ pub(super) fn build_opamp_feedback_stages(
                 // Unity-gain op-amps are paired with JFET stages for all-pass filters.
                 // Skip here — handled in plan.rs during JFET stage creation.
             }
-            OpAmpFeedbackKind::BridgedTResonator { r1, r2, c1, c2, rf } => {
-                let model = OpAmpModel::from_opamp_type(&info.opamp_type);
-                let gain = rf / r1;
-                let mut root = OpAmpRoot::new_inverting(model, gain);
-                root.set_sample_rate(sample_rate);
-
-                let default_supply = 9.0_f64;
-                let v_max = (default_supply / 2.0 - 1.5).max(0.5);
-                root.set_v_max(v_max);
-
-                let res_fb =
-                    super::stage::ResonatorFeedback::new(*r1, *r2, *c1, *c2, *rf, sample_rate);
-
-                // Minimal tree — the IIR bypasses WDF output, so the tree
-                // is only needed for pot state tracking (none for bridged-T).
-                let vs = DynNode::VoltageSource(0.0, 10_000.0);
-
-                let mut stage = WdfStage {
-                    injection_node_id: info.neg_node,
-                    output_node_id: info.out_node,
-                    resonator_feedback: Some(res_fb),
-                    ..WdfStage::new(
-                        vs,
-                        RootKind::OpAmp(root),
-                        crate::oversampling::Oversampler::new(oversampling),
-                    )
-                };
-                stage.balance_vs_impedance();
-                // BridgedTResonator always claims its feedback edges.
-                consumed_edges.extend(comp_ids_to_edge_indices(&info.feedback_comp_ids));
-                stages.push(stage);
+            OpAmpFeedbackKind::BridgedTResonator { .. } => {
+                // NOT claimed — falls through to the nullor VCVS path.
+                // The bridged-T feedback network is non-SP-reducible (R-node),
+                // so it needs full MNA scattering with the op-amp as a VCVS stamp.
+                // plan.rs will create a synthetic nullor plan for this op-amp.
             }
             OpAmpFeedbackKind::Inverting {
                 rf,
