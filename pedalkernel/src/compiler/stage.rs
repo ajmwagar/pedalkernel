@@ -2896,20 +2896,25 @@ impl MultiNlStage {
                     }
                     work[i] = flush_denormal(v);
                 }
+
+                // Op-amp rail saturation: apply tanh soft-clip to every state.
+                // In oscillator circuits (bridged-T), the op-amp output exceeds
+                // supply rails → tanh limits the amplitude → creates a stable
+                // limit cycle whose frequency is set by the RC network.
+                // Cap voltages are also clipped since they can't exceed Vcc.
+                if v_rail > 0.0 {
+                    for i in 0..n {
+                        work[i] = v_rail * crate::fast_math::fast_tanh(work[i] / v_rail);
+                    }
+                }
+
+                ss.x[..n].copy_from_slice(&work[..n]);
+
                 // Output extraction: y[n] = c · x[n]
                 let mut y = 0.0;
                 for i in 0..n {
                     y += ss.c_vector[i] * work[i];
                 }
-                // Soft-clip the internal op-amp gain stage node to model
-                // supply rail saturation. Only affects the last state (C_comp
-                // internal node), preserving cap voltage phase relationships.
-                // Uses tanh for smooth limiting like a real op-amp.
-                if v_rail > 0.0 && n > 0 {
-                    let last = n - 1; // Internal node is last cap state
-                    work[last] = v_rail * (work[last] / v_rail).tanh();
-                }
-                ss.x[..n].copy_from_slice(&work[..n]);
                 y
             });
             return flush_denormal(output);

@@ -113,15 +113,20 @@ impl Component for OpAmp {
         let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
         let ro = model.output_impedance;
 
-        // For the state-space MNA path, the op-amp is stamped as a finite-gain
-        // VCVS. The gain is set near the oscillation threshold for resonant
-        // circuits, which gives the correct frequency. For non-resonant circuits
-        // (simple feedback), high Aol still works correctly (virtual ground).
+        // For the state-space MNA path, use GBW-limited effective gain.
+        // The dominant pole at f_p = GBW/Aol creates gain rolloff.
+        // At the audio band center (~130 Hz for a kick drum), the effective
+        // Aol = GBW / f_audio. This keeps the loop gain near the oscillation
+        // threshold, giving complex eigenvalues at the correct frequency.
         //
-        // The GBW pole is NOT modeled as an internal node — instead, the
-        // finite Aol directly limits the loop gain, which the Schur complement
-        // reduction and bilinear transform capture as complex eigenvalues.
-        let aol = model.open_loop_gain;
+        // For non-resonant circuits (simple Rf/Ri feedback), the reduced
+        // Aol still gives accurate closed-loop gain because Aol >> gain.
+        // Use GBW-limited gain at a frequency that keeps eigenvalues complex.
+        // The Schur complement modifies the effective loop gain — eigenvalues
+        // go real above Aol≈55 for typical bridged-T circuits. Using
+        // Aol = GBW / f_high keeps the gain in the complex-eigenvalue regime.
+        let f_high = model.gbw / 50.0; // Target Aol ≈ 50
+        let aol = (model.gbw / f_high).min(model.open_loop_gain);
 
         mna.stamp_vcvs(
             (ctx.pin_to_mna)("pos"),
