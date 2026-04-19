@@ -802,6 +802,7 @@ pub(super) fn plan_stages(
     claimed_edges: &mut HashSet<usize>,
     opamp_input_nodes: &HashSet<NodeId>,
     feedback_diode_neg_map: &HashMap<NodeId, NodeId>,
+    feedback_opamp_ids: &HashSet<String>,
 ) -> (
     Vec<StagePlan>,
     Vec<PushPullPlan>,
@@ -1132,9 +1133,8 @@ pub(super) fn plan_stages(
                 continue;
             }
             // Skip op-amps already handled by opamp_analysis
-            if opamp_input_nodes.contains(&rec.pos_node)
-                || opamp_input_nodes.contains(&rec.neg_node)
-            {
+            let comp_id = &graph.components[rec.comp_idx].id;
+            if feedback_opamp_ids.contains(comp_id) {
                 continue;
             }
             let touches =
@@ -1171,9 +1171,8 @@ pub(super) fn plan_stages(
             if claimed_nullors.contains(&rec.comp_idx) {
                 continue;
             }
-            if opamp_input_nodes.contains(&rec.pos_node)
-                || opamp_input_nodes.contains(&rec.neg_node)
-            {
+            let comp_id = &graph.components[rec.comp_idx].id;
+            if feedback_opamp_ids.contains(comp_id) {
                 continue;
             }
             // BFS from op-amp pins through unclaimed passive edges

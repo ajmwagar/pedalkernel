@@ -42,7 +42,8 @@ fn bridged_t_kick_produces_wav() {
         let sample = proc.process(input);
         output.push(sample);
 
-        if i < 30 {
+        // Print every 10th sample for first 500
+        if i < 500 && i % 10 == 0 {
             eprintln!("  sample[{i}] = {sample:.10}")
         }
     }

@@ -1515,8 +1515,9 @@ fn build_rtype_stage(
         mna.d_matrix[vsrc_s * num_vsources + vsrc_s] = 1.0;
     }
 
-    // State-space mode for linearized OTA.
-    let use_state_space = has_linearized_ota && n_nl == 0;
+    // State-space mode: caps as bilinear companion models in MNA.
+    // Used for linearized OTA and nullor-only stages (bridged-T resonator).
+    let use_state_space = (has_linearized_ota || has_nullor) && n_nl == 0;
     let mut cap_stamps: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
     let mut pot_entries: Vec<(usize, DynNode, Option<usize>, Option<usize>, f64)> = Vec::new();
 
@@ -1610,15 +1611,42 @@ fn build_rtype_stage(
         });
     }
 
+    // ── Step 2b: Stamp multi-terminal components via Component trait ────
+    // Must happen BEFORE state-space matrix derivation so the VCVS
+    // constraint is part of the MNA when build_state_space_matrices runs.
+    for &(comp_idx, vsrc_base) in &comp_vsrc_map {
+        if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == comp_idx) {
+            let pin_fn = |pin: &str| -> Option<usize> {
+                match pin {
+                    "pos" => node_to_mna(rec.pos_node),
+                    "neg" => node_to_mna(rec.neg_node),
+                    "out" => node_to_mna(rec.out_node),
+                    _ => None,
+                }
+            };
+            let ctx = super::component::StampContext {
+                pin_to_mna: &pin_fn,
+                vsrc_base,
+                sample_rate: effective_rate,
+            };
+            let comp = &graph.components[comp_idx];
+            comp.kind.stamp_mna_multi(&comp.id, &ctx, &mut mna);
+        }
+    }
+
     // ── State-space path (same as try_build_multi_nl_stage) ─────────────
     if use_state_space {
         let vs_idx = num_vsources - 1;
         let injection_mna = node_to_mna(plan.injection_node);
         mna.stamp_voltage_source(injection_mna, None, vs_idx);
 
-        let out_circuit = plan
-            .output_node
-            .unwrap_or_else(|| plan.ota_vccs[0].out_node);
+        let out_circuit = plan.output_node.unwrap_or_else(|| {
+            if !plan.ota_vccs.is_empty() {
+                plan.ota_vccs[0].out_node
+            } else {
+                graph.out_node
+            }
+        });
         let out_mna = node_to_mna(out_circuit);
 
         let (a_d, b_d, c_out, n_states) =
@@ -1734,33 +1762,7 @@ fn build_rtype_stage(
         });
     }
 
-    // ── Step 2b: Stamp multi-terminal components via Component trait ────
-    // Each component stamps itself into the MNA through stamp_mna_multi().
-    // The pin_to_mna closure resolves pin names to MNA indices using the
-    // NullorPinRecord. This is the R-node path in SPQR decomposition.
-    if !comp_vsrc_map.is_empty() {
-        eprintln!("[nullor-stamp] stamping {} op-amps into MNA ({} nodes, {} vsources)",
-            comp_vsrc_map.len(), num_mna_nodes, num_vsources);
-    }
-    for &(comp_idx, vsrc_base) in &comp_vsrc_map {
-        if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == comp_idx) {
-            let pin_fn = |pin: &str| -> Option<usize> {
-                match pin {
-                    "pos" => node_to_mna(rec.pos_node),
-                    "neg" => node_to_mna(rec.neg_node),
-                    "out" => node_to_mna(rec.out_node),
-                    _ => None,
-                }
-            };
-            let ctx = super::component::StampContext {
-                pin_to_mna: &pin_fn,
-                vsrc_base,
-                sample_rate: effective_rate,
-            };
-            let comp = &graph.components[comp_idx];
-            comp.kind.stamp_mna_multi(&comp.id, &ctx, &mut mna);
-        }
-    }
+    // (Step 2b VCVS stamping was moved above the state-space block.)
 
     // ── Step 3: Build WDF ports ─────────────────────────────────────────
     // Port ordering: [NL_0..NL_{n-1}, subtree_0..subtree_{s-1}, reactive_0..reactive_{m-1}, (adapted)]
@@ -2707,7 +2709,11 @@ fn try_build_multi_nl_stage(
     // State-space path (linearized OTA, n_nl=0) requires ALL components in the
     // MNA — caps in cap_stamps, resistors/pots in G matrix. WDF subtrees bypass
     // MNA entirely, so skip subtree extraction for state-space mode.
-    let use_state_space = has_linearized_ota && n_nl == 0;
+    // Nullor-only stages (op-amp + passives, no NL elements) also use
+    // the state-space path so caps are companion models in the MNA.
+    // This is essential for resonance (bridged-T) — caps must be INSIDE
+    // the MNA, not external WDF ports.
+    let use_state_space = (has_linearized_ota || has_nullor) && n_nl == 0;
     let decomposed = if use_state_space {
         // No subtree extraction — all edges go to residual.
         super::graph::DecomposedCircuit {
