@@ -45,11 +45,16 @@ pub struct StampContext<'a> {
     /// Returns `None` for pins connected to ground or supply rails.
     pub pin_to_mna: &'a dyn Fn(&str) -> Option<usize>,
     /// Starting vsource index allocated for this component.
-    /// Components that declared `mna_vsource_count() > 0` get indices
-    /// `[vsrc_base .. vsrc_base + mna_vsource_count())`.
     pub vsrc_base: usize,
+    /// Starting internal MNA node index allocated for this component.
+    /// Components that declared `mna_internal_node_count() > 0` get indices
+    /// `[internal_node_base .. internal_node_base + mna_internal_node_count())`.
+    pub internal_node_base: usize,
     /// Sample rate in Hz.
     pub sample_rate: f64,
+    /// Capacitor stamps for state-space integration. Components can push
+    /// (node_pos, node_neg, capacitance) to add internal compensation caps.
+    pub cap_stamps: Option<&'a mut Vec<(Option<usize>, Option<usize>, f64)>>,
 }
 
 /// Pin configuration for validation and graph construction.
@@ -411,6 +416,12 @@ pub trait Component: std::fmt::Debug {
         0
     }
 
+    /// Number of internal MNA nodes this component needs.
+    /// Default: 0. Op-amps return 1 (internal gain stage node for GBW pole).
+    fn mna_internal_node_count(&self) -> usize {
+        0
+    }
+
     /// Stamp this component into an MNA system using multi-terminal pin resolution.
     ///
     /// Default implementation resolves pins "a" and "b" and delegates to
@@ -419,7 +430,7 @@ pub trait Component: std::fmt::Debug {
     fn stamp_mna_multi(
         &self,
         comp_id: &str,
-        ctx: &StampContext,
+        ctx: &mut StampContext,
         mna: &mut MnaSystem,
     ) -> StampResult {
         let n1 = (ctx.pin_to_mna)("a");

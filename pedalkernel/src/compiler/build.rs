@@ -1232,12 +1232,14 @@ fn stamp_passive_edge(
             _ => None,
         }
     };
-    let ctx = super::component::StampContext {
+    let mut ctx = super::component::StampContext {
         pin_to_mna: &pin_fn,
         vsrc_base: 0,
+        internal_node_base: 0,
         sample_rate,
+        cap_stamps: None,
     };
-    match comp.kind.stamp_mna_multi(&comp.id, &ctx, mna) {
+    match comp.kind.stamp_mna_multi(&comp.id, &mut ctx, mna) {
         StampResult::Stamped => {}
         StampResult::Reactive { dyn_node, .. } => {
             reactive_edges.push((eidx, dyn_node));
@@ -1466,7 +1468,19 @@ fn build_rtype_stage(
         }
     }
 
-    let num_mna_nodes = node_set.len();
+    // Count internal nodes needed by multi-terminal components (e.g., op-amp
+    // internal gain stage node for GBW dominant pole).
+    let mut internal_node_map: Vec<(usize, usize)> = Vec::new(); // (comp_idx, internal_node_base)
+    let circuit_node_count = node_set.len();
+    let mut total_internal_nodes = 0usize;
+    for &(comp_idx, _) in &comp_vsrc_map {
+        let count = graph.components[comp_idx].kind.mna_internal_node_count();
+        if count > 0 {
+            internal_node_map.push((comp_idx, circuit_node_count + total_internal_nodes));
+            total_internal_nodes += count;
+        }
+    }
+    let num_mna_nodes = circuit_node_count + total_internal_nodes;
     if num_mna_nodes == 0 {
         return None;
     }
@@ -1622,6 +1636,11 @@ fn build_rtype_stage(
     // constraint is part of the MNA when build_state_space_matrices runs.
     for &(comp_idx, vsrc_base) in &comp_vsrc_map {
         if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == comp_idx) {
+            let int_base = internal_node_map
+                .iter()
+                .find(|&&(ci, _)| ci == comp_idx)
+                .map(|&(_, base)| base)
+                .unwrap_or(0);
             let pin_fn = |pin: &str| -> Option<usize> {
                 match pin {
                     "pos" => node_to_mna(rec.pos_node),
@@ -1630,13 +1649,15 @@ fn build_rtype_stage(
                     _ => None,
                 }
             };
-            let ctx = super::component::StampContext {
+            let mut ctx = super::component::StampContext {
                 pin_to_mna: &pin_fn,
                 vsrc_base,
-                sample_rate: effective_rate,
+                internal_node_base: int_base,
+                sample_rate: effective_rate_ss,
+                cap_stamps: Some(&mut cap_stamps),
             };
             let comp = &graph.components[comp_idx];
-            comp.kind.stamp_mna_multi(&comp.id, &ctx, &mut mna);
+            comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
         }
     }
 

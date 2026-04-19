@@ -39,6 +39,9 @@ pub struct OpAmpModel {
     /// Maximum output voltage swing (V, single-sided from Vcc/2).
     /// Typically Vcc/2 - 1.5V for rail-to-rail, less for others.
     pub v_max: f64,
+    /// Output impedance (Ω). Typically 50-200Ω for voltage-feedback op-amps.
+    /// Used by the VCVS stamp in the MNA nullor path.
+    pub output_impedance: f64,
 }
 
 impl OpAmpModel {
@@ -53,6 +56,7 @@ impl OpAmpModel {
             gbw: 3e6,                  // 3 MHz
             slew_rate: 13.0,           // 13 V/µs
             v_max: 12.0,               // ±12V swing at ±15V supply
+            output_impedance: 75.0,  // Ω
         }
     }
 
@@ -63,101 +67,80 @@ impl OpAmpModel {
     pub fn tl082() -> Self {
         Self {
             open_loop_gain: 200_000.0,
-            gbw: 4e6, // 4 MHz (slightly faster)
+            gbw: 4e6,
             slew_rate: 13.0,
             v_max: 12.0,
+            output_impedance: 75.0,
         }
     }
 
-    /// LM308 — The RAT's secret weapon.
-    ///
-    /// Very slow slew rate (0.3 V/µs) creates the distinctive compression
-    /// and "sag" character of the ProCo RAT. The slow slew rate rounds off
-    /// transients, creating a smoother, more compressed distortion.
     pub fn lm308() -> Self {
         Self {
-            open_loop_gain: 300_000.0, // 110 dB
-            gbw: 1e6,                  // 1 MHz
-            slew_rate: 0.3,            // 0.3 V/µs — THE key to RAT tone
+            open_loop_gain: 300_000.0,
+            gbw: 1e6,
+            slew_rate: 0.3,
             v_max: 12.0,
+            output_impedance: 200.0, // Higher Ro than JFET types
         }
     }
 
-    /// LM741 — The classic vintage op-amp.
-    ///
-    /// Slow and noisy by modern standards, but has a characteristic sound.
-    /// Used in early Big Muff Pi and some vintage designs.
     pub fn lm741() -> Self {
         Self {
             open_loop_gain: 200_000.0,
             gbw: 1e6,
-            slew_rate: 0.5, // Slow
+            slew_rate: 0.5,
             v_max: 12.0,
+            output_impedance: 75.0,
         }
     }
 
-    /// JRC4558 — The Tube Screamer's heart.
-    ///
-    /// Medium slew rate (1.7 V/µs) contributes to the Tube Screamer's
-    /// warm, slightly compressed midrange. The JRC (Japan Radio Company)
-    /// 4558D is the legendary variant.
     pub fn jrc4558() -> Self {
         Self {
-            open_loop_gain: 100_000.0, // 100 dB
-            gbw: 3e6,                  // 3 MHz
-            slew_rate: 1.7,            // Moderate
+            open_loop_gain: 100_000.0,
+            gbw: 3e6,
+            slew_rate: 1.7,
             v_max: 12.0,
+            output_impedance: 75.0,
         }
     }
 
-    /// RC4558 — Common 4558 variant.
-    ///
-    /// Texas Instruments version of the 4558, used in many TS clones.
-    /// Very similar to JRC4558 but some players hear subtle differences.
     pub fn rc4558() -> Self {
         Self {
             open_loop_gain: 100_000.0,
             gbw: 3e6,
             slew_rate: 1.5,
             v_max: 12.0,
+            output_impedance: 75.0,
         }
     }
 
-    /// NE5532 — Studio-grade low-noise op-amp.
-    ///
-    /// Very fast, very clean. Used in high-end effects and studio gear.
-    /// The "transparent" choice when you don't want op-amp coloration.
     pub fn ne5532() -> Self {
         Self {
             open_loop_gain: 100_000.0,
-            gbw: 10e6,      // 10 MHz
-            slew_rate: 9.0, // Fast
+            gbw: 10e6,
+            slew_rate: 9.0,
             v_max: 12.0,
+            output_impedance: 50.0, // Lower Ro — studio grade
         }
     }
 
-    /// OP07 — Precision op-amp.
-    ///
-    /// Very low offset voltage and drift. Used in some boutique designs
-    /// where DC accuracy matters.
     pub fn op07() -> Self {
         Self {
-            open_loop_gain: 400_000.0, // 112 dB
-            gbw: 0.6e6,                // 600 kHz
-            slew_rate: 0.3,            // Slow
+            open_loop_gain: 400_000.0,
+            gbw: 0.6e6,
+            slew_rate: 0.3,
             v_max: 12.0,
+            output_impedance: 60.0,
         }
     }
 
-    /// Generic op-amp with typical values.
-    ///
-    /// Use when the specific op-amp type doesn't matter or isn't specified.
     pub fn generic() -> Self {
         Self {
             open_loop_gain: 100_000.0,
             gbw: 1e6,
             slew_rate: 1.0,
             v_max: 12.0,
+            output_impedance: 75.0,
         }
     }
 
