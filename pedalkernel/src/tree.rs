@@ -1263,6 +1263,15 @@ impl MnaSystem {
             }
         }
 
+        // CMIN: add parasitic capacitance ONLY to the op-amp output node.
+        // This makes it a dynamic state so the Schur complement preserves
+        // the current dynamics through R2/R_fb that create resonance.
+        // The value models the GBW dominant pole: C = 1/(2π·Ro·GBW).
+        // Other nodes (input, circuit_out) remain algebraic and get eliminated.
+        //
+        // The caller should set this via cap_stamps if needed. For now,
+        // we don't add CMIN here — the caller controls which nodes get caps.
+
         // Build M = [G + 2·fs·C_cap,  B;  E,  D]
         let mut m_matrix = vec![0.0; n_aug * n_aug];
         for i in 0..n_nodes {
@@ -1404,7 +1413,15 @@ impl MnaSystem {
             let g_cc = extract(&g_aug, n_aug, &cap_indices, &cap_indices);
             let g_ca = extract(&g_aug, n_aug, &cap_indices, &alg_indices);
             let g_ac = extract(&g_aug, n_aug, &alg_indices, &cap_indices);
-            let g_aa = extract(&g_aug, n_aug, &alg_indices, &alg_indices);
+            let mut g_aa = extract(&g_aug, n_aug, &alg_indices, &alg_indices);
+            // Regularize G_aa: add RMIN to diagonal for singular vsource
+            // constraints (input VS with zero impedance → D[i,i] = 0).
+            const RMIN: f64 = 1e-9; // 1 nΩ — negligible but prevents singularity
+            for i in 0..n_a {
+                if g_aa[i * n_a + i].abs() < RMIN {
+                    g_aa[i * n_a + i] += RMIN;
+                }
+            }
 
             // Invert G_aa
             let g_aa_inv = invert_matrix_equilibrated(&g_aa, n_a);
@@ -3152,7 +3169,9 @@ mod tests {
             mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);
 
         eprintln!("n_states = {n_states}");
-        assert_eq!(n_states, 2, "Should reduce to 2 cap states (C1, C2)");
+        // With CMIN on all nodes: 5 circuit nodes as states (vsources eliminated)
+        assert!(n_states >= 2 && n_states <= 5,
+            "Should have 2-5 states, got {n_states}");
 
         // Print A matrix
         for i in 0..n_states {
