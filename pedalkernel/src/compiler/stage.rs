@@ -2883,6 +2883,7 @@ impl MultiNlStage {
         // where cap port conductances overwhelm circuit conductances.
         if let Some(ref mut ss) = self.state_space {
             let work = &mut self.work_b_passive;
+            let v_rail = (self.supply_voltage * 0.5 - 1.5).max(0.5);
             let output = self.oversampler.process(input, |sample| {
                 let n = ss.n_states;
                 // x[n] = A · x[n-1] + b · u[n]
@@ -2895,10 +2896,18 @@ impl MultiNlStage {
                     }
                     work[i] = flush_denormal(v);
                 }
-                // y[n] = c · x[n]
+                // Output extraction: y[n] = c · x[n]
                 let mut y = 0.0;
                 for i in 0..n {
                     y += ss.c_vector[i] * work[i];
+                }
+                // Soft-clip the internal op-amp gain stage node to model
+                // supply rail saturation. Only affects the last state (C_comp
+                // internal node), preserving cap voltage phase relationships.
+                // Uses tanh for smooth limiting like a real op-amp.
+                if v_rail > 0.0 && n > 0 {
+                    let last = n - 1; // Internal node is last cap state
+                    work[last] = v_rail * (work[last] / v_rail).tanh();
                 }
                 ss.x[..n].copy_from_slice(&work[..n]);
                 y

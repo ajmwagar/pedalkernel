@@ -1531,13 +1531,9 @@ fn build_rtype_stage(
 
     // State-space mode: caps as bilinear companion models in MNA.
     // Used for linearized OTA and nullor-only stages (bridged-T resonator).
-    // For nullor-only stages, force 1× rate — no NL elements to oversample.
+    // Must use effective_rate (including oversampling) since the state-space
+    // update runs inside the oversampler's inner loop.
     let use_state_space = (has_linearized_ota || has_nullor) && n_nl == 0;
-    let effective_rate_ss = if has_nullor && !has_linearized_ota {
-        sample_rate // no oversampling for linear nullor stages
-    } else {
-        effective_rate
-    };
     let mut cap_stamps: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
     let mut pot_entries: Vec<(usize, DynNode, Option<usize>, Option<usize>, f64)> = Vec::new();
 
@@ -1653,7 +1649,7 @@ fn build_rtype_stage(
                 pin_to_mna: &pin_fn,
                 vsrc_base,
                 internal_node_base: int_base,
-                sample_rate: effective_rate_ss,
+                sample_rate: effective_rate,
                 cap_stamps: Some(&mut cap_stamps),
             };
             let comp = &graph.components[comp_idx];
@@ -1680,7 +1676,16 @@ fn build_rtype_stage(
         let out_mna = node_to_mna(out_circuit);
 
         eprintln!("[state-space] n_nodes={} n_vs={} n_caps={} rate={} injection={:?} output={:?}",
-            mna.num_nodes, mna.num_vsources, cap_stamps.len(), effective_rate_ss, injection_mna, out_mna);
+            mna.num_nodes, mna.num_vsources, cap_stamps.len(), effective_rate, injection_mna, out_mna);
+        // Print full G matrix for debugging
+        for i in 0..mna.num_nodes {
+            for j in 0..mna.num_nodes {
+                let g = mna.g_matrix[i * mna.num_nodes + j];
+                if g.abs() > 1e-15 {
+                    eprintln!("[G] G[{i},{j}] = {g:.6e}");
+                }
+            }
+        }
         for (i, &(p, n, c)) in cap_stamps.iter().enumerate() {
             eprintln!("[state-space] cap[{}]: pos={:?} neg={:?} C={:.3e}", i, p, n, c);
         }
@@ -1692,7 +1697,7 @@ fn build_rtype_stage(
             }
         }
         let (a_d, b_d, c_out, n_states) =
-            mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, effective_rate_ss);
+            mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, effective_rate);
         // Debug: print A_d matrix for eigenvalue analysis
         eprintln!("[state-space] A_d ({n_states}×{n_states}):");
         for i in 0..n_states.min(7) {
@@ -1795,7 +1800,7 @@ fn build_rtype_stage(
             dc_bias: Vec::new(),
             vcc_bias_all: Vec::new(),
             vcc_vs_index: None,
-            supply_voltage: 0.0,
+            supply_voltage,
             dc_blocker_x1: 0.0,
             dc_blocker_y1: 0.0,
             dc_ramp: 0,
