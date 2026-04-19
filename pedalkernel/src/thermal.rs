@@ -65,9 +65,11 @@ impl ThermalCoefficients {
             is_doubling_temp: 15.0, // Plate current drift is gradual
         }
     }
+}
 
+impl Default for ThermalCoefficients {
     /// Default (silicon) for circuits without specific device info.
-    pub fn default() -> Self {
+    fn default() -> Self {
         Self::silicon_bjt()
     }
 }

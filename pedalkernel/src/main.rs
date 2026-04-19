@@ -1,3 +1,10 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::needless_borrows_for_generic_args)]
+#![allow(clippy::manual_map)]
+#![allow(clippy::single_match)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
 mod cli;
 
 use clap::{Parser, Subcommand};

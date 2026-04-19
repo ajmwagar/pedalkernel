@@ -2779,11 +2779,8 @@ pub(super) fn plan_push_pull_half(
             load_passive_idxs: Vec::new(),
             load_terminals: None,
             grid_node,
-            nl_terminals: if grid_node.is_some() {
-                vec![
-                    (grid_node.unwrap(), cathode_node),
-                    (plate_node, cathode_node),
-                ]
+            nl_terminals: if let Some(gn) = grid_node {
+                vec![(gn, cathode_node), (plate_node, cathode_node)]
             } else {
                 Vec::new()
             },

@@ -18,6 +18,7 @@ pub mod components;
 mod dyn_node;
 mod graph;
 mod helpers;
+mod opamp_analysis;
 mod plan;
 mod split;
 mod stage;

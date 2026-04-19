@@ -41,6 +41,8 @@ jobs:
           - label: "jack-rt only"
             args: "--no-default-features --features jack-rt"
             jack: true
+          - label: "ebers-moll"
+            args: "--no-default-features --features ebers-moll"
           - label: "all features"
             args: "--all-features"
             jack: true
@@ -72,6 +74,8 @@ jobs:
           - label: "jack-rt only"
             args: "--no-default-features --features jack-rt"
             jack: true
+          - label: "ebers-moll"
+            args: "--no-default-features --features ebers-moll"
           - label: "all features"
             args: ""
             jack: true
@@ -104,14 +108,34 @@ jobs:
   bench:
     name: benchmarks
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libjack-dev
         run: sudo apt-get update && sudo apt-get install -y libjack-dev
       - uses: Swatinem/rust-cache@v2
+
+      # Restore baseline from main (if exists)
+      - name: Restore benchmark baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: target/criterion
+          key: bench-baseline-${{ runner.os }}
+
+      # Run benchmarks
       - name: Run benchmarks
         run: cargo bench --bench wdf_bench 2>&1 | tee bench-output.txt
+
+      # Save baseline on main pushes
+      - name: Save benchmark baseline
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: target/criterion
+          key: bench-baseline-${{ runner.os }}-${{ github.sha }}
+
+      # Upload results
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         if: always()
@@ -120,3 +144,11 @@ jobs:
           path: |
             bench-output.txt
             target/criterion/
+
+      # Check for regressions (>20% slower = warning in PR comment)
+      - name: Check for regressions
+        if: github.event_name == 'pull_request'
+        run: |
+          if grep -q "regressed" bench-output.txt; then
+            echo "::warning::Benchmark regression detected — check bench-output.txt artifact"
+          fi

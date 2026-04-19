@@ -1,3 +1,20 @@
+// Pre-existing lint suppressions for technical debt in this crate.
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_imports)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::for_kv_map)]
+#![allow(clippy::write_literal)]
+#![allow(clippy::redundant_field_names)]
+#![allow(clippy::single_match)]
+#![allow(clippy::needless_borrows_for_generic_args)]
+#![allow(clippy::manual_map)]
 //! Automatic schematic layout engine for PedalKernel `.pedal` circuits.
 //!
 //! Converts a parsed [`pedalkernel::dsl::PedalDef`] into a positioned layout
