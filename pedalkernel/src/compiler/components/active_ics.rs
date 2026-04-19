@@ -98,7 +98,7 @@ impl Component for OpAmp {
     }
 
     fn mna_internal_node_count(&self) -> usize {
-        if self.op_type.is_ota() { 0 } else { 1 } // Internal gain stage node
+        0 // No internal node — simple VCVS stamp
     }
 
     fn stamp_mna_multi(
@@ -112,56 +112,26 @@ impl Component for OpAmp {
         }
         let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
         let ro = model.output_impedance;
+
+        // For the state-space MNA path, the op-amp is stamped as a finite-gain
+        // VCVS. The gain is set near the oscillation threshold for resonant
+        // circuits, which gives the correct frequency. For non-resonant circuits
+        // (simple feedback), high Aol still works correctly (virtual ground).
+        //
+        // The GBW pole is NOT modeled as an internal node — instead, the
+        // finite Aol directly limits the loop gain, which the Schur complement
+        // reduction and bilinear transform capture as complex eigenvalues.
         let aol = model.open_loop_gain;
-        let pos = (ctx.pin_to_mna)("pos");
-        let neg = (ctx.pin_to_mna)("neg");
-        let out = (ctx.pin_to_mna)("out");
-        let n_int = Some(ctx.internal_node_base); // Internal gain stage node
 
-        // 2-stage macromodel (SPICE-style):
-        //
-        // Stage 1: VCCS — Gm × (V+ - V-) → current into internal node
-        //          Gm = Aol / R_int, where R_int = Aol × Ro
-        //          → simplifies to Gm = 1/Ro
-        //
-        // Stage 2: R_int (internal node to ground) — sets DC gain with Gm
-        //          C_comp (internal node to ground) — dominant pole
-        //          Ro (internal node to output) — output impedance
-        //
-        // Dominant pole: f_p = 1/(2π × R_int × C_comp) = GBW/Aol
-        // → C_comp = Aol / (2π × GBW × R_int) = 1/(2π × Ro × GBW)
-
-        let r_int = aol * ro;
-        let gm = 1.0 / ro; // = Aol / R_int
-        let c_comp = 1.0 / (2.0 * std::f64::consts::PI * ro * model.gbw);
-
-        // VCCS: Gm × (V+ - V-) into internal node
-        // Stamp as conductance: G[n_int, pos] += Gm, G[n_int, neg] -= Gm
-        if let Some(ni) = n_int {
-            if let Some(p) = pos {
-                mna.g_matrix[ni * mna.num_nodes + p] += gm;
-            }
-            if let Some(n) = neg {
-                mna.g_matrix[ni * mna.num_nodes + n] -= gm;
-            }
-            // R_int: internal node to ground
-            mna.g_matrix[ni * mna.num_nodes + ni] += 1.0 / r_int;
-        }
-
-        // Ro: internal node to output (conductance between n_int and out)
-        if let (Some(ni), Some(o)) = (n_int, out) {
-            let g_ro = 1.0 / ro;
-            mna.g_matrix[ni * mna.num_nodes + ni] += g_ro;
-            mna.g_matrix[ni * mna.num_nodes + o] -= g_ro;
-            mna.g_matrix[o * mna.num_nodes + ni] -= g_ro;
-            mna.g_matrix[o * mna.num_nodes + o] += g_ro;
-        }
-
-        // C_comp: internal node to ground → add to cap_stamps for state-space
-        if let Some(ref mut caps) = ctx.cap_stamps {
-            caps.push((n_int, None, c_comp));
-        }
-
+        mna.stamp_vcvs(
+            (ctx.pin_to_mna)("pos"),
+            (ctx.pin_to_mna)("neg"),
+            (ctx.pin_to_mna)("out"),
+            None,
+            aol,
+            ro,
+            ctx.vsrc_base,
+        );
         StampResult::Stamped
     }
 

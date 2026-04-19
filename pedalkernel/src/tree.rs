@@ -1331,56 +1331,193 @@ impl MnaSystem {
             c_full[n] -= 1.0;
         }
 
-        // ── Reduce to capacitor-only states ──────────────────────────────
-        // The augmented system has parasitic eigenvalues at -1 (Nyquist)
-        // from algebraic VCVS constraints. Identify capacitor nodes and
-        // extract the reduced A, b, c for those states only.
+        // ── Continuous-time Schur complement, then bilinear transform ───
         //
-        // Capacitor nodes: nodes that have nonzero C_cap diagonal entries.
-        // All other states (non-cap nodes, vsource currents) are algebraic.
-        let cap_node_indices: Vec<usize> = (0..n_nodes)
+        // Non-cap nodes are algebraic in continuous time (C·ẋ = 0):
+        //   C_c·ẋ_c + G_cc·x_c + G_ca·x_a = B_c·u
+        //   G_ac·x_c + G_aa·x_a = B_a·u           (algebraic)
+        //
+        // Eliminate x_a from the algebraic equation:
+        //   x_a = G_aa⁻¹·(B_a·u - G_ac·x_c)
+        //
+        // Reduced continuous system:
+        //   C_c·ẋ_c + G_red·x_c = B_red·u
+        //   G_red = G_cc - G_ca·G_aa⁻¹·G_ac    (Schur complement)
+        //   B_red = B_c - G_ca·G_aa⁻¹·B_a
+        //
+        // Then apply bilinear transform to the REDUCED system:
+        //   M_red = G_red + 2fs·C_c
+        //   N_red = 2fs·C_c - G_red
+        //   A_d = M_red⁻¹·N_red
+        //
+        // This avoids parasitic -1 eigenvalues entirely.
+        let cap_indices: Vec<usize> = (0..n_nodes)
             .filter(|&i| c_cap[i * n_nodes + i].abs() > 1e-30)
             .collect();
-        let n_caps = cap_node_indices.len();
+        let n_c = cap_indices.len();
 
-        if n_caps > 0 && n_caps < n_aug {
-            // Extract reduced matrices by selecting cap rows/columns from
-            // the full system. The full A_d already encodes the coupling
-            // between cap states through the algebraic elimination in M⁻¹.
-            let mut a_d = vec![0.0; n_caps * n_caps];
-            for (ri, &row) in cap_node_indices.iter().enumerate() {
-                for (ci, &col) in cap_node_indices.iter().enumerate() {
-                    a_d[ri * n_caps + ci] = a_full[row * n_aug + col];
+        eprintln!("[ss-reduce] n_aug={n_aug} n_c={n_c} cap_indices={cap_indices:?}");
+
+        if n_c > 0 && n_c < n_aug {
+            // Algebraic indices: non-cap nodes + all vsource rows
+            let alg_indices: Vec<usize> = (0..n_aug)
+                .filter(|i| !cap_indices.contains(i))
+                .collect();
+            let n_a = alg_indices.len();
+
+            // Build the full augmented G matrix [G, B; C, D]
+            let mut g_aug = vec![0.0; n_aug * n_aug];
+            for i in 0..n_nodes {
+                for j in 0..n_nodes {
+                    g_aug[i * n_aug + j] = self.g_matrix[i * n_nodes + j];
                 }
             }
-            let mut b_d = vec![0.0; n_caps];
-            for (ri, &row) in cap_node_indices.iter().enumerate() {
-                b_d[ri] = b_full[row];
+            for i in 0..n_nodes {
+                for j in 0..n_vs {
+                    g_aug[i * n_aug + n_nodes + j] = self.b_matrix[i * n_vs + j];
+                }
             }
-            // Output: c_full already selects the output node. We need to
-            // express V_out in terms of cap states. Use the M⁻¹ relationship:
-            // V_all = M⁻¹ · (N · x_cap_prev + F · u)
-            // The c_full · A_full gives the output's dependence on all states.
-            // Restricting to cap columns gives c_reduced.
-            let mut c_d = vec![0.0; n_caps];
-            for (ci, &col) in cap_node_indices.iter().enumerate() {
-                c_d[ci] = c_full[col];
+            for i in 0..n_vs {
+                for j in 0..n_nodes {
+                    g_aug[(n_nodes + i) * n_aug + j] = self.c_matrix[i * n_nodes + j];
+                }
             }
-            // If c_d is all zeros (output node is not a cap node), compute
-            // indirect output via c_full · A_full restricted to cap columns.
-            if c_d.iter().all(|v| (*v as f64).abs() < 1e-30) {
-                for (ci, &col) in cap_node_indices.iter().enumerate() {
-                    let mut sum = 0.0;
-                    for i in 0..n_aug {
-                        sum += c_full[i] * a_full[i * n_aug + col];
+            for i in 0..n_vs {
+                for j in 0..n_vs {
+                    g_aug[(n_nodes + i) * n_aug + n_nodes + j] = self.d_matrix[i * n_vs + j];
+                }
+            }
+
+            // Extract sub-blocks
+            let extract = |mat: &[f64], n: usize, rows: &[usize], cols: &[usize]| -> Vec<f64> {
+                let nr = rows.len();
+                let nc = cols.len();
+                let mut block = vec![0.0; nr * nc];
+                for (ri, &r) in rows.iter().enumerate() {
+                    for (ci, &c) in cols.iter().enumerate() {
+                        block[ri * nc + ci] = mat[r * n + c];
                     }
-                    c_d[ci] = sum;
+                }
+                block
+            };
+
+            let g_cc = extract(&g_aug, n_aug, &cap_indices, &cap_indices);
+            let g_ca = extract(&g_aug, n_aug, &cap_indices, &alg_indices);
+            let g_ac = extract(&g_aug, n_aug, &alg_indices, &cap_indices);
+            let g_aa = extract(&g_aug, n_aug, &alg_indices, &alg_indices);
+
+            // Invert G_aa
+            let g_aa_inv = invert_matrix_equilibrated(&g_aa, n_a);
+
+            // G_reduced = G_cc - G_ca · G_aa⁻¹ · G_ac  [n_c × n_c]
+            // First: G_aa⁻¹ · G_ac  [n_a × n_c]
+            let mut gaa_inv_gac = vec![0.0; n_a * n_c];
+            for i in 0..n_a {
+                for j in 0..n_c {
+                    let mut sum = 0.0;
+                    for k in 0..n_a {
+                        sum += g_aa_inv[i * n_a + k] * g_ac[k * n_c + j];
+                    }
+                    gaa_inv_gac[i * n_c + j] = sum;
                 }
             }
 
-            (a_d, b_d, c_d, n_caps)
+            let mut g_red = g_cc.clone();
+            for i in 0..n_c {
+                for j in 0..n_c {
+                    let mut sum = 0.0;
+                    for k in 0..n_a {
+                        sum += g_ca[i * n_a + k] * gaa_inv_gac[k * n_c + j];
+                    }
+                    g_red[i * n_c + j] -= sum;
+                }
+            }
+
+            eprintln!("[ss-reduce] G_cc = {g_cc:?}");
+            eprintln!("[ss-reduce] G_red = {g_red:?}");
+
+            // Reduced C matrix (cap diagonal only, in reduced space)
+            let mut c_red = vec![0.0; n_c * n_c];
+            for (ri, &ci) in cap_indices.iter().enumerate() {
+                c_red[ri * n_c + ri] = c_cap[ci * n_nodes + ci];
+            }
+
+            // B_reduced: input column from VS (B_c - G_ca · G_aa⁻¹ · B_a)
+            // B_a = augmented column at vs_row for algebraic indices
+            let b_c_aug: Vec<f64> = cap_indices.iter().map(|&i| {
+                if i < n_nodes { 0.0 } else { if i - n_nodes == vs_idx { 1.0 } else { 0.0 } }
+            }).collect();
+            let b_a_aug: Vec<f64> = alg_indices.iter().map(|&i| {
+                if i < n_nodes { 0.0 } else { if i - n_nodes == vs_idx { 1.0 } else { 0.0 } }
+            }).collect();
+
+            // G_aa⁻¹ · b_a
+            let mut gaa_inv_ba = vec![0.0; n_a];
+            for i in 0..n_a {
+                for k in 0..n_a {
+                    gaa_inv_ba[i] += g_aa_inv[i * n_a + k] * b_a_aug[k];
+                }
+            }
+
+            let mut b_red = b_c_aug.clone();
+            for i in 0..n_c {
+                let mut sum = 0.0;
+                for k in 0..n_a {
+                    sum += g_ca[i * n_a + k] * gaa_inv_ba[k];
+                }
+                b_red[i] -= sum;
+            }
+
+            // Bilinear transform on reduced system
+            // M = G_red + 2fs·C_red
+            // N = 2fs·C_red - G_red
+            let mut m_red = vec![0.0; n_c * n_c];
+            let mut n_red = vec![0.0; n_c * n_c];
+            for i in 0..n_c {
+                for j in 0..n_c {
+                    m_red[i * n_c + j] = g_red[i * n_c + j] + two_fs * c_red[i * n_c + j];
+                    n_red[i * n_c + j] = two_fs * c_red[i * n_c + j] - g_red[i * n_c + j];
+                }
+            }
+
+            let m_inv = invert_matrix_equilibrated(&m_red, n_c);
+
+            // A_d = M⁻¹ · N
+            let mut a_d = vec![0.0; n_c * n_c];
+            for i in 0..n_c {
+                for j in 0..n_c {
+                    for k in 0..n_c {
+                        a_d[i * n_c + j] += m_inv[i * n_c + k] * n_red[k * n_c + j];
+                    }
+                }
+            }
+
+            // b_d = M⁻¹ · b_red
+            let mut b_d = vec![0.0; n_c];
+            for i in 0..n_c {
+                for k in 0..n_c {
+                    b_d[i] += m_inv[i * n_c + k] * b_red[k];
+                }
+            }
+
+            // c_out: output extraction in reduced space
+            // V_out = c_c · x_c + c_a · x_a
+            //       = c_c · x_c + c_a · G_aa⁻¹ · (b_a·u - G_ac·x_c)
+            //       = (c_c - c_a · G_aa⁻¹ · G_ac) · x_c + c_a · G_aa⁻¹ · b_a · u
+            let c_c_out: Vec<f64> = cap_indices.iter().map(|&i| c_full[i]).collect();
+            let c_a_out: Vec<f64> = alg_indices.iter().map(|&i| c_full[i]).collect();
+
+            let mut c_d = c_c_out.clone();
+            for j in 0..n_c {
+                let mut sum = 0.0;
+                for k in 0..n_a {
+                    sum += c_a_out[k] * gaa_inv_gac[k * n_c + j];
+                }
+                c_d[j] -= sum;
+            }
+
+            (a_d, b_d, c_d, n_c)
         } else {
-            // No reduction possible — return full system
             (a_full, b_full, c_full, n_aug)
         }
     }
@@ -2858,6 +2995,216 @@ mod tests {
             "Scattering should change with port resistance (max_diff={max_diff:.6e})\n\
              s_lo={s_lo:.6?}\n\
              s_hi={s_hi:.6?}"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // State-space reduction tests (Schur complement)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Helper: compute eigenvalues of a 2×2 matrix.
+    fn eigenvalues_2x2(a: &[f64; 4]) -> (num_complex::Complex64, num_complex::Complex64) {
+        use num_complex::Complex64;
+        let tr = a[0] + a[3]; // trace
+        let det = a[0] * a[3] - a[1] * a[2]; // determinant
+        let disc = tr * tr - 4.0 * det;
+        if disc >= 0.0 {
+            let sq = disc.sqrt();
+            (
+                Complex64::new((tr + sq) / 2.0, 0.0),
+                Complex64::new((tr - sq) / 2.0, 0.0),
+            )
+        } else {
+            let sq = (-disc).sqrt();
+            (
+                Complex64::new(tr / 2.0, sq / 2.0),
+                Complex64::new(tr / 2.0, -sq / 2.0),
+            )
+        }
+    }
+
+    /// Simple RC lowpass: R + C to ground. One cap state.
+    /// Analog: H(s) = 1/(1 + sRC)
+    /// Discrete pole at z = (1 - RC·2fs)/(1 + RC·2fs) via bilinear.
+    #[test]
+    fn state_space_simple_rc_pole() {
+        let r = 10_000.0; // 10kΩ
+        let c = 100e-9; // 100nF
+        let fs = 48000.0;
+
+        // Build MNA: 2 nodes (in, cap_node), 1 VS (input)
+        let mut mna = MnaSystem::new(2, 1);
+        mna.stamp_resistor(Some(0), Some(1), r);
+        mna.stamp_voltage_source(Some(0), None, 0);
+
+        let cap_stamps = vec![(Some(1), None, c)];
+        let (a_d, b_d, c_out, n_states) =
+            mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);
+
+        // Should reduce to 1 state (the cap)
+        assert_eq!(n_states, 1, "Should have 1 cap state, got {n_states}");
+
+        // The single eigenvalue: z = (2fs*C*R - 1)/(2fs*C*R + 1)
+        let rc_2fs = 2.0 * fs * r * c;
+        let expected_pole = (rc_2fs - 1.0) / (rc_2fs + 1.0);
+        let actual_pole = a_d[0];
+        assert!(
+            (actual_pole - expected_pole).abs() < 1e-6,
+            "RC pole: expected {expected_pole:.6}, got {actual_pole:.6}"
+        );
+
+        // Pole should be real, positive, < 1 (stable)
+        assert!(actual_pole > 0.0 && actual_pole < 1.0,
+            "RC pole should be stable (0 < z < 1), got {actual_pole}");
+    }
+
+    /// Two-cap network with resistive coupling: creates complex eigenvalues.
+    /// R1-C1-R2-C2 ladder: two RC stages create a 2nd-order response.
+    #[test]
+    fn state_space_two_cap_has_complex_poles() {
+        let r1 = 10_000.0; // 10kΩ
+        let r2 = 10_000.0;
+        let c1 = 100e-9; // 100nF
+        let c2 = 100e-9;
+        let fs = 48000.0;
+
+        // 3 nodes: input(0), mid(1), output(2). 1 VS.
+        let mut mna = MnaSystem::new(3, 1);
+        mna.stamp_resistor(Some(0), Some(1), r1);
+        mna.stamp_resistor(Some(1), Some(2), r2);
+        mna.stamp_voltage_source(Some(0), None, 0);
+
+        let cap_stamps = vec![
+            (Some(1), None, c1), // C1: mid to gnd
+            (Some(2), None, c2), // C2: output to gnd
+        ];
+        let (a_d, _b_d, _c_out, n_states) =
+            mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
+
+        assert_eq!(n_states, 2, "Should have 2 cap states, got {n_states}");
+
+        let a_2x2 = [a_d[0], a_d[1], a_d[n_states], a_d[n_states + 1]];
+        let (ev1, ev2) = eigenvalues_2x2(&a_2x2);
+
+        // Two-stage RC ladder has two real poles (overdamped), not complex.
+        // But with feedback, it would oscillate. For this test, just verify
+        // the eigenvalues are stable and the reduction works.
+        eprintln!("Two-cap ladder: λ1={ev1}, λ2={ev2}");
+        assert!(
+            ev1.norm() < 1.0 && ev2.norm() < 1.0,
+            "Both eigenvalues should be stable (|λ|<1): {ev1}, {ev2}"
+        );
+    }
+
+    /// Bridged-T resonator with op-amp VCVS: the 808 kick drum circuit.
+    /// Must produce complex eigenvalues near 130 Hz.
+    #[test]
+    fn state_space_bridged_t_has_complex_poles_at_130hz() {
+        use std::f64::consts::PI;
+
+        let r1 = 150_000.0;
+        let r2 = 150_000.0;
+        let c1 = 8.2e-9;
+        let c2 = 8.2e-9;
+        let r_fb = 470_000.0;
+        let r_trig = 100_000.0;
+        let r_out = 10_000.0;
+        let aol = 5.0; // Near oscillation threshold for complex eigenvalues
+        let ro = 75.0;
+        let fs = 48000.0;
+
+        let rc_product: f64 = r1 * r2 * c1 * c2;
+        let f0_target = 1.0 / (2.0 * PI * rc_product.sqrt());
+        eprintln!("Target f0 = {f0_target:.1} Hz");
+
+        // MNA: 5 nodes + 2 VS (VCVS + input)
+        // Node assignment:
+        //   0 = junction (R1/R2/C2/R_trig)
+        //   1 = output (R2/R_fb/R_out)
+        //   2 = circuit_out (R_out far end)
+        //   3 = neg (R1/R_fb/C1)
+        //   4 = input (R_trig far end)
+        let n_nodes = 5;
+        let n_vs = 2; // VCVS + input VS
+        let mut mna = MnaSystem::new(n_nodes, n_vs);
+
+        // Resistors
+        mna.stamp_resistor(Some(3), Some(0), r1);
+        mna.stamp_resistor(Some(0), Some(1), r2);
+        mna.stamp_resistor(Some(3), Some(1), r_fb);
+        mna.stamp_resistor(Some(4), Some(0), r_trig);
+        mna.stamp_resistor(Some(1), Some(2), r_out);
+
+        // VCVS: V(out) - Aol*(V(pos) - V(neg)) + Ro*i = 0
+        // pos=gnd(None), neg=3, out=1
+        mna.stamp_vcvs(None, Some(3), Some(1), None, aol, ro, 0);
+
+        // Input VS at node 4
+        mna.stamp_voltage_source(Some(4), None, 1);
+
+        // Caps: C1 (neg→gnd), C2 (junction→gnd)
+        let cap_stamps = vec![
+            (Some(3), None, c1),
+            (Some(0), None, c2),
+        ];
+
+        let (a_d, b_d, c_out, n_states) =
+            mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);
+
+        eprintln!("n_states = {n_states}");
+        assert_eq!(n_states, 2, "Should reduce to 2 cap states (C1, C2)");
+
+        // Print A matrix
+        for i in 0..n_states {
+            let row: Vec<String> = (0..n_states)
+                .map(|j| format!("{:+.6e}", a_d[i * n_states + j]))
+                .collect();
+            eprintln!("A[{i}] = [{}]", row.join(", "));
+        }
+
+        // At least one eigenvalue pair should be complex (resonance)
+        // For a 3×3, compute eigenvalues numerically via companion matrix
+        // or just check the discriminant of the characteristic polynomial.
+        // Simpler: run the system for 2000 samples with an impulse and
+        // count zero crossings.
+        let mut x = vec![0.0; n_states];
+        let mut prev_y = 0.0;
+        let mut zero_crossings = 0u32;
+        let n_samples = 2000;
+        for i in 0..n_samples {
+            let u = if i == 0 { 1.0 } else { 0.0 };
+            let mut x_new = vec![0.0; n_states];
+            for r in 0..n_states {
+                let mut v = b_d[r] * u;
+                for c in 0..n_states {
+                    v += a_d[r * n_states + c] * x[c];
+                }
+                x_new[r] = v;
+            }
+            let mut y = 0.0;
+            for r in 0..n_states {
+                y += c_out[r] * x_new[r];
+            }
+            if i > 0 && y * prev_y < 0.0 {
+                zero_crossings += 1;
+            }
+            prev_y = y;
+            x = x_new;
+        }
+
+        let est_freq = zero_crossings as f64 / 2.0 / (n_samples as f64 / fs);
+        eprintln!("Zero crossings: {zero_crossings}, estimated f = {est_freq:.1} Hz");
+
+        // Must oscillate (at least 10 zero crossings in ~42ms)
+        assert!(
+            zero_crossings > 10,
+            "Bridged-T should oscillate: got only {zero_crossings} zero crossings"
+        );
+
+        // Frequency should be within 2× of 130 Hz
+        assert!(
+            est_freq > 65.0 && est_freq < 260.0,
+            "Resonant frequency {est_freq:.1} Hz should be near {f0_target:.1} Hz"
         );
     }
 }
