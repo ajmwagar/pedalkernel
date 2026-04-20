@@ -1,22 +1,124 @@
-//! SPQR stage builder: converts `SpqrStage` descriptors into runnable WDF stages.
+//! SPQR stage builder: converts `SpqrStage` descriptors into runnable WDF stages,
+//! and provides the `compile_via_spqr()` entry point for the full pipeline.
 //!
 //! Separation of concerns:
 //! - `spqr.rs`: graph decomposition + classification (topology + component semantics)
-//! - `spqr_build.rs`: stage construction (DynNode trees → WdfStage processors)
-//!
-//! The builder adds a voltage source input port, maps NL edges to RootKind
-//! via Component::classify_nonlinear(), and wraps everything in WdfStage.
+//! - `rigid_build.rs`: StageStats + RigidOptimization decision rules
+//! - `spqr_build.rs`: stage construction + full pipeline entry point
 
 use super::build::create_root;
+use super::compiled::{CompiledPedal, StageRef};
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
 use super::rigid_build::{classify_rigid, RigidOptimization, StageStats};
-use super::spqr::SpqrStage;
+use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
+use super::compiled::RailSaturation;
 use super::stage::{RootKind, WdfStage};
 use super::wdf_leaf::WdfVoltageSource;
-use crate::elements::OpAmpModel;
-use crate::elements::OpAmpRoot;
+use crate::dsl::PedalDef;
+use crate::elements::{OpAmpModel, OpAmpRoot};
 use crate::oversampling::{Oversampler, OversamplingFactor};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Full pipeline entry point
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Compile a `.pedal` circuit via the SPQR pipeline.
+///
+/// Full flow: PedalDef → CircuitGraph → SPQR decompose → classify →
+/// build stages → CompiledPedal.
+///
+/// Returns `Err` if any stage can't be built (unsupported topology).
+pub fn compile_via_spqr(
+    pedal: &PedalDef,
+    sample_rate: f64,
+) -> Result<CompiledPedal, String> {
+    let graph = CircuitGraph::from_pedal(pedal);
+
+    // Collect all non-bridge edges (passive + NL + VCVS)
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    if all_edges.is_empty() {
+        return Err("No circuit edges found".to_string());
+    }
+
+    // Decompose → classify → build
+    let terminals = vec![graph.in_node, graph.out_node];
+    let spqr_tree = spqr_decompose(&all_edges, &terminals, &graph, graph.gnd_node);
+    let spqr_stages = spqr_to_stages(&spqr_tree, &graph, sample_rate);
+
+    let mut wdf_stages: Vec<WdfStage> = Vec::new();
+    for (i, stage) in spqr_stages.into_iter().enumerate() {
+        let mut wdf = build_spqr_stage(stage, &graph, sample_rate)
+            .map_err(|e| format!("Stage {i}: {e}"))?;
+        wdf.signal_flow_distance = i;
+        wdf_stages.push(wdf);
+    }
+
+    // Build stage ordering (all WDF for now, in SPQR traversal order)
+    let stage_order: Vec<StageRef> = (0..wdf_stages.len())
+        .map(StageRef::Wdf)
+        .collect();
+
+    let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
+
+    Ok(CompiledPedal {
+        stages: wdf_stages,
+        push_pull_stages: Vec::new(),
+        multi_nl_stages: Vec::new(),
+        pre_gain: 1.0,
+        output_gain: 1.0,
+        rail_saturation: RailSaturation::None,
+        rail_sat_oversampler: Oversampler::new(OversamplingFactor::X1),
+        sample_rate,
+        controls: Vec::new(),
+        gain_range: (0.0, 1.0),
+        supply_voltage,
+        lfos: Vec::new(),
+        envelopes: Vec::new(),
+        slew_limiters: Vec::new(),
+        bbds: Vec::new(),
+        delay_lines: Vec::new(),
+        vcos: Vec::new(),
+        vcas: Vec::new(),
+        thermal: None,
+        tolerance_seed: 0,
+        oversampling: OversamplingFactor::X1,
+        opamp_stages: Vec::new(),
+        power_supply: None,
+        #[cfg(debug_assertions)]
+        debug_stats: None,
+        metrics_accumulator: None,
+        metrics_buffer: None,
+        input_loading: None,
+        output_loading: None,
+        output_dc_block: None,
+        sidechains: Vec::new(),
+        subcircuit_processors: Vec::new(),
+        subcircuit_routing: Vec::new(),
+        subcircuit_output_idx: None,
+        subcircuit_outputs: Vec::new(),
+        pot_smoothers: Vec::new(),
+        pot_mirrors: std::collections::HashMap::new(),
+        base_grid_bias: 0.0,
+        multi_nl_recompute_counter: 0,
+        stage_order,
+        node_signals: Vec::new(),
+        triggers: Vec::new(),
+        bbd_wet_mix: 0.5,
+        bbd_mix_pot_id: None,
+        midi_trigger_map: std::collections::HashMap::new(),
+        original_passive_values: std::collections::HashMap::new(),
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stage construction helpers
+// ═══════════════════════════════════════════════════════════════════════════
 
 /// Wrap a passive DynNode tree with a voltage source input port.
 ///
@@ -382,6 +484,77 @@ mod tests {
         assert!(
             gain_measured < 15.0,
             "Inverting gain should be ~10, got {gain_measured:.2}"
+        );
+    }
+
+    #[test]
+    fn compile_via_spqr_diode_clipper_end_to_end() {
+        use crate::PedalProcessor;
+
+        let pedal = crate::dsl::parse_pedal_file(r#"
+            pedal "test_clipper" { supply 9V
+                components { R1: resistor(4.7k)  D1: diode(silicon) }
+                nets { in -> R1.a  R1.b -> D1.a  D1.b -> gnd }
+                controls {}
+            }"#)
+        .expect("parse");
+
+        let mut compiled = compile_via_spqr(&pedal, 48000.0)
+            .expect("Should compile via SPQR");
+
+        // Process through PedalProcessor trait
+        let dc_out = compiled.process(5.0);
+        assert!(
+            dc_out.abs() < 2.0,
+            "Diode should clip 5V input, got {dc_out:.4}"
+        );
+
+        // Process sine
+        let mut peak = 0.0f64;
+        for i in 0..480 {
+            let input =
+                1.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            let output = compiled.process(input);
+            peak = peak.max(output.abs());
+        }
+        assert!(peak > 0.01, "Should produce output: {peak:.6}");
+    }
+
+    #[test]
+    fn compile_via_spqr_inverting_opamp_end_to_end() {
+        use crate::PedalProcessor;
+
+        let pedal = crate::dsl::parse_pedal_file(r#"
+            pedal "test_inv" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    Rf: resistor(100k)
+                    U1: opamp(tl072)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    Rf.a -> U1.neg
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#)
+        .expect("parse");
+
+        let mut compiled = compile_via_spqr(&pedal, 48000.0)
+            .expect("Should compile inverting amp via SPQR");
+
+        // Settle
+        for _ in 0..10 {
+            compiled.process(0.1);
+        }
+        let output = compiled.process(0.1);
+        let gain = output.abs() / 0.1;
+        assert!(
+            gain > 5.0 && gain < 15.0,
+            "Inverting gain should be ~10, got {gain:.2}"
         );
     }
 
