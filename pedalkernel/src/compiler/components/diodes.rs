@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
-    Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, PinDirection, SolverMethod,
-    StampResult,
+    Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, PinDirection, SignalTerminals,
+    SolverMethod, StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::compiler::validate::Severity;
@@ -28,6 +28,13 @@ impl Component for Diode {
 
     fn type_tag(&self) -> &'static str {
         "diode"
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::TwoPort {
+            input: "a",
+            output: "b",
+        }
     }
 
     fn is_passive(&self) -> bool {

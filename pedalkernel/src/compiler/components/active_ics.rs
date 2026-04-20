@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    PinDirection, ResolveContext, StampContext, StampResult,
+    PinDirection, ResolveContext, SignalTerminals, StampContext, StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::dsl::{
@@ -34,6 +34,24 @@ impl Component for OpAmp {
             "OTA"
         } else {
             "op-amp"
+        }
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        if self.op_type.is_ota() {
+            // OTA: transconductance amp, pos/neg → output current
+            SignalTerminals::Amplifier {
+                input: "pos",
+                output: "neg",
+                control: None,
+            }
+        } else {
+            // Op-amp VCVS: neg is inverting input, out is output, pos is reference
+            SignalTerminals::Amplifier {
+                input: "neg",
+                output: "out",
+                control: Some("pos"),
+            }
         }
     }
 

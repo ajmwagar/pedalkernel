@@ -80,6 +80,31 @@ pub enum PinDirection {
     Bidirectional,
 }
 
+/// Signal flow classification for a component's pins.
+///
+/// Used by feedback analysis to determine which components are coupled
+/// through feedback loops. The Component trait drives all decisions —
+/// no hardcoded component-type matching in the pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignalTerminals {
+    /// No directionality — R, C, L, pot. Signal flows either way.
+    Passive,
+    /// Unidirectional two-port — diode (a→b). Signal has a preferred direction.
+    TwoPort {
+        input: &'static str,
+        output: &'static str,
+    },
+    /// Amplifier with input, output, and optional control pin.
+    /// Op-amp: input=neg, output=out, control=Some(pos).
+    /// BJT: input=base, output=collector, control=None.
+    /// Tube: input=grid, output=plate, control=None.
+    Amplifier {
+        input: &'static str,
+        output: &'static str,
+        control: Option<&'static str>,
+    },
+}
+
 /// Classification of a circuit edge by electrical behavior.
 ///
 /// The planner uses edge kinds to group components into stages:
@@ -306,6 +331,16 @@ pub trait Component: std::fmt::Debug {
     /// (NR) and `ExplicitDiodePairRoot`/`ExplicitDiodeRoot` (WO).
     fn solver_hint(&self) -> Option<SolverMethod> {
         None
+    }
+
+    // ── Signal Flow ──────────────────────────────────────────────────────
+
+    /// Signal flow classification for this component's pins.
+    ///
+    /// Drives feedback analysis: amplifier input→output defines the
+    /// feedback cycle direction. Passive components have no directionality.
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Passive
     }
 
     // ── Classification ────────────────────────────────────────────────────

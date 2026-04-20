@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    PinDirection, ResolveContext, StampResult,
+    PinDirection, ResolveContext, SignalTerminals, StampResult,
 };
 use crate::compiler::dyn_node::DynNode;
 use crate::compiler::graph::NodeId;
@@ -29,6 +29,14 @@ impl Component for Npn {
 
     fn type_tag(&self) -> &'static str {
         "NPN transistor"
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "base",
+            output: "collector",
+            control: None,
+        }
     }
 
     fn is_passive(&self) -> bool {
@@ -159,6 +167,14 @@ impl Component for Pnp {
         "PNP transistor"
     }
 
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "base",
+            output: "collector",
+            control: None,
+        }
+    }
+
     fn is_passive(&self) -> bool {
         false
     }
@@ -285,6 +301,14 @@ impl Component for NJfet {
 
     fn type_tag(&self) -> &'static str {
         "N-channel JFET"
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "gate",
+            output: "drain",
+            control: None,
+        }
     }
 
     fn is_passive(&self) -> bool {
@@ -434,6 +458,14 @@ impl Component for PJfet {
         "P-channel JFET"
     }
 
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "gate",
+            output: "drain",
+            control: None,
+        }
+    }
+
     fn is_passive(&self) -> bool {
         false
     }
@@ -581,6 +613,14 @@ impl Component for Nmos {
         "N-channel MOSFET"
     }
 
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "gate",
+            output: "drain",
+            control: None,
+        }
+    }
+
     fn is_passive(&self) -> bool {
         false
     }
@@ -698,6 +738,14 @@ impl Component for Pmos {
 
     fn type_tag(&self) -> &'static str {
         "P-channel MOSFET"
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "gate",
+            output: "drain",
+            control: None,
+        }
     }
 
     fn is_passive(&self) -> bool {

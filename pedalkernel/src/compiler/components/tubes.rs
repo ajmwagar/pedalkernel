@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    PinDirection, StampResult,
+    PinDirection, SignalTerminals, StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::tree::MnaSystem;
@@ -26,6 +26,14 @@ impl Component for Triode {
 
     fn type_tag(&self) -> &'static str {
         "triode"
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "grid",
+            output: "plate",
+            control: None,
+        }
     }
 
     fn is_passive(&self) -> bool {
@@ -155,6 +163,14 @@ impl Component for Pentode {
         "pentode"
     }
 
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "grid",
+            output: "plate",
+            control: None,
+        }
+    }
+
     fn is_passive(&self) -> bool {
         false
     }
@@ -282,6 +298,14 @@ impl Component for VariMu {
 
     fn type_tag(&self) -> &'static str {
         "variable-mu triode"
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "grid",
+            output: "plate",
+            control: None,
+        }
     }
 
     fn is_passive(&self) -> bool {

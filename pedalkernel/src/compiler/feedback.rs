@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::component::EdgeKind;
+use super::component::{EdgeKind, SignalTerminals};
 use super::graph::{CircuitGraph, NodeId};
 
 /// An active element with identified input/output terminals.
@@ -58,46 +58,39 @@ fn find_active_elements(
     for &eidx in edge_indices {
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
-        let edge_kind = graph.effective_edge_kind(eidx);
 
-        match edge_kind {
-            EdgeKind::Vcvs => {
-                // Op-amp: input = neg, output = out
-                // The VCVS edge is neg→out, so node_a=neg, node_b=out
+        match comp.kind.signal_terminals() {
+            SignalTerminals::Passive => {} // R, C, L — no active element
+            SignalTerminals::TwoPort { input, output } => {
+                // Diode: resolve pin names to node IDs
+                let in_node = resolve_pin(&comp.id, input, graph).unwrap_or(e.node_a);
+                let out_node = resolve_pin(&comp.id, output, graph).unwrap_or(e.node_b);
                 elements.push(ActiveElement {
                     edge_idx: eidx,
-                    input_node: e.node_a, // neg
-                    output_node: e.node_b, // out
+                    input_node: in_node,
+                    output_node: out_node,
                 });
             }
-            EdgeKind::Nonlinear => {
-                // BJT: edge is collector→emitter. Input = base (found via nullor or coupled pins).
-                // Diode: edge is a→b. Treat as input=a, output=b.
-                // For feedback analysis, diodes are checked like any NL element.
-                if comp.kind.is_bjt() {
-                    // Find the base node from the graph's pin resolution
-                    let base_key = format!("{}.base", comp.id);
-                    if let Some(&base_node) = graph.node_names.get(&base_key) {
-                        elements.push(ActiveElement {
-                            edge_idx: eidx,
-                            input_node: base_node,
-                            output_node: e.node_a, // collector
-                        });
-                    }
-                } else {
-                    // Diode/JFET: use edge endpoints
-                    elements.push(ActiveElement {
-                        edge_idx: eidx,
-                        input_node: e.node_a,
-                        output_node: e.node_b,
-                    });
-                }
+            SignalTerminals::Amplifier { input, output, .. } => {
+                // Op-amp, BJT, JFET, Tube: resolve input/output pins
+                let in_node = resolve_pin(&comp.id, input, graph).unwrap_or(e.node_a);
+                let out_node = resolve_pin(&comp.id, output, graph).unwrap_or(e.node_b);
+                elements.push(ActiveElement {
+                    edge_idx: eidx,
+                    input_node: in_node,
+                    output_node: out_node,
+                });
             }
-            _ => {} // Passive edges handled separately
         }
     }
 
     elements
+}
+
+/// Resolve a component's pin name to a graph node ID.
+fn resolve_pin(comp_id: &str, pin: &str, graph: &CircuitGraph) -> Option<NodeId> {
+    let key = format!("{comp_id}.{pin}");
+    graph.node_names.get(&key).copied()
 }
 
 /// Build signal-edge adjacency (excludes rail nodes).
@@ -119,20 +112,18 @@ fn build_signal_adjacency(
         adj.entry(e.node_a).or_default().push((eidx, e.node_b));
         adj.entry(e.node_b).or_default().push((eidx, e.node_a));
 
-        // For BJTs: the graph edge is collector→emitter, but the base
-        // controls the transistor. Add virtual links base↔collector
-        // and base↔emitter so BFS can traverse through the transistor.
+        // For amplifiers (BJT, JFET, Tube): the graph edge typically spans
+        // output→emitter/source/cathode, but the input pin (base/gate/grid)
+        // controls the device. Add virtual links so BFS can traverse through.
         let comp = &graph.components[e.comp_idx];
-        if comp.kind.is_bjt() {
-            let base_key = format!("{}.base", comp.id);
-            if let Some(&base_node) = graph.node_names.get(&base_key) {
-                if !rails.contains(&base_node) {
-                    // base ↔ collector (node_a) — uses same edge_idx for path tracking
-                    adj.entry(base_node).or_default().push((eidx, e.node_a));
-                    adj.entry(e.node_a).or_default().push((eidx, base_node));
-                    // base ↔ emitter (node_b)
-                    adj.entry(base_node).or_default().push((eidx, e.node_b));
-                    adj.entry(e.node_b).or_default().push((eidx, base_node));
+        if let SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
+            if let Some(input_node) = resolve_pin(&comp.id, input, graph) {
+                if !rails.contains(&input_node) {
+                    // input ↔ edge endpoints (virtual signal coupling)
+                    adj.entry(input_node).or_default().push((eidx, e.node_a));
+                    adj.entry(e.node_a).or_default().push((eidx, input_node));
+                    adj.entry(input_node).or_default().push((eidx, e.node_b));
+                    adj.entry(e.node_b).or_default().push((eidx, input_node));
                 }
             }
         }
@@ -327,6 +318,7 @@ pub(in crate::compiler) fn find_feedback_groups(
 
         // DFS from each input terminal to its output terminal.
         // All edges on successful paths → feedback edges.
+        let mut has_feedback = false;
         for &elem_idx in &group_elem_indices {
             let elem = &active_elements[elem_idx];
             if rails.contains(&elem.input_node) || rails.contains(&elem.output_node) {
@@ -347,52 +339,70 @@ pub(in crate::compiler) fn find_feedback_groups(
                 &mut path,
                 &mut feedback_edges,
             );
+            has_feedback = has_feedback || !feedback_edges.is_empty();
             group_edges.extend(feedback_edges);
         }
 
-        // Also claim INPUT PENDANT edges: edges incident to an active
-        // terminal that aren't on the feedback cycle but carry signal
-        // INTO the stage. Example: R_in connects input → neg for an
-        // inverting amp. It determines gain (Rf/R_in) but isn't feedback.
-        for &elem_idx in &group_elem_indices {
-            let elem = &active_elements[elem_idx];
-            // Edges touching input terminal (pendants feeding the stage)
-            if let Some(neighbors) = adj.get(&elem.input_node) {
-                for &(eidx, _) in neighbors {
-                    if eidx != elem.edge_idx && !group_edges.contains(&eidx) {
-                        group_edges.insert(eidx);
-                    }
-                }
+        // Only claim passive edges if this group has actual feedback.
+        // Standalone NL elements (diodes to GND) don't get passive edges —
+        // they're independent clipping stages.
+        if !has_feedback {
+            for &eidx in &group_edges {
+                claimed.insert(eidx);
             }
+            groups.push(FeedbackGroup {
+                edge_indices: group_edges.into_iter().collect(),
+            });
+            continue;
         }
 
-        // Claim GROUND SHUNT edges touching any node owned by this group.
-        // Ground shunts don't couple stages, but they belong to the stage
-        // whose signal node they touch. Example: C1(neg→GND) creates the
-        // resonance in a bridged-T but doesn't couple to other stages.
-        let group_nodes: std::collections::HashSet<NodeId> = group_edges
+        // Claim two more edge categories (passive only):
+        //
+        // 1. GROUND SHUNTS: passive edge with one end at rail, other at a
+        //    group node. Creates resonance (caps) or loading (resistors).
+        //
+        // 2. INPUT PENDANTS: passive edge touching an active element's
+        //    input terminal. Determines Ri for gain computation.
+        //
+        // Everything else stays standalone (cascade, output load, etc.)
+        let group_nodes: HashSet<NodeId> = group_edges
             .iter()
             .flat_map(|&eidx| {
                 let e = &graph.edges[eidx];
                 [e.node_a, e.node_b].into_iter().filter(|n| !rails.contains(n))
             })
             .collect();
+
+        // Collect input terminal nodes for pendant detection
+        let input_terminals: HashSet<NodeId> = group_elem_indices
+            .iter()
+            .filter_map(|&i| {
+                let node = active_elements[i].input_node;
+                if rails.contains(&node) { None } else { Some(node) }
+            })
+            .collect();
+
         for &eidx in edge_indices {
-            if group_edges.contains(&eidx) {
+            if group_edges.contains(&eidx) || claimed.contains(&eidx) {
                 continue;
+            }
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+                continue; // Only claim passive edges
             }
             let e = &graph.edges[eidx];
             let a_rail = rails.contains(&e.node_a);
             let b_rail = rails.contains(&e.node_b);
-            // Passive ground shunt: one end is rail, other in this group.
-            // Only claim passive (Linear/Reactive) — NL ground shunts
-            // (diodes to GND) are independent clipping stages.
-            let ek = graph.effective_edge_kind(eidx);
-            let is_passive_shunt = matches!(ek, EdgeKind::Linear | EdgeKind::Reactive);
-            if is_passive_shunt
-                && ((a_rail && group_nodes.contains(&e.node_b))
-                    || (b_rail && group_nodes.contains(&e.node_a)))
-            {
+
+            // Ground shunt: one end rail, other end in group
+            let is_ground_shunt = (a_rail && group_nodes.contains(&e.node_b))
+                || (b_rail && group_nodes.contains(&e.node_a));
+
+            // Input pendant: touches an active input terminal
+            let is_input_pendant = input_terminals.contains(&e.node_a)
+                || input_terminals.contains(&e.node_b);
+
+            if is_ground_shunt || is_input_pendant {
                 group_edges.insert(eidx);
             }
         }
