@@ -2753,6 +2753,9 @@ pub(super) struct MultiNlStage {
     /// WDF scattering. Used for linearized OTA stages where cap port
     /// conductances overwhelm circuit conductances.
     pub(super) state_space: Option<StateSpaceData>,
+    /// IIR filter compiled from linear R-node MNA. Takes priority over
+    /// state_space when present — simpler, faster, correct Q for oscillators.
+    pub(super) iir: Option<IirData>,
     /// Precomputed interpolation table for single-pot stages.
     /// When Some, pot changes use table lookup instead of MNA re-inversion.
     pub(super) interp_table: Option<ScatteringInterpolationTable>,
@@ -2819,6 +2822,54 @@ pub(super) struct MultiNlStage {
 /// conductances dominate circuit conductances, causing identity S-matrix rows.
 /// Uses bilinear transform on the continuous-time MNA to get node-voltage
 /// dynamics directly, avoiding WDF port-impedance scaling issues.
+/// IIR filter compiled from a linear R-node MNA.
+/// For stable circuits: transfer function H(z) → IIR coefficients.
+/// For oscillators: biquad with f0/Q from component analysis.
+#[derive(Debug, Clone)]
+pub(super) struct IirData {
+    /// Numerator coefficients [b0, b1, b2, ...].
+    pub b_coeffs: Vec<f64>,
+    /// Denominator coefficients [1.0, a1, a2, ...] (a0 = 1.0).
+    pub a_coeffs: Vec<f64>,
+    /// Input history [x[n-1], x[n-2], ...].
+    pub x_hist: Vec<f64>,
+    /// Output history [y[n-1], y[n-2], ...].
+    pub y_hist: Vec<f64>,
+}
+
+impl IirData {
+    pub fn new(b_coeffs: Vec<f64>, a_coeffs: Vec<f64>) -> Self {
+        let order = a_coeffs.len() - 1;
+        Self {
+            b_coeffs,
+            a_coeffs,
+            x_hist: vec![0.0; order],
+            y_hist: vec![0.0; order],
+        }
+    }
+
+    /// Process one sample through the IIR (Direct Form I).
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        let order = self.x_hist.len();
+        let mut y = self.b_coeffs[0] * input;
+        for k in 0..order {
+            y += self.b_coeffs.get(k + 1).copied().unwrap_or(0.0) * self.x_hist[k];
+            y -= self.a_coeffs[k + 1] * self.y_hist[k];
+        }
+        // Shift histories
+        for k in (1..order).rev() {
+            self.x_hist[k] = self.x_hist[k - 1];
+            self.y_hist[k] = self.y_hist[k - 1];
+        }
+        if order > 0 {
+            self.x_hist[0] = input;
+            self.y_hist[0] = y;
+        }
+        y
+    }
+}
+
 pub(super) struct StateSpaceData {
     /// State vector [V_nodes..., I_vs...] (n_states elements).
     pub x: Vec<f64>,
@@ -2882,6 +2933,16 @@ impl MultiNlStage {
     pub fn process(&mut self, input: f64) -> f64 {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
+
+        // ── IIR path: compiled from linear R-node MNA ────────────────────
+        // Takes priority over state-space. Correct Q for oscillators,
+        // simpler and faster per-sample than matrix state-space.
+        if let Some(ref mut iir) = self.iir {
+            let output = self.oversampler.process(input, |sample| {
+                flush_denormal(iir.process(sample * self.compensation))
+            });
+            return flush_denormal(output);
+        }
 
         // ── State-space path: direct discrete-time simulation ────────────
         // Bypasses WDF scattering entirely. Used for linearized OTA stages

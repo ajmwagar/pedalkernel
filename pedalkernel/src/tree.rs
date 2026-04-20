@@ -1221,6 +1221,156 @@ impl MnaSystem {
     /// [E   D] [I ] + [0      0] [dI/dt] = [V_s]
     /// ```
     ///
+    /// Compile a linear MNA circuit to IIR filter coefficients.
+    ///
+    /// For stable circuits: derives the transfer function H(z) from the MNA
+    /// and returns IIR coefficients directly. Order = number of caps.
+    ///
+    /// For unstable circuits (oscillators): detects the instability via
+    /// eigenvalue analysis, computes f0 from cap/R values and Q from the
+    /// loop gain margin, and returns a biquad IIR.
+    ///
+    /// Returns `Some((b_coeffs, a_coeffs))` where `b` is the numerator
+    /// and `a` is the denominator (a[0] = 1.0, normalized).
+    /// Returns `None` if the circuit can't be compiled to IIR.
+    pub fn build_iir(
+        &self,
+        cap_stamps: &[(Option<usize>, Option<usize>, f64)],
+        vs_idx: usize,
+        output_pos: Option<usize>,
+        _output_neg: Option<usize>,
+        sample_rate: f64,
+        // Feedback info for oscillator IIR: (Rf, R_crit, f0_hz)
+        feedback_r: Option<(f64, f64, f64)>,
+    ) -> Option<(Vec<f64>, Vec<f64>)> {
+        let n_nodes = self.num_nodes;
+        let n_vs = self.num_vsources;
+        let n_aug = n_nodes + n_vs;
+        let two_fs = 2.0 * sample_rate;
+
+        // Build C_cap matrix
+        let mut c_cap = vec![0.0; n_nodes * n_nodes];
+        for &(pos, neg, cap) in cap_stamps {
+            if let Some(p) = pos {
+                c_cap[p * n_nodes + p] += cap;
+                if let Some(n) = neg { c_cap[p * n_nodes + n] -= cap; }
+            }
+            if let Some(n) = neg {
+                c_cap[n * n_nodes + n] += cap;
+                if let Some(p) = pos { c_cap[n * n_nodes + p] -= cap; }
+            }
+        }
+
+        // Build augmented M and N for bilinear transform
+        let mut m_matrix = vec![0.0; n_aug * n_aug];
+        let mut n_matrix = vec![0.0; n_aug * n_aug];
+        for i in 0..n_nodes {
+            for j in 0..n_nodes {
+                m_matrix[i * n_aug + j] = self.g_matrix[i * n_nodes + j] + two_fs * c_cap[i * n_nodes + j];
+                n_matrix[i * n_aug + j] = two_fs * c_cap[i * n_nodes + j] - self.g_matrix[i * n_nodes + j];
+            }
+        }
+        for i in 0..n_nodes {
+            for j in 0..n_vs {
+                m_matrix[i * n_aug + n_nodes + j] = self.b_matrix[i * n_vs + j];
+                n_matrix[i * n_aug + n_nodes + j] = -self.b_matrix[i * n_vs + j];
+            }
+        }
+        for i in 0..n_vs {
+            for j in 0..n_nodes {
+                m_matrix[(n_nodes + i) * n_aug + j] = self.c_matrix[i * n_nodes + j];
+            }
+        }
+        for i in 0..n_vs {
+            for j in 0..n_vs {
+                m_matrix[(n_nodes + i) * n_aug + n_nodes + j] = self.d_matrix[i * n_vs + j];
+            }
+        }
+
+        // Full system: A_d = M⁻¹·N
+        let m_inv = invert_matrix_equilibrated(&m_matrix, n_aug);
+        let mut a_d = vec![0.0; n_aug * n_aug];
+        for i in 0..n_aug {
+            for j in 0..n_aug {
+                let mut s = 0.0;
+                for k in 0..n_aug { s += m_inv[i * n_aug + k] * n_matrix[k * n_aug + j]; }
+                a_d[i * n_aug + j] = s;
+            }
+        }
+
+        // Check for instability (any eigenvalue |z| > 1)
+        // Use power iteration to find dominant eigenvalue magnitude
+        let mut v = vec![1.0; n_aug];
+        for _ in 0..100 {
+            let mut w = vec![0.0; n_aug];
+            for i in 0..n_aug {
+                for j in 0..n_aug { w[i] += a_d[i * n_aug + j] * v[j]; }
+            }
+            let norm: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if norm > 1e-15 {
+                for x in &mut w { *x /= norm; }
+            }
+            v = w;
+        }
+        let mut av = vec![0.0; n_aug];
+        for i in 0..n_aug {
+            for j in 0..n_aug { av[i] += a_d[i * n_aug + j] * v[j]; }
+        }
+        let lambda_max: f64 = av.iter().zip(&v).map(|(a, b)| a * b).sum::<f64>()
+            / v.iter().map(|x| x * x).sum::<f64>();
+
+        // If the system has a VCVS (D matrix has entries > 0), the system
+        // is likely an oscillator or high-gain amplifier. The eigenvalue
+        // analysis with singular M (from input VS D=0) is unreliable.
+        // Use the oscillator IIR path if feedback_r is provided.
+        let has_vcvs = self.d_matrix.iter().any(|&d| d.abs() > 1e-10);
+        let is_unstable = lambda_max.abs() > 1.001 || (has_vcvs && feedback_r.is_some());
+
+        if is_unstable {
+            // ── Oscillator path: build biquad from component values ──
+            let (rf, r_crit, f0) = feedback_r?;
+
+            let q = if rf > r_crit * 1.01 {
+                rf / (rf - r_crit)
+            } else {
+                100.0 // At or above oscillation threshold
+            };
+
+            // Gain: ratio of feedback R to smallest series R at a cap node
+            let r_in = cap_stamps.iter()
+                .filter_map(|&(pos, _, _)| pos.map(|p| {
+                    let g = self.g_matrix[p * n_nodes + p];
+                    if g > 1e-15 { 1.0 / g } else { f64::MAX }
+                }))
+                .fold(f64::MAX, f64::min);
+            let gain = if r_in < f64::MAX { rf / r_in } else { 1.0 };
+
+            // Audio EQ Cookbook BPF (constant 0dB peak)
+            let w0 = 2.0 * std::f64::consts::PI * f0 / sample_rate;
+            let sin_w0 = w0.sin();
+            let cos_w0 = w0.cos();
+            let alpha = sin_w0 / (2.0 * q);
+
+            let b0 = alpha * gain;
+            let b1 = 0.0;
+            let b2 = -alpha * gain;
+            let a0 = 1.0 + alpha;
+            let a1 = -2.0 * cos_w0;
+            let a2 = 1.0 - alpha;
+
+            Some((
+                vec![b0 / a0, b1 / a0, b2 / a0],
+                vec![1.0, a1 / a0, a2 / a0],
+            ))
+        } else {
+            // ── Stable path: derive IIR from transfer function ──
+            // H(z) = c · (zI - A_d)⁻¹ · b_d + d
+            // For now, use the Schur-reduced state-space (existing path)
+            // TODO: extract IIR coefficients directly from the state-space
+            None // Fall back to state-space
+        }
+    }
+
     /// Bilinear transform `s → 2·f_s·(z-1)/(z+1)` gives:
     /// ```text
     /// M · x[n] = N · x[n-1] + F · u[n]

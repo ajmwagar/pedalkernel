@@ -1675,6 +1675,138 @@ fn build_rtype_stage(
         });
         let out_mna = node_to_mna(out_circuit);
 
+        // ── Try IIR compilation for nullor-only stages ──────────────────
+        // For linear R-nodes (no NL elements), try compiling to IIR.
+        // This handles oscillator circuits (bridged-T) correctly by
+        // deriving f0 and Q from component values instead of using
+        // the state-space reduction (which loses Q).
+        eprintln!("[iir-check] has_nullor={has_nullor} n_nl={n_nl} has_ota={has_linearized_ota}");
+        if has_nullor && n_nl == 0 && !has_linearized_ota {
+            // Compute feedback R info for Q estimation
+            let feedback_r = comp_vsrc_map.first().and_then(|&(ci, _)| {
+                let rec = graph.nullor_pins.iter().find(|r| r.comp_idx == ci)?;
+                let neg = rec.neg_node;
+                let out = rec.out_node;
+
+                // Collect R and C values from the feedback network
+                let mut rf = 0.0;
+                let mut r_values: Vec<f64> = Vec::new();
+                let mut c_values: Vec<f64> = Vec::new();
+                for &eidx in &plan.passive_edge_indices {
+                    let e = &graph.edges[eidx];
+                    let comp = &graph.components[e.comp_idx];
+                    if !comp.kind.is_passive() { continue; }
+                    if let Some(r) = comp.kind.resistance() {
+                        if (e.node_a == neg && e.node_b == out) || (e.node_a == out && e.node_b == neg) {
+                            rf = r;
+                        }
+                        if e.node_a == neg || e.node_b == neg {
+                            r_values.push(r);
+                        }
+                    }
+                    if let Some(c) = comp.kind.capacitance() {
+                        c_values.push(c);
+                    }
+                }
+
+                if rf > 0.0 && c_values.len() >= 2 {
+                    // R_crit = sum of resistors at neg, minus Rf
+                    let r_crit: f64 = r_values.iter().sum::<f64>() - rf;
+
+                    // f0 from caps and T-network resistors:
+                    // f0 = 1/(2π√(R1·R2·C1·C2))
+                    // Use the non-feedback resistors at neg (R1, R2 etc.)
+                    let r_network: Vec<f64> = r_values.iter().copied()
+                        .filter(|&r| (r - rf).abs() > 1.0) // exclude Rf
+                        .collect();
+                    let r_prod: f64 = if r_network.len() >= 2 {
+                        r_network.iter().product()
+                    } else if !r_network.is_empty() {
+                        r_network[0] * r_network[0]
+                    } else {
+                        return None;
+                    };
+                    let c_prod: f64 = c_values.iter().take(2).product();
+                    let f0 = 1.0 / (2.0 * std::f64::consts::PI * (r_prod * c_prod).sqrt());
+
+                    Some((rf, r_crit.max(1.0), f0))
+                } else {
+                    None
+                }
+            });
+
+            eprintln!("[iir-build] attempting build_iir with feedback_r={:?}", feedback_r);
+            let iir_result = mna.build_iir(
+                &cap_stamps, vs_idx, out_mna, None, effective_rate, feedback_r,
+            );
+            eprintln!("[iir-build] result={}", if iir_result.is_some() { "Some" } else { "None" });
+            if let Some((b_coeffs, a_coeffs)) = iir_result {
+                let iir_data = super::stage::IirData::new(b_coeffs, a_coeffs);
+
+                let signal_flow_distance = plan.signal_chain_depth.unwrap_or_else(|| {
+                    classified.dist_from_in.get(&plan.injection_node).copied().unwrap_or(usize::MAX)
+                });
+
+                let dummy_s = vec![1.0];
+                let adaptor = RTypeAdaptor::new(dummy_s, &[1000.0]);
+                let scattering_blocks = super::stage::MultiNlScattering::from_full_matrix(&[0.0; 0], 0, 0);
+
+                return Some(MultiNlStage {
+                    adaptor,
+                    nl_devices: Vec::new(),
+                    nl_port_resistances: Vec::new(),
+                    passive_children: Vec::new(),
+                    pot_children: Vec::new(),
+                    pot_mna_stamps: Vec::new(),
+                    n_nl: 0,
+                    v_prev: Vec::new(),
+                    scattering: scattering_blocks,
+                    oversampler: Oversampler::new(oversampling),
+                    compensation: plan.compensation,
+                    output_port: 0,
+                    device_groups: None,
+                    recompute_data: None,
+                    signal_flow_distance,
+                    transformer_gain: 1.0,
+                    injection_node_id: plan.injection_node,
+                    output_node_id: out_circuit,
+                    recompute_pending: false,
+                    veb_bias_offset: 0.0,
+                    feedback_scale: 0.1,
+                    feedback_opamp: None,
+                    feedback_pot_id: None,
+                    linearized_ota: None,
+                    vs_injection: None,
+                    extract_coeffs: None,
+                    extract_vs: 0.0,
+                    state_space: None,
+                    iir: Some(iir_data),
+                    bias_pot_id: None,
+                    bias_emitter_r: 470.0,
+                    interp_table: None,
+                    dc_bias: Vec::new(),
+                    vcc_bias_all: Vec::new(),
+                    vcc_vs_index: None,
+                    supply_voltage,
+                    dc_blocker_x1: 0.0,
+                    dc_blocker_y1: 0.0,
+                    dc_ramp: 0,
+                    initial_v_prev: Vec::new(),
+                    v_prev_2: Vec::new(),
+                    nr_workspace: crate::elements::nonlinear::solver::NrWorkspace::new(0),
+                    work_b_passive: Vec::new(),
+                    work_known_a: Vec::new(),
+                    work_b_all: Vec::new(),
+                    work_a_all: Vec::new(),
+                    adaptive_x2: false,
+                    subsample_counter: 0,
+                    iteration_budget_remaining: super::stage::NR_ITERATION_BUDGET,
+                    prev_input: 0.0,
+                    opamp_post_fx: None,
+                });
+            }
+        }
+
         eprintln!("[state-space] n_nodes={} n_vs={} n_caps={} rate={} injection={:?} output={:?}",
             mna.num_nodes, mna.num_vsources, cap_stamps.len(), effective_rate, injection_mna, out_mna);
         // Print full G matrix for debugging
@@ -1795,7 +1927,7 @@ fn build_rtype_stage(
             vs_injection: None,
             extract_coeffs: None,
             extract_vs: 0.0,
-            state_space: Some(state_space_data),
+            state_space: Some(state_space_data), iir: None,
             bias_pot_id: None,
             bias_emitter_r: 470.0,
             interp_table: None, // state-space stages excluded from tables
@@ -2602,7 +2734,7 @@ fn build_rtype_stage(
         vs_injection: vs_injection_vec,
         extract_coeffs,
         extract_vs,
-        state_space: None,
+        state_space: None, iir: None,
         bias_pot_id: None,
         bias_emitter_r: 470.0,
         interp_table,
