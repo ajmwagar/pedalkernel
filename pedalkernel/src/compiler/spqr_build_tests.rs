@@ -382,6 +382,47 @@ fn compile_via_spqr_808_kick() {
 }
 
 #[test]
+fn try_all_legends_pedals() {
+    let pedal_dir = std::path::Path::new(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../pedalkernel-pro/pedals/legends")
+    );
+    if !pedal_dir.exists() {
+        eprintln!("Skipping: legends directory not found");
+        return;
+    }
+    let mut pass = 0;
+    let mut fail = 0;
+    for entry in std::fs::read_dir(pedal_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().map_or(true, |e| e != "pedal") {
+            continue;
+        }
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let source = std::fs::read_to_string(&path).unwrap();
+        let pedal = match crate::dsl::parse_pedal_file(&source) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("✗ {name}: parse error: {e}");
+                fail += 1;
+                continue;
+            }
+        };
+        match compile_via_spqr(&pedal, 48000.0) {
+            Ok(_) => {
+                eprintln!("✓ {name}");
+                pass += 1;
+            }
+            Err(e) => {
+                eprintln!("✗ {name}: {e}");
+                fail += 1;
+            }
+        }
+    }
+    eprintln!("\n{pass} passed, {fail} failed");
+    // Don't assert — just report. We're tracking coverage.
+}
+
+#[test]
 fn spqr_noninverting_opamp_gain() {
     // Non-inverting amp: R1=10k, Rf=100k → gain = 1 + 100k/10k = 11
     let (graph, edges) = make_graph_all_edges(r#"
@@ -432,4 +473,48 @@ fn spqr_noninverting_opamp_gain() {
         gain_measured < 16.0,
         "Non-inverting gain should be ~11, got {gain_measured:.2}"
     );
+}
+
+#[test]
+fn diagnose_ratking() {
+    let source = std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../pedalkernel-pro/pedals/legends/ratking.pedal")
+    ).expect("read ratking.pedal");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+    
+    eprintln!("\nRATKING diagnosis:");
+    eprintln!("  Total edges: {}", all_edges.len());
+    for &eidx in &all_edges {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        let ek = graph.effective_edge_kind(eidx);
+        eprintln!("    edge {eidx}: {} ({:?}) nodes {}→{}", comp.id, ek, e.node_a, e.node_b);
+    }
+    
+    let terminals = vec![graph.in_node, graph.out_node];
+    let spqr_tree = spqr_decompose(&all_edges, &terminals, &graph, graph.gnd_node);
+    eprintln!("\n  SPQR tree: {spqr_tree:?}");
+    let spqr_stages = spqr_to_stages(&spqr_tree, &graph, 48000.0);
+
+    eprintln!("\n  SPQR stages: {}", spqr_stages.len());
+    for (i, s) in spqr_stages.iter().enumerate() {
+        eprintln!("    stage {i}: {s:?}");
+    }
+    
+    // Also check what classify_rigid says
+    for (i, s) in spqr_stages.iter().enumerate() {
+        if let SpqrStage::Rigid { edge_indices, .. } = s {
+            let stats = super::rigid::StageStats::from_edges(edge_indices, &graph);
+            let opt = super::rigid::classify_rigid(&stats, &graph);
+            eprintln!("    stage {i} rigid: {:?} (stats: vcvs={}, nl={}, linear={}, reactive={})",
+                opt, stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count);
+        }
+    }
 }

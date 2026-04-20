@@ -658,16 +658,14 @@ fn collect_stages(
                     }
                 }
                 SpClassification::Vcvs => {
-                    // VCVS (op-amp) forces MNA — emit entire subtree as Rigid.
-                    // Build layer decides: simple feedback → OpAmpRoot, complex → MNA.
-                    let (a, b) = node.endpoints();
-                    stages.push(SpqrStage::Rigid {
-                        edge_indices: node.all_edge_indices(),
-                        boundary_nodes: vec![a, b],
-                        pendant_trees: vec![],
-                        order: *order,
-                    });
-                    *order += 1;
+                    // VCVS present — recurse into children. Each child is
+                    // classified independently: VCVS children → Rigid,
+                    // passive children → PassiveWdf, NL children → NlWdf.
+                    // This prevents the VCVS from infecting unrelated
+                    // stages (diodes to GND, tone stacks, volume pots).
+                    for child in children {
+                        collect_stages(child, graph, sample_rate, stages, order);
+                    }
                 }
                 SpClassification::Complex => {
                     // Multiple NL, no VCVS → recurse into children
