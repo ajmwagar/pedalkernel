@@ -714,4 +714,162 @@ mod tests {
             "Ground shunt diodes should be separate (GND is a rail)"
         );
     }
+
+    // ── Distance-based direction stress tests ────────────────────────
+
+    #[test]
+    fn direction_simple_cascade_separates() {
+        // Two op-amps in cascade: U1.out → R → U2.pos. No shared feedback.
+        // Distance: U1 closer to input, U2 farther. Should be 2 groups.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf1: resistor(100k)
+                    R_mid: resistor(10k)
+                    U2: opamp(tl072)
+                    Rf2: resistor(100k)
+                    R_out: resistor(10k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> Rf1.a
+                    Rf1.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R_mid.a
+                    R_mid.b -> U2.neg
+                    U2.neg -> Rf2.a
+                    Rf2.b -> U2.out
+                    U2.pos -> gnd
+                    U2.out -> R_out.a
+                    R_out.b -> out
+                }
+                controls {}
+            }"#);
+        let groups = find_feedback_groups(&edges, &graph);
+        let summary = group_summary(&groups, &graph);
+        eprintln!("Cascade: {summary:?}");
+
+        // U1 and U2 should be in DIFFERENT groups
+        let u1_group = groups.iter().position(|g| {
+            g.all_edges().iter().any(|&eidx| {
+                graph.components[graph.edges[eidx].comp_idx].id == "U1"
+            })
+        });
+        let u2_group = groups.iter().position(|g| {
+            g.all_edges().iter().any(|&eidx| {
+                graph.components[graph.edges[eidx].comp_idx].id == "U2"
+            })
+        });
+        assert_ne!(
+            u1_group, u2_group,
+            "Cascaded op-amps should be in separate groups"
+        );
+    }
+
+    #[test]
+    fn direction_bridged_t_stays_grouped() {
+        // 808 bridged-T: R1/R2 form forward+backward paths. Must stay grouped.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    U1: opamp(tl072)
+                    R1: resistor(150k)
+                    R2: resistor(150k)
+                    C1: cap(8.2n)
+                    C2: cap(8.2n)
+                    R_fb: resistor(470k)
+                    R_trig: resistor(100k)
+                }
+                nets {
+                    U1.neg -> R1.a, C1.a
+                    R1.b -> R2.a, C2.a
+                    R2.b -> U1.out
+                    C1.b -> gnd
+                    C2.b -> gnd
+                    U1.neg -> R_fb.a
+                    R_fb.b -> U1.out
+                    U1.pos -> gnd
+                    in -> R_trig.a
+                    R_trig.b -> R1.b
+                    U1.out -> out
+                }
+                controls {}
+            }"#);
+        let groups = find_feedback_groups(&edges, &graph);
+        let summary = group_summary(&groups, &graph);
+        eprintln!("Bridged-T: {summary:?}");
+
+        // U1, R1, R2, R_fb should all be in the same group
+        let u1_group = groups.iter().find(|g| {
+            g.all_edges().iter().any(|&eidx| {
+                graph.components[graph.edges[eidx].comp_idx].id == "U1"
+            })
+        }).expect("Should have U1 group");
+
+        let has_r1 = u1_group.all_edges().iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "R1"
+        });
+        let has_r2 = u1_group.all_edges().iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "R2"
+        });
+        assert!(has_r1, "R1 should be in U1's group (part of bridged-T)");
+        assert!(has_r2, "R2 should be in U1's group (part of bridged-T)");
+    }
+
+    #[test]
+    fn direction_equal_distance_parallel_paths() {
+        // Two equal-length paths from neg to out: R_fb and (R1+R2 series).
+        // Both should be found as feedback.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    R_fb: resistor(100k)
+                    R1: resistor(50k)
+                    R2: resistor(50k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> R_fb.a
+                    R_fb.b -> U1.out
+                    U1.neg -> R1.a
+                    R1.b -> R2.a
+                    R2.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#);
+        let groups = find_feedback_groups(&edges, &graph);
+
+        let u1_group = groups.iter().find(|g| {
+            g.all_edges().iter().any(|&eidx| {
+                graph.components[graph.edges[eidx].comp_idx].id == "U1"
+            })
+        }).expect("Should have U1 group");
+
+        // Both R_fb (direct) and R1+R2 (series chain) should be feedback
+        let has_rfb = u1_group.feedback_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "R_fb"
+        });
+        let has_r1 = u1_group.feedback_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "R1"
+        });
+        let has_r2 = u1_group.feedback_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "R2"
+        });
+
+        eprintln!("Equal-dist: fb={:?}", u1_group.feedback_edges.iter()
+            .map(|&e| graph.components[graph.edges[e].comp_idx].id.clone())
+            .collect::<Vec<_>>());
+
+        assert!(has_rfb, "R_fb should be feedback");
+        assert!(has_r1, "R1 should be feedback (series path)");
+        assert!(has_r2, "R2 should be feedback (series path)");
+    }
 }
