@@ -1696,7 +1696,7 @@ fn build_rtype_stage(
                 eprintln!("[state-space] G[{i},{i}] = {g:.6e}");
             }
         }
-        let (a_d, b_d, c_out, n_states) =
+        let (a_d, b_d, c_out, n_states, d_feedthrough) =
             mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, effective_rate);
         // Debug: print A_d matrix for eigenvalue analysis
         eprintln!("[state-space] A_d ({n_states}×{n_states}):");
@@ -1761,6 +1761,7 @@ fn build_rtype_stage(
             output_pos: out_mna,
             output_neg: None,
             sample_rate: effective_rate,
+            d_feedthrough,
             pot_stamps: pot_stamps_ss,
         };
 

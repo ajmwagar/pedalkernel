@@ -2840,6 +2840,8 @@ pub(super) struct StateSpaceData {
     pub output_neg: Option<usize>,
     /// Sample rate for bilinear transform (2·f_s·C scaling).
     pub sample_rate: f64,
+    /// Direct feedthrough: y = c·x + d·u. From Schur complement elimination.
+    pub d_feedthrough: f64,
     /// Pot stamps for delta-updating G when pots change.
     /// Each entry: (passive_child_index, node_pos, node_neg, last_conductance).
     pub pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
@@ -2910,8 +2912,8 @@ impl MultiNlStage {
 
                 ss.x[..n].copy_from_slice(&work[..n]);
 
-                // Output extraction: y[n] = c · x[n]
-                let mut y = 0.0;
+                // Output extraction: y[n] = c · x[n] + d · u[n]
+                let mut y = ss.d_feedthrough * sample;
                 for i in 0..n {
                     y += ss.c_vector[i] * work[i];
                 }
@@ -3553,7 +3555,7 @@ impl MultiNlStage {
                         ps.3 = new_g;
                     }
                 }
-                let (a_d, b_d, c_out, _n) = recompute.mna.build_state_space_matrices(
+                let (a_d, b_d, c_out, _n, d_ft) = recompute.mna.build_state_space_matrices(
                     &ss.cap_stamps,
                     ss.vs_idx,
                     ss.output_pos,
@@ -3564,6 +3566,7 @@ impl MultiNlStage {
                     ss.a_matrix = a_d;
                     ss.b_vector = b_d;
                     ss.c_vector = c_out;
+                    ss.d_feedthrough = d_ft;
                 }
             }
             return;

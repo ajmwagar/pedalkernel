@@ -1240,7 +1240,7 @@ impl MnaSystem {
         output_pos: Option<usize>,
         output_neg: Option<usize>,
         sample_rate: f64,
-    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize) {
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize, f64) {
         let n_nodes = self.num_nodes;
         let n_vs = self.num_vsources;
         let n_aug = n_nodes + n_vs;
@@ -1533,9 +1533,16 @@ impl MnaSystem {
                 c_d[j] -= sum;
             }
 
-            (a_d, b_d, c_d, n_c)
+            // d_d: direct feedthrough from input to output through algebraic nodes.
+            // d_d = c_a · G_aa⁻¹ · b_a (scalar)
+            let mut d_d = 0.0;
+            for k in 0..n_a {
+                d_d += c_a_out[k] * gaa_inv_ba[k];
+            }
+
+            (a_d, b_d, c_d, n_c, d_d)
         } else {
-            (a_full, b_full, c_full, n_aug)
+            (a_full, b_full, c_full, n_aug, 0.0)
         }
     }
 }
@@ -2443,10 +2450,12 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Helper: run state-space for N samples, return output vector.
+    /// y[n] = c · x[n] + d · u[n]  (d = direct feedthrough)
     fn run_state_space(
         a: &[f64],
         b: &[f64],
         c: &[f64],
+        d_ft: f64,
         n_states: usize,
         input: &[f64],
     ) -> Vec<f64> {
@@ -2461,7 +2470,7 @@ mod tests {
                 }
                 work[i] = v;
             }
-            let mut y = 0.0;
+            let mut y = d_ft * u;
             for i in 0..n_states {
                 y += c[i] * work[i];
             }
@@ -2487,7 +2496,7 @@ mod tests {
 
         // Cap on input node for coupling (makes node 0 a cap state)
         let cap_stamps = vec![(Some(0), None, 100e-9)];
-        let (a_d, b_d, c_out, n_states) =
+        let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
 
         assert!(n_states >= 1, "Should have at least 1 state");
@@ -2499,7 +2508,7 @@ mod tests {
             input[i] = (2.0 * std::f64::consts::PI * 100.0 * i as f64 / fs).sin();
         }
 
-        let output = run_state_space(&a_d, &b_d, &c_out, n_states, &input);
+        let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
 
         // Measure gain from last quarter (after transient settles)
         let start = n_samples * 3 / 4;
@@ -2528,7 +2537,7 @@ mod tests {
         mna.stamp_vcvs(Some(0), Some(1), Some(1), None, 200_000.0, 75.0, 1);
 
         let cap_stamps = vec![(Some(0), None, 1e-6)]; // coupling cap
-        let (a_d, b_d, c_out, n_states) =
+        let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);
 
         // 440 Hz sine
@@ -2537,7 +2546,7 @@ mod tests {
         for i in 0..n_samples {
             input[i] = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / fs).sin();
         }
-        let output = run_state_space(&a_d, &b_d, &c_out, n_states, &input);
+        let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
 
         let start = n_samples * 3 / 4;
         let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
@@ -2562,7 +2571,7 @@ mod tests {
         mna.stamp_vcvs(Some(0), Some(1), Some(2), None, 200_000.0, 75.0, 1);
 
         let cap_stamps = vec![(Some(0), None, 1e-6)];
-        let (a_d, b_d, c_out, n_states) =
+        let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
 
         let n_samples = (fs * 0.5) as usize;
@@ -2570,7 +2579,7 @@ mod tests {
         for i in 0..n_samples {
             input[i] = 0.1 * (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin();
         }
-        let output = run_state_space(&a_d, &b_d, &c_out, n_states, &input);
+        let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
 
         let start = n_samples * 3 / 4;
         let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
@@ -2603,7 +2612,7 @@ mod tests {
             (Some(0), None, 1e-6),       // coupling cap (large, doesn't affect response)
             (Some(1), Some(2), c),       // feedback cap (integrator)
         ];
-        let (a_d, b_d, c_out, n_states) =
+        let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
 
         // Measure gain at 50 Hz (below f_0dB → high gain)
@@ -2613,7 +2622,7 @@ mod tests {
             for i in 0..n_samples {
                 input[i] = 0.01 * (2.0 * std::f64::consts::PI * freq * i as f64 / fs).sin();
             }
-            let output = run_state_space(&a_d, &b_d, &c_out, n_states, &input);
+            let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
             let start = n_samples * 3 / 4;
             let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
             out_peak / 0.01
@@ -3246,7 +3255,7 @@ mod tests {
         mna.stamp_voltage_source(Some(0), None, 0);
 
         let cap_stamps = vec![(Some(1), None, c)];
-        let (a_d, b_d, c_out, n_states) =
+        let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);
 
         // Should reduce to 1 state (the cap)
@@ -3286,7 +3295,7 @@ mod tests {
             (Some(1), None, c1), // C1: mid to gnd
             (Some(2), None, c2), // C2: output to gnd
         ];
-        let (a_d, _b_d, _c_out, n_states) =
+        let (a_d, _b_d, _c_out, n_states, _d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
 
         assert_eq!(n_states, 2, "Should have 2 cap states, got {n_states}");
@@ -3356,7 +3365,7 @@ mod tests {
             (Some(0), None, c2),
         ];
 
-        let (a_d, b_d, c_out, n_states) =
+        let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);
 
         eprintln!("n_states = {n_states}");
