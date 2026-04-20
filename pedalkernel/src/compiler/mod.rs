@@ -21,6 +21,7 @@ mod helpers;
 mod opamp_analysis;
 mod plan;
 mod spqr;
+mod spqr_build;
 mod split;
 mod stage;
 pub mod stage_test_helpers;

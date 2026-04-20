@@ -3851,7 +3851,7 @@ fn wrap_with_transformer_load(
 ///
 /// `use_jfet_vr` overrides JFET creation: when true, builds a
 /// `JfetVr` (variable resistance, no NR) instead of `Jfet` (full NR solver).
-fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<DiodeModel>) {
+pub(super) fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<DiodeModel>) {
     match kind {
         NonlinearKind::DiodePair(dt) => {
             let model = diode_model(*dt);
