@@ -1340,7 +1340,10 @@ impl MnaSystem {
             c_full[n] -= 1.0;
         }
 
-        eprintln!("[ss] n_nodes={n_nodes} n_vs={n_vs} vs_idx={vs_idx}");
+        // Always use Schur complement reduction. The full system has
+        // parasitic -1 eigenvalues that are difficult to filter cleanly.
+        // The reduced system has correct frequency and gain; Q is low
+        // for oscillator circuits (bridged-T) but acceptable for amplifiers.
         // ── Step 1: Eliminate input VS node by substitution ──────────────
         // The input voltage source constrains V(injection_node) = u.
         // Substitute this into the G and C matrices to remove one node.

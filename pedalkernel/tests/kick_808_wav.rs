@@ -42,9 +42,9 @@ fn bridged_t_kick_produces_wav() {
         let sample = proc.process(input);
         output.push(sample);
 
-        // Print every sample for first 100
-        if i < 100 {
-            eprintln!("  s[{i}] = {sample:.8e}")
+        // Print samples across full decay
+        if i < 20 || (i < 2000 && i % 100 == 0) {
+            eprintln!("  s[{i:5}] = {sample:+.6e}")
         }
     }
 

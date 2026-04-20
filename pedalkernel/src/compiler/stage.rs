@@ -2842,6 +2842,9 @@ pub(super) struct StateSpaceData {
     pub sample_rate: f64,
     /// Direct feedthrough: y = c·x + d·u. From Schur complement elimination.
     pub d_feedthrough: f64,
+    /// Previous output for 2-sample Nyquist filter.
+    /// Removes parasitic -1 eigenvalue oscillation from unreduced systems.
+    pub prev_output: f64,
     /// Pot stamps for delta-updating G when pots change.
     /// Each entry: (passive_child_index, node_pos, node_neg, last_conductance).
     pub pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
@@ -2913,10 +2916,17 @@ impl MultiNlStage {
                 ss.x[..n].copy_from_slice(&work[..n]);
 
                 // Output extraction: y[n] = c · x[n] + d · u[n]
-                let mut y = ss.d_feedthrough * sample;
+                let mut y_raw = ss.d_feedthrough * sample;
                 for i in 0..n {
-                    y += ss.c_vector[i] * work[i];
+                    y_raw += ss.c_vector[i] * work[i];
                 }
+                // 2-sample moving average: kills Nyquist (-1 eigenvalue)
+                // parasitics from unreduced VCVS algebraic constraints.
+                // At 130 Hz this averages consecutive samples that are
+                // nearly identical → negligible signal loss. At Nyquist
+                // (alternating +/-) the average is zero → perfect cancellation.
+                let y = (y_raw + ss.prev_output) * 0.5;
+                ss.prev_output = y_raw;
                 y
             });
             return flush_denormal(output);

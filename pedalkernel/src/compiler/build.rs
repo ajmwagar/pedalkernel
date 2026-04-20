@@ -1762,6 +1762,7 @@ fn build_rtype_stage(
             output_neg: None,
             sample_rate: effective_rate,
             d_feedthrough,
+            prev_output: 0.0,
             pot_stamps: pot_stamps_ss,
         };
 

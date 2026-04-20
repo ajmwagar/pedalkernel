@@ -42,6 +42,10 @@ pub struct OpAmpModel {
     /// Output impedance (Ω). Typically 50-200Ω for voltage-feedback op-amps.
     /// Used by the VCVS stamp in the MNA nullor path.
     pub output_impedance: f64,
+    /// Output capacitance (F). Physical capacitance of the output stage.
+    /// Keeps the output node as a dynamic state in the state-space reduction,
+    /// preserving the feedback loop's energy recirculation. Typical: 10-50pF.
+    pub output_capacitance: f64,
 }
 
 impl OpAmpModel {
@@ -57,6 +61,7 @@ impl OpAmpModel {
             slew_rate: 13.0,           // 13 V/µs
             v_max: 12.0,               // ±12V swing at ±15V supply
             output_impedance: 75.0,  // Ω
+            output_capacitance: 20e-12, // 20pF
         }
     }
 
@@ -71,6 +76,7 @@ impl OpAmpModel {
             slew_rate: 13.0,
             v_max: 12.0,
             output_impedance: 75.0,
+            output_capacitance: 20e-12,
         }
     }
 
@@ -81,6 +87,7 @@ impl OpAmpModel {
             slew_rate: 0.3,
             v_max: 12.0,
             output_impedance: 200.0, // Higher Ro than JFET types
+            output_capacitance: 30e-12, // 30pF — slower output stage
         }
     }
 
@@ -91,6 +98,7 @@ impl OpAmpModel {
             slew_rate: 0.5,
             v_max: 12.0,
             output_impedance: 75.0,
+            output_capacitance: 20e-12,
         }
     }
 
@@ -101,6 +109,7 @@ impl OpAmpModel {
             slew_rate: 1.7,
             v_max: 12.0,
             output_impedance: 75.0,
+            output_capacitance: 20e-12,
         }
     }
 
@@ -111,6 +120,7 @@ impl OpAmpModel {
             slew_rate: 1.5,
             v_max: 12.0,
             output_impedance: 75.0,
+            output_capacitance: 20e-12,
         }
     }
 
@@ -121,6 +131,7 @@ impl OpAmpModel {
             slew_rate: 9.0,
             v_max: 12.0,
             output_impedance: 50.0, // Lower Ro — studio grade
+            output_capacitance: 15e-12, // 15pF — fast output
         }
     }
 
@@ -131,6 +142,7 @@ impl OpAmpModel {
             slew_rate: 0.3,
             v_max: 12.0,
             output_impedance: 60.0,
+            output_capacitance: 25e-12,
         }
     }
 
@@ -141,6 +153,7 @@ impl OpAmpModel {
             slew_rate: 1.0,
             v_max: 12.0,
             output_impedance: 75.0,
+            output_capacitance: 20e-12,
         }
     }
 

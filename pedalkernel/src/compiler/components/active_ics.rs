@@ -113,30 +113,29 @@ impl Component for OpAmp {
         let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
         let ro = model.output_impedance;
 
-        // For the state-space MNA path, use GBW-limited effective gain.
-        // The dominant pole at f_p = GBW/Aol creates gain rolloff.
-        // At the audio band center (~130 Hz for a kick drum), the effective
-        // Aol = GBW / f_audio. This keeps the loop gain near the oscillation
-        // threshold, giving complex eigenvalues at the correct frequency.
-        //
-        // For non-resonant circuits (simple Rf/Ri feedback), the reduced
-        // Aol still gives accurate closed-loop gain because Aol >> gain.
-        // Use GBW-limited gain at a frequency that keeps eigenvalues complex.
-        // The Schur complement modifies the effective loop gain — eigenvalues
-        // go real above Aol≈55 for typical bridged-T circuits. Using
-        // Aol = GBW / f_high keeps the gain in the complex-eigenvalue regime.
-        let f_high = model.gbw / 50.0; // Target Aol ≈ 50
-        let aol = (model.gbw / f_high).min(model.open_loop_gain);
+        let aol = model.open_loop_gain;
 
+        let out_mna = (ctx.pin_to_mna)("out");
         mna.stamp_vcvs(
             (ctx.pin_to_mna)("pos"),
             (ctx.pin_to_mna)("neg"),
-            (ctx.pin_to_mna)("out"),
+            out_mna,
             None,
             aol,
             ro,
             ctx.vsrc_base,
         );
+
+        // Output capacitance: keeps the output node as a dynamic state
+        // in the Schur complement reduction, preserving the feedback loop's
+        // energy recirculation. Without this, the output is eliminated
+        // algebraically and the Q drops to ~0.3.
+        if model.output_capacitance > 0.0 {
+            if let Some(ref mut caps) = ctx.cap_stamps {
+                caps.push((out_mna, None, model.output_capacitance));
+            }
+        }
+
         StampResult::Stamped
     }
 
