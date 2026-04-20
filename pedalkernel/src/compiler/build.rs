@@ -1756,19 +1756,70 @@ fn build_rtype_stage(
                     let c_prod: f64 = c_shunt.iter().take(2).product();
                     let f0 = 1.0 / (2.0 * std::f64::consts::PI * (r_prod * c_prod).sqrt());
 
-                    Some((rf, r_crit.max(1.0), f0))
+                    Some((rf, r_crit.max(1.0), f0, r_series, c_shunt))
                 } else {
                     None
                 }
             });
 
-            eprintln!("[iir-build] attempting build_iir with feedback_r={:?}", feedback_r);
+            // Extract component values and build_iir parameters
+            let (fb_for_iir, r_ser, c_shu) = match &feedback_r {
+                Some((rf, rc, f0, rs, cs)) => (Some((*rf, *rc, *f0)), rs.clone(), cs.clone()),
+                None => (None, Vec::new(), Vec::new()),
+            };
             let iir_result = mna.build_iir(
-                &cap_stamps, vs_idx, out_mna, None, effective_rate, feedback_r,
+                &cap_stamps, vs_idx, out_mna, None, effective_rate, fb_for_iir,
             );
-            eprintln!("[iir-build] result={}", if iir_result.is_some() { "Some" } else { "None" });
             if let Some((b_coeffs, a_coeffs)) = iir_result {
-                let iir_data = super::stage::IirData::new(b_coeffs, a_coeffs);
+                let mut iir_data = super::stage::IirData::new(
+                    b_coeffs, a_coeffs, effective_rate,
+                );
+
+                // Store component values for O(1) pot recomputation.
+                if let Some((rf, r_crit_val, _f0, _, _)) = &feedback_r {
+                    iir_data.r_fb = *rf;
+                    iir_data.r_crit = *r_crit_val;
+                    let r_prod: f64 = if r_ser.len() >= 2 {
+                        r_ser[0] * r_ser[1]
+                    } else if !r_ser.is_empty() {
+                        r_ser[0] * r_ser[0]
+                    } else { 1.0 };
+                    iir_data.r_series_product = r_prod;
+                    let c_prod: f64 = c_shu.iter().take(2).product();
+                    iir_data.c_shunt_product = c_prod;
+                    iir_data.r_series_base = [
+                        *r_ser.first().unwrap_or(&150e3),
+                        *r_ser.get(1).unwrap_or(r_ser.first().unwrap_or(&150e3)),
+                    ];
+                    iir_data.c_shunt_base = [
+                        *c_shu.first().unwrap_or(&8.2e-9),
+                        *c_shu.get(1).unwrap_or(c_shu.first().unwrap_or(&8.2e-9)),
+                    ];
+                }
+
+                // Collect pot children from plan edges for runtime pot binding
+                let mut pot_children: Vec<DynNode> = Vec::new();
+                let rec = graph.nullor_pins.iter().find(|r| {
+                    comp_vsrc_map.first().map(|&(ci, _)| ci) == Some(r.comp_idx)
+                });
+                let (neg_node, out_node) = rec.map(|r| (r.neg_node, r.out_node)).unwrap_or((0, 0));
+
+                for &eidx in &plan.passive_edge_indices {
+                    let e = &graph.edges[eidx];
+                    let comp = &graph.components[e.comp_idx];
+                    if comp.kind.is_pot() {
+                        if let Some(pot) = comp.kind.as_any().downcast_ref::<super::components::Potentiometer>() {
+                            let is_fb = (e.node_a == neg_node && e.node_b == out_node)
+                                || (e.node_a == out_node && e.node_b == neg_node);
+                            let is_series = !is_fb && (e.node_a == neg_node || e.node_b == neg_node);
+                            let child_idx = pot_children.len();
+                            pot_children.push(DynNode::Pot(
+                                comp.id.clone(), pot.max_r, 0.5, pot.taper,
+                            ));
+                            iir_data.pot_map.push((child_idx, is_series, is_fb));
+                        }
+                    }
+                }
 
                 let signal_flow_distance = plan.signal_chain_depth.unwrap_or_else(|| {
                     classified.dist_from_in.get(&plan.injection_node).copied().unwrap_or(usize::MAX)
@@ -1783,7 +1834,7 @@ fn build_rtype_stage(
                     nl_devices: Vec::new(),
                     nl_port_resistances: Vec::new(),
                     passive_children: Vec::new(),
-                    pot_children: Vec::new(),
+                    pot_children,
                     pot_mna_stamps: Vec::new(),
                     n_nl: 0,
                     v_prev: Vec::new(),

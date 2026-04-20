@@ -2823,29 +2823,87 @@ pub(super) struct MultiNlStage {
 /// Uses bilinear transform on the continuous-time MNA to get node-voltage
 /// dynamics directly, avoiding WDF port-impedance scaling issues.
 /// IIR filter compiled from a linear R-node MNA.
-/// For stable circuits: transfer function H(z) → IIR coefficients.
-/// For oscillators: biquad with f0/Q from component analysis.
+/// For oscillators: biquad with f0/Q derived from component values.
+/// Recomputation on pot change is O(1) — just recalculate f0, Q, gain
+/// from stored component values and update the 5 biquad coefficients.
+/// No matrix inversion needed. Cortex-M7 safe.
 #[derive(Debug, Clone)]
 pub(super) struct IirData {
-    /// Numerator coefficients [b0, b1, b2, ...].
+    /// Numerator coefficients [b0, b1, b2].
     pub b_coeffs: Vec<f64>,
-    /// Denominator coefficients [1.0, a1, a2, ...] (a0 = 1.0).
+    /// Denominator coefficients [1.0, a1, a2].
     pub a_coeffs: Vec<f64>,
-    /// Input history [x[n-1], x[n-2], ...].
+    /// Input history [x[n-1], x[n-2]].
     pub x_hist: Vec<f64>,
-    /// Output history [y[n-1], y[n-2], ...].
+    /// Output history [y[n-1], y[n-2]].
     pub y_hist: Vec<f64>,
+    /// Sample rate for coefficient recomputation.
+    pub sample_rate: f64,
+    /// Stored component values for O(1) recomputation.
+    /// R_series: product of series resistors (R1×R2).
+    pub r_series_product: f64,
+    /// C_shunt: product of shunt caps (C1×C2).
+    pub c_shunt_product: f64,
+    /// Feedback resistor value (current, changes with pot).
+    pub r_fb: f64,
+    /// Critical resistance: R1 + R2 + R1*C1/C2.
+    /// Recomputed when series R changes (tuning pot).
+    pub r_crit: f64,
+    /// Pot-to-component mapping for recomputation.
+    /// Each entry: (pot_child_index, affects_r_series, affects_r_fb)
+    pub pot_map: Vec<(usize, bool, bool)>,
+    /// Base R values for series resistors (before pot contribution).
+    pub r_series_base: [f64; 2],
+    /// Base C values for shunt caps.
+    pub c_shunt_base: [f64; 2],
 }
 
 impl IirData {
-    pub fn new(b_coeffs: Vec<f64>, a_coeffs: Vec<f64>) -> Self {
+    pub fn new(b_coeffs: Vec<f64>, a_coeffs: Vec<f64>, sample_rate: f64) -> Self {
         let order = a_coeffs.len() - 1;
         Self {
             b_coeffs,
             a_coeffs,
             x_hist: vec![0.0; order],
             y_hist: vec![0.0; order],
+            sample_rate,
+            r_series_product: 0.0,
+            c_shunt_product: 0.0,
+            r_fb: 0.0,
+            r_crit: 0.0,
+            pot_map: Vec::new(),
+            r_series_base: [0.0; 2],
+            c_shunt_base: [0.0; 2],
         }
+    }
+
+    /// Recompute biquad coefficients from current R/C values.
+    /// O(1): sqrt + sin + cos + a few multiplies. Cortex-M7 safe.
+    pub fn recompute(&mut self) {
+        use std::f64::consts::PI;
+        if self.r_series_product <= 0.0 || self.c_shunt_product <= 0.0 || self.r_fb <= 0.0 {
+            return;
+        }
+
+        let f0 = 1.0 / (2.0 * PI * (self.r_series_product * self.c_shunt_product).sqrt());
+        let q = if self.r_fb > self.r_crit * 1.01 {
+            self.r_fb / (self.r_fb - self.r_crit)
+        } else {
+            100.0
+        };
+        let gain = self.r_fb / (self.r_series_product.sqrt()); // Rf / sqrt(R1*R2)
+
+        let w0 = 2.0 * PI * f0 / self.sample_rate;
+        let sin_w0 = w0.sin();
+        let cos_w0 = w0.cos();
+        let alpha = sin_w0 / (2.0 * q);
+
+        let a0 = 1.0 + alpha;
+        self.b_coeffs[0] = alpha * gain / a0;
+        self.b_coeffs[1] = 0.0;
+        self.b_coeffs[2] = -alpha * gain / a0;
+        self.a_coeffs[1] = -2.0 * cos_w0 / a0;
+        self.a_coeffs[2] = (1.0 - alpha) / a0;
     }
 
     /// Process one sample through the IIR (Direct Form I).
@@ -2857,7 +2915,6 @@ impl IirData {
             y += self.b_coeffs.get(k + 1).copied().unwrap_or(0.0) * self.x_hist[k];
             y -= self.a_coeffs[k + 1] * self.y_hist[k];
         }
-        // Shift histories
         for k in (1..order).rev() {
             self.x_hist[k] = self.x_hist[k - 1];
             self.y_hist[k] = self.y_hist[k - 1];
@@ -3595,6 +3652,31 @@ impl MultiNlStage {
     /// and passive_children, re-derives the scattering matrix, and updates all
     /// sub-blocks (s_nl, s_nl_passive, s_nl_adapted) and the RTypeAdaptor.
     fn recompute_scattering(&mut self) {
+        // ── IIR recompute ────────────────────────────────────────────────
+        // When IIR is active, read current pot resistances and recompute
+        // the biquad coefficients. O(1) — no matrix inversion.
+        if let Some(ref mut iir) = self.iir {
+            // Update R_fb and R_series from pot children
+            for &(child_idx, is_series, is_fb) in &iir.pot_map.clone() {
+                if child_idx < self.pot_children.len() {
+                    let pot_r = self.pot_children[child_idx].port_resistance();
+                    if is_fb {
+                        iir.r_fb = pot_r;
+                        // R_crit depends on R_series, not R_fb — no update needed
+                    }
+                    if is_series {
+                        // Tuning pot adds to R1 — recompute R products and R_crit
+                        let r1 = iir.r_series_base[0] + pot_r;
+                        let r2 = iir.r_series_base[1];
+                        iir.r_series_product = r1 * r2;
+                        iir.r_crit = r1 + r2 + r1 * iir.c_shunt_base[0] / iir.c_shunt_base[1];
+                    }
+                }
+            }
+            iir.recompute();
+            return;
+        }
+
         // ── State-space recompute ────────────────────────────────────────
         // When state-space is active, rebuild A_d, b_d from the updated MNA
         // (G matrix has been delta-updated by set_ota_gain_linear or set_pot).
