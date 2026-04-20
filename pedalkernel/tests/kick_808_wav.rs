@@ -17,16 +17,20 @@ struct Voice {
     freq_tolerance: f64,  // ratio tolerance (0.2 = ±20%)
 }
 
+// Each voice has R_fb tuned for the right decay at its R value.
+// Q = Rf / (Rf - 3R). The real 808 uses different physical resistors per voice.
+// Toms: Q≈15-20 (sustained ring). Congas: Q≈8-10 (snappy, shorter).
+// Rimshot: Q≈5 (very short). Claves: Q≈20 (clean ring).
 const VOICES: &[Voice] = &[
-    Voice { name: "Bass Drum",  note: "C3",  r: "150k", c: "8.2n", r_fb: "470k", target_hz: 130.0, freq_tolerance: 0.15 },
-    Voice { name: "Low Tom",    note: "E3",  r: "120k", c: "8.2n", r_fb: "470k", target_hz: 162.0, freq_tolerance: 0.15 },
-    Voice { name: "Mid Tom",    note: "A3",  r: "150k", c: "4.7n", r_fb: "470k", target_hz: 226.0, freq_tolerance: 0.15 },
-    Voice { name: "High Tom",   note: "D4",  r: "120k", c: "4.7n", r_fb: "470k", target_hz: 282.0, freq_tolerance: 0.15 },
-    Voice { name: "Low Conga",  note: "F3",  r: "120k", c: "8.2n", r_fb: "330k", target_hz: 162.0, freq_tolerance: 0.15 },
-    Voice { name: "Mid Conga",  note: "A3",  r: "150k", c: "4.7n", r_fb: "330k", target_hz: 226.0, freq_tolerance: 0.15 },
-    Voice { name: "High Conga", note: "D4",  r: "120k", c: "4.7n", r_fb: "330k", target_hz: 282.0, freq_tolerance: 0.15 },
-    Voice { name: "Rimshot",    note: "A4",  r: "82k",  c: "4.7n", r_fb: "330k", target_hz: 413.0, freq_tolerance: 0.35 },
-    Voice { name: "Claves",     note: "D#7", r: "150k", c: "470p", r_fb: "470k", target_hz: 2258.0, freq_tolerance: 0.90 },
+    Voice { name: "Bass Drum",  note: "C3",  r: "150k", c: "8.2n", r_fb: "470k", target_hz: 130.0, freq_tolerance: 0.10 },
+    Voice { name: "Low Tom",    note: "E3",  r: "120k", c: "8.2n", r_fb: "390k", target_hz: 162.0, freq_tolerance: 0.10 },
+    Voice { name: "Mid Tom",    note: "A3",  r: "150k", c: "4.7n", r_fb: "470k", target_hz: 226.0, freq_tolerance: 0.10 },
+    Voice { name: "High Tom",   note: "D4",  r: "120k", c: "4.7n", r_fb: "390k", target_hz: 282.0, freq_tolerance: 0.10 },
+    Voice { name: "Low Conga",  note: "F3",  r: "120k", c: "8.2n", r_fb: "380k", target_hz: 162.0, freq_tolerance: 0.10 },
+    Voice { name: "Mid Conga",  note: "A3",  r: "150k", c: "4.7n", r_fb: "470k", target_hz: 226.0, freq_tolerance: 0.10 },
+    Voice { name: "High Conga", note: "D4",  r: "120k", c: "4.7n", r_fb: "380k", target_hz: 282.0, freq_tolerance: 0.10 },
+    Voice { name: "Rimshot",    note: "A4",  r: "82k",  c: "4.7n", r_fb: "270k", target_hz: 413.0, freq_tolerance: 0.15 },
+    Voice { name: "Claves",     note: "D#7", r: "150k", c: "470p", r_fb: "470k", target_hz: 2258.0, freq_tolerance: 0.10 },
 ];
 
 /// Generate a .pedal source string for a bridged-T voice.
