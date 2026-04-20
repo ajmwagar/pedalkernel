@@ -750,6 +750,9 @@ fn compile_muff() {
             super::compiled::StageRef::Iir(i) => {
                 signal = proc2.iir_stages[*i].process(signal);
             }
+            super::compiled::StageRef::StateSpace(i) => {
+                signal = proc2.state_space_stages[*i].process(signal);
+            }
         }
     }
     let final_out = signal * proc2.output_gain;
@@ -829,7 +832,7 @@ fn compile_muff() {
                     signal = if out.is_finite() { out } else { 0.0 };
                     stage_bufs[*si + 1].push(signal);
                 }
-                super::compiled::StageRef::MultiNl(_) | super::compiled::StageRef::Iir(_) => {}
+                super::compiled::StageRef::MultiNl(_) | super::compiled::StageRef::Iir(_) | super::compiled::StageRef::StateSpace(_) => {}
             }
         }
     }
@@ -2753,6 +2756,9 @@ fn big_muff_per_stage_signal_levels() {
             super::compiled::StageRef::Iir(i) => {
                 signal = proc2.iir_stages[*i].process(signal);
             }
+            super::compiled::StageRef::StateSpace(i) => {
+                signal = proc2.state_space_stages[*i].process(signal);
+            }
         }
     }
     let final_out = signal * proc2.output_gain;
@@ -2803,6 +2809,9 @@ fn big_muff_sustain_spectral_sweep() {
                     }
                     super::compiled::StageRef::Iir(i) => {
                         eprintln!("  [{pos}] Iir({i})");
+                    }
+                    super::compiled::StageRef::StateSpace(i) => {
+                        eprintln!("  [{pos}] StateSpace({i})");
                     }
                 }
             }
@@ -6383,6 +6392,9 @@ fn diag_bluesbreaker_inner(pedal: &PedalDef) {
                     }
                     super::compiled::StageRef::Iir(i) => {
                         signal = p.iir_stages[*i].process(signal);
+                    }
+                    super::compiled::StageRef::StateSpace(i) => {
+                        signal = p.state_space_stages[*i].process(signal);
                     }
                 }
             }

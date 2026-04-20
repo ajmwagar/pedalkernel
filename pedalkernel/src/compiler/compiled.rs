@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::stage::{
     IirStage, MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind,
-    SidechainProcessor, SubcircuitProcessor, WdfStage,
+    SidechainProcessor, StateSpaceStage, SubcircuitProcessor, WdfStage,
 };
 
 /// Reference to a stage by type and index, for topological ordering.
@@ -20,6 +20,7 @@ pub(super) enum StageRef {
     Wdf(usize),
     MultiNl(usize),
     Iir(usize),
+    StateSpace(usize),
 }
 
 #[cfg(feature = "debug-trace")]
@@ -482,6 +483,8 @@ pub struct CompiledPedal {
     pub(super) multi_nl_stages: Vec<MultiNlStage>,
     /// IIR biquad stages compiled from linear rigid MNA. O(1)/sample.
     pub(super) iir_stages: Vec<IirStage>,
+    /// State-space stages for linear circuits with 3+ reactive elements. O(N²)/sample.
+    pub(super) state_space_stages: Vec<StateSpaceStage>,
     pub(super) pre_gain: f64,
     /// Auto-calibrated output gain scalar (1.0 = no calibration).
     pub(super) output_gain: f64,
@@ -2129,6 +2132,11 @@ impl PedalProcessor for CompiledPedal {
                     prev_was_clipping = false;
                     let iir_stage = &mut self.iir_stages[*i];
                     signal = iir_stage.process(signal);
+                }
+                StageRef::StateSpace(i) => {
+                    prev_was_clipping = false;
+                    let ss_stage = &mut self.state_space_stages[*i];
+                    signal = ss_stage.process(signal);
                 }
             }
         }

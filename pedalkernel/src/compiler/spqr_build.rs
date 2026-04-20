@@ -12,15 +12,16 @@ use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
 use super::rigid::{build_rigid, build_rigid_from_group};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
-use super::stage::{IirStage, RootKind, WdfStage};
+use super::stage::{IirStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::WdfVoltageSource;
 use crate::dsl::PedalDef;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 
-/// A stage built from the SPQR pipeline. Either WDF or IIR.
+/// A stage built from the SPQR pipeline. Either WDF, IIR, or StateSpace.
 pub(super) enum BuiltStage {
     Wdf(WdfStage),
     Iir(IirStage),
+    StateSpace(StateSpaceStage),
 }
 
 impl BuiltStage {
@@ -29,7 +30,7 @@ impl BuiltStage {
     pub(super) fn into_wdf(self) -> WdfStage {
         match self {
             BuiltStage::Wdf(w) => w,
-            BuiltStage::Iir(_) => panic!("Expected WdfStage, got IirStage"),
+            _ => panic!("Expected WdfStage"),
         }
     }
 
@@ -38,7 +39,16 @@ impl BuiltStage {
     pub(super) fn into_iir(self) -> IirStage {
         match self {
             BuiltStage::Iir(i) => i,
-            BuiltStage::Wdf(_) => panic!("Expected IirStage, got WdfStage"),
+            _ => panic!("Expected IirStage"),
+        }
+    }
+
+    /// Extract as StateSpaceStage, panicking if it's a different type. For tests.
+    #[cfg(test)]
+    pub(super) fn into_state_space(self) -> StateSpaceStage {
+        match self {
+            BuiltStage::StateSpace(s) => s,
+            _ => panic!("Expected StateSpaceStage"),
         }
     }
 }
@@ -90,6 +100,7 @@ pub fn compile_via_spqr_with_options(
     let terminals = vec![graph.in_node, graph.out_node];
     let mut wdf_stages: Vec<WdfStage> = Vec::new();
     let mut iir_stages: Vec<IirStage> = Vec::new();
+    let mut state_space_stages: Vec<StateSpaceStage> = Vec::new();
     let mut stage_order: Vec<StageRef> = Vec::new();
     let mut stage_counter = 0usize;
 
@@ -119,6 +130,11 @@ pub fn compile_via_spqr_with_options(
                     stage_order.push(StageRef::Iir(iir_stages.len()));
                     iir_stages.push(iir);
                 }
+                BuiltStage::StateSpace(mut ss) => {
+                    ss.signal_flow_distance = stage_counter;
+                    stage_order.push(StageRef::StateSpace(state_space_stages.len()));
+                    state_space_stages.push(ss);
+                }
             }
             stage_counter += 1;
         } else {
@@ -145,6 +161,11 @@ pub fn compile_via_spqr_with_options(
                         stage_order.push(StageRef::Iir(iir_stages.len()));
                         iir_stages.push(iir);
                     }
+                    BuiltStage::StateSpace(mut ss) => {
+                        ss.signal_flow_distance = stage_counter;
+                        stage_order.push(StageRef::StateSpace(state_space_stages.len()));
+                        state_space_stages.push(ss);
+                    }
                 }
                 stage_counter += 1;
             }
@@ -153,11 +174,12 @@ pub fn compile_via_spqr_with_options(
 
     let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
 
-    Ok(CompiledPedal {
+    let mut compiled = CompiledPedal {
         stages: wdf_stages,
         push_pull_stages: Vec::new(),
         multi_nl_stages: Vec::new(),
         iir_stages,
+        state_space_stages,
         pre_gain: 1.0,
         output_gain: 1.0,
         rail_saturation: RailSaturation::None,
@@ -201,7 +223,13 @@ pub fn compile_via_spqr_with_options(
         bbd_mix_pot_id: None,
         midi_trigger_map: std::collections::HashMap::new(),
         original_passive_values: std::collections::HashMap::new(),
-    })
+    };
+
+    if pedal.calibrate {
+        super::calibrate::calibrate_output(&mut compiled);
+    }
+
+    Ok(compiled)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

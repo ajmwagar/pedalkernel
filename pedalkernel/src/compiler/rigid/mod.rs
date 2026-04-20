@@ -30,7 +30,7 @@ use super::dyn_node::DynNode;
 use super::signal_flow::FlowGroup;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr_build::BuiltStage;
-use super::stage::{IirStage, RootKind, WdfStage};
+use super::stage::{IirStage, RootKind, StateSpaceStage, WdfStage};
 use crate::oversampling::{Oversampler, OversamplingFactor};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -240,12 +240,27 @@ pub(super) fn build_rigid_from_group(
             }
         }
         RigidOptimization::Iir => {
-            let pendant_trees = Vec::new(); // TODO: extract from group
-            iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate)
-                .map(|iir| BuiltStage::Iir(IirStage::new(iir)))
+            let pendant_trees = Vec::new();
+            // Try IIR (≤2 states). If too many states, use StateSpace.
+            match iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate) {
+                Ok(iir) => Ok(BuiltStage::Iir(IirStage::new(iir))),
+                Err(_) => {
+                    // IIR failed (>2 states or other issue) → StateSpace
+                    let supply_voltage = 9.0; // TODO: pass from PedalDef
+                    state_space::build_state_space_stage(
+                        &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
+                    )
+                    .map(BuiltStage::StateSpace)
+                }
+            }
         }
         RigidOptimization::StateSpace => {
-            Err("StateSpace rigid stages not yet implemented".to_string())
+            let pendant_trees = Vec::new(); // TODO: extract from group
+            let supply_voltage = 9.0; // TODO: pass from PedalDef
+            state_space::build_state_space_stage(
+                &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
+            )
+            .map(BuiltStage::StateSpace)
         }
         RigidOptimization::General => {
             if let Some(g) = group {

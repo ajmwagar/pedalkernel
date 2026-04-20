@@ -519,3 +519,48 @@ fn diagnose_ratking() {
         }
     }
 }
+
+#[test]
+fn compile_via_spqr_state_space_active_filter() {
+    // An active filter with 3 caps that can't reduce to biquad.
+    // Should compile via StateSpace and produce filtered output.
+    use crate::PedalProcessor;
+
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                C1: cap(100n)
+                C2: cap(47n)
+                C3: cap(22n)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                C1.a -> U1.neg
+                C1.b -> gnd
+                C2.a -> U1.out
+                C2.b -> gnd
+                C3.a -> U1.neg
+                C3.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0)
+        .expect("Should compile active filter via StateSpace");
+
+    // Should produce filtered output (not silence)
+    for _ in 0..100 {
+        compiled.process(0.1);
+    }
+    let output = compiled.process(0.1);
+    assert!(output.abs() > 0.001, "StateSpace should produce output, got {output:.6}");
+}

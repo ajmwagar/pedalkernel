@@ -1478,6 +1478,7 @@ fn compile_subcircuit_equipment(
         push_pull_stages: Vec::new(),
         multi_nl_stages: Vec::new(),
         iir_stages: Vec::new(),
+        state_space_stages: Vec::new(),
         pre_gain: 1.0,
         output_gain: 1.0,
         rail_saturation: super::compiled::RailSaturation::None,
@@ -2715,7 +2716,7 @@ pub fn compile_pedal_with_options(
             .map(|(sr, _)| match sr {
                 StageRef::Wdf(i) => stages[*i].injection_node_id,
                 StageRef::MultiNl(i) => multi_nl_stages[*i].injection_node_id,
-                StageRef::Iir(_) => usize::MAX, // IIR stages only from SPQR pipeline
+                StageRef::Iir(_) | StageRef::StateSpace(_) => usize::MAX,
             })
             .collect();
 
@@ -2740,7 +2741,7 @@ pub fn compile_pedal_with_options(
                 let out_id = match sr {
                     StageRef::Wdf(i) => stages[*i].output_node_id,
                     StageRef::MultiNl(i) => multi_nl_stages[*i].output_node_id,
-                    StageRef::Iir(_) => usize::MAX,
+                    StageRef::Iir(_) | StageRef::StateSpace(_) => usize::MAX,
                 };
                 if out_id == usize::MAX {
                     HashSet::new()
@@ -2784,7 +2785,7 @@ pub fn compile_pedal_with_options(
                 let out_id = match sr {
                     StageRef::Wdf(i) => stages[*i].output_node_id,
                     StageRef::MultiNl(i) => multi_nl_stages[*i].output_node_id,
-                    StageRef::Iir(_) => usize::MAX,
+                    StageRef::Iir(_) | StageRef::StateSpace(_) => usize::MAX,
                 };
                 if out_id != usize::MAX {
                     outputs_by_sfd.entry(sfd).or_default().insert(out_id);
@@ -2850,6 +2851,7 @@ pub fn compile_pedal_with_options(
         push_pull_stages,
         multi_nl_stages,
         iir_stages: Vec::new(),
+        state_space_stages: Vec::new(),
         pre_gain,
         output_gain: 1.0,
         rail_saturation,
@@ -2974,13 +2976,7 @@ pub fn compile_pedal_with_options(
 
     // Auto-calibrate input and output levels if requested by pedal definition
     if pedal.calibrate {
-        let input_atten = calibrate_input_level(&mut compiled);
-        compiled.pre_gain *= input_atten;
-        compiled.reset();
-
-        let output_gain = calibrate_output_gain(&mut compiled);
-        compiled.output_gain = output_gain;
-        compiled.reset();
+        super::calibrate::calibrate_output(&mut compiled);
     }
 
     // Snapshot original passive values for reset support.
@@ -3135,45 +3131,6 @@ fn topological_refine_stage_order(
 /// Output calibration then compensates to restore unity gain.
 ///
 /// Returns attenuation factor to multiply pre_gain by.
-fn calibrate_input_level(_pedal: &mut CompiledPedal) -> f64 {
-    // Single-coil average: ~50-80mV RMS, peak ~100mV.
-    // But pedal circuits have internal gain stages (opamp, transistor)
-    // that amplify before nonlinear elements. To preserve the full
-    // dynamic range of the gain control, use a conservative level
-    // that keeps the circuit below saturation at minimum gain.
-    0.03
-}
-
-fn calibrate_output_gain(pedal: &mut CompiledPedal) -> f64 {
-    use std::f64::consts::PI;
-
-    let sr = pedal.sample_rate;
-    let n = (0.5 * sr) as usize; // 500ms
-    let two_pi_f = 2.0 * PI * 1000.0; // 1kHz
-    let amp = 0.25; // -12dBFS
-
-    // Warm up (128 samples — let caps settle)
-    for i in 0..128usize {
-        let _ = pedal.process(amp * (two_pi_f * i as f64 / sr).sin());
-    }
-
-    // Measure steady-state output RMS
-    let mut sum_sq = 0.0;
-    let measure_len = n - 128;
-    for i in 128..n {
-        let input = amp * (two_pi_f * i as f64 / sr).sin();
-        let out = pedal.process(input);
-        sum_sq += out * out;
-    }
-    let output_rms = (sum_sq / measure_len as f64).sqrt();
-    let input_rms = amp / std::f64::consts::SQRT_2;
-
-    if output_rms < 1e-10 {
-        return 1.0; // Silent — don't amplify noise
-    }
-
-    (input_rms / output_rms).clamp(0.01, 100.0)
-}
 
 #[cfg(test)]
 mod tests {

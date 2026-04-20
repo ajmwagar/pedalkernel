@@ -2955,6 +2955,73 @@ impl IirStage {
     }
 }
 
+/// Standalone state-space stage for linear circuits with 3+ reactive elements.
+///
+/// Implements discrete-time state-space simulation:
+///   x[n] = A·x[n-1] + b·u[n]
+///   y = c·x + d·u
+///
+/// O(N²)/sample where N = number of states. Covers complex active filters
+/// (Klon stages, BB Preamp) that can't reduce to a biquad.
+pub(super) struct StateSpaceStage {
+    pub(super) ss: StateSpaceData,
+    /// Pre-allocated work buffer for state update (avoids per-sample allocation).
+    work: Vec<f64>,
+    /// Passive attenuation compensation factor.
+    pub(super) compensation: f64,
+    /// BFS distance from input (for topological ordering).
+    pub(super) signal_flow_distance: usize,
+    /// Supply voltage for rail saturation.
+    pub(super) supply_voltage: f64,
+}
+
+impl StateSpaceStage {
+    pub(super) fn new(ss: StateSpaceData, supply_voltage: f64) -> Self {
+        let n = ss.n_states;
+        Self {
+            ss,
+            work: vec![0.0; n],
+            compensation: 1.0,
+            signal_flow_distance: 0,
+            supply_voltage,
+        }
+    }
+
+    #[inline]
+    pub(super) fn process(&mut self, input: f64) -> f64 {
+        let n = self.ss.n_states;
+        let sample = input * self.compensation;
+
+        // x[n] = A · x[n-1] + b · u[n]  (into pre-allocated work buffer)
+        for i in 0..n {
+            let mut v = self.ss.b_vector[i] * sample;
+            let row_start = i * n;
+            for j in 0..n {
+                v += self.ss.a_matrix[row_start + j] * self.ss.x[j];
+            }
+            self.work[i] = flush_denormal(v);
+        }
+
+        // Op-amp rail saturation: tanh soft-clip state variables.
+        let v_rail = (self.supply_voltage * 0.5 - 1.5).max(0.5);
+        for x in &mut self.work[..n] {
+            *x = v_rail * crate::fast_math::fast_tanh(*x / v_rail);
+        }
+        self.ss.x[..n].copy_from_slice(&self.work[..n]);
+
+        // Output extraction: y[n] = c · x[n] + d · u[n]
+        let mut y_raw = self.ss.d_feedthrough * sample;
+        for i in 0..n {
+            y_raw += self.ss.c_vector[i] * self.work[i];
+        }
+
+        // 2-sample moving average: kills Nyquist (-1 eigenvalue) parasitics.
+        let y = (y_raw + self.ss.prev_output) * 0.5;
+        self.ss.prev_output = y_raw;
+        flush_denormal(y)
+    }
+}
+
 pub(super) struct StateSpaceData {
     /// State vector [V_nodes..., I_vs...] (n_states elements).
     pub x: Vec<f64>,
