@@ -15,7 +15,6 @@ pedal "Bridged-T Resonator" subtitle "Single voice test" {
   supply 9V
 
   components {
-    T1: trigger_input()
     U1: opamp(tl072)
     Rb1: resistor(100k)
     Rb2: resistor(100k)
@@ -45,8 +44,8 @@ pedal "Bridged-T Resonator" subtitle "Single voice test" {
     U1.neg -> R_fb.a
     R_fb.b -> U1.out
 
-    # Trigger injection at midpoint
-    T1.out -> R_trig.a
+    # Input injection at midpoint (trigger = just an impulse on the input)
+    in -> R_trig.a
     R_trig.b -> R1.b
 
     # Output
@@ -55,6 +54,5 @@ pedal "Bridged-T Resonator" subtitle "Single voice test" {
   }
 
   controls {
-    T1.trigger -> midi(48)
   }
 }

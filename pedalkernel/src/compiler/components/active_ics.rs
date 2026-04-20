@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    PinDirection, ResolveContext, StampResult,
+    PinDirection, ResolveContext, StampContext, StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::dsl::{
@@ -89,11 +89,54 @@ impl Component for OpAmp {
         _mna: &mut MnaSystem,
         _sample_rate: f64,
     ) -> StampResult {
-        // Op-amps are not stamped as two-terminal elements. Instead they are
-        // absorbed into the R-type adaptor's MNA matrix via the nullor_pins
-        // registration in the circuit graph, and stamped via stamp_vcvs in
-        // build_rtype_stage. See GraphRole::VcvsEdge and CircuitGraph::nullor_pins.
+        // Two-terminal path unused for op-amps. Use stamp_mna_multi.
         StampResult::Skip
+    }
+
+    fn mna_vsource_count(&self) -> usize {
+        if self.op_type.is_ota() { 0 } else { 1 }
+    }
+
+    fn mna_internal_node_count(&self) -> usize {
+        0 // No internal node — simple VCVS stamp
+    }
+
+    fn stamp_mna_multi(
+        &self,
+        _comp_id: &str,
+        ctx: &mut StampContext,
+        mna: &mut MnaSystem,
+    ) -> StampResult {
+        if self.op_type.is_ota() {
+            return StampResult::Skip;
+        }
+        let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
+        let ro = model.output_impedance;
+
+        let aol = model.open_loop_gain;
+
+        let out_mna = (ctx.pin_to_mna)("out");
+        mna.stamp_vcvs(
+            (ctx.pin_to_mna)("pos"),
+            (ctx.pin_to_mna)("neg"),
+            out_mna,
+            None,
+            aol,
+            ro,
+            ctx.vsrc_base,
+        );
+
+        // Output capacitance: keeps the output node as a dynamic state
+        // in the Schur complement reduction, preserving the feedback loop's
+        // energy recirculation. Without this, the output is eliminated
+        // algebraically and the Q drops to ~0.3.
+        if model.output_capacitance > 0.0 {
+            if let Some(ref mut caps) = ctx.cap_stamps {
+                caps.push((out_mna, None, model.output_capacitance));
+            }
+        }
+
+        StampResult::Stamped
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {

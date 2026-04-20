@@ -1224,8 +1224,22 @@ fn stamp_passive_edge(
         return;
     }
 
-    // All other passives: delegate to Component trait.
-    match comp.kind.stamp_mna(&comp.id, n1, n2, mna, sample_rate) {
+    // All other passives: delegate to Component trait via stamp_mna_multi.
+    let pin_fn = |pin: &str| -> Option<usize> {
+        match pin {
+            "a" => n1,
+            "b" => n2,
+            _ => None,
+        }
+    };
+    let mut ctx = super::component::StampContext {
+        pin_to_mna: &pin_fn,
+        vsrc_base: 0,
+        internal_node_base: 0,
+        sample_rate,
+        cap_stamps: None,
+    };
+    match comp.kind.stamp_mna_multi(&comp.id, &mut ctx, mna) {
         StampResult::Stamped => {}
         StampResult::Reactive { dyn_node, .. } => {
             reactive_edges.push((eidx, dyn_node));
@@ -1270,8 +1284,10 @@ fn build_rtype_stage(
     // causing a mismatch between port R and the S matrix.
     let effective_rate = sample_rate * oversampling.ratio() as f64;
 
-    // Need either NL ports or linearized OTA, and at least some passive content.
-    if n_nl == 0 && !has_linearized_ota {
+    let has_nullor = !plan.nullor_comp_indices.is_empty();
+
+    // Need either NL ports, linearized OTA, or nullor op-amps.
+    if n_nl == 0 && !has_linearized_ota && !has_nullor {
         return None;
     }
     if decomposed.residual_edges.is_empty() && decomposed.wdf_subtrees.is_empty() {
@@ -1430,7 +1446,41 @@ fn build_rtype_stage(
         None
     };
 
-    let num_mna_nodes = node_set.len();
+    // Count vsources needed by multi-terminal components (op-amp VCVS).
+    // Each component declares how many via mna_vsource_count().
+    let mut comp_vsrc_map: Vec<(usize, usize)> = Vec::new(); // (comp_idx, vsrc_base)
+    for &ci in &plan.nullor_comp_indices {
+        if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == ci) {
+            let out_in = node_set.contains(&rec.out_node)
+                || rec.out_node == graph.gnd_node
+                || graph.supply_nodes.contains(&rec.out_node);
+            let any_in = node_set.contains(&rec.pos_node)
+                || node_set.contains(&rec.neg_node)
+                || rec.pos_node == graph.gnd_node
+                || rec.neg_node == graph.gnd_node;
+            if out_in && any_in {
+                let count = graph.components[ci].kind.mna_vsource_count();
+                if count > 0 {
+                    comp_vsrc_map.push((ci, num_vsources));
+                    num_vsources += count;
+                }
+            }
+        }
+    }
+
+    // Count internal nodes needed by multi-terminal components (e.g., op-amp
+    // internal gain stage node for GBW dominant pole).
+    let mut internal_node_map: Vec<(usize, usize)> = Vec::new(); // (comp_idx, internal_node_base)
+    let circuit_node_count = node_set.len();
+    let mut total_internal_nodes = 0usize;
+    for &(comp_idx, _) in &comp_vsrc_map {
+        let count = graph.components[comp_idx].kind.mna_internal_node_count();
+        if count > 0 {
+            internal_node_map.push((comp_idx, circuit_node_count + total_internal_nodes));
+            total_internal_nodes += count;
+        }
+    }
+    let num_mna_nodes = circuit_node_count + total_internal_nodes;
     if num_mna_nodes == 0 {
         return None;
     }
@@ -1479,8 +1529,11 @@ fn build_rtype_stage(
         mna.d_matrix[vsrc_s * num_vsources + vsrc_s] = 1.0;
     }
 
-    // State-space mode for linearized OTA.
-    let use_state_space = has_linearized_ota && n_nl == 0;
+    // State-space mode: caps as bilinear companion models in MNA.
+    // Used for linearized OTA and nullor-only stages (bridged-T resonator).
+    // Must use effective_rate (including oversampling) since the state-space
+    // update runs inside the oversampler's inner loop.
+    let use_state_space = (has_linearized_ota || has_nullor) && n_nl == 0;
     let mut cap_stamps: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
     let mut pot_entries: Vec<(usize, DynNode, Option<usize>, Option<usize>, f64)> = Vec::new();
 
@@ -1574,19 +1627,297 @@ fn build_rtype_stage(
         });
     }
 
+    // ── Step 2b: Stamp multi-terminal components via Component trait ────
+    // Must happen BEFORE state-space matrix derivation so the VCVS
+    // constraint is part of the MNA when build_state_space_matrices runs.
+    for &(comp_idx, vsrc_base) in &comp_vsrc_map {
+        if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == comp_idx) {
+            let int_base = internal_node_map
+                .iter()
+                .find(|&&(ci, _)| ci == comp_idx)
+                .map(|&(_, base)| base)
+                .unwrap_or(0);
+            let pin_fn = |pin: &str| -> Option<usize> {
+                match pin {
+                    "pos" => node_to_mna(rec.pos_node),
+                    "neg" => node_to_mna(rec.neg_node),
+                    "out" => node_to_mna(rec.out_node),
+                    _ => None,
+                }
+            };
+            let mut ctx = super::component::StampContext {
+                pin_to_mna: &pin_fn,
+                vsrc_base,
+                internal_node_base: int_base,
+                sample_rate: effective_rate,
+                cap_stamps: Some(&mut cap_stamps),
+            };
+            let comp = &graph.components[comp_idx];
+            comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
+        }
+    }
+
+    // (GBW compensation is handled inside stamp_mna_multi via the
+    //  2-stage macromodel: internal node + comp cap. See OpAmpComp.)
+
     // ── State-space path (same as try_build_multi_nl_stage) ─────────────
     if use_state_space {
         let vs_idx = num_vsources - 1;
         let injection_mna = node_to_mna(plan.injection_node);
         mna.stamp_voltage_source(injection_mna, None, vs_idx);
 
-        let out_circuit = plan
-            .output_node
-            .unwrap_or_else(|| plan.ota_vccs[0].out_node);
+        let out_circuit = plan.output_node.unwrap_or_else(|| {
+            if !plan.ota_vccs.is_empty() {
+                plan.ota_vccs[0].out_node
+            } else {
+                graph.out_node
+            }
+        });
         let out_mna = node_to_mna(out_circuit);
 
-        let (a_d, b_d, c_out, n_states) =
+        // ── Try IIR compilation for nullor-only stages ──────────────────
+        // For linear R-nodes (no NL elements), try compiling to IIR.
+        // This handles oscillator circuits (bridged-T) correctly by
+        // deriving f0 and Q from component values instead of using
+        // the state-space reduction (which loses Q).
+        eprintln!("[iir-check] has_nullor={has_nullor} n_nl={n_nl} has_ota={has_linearized_ota}");
+        if has_nullor && n_nl == 0 && !has_linearized_ota {
+            // Compute feedback R info for Q estimation
+            let feedback_r = comp_vsrc_map.first().and_then(|&(ci, _)| {
+                let rec = graph.nullor_pins.iter().find(|r| r.comp_idx == ci)?;
+                let neg = rec.neg_node;
+                let out = rec.out_node;
+
+                // Collect ALL R and C values from the feedback network.
+                // Classify each edge by its role in the bridged-T topology.
+                let mut rf = 0.0_f64;     // Direct neg→out feedback
+                let mut r_series = Vec::new(); // Series R in T-network (neg→jct, jct→out)
+                let mut c_shunt = Vec::new();  // Shunt C to ground
+                let mut r_other = Vec::new();  // Load, trigger, etc.
+
+                for &eidx in &plan.passive_edge_indices {
+                    let e = &graph.edges[eidx];
+                    let comp = &graph.components[e.comp_idx];
+                    if !comp.kind.is_passive() { continue; }
+                    if let Some(r) = comp.kind.resistance() {
+                        if (e.node_a == neg && e.node_b == out)
+                            || (e.node_a == out && e.node_b == neg)
+                        {
+                            rf = r; // Rf: direct neg↔out
+                        } else if e.node_a == neg || e.node_b == neg
+                            || e.node_a == out || e.node_b == out
+                        {
+                            // R connected to neg or out (part of T-network or load)
+                            let other = if e.node_a == neg || e.node_a == out {
+                                e.node_b
+                            } else {
+                                e.node_a
+                            };
+                            // If the other end connects to both neg-side AND out-side
+                            // edges, it's the junction → this is a series R
+                            let is_junction = plan.passive_edge_indices.iter().any(|&ei2| {
+                                if ei2 == eidx { return false; }
+                                let e2 = &graph.edges[ei2];
+                                (e2.node_a == other || e2.node_b == other)
+                                    && (e2.node_a == neg || e2.node_b == neg
+                                        || e2.node_a == out || e2.node_b == out
+                                        || graph.components[e2.comp_idx].kind.capacitance().is_some())
+                            });
+                            if is_junction {
+                                r_series.push(r);
+                            } else {
+                                r_other.push(r);
+                            }
+                        } else {
+                            r_other.push(r);
+                        }
+                    }
+                    if let Some(c) = comp.kind.capacitance() {
+                        c_shunt.push(c);
+                    }
+                }
+
+                if rf > 0.0 && c_shunt.len() >= 2 && !r_series.is_empty() {
+                    // R_crit for bridged-T: R1 + R2 + R1·C1/C2
+                    // For equal R,C: R_crit = 3·R
+                    let r_crit = if r_series.len() >= 2 && c_shunt.len() >= 2 {
+                        r_series[0] + r_series[1] + r_series[0] * c_shunt[0] / c_shunt[1]
+                    } else {
+                        // Equal R,C assumption
+                        3.0 * r_series[0]
+                    };
+
+                    // f0 = 1/(2π√(R1·R2·C1·C2))
+                    let r_prod: f64 = if r_series.len() >= 2 {
+                        r_series[0] * r_series[1]
+                    } else {
+                        r_series[0] * r_series[0]
+                    };
+                    let c_prod: f64 = c_shunt.iter().take(2).product();
+                    let f0 = 1.0 / (2.0 * std::f64::consts::PI * (r_prod * c_prod).sqrt());
+
+                    Some((rf, r_crit.max(1.0), f0, r_series, c_shunt))
+                } else {
+                    None
+                }
+            });
+
+            // Extract component values and build_iir parameters
+            let (fb_for_iir, r_ser, c_shu) = match &feedback_r {
+                Some((rf, rc, f0, rs, cs)) => (Some((*rf, *rc, *f0)), rs.clone(), cs.clone()),
+                None => (None, Vec::new(), Vec::new()),
+            };
+            let iir_result = mna.build_iir(
+                &cap_stamps, vs_idx, out_mna, None, effective_rate, fb_for_iir,
+            );
+            if let Some((b_coeffs, a_coeffs)) = iir_result {
+                let mut iir_data = super::stage::IirData::new(
+                    b_coeffs, a_coeffs, effective_rate,
+                );
+
+                // Store component values for O(1) pot recomputation.
+                if let Some((rf, r_crit_val, _f0, _, _)) = &feedback_r {
+                    iir_data.r_fb = *rf;
+                    iir_data.r_crit = *r_crit_val;
+                    let r_prod: f64 = if r_ser.len() >= 2 {
+                        r_ser[0] * r_ser[1]
+                    } else if !r_ser.is_empty() {
+                        r_ser[0] * r_ser[0]
+                    } else { 1.0 };
+                    iir_data.r_series_product = r_prod;
+                    let c_prod: f64 = c_shu.iter().take(2).product();
+                    iir_data.c_shunt_product = c_prod;
+                    iir_data.r_series_base = [
+                        *r_ser.first().unwrap_or(&150e3),
+                        *r_ser.get(1).unwrap_or(r_ser.first().unwrap_or(&150e3)),
+                    ];
+                    iir_data.c_shunt_base = [
+                        *c_shu.first().unwrap_or(&8.2e-9),
+                        *c_shu.get(1).unwrap_or(c_shu.first().unwrap_or(&8.2e-9)),
+                    ];
+                }
+
+                // Collect pot children from plan edges for runtime pot binding
+                let mut pot_children: Vec<DynNode> = Vec::new();
+                let rec = graph.nullor_pins.iter().find(|r| {
+                    comp_vsrc_map.first().map(|&(ci, _)| ci) == Some(r.comp_idx)
+                });
+                let (neg_node, out_node) = rec.map(|r| (r.neg_node, r.out_node)).unwrap_or((0, 0));
+
+                for &eidx in &plan.passive_edge_indices {
+                    let e = &graph.edges[eidx];
+                    let comp = &graph.components[e.comp_idx];
+                    if comp.kind.is_pot() {
+                        if let Some(pot) = comp.kind.as_any().downcast_ref::<super::components::Potentiometer>() {
+                            let is_fb = (e.node_a == neg_node && e.node_b == out_node)
+                                || (e.node_a == out_node && e.node_b == neg_node);
+                            let is_series = !is_fb && (e.node_a == neg_node || e.node_b == neg_node);
+                            let child_idx = pot_children.len();
+                            pot_children.push(DynNode::Pot(
+                                comp.id.clone(), pot.max_r, 0.5, pot.taper,
+                            ));
+                            iir_data.pot_map.push((child_idx, is_series, is_fb));
+                        }
+                    }
+                }
+
+                let signal_flow_distance = plan.signal_chain_depth.unwrap_or_else(|| {
+                    classified.dist_from_in.get(&plan.injection_node).copied().unwrap_or(usize::MAX)
+                });
+
+                let dummy_s = vec![1.0];
+                let adaptor = RTypeAdaptor::new(dummy_s, &[1000.0]);
+                let scattering_blocks = super::stage::MultiNlScattering::from_full_matrix(&[0.0; 0], 0, 0);
+
+                return Some(MultiNlStage {
+                    adaptor,
+                    nl_devices: Vec::new(),
+                    nl_port_resistances: Vec::new(),
+                    passive_children: Vec::new(),
+                    pot_children,
+                    pot_mna_stamps: Vec::new(),
+                    n_nl: 0,
+                    v_prev: Vec::new(),
+                    scattering: scattering_blocks,
+                    oversampler: Oversampler::new(oversampling),
+                    compensation: plan.compensation,
+                    output_port: 0,
+                    device_groups: None,
+                    recompute_data: None,
+                    signal_flow_distance,
+                    transformer_gain: 1.0,
+                    injection_node_id: plan.injection_node,
+                    output_node_id: out_circuit,
+                    recompute_pending: false,
+                    veb_bias_offset: 0.0,
+                    feedback_scale: 0.1,
+                    feedback_opamp: None,
+                    feedback_pot_id: None,
+                    linearized_ota: None,
+                    vs_injection: None,
+                    extract_coeffs: None,
+                    extract_vs: 0.0,
+                    state_space: None,
+                    iir: Some(iir_data),
+                    bias_pot_id: None,
+                    bias_emitter_r: 470.0,
+                    interp_table: None,
+                    dc_bias: Vec::new(),
+                    vcc_bias_all: Vec::new(),
+                    vcc_vs_index: None,
+                    supply_voltage,
+                    dc_blocker_x1: 0.0,
+                    dc_blocker_y1: 0.0,
+                    dc_ramp: 0,
+                    initial_v_prev: Vec::new(),
+                    v_prev_2: Vec::new(),
+                    nr_workspace: crate::elements::nonlinear::solver::NrWorkspace::new(0),
+                    work_b_passive: Vec::new(),
+                    work_known_a: Vec::new(),
+                    work_b_all: Vec::new(),
+                    work_a_all: Vec::new(),
+                    adaptive_x2: false,
+                    subsample_counter: 0,
+                    iteration_budget_remaining: super::stage::NR_ITERATION_BUDGET,
+                    prev_input: 0.0,
+                    opamp_post_fx: None,
+                });
+            }
+        }
+
+        eprintln!("[state-space] n_nodes={} n_vs={} n_caps={} rate={} injection={:?} output={:?}",
+            mna.num_nodes, mna.num_vsources, cap_stamps.len(), effective_rate, injection_mna, out_mna);
+        // Print full G matrix for debugging
+        for i in 0..mna.num_nodes {
+            for j in 0..mna.num_nodes {
+                let g = mna.g_matrix[i * mna.num_nodes + j];
+                if g.abs() > 1e-15 {
+                    eprintln!("[G] G[{i},{j}] = {g:.6e}");
+                }
+            }
+        }
+        for (i, &(p, n, c)) in cap_stamps.iter().enumerate() {
+            eprintln!("[state-space] cap[{}]: pos={:?} neg={:?} C={:.3e}", i, p, n, c);
+        }
+        // Debug: print G matrix diagonal to verify resistor stamps
+        for i in 0..mna.num_nodes {
+            let g = mna.g_matrix[i * mna.num_nodes + i];
+            if g.abs() > 1e-15 {
+                eprintln!("[state-space] G[{i},{i}] = {g:.6e}");
+            }
+        }
+        let (a_d, b_d, c_out, n_states, d_feedthrough) =
             mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, effective_rate);
+        // Debug: print A_d matrix for eigenvalue analysis
+        eprintln!("[state-space] A_d ({n_states}×{n_states}):");
+        for i in 0..n_states.min(7) {
+            let row: Vec<String> = (0..n_states.min(7))
+                .map(|j| format!("{:+.6e}", a_d[i * n_states + j]))
+                .collect();
+            eprintln!("  [{}]", row.join(", "));
+        }
+        eprintln!("[state-space] b_d: {:?}", &b_d[..n_states.min(7)]);
+        eprintln!("[state-space] c_out: {:?}", &c_out[..n_states.min(7)]);
 
         if a_d.iter().any(|v| !v.is_finite()) || b_d.iter().any(|v| !v.is_finite()) {
             return None;
@@ -1640,6 +1971,8 @@ fn build_rtype_stage(
             output_pos: out_mna,
             output_neg: None,
             sample_rate: effective_rate,
+            d_feedthrough,
+            prev_output: 0.0,
             pot_stamps: pot_stamps_ss,
         };
 
@@ -1672,14 +2005,14 @@ fn build_rtype_stage(
             vs_injection: None,
             extract_coeffs: None,
             extract_vs: 0.0,
-            state_space: Some(state_space_data),
+            state_space: Some(state_space_data), iir: None,
             bias_pot_id: None,
             bias_emitter_r: 470.0,
             interp_table: None, // state-space stages excluded from tables
             dc_bias: Vec::new(),
             vcc_bias_all: Vec::new(),
             vcc_vs_index: None,
-            supply_voltage: 0.0,
+            supply_voltage,
             dc_blocker_x1: 0.0,
             dc_blocker_y1: 0.0,
             dc_ramp: 0,
@@ -1697,6 +2030,8 @@ fn build_rtype_stage(
             opamp_post_fx: None,
         });
     }
+
+    // (Step 2b VCVS stamping was moved above the state-space block.)
 
     // ── Step 3: Build WDF ports ─────────────────────────────────────────
     // Port ordering: [NL_0..NL_{n-1}, subtree_0..subtree_{s-1}, reactive_0..reactive_{m-1}, (adapted)]
@@ -2477,7 +2812,7 @@ fn build_rtype_stage(
         vs_injection: vs_injection_vec,
         extract_coeffs,
         extract_vs,
-        state_space: None,
+        state_space: None, iir: None,
         bias_pot_id: None,
         bias_emitter_r: 470.0,
         interp_table,
@@ -2578,7 +2913,8 @@ fn try_build_multi_nl_stage(
 ) -> Option<MultiNlStage> {
     let n_nl = plan.nl_terminals.len();
     let has_linearized_ota = !plan.ota_vccs.is_empty();
-    if (n_nl == 0 && !has_linearized_ota) || plan.passive_edge_indices.is_empty() {
+    let has_nullor = !plan.nullor_comp_indices.is_empty();
+    if (n_nl == 0 && !has_linearized_ota && !has_nullor) || plan.passive_edge_indices.is_empty() {
         return None;
     }
 
@@ -2626,10 +2962,27 @@ fn try_build_multi_nl_stage(
         }
     }
 
+    // Add nullor op-amp pins as junctions so feedback edges stay in
+    // the R-node residual (not SP-reduced into subtrees that can't
+    // see the VCVS constraint).
+    for &comp_idx in &plan.nullor_comp_indices {
+        if let Some(rec) = graph.nullor_pins.iter().find(|r| r.comp_idx == comp_idx) {
+            for &n in &[rec.pos_node, rec.neg_node, rec.out_node] {
+                if !junction_nodes.contains(&n) {
+                    junction_nodes.push(n);
+                }
+            }
+        }
+    }
+
     // State-space path (linearized OTA, n_nl=0) requires ALL components in the
     // MNA — caps in cap_stamps, resistors/pots in G matrix. WDF subtrees bypass
     // MNA entirely, so skip subtree extraction for state-space mode.
-    let use_state_space = has_linearized_ota && n_nl == 0;
+    // Nullor-only stages (op-amp + passives, no NL elements) also use
+    // the state-space path so caps are companion models in the MNA.
+    // This is essential for resonance (bridged-T) — caps must be INSIDE
+    // the MNA, not external WDF ports.
+    let use_state_space = (has_linearized_ota || has_nullor) && n_nl == 0;
     let decomposed = if use_state_space {
         // No subtree extraction — all edges go to residual.
         super::graph::DecomposedCircuit {

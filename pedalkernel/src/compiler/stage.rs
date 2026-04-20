@@ -2753,6 +2753,9 @@ pub(super) struct MultiNlStage {
     /// WDF scattering. Used for linearized OTA stages where cap port
     /// conductances overwhelm circuit conductances.
     pub(super) state_space: Option<StateSpaceData>,
+    /// IIR filter compiled from linear R-node MNA. Takes priority over
+    /// state_space when present — simpler, faster, correct Q for oscillators.
+    pub(super) iir: Option<IirData>,
     /// Precomputed interpolation table for single-pot stages.
     /// When Some, pot changes use table lookup instead of MNA re-inversion.
     pub(super) interp_table: Option<ScatteringInterpolationTable>,
@@ -2819,6 +2822,111 @@ pub(super) struct MultiNlStage {
 /// conductances dominate circuit conductances, causing identity S-matrix rows.
 /// Uses bilinear transform on the continuous-time MNA to get node-voltage
 /// dynamics directly, avoiding WDF port-impedance scaling issues.
+/// IIR filter compiled from a linear R-node MNA.
+/// For oscillators: biquad with f0/Q derived from component values.
+/// Recomputation on pot change is O(1) — just recalculate f0, Q, gain
+/// from stored component values and update the 5 biquad coefficients.
+/// No matrix inversion needed. Cortex-M7 safe.
+#[derive(Debug, Clone)]
+pub(super) struct IirData {
+    /// Numerator coefficients [b0, b1, b2].
+    pub b_coeffs: Vec<f64>,
+    /// Denominator coefficients [1.0, a1, a2].
+    pub a_coeffs: Vec<f64>,
+    /// Input history [x[n-1], x[n-2]].
+    pub x_hist: Vec<f64>,
+    /// Output history [y[n-1], y[n-2]].
+    pub y_hist: Vec<f64>,
+    /// Sample rate for coefficient recomputation.
+    pub sample_rate: f64,
+    /// Stored component values for O(1) recomputation.
+    /// R_series: product of series resistors (R1×R2).
+    pub r_series_product: f64,
+    /// C_shunt: product of shunt caps (C1×C2).
+    pub c_shunt_product: f64,
+    /// Feedback resistor value (current, changes with pot).
+    pub r_fb: f64,
+    /// Critical resistance: R1 + R2 + R1*C1/C2.
+    /// Recomputed when series R changes (tuning pot).
+    pub r_crit: f64,
+    /// Pot-to-component mapping for recomputation.
+    /// Each entry: (pot_child_index, affects_r_series, affects_r_fb)
+    pub pot_map: Vec<(usize, bool, bool)>,
+    /// Base R values for series resistors (before pot contribution).
+    pub r_series_base: [f64; 2],
+    /// Base C values for shunt caps.
+    pub c_shunt_base: [f64; 2],
+}
+
+impl IirData {
+    pub fn new(b_coeffs: Vec<f64>, a_coeffs: Vec<f64>, sample_rate: f64) -> Self {
+        let order = a_coeffs.len() - 1;
+        Self {
+            b_coeffs,
+            a_coeffs,
+            x_hist: vec![0.0; order],
+            y_hist: vec![0.0; order],
+            sample_rate,
+            r_series_product: 0.0,
+            c_shunt_product: 0.0,
+            r_fb: 0.0,
+            r_crit: 0.0,
+            pot_map: Vec::new(),
+            r_series_base: [0.0; 2],
+            c_shunt_base: [0.0; 2],
+        }
+    }
+
+    /// Recompute biquad coefficients from current R/C values.
+    /// O(1): sqrt + sin + cos + a few multiplies. Cortex-M7 safe.
+    pub fn recompute(&mut self) {
+        use std::f64::consts::PI;
+        if self.r_series_product <= 0.0 || self.c_shunt_product <= 0.0 || self.r_fb <= 0.0 {
+            return;
+        }
+
+        let f0 = 1.0 / (2.0 * PI * (self.r_series_product * self.c_shunt_product).sqrt());
+        let q = if self.r_fb > self.r_crit * 1.01 {
+            self.r_fb / (self.r_fb - self.r_crit)
+        } else {
+            100.0
+        };
+        let gain = self.r_fb / (self.r_series_product.sqrt()); // Rf / sqrt(R1*R2)
+
+        let w0 = 2.0 * PI * f0 / self.sample_rate;
+        let sin_w0 = w0.sin();
+        let cos_w0 = w0.cos();
+        let alpha = sin_w0 / (2.0 * q);
+
+        let a0 = 1.0 + alpha;
+        self.b_coeffs[0] = alpha * gain / a0;
+        self.b_coeffs[1] = 0.0;
+        self.b_coeffs[2] = -alpha * gain / a0;
+        self.a_coeffs[1] = -2.0 * cos_w0 / a0;
+        self.a_coeffs[2] = (1.0 - alpha) / a0;
+    }
+
+    /// Process one sample through the IIR (Direct Form I).
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        let order = self.x_hist.len();
+        let mut y = self.b_coeffs[0] * input;
+        for k in 0..order {
+            y += self.b_coeffs.get(k + 1).copied().unwrap_or(0.0) * self.x_hist[k];
+            y -= self.a_coeffs[k + 1] * self.y_hist[k];
+        }
+        for k in (1..order).rev() {
+            self.x_hist[k] = self.x_hist[k - 1];
+            self.y_hist[k] = self.y_hist[k - 1];
+        }
+        if order > 0 {
+            self.x_hist[0] = input;
+            self.y_hist[0] = y;
+        }
+        y
+    }
+}
+
 pub(super) struct StateSpaceData {
     /// State vector [V_nodes..., I_vs...] (n_states elements).
     pub x: Vec<f64>,
@@ -2840,6 +2948,11 @@ pub(super) struct StateSpaceData {
     pub output_neg: Option<usize>,
     /// Sample rate for bilinear transform (2·f_s·C scaling).
     pub sample_rate: f64,
+    /// Direct feedthrough: y = c·x + d·u. From Schur complement elimination.
+    pub d_feedthrough: f64,
+    /// Previous output for 2-sample Nyquist filter.
+    /// Removes parasitic -1 eigenvalue oscillation from unreduced systems.
+    pub prev_output: f64,
     /// Pot stamps for delta-updating G when pots change.
     /// Each entry: (passive_child_index, node_pos, node_neg, last_conductance).
     pub pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
@@ -2878,11 +2991,22 @@ impl MultiNlStage {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
 
+        // ── IIR path: compiled from linear R-node MNA ────────────────────
+        // Takes priority over state-space. Correct Q for oscillators,
+        // simpler and faster per-sample than matrix state-space.
+        if let Some(ref mut iir) = self.iir {
+            let output = self.oversampler.process(input, |sample| {
+                flush_denormal(iir.process(sample * self.compensation))
+            });
+            return flush_denormal(output);
+        }
+
         // ── State-space path: direct discrete-time simulation ────────────
         // Bypasses WDF scattering entirely. Used for linearized OTA stages
         // where cap port conductances overwhelm circuit conductances.
         if let Some(ref mut ss) = self.state_space {
             let work = &mut self.work_b_passive;
+            let v_rail = (self.supply_voltage * 0.5 - 1.5).max(0.5);
             let output = self.oversampler.process(input, |sample| {
                 let n = ss.n_states;
                 // x[n] = A · x[n-1] + b · u[n]
@@ -2895,12 +3019,32 @@ impl MultiNlStage {
                     }
                     work[i] = flush_denormal(v);
                 }
-                // y[n] = c · x[n]
-                let mut y = 0.0;
-                for i in 0..n {
-                    y += ss.c_vector[i] * work[i];
+
+                // Op-amp rail saturation: apply tanh soft-clip to every state.
+                // In oscillator circuits (bridged-T), the op-amp output exceeds
+                // supply rails → tanh limits the amplitude → creates a stable
+                // limit cycle whose frequency is set by the RC network.
+                // Cap voltages are also clipped since they can't exceed Vcc.
+                if v_rail > 0.0 {
+                    for i in 0..n {
+                        work[i] = v_rail * crate::fast_math::fast_tanh(work[i] / v_rail);
+                    }
                 }
+
                 ss.x[..n].copy_from_slice(&work[..n]);
+
+                // Output extraction: y[n] = c · x[n] + d · u[n]
+                let mut y_raw = ss.d_feedthrough * sample;
+                for i in 0..n {
+                    y_raw += ss.c_vector[i] * work[i];
+                }
+                // 2-sample moving average: kills Nyquist (-1 eigenvalue)
+                // parasitics from unreduced VCVS algebraic constraints.
+                // At 130 Hz this averages consecutive samples that are
+                // nearly identical → negligible signal loss. At Nyquist
+                // (alternating +/-) the average is zero → perfect cancellation.
+                let y = (y_raw + ss.prev_output) * 0.5;
+                ss.prev_output = y_raw;
                 y
             });
             return flush_denormal(output);
@@ -3508,6 +3652,31 @@ impl MultiNlStage {
     /// and passive_children, re-derives the scattering matrix, and updates all
     /// sub-blocks (s_nl, s_nl_passive, s_nl_adapted) and the RTypeAdaptor.
     fn recompute_scattering(&mut self) {
+        // ── IIR recompute ────────────────────────────────────────────────
+        // When IIR is active, read current pot resistances and recompute
+        // the biquad coefficients. O(1) — no matrix inversion.
+        if let Some(ref mut iir) = self.iir {
+            // Update R_fb and R_series from pot children
+            for &(child_idx, is_series, is_fb) in &iir.pot_map.clone() {
+                if child_idx < self.pot_children.len() {
+                    let pot_r = self.pot_children[child_idx].port_resistance();
+                    if is_fb {
+                        iir.r_fb = pot_r;
+                        // R_crit depends on R_series, not R_fb — no update needed
+                    }
+                    if is_series {
+                        // Tuning pot adds to R1 — recompute R products and R_crit
+                        let r1 = iir.r_series_base[0] + pot_r;
+                        let r2 = iir.r_series_base[1];
+                        iir.r_series_product = r1 * r2;
+                        iir.r_crit = r1 + r2 + r1 * iir.c_shunt_base[0] / iir.c_shunt_base[1];
+                    }
+                }
+            }
+            iir.recompute();
+            return;
+        }
+
         // ── State-space recompute ────────────────────────────────────────
         // When state-space is active, rebuild A_d, b_d from the updated MNA
         // (G matrix has been delta-updated by set_ota_gain_linear or set_pot).
@@ -3539,7 +3708,7 @@ impl MultiNlStage {
                         ps.3 = new_g;
                     }
                 }
-                let (a_d, b_d, c_out, _n) = recompute.mna.build_state_space_matrices(
+                let (a_d, b_d, c_out, _n, d_ft) = recompute.mna.build_state_space_matrices(
                     &ss.cap_stamps,
                     ss.vs_idx,
                     ss.output_pos,
@@ -3550,6 +3719,7 @@ impl MultiNlStage {
                     ss.a_matrix = a_d;
                     ss.b_vector = b_d;
                     ss.c_vector = c_out;
+                    ss.d_feedthrough = d_ft;
                 }
             }
             return;

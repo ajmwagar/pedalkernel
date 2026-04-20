@@ -1810,6 +1810,7 @@ pub fn compile_pedal_with_options(
                 && !matches!(
                     info.feedback_kind,
                     super::graph::OpAmpFeedbackKind::UnityGain
+                        | super::graph::OpAmpFeedbackKind::BridgedTResonator { .. }
                 )
         })
         .flat_map(|info| [info.neg_node, info.pos_node])
@@ -1841,6 +1842,7 @@ pub fn compile_pedal_with_options(
         &mut claimed_edges,
         &opamp_input_nodes,
         &feedback_diode_neg_map,
+        &opamp_analysis.feedback_opamp_ids,
     );
 
     // Now set signal_flow_distance on opamp feedback stages using island depths.

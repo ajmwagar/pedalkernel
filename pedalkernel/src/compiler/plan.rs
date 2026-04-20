@@ -802,6 +802,7 @@ pub(super) fn plan_stages(
     claimed_edges: &mut HashSet<usize>,
     opamp_input_nodes: &HashSet<NodeId>,
     feedback_diode_neg_map: &HashMap<NodeId, NodeId>,
+    feedback_opamp_ids: &HashSet<String>,
 ) -> (
     Vec<StagePlan>,
     Vec<PushPullPlan>,
@@ -1108,6 +1109,131 @@ pub(super) fn plan_stages(
                 .min()
                 .copied();
             plan.signal_chain_depth = min_depth;
+        }
+    }
+
+    // ── Nullor fallback: assign unclaimed op-amps to plans ─────────────
+    // Op-amps whose feedback topology isn't handled by opamp_analysis
+    // (bridged-T, multi-path) need VCVS stamping in an R-node MNA.
+    // First, enrich existing plans that touch an unclaimed op-amp's pins.
+    // Then, create synthetic plans for op-amps no plan touches.
+    // Track claimed op-amps across plans to prevent double-stamping.
+    let mut claimed_nullors: HashSet<usize> = HashSet::new();
+    for plan in &mut multi_nl_plans {
+        let plan_nodes: HashSet<super::graph::NodeId> = plan
+            .passive_edge_indices
+            .iter()
+            .flat_map(|&eidx| {
+                let e = &graph.edges[eidx];
+                [e.node_a, e.node_b]
+            })
+            .collect();
+        for rec in &graph.nullor_pins {
+            if claimed_nullors.contains(&rec.comp_idx) {
+                continue;
+            }
+            // Skip op-amps already handled by opamp_analysis
+            let comp_id = &graph.components[rec.comp_idx].id;
+            if feedback_opamp_ids.contains(comp_id) {
+                continue;
+            }
+            let touches =
+                plan_nodes.contains(&rec.out_node) || plan_nodes.contains(&rec.neg_node);
+            if touches {
+                plan.nullor_comp_indices.push(rec.comp_idx);
+                claimed_nullors.insert(rec.comp_idx);
+            }
+        }
+    }
+
+    // Unclaimed op-amps → synthetic nullor plans via BFS.
+    {
+        let active_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
+        // Build adjacency list for O(V+E) BFS instead of O(V*E).
+        let mut adj: HashMap<super::graph::NodeId, Vec<(usize, super::graph::NodeId)>> =
+            HashMap::new();
+        for (eidx, e) in graph.edges.iter().enumerate() {
+            if active_set.contains(&eidx) {
+                continue;
+            }
+            if !graph.components[e.comp_idx].kind.is_passive() {
+                continue;
+            }
+            adj.entry(e.node_a)
+                .or_default()
+                .push((eidx, e.node_b));
+            adj.entry(e.node_b)
+                .or_default()
+                .push((eidx, e.node_a));
+        }
+
+        for rec in &graph.nullor_pins {
+            if claimed_nullors.contains(&rec.comp_idx) {
+                continue;
+            }
+            let comp_id = &graph.components[rec.comp_idx].id;
+            if feedback_opamp_ids.contains(comp_id) {
+                continue;
+            }
+            // BFS from neg and out only — NOT pos. The pos input is
+            // typically a DC reference (bias divider) that shouldn't be
+            // in the signal-path MNA. When pos isn't in the MNA,
+            // node_to_mna returns None → VCVS treats it as ground →
+            // correct inverting behavior.
+            let mut passive_edges: HashSet<usize> = HashSet::new();
+            let mut visited: HashSet<super::graph::NodeId> = HashSet::new();
+            let mut frontier = vec![rec.neg_node, rec.out_node];
+            for &n in &frontier {
+                visited.insert(n);
+            }
+            while let Some(node) = frontier.pop() {
+                // Don't expand through ground, supply, or AC-ground nodes.
+                // These are shared bus nodes — expanding through them pulls
+                // in bias networks, decoupling caps, and other circuits.
+                // Edges TO these nodes are still collected (C1→gnd is valid)
+                // but we don't traverse FROM them to find more edges.
+                if node == graph.gnd_node
+                    || node == graph.vcc_node
+                    || graph.supply_nodes.contains(&node)
+                    || graph.ac_ground_nodes.contains(&node)
+                {
+                    continue;
+                }
+                if let Some(neighbors) = adj.get(&node) {
+                    for &(eidx, other) in neighbors {
+                        if claimed_edges.contains(&eidx) {
+                            continue;
+                        }
+                        passive_edges.insert(eidx);
+                        if visited.insert(other) {
+                            frontier.push(other);
+                        }
+                    }
+                }
+            }
+            if !passive_edges.is_empty() {
+                let edge_names: Vec<String> = passive_edges.iter().map(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    format!("{}({}→{})", graph.components[e.comp_idx].id, e.node_a, e.node_b)
+                }).collect();
+                eprintln!("[nullor-plan] synthetic plan for comp_idx={}: {} edges: {:?}",
+                    rec.comp_idx, passive_edges.len(), edge_names);
+                let edges_vec: Vec<usize> = passive_edges.iter().copied().collect();
+                claimed_edges.extend(&edges_vec);
+                claimed_nullors.insert(rec.comp_idx);
+                multi_nl_plans.push(MultiNlPlan {
+                    nl_element_indices: Vec::new(),
+                    output_element_idx: 0,
+                    passive_edge_indices: edges_vec,
+                    injection_node: graph.in_node,
+                    nl_terminals: Vec::new(),
+                    compensation: 1.0,
+                    output_node: Some(graph.out_node),
+                    ota_vccs: Vec::new(),
+                    signal_chain_depth: None,
+                    nullor_comp_indices: vec![rec.comp_idx],
+                });
+            }
         }
     }
 
