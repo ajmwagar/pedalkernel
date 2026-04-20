@@ -1,0 +1,357 @@
+// Tests extracted from spqr_build.rs — stage building + end-to-end pipeline.
+
+use super::graph::CircuitGraph;
+use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
+use super::spqr_build::*;
+
+fn make_graph_all_edges(
+    pedal_src: &str,
+) -> (CircuitGraph, Vec<usize>) {
+    let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+    (graph, all_edges)
+}
+
+fn make_graph_passive(
+    pedal_src: &str,
+) -> (CircuitGraph, Vec<usize>) {
+    let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let passive_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .filter(|&i| graph.components[graph.edges[i].comp_idx].kind.is_passive())
+        .collect();
+    (graph, passive_edges)
+}
+
+#[test]
+fn spqr_diode_clipper_produces_audio() {
+    let (graph, edges) = make_graph_all_edges(r#"
+        pedal "test" { supply 9V
+            components { R1: resistor(4.7k)  D1: diode(silicon) }
+            nets { in -> R1.a  R1.b -> D1.a  D1.b -> gnd }
+            controls {}
+        }"#);
+    let spqr = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+    let spqr_stages = spqr_to_stages(&spqr, &graph, 48000.0);
+
+    assert_eq!(spqr_stages.len(), 1);
+    let mut stage = build_spqr_stage(
+        spqr_stages.into_iter().next().unwrap(),
+        &graph,
+        48000.0,
+    )
+    .expect("Should build NlWdf stage");
+
+    // DC test: 5V input should clip to ~0.6V (silicon diode forward voltage)
+    let dc_out = stage.process(5.0);
+    assert!(
+        dc_out < 1.5,
+        "5V DC should clip to <1.5V, got {dc_out:.4}V"
+    );
+    assert!(dc_out > 0.1, "5V DC should produce output, got {dc_out:.4}V");
+
+    // Negative DC: single diode doesn't clip reverse bias → passes through
+    let neg_out = stage.process(-5.0);
+    assert!(
+        neg_out.abs() > 2.0,
+        "Reverse bias should pass through, got {neg_out:.4}V"
+    );
+
+    // Sine wave: positive peaks clipped, negative peaks pass through
+    let mut pos_peak = 0.0f64;
+    let mut neg_peak = 0.0f64;
+    for i in 0..960 {
+        let input =
+            5.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+        let output = stage.process(input);
+        pos_peak = pos_peak.max(output);
+        neg_peak = neg_peak.min(output);
+    }
+
+    // SingleDiode clips forward (positive) direction only
+    assert!(
+        pos_peak < 1.5,
+        "Forward bias should clip: pos_peak={pos_peak:.3}V"
+    );
+    assert!(
+        neg_peak < -1.0,
+        "Reverse bias should pass: neg_peak={neg_peak:.3}V"
+    );
+}
+
+#[test]
+fn spqr_passive_rc_produces_audio() {
+    let (graph, edges) = make_graph_passive(r#"
+        pedal "test" { supply 9V
+            components { R1: resistor(10k)  C1: cap(100n) }
+            nets { in -> R1.a  R1.b -> C1.a  C1.b -> gnd }
+            controls {}
+        }"#);
+    let spqr = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+    let spqr_stages = spqr_to_stages(&spqr, &graph, 48000.0);
+
+    assert_eq!(spqr_stages.len(), 1);
+    let mut stage = build_spqr_stage(
+        spqr_stages.into_iter().next().unwrap(),
+        &graph,
+        48000.0,
+    )
+    .expect("Should build PassiveWdf stage");
+
+    // Process step input — capacitor should charge (lowpass)
+    let mut output = 0.0;
+    for _ in 0..480 {
+        output = stage.process(1.0);
+    }
+
+    // After 10ms with RC = 1ms, cap should be mostly charged
+    assert!(output.abs() > 0.001, "RC lowpass should pass DC, got {output:.6}");
+}
+
+#[test]
+fn spqr_inverting_opamp_gain() {
+    // Inverting amp: R1=10k, Rf=100k → gain = -10
+    let (graph, edges) = make_graph_all_edges(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                Rf: resistor(100k)
+                U1: opamp(tl072)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> U1.neg
+                Rf.a -> U1.neg
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#);
+    let spqr = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+    let spqr_stages = spqr_to_stages(&spqr, &graph, 48000.0);
+
+    assert_eq!(spqr_stages.len(), 1);
+    let mut stage = build_spqr_stage(
+        spqr_stages.into_iter().next().unwrap(),
+        &graph,
+        48000.0,
+    )
+    .expect("Should build OpAmpRoot stage");
+
+    // Small signal: 0.1V input → should get ~1.0V output (gain=10, inverted)
+    // Let the stage settle for a few samples
+    for _ in 0..10 {
+        stage.process(0.1);
+    }
+    let output = stage.process(0.1);
+    let gain_measured = output.abs() / 0.1;
+
+    assert!(
+        gain_measured > 5.0,
+        "Inverting gain should be ~10, got {gain_measured:.2}"
+    );
+    assert!(
+        gain_measured < 15.0,
+        "Inverting gain should be ~10, got {gain_measured:.2}"
+    );
+}
+
+#[test]
+fn compile_via_spqr_diode_clipper_end_to_end() {
+    use crate::PedalProcessor;
+
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test_clipper" { supply 9V
+            components { R1: resistor(4.7k)  D1: diode(silicon) }
+            nets { in -> R1.a  R1.b -> D1.a  D1.b -> gnd }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0)
+        .expect("Should compile via SPQR");
+
+    // Process through PedalProcessor trait
+    let dc_out = compiled.process(5.0);
+    assert!(
+        dc_out.abs() < 2.0,
+        "Diode should clip 5V input, got {dc_out:.4}"
+    );
+
+    // Process sine
+    let mut peak = 0.0f64;
+    for i in 0..480 {
+        let input =
+            1.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+        let output = compiled.process(input);
+        peak = peak.max(output.abs());
+    }
+    assert!(peak > 0.01, "Should produce output: {peak:.6}");
+}
+
+#[test]
+fn compile_via_spqr_inverting_opamp_end_to_end() {
+    use crate::PedalProcessor;
+
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test_inv" { supply 9V
+            components {
+                R1: resistor(10k)
+                Rf: resistor(100k)
+                U1: opamp(tl072)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> U1.neg
+                Rf.a -> U1.neg
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0)
+        .expect("Should compile inverting amp via SPQR");
+
+    // Settle
+    for _ in 0..10 {
+        compiled.process(0.1);
+    }
+    let output = compiled.process(0.1);
+    let gain = output.abs() / 0.1;
+    assert!(
+        gain > 5.0 && gain < 15.0,
+        "Inverting gain should be ~10, got {gain:.2}"
+    );
+}
+
+#[test]
+fn compile_via_spqr_opamp_diode_feedback() {
+    // TS-style: R1 → opamp(neg) ← Rf ← diode ← opamp(out)
+    // OpAmpRoot pre-amplifies, diode clips
+    use crate::PedalProcessor;
+
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test_ts" { supply 9V
+            components {
+                R1: resistor(4.7k)
+                D1: diode(silicon)
+                Rf: resistor(51k)
+                U1: opamp(jrc4558)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> U1.neg
+                D1.a -> U1.neg
+                D1.b -> U1.out
+                Rf.a -> U1.neg
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0)
+        .expect("Should compile TS-style circuit via SPQR");
+
+    // Small signal should be amplified (gain ≈ Rf/Ri ≈ 51k/4.7k ≈ 10.8)
+    for _ in 0..20 {
+        compiled.process(0.01);
+    }
+    let output = compiled.process(0.01);
+    assert!(
+        output.abs() > 0.02,
+        "Should amplify small signal, got {output:.6}"
+    );
+
+    // Large signal should clip (diode limits output)
+    for _ in 0..20 {
+        compiled.process(0.5);
+    }
+    let loud_output = compiled.process(0.5);
+    // Gain of ~11 would give 5.5V, but diode clips at ~0.6V
+    assert!(
+        loud_output.abs() < 3.0,
+        "Diode should clip large signal, got {loud_output:.4}V"
+    );
+}
+
+#[test]
+fn spqr_noninverting_opamp_gain() {
+    // Non-inverting amp: R1=10k, Rf=100k → gain = 1 + 100k/10k = 11
+    let (graph, edges) = make_graph_all_edges(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                Rf: resistor(100k)
+                U1: opamp(tl072)
+            }
+            nets {
+                in -> U1.pos
+                U1.neg -> R1.a
+                R1.b -> gnd
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.out -> out
+            }
+            controls {}
+        }"#);
+    let spqr = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+    let spqr_stages = spqr_to_stages(&spqr, &graph, 48000.0);
+
+    assert_eq!(spqr_stages.len(), 1);
+    let mut stage = build_spqr_stage(
+        spqr_stages.into_iter().next().unwrap(),
+        &graph,
+        48000.0,
+    )
+    .expect("Should build OpAmpRoot stage");
+
+    for _ in 0..10 {
+        stage.process(0.1);
+    }
+    let output = stage.process(0.1);
+    let gain_measured = output.abs() / 0.1;
+
+    assert!(
+        gain_measured > 6.0,
+        "Non-inverting gain should be ~11, got {gain_measured:.2}"
+    );
+    assert!(
+        gain_measured < 16.0,
+        "Non-inverting gain should be ~11, got {gain_measured:.2}"
+    );
+}

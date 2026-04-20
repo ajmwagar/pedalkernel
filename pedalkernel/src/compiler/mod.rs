@@ -20,7 +20,7 @@ mod graph;
 mod helpers;
 mod opamp_analysis;
 mod plan;
-mod rigid_build;
+mod rigid;
 mod spqr;
 mod spqr_build;
 mod split;
@@ -43,3 +43,9 @@ pub use warnings::{check_voltage_compatibility, VoltageWarning, WarningSeverity}
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod spqr_tests;
+#[cfg(test)]
+mod spqr_build_tests;
+#[cfg(test)]
+mod rigid_tests;
