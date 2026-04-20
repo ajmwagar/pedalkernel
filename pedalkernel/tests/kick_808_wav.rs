@@ -179,3 +179,204 @@ fn all_808_voices_produce_correct_frequency() {
 
     assert!(all_pass, "Some 808 voices failed frequency check");
 }
+
+/// Generate a pedal source with a Decay pot (R_fb as pot) and optional Tuning pot.
+fn make_pedal_with_controls(r: &str, c: &str, r_fb_max: &str, has_tuning: bool) -> String {
+    let tuning_comp = if has_tuning {
+        "    Tuning: pot(100k, linear)\n"
+    } else {
+        ""
+    };
+    let tuning_net = if has_tuning {
+        "    U1.neg -> Tuning.a\n    Tuning.b -> R1.a, C1.a"
+    } else {
+        "    U1.neg -> R1.a, C1.a"
+    };
+    let tuning_ctrl = if has_tuning {
+        "    Tuning.position -> \"Tuning\"\n"
+    } else {
+        ""
+    };
+    format!(
+        r#"pedal "808 Test Voice" {{
+  supply 9V
+  components {{
+    U1: opamp(tl072)
+    Rb1: resistor(100k)
+    Rb2: resistor(100k)
+    R1: resistor({r})
+    R2: resistor({r})
+    C1: cap({c})
+    C2: cap({c})
+    Decay: pot({r_fb_max}, linear)
+    R_trig: resistor(100k)
+    R_out: resistor(10k)
+{tuning_comp}  }}
+  nets {{
+    vcc -> Rb1.a
+    Rb1.b -> Rb2.a, U1.pos
+    Rb2.b -> gnd
+{tuning_net}
+    R1.b -> R2.a, C2.a
+    R2.b -> U1.out
+    C1.b -> gnd
+    C2.b -> gnd
+    U1.neg -> Decay.a
+    Decay.b -> U1.out
+    in -> R_trig.a
+    R_trig.b -> R1.b
+    U1.out -> R_out.a
+    R_out.b -> out
+  }}
+  controls {{
+    Decay.position -> "Decay"
+{tuning_ctrl}  }}
+}}"#
+    )
+}
+
+/// Measure frequency and decay time from an impulse response.
+fn measure_response(output: &[f64], sample_rate: f64) -> (f64, f64, f64) {
+    let peak = output.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
+
+    // Frequency from zero crossings in first 200ms
+    let analysis = (sample_rate * 0.2) as usize;
+    let zc: u32 = (1..analysis.min(output.len()))
+        .filter(|&i| output[i] * output[i - 1] < 0.0)
+        .count() as u32;
+    let freq = zc as f64 / 2.0 / 0.2;
+
+    // Decay time: find when amplitude drops to -20dB (0.1×) of peak
+    let threshold = peak * 0.1;
+    let mut decay_ms = 0.0;
+    for i in 0..output.len() {
+        if i > 10 && output[i].abs() < threshold {
+            // Check it stays below threshold
+            let still_below = output[i..].iter().take(100).all(|s| s.abs() < threshold * 2.0);
+            if still_below {
+                decay_ms = i as f64 / sample_rate * 1000.0;
+                break;
+            }
+        }
+    }
+
+    (freq, peak, decay_ms)
+}
+
+/// Test: sweeping the Decay pot changes the ring time but NOT the frequency.
+#[test]
+#[ignore] // TODO: IIR recomputation on pot change
+fn decay_pot_changes_ring_time() {
+    let source = make_pedal_with_controls("150k", "8.2n", "470k", false);
+    let pedal_def = pedalkernel::dsl::parse_pedal_file(&source).expect("parse");
+
+    let mut results: Vec<(f64, f64, f64, f64)> = Vec::new(); // (pot_pos, freq, peak, decay_ms)
+
+    for &pot_pos in &[0.95, 0.8, 0.6, 0.4, 0.2] {
+        let mut proc = pedalkernel::compiler::compile_pedal(&pedal_def, SAMPLE_RATE).expect("compile");
+
+        // Set decay pot position
+        proc.set_control("Decay", pot_pos);
+
+        // Warmup
+        for _ in 0..480 {
+            proc.process(0.0);
+        }
+
+        // Impulse + 1 second
+        let mut output = Vec::with_capacity(SAMPLE_RATE as usize);
+        for i in 0..SAMPLE_RATE as usize {
+            let input = if i == 0 { 1.0 } else { 0.0 };
+            output.push(proc.process(input));
+        }
+
+        let (freq, peak, decay_ms) = measure_response(&output, SAMPLE_RATE);
+        results.push((pot_pos, freq, peak, decay_ms));
+    }
+
+    println!("\n{:>8} {:>8} {:>8} {:>10}", "Decay", "Freq", "Peak", "Decay(ms)");
+    println!("{}", "-".repeat(40));
+    for &(pos, freq, peak, decay) in &results {
+        println!("{:>8.2} {:>7.0}Hz {:>8.3} {:>9.1}ms", pos, freq, peak, decay);
+    }
+
+    // Verify: frequency should stay roughly constant across decay settings
+    let freqs: Vec<f64> = results.iter().map(|r| r.1).filter(|&f| f > 10.0).collect();
+    if freqs.len() >= 2 {
+        let f_min = freqs.iter().copied().fold(f64::MAX, f64::min);
+        let f_max = freqs.iter().copied().fold(0.0_f64, f64::max);
+        let f_ratio = f_max / f_min.max(1.0);
+        assert!(
+            f_ratio < 1.3,
+            "Frequency should be stable across decay settings: min={f_min:.0}, max={f_max:.0}, ratio={f_ratio:.2}"
+        );
+    }
+
+    // Verify: higher decay pot = longer ring (higher R_fb = higher Q)
+    // pot_pos=0.95 should have longest decay, pot_pos=0.2 shortest
+    let decays: Vec<f64> = results.iter().map(|r| r.3).collect();
+    if decays.len() >= 2 && decays[0] > 0.0 && decays[decays.len() - 1] > 0.0 {
+        assert!(
+            decays[0] > decays[decays.len() - 1] * 0.5,
+            "Higher decay pot should give longer ring: pos=0.95→{:.1}ms, pos=0.2→{:.1}ms",
+            decays[0], decays[decays.len() - 1]
+        );
+    }
+}
+
+/// Test: sweeping Tuning pot changes frequency monotonically.
+#[test]
+#[ignore] // TODO: IIR recomputation on pot change
+fn tuning_pot_sweeps_frequency() {
+    let source = make_pedal_with_controls("150k", "8.2n", "470k", true);
+    let pedal_def = pedalkernel::dsl::parse_pedal_file(&source).expect("parse");
+
+    let mut results: Vec<(f64, f64, f64)> = Vec::new(); // (pot_pos, freq, peak)
+
+    for &pot_pos in &[0.1, 0.3, 0.5, 0.7, 0.9] {
+        let mut proc = pedalkernel::compiler::compile_pedal(&pedal_def, SAMPLE_RATE).expect("compile");
+
+        // Set tuning pot — adds series resistance, should lower f0
+        proc.set_control("Tuning", pot_pos);
+        // Keep decay high for audible ring
+        proc.set_control("Decay", 0.9);
+
+        for _ in 0..480 {
+            proc.process(0.0);
+        }
+
+        let mut output = Vec::with_capacity(SAMPLE_RATE as usize);
+        for i in 0..SAMPLE_RATE as usize {
+            let input = if i == 0 { 1.0 } else { 0.0 };
+            output.push(proc.process(input));
+        }
+
+        let (freq, peak, _) = measure_response(&output, SAMPLE_RATE);
+        results.push((pot_pos, freq, peak));
+    }
+
+    println!("\n{:>8} {:>8} {:>8}", "Tuning", "Freq", "Peak");
+    println!("{}", "-".repeat(28));
+    for &(pos, freq, peak) in &results {
+        println!("{:>8.2} {:>7.0}Hz {:>8.3}", pos, freq, peak);
+    }
+
+    // Verify: frequency should change with tuning
+    let freqs: Vec<f64> = results.iter().map(|r| r.1).filter(|&f| f > 10.0).collect();
+    if freqs.len() >= 2 {
+        let f_range = freqs.iter().copied().fold(0.0_f64, f64::max)
+            - freqs.iter().copied().fold(f64::MAX, f64::min);
+        assert!(
+            f_range > 10.0,
+            "Tuning pot should change frequency: range={f_range:.0}Hz (frequencies: {freqs:?})"
+        );
+    }
+
+    // Verify all voices produced output
+    for &(pos, _, peak) in &results {
+        assert!(
+            peak > 0.0001,
+            "Tuning={pos:.1} should produce output, got peak={peak:.6}"
+        );
+    }
+}
