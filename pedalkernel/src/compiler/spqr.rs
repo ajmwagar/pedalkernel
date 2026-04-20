@@ -363,6 +363,316 @@ pub(super) fn spqr_decompose(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// SP subtree classification
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Component-level classification of an SP subtree.
+///
+/// Determined by walking Q leaves and checking `Component::is_passive()`
+/// and `Component::is_nonlinear()`. Drives the choice of runtime strategy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SpClassification {
+    /// All edges are passive → pure WDF tree (or IIR for rigid).
+    AllPassive,
+    /// Exactly one nonlinear edge → WDF tree + scalar NR/Wright Omega root.
+    SingleNl { nl_edge_idx: usize },
+    /// Multiple NL elements or mixed active — needs MNA or further decomposition.
+    Complex,
+}
+
+/// Classify an S/P/Q subtree by its component content.
+///
+/// Walks Q leaves, counts nonlinear edges. Does NOT look at topology
+/// (that's already captured by the SpqrNode structure).
+pub(super) fn classify_sp_subtree(node: &SpqrNode, graph: &CircuitGraph) -> SpClassification {
+    let mut nl_edges: Vec<usize> = Vec::new();
+    collect_nl_edges(node, graph, &mut nl_edges);
+    match nl_edges.len() {
+        0 => SpClassification::AllPassive,
+        1 => SpClassification::SingleNl { nl_edge_idx: nl_edges[0] },
+        _ => SpClassification::Complex,
+    }
+}
+
+fn collect_nl_edges(node: &SpqrNode, graph: &CircuitGraph, nl_edges: &mut Vec<usize>) {
+    match node {
+        SpqrNode::Q { edge_idx, .. } => {
+            let e = &graph.edges[*edge_idx];
+            let comp = &graph.components[e.comp_idx];
+            if !comp.kind.is_passive() {
+                nl_edges.push(*edge_idx);
+            }
+        }
+        SpqrNode::S { children, .. } | SpqrNode::P { children, .. } => {
+            for child in children {
+                collect_nl_edges(child, graph, nl_edges);
+            }
+        }
+        SpqrNode::R { edge_indices, children, .. } => {
+            for &eidx in edge_indices {
+                let e = &graph.edges[eidx];
+                let comp = &graph.components[e.comp_idx];
+                if !comp.kind.is_passive() {
+                    nl_edges.push(eidx);
+                }
+            }
+            for child in children {
+                collect_nl_edges(child, graph, nl_edges);
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SPQR → DynNode (WDF tree) conversion
+// ═══════════════════════════════════════════════════════════════════════════
+
+use super::dyn_node::DynNode;
+
+/// Fold a list of DynNodes into a binary tree using the given constructor.
+///
+/// Shared by series and parallel tree building. Folds right:
+/// `fold([a, b, c], Series) → Series(a, Series(b, c))`
+fn fold_binary(mut nodes: Vec<DynNode>, ctor: fn(Box<DynNode>, Box<DynNode>) -> DynNode) -> Option<DynNode> {
+    match nodes.len() {
+        0 => None,
+        1 => Some(nodes.remove(0)),
+        _ => {
+            let mut tree = nodes.pop().unwrap();
+            while let Some(left) = nodes.pop() {
+                tree = ctor(Box::new(left), Box::new(tree));
+            }
+            Some(tree)
+        }
+    }
+}
+
+/// Convert an S/P/Q subtree to a WDF DynNode (all-passive).
+///
+/// Returns `None` if any edge is non-passive (NL element, op-amp, etc.).
+pub(super) fn spqr_to_dyn_node(
+    node: &SpqrNode,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Option<DynNode> {
+    match node {
+        SpqrNode::Q { edge_idx, .. } => {
+            let e = &graph.edges[*edge_idx];
+            let comp = &graph.components[e.comp_idx];
+            comp.kind.make_leaf(&comp.id, sample_rate)
+        }
+        SpqrNode::S { children, .. } => {
+            let nodes: Option<Vec<DynNode>> = children
+                .iter()
+                .map(|c| spqr_to_dyn_node(c, graph, sample_rate))
+                .collect();
+            fold_binary(nodes?, DynNode::Series)
+        }
+        SpqrNode::P { children, .. } => {
+            let nodes: Option<Vec<DynNode>> = children
+                .iter()
+                .map(|c| spqr_to_dyn_node(c, graph, sample_rate))
+                .collect();
+            fold_binary(nodes?, DynNode::Parallel)
+        }
+        SpqrNode::R { .. } => None,
+    }
+}
+
+/// Convert an S/P/Q subtree to a WDF DynNode, skipping one NL edge.
+///
+/// Builds the passive WDF tree for Case 2 (SingleNl). The excluded
+/// NL edge becomes the root element solved by NR/Wright Omega.
+pub(super) fn spqr_to_passive_dyn_node(
+    node: &SpqrNode,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    exclude_edge: usize,
+) -> Option<DynNode> {
+    match node {
+        SpqrNode::Q { edge_idx, .. } => {
+            if *edge_idx == exclude_edge {
+                return None; // This is the NL root — skip it
+            }
+            let e = &graph.edges[*edge_idx];
+            let comp = &graph.components[e.comp_idx];
+            comp.kind.make_leaf(&comp.id, sample_rate)
+        }
+        SpqrNode::S { children, .. } => {
+            let nodes: Vec<DynNode> = children
+                .iter()
+                .filter_map(|c| spqr_to_passive_dyn_node(c, graph, sample_rate, exclude_edge))
+                .collect();
+            fold_binary(nodes, DynNode::Series)
+        }
+        SpqrNode::P { children, .. } => {
+            let nodes: Vec<DynNode> = children
+                .iter()
+                .filter_map(|c| spqr_to_passive_dyn_node(c, graph, sample_rate, exclude_edge))
+                .collect();
+            fold_binary(nodes, DynNode::Parallel)
+        }
+        SpqrNode::R { .. } => None,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SPQR → stages
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A stage produced by SPQR tree conversion.
+///
+/// Three cases, matching topology × component classification:
+/// - **PassiveWdf**: SP-reducible, all passive → pure WDF tree
+/// - **NlWdf**: SP-reducible, single NL root → WDF tree + scalar NR solve
+/// - **Rigid**: non-SP topology → MNA scattering (build layer decides IIR vs NR)
+pub(super) enum SpqrStage {
+    /// Case 1: all-passive SP tree → pure WDF (or IIR candidate).
+    PassiveWdf {
+        tree: DynNode,
+        edge_indices: Vec<usize>,
+        order: usize,
+    },
+    /// Case 2: SP tree with single NL root → WDF + scalar NR/Wright Omega.
+    NlWdf {
+        /// Passive WDF tree (NL edge excluded).
+        tree: DynNode,
+        /// The nonlinear edge index (becomes RootKind).
+        nl_edge_idx: usize,
+        /// All edge indices (passive + NL).
+        edge_indices: Vec<usize>,
+        order: usize,
+    },
+    /// Case 3: rigid subgraph → MNA scattering matrix.
+    /// Build layer checks Component::is_passive() to pick IIR (3a) vs NR (3b).
+    Rigid {
+        edge_indices: Vec<usize>,
+        boundary_nodes: Vec<NodeId>,
+        /// Pendant WDF subtrees (SP-reduced children of the R-node).
+        pendant_trees: Vec<(DynNode, NodeId)>,
+        order: usize,
+    },
+}
+
+impl std::fmt::Debug for SpqrStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpqrStage::PassiveWdf { edge_indices, order, .. } => f
+                .debug_struct("PassiveWdf")
+                .field("edge_indices", edge_indices)
+                .field("order", order)
+                .finish(),
+            SpqrStage::NlWdf { nl_edge_idx, edge_indices, order, .. } => f
+                .debug_struct("NlWdf")
+                .field("nl_edge_idx", nl_edge_idx)
+                .field("edge_indices", edge_indices)
+                .field("order", order)
+                .finish(),
+            SpqrStage::Rigid { edge_indices, boundary_nodes, pendant_trees, order } => f
+                .debug_struct("Rigid")
+                .field("edge_indices", edge_indices)
+                .field("boundary_nodes", boundary_nodes)
+                .field("pendant_count", &pendant_trees.len())
+                .field("order", order)
+                .finish(),
+        }
+    }
+}
+
+/// Convert an SPQR tree into a list of stages in signal-flow order.
+///
+/// Walks the SPQR tree depth-first. Classification at each S/P node
+/// determines the stage type. Traversal order IS signal routing.
+pub(super) fn spqr_to_stages(
+    root: &SpqrNode,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Vec<SpqrStage> {
+    let mut stages = Vec::new();
+    let mut order = 0;
+    collect_stages(root, graph, sample_rate, &mut stages, &mut order);
+    stages
+}
+
+fn collect_stages(
+    node: &SpqrNode,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    stages: &mut Vec<SpqrStage>,
+    order: &mut usize,
+) {
+    match node {
+        SpqrNode::Q { edge_idx, .. } => {
+            let e = &graph.edges[*edge_idx];
+            let comp = &graph.components[e.comp_idx];
+            if let Some(tree) = comp.kind.make_leaf(&comp.id, sample_rate) {
+                stages.push(SpqrStage::PassiveWdf {
+                    tree,
+                    edge_indices: vec![*edge_idx],
+                    order: *order,
+                });
+                *order += 1;
+            }
+            // Bare NL Q-nodes are absorbed by their parent stage
+        }
+        SpqrNode::S { children, .. } | SpqrNode::P { children, .. } => {
+            match classify_sp_subtree(node, graph) {
+                SpClassification::AllPassive => {
+                    if let Some(tree) = spqr_to_dyn_node(node, graph, sample_rate) {
+                        stages.push(SpqrStage::PassiveWdf {
+                            tree,
+                            edge_indices: node.all_edge_indices(),
+                            order: *order,
+                        });
+                        *order += 1;
+                    }
+                }
+                SpClassification::SingleNl { nl_edge_idx } => {
+                    if let Some(tree) = spqr_to_passive_dyn_node(node, graph, sample_rate, nl_edge_idx) {
+                        stages.push(SpqrStage::NlWdf {
+                            tree,
+                            nl_edge_idx,
+                            edge_indices: node.all_edge_indices(),
+                            order: *order,
+                        });
+                        *order += 1;
+                    }
+                }
+                SpClassification::Complex => {
+                    // Multiple NL or mixed → recurse into children
+                    for child in children {
+                        collect_stages(child, graph, sample_rate, stages, order);
+                    }
+                }
+            }
+        }
+        SpqrNode::R { edge_indices, boundary_nodes, children, .. } => {
+            let mut pendant_trees: Vec<(DynNode, NodeId)> = Vec::new();
+            let mut remaining_edges = edge_indices.clone();
+
+            for child in children {
+                if let Some(tree) = spqr_to_dyn_node(child, graph, sample_rate) {
+                    let (attach, _) = child.endpoints();
+                    pendant_trees.push((tree, attach));
+                } else {
+                    // Non-passive child of R-node → recurse
+                    collect_stages(child, graph, sample_rate, stages, order);
+                    remaining_edges.extend(child.all_edge_indices());
+                }
+            }
+
+            stages.push(SpqrStage::Rigid {
+                edge_indices: remaining_edges,
+                boundary_nodes: boundary_nodes.clone(),
+                pendant_trees,
+                order: *order,
+            });
+            *order += 1;
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -382,6 +692,19 @@ mod tests {
             .filter(|&i| graph.components[graph.edges[i].comp_idx].kind.is_passive())
             .collect();
         (graph, passive_edges)
+    }
+
+    /// Helper: build a CircuitGraph and return ALL non-active-IC edges
+    /// (passives + nonlinear elements like diodes). Used for NlWdf tests.
+    fn make_graph_all_edges(pedal_src: &str) -> (CircuitGraph, Vec<usize>) {
+        let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse failed");
+        let graph = CircuitGraph::from_pedal(&pedal);
+        let active_set: std::collections::HashSet<usize> =
+            graph.active_edge_indices.iter().copied().collect();
+        let all_edges: Vec<usize> = (0..graph.edges.len())
+            .filter(|i| !active_set.contains(i))
+            .collect();
+        (graph, all_edges)
     }
 
     #[test]
@@ -497,6 +820,204 @@ mod tests {
             n_passive,
             "Decomposition must preserve all {} passive edges",
             n_passive
+        );
+    }
+
+    // ── Phase 2: SPQR → stages tests ────────────────────────────────
+
+    #[test]
+    fn spqr_to_stages_passive_rc_single_wdf() {
+        let (graph, edges) = make_graph(r#"
+            pedal "test" { supply 9V
+                components { R1: resistor(10k)  C1: cap(100n) }
+                nets { in -> R1.a  R1.b -> C1.a  C1.b -> out }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let stages = spqr_to_stages(&tree, &graph, 48000.0);
+        assert_eq!(stages.len(), 1, "Passive RC should produce 1 stage");
+        assert!(
+            matches!(&stages[0], SpqrStage::PassiveWdf { edge_indices, .. } if edge_indices.len() == 2),
+            "Passive RC should be PassiveWdf with 2 edges, got {:?}", stages[0]
+        );
+    }
+
+    #[test]
+    fn spqr_to_stages_parallel_rc_single_wdf() {
+        let (graph, edges) = make_graph(r#"
+            pedal "test" { supply 9V
+                components { R1: resistor(10k)  R2: resistor(20k) }
+                nets { in -> R1.a, R2.a  R1.b -> out  R2.b -> out }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let stages = spqr_to_stages(&tree, &graph, 48000.0);
+        assert_eq!(stages.len(), 1, "Parallel R should produce 1 stage");
+        assert!(
+            matches!(&stages[0], SpqrStage::PassiveWdf { .. }),
+            "Parallel R should be PassiveWdf, got {:?}", stages[0]
+        );
+    }
+
+    #[test]
+    fn spqr_to_stages_bridge_becomes_rigid() {
+        let (graph, edges) = make_graph(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)  R2: resistor(10k)
+                    R3: resistor(10k)  R4: resistor(10k)
+                    R5: resistor(10k)
+                }
+                nets {
+                    in -> R1.a, R3.a
+                    R1.b -> R2.a, R5.a
+                    R3.b -> R4.a, R5.b
+                    R2.b -> out  R4.b -> out
+                }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let stages = spqr_to_stages(&tree, &graph, 48000.0);
+
+        let has_rigid = stages.iter().any(|s| matches!(s, SpqrStage::Rigid { .. }));
+        assert!(has_rigid, "Wheatstone bridge should produce a Rigid stage");
+    }
+
+    #[test]
+    fn spqr_to_stages_ordering_matches_traversal() {
+        let (graph, edges) = make_graph(r#"
+            pedal "test" { supply 9V
+                components { R1: resistor(10k)  R2: resistor(10k)  R3: resistor(10k) }
+                nets { in -> R1.a  R1.b -> R2.a  R2.b -> R3.a  R3.b -> out }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let stages = spqr_to_stages(&tree, &graph, 48000.0);
+
+        let get_order = |s: &SpqrStage| match s {
+            SpqrStage::PassiveWdf { order, .. }
+            | SpqrStage::NlWdf { order, .. }
+            | SpqrStage::Rigid { order, .. } => *order,
+        };
+        for i in 1..stages.len() {
+            assert!(
+                get_order(&stages[i]) > get_order(&stages[i - 1]),
+                "Stage ordering should be monotonic: stage[{}]={} <= stage[{}]={}",
+                i - 1, get_order(&stages[i - 1]), i, get_order(&stages[i])
+            );
+        }
+    }
+
+    // ── Phase 2.5: classifier + NlWdf tests ────────────────────────
+
+    #[test]
+    fn classify_all_passive_rc() {
+        let (graph, edges) = make_graph(r#"
+            pedal "test" { supply 9V
+                components { R1: resistor(10k)  C1: cap(100n) }
+                nets { in -> R1.a  R1.b -> C1.a  C1.b -> out }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        assert_eq!(classify_sp_subtree(&tree, &graph), SpClassification::AllPassive);
+    }
+
+    #[test]
+    fn classify_single_nl_diode_clipper() {
+        // R in series with diode pair to ground — classic hard clipper
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components { R1: resistor(10k)  D1: diode(silicon) }
+                nets { in -> R1.a  R1.b -> D1.a  D1.b -> out }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        match classify_sp_subtree(&tree, &graph) {
+            SpClassification::SingleNl { .. } => {} // correct
+            other => panic!("Diode clipper should be SingleNl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_complex_two_diodes() {
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components { D1: diode(silicon)  D2: diode(silicon) }
+                nets { in -> D1.a  D1.b -> D2.a  D2.b -> out }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        assert_eq!(classify_sp_subtree(&tree, &graph), SpClassification::Complex);
+    }
+
+    #[test]
+    fn spqr_to_stages_diode_clipper_is_nl_wdf() {
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components { R1: resistor(10k)  C1: cap(100n)  D1: diode(silicon) }
+                nets { in -> R1.a  R1.b -> C1.a  C1.b -> D1.a  D1.b -> out }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let stages = spqr_to_stages(&tree, &graph, 48000.0);
+        assert_eq!(stages.len(), 1, "Diode clipper should produce 1 stage");
+        match &stages[0] {
+            SpqrStage::NlWdf { nl_edge_idx, edge_indices, tree, .. } => {
+                assert_eq!(edge_indices.len(), 3, "Should have R + C + D");
+                // The passive tree should have port_resistance for R + C
+                let rp = tree.port_resistance();
+                assert!(rp > 0.0, "Passive tree should have valid port resistance, got {rp}");
+                // The NL edge should point to the diode
+                let nl_edge = &graph.edges[*nl_edge_idx];
+                let nl_comp = &graph.components[nl_edge.comp_idx];
+                assert!(!nl_comp.kind.is_passive(), "NL edge should be non-passive");
+            }
+            other => panic!("Diode clipper should be NlWdf, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn spqr_to_stages_nl_wdf_passive_tree_excludes_diode() {
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components { R1: resistor(4.7k)  D1: diode(silicon) }
+                nets { in -> R1.a  R1.b -> D1.a  D1.b -> out }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let stages = spqr_to_stages(&tree, &graph, 48000.0);
+        match &stages[0] {
+            SpqrStage::NlWdf { tree, .. } => {
+                // Passive tree should only be the resistor (4.7k)
+                let rp = tree.port_resistance();
+                assert!(
+                    (rp - 4700.0).abs() < 100.0,
+                    "Passive tree should be just R1=4.7k, got Rp={rp:.0}"
+                );
+            }
+            other => panic!("Expected NlWdf, got {:?}", other),
+        }
+    }
+
+    // ── Phase 2 continued ───────────────────────────────────────────
+
+    #[test]
+    fn spqr_dyn_node_series_has_correct_structure() {
+        let (graph, edges) = make_graph(r#"
+            pedal "test" { supply 9V
+                components { R1: resistor(10k)  R2: resistor(10k) }
+                nets { in -> R1.a  R1.b -> R2.a  R2.b -> out }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let dyn_node = spqr_to_dyn_node(&tree, &graph, 48000.0);
+        assert!(dyn_node.is_some(), "Series resistors should produce a DynNode");
+        // The DynNode should have port_resistance = R1 + R2 = 20k
+        let node = dyn_node.unwrap();
+        let rp = node.port_resistance();
+        assert!(
+            (rp - 20_000.0).abs() < 100.0,
+            "Series R1+R2 port resistance should be ~20k, got {rp:.0}"
         );
     }
 }
