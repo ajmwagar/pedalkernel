@@ -347,6 +347,29 @@ fn compile_via_spqr_808_kick() {
         }"#)
     .expect("parse");
 
+    // Debug: show feedback groups
+    {
+        use super::feedback::find_feedback_groups;
+        let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+        let active_set: std::collections::HashSet<usize> =
+            graph.active_edge_indices.iter().copied().collect();
+        let all_edges: Vec<usize> = (0..graph.edges.len())
+            .filter(|i| !active_set.contains(i))
+            .collect();
+        let groups = find_feedback_groups(&all_edges, &graph);
+        for (i, g) in groups.iter().enumerate() {
+            let names: Vec<String> = g.all_edges().iter()
+                .map(|&eidx| {
+                    let comp = &graph.components[graph.edges[eidx].comp_idx];
+                    format!("{}({:?})", comp.id, graph.effective_edge_kind(eidx))
+                })
+                .collect();
+            eprintln!("808 group {i}: active={} fb={} pendant={} gnd={} :: {:?}",
+                g.active_edges.len(), g.feedback_edges.len(),
+                g.pendant_edges.len(), g.ground_shunt_edges.len(), names);
+        }
+    }
+
     let mut compiled = compile_via_spqr(&pedal, 48000.0)
         .expect("Should compile 808 kick via SPQR");
 

@@ -177,18 +177,53 @@ pub(in crate::compiler) fn build_iir_stage(
     let feedback_r = extract_feedback_r(edge_indices, graph);
 
     // ── Step 5: Build IIR biquad ────────────────────────────────────
-    match mna.build_iir(&cap_stamps, vs_idx, out_mna, None, sample_rate, feedback_r.as_ref().map(|&(rf, rc, f0)| (rf, rc, f0))) {
-        Some((b_coeffs, a_coeffs)) => {
-            let mut iir = IirData::new(b_coeffs, a_coeffs, sample_rate);
-            // Store component values for pot recomputation
-            if let Some((rf, r_crit, _)) = feedback_r {
-                iir.r_fb = rf;
-                iir.r_crit = r_crit;
-            }
-            Ok(iir)
+    // Try IIR biquad (works for bridged-T oscillators with feedback_r,
+    // and for stable 2nd-order systems via state-space reduction).
+    if let Some((b_coeffs, a_coeffs)) = mna.build_iir(
+        &cap_stamps, vs_idx, out_mna, None, sample_rate,
+        feedback_r.as_ref().map(|&(rf, rc, f0)| (rf, rc, f0)),
+    ) {
+        let mut iir = IirData::new(b_coeffs, a_coeffs, sample_rate);
+        if let Some((rf, r_crit, _)) = feedback_r {
+            iir.r_fb = rf;
+            iir.r_crit = r_crit;
         }
-        None => Err("IIR: build_iir failed — circuit may need StateSpace".to_string()),
+        return Ok(iir);
     }
+
+    // Fallback: state-space reduction → extract biquad if 2nd order
+    let (a_d, b_d, c_out, n_states, d_feedthrough) =
+        mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, sample_rate);
+
+    if n_states <= 2 && n_states > 0 {
+        // Extract biquad from reduced state-space (same math as before)
+        if n_states == 1 {
+            // 1st-order: H(z) = (d*z + (c*b - d*A)) / (z - A)
+            let a_val = a_d[0];
+            let b0 = d_feedthrough;
+            let b1 = c_out[0] * b_d[0] - d_feedthrough * a_val;
+            return Ok(IirData::new(vec![b0, b1], vec![1.0, -a_val], sample_rate));
+        } else {
+            // 2nd-order: same extraction as before
+            let a11 = a_d[0]; let a12 = a_d[1];
+            let a21 = a_d[2]; let a22 = a_d[3];
+            let da1 = -(a11 + a22);
+            let da2 = a11 * a22 - a12 * a21;
+            let num_z1 = c_out[0] * b_d[0] + c_out[1] * b_d[1];
+            let num_z0 = c_out[0] * (-a22 * b_d[0] + a12 * b_d[1])
+                + c_out[1] * (a21 * b_d[0] - a11 * b_d[1]);
+            let b0 = d_feedthrough;
+            let b1 = d_feedthrough * da1 + num_z1;
+            let b2 = d_feedthrough * da2 + num_z0;
+            return Ok(IirData::new(vec![b0, b1, b2], vec![1.0, da1, da2], sample_rate));
+        }
+    }
+
+    // n_states > 2: can't reduce to biquad, need full state-space
+    Err(format!(
+        "IIR: circuit has {} states (need ≤2 for biquad)",
+        n_states
+    ))
 }
 
 /// Extract feedback parameters (Rf, R_crit, f0) from a VCVS rigid stage.

@@ -212,6 +212,17 @@ pub(super) fn build_rigid_from_group(
 
     match optimization {
         RigidOptimization::OpAmpRoot { inverting } => {
+            // If reactive elements present, try IIR first (might be resonator).
+            // extract_feedback_r detects bridged-T structure from the edges.
+            // If no bridged-T, fall back to OpAmpRoot (GBW handles caps).
+            if stats.reactive_count > 0 {
+                let pendant_trees = Vec::new();
+                if let Ok(iir_data) = iir::build_iir_stage(
+                    &edge_indices, &pendant_trees, graph, sample_rate,
+                ) {
+                    return Ok(BuiltStage::Iir(IirStage::new(iir_data)));
+                }
+            }
             if let Some(g) = group {
                 build_opamp_root(g, inverting, graph, sample_rate).map(BuiltStage::Wdf)
             } else {
