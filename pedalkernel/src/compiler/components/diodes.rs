@@ -144,6 +144,10 @@ impl Component for DiodePair {
         "diode pair"
     }
 
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::TwoPort { input: "a", output: "b" }
+    }
+
     fn is_passive(&self) -> bool {
         false
     }
@@ -249,6 +253,10 @@ impl Component for Zener {
 
     fn type_tag(&self) -> &'static str {
         "zener diode"
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::TwoPort { input: "a", output: "b" }
     }
 
     fn is_passive(&self) -> bool {
@@ -365,6 +373,10 @@ impl Component for Neon {
 
     fn type_tag(&self) -> &'static str {
         "neon bulb"
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::TwoPort { input: "a", output: "b" }
     }
 
     fn is_passive(&self) -> bool {

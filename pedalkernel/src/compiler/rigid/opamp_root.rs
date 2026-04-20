@@ -100,9 +100,7 @@ pub(in crate::compiler) fn build_opamp_root(
     sample_rate: f64,
 ) -> Result<WdfStage, String> {
     let config = extract_opamp_config(group, inverting, graph)?;
-    if config.rf <= 0.0 {
-        return Err("OpAmpRoot: no feedback resistance found".to_string());
-    }
+    // Rf=0 is valid: unity-gain buffer (direct neg→out connection)
     let root = make_opamp_root(&config, sample_rate);
 
     // Build WDF tree from pendant edges (input coupling)
