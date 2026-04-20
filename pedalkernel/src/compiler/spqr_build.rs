@@ -66,7 +66,7 @@ pub fn compile_via_spqr_with_options(
     sample_rate: f64,
     options: super::compile::CompileOptions,
 ) -> Result<CompiledPedal, String> {
-    use super::feedback::find_feedback_groups;
+    use super::signal_flow::find_flow_groups;
 
     let graph = CircuitGraph::from_pedal(pedal);
 
@@ -81,9 +81,10 @@ pub fn compile_via_spqr_with_options(
         return Err("No circuit edges found".to_string());
     }
 
-    // Step 1: Partition edges into feedback groups.
-    // Each group = a set of coupled components that must share a stage.
-    let feedback_groups = find_feedback_groups(&all_edges, &graph);
+    // Step 1: Partition edges into signal flow groups.
+    // Each group = mutually-dependent components that must share a stage.
+    // Uses directed dependency graph: cycles = co-solved, acyclic = sequential.
+    let feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
 
     // Step 2: SPQR decompose each group independently.
     let terminals = vec![graph.in_node, graph.out_node];
@@ -93,7 +94,7 @@ pub fn compile_via_spqr_with_options(
     let mut stage_counter = 0usize;
 
     for group in &feedback_groups {
-        if group.len() == 0 {
+        if group.all_edges().is_empty() {
             continue;
         }
 

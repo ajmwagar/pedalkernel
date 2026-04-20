@@ -1,11 +1,11 @@
 //! Op-amp root stage building for Rigid stages.
 //!
-//! Uses the classified FeedbackGroup directly — no second DFS.
+//! Uses the classified FlowGroup directly — no second DFS.
 //! Rf comes from feedback_edges, Ri from pendant_edges.
 
 use super::super::component::EdgeKind;
 use super::super::dyn_node::DynNode;
-use super::super::feedback::FeedbackGroup;
+use super::super::signal_flow::FlowGroup;
 use super::super::graph::CircuitGraph;
 use super::super::stage::{RootKind, WdfStage};
 use super::super::wdf_leaf::WdfVoltageSource;
@@ -15,7 +15,7 @@ use crate::oversampling::{Oversampler, OversamplingFactor};
 use super::super::spqr_build::with_voltage_source;
 use super::super::graph::NodeId;
 
-/// Shared op-amp extraction from classified FeedbackGroup.
+/// Shared op-amp extraction from classified FlowGroup.
 pub(in crate::compiler) struct OpAmpConfig {
     pub model: OpAmpModel,
     pub rf: f64,
@@ -24,13 +24,13 @@ pub(in crate::compiler) struct OpAmpConfig {
     pub inverting: bool,
 }
 
-/// Extract op-amp configuration from a classified FeedbackGroup.
+/// Extract op-amp configuration from a classified FlowGroup.
 ///
 /// Rf = sum of resistance on feedback_edges (the out→neg cycle).
 /// Ri = sum of resistance on pendant_edges (input coupling).
 /// No DFS — feedback.rs already did the classification.
 pub(in crate::compiler) fn extract_opamp_config(
-    group: &FeedbackGroup,
+    group: &FlowGroup,
     inverting: bool,
     graph: &CircuitGraph,
 ) -> Result<OpAmpConfig, String> {
@@ -92,9 +92,9 @@ pub(in crate::compiler) fn make_opamp_root(config: &OpAmpConfig, sample_rate: f6
     root
 }
 
-/// Build an OpAmpRoot stage from a classified FeedbackGroup.
+/// Build an OpAmpRoot stage from a classified FlowGroup.
 pub(in crate::compiler) fn build_opamp_root(
-    group: &FeedbackGroup,
+    group: &FlowGroup,
     inverting: bool,
     graph: &CircuitGraph,
     sample_rate: f64,

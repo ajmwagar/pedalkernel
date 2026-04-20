@@ -27,7 +27,7 @@ pub(super) use self::opamp_root::{
 
 use super::component::EdgeKind;
 use super::dyn_node::DynNode;
-use super::feedback::FeedbackGroup;
+use super::signal_flow::FlowGroup;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr_build::BuiltStage;
 use super::stage::{IirStage, RootKind, WdfStage};
@@ -125,7 +125,7 @@ pub(super) enum RigidOptimization {
 pub(super) fn classify_rigid(
     stats: &StageStats,
     graph: &CircuitGraph,
-    group: Option<&FeedbackGroup>,
+    group: Option<&FlowGroup>,
 ) -> RigidOptimization {
     // Rule 1: any NL element forces general MNA + solver
     if stats.nl_count > 0 {
@@ -207,10 +207,10 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
 ///
 /// Uses `StageStats` + `classify_rigid()` to select the cheapest strategy,
 /// then constructs the appropriate stage type.
-/// Build a runnable stage from a classified FeedbackGroup.
+/// Build a runnable stage from a classified FlowGroup.
 ///
 /// Uses `StageStats` + `classify_rigid()` to select the cheapest strategy.
-/// Edge classification from FeedbackGroup flows directly to builders.
+/// Edge classification from FlowGroup flows directly to builders.
 pub(super) fn build_rigid(
     edge_indices: Vec<usize>,
     _boundary_nodes: Vec<NodeId>,
@@ -221,12 +221,12 @@ pub(super) fn build_rigid(
     build_rigid_from_group(edge_indices, graph, sample_rate, None)
 }
 
-/// Build from a FeedbackGroup with full classification.
+/// Build from a FlowGroup with full classification.
 pub(super) fn build_rigid_from_group(
     edge_indices: Vec<usize>,
     graph: &CircuitGraph,
     sample_rate: f64,
-    group: Option<&FeedbackGroup>,
+    group: Option<&FlowGroup>,
 ) -> Result<BuiltStage, String> {
     let stats = StageStats::from_edges(&edge_indices, graph);
     let optimization = classify_rigid(&stats, graph, group);
@@ -236,7 +236,7 @@ pub(super) fn build_rigid_from_group(
             if let Some(g) = group {
                 build_opamp_root(g, inverting, graph, sample_rate).map(BuiltStage::Wdf)
             } else {
-                Err("OpAmpRoot needs classified FeedbackGroup".to_string())
+                Err("OpAmpRoot needs classified FlowGroup".to_string())
             }
         }
         RigidOptimization::Iir => {

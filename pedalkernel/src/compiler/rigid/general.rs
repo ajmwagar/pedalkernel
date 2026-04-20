@@ -1,12 +1,12 @@
 //! General rigid stage building (NL feedback paths).
 //!
 //! Handles stages with op-amp gain driving a nonlinear root
-//! (TS/RAT/Klon clipping pattern). Uses classified FeedbackGroup.
+//! (TS/RAT/Klon clipping pattern). Uses classified FlowGroup.
 
 use super::super::build::create_root;
 use super::super::component::EdgeKind;
 use super::super::dyn_node::DynNode;
-use super::super::feedback::FeedbackGroup;
+use super::super::signal_flow::FlowGroup;
 use super::super::graph::CircuitGraph;
 use super::super::stage::WdfStage;
 use super::super::wdf_leaf::WdfVoltageSource;
@@ -18,10 +18,10 @@ use super::super::spqr_build::with_voltage_source;
 
 /// Build a stage with op-amp gain driving a nonlinear root.
 ///
-/// Uses classified FeedbackGroup: Rf from feedback_edges, Ri from
+/// Uses classified FlowGroup: Rf from feedback_edges, Ri from
 /// pendant_edges, NL root from active_edges.
 pub(in crate::compiler) fn build_opamp_nl_feedback(
-    group: &FeedbackGroup,
+    group: &FlowGroup,
     stats: &StageStats,
     graph: &CircuitGraph,
     sample_rate: f64,
