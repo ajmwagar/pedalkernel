@@ -1688,45 +1688,72 @@ fn build_rtype_stage(
                 let neg = rec.neg_node;
                 let out = rec.out_node;
 
-                // Collect R and C values from the feedback network
-                let mut rf = 0.0;
-                let mut r_values: Vec<f64> = Vec::new();
-                let mut c_values: Vec<f64> = Vec::new();
+                // Collect ALL R and C values from the feedback network.
+                // Classify each edge by its role in the bridged-T topology.
+                let mut rf = 0.0_f64;     // Direct neg→out feedback
+                let mut r_series = Vec::new(); // Series R in T-network (neg→jct, jct→out)
+                let mut c_shunt = Vec::new();  // Shunt C to ground
+                let mut r_other = Vec::new();  // Load, trigger, etc.
+
                 for &eidx in &plan.passive_edge_indices {
                     let e = &graph.edges[eidx];
                     let comp = &graph.components[e.comp_idx];
                     if !comp.kind.is_passive() { continue; }
                     if let Some(r) = comp.kind.resistance() {
-                        if (e.node_a == neg && e.node_b == out) || (e.node_a == out && e.node_b == neg) {
-                            rf = r;
-                        }
-                        if e.node_a == neg || e.node_b == neg {
-                            r_values.push(r);
+                        if (e.node_a == neg && e.node_b == out)
+                            || (e.node_a == out && e.node_b == neg)
+                        {
+                            rf = r; // Rf: direct neg↔out
+                        } else if e.node_a == neg || e.node_b == neg
+                            || e.node_a == out || e.node_b == out
+                        {
+                            // R connected to neg or out (part of T-network or load)
+                            let other = if e.node_a == neg || e.node_a == out {
+                                e.node_b
+                            } else {
+                                e.node_a
+                            };
+                            // If the other end connects to both neg-side AND out-side
+                            // edges, it's the junction → this is a series R
+                            let is_junction = plan.passive_edge_indices.iter().any(|&ei2| {
+                                if ei2 == eidx { return false; }
+                                let e2 = &graph.edges[ei2];
+                                (e2.node_a == other || e2.node_b == other)
+                                    && (e2.node_a == neg || e2.node_b == neg
+                                        || e2.node_a == out || e2.node_b == out
+                                        || graph.components[e2.comp_idx].kind.capacitance().is_some())
+                            });
+                            if is_junction {
+                                r_series.push(r);
+                            } else {
+                                r_other.push(r);
+                            }
+                        } else {
+                            r_other.push(r);
                         }
                     }
                     if let Some(c) = comp.kind.capacitance() {
-                        c_values.push(c);
+                        c_shunt.push(c);
                     }
                 }
 
-                if rf > 0.0 && c_values.len() >= 2 {
-                    // R_crit = sum of resistors at neg, minus Rf
-                    let r_crit: f64 = r_values.iter().sum::<f64>() - rf;
-
-                    // f0 from caps and T-network resistors:
-                    // f0 = 1/(2π√(R1·R2·C1·C2))
-                    // Use the non-feedback resistors at neg (R1, R2 etc.)
-                    let r_network: Vec<f64> = r_values.iter().copied()
-                        .filter(|&r| (r - rf).abs() > 1.0) // exclude Rf
-                        .collect();
-                    let r_prod: f64 = if r_network.len() >= 2 {
-                        r_network.iter().product()
-                    } else if !r_network.is_empty() {
-                        r_network[0] * r_network[0]
+                if rf > 0.0 && c_shunt.len() >= 2 && !r_series.is_empty() {
+                    // R_crit for bridged-T: R1 + R2 + R1·C1/C2
+                    // For equal R,C: R_crit = 3·R
+                    let r_crit = if r_series.len() >= 2 && c_shunt.len() >= 2 {
+                        r_series[0] + r_series[1] + r_series[0] * c_shunt[0] / c_shunt[1]
                     } else {
-                        return None;
+                        // Equal R,C assumption
+                        3.0 * r_series[0]
                     };
-                    let c_prod: f64 = c_values.iter().take(2).product();
+
+                    // f0 = 1/(2π√(R1·R2·C1·C2))
+                    let r_prod: f64 = if r_series.len() >= 2 {
+                        r_series[0] * r_series[1]
+                    } else {
+                        r_series[0] * r_series[0]
+                    };
+                    let c_prod: f64 = c_shunt.iter().take(2).product();
                     let f0 = 1.0 / (2.0 * std::f64::consts::PI * (r_prod * c_prod).sqrt());
 
                     Some((rf, r_crit.max(1.0), f0))
