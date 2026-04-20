@@ -1599,17 +1599,162 @@ pub fn compile_pedal_with_options(
     let classified = super::classify::classify_circuit(&graph, pedal);
 
     // ══ Pass 1.5: Component self-classification ═══════════════════════
-    // Components inspect their neighborhood and self-classify topologies.
-    // Pre-classified opamps are skipped by the monolithic find_opamp_feedback_loops.
     let (topology_classified, topology_classified_ids) =
         super::topology::classify_topologies(pedal, sample_rate);
 
-    // ══ Pass 2: Op-amp analysis ═══════════════════════════════════════
+    // ══ Pass 1.75: SPQR op-amp fast path ═════════════════════════════
+    // For each op-amp, try SP reduction on its feedback network.
+    // If reducible → create OpAmpRoot directly (O(1) per sample).
+    // If not → leave for nullor/IIR path (handled after plan_stages).
+    let mut sp_opamp_stages: Vec<super::stage::WdfStage> = Vec::new();
+    let mut sp_claimed_edges: HashSet<usize> = HashSet::new();
+    let mut sp_handled_opamps: HashSet<String> = HashSet::new();
+
+    {
+        let active_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
+        // Find op-amps by checking each component for VcvsEdge graph role
+        let opamp_pins: Vec<(usize, super::graph::NodeId, super::graph::NodeId, super::graph::NodeId)> = graph.components.iter().enumerate()
+            .filter_map(|(idx, comp)| {
+                if let super::component::GraphRole::VcvsEdge { pin_pos, pin_neg, pin_out } = comp.kind.graph_role() {
+                    // Resolve pin names to node IDs
+                    let pos = graph.node_names.get(&format!("{}.{}", comp.id, pin_pos)).copied()?;
+                    let neg = graph.node_names.get(&format!("{}.{}", comp.id, pin_neg)).copied()?;
+                    let out = graph.node_names.get(&format!("{}.{}", comp.id, pin_out)).copied()?;
+                    Some((idx, pos, neg, out))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for &(comp_idx, pos, neg, out) in &opamp_pins {
+            let comp_id = &graph.components[comp_idx].id;
+
+            // Skip unity buffers (neg == out) — handled by node merging below
+            if neg == out { continue; }
+
+            // Detect topology: is pos grounded? → inverting
+            let is_inverting = pos == graph.gnd_node
+                || graph.supply_nodes.contains(&pos)
+                || graph.ac_ground_nodes.contains(&pos);
+
+            // Skip if NL elements (diodes) are near neg or out.
+            // Circuits with diodes in the feedback path need the NR solver.
+            // Check both direct adjacency AND one-hop through passive edges.
+            let nl_junction_nodes: HashSet<super::graph::NodeId> = classified
+                .nonlinear_elements.iter()
+                .flat_map(|nl| nl.junction_nodes.iter().copied())
+                .collect();
+            let has_adjacent_nl = nl_junction_nodes.contains(&neg)
+                || nl_junction_nodes.contains(&out)
+                || graph.edges.iter().enumerate().any(|(eidx, e)| {
+                    if active_set.contains(&eidx) { return false; }
+                    let touches = (e.node_a == neg || e.node_b == neg
+                        || e.node_a == out || e.node_b == out);
+                    let other = if e.node_a == neg || e.node_a == out { e.node_b } else { e.node_a };
+                    touches && nl_junction_nodes.contains(&other)
+                });
+            if has_adjacent_nl { continue; }
+
+            // Collect feedback edges: passive edges touching neg or out
+            let mut feedback_edges: Vec<usize> = Vec::new();
+            for (eidx, e) in graph.edges.iter().enumerate() {
+                if active_set.contains(&eidx) { continue; }
+                if !graph.components[e.comp_idx].kind.is_passive() { continue; }
+                let touches_neg = e.node_a == neg || e.node_b == neg;
+                let touches_out = e.node_a == out || e.node_b == out;
+                if touches_neg || touches_out {
+                    feedback_edges.push(eidx);
+                }
+            }
+
+            if feedback_edges.is_empty() { continue; }
+
+            // Try SP reduction: can we build a WDF tree from these edges?
+            let terminals = vec![graph.in_node, graph.gnd_node];
+            let result = super::graph::graph_reduce(
+                &feedback_edges,
+                &[],
+                &terminals,
+                &graph,
+                sample_rate * oversampling.ratio() as f64,
+                &HashMap::new(),
+                |n| n,
+                Some(graph.out_node),
+            );
+
+            if let Ok((tree, _pot_id)) = result {
+                // SP reduction succeeded → build OpAmpRoot
+                let op_type = graph.components[comp_idx].kind.op_amp_type();
+                let model = op_type.map(|ot| {
+                    crate::elements::OpAmpModel::from_opamp_type(&ot)
+                }).unwrap_or_else(crate::elements::OpAmpModel::generic);
+
+                // Compute gain from tree structure:
+                // For inverting: find Rf (neg→out direct) and Ri (input→neg)
+                let mut rf = 0.0_f64;
+                let mut ri = 0.0_f64;
+                for &eidx in &feedback_edges {
+                    let e = &graph.edges[eidx];
+                    let comp = &graph.components[e.comp_idx];
+                    if let Some(r) = comp.kind.resistance() {
+                        let a_is_neg = e.node_a == neg;
+                        let b_is_neg = e.node_b == neg;
+                        let a_is_out = e.node_a == out;
+                        let b_is_out = e.node_b == out;
+                        if (a_is_neg && b_is_out) || (a_is_out && b_is_neg) {
+                            rf = r; // Direct neg↔out = feedback R
+                        } else if a_is_neg || b_is_neg {
+                            if ri == 0.0 { ri = r; } // First R at neg = input R
+                        }
+                    }
+                }
+
+                if rf > 0.0 && ri > 0.0 {
+                    let gain = if is_inverting { rf / ri } else { 1.0 + rf / ri };
+                    let mut root = if is_inverting {
+                        crate::elements::OpAmpRoot::new_inverting(model, gain)
+                    } else {
+                        crate::elements::OpAmpRoot::new_non_inverting(model, gain)
+                    };
+                    root.set_sample_rate(sample_rate);
+                    root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5));
+
+                    // Wrap tree in a series adaptor with VS for signal injection
+                    let vs = super::dyn_node::DynNode::VoltageSource(0.0, 10_000.0);
+                    let series_tree = super::dyn_node::DynNode::Series(
+                        Box::new(vs),
+                        Box::new(tree),
+                    );
+
+                    let mut stage = super::stage::WdfStage::new(
+                        series_tree,
+                        super::stage::RootKind::OpAmp(root),
+                        crate::oversampling::Oversampler::new(oversampling),
+                    );
+                    stage.injection_node_id = graph.in_node;
+                    stage.output_node_id = graph.out_node;
+                    stage.balance_vs_impedance();
+
+                    eprintln!("[SPQR] SP→OpAmpRoot for {} gain={gain:.1} inv={is_inverting} edges={}", comp_id, feedback_edges.len());
+                    sp_claimed_edges.extend(feedback_edges.iter());
+                    sp_handled_opamps.insert(comp_id.clone());
+                    sp_opamp_stages.push(stage);
+                }
+            }
+            // If graph_reduce failed → not SP-reducible → skip, let nullor handle it
+        }
+    }
+
+    // ══ Pass 2: Op-amp analysis (legacy, for circuits not handled by SPQR) ═
+    // Skip op-amps already handled by the SP fast path above.
+    let mut all_skip_ids = topology_classified_ids.clone();
+    all_skip_ids.extend(sp_handled_opamps.iter().cloned());
     let opamp_analysis = super::opamp_analysis::analyze_opamps(
         &graph,
         pedal,
         &topology_classified,
-        &topology_classified_ids,
+        &all_skip_ids,
     );
     let opamp_feedback_gain = 1.0_f64;
 
@@ -1731,6 +1876,7 @@ pub fn compile_pedal_with_options(
             &nl_junction_nodes,
         );
     let mut claimed_edges: HashSet<usize> = opamp_consumed_edges;
+    claimed_edges.extend(sp_claimed_edges.iter());
     // Apply oversampling rate to opamp feedback stages.
     // The OpAmpRoot GBW filter and slew rate limiter are initialized at base_rate
     // but run inside the oversampler at effective_rate. Without this correction,
@@ -1902,6 +2048,9 @@ pub fn compile_pedal_with_options(
             &diode_paired_opamps,
         );
     stages.extend(nonlinear_stages);
+
+    // Add SP-reduced op-amp stages (from SPQR fast path).
+    stages.extend(sp_opamp_stages);
 
     // Build push-pull stages.
     let push_pull_stages = super::build::build_push_pull_stages(
