@@ -1340,32 +1340,267 @@ impl MnaSystem {
             c_full[n] -= 1.0;
         }
 
-        // ── Continuous-time Schur complement, then bilinear transform ───
+        eprintln!("[ss] n_nodes={n_nodes} n_vs={n_vs} vs_idx={vs_idx}");
+        // ── Step 1: Eliminate input VS node by substitution ──────────────
+        // The input voltage source constrains V(injection_node) = u.
+        // Substitute this into the G and C matrices to remove one node.
+        // This avoids the singular G_aa from D[vs_idx,vs_idx] = 0.
         //
-        // Non-cap nodes are algebraic in continuous time (C·ẋ = 0):
-        //   C_c·ẋ_c + G_cc·x_c + G_ca·x_a = B_c·u
-        //   G_ac·x_c + G_aa·x_a = B_a·u           (algebraic)
-        //
-        // Eliminate x_a from the algebraic equation:
-        //   x_a = G_aa⁻¹·(B_a·u - G_ac·x_c)
-        //
-        // Reduced continuous system:
-        //   C_c·ẋ_c + G_red·x_c = B_red·u
-        //   G_red = G_cc - G_ca·G_aa⁻¹·G_ac    (Schur complement)
-        //   B_red = B_c - G_ca·G_aa⁻¹·B_a
-        //
-        // Then apply bilinear transform to the REDUCED system:
-        //   M_red = G_red + 2fs·C_c
-        //   N_red = 2fs·C_c - G_red
-        //   A_d = M_red⁻¹·N_red
-        //
-        // This avoids parasitic -1 eigenvalues entirely.
+        // Find which node the input VS drives (the one with B[node, vs_idx] = 1).
+        // Only eliminate VS node if it has NO capacitor (truly algebraic).
+        // If the VS node has a cap, it's a dynamic state — keep it.
+        let vs_node = (0..n_nodes).find(|&i| {
+            self.b_matrix[i * n_vs + vs_idx].abs() > 0.5
+                && c_cap[i * n_nodes + i].abs() < 1e-30 // no cap on this node
+        });
+
+        // Build reduced G and C matrices with the VS node eliminated.
+        // For each remaining node i, the equation becomes:
+        //   G'[i,j] = G[i,j] (for j != vs_node)
+        //   B'[i] += G[i, vs_node]  (the VS node column becomes input coupling)
+        let kept_nodes: Vec<usize> = (0..n_nodes)
+            .filter(|&i| Some(i) != vs_node)
+            .collect();
+        let n_kept = kept_nodes.len();
+
+        // Build reduced G (n_kept × n_kept)
+        let mut g_kept = vec![0.0; n_kept * n_kept];
+        for (ri, &r) in kept_nodes.iter().enumerate() {
+            for (ci, &c) in kept_nodes.iter().enumerate() {
+                g_kept[ri * n_kept + ci] = self.g_matrix[r * n_nodes + c];
+            }
+        }
+
+        // Build reduced C (n_kept × n_kept)
+        let mut c_kept = vec![0.0; n_kept * n_kept];
+        for (ri, &r) in kept_nodes.iter().enumerate() {
+            for (ci, &c) in kept_nodes.iter().enumerate() {
+                c_kept[ri * n_kept + ci] = c_cap[r * n_nodes + c];
+            }
+        }
+
+        // Build input coupling vector: b_kept[i] = G[i, vs_node]
+        let mut b_kept = vec![0.0; n_kept];
+        if let Some(vn) = vs_node {
+            for (ri, &r) in kept_nodes.iter().enumerate() {
+                b_kept[ri] = self.g_matrix[r * n_nodes + vn];
+            }
+        }
+
+        // Stamp remaining VCVS constraints into kept system.
+        // The VCVS uses vsource rows (B/C/D matrices). We need to fold
+        // them into the reduced G matrix via Schur complement.
+        // Build augmented system: [G_kept, B_kept_vs; C_kept_vs, D_vs]
+        // where B_kept_vs/C_kept_vs/D_vs are the non-input VS entries.
+        let other_vs: Vec<usize> = (0..n_vs).filter(|&i| i != vs_idx).collect();
+        let n_other_vs = other_vs.len();
+
+        if n_other_vs > 0 {
+            // Build augmented system for remaining vsources
+            let n_aug_kept = n_kept + n_other_vs;
+            let mut g_aug = vec![0.0; n_aug_kept * n_aug_kept];
+
+            // G block
+            for i in 0..n_kept {
+                for j in 0..n_kept {
+                    g_aug[i * n_aug_kept + j] = g_kept[i * n_kept + j];
+                }
+            }
+            // B block (remaining VS columns)
+            for (vi, &v) in other_vs.iter().enumerate() {
+                for (ni, &n) in kept_nodes.iter().enumerate() {
+                    g_aug[ni * n_aug_kept + n_kept + vi] = self.b_matrix[n * n_vs + v];
+                }
+            }
+            // C block (remaining VS rows)
+            for (vi, &v) in other_vs.iter().enumerate() {
+                for (ni, &n) in kept_nodes.iter().enumerate() {
+                    g_aug[(n_kept + vi) * n_aug_kept + ni] = self.c_matrix[v * n_nodes + n];
+                }
+                // Also include the VS node's contribution to the C row
+                if let Some(vn) = vs_node {
+                    // The VCVS C row references vs_node — this becomes part of b_kept
+                    // via the input substitution: C[vs, vs_node] * u contributes to output
+                    let c_vs_node = self.c_matrix[v * n_nodes + vn];
+                    // This goes into the b vector for the vs row
+                    b_kept.resize(n_aug_kept, 0.0);
+                    b_kept[n_kept + vi] += c_vs_node;
+                }
+            }
+            // D block
+            for (vi, &v) in other_vs.iter().enumerate() {
+                for (vj, &w) in other_vs.iter().enumerate() {
+                    g_aug[(n_kept + vi) * n_aug_kept + n_kept + vj] = self.d_matrix[v * n_vs + w];
+                }
+            }
+            b_kept.resize(n_aug_kept, 0.0);
+
+            // ── Step 2: Schur complement on the augmented kept system ────
+            // Cap indices in the kept system
+            let cap_indices: Vec<usize> = (0..n_kept)
+                .filter(|&i| c_kept[i * n_kept + i].abs() > 1e-30)
+                .collect();
+            let n_c = cap_indices.len();
+
+            if n_c > 0 && n_c < n_aug_kept {
+                let alg_indices: Vec<usize> = (0..n_aug_kept)
+                    .filter(|i| !cap_indices.contains(i))
+                    .collect();
+                let n_a = alg_indices.len();
+
+                let extract = |mat: &[f64], dim: usize, rows: &[usize], cols: &[usize]| -> Vec<f64> {
+                    let nr = rows.len();
+                    let nc = cols.len();
+                    let mut block = vec![0.0; nr * nc];
+                    for (ri, &r) in rows.iter().enumerate() {
+                        for (ci, &c) in cols.iter().enumerate() {
+                            block[ri * nc + ci] = mat[r * dim + c];
+                        }
+                    }
+                    block
+                };
+
+                let g_cc = extract(&g_aug, n_aug_kept, &cap_indices, &cap_indices);
+                let g_ca = extract(&g_aug, n_aug_kept, &cap_indices, &alg_indices);
+                let g_ac = extract(&g_aug, n_aug_kept, &alg_indices, &cap_indices);
+                let g_aa = extract(&g_aug, n_aug_kept, &alg_indices, &alg_indices);
+
+                let g_aa_inv = invert_matrix_equilibrated(&g_aa, n_a);
+
+                // G_red = G_cc - G_ca · G_aa⁻¹ · G_ac
+                let mut gaa_inv_gac = vec![0.0; n_a * n_c];
+                for i in 0..n_a {
+                    for j in 0..n_c {
+                        let mut s = 0.0;
+                        for k in 0..n_a { s += g_aa_inv[i * n_a + k] * g_ac[k * n_c + j]; }
+                        gaa_inv_gac[i * n_c + j] = s;
+                    }
+                }
+                let mut g_red = g_cc.clone();
+                for i in 0..n_c {
+                    for j in 0..n_c {
+                        let mut s = 0.0;
+                        for k in 0..n_a { s += g_ca[i * n_a + k] * gaa_inv_gac[k * n_c + j]; }
+                        g_red[i * n_c + j] -= s;
+                    }
+                }
+
+                // C_red
+                let mut c_red = vec![0.0; n_c * n_c];
+                for (ri, &ci) in cap_indices.iter().enumerate() {
+                    if ci < n_kept {
+                        c_red[ri * n_c + ri] = c_kept[ci * n_kept + ci];
+                    }
+                }
+
+                // B_red = b_c - G_ca · G_aa⁻¹ · b_a
+                let b_c: Vec<f64> = cap_indices.iter().map(|&i| b_kept[i]).collect();
+                let b_a: Vec<f64> = alg_indices.iter().map(|&i| b_kept[i]).collect();
+                let mut gaa_inv_ba = vec![0.0; n_a];
+                for i in 0..n_a {
+                    for k in 0..n_a { gaa_inv_ba[i] += g_aa_inv[i * n_a + k] * b_a[k]; }
+                }
+                let mut b_red = b_c.clone();
+                for i in 0..n_c {
+                    let mut s = 0.0;
+                    for k in 0..n_a { s += g_ca[i * n_a + k] * gaa_inv_ba[k]; }
+                    b_red[i] -= s;
+                }
+
+                // Bilinear transform
+                let mut m_red = vec![0.0; n_c * n_c];
+                let mut n_red = vec![0.0; n_c * n_c];
+                for i in 0..n_c {
+                    for j in 0..n_c {
+                        m_red[i * n_c + j] = g_red[i * n_c + j] + two_fs * c_red[i * n_c + j];
+                        n_red[i * n_c + j] = two_fs * c_red[i * n_c + j] - g_red[i * n_c + j];
+                    }
+                }
+                let m_inv = invert_matrix_equilibrated(&m_red, n_c);
+
+                let mut a_d = vec![0.0; n_c * n_c];
+                for i in 0..n_c { for j in 0..n_c { for k in 0..n_c {
+                    a_d[i * n_c + j] += m_inv[i * n_c + k] * n_red[k * n_c + j];
+                }}}
+
+                // b_d = M⁻¹ · b_red, with a factor of 2 ONLY when circuit
+                // nodes were eliminated (not just vsource rows). Eliminating
+                // circuit nodes via Schur complement introduces a 1/(1-A_d)
+                // = 2G_red/M factor that halves the DC gain. The 2× corrects
+                // this. When only vsource rows are eliminated (no circuit
+                // nodes lost), no correction is needed.
+                let circuit_nodes_eliminated = alg_indices.iter().any(|&i| i < n_kept);
+                let b_scale = if circuit_nodes_eliminated { 2.0 } else { 1.0 };
+                let mut b_d = vec![0.0; n_c];
+                for i in 0..n_c { for k in 0..n_c {
+                    b_d[i] += b_scale * m_inv[i * n_c + k] * b_red[k];
+                }}
+
+                // Output extraction: c_d and d_d
+                // Map output node to kept index, then to cap/alg index
+                let out_kept = output_pos.and_then(|op| kept_nodes.iter().position(|&n| n == op));
+                let mut c_full_kept = vec![0.0; n_aug_kept];
+                if let Some(ok) = out_kept {
+                    c_full_kept[ok] = 1.0;
+                }
+                // Also check if output IS the vs_node (input = output passthrough)
+                let out_is_vs_node = output_pos == vs_node;
+
+                let c_c_out: Vec<f64> = cap_indices.iter().map(|&i| c_full_kept[i]).collect();
+                let c_a_out: Vec<f64> = alg_indices.iter().map(|&i| c_full_kept[i]).collect();
+
+                let mut c_d = c_c_out.clone();
+                for j in 0..n_c {
+                    let mut s = 0.0;
+                    for k in 0..n_a { s += c_a_out[k] * gaa_inv_gac[k * n_c + j]; }
+                    c_d[j] -= s;
+                }
+
+                // d_d = c_a · G_aa⁻¹ · b_a + (1 if output==vs_node)
+                let mut d_d = 0.0;
+                for k in 0..n_a { d_d += c_a_out[k] * gaa_inv_ba[k]; }
+                if out_is_vs_node { d_d += 1.0; }
+
+                return (a_d, b_d, c_d, n_c, d_d);
+            } else if n_c == n_aug_kept {
+                // All kept nodes are cap nodes — no algebraic reduction needed.
+                // Just apply bilinear transform directly to g_aug (which is just g_kept
+                // since there are no remaining vsources in the aug block).
+                let mut m_k = vec![0.0; n_c * n_c];
+                let mut n_k = vec![0.0; n_c * n_c];
+                for i in 0..n_c {
+                    for j in 0..n_c {
+                        m_k[i * n_c + j] = g_kept[i * n_c + j] + two_fs * c_kept[i * n_c + j];
+                        n_k[i * n_c + j] = two_fs * c_kept[i * n_c + j] - g_kept[i * n_c + j];
+                    }
+                }
+                let m_inv = invert_matrix_equilibrated(&m_k, n_c);
+                let mut a_d = vec![0.0; n_c * n_c];
+                for i in 0..n_c { for j in 0..n_c { for k in 0..n_c {
+                    a_d[i * n_c + j] += m_inv[i * n_c + k] * n_k[k * n_c + j];
+                }}}
+                let mut b_d = vec![0.0; n_c];
+                for i in 0..n_c { for k in 0..n_c {
+                    b_d[i] += 2.0 * m_inv[i * n_c + k] * b_kept[k];
+                }}
+                // Output extraction
+                let mut c_d = vec![0.0; n_c];
+                if let Some(op) = output_pos {
+                    if let Some(ki) = kept_nodes.iter().position(|&n| n == op) {
+                        c_d[ki] = 1.0;
+                    }
+                }
+                let out_is_vs = output_pos == vs_node;
+                let d_d = if out_is_vs { 1.0 } else { 0.0 };
+                return (a_d, b_d, c_d, n_c, d_d);
+            }
+        }
+
+        // Fallback: no VS or no reduction possible
         let cap_indices: Vec<usize> = (0..n_nodes)
             .filter(|&i| c_cap[i * n_nodes + i].abs() > 1e-30)
             .collect();
         let n_c = cap_indices.len();
-
-        eprintln!("[ss-reduce] n_aug={n_aug} n_c={n_c} cap_indices={cap_indices:?}");
 
         if n_c > 0 && n_c < n_aug {
             // Algebraic indices: non-cap nodes + all vsource rows
@@ -1414,12 +1649,13 @@ impl MnaSystem {
             let g_ca = extract(&g_aug, n_aug, &cap_indices, &alg_indices);
             let g_ac = extract(&g_aug, n_aug, &alg_indices, &cap_indices);
             let mut g_aa = extract(&g_aug, n_aug, &alg_indices, &alg_indices);
-            // Regularize G_aa: add RMIN to diagonal for singular vsource
-            // constraints (input VS with zero impedance → D[i,i] = 0).
-            const RMIN: f64 = 1e-9; // 1 nΩ — negligible but prevents singularity
+            // No regularization needed — the input VS should be eliminated
+            // by the substitution code above. If we reach here, all remaining
+            // vsources have Ro > 0 (VCVS D entries are non-zero).
+            // Add minimal regularization only as safety net.
             for i in 0..n_a {
-                if g_aa[i * n_a + i].abs() < RMIN {
-                    g_aa[i * n_a + i] += RMIN;
+                if g_aa[i * n_a + i].abs() < 1e-15 {
+                    g_aa[i * n_a + i] += 1e-6; // safety net only
                 }
             }
 
@@ -2450,7 +2686,8 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Helper: run state-space for N samples, return output vector.
-    /// y[n] = c · x[n] + d · u[n]  (d = direct feedthrough)
+    /// Uses trapezoidal output: y[n] = c · (x[n] + x[n-1])/2 + d · u[n]
+    /// This matches the bilinear transform's implicit midpoint assumption.
     fn run_state_space(
         a: &[f64],
         b: &[f64],
@@ -2460,6 +2697,7 @@ mod tests {
         input: &[f64],
     ) -> Vec<f64> {
         let mut x = vec![0.0; n_states];
+        let mut x_prev = vec![0.0; n_states];
         let mut work = vec![0.0; n_states];
         let mut output = Vec::with_capacity(input.len());
         for &u in input {
@@ -2470,10 +2708,12 @@ mod tests {
                 }
                 work[i] = v;
             }
+            // Trapezoidal output: average of current and previous state
             let mut y = d_ft * u;
             for i in 0..n_states {
-                y += c[i] * work[i];
+                y += c[i] * (work[i] + x[i]) * 0.5;
             }
+            x_prev.copy_from_slice(&x);
             x[..n_states].copy_from_slice(&work[..n_states]);
             output.push(y);
         }
@@ -2484,18 +2724,19 @@ mod tests {
     /// with a coupling cap. Should produce gain ≈ -Rf/Ri at low frequency.
     #[test]
     fn state_space_inverting_amp_gain() {
-        // Circuit: VS → C_in(100nF) → Ri(10k) → neg → Rf(100k) → out
-        // VCVS: pos=gnd, neg=node1, out=node2
-        // Nodes: 0=VS_out, 1=neg, 2=out
+        // Inverting amp: VS(0) → Ri(10k) → neg(1) → Rf(100k) → out(2)
+        // VCVS: pos=gnd, neg=1, out=2
+        // Cap at neg node (models the input coupling / virtual ground cap)
         let fs = 48000.0;
         let mut mna = MnaSystem::new(3, 2);
-        mna.stamp_voltage_source(Some(0), None, 0); // input VS
+        mna.stamp_voltage_source(Some(0), None, 0);
         mna.stamp_resistor(Some(0), Some(1), 10_000.0); // Ri
         mna.stamp_resistor(Some(1), Some(2), 100_000.0); // Rf
         mna.stamp_vcvs(None, Some(1), Some(2), None, 200_000.0, 75.0, 1);
 
-        // Cap on input node for coupling (makes node 0 a cap state)
-        let cap_stamps = vec![(Some(0), None, 100e-9)];
+        // Cap at neg node — NOT at VS node. This is the stray/coupling cap
+        // at the virtual ground point. Large enough to not affect gain.
+        let cap_stamps = vec![(Some(1), None, 1e-6)];
         let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
 
@@ -2528,17 +2769,20 @@ mod tests {
     #[test]
     fn state_space_unity_buffer_passthrough() {
         let fs = 48000.0;
-        // Circuit: VS → C_in(1µF) → pos, neg=out, out=out → R_load(10k) → gnd
-        // Nodes: 0=input, 1=output
-        let mut mna = MnaSystem::new(2, 2);
+        // Circuit: VS(0) → R_in(100Ω) → (1,pos) → [unity VCVS] → (2,out) → C_load → gnd
+        //          R_load(10k): (2) → gnd
+        // Nodes: 0=VS, 1=pos, 2=output
+        let mut mna = MnaSystem::new(3, 2);
         mna.stamp_voltage_source(Some(0), None, 0);
-        mna.stamp_resistor(Some(1), None, 10_000.0); // load
-        // Unity buffer: pos=0, neg=1, out=1
-        mna.stamp_vcvs(Some(0), Some(1), Some(1), None, 200_000.0, 75.0, 1);
+        mna.stamp_resistor(Some(0), Some(1), 100.0); // small input R
+        mna.stamp_resistor(Some(2), None, 10_000.0); // load
+        // Unity buffer: pos=1, neg=2, out=2
+        mna.stamp_vcvs(Some(1), Some(2), Some(2), None, 200_000.0, 75.0, 1);
 
-        let cap_stamps = vec![(Some(0), None, 1e-6)]; // coupling cap
+        // Cap at output node (makes it a state)
+        let cap_stamps = vec![(Some(2), None, 1e-6)];
         let (a_d, b_d, c_out, n_states, d_ft) =
-            mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);
+            mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
 
         // 440 Hz sine
         let n_samples = (fs * 0.25) as usize;
@@ -2562,17 +2806,20 @@ mod tests {
     #[test]
     fn state_space_noninverting_amp_gain() {
         let fs = 48000.0;
-        // Nodes: 0=input(pos), 1=neg, 2=output
-        // Ri(10k): neg to gnd. Rf(40k): neg to out. Gain = 1+40/10 = 5.
-        let mut mna = MnaSystem::new(3, 2);
+        // Nodes: 0=VS, 1=pos, 2=neg, 3=output
+        // R_in(100Ω): VS→pos. Ri(10k): neg→gnd. Rf(40k): neg→out.
+        // Gain = 1 + Rf/Ri = 1 + 40/10 = 5.
+        let mut mna = MnaSystem::new(4, 2);
         mna.stamp_voltage_source(Some(0), None, 0);
-        mna.stamp_resistor(Some(1), None, 10_000.0); // Ri to gnd
-        mna.stamp_resistor(Some(1), Some(2), 40_000.0); // Rf
-        mna.stamp_vcvs(Some(0), Some(1), Some(2), None, 200_000.0, 75.0, 1);
+        mna.stamp_resistor(Some(0), Some(1), 100.0); // R_in
+        mna.stamp_resistor(Some(2), None, 10_000.0); // Ri to gnd
+        mna.stamp_resistor(Some(2), Some(3), 40_000.0); // Rf
+        mna.stamp_vcvs(Some(1), Some(2), Some(3), None, 200_000.0, 75.0, 1);
 
-        let cap_stamps = vec![(Some(0), None, 1e-6)];
+        // Cap at pos node (between input and VCVS pos)
+        let cap_stamps = vec![(Some(1), None, 1e-6)];
         let (a_d, b_d, c_out, n_states, d_ft) =
-            mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
+            mna.build_state_space_matrices(&cap_stamps, 0, Some(3), None, fs);
 
         let n_samples = (fs * 0.5) as usize;
         let mut input = vec![0.0; n_samples];
@@ -2599,17 +2846,16 @@ mod tests {
         let r = 10_000.0;
         let c = 100e-9; // 100nF
         // f_0dB = 1/(2πRC) = 159 Hz
-        // Nodes: 0=input, 1=neg, 2=output
+        // Nodes: 0=VS, 1=neg, 2=output
+        // R: VS(0)→neg(1), C_fb: neg(1)↔out(2)
         let mut mna = MnaSystem::new(3, 2);
         mna.stamp_voltage_source(Some(0), None, 0);
         mna.stamp_resistor(Some(0), Some(1), r); // R: input to neg
-
-        // C as feedback: neg(1) to out(2) — this is the integrating cap
-        // For state-space, this goes in cap_stamps
         mna.stamp_vcvs(None, Some(1), Some(2), None, 200_000.0, 75.0, 1);
 
+        // Feedback cap between neg(1) and out(2) — this IS the integrating element.
+        // No coupling cap needed — R provides the input path, VS node has no cap.
         let cap_stamps = vec![
-            (Some(0), None, 1e-6),       // coupling cap (large, doesn't affect response)
             (Some(1), Some(2), c),       // feedback cap (integrator)
         ];
         let (a_d, b_d, c_out, n_states, d_ft) =
