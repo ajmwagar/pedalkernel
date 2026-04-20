@@ -2439,6 +2439,197 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // VCVS state-space (AC/dynamic) tests
+    // -------------------------------------------------------------------------
+
+    /// Helper: run state-space for N samples, return output vector.
+    fn run_state_space(
+        a: &[f64],
+        b: &[f64],
+        c: &[f64],
+        n_states: usize,
+        input: &[f64],
+    ) -> Vec<f64> {
+        let mut x = vec![0.0; n_states];
+        let mut work = vec![0.0; n_states];
+        let mut output = Vec::with_capacity(input.len());
+        for &u in input {
+            for i in 0..n_states {
+                let mut v = b[i] * u;
+                for j in 0..n_states {
+                    v += a[i * n_states + j] * x[j];
+                }
+                work[i] = v;
+            }
+            let mut y = 0.0;
+            for i in 0..n_states {
+                y += c[i] * work[i];
+            }
+            x[..n_states].copy_from_slice(&work[..n_states]);
+            output.push(y);
+        }
+        output
+    }
+
+    /// Inverting amplifier via state-space: V_in through Ri, Rf feedback,
+    /// with a coupling cap. Should produce gain ≈ -Rf/Ri at low frequency.
+    #[test]
+    fn state_space_inverting_amp_gain() {
+        // Circuit: VS → C_in(100nF) → Ri(10k) → neg → Rf(100k) → out
+        // VCVS: pos=gnd, neg=node1, out=node2
+        // Nodes: 0=VS_out, 1=neg, 2=out
+        let fs = 48000.0;
+        let mut mna = MnaSystem::new(3, 2);
+        mna.stamp_voltage_source(Some(0), None, 0); // input VS
+        mna.stamp_resistor(Some(0), Some(1), 10_000.0); // Ri
+        mna.stamp_resistor(Some(1), Some(2), 100_000.0); // Rf
+        mna.stamp_vcvs(None, Some(1), Some(2), None, 200_000.0, 75.0, 1);
+
+        // Cap on input node for coupling (makes node 0 a cap state)
+        let cap_stamps = vec![(Some(0), None, 100e-9)];
+        let (a_d, b_d, c_out, n_states) =
+            mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
+
+        assert!(n_states >= 1, "Should have at least 1 state");
+
+        // Feed a 100 Hz sine for 0.5s, measure output amplitude
+        let n_samples = (fs * 0.5) as usize;
+        let mut input = vec![0.0; n_samples];
+        for i in 0..n_samples {
+            input[i] = (2.0 * std::f64::consts::PI * 100.0 * i as f64 / fs).sin();
+        }
+
+        let output = run_state_space(&a_d, &b_d, &c_out, n_states, &input);
+
+        // Measure gain from last quarter (after transient settles)
+        let start = n_samples * 3 / 4;
+        let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let in_peak = 1.0; // sine amplitude
+
+        // Gain should be approximately |-Rf/Ri| = 10
+        let gain = out_peak / in_peak;
+        eprintln!("Inverting amp state-space: gain = {gain:.2} (expected ~10)");
+        assert!(
+            gain > 5.0 && gain < 15.0,
+            "Inverting amp gain {gain:.2} should be near 10"
+        );
+    }
+
+    /// Unity buffer via state-space: should pass signal with gain ≈ 1.
+    #[test]
+    fn state_space_unity_buffer_passthrough() {
+        let fs = 48000.0;
+        // Circuit: VS → C_in(1µF) → pos, neg=out, out=out → R_load(10k) → gnd
+        // Nodes: 0=input, 1=output
+        let mut mna = MnaSystem::new(2, 2);
+        mna.stamp_voltage_source(Some(0), None, 0);
+        mna.stamp_resistor(Some(1), None, 10_000.0); // load
+        // Unity buffer: pos=0, neg=1, out=1
+        mna.stamp_vcvs(Some(0), Some(1), Some(1), None, 200_000.0, 75.0, 1);
+
+        let cap_stamps = vec![(Some(0), None, 1e-6)]; // coupling cap
+        let (a_d, b_d, c_out, n_states) =
+            mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);
+
+        // 440 Hz sine
+        let n_samples = (fs * 0.25) as usize;
+        let mut input = vec![0.0; n_samples];
+        for i in 0..n_samples {
+            input[i] = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / fs).sin();
+        }
+        let output = run_state_space(&a_d, &b_d, &c_out, n_states, &input);
+
+        let start = n_samples * 3 / 4;
+        let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let gain = out_peak / 1.0;
+        eprintln!("Unity buffer state-space: gain = {gain:.4} (expected ~1.0)");
+        assert!(
+            gain > 0.8 && gain < 1.2,
+            "Unity buffer gain {gain:.4} should be near 1.0"
+        );
+    }
+
+    /// Non-inverting amp via state-space: gain = 1 + Rf/Ri.
+    #[test]
+    fn state_space_noninverting_amp_gain() {
+        let fs = 48000.0;
+        // Nodes: 0=input(pos), 1=neg, 2=output
+        // Ri(10k): neg to gnd. Rf(40k): neg to out. Gain = 1+40/10 = 5.
+        let mut mna = MnaSystem::new(3, 2);
+        mna.stamp_voltage_source(Some(0), None, 0);
+        mna.stamp_resistor(Some(1), None, 10_000.0); // Ri to gnd
+        mna.stamp_resistor(Some(1), Some(2), 40_000.0); // Rf
+        mna.stamp_vcvs(Some(0), Some(1), Some(2), None, 200_000.0, 75.0, 1);
+
+        let cap_stamps = vec![(Some(0), None, 1e-6)];
+        let (a_d, b_d, c_out, n_states) =
+            mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
+
+        let n_samples = (fs * 0.5) as usize;
+        let mut input = vec![0.0; n_samples];
+        for i in 0..n_samples {
+            input[i] = 0.1 * (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin();
+        }
+        let output = run_state_space(&a_d, &b_d, &c_out, n_states, &input);
+
+        let start = n_samples * 3 / 4;
+        let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let gain = out_peak / 0.1;
+        eprintln!("Non-inverting amp state-space: gain = {gain:.2} (expected ~5.0)");
+        assert!(
+            gain > 3.0 && gain < 7.0,
+            "Non-inverting gain {gain:.2} should be near 5.0"
+        );
+    }
+
+    /// Integrator via state-space: VS → R → neg → C → out, pos=gnd.
+    /// At DC, infinite gain (ramp). At frequency f, gain = 1/(2πfRC).
+    #[test]
+    fn state_space_integrator_rolls_off() {
+        let fs = 48000.0;
+        let r = 10_000.0;
+        let c = 100e-9; // 100nF
+        // f_0dB = 1/(2πRC) = 159 Hz
+        // Nodes: 0=input, 1=neg, 2=output
+        let mut mna = MnaSystem::new(3, 2);
+        mna.stamp_voltage_source(Some(0), None, 0);
+        mna.stamp_resistor(Some(0), Some(1), r); // R: input to neg
+
+        // C as feedback: neg(1) to out(2) — this is the integrating cap
+        // For state-space, this goes in cap_stamps
+        mna.stamp_vcvs(None, Some(1), Some(2), None, 200_000.0, 75.0, 1);
+
+        let cap_stamps = vec![
+            (Some(0), None, 1e-6),       // coupling cap (large, doesn't affect response)
+            (Some(1), Some(2), c),       // feedback cap (integrator)
+        ];
+        let (a_d, b_d, c_out, n_states) =
+            mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
+
+        // Measure gain at 50 Hz (below f_0dB → high gain)
+        let measure_gain = |freq: f64| -> f64 {
+            let n_samples = (fs * 0.25) as usize;
+            let mut input = vec![0.0; n_samples];
+            for i in 0..n_samples {
+                input[i] = 0.01 * (2.0 * std::f64::consts::PI * freq * i as f64 / fs).sin();
+            }
+            let output = run_state_space(&a_d, &b_d, &c_out, n_states, &input);
+            let start = n_samples * 3 / 4;
+            let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+            out_peak / 0.01
+        };
+
+        let gain_low = measure_gain(50.0);
+        let gain_high = measure_gain(1000.0);
+        eprintln!("Integrator: gain@50Hz={gain_low:.1}, gain@1kHz={gain_high:.2}");
+        // Integrator should have higher gain at low frequency
+        assert!(
+            gain_low > gain_high * 2.0,
+            "Integrator should roll off: gain@50Hz={gain_low:.1} should be > 2× gain@1kHz={gain_high:.2}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Series/parallel adaptor tests (existing)
     // -------------------------------------------------------------------------
 
