@@ -20,6 +20,7 @@ mod graph;
 mod helpers;
 mod opamp_analysis;
 mod plan;
+mod spqr;
 mod split;
 mod stage;
 pub mod stage_test_helpers;
