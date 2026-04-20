@@ -308,8 +308,6 @@ fn compile_via_spqr_opamp_diode_feedback() {
 }
 
 #[test]
-#[ignore] // State-space → biquad extraction produces real poles for bridged-T oscillators.
-          // Needs explicit feedback_r detection or Schur complement fix.
 fn compile_via_spqr_808_kick() {
     // 808 bass drum: bridged-T resonator with op-amp
     // Should classify as Iir (VCVS + reactive, all linear)
@@ -348,28 +346,6 @@ fn compile_via_spqr_808_kick() {
             controls {}
         }"#)
     .expect("parse");
-
-    // Debug: check what SPQR produces
-    {
-        let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-        let active_set: std::collections::HashSet<usize> =
-            graph.active_edge_indices.iter().copied().collect();
-        let all_edges: Vec<usize> = (0..graph.edges.len())
-            .filter(|i| !active_set.contains(i))
-            .collect();
-        let terminals = vec![graph.in_node, graph.out_node];
-        let spqr_tree = spqr_decompose(&all_edges, &terminals, &graph, graph.gnd_node);
-        let spqr_stages = spqr_to_stages(&spqr_tree, &graph, 48000.0);
-        eprintln!("808 kick: {} SPQR stages", spqr_stages.len());
-        for (i, s) in spqr_stages.iter().enumerate() {
-            eprintln!("  stage {i}: {s:?}");
-        }
-        for &eidx in &all_edges {
-            let e = &graph.edges[eidx];
-            let comp = &graph.components[e.comp_idx];
-            eprintln!("  edge {eidx}: {} ({:?}) {}->{}", comp.id, graph.effective_edge_kind(eidx), e.node_a, e.node_b);
-        }
-    }
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0)
         .expect("Should compile 808 kick via SPQR");

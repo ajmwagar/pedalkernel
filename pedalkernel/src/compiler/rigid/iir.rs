@@ -162,106 +162,102 @@ pub(in crate::compiler) fn build_iir_stage(
         .unwrap_or(graph.out_node);
     let out_mna = node_to_mna(output_node);
 
-    // ── Step 4: Build IIR biquad ────────────────────────────────────
-    // Try direct IIR first (works for oscillators with feedback_r)
-    if let Some((b_coeffs, a_coeffs)) =
-        mna.build_iir(&cap_stamps, vs_idx, out_mna, None, sample_rate, None)
-    {
-        return Ok(IirData::new(b_coeffs, a_coeffs, sample_rate));
+    // ── Step 4: Extract feedback_r for VCVS circuits ──────────────
+    // For bridged-T and similar VCVS oscillators, build_iir needs
+    // (Rf, R_crit, f0) to compute biquad coefficients directly.
+    // Classification uses graph structure: edges touching neg/out nodes.
+    let feedback_r = extract_feedback_r(edge_indices, graph);
+
+    // ── Step 5: Build IIR biquad ────────────────────────────────────
+    match mna.build_iir(&cap_stamps, vs_idx, out_mna, None, sample_rate, feedback_r.as_ref().map(|&(rf, rc, f0)| (rf, rc, f0))) {
+        Some((b_coeffs, a_coeffs)) => {
+            let mut iir = IirData::new(b_coeffs, a_coeffs, sample_rate);
+            // Store component values for pot recomputation
+            if let Some((rf, r_crit, _)) = feedback_r {
+                iir.r_fb = rf;
+                iir.r_crit = r_crit;
+            }
+            Ok(iir)
+        }
+        None => Err("IIR: build_iir failed — circuit may need StateSpace".to_string()),
+    }
+}
+
+/// Extract feedback parameters (Rf, R_crit, f0) from a VCVS rigid stage.
+///
+/// Classifies edges by their relationship to the VCVS neg/out nodes:
+/// - Linear edge spanning neg→out → **Rf** (feedback resistor)
+/// - Linear edge touching neg OR out (not both) → **series R** (T-network)
+/// - Reactive edge touching GND → **shunt C**
+///
+/// Returns `None` if the circuit doesn't have the right structure.
+fn extract_feedback_r(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+) -> Option<(f64, f64, f64)> {
+    // Find the VCVS edge → get neg and out nodes
+    let vcvs_rec = graph.nullor_pins.iter().find(|rec| {
+        edge_indices.iter().any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+    })?;
+    let neg = vcvs_rec.neg_node;
+    let out = vcvs_rec.out_node;
+
+    let mut rf = 0.0f64;
+    let mut r_series: Vec<f64> = Vec::new();
+    let mut c_shunt: Vec<f64> = Vec::new();
+
+    let is_ground = |node: NodeId| -> bool {
+        node == graph.gnd_node
+            || graph.ac_ground_nodes.contains(&node)
+            || graph.supply_nodes.contains(&node)
+    };
+
+    for &eidx in edge_indices {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        let edge_kind = graph.effective_edge_kind(eidx);
+
+        let touches_neg = e.node_a == neg || e.node_b == neg;
+        let touches_out = e.node_a == out || e.node_b == out;
+        let touches_gnd = is_ground(e.node_a) || is_ground(e.node_b);
+
+        match edge_kind {
+            EdgeKind::Linear => {
+                if let Some(r) = comp.kind.resistance() {
+                    if touches_neg && touches_out {
+                        // Feedback R: spans neg→out directly
+                        rf += r;
+                    } else if (touches_neg || touches_out) && !touches_gnd {
+                        // Series R: part of T-network (touches one side, not ground)
+                        r_series.push(r);
+                    }
+                    // Bias/load resistors touching GND are ignored
+                }
+            }
+            EdgeKind::Reactive => {
+                if let Some(c) = comp.kind.capacitance() {
+                    if touches_gnd {
+                        // Shunt cap to ground
+                        c_shunt.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
-    // Fallback: reduce to state-space, then extract biquad if 2nd order
-    let (a_d, b_d, c_out, n_states, d_feedthrough) =
-        mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, sample_rate);
-
-    if n_states == 2 {
-        // 2×2 state-space → biquad directly
-        // A = [[a11,a12],[a21,a22]], characteristic poly: z² - tr(A)z + det(A)
-        let a11 = a_d[0];
-        let a12 = a_d[1];
-        let a21 = a_d[2];
-        let a22 = a_d[3];
-        let tr_a = a11 + a22;
-        let det_a = a11 * a22 - a12 * a21;
-
-        // Denominator: 1, -tr(A), det(A)
-        let da1 = -tr_a;
-        let da2 = det_a;
-
-        // Numerator from transfer function:
-        // H(z) = c·(zI-A)⁻¹·b + d
-        // For z⁻¹ form: b0 = d + c·b, b1 = c·A·b - d·tr(A), b2 = d·det(A) - c·adj(A)·b·??
-        // Simpler: evaluate H(z) at z=0,1,-1 and solve for b0,b1,b2
-        // H(z) = (b0 + b1/z + b2/z²) / (1 + a1/z + a2/z²)
-        //       = (b0·z² + b1·z + b2) / (z² + a1·z + a2)
-        //
-        // Direct: b0 = d_feedthrough
-        //         and state-space → transfer function via matrix ops
-        let cb0 = c_out[0] * b_d[0] + c_out[1] * b_d[1]; // c·b
-        // c·A·b
-        let ab0 = a11 * b_d[0] + a12 * b_d[1];
-        let ab1 = a21 * b_d[0] + a22 * b_d[1];
-        let cab = c_out[0] * ab0 + c_out[1] * ab1;
-
-        let b0 = d_feedthrough + cb0;
-        let b1 = cab + d_feedthrough * da1;
-        let b2 = d_feedthrough * da2
-            + c_out[0] * (a11 * ab0 + a12 * ab1)
-            + c_out[1] * (a21 * ab0 + a22 * ab1)
-            - cb0 * tr_a;
-
-        // Hmm, this is getting complicated. Let me use the simpler approach:
-        // Just wrap in StateSpaceData and let that process. But the user wants IIR...
-        //
-        // Actually, the simplest correct approach: use the state-space process
-        // but wrap it in IirData format. The 2×2 state-space IS equivalent
-        // to a biquad. Let me just use evaluation at 3 points.
-
-        // Evaluate H(z) at z=1 (DC), z=-1 (Nyquist), z=e^(jπ/2) (quarter rate)
-        // to get 3 equations for b0, b1, b2.
-        // Actually, for a proper z-transform extraction:
-        //
-        // From y = c·x + d·u with x = A·x_prev + b·u:
-        // Y(z) = c·(zI-A)⁻¹·b·U(z) + d·U(z)
-        // H(z) = c·(zI-A)⁻¹·b + d
-        //
-        // (zI-A)⁻¹ = adj(zI-A) / det(zI-A)
-        // det(zI-A) = z² - tr(A)·z + det(A)
-        // adj(zI-A) = [[z-a22, a12], [a21, z-a11]]
-        //
-        // c·adj(zI-A)·b = c0·((z-a22)·b0 + a12·b1) + c1·(a21·b0 + (z-a11)·b1)
-        //               = (c0·b0 + c1·b1)·z + (c1·a21·b0 - c0·a22·b0 + c0·a12·b1 - c1·a11·b1)
-        //
-        // So numerator = d·(z² + a1·z + a2) + (c0·b0+c1·b1)·z + (c1·a21·b0 - c0·a22·b0 + c0·a12·b1 - c1·a11·b1)
-
-        let num_z1 = c_out[0] * b_d[0] + c_out[1] * b_d[1]; // coefficient of z
-        let num_z0 = c_out[0] * (-a22 * b_d[0] + a12 * b_d[1])
-            + c_out[1] * (a21 * b_d[0] - a11 * b_d[1]); // constant term
-
-        // H(z) = [d·z² + (d·a1 + num_z1)·z + (d·a2 + num_z0)] / [z² + a1·z + a2]
-        let b0_iir = d_feedthrough;
-        let b1_iir = d_feedthrough * da1 + num_z1;
-        let b2_iir = d_feedthrough * da2 + num_z0;
-
-        #[cfg(test)]
-        eprintln!(
-            "IIR biquad: b=[{b0_iir:.6e}, {b1_iir:.6e}, {b2_iir:.6e}] a=[1, {da1:.6e}, {da2:.6e}] n_states={n_states} d={d_feedthrough:.6e}"
-        );
-        #[cfg(test)]
-        eprintln!(
-            "  A=[[{a11:.6e},{a12:.6e}],[{a21:.6e},{a22:.6e}]] b=[{:.6e},{:.6e}] c=[{:.6e},{:.6e}]",
-            b_d[0], b_d[1], c_out[0], c_out[1]
-        );
-
-        return Ok(IirData::new(
-            vec![b0_iir, b1_iir, b2_iir],
-            vec![1.0, da1, da2],
-            sample_rate,
-        ));
+    // Need at least: Rf, 2 series R, 2 shunt C for bridged-T
+    if rf <= 0.0 || r_series.len() < 2 || c_shunt.len() < 2 {
+        return None;
     }
 
-    Err(format!(
-        "IIR: circuit has {} states (need ≤2 for biquad). Consider StateSpace.",
-        n_states
-    ))
+    // f0 = 1 / (2π √(R1·R2·C1·C2))
+    let r_product: f64 = r_series.iter().take(2).product();
+    let c_product: f64 = c_shunt.iter().take(2).product();
+    let f0 = 1.0 / (2.0 * std::f64::consts::PI * (r_product * c_product).sqrt());
+
+    // R_crit = R1 + R2 + R1·C1/C2
+    let r_crit = r_series[0] + r_series[1] + r_series[0] * c_shunt[0] / c_shunt[1];
+
+    Some((rf, r_crit, f0))
 }
