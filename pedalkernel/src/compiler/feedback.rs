@@ -205,6 +205,19 @@ fn dfs_find_paths(
     }
 }
 
+/// Find all edges on any simple path from `start` to `target` in the
+/// given adjacency. Public wrapper for use by opamp_root edge classification.
+pub(in crate::compiler) fn dfs_find_feedback_edges(
+    start: NodeId,
+    target: NodeId,
+    adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
+    visited: &mut HashSet<NodeId>,
+    path: &mut Vec<usize>,
+    result: &mut HashSet<usize>,
+) {
+    dfs_find_paths(start, target, usize::MAX, adj, visited, path, result);
+}
+
 /// Partition circuit edges into feedback groups.
 ///
 /// Each group contains active elements that share feedback loops,
@@ -337,6 +350,53 @@ pub(in crate::compiler) fn find_feedback_groups(
             group_edges.extend(feedback_edges);
         }
 
+        // Also claim INPUT PENDANT edges: edges incident to an active
+        // terminal that aren't on the feedback cycle but carry signal
+        // INTO the stage. Example: R_in connects input → neg for an
+        // inverting amp. It determines gain (Rf/R_in) but isn't feedback.
+        for &elem_idx in &group_elem_indices {
+            let elem = &active_elements[elem_idx];
+            // Edges touching input terminal (pendants feeding the stage)
+            if let Some(neighbors) = adj.get(&elem.input_node) {
+                for &(eidx, _) in neighbors {
+                    if eidx != elem.edge_idx && !group_edges.contains(&eidx) {
+                        group_edges.insert(eidx);
+                    }
+                }
+            }
+        }
+
+        // Claim GROUND SHUNT edges touching any node owned by this group.
+        // Ground shunts don't couple stages, but they belong to the stage
+        // whose signal node they touch. Example: C1(neg→GND) creates the
+        // resonance in a bridged-T but doesn't couple to other stages.
+        let group_nodes: std::collections::HashSet<NodeId> = group_edges
+            .iter()
+            .flat_map(|&eidx| {
+                let e = &graph.edges[eidx];
+                [e.node_a, e.node_b].into_iter().filter(|n| !rails.contains(n))
+            })
+            .collect();
+        for &eidx in edge_indices {
+            if group_edges.contains(&eidx) {
+                continue;
+            }
+            let e = &graph.edges[eidx];
+            let a_rail = rails.contains(&e.node_a);
+            let b_rail = rails.contains(&e.node_b);
+            // Passive ground shunt: one end is rail, other in this group.
+            // Only claim passive (Linear/Reactive) — NL ground shunts
+            // (diodes to GND) are independent clipping stages.
+            let ek = graph.effective_edge_kind(eidx);
+            let is_passive_shunt = matches!(ek, EdgeKind::Linear | EdgeKind::Reactive);
+            if is_passive_shunt
+                && ((a_rail && group_nodes.contains(&e.node_b))
+                    || (b_rail && group_nodes.contains(&e.node_a)))
+            {
+                group_edges.insert(eidx);
+            }
+        }
+
         for &eidx in &group_edges {
             claimed.insert(eidx);
         }
@@ -348,10 +408,8 @@ pub(in crate::compiler) fn find_feedback_groups(
     // Unclaimed edges → individual groups (cascaded passive stages)
     for &eidx in edge_indices {
         if !claimed.contains(&eidx) {
-            // Check if this edge is a ground shunt (one end is rail)
             let e = &graph.edges[eidx];
             if rails.contains(&e.node_a) || rails.contains(&e.node_b) {
-                // Ground shunt — standalone stage
                 groups.push(FeedbackGroup {
                     edge_indices: vec![eidx],
                 });

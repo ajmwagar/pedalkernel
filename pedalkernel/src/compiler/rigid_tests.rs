@@ -105,7 +105,7 @@ fn stats_noninverting_opamp_is_opamproot() {
 }
 
 #[test]
-fn stats_opamp_with_feedback_cap_is_iir() {
+fn stats_opamp_with_feedback_cap_is_opamproot() {
     let (graph, edges) = make_graph_all_edges(r#"
         pedal "test" { supply 9V
             components {
@@ -129,8 +129,8 @@ fn stats_opamp_with_feedback_cap_is_iir() {
     let stats = StageStats::from_edges(&edges, &graph);
     assert_eq!(stats.vcvs_count, 1);
     assert_eq!(stats.reactive_count, 1);
-    // VCVS + reactive is linear → IIR (VCVS is a linear constraint)
-    assert_eq!(classify_rigid(&stats, &graph), RigidOptimization::Iir);
+    // Single VCVS → OpAmpRoot (reactive feedback cap absorbed by GBW model)
+    assert_eq!(classify_rigid(&stats, &graph), RigidOptimization::OpAmpRoot { inverting: true });
 }
 
 #[test]

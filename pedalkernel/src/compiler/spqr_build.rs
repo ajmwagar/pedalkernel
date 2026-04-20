@@ -57,8 +57,8 @@ pub fn compile_via_spqr(
 
 /// Compile a `.pedal` circuit via the SPQR pipeline.
 ///
-/// Full flow: PedalDef → CircuitGraph → SPQR decompose → classify →
-/// build stages → CompiledPedal.
+/// Full flow: PedalDef → CircuitGraph → feedback groups → per-group
+/// SPQR decompose → classify → build stages → CompiledPedal.
 ///
 /// Returns `Err` if any stage can't be built (unsupported topology).
 pub fn compile_via_spqr_with_options(
@@ -66,6 +66,8 @@ pub fn compile_via_spqr_with_options(
     sample_rate: f64,
     options: super::compile::CompileOptions,
 ) -> Result<CompiledPedal, String> {
+    use super::feedback::find_feedback_groups;
+
     let graph = CircuitGraph::from_pedal(pedal);
 
     // Collect all non-bridge edges (passive + NL + VCVS)
@@ -79,28 +81,81 @@ pub fn compile_via_spqr_with_options(
         return Err("No circuit edges found".to_string());
     }
 
-    // Decompose → classify → build
-    let terminals = vec![graph.in_node, graph.out_node];
-    let spqr_tree = spqr_decompose(&all_edges, &terminals, &graph, graph.gnd_node);
-    let spqr_stages = spqr_to_stages(&spqr_tree, &graph, sample_rate);
+    // Step 1: Partition edges into feedback groups.
+    // Each group = a set of coupled components that must share a stage.
+    let feedback_groups = find_feedback_groups(&all_edges, &graph);
 
+    // Step 2: SPQR decompose each group independently.
+    let terminals = vec![graph.in_node, graph.out_node];
     let mut wdf_stages: Vec<WdfStage> = Vec::new();
     let mut iir_stages: Vec<IirStage> = Vec::new();
     let mut stage_order: Vec<StageRef> = Vec::new();
+    let mut stage_counter = 0usize;
 
-    for (i, stage) in spqr_stages.into_iter().enumerate() {
-        let built = build_spqr_stage(stage, &graph, sample_rate)
-            .map_err(|e| format!("Stage {i}: {e}"))?;
-        match built {
-            BuiltStage::Wdf(mut wdf) => {
-                wdf.signal_flow_distance = i;
-                stage_order.push(StageRef::Wdf(wdf_stages.len()));
-                wdf_stages.push(wdf);
+    for group in &feedback_groups {
+        if group.edge_indices.is_empty() {
+            continue;
+        }
+
+        // Feedback groups with a VCVS (op-amp) are already correctly
+        // sized by feedback analysis — build directly as one Rigid stage.
+        // Groups without VCVS (diode clippers, passive chains, BJTs) go
+        // through SPQR which handles NlWdf and PassiveWdf correctly.
+        let has_vcvs_feedback = group.edge_indices.len() > 1
+            && group.edge_indices.iter().any(|&eidx| {
+                graph.effective_edge_kind(eidx) == super::component::EdgeKind::Vcvs
+            });
+
+        if has_vcvs_feedback {
+            // Active feedback group → build directly as one Rigid stage.
+            // SPQR decomposition would split feedback edges incorrectly.
+            let built = build_rigid(
+                group.edge_indices.clone(),
+                vec![graph.in_node, graph.out_node],
+                vec![], // No pendant extraction — group is self-contained
+                &graph,
+                sample_rate,
+            )
+            .map_err(|e| format!("Stage {stage_counter}: {e}"))?;
+            match built {
+                BuiltStage::Wdf(mut wdf) => {
+                    wdf.signal_flow_distance = stage_counter;
+                    stage_order.push(StageRef::Wdf(wdf_stages.len()));
+                    wdf_stages.push(wdf);
+                }
+                BuiltStage::Iir(mut iir) => {
+                    iir.signal_flow_distance = stage_counter;
+                    stage_order.push(StageRef::Iir(iir_stages.len()));
+                    iir_stages.push(iir);
+                }
             }
-            BuiltStage::Iir(mut iir) => {
-                iir.signal_flow_distance = i;
-                stage_order.push(StageRef::Iir(iir_stages.len()));
-                iir_stages.push(iir);
+            stage_counter += 1;
+        } else {
+            // Passive group → SPQR decompose for WDF tree building
+            let spqr_tree = spqr_decompose(
+                &group.edge_indices,
+                &terminals,
+                &graph,
+                graph.gnd_node,
+            );
+            let spqr_stages = spqr_to_stages(&spqr_tree, &graph, sample_rate);
+
+            for stage in spqr_stages {
+                let built = build_spqr_stage(stage, &graph, sample_rate)
+                    .map_err(|e| format!("Stage {stage_counter}: {e}"))?;
+                match built {
+                    BuiltStage::Wdf(mut wdf) => {
+                        wdf.signal_flow_distance = stage_counter;
+                        stage_order.push(StageRef::Wdf(wdf_stages.len()));
+                        wdf_stages.push(wdf);
+                    }
+                    BuiltStage::Iir(mut iir) => {
+                        iir.signal_flow_distance = stage_counter;
+                        stage_order.push(StageRef::Iir(iir_stages.len()));
+                        iir_stages.push(iir);
+                    }
+                }
+                stage_counter += 1;
             }
         }
     }

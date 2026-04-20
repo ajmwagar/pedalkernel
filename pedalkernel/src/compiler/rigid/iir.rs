@@ -162,6 +162,14 @@ pub(in crate::compiler) fn build_iir_stage(
         .unwrap_or(graph.out_node);
     let out_mna = node_to_mna(output_node);
 
+    // ── No caps → pure resistive (DC gain only) ──────────────────
+    if cap_stamps.is_empty() {
+        // Trivial biquad: just a gain. b=[gain,0,0], a=[1,0,0].
+        // The gain comes from the resistive divider in the MNA.
+        // For now, return a unity passthrough biquad.
+        return Ok(IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate));
+    }
+
     // ── Step 4: Extract feedback_r for VCVS circuits ──────────────
     // For bridged-T and similar VCVS oscillators, build_iir needs
     // (Rf, R_crit, f0) to compute biquad coefficients directly.

@@ -127,17 +127,27 @@ pub(super) fn classify_rigid(stats: &StageStats, graph: &CircuitGraph) -> RigidO
         return RigidOptimization::General;
     }
 
-    // Rule 2: single VCVS, resistive-only feedback → OpAmpRoot
-    if stats.is_single_vcvs_linear() && stats.reactive_count == 0 {
+    // Rule 2: single VCVS, no NL → OpAmpRoot
+    // Reactive elements in feedback (e.g., 100pF HF rolloff cap) are
+    // absorbed by the OpAmpRoot's GBW model — no separate IIR needed.
+    if stats.is_single_vcvs_linear() {
         let inverting = is_inverting_topology(stats, graph);
         return RigidOptimization::OpAmpRoot { inverting };
     }
 
-    // Rule 3: all linear (no NL) → IIR from MNA
+    // Rule 3: all linear with reactive elements → IIR from MNA
     // This covers both passive bridges AND active linear circuits
     // (808 bridged-T with VCVS + caps). VCVS is linear.
-    if stats.nl_count == 0 {
+    // Must have at least 1 reactive element for biquad coefficients.
+    if stats.nl_count == 0 && stats.reactive_count > 0 {
         return RigidOptimization::Iir;
+    }
+
+    // Rule 3b: all linear, purely resistive → passthrough (no dynamics)
+    // These stages are just resistive dividers or loads.
+    if stats.nl_count == 0 && stats.reactive_count == 0 && stats.vcvs_count == 0 {
+        return RigidOptimization::Iir; // Will produce trivial biquad (DC gain)
+        // TODO: could optimize to just a gain stage
     }
 
     // Rule 4: fallback

@@ -47,18 +47,69 @@ pub(in crate::compiler) fn extract_opamp_config(
         .ok_or("VCVS component has no op_amp_type")?;
     let model = OpAmpModel::from_opamp_type(&op_type);
 
-    // Sum feedback resistance (Rf): linear edges in the R-node
-    let rf: f64 = edge_indices
-        .iter()
-        .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Linear)
-        .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
-        .sum();
+    // Get VCVS terminals (neg, out) for classifying edges
+    let vcvs_edge = &graph.edges[*vcvs_edge_idx];
+    let neg = vcvs_edge.node_a;
+    let out = vcvs_edge.node_b;
 
-    // Input resistance (Ri): from pendant tree port resistance
-    let ri: f64 = if !pendant_trees.is_empty() {
+    let is_rail = |node: NodeId| -> bool {
+        node == graph.gnd_node
+            || graph.supply_nodes.contains(&node)
+            || graph.ac_ground_nodes.contains(&node)
+    };
+
+    // Classify linear edges by VCVS terminal relationship:
+    // - Feedback R (Rf): on path between neg and out (both ends touch neg/out/intermediate)
+    // - Input R (Ri): touches neg but NOT out (pendant input coupling)
+    let mut rf = 0.0f64;
+    let mut ri_from_edges = 0.0f64;
+
+    // Use DFS to find edges on paths from out→neg (feedback path)
+    let mut feedback_edge_set = std::collections::HashSet::new();
+    {
+        // Build signal adjacency for just these edges
+        let mut adj: std::collections::HashMap<NodeId, Vec<(usize, NodeId)>> =
+            std::collections::HashMap::new();
+        for &eidx in edge_indices {
+            let e = &graph.edges[eidx];
+            if is_rail(e.node_a) || is_rail(e.node_b) {
+                continue;
+            }
+            if graph.effective_edge_kind(eidx) == EdgeKind::Vcvs {
+                continue; // Skip the VCVS edge itself
+            }
+            adj.entry(e.node_a).or_default().push((eidx, e.node_b));
+            adj.entry(e.node_b).or_default().push((eidx, e.node_a));
+        }
+        // DFS from out to neg, collecting feedback edges
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(out);
+        let mut path = Vec::new();
+        super::super::feedback::dfs_find_feedback_edges(
+            out, neg, &adj, &mut visited, &mut path, &mut feedback_edge_set,
+        );
+    }
+
+    for &eidx in edge_indices {
+        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+            continue;
+        }
+        if let Some(r) = graph.components[graph.edges[eidx].comp_idx].kind.resistance() {
+            if feedback_edge_set.contains(&eidx) {
+                rf += r; // On feedback path → Rf
+            } else {
+                ri_from_edges += r; // Not on feedback path → Ri
+            }
+        }
+    }
+
+    // Input resistance: from edge-based Ri or pendant trees
+    let ri: f64 = if ri_from_edges > 0.0 {
+        ri_from_edges
+    } else if !pendant_trees.is_empty() {
         pendant_trees.iter().map(|(tree, _)| tree.port_resistance()).sum()
     } else {
-        f64::INFINITY // No pendant → unity gain
+        f64::INFINITY // No input coupling → unity gain
     };
 
     let gain = if ri.is_infinite() {
