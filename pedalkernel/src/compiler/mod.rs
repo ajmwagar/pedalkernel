@@ -20,6 +20,7 @@ mod graph;
 mod helpers;
 mod opamp_analysis;
 mod plan;
+mod rigid_build;
 mod spqr;
 mod spqr_build;
 mod split;
