@@ -9,10 +9,13 @@
 
 use super::build::create_root;
 use super::dyn_node::DynNode;
-use super::graph::CircuitGraph;
+use super::graph::{CircuitGraph, NodeId};
+use super::rigid_build::{classify_rigid, RigidOptimization, StageStats};
 use super::spqr::SpqrStage;
 use super::stage::{RootKind, WdfStage};
 use super::wdf_leaf::WdfVoltageSource;
+use crate::elements::OpAmpModel;
+use crate::elements::OpAmpRoot;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 
 /// Wrap a passive DynNode tree with a voltage source input port.
@@ -68,10 +71,133 @@ pub(super) fn build_spqr_stage(
             wdf_stage.base_diode_model = base_diode_model;
             Ok(wdf_stage)
         }
-        SpqrStage::Rigid { .. } => {
-            Err("Rigid stages not yet supported in SPQR pipeline".to_string())
+        SpqrStage::Rigid {
+            edge_indices,
+            boundary_nodes,
+            pendant_trees,
+            ..
+        } => build_rigid(edge_indices, boundary_nodes, pendant_trees, graph, _sample_rate),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Rigid stage building
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Build a runnable stage from a Rigid SpqrStage.
+///
+/// Uses `StageStats` + `classify_rigid()` to select the cheapest strategy,
+/// then constructs the appropriate stage type.
+fn build_rigid(
+    edge_indices: Vec<usize>,
+    _boundary_nodes: Vec<NodeId>,
+    pendant_trees: Vec<(DynNode, NodeId)>,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Result<WdfStage, String> {
+    let stats = StageStats::from_edges(&edge_indices, graph);
+    let optimization = classify_rigid(&stats, graph);
+
+    match optimization {
+        RigidOptimization::OpAmpRoot { inverting } => {
+            build_opamp_root(&edge_indices, &pendant_trees, inverting, graph, sample_rate)
+        }
+        RigidOptimization::Iir => {
+            Err("IIR rigid stages not yet implemented".to_string())
+        }
+        RigidOptimization::StateSpace => {
+            Err("StateSpace rigid stages not yet implemented".to_string())
+        }
+        RigidOptimization::General => {
+            Err("General MNA rigid stages not yet implemented".to_string())
         }
     }
+}
+
+/// Build an OpAmpRoot stage from a simple VCVS feedback topology.
+///
+/// Extracts Rf from linear edges in the R-node, Ri from pendant trees,
+/// and the OpAmpModel from the VCVS edge's Component.
+fn build_opamp_root(
+    edge_indices: &[usize],
+    pendant_trees: &[(DynNode, NodeId)],
+    inverting: bool,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Result<WdfStage, String> {
+    // Find the VCVS edge → get OpAmpModel
+    let vcvs_edge_idx = edge_indices
+        .iter()
+        .find(|&&eidx| {
+            graph.effective_edge_kind(eidx) == super::component::EdgeKind::Vcvs
+        })
+        .ok_or("No VCVS edge in OpAmpRoot stage")?;
+
+    let vcvs_comp = &graph.components[graph.edges[*vcvs_edge_idx].comp_idx];
+    let op_type = vcvs_comp
+        .kind
+        .op_amp_type()
+        .ok_or("VCVS edge component has no op_amp_type")?;
+    let model = OpAmpModel::from_opamp_type(&op_type);
+
+    // Sum feedback resistance (Rf): linear edges in the R-node (between neg and out)
+    let rf: f64 = edge_indices
+        .iter()
+        .filter(|&&eidx| {
+            graph.effective_edge_kind(eidx) == super::component::EdgeKind::Linear
+        })
+        .filter_map(|&eidx| {
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            comp.kind.resistance()
+        })
+        .sum();
+
+    if rf <= 0.0 {
+        return Err("OpAmpRoot: no feedback resistance found".to_string());
+    }
+
+    // Input resistance (Ri): from pendant tree port resistance
+    let ri: f64 = if !pendant_trees.is_empty() {
+        pendant_trees.iter().map(|(tree, _)| tree.port_resistance()).sum()
+    } else {
+        // No pendant → unity gain buffer (Ri = infinity, gain = 1)
+        f64::INFINITY
+    };
+
+    let gain = if ri.is_infinite() {
+        1.0
+    } else if inverting {
+        rf / ri
+    } else {
+        1.0 + rf / ri
+    };
+
+    let supply_voltage: f64 = 9.0; // TODO: from PedalDef
+    let mut root = if inverting {
+        OpAmpRoot::new_inverting(model, gain)
+    } else {
+        OpAmpRoot::new_non_inverting(model, gain)
+    };
+    root.set_sample_rate(sample_rate);
+    root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5));
+
+    // Build tree: VS (input port) in series with pendant Ri if present
+    let tree = if let Some((pendant, _)) = pendant_trees.first() {
+        let ri_tree = pendant.clone();
+        with_voltage_source(ri_tree)
+    } else {
+        // Unity buffer: just a VS
+        DynNode::Leaf(Box::new(WdfVoltageSource {
+            voltage: 0.0,
+            rp: 1.0,
+            is_cathode_bias: false,
+        }))
+    };
+
+    let oversampler = Oversampler::new(OversamplingFactor::X1);
+    let mut stage = WdfStage::new(tree, RootKind::OpAmp(root), oversampler);
+    stage.compensation = 1.0;
+    Ok(stage)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -203,5 +329,111 @@ mod tests {
 
         // After 10ms with RC = 1ms, cap should be mostly charged
         assert!(output.abs() > 0.001, "RC lowpass should pass DC, got {output:.6}");
+    }
+
+    #[test]
+    fn spqr_inverting_opamp_gain() {
+        // Inverting amp: R1=10k, Rf=100k → gain = -10
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    Rf: resistor(100k)
+                    U1: opamp(tl072)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    Rf.a -> U1.neg
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#);
+        let spqr = spqr_decompose(
+            &edges,
+            &[graph.in_node, graph.out_node],
+            &graph,
+            graph.gnd_node,
+        );
+        let spqr_stages = spqr_to_stages(&spqr, &graph, 48000.0);
+
+        assert_eq!(spqr_stages.len(), 1);
+        let mut stage = build_spqr_stage(
+            spqr_stages.into_iter().next().unwrap(),
+            &graph,
+            48000.0,
+        )
+        .expect("Should build OpAmpRoot stage");
+
+        // Small signal: 0.1V input → should get ~1.0V output (gain=10, inverted)
+        // Let the stage settle for a few samples
+        for _ in 0..10 {
+            stage.process(0.1);
+        }
+        let output = stage.process(0.1);
+        let gain_measured = output.abs() / 0.1;
+
+        assert!(
+            gain_measured > 5.0,
+            "Inverting gain should be ~10, got {gain_measured:.2}"
+        );
+        assert!(
+            gain_measured < 15.0,
+            "Inverting gain should be ~10, got {gain_measured:.2}"
+        );
+    }
+
+    #[test]
+    fn spqr_noninverting_opamp_gain() {
+        // Non-inverting amp: R1=10k, Rf=100k → gain = 1 + 100k/10k = 11
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    Rf: resistor(100k)
+                    U1: opamp(tl072)
+                }
+                nets {
+                    in -> U1.pos
+                    U1.neg -> R1.a
+                    R1.b -> gnd
+                    U1.neg -> Rf.a
+                    Rf.b -> U1.out
+                    U1.out -> out
+                }
+                controls {}
+            }"#);
+        let spqr = spqr_decompose(
+            &edges,
+            &[graph.in_node, graph.out_node],
+            &graph,
+            graph.gnd_node,
+        );
+        let spqr_stages = spqr_to_stages(&spqr, &graph, 48000.0);
+
+        assert_eq!(spqr_stages.len(), 1);
+        let mut stage = build_spqr_stage(
+            spqr_stages.into_iter().next().unwrap(),
+            &graph,
+            48000.0,
+        )
+        .expect("Should build OpAmpRoot stage");
+
+        for _ in 0..10 {
+            stage.process(0.1);
+        }
+        let output = stage.process(0.1);
+        let gain_measured = output.abs() / 0.1;
+
+        assert!(
+            gain_measured > 6.0,
+            "Non-inverting gain should be ~11, got {gain_measured:.2}"
+        );
+        assert!(
+            gain_measured < 16.0,
+            "Non-inverting gain should be ~11, got {gain_measured:.2}"
+        );
     }
 }
