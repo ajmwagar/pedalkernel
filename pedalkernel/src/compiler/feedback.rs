@@ -29,12 +29,51 @@ struct ActiveElement {
     output_node: NodeId,
 }
 
-/// A group of edges that share a feedback loop.
-/// All edges in a group must be simulated as one stage.
+/// A group of edges that share a feedback loop, with classification.
+///
+/// The feedback analysis classifies each edge once. Downstream builders
+/// (OpAmpRoot, IIR, General) read the classification directly — no
+/// re-scanning or second DFS needed.
 #[derive(Debug, Clone)]
 pub(in crate::compiler) struct FeedbackGroup {
-    /// Edge indices in this group (active + passive feedback edges).
-    pub edge_indices: Vec<usize>,
+    /// Active element edges (VCVS, diode, BJT) — the core of the stage.
+    pub active_edges: Vec<usize>,
+    /// Passive edges on the feedback cycle (out→in path). Determines Rf.
+    pub feedback_edges: Vec<usize>,
+    /// Passive edges touching an active input terminal. Determines Ri.
+    pub pendant_edges: Vec<usize>,
+    /// Passive ground shunts touching group signal nodes. Loading/resonance.
+    pub ground_shunt_edges: Vec<usize>,
+}
+
+impl FeedbackGroup {
+    /// All edge indices in this group (all categories combined).
+    pub fn all_edges(&self) -> Vec<usize> {
+        let mut all = Vec::with_capacity(
+            self.active_edges.len()
+                + self.feedback_edges.len()
+                + self.pendant_edges.len()
+                + self.ground_shunt_edges.len(),
+        );
+        all.extend(&self.active_edges);
+        all.extend(&self.feedback_edges);
+        all.extend(&self.pendant_edges);
+        all.extend(&self.ground_shunt_edges);
+        all
+    }
+
+    /// Total number of edges.
+    pub fn len(&self) -> usize {
+        self.active_edges.len()
+            + self.feedback_edges.len()
+            + self.pendant_edges.len()
+            + self.ground_shunt_edges.len()
+    }
+
+    /// Whether this group has feedback (cycle through active element).
+    pub fn has_feedback(&self) -> bool {
+        !self.feedback_edges.is_empty()
+    }
 }
 
 /// Set of nodes that are rails (not signal-carrying shared nodes).
@@ -229,7 +268,10 @@ pub(in crate::compiler) fn find_feedback_groups(
     if active_elements.is_empty() {
         // No active elements — everything is one passive group
         return vec![FeedbackGroup {
-            edge_indices: edge_indices.to_vec(),
+            active_edges: Vec::new(),
+            feedback_edges: Vec::new(),
+            pendant_edges: edge_indices.to_vec(),
+            ground_shunt_edges: Vec::new(),
         }];
     }
 
@@ -289,46 +331,33 @@ pub(in crate::compiler) fn find_feedback_groups(
         }
     }
 
-    // Collect edges per group
-    // Each active element maps to a group. Passive edges are assigned
-    // to a group if they touch a signal node owned by that group.
+    // Collect active edges per group (from union-find)
     let mut group_map: HashMap<usize, Vec<usize>> = HashMap::new();
     for i in 0..n {
         let root = find(&mut parent, i);
-        group_map
-            .entry(root)
-            .or_default()
-            .push(active_elements[i].edge_idx);
+        group_map.entry(root).or_default().push(i);
     }
 
-    // For each group, find passive edges on the FEEDBACK PATH:
-    // edges on any simple path from input to output through signal edges.
-    // This excludes downstream cascade and input pendant edges.
+    // Build classified FeedbackGroup for each union-find group.
+    // One DFS, one pass — all edge classification happens here.
     let mut claimed: HashSet<usize> = HashSet::new();
     let mut groups: Vec<FeedbackGroup> = Vec::new();
 
-    for (&_root, active_edge_indices) in &group_map {
-        let mut group_edges: HashSet<usize> = HashSet::new();
-        group_edges.extend(active_edge_indices);
-
-        // Collect all (input, output) terminal pairs for this group
-        let group_elem_indices: Vec<usize> = (0..n)
-            .filter(|&i| find(&mut parent, i) == find(&mut parent, _root))
+    for (&_root, elem_indices) in &group_map {
+        let active_edges: Vec<usize> = elem_indices
+            .iter()
+            .map(|&i| active_elements[i].edge_idx)
             .collect();
 
-        // DFS from each input terminal to its output terminal.
-        // All edges on successful paths → feedback edges.
-        let mut has_feedback = false;
-        for &elem_idx in &group_elem_indices {
-            let elem = &active_elements[elem_idx];
+        // DFS: find passive edges on the feedback cycle (out→in paths)
+        let mut feedback_set: HashSet<usize> = HashSet::new();
+        for &ei in elem_indices {
+            let elem = &active_elements[ei];
             if rails.contains(&elem.input_node) || rails.contains(&elem.output_node) {
                 continue;
             }
-            // Find all edges on paths from output back to input
-            // (excluding the active element's own edge)
-            let mut feedback_edges: HashSet<usize> = HashSet::new();
-            let mut path: Vec<usize> = Vec::new();
-            let mut visited: HashSet<NodeId> = HashSet::new();
+            let mut path = Vec::new();
+            let mut visited = HashSet::new();
             visited.insert(elem.output_node);
             dfs_find_paths(
                 elem.output_node,
@@ -337,44 +366,41 @@ pub(in crate::compiler) fn find_feedback_groups(
                 &adj,
                 &mut visited,
                 &mut path,
-                &mut feedback_edges,
+                &mut feedback_set,
             );
-            has_feedback = has_feedback || !feedback_edges.is_empty();
-            group_edges.extend(feedback_edges);
         }
 
-        // Only claim passive edges if this group has actual feedback.
-        // Standalone NL elements (diodes to GND) don't get passive edges —
-        // they're independent clipping stages.
+        // Remove active element edges from feedback_set (they go in active_edges)
+        for &ae in &active_edges {
+            feedback_set.remove(&ae);
+        }
+        let feedback_edges: Vec<usize> = feedback_set.into_iter().collect();
+        let has_feedback = !feedback_edges.is_empty();
+
+        // If no feedback, this is a standalone NL element — no passive claiming
         if !has_feedback {
-            for &eidx in &group_edges {
+            for &eidx in &active_edges {
                 claimed.insert(eidx);
             }
             groups.push(FeedbackGroup {
-                edge_indices: group_edges.into_iter().collect(),
+                active_edges,
+                feedback_edges: Vec::new(),
+                pendant_edges: Vec::new(),
+                ground_shunt_edges: Vec::new(),
             });
             continue;
         }
 
-        // Claim two more edge categories (passive only):
-        //
-        // 1. GROUND SHUNTS: passive edge with one end at rail, other at a
-        //    group node. Creates resonance (caps) or loading (resistors).
-        //
-        // 2. INPUT PENDANTS: passive edge touching an active element's
-        //    input terminal. Determines Ri for gain computation.
-        //
-        // Everything else stays standalone (cascade, output load, etc.)
-        let group_nodes: HashSet<NodeId> = group_edges
-            .iter()
-            .flat_map(|&eidx| {
-                let e = &graph.edges[eidx];
-                [e.node_a, e.node_b].into_iter().filter(|n| !rails.contains(n))
-            })
-            .collect();
+        // Collect group signal nodes (from active + feedback edges)
+        let mut group_nodes: HashSet<NodeId> = HashSet::new();
+        for &eidx in active_edges.iter().chain(feedback_edges.iter()) {
+            let e = &graph.edges[eidx];
+            if !rails.contains(&e.node_a) { group_nodes.insert(e.node_a); }
+            if !rails.contains(&e.node_b) { group_nodes.insert(e.node_b); }
+        }
 
-        // Collect input terminal nodes for pendant detection
-        let input_terminals: HashSet<NodeId> = group_elem_indices
+        // Input terminal nodes for pendant detection
+        let input_terminals: HashSet<NodeId> = elem_indices
             .iter()
             .filter_map(|&i| {
                 let node = active_elements[i].input_node;
@@ -382,51 +408,63 @@ pub(in crate::compiler) fn find_feedback_groups(
             })
             .collect();
 
+        // Classify remaining passive edges: pendant or ground shunt
+        let mut pendant_edges = Vec::new();
+        let mut ground_shunt_edges = Vec::new();
+
         for &eidx in edge_indices {
-            if group_edges.contains(&eidx) || claimed.contains(&eidx) {
+            if claimed.contains(&eidx)
+                || active_edges.contains(&eidx)
+                || feedback_edges.contains(&eidx)
+            {
                 continue;
             }
             let comp = &graph.components[graph.edges[eidx].comp_idx];
             if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
-                continue; // Only claim passive edges
+                continue;
             }
             let e = &graph.edges[eidx];
             let a_rail = rails.contains(&e.node_a);
             let b_rail = rails.contains(&e.node_b);
 
-            // Ground shunt: one end rail, other end in group
-            let is_ground_shunt = (a_rail && group_nodes.contains(&e.node_b))
-                || (b_rail && group_nodes.contains(&e.node_a));
-
-            // Input pendant: touches an active input terminal
-            let is_input_pendant = input_terminals.contains(&e.node_a)
-                || input_terminals.contains(&e.node_b);
-
-            if is_ground_shunt || is_input_pendant {
-                group_edges.insert(eidx);
+            if (a_rail && group_nodes.contains(&e.node_b))
+                || (b_rail && group_nodes.contains(&e.node_a))
+            {
+                ground_shunt_edges.push(eidx);
+            } else if input_terminals.contains(&e.node_a)
+                || input_terminals.contains(&e.node_b)
+            {
+                pendant_edges.push(eidx);
             }
         }
 
-        for &eidx in &group_edges {
+        // Mark all claimed
+        for &eidx in active_edges
+            .iter()
+            .chain(&feedback_edges)
+            .chain(&pendant_edges)
+            .chain(&ground_shunt_edges)
+        {
             claimed.insert(eidx);
         }
+
         groups.push(FeedbackGroup {
-            edge_indices: group_edges.into_iter().collect(),
+            active_edges,
+            feedback_edges,
+            pendant_edges,
+            ground_shunt_edges,
         });
     }
 
-    // Unclaimed edges → individual groups (cascaded passive stages)
+    // Unclaimed edges → individual standalone groups
     for &eidx in edge_indices {
         if !claimed.contains(&eidx) {
-            let e = &graph.edges[eidx];
-            if rails.contains(&e.node_a) || rails.contains(&e.node_b) {
+            {
                 groups.push(FeedbackGroup {
-                    edge_indices: vec![eidx],
-                });
-            } else {
-                // Signal edge not in any feedback group — standalone
-                groups.push(FeedbackGroup {
-                    edge_indices: vec![eidx],
+                    active_edges: Vec::new(),
+                    feedback_edges: Vec::new(),
+                    pendant_edges: vec![eidx],
+                    ground_shunt_edges: Vec::new(),
                 });
             }
         }
@@ -458,13 +496,13 @@ mod tests {
         groups
             .iter()
             .map(|g| {
-                let names: Vec<String> = g
-                    .edge_indices
+                let mut names: Vec<String> = g
+                    .all_edges()
                     .iter()
                     .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
                     .collect();
-                let mut names = names;
                 names.sort();
+                names.dedup();
                 names.join("+")
             })
             .collect()
@@ -513,23 +551,31 @@ mod tests {
 
         // The op-amp + feedback should be one group
         let opamp_group = groups.iter().find(|g| {
-            g.edge_indices.iter().any(|&eidx| {
+            g.active_edges.iter().any(|&eidx| {
                 graph.effective_edge_kind(eidx) == EdgeKind::Vcvs
             })
         });
         assert!(opamp_group.is_some(), "Should have an op-amp group");
+        let og = opamp_group.unwrap();
 
-        let opamp_edges = &opamp_group.unwrap().edge_indices;
-        // Feedback group should contain: U1, R_fb, C_hpf, R_in
-        // Should NOT contain: D1, D2, C_tone (ground shunts)
-        let has_rfb = opamp_edges.iter().any(|&eidx| {
+        // R_fb should be in feedback_edges (on the out→neg cycle)
+        let has_rfb = og.feedback_edges.iter().any(|&eidx| {
             graph.components[graph.edges[eidx].comp_idx].id == "R_fb"
         });
-        let has_d1 = opamp_edges.iter().any(|&eidx| {
+        assert!(has_rfb, "R_fb should be in feedback_edges");
+
+        // R_in should be in pendant_edges (input coupling, not feedback)
+        let has_rin = og.pendant_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "R_in"
+        });
+        assert!(has_rin, "R_in should be in pendant_edges");
+
+        // D1 should NOT be in any category of this group
+        let all = og.all_edges();
+        let has_d1 = all.iter().any(|&eidx| {
             graph.components[graph.edges[eidx].comp_idx].id == "D1"
         });
-        assert!(has_rfb, "Op-amp group should include R_fb (feedback)");
-        assert!(!has_d1, "Op-amp group should NOT include D1 (ground shunt)");
+        assert!(!has_d1, "D1 should NOT be in op-amp group");
 
         // Should have more than 1 group (multi-stage)
         assert!(groups.len() >= 3, "RAT should split into ≥3 groups, got {}", groups.len());
@@ -573,12 +619,12 @@ mod tests {
 
         // Q1 and Q2 should be in the SAME group (feedback: Q2.emitter → Q1.base)
         let q1_group = groups.iter().position(|g| {
-            g.edge_indices.iter().any(|&eidx| {
+            g.all_edges().iter().any(|&eidx| {
                 graph.components[graph.edges[eidx].comp_idx].id == "Q1"
             })
         });
         let q2_group = groups.iter().position(|g| {
-            g.edge_indices.iter().any(|&eidx| {
+            g.all_edges().iter().any(|&eidx| {
                 graph.components[graph.edges[eidx].comp_idx].id == "Q2"
             })
         });
@@ -614,12 +660,12 @@ mod tests {
 
         // D1 output doesn't reach D1 input → separate groups
         let d1_group = groups.iter().position(|g| {
-            g.edge_indices.iter().any(|&eidx| {
+            g.all_edges().iter().any(|&eidx| {
                 graph.components[graph.edges[eidx].comp_idx].id == "D1"
             })
         });
         let d2_group = groups.iter().position(|g| {
-            g.edge_indices.iter().any(|&eidx| {
+            g.all_edges().iter().any(|&eidx| {
                 graph.components[graph.edges[eidx].comp_idx].id == "D2"
             })
         });
@@ -654,12 +700,12 @@ mod tests {
         // D1 and D2 both go to GND — GND is a rail, not a coupling node
         // They should NOT be in the same feedback group
         let d1_group = groups.iter().position(|g| {
-            g.edge_indices.iter().any(|&eidx| {
+            g.all_edges().iter().any(|&eidx| {
                 graph.components[graph.edges[eidx].comp_idx].id == "D1"
             })
         });
         let d2_group = groups.iter().position(|g| {
-            g.edge_indices.iter().any(|&eidx| {
+            g.all_edges().iter().any(|&eidx| {
                 graph.components[graph.edges[eidx].comp_idx].id == "D2"
             })
         });

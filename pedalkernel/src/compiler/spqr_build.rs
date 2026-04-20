@@ -10,7 +10,7 @@ use super::build::create_root;
 use super::compiled::{CompiledPedal, RailSaturation, StageRef};
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
-use super::rigid::build_rigid;
+use super::rigid::{build_rigid, build_rigid_from_group};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::stage::{IirStage, RootKind, WdfStage};
 use super::wdf_leaf::WdfVoltageSource;
@@ -93,28 +93,18 @@ pub fn compile_via_spqr_with_options(
     let mut stage_counter = 0usize;
 
     for group in &feedback_groups {
-        if group.edge_indices.is_empty() {
+        if group.len() == 0 {
             continue;
         }
 
-        // Feedback groups with a VCVS (op-amp) are already correctly
-        // sized by feedback analysis — build directly as one Rigid stage.
-        // Groups without VCVS (diode clippers, passive chains, BJTs) go
-        // through SPQR which handles NlWdf and PassiveWdf correctly.
-        let has_vcvs_feedback = group.edge_indices.len() > 1
-            && group.edge_indices.iter().any(|&eidx| {
-                graph.effective_edge_kind(eidx) == super::component::EdgeKind::Vcvs
-            });
-
-        if has_vcvs_feedback {
-            // Active feedback group → build directly as one Rigid stage.
-            // SPQR decomposition would split feedback edges incorrectly.
-            let built = build_rigid(
-                group.edge_indices.clone(),
-                vec![graph.in_node, graph.out_node],
-                vec![], // No pendant extraction — group is self-contained
+        if group.has_feedback() {
+            // Feedback group → build directly as Rigid.
+            // Classification flows from FeedbackGroup to builder.
+            let built = build_rigid_from_group(
+                group.all_edges(),
                 &graph,
                 sample_rate,
+                Some(group),
             )
             .map_err(|e| format!("Stage {stage_counter}: {e}"))?;
             match built {
@@ -131,9 +121,9 @@ pub fn compile_via_spqr_with_options(
             }
             stage_counter += 1;
         } else {
-            // Passive group → SPQR decompose for WDF tree building
+            // No feedback → SPQR decompose for WDF/NlWdf stages
             let spqr_tree = spqr_decompose(
-                &group.edge_indices,
+                &group.all_edges(),
                 &terminals,
                 &graph,
                 graph.gnd_node,

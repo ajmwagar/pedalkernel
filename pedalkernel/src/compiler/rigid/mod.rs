@@ -27,6 +27,7 @@ pub(super) use self::opamp_root::{
 
 use super::component::EdgeKind;
 use super::dyn_node::DynNode;
+use super::feedback::FeedbackGroup;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr_build::BuiltStage;
 use super::stage::{IirStage, RootKind, WdfStage};
@@ -185,22 +186,40 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
 ///
 /// Uses `StageStats` + `classify_rigid()` to select the cheapest strategy,
 /// then constructs the appropriate stage type.
+/// Build a runnable stage from a classified FeedbackGroup.
+///
+/// Uses `StageStats` + `classify_rigid()` to select the cheapest strategy.
+/// Edge classification from FeedbackGroup flows directly to builders.
 pub(super) fn build_rigid(
     edge_indices: Vec<usize>,
     _boundary_nodes: Vec<NodeId>,
-    pendant_trees: Vec<(DynNode, NodeId)>,
+    _pendant_trees: Vec<(DynNode, NodeId)>,
     graph: &CircuitGraph,
     sample_rate: f64,
+) -> Result<BuiltStage, String> {
+    build_rigid_from_group(edge_indices, graph, sample_rate, None)
+}
+
+/// Build from a FeedbackGroup with full classification.
+pub(super) fn build_rigid_from_group(
+    edge_indices: Vec<usize>,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    group: Option<&FeedbackGroup>,
 ) -> Result<BuiltStage, String> {
     let stats = StageStats::from_edges(&edge_indices, graph);
     let optimization = classify_rigid(&stats, graph);
 
     match optimization {
         RigidOptimization::OpAmpRoot { inverting } => {
-            build_opamp_root(&edge_indices, &pendant_trees, inverting, graph, sample_rate)
-                .map(BuiltStage::Wdf)
+            if let Some(g) = group {
+                build_opamp_root(g, inverting, graph, sample_rate).map(BuiltStage::Wdf)
+            } else {
+                Err("OpAmpRoot needs classified FeedbackGroup".to_string())
+            }
         }
         RigidOptimization::Iir => {
+            let pendant_trees = Vec::new(); // TODO: extract from group
             iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate)
                 .map(|iir| BuiltStage::Iir(IirStage::new(iir)))
         }
@@ -208,15 +227,16 @@ pub(super) fn build_rigid(
             Err("StateSpace rigid stages not yet implemented".to_string())
         }
         RigidOptimization::General => {
-            if stats.vcvs_count == 1 && stats.nl_count > 0 {
-                build_opamp_nl_feedback(
-                    &edge_indices,
-                    &pendant_trees,
-                    &stats,
-                    graph,
-                    sample_rate,
-                )
-                .map(BuiltStage::Wdf)
+            if let Some(g) = group {
+                if stats.vcvs_count == 1 && stats.nl_count > 0 {
+                    build_opamp_nl_feedback(g, &stats, graph, sample_rate)
+                        .map(BuiltStage::Wdf)
+                } else {
+                    Err(format!(
+                        "General MNA not yet implemented (vcvs={}, nl={}, linear={}, reactive={})",
+                        stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count
+                    ))
+                }
             } else {
                 Err(format!(
                     "General MNA not yet implemented (vcvs={}, nl={}, linear={}, reactive={})",
