@@ -33,7 +33,7 @@ mod warnings;
 pub(crate) mod wdf_leaf;
 
 pub use compile::{compile_pedal, compile_pedal_with_options, CompileOptions};
-pub use spqr_build::compile_via_spqr;
+pub use spqr_build::{compile_via_spqr, compile_via_spqr_with_options};
 pub(crate) use compiled::extract_precomputed_from_compiled;
 pub use compiled::CompiledPedal;
 pub use component::{Component, PinDirection};

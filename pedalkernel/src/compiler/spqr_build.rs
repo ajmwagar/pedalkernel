@@ -47,15 +47,24 @@ impl BuiltStage {
 // Full pipeline entry point
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Compile a `.pedal` circuit via the SPQR pipeline with default options.
+pub fn compile_via_spqr(
+    pedal: &PedalDef,
+    sample_rate: f64,
+) -> Result<CompiledPedal, String> {
+    compile_via_spqr_with_options(pedal, sample_rate, super::compile::CompileOptions::default())
+}
+
 /// Compile a `.pedal` circuit via the SPQR pipeline.
 ///
 /// Full flow: PedalDef → CircuitGraph → SPQR decompose → classify →
 /// build stages → CompiledPedal.
 ///
 /// Returns `Err` if any stage can't be built (unsupported topology).
-pub fn compile_via_spqr(
+pub fn compile_via_spqr_with_options(
     pedal: &PedalDef,
     sample_rate: f64,
+    options: super::compile::CompileOptions,
 ) -> Result<CompiledPedal, String> {
     let graph = CircuitGraph::from_pedal(pedal);
 
@@ -106,11 +115,12 @@ pub fn compile_via_spqr(
         pre_gain: 1.0,
         output_gain: 1.0,
         rail_saturation: RailSaturation::None,
-        rail_sat_oversampler: Oversampler::new(OversamplingFactor::X1),
+        rail_sat_oversampler: Oversampler::new(options.oversampling),
         sample_rate,
         controls: Vec::new(),
         gain_range: (0.0, 1.0),
         supply_voltage,
+        oversampling: options.oversampling,
         lfos: Vec::new(),
         envelopes: Vec::new(),
         slew_limiters: Vec::new(),
@@ -120,7 +130,6 @@ pub fn compile_via_spqr(
         vcas: Vec::new(),
         thermal: None,
         tolerance_seed: 0,
-        oversampling: OversamplingFactor::X1,
         opamp_stages: Vec::new(),
         power_supply: None,
         #[cfg(debug_assertions)]
