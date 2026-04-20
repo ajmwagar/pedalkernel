@@ -46,7 +46,7 @@ fn stats_passive_bridge_is_iir() {
     let stats = StageStats::from_edges(&edges, &graph);
     assert!(stats.is_all_linear());
     assert_eq!(stats.linear_count, 5);
-    assert_eq!(classify_rigid(&stats, &graph), RigidOptimization::Iir);
+    assert_eq!(classify_rigid(&stats, &graph, None), RigidOptimization::Iir);
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn stats_inverting_opamp_is_opamproot() {
     assert_eq!(stats.nl_count, 0);
     assert_eq!(stats.linear_count, 2);
     assert_eq!(
-        classify_rigid(&stats, &graph),
+        classify_rigid(&stats, &graph, None),
         RigidOptimization::OpAmpRoot { inverting: true }
     );
 }
@@ -99,7 +99,7 @@ fn stats_noninverting_opamp_is_opamproot() {
         }"#);
     let stats = StageStats::from_edges(&edges, &graph);
     assert_eq!(
-        classify_rigid(&stats, &graph),
+        classify_rigid(&stats, &graph, None),
         RigidOptimization::OpAmpRoot { inverting: false }
     );
 }
@@ -130,7 +130,7 @@ fn stats_opamp_with_feedback_cap_is_opamproot() {
     assert_eq!(stats.vcvs_count, 1);
     assert_eq!(stats.reactive_count, 1);
     // Single VCVS → OpAmpRoot (reactive feedback cap absorbed by GBW model)
-    assert_eq!(classify_rigid(&stats, &graph), RigidOptimization::OpAmpRoot { inverting: true });
+    assert_eq!(classify_rigid(&stats, &graph, None), RigidOptimization::OpAmpRoot { inverting: true });
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn stats_diode_in_rigid_is_general() {
         }"#);
     let stats = StageStats::from_edges(&edges, &graph);
     assert!(stats.nl_count > 0, "Should detect diode as NL");
-    assert_eq!(classify_rigid(&stats, &graph), RigidOptimization::General);
+    assert_eq!(classify_rigid(&stats, &graph, None), RigidOptimization::General);
 }
 
 #[test]

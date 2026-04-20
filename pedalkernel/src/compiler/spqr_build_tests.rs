@@ -535,7 +535,7 @@ fn diagnose_ratking() {
     for (i, s) in spqr_stages.iter().enumerate() {
         if let SpqrStage::Rigid { edge_indices, .. } = s {
             let stats = super::rigid::StageStats::from_edges(edge_indices, &graph);
-            let opt = super::rigid::classify_rigid(&stats, &graph);
+            let opt = super::rigid::classify_rigid(&stats, &graph, None);
             eprintln!("    stage {i} rigid: {:?} (stats: vcvs={}, nl={}, linear={}, reactive={})",
                 opt, stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count);
         }

@@ -122,15 +122,36 @@ pub(super) enum RigidOptimization {
 /// 2. Single VCVS, no reactive, no NL → OpAmpRoot (pure gain)
 /// 3. All linear (no NL) → Iir (biquad from MNA, covers passive + VCVS)
 /// 4. Fallback → General
-pub(super) fn classify_rigid(stats: &StageStats, graph: &CircuitGraph) -> RigidOptimization {
+pub(super) fn classify_rigid(
+    stats: &StageStats,
+    graph: &CircuitGraph,
+    group: Option<&FeedbackGroup>,
+) -> RigidOptimization {
     // Rule 1: any NL element forces general MNA + solver
     if stats.nl_count > 0 {
         return RigidOptimization::General;
     }
 
-    // Rule 2: single VCVS, no NL → OpAmpRoot
+    // Rule 2: single VCVS, reactive ground shunts, resistive feedback → IIR
+    // Resonator circuits (808 bridged-T): caps to GND create resonance,
+    // feedback path is purely resistive. IIR captures the dynamics.
+    if stats.is_single_vcvs_linear() {
+        if let Some(g) = group {
+            let is_reactive = |eidx: usize| -> bool {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                comp.kind.capacitance().is_some() || comp.kind.inductance().is_some()
+            };
+            let has_reactive_ground = g.ground_shunt_edges.iter().any(|&eidx| is_reactive(eidx));
+            let feedback_purely_resistive = g.feedback_edges.iter().all(|&eidx| !is_reactive(eidx));
+            if has_reactive_ground && feedback_purely_resistive {
+                return RigidOptimization::Iir;
+            }
+        }
+    }
+
+    // Rule 3: single VCVS, no NL → OpAmpRoot
     // Reactive elements in feedback (e.g., 100pF HF rolloff cap) are
-    // absorbed by the OpAmpRoot's GBW model — no separate IIR needed.
+    // absorbed by the OpAmpRoot's GBW model.
     if stats.is_single_vcvs_linear() {
         let inverting = is_inverting_topology(stats, graph);
         return RigidOptimization::OpAmpRoot { inverting };
@@ -208,21 +229,10 @@ pub(super) fn build_rigid_from_group(
     group: Option<&FeedbackGroup>,
 ) -> Result<BuiltStage, String> {
     let stats = StageStats::from_edges(&edge_indices, graph);
-    let optimization = classify_rigid(&stats, graph);
+    let optimization = classify_rigid(&stats, graph, group);
 
     match optimization {
         RigidOptimization::OpAmpRoot { inverting } => {
-            // If reactive elements present, try IIR first (might be resonator).
-            // extract_feedback_r detects bridged-T structure from the edges.
-            // If no bridged-T, fall back to OpAmpRoot (GBW handles caps).
-            if stats.reactive_count > 0 {
-                let pendant_trees = Vec::new();
-                if let Ok(iir_data) = iir::build_iir_stage(
-                    &edge_indices, &pendant_trees, graph, sample_rate,
-                ) {
-                    return Ok(BuiltStage::Iir(IirStage::new(iir_data)));
-                }
-            }
             if let Some(g) = group {
                 build_opamp_root(g, inverting, graph, sample_rate).map(BuiltStage::Wdf)
             } else {
