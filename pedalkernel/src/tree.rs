@@ -1485,11 +1485,14 @@ impl MnaSystem {
                     }
                 }
 
-                // C_red
+                // C_red — extract full sub-block from c_kept, including
+                // off-diagonal entries for caps spanning two nodes.
                 let mut c_red = vec![0.0; n_c * n_c];
                 for (ri, &ci) in cap_indices.iter().enumerate() {
-                    if ci < n_kept {
-                        c_red[ri * n_c + ri] = c_kept[ci * n_kept + ci];
+                    for (rj, &cj) in cap_indices.iter().enumerate() {
+                        if ci < n_kept && cj < n_kept {
+                            c_red[ri * n_c + rj] = c_kept[ci * n_kept + cj];
+                        }
                     }
                 }
 
