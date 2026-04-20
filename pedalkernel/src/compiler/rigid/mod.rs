@@ -13,6 +13,7 @@
 
 mod general;
 mod iir;
+mod mna_builder;
 mod opamp_root;
 mod state_space;
 
