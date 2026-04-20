@@ -211,59 +211,72 @@ fn build_rigid(
             Err("StateSpace rigid stages not yet implemented".to_string())
         }
         RigidOptimization::General => {
-            Err("General MNA rigid stages not yet implemented".to_string())
+            // Common case: VCVS + NL (TS/RAT/Klon clipping stages).
+            // OpAmpRoot handles gain+GBW+slew, NL root handles clipping.
+            if stats.vcvs_count == 1 && stats.nl_count > 0 {
+                build_opamp_nl_feedback(
+                    &edge_indices,
+                    &pendant_trees,
+                    &stats,
+                    graph,
+                    sample_rate,
+                )
+            } else {
+                Err(format!(
+                    "General MNA not yet implemented (vcvs={}, nl={}, linear={}, reactive={})",
+                    stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count
+                ))
+            }
         }
     }
 }
 
-/// Build an OpAmpRoot stage from a simple VCVS feedback topology.
+/// Shared op-amp extraction: finds VCVS edge, computes Rf, Ri, gain.
+struct OpAmpConfig {
+    model: OpAmpModel,
+    rf: f64,
+    ri: f64,
+    gain: f64,
+    inverting: bool,
+}
+
+/// Extract op-amp configuration from a Rigid stage's edges + pendants.
 ///
-/// Extracts Rf from linear edges in the R-node, Ri from pendant trees,
-/// and the OpAmpModel from the VCVS edge's Component.
-fn build_opamp_root(
+/// Queries Component::op_amp_type() for the model, Component::resistance()
+/// for Rf (linear edges in R-node), and pendant port_resistance() for Ri.
+fn extract_opamp_config(
     edge_indices: &[usize],
     pendant_trees: &[(DynNode, NodeId)],
     inverting: bool,
     graph: &CircuitGraph,
-    sample_rate: f64,
-) -> Result<WdfStage, String> {
+) -> Result<OpAmpConfig, String> {
+    use super::component::EdgeKind;
+
     // Find the VCVS edge → get OpAmpModel
     let vcvs_edge_idx = edge_indices
         .iter()
-        .find(|&&eidx| {
-            graph.effective_edge_kind(eidx) == super::component::EdgeKind::Vcvs
-        })
-        .ok_or("No VCVS edge in OpAmpRoot stage")?;
+        .find(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Vcvs)
+        .ok_or("No VCVS edge found")?;
 
     let vcvs_comp = &graph.components[graph.edges[*vcvs_edge_idx].comp_idx];
     let op_type = vcvs_comp
         .kind
         .op_amp_type()
-        .ok_or("VCVS edge component has no op_amp_type")?;
+        .ok_or("VCVS component has no op_amp_type")?;
     let model = OpAmpModel::from_opamp_type(&op_type);
 
-    // Sum feedback resistance (Rf): linear edges in the R-node (between neg and out)
+    // Sum feedback resistance (Rf): linear edges in the R-node
     let rf: f64 = edge_indices
         .iter()
-        .filter(|&&eidx| {
-            graph.effective_edge_kind(eidx) == super::component::EdgeKind::Linear
-        })
-        .filter_map(|&eidx| {
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            comp.kind.resistance()
-        })
+        .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Linear)
+        .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
         .sum();
-
-    if rf <= 0.0 {
-        return Err("OpAmpRoot: no feedback resistance found".to_string());
-    }
 
     // Input resistance (Ri): from pendant tree port resistance
     let ri: f64 = if !pendant_trees.is_empty() {
         pendant_trees.iter().map(|(tree, _)| tree.port_resistance()).sum()
     } else {
-        // No pendant → unity gain buffer (Ri = infinity, gain = 1)
-        f64::INFINITY
+        f64::INFINITY // No pendant → unity gain
     };
 
     let gain = if ri.is_infinite() {
@@ -274,21 +287,40 @@ fn build_opamp_root(
         1.0 + rf / ri
     };
 
-    let supply_voltage: f64 = 9.0; // TODO: from PedalDef
-    let mut root = if inverting {
-        OpAmpRoot::new_inverting(model, gain)
+    Ok(OpAmpConfig { model, rf, ri, gain, inverting })
+}
+
+/// Create an OpAmpRoot from config, with sample rate and supply voltage set.
+fn make_opamp_root(config: &OpAmpConfig, sample_rate: f64) -> OpAmpRoot {
+    let supply_voltage: f64 = 9.0; // TODO: propagate from PedalDef
+    let mut root = if config.inverting {
+        OpAmpRoot::new_inverting(config.model, config.gain)
     } else {
-        OpAmpRoot::new_non_inverting(model, gain)
+        OpAmpRoot::new_non_inverting(config.model, config.gain)
     };
     root.set_sample_rate(sample_rate);
     root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5));
+    root
+}
 
-    // Build tree: VS (input port) in series with pendant Ri if present
+/// Build an OpAmpRoot stage (no NL elements — pure gain + GBW + slew).
+fn build_opamp_root(
+    edge_indices: &[usize],
+    pendant_trees: &[(DynNode, NodeId)],
+    inverting: bool,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Result<WdfStage, String> {
+    let config = extract_opamp_config(edge_indices, pendant_trees, inverting, graph)?;
+    if config.rf <= 0.0 {
+        return Err("OpAmpRoot: no feedback resistance found".to_string());
+    }
+    let root = make_opamp_root(&config, sample_rate);
+
+    // Tree: VS + pendant Ri
     let tree = if let Some((pendant, _)) = pendant_trees.first() {
-        let ri_tree = pendant.clone();
-        with_voltage_source(ri_tree)
+        with_voltage_source(pendant.clone())
     } else {
-        // Unity buffer: just a VS
         DynNode::Leaf(Box::new(WdfVoltageSource {
             voltage: 0.0,
             rp: 1.0,
@@ -297,8 +329,61 @@ fn build_opamp_root(
     };
 
     let oversampler = Oversampler::new(OversamplingFactor::X1);
-    let mut stage = WdfStage::new(tree, RootKind::OpAmp(root), oversampler);
-    stage.compensation = 1.0;
+    Ok(WdfStage::new(tree, RootKind::OpAmp(root), oversampler))
+}
+
+/// Build a stage with op-amp gain driving a nonlinear root (TS/RAT/Klon pattern).
+///
+/// The OpAmpRoot pre-amplifies the input (gain + GBW + slew), then the
+/// NL root (diode) clips the amplified signal. This is the `feedback_opamp`
+/// pattern from the existing pipeline.
+fn build_opamp_nl_feedback(
+    edge_indices: &[usize],
+    pendant_trees: &[(DynNode, NodeId)],
+    stats: &StageStats,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Result<WdfStage, String> {
+    use super::component::EdgeKind;
+
+    // Extract op-amp config (gain from Rf/Ri)
+    let inverting = super::rigid_build::is_inverting_topology(stats, graph);
+    let config = extract_opamp_config(edge_indices, pendant_trees, inverting, graph)?;
+    let opamp = make_opamp_root(&config, sample_rate);
+
+    // Find first NL edge → build root
+    let nl_edge_idx = edge_indices
+        .iter()
+        .find(|&&eidx| {
+            let ek = graph.effective_edge_kind(eidx);
+            ek == EdgeKind::Nonlinear
+        })
+        .ok_or("General stage has no NL edge")?;
+
+    let e = &graph.edges[*nl_edge_idx];
+    let comp = &graph.components[e.comp_idx];
+    let (nl_kind, _) = comp
+        .kind
+        .classify_nonlinear(&comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names)
+        .ok_or_else(|| format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id))?;
+
+    let (root, base_diode_model) = create_root(&nl_kind, false);
+
+    // Tree: VS + pendant Ri (same as OpAmpRoot path)
+    let tree = if let Some((pendant, _)) = pendant_trees.first() {
+        with_voltage_source(pendant.clone())
+    } else {
+        DynNode::Leaf(Box::new(WdfVoltageSource {
+            voltage: 0.0,
+            rp: 1.0,
+            is_cathode_bias: false,
+        }))
+    };
+
+    let oversampler = Oversampler::new(OversamplingFactor::X2);
+    let mut stage = WdfStage::new(tree, root, oversampler);
+    stage.feedback_opamp = Some(opamp);
+    stage.base_diode_model = base_diode_model;
     Ok(stage)
 }
 
@@ -555,6 +640,59 @@ mod tests {
         assert!(
             gain > 5.0 && gain < 15.0,
             "Inverting gain should be ~10, got {gain:.2}"
+        );
+    }
+
+    #[test]
+    fn compile_via_spqr_opamp_diode_feedback() {
+        // TS-style: R1 → opamp(neg) ← Rf ← diode ← opamp(out)
+        // OpAmpRoot pre-amplifies, diode clips
+        use crate::PedalProcessor;
+
+        let pedal = crate::dsl::parse_pedal_file(r#"
+            pedal "test_ts" { supply 9V
+                components {
+                    R1: resistor(4.7k)
+                    D1: diode(silicon)
+                    Rf: resistor(51k)
+                    U1: opamp(jrc4558)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    D1.a -> U1.neg
+                    D1.b -> U1.out
+                    Rf.a -> U1.neg
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#)
+        .expect("parse");
+
+        let mut compiled = compile_via_spqr(&pedal, 48000.0)
+            .expect("Should compile TS-style circuit via SPQR");
+
+        // Small signal should be amplified (gain ≈ Rf/Ri ≈ 51k/4.7k ≈ 10.8)
+        for _ in 0..20 {
+            compiled.process(0.01);
+        }
+        let output = compiled.process(0.01);
+        assert!(
+            output.abs() > 0.02,
+            "Should amplify small signal, got {output:.6}"
+        );
+
+        // Large signal should clip (diode limits output)
+        for _ in 0..20 {
+            compiled.process(0.5);
+        }
+        let loud_output = compiled.process(0.5);
+        // Gain of ~11 would give 5.5V, but diode clips at ~0.6V
+        assert!(
+            loud_output.abs() < 3.0,
+            "Diode should clip large signal, got {loud_output:.4}V"
         );
     }
 

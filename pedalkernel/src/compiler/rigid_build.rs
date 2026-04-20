@@ -133,7 +133,7 @@ pub(super) fn classify_rigid(stats: &StageStats, graph: &CircuitGraph) -> RigidO
 ///
 /// Inverting: pos pin is at ground (or AC ground).
 /// Non-inverting: pos pin carries signal (not ground).
-fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) -> bool {
+pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) -> bool {
     let vcvs_idx = match stats.vcvs_edge {
         Some(idx) => idx,
         None => return true,
