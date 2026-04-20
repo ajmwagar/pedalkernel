@@ -16,7 +16,6 @@ mod compiled;
 pub mod component;
 pub mod components;
 mod dyn_node;
-mod feedback;
 mod graph;
 mod signal_flow;
 mod helpers;
