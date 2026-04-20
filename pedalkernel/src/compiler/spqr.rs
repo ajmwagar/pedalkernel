@@ -11,7 +11,8 @@
 //! - R nodes become MNA stages (O(N²) per sample)
 //! - Tree traversal order = signal routing (no sort needed)
 
-use super::graph::{CircuitGraph, NodeId, NullorPinRecord};
+use super::component::EdgeKind;
+use super::graph::{CircuitGraph, NodeId};
 
 /// A node in the SPQR decomposition tree.
 #[derive(Debug, Clone)]
@@ -368,25 +369,32 @@ pub(super) fn spqr_decompose(
 
 /// Component-level classification of an SP subtree.
 ///
-/// Determined by walking Q leaves and checking `Component::is_passive()`
-/// and `Component::is_nonlinear()`. Drives the choice of runtime strategy.
+/// Uses `EdgeKind` from the Component trait to determine runtime strategy.
+/// Priority: VCVS > SingleNl > AllPassive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SpClassification {
     /// All edges are passive → pure WDF tree (or IIR for rigid).
     AllPassive,
     /// Exactly one nonlinear edge → WDF tree + scalar NR/Wright Omega root.
     SingleNl { nl_edge_idx: usize },
-    /// Multiple NL elements or mixed active — needs MNA or further decomposition.
+    /// Contains a VCVS (op-amp) → entire subtree needs MNA, emit as Rigid.
+    Vcvs,
+    /// Multiple NL elements, no VCVS → recurse into children.
     Complex,
 }
 
 /// Classify an S/P/Q subtree by its component content.
 ///
-/// Walks Q leaves, counts nonlinear edges. Does NOT look at topology
-/// (that's already captured by the SpqrNode structure).
+/// Walks Q leaves, checks EdgeKind via the graph. VCVS edges take
+/// priority — any VCVS forces the whole subtree to Rigid.
 pub(super) fn classify_sp_subtree(node: &SpqrNode, graph: &CircuitGraph) -> SpClassification {
     let mut nl_edges: Vec<usize> = Vec::new();
-    collect_nl_edges(node, graph, &mut nl_edges);
+    let mut has_vcvs = false;
+    collect_non_passive_edges(node, graph, &mut nl_edges, &mut has_vcvs);
+
+    if has_vcvs {
+        return SpClassification::Vcvs;
+    }
     match nl_edges.len() {
         0 => SpClassification::AllPassive,
         1 => SpClassification::SingleNl { nl_edge_idx: nl_edges[0] },
@@ -394,30 +402,41 @@ pub(super) fn classify_sp_subtree(node: &SpqrNode, graph: &CircuitGraph) -> SpCl
     }
 }
 
-fn collect_nl_edges(node: &SpqrNode, graph: &CircuitGraph, nl_edges: &mut Vec<usize>) {
+fn collect_non_passive_edges(
+    node: &SpqrNode,
+    graph: &CircuitGraph,
+    nl_edges: &mut Vec<usize>,
+    has_vcvs: &mut bool,
+) {
     match node {
         SpqrNode::Q { edge_idx, .. } => {
-            let e = &graph.edges[*edge_idx];
-            let comp = &graph.components[e.comp_idx];
-            if !comp.kind.is_passive() {
-                nl_edges.push(*edge_idx);
+            let edge_kind = graph.effective_edge_kind(*edge_idx);
+            match edge_kind {
+                EdgeKind::Vcvs => *has_vcvs = true,
+                EdgeKind::Linear | EdgeKind::Reactive => {} // passive
+                EdgeKind::Nonlinear | EdgeKind::Vccs | EdgeKind::Behavioral => {
+                    nl_edges.push(*edge_idx);
+                }
             }
         }
         SpqrNode::S { children, .. } | SpqrNode::P { children, .. } => {
             for child in children {
-                collect_nl_edges(child, graph, nl_edges);
+                collect_non_passive_edges(child, graph, nl_edges, has_vcvs);
             }
         }
         SpqrNode::R { edge_indices, children, .. } => {
             for &eidx in edge_indices {
-                let e = &graph.edges[eidx];
-                let comp = &graph.components[e.comp_idx];
-                if !comp.kind.is_passive() {
-                    nl_edges.push(eidx);
+                let edge_kind = graph.effective_edge_kind(eidx);
+                match edge_kind {
+                    EdgeKind::Vcvs => *has_vcvs = true,
+                    EdgeKind::Linear | EdgeKind::Reactive => {}
+                    EdgeKind::Nonlinear | EdgeKind::Vccs | EdgeKind::Behavioral => {
+                        nl_edges.push(eidx);
+                    }
                 }
             }
             for child in children {
-                collect_nl_edges(child, graph, nl_edges);
+                collect_non_passive_edges(child, graph, nl_edges, has_vcvs);
             }
         }
     }
@@ -638,8 +657,20 @@ fn collect_stages(
                         *order += 1;
                     }
                 }
+                SpClassification::Vcvs => {
+                    // VCVS (op-amp) forces MNA — emit entire subtree as Rigid.
+                    // Build layer decides: simple feedback → OpAmpRoot, complex → MNA.
+                    let (a, b) = node.endpoints();
+                    stages.push(SpqrStage::Rigid {
+                        edge_indices: node.all_edge_indices(),
+                        boundary_nodes: vec![a, b],
+                        pendant_trees: vec![],
+                        order: *order,
+                    });
+                    *order += 1;
+                }
                 SpClassification::Complex => {
-                    // Multiple NL or mixed → recurse into children
+                    // Multiple NL, no VCVS → recurse into children
                     for child in children {
                         collect_stages(child, graph, sample_rate, stages, order);
                     }
@@ -647,22 +678,24 @@ fn collect_stages(
             }
         }
         SpqrNode::R { edge_indices, boundary_nodes, children, .. } => {
+            // R-nodes are rigid: everything inside goes into one MNA stage.
+            // Passive SP children become pendant WDF trees (port optimization).
+            // Non-passive children are absorbed into the R-node's edge list.
             let mut pendant_trees: Vec<(DynNode, NodeId)> = Vec::new();
-            let mut remaining_edges = edge_indices.clone();
+            let mut all_edges = edge_indices.clone();
 
             for child in children {
                 if let Some(tree) = spqr_to_dyn_node(child, graph, sample_rate) {
                     let (attach, _) = child.endpoints();
                     pendant_trees.push((tree, attach));
                 } else {
-                    // Non-passive child of R-node → recurse
-                    collect_stages(child, graph, sample_rate, stages, order);
-                    remaining_edges.extend(child.all_edge_indices());
+                    // Non-passive child → absorb into R-node MNA
+                    all_edges.extend(child.all_edge_indices());
                 }
             }
 
             stages.push(SpqrStage::Rigid {
-                edge_indices: remaining_edges,
+                edge_indices: all_edges,
                 boundary_nodes: boundary_nodes.clone(),
                 pendant_trees,
                 order: *order,
@@ -997,6 +1030,181 @@ mod tests {
             }
             other => panic!("Expected NlWdf, got {:?}", other),
         }
+    }
+
+    // ── Phase 3: Op-amp absorption via VCVS edges ─────────────────
+
+    #[test]
+    fn classify_vcvs_inverting_opamp() {
+        // Inverting amp: R1 + Rf + U1(VCVS) — should classify as Vcvs
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    Rf: resistor(100k)
+                    U1: opamp(tl072)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    Rf.a -> U1.neg
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        assert_eq!(
+            classify_sp_subtree(&tree, &graph),
+            SpClassification::Vcvs,
+            "Inverting op-amp should classify as Vcvs"
+        );
+    }
+
+    #[test]
+    fn spqr_opamp_inverting_emits_rigid() {
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    Rf: resistor(100k)
+                    U1: opamp(tl072)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    Rf.a -> U1.neg
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let stages = spqr_to_stages(&tree, &graph, 48000.0);
+
+        assert_eq!(stages.len(), 1, "Inverting amp should produce 1 stage");
+        match &stages[0] {
+            SpqrStage::Rigid { edge_indices, pendant_trees, .. } => {
+                // Rf and U1(VCVS) are in the MNA edge list (parallel, neg→out)
+                // R1 is extracted as a pendant WDF tree (series, in→neg)
+                assert_eq!(edge_indices.len(), 2, "MNA edges: Rf + U1(VCVS)");
+                assert_eq!(pendant_trees.len(), 1, "R1 should be a pendant WDF port");
+                // Verify the VCVS edge is present in MNA edges
+                let has_vcvs = edge_indices.iter().any(|&eidx| {
+                    graph.effective_edge_kind(eidx) == super::super::component::EdgeKind::Vcvs
+                });
+                assert!(has_vcvs, "Rigid stage should contain the VCVS edge");
+            }
+            other => panic!("Inverting amp should be Rigid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn spqr_opamp_noninverting_emits_rigid() {
+        // Non-inverting: signal to pos, voltage divider on neg
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    Rf: resistor(100k)
+                    U1: opamp(tl072)
+                }
+                nets {
+                    in -> U1.pos
+                    U1.neg -> R1.a
+                    R1.b -> gnd
+                    U1.neg -> Rf.a
+                    Rf.b -> U1.out
+                    U1.out -> out
+                }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let stages = spqr_to_stages(&tree, &graph, 48000.0);
+
+        let has_rigid = stages.iter().any(|s| matches!(s, SpqrStage::Rigid { .. }));
+        assert!(has_rigid, "Non-inverting amp should produce a Rigid stage");
+    }
+
+    #[test]
+    fn spqr_diode_opamp_shared_rigid() {
+        // TS-style: diode clipper in op-amp feedback loop
+        // All three (R1, D1, Rf, U1) should land in one Rigid stage
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(4.7k)
+                    D1: diode(silicon)
+                    Rf: resistor(51k)
+                    U1: opamp(jrc4558)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    D1.a -> U1.neg
+                    D1.b -> U1.out
+                    Rf.a -> U1.neg
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let stages = spqr_to_stages(&tree, &graph, 48000.0);
+
+        // Single Rigid: D1 + Rf + U1 in MNA, R1 as pendant WDF port
+        assert_eq!(stages.len(), 1, "TS clipping should produce 1 stage");
+        match &stages[0] {
+            SpqrStage::Rigid { edge_indices, pendant_trees, .. } => {
+                // D1, Rf, U1 are parallel (neg→out) → MNA edges
+                // R1 is pendant (in→neg) → WDF port
+                assert_eq!(edge_indices.len(), 3, "MNA edges: D1 + Rf + U1");
+                assert_eq!(pendant_trees.len(), 1, "R1 should be a pendant WDF port");
+            }
+            other => panic!("TS clipping should be Rigid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn spqr_opamp_preserves_passive_context() {
+        // Inverting amp with input RC filter: the RC should be
+        // part of the same Rigid stage (connected to op-amp pins)
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    C1: cap(100n)
+                    R1: resistor(10k)
+                    Rf: resistor(100k)
+                    U1: opamp(tl072)
+                }
+                nets {
+                    in -> C1.a
+                    C1.b -> R1.a
+                    R1.b -> U1.neg
+                    Rf.a -> U1.neg
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#);
+        let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
+        let stages = spqr_to_stages(&tree, &graph, 48000.0);
+
+        // All edges in one Rigid (VCVS infects the whole SP subtree)
+        let rigid_count = stages.iter().filter(|s| matches!(s, SpqrStage::Rigid { .. })).count();
+        assert!(rigid_count >= 1, "Should have at least one Rigid stage");
+
+        // Total edges across all stages should account for C1 + R1 + Rf + U1
+        let total_edges: usize = stages.iter().map(|s| match s {
+            SpqrStage::PassiveWdf { edge_indices, .. }
+            | SpqrStage::NlWdf { edge_indices, .. }
+            | SpqrStage::Rigid { edge_indices, .. } => edge_indices.len(),
+        }).sum();
+        assert_eq!(total_edges, 4, "All 4 edges should be accounted for");
     }
 
     // ── Phase 2 continued ───────────────────────────────────────────
