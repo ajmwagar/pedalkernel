@@ -200,6 +200,38 @@ pub struct FeedbackConfig {
     pub is_inverting: bool,
 }
 
+impl FeedbackConfig {
+    /// Create a feedback config for a pot in the feedback (Rf) leg.
+    /// `pot_id`: component ID of the pot.
+    /// `ri`: fixed input resistance (the other leg).
+    /// `is_inverting`: true for inverting topology.
+    pub fn feedback_pot(pot_id: &str, ri: f64, is_inverting: bool) -> Self {
+        Self {
+            pot_comp_id: pot_id.to_string(),
+            other_leg_r: ri,
+            fixed_series_r: 0.0,
+            parallel_r: None,
+            pot_is_feedback: true,
+            is_inverting,
+        }
+    }
+
+    /// Create a feedback config for a pot in the input (Ri) leg.
+    /// `pot_id`: component ID of the pot.
+    /// `rf`: fixed feedback resistance (the other leg).
+    /// `is_inverting`: true for inverting topology.
+    pub fn input_pot(pot_id: &str, rf: f64, is_inverting: bool) -> Self {
+        Self {
+            pot_comp_id: pot_id.to_string(),
+            other_leg_r: rf,
+            fixed_series_r: 0.0,
+            parallel_r: None,
+            pot_is_feedback: false,
+            is_inverting,
+        }
+    }
+}
+
 /// Op-amp nonlinear root for WDF trees.
 ///
 /// Models the op-amp as a voltage-controlled voltage source:

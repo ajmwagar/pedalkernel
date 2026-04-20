@@ -362,6 +362,78 @@ fn compute_transformer_gain(
 ///
 /// Each plan becomes one WdfStage through the same algorithm:
 /// build SP edges → sp_reduce → sp_to_dyn → create root → package stage.
+/// Find an adjacent op-amp for a diode stage via VcvsEdge graph role.
+/// Returns (OpAmpRoot, Option<pot_id>) if an op-amp's neg/out touches
+/// the diode's junction nodes (directly or through one passive hop).
+fn find_adjacent_opamp_for_diode(
+    junction_nodes: &[super::graph::NodeId],
+    graph: &CircuitGraph,
+    passive_edges: &[usize],
+    sample_rate: f64,
+    supply_voltage: f64,
+) -> Option<(crate::elements::OpAmpRoot, Option<String>)> {
+    eprintln!("[FIND-OPAMP] junctions={junction_nodes:?} passive_edges={}", passive_edges.len());
+    for comp in &graph.components {
+        if let super::component::GraphRole::VcvsEdge { pin_neg, pin_out, pin_pos, .. } = comp.kind.graph_role() {
+            let neg = graph.node_names.get(&format!("{}.{}", comp.id, pin_neg)).copied()?;
+            let out = graph.node_names.get(&format!("{}.{}", comp.id, pin_out)).copied()?;
+            let pos = graph.node_names.get(&format!("{}.{}", comp.id, pin_pos)).copied();
+
+            let touches = junction_nodes.iter().any(|&jn| jn == neg || jn == out)
+                || junction_nodes.iter().any(|&jn| {
+                    graph.edges.iter().any(|e| {
+                        let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
+                            || graph.components[e.comp_idx].kind.is_pot();
+                        is_passive && (
+                            (e.node_a == neg && e.node_b == jn) || (e.node_b == neg && e.node_a == jn)
+                            || (e.node_a == out && e.node_b == jn) || (e.node_b == out && e.node_a == jn)
+                        )
+                    })
+                });
+
+            if !touches { continue; }
+
+            let ot = comp.kind.op_amp_type();
+            let model = ot.map(|t| crate::elements::OpAmpModel::from_opamp_type(&t))
+                .unwrap_or_else(crate::elements::OpAmpModel::generic);
+
+            let mut rf = 0.0_f64;
+            let mut ri = 0.0_f64;
+            let mut pot_id: Option<String> = None;
+
+            for &eidx in passive_edges {
+                let e = &graph.edges[eidx];
+                if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
+                    if (e.node_a == neg && e.node_b == out) || (e.node_a == out && e.node_b == neg) {
+                        rf = r;
+                    } else if e.node_a == neg || e.node_b == neg {
+                        if ri == 0.0 { ri = r; }
+                    }
+                }
+                if graph.components[e.comp_idx].kind.is_pot() && pot_id.is_none() {
+                    rf = graph.components[e.comp_idx].kind.resistance().unwrap_or(100_000.0);
+                    pot_id = Some(graph.components[e.comp_idx].id.clone());
+                }
+            }
+
+            let gain = if rf > 0.0 && ri > 0.0 { rf / ri } else { 10.0 };
+            let is_inv = pos.map_or(true, |p| p == graph.gnd_node || graph.ac_ground_nodes.contains(&p));
+            let mut root = if is_inv {
+                crate::elements::OpAmpRoot::new_inverting(model, gain)
+            } else {
+                crate::elements::OpAmpRoot::new_non_inverting(model, gain)
+            };
+            root.set_sample_rate(sample_rate);
+            root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5));
+            if let Some(ref pid) = pot_id {
+                root.set_feedback_config(crate::elements::FeedbackConfig::feedback_pot(pid, ri, is_inv));
+            }
+            return Some((root, pot_id));
+        }
+    }
+    None
+}
+
 ///
 /// Triode plans that fail SP reduction are retried as single-NL MNA stages
 /// (MultiNlStage with n_nl=1) using BFS passive collection, which handles
@@ -438,9 +510,19 @@ pub(super) fn build_stages(
             ) {
                 multi_nl.transformer_gain =
                     compute_transformer_gain(&plan.passive_idxs, graph, &transformer_subtrees);
-                // Use island-depth when available (boundary-split stages),
-                // else element's BFS distance for ordering.
                 multi_nl.signal_flow_distance = plan.signal_chain_depth.unwrap_or(elem.distance);
+
+                // Diode-opamp pairing via VcvsEdge for the fallback path
+                if matches!(&elem.kind, NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)) {
+                    if let Some((root, pot_id)) = find_adjacent_opamp_for_diode(
+                        &elem.junction_nodes, graph, &plan.passive_idxs,
+                        sample_rate, supply_voltage,
+                    ) {
+                        multi_nl.feedback_opamp = Some(root);
+                        multi_nl.feedback_pot_id = pot_id;
+                    }
+                }
+
                 fallback_multi_nl.push(multi_nl);
                 fallback_claimed_edges.extend(&plan.passive_idxs);
             }
@@ -515,76 +597,19 @@ pub(super) fn build_stages(
                 }
             }
 
-            // Pair DiodePair/SingleDiode stages with feedback opamps.
-            // Match by junction node: either direct overlap or 1-hop passive adjacency.
             // Pair diode stages with adjacent op-amps via VcvsEdge discovery.
-            // No opamp_analysis needed — find op-amps whose neg/out touches
-            // the diode's junction nodes directly or through one passive hop.
             if matches!(
                 &elem.kind,
                 NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)
             ) {
-                let junction_nodes = &elem.junction_nodes;
-                for comp in &graph.components {
-                    if let super::component::GraphRole::VcvsEdge { pin_pos, pin_neg, pin_out } = comp.kind.graph_role() {
-                        let neg_n = graph.node_names.get(&format!("{}.{}", comp.id, pin_neg)).copied();
-                        let out_n = graph.node_names.get(&format!("{}.{}", comp.id, pin_out)).copied();
-                        let pos_n = graph.node_names.get(&format!("{}.{}", comp.id, pin_pos)).copied();
-                        if let (Some(neg), Some(out)) = (neg_n, out_n) {
-                            let touches = junction_nodes.iter().any(|&jn| jn == neg || jn == out)
-                                || junction_nodes.iter().any(|&jn| {
-                                    graph.edges.iter().any(|e| {
-                                        let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
-                                            || graph.components[e.comp_idx].kind.pot_taper().is_some();
-                                        is_passive && (
-                                            (e.node_a == neg && e.node_b == jn)
-                                            || (e.node_b == neg && e.node_a == jn)
-                                            || (e.node_a == out && e.node_b == jn)
-                                            || (e.node_b == out && e.node_a == jn)
-                                        )
-                                    })
-                                });
-                            if touches {
-                                let ot = comp.kind.op_amp_type();
-                                let model = ot.map(|t| crate::elements::OpAmpModel::from_opamp_type(&t))
-                                    .unwrap_or_else(crate::elements::OpAmpModel::generic);
-                                // Compute gain: find Rf (neg→out) and Ri (input→neg) in plan edges
-                                let mut rf = 0.0_f64;
-                                let mut ri = 0.0_f64;
-                                for &eidx in &plan.passive_idxs {
-                                    let e = &graph.edges[eidx];
-                                    if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
-                                        if (e.node_a == neg && e.node_b == out) || (e.node_a == out && e.node_b == neg) {
-                                            rf = r;
-                                        } else if e.node_a == neg || e.node_b == neg {
-                                            if ri == 0.0 { ri = r; }
-                                        }
-                                    }
-                                    // Check if feedback R is a pot (variable gain)
-                                    if graph.components[e.comp_idx].kind.is_pot() {
-                                        if (e.node_a == neg && e.node_b == out) || (e.node_a == out && e.node_b == neg) {
-                                            rf = graph.components[e.comp_idx].kind.resistance().unwrap_or(100_000.0);
-                                            stage.feedback_pot_id = Some(graph.components[e.comp_idx].id.clone());
-                                        }
-                                    }
-                                }
-                                let gain = if rf > 0.0 && ri > 0.0 { rf / ri } else { 10.0 };
-                                let is_inv = pos_n.map_or(true, |p| p == graph.gnd_node || graph.ac_ground_nodes.contains(&p));
-                                let mut root = if is_inv {
-                                    crate::elements::OpAmpRoot::new_inverting(model, gain)
-                                } else {
-                                    crate::elements::OpAmpRoot::new_non_inverting(model, gain)
-                                };
-                                root.set_sample_rate(sample_rate);
-                                root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5));
-                                stage.feedback_opamp = Some(root);
-                                break;
-                            }
-                        }
-                    }
+                if let Some((root, pot_id)) = find_adjacent_opamp_for_diode(
+                    &elem.junction_nodes, graph, &plan.passive_idxs,
+                    sample_rate, supply_voltage,
+                ) {
+                    stage.feedback_opamp = Some(root);
+                    stage.feedback_pot_id = pot_id;
                 }
             }
-
             stage.signal_flow_distance = if let Some(depth) = plan.signal_chain_depth {
                 depth
             } else {
@@ -1148,6 +1173,7 @@ pub(super) fn build_multi_nl_stages(
     diode_paired_opamps: &[super::opamp_analysis::DiodePairedOpAmp],
 ) -> Vec<MultiNlStage> {
     let mut multi_nl_stages = Vec::new();
+    eprintln!("[BUILD-MULTI-NL] {} plans", multi_nl_plans.len());
 
     for plan in multi_nl_plans {
         match try_build_multi_nl_stage(
@@ -1171,37 +1197,24 @@ pub(super) fn build_multi_nl_stages(
                         NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)
                     )
                 });
+                // Pair diode stages with adjacent op-amps via VcvsEdge discovery.
                 if has_diode {
                     let all_junction_nodes: Vec<super::graph::NodeId> = plan
                         .nl_element_indices
                         .iter()
-                        .flat_map(|&idx| {
-                            classified.nonlinear_elements[idx]
+                        .flat_map(|&idx2| {
+                            classified.nonlinear_elements[idx2]
                                 .junction_nodes
                                 .iter()
                                 .copied()
                         })
                         .collect();
-                    if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
-                        // Direct: opamp neg/out matches any diode junction node
-                        all_junction_nodes.iter().any(|&jn| jn == dp.neg_node || jn == dp.out_node)
-                            // 1-hop: passive edge connects opamp neg/out to diode junction
-                            || all_junction_nodes.iter().any(|&jn| {
-                                graph.edges.iter().any(|e| {
-                                    let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
-                                        || graph.components[e.comp_idx].kind.pot_taper().is_some();
-                                    is_passive
-                                        && ((e.node_a == dp.neg_node && e.node_b == jn)
-                                            || (e.node_b == dp.neg_node && e.node_a == jn)
-                                            || (e.node_a == dp.out_node && e.node_b == jn)
-                                            || (e.node_b == dp.out_node && e.node_a == jn))
-                                })
-                            })
-                    }) {
-                        stage.feedback_opamp = Some(dp.opamp_root.clone());
-                        if dp.feedback_pot_id.is_some() {
-                            stage.feedback_pot_id = dp.feedback_pot_id.clone();
-                        }
+                    if let Some((root, pot_id)) = find_adjacent_opamp_for_diode(
+                        &all_junction_nodes, graph, &plan.passive_edge_indices,
+                        sample_rate, supply_voltage,
+                    ) {
+                        stage.feedback_opamp = Some(root);
+                        stage.feedback_pot_id = pot_id;
                     }
                 }
 
