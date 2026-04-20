@@ -97,6 +97,9 @@ pub enum EdgeKind {
     Nonlinear,
     /// Voltage-controlled current source: OTA in linear mode (future).
     Vccs,
+    /// Voltage-controlled voltage source: op-amp nullor (neg→out edge,
+    /// pos resolved via stamp_mna_multi). Forces R-node in SPQR.
+    Vcvs,
     /// Handled outside WDF/MNA: BBD, delay line.
     Behavioral,
 }
@@ -721,11 +724,15 @@ mod tests {
     }
 
     #[test]
-    fn edges_active_ic_opamp_empty() {
+    fn edges_active_ic_opamp_vcvs() {
         let o = OpAmp {
             op_type: crate::dsl::OpAmpType::Tl072,
         };
-        assert!(o.edges().is_empty());
+        let edges = o.edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, EdgeKind::Vcvs);
+        assert_eq!(edges[0].pin_a, "neg");
+        assert_eq!(edges[0].pin_b, "out");
     }
 
     #[test]

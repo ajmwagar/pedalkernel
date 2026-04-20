@@ -590,18 +590,29 @@ impl CircuitGraph {
                     pin_neg,
                     pin_out,
                 } => {
-                    // Record nullor pins for MNA fallback path.
                     let key_pos = format!("{}.{}", comp.id, pin_pos);
                     let key_neg = format!("{}.{}", comp.id, pin_neg);
                     let key_out = format!("{}.{}", comp.id, pin_out);
                     let id_pos = get_id(&key_pos, &mut uf);
                     let id_neg = get_id(&key_neg, &mut uf);
                     let id_out = get_id(&key_out, &mut uf);
+
+                    // Create a proper graph edge (neg→out) for SPQR decomposition.
+                    // The Component's stamp_mna_multi() resolves all 3 pins.
+                    let node_neg = uf.find(id_neg);
+                    let node_out = uf.find(id_out);
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a: node_neg,
+                        node_b: node_out,
+                    });
+
+                    // Record nullor pins for backward compat with existing pipeline.
                     nullor_pin_records.push(NullorPinRecord {
                         comp_idx: idx,
                         pos_node: uf.find(id_pos),
-                        neg_node: uf.find(id_neg),
-                        out_node: uf.find(id_out),
+                        neg_node: node_neg,
+                        out_node: node_out,
                     });
                     num_active += 1;
                 }

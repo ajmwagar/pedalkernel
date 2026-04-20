@@ -11,7 +11,7 @@
 //! - R nodes become MNA stages (O(N²) per sample)
 //! - Tree traversal order = signal routing (no sort needed)
 
-use super::graph::{CircuitGraph, NodeId};
+use super::graph::{CircuitGraph, NodeId, NullorPinRecord};
 
 /// A node in the SPQR decomposition tree.
 #[derive(Debug, Clone)]

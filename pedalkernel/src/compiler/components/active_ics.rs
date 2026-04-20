@@ -148,7 +148,14 @@ impl Component for OpAmp {
                 port_group: None,
             }]
         } else {
-            vec![]
+            // VCVS edge: neg→out carries the nullor constraint.
+            // pos is resolved via stamp_mna_multi's pin_to_mna("pos").
+            vec![ComponentEdge {
+                pin_a: "neg",
+                pin_b: "out",
+                kind: EdgeKind::Vcvs,
+                port_group: None,
+            }]
         }
     }
 
