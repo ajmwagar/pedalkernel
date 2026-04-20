@@ -3,6 +3,7 @@
 use super::graph::CircuitGraph;
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::spqr_build::*;
+use crate::PedalProcessor;
 
 fn make_graph_all_edges(
     pedal_src: &str,
@@ -563,4 +564,40 @@ fn compile_via_spqr_state_space_active_filter() {
     }
     let output = compiled.process(0.1);
     assert!(output.abs() > 0.001, "StateSpace should produce output, got {output:.6}");
+}
+
+#[test]
+fn compile_via_spqr_single_bjt_stage() {
+    // Simple common-emitter BJT amp: should compile via General MNA
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                C_in: cap(1u)
+                R_b: resistor(100k)
+                Q1: npn(2n3904)
+                R_c: resistor(10k)
+                R_e: resistor(1k)
+                C_out: cap(10u)
+            }
+            nets {
+                in -> C_in.a
+                C_in.b -> R_b.a, Q1.base
+                R_b.b -> vcc
+                Q1.collector -> R_c.a
+                R_c.b -> vcc
+                Q1.emitter -> R_e.a
+                R_e.b -> gnd
+                Q1.collector -> C_out.a
+                C_out.b -> out
+            }
+            controls {}
+        }"#).expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0)
+        .expect("Should compile BJT stage");
+
+    // Should produce amplified output
+    for _ in 0..100 { compiled.process(0.01); }
+    let output = compiled.process(0.01);
+    assert!(output.abs() > 0.0001, "BJT should produce output: {output:.6}");
 }

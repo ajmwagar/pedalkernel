@@ -12,16 +12,17 @@ use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
 use super::rigid::{build_rigid, build_rigid_from_group};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
-use super::stage::{IirStage, RootKind, StateSpaceStage, WdfStage};
+use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::WdfVoltageSource;
 use crate::dsl::PedalDef;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 
-/// A stage built from the SPQR pipeline. Either WDF, IIR, or StateSpace.
+/// A stage built from the SPQR pipeline. Either WDF, IIR, StateSpace, or MultiNl.
 pub(super) enum BuiltStage {
     Wdf(WdfStage),
     Iir(IirStage),
     StateSpace(StateSpaceStage),
+    MultiNl(MultiNlStage),
 }
 
 impl BuiltStage {
@@ -49,6 +50,15 @@ impl BuiltStage {
         match self {
             BuiltStage::StateSpace(s) => s,
             _ => panic!("Expected StateSpaceStage"),
+        }
+    }
+
+    /// Extract as MultiNlStage, panicking if it's a different type. For tests.
+    #[cfg(test)]
+    pub(super) fn into_multi_nl(self) -> MultiNlStage {
+        match self {
+            BuiltStage::MultiNl(m) => m,
+            _ => panic!("Expected MultiNlStage"),
         }
     }
 }
@@ -101,6 +111,7 @@ pub fn compile_via_spqr_with_options(
     let mut wdf_stages: Vec<WdfStage> = Vec::new();
     let mut iir_stages: Vec<IirStage> = Vec::new();
     let mut state_space_stages: Vec<StateSpaceStage> = Vec::new();
+    let mut multi_nl_stages: Vec<MultiNlStage> = Vec::new();
     let mut stage_order: Vec<StageRef> = Vec::new();
     let mut stage_counter = 0usize;
 
@@ -135,6 +146,11 @@ pub fn compile_via_spqr_with_options(
                     stage_order.push(StageRef::StateSpace(state_space_stages.len()));
                     state_space_stages.push(ss);
                 }
+                BuiltStage::MultiNl(mut mnl) => {
+                    mnl.signal_flow_distance = stage_counter;
+                    stage_order.push(StageRef::MultiNl(multi_nl_stages.len()));
+                    multi_nl_stages.push(mnl);
+                }
             }
             stage_counter += 1;
         } else {
@@ -166,6 +182,11 @@ pub fn compile_via_spqr_with_options(
                         stage_order.push(StageRef::StateSpace(state_space_stages.len()));
                         state_space_stages.push(ss);
                     }
+                    BuiltStage::MultiNl(mut mnl) => {
+                        mnl.signal_flow_distance = stage_counter;
+                        stage_order.push(StageRef::MultiNl(multi_nl_stages.len()));
+                        multi_nl_stages.push(mnl);
+                    }
                 }
                 stage_counter += 1;
             }
@@ -177,7 +198,7 @@ pub fn compile_via_spqr_with_options(
     let mut compiled = CompiledPedal {
         stages: wdf_stages,
         push_pull_stages: Vec::new(),
-        multi_nl_stages: Vec::new(),
+        multi_nl_stages,
         iir_stages,
         state_space_stages,
         pre_gain: 1.0,

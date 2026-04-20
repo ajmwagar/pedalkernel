@@ -19,6 +19,7 @@ pub mod components;
 mod dyn_node;
 mod graph;
 mod signal_flow;
+mod spqr_control;
 mod helpers;
 mod opamp_analysis;
 mod plan;
@@ -51,3 +52,5 @@ mod spqr_tests;
 mod spqr_build_tests;
 #[cfg(test)]
 mod rigid_tests;
+#[cfg(test)]
+mod bind_tests;

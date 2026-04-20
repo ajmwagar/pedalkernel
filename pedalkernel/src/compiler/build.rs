@@ -3067,7 +3067,7 @@ fn has_mixed_device_types(plan: &MultiNlPlan, classified: &ClassifiedCircuit) ->
 }
 
 /// Create an NlDeviceKind from a NonlinearKind classification.
-fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
+pub(super) fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
     match kind {
         NonlinearKind::Triode {
             model_name,

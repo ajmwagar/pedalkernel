@@ -20,7 +20,7 @@ mod state_space;
 // Re-exports
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(super) use self::general::build_opamp_nl_feedback;
+pub(super) use self::general::{build_general_mna, build_opamp_nl_feedback};
 pub(super) use self::opamp_root::{
     extract_opamp_config, make_opamp_root, build_opamp_root, OpAmpConfig,
 };
@@ -267,6 +267,12 @@ pub(super) fn build_rigid_from_group(
                 if stats.vcvs_count == 1 && stats.nl_count > 0 {
                     build_opamp_nl_feedback(g, &stats, graph, sample_rate)
                         .map(BuiltStage::Wdf)
+                } else if stats.nl_count > 0 {
+                    // NL case (with or without VCVS): BJTs, coupled diodes, etc.
+                    // For multi-VCVS + NL (blues), the op-amps are stamped as
+                    // nullors in the MNA and become part of the scattering matrix.
+                    build_general_mna(g, graph, sample_rate)
+                        .map(BuiltStage::MultiNl)
                 } else {
                     Err(format!(
                         "General MNA not yet implemented (vcvs={}, nl={}, linear={}, reactive={})",
