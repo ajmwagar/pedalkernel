@@ -53,7 +53,8 @@ fn spqr_diode_clipper_produces_audio() {
         &graph,
         48000.0,
     )
-    .expect("Should build NlWdf stage");
+    .expect("Should build NlWdf stage")
+    .into_wdf();
 
     // DC test: 5V input should clip to ~0.6V (silicon diode forward voltage)
     let dc_out = stage.process(5.0);
@@ -114,7 +115,8 @@ fn spqr_passive_rc_produces_audio() {
         &graph,
         48000.0,
     )
-    .expect("Should build PassiveWdf stage");
+    .expect("Should build PassiveWdf stage")
+    .into_wdf();
 
     // Process step input — capacitor should charge (lowpass)
     let mut output = 0.0;
@@ -160,7 +162,8 @@ fn spqr_inverting_opamp_gain() {
         &graph,
         48000.0,
     )
-    .expect("Should build OpAmpRoot stage");
+    .expect("Should build OpAmpRoot stage")
+    .into_wdf();
 
     // Small signal: 0.1V input → should get ~1.0V output (gain=10, inverted)
     // Let the stage settle for a few samples
@@ -338,7 +341,8 @@ fn spqr_noninverting_opamp_gain() {
         &graph,
         48000.0,
     )
-    .expect("Should build OpAmpRoot stage");
+    .expect("Should build OpAmpRoot stage")
+    .into_wdf();
 
     for _ in 0..10 {
         stage.process(0.1);

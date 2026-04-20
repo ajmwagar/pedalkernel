@@ -7,16 +7,41 @@
 //! - `spqr_build.rs`: stage construction + full pipeline entry point
 
 use super::build::create_root;
-use super::compiled::{CompiledPedal, StageRef};
+use super::compiled::{CompiledPedal, RailSaturation, StageRef};
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
 use super::rigid::build_rigid;
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
-use super::compiled::RailSaturation;
-use super::stage::{RootKind, WdfStage};
+use super::stage::{IirStage, RootKind, WdfStage};
 use super::wdf_leaf::WdfVoltageSource;
 use crate::dsl::PedalDef;
 use crate::oversampling::{Oversampler, OversamplingFactor};
+
+/// A stage built from the SPQR pipeline. Either WDF or IIR.
+pub(super) enum BuiltStage {
+    Wdf(WdfStage),
+    Iir(IirStage),
+}
+
+impl BuiltStage {
+    /// Extract as WdfStage, panicking if it's a different type. For tests.
+    #[cfg(test)]
+    pub(super) fn into_wdf(self) -> WdfStage {
+        match self {
+            BuiltStage::Wdf(w) => w,
+            BuiltStage::Iir(_) => panic!("Expected WdfStage, got IirStage"),
+        }
+    }
+
+    /// Extract as IirStage, panicking if it's a different type. For tests.
+    #[cfg(test)]
+    pub(super) fn into_iir(self) -> IirStage {
+        match self {
+            BuiltStage::Iir(i) => i,
+            BuiltStage::Wdf(_) => panic!("Expected IirStage, got WdfStage"),
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Full pipeline entry point
@@ -51,17 +76,25 @@ pub fn compile_via_spqr(
     let spqr_stages = spqr_to_stages(&spqr_tree, &graph, sample_rate);
 
     let mut wdf_stages: Vec<WdfStage> = Vec::new();
-    for (i, stage) in spqr_stages.into_iter().enumerate() {
-        let mut wdf = build_spqr_stage(stage, &graph, sample_rate)
-            .map_err(|e| format!("Stage {i}: {e}"))?;
-        wdf.signal_flow_distance = i;
-        wdf_stages.push(wdf);
-    }
+    let mut iir_stages: Vec<IirStage> = Vec::new();
+    let mut stage_order: Vec<StageRef> = Vec::new();
 
-    // Build stage ordering (all WDF for now, in SPQR traversal order)
-    let stage_order: Vec<StageRef> = (0..wdf_stages.len())
-        .map(StageRef::Wdf)
-        .collect();
+    for (i, stage) in spqr_stages.into_iter().enumerate() {
+        let built = build_spqr_stage(stage, &graph, sample_rate)
+            .map_err(|e| format!("Stage {i}: {e}"))?;
+        match built {
+            BuiltStage::Wdf(mut wdf) => {
+                wdf.signal_flow_distance = i;
+                stage_order.push(StageRef::Wdf(wdf_stages.len()));
+                wdf_stages.push(wdf);
+            }
+            BuiltStage::Iir(mut iir) => {
+                iir.signal_flow_distance = i;
+                stage_order.push(StageRef::Iir(iir_stages.len()));
+                iir_stages.push(iir);
+            }
+        }
+    }
 
     let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
 
@@ -69,6 +102,7 @@ pub fn compile_via_spqr(
         stages: wdf_stages,
         push_pull_stages: Vec::new(),
         multi_nl_stages: Vec::new(),
+        iir_stages,
         pre_gain: 1.0,
         output_gain: 1.0,
         rail_saturation: RailSaturation::None,
@@ -142,12 +176,12 @@ pub(super) fn build_spqr_stage(
     stage: SpqrStage,
     graph: &CircuitGraph,
     _sample_rate: f64,
-) -> Result<WdfStage, String> {
+) -> Result<BuiltStage, String> {
     match stage {
         SpqrStage::PassiveWdf { tree, .. } => {
             let tree = with_voltage_source(tree);
             let oversampler = Oversampler::new(OversamplingFactor::X1);
-            Ok(WdfStage::new(tree, RootKind::Passthrough, oversampler))
+            Ok(BuiltStage::Wdf(WdfStage::new(tree, RootKind::Passthrough, oversampler)))
         }
         SpqrStage::NlWdf { tree, nl_edge_idx, .. } => {
             let e = &graph.edges[nl_edge_idx];
@@ -170,7 +204,7 @@ pub(super) fn build_spqr_stage(
             let oversampler = Oversampler::new(OversamplingFactor::X1);
             let mut wdf_stage = WdfStage::new(tree, root, oversampler);
             wdf_stage.base_diode_model = base_diode_model;
-            Ok(wdf_stage)
+            Ok(BuiltStage::Wdf(wdf_stage))
         }
         SpqrStage::Rigid {
             edge_indices,

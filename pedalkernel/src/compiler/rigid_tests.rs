@@ -105,7 +105,7 @@ fn stats_noninverting_opamp_is_opamproot() {
 }
 
 #[test]
-fn stats_opamp_with_feedback_cap_is_statesp() {
+fn stats_opamp_with_feedback_cap_is_iir() {
     let (graph, edges) = make_graph_all_edges(r#"
         pedal "test" { supply 9V
             components {
@@ -129,7 +129,8 @@ fn stats_opamp_with_feedback_cap_is_statesp() {
     let stats = StageStats::from_edges(&edges, &graph);
     assert_eq!(stats.vcvs_count, 1);
     assert_eq!(stats.reactive_count, 1);
-    assert_eq!(classify_rigid(&stats, &graph), RigidOptimization::StateSpace);
+    // VCVS + reactive is linear → IIR (VCVS is a linear constraint)
+    assert_eq!(classify_rigid(&stats, &graph), RigidOptimization::Iir);
 }
 
 #[test]

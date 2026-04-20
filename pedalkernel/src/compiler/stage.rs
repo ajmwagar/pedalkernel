@@ -2927,6 +2927,34 @@ impl IirData {
     }
 }
 
+/// Standalone IIR biquad stage compiled from a linear rigid MNA.
+///
+/// Clean, minimal: just coefficients + state + process(). O(1)/sample.
+/// No WDF tree, no scattering matrix, no NR solver.
+pub(super) struct IirStage {
+    /// The biquad filter data (coefficients + history).
+    pub(super) iir: IirData,
+    /// Passive attenuation compensation factor.
+    pub(super) compensation: f64,
+    /// BFS distance from input (for topological ordering).
+    pub(super) signal_flow_distance: usize,
+}
+
+impl IirStage {
+    pub(super) fn new(iir: IirData) -> Self {
+        Self {
+            iir,
+            compensation: 1.0,
+            signal_flow_distance: 0,
+        }
+    }
+
+    #[inline]
+    pub(super) fn process(&mut self, input: f64) -> f64 {
+        flush_denormal(self.iir.process(input * self.compensation))
+    }
+}
+
 pub(super) struct StateSpaceData {
     /// State vector [V_nodes..., I_vs...] (n_states elements).
     pub x: Vec<f64>,

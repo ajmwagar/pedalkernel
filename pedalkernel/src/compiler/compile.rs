@@ -1477,6 +1477,7 @@ fn compile_subcircuit_equipment(
         stages: Vec::new(),
         push_pull_stages: Vec::new(),
         multi_nl_stages: Vec::new(),
+        iir_stages: Vec::new(),
         pre_gain: 1.0,
         output_gain: 1.0,
         rail_saturation: super::compiled::RailSaturation::None,
@@ -2714,6 +2715,7 @@ pub fn compile_pedal_with_options(
             .map(|(sr, _)| match sr {
                 StageRef::Wdf(i) => stages[*i].injection_node_id,
                 StageRef::MultiNl(i) => multi_nl_stages[*i].injection_node_id,
+                StageRef::Iir(_) => usize::MAX, // IIR stages only from SPQR pipeline
             })
             .collect();
 
@@ -2738,6 +2740,7 @@ pub fn compile_pedal_with_options(
                 let out_id = match sr {
                     StageRef::Wdf(i) => stages[*i].output_node_id,
                     StageRef::MultiNl(i) => multi_nl_stages[*i].output_node_id,
+                    StageRef::Iir(_) => usize::MAX,
                 };
                 if out_id == usize::MAX {
                     HashSet::new()
@@ -2781,6 +2784,7 @@ pub fn compile_pedal_with_options(
                 let out_id = match sr {
                     StageRef::Wdf(i) => stages[*i].output_node_id,
                     StageRef::MultiNl(i) => multi_nl_stages[*i].output_node_id,
+                    StageRef::Iir(_) => usize::MAX,
                 };
                 if out_id != usize::MAX {
                     outputs_by_sfd.entry(sfd).or_default().insert(out_id);
@@ -2845,6 +2849,7 @@ pub fn compile_pedal_with_options(
         stages,
         push_pull_stages,
         multi_nl_stages,
+        iir_stages: Vec::new(),
         pre_gain,
         output_gain: 1.0,
         rail_saturation,

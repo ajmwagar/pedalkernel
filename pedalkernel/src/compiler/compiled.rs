@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::stage::{
-    MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind, SidechainProcessor,
-    SubcircuitProcessor, WdfStage,
+    IirStage, MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind,
+    SidechainProcessor, SubcircuitProcessor, WdfStage,
 };
 
 /// Reference to a stage by type and index, for topological ordering.
@@ -19,6 +19,7 @@ use super::stage::{
 pub(super) enum StageRef {
     Wdf(usize),
     MultiNl(usize),
+    Iir(usize),
 }
 
 #[cfg(feature = "debug-trace")]
@@ -479,6 +480,8 @@ pub struct CompiledPedal {
     pub(super) push_pull_stages: Vec<PushPullStage>,
     /// Multi-NL stages using R-type adaptor + multi-port NR solver.
     pub(super) multi_nl_stages: Vec<MultiNlStage>,
+    /// IIR biquad stages compiled from linear rigid MNA. O(1)/sample.
+    pub(super) iir_stages: Vec<IirStage>,
     pub(super) pre_gain: f64,
     /// Auto-calibrated output gain scalar (1.0 = no calibration).
     pub(super) output_gain: f64,
@@ -2121,6 +2124,11 @@ impl PedalProcessor for CompiledPedal {
                             &mnl.scattering.s_nl_adapted, &mnl.v_prev,
                         );
                     }
+                }
+                StageRef::Iir(i) => {
+                    prev_was_clipping = false;
+                    let iir_stage = &mut self.iir_stages[*i];
+                    signal = iir_stage.process(signal);
                 }
             }
         }

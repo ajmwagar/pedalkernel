@@ -747,6 +747,9 @@ fn compile_muff() {
                 eprintln!("[muff-trace] MultiNl({i}) in={signal:.6e} out={out:.6e}");
                 signal = out;
             }
+            super::compiled::StageRef::Iir(i) => {
+                signal = proc2.iir_stages[*i].process(signal);
+            }
         }
     }
     let final_out = signal * proc2.output_gain;
@@ -826,7 +829,7 @@ fn compile_muff() {
                     signal = if out.is_finite() { out } else { 0.0 };
                     stage_bufs[*si + 1].push(signal);
                 }
-                super::compiled::StageRef::MultiNl(_) => {}
+                super::compiled::StageRef::MultiNl(_) | super::compiled::StageRef::Iir(_) => {}
             }
         }
     }
@@ -2747,6 +2750,9 @@ fn big_muff_per_stage_signal_levels() {
                 eprintln!("[bm-diag] MultiNl({i}) in={signal:.6e} out={out:.6e}");
                 signal = out;
             }
+            super::compiled::StageRef::Iir(i) => {
+                signal = proc2.iir_stages[*i].process(signal);
+            }
         }
     }
     let final_out = signal * proc2.output_gain;
@@ -2794,6 +2800,9 @@ fn big_muff_sustain_spectral_sweep() {
                             "  [{pos}] MultiNl({i}) sfd={} inj={} out={} n_nl={}",
                             s.signal_flow_distance, s.injection_node_id, s.output_node_id, s.n_nl
                         );
+                    }
+                    super::compiled::StageRef::Iir(i) => {
+                        eprintln!("  [{pos}] Iir({i})");
                     }
                 }
             }
@@ -6371,6 +6380,9 @@ fn diag_bluesbreaker_inner(pedal: &PedalDef) {
                             mnl.injection_node_id, mnl.output_node_id
                         );
                         signal = out;
+                    }
+                    super::compiled::StageRef::Iir(i) => {
+                        signal = p.iir_stages[*i].process(signal);
                     }
                 }
             }

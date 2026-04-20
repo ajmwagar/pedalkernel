@@ -28,7 +28,8 @@ pub(super) use self::opamp_root::{
 use super::component::EdgeKind;
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
-use super::stage::{RootKind, WdfStage};
+use super::spqr_build::BuiltStage;
+use super::stage::{IirStage, RootKind, WdfStage};
 use crate::oversampling::{Oversampler, OversamplingFactor};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -102,11 +103,12 @@ impl StageStats {
 /// Runtime strategy for a Rigid stage, selected at compile time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RigidOptimization {
-    /// All linear, no VCVS → biquad from MNA eigenvalues. O(1)/sample.
+    /// All linear (with or without VCVS) → biquad from MNA. O(1)/sample.
+    /// Covers passive bridges AND active linear circuits (808 bridged-T).
     Iir,
     /// Single VCVS, resistive feedback → gain + GBW + slew. O(1)/sample.
     OpAmpRoot { inverting: bool },
-    /// VCVS + reactive feedback, no NL → state-space. O(N)/sample.
+    /// Linear but IIR-incompatible (>2nd order) → state-space. O(N)/sample.
     StateSpace,
     /// Has NL elements → MNA scattering + Component::solver_hint(). O(N²)/sample.
     General,
@@ -116,33 +118,29 @@ pub(super) enum RigidOptimization {
 ///
 /// Decision rules (applied in cost order):
 /// 1. NL present → General (needs NR/WO solver, Component decides which)
-/// 2. No VCVS, no NL → Iir (pure passive rigid, e.g. Wheatstone bridge)
-/// 3. Single VCVS, all linear, no reactive → OpAmpRoot
-/// 4. VCVS + reactive → StateSpace
-/// 5. Fallback → General
+/// 2. Single VCVS, no reactive, no NL → OpAmpRoot (pure gain)
+/// 3. All linear (no NL) → Iir (biquad from MNA, covers passive + VCVS)
+/// 4. Fallback → General
 pub(super) fn classify_rigid(stats: &StageStats, graph: &CircuitGraph) -> RigidOptimization {
     // Rule 1: any NL element forces general MNA + solver
     if stats.nl_count > 0 {
         return RigidOptimization::General;
     }
 
-    // Rule 2: pure passive rigid → IIR
-    if stats.is_all_linear() {
-        return RigidOptimization::Iir;
-    }
-
-    // Rule 3: single VCVS, resistive-only feedback → OpAmpRoot
+    // Rule 2: single VCVS, resistive-only feedback → OpAmpRoot
     if stats.is_single_vcvs_linear() && stats.reactive_count == 0 {
         let inverting = is_inverting_topology(stats, graph);
         return RigidOptimization::OpAmpRoot { inverting };
     }
 
-    // Rule 4: VCVS + reactive (caps/inductors in feedback) → StateSpace
-    if stats.vcvs_count >= 1 && stats.reactive_count > 0 && stats.nl_count == 0 {
-        return RigidOptimization::StateSpace;
+    // Rule 3: all linear (no NL) → IIR from MNA
+    // This covers both passive bridges AND active linear circuits
+    // (808 bridged-T with VCVS + caps). VCVS is linear.
+    if stats.nl_count == 0 {
+        return RigidOptimization::Iir;
     }
 
-    // Rule 5: fallback
+    // Rule 4: fallback
     RigidOptimization::General
 }
 
@@ -183,23 +181,23 @@ pub(super) fn build_rigid(
     pendant_trees: Vec<(DynNode, NodeId)>,
     graph: &CircuitGraph,
     sample_rate: f64,
-) -> Result<WdfStage, String> {
+) -> Result<BuiltStage, String> {
     let stats = StageStats::from_edges(&edge_indices, graph);
     let optimization = classify_rigid(&stats, graph);
 
     match optimization {
         RigidOptimization::OpAmpRoot { inverting } => {
             build_opamp_root(&edge_indices, &pendant_trees, inverting, graph, sample_rate)
+                .map(BuiltStage::Wdf)
         }
         RigidOptimization::Iir => {
-            iir::build_iir_stage()
+            iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate)
+                .map(|iir| BuiltStage::Iir(IirStage::new(iir)))
         }
         RigidOptimization::StateSpace => {
-            state_space::build_state_space_stage()
+            Err("StateSpace rigid stages not yet implemented".to_string())
         }
         RigidOptimization::General => {
-            // Common case: VCVS + NL (TS/RAT/Klon clipping stages).
-            // OpAmpRoot handles gain+GBW+slew, NL root handles clipping.
             if stats.vcvs_count == 1 && stats.nl_count > 0 {
                 build_opamp_nl_feedback(
                     &edge_indices,
@@ -208,6 +206,7 @@ pub(super) fn build_rigid(
                     graph,
                     sample_rate,
                 )
+                .map(BuiltStage::Wdf)
             } else {
                 Err(format!(
                     "General MNA not yet implemented (vcvs={}, nl={}, linear={}, reactive={})",
