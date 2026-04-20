@@ -126,12 +126,15 @@ pub(in crate::compiler) fn build_iir_stage(
                     let node = graph.node_names.get(&key)?;
                     node_to_mna(*node)
                 };
+                // cap_stamps: None — don't collect op-amp internal caps (GBW modeling).
+                // The circuit's physical caps (C1, C2) are already collected from
+                // Reactive edges. The op-amp output cap would add a spurious state.
                 let mut ctx = StampContext {
                     pin_to_mna: &pin_fn,
                     vsrc_base: vsrc_base,
                     internal_node_base: 0,
                     sample_rate,
-                    cap_stamps: Some(&mut cap_stamps),
+                    cap_stamps: None,
                 };
                 comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
             }
@@ -148,12 +151,8 @@ pub(in crate::compiler) fn build_iir_stage(
         }
     }
 
-    // Input voltage source — find injection node (first pendant or first edge node)
-    let injection_node = pendant_trees
-        .first()
-        .map(|(_, n)| *n)
-        .unwrap_or_else(|| graph.edges[edge_indices[0]].node_a);
-    let injection_mna = node_to_mna(injection_node);
+    // Input voltage source — inject at graph.in_node (signal entry point)
+    let injection_mna = node_to_mna(graph.in_node);
     mna.stamp_voltage_source(injection_mna, None, vs_idx);
 
     // Output node — typically the VCVS out node or last edge node
@@ -164,9 +163,105 @@ pub(in crate::compiler) fn build_iir_stage(
     let out_mna = node_to_mna(output_node);
 
     // ── Step 4: Build IIR biquad ────────────────────────────────────
-    let (b_coeffs, a_coeffs) = mna
-        .build_iir(&cap_stamps, vs_idx, out_mna, None, sample_rate, None)
-        .ok_or("IIR: build_iir failed — circuit may not reduce to biquad")?;
+    // Try direct IIR first (works for oscillators with feedback_r)
+    if let Some((b_coeffs, a_coeffs)) =
+        mna.build_iir(&cap_stamps, vs_idx, out_mna, None, sample_rate, None)
+    {
+        return Ok(IirData::new(b_coeffs, a_coeffs, sample_rate));
+    }
 
-    Ok(IirData::new(b_coeffs, a_coeffs, sample_rate))
+    // Fallback: reduce to state-space, then extract biquad if 2nd order
+    let (a_d, b_d, c_out, n_states, d_feedthrough) =
+        mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, sample_rate);
+
+    if n_states == 2 {
+        // 2×2 state-space → biquad directly
+        // A = [[a11,a12],[a21,a22]], characteristic poly: z² - tr(A)z + det(A)
+        let a11 = a_d[0];
+        let a12 = a_d[1];
+        let a21 = a_d[2];
+        let a22 = a_d[3];
+        let tr_a = a11 + a22;
+        let det_a = a11 * a22 - a12 * a21;
+
+        // Denominator: 1, -tr(A), det(A)
+        let da1 = -tr_a;
+        let da2 = det_a;
+
+        // Numerator from transfer function:
+        // H(z) = c·(zI-A)⁻¹·b + d
+        // For z⁻¹ form: b0 = d + c·b, b1 = c·A·b - d·tr(A), b2 = d·det(A) - c·adj(A)·b·??
+        // Simpler: evaluate H(z) at z=0,1,-1 and solve for b0,b1,b2
+        // H(z) = (b0 + b1/z + b2/z²) / (1 + a1/z + a2/z²)
+        //       = (b0·z² + b1·z + b2) / (z² + a1·z + a2)
+        //
+        // Direct: b0 = d_feedthrough
+        //         and state-space → transfer function via matrix ops
+        let cb0 = c_out[0] * b_d[0] + c_out[1] * b_d[1]; // c·b
+        // c·A·b
+        let ab0 = a11 * b_d[0] + a12 * b_d[1];
+        let ab1 = a21 * b_d[0] + a22 * b_d[1];
+        let cab = c_out[0] * ab0 + c_out[1] * ab1;
+
+        let b0 = d_feedthrough + cb0;
+        let b1 = cab + d_feedthrough * da1;
+        let b2 = d_feedthrough * da2
+            + c_out[0] * (a11 * ab0 + a12 * ab1)
+            + c_out[1] * (a21 * ab0 + a22 * ab1)
+            - cb0 * tr_a;
+
+        // Hmm, this is getting complicated. Let me use the simpler approach:
+        // Just wrap in StateSpaceData and let that process. But the user wants IIR...
+        //
+        // Actually, the simplest correct approach: use the state-space process
+        // but wrap it in IirData format. The 2×2 state-space IS equivalent
+        // to a biquad. Let me just use evaluation at 3 points.
+
+        // Evaluate H(z) at z=1 (DC), z=-1 (Nyquist), z=e^(jπ/2) (quarter rate)
+        // to get 3 equations for b0, b1, b2.
+        // Actually, for a proper z-transform extraction:
+        //
+        // From y = c·x + d·u with x = A·x_prev + b·u:
+        // Y(z) = c·(zI-A)⁻¹·b·U(z) + d·U(z)
+        // H(z) = c·(zI-A)⁻¹·b + d
+        //
+        // (zI-A)⁻¹ = adj(zI-A) / det(zI-A)
+        // det(zI-A) = z² - tr(A)·z + det(A)
+        // adj(zI-A) = [[z-a22, a12], [a21, z-a11]]
+        //
+        // c·adj(zI-A)·b = c0·((z-a22)·b0 + a12·b1) + c1·(a21·b0 + (z-a11)·b1)
+        //               = (c0·b0 + c1·b1)·z + (c1·a21·b0 - c0·a22·b0 + c0·a12·b1 - c1·a11·b1)
+        //
+        // So numerator = d·(z² + a1·z + a2) + (c0·b0+c1·b1)·z + (c1·a21·b0 - c0·a22·b0 + c0·a12·b1 - c1·a11·b1)
+
+        let num_z1 = c_out[0] * b_d[0] + c_out[1] * b_d[1]; // coefficient of z
+        let num_z0 = c_out[0] * (-a22 * b_d[0] + a12 * b_d[1])
+            + c_out[1] * (a21 * b_d[0] - a11 * b_d[1]); // constant term
+
+        // H(z) = [d·z² + (d·a1 + num_z1)·z + (d·a2 + num_z0)] / [z² + a1·z + a2]
+        let b0_iir = d_feedthrough;
+        let b1_iir = d_feedthrough * da1 + num_z1;
+        let b2_iir = d_feedthrough * da2 + num_z0;
+
+        #[cfg(test)]
+        eprintln!(
+            "IIR biquad: b=[{b0_iir:.6e}, {b1_iir:.6e}, {b2_iir:.6e}] a=[1, {da1:.6e}, {da2:.6e}] n_states={n_states} d={d_feedthrough:.6e}"
+        );
+        #[cfg(test)]
+        eprintln!(
+            "  A=[[{a11:.6e},{a12:.6e}],[{a21:.6e},{a22:.6e}]] b=[{:.6e},{:.6e}] c=[{:.6e},{:.6e}]",
+            b_d[0], b_d[1], c_out[0], c_out[1]
+        );
+
+        return Ok(IirData::new(
+            vec![b0_iir, b1_iir, b2_iir],
+            vec![1.0, da1, da2],
+            sample_rate,
+        ));
+    }
+
+    Err(format!(
+        "IIR: circuit has {} states (need ≤2 for biquad). Consider StateSpace.",
+        n_states
+    ))
 }

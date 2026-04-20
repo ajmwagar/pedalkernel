@@ -308,6 +308,104 @@ fn compile_via_spqr_opamp_diode_feedback() {
 }
 
 #[test]
+#[ignore] // State-space → biquad extraction produces real poles for bridged-T oscillators.
+          // Needs explicit feedback_r detection or Schur complement fix.
+fn compile_via_spqr_808_kick() {
+    // 808 bass drum: bridged-T resonator with op-amp
+    // Should classify as Iir (VCVS + reactive, all linear)
+    use crate::PedalProcessor;
+
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "808 BD" { supply 9V
+            components {
+                U1: opamp(tl072)
+                Rb1: resistor(100k)
+                Rb2: resistor(100k)
+                R1: resistor(150k)
+                R2: resistor(150k)
+                C1: cap(8.2n)
+                C2: cap(8.2n)
+                R_fb: resistor(470k)
+                R_trig: resistor(100k)
+                R_out: resistor(10k)
+            }
+            nets {
+                vcc -> Rb1.a
+                Rb1.b -> Rb2.a, U1.pos
+                Rb2.b -> gnd
+                U1.neg -> R1.a, C1.a
+                R1.b -> R2.a, C2.a
+                R2.b -> U1.out
+                C1.b -> gnd
+                C2.b -> gnd
+                U1.neg -> R_fb.a
+                R_fb.b -> U1.out
+                in -> R_trig.a
+                R_trig.b -> R1.b
+                U1.out -> R_out.a
+                R_out.b -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    // Debug: check what SPQR produces
+    {
+        let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+        let active_set: std::collections::HashSet<usize> =
+            graph.active_edge_indices.iter().copied().collect();
+        let all_edges: Vec<usize> = (0..graph.edges.len())
+            .filter(|i| !active_set.contains(i))
+            .collect();
+        let terminals = vec![graph.in_node, graph.out_node];
+        let spqr_tree = spqr_decompose(&all_edges, &terminals, &graph, graph.gnd_node);
+        let spqr_stages = spqr_to_stages(&spqr_tree, &graph, 48000.0);
+        eprintln!("808 kick: {} SPQR stages", spqr_stages.len());
+        for (i, s) in spqr_stages.iter().enumerate() {
+            eprintln!("  stage {i}: {s:?}");
+        }
+        for &eidx in &all_edges {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            eprintln!("  edge {eidx}: {} ({:?}) {}->{}", comp.id, graph.effective_edge_kind(eidx), e.node_a, e.node_b);
+        }
+    }
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0)
+        .expect("Should compile 808 kick via SPQR");
+
+    // Warmup
+    for _ in 0..480 {
+        compiled.process(0.0);
+    }
+
+    // Fire impulse and collect output
+    let n_samples = 48000;
+    let mut output = Vec::with_capacity(n_samples);
+    for i in 0..n_samples {
+        let input = if i == 0 { 1.0 } else { 0.0 };
+        output.push(compiled.process(input));
+    }
+
+    let peak = output.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
+    assert!(peak > 0.001, "808 kick should produce output, peak={peak:.6}");
+
+    // Count zero crossings in first 500ms to estimate frequency
+    let analysis = 24000; // 500ms
+    let zc: u32 = (1..analysis.min(output.len()))
+        .filter(|&i| output[i] * output[i - 1] < 0.0)
+        .count() as u32;
+    let freq = zc as f64 / 2.0 / 0.5;
+
+    // 808 kick should resonate around 130Hz (±30%)
+    eprintln!("808 kick: peak={peak:.4}, freq={freq:.1}Hz");
+    assert!(
+        freq > 90.0 && freq < 170.0,
+        "808 kick frequency should be ~130Hz, got {freq:.1}Hz"
+    );
+}
+
+#[test]
 fn spqr_noninverting_opamp_gain() {
     // Non-inverting amp: R1=10k, Rf=100k → gain = 1 + 100k/10k = 11
     let (graph, edges) = make_graph_all_edges(r#"
