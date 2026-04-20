@@ -1,0 +1,985 @@
+//! Directed signal flow graph analysis for circuit stage partitioning.
+//!
+//! Replaces the undirected BFS approach in `feedback.rs` with directed
+//! inter-element dependency analysis. This correctly handles multi-opamp
+//! cascades (e.g., Klon Centaur) where undirected BFS incorrectly groups
+//! all op-amps together.
+//!
+//! **Algorithm:**
+//! 1. Each active element (op-amp, BJT, JFET, diode, tube) is a NODE in a
+//!    directed flow graph.
+//! 2. A directed edge A->B exists if A's output_node can reach B's input_node
+//!    through passive signal edges (excluding rails).
+//! 3. Strongly connected components (SCCs) define co-solved groups.
+//! 4. Elements without mutual dependency are separate stages.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use super::component::{EdgeKind, SignalTerminals};
+use super::graph::{CircuitGraph, NodeId};
+
+/// A group of mutually-dependent active elements (same stage).
+#[derive(Debug, Clone)]
+pub(in crate::compiler) struct FlowGroup {
+    /// Active element edge indices in this group.
+    pub active_edges: Vec<usize>,
+    /// Passive edges classified as feedback (on cycle paths).
+    pub feedback_edges: Vec<usize>,
+    /// Passive edges touching input terminals (pendants / Ri).
+    pub pendant_edges: Vec<usize>,
+    /// Passive ground shunts touching group signal nodes.
+    pub ground_shunt_edges: Vec<usize>,
+}
+
+impl FlowGroup {
+    /// All edge indices in this group (all categories combined).
+    pub fn all_edges(&self) -> Vec<usize> {
+        let mut all = Vec::with_capacity(
+            self.active_edges.len()
+                + self.feedback_edges.len()
+                + self.pendant_edges.len()
+                + self.ground_shunt_edges.len(),
+        );
+        all.extend(&self.active_edges);
+        all.extend(&self.feedback_edges);
+        all.extend(&self.pendant_edges);
+        all.extend(&self.ground_shunt_edges);
+        all
+    }
+
+    /// Whether this group has feedback (cycle through active element).
+    pub fn has_feedback(&self) -> bool {
+        !self.feedback_edges.is_empty()
+    }
+}
+
+/// An active element with identified input/output terminals.
+#[derive(Debug, Clone)]
+struct ActiveElement {
+    /// Index into graph.edges for this element's primary edge.
+    edge_idx: usize,
+    /// Input terminal node (where signal controls the element).
+    input_node: NodeId,
+    /// Output terminal node (where amplified signal leaves).
+    output_node: NodeId,
+    /// All output-side nodes (for BJT: both collector and emitter carry signal).
+    /// Used for flow graph BFS starting points.
+    output_nodes: Vec<NodeId>,
+}
+
+/// Set of nodes that are rails (not signal-carrying shared nodes).
+fn rail_nodes(graph: &CircuitGraph) -> HashSet<NodeId> {
+    let mut rails = HashSet::new();
+    rails.insert(graph.gnd_node);
+    rails.insert(graph.vcc_node);
+    rails.extend(&graph.supply_nodes);
+    rails.extend(&graph.ac_ground_nodes);
+    rails
+}
+
+/// Resolve a component's pin name to a graph node ID.
+fn resolve_pin(comp_id: &str, pin: &str, graph: &CircuitGraph) -> Option<NodeId> {
+    let key = format!("{comp_id}.{pin}");
+    graph.node_names.get(&key).copied()
+}
+
+/// Identify active elements and their input/output terminals.
+fn find_active_elements(edge_indices: &[usize], graph: &CircuitGraph) -> Vec<ActiveElement> {
+    let mut elements = Vec::new();
+
+    for &eidx in edge_indices {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+
+        match comp.kind.signal_terminals() {
+            SignalTerminals::Passive => {}
+            SignalTerminals::TwoPort { input, output } => {
+                let in_node = resolve_pin(&comp.id, input, graph).unwrap_or(e.node_a);
+                let out_node = resolve_pin(&comp.id, output, graph).unwrap_or(e.node_b);
+                elements.push(ActiveElement {
+                    edge_idx: eidx,
+                    input_node: in_node,
+                    output_node: out_node,
+                    output_nodes: vec![out_node],
+                });
+            }
+            SignalTerminals::Amplifier { input, output, .. } => {
+                let in_node = resolve_pin(&comp.id, input, graph).unwrap_or(e.node_a);
+                let out_node = resolve_pin(&comp.id, output, graph).unwrap_or(e.node_b);
+                // For amplifiers (BJT, JFET, tube): both edge endpoints carry
+                // output signal (collector AND emitter for BJT, drain AND source
+                // for JFET). Include all non-input, non-rail edge endpoints.
+                let mut output_nodes = vec![out_node];
+                // Add the other edge endpoint if it's different from output and input
+                if e.node_a != out_node && e.node_a != in_node {
+                    output_nodes.push(e.node_a);
+                }
+                if e.node_b != out_node && e.node_b != in_node {
+                    output_nodes.push(e.node_b);
+                }
+                elements.push(ActiveElement {
+                    edge_idx: eidx,
+                    input_node: in_node,
+                    output_node: out_node,
+                    output_nodes,
+                });
+            }
+        }
+    }
+
+    elements
+}
+
+/// Build undirected signal-edge adjacency (excludes rail nodes).
+/// Same as feedback.rs but without virtual amplifier links — directionality
+/// is handled by the flow graph, not the adjacency.
+fn build_passive_adjacency(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    rails: &HashSet<NodeId>,
+    active_edge_set: &HashSet<usize>,
+) -> HashMap<NodeId, Vec<(usize, NodeId)>> {
+    let mut adj: HashMap<NodeId, Vec<(usize, NodeId)>> = HashMap::new();
+    for &eidx in edge_indices {
+        // Skip active element edges — we only traverse passive signal paths
+        if active_edge_set.contains(&eidx) {
+            continue;
+        }
+        let e = &graph.edges[eidx];
+        if rails.contains(&e.node_a) || rails.contains(&e.node_b) {
+            continue;
+        }
+        adj.entry(e.node_a).or_default().push((eidx, e.node_b));
+        adj.entry(e.node_b).or_default().push((eidx, e.node_a));
+    }
+    adj
+}
+
+/// BFS from `start` through passive signal edges. Returns all reachable nodes.
+/// Blocks traversal through other active elements' output nodes (signal sources)
+/// to prevent "backward" traversal through a cascade.
+fn bfs_reachable_nodes(
+    start: NodeId,
+    adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
+    blocked_outputs: &HashSet<NodeId>,
+) -> HashSet<NodeId> {
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    visited.insert(start);
+    queue.push_back(start);
+
+    while let Some(node) = queue.pop_front() {
+        if let Some(neighbors) = adj.get(&node) {
+            for &(_eidx, next) in neighbors {
+                if visited.contains(&next) {
+                    continue;
+                }
+                visited.insert(next);
+                // Don't expand from blocked output nodes (they are signal
+                // sources for other elements). We still mark them visited
+                // so they appear in reachable set, but don't traverse further.
+                if blocked_outputs.contains(&next) {
+                    continue;
+                }
+                queue.push_back(next);
+            }
+        }
+    }
+
+    visited
+}
+
+/// Build the directed flow graph between active elements.
+/// Returns adjacency list: flow_adj[i] = list of j where element i's output
+/// can reach element j's input through passive edges.
+///
+/// Key insight: when checking reachability from element i's output nodes, we
+/// block traversal through OTHER active elements' output nodes. This prevents
+/// "backward" traversal through a cascade (e.g., U2.out -> Rf2 -> U2.neg
+/// -> R_mid -> U1.out -> Rf1 -> U1.neg would incorrectly create U2->U1).
+fn build_flow_graph(
+    elements: &[ActiveElement],
+    adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
+    rails: &HashSet<NodeId>,
+) -> Vec<Vec<usize>> {
+    let n = elements.len();
+    let mut flow_adj = vec![Vec::new(); n];
+
+    for i in 0..n {
+        let elem_i = &elements[i];
+
+        // Block traversal through other elements' output nodes (ALL of them)
+        let blocked_outputs: HashSet<NodeId> = elements
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| j != i)
+            .flat_map(|(_, e)| e.output_nodes.iter().copied())
+            .filter(|node| !rails.contains(node))
+            .collect();
+
+        // BFS from ALL of element i's output nodes through passive edges
+        let mut reachable = HashSet::new();
+        for &out_node in &elem_i.output_nodes {
+            if rails.contains(&out_node) {
+                continue;
+            }
+            let r = bfs_reachable_nodes(out_node, adj, &blocked_outputs);
+            reachable.extend(r);
+        }
+
+        // Check if any other element's input is reachable
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            let elem_j = &elements[j];
+            if rails.contains(&elem_j.input_node) {
+                continue;
+            }
+            if reachable.contains(&elem_j.input_node) {
+                flow_adj[i].push(j);
+            }
+        }
+    }
+
+    flow_adj
+}
+
+/// Find strongly connected components using Tarjan's algorithm.
+/// Returns groups of element indices that form SCCs.
+fn tarjan_scc(flow_adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = flow_adj.len();
+    let mut index_counter: usize = 0;
+    let mut stack: Vec<usize> = Vec::new();
+    let mut on_stack = vec![false; n];
+    let mut index = vec![usize::MAX; n];
+    let mut lowlink = vec![0usize; n];
+    let mut sccs: Vec<Vec<usize>> = Vec::new();
+
+    fn strongconnect(
+        v: usize,
+        flow_adj: &[Vec<usize>],
+        index_counter: &mut usize,
+        stack: &mut Vec<usize>,
+        on_stack: &mut [bool],
+        index: &mut [usize],
+        lowlink: &mut [usize],
+        sccs: &mut Vec<Vec<usize>>,
+    ) {
+        index[v] = *index_counter;
+        lowlink[v] = *index_counter;
+        *index_counter += 1;
+        stack.push(v);
+        on_stack[v] = true;
+
+        for &w in &flow_adj[v] {
+            if index[w] == usize::MAX {
+                strongconnect(w, flow_adj, index_counter, stack, on_stack, index, lowlink, sccs);
+                lowlink[v] = lowlink[v].min(lowlink[w]);
+            } else if on_stack[w] {
+                lowlink[v] = lowlink[v].min(index[w]);
+            }
+        }
+
+        if lowlink[v] == index[v] {
+            let mut scc = Vec::new();
+            loop {
+                let w = stack.pop().unwrap();
+                on_stack[w] = false;
+                scc.push(w);
+                if w == v {
+                    break;
+                }
+            }
+            sccs.push(scc);
+        }
+    }
+
+    for v in 0..n {
+        if index[v] == usize::MAX {
+            strongconnect(
+                v,
+                flow_adj,
+                &mut index_counter,
+                &mut stack,
+                &mut on_stack,
+                &mut index,
+                &mut lowlink,
+                &mut sccs,
+            );
+        }
+    }
+
+    sccs
+}
+
+/// DFS: find all edges on any simple path from `current` to `target`.
+fn dfs_find_paths(
+    current: NodeId,
+    target: NodeId,
+    adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
+    visited: &mut HashSet<NodeId>,
+    path: &mut Vec<usize>,
+    result: &mut HashSet<usize>,
+) {
+    if let Some(neighbors) = adj.get(&current) {
+        for &(eidx, next) in neighbors {
+            if next == target {
+                result.insert(eidx);
+                result.extend(path.iter());
+                continue;
+            }
+            if visited.contains(&next) {
+                continue;
+            }
+            visited.insert(next);
+            path.push(eidx);
+            dfs_find_paths(next, target, adj, visited, path, result);
+            path.pop();
+            visited.remove(&next);
+        }
+    }
+}
+
+/// Partition circuit edges into signal flow groups.
+///
+/// Uses directed signal flow analysis (SCC detection) to correctly
+/// separate cascaded stages while grouping mutually-dependent elements.
+pub(in crate::compiler) fn find_flow_groups(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+) -> Vec<FlowGroup> {
+    let rails = rail_nodes(graph);
+    let active_elements = find_active_elements(edge_indices, graph);
+
+    if active_elements.is_empty() {
+        return vec![FlowGroup {
+            active_edges: Vec::new(),
+            feedback_edges: Vec::new(),
+            pendant_edges: edge_indices.to_vec(),
+            ground_shunt_edges: Vec::new(),
+        }];
+    }
+
+    let active_edge_set: HashSet<usize> = active_elements.iter().map(|e| e.edge_idx).collect();
+    let adj = build_passive_adjacency(edge_indices, graph, &rails, &active_edge_set);
+
+    // Build directed flow graph and find SCCs
+    let flow_adj = build_flow_graph(&active_elements, &adj, &rails);
+    let sccs = tarjan_scc(&flow_adj);
+
+    // Build classified FlowGroup for each SCC
+    let mut claimed: HashSet<usize> = HashSet::new();
+    let mut groups: Vec<FlowGroup> = Vec::new();
+
+    for scc in &sccs {
+        let active_edges: Vec<usize> = scc.iter().map(|&i| active_elements[i].edge_idx).collect();
+
+        // Determine if this SCC has self-feedback or mutual feedback
+        // A single element has self-feedback if its output reaches its input
+        // Multiple elements in SCC always have mutual feedback
+        let has_mutual = scc.len() > 1;
+
+        // Check self-feedback for single-element SCCs
+        let has_self_feedback = if scc.len() == 1 {
+            let elem = &active_elements[scc[0]];
+            if rails.contains(&elem.input_node) || rails.contains(&elem.output_node) {
+                false
+            } else {
+                // For self-feedback, block other elements' outputs but not our own
+                let blocked_outputs: HashSet<NodeId> = active_elements
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != scc[0])
+                    .filter_map(|(_, e)| {
+                        if rails.contains(&e.output_node) {
+                            None
+                        } else {
+                            Some(e.output_node)
+                        }
+                    })
+                    .collect();
+                let reachable = bfs_reachable_nodes(elem.output_node, &adj, &blocked_outputs);
+                reachable.contains(&elem.input_node)
+            }
+        } else {
+            false
+        };
+
+        let has_feedback = has_mutual || has_self_feedback;
+
+        if !has_feedback {
+            // Standalone NL element — no passive claiming
+            for &eidx in &active_edges {
+                claimed.insert(eidx);
+            }
+            groups.push(FlowGroup {
+                active_edges,
+                feedback_edges: Vec::new(),
+                pendant_edges: Vec::new(),
+                ground_shunt_edges: Vec::new(),
+            });
+            continue;
+        }
+
+        // DFS: find passive edges on feedback paths (out->in for each element in group)
+        let mut feedback_set: HashSet<usize> = HashSet::new();
+        for &ei in scc {
+            let elem = &active_elements[ei];
+            if rails.contains(&elem.input_node) || rails.contains(&elem.output_node) {
+                continue;
+            }
+            let mut path = Vec::new();
+            let mut visited = HashSet::new();
+            visited.insert(elem.output_node);
+            dfs_find_paths(
+                elem.output_node,
+                elem.input_node,
+                &adj,
+                &mut visited,
+                &mut path,
+                &mut feedback_set,
+            );
+        }
+
+        // For mutual feedback groups, also find paths between elements
+        if has_mutual {
+            for &ei in scc {
+                for &ej in scc {
+                    if ei == ej {
+                        continue;
+                    }
+                    let elem_i = &active_elements[ei];
+                    let elem_j = &active_elements[ej];
+                    if rails.contains(&elem_i.output_node) || rails.contains(&elem_j.input_node) {
+                        continue;
+                    }
+                    let mut path = Vec::new();
+                    let mut visited = HashSet::new();
+                    visited.insert(elem_i.output_node);
+                    dfs_find_paths(
+                        elem_i.output_node,
+                        elem_j.input_node,
+                        &adj,
+                        &mut visited,
+                        &mut path,
+                        &mut feedback_set,
+                    );
+                }
+            }
+        }
+
+        // Remove active element edges from feedback_set
+        for &ae in &active_edges {
+            feedback_set.remove(&ae);
+        }
+        let feedback_edges: Vec<usize> = feedback_set.into_iter().collect();
+
+        // Collect group signal nodes
+        let mut group_nodes: HashSet<NodeId> = HashSet::new();
+        for &eidx in active_edges.iter().chain(feedback_edges.iter()) {
+            let e = &graph.edges[eidx];
+            if !rails.contains(&e.node_a) {
+                group_nodes.insert(e.node_a);
+            }
+            if !rails.contains(&e.node_b) {
+                group_nodes.insert(e.node_b);
+            }
+        }
+
+        // Input terminal nodes for pendant detection
+        let input_terminals: HashSet<NodeId> = scc
+            .iter()
+            .filter_map(|&i| {
+                let node = active_elements[i].input_node;
+                if rails.contains(&node) {
+                    None
+                } else {
+                    Some(node)
+                }
+            })
+            .collect();
+
+        // Classify remaining passive edges: pendant or ground shunt
+        let mut pendant_edges = Vec::new();
+        let mut ground_shunt_edges = Vec::new();
+
+        for &eidx in edge_indices {
+            if claimed.contains(&eidx)
+                || active_edges.contains(&eidx)
+                || feedback_edges.contains(&eidx)
+            {
+                continue;
+            }
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+                continue;
+            }
+            let e = &graph.edges[eidx];
+            let a_rail = rails.contains(&e.node_a);
+            let b_rail = rails.contains(&e.node_b);
+
+            if (a_rail && group_nodes.contains(&e.node_b))
+                || (b_rail && group_nodes.contains(&e.node_a))
+            {
+                ground_shunt_edges.push(eidx);
+            } else if input_terminals.contains(&e.node_a) || input_terminals.contains(&e.node_b) {
+                pendant_edges.push(eidx);
+            }
+        }
+
+        // Mark all claimed
+        for &eidx in active_edges
+            .iter()
+            .chain(&feedback_edges)
+            .chain(&pendant_edges)
+            .chain(&ground_shunt_edges)
+        {
+            claimed.insert(eidx);
+        }
+
+        groups.push(FlowGroup {
+            active_edges,
+            feedback_edges,
+            pendant_edges,
+            ground_shunt_edges,
+        });
+    }
+
+    // Unclaimed edges -> individual standalone groups
+    for &eidx in edge_indices {
+        if !claimed.contains(&eidx) {
+            groups.push(FlowGroup {
+                active_edges: Vec::new(),
+                feedback_edges: Vec::new(),
+                pendant_edges: vec![eidx],
+                ground_shunt_edges: Vec::new(),
+            });
+        }
+    }
+
+    groups
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_graph_all_edges(pedal_src: &str) -> (CircuitGraph, Vec<usize>) {
+        let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse failed");
+        let graph = CircuitGraph::from_pedal(&pedal);
+        let active_set: std::collections::HashSet<usize> =
+            graph.active_edge_indices.iter().copied().collect();
+        let all_edges: Vec<usize> = (0..graph.edges.len())
+            .filter(|i| !active_set.contains(i))
+            .collect();
+        (graph, all_edges)
+    }
+
+    fn group_active_names(group: &FlowGroup, graph: &CircuitGraph) -> Vec<String> {
+        let mut names: Vec<String> = group
+            .active_edges
+            .iter()
+            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn find_group_containing(
+        groups: &[FlowGroup],
+        graph: &CircuitGraph,
+        comp_id: &str,
+    ) -> Option<usize> {
+        groups.iter().position(|g| {
+            g.all_edges().iter().any(|&eidx| {
+                graph.components[graph.edges[eidx].comp_idx].id == comp_id
+            })
+        })
+    }
+
+    // ── Test 1: Two op-amps in cascade, no inter-stage feedback ──────────
+
+    #[test]
+    fn flow_cascade_two_opamps_separate() {
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf1: resistor(100k)
+                    R_mid: resistor(10k)
+                    U2: opamp(tl072)
+                    Rf2: resistor(100k)
+                    R_out: resistor(10k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> Rf1.a
+                    Rf1.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R_mid.a
+                    R_mid.b -> U2.neg
+                    U2.neg -> Rf2.a
+                    Rf2.b -> U2.out
+                    U2.pos -> gnd
+                    U2.out -> R_out.a
+                    R_out.b -> out
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let u2_group = find_group_containing(&groups, &graph, "U2");
+        assert!(u1_group.is_some(), "Should have U1 group");
+        assert!(u2_group.is_some(), "Should have U2 group");
+        assert_ne!(
+            u1_group, u2_group,
+            "Cascaded op-amps without inter-stage feedback should be in SEPARATE groups"
+        );
+    }
+
+    // ── Test 2: Fuzz Face — two BJTs with feedback ───────────────────────
+
+    #[test]
+    fn flow_fuzz_face_coupled() {
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(33k)
+                    R2: resistor(8.2k)
+                    R3: resistor(100k)
+                    R4: resistor(470)
+                    C1: cap(2.2u)
+                    C2: cap(22u)
+                    Q1: npn(2n3904)
+                    Q2: npn(2n3904)
+                }
+                nets {
+                    in -> C1.a
+                    C1.b -> R1.a
+                    R1.b -> Q1.base
+                    Q1.collector -> R2.a, Q2.base
+                    R2.b -> vcc
+                    Q1.emitter -> gnd
+                    Q2.collector -> R3.a
+                    R3.b -> vcc
+                    Q2.emitter -> R4.a, Q1.base
+                    R4.b -> gnd
+                    Q2.collector -> C2.a
+                    C2.b -> out
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        let q1_group = find_group_containing(&groups, &graph, "Q1");
+        let q2_group = find_group_containing(&groups, &graph, "Q2");
+        assert!(q1_group.is_some(), "Should have Q1 group");
+        assert!(q2_group.is_some(), "Should have Q2 group");
+        assert_eq!(
+            q1_group, q2_group,
+            "Fuzz Face Q1 and Q2 should be in SAME group (Q2.emitter -> Q1.base feedback)"
+        );
+    }
+
+    // ── Test 3: RAT — op-amp + diodes to GND separate ───────────────────
+
+    #[test]
+    fn flow_rat_opamp_plus_diodes_to_gnd() {
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(1k)
+                    U1: opamp(lm308)
+                    R_fb: resistor(47k)
+                    D1: diode(silicon)
+                    D2: diode(silicon)
+                    R_out: resistor(10k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> R_fb.a
+                    R_fb.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> D1.a
+                    D1.b -> gnd
+                    U1.out -> D2.b
+                    D2.a -> gnd
+                    U1.out -> R_out.a
+                    R_out.b -> out
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let d1_group = find_group_containing(&groups, &graph, "D1");
+        let d2_group = find_group_containing(&groups, &graph, "D2");
+
+        assert!(u1_group.is_some());
+        assert!(d1_group.is_some());
+        assert!(d2_group.is_some());
+
+        // Op-amp is separate from diodes (diodes go to GND = rail)
+        assert_ne!(
+            u1_group, d1_group,
+            "Op-amp and GND-shunt diode D1 should be separate groups"
+        );
+        assert_ne!(
+            u1_group, d2_group,
+            "Op-amp and GND-shunt diode D2 should be separate groups"
+        );
+        // Each diode is also separate from each other (GND doesn't couple)
+        assert_ne!(
+            d1_group, d2_group,
+            "D1 and D2 to GND should be separate groups"
+        );
+    }
+
+    // ── Test 4: Screamer — diode pair in feedback loop ───────────────────
+
+    #[test]
+    fn flow_screamer_diode_in_feedback() {
+        // Op-amp with diodes in the feedback path (neg -> out through diode pair)
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(4.7k)
+                    U1: opamp(tl072)
+                    R_fb: resistor(51k)
+                    D1: diode(silicon)
+                    D2: diode(silicon)
+                    R_out: resistor(10k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> R_fb.a
+                    R_fb.b -> U1.out
+                    U1.neg -> D1.a
+                    D1.b -> U1.out
+                    U1.neg -> D2.b
+                    D2.a -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R_out.a
+                    R_out.b -> out
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let d1_group = find_group_containing(&groups, &graph, "D1");
+        let d2_group = find_group_containing(&groups, &graph, "D2");
+
+        assert!(u1_group.is_some());
+        assert!(d1_group.is_some());
+        assert!(d2_group.is_some());
+
+        // All in same group — diodes are in the feedback loop
+        assert_eq!(
+            u1_group, d1_group,
+            "Op-amp and feedback diode D1 should be in SAME group"
+        );
+        assert_eq!(
+            u1_group, d2_group,
+            "Op-amp and feedback diode D2 should be in SAME group"
+        );
+    }
+
+    // ── Test 5: 808 bridged-T — single op-amp with T-network ────────────
+
+    #[test]
+    fn flow_808_bridged_t() {
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    U1: opamp(tl072)
+                    R1: resistor(150k)
+                    R2: resistor(150k)
+                    C1: cap(8.2n)
+                    C2: cap(8.2n)
+                    R_fb: resistor(470k)
+                    R_in: resistor(100k)
+                }
+                nets {
+                    U1.neg -> R1.a, C1.a
+                    R1.b -> R2.a, C2.a
+                    R2.b -> U1.out
+                    C1.b -> gnd
+                    C2.b -> gnd
+                    U1.neg -> R_fb.a
+                    R_fb.b -> U1.out
+                    U1.pos -> gnd
+                    in -> R_in.a
+                    R_in.b -> R1.b
+                    U1.out -> out
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        // Find the group containing U1
+        let u1_group_idx = find_group_containing(&groups, &graph, "U1").expect("Should have U1");
+        let u1_group = &groups[u1_group_idx];
+
+        // Should have feedback (R_fb, R1, R2 form feedback paths)
+        assert!(
+            u1_group.has_feedback(),
+            "808 bridged-T should have feedback"
+        );
+
+        // R1 and R2 should be in the feedback edges
+        let has_r1 = u1_group.feedback_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "R1"
+        });
+        let has_r2 = u1_group.feedback_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "R2"
+        });
+        assert!(has_r1, "R1 should be in feedback edges (bridged-T path)");
+        assert!(has_r2, "R2 should be in feedback edges (bridged-T path)");
+    }
+
+    // ── Test 6: Ground shunt diodes independent ──────────────────────────
+
+    #[test]
+    fn flow_ground_shunt_diodes_independent() {
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(4.7k)
+                    D1: diode(silicon)
+                    D2: diode(silicon)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> D1.a, D2.b
+                    D1.b -> gnd
+                    D2.a -> gnd
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        let d1_group = find_group_containing(&groups, &graph, "D1");
+        let d2_group = find_group_containing(&groups, &graph, "D2");
+
+        assert!(d1_group.is_some());
+        assert!(d2_group.is_some());
+        assert_ne!(
+            d1_group, d2_group,
+            "Ground shunt diodes should be in separate groups (GND is a rail)"
+        );
+    }
+
+    // ── Test 7: Klon Centaur — four op-amps cascade ──────────────────────
+
+    #[test]
+    fn flow_klon_four_opamps_cascade() {
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf1: resistor(100k)
+                    Ri1: resistor(10k)
+                    R12: resistor(10k)
+                    U2: opamp(tl072)
+                    Rf2: resistor(47k)
+                    Ri2: resistor(10k)
+                    R23: resistor(10k)
+                    U3: opamp(tl072)
+                    Rf3: resistor(100k)
+                    Ri3: resistor(10k)
+                    R34: resistor(10k)
+                    U4: opamp(tl072)
+                    Rf4: resistor(47k)
+                    Ri4: resistor(10k)
+                    R_out: resistor(10k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> Ri1.a
+                    Ri1.b -> U1.neg
+                    U1.neg -> Rf1.a
+                    Rf1.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R12.a
+                    R12.b -> Ri2.a
+                    Ri2.b -> U2.neg
+                    U2.neg -> Rf2.a
+                    Rf2.b -> U2.out
+                    U2.pos -> gnd
+                    U2.out -> R23.a
+                    R23.b -> Ri3.a
+                    Ri3.b -> U3.neg
+                    U3.neg -> Rf3.a
+                    Rf3.b -> U3.out
+                    U3.pos -> gnd
+                    U3.out -> R34.a
+                    R34.b -> Ri4.a
+                    Ri4.b -> U4.neg
+                    U4.neg -> Rf4.a
+                    Rf4.b -> U4.out
+                    U4.pos -> gnd
+                    U4.out -> R_out.a
+                    R_out.b -> out
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let u2_group = find_group_containing(&groups, &graph, "U2");
+        let u3_group = find_group_containing(&groups, &graph, "U3");
+        let u4_group = find_group_containing(&groups, &graph, "U4");
+
+        assert!(u1_group.is_some(), "Should have U1 group");
+        assert!(u2_group.is_some(), "Should have U2 group");
+        assert!(u3_group.is_some(), "Should have U3 group");
+        assert!(u4_group.is_some(), "Should have U4 group");
+
+        // All four should be in DIFFERENT groups
+        let all_groups = [u1_group, u2_group, u3_group, u4_group];
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert_ne!(
+                    all_groups[i], all_groups[j],
+                    "U{} and U{} should be in separate groups (cascade, no inter-stage feedback)",
+                    i + 1,
+                    j + 1
+                );
+            }
+        }
+    }
+}
