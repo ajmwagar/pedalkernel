@@ -54,3 +54,5 @@ mod spqr_build_tests;
 mod rigid_tests;
 #[cfg(test)]
 mod bind_tests;
+#[cfg(test)]
+mod general_mna_tests;
