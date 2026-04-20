@@ -95,6 +95,22 @@ pub(super) struct DiodePairedOpAmp {
 /// - `Vec<DiodePairedOpAmp>`: op-amps that should be paired with DiodePair stages
 /// - `HashSet<usize>`: edge indices consumed by opamp feedback stages (for global claiming)
 pub(super) fn build_opamp_feedback_stages(
+    _analysis: &OpAmpAnalysis,
+    _pedal: &PedalDef,
+    _graph: &CircuitGraph,
+    _existing_stage_count: usize,
+    _sample_rate: f64,
+    _oversampling: crate::oversampling::OversamplingFactor,
+    _skip_feedback_tree: &HashSet<String>,
+    _nl_junction_nodes: &HashSet<NodeId>,
+) -> (Vec<WdfStage>, Vec<DiodePairedOpAmp>, HashSet<usize>) {
+    // Gutted — op-amp stages are now built by the SPQR fast path in compile.rs.
+    // Diode-paired opamps will be handled by VCVS stamping in build_rtype_stage.
+    (Vec::new(), Vec::new(), HashSet::new())
+}
+
+#[allow(dead_code)]
+fn _old_build_opamp_feedback_stages(
     analysis: &OpAmpAnalysis,
     pedal: &PedalDef,
     graph: &CircuitGraph,
@@ -110,7 +126,6 @@ pub(super) fn build_opamp_feedback_stages(
     let mut diode_paired = Vec::new();
     let mut consumed_edges: HashSet<usize> = HashSet::new();
 
-    // Helper: map feedback_comp_ids to edge indices.
     let comp_ids_to_edge_indices = |comp_ids: &[String]| -> Vec<usize> {
         let id_set: HashSet<&str> = comp_ids.iter().map(|s| s.as_str()).collect();
         graph

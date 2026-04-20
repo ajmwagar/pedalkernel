@@ -517,30 +517,70 @@ pub(super) fn build_stages(
 
             // Pair DiodePair/SingleDiode stages with feedback opamps.
             // Match by junction node: either direct overlap or 1-hop passive adjacency.
+            // Pair diode stages with adjacent op-amps via VcvsEdge discovery.
+            // No opamp_analysis needed — find op-amps whose neg/out touches
+            // the diode's junction nodes directly or through one passive hop.
             if matches!(
                 &elem.kind,
                 NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)
             ) {
                 let junction_nodes = &elem.junction_nodes;
-                if let Some(dp) = diode_paired_opamps.iter().find(|dp| {
-                    // Direct: opamp neg/out matches diode junction node
-                    junction_nodes.iter().any(|&jn| jn == dp.neg_node || jn == dp.out_node)
-                        // 1-hop: passive edge connects opamp neg to diode junction (Klon R6)
-                        || junction_nodes.iter().any(|&jn| {
-                            graph.edges.iter().any(|e| {
-                                let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
-                                    || graph.components[e.comp_idx].kind.pot_taper().is_some();
-                                is_passive
-                                    && ((e.node_a == dp.neg_node && e.node_b == jn)
-                                        || (e.node_b == dp.neg_node && e.node_a == jn)
-                                        || (e.node_a == dp.out_node && e.node_b == jn)
-                                        || (e.node_b == dp.out_node && e.node_a == jn))
-                            })
-                        })
-                }) {
-                    stage.feedback_opamp = Some(dp.opamp_root.clone());
-                    if dp.feedback_pot_id.is_some() {
-                        stage.feedback_pot_id = dp.feedback_pot_id.clone();
+                for comp in &graph.components {
+                    if let super::component::GraphRole::VcvsEdge { pin_pos, pin_neg, pin_out } = comp.kind.graph_role() {
+                        let neg_n = graph.node_names.get(&format!("{}.{}", comp.id, pin_neg)).copied();
+                        let out_n = graph.node_names.get(&format!("{}.{}", comp.id, pin_out)).copied();
+                        let pos_n = graph.node_names.get(&format!("{}.{}", comp.id, pin_pos)).copied();
+                        if let (Some(neg), Some(out)) = (neg_n, out_n) {
+                            let touches = junction_nodes.iter().any(|&jn| jn == neg || jn == out)
+                                || junction_nodes.iter().any(|&jn| {
+                                    graph.edges.iter().any(|e| {
+                                        let is_passive = graph.components[e.comp_idx].kind.resistance().is_some()
+                                            || graph.components[e.comp_idx].kind.pot_taper().is_some();
+                                        is_passive && (
+                                            (e.node_a == neg && e.node_b == jn)
+                                            || (e.node_b == neg && e.node_a == jn)
+                                            || (e.node_a == out && e.node_b == jn)
+                                            || (e.node_b == out && e.node_a == jn)
+                                        )
+                                    })
+                                });
+                            if touches {
+                                let ot = comp.kind.op_amp_type();
+                                let model = ot.map(|t| crate::elements::OpAmpModel::from_opamp_type(&t))
+                                    .unwrap_or_else(crate::elements::OpAmpModel::generic);
+                                // Compute gain: find Rf (neg→out) and Ri (input→neg) in plan edges
+                                let mut rf = 0.0_f64;
+                                let mut ri = 0.0_f64;
+                                for &eidx in &plan.passive_idxs {
+                                    let e = &graph.edges[eidx];
+                                    if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
+                                        if (e.node_a == neg && e.node_b == out) || (e.node_a == out && e.node_b == neg) {
+                                            rf = r;
+                                        } else if e.node_a == neg || e.node_b == neg {
+                                            if ri == 0.0 { ri = r; }
+                                        }
+                                    }
+                                    // Check if feedback R is a pot (variable gain)
+                                    if graph.components[e.comp_idx].kind.is_pot() {
+                                        if (e.node_a == neg && e.node_b == out) || (e.node_a == out && e.node_b == neg) {
+                                            rf = graph.components[e.comp_idx].kind.resistance().unwrap_or(100_000.0);
+                                            stage.feedback_pot_id = Some(graph.components[e.comp_idx].id.clone());
+                                        }
+                                    }
+                                }
+                                let gain = if rf > 0.0 && ri > 0.0 { rf / ri } else { 10.0 };
+                                let is_inv = pos_n.map_or(true, |p| p == graph.gnd_node || graph.ac_ground_nodes.contains(&p));
+                                let mut root = if is_inv {
+                                    crate::elements::OpAmpRoot::new_inverting(model, gain)
+                                } else {
+                                    crate::elements::OpAmpRoot::new_non_inverting(model, gain)
+                                };
+                                root.set_sample_rate(sample_rate);
+                                root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5));
+                                stage.feedback_opamp = Some(root);
+                                break;
+                            }
+                        }
                     }
                 }
             }
