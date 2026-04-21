@@ -154,6 +154,8 @@ pub fn compile_via_spqr_with_options(
             }
             stage_counter += 1;
         } else if is_pot_divider_group(group, &graph) {
+            #[cfg(test)]
+            eprintln!("  → POT DIVIDER group: {:?}", group.all_edges());
             // Pot voltage divider: both halves in one stage.
             // Build directly as Parallel(aw, wb) with ShortCircuit root.
             let built = build_pot_divider(group, &graph, sample_rate);
