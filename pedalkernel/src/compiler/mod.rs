@@ -58,3 +58,5 @@ mod bind_tests;
 mod general_mna_tests;
 #[cfg(test)]
 mod pot_tests;
+#[cfg(test)]
+mod graph_role_tests;
