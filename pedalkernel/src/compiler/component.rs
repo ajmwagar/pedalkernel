@@ -333,6 +333,18 @@ pub trait Component: std::fmt::Debug {
         None
     }
 
+    // ── Ports ─────────────────────────────────────────────────────────────
+
+    /// Terminal pairs carrying current through this component.
+    ///
+    /// Each port = one graph edge. A resistor has 1 port (a, b).
+    /// A BJT has 2 ports (base-emitter, collector-emitter).
+    /// A pot has 2 ports (a-wiper, wiper-b).
+    /// An op-amp has 1 port (neg-out, pos is voltage-sense).
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("a", "b")] // default: 1-port component
+    }
+
     // ── Signal Flow ──────────────────────────────────────────────────────
 
     /// Signal flow classification for this component's pins.

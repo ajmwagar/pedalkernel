@@ -1,7 +1,8 @@
-// TDD tests for unified GraphRole.
+// TDD tests for port-based graph construction.
 //
-// Every component creates one Edge with two pins. No special variants.
-// All other pin info comes from Component trait + node_names.
+// Every component declares its ports (terminal pairs carrying current).
+// The graph creates one edge per port, all sharing the same comp_idx.
+// No synthetic splits, no virtual bridges, no special-case GraphRole variants.
 
 use super::graph::CircuitGraph;
 
@@ -10,185 +11,188 @@ fn make_graph(pedal_src: &str) -> CircuitGraph {
     CircuitGraph::from_pedal(&pedal)
 }
 
+fn edges_for_component(graph: &CircuitGraph, comp_id: &str) -> Vec<usize> {
+    (0..graph.edges.len())
+        .filter(|&i| {
+            let id = &graph.components[graph.edges[i].comp_idx].id;
+            id == comp_id || id.starts_with(&format!("{comp_id}__"))
+        })
+        .collect()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1-port components: one terminal pair, one edge
+// ═══════════════════════════════════════════════════════════════════════════
+
 #[test]
-fn resistor_creates_one_edge() {
+fn resistor_one_port_one_edge() {
     let graph = make_graph(r#"
         pedal "test" { supply 9V
             components { R1: resistor(10k) }
             nets { in -> R1.a  R1.b -> out }
             controls {}
         }"#);
-    let edges: Vec<_> = (0..graph.edges.len())
-        .filter(|&i| graph.components[graph.edges[i].comp_idx].id == "R1")
-        .collect();
-    assert_eq!(edges.len(), 1, "Resistor should create 1 edge");
+    assert_eq!(edges_for_component(&graph, "R1").len(), 1);
 }
 
 #[test]
-fn bjt_creates_one_edge() {
+fn diode_one_port_one_edge() {
     let graph = make_graph(r#"
         pedal "test" { supply 9V
-            components {
-                Q1: npn(2n3904)
-                R_c: resistor(10k)
-                R_b: resistor(100k)
-            }
+            components { D1: diode(silicon) }
+            nets { in -> D1.a  D1.b -> out }
+            controls {}
+        }"#);
+    assert_eq!(edges_for_component(&graph, "D1").len(), 1);
+}
+
+#[test]
+fn opamp_one_port_one_edge() {
+    // Op-amp: 1 port (neg→out). Pos is voltage-sense, no current.
+    let graph = make_graph(r#"
+        pedal "test" { supply 9V
+            components { U1: opamp(tl072)  R1: resistor(10k)  Rf: resistor(100k) }
             nets {
-                in -> R_b.a
-                R_b.b -> Q1.base
-                Q1.collector -> R_c.a
-                R_c.b -> vcc
-                Q1.emitter -> gnd
-                Q1.collector -> out
+                in -> R1.a  R1.b -> U1.neg  U1.neg -> Rf.a  Rf.b -> U1.out
+                U1.pos -> gnd  U1.out -> out
             }
             controls {}
         }"#);
-    // BJT should have exactly 1 graph edge (collector-emitter)
-    let bjt_edges: Vec<_> = (0..graph.edges.len())
-        .filter(|&i| graph.components[graph.edges[i].comp_idx].id == "Q1")
-        .collect();
-    assert_eq!(bjt_edges.len(), 1, "BJT should create 1 edge");
-
-    // Base should be resolvable via node_names
-    assert!(
-        graph.node_names.contains_key("Q1.base"),
-        "Q1.base should be in node_names"
+    assert_eq!(
+        edges_for_component(&graph, "U1").len(), 1,
+        "Op-amp has 1 port (neg→out)"
     );
+    // Pos pin accessible via node_names
+    assert!(graph.node_names.contains_key("U1.pos"));
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 2-port components: two terminal pairs, two edges, same comp_idx
+// ═══════════════════════════════════════════════════════════════════════════
+
 #[test]
-fn opamp_creates_one_edge() {
+fn bjt_two_ports_two_edges() {
+    // BJT: 2 ports (base→emitter, collector→emitter)
     let graph = make_graph(r#"
         pedal "test" { supply 9V
-            components {
-                U1: opamp(tl072)
-                R1: resistor(10k)
-                Rf: resistor(100k)
-            }
+            components { Q1: npn(2n3904)  R_c: resistor(10k)  R_b: resistor(100k) }
             nets {
-                in -> R1.a
-                R1.b -> U1.neg
-                U1.neg -> Rf.a
-                Rf.b -> U1.out
-                U1.pos -> gnd
-                U1.out -> out
+                in -> R_b.a  R_b.b -> Q1.base
+                Q1.collector -> R_c.a  R_c.b -> vcc
+                Q1.emitter -> gnd  Q1.collector -> out
             }
             controls {}
         }"#);
-    // Op-amp should have exactly 1 graph edge (neg-out)
-    let opamp_edges: Vec<_> = (0..graph.edges.len())
-        .filter(|&i| graph.components[graph.edges[i].comp_idx].id == "U1")
-        .collect();
-    assert_eq!(opamp_edges.len(), 1, "Op-amp should create 1 edge");
-
-    // Pos should be resolvable via node_names
-    assert!(
-        graph.node_names.contains_key("U1.pos"),
-        "U1.pos should be in node_names"
+    let bjt_edges = edges_for_component(&graph, "Q1");
+    assert_eq!(
+        bjt_edges.len(), 2,
+        "BJT has 2 ports (B-E + C-E), got {}",
+        bjt_edges.len()
     );
+    // Both edges share the same comp_idx (Q1)
+    let comp_idx_0 = graph.edges[bjt_edges[0]].comp_idx;
+    let comp_idx_1 = graph.edges[bjt_edges[1]].comp_idx;
+    assert_eq!(comp_idx_0, comp_idx_1, "Both BJT ports same comp_idx");
+    // All pins in node_names
+    assert!(graph.node_names.contains_key("Q1.base"));
+    assert!(graph.node_names.contains_key("Q1.collector"));
+    assert!(graph.node_names.contains_key("Q1.emitter"));
 }
 
 #[test]
-fn pot_3term_creates_one_edge_no_split() {
-    // A 3-terminal pot should create 1 edge, NOT 2 synthetic __aw/__wb edges.
+fn pot_3term_two_ports_two_edges() {
+    // Pot: 2 ports (a→wiper, wiper→b). Same comp_idx, no __aw/__wb split.
     let graph = make_graph(r#"
         pedal "test" { supply 9V
             components { Volume: pot(100k, a) }
             nets { in -> Volume.a  Volume.w -> out  Volume.b -> gnd }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
         }"#);
-
-    let pot_edges: Vec<_> = (0..graph.edges.len())
-        .filter(|&i| {
-            let id = &graph.components[graph.edges[i].comp_idx].id;
-            id == "Volume" || id.starts_with("Volume__")
-        })
-        .collect();
+    let pot_edges = edges_for_component(&graph, "Volume");
     assert_eq!(
-        pot_edges.len(), 1,
-        "3-terminal pot should create 1 edge, got {} (IDs: {:?})",
+        pot_edges.len(), 2,
+        "Pot has 2 ports (a-w + w-b), got {} (IDs: {:?})",
         pot_edges.len(),
         pot_edges.iter().map(|&i| &graph.components[graph.edges[i].comp_idx].id).collect::<Vec<_>>()
     );
-
-    // Wiper should be resolvable via node_names
-    assert!(
-        graph.node_names.contains_key("Volume.w") || graph.node_names.contains_key("Volume.wiper"),
-        "Wiper should be in node_names"
-    );
-
-    // No synthetic __aw/__wb components should exist
+    // Both use original comp_idx — no synthetic __aw/__wb
     let has_synthetic = graph.components.iter().any(|c| {
         c.id.contains("__aw") || c.id.contains("__wb")
     });
-    assert!(!has_synthetic, "No synthetic __aw/__wb components should exist");
-}
-
-#[test]
-fn tube_creates_one_edge() {
-    let graph = make_graph(r#"
-        pedal "test" { supply 9V
-            components {
-                V1: triode(12ax7)
-                R_p: resistor(100k)
-                R_k: resistor(1.5k)
-            }
-            nets {
-                in -> V1.grid
-                V1.plate -> R_p.a
-                R_p.b -> vcc
-                V1.cathode -> R_k.a
-                R_k.b -> gnd
-                V1.plate -> out
-            }
-            controls {}
-        }"#);
-    let tube_edges: Vec<_> = (0..graph.edges.len())
-        .filter(|&i| graph.components[graph.edges[i].comp_idx].id == "V1")
-        .collect();
-    assert_eq!(tube_edges.len(), 1, "Tube should create 1 edge");
-
+    assert!(!has_synthetic, "No synthetic __aw/__wb components");
+    // Wiper in node_names
     assert!(
-        graph.node_names.contains_key("V1.grid"),
-        "V1.grid should be in node_names"
+        graph.node_names.contains_key("Volume.w") || graph.node_names.contains_key("Volume.wiper"),
+        "Wiper in node_names"
     );
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Component trait: ports() method
+// ═══════════════════════════════════════════════════════════════════════════
+
 #[test]
-fn no_nullor_pin_records_needed() {
-    // With unified GraphRole, nullor_pins should be empty.
-    // All pin info accessible via signal_terminals() + node_names.
+fn component_ports_resistor() {
+    use super::components::Resistor;
+    use super::component::Component;
+    let r = Resistor { value: 10_000.0 };
+    assert_eq!(r.ports(), vec![("a", "b")]);
+}
+
+#[test]
+fn component_ports_bjt() {
+    use super::components::Npn;
+    use super::component::Component;
+    let q = Npn { model: "2n3904".to_string() };
+    let ports = q.ports();
+    assert_eq!(ports.len(), 2);
+    assert!(ports.contains(&("base", "emitter")));
+    assert!(ports.contains(&("collector", "emitter")));
+}
+
+#[test]
+fn component_ports_opamp() {
+    use super::components::OpAmp;
+    use super::component::Component;
+    use crate::dsl::OpAmpType;
+    let u = OpAmp { op_type: OpAmpType::Tl072 };
+    assert_eq!(u.ports(), vec![("neg", "out")]);
+}
+
+#[test]
+fn component_ports_pot() {
+    use super::components::Potentiometer;
+    use super::component::Component;
+    use crate::dsl::PotTaper;
+    let p = Potentiometer { max_r: 100_000.0, taper: PotTaper::A };
+    let ports = p.ports();
+    // 2-terminal pot: 1 port. 3-terminal pot: 2 ports.
+    // The Component doesn't know if wiper is connected — that's determined
+    // by the circuit nets. Default: 2 ports (a→w, w→b).
+    assert_eq!(ports.len(), 2, "Pot default: 2 ports (a-w, w-b)");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// No virtual bridge edges needed
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn no_virtual_bridge_edges() {
+    // With real multi-port edges, virtual bridges are redundant.
     let graph = make_graph(r#"
         pedal "test" { supply 9V
-            components {
-                U1: opamp(tl072)
-                R1: resistor(10k)
-                Rf: resistor(100k)
-            }
+            components { Q1: npn(2n3904)  R_c: resistor(10k)  R_b: resistor(100k) }
             nets {
-                in -> R1.a
-                R1.b -> U1.neg
-                U1.neg -> Rf.a
-                Rf.b -> U1.out
-                U1.pos -> gnd
-                U1.out -> out
+                in -> R_b.a  R_b.b -> Q1.base
+                Q1.collector -> R_c.a  R_c.b -> vcc
+                Q1.emitter -> gnd  Q1.collector -> out
             }
             controls {}
         }"#);
-
-    // All op-amp pin info should be accessible without NullorPinRecord
-    let comp = graph.components.iter().find(|c| c.id == "U1").unwrap();
-    let terminals = comp.kind.signal_terminals();
-    match terminals {
-        super::component::SignalTerminals::Amplifier { input, output, control } => {
-            assert_eq!(input, "neg");
-            assert_eq!(output, "out");
-            assert_eq!(control, Some("pos"));
-            // All pins resolvable via node_names
-            assert!(graph.node_names.contains_key("U1.neg"));
-            assert!(graph.node_names.contains_key("U1.out"));
-            assert!(graph.node_names.contains_key("U1.pos"));
-        }
-        _ => panic!("Op-amp should be Amplifier"),
-    }
+    // active_edge_indices should be empty — real edges provide connectivity
+    assert!(
+        graph.active_edge_indices.is_empty(),
+        "No virtual bridge edges needed, got {}",
+        graph.active_edge_indices.len()
+    );
 }
