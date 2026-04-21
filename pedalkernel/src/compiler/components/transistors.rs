@@ -31,6 +31,10 @@ impl Component for Npn {
         "NPN transistor"
     }
 
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("base", "emitter"), ("collector", "emitter")]
+    }
+
     fn signal_terminals(&self) -> SignalTerminals {
         SignalTerminals::Amplifier {
             input: "base",
@@ -167,6 +171,10 @@ impl Component for Pnp {
         "PNP transistor"
     }
 
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("base", "emitter"), ("collector", "emitter")]
+    }
+
     fn signal_terminals(&self) -> SignalTerminals {
         SignalTerminals::Amplifier {
             input: "base",
@@ -301,6 +309,10 @@ impl Component for NJfet {
 
     fn type_tag(&self) -> &'static str {
         "N-channel JFET"
+    }
+
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("drain", "source")] // gate is voltage-sense
     }
 
     fn signal_terminals(&self) -> SignalTerminals {
@@ -458,6 +470,10 @@ impl Component for PJfet {
         "P-channel JFET"
     }
 
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("drain", "source")]
+    }
+
     fn signal_terminals(&self) -> SignalTerminals {
         SignalTerminals::Amplifier {
             input: "gate",
@@ -613,6 +629,10 @@ impl Component for Nmos {
         "N-channel MOSFET"
     }
 
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("drain", "source")]
+    }
+
     fn signal_terminals(&self) -> SignalTerminals {
         SignalTerminals::Amplifier {
             input: "gate",
@@ -738,6 +758,10 @@ impl Component for Pmos {
 
     fn type_tag(&self) -> &'static str {
         "P-channel MOSFET"
+    }
+
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("drain", "source")]
     }
 
     fn signal_terminals(&self) -> SignalTerminals {

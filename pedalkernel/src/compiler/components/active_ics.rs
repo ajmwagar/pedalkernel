@@ -37,16 +37,22 @@ impl Component for OpAmp {
         }
     }
 
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        if self.op_type.is_ota() {
+            vec![("pos", "neg")]
+        } else {
+            vec![("neg", "out")] // pos is voltage-sense
+        }
+    }
+
     fn signal_terminals(&self) -> SignalTerminals {
         if self.op_type.is_ota() {
-            // OTA: transconductance amp, pos/neg → output current
             SignalTerminals::Amplifier {
                 input: "pos",
                 output: "neg",
                 control: None,
             }
         } else {
-            // Op-amp VCVS: neg is inverting input, out is output, pos is reference
             SignalTerminals::Amplifier {
                 input: "neg",
                 output: "out",

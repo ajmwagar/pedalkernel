@@ -28,6 +28,10 @@ impl Component for Triode {
         "triode"
     }
 
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("plate", "cathode")] // grid is voltage-sense
+    }
+
     fn signal_terminals(&self) -> SignalTerminals {
         SignalTerminals::Amplifier {
             input: "grid",
@@ -161,6 +165,10 @@ impl Component for Pentode {
 
     fn type_tag(&self) -> &'static str {
         "pentode"
+    }
+
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("plate", "cathode")]
     }
 
     fn signal_terminals(&self) -> SignalTerminals {
@@ -298,6 +306,10 @@ impl Component for VariMu {
 
     fn type_tag(&self) -> &'static str {
         "variable-mu triode"
+    }
+
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("plate", "cathode")]
     }
 
     fn signal_terminals(&self) -> SignalTerminals {

@@ -396,6 +396,12 @@ impl Component for Potentiometer {
         "potentiometer"
     }
 
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        // 2 ports: a→wiper (top half), wiper→b (bottom half)
+        // For 2-terminal use (no wiper connected), graph_role handles it.
+        vec![("a", "w"), ("w", "b")]
+    }
+
     fn is_passive(&self) -> bool {
         true
     }
