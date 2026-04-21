@@ -56,3 +56,5 @@ mod rigid_tests;
 mod bind_tests;
 #[cfg(test)]
 mod general_mna_tests;
+#[cfg(test)]
+mod pot_tests;
