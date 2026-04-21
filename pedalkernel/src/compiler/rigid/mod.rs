@@ -20,7 +20,7 @@ mod state_space;
 // Re-exports
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(super) use self::general::{build_general_mna, build_opamp_nl_feedback};
+pub(super) use self::general::{build_general_mna, build_general_mna_from_edges, build_opamp_nl_feedback};
 // Legacy re-exports for old pipeline — will be removed with opamp_analysis.rs
 pub(super) use self::opamp_root::{
     extract_opamp_config, make_opamp_root, build_opamp_root, OpAmpConfig,
@@ -315,25 +315,22 @@ pub(super) fn build_rigid_from_group(
             .map(BuiltStage::StateSpace)
         }
         RigidOptimization::General => {
+            // VCVS + NL with FlowGroup → op-amp drives NL root (TS/RAT/Klon)
             if let Some(g) = group {
                 if stats.vcvs_count == 1 && stats.nl_count > 0 {
-                    build_opamp_nl_feedback(g, &stats, graph, sample_rate)
-                        .map(BuiltStage::Wdf)
-                } else if stats.nl_count > 0 {
-                    // NL case (with or without VCVS): BJTs, coupled diodes, etc.
-                    // For multi-VCVS + NL (blues), the op-amps are stamped as
-                    // nullors in the MNA and become part of the scattering matrix.
-                    build_general_mna(g, graph, sample_rate)
-                        .map(BuiltStage::MultiNl)
-                } else {
-                    Err(format!(
-                        "General MNA not yet implemented (vcvs={}, nl={}, linear={}, reactive={})",
-                        stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count
-                    ))
+                    return build_opamp_nl_feedback(g, &stats, graph, sample_rate)
+                        .map(BuiltStage::Wdf);
                 }
+            }
+
+            // NL present → General MNA + NR solver.
+            // Works with or without FlowGroup — uses raw edge indices.
+            if stats.nl_count > 0 {
+                build_general_mna_from_edges(&edge_indices, graph, sample_rate)
+                    .map(BuiltStage::MultiNl)
             } else {
                 Err(format!(
-                    "General MNA not yet implemented (vcvs={}, nl={}, linear={}, reactive={})",
+                    "General: no NL elements (vcvs={}, nl={}, linear={}, reactive={})",
                     stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count
                 ))
             }
