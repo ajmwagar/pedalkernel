@@ -58,9 +58,17 @@ fn opamp_one_port_one_edge() {
             }
             controls {}
         }"#);
+    // Count REAL edges for U1 (exclude virtual bridges with comp_idx=0 placeholder)
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let opamp_edges: Vec<_> = edges_for_component(&graph, "U1")
+        .into_iter()
+        .filter(|i| !active_set.contains(i))
+        .collect();
     assert_eq!(
-        edges_for_component(&graph, "U1").len(), 1,
-        "Op-amp has 1 port (neg→out)"
+        opamp_edges.len(), 1,
+        "Op-amp has 1 real port (neg→out), got {}",
+        opamp_edges.len()
     );
     // Pos pin accessible via node_names
     assert!(graph.node_names.contains_key("U1.pos"));

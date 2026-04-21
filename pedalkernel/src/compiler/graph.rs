@@ -395,17 +395,38 @@ impl CircuitGraph {
                     });
                 }
                 GraphRole::ActiveEdge { pin_a, pin_b } => {
-                    let key_a = format!("{}.{}", comp.id, pin_a);
-                    let key_b = format!("{}.{}", comp.id, pin_b);
-                    let id_a = get_id(&key_a, &mut uf);
-                    let id_b = get_id(&key_b, &mut uf);
-                    let node_a = uf.find(id_a);
-                    let node_b = uf.find(id_b);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a,
-                        node_b,
-                    });
+                    // Use ports() for multi-port active components (BJTs: 2 ports).
+                    // All edges share the same comp_idx.
+                    let ports = comp.kind.ports();
+                    if ports.len() > 1 {
+                        for (pa, pb) in &ports {
+                            let key_a = format!("{}.{}", comp.id, pa);
+                            let key_b = format!("{}.{}", comp.id, pb);
+                            let id_a = get_id(&key_a, &mut uf);
+                            let id_b = get_id(&key_b, &mut uf);
+                            let node_a = uf.find(id_a);
+                            let node_b = uf.find(id_b);
+                            if node_a != node_b {
+                                edges.push(GraphEdge {
+                                    comp_idx: idx,
+                                    node_a,
+                                    node_b,
+                                });
+                            }
+                        }
+                    } else {
+                        let key_a = format!("{}.{}", comp.id, pin_a);
+                        let key_b = format!("{}.{}", comp.id, pin_b);
+                        let id_a = get_id(&key_a, &mut uf);
+                        let id_b = get_id(&key_b, &mut uf);
+                        let node_a = uf.find(id_a);
+                        let node_b = uf.find(id_b);
+                        edges.push(GraphEdge {
+                            comp_idx: idx,
+                            node_a,
+                            node_b,
+                        });
+                    }
                     num_active += 1;
                 }
                 GraphRole::CoupledEdge {
@@ -713,25 +734,27 @@ impl CircuitGraph {
             }
         }
 
-        // Create virtual bridge edges for active elements (OpAmp, Npn, Pnp).
-        // This ensures BFS can traverse through them for distance computation
-        // and voltage source injection picks a proper connected node.
+        // Create virtual bridge edges for active elements that have only 1 port.
+        // Components with 2+ ports (BJTs) already have all terminals connected
+        // via real edges — no bridge needed.
+        // Op-amps with 1 port (neg→out) still need a bridge for pos connectivity.
         let mut active_edge_indices = Vec::new();
         for comp in &pedal.components {
+            // Skip components with multi-port edges (BJTs) — already connected
+            if comp.kind.ports().len() > 1 {
+                continue;
+            }
+
             let pin_order: &[&str] = if comp.kind.op_amp_type().is_some() {
-                // OpAmps use either 3-pin (pos/neg/out) or 2-pin (in/out) form.
                 if pin_ids.contains_key(&format!("{}.pos", comp.id)) {
                     &["pos", "neg", "out"]
                 } else {
                     &["in", "out"]
                 }
-            } else if comp.kind.is_bjt() {
-                &["base", "collector", "emitter"]
             } else {
                 continue;
             };
 
-            // Collect resolved node IDs for each pin that exists in the netlist.
             let mut pin_nodes: Vec<NodeId> = Vec::new();
             for pin_name in pin_order {
                 let key = format!("{}.{}", comp.id, pin_name);
@@ -740,12 +763,11 @@ impl CircuitGraph {
                 }
             }
 
-            // Chain consecutive pin pairs as virtual bridge edges.
             for pair in pin_nodes.windows(2) {
                 if pair[0] != pair[1] {
                     active_edge_indices.push(edges.len());
                     edges.push(GraphEdge {
-                        comp_idx: 0, // placeholder — active edges are excluded from WDF
+                        comp_idx: 0,
                         node_a: pair[0],
                         node_b: pair[1],
                     });
