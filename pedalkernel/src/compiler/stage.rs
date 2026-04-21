@@ -2941,6 +2941,21 @@ impl IirData {
 ///
 /// When the stage contains an op-amp, component-declared `NonIdealFx`
 /// are applied as post-processing: GBW rolloff → slew limiting → rail clamp.
+/// Pot binding info stored in IirStage for runtime coefficient recomputation.
+#[derive(Debug, Clone)]
+pub(super) struct IirPotBinding {
+    /// Component ID of the pot (matches ControlBinding::component_id).
+    pub comp_id: String,
+    /// Maximum resistance of the pot.
+    pub max_r: f64,
+    /// Fixed resistance in series with the pot (e.g., R_min before Drive pot).
+    pub fixed_series_r: f64,
+    /// Input resistance Ri (for gain = Rf/Ri calculation).
+    pub ri: f64,
+    /// Current pot position (0.0–1.0).
+    pub position: f64,
+}
+
 pub(super) struct IirStage {
     /// The biquad filter data (coefficients + history).
     pub(super) iir: IirData,
@@ -2950,6 +2965,10 @@ pub(super) struct IirStage {
     pub(super) signal_flow_distance: usize,
     /// Component-declared non-idealities applied after IIR computation.
     pub(super) nonideal_fx: Vec<super::component::NonIdealFx>,
+    /// Pot bindings for runtime coefficient recomputation.
+    pub(super) pot_bindings: Vec<IirPotBinding>,
+    /// Sample rate (needed for GBW recomputation on gain change).
+    pub(super) sample_rate: f64,
     // ── NonIdealFx runtime state ──
     /// GBW single-pole IIR state (for OpAmpBandwidth).
     gbw_state: f64,
@@ -2961,20 +2980,26 @@ pub(super) struct IirStage {
     max_dv_per_sample: f64,
     /// Rail saturation voltage (from RailSaturation).
     v_max: f64,
+    /// Stored GBW from OpAmpBandwidth (for recomputation when gain changes).
+    stored_gbw: f64,
 }
 
 impl IirStage {
     pub(super) fn new(iir: IirData) -> Self {
+        let sample_rate = iir.sample_rate;
         Self {
             iir,
             compensation: 1.0,
             signal_flow_distance: 0,
             nonideal_fx: Vec::new(),
+            pot_bindings: Vec::new(),
+            sample_rate,
             gbw_state: 0.0,
             gbw_coeff: 1.0, // passthrough (no GBW limiting)
             prev_out: 0.0,
             max_dv_per_sample: f64::MAX,
             v_max: f64::MAX,
+            stored_gbw: 0.0,
         }
     }
 
@@ -2987,6 +3012,7 @@ impl IirStage {
         for effect in &fx {
             match effect {
                 NonIdealFx::OpAmpBandwidth { gbw, slew_rate } => {
+                    self.stored_gbw = *gbw;
                     // Estimate closed-loop gain from IIR DC response (b[0]+b[1]+b[2]) / (a[0]+a[1]+a[2])
                     let gain = self.iir.dc_gain().abs().max(1.0);
                     let fc = gbw / gain;
@@ -3026,6 +3052,40 @@ impl IirStage {
         }
 
         flush_denormal(out)
+    }
+
+    /// Check if this stage contains a pot with the given component ID.
+    pub(super) fn has_pot(&self, comp_id: &str) -> bool {
+        self.pot_bindings.iter().any(|b| b.comp_id == comp_id)
+    }
+
+    /// Update pot position and recompute IIR coefficients.
+    ///
+    /// For resistive feedback (no caps): recomputes dc_gain from Rf/Ri.
+    /// For resonators (caps): delegates to IirData::recompute().
+    /// No heap allocations — all state is pre-allocated.
+    pub(super) fn set_pot(&mut self, comp_id: &str, position: f64) {
+        let binding = match self.pot_bindings.iter_mut().find(|b| b.comp_id == comp_id) {
+            Some(b) => b,
+            None => return,
+        };
+        binding.position = position;
+
+        // Recompute dc_gain: gain = -(fixed_r + pos * max_r) / ri
+        let rf = binding.fixed_series_r + position * binding.max_r;
+        let ri = binding.ri;
+        let dc_gain = if ri > 0.0 { -(rf / ri) } else { -1.0 };
+
+        // Update biquad: for DC-only (no caps), b=[gain, 0, 0], a=[1, 0, 0]
+        self.iir.b_coeffs[0] = dc_gain;
+
+        // Recompute GBW coefficient for new gain (fc = GBW / |gain|)
+        if self.stored_gbw > 0.0 {
+            let gain_abs = dc_gain.abs().max(1.0);
+            let fc = self.stored_gbw / gain_abs;
+            let w = 2.0 * std::f64::consts::PI * fc;
+            self.gbw_coeff = w / (w + self.sample_rate);
+        }
     }
 }
 

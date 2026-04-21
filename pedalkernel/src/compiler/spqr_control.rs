@@ -108,8 +108,21 @@ fn find_pot_binding(
         }
     }
 
-    // TODO: OpAmpRoot gain recompute (pot in feedback → changes Rf or Ri)
-    // TODO: IirStage recompute (pot in reactive network)
+    // Search IIR stages (pot in feedback → changes dc_gain)
+    for (idx, stage) in compiled.iir_stages.iter().enumerate() {
+        if stage.has_pot(comp_id) {
+            return Some(make_binding(
+                ctrl,
+                comp_id,
+                &aw_id,
+                &wb_id,
+                max_r,
+                taper,
+                ControlTarget::PotInIirStage(idx),
+            ));
+        }
+    }
+
     // TODO: StateSpaceStage G-matrix delta
 
     None

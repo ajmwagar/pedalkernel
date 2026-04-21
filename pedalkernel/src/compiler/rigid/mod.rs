@@ -31,7 +31,7 @@ use super::dyn_node::DynNode;
 use super::signal_flow::FlowGroup;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr_build::BuiltStage;
-use super::stage::IirStage;
+use super::stage::{IirPotBinding, IirStage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // StageStats — one-pass Component trait scan
@@ -198,6 +198,54 @@ fn collect_nonideal_fx(
     fx
 }
 
+/// Extract pot bindings from a classified FlowGroup for IIR runtime recomputation.
+///
+/// For each pot in the feedback path, computes:
+/// - `ri`: sum of resistance on pendant_edges (input coupling)
+/// - `fixed_series_r`: sum of non-pot resistance on feedback_edges
+/// - `max_r`: pot's maximum resistance
+///
+/// No heap allocations at runtime — all values are scalars stored at compile time.
+fn extract_pot_bindings(
+    group: &FlowGroup,
+    _edge_indices: &[usize],
+    graph: &CircuitGraph,
+) -> Vec<IirPotBinding> {
+    let mut bindings = Vec::new();
+
+    // Ri: sum of resistance on pendant_edges (input coupling path)
+    let ri: f64 = group
+        .pendant_edges
+        .iter()
+        .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
+        .sum();
+    let ri = if ri <= 0.0 { 1.0 } else { ri }; // Safety: avoid div-by-zero
+
+    // Scan feedback edges for pots
+    let mut fixed_r: f64 = 0.0;
+    for &eidx in &group.feedback_edges {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if let Some(pot) = comp.kind.as_any().downcast_ref::<crate::compiler::components::Potentiometer>() {
+            bindings.push(IirPotBinding {
+                comp_id: comp.id.clone(),
+                max_r: pot.max_r,
+                fixed_series_r: 0.0, // filled in below
+                ri,
+                position: 0.5, // default
+            });
+        } else if let Some(r) = comp.kind.resistance() {
+            fixed_r += r;
+        }
+    }
+
+    // Set fixed_series_r on all pot bindings
+    for b in &mut bindings {
+        b.fixed_series_r = fixed_r;
+    }
+
+    bindings
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Rigid stage dispatcher
 // ═══════════════════════════════════════════════════════════════════════════
@@ -241,6 +289,10 @@ pub(super) fn build_rigid_from_group(
                     let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
                     if !fx.is_empty() {
                         stage.set_nonideal_fx(fx, sample_rate);
+                    }
+                    // Extract pot bindings for runtime coefficient recomputation.
+                    if let Some(g) = group {
+                        stage.pot_bindings = extract_pot_bindings(g, &edge_indices, graph);
                     }
                     Ok(BuiltStage::Iir(stage))
                 }

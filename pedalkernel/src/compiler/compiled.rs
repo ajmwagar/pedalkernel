@@ -70,6 +70,8 @@ pub(super) struct ControlBinding {
 pub(super) enum ControlTarget {
     /// Modify a pot in a specific WDF stage.
     PotInStage(usize),
+    /// Modify a pot in an IIR stage (recomputes dc_gain / biquad coefficients).
+    PotInIirStage(usize),
     /// Modify a pot inside a multi-NL stage (R-type adaptor approach).
     /// (multi_nl_stage_idx, passive_child_idx)
     PotInMultiNlStage(usize, usize),
@@ -1140,7 +1142,7 @@ impl CompiledPedal {
             let tapered_pos = self.controls[i].taper.apply(value);
             let value = (r0 + tapered_pos * (r1 - r0)).clamp(0.0, 1.0);
             match &self.controls[i].target {
-                ControlTarget::PotInStage(_) | ControlTarget::PotInMultiNlStage(_, _) => {
+                ControlTarget::PotInStage(_) | ControlTarget::PotInIirStage(_) | ControlTarget::PotInMultiNlStage(_, _) => {
                     if let Some(smoother) =
                         self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
                     {
@@ -1156,6 +1158,9 @@ impl CompiledPedal {
                             stage.set_pot(&comp_id_aw, value);
                             stage.set_pot(&comp_id_wb, 1.0 - value);
                             stage.flush_recompute();
+                        }
+                        for stage in &mut self.iir_stages {
+                            stage.set_pot(&comp_id, value);
                         }
                         for stage in &mut self.multi_nl_stages {
                             stage.set_pot(&comp_id, value);
@@ -1336,6 +1341,10 @@ impl CompiledPedal {
                     stage.set_pot(&comp_id, value);
                     stage.set_pot(&comp_id_aw, value);
                     stage.set_pot(&comp_id_wb, 1.0 - value);
+                }
+                // Update all IIR stages — recomputes dc_gain / biquad coefficients.
+                for stage in &mut self.iir_stages {
+                    stage.set_pot(&comp_id, value);
                 }
                 // Update all multi-NL stages (handles __aw/__wb internally).
                 for stage in &mut self.multi_nl_stages {
