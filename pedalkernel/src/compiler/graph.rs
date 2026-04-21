@@ -446,8 +446,26 @@ impl CircuitGraph {
                     }
                 }
                 GraphRole::Pot => {
-                    if pots_with_wiper.contains(&comp.id) {
-                        deferred_3term.push((idx, comp.id.clone()));
+                    // Use ports() for edge creation — handles both 2-term and 3-term pots.
+                    // 3-term pots create 2 edges (a→w, w→b) with the same comp_idx.
+                    // No synthetic __aw/__wb split.
+                    let ports = comp.kind.ports();
+                    if pots_with_wiper.contains(&comp.id) && ports.len() > 1 {
+                        for (pin_a, pin_b) in &ports {
+                            let key_a = format!("{}.{}", comp.id, pin_a);
+                            let key_b = format!("{}.{}", comp.id, pin_b);
+                            let id_a = get_id(&key_a, &mut uf);
+                            let id_b = get_id(&key_b, &mut uf);
+                            let node_a = uf.find(id_a);
+                            let node_b = uf.find(id_b);
+                            if node_a != node_b {
+                                edges.push(GraphEdge {
+                                    comp_idx: idx,
+                                    node_a,
+                                    node_b,
+                                });
+                            }
+                        }
                     } else {
                         let key_a = format!("{}.a", comp.id);
                         let key_b = format!("{}.b", comp.id);
