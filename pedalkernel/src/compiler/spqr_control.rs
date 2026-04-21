@@ -1,42 +1,47 @@
 //! Control binding for the SPQR pipeline.
 //!
-//! Maps .pedal `controls {}` declarations to runtime parameter targets.
-//! One path per control type. Component ID lookup, no special cases.
+//! Pots are components. Each stage knows how to handle its own pot changes.
+//! The control module just routes: find stage → tell it the new position.
 //!
-//! Current: pots.
-//! Future: CV inputs, switches, buttons, MIDI CC.
+//! Smoothing spreads parameter changes over ~32 samples to avoid zipper
+//! noise and CPU spikes from recomputation.
 
 use super::compiled::{CompiledPedal, ControlBinding, ControlTarget};
 use crate::dsl::{PedalDef, PotTaper};
 
-/// Bind control declarations from the .pedal file to compiled stage parameters.
+/// Bind control declarations to compiled stages.
 ///
-/// For each control in `pedal.controls`, finds the matching component
-/// in the compiled stages and creates a runtime binding.
+/// For each pot control in the .pedal file, finds which stage contains
+/// that pot and creates a binding. The stage handles recomputation
+/// internally — WDF trees recompute impedances, OpAmpRoot recalcs
+/// gain, IIR recalcs coefficients.
 pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
     for ctrl in &pedal.controls {
-        if let Some(binding) = bind_pot(ctrl, pedal, compiled) {
+        if let Some(binding) = find_pot_binding(ctrl, pedal, compiled) {
             compiled.controls.push(binding);
         }
     }
 
-    // Apply default positions
+    // Apply defaults
     for ctrl in &pedal.controls {
         compiled.set_control(&ctrl.label, ctrl.default);
     }
 }
 
-/// Try to bind a control declaration as a pot.
+/// Find which stage owns a pot and create the binding.
 ///
-/// Searches WDF stages for a pot leaf matching the component ID.
-fn bind_pot(
+/// Searches all stage types. The pot may be:
+/// - A WdfPot leaf in a WdfStage tree (tree.set_pot works)
+/// - Consumed by OpAmpRoot at compile time (needs gain recompute)
+/// - In a MultiNlStage (delta-update scattering matrix)
+fn find_pot_binding(
     ctrl: &crate::dsl::ControlDef,
     pedal: &PedalDef,
     compiled: &CompiledPedal,
 ) -> Option<ControlBinding> {
     let comp_id = &ctrl.component;
 
-    // Get pot metadata (taper, max_r) from the PedalDef component list
+    // Get pot metadata
     let pot_comp = pedal.components.iter().find(|c| c.id == *comp_id)?;
     let (max_r, taper) = pot_comp
         .kind
@@ -45,29 +50,88 @@ fn bind_pot(
         .map(|p| (p.max_r, p.taper))
         .unwrap_or((100_000.0, PotTaper::B));
 
-    // Search WDF stages for the pot leaf (synthetic names: {id}__aw, {id}__wb)
-    for (stage_idx, stage) in compiled.stages.iter().enumerate() {
-        let aw_id = format!("{comp_id}__aw");
-        let wb_id = format!("{comp_id}__wb");
-        let has_pot = stage.tree.get_pot_position(comp_id).is_some()
+    let aw_id = format!("{comp_id}__aw");
+    let wb_id = format!("{comp_id}__wb");
+
+    // Search WDF stages (pot leaves in DynNode trees)
+    for (idx, stage) in compiled.stages.iter().enumerate() {
+        if stage.tree.get_pot_position(comp_id).is_some()
             || stage.tree.get_pot_position(&aw_id).is_some()
-            || stage.tree.get_pot_position(&wb_id).is_some();
-        if has_pot {
-            return Some(ControlBinding {
-                label: ctrl.label.clone(),
-                target: ControlTarget::PotInStage(stage_idx),
-                component_id: comp_id.clone(),
-                component_id_aw: aw_id,
-                component_id_wb: wb_id,
-                max_resistance: max_r,
+            || stage.tree.get_pot_position(&wb_id).is_some()
+        {
+            return Some(make_binding(
+                ctrl,
+                comp_id,
+                &aw_id,
+                &wb_id,
+                max_r,
                 taper,
-                range: ctrl.range,
-            });
+                ControlTarget::PotInStage(idx),
+            ));
         }
     }
 
-    // TODO: search IIR/StateSpace/MultiNl stages for pots
-    // TODO: handle non-pot controls (switches, LFO rate, etc.)
+    // Search MultiNl stages (pot in MNA scattering)
+    for (idx, stage) in compiled.multi_nl_stages.iter().enumerate() {
+        for (pi, child) in stage.passive_children.iter().enumerate() {
+            if child.get_pot_position(comp_id).is_some()
+                || child.get_pot_position(&aw_id).is_some()
+                || child.get_pot_position(&wb_id).is_some()
+            {
+                return Some(make_binding(
+                    ctrl,
+                    comp_id,
+                    &aw_id,
+                    &wb_id,
+                    max_r,
+                    taper,
+                    ControlTarget::PotInMultiNlStage(idx, pi),
+                ));
+            }
+        }
+        // Also check pot_children
+        for child in &stage.pot_children {
+            if child.get_pot_position(comp_id).is_some()
+                || child.get_pot_position(&aw_id).is_some()
+                || child.get_pot_position(&wb_id).is_some()
+            {
+                return Some(make_binding(
+                    ctrl,
+                    comp_id,
+                    &aw_id,
+                    &wb_id,
+                    max_r,
+                    taper,
+                    ControlTarget::PotInMultiNlStage(idx, 0),
+                ));
+            }
+        }
+    }
+
+    // TODO: OpAmpRoot gain recompute (pot in feedback → changes Rf or Ri)
+    // TODO: IirStage recompute (pot in reactive network)
+    // TODO: StateSpaceStage G-matrix delta
 
     None
+}
+
+fn make_binding(
+    ctrl: &crate::dsl::ControlDef,
+    comp_id: &str,
+    aw_id: &str,
+    wb_id: &str,
+    max_r: f64,
+    taper: PotTaper,
+    target: ControlTarget,
+) -> ControlBinding {
+    ControlBinding {
+        label: ctrl.label.clone(),
+        target,
+        component_id: comp_id.to_string(),
+        component_id_aw: aw_id.to_string(),
+        component_id_wb: wb_id.to_string(),
+        max_resistance: max_r,
+        taper,
+        range: ctrl.range,
+    }
 }

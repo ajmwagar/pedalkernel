@@ -64,6 +64,11 @@ fn bind_volume_pot_changes_output() {
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
     bind_controls(&pedal, &mut compiled);
 
+    eprintln!("Controls bound: {}", compiled.controls.len());
+    for c in &compiled.controls {
+        eprintln!("  {:?} -> {:?}", c.label, c.target);
+    }
+
     // Full volume
     compiled.set_control("Volume", 1.0);
     for _ in 0..50 {
@@ -99,4 +104,30 @@ fn bind_empty_controls_produces_nothing() {
     bind_controls(&pedal, &mut compiled);
 
     assert!(compiled.controls.is_empty());
+}
+
+#[test]
+fn debug_volume_stages() {
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(4.7k)
+                D1: diode(silicon)
+                Volume: pot(100k, a)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> D1.a
+                D1.b -> Volume.a
+                Volume.w -> out
+                Volume.b -> gnd
+            }
+            controls { Volume.position -> "Volume" [1.0, 0.0] = 0.5 }
+        }"#).expect("parse");
+
+    let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    eprintln!("Stages: {}", compiled.stages.len());
+    for (i, s) in compiled.stages.iter().enumerate() {
+        eprintln!("  stage {i}: rp={:.1}", s.tree.port_resistance());
+    }
 }
