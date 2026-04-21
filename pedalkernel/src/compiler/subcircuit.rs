@@ -73,7 +73,6 @@ pub fn resolve_subcircuits(pedal: &PedalDef) -> Result<Vec<ResolvedSubcircuit>, 
             sidechains: Vec::new(),
             subcircuits: Vec::new(),
             mirrors: sc.mirrors.clone(),
-            midi_bindings: sc.midi_bindings.clone(),
             calibrate: false,
         };
 

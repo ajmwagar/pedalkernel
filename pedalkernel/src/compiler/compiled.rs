@@ -594,10 +594,6 @@ pub struct CompiledPedal {
     pub(super) bbd_mix_pot_id: Option<String>,
     /// Trigger impulse sources for drum/percussion circuits.
     pub(super) triggers: Vec<TriggerState>,
-    /// MIDI note → trigger index mapping for per-note dispatch.
-    /// When non-empty, `note_on()` fires only the trigger for the given note.
-    /// When empty, `note_on()` fires all triggers (backward compatibility).
-    pub(super) midi_trigger_map: HashMap<u8, usize>,
     /// Original passive component values for reset support.
     /// Maps comp_id -> (kind_str, original_value).
     pub(super) original_passive_values: HashMap<String, (&'static str, f64)>,
@@ -1262,29 +1258,16 @@ impl CompiledPedal {
         }
     }
 
-    /// Handle MIDI note-on by firing trigger inputs.
-    /// If MIDI bindings are present, fires only the trigger for the given note.
-    /// Otherwise, fires all triggers (backward compatibility).
+    /// Handle MIDI note-on by firing all trigger inputs.
     pub fn note_on(&mut self, note: u8, _velocity: u8) {
-        if self.midi_trigger_map.is_empty() {
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "[CompiledPedal] note_on({}) → firing ALL {} triggers",
-                note,
-                self.triggers.len()
-            );
-            for trig in &mut self.triggers {
-                trig.fire();
-            }
-        } else if let Some(&idx) = self.midi_trigger_map.get(&note) {
-            #[cfg(debug_assertions)]
-            eprintln!("[CompiledPedal] note_on({}) → trigger[{}]", note, idx);
-            if let Some(trig) = self.triggers.get_mut(idx) {
-                trig.fire();
-            }
-        } else {
-            #[cfg(debug_assertions)]
-            eprintln!("[CompiledPedal] note_on({}) → no trigger mapped", note);
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[CompiledPedal] note_on({}) → firing ALL {} triggers",
+            note,
+            self.triggers.len()
+        );
+        for trig in &mut self.triggers {
+            trig.fire();
         }
     }
 

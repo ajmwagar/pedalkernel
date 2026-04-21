@@ -258,7 +258,6 @@ pub fn compile_via_spqr_with_options(
         triggers: Vec::new(),
         bbd_wet_mix: 0.5,
         bbd_mix_pot_id: None,
-        midi_trigger_map: std::collections::HashMap::new(),
         original_passive_values: std::collections::HashMap::new(),
     };
 

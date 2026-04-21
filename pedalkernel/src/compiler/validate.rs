@@ -1160,7 +1160,6 @@ mod tests {
             monitors: vec![],
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
-            midi_bindings: vec![],
             calibrate: false,
             subcircuits: vec![],
         }
@@ -1303,7 +1302,6 @@ mod tests {
             monitors: vec![],
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
-            midi_bindings: vec![],
             calibrate: false,
             subcircuits: vec![],
         };
@@ -2085,7 +2083,6 @@ mod tests {
             monitors: vec![],
             sidechains: vec![],
             mirrors: std::collections::HashMap::new(),
-            midi_bindings: vec![],
             calibrate: false,
             subcircuits: vec![],
         }

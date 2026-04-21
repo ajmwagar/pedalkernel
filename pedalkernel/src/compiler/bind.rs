@@ -1039,7 +1039,6 @@ fn extract_sidechain_def(
         monitors: vec![],
         sidechains: vec![],
         mirrors: std::collections::HashMap::new(),
-        midi_bindings: vec![],
         calibrate: false,
         subcircuits: vec![],
     }
