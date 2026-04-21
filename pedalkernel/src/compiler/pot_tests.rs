@@ -172,6 +172,98 @@ fn pot_in_feedback_changes_gain() {
     );
 }
 
+/// Inverted range: [1.0, 0.0] means knob CW = pot position 0 (low R).
+/// The pedal designer uses this when the circuit's wiring is "backwards"
+/// from the user's expectation. The control system handles the inversion.
+#[test]
+fn pot_in_feedback_inverted_range() {
+    // Same circuit as pot_in_feedback_changes_gain, but range [1.0, 0.0].
+    // User "Drive" at 1.0 (CW) → pot position 0.0 → Rf = R_min → LOW gain.
+    // User "Drive" at 0.0 (CCW) → pot position 1.0 → Rf = R_min + 100k → HIGH gain.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(1k)
+                U1: opamp(tl072)
+                R_min: resistor(1k)
+                Drive: pot(100k, a)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> U1.neg
+                U1.neg -> R_min.a
+                R_min.b -> Drive.a
+                Drive.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [1.0, 0.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    bind_controls(&pedal, &mut compiled);
+
+    // User CW (value=1.0) → range maps to position 0.0 → low Rf → LOW gain
+    compiled.set_control("Drive", 1.0);
+    for _ in 0..50 { compiled.process(0.01); }
+    let cw_out = compiled.process(0.01).abs();
+
+    // User CCW (value=0.0) → range maps to position 1.0 → high Rf → HIGH gain
+    compiled.set_control("Drive", 0.0);
+    for _ in 0..50 { compiled.process(0.01); }
+    let ccw_out = compiled.process(0.01).abs();
+
+    eprintln!("Inverted range: CW(low gain)={cw_out:.4}, CCW(high gain)={ccw_out:.4}");
+    // With inverted range, CCW should produce MORE gain (higher Rf)
+    assert!(
+        ccw_out > cw_out * 2.0,
+        "Inverted range: CCW should have more gain than CW: cw={cw_out:.4}, ccw={ccw_out:.4}"
+    );
+}
+
+/// Normal range with volume pot (not feedback). Validates that range
+/// direction is respected for simple voltage divider pots too.
+#[test]
+fn pot_volume_inverted_range() {
+    // Volume pot: wiper → output. [1.0, 0.0] = "turn right for less volume"
+    // (uncommon but valid — some designers prefer reverse-log feel).
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(4.7k)
+                Volume: pot(100k, a)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> Volume.a
+                Volume.w -> out
+                Volume.b -> gnd
+            }
+            controls { Volume.position -> "Volume" [1.0, 0.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    bind_controls(&pedal, &mut compiled);
+
+    // User CW (value=1.0) → range maps to position 0.0 → wiper at ground → quiet
+    compiled.set_control("Volume", 1.0);
+    for _ in 0..50 { compiled.process(0.5); }
+    let cw_out = compiled.process(0.5).abs();
+
+    // User CCW (value=0.0) → range maps to position 1.0 → wiper at input → loud
+    compiled.set_control("Volume", 0.0);
+    for _ in 0..50 { compiled.process(0.5); }
+    let ccw_out = compiled.process(0.5).abs();
+
+    eprintln!("Inverted volume: CW(quiet)={cw_out:.4}, CCW(loud)={ccw_out:.4}");
+    assert!(
+        ccw_out > cw_out * 2.0 || cw_out < 0.01,
+        "Inverted range: CW should be quieter: cw={cw_out:.4}, ccw={ccw_out:.4}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Layer 1: MNA stamping — does the pot stamp correct resistances?
 // ═══════════════════════════════════════════════════════════════════════════

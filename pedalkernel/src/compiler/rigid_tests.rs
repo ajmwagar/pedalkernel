@@ -50,7 +50,7 @@ fn stats_passive_bridge_is_iir() {
 }
 
 #[test]
-fn stats_inverting_opamp_is_opamproot() {
+fn stats_inverting_opamp_is_iir() {
     let (graph, edges) = make_graph_all_edges(r#"
         pedal "test" { supply 9V
             components {
@@ -74,12 +74,12 @@ fn stats_inverting_opamp_is_opamproot() {
     assert_eq!(stats.linear_count, 2);
     assert_eq!(
         classify_rigid(&stats, &graph, None),
-        RigidOptimization::OpAmpRoot { inverting: true }
+        RigidOptimization::Iir
     );
 }
 
 #[test]
-fn stats_noninverting_opamp_is_opamproot() {
+fn stats_noninverting_opamp_is_iir() {
     let (graph, edges) = make_graph_all_edges(r#"
         pedal "test" { supply 9V
             components {
@@ -100,12 +100,12 @@ fn stats_noninverting_opamp_is_opamproot() {
     let stats = StageStats::from_edges(&edges, &graph);
     assert_eq!(
         classify_rigid(&stats, &graph, None),
-        RigidOptimization::OpAmpRoot { inverting: false }
+        RigidOptimization::Iir
     );
 }
 
 #[test]
-fn stats_opamp_with_feedback_cap_is_opamproot() {
+fn stats_opamp_with_feedback_cap_is_iir() {
     let (graph, edges) = make_graph_all_edges(r#"
         pedal "test" { supply 9V
             components {
@@ -129,8 +129,8 @@ fn stats_opamp_with_feedback_cap_is_opamproot() {
     let stats = StageStats::from_edges(&edges, &graph);
     assert_eq!(stats.vcvs_count, 1);
     assert_eq!(stats.reactive_count, 1);
-    // Single VCVS → OpAmpRoot (reactive feedback cap absorbed by GBW model)
-    assert_eq!(classify_rigid(&stats, &graph, None), RigidOptimization::OpAmpRoot { inverting: true });
+    // Single VCVS + reactive → IIR (GBW/slew/rails via NonIdealFx post-processing)
+    assert_eq!(classify_rigid(&stats, &graph, None), RigidOptimization::Iir);
 }
 
 #[test]

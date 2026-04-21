@@ -2906,6 +2906,13 @@ impl IirData {
         self.a_coeffs[2] = (1.0 - alpha) / a0;
     }
 
+    /// DC gain: H(z=1) = sum(b) / sum(a).
+    pub fn dc_gain(&self) -> f64 {
+        let num: f64 = self.b_coeffs.iter().sum();
+        let den: f64 = self.a_coeffs.iter().sum();
+        if den.abs() < 1e-30 { 1.0 } else { num / den }
+    }
+
     /// Process one sample through the IIR (Direct Form I).
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
@@ -2931,6 +2938,9 @@ impl IirData {
 ///
 /// Clean, minimal: just coefficients + state + process(). O(1)/sample.
 /// No WDF tree, no scattering matrix, no NR solver.
+///
+/// When the stage contains an op-amp, component-declared `NonIdealFx`
+/// are applied as post-processing: GBW rolloff → slew limiting → rail clamp.
 pub(super) struct IirStage {
     /// The biquad filter data (coefficients + history).
     pub(super) iir: IirData,
@@ -2938,6 +2948,19 @@ pub(super) struct IirStage {
     pub(super) compensation: f64,
     /// BFS distance from input (for topological ordering).
     pub(super) signal_flow_distance: usize,
+    /// Component-declared non-idealities applied after IIR computation.
+    pub(super) nonideal_fx: Vec<super::component::NonIdealFx>,
+    // ── NonIdealFx runtime state ──
+    /// GBW single-pole IIR state (for OpAmpBandwidth).
+    gbw_state: f64,
+    /// GBW lowpass coefficient: α = 2π·fc / (2π·fc + fs) where fc = GBW/gain.
+    gbw_coeff: f64,
+    /// Previous output sample (for slew rate limiting).
+    prev_out: f64,
+    /// Maximum dV per sample from slew rate (slew_rate / sample_rate).
+    max_dv_per_sample: f64,
+    /// Rail saturation voltage (from RailSaturation).
+    v_max: f64,
 }
 
 impl IirStage {
@@ -2946,12 +2969,63 @@ impl IirStage {
             iir,
             compensation: 1.0,
             signal_flow_distance: 0,
+            nonideal_fx: Vec::new(),
+            gbw_state: 0.0,
+            gbw_coeff: 1.0, // passthrough (no GBW limiting)
+            prev_out: 0.0,
+            max_dv_per_sample: f64::MAX,
+            v_max: f64::MAX,
         }
+    }
+
+    /// Configure NonIdealFx post-processing from component declarations.
+    ///
+    /// Pre-computes runtime constants (gbw_coeff, max_dv_per_sample, v_max)
+    /// so process() stays O(1) with no branching on enum variants.
+    pub(super) fn set_nonideal_fx(&mut self, fx: Vec<super::component::NonIdealFx>, sample_rate: f64) {
+        use super::component::NonIdealFx;
+        for effect in &fx {
+            match effect {
+                NonIdealFx::OpAmpBandwidth { gbw, slew_rate } => {
+                    // Estimate closed-loop gain from IIR DC response (b[0]+b[1]+b[2]) / (a[0]+a[1]+a[2])
+                    let gain = self.iir.dc_gain().abs().max(1.0);
+                    let fc = gbw / gain;
+                    let w = 2.0 * std::f64::consts::PI * fc;
+                    self.gbw_coeff = w / (w + sample_rate);
+                    // slew_rate from SPICE model is in V/µs — convert to V/s
+                    self.max_dv_per_sample = slew_rate * 1e6 / sample_rate;
+                }
+                NonIdealFx::RailSaturation { v_max } => {
+                    self.v_max = *v_max;
+                }
+            }
+        }
+        self.nonideal_fx = fx;
     }
 
     #[inline]
     pub(super) fn process(&mut self, input: f64) -> f64 {
-        flush_denormal(self.iir.process(input * self.compensation))
+        let mut out = self.iir.process(input * self.compensation);
+
+        // GBW rolloff: single-pole lowpass
+        out = self.gbw_coeff * out + (1.0 - self.gbw_coeff) * self.gbw_state;
+        self.gbw_state = out;
+
+        // Slew rate limiting
+        let dv = out - self.prev_out;
+        if dv > self.max_dv_per_sample {
+            out = self.prev_out + self.max_dv_per_sample;
+        } else if dv < -self.max_dv_per_sample {
+            out = self.prev_out - self.max_dv_per_sample;
+        }
+        self.prev_out = out;
+
+        // Rail saturation: tanh soft clip
+        if self.v_max < f64::MAX {
+            out = self.v_max * crate::fast_math::fast_tanh(out / self.v_max);
+        }
+
+        flush_denormal(out)
     }
 }
 

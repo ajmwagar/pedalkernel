@@ -460,8 +460,10 @@ fn spqr_diode_opamp_shared_rigid() {
 
 #[test]
 fn spqr_opamp_preserves_passive_context() {
-    // Inverting amp with input RC filter: the RC should be
-    // part of the same Rigid stage (connected to op-amp pins)
+    // Inverting amp with input RC filter.
+    // VCVS edges are handled by signal_flow groups (not SPQR decomposition).
+    // The SPQR decomposition only sees passive edges: C1, R1, Rf.
+    // These form a series chain → single PassiveWdf or Rigid stage.
     let (graph, edges) = make_graph_all_edges(r#"
         pedal "test" { supply 9V
             components {
@@ -484,17 +486,38 @@ fn spqr_opamp_preserves_passive_context() {
     let tree = spqr_decompose(&edges, &[graph.in_node, graph.out_node], &graph, graph.gnd_node);
     let stages = spqr_to_stages(&tree, &graph, 48000.0);
 
-    // All edges in one Rigid (VCVS infects the whole SP subtree)
-    let rigid_count = stages.iter().filter(|s| matches!(s, SpqrStage::Rigid { .. })).count();
-    assert!(rigid_count >= 1, "Should have at least one Rigid stage");
-
-    // Total edges across all stages should account for C1 + R1 + Rf + U1
+    // VCVS excluded → 3 passive edges decomposed
     let total_edges: usize = stages.iter().map(|s| match s {
         SpqrStage::PassiveWdf { edge_indices, .. }
         | SpqrStage::NlWdf { edge_indices, .. }
         | SpqrStage::Rigid { edge_indices, .. } => edge_indices.len(),
     }).sum();
-    assert_eq!(total_edges, 4, "All 4 edges should be accounted for");
+    assert_eq!(total_edges, 3, "3 passive edges (C1 + R1 + Rf), VCVS handled by signal flow");
+
+    // Full pipeline test: the compile_via_spqr path groups VCVS + passives
+    // into a single FlowGroup → IIR stage with NonIdealFx.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                C1: cap(100n)
+                R1: resistor(10k)
+                Rf: resistor(100k)
+                U1: opamp(tl072)
+            }
+            nets {
+                in -> C1.a
+                C1.b -> R1.a
+                R1.b -> U1.neg
+                Rf.a -> U1.neg
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+    let compiled = super::spqr_build::compile_via_spqr(&pedal, 48000.0);
+    assert!(compiled.is_ok(), "Should compile through full pipeline");
 }
 
 // ── Phase 2 continued ───────────────────────────────────────────

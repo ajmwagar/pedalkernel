@@ -6,15 +6,14 @@
 //! pattern matching.
 //!
 //! Cost ordering (cheapest first):
-//! 1. **Iir** — all linear → biquad from MNA. O(1)/sample.
-//! 2. **OpAmpRoot** — simple VCVS feedback → gain + GBW + slew. O(1)/sample.
-//! 3. **StateSpace** — VCVS + reactive, no NL → Schur complement. O(N)/sample.
-//! 4. **General** — has NL → MNA scattering + solver from Component. O(N²)/sample.
+//! 1. **Iir** — all linear (±VCVS) → biquad from MNA + NonIdealFx. O(1)/sample.
+//! 2. **StateSpace** — linear, >2nd order → Schur complement. O(N)/sample.
+//! 3. **General** — has NL → MNA scattering + Component::solver_hint(). O(N²)/sample.
 
 mod general;
 mod iir;
 mod mna_builder;
-mod opamp_root;
+mod opamp_root; // TODO: remove once all references in old pipeline are gone
 mod state_space;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -22,6 +21,7 @@ mod state_space;
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub(super) use self::general::{build_general_mna, build_opamp_nl_feedback};
+// Legacy re-exports for old pipeline — will be removed with opamp_analysis.rs
 pub(super) use self::opamp_root::{
     extract_opamp_config, make_opamp_root, build_opamp_root, OpAmpConfig,
 };
@@ -31,8 +31,7 @@ use super::dyn_node::DynNode;
 use super::signal_flow::FlowGroup;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr_build::BuiltStage;
-use super::stage::{IirStage, RootKind, StateSpaceStage, WdfStage};
-use crate::oversampling::{Oversampler, OversamplingFactor};
+use super::stage::IirStage;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // StageStats — one-pass Component trait scan
@@ -116,9 +115,9 @@ impl StageStats {
 pub(super) enum RigidOptimization {
     /// All linear (with or without VCVS) → biquad from MNA. O(1)/sample.
     /// Covers passive bridges AND active linear circuits (808 bridged-T).
+    /// When VCVS is present, NonIdealFx (GBW/slew/rails) are applied as
+    /// post-processing on the IirStage — no OpAmpRoot special case.
     Iir,
-    /// Single VCVS, resistive feedback → gain + GBW + slew. O(1)/sample.
-    OpAmpRoot { inverting: bool },
     /// Linear but IIR-incompatible (>2nd order) → state-space. O(N)/sample.
     StateSpace,
     /// Has NL elements → MNA scattering + Component::solver_hint(). O(N²)/sample.
@@ -129,60 +128,30 @@ pub(super) enum RigidOptimization {
 ///
 /// Decision rules (applied in cost order):
 /// 1. NL present → General (needs NR/WO solver, Component decides which)
-/// 2. Single VCVS, no reactive, no NL → OpAmpRoot (pure gain)
-/// 3. All linear (no NL) → Iir (biquad from MNA, covers passive + VCVS)
-/// 4. Fallback → General
+/// 2. All linear (no NL) → IIR from MNA (passive bridges, VCVS feedback, resonators)
+///    - VCVS is a linear constraint — MNA handles it natively
+///    - NonIdealFx (GBW/slew/rails) applied as IirStage post-processing
+/// 3. Fallback → General
 pub(super) fn classify_rigid(
     stats: &StageStats,
     graph: &CircuitGraph,
-    group: Option<&FlowGroup>,
+    _group: Option<&FlowGroup>,
 ) -> RigidOptimization {
     // Rule 1: any NL element forces general MNA + solver
     if stats.nl_count > 0 {
         return RigidOptimization::General;
     }
 
-    // Rule 2: single VCVS, reactive ground shunts, resistive feedback → IIR
-    // Resonator circuits (808 bridged-T): caps to GND create resonance,
-    // feedback path is purely resistive. IIR captures the dynamics.
-    if stats.is_single_vcvs_linear() {
-        if let Some(g) = group {
-            let is_reactive = |eidx: usize| -> bool {
-                let comp = &graph.components[graph.edges[eidx].comp_idx];
-                comp.kind.capacitance().is_some() || comp.kind.inductance().is_some()
-            };
-            let has_reactive_ground = g.ground_shunt_edges.iter().any(|&eidx| is_reactive(eidx));
-            let feedback_purely_resistive = g.feedback_edges.iter().all(|&eidx| !is_reactive(eidx));
-            if has_reactive_ground && feedback_purely_resistive {
-                return RigidOptimization::Iir;
-            }
-        }
-    }
-
-    // Rule 3: single VCVS, no NL → OpAmpRoot
-    // Reactive elements in feedback (e.g., 100pF HF rolloff cap) are
-    // absorbed by the OpAmpRoot's GBW model.
-    if stats.is_single_vcvs_linear() {
-        let inverting = is_inverting_topology(stats, graph);
-        return RigidOptimization::OpAmpRoot { inverting };
-    }
-
-    // Rule 3: all linear with reactive elements → IIR from MNA
-    // This covers both passive bridges AND active linear circuits
-    // (808 bridged-T with VCVS + caps). VCVS is linear.
-    // Must have at least 1 reactive element for biquad coefficients.
-    if stats.nl_count == 0 && stats.reactive_count > 0 {
+    // Rule 2: all linear (with or without VCVS, with or without reactive) → IIR
+    // VCVS is a linear constraint that MNA handles natively.
+    // Reactive elements give biquad dynamics; purely resistive gives DC gain.
+    // Op-amp non-idealities (GBW, slew, rails) come from Component::nonideal_fx()
+    // and are applied as post-processing on the IirStage.
+    if stats.nl_count == 0 {
         return RigidOptimization::Iir;
     }
 
-    // Rule 3b: all linear, purely resistive → passthrough (no dynamics)
-    // These stages are just resistive dividers or loads.
-    if stats.nl_count == 0 && stats.reactive_count == 0 && stats.vcvs_count == 0 {
-        return RigidOptimization::Iir; // Will produce trivial biquad (DC gain)
-        // TODO: could optimize to just a gain stage
-    }
-
-    // Rule 4: fallback
+    // Rule 3: fallback
     RigidOptimization::General
 }
 
@@ -190,6 +159,7 @@ pub(super) fn classify_rigid(
 ///
 /// Inverting: pos pin is at ground (or AC ground).
 /// Non-inverting: pos pin carries signal (not ground).
+/// Used by general.rs for NL+VCVS stages (TS, RAT pattern).
 pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) -> bool {
     let vcvs_idx = match stats.vcvs_edge {
         Some(idx) => idx,
@@ -197,16 +167,35 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
     };
     let edge = &graph.edges[vcvs_idx];
 
-    // Find the NullorPinRecord for this op-amp component
     for rec in &graph.nullor_pins {
         if rec.comp_idx == edge.comp_idx {
-            // Inverting if pos is ground or AC-ground (bypassed supply rail)
             return rec.pos_node == graph.gnd_node
                 || graph.ac_ground_nodes.contains(&rec.pos_node);
         }
     }
 
     true // Default: inverting
+}
+
+/// Collect NonIdealFx from all components in a stage's edge set.
+///
+/// Each component declares its own non-idealities via the Component trait.
+/// The builder collects them all and attaches to the stage as post-processing.
+/// Deduplicates by comp_idx (multi-port components have multiple edges).
+fn collect_nonideal_fx(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Vec<super::component::NonIdealFx> {
+    let mut seen = std::collections::HashSet::new();
+    let mut fx = Vec::new();
+    for &eidx in edge_indices {
+        let comp_idx = graph.edges[eidx].comp_idx;
+        if seen.insert(comp_idx) {
+            fx.extend(graph.components[comp_idx].kind.nonideal_fx(sample_rate));
+        }
+    }
+    fx
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -242,18 +231,19 @@ pub(super) fn build_rigid_from_group(
     let optimization = classify_rigid(&stats, graph, group);
 
     match optimization {
-        RigidOptimization::OpAmpRoot { inverting } => {
-            if let Some(g) = group {
-                build_opamp_root(g, inverting, graph, sample_rate).map(BuiltStage::Wdf)
-            } else {
-                Err("OpAmpRoot needs classified FlowGroup".to_string())
-            }
-        }
         RigidOptimization::Iir => {
             let pendant_trees = Vec::new();
             // Try IIR (≤2 states). If too many states, use StateSpace.
             match iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate) {
-                Ok(iir) => Ok(BuiltStage::Iir(IirStage::new(iir))),
+                Ok(iir_data) => {
+                    let mut stage = IirStage::new(iir_data);
+                    // Collect NonIdealFx from any op-amp components in this stage.
+                    let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                    if !fx.is_empty() {
+                        stage.set_nonideal_fx(fx, sample_rate);
+                    }
+                    Ok(BuiltStage::Iir(stage))
+                }
                 Err(_) => {
                     // IIR failed (>2 states or other issue) → StateSpace
                     let supply_voltage = 9.0; // TODO: pass from PedalDef

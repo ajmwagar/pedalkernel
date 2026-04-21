@@ -80,6 +80,37 @@ pub enum PinDirection {
     Bidirectional,
 }
 
+/// Component-declared non-ideal behavior applied as post-processing.
+///
+/// Non-ideal behavior declared by a component (from its datasheet/SPICE model).
+///
+/// Each variant is a distinct physical effect. A component returns a `Vec` of
+/// these — the stage builder applies them as post-processing. No pattern
+/// matching on component type anywhere in the pipeline.
+#[derive(Debug, Clone)]
+pub enum NonIdealFx {
+    /// Gain-bandwidth product limiting + slew rate.
+    /// Applied as a first-order IIR lowpass (fc = GBW/gain) followed by
+    /// sample-rate-limited dV/dt clamping.
+    OpAmpBandwidth {
+        /// GBW product in Hz. Determines the -3dB frequency at unity gain.
+        gbw: f64,
+        /// Maximum output rate of change in V/s.
+        slew_rate: f64,
+    },
+    /// Output rail saturation (tanh soft clip at supply limits).
+    /// Separate from power supply sag — this is instantaneous clamping,
+    /// not the slow voltage droop under load.
+    RailSaturation {
+        /// Maximum output swing in V (half-supply minus saturation voltage).
+        v_max: f64,
+    },
+    // Future variants:
+    // BjtThermal { thermal_voltage: f64 },
+    // TubeGridCurrent { onset_voltage: f64 },
+    // PowerSupplySag { esr: f64, filter_cap: f64 },
+}
+
 /// Signal flow classification for a component's pins.
 ///
 /// Used by feedback analysis to determine which components are coupled
@@ -343,6 +374,19 @@ pub trait Component: std::fmt::Debug {
     /// An op-amp has 1 port (neg-out, pos is voltage-sense).
     fn ports(&self) -> Vec<(&'static str, &'static str)> {
         vec![("a", "b")] // default: 1-port component
+    }
+
+    // ── Non-Idealities ────────────────────────────────────────────────────
+
+    /// Non-ideal behaviors for this component (GBW, slew, rails, thermal, etc.).
+    ///
+    /// Each component declares what non-idealities it has. Values come from
+    /// the SPICE model / datasheet lookup. The stage builder attaches them
+    /// as post-processing. No pattern matching on component type.
+    ///
+    /// Default: empty vec (ideal component).
+    fn nonideal_fx(&self, _sample_rate: f64) -> Vec<NonIdealFx> {
+        Vec::new()
     }
 
     // ── Signal Flow ──────────────────────────────────────────────────────

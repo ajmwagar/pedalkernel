@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
-    Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    PinDirection, ResolveContext, SignalTerminals, StampContext, StampResult,
+    Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, NonIdealFx,
+    PinConfig, PinDirection, ResolveContext, SignalTerminals, StampContext, StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::dsl::{
@@ -41,8 +41,24 @@ impl Component for OpAmp {
         if self.op_type.is_ota() {
             vec![("pos", "neg")]
         } else {
-            vec![("neg", "out")] // pos is voltage-sense
+            vec![("neg", "out")]
         }
+    }
+
+    fn nonideal_fx(&self, _sample_rate: f64) -> Vec<NonIdealFx> {
+        if self.op_type.is_ota() {
+            return Vec::new(); // OTA non-idealities handled differently
+        }
+        let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
+        vec![
+            NonIdealFx::OpAmpBandwidth {
+                gbw: model.gbw,
+                slew_rate: model.slew_rate,
+            },
+            NonIdealFx::RailSaturation {
+                v_max: 3.0, // default: 9V/2 - 1.5V saturation. Updated by set_supply_voltage.
+            },
+        ]
     }
 
     fn signal_terminals(&self) -> SignalTerminals {

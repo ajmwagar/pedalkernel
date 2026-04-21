@@ -7,6 +7,59 @@ use super::spqr_build::compile_via_spqr;
 use crate::PedalProcessor;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Component trait: nonideal_fx() declared by the component
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn opamp_declares_nonideal_fx() {
+    use super::components::OpAmp;
+    use super::component::{Component, NonIdealFx};
+    use crate::dsl::OpAmpType;
+
+    let lm308 = OpAmp { op_type: OpAmpType::Lm308 };
+    let fx_list = lm308.nonideal_fx(48000.0);
+    assert!(!fx_list.is_empty(), "LM308 should declare non-idealities");
+
+    // Should have both OpAmpBandwidth and RailSaturation
+    let mut found_bw = false;
+    let mut found_rails = false;
+    for fx in &fx_list {
+        match fx {
+            NonIdealFx::OpAmpBandwidth { gbw, slew_rate } => {
+                assert!(*gbw > 100_000.0, "LM308 GBW should be > 100kHz, got {gbw}");
+                assert!(*slew_rate > 0.1, "LM308 slew rate should be > 0.1 V/µs, got {slew_rate}");
+                eprintln!("LM308: GBW={gbw:.0}Hz, slew={:.1}V/µs", slew_rate / 1e6);
+                found_bw = true;
+            }
+            NonIdealFx::RailSaturation { v_max } => {
+                assert!(*v_max > 0.0, "Should have rail limit");
+                eprintln!("LM308: v_max={v_max:.1}V");
+                found_rails = true;
+            }
+        }
+    }
+    assert!(found_bw, "Should declare OpAmpBandwidth");
+    assert!(found_rails, "Should declare RailSaturation");
+}
+
+#[test]
+fn resistor_has_no_nonideal_fx() {
+    use super::components::Resistor;
+    use super::component::Component;
+    let r = Resistor { value: 10_000.0 };
+    assert!(r.nonideal_fx(48000.0).is_empty(), "Resistors are ideal");
+}
+
+#[test]
+fn diode_has_no_nonideal_fx() {
+    use super::components::Diode;
+    use super::component::Component;
+    use crate::dsl::DiodeType;
+    let d = Diode { diode_type: DiodeType::Silicon };
+    assert!(d.nonideal_fx(48000.0).is_empty(), "Diodes are ideal (NL handled by NR solver)");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Gain: should come from circuit math (IIR), not OpAmpRoot
 // ═══════════════════════════════════════════════════════════════════════════
 
