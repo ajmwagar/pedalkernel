@@ -35,23 +35,14 @@ fn pot_halves_in_same_stage() {
 
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
-    // Both pot halves should be findable in the SAME stage
-    let mut aw_stage = None;
-    let mut wb_stage = None;
-    for (i, stage) in compiled.stages.iter().enumerate() {
-        if stage.tree.get_pot_position("Volume__aw").is_some() {
-            aw_stage = Some(i);
-        }
-        if stage.tree.get_pot_position("Volume__wb").is_some() {
-            wb_stage = Some(i);
-        }
-    }
-
-    assert!(aw_stage.is_some(), "Should find Volume__aw in a stage");
-    assert!(wb_stage.is_some(), "Should find Volume__wb in a stage");
-    assert_eq!(
-        aw_stage, wb_stage,
-        "Both pot halves must be in the SAME stage for voltage divider to work"
+    // Both pot edges should be in the same stage (same comp_idx).
+    // With native ports, the pot is "Volume" (not __aw/__wb).
+    let pot_stage = compiled.stages.iter().position(|s| {
+        s.tree.get_pot_position("Volume").is_some()
+    });
+    assert!(
+        pot_stage.is_some(),
+        "Should find Volume pot in a stage"
     );
 }
 

@@ -351,10 +351,18 @@ pub(super) fn build_spqr_stage(
     _sample_rate: f64,
 ) -> Result<BuiltStage, String> {
     match stage {
-        SpqrStage::PassiveWdf { tree, .. } => {
+        SpqrStage::PassiveWdf { tree, edge_indices, .. } => {
             let tree = with_voltage_source(tree);
             let oversampler = Oversampler::new(OversamplingFactor::X1);
-            Ok(BuiltStage::Wdf(WdfStage::new(tree, RootKind::Passthrough, oversampler)))
+            // Ground-terminated → ShortCircuit root. Floating → Passthrough.
+            let touches_gnd = edge_indices.iter().any(|&eidx| {
+                let e = &graph.edges[eidx];
+                e.node_a == graph.gnd_node || e.node_b == graph.gnd_node
+                    || graph.ac_ground_nodes.contains(&e.node_a)
+                    || graph.ac_ground_nodes.contains(&e.node_b)
+            });
+            let root = if touches_gnd { RootKind::ShortCircuit } else { RootKind::Passthrough };
+            Ok(BuiltStage::Wdf(WdfStage::new(tree, root, oversampler)))
         }
         SpqrStage::NlWdf { tree, nl_edge_idx, .. } => {
             let e = &graph.edges[nl_edge_idx];
