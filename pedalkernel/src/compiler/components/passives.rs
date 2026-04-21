@@ -3,7 +3,7 @@
 
 use crate::compiler::component::{
     Component, ComponentEdge, ControlParam, ControlParamKind, EdgeKind, GraphRole, PinConfig,
-    PinDirection, StampResult, OPEN_CIRCUIT_R,
+    PinDirection, StampContext, StampResult, OPEN_CIRCUIT_R,
 };
 use crate::compiler::dyn_node::DynNode;
 use crate::compiler::validate::Severity;
@@ -433,6 +433,28 @@ impl Component for Potentiometer {
             dyn_node: DynNode::Pot(comp_id.to_string(), self.max_r, initial_pos, self.taper),
             initial_conductance: 1.0 / r,
         }
+    }
+
+    fn stamp_mna_multi(
+        &self,
+        _comp_id: &str,
+        ctx: &mut StampContext,
+        mna: &mut MnaSystem,
+    ) -> StampResult {
+        let initial_pos = 0.5;
+        let tapered_pos = self.taper.apply(initial_pos);
+        // a→w half: R_aw = pos * max_R
+        let r_aw = (tapered_pos * self.max_r).max(1.0);
+        let n_a = (ctx.pin_to_mna)("a");
+        let n_w = (ctx.pin_to_mna)("w").or_else(|| (ctx.pin_to_mna)("wiper"));
+        mna.stamp_resistor(n_a, n_w, r_aw);
+
+        // w→b half: R_wb = (1-pos) * max_R
+        let r_wb = ((1.0 - tapered_pos) * self.max_r).max(1.0);
+        let n_b = (ctx.pin_to_mna)("b");
+        mna.stamp_resistor(n_w, n_b, r_wb);
+
+        StampResult::Stamped
     }
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {

@@ -724,6 +724,85 @@ impl MnaSystem {
 
     /// Derive the scattering matrix for WDF ports.
     ///
+    /// Compute the DC transfer function gain: V_out / V_in at f=0.
+    ///
+    /// Solves the augmented MNA system [G, B; C, D] · [V; I] = [0; ...1...]
+    /// and returns the voltage at the output node when VS injects 1V.
+    /// For purely resistive networks (no caps), this IS the transfer function.
+    pub fn dc_gain(&self, vs_idx: usize, output_pos: Option<usize>) -> f64 {
+        let n = self.num_nodes;
+        let nv = self.num_vsources;
+        let n_aug = n + nv;
+
+        // Build augmented matrix [G, B; C, D]
+        let mut aug = vec![0.0; n_aug * n_aug];
+        for i in 0..n {
+            for j in 0..n {
+                aug[i * n_aug + j] = self.g_matrix[i * n + j];
+            }
+            for j in 0..nv {
+                aug[i * n_aug + n + j] = self.b_matrix[i * nv + j];
+            }
+        }
+        for i in 0..nv {
+            for j in 0..n {
+                aug[(n + i) * n_aug + j] = self.c_matrix[i * n + j];
+            }
+            for j in 0..nv {
+                aug[(n + i) * n_aug + n + j] = self.d_matrix[i * nv + j];
+            }
+        }
+
+        // RHS: 1V at the voltage source row
+        let mut rhs = vec![0.0; n_aug];
+        rhs[n + vs_idx] = 1.0;
+
+        // Solve aug · x = rhs via Gaussian elimination
+        let mut a = aug;
+        let mut b = rhs;
+        for col in 0..n_aug {
+            // Partial pivoting
+            let mut max_row = col;
+            let mut max_val = a[col * n_aug + col].abs();
+            for row in (col + 1)..n_aug {
+                let v = a[row * n_aug + col].abs();
+                if v > max_val {
+                    max_val = v;
+                    max_row = row;
+                }
+            }
+            if max_val < 1e-30 {
+                return 0.0; // Singular — no gain
+            }
+            if max_row != col {
+                for k in 0..n_aug {
+                    a.swap(col * n_aug + k, max_row * n_aug + k);
+                }
+                b.swap(col, max_row);
+            }
+            let pivot = a[col * n_aug + col];
+            for row in (col + 1)..n_aug {
+                let factor = a[row * n_aug + col] / pivot;
+                for k in col..n_aug {
+                    a[row * n_aug + k] -= factor * a[col * n_aug + k];
+                }
+                b[row] -= factor * b[col];
+            }
+        }
+        // Back-substitute
+        let mut x = vec![0.0; n_aug];
+        for col in (0..n_aug).rev() {
+            let mut sum = b[col];
+            for k in (col + 1)..n_aug {
+                sum -= a[col * n_aug + k] * x[k];
+            }
+            x[col] = sum / a[col * n_aug + col];
+        }
+
+        // Output voltage at the output node
+        output_pos.map_or(0.0, |p| x[p])
+    }
+
     /// Each port corresponds to a Thévenin equivalent at a node pair.
     /// The last port is adapted (reflection-free).
     ///

@@ -31,9 +31,12 @@ pub(in crate::compiler) fn build_iir_stage(
     let vs_idx = built.vs_idx;
     let out_mna = built.output_mna;
 
-    // ── No caps → pure resistive (DC gain only) ──────────────────
+    // ── No caps → pure resistive network (DC gain only) ──────────
+    // Compute the actual gain from MNA instead of assuming passthrough.
+    // This handles pot voltage dividers, attenuator pads, etc.
     if cap_stamps.is_empty() {
-        return Ok(IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate));
+        let dc_gain = mna.dc_gain(vs_idx, out_mna);
+        return Ok(IirData::new(vec![dc_gain, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate));
     }
 
     // ── Extract feedback_r for VCVS circuits ──────────────────────

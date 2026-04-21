@@ -96,12 +96,36 @@ pub(super) fn build_mna(
     let mut mna = MnaSystem::new(num_nodes, num_vsources);
     let mut cap_stamps: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
 
+    // Track multi-port components to avoid double-stamping.
+    // Components with >1 port use stamp_mna_multi() once.
+    let mut stamped_multi: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
     for &eidx in edge_indices {
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
         let n1 = node_to_mna(e.node_a);
         let n2 = node_to_mna(e.node_b);
         let edge_kind = graph.effective_edge_kind(eidx);
+
+        // Multi-port components (pots with 2 edges): stamp once via stamp_mna_multi
+        if comp.kind.ports().len() > 1 && edge_kind == EdgeKind::Linear {
+            if stamped_multi.insert(e.comp_idx) {
+                let pin_fn = |pin: &str| -> Option<usize> {
+                    let key = format!("{}.{}", comp.id, pin);
+                    let node = graph.node_names.get(&key)?;
+                    node_to_mna(*node)
+                };
+                let mut ctx = StampContext {
+                    pin_to_mna: &pin_fn,
+                    vsrc_base: 0,
+                    internal_node_base: 0,
+                    sample_rate,
+                    cap_stamps: None,
+                };
+                comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
+            }
+            continue;
+        }
 
         match edge_kind {
             EdgeKind::Linear => {
