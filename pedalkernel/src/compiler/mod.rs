@@ -60,3 +60,5 @@ mod general_mna_tests;
 mod pot_tests;
 #[cfg(test)]
 mod graph_role_tests;
+#[cfg(test)]
+mod nonideal_tests;
