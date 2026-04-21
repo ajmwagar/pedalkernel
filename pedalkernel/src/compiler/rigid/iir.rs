@@ -36,6 +36,8 @@ pub(in crate::compiler) fn build_iir_stage(
     // This handles pot voltage dividers, attenuator pads, etc.
     if cap_stamps.is_empty() {
         let dc_gain = mna.dc_gain(vs_idx, out_mna);
+        #[cfg(test)]
+        eprintln!("IIR dc_gain={dc_gain:.4} vs_idx={vs_idx} out_mna={out_mna:?}");
         return Ok(IirData::new(vec![dc_gain, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate));
     }
 

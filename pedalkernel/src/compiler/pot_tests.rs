@@ -269,8 +269,53 @@ fn iir_builder_pot_dc_gain() {
             .collect();
         eprintln!("Group ({} edges): {names:?}", edges.len());
 
-        // Just verify the group exists and is multi-edge
-        eprintln!("  (group has pot — would go through IIR path)");
+        // Build MNA manually to check dc_gain with correct output node
+        use crate::tree::MnaSystem;
+        use super::component::StampContext;
+        // Collect nodes
+        let mut nodes: Vec<super::graph::NodeId> = Vec::new();
+        for &eidx in &edges {
+            let e = &graph.edges[eidx];
+            for n in [e.node_a, e.node_b] {
+                if n != graph.gnd_node && !graph.supply_nodes.contains(&n) && !nodes.contains(&n) {
+                    nodes.push(n);
+                }
+            }
+        }
+        let n2m = |n: super::graph::NodeId| -> Option<usize> {
+            if n == graph.gnd_node { None } else { nodes.iter().position(|&x| x == n) }
+        };
+        let mut mna = MnaSystem::new(nodes.len(), 1);
+        // Stamp pot via stamp_mna_multi
+        for &eidx in &edges {
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            if comp.kind.ports().len() > 1 {
+                let pin_fn = |pin: &str| -> Option<usize> {
+                    let key = format!("{}.{}", comp.id, pin);
+                    graph.node_names.get(&key).and_then(|&n| n2m(n))
+                };
+                let mut ctx = StampContext {
+                    pin_to_mna: &pin_fn, vsrc_base: 0, internal_node_base: 0,
+                    sample_rate: 48000.0, cap_stamps: None,
+                };
+                comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
+                break; // Only stamp once
+            } else if let Some(r) = comp.kind.resistance() {
+                let e = &graph.edges[eidx];
+                mna.stamp_resistor(n2m(e.node_a), n2m(e.node_b), r);
+            }
+        }
+        // VS at in_node
+        let vs_mna = n2m(graph.in_node);
+        mna.stamp_voltage_source(vs_mna, None, 0);
+        // Output at out_node (wiper)
+        let out_mna = n2m(graph.out_node);
+        let gain = mna.dc_gain(0, out_mna);
+        eprintln!("  Manual MNA: nodes={:?} vs={vs_mna:?} out={out_mna:?} dc_gain={gain:.4}", nodes);
+        assert!(
+            gain.abs() > 0.01 && gain.abs() < 1.0,
+            "DC gain should attenuate, got {gain:.4}"
+        );
         break;
     }
 }
