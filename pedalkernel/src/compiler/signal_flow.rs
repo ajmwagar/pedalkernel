@@ -546,16 +546,46 @@ pub(in crate::compiler) fn find_flow_groups(
         });
     }
 
-    // Unclaimed edges -> individual standalone groups
+    // Unclaimed edges -> standalone groups.
+    // Pot halves (__aw/__wb) sharing the same base component ID are merged
+    // into one group so they form a working voltage divider.
+    let mut pot_groups: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut other_unclaimed: Vec<usize> = Vec::new();
+
     for &eidx in edge_indices {
-        if !claimed.contains(&eidx) {
-            groups.push(FlowGroup {
-                active_edges: Vec::new(),
-                feedback_edges: Vec::new(),
-                pendant_edges: vec![eidx],
-                ground_shunt_edges: Vec::new(),
-            });
+        if claimed.contains(&eidx) {
+            continue;
         }
+        let comp_id = &graph.components[graph.edges[eidx].comp_idx].id;
+        if comp_id.contains("__aw") || comp_id.contains("__wb") {
+            let base_id = comp_id
+                .trim_end_matches("__aw")
+                .trim_end_matches("__wb")
+                .to_string();
+            pot_groups.entry(base_id).or_default().push(eidx);
+        } else {
+            other_unclaimed.push(eidx);
+        }
+    }
+
+    // Merged pot halves → one group per pot
+    for (_base_id, edges) in pot_groups {
+        groups.push(FlowGroup {
+            active_edges: Vec::new(),
+            feedback_edges: Vec::new(),
+            pendant_edges: edges,
+            ground_shunt_edges: Vec::new(),
+        });
+    }
+
+    // Other unclaimed → individual standalone groups
+    for eidx in other_unclaimed {
+        groups.push(FlowGroup {
+            active_edges: Vec::new(),
+            feedback_edges: Vec::new(),
+            pendant_edges: vec![eidx],
+            ground_shunt_edges: Vec::new(),
+        });
     }
 
     groups

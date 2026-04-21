@@ -13,37 +13,45 @@ use crate::PedalProcessor;
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn pot_is_single_edge_in_graph() {
-    // A 3-terminal pot should produce ONE graph edge, not two synthetic ones.
+fn pot_halves_in_same_stage() {
+    // Pot halves (aw + wb) should end up in the same stage, not split apart.
+    // The wiper is a real circuit node — two edges is correct in the graph.
+    // But the SPQR pipeline must keep them together for the divider to work.
     let pedal = crate::dsl::parse_pedal_file(r#"
         pedal "test" { supply 9V
-            components { Volume: pot(100k, a) }
-            nets { in -> Volume.a  Volume.w -> out  Volume.b -> gnd }
-            controls { Volume.position -> "Volume" [1.0, 0.0] = 0.5 }
+            components {
+                R1: resistor(10k)
+                Volume: pot(100k, a)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> Volume.a
+                Volume.w -> out
+                Volume.b -> gnd
+            }
+            controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
         }"#)
     .expect("parse");
 
-    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-    let active_set: std::collections::HashSet<usize> =
-        graph.active_edge_indices.iter().copied().collect();
-    let signal_edges: Vec<usize> = (0..graph.edges.len())
-        .filter(|i| !active_set.contains(i))
-        .collect();
+    let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
-    // Should have exactly 1 edge for the pot (not 2 synthetic __aw/__wb)
-    let pot_edges: Vec<_> = signal_edges
-        .iter()
-        .filter(|&&eidx| {
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            comp.id == "Volume" || comp.id.starts_with("Volume__")
-        })
-        .collect();
+    // Both pot halves should be findable in the SAME stage
+    let mut aw_stage = None;
+    let mut wb_stage = None;
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        if stage.tree.get_pot_position("Volume__aw").is_some() {
+            aw_stage = Some(i);
+        }
+        if stage.tree.get_pot_position("Volume__wb").is_some() {
+            wb_stage = Some(i);
+        }
+    }
 
+    assert!(aw_stage.is_some(), "Should find Volume__aw in a stage");
+    assert!(wb_stage.is_some(), "Should find Volume__wb in a stage");
     assert_eq!(
-        pot_edges.len(), 1,
-        "3-terminal pot should be 1 edge, not {} (IDs: {:?})",
-        pot_edges.len(),
-        pot_edges.iter().map(|&&eidx| &graph.components[graph.edges[eidx].comp_idx].id).collect::<Vec<_>>()
+        aw_stage, wb_stage,
+        "Both pot halves must be in the SAME stage for voltage divider to work"
     );
 }
 
@@ -71,6 +79,10 @@ fn pot_creates_voltage_divider_stage() {
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    eprintln!("Divider stages: {}", compiled.stages.len());
+    for (i, s) in compiled.stages.iter().enumerate() {
+        eprintln!("  stage {i}: rp={:.1}", s.tree.port_resistance());
+    }
 
     // At default (0.5): should pass signal with some attenuation
     for _ in 0..100 {
