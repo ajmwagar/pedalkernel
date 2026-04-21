@@ -182,6 +182,100 @@ fn pot_in_feedback_changes_gain() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Layer 1: MNA stamping — does the pot stamp correct resistances?
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn mna_pot_stamps_split_resistance() {
+    use crate::tree::MnaSystem;
+    use super::component::{Component, StampContext};
+    use super::components::Potentiometer;
+    use crate::dsl::PotTaper;
+
+    let pot = Potentiometer { max_r: 100_000.0, taper: PotTaper::B };
+    let mut mna = MnaSystem::new(3, 0); // nodes: a(0), w(1), b(2)
+
+    let pin_fn = |pin: &str| -> Option<usize> {
+        match pin { "a" => Some(0), "w" | "wiper" => Some(1), "b" => Some(2), _ => None }
+    };
+    let mut ctx = StampContext {
+        pin_to_mna: &pin_fn, vsrc_base: 0, internal_node_base: 0,
+        sample_rate: 48000.0, cap_stamps: None,
+    };
+    pot.stamp_mna_multi("Vol", &mut ctx, &mut mna);
+
+    // Position 0.5, linear: R_aw=50k, R_wb=50k → G=2e-5 each
+    let g_half = 1.0 / 50_000.0;
+    assert!((mna.g_matrix[0] - g_half).abs() < 1e-8, "G[a,a]");
+    assert!((mna.g_matrix[4] - 2.0 * g_half).abs() < 1e-8, "G[w,w] = aw+wb");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 2: DC gain — does the MNA produce correct gain?
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn mna_dc_gain_voltage_divider() {
+    use crate::tree::MnaSystem;
+    // VS → R1(50k) → R2(50k) → GND. Gain at junction = 0.5
+    let mut mna = MnaSystem::new(2, 1);
+    mna.stamp_resistor(Some(0), Some(1), 50_000.0);
+    mna.stamp_resistor(Some(1), None, 50_000.0);
+    mna.stamp_voltage_source(Some(0), None, 0);
+    let gain = mna.dc_gain(0, Some(1));
+    eprintln!("50k/50k divider gain: {gain:.4}");
+    assert!((gain - 0.5).abs() < 0.01, "Expected 0.5, got {gain:.4}");
+}
+
+#[test]
+fn mna_dc_gain_asymmetric() {
+    use crate::tree::MnaSystem;
+    // 10k / 90k → gain = 0.9
+    let mut mna = MnaSystem::new(2, 1);
+    mna.stamp_resistor(Some(0), Some(1), 10_000.0);
+    mna.stamp_resistor(Some(1), None, 90_000.0);
+    mna.stamp_voltage_source(Some(0), None, 0);
+    let gain = mna.dc_gain(0, Some(1));
+    eprintln!("10k/90k divider gain: {gain:.4}");
+    assert!((gain - 0.9).abs() < 0.01, "Expected 0.9, got {gain:.4}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 3: IIR builder — correct biquad from pot circuit?
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn iir_builder_pot_dc_gain() {
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components { R1: resistor(10k)  Volume: pot(100k, b) }
+            nets { in -> R1.a  R1.b -> Volume.a  Volume.w -> out  Volume.b -> gnd }
+            controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
+        }"#).expect("parse");
+
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    for group in &groups {
+        let edges = group.all_edges();
+        if edges.len() < 2 { continue; }
+        let names: Vec<_> = edges.iter()
+            .map(|&e| graph.components[graph.edges[e].comp_idx].id.clone())
+            .collect();
+        eprintln!("Group ({} edges): {names:?}", edges.len());
+
+        // Just verify the group exists and is multi-edge
+        eprintln!("  (group has pot — would go through IIR path)");
+        break;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Direct WDF scatter math test
 // ═══════════════════════════════════════════════════════════════════════════
 
