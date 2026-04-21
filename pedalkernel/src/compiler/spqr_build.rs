@@ -153,8 +153,22 @@ pub fn compile_via_spqr_with_options(
                 }
             }
             stage_counter += 1;
+        } else if is_pot_divider_group(group, &graph) {
+            // Pot voltage divider: both halves in one stage.
+            // Build directly as Parallel(aw, wb) with ShortCircuit root.
+            let built = build_pot_divider(group, &graph, sample_rate);
+            match built {
+                Ok(BuiltStage::Wdf(mut wdf)) => {
+                    wdf.signal_flow_distance = stage_counter;
+                    stage_order.push(StageRef::Wdf(wdf_stages.len()));
+                    wdf_stages.push(wdf);
+                }
+                Ok(_) => unreachable!(),
+                Err(e) => return Err(format!("Stage {stage_counter} (pot): {e}")),
+            }
+            stage_counter += 1;
         } else {
-            // No feedback → SPQR decompose for WDF/NlWdf stages
+            // No feedback, not a pot → SPQR decompose for WDF/NlWdf stages
             let spqr_tree = spqr_decompose(
                 &group.all_edges(),
                 &terminals,
@@ -256,6 +270,59 @@ pub fn compile_via_spqr_with_options(
 // ═══════════════════════════════════════════════════════════════════════════
 // Stage construction helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Check if a group is a merged pot pair (aw + wb of same component).
+fn is_pot_divider_group(
+    group: &super::signal_flow::FlowGroup,
+    graph: &CircuitGraph,
+) -> bool {
+    let edges = group.all_edges();
+    if edges.len() != 2 {
+        return false;
+    }
+    let id0 = &graph.components[graph.edges[edges[0]].comp_idx].id;
+    let id1 = &graph.components[graph.edges[edges[1]].comp_idx].id;
+    // Both are pot halves of the same base component
+    (id0.ends_with("__aw") && id1.ends_with("__wb"))
+        || (id0.ends_with("__wb") && id1.ends_with("__aw"))
+}
+
+/// Build a pot voltage divider stage: Parallel(R_aw, R_wb) with ShortCircuit root.
+///
+/// The output is at the wiper (parallel junction). In WDF, the Parallel
+/// adaptor's junction voltage IS the voltage divider output.
+fn build_pot_divider(
+    group: &super::signal_flow::FlowGroup,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Result<BuiltStage, String> {
+    let edges = group.all_edges();
+
+    // Build both pot leaf nodes
+    let mut leaves: Vec<DynNode> = Vec::new();
+    for &eidx in &edges {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if let Some(leaf) = comp.kind.make_leaf(&comp.id, sample_rate) {
+            leaves.push(leaf);
+        }
+    }
+
+    if leaves.len() != 2 {
+        return Err("Pot divider: expected 2 leaves".to_string());
+    }
+
+    // Series(R_aw, R_wb) — voltage divider from signal to ground.
+    // Wiper is the junction between aw and wb.
+    // ShortCircuit root = ground at the bottom of R_wb.
+    // Output extracted at the junction (series_junction_voltage).
+    let divider = DynNode::Series(Box::new(leaves.remove(0)), Box::new(leaves.remove(0)));
+
+    // Tree: VS in series with the divider chain
+    let tree = with_voltage_source(divider);
+
+    let oversampler = Oversampler::new(OversamplingFactor::X1);
+    Ok(BuiltStage::Wdf(WdfStage::new(tree, RootKind::ShortCircuit, oversampler)))
+}
 
 /// Wrap a passive DynNode tree with a voltage source input port.
 ///
