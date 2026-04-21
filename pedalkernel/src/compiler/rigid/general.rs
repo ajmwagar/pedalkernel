@@ -131,11 +131,17 @@ pub(in crate::compiler) fn build_general_mna(
         return Err("build_general_mna: no NL edges found".to_string());
     }
 
-    // Classify NL elements and collect terminal pairs
+    // Classify NL elements and collect terminal pairs.
+    // Deduplicate by comp_idx — multi-port components (BJTs) have 2 edges
+    // but are ONE device. classify_nonlinear() should be called once per device.
     let mut nl_kinds: Vec<NonlinearKind> = Vec::new();
     let mut nl_terminals: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut seen_comp_idx: HashSet<usize> = HashSet::new();
     for &eidx in &nl_edge_indices {
         let e = &graph.edges[eidx];
+        if !seen_comp_idx.insert(e.comp_idx) {
+            continue; // Already classified this component
+        }
         let comp = &graph.components[e.comp_idx];
         let (kind, _junctions) = comp
             .kind

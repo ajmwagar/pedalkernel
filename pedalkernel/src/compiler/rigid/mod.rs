@@ -67,16 +67,25 @@ impl StageStats {
             vcvs_edge: None,
             nl_edge: None,
         };
+        // Count unique components per edge kind (multi-port components
+        // have multiple edges but count as one device).
+        let mut seen_nl: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut seen_vcvs: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for &eidx in edge_indices {
+            let comp_idx = graph.edges[eidx].comp_idx;
             match graph.effective_edge_kind(eidx) {
                 EdgeKind::Vcvs => {
-                    stats.vcvs_count += 1;
-                    stats.vcvs_edge = Some(eidx);
+                    if seen_vcvs.insert(comp_idx) {
+                        stats.vcvs_count += 1;
+                        stats.vcvs_edge = Some(eidx);
+                    }
                 }
                 EdgeKind::Nonlinear => {
-                    stats.nl_count += 1;
-                    if stats.nl_edge.is_none() {
-                        stats.nl_edge = Some(eidx);
+                    if seen_nl.insert(comp_idx) {
+                        stats.nl_count += 1;
+                        if stats.nl_edge.is_none() {
+                            stats.nl_edge = Some(eidx);
+                        }
                     }
                 }
                 EdgeKind::Reactive => stats.reactive_count += 1,
