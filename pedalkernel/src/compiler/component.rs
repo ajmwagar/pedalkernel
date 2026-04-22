@@ -826,6 +826,21 @@ pub trait Component: std::fmt::Debug {
         false
     }
 
+    /// Whether this element's input node acts as a summing junction that
+    /// should block BFS traversal in the signal flow graph.
+    ///
+    /// Op-amp neg nodes are summing junctions: the input signal, feedback
+    /// network, and interstage coupling all connect to the same node.
+    /// Without blocking, BFS from a downstream element can traverse backward
+    /// through this element's feedback, across shared passives, and reach
+    /// upstream elements — creating false cycle edges.
+    ///
+    /// Returns true for op-amps (VCVS). Returns false for diodes, BJTs,
+    /// tubes, etc. — their input nodes don't create false coupling paths.
+    fn feedback_input_is_barrier(&self) -> bool {
+        false
+    }
+
     // ── Composite classification ─────────────────────────────────────────
 
     /// Passive two-terminal element (R, C, L, etc.) — excludes transformers and pots.

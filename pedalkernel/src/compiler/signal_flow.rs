@@ -201,6 +201,7 @@ fn build_flow_graph(
     elements: &[ActiveElement],
     adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
     rails: &HashSet<NodeId>,
+    graph: &CircuitGraph,
 ) -> Vec<Vec<usize>> {
     let n = elements.len();
     let mut flow_adj = vec![Vec::new(); n];
@@ -208,12 +209,41 @@ fn build_flow_graph(
     for i in 0..n {
         let elem_i = &elements[i];
 
-        // Block traversal through other elements' output nodes (ALL of them)
+        // Block traversal through other elements' output nodes (ALL of them).
+        // Additionally, block other VCVS (op-amp) elements' input nodes.
+        // VCVS neg nodes act as summing junctions shared with interstage
+        // coupling networks (pots, resistors). Without this blocking, BFS
+        // from element i's output can traverse backward through i's own
+        // feedback, through shared passives, and reach another op-amp's
+        // neg node — creating a false cycle edge.
+        //
+        // We only block VCVS inputs, not diode/BJT inputs, because:
+        // - Diodes in feedback (e.g., Screamer D1 between neg and out)
+        //   MUST be reachable from the op-amp's BFS for correct coupling.
+        // - BJTs with shared emitter coupling (Fuzz Face) need their
+        //   input nodes reachable for mutual feedback detection.
+        // - Op-amp neg nodes are the only ones that create false paths
+        //   through feedback networks to upstream stages.
+        // Block traversal through other elements' output nodes AND through
+        // other elements whose input node acts as a summing junction
+        // (feedback_input_is_barrier). Op-amp neg nodes are summing junctions
+        // shared with interstage coupling — without blocking, BFS traverses
+        // backward through i's feedback, across shared passives, and creates
+        // false cycle edges.
+        //
+        // The barrier property comes from Component::feedback_input_is_barrier().
         let blocked_outputs: HashSet<NodeId> = elements
             .iter()
             .enumerate()
             .filter(|&(j, _)| j != i)
-            .flat_map(|(_, e)| e.output_nodes.iter().copied())
+            .flat_map(|(_, e)| {
+                let mut nodes: Vec<NodeId> = e.output_nodes.clone();
+                let comp = &graph.components[graph.edges[e.edge_idx].comp_idx];
+                if comp.kind.feedback_input_is_barrier() {
+                    nodes.push(e.input_node);
+                }
+                nodes
+            })
             .filter(|node| !rails.contains(node))
             .collect();
 
@@ -227,7 +257,31 @@ fn build_flow_graph(
             reachable.extend(r);
         }
 
-        // Check if any other element's input is reachable
+        // Also compute restricted reachability with i's own input blocked.
+        // This prevents false backward paths where BFS traverses through i's
+        // feedback network, across interstage coupling, and reaches another
+        // barrier element's input (i.out → i.feedback → i.neg → pot → j.neg).
+        // Computed for ALL elements — even non-barrier elements like diodes
+        // can create false paths through shared feedback networks.
+        let restricted_reachable = if !rails.contains(&elem_i.input_node) {
+            let mut blocked_plus_self = blocked_outputs.clone();
+            blocked_plus_self.insert(elem_i.input_node);
+            let mut r = HashSet::new();
+            for &out_node in &elem_i.output_nodes {
+                if rails.contains(&out_node) {
+                    continue;
+                }
+                r.extend(bfs_reachable_nodes(out_node, adj, &blocked_plus_self));
+            }
+            Some(r)
+        } else {
+            None
+        };
+
+        // Check if any other element's input is reachable.
+        // For barrier targets (op-amps): use restricted reachability if
+        // element i is also a barrier. This prevents false cycles through
+        // shared feedback/interstage networks.
         for j in 0..n {
             if i == j {
                 continue;
@@ -236,7 +290,15 @@ fn build_flow_graph(
             if rails.contains(&elem_j.input_node) {
                 continue;
             }
-            if reachable.contains(&elem_j.input_node) {
+            let comp_j = &graph.components[graph.edges[elem_j.edge_idx].comp_idx];
+            let use_restricted = comp_j.kind.feedback_input_is_barrier()
+                && restricted_reachable.is_some();
+            let reach = if use_restricted {
+                restricted_reachable.as_ref().unwrap()
+            } else {
+                &reachable
+            };
+            if reach.contains(&elem_j.input_node) {
                 flow_adj[i].push(j);
             }
         }
@@ -365,7 +427,7 @@ pub(in crate::compiler) fn find_flow_groups(
     let adj = build_passive_adjacency(edge_indices, graph, &rails, &active_edge_set);
 
     // Build directed flow graph and find SCCs
-    let flow_adj = build_flow_graph(&active_elements, &adj, &rails);
+    let flow_adj = build_flow_graph(&active_elements, &adj, &rails, graph);
     let sccs = tarjan_scc(&flow_adj);
 
     // Build classified FlowGroup for each SCC
@@ -1538,8 +1600,8 @@ mod tests {
                     R4: resistor(4.7k)
                     IC1b: opamp(tl072)
                     Rf2: resistor(47k)
-                    D1: diode(1n4148)
-                    D2: diode(1n4148)
+                    D1: diode(silicon)
+                    D2: diode(silicon)
                 }
                 nets {
                     in -> R_in.a
