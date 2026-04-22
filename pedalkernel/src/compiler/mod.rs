@@ -63,3 +63,5 @@ mod nonideal_tests;
 mod split_point_tests;
 #[cfg(test)]
 mod pot_sweep_tests;
+#[cfg(test)]
+mod zero_output_tests;

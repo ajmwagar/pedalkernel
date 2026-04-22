@@ -531,24 +531,46 @@ fn extract_pendants(
     let mut remaining: Vec<usize> = edge_indices.to_vec();
     let mut pendants: Vec<SpqrNode> = Vec::new();
 
+    // Rail nodes are always considered pendant endpoints — multiple edges
+    // connecting to GND/VCC don't create a signal path between them.
+    // Excluding them from degree count ensures each ground-terminated
+    // edge is recognized as a pendant independently.
+    let rail_nodes: std::collections::HashSet<NodeId> = {
+        let mut r = std::collections::HashSet::new();
+        r.insert(graph.gnd_node);
+        r.insert(graph.vcc_node);
+        r.extend(&graph.supply_nodes);
+        r.extend(&graph.ac_ground_nodes);
+        r
+    };
+
     loop {
-        // Build degree map for current remaining edges
+        // Build degree map — exclude rail nodes (they're always "dead ends")
         let mut degree: std::collections::HashMap<NodeId, usize> =
             std::collections::HashMap::new();
         for &eidx in &remaining {
             let e = &graph.edges[eidx];
-            *degree.entry(e.node_a).or_default() += 1;
-            *degree.entry(e.node_b).or_default() += 1;
+            if !rail_nodes.contains(&e.node_a) {
+                *degree.entry(e.node_a).or_default() += 1;
+            }
+            if !rail_nodes.contains(&e.node_b) {
+                *degree.entry(e.node_b).or_default() += 1;
+            }
         }
 
-        // Find edges with a degree-1 non-terminal endpoint
+        // Find edges with a degree-1 non-terminal endpoint, OR
+        // edges where one endpoint is a rail node (always pendant).
         let mut found: Vec<usize> = Vec::new();
         for &eidx in &remaining {
             let e = &graph.edges[eidx];
-            let a_pendant = degree.get(&e.node_a).copied().unwrap_or(0) == 1
-                && !terminal_set.contains(&e.node_a);
-            let b_pendant = degree.get(&e.node_b).copied().unwrap_or(0) == 1
-                && !terminal_set.contains(&e.node_b);
+            let a_is_rail = rail_nodes.contains(&e.node_a);
+            let b_is_rail = rail_nodes.contains(&e.node_b);
+            let a_pendant = (a_is_rail && !terminal_set.contains(&e.node_a))
+                || (degree.get(&e.node_a).copied().unwrap_or(0) == 1
+                    && !terminal_set.contains(&e.node_a));
+            let b_pendant = (b_is_rail && !terminal_set.contains(&e.node_b))
+                || (degree.get(&e.node_b).copied().unwrap_or(0) == 1
+                    && !terminal_set.contains(&e.node_b));
             if a_pendant || b_pendant {
                 found.push(eidx);
             }
