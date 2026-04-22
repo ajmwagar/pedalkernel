@@ -48,13 +48,14 @@ pub(in crate::compiler) fn extract_opamp_config(
         .ok_or("VCVS component has no op_amp_type")?;
     let model = OpAmpModel::from_opamp_type(&op_type);
 
-    // Compute Rf: sum resistance of feedback edges (excluding pots and GND-touching).
+    // Compute Rf: sum resistance of ALL feedback edges (resistors + pots).
+    // Pots contribute their current position's resistance. At compile time
+    // this is the initial position (typically 50% of max_r).
     let rf: f64 = group
         .feedback_edges
         .iter()
         .filter_map(|&eidx| {
             let comp = &graph.components[graph.edges[eidx].comp_idx];
-            if comp.kind.is_pot() { return None; }
             comp.kind.resistance()
         })
         .sum();
