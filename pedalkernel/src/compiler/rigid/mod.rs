@@ -198,7 +198,49 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
                 return true;
             }
 
-            return false; // pos not at GND/AC ground → non-inverting
+            // Check if pos_node is a bias point: BFS from pos through
+            // passive edges (excluding neg/out to avoid traversing the
+            // feedback network). If pos reaches ANY rail → it's biased
+            // to a fixed DC point → inverting.
+            let mut blocked = std::collections::HashSet::new();
+            blocked.insert(rec.neg_node);
+            blocked.insert(rec.out_node);
+
+            let mut visited = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            visited.insert(rec.pos_node);
+            queue.push_back(rec.pos_node);
+
+            let mut reaches_rail = false;
+            while let Some(node) = queue.pop_front() {
+                for e in &graph.edges {
+                    let comp = &graph.components[e.comp_idx];
+                    if !comp.kind.is_passive() { continue; }
+                    let next = if e.node_a == node && !visited.contains(&e.node_b) {
+                        Some(e.node_b)
+                    } else if e.node_b == node && !visited.contains(&e.node_a) {
+                        Some(e.node_a)
+                    } else {
+                        None
+                    };
+                    if let Some(n) = next {
+                        if blocked.contains(&n) { continue; }
+                        if n == graph.gnd_node || n == graph.vcc_node
+                            || graph.supply_nodes.contains(&n)
+                        {
+                            reaches_rail = true;
+                            break;
+                        }
+                        visited.insert(n);
+                        queue.push_back(n);
+                    }
+                }
+                if reaches_rail { break; }
+            }
+
+            // If pos reaches a rail (through bias network) → inverting.
+            // If pos doesn't reach any rail → it's a floating signal input → non-inverting.
+            return reaches_rail;
         }
     }
 

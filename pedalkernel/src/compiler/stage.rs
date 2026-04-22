@@ -3316,8 +3316,16 @@ impl BlackFeedbackStage {
 
     /// Current closed-loop gain.
     pub(super) fn gain(&self) -> f64 {
+        // When Rf is 0 (all-reactive feedback, e.g., coupling cap only),
+        // the DC gain is undefined. Use unity passthrough — the reactive
+        // elements handle frequency shaping in the WDF tree, not here.
+        if self.rf <= 0.0 && self.ri <= 0.0 {
+            return 1.0;
+        }
         if self.inverting {
-            -(self.rf / self.ri.max(1.0))
+            let g = self.rf / self.ri.max(1.0);
+            if g < 1e-6 { return -1.0; } // Cap-only feedback → unity
+            -g
         } else {
             1.0 + self.rf / self.ri.max(1.0)
         }
