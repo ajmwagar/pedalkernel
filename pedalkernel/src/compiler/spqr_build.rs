@@ -305,8 +305,8 @@ fn build_pot_divider(
     let edges = group.all_edges();
 
     // Build both pot leaf nodes. Use the component's actual name (no __aw/__wb).
-    // The ground-side half gets marked as complement so set_control applies
-    // 1-value automatically.
+    // The signal-side half (NOT touching ground) gets marked as complement
+    // so set_control applies 1-value: R_aw = (1-pos)*max_R.
     let mut leaves: Vec<DynNode> = Vec::new();
     for &eidx in &edges {
         let e = &graph.edges[eidx];
@@ -316,7 +316,7 @@ fn build_pot_divider(
                 || e.node_b == graph.gnd_node
                 || graph.ac_ground_nodes.contains(&e.node_a)
                 || graph.ac_ground_nodes.contains(&e.node_b);
-            if touches_gnd {
+            if !touches_gnd {
                 if let DynNode::Leaf(ref mut l) = leaf {
                     l.set_complement();
                 }
