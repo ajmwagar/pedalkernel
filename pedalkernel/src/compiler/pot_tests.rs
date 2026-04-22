@@ -109,7 +109,7 @@ fn pot_set_control_changes_level() {
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    bind_controls(&pedal, &mut compiled);
+    // bind_controls is now called inside compile_via_spqr
 
     // Full volume
     compiled.set_control("Volume", 1.0);
@@ -153,7 +153,7 @@ fn pot_in_feedback_changes_gain() {
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    bind_controls(&pedal, &mut compiled);
+    // bind_controls is now called inside compile_via_spqr
 
     // Low gain
     compiled.set_control("Drive", 0.0);
@@ -202,7 +202,7 @@ fn pot_in_feedback_inverted_range() {
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    bind_controls(&pedal, &mut compiled);
+    // bind_controls is now called inside compile_via_spqr
 
     // User CW (value=1.0) → range maps to position 0.0 → low Rf → LOW gain
     compiled.set_control("Drive", 1.0);
@@ -245,7 +245,7 @@ fn pot_volume_inverted_range() {
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    bind_controls(&pedal, &mut compiled);
+    // bind_controls is now called inside compile_via_spqr
 
     // User CW (value=1.0) → range maps to position 0.0 → wiper at ground → quiet
     compiled.set_control("Volume", 1.0);
@@ -526,7 +526,7 @@ fn no_synthetic_aw_wb_components() {
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    bind_controls(&pedal, &mut compiled);
+    // bind_controls is now called inside compile_via_spqr
 
     // Control binding should use base ID "Volume", not "Volume__aw"
     for ctrl in &compiled.controls {

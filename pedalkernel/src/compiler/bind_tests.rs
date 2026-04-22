@@ -30,7 +30,7 @@ fn bind_pot_produces_binding() {
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    bind_controls(&pedal, &mut compiled);
+    // bind_controls is now called inside compile_via_spqr
 
     assert!(
         !compiled.controls.is_empty(),
@@ -62,7 +62,7 @@ fn bind_volume_pot_changes_output() {
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    bind_controls(&pedal, &mut compiled);
+    // bind_controls is now called inside compile_via_spqr
 
     eprintln!("Controls bound: {}", compiled.controls.len());
     for c in &compiled.controls {
@@ -101,7 +101,7 @@ fn bind_empty_controls_produces_nothing() {
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    bind_controls(&pedal, &mut compiled);
+    // bind_controls is now called inside compile_via_spqr
 
     assert!(compiled.controls.is_empty());
 }
