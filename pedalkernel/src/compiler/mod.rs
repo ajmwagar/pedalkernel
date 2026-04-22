@@ -67,3 +67,5 @@ mod pot_sweep_tests;
 mod zero_output_tests;
 #[cfg(test)]
 mod pot_binding_tests;
+#[cfg(test)]
+mod black_feedback_tests;
