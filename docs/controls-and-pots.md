@@ -4,6 +4,7 @@ description: "How runtime control updates flow through the engine — binding, d
 section: "Internals"
 weight: 87
 source_commit: "2cafa26fe49ea6ad3d1ccf9f52401060c4ae1ea2"
+preview: true
 watches:
   - pedalkernel/src/compiler/spqr_control.rs
   - pedalkernel/src/compiler/compiled.rs

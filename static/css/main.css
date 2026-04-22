@@ -334,6 +334,41 @@ body.page main {
   margin-left: 0.4rem;
 }
 
+/* ---------- preview badge (book index) ---------- */
+
+.preview-badge {
+  display: inline-block;
+  margin: 0 0.1rem 0 0.45rem;
+  padding: 0.08rem 0.5rem 0.12rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: var(--accent-weak);
+  color: var(--accent);
+  border-radius: 999px;
+  vertical-align: 0.15em;
+  white-space: nowrap;
+}
+.preview-callout {
+  margin: 0 0 1.5rem;
+  padding: 0.7rem 1rem;
+  background: var(--card);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.preview-callout code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: transparent;
+  padding: 0;
+  border: 0;
+  color: inherit;
+}
+
 /* ---------- doc freshness badge ---------- */
 
 .doc-freshness {
