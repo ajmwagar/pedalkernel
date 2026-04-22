@@ -1,0 +1,53 @@
+baseURL = "https://docs.pedalkernel.com/"
+languageCode = "en-us"
+title = "pedalkernel"
+enableRobotsTXT = true
+
+# The theme lives entirely inside layouts/ and static/ — no external theme needed.
+
+[params]
+  description = "Rust WDF kernel for guitar FX pedal simulation. Write a schematic in .pedal files. Hear it. Build it."
+  github = "https://github.com/ajmwagar/pedalkernel"
+  site = "https://pedalkernel.com"
+
+[markup]
+  [markup.goldmark.renderer]
+    unsafe = true
+  [markup.highlight]
+    style = "github-dark"
+    noClasses = true
+    lineNos = false
+    tabWidth = 2
+
+[menu]
+  [[menu.main]]
+    name = "Book"
+    url = "/book/"
+    weight = 10
+  [[menu.main]]
+    name = "API"
+    url = "/api/"
+    weight = 20
+
+[outputs]
+  home = ["HTML"]
+  section = ["HTML"]
+  page = ["HTML"]
+
+# Mount docs/ as the book section, so any .md file dropped into docs/
+# becomes a page at /book/<slug>/ without needing a wrapper file.
+# Files that should NOT appear on the site (CLA.md, internal notes, etc.)
+# simply stay out of docs/.
+[module]
+  [[module.mounts]]
+    source = "content"
+    target = "content"
+  [[module.mounts]]
+    source = "docs"
+    target = "content/book"
+  [[module.mounts]]
+    source = "layouts"
+    target = "layouts"
+  [[module.mounts]]
+    source = "static"
+    target = "static"

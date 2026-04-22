@@ -21,3 +21,14 @@ tools/.venv/
 # Beads task tracking (ephemeral)
 .beads/
 .mcp.json
+
+# Local git worktrees (created by beads workflow; never meant to be committed)
+.worktrees/
+
+# Netlify build plugin (only needed for docs.pedalkernel.com build)
+node_modules/
+
+# Hugo build output + lock (docs.pedalkernel.com)
+/public/
+.hugo_build.lock
+resources/_gen/

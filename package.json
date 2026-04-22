@@ -1,0 +1,8 @@
+{
+  "name": "pedalkernel-netlify",
+  "private": true,
+  "description": "Build-time-only package.json. Declares netlify-plugin-cache so Netlify will install it during docs.pedalkernel.com builds. Not published; unrelated to the Rust crates.",
+  "devDependencies": {
+    "netlify-plugin-cache": "^1.0.3"
+  }
+}

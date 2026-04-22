@@ -1,0 +1,11 @@
+<header class="site-header">
+  <nav>
+    <a class="brand" href="{{ "/" | relURL }}">pedalkernel</a>
+    <ul>
+      {{ range .Site.Menus.main }}
+      <li><a href="{{ .URL | relURL }}">{{ .Name }}</a></li>
+      {{ end }}
+      <li><a href="{{ .Site.Params.github }}" rel="noopener">GitHub</a></li>
+    </ul>
+  </nav>
+</header>
