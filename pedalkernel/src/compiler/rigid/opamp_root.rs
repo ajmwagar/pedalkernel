@@ -65,8 +65,22 @@ pub(in crate::compiler) fn extract_opamp_config(
                 .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
                 .sum::<f64>()
         } else {
-            f64::INFINITY
+            // Fallback: pendant_edges empty (input coupling got classified as
+            // feedback). Search all group edges for a resistor that touches
+            // the circuit input node — that's the input coupling (Ri).
+            group
+                .all_edges()
+                .iter()
+                .filter_map(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    let comp = &graph.components[e.comp_idx];
+                    if comp.kind.is_pot() { return None; }
+                    let touches_input = e.node_a == graph.in_node || e.node_b == graph.in_node;
+                    if touches_input { comp.kind.resistance() } else { None }
+                })
+                .sum::<f64>()
         };
+        let ri = if ri <= 0.0 { f64::INFINITY } else { ri };
         (rf, ri)
     } else {
         // Non-inverting: split feedback_edges into Rf (neg→out) and Ri (neg→GND).

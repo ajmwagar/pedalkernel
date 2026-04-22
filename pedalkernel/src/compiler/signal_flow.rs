@@ -201,6 +201,7 @@ fn build_flow_graph(
     elements: &[ActiveElement],
     adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
     rails: &HashSet<NodeId>,
+    graph: &CircuitGraph,
 ) -> Vec<Vec<usize>> {
     let n = elements.len();
     let mut flow_adj = vec![Vec::new(); n];
@@ -208,12 +209,41 @@ fn build_flow_graph(
     for i in 0..n {
         let elem_i = &elements[i];
 
-        // Block traversal through other elements' output nodes (ALL of them)
+        // Block traversal through other elements' output nodes (ALL of them).
+        // Additionally, block other VCVS (op-amp) elements' input nodes.
+        // VCVS neg nodes act as summing junctions shared with interstage
+        // coupling networks (pots, resistors). Without this blocking, BFS
+        // from element i's output can traverse backward through i's own
+        // feedback, through shared passives, and reach another op-amp's
+        // neg node — creating a false cycle edge.
+        //
+        // We only block VCVS inputs, not diode/BJT inputs, because:
+        // - Diodes in feedback (e.g., Screamer D1 between neg and out)
+        //   MUST be reachable from the op-amp's BFS for correct coupling.
+        // - BJTs with shared emitter coupling (Fuzz Face) need their
+        //   input nodes reachable for mutual feedback detection.
+        // - Op-amp neg nodes are the only ones that create false paths
+        //   through feedback networks to upstream stages.
+        // Block traversal through other elements' output nodes AND through
+        // other elements whose input node acts as a summing junction
+        // (feedback_input_is_barrier). Op-amp neg nodes are summing junctions
+        // shared with interstage coupling — without blocking, BFS traverses
+        // backward through i's feedback, across shared passives, and creates
+        // false cycle edges.
+        //
+        // The barrier property comes from Component::feedback_input_is_barrier().
         let blocked_outputs: HashSet<NodeId> = elements
             .iter()
             .enumerate()
             .filter(|&(j, _)| j != i)
-            .flat_map(|(_, e)| e.output_nodes.iter().copied())
+            .flat_map(|(_, e)| {
+                let mut nodes: Vec<NodeId> = e.output_nodes.clone();
+                let comp = &graph.components[graph.edges[e.edge_idx].comp_idx];
+                if comp.kind.feedback_input_is_barrier() {
+                    nodes.push(e.input_node);
+                }
+                nodes
+            })
             .filter(|node| !rails.contains(node))
             .collect();
 
@@ -227,7 +257,31 @@ fn build_flow_graph(
             reachable.extend(r);
         }
 
-        // Check if any other element's input is reachable
+        // Also compute restricted reachability with i's own input blocked.
+        // This prevents false backward paths where BFS traverses through i's
+        // feedback network, across interstage coupling, and reaches another
+        // barrier element's input (i.out → i.feedback → i.neg → pot → j.neg).
+        // Computed for ALL elements — even non-barrier elements like diodes
+        // can create false paths through shared feedback networks.
+        let restricted_reachable = if !rails.contains(&elem_i.input_node) {
+            let mut blocked_plus_self = blocked_outputs.clone();
+            blocked_plus_self.insert(elem_i.input_node);
+            let mut r = HashSet::new();
+            for &out_node in &elem_i.output_nodes {
+                if rails.contains(&out_node) {
+                    continue;
+                }
+                r.extend(bfs_reachable_nodes(out_node, adj, &blocked_plus_self));
+            }
+            Some(r)
+        } else {
+            None
+        };
+
+        // Check if any other element's input is reachable.
+        // For barrier targets (op-amps): use restricted reachability if
+        // element i is also a barrier. This prevents false cycles through
+        // shared feedback/interstage networks.
         for j in 0..n {
             if i == j {
                 continue;
@@ -236,7 +290,15 @@ fn build_flow_graph(
             if rails.contains(&elem_j.input_node) {
                 continue;
             }
-            if reachable.contains(&elem_j.input_node) {
+            let comp_j = &graph.components[graph.edges[elem_j.edge_idx].comp_idx];
+            let use_restricted = comp_j.kind.feedback_input_is_barrier()
+                && restricted_reachable.is_some();
+            let reach = if use_restricted {
+                restricted_reachable.as_ref().unwrap()
+            } else {
+                &reachable
+            };
+            if reach.contains(&elem_j.input_node) {
                 flow_adj[i].push(j);
             }
         }
@@ -365,7 +427,7 @@ pub(in crate::compiler) fn find_flow_groups(
     let adj = build_passive_adjacency(edge_indices, graph, &rails, &active_edge_set);
 
     // Build directed flow graph and find SCCs
-    let flow_adj = build_flow_graph(&active_elements, &adj, &rails);
+    let flow_adj = build_flow_graph(&active_elements, &adj, &rails, graph);
     let sccs = tarjan_scc(&flow_adj);
 
     // Build classified FlowGroup for each SCC
@@ -1518,6 +1580,168 @@ mod tests {
         assert_ne!(
             u1_group, u2_group,
             "Shared bias node should NOT create false coupling between cascaded op-amps"
+        );
+    }
+
+    // ── Multi-VCVS splitting: extended edge cases ────────────────────────
+
+    #[test]
+    fn flow_cascade_with_diodes_in_second_stage_separate() {
+        // Blues driver full pattern: IC1a (clean gain) → pot → IC1b (clipping).
+        // IC1b has diode pair D1/D2 in its feedback. The diodes should be
+        // grouped with IC1b (same feedback loop), but IC1a should be separate.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    IC1a: opamp(tl072)
+                    Rf1: resistor(100k)
+                    Gain: pot(100k, a)
+                    R4: resistor(4.7k)
+                    IC1b: opamp(tl072)
+                    Rf2: resistor(47k)
+                    D1: diode(silicon)
+                    D2: diode(silicon)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> IC1a.neg
+                    IC1a.neg -> Rf1.a
+                    Rf1.b -> IC1a.out
+                    IC1a.pos -> gnd
+                    IC1a.neg -> Gain.a
+                    Gain.b -> gnd
+                    Gain.w -> R4.a
+                    R4.b -> IC1b.neg
+                    IC1b.neg -> Rf2.a
+                    Rf2.b -> IC1b.out
+                    IC1b.neg -> D1.a
+                    D1.b -> IC1b.out
+                    IC1b.neg -> D2.b
+                    D2.a -> IC1b.out
+                    IC1b.pos -> gnd
+                    IC1b.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let ic1a_group = find_group_containing(&groups, &graph, "IC1a");
+        let ic1b_group = find_group_containing(&groups, &graph, "IC1b");
+        let d1_group = find_group_containing(&groups, &graph, "D1");
+
+        assert!(ic1a_group.is_some(), "Should find IC1a");
+        assert!(ic1b_group.is_some(), "Should find IC1b");
+        assert_ne!(
+            ic1a_group, ic1b_group,
+            "IC1a (clean gain) should be SEPARATE from IC1b (clipping)"
+        );
+        assert_eq!(
+            ic1b_group, d1_group,
+            "D1 (in IC1b's feedback) should be in SAME group as IC1b"
+        );
+    }
+
+    #[test]
+    fn flow_three_opamp_cascade_all_separate() {
+        // Goldenrod-like: U1 (buffer) → U2 (gain) → U3 (tone).
+        // All three should be in separate groups — no mutual feedback.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf1: resistor(10k)
+                    R2: resistor(10k)
+                    U2: opamp(tl072)
+                    Rf2: resistor(100k)
+                    R3: resistor(10k)
+                    U3: opamp(tl072)
+                    Rf3: resistor(47k)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    U1.neg -> Rf1.a
+                    Rf1.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R2.a
+                    R2.b -> U2.neg
+                    U2.neg -> Rf2.a
+                    Rf2.b -> U2.out
+                    U2.pos -> gnd
+                    U2.out -> R3.a
+                    R3.b -> U3.neg
+                    U3.neg -> Rf3.a
+                    Rf3.b -> U3.out
+                    U3.pos -> gnd
+                    U3.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let u2_group = find_group_containing(&groups, &graph, "U2");
+        let u3_group = find_group_containing(&groups, &graph, "U3");
+
+        assert!(u1_group.is_some() && u2_group.is_some() && u3_group.is_some());
+
+        let all_different = u1_group != u2_group && u2_group != u3_group && u1_group != u3_group;
+        assert!(
+            all_different,
+            "Three cascaded op-amps should all be in SEPARATE groups: U1={:?} U2={:?} U3={:?}",
+            u1_group, u2_group, u3_group
+        );
+    }
+
+    #[test]
+    fn flow_global_negative_feedback_same_group() {
+        // Global negative feedback: U1 (gain) → U2 (output), U2.out feeds
+        // back to U1.neg via a resistor. This IS true inter-stage feedback.
+        // They must stay in the same group.
+        // (Same pattern as flow_two_opamp_true_feedback_same_group but with
+        // a summing junction at U1.neg — the global NFB goes to the same
+        // node as the local feedback Rf1.)
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf1: resistor(100k)
+                    R_mid: resistor(10k)
+                    U2: opamp(tl072)
+                    Rf2: resistor(100k)
+                    R_nfb: resistor(470k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> Rf1.a
+                    Rf1.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R_mid.a
+                    R_mid.b -> U2.neg
+                    U2.neg -> Rf2.a
+                    Rf2.b -> U2.out
+                    U2.pos -> gnd
+                    U2.out -> R_nfb.a
+                    R_nfb.b -> U1.neg
+                    U2.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let u2_group = find_group_containing(&groups, &graph, "U2");
+
+        assert_eq!(
+            u1_group, u2_group,
+            "Global NFB (U2.out → R_nfb → U1.neg) is true feedback — must stay SAME group"
         );
     }
 }

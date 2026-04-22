@@ -156,6 +156,77 @@ fn bf_pot_sweep_changes_gain() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Pot binding: set_pot maps position → Rf → gain
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn bf_has_pot_matches_bound_id() {
+    use super::stage::BlackFeedbackStage;
+    let mut stage = BlackFeedbackStage::new_test(100_000.0, 10_000.0, true, 48000.0);
+    // No pot bound by default
+    assert!(!stage.has_pot("Drive"), "Should not match unbound pot");
+
+    // Bind a pot
+    stage.pot_comp_id = Some("Drive".to_string());
+    stage.pot_max_r = 100_000.0;
+    assert!(stage.has_pot("Drive"), "Should match bound pot");
+    assert!(!stage.has_pot("Tone"), "Should not match different pot");
+}
+
+#[test]
+fn bf_set_pot_changes_gain() {
+    use super::stage::BlackFeedbackStage;
+    let mut stage = BlackFeedbackStage::new_test(100_000.0, 10_000.0, true, 48000.0);
+    stage.pot_comp_id = Some("Drive".to_string());
+    stage.pot_max_r = 100_000.0;
+
+    // Position 1.0 → Rf = 100k → gain = 10
+    stage.set_pot("Drive", 1.0);
+    let gain_hi = stage.gain().abs();
+
+    // Position 0.1 → Rf = 10k → gain = 1
+    stage.set_pot("Drive", 0.1);
+    let gain_lo = stage.gain().abs();
+
+    eprintln!("set_pot: @1.0 gain={gain_hi:.2}, @0.1 gain={gain_lo:.2}");
+    assert!(gain_hi > gain_lo * 3.0,
+        "Higher position should give more gain: hi={gain_hi:.2}, lo={gain_lo:.2}");
+}
+
+#[test]
+fn bf_e2e_pot_bound_at_compile_time() {
+    // When a pot is in the feedback path, compile_via_spqr should
+    // set pot_comp_id on the BlackFeedbackStage automatically.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(100k, a)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    let bf = compiled.stages.iter()
+        .find_map(|s| s.as_black_feedback())
+        .expect("Should have a BlackFeedback stage");
+
+    assert_eq!(bf.pot_comp_id.as_deref(), Some("Drive"),
+        "Pot should be bound at compile time, got {:?}", bf.pot_comp_id);
+    assert!(bf.pot_max_r > 0.0, "pot_max_r should be set");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // End-to-end: BlackFeedbackStage through compile_via_spqr pipeline
 //
 // These tests use sustained 440Hz sine waves (not single-sample impulses)

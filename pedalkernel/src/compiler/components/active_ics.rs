@@ -91,6 +91,12 @@ impl Component for OpAmp {
         false
     }
 
+    fn feedback_input_is_barrier(&self) -> bool {
+        // Op-amp neg node is a summing junction shared with interstage
+        // coupling. OTAs don't have this property.
+        !self.op_type.is_ota()
+    }
+
     fn is_nonlinear(&self) -> bool {
         self.op_type.is_ota()
     }

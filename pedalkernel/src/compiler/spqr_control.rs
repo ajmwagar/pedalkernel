@@ -126,7 +126,20 @@ fn find_pot_binding(
                     ));
                 }
             }
-            Stage::BlackFeedback(_) | Stage::StateSpace(_) => {
+            Stage::BlackFeedback(bf) => {
+                if bf.has_pot(comp_id) {
+                    return Some(make_binding(
+                        ctrl,
+                        comp_id,
+                        &aw_id,
+                        &wb_id,
+                        max_r,
+                        taper,
+                        ControlTarget::PotInBlackFeedbackStage(idx),
+                    ));
+                }
+            }
+            Stage::StateSpace(_) => {
                 // TODO: StateSpaceStage G-matrix delta
             }
         }

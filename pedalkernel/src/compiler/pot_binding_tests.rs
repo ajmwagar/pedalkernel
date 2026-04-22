@@ -209,3 +209,347 @@ fn tone_pot_in_blackfeedback_changes_spectrum() {
         panic!("Tone pot not found in any WDF stage after set_control");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 3: Feedback pot parameter extraction — the root cause of broken
+// Drive/Distortion pots. The FeedbackConfig must have correct Rf/Ri/series
+// values for the gain recomputation to work.
+//
+// These test MINIMAL circuits where we know the exact expected gain.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Helper: compile a circuit and measure peak output at two pot positions.
+fn measure_pot_sweep(pedal_src: &str, control: &str) -> (f64, f64) {
+    let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse");
+    let sr = 48000.0;
+    let freq = 440.0;
+
+    let mut measure = |pos: f64| -> f64 {
+        let mut c = compile_via_spqr(&pedal, sr).expect("compile");
+        c.set_control(control, pos);
+        // Settle
+        for s in 0..500 {
+            let input = 0.01 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+            c.process(input);
+        }
+        // Measure
+        let mut peak = 0.0f64;
+        for s in 500..720 {
+            let input = 0.01 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+            peak = peak.max(c.process(input).abs());
+        }
+        peak
+    };
+
+    (measure(0.1), measure(0.9))
+}
+
+#[test]
+fn feedback_pot_only_drive_changes_gain() {
+    // Simplest NL feedback: pot is the ONLY element between neg and out
+    // (besides the diode). No series resistors, no parallel resistors.
+    // Drive @0.1 → low gain, @0.9 → high gain.
+    let (lo, hi) = measure_pot_sweep(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(500k, a)
+                D1: diode(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#, "Drive");
+
+    eprintln!("pot-only drive: lo={lo:.6}, hi={hi:.6}");
+    assert!(hi > lo * 1.5, "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}");
+}
+
+#[test]
+fn feedback_pot_with_series_r_drive_changes_gain() {
+    // TS-style: Drive pot in series with R_clip(4.7k).
+    // The series R sets the minimum gain floor.
+    let (lo, hi) = measure_pot_sweep(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(500k, a)
+                R_clip: resistor(4.7k)
+                D1: diode(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> R_clip.a
+                R_clip.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#, "Drive");
+
+    eprintln!("pot+series drive: lo={lo:.6}, hi={hi:.6}");
+    assert!(hi > lo * 1.5, "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}");
+}
+
+#[test]
+fn feedback_pot_parallel_with_rf_drive_changes_gain() {
+    // TS/RAT pattern: Drive pot + R_clip in series, Rf in parallel.
+    // This is the topology that find_feedback_pot's heuristic gets wrong.
+    let (lo, hi) = measure_pot_sweep(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(500k, a)
+                R_clip: resistor(4.7k)
+                Rf: resistor(100k)
+                D1: diode(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> R_clip.a
+                R_clip.b -> U1.out
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#, "Drive");
+
+    eprintln!("pot+parallel Rf drive: lo={lo:.6}, hi={hi:.6}");
+    assert!(hi > lo * 1.5, "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}");
+}
+
+#[test]
+fn feedback_pot_screamer_topology_drive_changes_gain() {
+    // Full Screamer-like topology: Drive pot + multiple resistors + cap in feedback.
+    // This is the real-world circuit that currently fails.
+    let (lo, hi) = measure_pot_sweep(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(500k, a)
+                R_clip: resistor(4.7k)
+                C_clip: cap(47n)
+                D1: diode(silicon)
+                D2: diode(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> R_clip.a
+                R_clip.b -> U1.out
+                U1.neg -> C_clip.a
+                C_clip.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.neg -> D2.b
+                D2.a -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#, "Drive");
+
+    eprintln!("screamer-like drive: lo={lo:.6}, hi={hi:.6}");
+    assert!(hi > lo * 1.5, "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 4: FlowGroup edge classification — R_in should be pendant, not feedback
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn r_in_is_pendant_not_feedback_simple() {
+    // In a simple inverting amp, R_in (input → neg) should be pendant.
+    let pedal_src = r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#;
+
+    let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse");
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+
+    // Find the group containing U1
+    let u1_group = groups.iter().find(|g| {
+        g.active_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "U1"
+        })
+    }).expect("Should find U1's group");
+
+    let pendant_names: Vec<&str> = u1_group.pendant_edges.iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .collect();
+    let feedback_names: Vec<&str> = u1_group.feedback_edges.iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .collect();
+
+    eprintln!("Simple: pendant={pendant_names:?}, feedback={feedback_names:?}");
+    assert!(pendant_names.contains(&"R_in"), "R_in should be pendant, not feedback");
+}
+
+#[test]
+fn r_in_is_pendant_with_diodes_in_feedback() {
+    // With diodes in feedback, R_in should STILL be pendant.
+    // This is the case that fails in real pedals.
+    let pedal_src = r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(500k, a)
+                R_clip: resistor(4.7k)
+                C_clip: cap(47n)
+                D1: diode(silicon)
+                D2: diode(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> R_clip.a
+                R_clip.b -> U1.out
+                U1.neg -> C_clip.a
+                C_clip.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.neg -> D2.b
+                D2.a -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#;
+
+    let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse");
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+
+    // Find the group containing U1
+    let u1_group = groups.iter().find(|g| {
+        g.active_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "U1"
+        })
+    }).expect("Should find U1's group");
+
+    let pendant_names: Vec<&str> = u1_group.pendant_edges.iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .collect();
+    let feedback_names: Vec<&str> = u1_group.feedback_edges.iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .collect();
+
+    eprintln!("With diodes: pendant={pendant_names:?}, feedback={feedback_names:?}");
+    assert!(
+        pendant_names.contains(&"R_in"),
+        "R_in should be pendant even with diodes in feedback. Got pendant={pendant_names:?}, feedback={feedback_names:?}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 5: WdfStage gain from port resistances — the correct approach
+//
+// The stage should compute gain = Rf/Ri from actual port resistances,
+// not from pre-computed FeedbackConfig parameters. When a pot moves,
+// the stage reads the pot's current resistance, adds any fixed series R,
+// divides by Ri (from pendant tree), and calls opamp.set_gain().
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn wdf_stage_gain_updates_from_pot_resistance() {
+    // End-to-end: compile a circuit with Drive pot in feedback + diode,
+    // sweep the pot, verify the OpAmpRoot gain changes.
+    // This tests the STAGE's pot→gain pipeline, not just OpAmpRoot math.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(500k, a)
+                D1: diode(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let sr = 48000.0;
+    let freq = 440.0;
+
+    let mut measure = |pos: f64| -> f64 {
+        let mut c = compile_via_spqr(&pedal, sr).expect("compile");
+        c.set_control("Drive", pos);
+        for s in 0..500 {
+            let input = 0.01 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+            c.process(input);
+        }
+        let mut peak = 0.0f64;
+        for s in 500..720 {
+            let input = 0.01 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+            peak = peak.max(c.process(input).abs());
+        }
+        peak
+    };
+
+    let lo = measure(0.1);
+    let hi = measure(0.9);
+    eprintln!("WDF stage pot→gain: lo={lo:.6}, hi={hi:.6}");
+    assert!(hi > lo * 1.5,
+        "Drive pot should change WDF stage gain: lo={lo:.6}, hi={hi:.6}");
+}

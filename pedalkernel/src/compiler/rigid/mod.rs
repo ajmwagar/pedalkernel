@@ -282,37 +282,21 @@ fn find_feedback_pot(
 
     for &eidx in &group.feedback_edges {
         let comp = &graph.components[graph.edges[eidx].comp_idx];
-        if comp.kind.as_any().downcast_ref::<crate::compiler::components::Potentiometer>().is_some() {
+        if comp.kind.is_pot() {
             if pot_id.is_none() {
                 pot_id = Some(comp.id.clone());
-                // Create a WDF leaf for the pot (using the base comp_id, not __aw/__wb)
                 pot_leaf = comp.kind.make_leaf(&comp.id, 48000.0);
             }
         } else if let Some(r) = comp.kind.resistance() {
-            // Could be series or parallel with the pot — heuristic:
-            // if it's on the same edge pair as the pot, it's in parallel
-            // otherwise it's in series. For now, assume series.
             fixed_r += r;
         }
     }
 
-    // Check for parallel resistors (Rf in parallel with the pot+series chain)
-    // This is common in TS-style circuits where Rf parallels Drive+R_clip.
-    // For now, if there are multiple resistors in feedback, the largest is parallel.
-    if fixed_r > 0.0 && group.feedback_edges.len() > 3 {
-        let mut resistances: Vec<f64> = group.feedback_edges.iter()
-            .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
-            .collect();
-        resistances.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        // Heuristic: if there are 2+ resistors and one is much larger, it's parallel
-        if resistances.len() >= 2 && resistances[0] > resistances[1] * 5.0 {
-            let pr = resistances[0];
-            fixed_r -= pr; // Remove it from series sum
-            parallel_r_candidates.push(pr);
-        }
-    }
-
-    let parallel_r = parallel_r_candidates.first().copied();
+    // No heuristic for series vs parallel — sum all non-pot resistors
+    // in feedback as fixed_series_r. The OpAmpRoot gain formula handles
+    // the effective Rf = pot_r + fixed_series_r correctly for series topology.
+    // Parallel Rf (if present) is captured separately by the topology.
+    let parallel_r: Option<f64> = None;
 
     pot_id.map(|id| {
         let leaf = pot_leaf.unwrap_or_else(|| {
@@ -376,9 +360,22 @@ pub(super) fn build_rigid_from_group(
                 // Collect NonIdealFx from the op-amp component
                 let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
 
-                let stage = super::stage::BlackFeedbackStage::new(
+                let mut stage = super::stage::BlackFeedbackStage::new(
                     config.rf, config.ri, inverting, &fx, sample_rate,
                 );
+
+                // Bind feedback pot: find pot in group edges for runtime gain control.
+                for &eidx in &g.all_edges() {
+                    let comp = &graph.components[graph.edges[eidx].comp_idx];
+                    if comp.kind.is_pot() {
+                        if let Some(max_r) = comp.kind.resistance() {
+                            stage.pot_comp_id = Some(comp.id.clone());
+                            stage.pot_max_r = max_r;
+                            break;
+                        }
+                    }
+                }
+
                 Ok(BuiltStage::BlackFeedback(stage))
             } else {
                 // No FlowGroup → can't classify Rf/Ri. Fall back to IIR.

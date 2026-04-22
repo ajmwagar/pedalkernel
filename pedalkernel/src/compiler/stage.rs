@@ -714,6 +714,12 @@ pub(super) struct WdfStage {
     /// OpAmpRoot gain recalculation. After pot update + recompute, the stage
     /// reads the pot's resistance and calls `OpAmpRoot::set_feedback_pot_r()`.
     pub(super) feedback_pot_id: Option<String>,
+    /// Fixed resistance in series with the feedback pot (e.g., R_clip).
+    /// Used to compute effective Rf = pot_r + series_r when pot changes.
+    pub(super) feedback_series_r: f64,
+    /// Input resistance (Ri) for gain computation. Read from pendant tree
+    /// port resistance or input-touching resistor at compile time.
+    pub(super) feedback_ri: f64,
     /// When set, extract output voltage at this component (pot leaf) in the
     /// WDF tree instead of at the root junction. After the down-sweep,
     /// V_out = a_leaf / 2 (for a resistive leaf where b=0).
@@ -819,6 +825,8 @@ impl WdfStage {
             sample_counter: 0,
             root_comp_id: String::new(),
             feedback_pot_id: None,
+            feedback_series_r: 0.0,
+            feedback_ri: f64::INFINITY,
             output_probe: None,
             feedback_opamp: None,
             vcc_injection_coeff: 0.0,
@@ -1808,11 +1816,19 @@ impl WdfStage {
                         .find_map(|c| c.get_pot_resistance(pot_id))
                 });
             if let Some(pot_r) = pot_r {
-                if let RootKind::OpAmp(ref mut oa) = self.root {
-                    oa.set_feedback_pot_r(pot_r);
-                }
-                if let Some(ref mut oa) = self.feedback_opamp {
-                    oa.set_feedback_pot_r(pot_r);
+                // Compute gain from port resistances:
+                // Rf = pot_r + fixed series resistance (e.g., R_clip)
+                // Gain = Rf / Ri (inverting) — set_gain takes absolute value
+                let rf = pot_r + self.feedback_series_r;
+                let ri = self.feedback_ri;
+                if ri > 0.0 && ri < f64::MAX {
+                    let gain = rf / ri;
+                    if let RootKind::OpAmp(ref mut oa) = self.root {
+                        oa.set_gain(gain);
+                    }
+                    if let Some(ref mut oa) = self.feedback_opamp {
+                        oa.set_gain(gain);
+                    }
                 }
             }
         }
@@ -3257,6 +3273,10 @@ pub(super) struct BlackFeedbackStage {
     sample_rate: f64,
     /// BFS distance from input (for topological ordering).
     pub(super) signal_flow_distance: usize,
+    /// Pot component ID bound to Rf (if any). Set at compile time.
+    pub(super) pot_comp_id: Option<String>,
+    /// Maximum pot resistance (Ohms). Position 1.0 = this value.
+    pub(super) pot_max_r: f64,
 }
 
 impl BlackFeedbackStage {
@@ -3283,6 +3303,8 @@ impl BlackFeedbackStage {
             stored_gbw,
             sample_rate,
             signal_flow_distance: 0,
+            pot_comp_id: None,
+            pot_max_r: 0.0,
         }
     }
 
@@ -3298,6 +3320,18 @@ impl BlackFeedbackStage {
             -(self.rf / self.ri.max(1.0))
         } else {
             1.0 + self.rf / self.ri.max(1.0)
+        }
+    }
+
+    /// Check if this stage owns a pot with the given component ID.
+    pub(super) fn has_pot(&self, comp_id: &str) -> bool {
+        self.pot_comp_id.as_deref() == Some(comp_id)
+    }
+
+    /// Set pot position (0.0–1.0). Converts to Rf = position * max_r.
+    pub(super) fn set_pot(&mut self, _comp_id: &str, position: f64) {
+        if self.pot_max_r > 0.0 {
+            self.set_rf(position * self.pot_max_r);
         }
     }
 
