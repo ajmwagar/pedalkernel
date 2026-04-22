@@ -42,6 +42,12 @@
     # --- Merge rustdoc under /api/ ------------------------------------------
     mkdir -p public/api
     cp -r target/doc/. public/api/
+
+    # --- Search index (Pagefind) --------------------------------------------
+    # Runs post-Hugo so it sees every rendered HTML page. /api/ is excluded
+    # because rustdoc already has its own search.
+    npx --yes pagefind@latest --site public --exclude-selectors "nav.site-header, footer, nav.pager" \
+      --glob "**/*.html" --force-language en
   """
 
 [build.environment]
