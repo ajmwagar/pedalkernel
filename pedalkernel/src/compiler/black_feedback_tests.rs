@@ -156,13 +156,40 @@ fn bf_pot_sweep_changes_gain() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// End-to-end: BlackFeedbackStage in the full pipeline
+// End-to-end: BlackFeedbackStage through compile_via_spqr pipeline
+//
+// These tests use sustained 440Hz sine waves (not single-sample impulses)
+// because the 4x oversampler in compiled.process() smears impulses across
+// multiple output samples. Steady-state sine measurement is immune to that.
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Helper: measure peak output of a 440Hz sine at given amplitude through a compiled pedal.
+/// Runs 500 warmup samples, then 2 full cycles (≈109 samples at 48kHz) and returns peak.
+fn measure_sine_peak(compiled: &mut super::compiled::CompiledPedal, amplitude: f64) -> f64 {
+    let sr = 48000.0;
+    let freq = 440.0;
+
+    // Warmup: let filters settle
+    for s in 0..500 {
+        let input = amplitude * (2.0 * std::f64::consts::PI * freq * s as f64 / sr).sin();
+        compiled.process(input);
+    }
+
+    // Measure: 2 full cycles
+    let n_samples = (2.0 * sr / freq).ceil() as usize;
+    let mut peak = 0.0f64;
+    for s in 0..n_samples {
+        let input = amplitude * (2.0 * std::f64::consts::PI * freq * (500 + s) as f64 / sr).sin();
+        let output = compiled.process(input);
+        peak = peak.max(output.abs());
+    }
+    peak
+}
 
 #[test]
 fn bf_e2e_inverting_amp_produces_audio() {
-    // Compile a simple inverting amp through compile_via_spqr.
-    // Should produce gain ≈ 10 at 440Hz.
+    // Compile a simple inverting amp: R1(10k) → U1.neg, Rf(100k) feedback.
+    // Expected gain ≈ 10 at 440Hz.
     let pedal = crate::dsl::parse_pedal_file(r#"
         pedal "test" { supply 9V
             components {
@@ -183,17 +210,53 @@ fn bf_e2e_inverting_amp_produces_audio() {
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..100 { compiled.process(0.0); }
 
-    let output = compiled.process(0.01);
-    let gain = output.abs() / 0.01;
-    eprintln!("E2E inverting: gain={gain:.2}");
-    assert!(gain > 5.0 && gain < 15.0, "Should amplify ~10x, got {gain:.2}");
+    // Should route to BlackFeedbackStage
+    assert!(
+        compiled.stages.iter().any(|s| matches!(s, super::compiled::Stage::BlackFeedback(_))),
+        "Should compile as BlackFeedbackStage"
+    );
+
+    let peak = measure_sine_peak(&mut compiled, 0.01);
+    let gain = peak / 0.01;
+    eprintln!("E2E inverting: peak={peak:.6}, gain={gain:.2}");
+    assert!(gain > 5.0, "Should amplify (gain>5), got {gain:.2}");
+    assert!(gain < 15.0, "Should not over-amplify (gain<15), got {gain:.2}");
+}
+
+#[test]
+fn bf_e2e_noninverting_amp_produces_audio() {
+    // Non-inverting: V+ = input, Rf(100k)/Ri(10k) → gain = 1 + 10 = 11.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                Ri: resistor(10k)
+            }
+            nets {
+                in -> U1.pos
+                U1.neg -> Ri.a
+                Ri.b -> gnd
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    let peak = measure_sine_peak(&mut compiled, 0.01);
+    let gain = peak / 0.01;
+    eprintln!("E2E non-inverting: peak={peak:.6}, gain={gain:.2}");
+    assert!(gain > 5.0, "Should amplify (gain>5), got {gain:.2}");
+    assert!(gain < 20.0, "Should not over-amplify (gain<20), got {gain:.2}");
 }
 
 #[test]
 fn bf_e2e_drive_pot_changes_output() {
-    // Drive pot in feedback should change gain.
+    // Drive pot in feedback: sweeping pot position should change gain.
     let pedal = crate::dsl::parse_pedal_file(r#"
         pedal "test" { supply 9V
             components {
@@ -213,19 +276,126 @@ fn bf_e2e_drive_pot_changes_output() {
         }"#)
     .expect("parse");
 
-    let mut lo = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    // Low gain: Drive = 10%
+    let mut lo = compile_via_spqr(&pedal, 48000.0).expect("compile lo");
     lo.set_control("Drive", 0.1);
-    for _ in 0..100 { lo.process(0.0); }
-    let out_lo = lo.process(0.01).abs();
+    let peak_lo = measure_sine_peak(&mut lo, 0.01);
 
-    let mut hi = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    // High gain: Drive = 100%
+    let mut hi = compile_via_spqr(&pedal, 48000.0).expect("compile hi");
     hi.set_control("Drive", 1.0);
-    for _ in 0..100 { hi.process(0.0); }
-    let out_hi = hi.process(0.01).abs();
+    let peak_hi = measure_sine_peak(&mut hi, 0.01);
 
-    eprintln!("E2E pot sweep: lo={out_lo:.6}, hi={out_hi:.6}");
+    eprintln!("E2E pot: lo={peak_lo:.6}, hi={peak_hi:.6}");
     assert!(
-        out_hi > out_lo * 2.0,
-        "Drive pot should change gain: lo={out_lo:.6}, hi={out_hi:.6}"
+        peak_hi > peak_lo * 2.0,
+        "High Drive should give more output: lo={peak_lo:.6}, hi={peak_hi:.6}"
     );
+}
+
+#[test]
+fn bf_e2e_stage_count_correct() {
+    // A single inverting op-amp circuit should produce exactly 1 stage,
+    // and it should be a BlackFeedback stage (not WDF or IIR).
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    let bf_count = compiled.stages.iter()
+        .filter(|s| matches!(s, super::compiled::Stage::BlackFeedback(_)))
+        .count();
+    let wdf_count = compiled.stages.iter()
+        .filter(|s| matches!(s, super::compiled::Stage::Wdf(_)))
+        .count();
+
+    eprintln!("Stage count: total={}, bf={bf_count}, wdf={wdf_count}", compiled.stages.len());
+    assert_eq!(bf_count, 1, "Should have exactly 1 BlackFeedback stage");
+    assert_eq!(wdf_count, 0, "Should have 0 WDF stages (no passive sections)");
+}
+
+#[test]
+fn bf_e2e_with_coupling_cap() {
+    // Input coupling cap + inverting amp: C1 blocks DC, R1 sets Ri.
+    // At 440Hz with C=100nF, R=10k: fc ≈ 159Hz, so 440Hz should pass.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                C1: cap(100n)
+                R1: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+            }
+            nets {
+                in -> C1.a
+                C1.b -> R1.a
+                R1.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    let peak = measure_sine_peak(&mut compiled, 0.01);
+    let gain = peak / 0.01;
+    eprintln!("E2E with cap: peak={peak:.6}, gain={gain:.2}");
+    // Gain should still be ~10 at 440Hz (well above the 159Hz HP corner)
+    assert!(gain > 3.0, "Should amplify above HP corner: gain={gain:.2}");
+}
+
+#[test]
+fn bf_e2e_gain_scales_with_rf_ri_ratio() {
+    // Two circuits with different Rf/Ri ratios should produce proportionally
+    // different gains. Rf=50k/Ri=10k → gain=5, Rf=200k/Ri=10k → gain=20.
+    let make_pedal = |rf: &str| {
+        crate::dsl::parse_pedal_file(&format!(r#"
+            pedal "test" {{ supply 9V
+                components {{
+                    R1: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf: resistor({rf})
+                }}
+                nets {{
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    U1.neg -> Rf.a
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }}
+                controls {{}}
+            }}"#))
+        .expect("parse")
+    };
+
+    let mut lo = compile_via_spqr(&make_pedal("50k"), 48000.0).expect("compile lo");
+    let peak_lo = measure_sine_peak(&mut lo, 0.01);
+
+    let mut hi = compile_via_spqr(&make_pedal("200k"), 48000.0).expect("compile hi");
+    let peak_hi = measure_sine_peak(&mut hi, 0.01);
+
+    let ratio = peak_hi / peak_lo.max(1e-10);
+    eprintln!("Gain ratio: lo={peak_lo:.6} (Rf=50k), hi={peak_hi:.6} (Rf=200k), ratio={ratio:.1}x");
+    // 200k/50k = 4x gain ratio. Allow tolerance for GBW/oversampler effects.
+    assert!(ratio > 2.0, "4x Rf should give ≥2x more output, got {ratio:.1}x");
+    assert!(ratio < 8.0, "4x Rf should give ≤8x more output, got {ratio:.1}x");
 }
