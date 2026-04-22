@@ -65,3 +65,5 @@ mod split_point_tests;
 mod pot_sweep_tests;
 #[cfg(test)]
 mod zero_output_tests;
+#[cfg(test)]
+mod pot_binding_tests;
