@@ -334,6 +334,82 @@ body.page main {
   margin-left: 0.4rem;
 }
 
+/* ---------- preview badge (book index) ---------- */
+
+.preview-badge {
+  display: inline-block;
+  margin: 0 0.1rem 0 0.45rem;
+  padding: 0.08rem 0.5rem 0.12rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: var(--accent-weak);
+  color: var(--accent);
+  border-radius: 999px;
+  vertical-align: 0.15em;
+  white-space: nowrap;
+}
+.preview-callout {
+  margin: 0 0 1.5rem;
+  padding: 0.7rem 1rem;
+  background: var(--card);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.preview-callout code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: transparent;
+  padding: 0;
+  border: 0;
+  color: inherit;
+}
+
+/* ---------- doc freshness badge ---------- */
+
+.doc-freshness {
+  margin: 2.5rem 0 0;
+  padding: 0.9rem 1.1rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.doc-freshness-line {
+  margin: 0;
+}
+.doc-freshness code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  color: var(--accent);
+  background: transparent;
+  padding: 0;
+  border: 0;
+}
+.doc-freshness a { color: var(--accent); }
+.doc-freshness-watches {
+  margin-top: 0.6rem;
+}
+.doc-freshness-watches summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.doc-freshness-watches ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.82rem;
+}
+.doc-freshness-watches li {
+  margin: 0.1rem 0;
+  list-style: square;
+}
+
 /* ---------- chapter pager ---------- */
 
 .pager {
