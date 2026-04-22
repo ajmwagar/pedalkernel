@@ -175,8 +175,15 @@ pub(super) fn build_mna(
         }
     }
 
-    // Input voltage source at injection node
-    let injection_mna = node_to_mna(graph.in_node);
+    // Input voltage source at injection node.
+    // Prefer graph.in_node if it's in this stage's MNA. Otherwise, fall
+    // back to the VCVS neg node (for multi-stage pedals where the global
+    // input is in a different stage).
+    let injection_mna = node_to_mna(graph.in_node).or_else(|| {
+        graph.nullor_pins.iter()
+            .find(|rec| edge_indices.iter().any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx))
+            .and_then(|rec| node_to_mna(rec.neg_node))
+    });
     mna.stamp_voltage_source(injection_mna, None, vs_idx);
 
     // Output node: VCVS out node (if present) or graph.out_node
