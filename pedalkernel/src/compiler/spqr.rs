@@ -709,7 +709,26 @@ pub(super) fn spqr_to_dyn_node(
         SpqrNode::Q { edge_idx, .. } => {
             let e = &graph.edges[*edge_idx];
             let comp = &graph.components[e.comp_idx];
-            comp.kind.make_leaf(&comp.id, sample_rate)
+            let mut leaf = comp.kind.make_leaf(&comp.id, sample_rate)?;
+            // For 3-terminal pots (two edges, same comp_idx): the half
+            // touching ground is the complement (uses 1 - position).
+            if comp.kind.is_pot() {
+                let is_3term = graph.edges.iter()
+                    .filter(|other| other.comp_idx == e.comp_idx)
+                    .count() > 1;
+                if is_3term {
+                    let touches_gnd = e.node_a == graph.gnd_node
+                        || e.node_b == graph.gnd_node
+                        || graph.ac_ground_nodes.contains(&e.node_a)
+                        || graph.ac_ground_nodes.contains(&e.node_b);
+                    if touches_gnd {
+                        if let DynNode::Leaf(ref mut l) = leaf {
+                            l.set_complement();
+                        }
+                    }
+                }
+            }
+            Some(leaf)
         }
         SpqrNode::S { children, .. } => {
             let nodes: Option<Vec<DynNode>> = children

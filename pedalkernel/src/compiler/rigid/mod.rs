@@ -357,6 +357,7 @@ fn find_feedback_pot(
                 taper: crate::dsl::PotTaper::B,
                 rp: 50_000.0,
                 last_a: 0.0,
+                complement: false,
             }))
         });
         (id, leaf, fixed_r, parallel_r)

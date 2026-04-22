@@ -113,10 +113,6 @@ pub(super) struct ControlBinding {
     pub(super) label: String,
     pub(super) target: ControlTarget,
     pub(super) component_id: String,
-    /// Pre-computed "{component_id}__aw" for 3-terminal pot halves (avoids RT allocation).
-    pub(super) component_id_aw: String,
-    /// Pre-computed "{component_id}__wb" for 3-terminal pot halves (avoids RT allocation).
-    pub(super) component_id_wb: String,
     #[allow(dead_code)]
     pub(super) max_resistance: f64,
     /// Pot taper curve — applied once before splitting into aw/wb halves
@@ -1218,14 +1214,10 @@ impl CompiledPedal {
                         // Fallback: no smoother (shouldn't happen), update immediately.
                         // `value` is already tapered+ranged from above.
                         let comp_id = self.controls[i].component_id.clone();
-                        let comp_id_aw = self.controls[i].component_id_aw.clone();
-                        let comp_id_wb = self.controls[i].component_id_wb.clone();
                         for stage in &mut self.stages {
                             match stage {
                                 Stage::Wdf(wdf) => {
                                     wdf.set_pot(&comp_id, value);
-                                    wdf.set_pot(&comp_id_aw, value);
-                                    wdf.set_pot(&comp_id_wb, 1.0 - value);
                                     wdf.flush_recompute();
                                 }
                                 Stage::Iir(iir) => {
@@ -1405,19 +1397,13 @@ impl CompiledPedal {
                 let ctrl_idx = self.pot_smoothers[si].control_idx;
                 let value = self.pot_smoothers[si].current;
                 let comp_id = self.controls[ctrl_idx].component_id.clone();
-                let comp_id_aw = self.controls[ctrl_idx].component_id_aw.clone();
-                let comp_id_wb = self.controls[ctrl_idx].component_id_wb.clone();
-                // Taper is already applied in set_control() before the smoother
-                // stores the target. The smoothed value is tapered+ranged, so
-                // aw/wb split uses it directly (aw + wb = max_R always).
 
                 // Update all stages — each stage ignores pots it doesn't own.
+                // Complement halves automatically use 1-value via the complement flag.
                 for stage in &mut self.stages {
                     match stage {
                         Stage::Wdf(wdf) => {
                             wdf.set_pot(&comp_id, value);
-                            wdf.set_pot(&comp_id_aw, value);
-                            wdf.set_pot(&comp_id_wb, 1.0 - value);
                         }
                         Stage::Iir(iir) => {
                             iir.set_pot(&comp_id, value);

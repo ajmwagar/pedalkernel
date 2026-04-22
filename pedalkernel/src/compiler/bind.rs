@@ -122,8 +122,6 @@ pub(super) fn build_controls(
             label: ctrl.label.clone(),
             target,
             component_id: ctrl.component.clone(),
-            component_id_aw: format!("{}__aw", ctrl.component),
-            component_id_wb: format!("{}__wb", ctrl.component),
             max_resistance: max_r,
             taper,
             range: ctrl.range,

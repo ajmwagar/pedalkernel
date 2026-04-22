@@ -187,6 +187,7 @@ impl DynNode {
             taper,
             rp,
             last_a: 0.0,
+            complement: false,
         }))
     }
 
@@ -576,6 +577,7 @@ impl DynNode {
                         taper: PotTaper::B,
                         rp,
                         last_a: 0.0,
+                        complement: false,
                     }));
                     true
                 } else {

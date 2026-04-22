@@ -304,18 +304,23 @@ fn build_pot_divider(
 ) -> Result<BuiltStage, String> {
     let edges = group.all_edges();
 
-    // Build both pot leaf nodes. For same-component pots (2 edges, 1 comp),
-    // give them distinct __aw/__wb names to match the control binding.
+    // Build both pot leaf nodes. Use the component's actual name (no __aw/__wb).
+    // The ground-side half gets marked as complement so set_control applies
+    // 1-value automatically.
     let mut leaves: Vec<DynNode> = Vec::new();
-    let same_comp = graph.edges[edges[0]].comp_idx == graph.edges[edges[1]].comp_idx;
-    for (i, &eidx) in edges.iter().enumerate() {
-        let comp = &graph.components[graph.edges[eidx].comp_idx];
-        let leaf_id = if same_comp {
-            format!("{}{}", comp.id, if i == 0 { "__aw" } else { "__wb" })
-        } else {
-            comp.id.clone()
-        };
-        if let Some(leaf) = comp.kind.make_leaf(&leaf_id, sample_rate) {
+    for &eidx in &edges {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if let Some(mut leaf) = comp.kind.make_leaf(&comp.id, sample_rate) {
+            let touches_gnd = e.node_a == graph.gnd_node
+                || e.node_b == graph.gnd_node
+                || graph.ac_ground_nodes.contains(&e.node_a)
+                || graph.ac_ground_nodes.contains(&e.node_b);
+            if touches_gnd {
+                if let DynNode::Leaf(ref mut l) = leaf {
+                    l.set_complement();
+                }
+            }
             leaves.push(leaf);
         }
     }
