@@ -337,19 +337,24 @@ body.page main {
 /* ---------- chapter pager ---------- */
 
 .pager {
-  max-width: var(--max);
-  margin: 2.5rem auto 0;
-  padding: 1.5rem 0 0;
+  margin: 3rem 0 0;
+  padding: 1.8rem 0 0;
   border-top: 1px solid var(--border);
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 1rem;
+  align-items: stretch;
 }
-.pager-cell { min-width: 0; }
-.pager-next { text-align: right; }
-.pager a {
+.pager-cell {
+  min-width: 0;
+  display: flex;
+}
+.pager-cell-next { justify-content: flex-end; }
+
+.pager-card {
   display: block;
-  padding: 0.9rem 1.1rem;
+  flex: 1;
+  padding: 1.25rem 1.4rem;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -357,34 +362,42 @@ body.page main {
   color: inherit;
   transition: border-color 0.15s ease, transform 0.15s ease, background 0.15s ease;
 }
-.pager a:hover {
+.pager-card:hover {
   border-color: var(--accent);
   background: var(--card-hover);
   transform: translateY(-1px);
   text-decoration: none;
 }
-.pager-label {
-  display: block;
+.pager-card-next { text-align: right; }
+
+.pager-kicker {
   font-family: var(--mono);
   font-size: 0.72rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
-  margin-bottom: 0.3rem;
+  margin: 0 0 0.4rem;
 }
 .pager-title {
-  display: block;
   font-family: var(--mono);
-  font-size: 1rem;
+  font-size: 1.05rem;
   color: var(--accent);
+  margin: 0 0 0.45rem;
   line-height: 1.3;
+}
+.pager-desc {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0;
+  line-height: 1.5;
 }
 
 @media (max-width: 560px) {
   .pager {
     grid-template-columns: 1fr;
   }
-  .pager-next { text-align: left; }
+  .pager-cell-next { justify-content: flex-start; }
+  .pager-card-next { text-align: left; }
 }
 
 /* ---------- responsive ---------- */
