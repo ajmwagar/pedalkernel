@@ -378,6 +378,104 @@ fn wdf_opamp_diode_gain_increases_with_drive() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 3b. WDF clipping with input coupling — the screamer pattern
+//
+// When the input coupling (R_in + Cin) is in a separate group from the
+// clipping stage, the OpAmpRoot needs to get Ri from the pipeline.
+// Without it, gain=1 and the clipping stage barely amplifies.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn wdf_clipping_with_separate_input_coupling_amplifies() {
+    // Screamer-like: Cin + R_in → U1.neg → Drive(feedback) + D1(clipping).
+    // The input coupling (Cin + R_in) ends up in a separate FlowGroup.
+    // The clipping stage should still amplify with gain ≈ Drive/R_in.
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                Cin: cap(47n)
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(500k, a)
+                D1: diode(silicon)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#);
+    eprintln!("Clipping+coupling: gain={gain:.2}");
+    // At default Drive=50% → Rf≈250k, Ri=10k → gain≈25.
+    // Diode clips, so actual gain depends on signal level.
+    // At 0.01V input, 25x = 0.25V (below diode Vf) → should amplify.
+    assert!(gain > 3.0, "Should amplify with input coupling: {gain:.2}");
+}
+
+#[test]
+fn wdf_clipping_gain_matches_single_stage() {
+    // Compare: same Rf/Ri ratio, one with coupling cap (multi-group)
+    // and one without (single group). Gains should be similar.
+    let gain_single = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                D1: diode(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#);
+
+    let gain_coupled = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                Cin: cap(47n)
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                D1: diode(silicon)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#);
+
+    eprintln!("Single={gain_single:.2}, Coupled={gain_coupled:.2}");
+    // Both have Rf/Ri=10. Gains should be in the same ballpark.
+    assert!(gain_single > 3.0, "Single stage should amplify: {gain_single:.2}");
+    assert!(gain_coupled > 3.0, "Coupled stage should amplify: {gain_coupled:.2}");
+    let ratio = gain_single.max(gain_coupled) / gain_single.min(gain_coupled).max(0.01);
+    assert!(ratio < 5.0, "Gains should be within 5x: single={gain_single:.2}, coupled={gain_coupled:.2}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 4. Pot dividers — voltage division accuracy
 // ═══════════════════════════════════════════════════════════════════════════
 
