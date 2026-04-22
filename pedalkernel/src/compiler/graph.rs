@@ -739,7 +739,7 @@ impl CircuitGraph {
         // via real edges — no bridge needed.
         // Op-amps with 1 port (neg→out) still need a bridge for pos connectivity.
         let mut active_edge_indices = Vec::new();
-        for comp in &pedal.components {
+        for (pedal_comp_idx, comp) in pedal.components.iter().enumerate() {
             // Skip components with multi-port edges (BJTs) — already connected
             if comp.kind.ports().len() > 1 {
                 continue;
@@ -755,6 +755,10 @@ impl CircuitGraph {
                 continue;
             };
 
+            // Find this component's index in all_components
+            let comp_idx = all_components.iter().position(|c| c.id == comp.id)
+                .unwrap_or(pedal_comp_idx);
+
             let mut pin_nodes: Vec<NodeId> = Vec::new();
             for pin_name in pin_order {
                 let key = format!("{}.{}", comp.id, pin_name);
@@ -767,7 +771,7 @@ impl CircuitGraph {
                 if pair[0] != pair[1] {
                     active_edge_indices.push(edges.len());
                     edges.push(GraphEdge {
-                        comp_idx: 0,
+                        comp_idx,
                         node_a: pair[0],
                         node_b: pair[1],
                     });
