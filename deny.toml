@@ -1,0 +1,102 @@
+# cargo-deny configuration — license + supply-chain policy for pedalkernel.
+#
+# Run locally:  cargo deny check
+# In CI:        see .github/workflows/ (licenses and bans run on every PR)
+#
+# Schema: cargo-deny 0.19+ (v2 config format).
+
+[graph]
+# Default targets — limit the audit to things we actually ship for.
+# Add entries here if you start cross-compiling to Windows, macOS-arm, etc.
+targets = [
+  { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "aarch64-unknown-linux-gnu" },
+  { triple = "x86_64-apple-darwin" },
+  { triple = "aarch64-apple-darwin" },
+]
+
+all-features = true
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+confidence-threshold = 0.93
+
+# Allowlist — anything not in this list fails the check.
+# Intent: permissive + AGPL (ours) + weak-copyleft (MPL-2.0).
+# Do NOT add LGPL / GPL without discussion; adding them here silently
+# accepts new GPL deps on future PRs.
+allow = [
+  # Permissive
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "ISC",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "0BSD",
+  "Zlib",
+  "Unlicense",
+  "BSL-1.0",
+  "Unicode-3.0",
+  # Weak copyleft — OK to consume, not OK to modify without sharing
+  "MPL-2.0",
+  # Ours
+  "AGPL-3.0-or-later",
+]
+
+# Private crates (publish = false) don't need an exception for AGPL.
+private = { ignore = true }
+
+# ---------------------------------------------------------------------------
+# Bans (dependency hygiene)
+# ---------------------------------------------------------------------------
+[bans]
+# Warn on duplicate versions of the same crate in the tree — catches bloat
+# early. Switch to "deny" once the tree is clean and you want CI to block.
+multiple-versions = "warn"
+
+# Wildcards (foo = "*") make reproducibility impossible.
+wildcards = "deny"
+
+# Highlight the worst offenders in reports.
+highlight = "all"
+
+# Crates we deliberately allow multiple versions of (normally none).
+# skip = [{ name = "syn", version = "=1.0" }]
+
+# ---------------------------------------------------------------------------
+# Advisories (RustSec)
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+# Vulnerabilities fail the check unconditionally. Unmaintained-crate advisories
+# for transitive deps we don't control are ignored here with justifications so
+# the rule stays noisy only for things we can act on. Each entry should have a
+# tracked follow-up to remove the ignore.
+ignore = [
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error via tabled_derive 0.7 -> tabled 0.15; fix = upgrade tabled to 0.17+" },
+  { id = "RUSTSEC-2024-0436", reason = "paste via ratatui 0.29 / nih_plug_xtask; upstream migration pending" },
+  { id = "RUSTSEC-2025-0119", reason = "number_prefix via indicatif 0.17; fix = indicatif upgrade to unit-prefix-based release" },
+]
+
+# ---------------------------------------------------------------------------
+# Sources (where crates can come from)
+# ---------------------------------------------------------------------------
+[sources]
+# Only crates.io by default. Git deps need explicit opt-in below.
+unknown-registry = "deny"
+unknown-git = "deny"
+
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# Known git deps — keep this list short. Each entry is a hidden source of
+# unreviewed code and undermines supply-chain auditability. Both entries
+# below are pinned to specific revs in the consuming Cargo.toml /
+# Cargo.lock so they cannot silently drift.
+allow-git = [
+  "https://github.com/robbert-vdh/nih-plug.git",   # xtask: nih_plug_xtask
+  "https://github.com/nicokoch/reflink.git",       # transitive via nih_plug_xtask
+]
