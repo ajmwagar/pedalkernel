@@ -3,7 +3,7 @@ title: "Modeling limits"
 description: "Where PedalKernel is pure WDF, where it approximates, and why."
 section: "Internals"
 weight: 90
-source_commit: "97277d4988a7e0b16efe26dd98ba7a341f0b76b9"
+source_commit: "2cafa26fe49ea6ad3d1ccf9f52401060c4ae1ea2"
 watches:
   - pedalkernel/src/compiler/stage.rs
   - pedalkernel/src/elements/nonlinear/

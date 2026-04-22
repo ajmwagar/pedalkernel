@@ -65,14 +65,25 @@ def parse_front_matter(path: Path) -> DocMeta:
 
 
 def git_commits_since(source_commit: str, path: str) -> list[tuple[str, str]]:
-    """Return [(short_sha, subject), ...] touching path since source_commit."""
+    """Return [(short_sha, subject), ...] of non-merge commits touching path
+    since source_commit.
+
+    Merge commits are skipped (--no-merges): they don't introduce new content
+    relative to their parents, and counting them would flag docs as stale on
+    any branch that has merged main into a feature branch even though nothing
+    substantive changed. The non-merge commits they bring in still show up
+    here — those are the real drift events.
+    """
     try:
         out = subprocess.check_output(
-            ["git", "log", "--oneline", f"{source_commit}..HEAD", "--", path],
+            ["git", "log", "--oneline", "--no-merges",
+             f"{source_commit}..HEAD", "--", path],
             text=True,
             stderr=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError:
+        # source_commit unreachable from HEAD — report no drift rather than
+        # crashing. Useful when previewing SPQR-tree docs on main before merge.
         return []
     rows: list[tuple[str, str]] = []
     for line in out.splitlines():
