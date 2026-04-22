@@ -1,9 +1,69 @@
-//! Component trait: compile-time behavior for circuit components.
+//! # Component Trait and Supporting Types
 //!
-//! Centralizes passivity, MNA stamping, pin configs, WDF leaf creation,
-//! validation, and KiCad export so that callers in graph.rs, validate.rs,
-//! classify.rs, compile.rs, build.rs, and kicad.rs can delegate to
-//! trait methods on concrete component structs.
+//! This module defines [`Component`], the central trait that drives the entire
+//! PedalKernel compilation pipeline. Every circuit element — from a simple
+//! resistor to a 12AX7 vacuum tube — implements `Component` to declare its
+//! electrical behavior, topology, and runtime characteristics.
+//!
+//! # Design Philosophy
+//!
+//! **Components declare; the compiler reacts.** The pipeline never pattern-matches
+//! on component types. Instead, it queries trait methods to determine how each
+//! component participates in the circuit:
+//!
+//! - **What edges does it create?** ([`Component::edges`]) — determines graph topology
+//! - **Is it passive or nonlinear?** ([`Component::is_passive`], [`Component::is_nonlinear`]) — determines stage solver
+//! - **What is its output impedance?** ([`Component::output_impedance`]) — determines stage boundaries
+//! - **What non-ideal effects does it have?** ([`Component::nonideal_fx`]) — determines post-processing
+//! - **How does signal flow through it?** ([`Component::signal_terminals`]) — determines feedback loops
+//!
+//! This inversion of control means adding a new component type requires implementing
+//! one trait — no changes to the graph builder, SPQR decomposer, stage builder,
+//! or any other pipeline stage.
+//!
+//! # How Components Drive the Pipeline
+//!
+//! ## Stage Splitting via Output Impedance
+//!
+//! [`OutputImpedance`] controls where the compiler can safely split a circuit into
+//! independent processing stages. This is based on Harold Black's theorem:
+//! a negative-feedback amplifier's output behaves as a voltage source (zero
+//! output impedance), meaning downstream loads cannot affect upstream behavior.
+//!
+//! When a component returns [`OutputImpedance::VoltageSource`], the compiler knows
+//! it can insert a stage boundary after that component's output. Op-amps in
+//! negative feedback return `VoltageSource`; passive components return
+//! [`OutputImpedance::Finite`].
+//!
+//! ## Feedback Detection via Signal Terminals
+//!
+//! [`SignalTerminals`] drives the feedback analysis pass. The compiler uses Tarjan's
+//! strongly-connected-component algorithm to find feedback loops. Components with
+//! [`SignalTerminals::Amplifier`] define the forward path direction; passive
+//! components with [`SignalTerminals::Passive`] can carry signal in either direction
+//! and may form the feedback path.
+//!
+//! ## Post-Processing via Non-Ideal Effects
+//!
+//! [`NonIdealFx`] allows components to declare physical imperfections from their
+//! SPICE models and datasheets. An LM308 op-amp declares its 1 MHz GBW product
+//! and 0.3 V/us slew rate; the stage builder translates these into a first-order
+//! IIR lowpass and a slew-rate limiter applied after the ideal WDF/MNA solver.
+//!
+//! # Key Types
+//!
+//! - [`Component`] — the trait itself (see its documentation for method groups)
+//! - [`EdgeKind`] — electrical classification of a circuit edge (Linear, Reactive, Nonlinear, Vcvs, etc.)
+//! - [`ComponentEdge`] — a single edge declared by a component
+//! - [`GraphRole`] — how a component participates in circuit graph construction
+//! - [`OutputImpedance`] — voltage-source vs. finite impedance classification
+//! - [`SignalTerminals`] — signal flow directionality for feedback analysis
+//! - [`NonIdealFx`] — non-ideal behaviors (GBW, slew rate, rail saturation)
+//! - [`StampResult`] — result of stamping a component into an MNA matrix
+//! - [`StampContext`] — pin-to-MNA-index resolution for multi-terminal stamping
+//! - [`ControlParam`] — controllable parameter declaration (pots, LFO rate, etc.)
+//! - [`ModulationSink`] — how a component receives LFO/envelope modulation
+//! - [`SolverMethod`] — preferred nonlinear solver (Newton-Raphson, Wright Omega, Ebers-Moll, Gummel-Poon)
 
 use std::collections::HashMap;
 
@@ -341,11 +401,114 @@ pub enum SolverMethod {
 // Component trait
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Compile-time component behavior.
+/// The single source of truth for circuit component behavior.
 ///
-/// Requires `Debug` for trait-object `Debug` forwarding.
-/// Provides `clone_box`, `as_any`, and `dyn_eq` for trait-object
-/// `Clone`, `PartialEq`, and downcasting support.
+/// Every circuit element in PedalKernel — resistors, capacitors, op-amps,
+/// BJTs, vacuum tubes, diodes, potentiometers, transformers, BBD delay lines —
+/// implements this trait. The compilation pipeline queries these methods to
+/// determine topology, solver strategy, stage boundaries, and runtime behavior
+/// without ever pattern-matching on concrete component types.
+///
+/// # Trait Object Support
+///
+/// `Component` is used as `Box<dyn Component>` throughout the pipeline. It
+/// requires [`Debug`] for trait-object formatting and provides `clone_box`,
+/// `as_any`, and `dyn_eq` for trait-object [`Clone`], downcasting, and
+/// [`PartialEq`] support.
+///
+/// # Method Groups
+///
+/// The trait methods are organized into functional groups:
+///
+/// ## Identity
+/// - [`type_tag`](Component::type_tag) — human-readable name (e.g., `"resistor"`, `"NPN transistor"`)
+///
+/// ## Ports
+/// - [`ports`](Component::ports) — terminal pairs carrying current. A resistor has 1 port `(a, b)`;
+///   a BJT has 2 ports `(base-emitter, collector-emitter)`.
+///
+/// ## Signal Flow
+/// - [`signal_terminals`](Component::signal_terminals) — directionality for feedback analysis.
+///   Amplifiers declare input/output pins; passive components are bidirectional.
+///   The compiler uses Tarjan's SCC algorithm on the directed signal graph to
+///   detect feedback loops.
+/// - [`output_impedance`](Component::output_impedance) — determines stage split points.
+///   [`OutputImpedance::VoltageSource`] (op-amps in feedback) allows safe splitting;
+///   [`OutputImpedance::Finite`] (passives, BJT collectors) prevents it.
+///   Based on Harold Black's negative feedback theorem (1934).
+///
+/// ## Non-Idealities
+/// - [`nonideal_fx`](Component::nonideal_fx) — declares physical imperfections as
+///   [`NonIdealFx`] variants. Values come from SPICE models and datasheets. The
+///   stage builder applies these as composable post-processing filters after the
+///   ideal WDF/MNA solver.
+///
+/// ## Classification
+/// - [`is_passive`](Component::is_passive) — whether BFS can collect this component into a stage
+/// - [`is_nonlinear`](Component::is_nonlinear) — whether this needs a Newton-Raphson solver
+/// - [`is_active_ic`](Component::is_active_ic) — whether this counts toward `num_active`
+/// - [`is_variable`](Component::is_variable) — whether the edge impedance changes at runtime
+///   (triggers scattering matrix recomputation)
+/// - Family booleans: [`is_bjt`](Component::is_bjt), [`is_jfet`](Component::is_jfet),
+///   [`is_tube`](Component::is_tube), [`is_pot`](Component::is_pot), etc.
+///
+/// ## Graph Building
+/// - [`graph_role`](Component::graph_role) — how this component participates in the circuit graph.
+///   [`GraphRole::Edge`] for passives, [`GraphRole::VcvsEdge`] for op-amps,
+///   [`GraphRole::Virtual`] for LFOs, [`GraphRole::Pot`] for potentiometers.
+/// - [`edges`](Component::edges) — declares circuit edges with [`EdgeKind`] classification.
+///   [`EdgeKind::Linear`] and [`EdgeKind::Reactive`] form passive WDF trees;
+///   [`EdgeKind::Nonlinear`] seeds NR solver stages; [`EdgeKind::Vcvs`] forces R-node MNA.
+/// - [`resolve_edges`](Component::resolve_edges) — context-dependent edge resolution. A JFET
+///   with its gate driven by an LFO resolves from `Nonlinear` to `Linear` (variable resistor).
+///
+/// ## MNA Stamping
+/// - [`stamp_mna`](Component::stamp_mna) — stamp into a 2-terminal MNA system (resistors, caps)
+/// - [`stamp_mna_multi`](Component::stamp_mna_multi) — stamp with multi-terminal pin resolution
+///   (op-amps resolve pos/neg/out pins)
+/// - [`mna_vsource_count`](Component::mna_vsource_count) — voltage sources needed (op-amps: 1)
+/// - [`mna_internal_node_count`](Component::mna_internal_node_count) — internal MNA nodes (op-amps: 1 for GBW pole)
+///
+/// ## WDF Leaf Creation
+/// - [`make_leaf`](Component::make_leaf) — create a runtime WDF leaf node (`DynNode`).
+///   Resistors, capacitors, and inductors return leaf nodes; nonlinear and virtual
+///   components return `None`.
+///
+/// ## Pin Interface
+/// - [`pin_config`](Component::pin_config) — valid pin names and aliases
+/// - [`pin_direction`](Component::pin_direction) — inferred direction for layout (Input, Output, Up, Down)
+///
+/// ## Controls
+/// - [`controls`](Component::controls) — declares runtime-adjustable parameters ([`ControlParam`]).
+///   Pots declare `PotPosition`; LFOs declare `LfoRate` and `LfoDepth`.
+/// - [`modulation_sink`](Component::modulation_sink) — how this component receives LFO/envelope
+///   control signals, including bias voltage and modulation range.
+///
+/// ## Validation
+/// - [`validate_values`](Component::validate_values) — design rule checks for suspicious or
+///   invalid component values (e.g., a 1-ohm resistor, a 1-farad capacitor).
+///
+/// # Implementing a New Component
+///
+/// To add a new component type to PedalKernel:
+///
+/// 1. Create a struct in [`super::components`] (e.g., `MyDevice { model: String }`)
+/// 2. Implement `Component` with at minimum:
+///    - `type_tag()` — return a human-readable name
+///    - `is_passive()` — `true` for R/C/L, `false` for active devices
+///    - `pin_config()` — declare valid pin names
+///    - `graph_role()` — how it enters the circuit graph
+///    - `edges()` — declare edge kinds (Linear, Nonlinear, etc.)
+///    - `stamp_mna()` — stamp into MNA matrices (for R-node solving)
+///    - `footprint_ref()` — KiCad symbol reference
+/// 3. For nonlinear devices, also implement `classify_nonlinear()` and set
+///    `is_nonlinear() -> true`
+/// 4. For active devices with feedback, implement `output_impedance()` and
+///    `signal_terminals()`
+/// 5. Add the DSL parser variant in [`crate::dsl`]
+///
+/// No changes are needed in the graph builder, SPQR decomposer, stage builder,
+/// or any other pipeline module.
 pub trait Component: std::fmt::Debug {
     // ── Trait Object Support ──────────────────────────────────────────────
 

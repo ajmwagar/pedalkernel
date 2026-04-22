@@ -1,15 +1,125 @@
-//! SPQR tree decomposition for circuit graphs.
+//! # SPQR Tree Decomposition for Circuit Graphs
 //!
-//! Every 2-connected graph decomposes uniquely into:
-//! - **S (Series)**: components in series → WDF series adaptor
-//! - **P (Parallel)**: components sharing endpoints → WDF parallel adaptor
-//! - **Q (single edge)**: leaf component → WDF leaf element
-//! - **R (Rigid)**: non-SP subgraph → MNA scattering matrix
+//! This module implements SPQR decomposition — the algorithm at the heart of
+//! PedalKernel's compilation strategy. It transforms a flat circuit graph into
+//! a hierarchical tree that directly determines the runtime solver for each
+//! sub-circuit.
 //!
-//! The decomposition drives the entire compilation pipeline:
-//! - S/P/Q nodes become WDF tree nodes (O(1) per sample)
-//! - R nodes become MNA stages (O(N²) per sample)
-//! - Tree traversal order = signal routing (no sort needed)
+//! # What is SPQR Decomposition?
+//!
+//! Every 2-connected graph has a unique decomposition into four types of nodes,
+//! named after their topological structure:
+//!
+//! - **S (Series)**: A chain of components connected end-to-end through degree-2
+//!   internal nodes. In WDF terms, this becomes a **series adaptor** — the wave
+//!   variables combine additively. Example: an RC lowpass (resistor in series
+//!   with a capacitor to ground).
+//!
+//! - **P (Parallel)**: Multiple components sharing the same pair of endpoints.
+//!   In WDF terms, this becomes a **parallel adaptor** — the wave variables
+//!   combine via admittance weighting. Example: a resistor and capacitor
+//!   both connected between the same two nodes.
+//!
+//! - **Q (Leaf)**: A single edge — one component between two nodes. This becomes
+//!   a **WDF leaf element** (resistor, capacitor, inductor) or a nonlinear root
+//!   (diode, transistor junction).
+//!
+//! - **R (Rigid)**: A triconnected subgraph that cannot be decomposed into series
+//!   or parallel combinations. These require a **matrix-based solver** — either
+//!   MNA scattering (for general circuits), IIR biquads (for all-passive cases
+//!   like tone stacks), or Harold Black's feedback formula (for op-amp stages).
+//!
+//! # Why SPQR Matters for WDF
+//!
+//! Wave Digital Filters require a binary tree of series/parallel adaptors.
+//! Arbitrary circuits do not naturally form binary trees — a Wheatstone bridge,
+//! for instance, is triconnected and has no series/parallel decomposition.
+//!
+//! SPQR decomposition solves this by automatically identifying the maximal
+//! series/parallel structure in any circuit. The S/P portions get the cheap
+//! O(1)-per-sample WDF treatment; only the irreducible R portions pay the
+//! cost of matrix solvers. For most guitar pedal circuits, the vast majority
+//! of components fall into S/P subtrees.
+//!
+//! # The Signal Flow Pipeline
+//!
+//! The full compilation flow through this module:
+//!
+//! ```text
+//! CircuitGraph ──> signal_flow::find_flow_groups()
+//!                       │
+//!                       v
+//!               flow groups (split at VoltageSource nodes)
+//!                       │
+//!                       v
+//!               spqr_decompose() ──> SpqrNode tree
+//!                       │
+//!                       v
+//!               spqr_to_stages() ──> Vec<SpqrStage>
+//!                       │
+//!                       v
+//!               build pass ──> runtime processors
+//! ```
+//!
+//! ## Stage Classification
+//!
+//! Each SPQR subtree is classified by [`classify_sp_subtree`] based on the
+//! [`EdgeKind`](super::component::EdgeKind) of its leaf components:
+//!
+//! - **AllPassive** (all edges are [`Linear`](super::component::EdgeKind::Linear) or
+//!   [`Reactive`](super::component::EdgeKind::Reactive)): emitted as a
+//!   [`SpqrStage::PassiveWdf`] — a pure WDF tree with O(1) per-sample cost.
+//!
+//! - **SingleNl** (exactly one [`Nonlinear`](super::component::EdgeKind::Nonlinear)
+//!   edge): emitted as a [`SpqrStage::NlWdf`] — a WDF tree with the nonlinear
+//!   element at the root, solved by scalar Newton-Raphson or Wright Omega.
+//!
+//! - **Vcvs** (contains a [`Vcvs`](super::component::EdgeKind::Vcvs) edge, i.e., an
+//!   op-amp): the subtree is recursed into its children so the VCVS does not
+//!   infect unrelated passive stages.
+//!
+//! - **Complex** (multiple nonlinear elements): recursed into children for
+//!   independent classification.
+//!
+//! R-nodes always become [`SpqrStage::Rigid`]. The build layer then inspects
+//! the component content to choose the solver:
+//! - All passive → IIR biquad (O(1), e.g., Big Muff tone stack)
+//! - Op-amp + passive feedback → BlackFeedback (O(1), Harold Black's formula)
+//! - Reactive + active → StateSpace (O(N), state-space MNA integration)
+//! - Multiple nonlinear → MultiNl (O(N^2), multi-dimensional Newton-Raphson)
+//!
+//! ## Pendant Extraction
+//!
+//! Before series/parallel reduction, [`extract_pendants`] removes dead-end edges
+//! from the subgraph. A pendant is an edge where one endpoint has degree 1 —
+//! it connects to only one junction node. Ground-terminated capacitors are the
+//! most common example: the cap connects a signal node to GND, and within the
+//! local subgraph GND has degree 1.
+//!
+//! Removing pendants reduces junction degrees, often enabling series detection
+//! that would otherwise be blocked. For example, a T-junction with a cap to
+//! ground: after extracting the pendant cap, the junction becomes degree 2,
+//! revealing a series chain.
+//!
+//! ## Output Impedance and Stage Splitting
+//!
+//! Before SPQR decomposition begins, the signal flow analysis pass splits the
+//! circuit at nodes where a component declares
+//! [`OutputImpedance::VoltageSource`](super::component::OutputImpedance::VoltageSource).
+//! This creates independent flow groups that are decomposed separately. The
+//! physical justification: a voltage source output decouples upstream and
+//! downstream impedances, so the sub-circuits on each side can be solved
+//! independently without loss of accuracy.
+//!
+//! # Converting to Runtime Processors
+//!
+//! - [`spqr_to_dyn_node`] folds an all-passive S/P/Q subtree into a
+//!   [`DynNode`](super::dyn_node::DynNode) WDF binary tree.
+//! - [`spqr_to_passive_dyn_node`] does the same but excludes one nonlinear edge,
+//!   which becomes the NR/Wright Omega root element.
+//! - [`spqr_to_stages`] walks the full SPQR tree depth-first, classifying each
+//!   subtree and emitting [`SpqrStage`] values in signal-flow order. The
+//!   traversal order *is* the signal routing — no topological sort is needed.
 
 use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
