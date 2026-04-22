@@ -2246,6 +2246,7 @@ impl PedalProcessor for CompiledPedal {
                     let bf_stage = if let Stage::BlackFeedback(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
                     signal = bf_stage.process(signal);
             }
+
         }
 
         #[cfg(feature = "debug-trace")]
