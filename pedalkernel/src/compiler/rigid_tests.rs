@@ -202,7 +202,7 @@ fn classify_inverting(pedal_src: &str) -> bool {
 #[test]
 fn inverting_pos_to_gnd() {
     // Simplest inverting: pos → GND directly.
-    assert!(classify_inverting(r#"
+    let src = r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -218,7 +218,19 @@ fn inverting_pos_to_gnd() {
                 U1.out -> out
             }
             controls {}
-        }"#), "pos→GND should be inverting");
+        }"#;
+
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let r_in_edges: Vec<_> = graph.edges.iter().enumerate()
+        .filter(|(_, e)| graph.components[e.comp_idx].id == "R_in")
+        .map(|(i, e)| (i, e.node_a, e.node_b))
+        .collect();
+    eprintln!("Simple inverting — R_in edges: {r_in_edges:?} (total edges: {})", graph.edges.len());
+    assert_eq!(r_in_edges.len(), 1,
+        "R_in should have exactly 1 edge in simple circuit too: {:?}", r_in_edges);
+
+    assert!(classify_inverting(src), "pos→GND should be inverting");
 }
 
 #[test]
@@ -248,7 +260,7 @@ fn inverting_pos_to_bias_with_cap() {
     // Inverting with Vref bias: pos → R-R divider + bypass cap to GND.
     // The cap makes pos an AC ground → inverting.
     // This is the Screamer / RAT / SD-1 pattern.
-    assert!(classify_inverting(r#"
+    let src = r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -272,7 +284,31 @@ fn inverting_pos_to_bias_with_cap() {
                 U1.out -> out
             }
             controls {}
-        }"#), "pos→bias(R+R+C) should be inverting");
+        }"#;
+
+    // Dump all graph edges to understand phantom edges
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+    let graph = CircuitGraph::from_pedal(&pedal);
+    eprintln!("Graph: {} edges, {} components", graph.edges.len(), graph.components.len());
+    eprintln!("  in_node={} out_node={} gnd={} vcc={}",
+        graph.in_node, graph.out_node, graph.gnd_node, graph.vcc_node);
+    for (i, e) in graph.edges.iter().enumerate() {
+        let c = &graph.components[e.comp_idx];
+        eprintln!("  edge[{i}] comp[{}]={} ({}->{}) passive={}",
+            e.comp_idx, c.id, e.node_a, e.node_b, c.kind.is_passive());
+    }
+
+    // Edge 6 and 7 are PHANTOM edges — R_in should only have 1 edge (0→5),
+    // not 3. This is a graph construction bug from nullor model stamping.
+    let r_in_edges: Vec<_> = graph.edges.iter().enumerate()
+        .filter(|(_, e)| e.comp_idx == 0) // comp[0] = R_in
+        .map(|(i, e)| (i, e.node_a, e.node_b))
+        .collect();
+    eprintln!("  R_in edges: {r_in_edges:?}");
+    assert_eq!(r_in_edges.len(), 1,
+        "R_in should have exactly 1 edge, got {}: {:?}", r_in_edges.len(), r_in_edges);
+
+    assert!(classify_inverting(src), "pos→bias(R+R+C) should be inverting");
 }
 
 #[test]
