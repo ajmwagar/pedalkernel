@@ -377,6 +377,101 @@ fn feedback_pot_screamer_topology_drive_changes_gain() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Layer 3b: Orphaned pots — pots in non-feedback passive groups
+//
+// Some pots (volume dividers, fuzz emitter coupling) aren't in any
+// feedback stage. They're standalone passive groups. The binding
+// system needs to find and bind them anyway.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn orphan_volume_pot_is_bound() {
+    // Volume pot as a simple voltage divider (not in any feedback loop).
+    // Should still be bound as a control.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                Volume: pot(100k, a)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Volume.a
+                Volume.w -> out
+                Volume.b -> gnd
+            }
+            controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    let bound = compiled.controls.iter().any(|c| c.label == "Volume");
+    eprintln!("Orphan volume: bound={bound}");
+    for c in &compiled.controls {
+        eprintln!("  {:?} -> {:?}", c.label, c.target);
+    }
+    assert!(bound, "Volume pot (voltage divider) should be bound even when not in feedback");
+}
+
+#[test]
+fn orphan_volume_pot_changes_output() {
+    // Volume pot as divider should actually change output level.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                Volume: pot(100k, a)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Volume.a
+                Volume.w -> out
+                Volume.b -> gnd
+            }
+            controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Volume");
+    eprintln!("Orphan volume: lo={lo:.6}, hi={hi:.6}");
+    assert!(hi > lo * 1.5,
+        "Volume pot should change output: lo={lo:.6}, hi={hi:.6}");
+}
+
+/// Helper for parsed pedals (avoids re-parsing)
+fn measure_pot_sweep_parsed(pedal: &crate::dsl::PedalDef, control: &str) -> (f64, f64) {
+    let sr = 48000.0;
+    let freq = 440.0;
+    let mut measure = |pos: f64| -> f64 {
+        let mut c = compile_via_spqr(pedal, sr).expect("compile");
+        c.set_control(control, pos);
+        for s in 0..500 {
+            let input = 0.01 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+            c.process(input);
+        }
+        let mut peak = 0.0f64;
+        for s in 500..720 {
+            let input = 0.01 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+            peak = peak.max(c.process(input).abs());
+        }
+        peak
+    };
+    (measure(0.1), measure(0.9))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Layer 4: FlowGroup edge classification — R_in should be pendant, not feedback
 // ═══════════════════════════════════════════════════════════════════════════
 

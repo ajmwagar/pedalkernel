@@ -366,3 +366,64 @@ fn noninverting_pos_to_signal_with_bias_on_neg() {
             controls {}
         }"#), "pos→signal (with Ri on neg) should be non-inverting");
 }
+
+#[test]
+fn inverting_second_stage_with_bias() {
+    // Two-stage pedal: U1 (inverting, pos→GND) → U2 (inverting, pos→Vref).
+    // Both should classify as inverting. U2's pos connects to a bias divider,
+    // NOT to the circuit input. This is the Screamer/SD-1 pattern.
+    //
+    // The fix must work per-stage (not BFS from global in_node) because
+    // U2's signal enters through the serial chain, not from in_node.
+    let (graph, edges) = make_graph_all_edges(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf1: resistor(100k)
+                R_mid: resistor(10k)
+                U2: opamp(tl072)
+                Rf2: resistor(47k)
+                R_bias1: resistor(100k)
+                R_bias2: resistor(100k)
+                C_bias: cap(10u)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf1.a
+                Rf1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> R_mid.a
+                R_mid.b -> U2.neg
+                U2.neg -> Rf2.a
+                Rf2.b -> U2.out
+                vcc -> R_bias1.a
+                R_bias1.b -> U2.pos
+                U2.pos -> R_bias2.a
+                R_bias2.b -> gnd
+                U2.pos -> C_bias.a
+                C_bias.b -> gnd
+                U2.out -> out
+            }
+            controls {}
+        }"#);
+
+    // Test U1 (pos→GND)
+    let u1_edges: Vec<usize> = edges.iter().copied().filter(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        // U1's group: R_in, U1, Rf1
+        comp.id == "R_in" || comp.id == "U1" || comp.id == "Rf1"
+    }).collect();
+    let stats1 = StageStats::from_edges(&u1_edges, &graph);
+    assert!(is_inverting_topology(&stats1, &graph), "U1 (pos→GND) should be inverting");
+
+    // Test U2 (pos→Vref bias)
+    let u2_edges: Vec<usize> = edges.iter().copied().filter(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        comp.id == "R_mid" || comp.id == "U2" || comp.id == "Rf2"
+    }).collect();
+    let stats2 = StageStats::from_edges(&u2_edges, &graph);
+    assert!(is_inverting_topology(&stats2, &graph),
+        "U2 (pos→bias divider) should be inverting in second stage");
+}
