@@ -198,7 +198,7 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
                 return true;
             }
 
-            return false; // pos is a signal input → non-inverting
+            return false; // pos not at GND/AC ground → non-inverting
         }
     }
 
