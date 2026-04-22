@@ -173,7 +173,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
         .copied()
         .collect();
 
-    let (mut mna, reactive_edges) = stamp_passive_edges(
+    let (mut mna, reactive_edges, pot_stamps) = stamp_passive_edges(
         all_edges,
         &nl_edge_set,
         graph,
@@ -220,6 +220,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
         supply_voltage,
         oversampling,
         graph,
+        pot_stamps,
     )
 }
 
@@ -308,6 +309,18 @@ fn check_vcc_needed(
 
 /// Step 3: Build MNA system and stamp passive edges (skip NL).
 /// Returns (mna, reactive_edges).
+/// A pot detected during passive stamping. Stamped into MNA as a fixed resistor
+/// at its initial position, but also tracked for runtime delta-updating.
+struct PotStamp {
+    /// WDF pot leaf for runtime position changes.
+    leaf: DynNode,
+    /// MNA node indices (pos, neg) for G-matrix delta updates.
+    mna_pos: Option<usize>,
+    mna_neg: Option<usize>,
+    /// Initial conductance stamped into MNA.
+    initial_conductance: f64,
+}
+
 fn stamp_passive_edges(
     all_edges: &[usize],
     nl_edge_set: &HashSet<usize>,
@@ -317,9 +330,10 @@ fn stamp_passive_edges(
     num_vsources: usize,
     effective_rate: f64,
     vcc_vs_idx: Option<usize>,
-) -> (MnaSystem, Vec<(usize, DynNode)>) {
+) -> (MnaSystem, Vec<(usize, DynNode)>, Vec<PotStamp>) {
     let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
     let mut reactive_edges: Vec<(usize, DynNode)> = Vec::new();
+    let mut pot_stamps: Vec<PotStamp> = Vec::new();
 
     for &eidx in all_edges {
         if nl_edge_set.contains(&eidx) {
@@ -330,7 +344,23 @@ fn stamp_passive_edges(
         let n1 = node_to_mna(e.node_a);
         let n2 = node_to_mna(e.node_b);
 
-        if let Some(r) = comp.kind.resistance() {
+        if comp.kind.is_pot() {
+            // Pots: stamp initial resistance into MNA AND create a WDF leaf
+            // for runtime updates. The leaf tracks position; flush_recompute
+            // delta-updates the G matrix when the pot moves.
+            if let Some(r) = comp.kind.resistance() {
+                let initial_r = r * 0.5; // Default position = 0.5
+                mna.stamp_resistor(n1, n2, initial_r);
+                if let Some(leaf) = comp.kind.make_leaf(&comp.id, effective_rate) {
+                    pot_stamps.push(PotStamp {
+                        leaf,
+                        mna_pos: n1,
+                        mna_neg: n2,
+                        initial_conductance: 1.0 / initial_r,
+                    });
+                }
+            }
+        } else if let Some(r) = comp.kind.resistance() {
             mna.stamp_resistor(n1, n2, r);
         } else if let Some(c) = comp.kind.capacitance() {
             let rp = 1.0 / (2.0 * effective_rate * c);
@@ -352,7 +382,7 @@ fn stamp_passive_edges(
         mna.stamp_voltage_source(vcc_mna, None, vcc_idx);
     }
 
-    (mna, reactive_edges)
+    (mna, reactive_edges, pot_stamps)
 }
 
 /// Step 4: Build WDF ports (NL + reactive + adapted input).
@@ -551,6 +581,7 @@ fn assemble_multi_nl_stage(
     supply_voltage: f64,
     oversampling: OversamplingFactor,
     graph: &CircuitGraph,
+    pot_stamps: Vec<PotStamp>,
 ) -> Result<MultiNlStage, String> {
     let scattering_blocks = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
@@ -596,8 +627,10 @@ fn assemble_multi_nl_stage(
         nl_devices,
         nl_port_resistances,
         passive_children,
-        pot_children: Vec::new(),
-        pot_mna_stamps: Vec::new(),
+        pot_children: pot_stamps.iter().map(|ps| ps.leaf.clone()).collect(),
+        pot_mna_stamps: pot_stamps.iter().enumerate().map(|(i, ps)| {
+            (i, ps.mna_pos, ps.mna_neg, ps.initial_conductance)
+        }).collect(),
         n_nl,
         v_prev: initial_v.clone(),
         scattering: scattering_blocks,
