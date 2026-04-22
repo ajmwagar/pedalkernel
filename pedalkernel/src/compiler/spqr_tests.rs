@@ -541,3 +541,165 @@ fn spqr_dyn_node_series_has_correct_structure() {
         "Series R1+R2 port resistance should be ~20k, got {rp:.0}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T-junction: passive network with a branch (the canary for HPF regression)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn spqr_t_junction_is_series_parallel() {
+    // T-junction: R1 → junction → (C1 to gnd, R2 to out)
+    // This is Series(R1, Parallel(C1, R2)) — SP-reducible.
+    // SPQR should NOT classify this as Rigid.
+    let (graph, edges) = make_graph(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                C1: cap(22n)
+                R2: resistor(10k)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> C1.a
+                C1.b -> gnd
+                R1.b -> R2.a
+                R2.b -> out
+            }
+            controls {}
+        }"#);
+
+    let tree = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+
+    // Should be S or P, NOT R
+    let is_rigid = matches!(tree, SpqrNode::R { .. });
+    eprintln!("T-junction SPQR: rigid={is_rigid}, tree={tree:?}");
+    assert!(
+        !is_rigid,
+        "T-junction (R + parallel C/R) should be SP-reducible, not Rigid"
+    );
+}
+
+#[test]
+fn spqr_t_junction_with_wrong_terminals_is_rigid() {
+    // Same T-junction, but with terminals that DON'T match the circuit's
+    // boundary nodes. If terminals are [in, out] but the passive group's
+    // edges don't span in→out, SPQR falls back to Rigid.
+    //
+    // This is the canary: when signal_flow creates a passive group that
+    // doesn't touch in/out, SPQR misclassifies it.
+    let (graph, edges) = make_graph(r#"
+        pedal "test" { supply 9V
+            components {
+                R_before: resistor(10k)
+                R1: resistor(10k)
+                C1: cap(22n)
+                R2: resistor(10k)
+                R_after: resistor(10k)
+            }
+            nets {
+                in -> R_before.a
+                R_before.b -> R1.a
+                R1.b -> C1.a
+                C1.b -> gnd
+                R1.b -> R2.a
+                R2.b -> R_after.a
+                R_after.b -> out
+            }
+            controls {}
+        }"#);
+
+    // Decompose ONLY the T-junction edges (R1, C1, R2) — not R_before/R_after.
+    // Use the circuit's in/out as terminals (which the T-junction doesn't span).
+    let t_edges: Vec<usize> = edges.iter().copied().filter(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        comp.id == "R1" || comp.id == "C1" || comp.id == "R2"
+    }).collect();
+
+    eprintln!("T-junction sub-group edges: {:?}", t_edges.iter().map(|&e| {
+        graph.components[graph.edges[e].comp_idx].id.clone()
+    }).collect::<Vec<_>>());
+
+    // With global terminals [in, out] — T-junction doesn't touch these
+    let tree_global = spqr_decompose(
+        &t_edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+    let rigid_with_global = matches!(tree_global, SpqrNode::R { .. });
+
+    // With correct boundary terminals [R_before.b, R_after.a]
+    let r_before_b = graph.node_names.get("R_before.b").copied().unwrap_or(graph.in_node);
+    let r_after_a = graph.node_names.get("R_after.a").copied().unwrap_or(graph.out_node);
+    let tree_local = spqr_decompose(
+        &t_edges,
+        &[r_before_b, r_after_a],
+        &graph,
+        graph.gnd_node,
+    );
+    let rigid_with_local = matches!(tree_local, SpqrNode::R { .. });
+
+    eprintln!("Global terminals: rigid={rigid_with_global}");
+    eprintln!("Local terminals:  rigid={rigid_with_local}");
+
+    // With local terminals, the T-junction should be SP-reducible
+    assert!(
+        !rigid_with_local,
+        "T-junction with correct boundary terminals should be SP-reducible"
+    );
+}
+
+#[test]
+fn spqr_t_junction_produces_audio_as_stage() {
+    // End-to-end: passive T-junction tone stack between op-amp and output.
+    // When SPQR resolves the correct terminals, the passive group becomes
+    // a WDF tree instead of an IIR with b=[0,0,0].
+    use crate::PedalProcessor;
+
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                R_tone: resistor(10k)
+                C_tone: cap(22n)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> R_tone.a
+                R_tone.b -> C_tone.a
+                C_tone.b -> gnd
+                R_tone.b -> R_out.a
+                R_out.b -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = super::spqr_build::compile_via_spqr(&pedal, 48000.0)
+        .expect("compile");
+
+    // Settle
+    for _ in 0..2000 { compiled.process(0.0); }
+
+    // 1kHz should pass through tone stack
+    let mut peak = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 1000.0 * s as f64 / 48000.0).sin();
+        peak = peak.max(compiled.process(input).abs());
+    }
+
+    eprintln!("T-junction tone stack: 1kHz peak={peak:.6}");
+    assert!(peak > 0.001, "Tone stack should pass signal: peak={peak:.6}");
+}
