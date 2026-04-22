@@ -2122,8 +2122,17 @@ impl PedalProcessor for CompiledPedal {
                 }
                 StageRef::Iir(i) => {
                     prev_was_clipping = false;
+                    let iir_in = signal;
                     let iir_stage = &mut self.iir_stages[*i];
                     signal = iir_stage.process(signal);
+                    #[cfg(test)]
+                    if iir_in.abs() > 1e-10 || signal.abs() > 1e-10 {
+                        static IIR_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        let n = IIR_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n < 3 {
+                            eprintln!("  [IIR {i}] in={iir_in:.6e} out={signal:.6e}");
+                        }
+                    }
                 }
                 StageRef::StateSpace(i) => {
                     prev_was_clipping = false;

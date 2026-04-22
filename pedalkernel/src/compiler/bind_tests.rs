@@ -126,8 +126,10 @@ fn debug_volume_stages() {
         }"#).expect("parse");
 
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    eprintln!("Stages: {}", compiled.stages.len());
+    eprintln!("WDF Stages: {}", compiled.stages.len());
     for (i, s) in compiled.stages.iter().enumerate() {
-        eprintln!("  stage {i}: rp={:.1}", s.tree.port_resistance());
+        eprintln!("  wdf {i}: rp={:.1}", s.tree.port_resistance());
     }
+    eprintln!("IIR Stages: {}", compiled.iir_stages.len());
+    eprintln!("Stage order: {:?}", compiled.stage_order);
 }

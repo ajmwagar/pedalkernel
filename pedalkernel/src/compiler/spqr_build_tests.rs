@@ -397,6 +397,106 @@ fn try_all_legends_pedals() {
     // Don't assert — just report. We're tracking coverage.
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Audio output regression tests — each legend pedal must produce non-zero output
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn load_legend(name: &str) -> crate::dsl::PedalDef {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/{}.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+        name
+    );
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("Can't read {path}"));
+    crate::dsl::parse_pedal_file(&source)
+        .unwrap_or_else(|e| panic!("{name}: parse error: {e}"))
+}
+
+fn assert_produces_audio(name: &str, pedal: &crate::dsl::PedalDef) {
+    let mut compiled = compile_via_spqr(pedal, 48000.0)
+        .unwrap_or_else(|e| panic!("{name}: compile error: {e}"));
+
+    eprintln!("{name}: wdf={}, iir={}, ss={}, mnl={}, order={:?}",
+        compiled.stages.len(), compiled.iir_stages.len(),
+        compiled.state_space_stages.len(), compiled.multi_nl_stages.len(),
+        compiled.stage_order);
+
+    // Settle DC
+    for _ in 0..2000 {
+        compiled.process(0.0);
+    }
+
+    // Feed guitar-level 440Hz signal — trace first few samples
+    let mut peak = 0.0f64;
+    for i in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+        let output = compiled.process(input);
+        if i < 5 {
+            eprintln!("  sample {i}: in={input:.6} out={output:.6}");
+        }
+        peak = peak.max(output.abs());
+    }
+
+    eprintln!("{name}: peak={peak:.6}V");
+    assert!(peak.is_finite(), "{name}: output is NaN/Inf");
+    assert!(peak > 0.001, "{name}: ZERO OUTPUT regression — peak={peak:.6}V");
+}
+
+#[test]
+fn legend_goldenrod_produces_audio() {
+    let pedal = load_legend("goldenrod");
+    assert_produces_audio("goldenrod", &pedal);
+}
+
+#[test]
+fn legend_ratking_produces_audio() {
+    let pedal = load_legend("ratking");
+    assert_produces_audio("ratking", &pedal);
+}
+
+#[test]
+fn legend_sd1_produces_audio() {
+    let pedal = load_legend("sd1");
+    assert_produces_audio("sd1", &pedal);
+}
+
+#[test]
+fn legend_screamer_produces_audio() {
+    let pedal = load_legend("screamer");
+    assert_produces_audio("screamer", &pedal);
+}
+
+#[test]
+fn legend_muff_produces_audio() {
+    let pedal = load_legend("muff");
+    assert_produces_audio("muff", &pedal);
+}
+
+#[test]
+fn legend_blues_produces_audio() {
+    let pedal = load_legend("blues");
+    assert_produces_audio("blues", &pedal);
+}
+
+#[test]
+fn legend_fizz_produces_audio() {
+    let pedal = load_legend("fizz");
+    assert_produces_audio("fizz", &pedal);
+}
+
+#[test]
+fn legend_rangemaster_produces_audio() {
+    let pedal = load_legend("rangemaster");
+    assert_produces_audio("rangemaster", &pedal);
+}
+
+#[test]
+fn legend_shrine_produces_audio() {
+    let pedal = load_legend("shrine");
+    assert_produces_audio("shrine", &pedal);
+}
+
 #[test]
 fn spqr_noninverting_opamp_gain() {
     // Non-inverting amp: R1=10k, Rf=100k → gain = 1 + 100k/10k = 11

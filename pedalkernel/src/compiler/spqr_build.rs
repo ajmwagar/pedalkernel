@@ -115,9 +115,19 @@ pub fn compile_via_spqr_with_options(
     let mut stage_order: Vec<StageRef> = Vec::new();
     let mut stage_counter = 0usize;
 
-    for group in &feedback_groups {
+    for (gi, group) in feedback_groups.iter().enumerate() {
         if group.all_edges().is_empty() {
             continue;
+        }
+
+        #[cfg(test)]
+        {
+            let edges = group.all_edges();
+            let edge_names: Vec<String> = edges.iter().map(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                format!("{}({:?})", comp.id, graph.effective_edge_kind(eidx))
+            }).collect();
+            eprintln!("group {gi}: feedback={} edges={:?}", group.has_feedback(), edge_names);
         }
 
         if group.has_feedback() {

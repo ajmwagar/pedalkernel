@@ -3033,6 +3033,15 @@ impl IirStage {
     pub(super) fn process(&mut self, input: f64) -> f64 {
         let mut out = self.iir.process(input * self.compensation);
 
+        #[cfg(test)]
+        {
+            static IIR_COEFF_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            if input.abs() > 1e-10 && IIR_COEFF_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1 {
+                eprintln!("  IIR coeffs: b={:?} a={:?} comp={} gbw_coeff={} v_max={}",
+                    self.iir.b_coeffs, self.iir.a_coeffs, self.compensation, self.gbw_coeff, self.v_max);
+            }
+        }
+
         // GBW rolloff: single-pole lowpass
         out = self.gbw_coeff * out + (1.0 - self.gbw_coeff) * self.gbw_state;
         self.gbw_state = out;

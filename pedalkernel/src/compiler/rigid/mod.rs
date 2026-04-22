@@ -278,12 +278,17 @@ pub(super) fn build_rigid_from_group(
     let stats = StageStats::from_edges(&edge_indices, graph);
     let optimization = classify_rigid(&stats, graph, group);
 
+    #[cfg(test)]
+    eprintln!("  rigid: {:?} (vcvs={}, nl={}, linear={}, reactive={}, edges={})",
+        optimization, stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count, edge_indices.len());
+
     match optimization {
         RigidOptimization::Iir => {
             let pendant_trees = Vec::new();
             // Try IIR (≤2 states). If too many states, use StateSpace.
             match iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate) {
-                Ok(iir_data) => {
+                Ok(iir_data) if iir_data.b_coeffs.iter().any(|&b| b.abs() > 1e-30) => {
+                    // Valid biquad — b coefficients are non-zero
                     let mut stage = IirStage::new(iir_data);
                     // Collect NonIdealFx from any op-amp components in this stage.
                     let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
@@ -295,6 +300,18 @@ pub(super) fn build_rigid_from_group(
                         stage.pot_bindings = extract_pot_bindings(g, &edge_indices, graph);
                     }
                     Ok(BuiltStage::Iir(stage))
+                }
+                Ok(_zero_b) => {
+                    // IIR produced zero numerator — MNA couldn't extract transfer function.
+                    // Common for VCVS + reactive feedback (e.g., RAT op-amp stage).
+                    // Fall back to StateSpace which handles arbitrary linear systems.
+                    #[cfg(test)]
+                    eprintln!("  IIR b=[0,0,0] → falling back to StateSpace");
+                    let supply_voltage = 9.0;
+                    state_space::build_state_space_stage(
+                        &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
+                    )
+                    .map(BuiltStage::StateSpace)
                 }
                 Err(_) => {
                     // IIR failed (>2 states or other issue) → StateSpace
