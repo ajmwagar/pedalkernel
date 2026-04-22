@@ -1,9 +1,10 @@
 # Netlify configuration for docs.pedalkernel.com
 #
 # Publishes Rust API documentation (cargo doc output) on every push to main.
-# Rust is installed fresh per build since it is not in Netlify's base image;
-# netlify-plugin-cache persists the toolchain and compiled artifacts across
-# builds, so only the first cold build is slow.
+# Netlify's build image ships rustup preinstalled but with no default
+# toolchain set, so the build unconditionally selects stable.
+# netlify-plugin-cache persists ~/.rustup and target/ across builds, so
+# only the first cold build is slow.
 #
 # Scope: pedalkernel + pedalkernel-layout.
 # pedalkernel-validate is excluded because its Cargo.toml pulls pedalkernel
@@ -14,11 +15,13 @@
   publish = "target/doc"
   command = """
     set -euo pipefail
-    if ! command -v cargo >/dev/null 2>&1; then
+    if ! command -v rustup >/dev/null 2>&1; then
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain stable --profile minimal
+        | sh -s -- -y --default-toolchain none --profile minimal
+      . "$HOME/.cargo/env"
     fi
-    . "$HOME/.cargo/env"
+    rustup toolchain install stable --profile minimal --no-self-update
+    rustup default stable
     rustc --version
     cargo doc -p pedalkernel --no-deps --no-default-features --features tui,cli,gummel-poon
     cargo doc -p pedalkernel-layout --no-deps
