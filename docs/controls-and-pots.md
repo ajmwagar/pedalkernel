@@ -3,7 +3,7 @@ title: "Controls and pots"
 description: "How runtime control updates flow through the engine — binding, dispatch, and what each pot movement actually costs."
 section: "Internals"
 weight: 87
-source_commit: "97277d4988a7e0b16efe26dd98ba7a341f0b76b9"
+source_commit: "2cafa26fe49ea6ad3d1ccf9f52401060c4ae1ea2"
 watches:
   - pedalkernel/src/compiler/spqr_control.rs
   - pedalkernel/src/compiler/compiled.rs

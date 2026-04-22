@@ -3,7 +3,7 @@ title: "Compiler internals"
 description: "SPQR decomposition, stage routing, and the compiler passes that turn a .pedal file into a runnable processor."
 section: "Internals"
 weight: 85
-source_commit: "97277d4988a7e0b16efe26dd98ba7a341f0b76b9"
+source_commit: "2cafa26fe49ea6ad3d1ccf9f52401060c4ae1ea2"
 watches:
   - pedalkernel/src/compiler/mod.rs
   - pedalkernel/src/compiler/compile.rs
