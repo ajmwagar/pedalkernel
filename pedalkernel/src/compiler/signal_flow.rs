@@ -578,7 +578,11 @@ pub(in crate::compiler) fn find_flow_groups(
         });
     }
 
-    // Other unclaimed → individual standalone groups
+    // Other unclaimed → individual standalone groups.
+    // TODO: merge connected passives into WDF trees (currently each component
+    // is its own stage, causing standalone caps to act as high-pass filters).
+    // The fix requires careful handling of rail-connected edges and overlap
+    // with feedback group nodes.
     for eidx in other_unclaimed {
         groups.push(FlowGroup {
             active_edges: Vec::new(),
@@ -589,6 +593,62 @@ pub(in crate::compiler) fn find_flow_groups(
     }
 
     groups
+}
+
+/// Group edges by node connectivity using union-find.
+/// Edges sharing a node (excluding GND, VCC, supply, AC ground) are merged.
+fn group_by_connectivity(edges: &[usize], graph: &CircuitGraph) -> Vec<Vec<usize>> {
+    if edges.is_empty() {
+        return Vec::new();
+    }
+
+    // Build node → edge index mapping
+    let rails = rail_nodes(graph);
+    let mut node_to_edges: HashMap<NodeId, Vec<usize>> = HashMap::new();
+    for &eidx in edges {
+        let e = &graph.edges[eidx];
+        if !rails.contains(&e.node_a) {
+            node_to_edges.entry(e.node_a).or_default().push(eidx);
+        }
+        if !rails.contains(&e.node_b) {
+            node_to_edges.entry(e.node_b).or_default().push(eidx);
+        }
+    }
+
+    // Union-find: edges sharing a non-rail node are in the same group
+    let edge_pos: HashMap<usize, usize> = edges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
+    let mut parent: Vec<usize> = (0..edges.len()).collect();
+
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+
+    for edge_list in node_to_edges.values() {
+        if edge_list.len() > 1 {
+            let first = edge_pos[&edge_list[0]];
+            for &eidx in &edge_list[1..] {
+                let pos = edge_pos[&eidx];
+                let ra = find(&mut parent, first);
+                let rb = find(&mut parent, pos);
+                if ra != rb {
+                    parent[rb] = ra;
+                }
+            }
+        }
+    }
+
+    // Collect groups
+    let mut groups_map: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, &eidx) in edges.iter().enumerate() {
+        let root = find(&mut parent, i);
+        groups_map.entry(root).or_default().push(eidx);
+    }
+
+    groups_map.into_values().collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -427,14 +427,11 @@ fn assert_produces_audio(name: &str, pedal: &crate::dsl::PedalDef) {
         compiled.process(0.0);
     }
 
-    // Feed guitar-level 440Hz signal — trace first few samples
+    // Feed guitar-level 440Hz signal
     let mut peak = 0.0f64;
     for i in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
         let output = compiled.process(input);
-        if i < 5 {
-            eprintln!("  sample {i}: in={input:.6} out={output:.6}");
-        }
         peak = peak.max(output.abs());
     }
 
@@ -495,6 +492,74 @@ fn legend_rangemaster_produces_audio() {
 fn legend_shrine_produces_audio() {
     let pedal = load_legend("shrine");
     assert_produces_audio("shrine", &pedal);
+}
+
+/// Diagnostic: measure frequency response to find HPF behavior.
+/// Runs the full pipeline at two frequencies and compares levels.
+#[test]
+fn diagnose_ratking_hpf() {
+    let pedal = load_legend("ratking_non_invert_v1a");
+
+    eprintln!("\nRATKING HPF diagnosis:");
+
+    // Measure at 200Hz (should be loud for a distortion pedal)
+    let mut compiled_lo = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    for _ in 0..2000 { compiled_lo.process(0.0); }
+    let mut peak_lo = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 200.0 * s as f64 / 48000.0).sin();
+        peak_lo = peak_lo.max(compiled_lo.process(input).abs());
+    }
+
+    // Measure at 5kHz
+    let mut compiled_hi = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    for _ in 0..2000 { compiled_hi.process(0.0); }
+    let mut peak_hi = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 5000.0 * s as f64 / 48000.0).sin();
+        peak_hi = peak_hi.max(compiled_hi.process(input).abs());
+    }
+
+    let ratio = if peak_lo > 1e-10 { peak_hi / peak_lo } else { f64::INFINITY };
+    eprintln!("  200Hz peak={peak_lo:.6}V, 5kHz peak={peak_hi:.6}V, ratio={ratio:.1}x");
+    eprintln!("  stage_order: {:?}", compiled_lo.stage_order);
+    for (i, s) in compiled_lo.stages.iter().enumerate() {
+        eprintln!("  wdf[{i}]: rp={:.0} comp={} clip={}",
+            s.tree.port_resistance(), s.root_comp_id, s.root.is_clipping_stage());
+    }
+
+    // A distortion pedal should NOT have 10x more output at 5kHz vs 200Hz
+    assert!(
+        ratio < 10.0,
+        "HPF detected: 5kHz/200Hz ratio={ratio:.1}x (should be <10x for a distortion pedal)"
+    );
+    // Both frequencies should produce audible output
+    assert!(peak_lo > 0.001, "200Hz should produce output: {peak_lo:.6}");
+    assert!(peak_hi > 0.001, "5kHz should produce output: {peak_hi:.6}");
+}
+
+/// Same HPF test for screamer
+#[test]
+fn diagnose_screamer_hpf() {
+    let pedal = load_legend("screamer");
+    let mut compiled_lo = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    for _ in 0..2000 { compiled_lo.process(0.0); }
+    let mut peak_lo = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 200.0 * s as f64 / 48000.0).sin();
+        peak_lo = peak_lo.max(compiled_lo.process(input).abs());
+    }
+    let mut compiled_hi = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    for _ in 0..2000 { compiled_hi.process(0.0); }
+    let mut peak_hi = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 5000.0 * s as f64 / 48000.0).sin();
+        peak_hi = peak_hi.max(compiled_hi.process(input).abs());
+    }
+    let ratio = if peak_lo > 1e-10 { peak_hi / peak_lo } else { f64::INFINITY };
+    eprintln!("SCREAMER: 200Hz={peak_lo:.6}, 5kHz={peak_hi:.6}, ratio={ratio:.1}x");
+    assert!(ratio < 10.0, "HPF detected: ratio={ratio:.1}x");
+    assert!(peak_lo > 0.001, "200Hz should produce output: {peak_lo:.6}");
 }
 
 #[test]
