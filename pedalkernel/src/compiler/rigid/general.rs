@@ -79,6 +79,9 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     //   Rf = pot_r + series_r,  gain = Rf / Ri
     let feedback_pot = super::find_feedback_pot(group, graph);
     if let Some((pot_id, pot_leaf, fixed_r, _parallel_r)) = feedback_pot {
+        #[cfg(test)]
+        eprintln!("  [POT BIND] pot={pot_id} series_r={fixed_r:.0} ri={:.0} gain={:.2}",
+            config.ri, config.gain);
         stage.feedback_pot_id = Some(pot_id);
         stage.feedback_series_r = fixed_r;
         stage.feedback_ri = config.ri;

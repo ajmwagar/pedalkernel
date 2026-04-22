@@ -484,8 +484,20 @@ pub(in crate::compiler) fn find_flow_groups(
             continue;
         }
 
-        // DFS: find passive edges on feedback paths (out->in for each element in group)
+        // DFS: find passive edges on feedback paths (out->in for each element in group).
+        // Block circuit terminal nodes (in/out) from expansion — these are signal
+        // entry/exit points, not part of feedback loops. Without this, the DFS
+        // traverses through the input node and sweeps input coupling resistors
+        // (R_in) into the feedback set.
         let mut feedback_set: HashSet<usize> = HashSet::new();
+        let mut terminal_block: HashSet<NodeId> = HashSet::new();
+        if !rails.contains(&graph.in_node) {
+            terminal_block.insert(graph.in_node);
+        }
+        if !rails.contains(&graph.out_node) {
+            terminal_block.insert(graph.out_node);
+        }
+
         for &ei in scc {
             let elem = &active_elements[ei];
             if rails.contains(&elem.input_node) || rails.contains(&elem.output_node) {
@@ -494,6 +506,10 @@ pub(in crate::compiler) fn find_flow_groups(
             let mut path = Vec::new();
             let mut visited = HashSet::new();
             visited.insert(elem.output_node);
+            // Block terminal nodes from expansion
+            for &t in &terminal_block {
+                visited.insert(t);
+            }
             dfs_find_paths(
                 elem.output_node,
                 elem.input_node,
@@ -519,6 +535,9 @@ pub(in crate::compiler) fn find_flow_groups(
                     let mut path = Vec::new();
                     let mut visited = HashSet::new();
                     visited.insert(elem_i.output_node);
+                    for &t in &terminal_block {
+                        visited.insert(t);
+                    }
                     dfs_find_paths(
                         elem_i.output_node,
                         elem_j.input_node,
