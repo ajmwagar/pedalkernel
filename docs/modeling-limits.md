@@ -19,6 +19,7 @@ These are compiled through the Wave Digital Filter tree and solved per-sample.
 |---|---|
 | Resistor, capacitor, inductor, potentiometer | Textbook one-port adaptors |
 | Diode, diode pair, zener | WDF root, Newton-Raphson Shockley (per-device Is/n) |
+| NPN / PNP BJT | WDF root, Newton-Raphson Ebers-Moll or Gummel-Poon (feature-gated) |
 | N- / P- JFET | WDF root, square-law |
 | N- / P- MOSFET | WDF root, square-law |
 | Triode, pentode, vari-mu | WDF root, Koren equation with softplus smoothing |
@@ -31,9 +32,9 @@ Per-device parameters — Shockley Is/n for diodes, Koren parameters for tubes, 
 
 These are modeled with a physical story but simplified for real-time cost or for modeling uncertainty.
 
-**Op-amps** are treated as per-device-type gain with rail saturation and slew-rate limiting. The feedback topology (inverting vs non-inverting, feedback-network impedance, virtual ground) is **not** modeled as part of the WDF tree. Op-amp character in PedalKernel therefore reflects slew-rate, output swing, and rail-saturation shape — but not feedback-dependent frequency response.
+**Op-amp feedback topology** is now extracted from the circuit graph. Single-VCVS acyclic feedback groups (one op-amp with passive feedback) compile to a `BlackFeedbackStage` whose gain is computed via Harold Black's formula — `Rf / Ri` for inverting, `1 + Rf / Ri` for non-inverting — with `Rf` and `Ri` read off the graph. Multi-VCVS or irreducible-rigid feedback compiles to an `OpAmpRoot` embedded in a WDF tree with an MNA adaptor. Gain recomputes when a feedback-path pot changes. What is still approximate: closed-loop dynamics are handled by a post-processing layer rather than as part of the scattering matrix — see the next note.
 
-**BJT gain stages** contribute a per-device gain factor (2.5× for standard small-signal NPN/PNP, per-type for germanium variants) rather than participating in the WDF tree as a root element. CE / CB / CC topology, collector load, emitter degeneration, and bias-point shifts collapse into that scalar. JFETs and tubes are treated differently — they are full WDF roots.
+**Op-amp non-idealities** (gain-bandwidth product, slew rate, rail saturation) are applied as a shared post-processor on top of every stage type, not as WDF elements. This means GBW-induced phase shift, slew-induced HF compression, and rail clipping all sit downstream of the scattering matrix. For most pedal circuits this is inaudible, but for precision topologies (servo loops, active filters where GBW is a design variable) it is a simplification worth knowing about.
 
 **Rail saturation** is device-aware but not circuit-exact. Op-amps use a symmetric quintic-knee clipper with per-type output swing. BJTs use asymmetric saturation (hard positive knee, soft negative cutoff). FETs use a square-law pinch-off shape. Tubes use grid-conduction / plate-cutoff asymmetry.
 

@@ -13,9 +13,7 @@ PedalKernel is under active development. This page tracks the significant work i
 
 These are the largest open questions in the WDF engine.
 
-**Op-amp feedback topology.** Op-amps are currently modeled as per-device gain multipliers with slew-rate and rail-saturation. The inverting / non-inverting feedback network, virtual-ground behaviour, and frequency-dependent open-loop response are not yet part of the WDF tree. Closing this gap is the single biggest accuracy win available.
-
-**BJT gain stages as WDF roots.** JFETs, MOSFETs, triodes, pentodes, diodes, and zeners all have true WDF root elements. BJTs currently contribute a per-device gain factor without their own root — so CE/CB/CC topology, collector load, and emitter degeneration collapse into a scalar. A `BjtRoot` would make Fuzz Face, Big Muff, and Tonebender behave correctly under bias-point shifts.
+**Op-amp closed-loop dynamics inside the WDF tree.** Feedback topology and gain are now derived from the circuit graph (see the [modeling limits](./modeling-limits.md) page), but gain-bandwidth product, slew rate, and rail saturation still run as a post-processing layer on top of each stage rather than as scattering matrix entries. For most guitar circuits this is inaudible; for precision topologies (servo loops, active filters where GBW is a design variable) it is the next accuracy win available.
 
 **Power supply sag across a pedalboard.** Single pedals can opt into a supply model (see the `supplies` block in the DSL). A shared 9 V supply sagging across several pedals drawing current together is not yet modeled.
 
