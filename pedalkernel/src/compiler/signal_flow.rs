@@ -1520,4 +1520,166 @@ mod tests {
             "Shared bias node should NOT create false coupling between cascaded op-amps"
         );
     }
+
+    // ── Multi-VCVS splitting: extended edge cases ────────────────────────
+
+    #[test]
+    fn flow_cascade_with_diodes_in_second_stage_separate() {
+        // Blues driver full pattern: IC1a (clean gain) → pot → IC1b (clipping).
+        // IC1b has diode pair D1/D2 in its feedback. The diodes should be
+        // grouped with IC1b (same feedback loop), but IC1a should be separate.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    IC1a: opamp(tl072)
+                    Rf1: resistor(100k)
+                    Gain: pot(100k, a)
+                    R4: resistor(4.7k)
+                    IC1b: opamp(tl072)
+                    Rf2: resistor(47k)
+                    D1: diode(1n4148)
+                    D2: diode(1n4148)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> IC1a.neg
+                    IC1a.neg -> Rf1.a
+                    Rf1.b -> IC1a.out
+                    IC1a.pos -> gnd
+                    IC1a.neg -> Gain.a
+                    Gain.b -> gnd
+                    Gain.w -> R4.a
+                    R4.b -> IC1b.neg
+                    IC1b.neg -> Rf2.a
+                    Rf2.b -> IC1b.out
+                    IC1b.neg -> D1.a
+                    D1.b -> IC1b.out
+                    IC1b.neg -> D2.b
+                    D2.a -> IC1b.out
+                    IC1b.pos -> gnd
+                    IC1b.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let ic1a_group = find_group_containing(&groups, &graph, "IC1a");
+        let ic1b_group = find_group_containing(&groups, &graph, "IC1b");
+        let d1_group = find_group_containing(&groups, &graph, "D1");
+
+        assert!(ic1a_group.is_some(), "Should find IC1a");
+        assert!(ic1b_group.is_some(), "Should find IC1b");
+        assert_ne!(
+            ic1a_group, ic1b_group,
+            "IC1a (clean gain) should be SEPARATE from IC1b (clipping)"
+        );
+        assert_eq!(
+            ic1b_group, d1_group,
+            "D1 (in IC1b's feedback) should be in SAME group as IC1b"
+        );
+    }
+
+    #[test]
+    fn flow_three_opamp_cascade_all_separate() {
+        // Goldenrod-like: U1 (buffer) → U2 (gain) → U3 (tone).
+        // All three should be in separate groups — no mutual feedback.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf1: resistor(10k)
+                    R2: resistor(10k)
+                    U2: opamp(tl072)
+                    Rf2: resistor(100k)
+                    R3: resistor(10k)
+                    U3: opamp(tl072)
+                    Rf3: resistor(47k)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    U1.neg -> Rf1.a
+                    Rf1.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R2.a
+                    R2.b -> U2.neg
+                    U2.neg -> Rf2.a
+                    Rf2.b -> U2.out
+                    U2.pos -> gnd
+                    U2.out -> R3.a
+                    R3.b -> U3.neg
+                    U3.neg -> Rf3.a
+                    Rf3.b -> U3.out
+                    U3.pos -> gnd
+                    U3.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let u2_group = find_group_containing(&groups, &graph, "U2");
+        let u3_group = find_group_containing(&groups, &graph, "U3");
+
+        assert!(u1_group.is_some() && u2_group.is_some() && u3_group.is_some());
+
+        let all_different = u1_group != u2_group && u2_group != u3_group && u1_group != u3_group;
+        assert!(
+            all_different,
+            "Three cascaded op-amps should all be in SEPARATE groups: U1={:?} U2={:?} U3={:?}",
+            u1_group, u2_group, u3_group
+        );
+    }
+
+    #[test]
+    fn flow_global_negative_feedback_same_group() {
+        // Global negative feedback: U1 (gain) → U2 (output), U2.out feeds
+        // back to U1.neg via a resistor. This IS true inter-stage feedback.
+        // They must stay in the same group.
+        // (Same pattern as flow_two_opamp_true_feedback_same_group but with
+        // a summing junction at U1.neg — the global NFB goes to the same
+        // node as the local feedback Rf1.)
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf1: resistor(100k)
+                    R_mid: resistor(10k)
+                    U2: opamp(tl072)
+                    Rf2: resistor(100k)
+                    R_nfb: resistor(470k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> Rf1.a
+                    Rf1.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R_mid.a
+                    R_mid.b -> U2.neg
+                    U2.neg -> Rf2.a
+                    Rf2.b -> U2.out
+                    U2.pos -> gnd
+                    U2.out -> R_nfb.a
+                    R_nfb.b -> U1.neg
+                    U2.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let u2_group = find_group_containing(&groups, &graph, "U2");
+
+        assert_eq!(
+            u1_group, u2_group,
+            "Global NFB (U2.out → R_nfb → U1.neg) is true feedback — must stay SAME group"
+        );
+    }
 }
