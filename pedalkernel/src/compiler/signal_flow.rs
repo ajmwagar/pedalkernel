@@ -1212,4 +1212,199 @@ mod tests {
             "Sequential op-amp then diode clipper should be separate groups"
         );
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Multi-VCVS cascade: op-amps sharing passive nodes must NOT
+    // form false cycles. These are the regression cases.
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn flow_two_opamp_cascade_via_pot_separate() {
+        // Blues driver pattern: IC1a gain stage → Gain pot → IC1b clipping stage.
+        // The Gain pot connects IC1a's feedback node to IC1b's input.
+        // BFS from IC1b.neg can reach IC1a.neg through the pot — but that's
+        // NOT feedback, it's just passive connectivity. They should be separate.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    IC1a: opamp(tl072)
+                    Rf1: resistor(100k)
+                    Gain: pot(100k, a)
+                    R4: resistor(4.7k)
+                    IC1b: opamp(tl072)
+                    Rf2: resistor(47k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> IC1a.neg
+                    IC1a.neg -> Rf1.a
+                    Rf1.b -> IC1a.out
+                    IC1a.pos -> gnd
+                    IC1a.neg -> Gain.a
+                    Gain.b -> gnd
+                    Gain.w -> R4.a
+                    R4.b -> IC1b.neg
+                    IC1b.neg -> Rf2.a
+                    Rf2.b -> IC1b.out
+                    IC1b.pos -> gnd
+                    IC1b.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let ic1a_group = find_group_containing(&groups, &graph, "IC1a");
+        let ic1b_group = find_group_containing(&groups, &graph, "IC1b");
+
+        assert!(ic1a_group.is_some(), "Should find IC1a");
+        assert!(ic1b_group.is_some(), "Should find IC1b");
+        assert_ne!(
+            ic1a_group, ic1b_group,
+            "Two cascaded op-amps via pot should be SEPARATE groups (not a false cycle)"
+        );
+    }
+
+    #[test]
+    fn flow_buffer_into_summing_amp_via_feedforward_separate() {
+        // Goldenrod pattern: U1 (buffer) output feeds U3 (summing amp)
+        // through two feedforward paths. BFS from U3.neg can reach U1.out
+        // through the feedforward resistor chain — but signal flows U1→U3,
+        // not U3→U1. They should be separate.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    R3: resistor(10k)
+                    U2: opamp(tl072)
+                    Rf2: resistor(100k)
+                    R_ff: resistor(15k)
+                    U3: opamp(tl072)
+                    Rf3: resistor(560k)
+                }
+                nets {
+                    in -> U1.pos
+                    U1.neg -> U1.out
+                    U1.out -> R3.a
+                    R3.b -> U2.pos
+                    U2.neg -> Rf2.a
+                    Rf2.b -> U2.out
+                    U2.neg -> gnd
+                    U2.out -> U3.neg
+                    U1.out -> R_ff.a
+                    R_ff.b -> U3.neg
+                    U3.neg -> Rf3.a
+                    Rf3.b -> U3.out
+                    U3.pos -> gnd
+                    U3.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let u3_group = find_group_containing(&groups, &graph, "U3");
+
+        assert!(u1_group.is_some(), "Should find U1");
+        assert!(u3_group.is_some(), "Should find U3");
+        assert_ne!(
+            u1_group, u3_group,
+            "Buffer → summing amp via feedforward should be SEPARATE (not false cycle)"
+        );
+    }
+
+    #[test]
+    fn flow_two_opamp_true_feedback_same_group() {
+        // When op-amp B's output DOES feed back to op-amp A's input,
+        // they should be in the SAME group. This is true mutual feedback.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf1: resistor(100k)
+                    R_mid: resistor(10k)
+                    U2: opamp(tl072)
+                    Rf2: resistor(47k)
+                    R_fb: resistor(10k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> Rf1.a
+                    Rf1.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R_mid.a
+                    R_mid.b -> U2.neg
+                    U2.neg -> Rf2.a
+                    Rf2.b -> U2.out
+                    U2.pos -> gnd
+                    U2.out -> R_fb.a
+                    R_fb.b -> U1.neg
+                    U2.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let u2_group = find_group_containing(&groups, &graph, "U2");
+
+        assert_eq!(
+            u1_group, u2_group,
+            "True mutual feedback (U2.out → R_fb → U1.neg) must be same group"
+        );
+    }
+
+    #[test]
+    fn flow_opamp_cascade_shared_bias_separate() {
+        // Two op-amps sharing a bias node (Vref). This is NOT coupling —
+        // bias nodes are rails, not signal paths. They should be separate.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf1: resistor(100k)
+                    R_mid: resistor(10k)
+                    U2: opamp(tl072)
+                    Rf2: resistor(47k)
+                    R_bias1: resistor(100k)
+                    R_bias2: resistor(100k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> Rf1.a
+                    Rf1.b -> U1.out
+                    U1.pos -> R_bias1.b
+                    U1.out -> R_mid.a
+                    R_mid.b -> U2.neg
+                    U2.neg -> Rf2.a
+                    Rf2.b -> U2.out
+                    U2.pos -> R_bias1.b
+                    vcc -> R_bias1.a
+                    R_bias1.b -> R_bias2.a
+                    R_bias2.b -> gnd
+                    U2.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let u2_group = find_group_containing(&groups, &graph, "U2");
+
+        assert!(u1_group.is_some(), "Should find U1");
+        assert!(u2_group.is_some(), "Should find U2");
+        assert_ne!(
+            u1_group, u2_group,
+            "Shared bias node should NOT create false coupling between cascaded op-amps"
+        );
+    }
 }
