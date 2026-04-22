@@ -1012,4 +1012,204 @@ mod tests {
             }
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Diode-in-feedback edge cases (TS/RAT/SD1/Klon pattern)
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn flow_diode_in_opamp_feedback_same_group() {
+        // RAT-style: diode between U1.neg and U1.out.
+        // The diode IS in the op-amp's feedback loop.
+        // They MUST be in the same group — splitting kills audio output.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf: resistor(100k)
+                    D1: diode(silicon)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    U1.neg -> Rf.a
+                    Rf.b -> U1.out
+                    U1.neg -> D1.a
+                    D1.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let d1_group = find_group_containing(&groups, &graph, "D1");
+
+        assert!(u1_group.is_some(), "Should find U1 group");
+        assert!(d1_group.is_some(), "Should find D1 group");
+        assert_eq!(
+            u1_group, d1_group,
+            "Diode in feedback MUST be in same group as op-amp"
+        );
+
+        // The combined group should have feedback
+        let group = &groups[u1_group.unwrap()];
+        assert!(group.has_feedback(), "Op-amp + diode feedback group should have feedback=true");
+    }
+
+    #[test]
+    fn flow_diode_pair_in_opamp_feedback() {
+        // TS-style: anti-parallel diode pair in feedback.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf: resistor(100k)
+                    D1: diode(silicon)
+                    D2: diode(silicon)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    U1.neg -> Rf.a
+                    Rf.b -> U1.out
+                    U1.neg -> D1.a
+                    D1.b -> U1.out
+                    U1.neg -> D2.b
+                    D2.a -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let d1_group = find_group_containing(&groups, &graph, "D1");
+        let d2_group = find_group_containing(&groups, &graph, "D2");
+
+        assert_eq!(u1_group, d1_group, "D1 must be in same group as U1");
+        assert_eq!(u1_group, d2_group, "D2 must be in same group as U1");
+    }
+
+    #[test]
+    fn flow_diode_after_opamp_not_in_feedback() {
+        // Diode NOT in feedback — it's after the op-amp output, going to ground.
+        // This should be a SEPARATE group (standalone clipper stage).
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf: resistor(100k)
+                    D1: diode(silicon)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    U1.neg -> Rf.a
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> D1.a
+                    D1.b -> gnd
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let d1_group = find_group_containing(&groups, &graph, "D1");
+
+        assert!(u1_group.is_some(), "Should find U1");
+        assert!(d1_group.is_some(), "Should find D1");
+        // D1 goes to ground, NOT back to U1.neg — should be separate
+        assert_ne!(
+            u1_group, d1_group,
+            "Diode to ground should be separate from op-amp (not in feedback)"
+        );
+    }
+
+    #[test]
+    fn flow_diode_in_feedback_with_pot() {
+        // RAT with Drive pot: pot + Rf in parallel, diode in parallel too.
+        // Pot/Rf/diode all span U1.neg↔U1.out (feedback path).
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(1k)
+                    U1: opamp(tl072)
+                    Rf: resistor(100k)
+                    Drive: pot(100k, a)
+                    D1: diode(silicon)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    U1.neg -> Rf.a
+                    Rf.b -> U1.out
+                    U1.neg -> Drive.a
+                    Drive.b -> D1.a
+                    D1.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let d1_group = find_group_containing(&groups, &graph, "D1");
+
+        assert_eq!(
+            u1_group, d1_group,
+            "Diode + pot in feedback must be in same group as op-amp"
+        );
+    }
+
+    #[test]
+    fn flow_cascade_opamp_then_diode_clipper_separate() {
+        // Op-amp gain stage → separate diode clipper stage.
+        // The diode clips the signal AFTER the op-amp, not in its feedback.
+        // These should be in DIFFERENT groups.
+        let (graph, edges) = make_graph_all_edges(r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf: resistor(100k)
+                    R_mid: resistor(4.7k)
+                    D1: diode(silicon)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> Rf.a
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R_mid.a
+                    R_mid.b -> D1.a
+                    D1.b -> gnd
+                    R_mid.b -> out
+                }
+                controls {}
+            }"#,
+        );
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let d1_group = find_group_containing(&groups, &graph, "D1");
+
+        assert!(u1_group.is_some(), "Should find U1");
+        assert!(d1_group.is_some(), "Should find D1");
+        assert_ne!(
+            u1_group, d1_group,
+            "Sequential op-amp then diode clipper should be separate groups"
+        );
+    }
 }
