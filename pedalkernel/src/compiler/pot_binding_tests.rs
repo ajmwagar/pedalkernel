@@ -375,3 +375,120 @@ fn feedback_pot_screamer_topology_drive_changes_gain() {
     eprintln!("screamer-like drive: lo={lo:.6}, hi={hi:.6}");
     assert!(hi > lo * 1.5, "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 4: FlowGroup edge classification — R_in should be pendant, not feedback
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn r_in_is_pendant_not_feedback_simple() {
+    // In a simple inverting amp, R_in (input → neg) should be pendant.
+    let pedal_src = r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#;
+
+    let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse");
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+
+    // Find the group containing U1
+    let u1_group = groups.iter().find(|g| {
+        g.active_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "U1"
+        })
+    }).expect("Should find U1's group");
+
+    let pendant_names: Vec<&str> = u1_group.pendant_edges.iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .collect();
+    let feedback_names: Vec<&str> = u1_group.feedback_edges.iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .collect();
+
+    eprintln!("Simple: pendant={pendant_names:?}, feedback={feedback_names:?}");
+    assert!(pendant_names.contains(&"R_in"), "R_in should be pendant, not feedback");
+}
+
+#[test]
+fn r_in_is_pendant_with_diodes_in_feedback() {
+    // With diodes in feedback, R_in should STILL be pendant.
+    // This is the case that fails in real pedals.
+    let pedal_src = r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(500k, a)
+                R_clip: resistor(4.7k)
+                C_clip: cap(47n)
+                D1: diode(silicon)
+                D2: diode(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> R_clip.a
+                R_clip.b -> U1.out
+                U1.neg -> C_clip.a
+                C_clip.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.neg -> D2.b
+                D2.a -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#;
+
+    let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse");
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+
+    // Find the group containing U1
+    let u1_group = groups.iter().find(|g| {
+        g.active_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "U1"
+        })
+    }).expect("Should find U1's group");
+
+    let pendant_names: Vec<&str> = u1_group.pendant_edges.iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .collect();
+    let feedback_names: Vec<&str> = u1_group.feedback_edges.iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .collect();
+
+    eprintln!("With diodes: pendant={pendant_names:?}, feedback={feedback_names:?}");
+    assert!(
+        pendant_names.contains(&"R_in"),
+        "R_in should be pendant even with diodes in feedback. Got pendant={pendant_names:?}, feedback={feedback_names:?}"
+    );
+}
