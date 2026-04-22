@@ -475,6 +475,89 @@ fn measure_pot_sweep_parsed(pedal: &crate::dsl::PedalDef, control: &str) -> (f64
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Layer 3c: Inter-stage voltage divider — pot wiper splits across stages
+//
+// When a pot's wiper sits between two stages (output of one, input of next),
+// the pot acts as a voltage divider in the routing layer. No WDF tree needed.
+// signal *= R_wb / (R_aw + R_wb) applied between stages.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn interstage_volume_pot_changes_output() {
+    // Simple case: gain stage → Volume pot → output.
+    // Volume wiper goes to out. Volume.a connects to stage output.
+    // Volume.b goes to GND. Sweeping should attenuate.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                Volume: pot(100k, a)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Volume.a
+                Volume.w -> out
+                Volume.b -> gnd
+            }
+            controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Volume");
+    let ratio = lo.max(hi) / lo.min(hi).max(1e-10);
+    eprintln!("Interstage volume: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+    assert!(ratio > 2.0,
+        "Volume pot should attenuate: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+}
+
+#[test]
+fn interstage_volume_pot_between_two_stages() {
+    // Two gain stages with Volume pot between them.
+    // U1.out → Volume.a, Volume.w → R_mid → U2.neg, Volume.b → gnd.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf1: resistor(100k)
+                Volume: pot(100k, a)
+                R_mid: resistor(10k)
+                U2: opamp(tl072)
+                Rf2: resistor(100k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf1.a
+                Rf1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Volume.a
+                Volume.w -> R_mid.a
+                R_mid.b -> U2.neg
+                U2.neg -> Rf2.a
+                Rf2.b -> U2.out
+                U2.pos -> gnd
+                Volume.b -> gnd
+                U2.out -> out
+            }
+            controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Volume");
+    let ratio = lo.max(hi) / lo.min(hi).max(1e-10);
+    eprintln!("Interstage 2-stage volume: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+    assert!(ratio > 2.0,
+        "Volume between stages should attenuate: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Layer 4: FlowGroup edge classification — R_in should be pendant, not feedback
 // ═══════════════════════════════════════════════════════════════════════════
 
