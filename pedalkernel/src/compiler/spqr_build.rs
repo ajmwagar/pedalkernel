@@ -279,11 +279,18 @@ fn is_pot_divider_group(
     if edges.len() != 2 {
         return false;
     }
-    let id0 = &graph.components[graph.edges[edges[0]].comp_idx].id;
-    let id1 = &graph.components[graph.edges[edges[1]].comp_idx].id;
-    // Both are pot halves of the same base component
-    (id0.ends_with("__aw") && id1.ends_with("__wb"))
-        || (id0.ends_with("__wb") && id1.ends_with("__aw"))
+    let comp0 = &graph.components[graph.edges[edges[0]].comp_idx];
+    let comp1 = &graph.components[graph.edges[edges[1]].comp_idx];
+
+    // Check for synthetic __aw/__wb split (legacy 3-terminal pot encoding)
+    let is_aw_wb = (comp0.id.ends_with("__aw") && comp1.id.ends_with("__wb"))
+        || (comp0.id.ends_with("__wb") && comp1.id.ends_with("__aw"));
+
+    // Check for 2-edge pot (same component, both edges are the same pot)
+    let is_same_pot = graph.edges[edges[0]].comp_idx == graph.edges[edges[1]].comp_idx
+        && comp0.kind.is_pot();
+
+    is_aw_wb || is_same_pot
 }
 
 /// Build a pot voltage divider stage: Parallel(R_aw, R_wb) with ShortCircuit root.
@@ -297,11 +304,18 @@ fn build_pot_divider(
 ) -> Result<BuiltStage, String> {
     let edges = group.all_edges();
 
-    // Build both pot leaf nodes
+    // Build both pot leaf nodes. For same-component pots (2 edges, 1 comp),
+    // give them distinct __aw/__wb names to match the control binding.
     let mut leaves: Vec<DynNode> = Vec::new();
-    for &eidx in &edges {
+    let same_comp = graph.edges[edges[0]].comp_idx == graph.edges[edges[1]].comp_idx;
+    for (i, &eidx) in edges.iter().enumerate() {
         let comp = &graph.components[graph.edges[eidx].comp_idx];
-        if let Some(leaf) = comp.kind.make_leaf(&comp.id, sample_rate) {
+        let leaf_id = if same_comp {
+            format!("{}{}", comp.id, if i == 0 { "__aw" } else { "__wb" })
+        } else {
+            comp.id.clone()
+        };
+        if let Some(leaf) = comp.kind.make_leaf(&leaf_id, sample_rate) {
             leaves.push(leaf);
         }
     }
