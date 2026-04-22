@@ -14,14 +14,75 @@ use super::stage::{
     SidechainProcessor, StateSpaceStage, SubcircuitProcessor, WdfStage,
 };
 
-/// Reference to a stage by type and index, for topological ordering.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum StageRef {
-    Wdf(usize),
-    MultiNl(usize),
-    Iir(usize),
-    StateSpace(usize),
+/// A single processing stage in the compiled pedal.
+///
+/// Owns its data directly — no index indirection. The `stages` vec
+/// on [`CompiledPedal`] holds these in processing order.
+pub(super) enum Stage {
+    Wdf(WdfStage),
+    MultiNl(MultiNlStage),
+    Iir(IirStage),
+    StateSpace(StateSpaceStage),
+    BlackFeedback(super::stage::BlackFeedbackStage),
 }
+
+impl std::fmt::Debug for Stage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Stage::Wdf(_) => write!(f, "Stage::Wdf(..)"),
+            Stage::MultiNl(_) => write!(f, "Stage::MultiNl(..)"),
+            Stage::Iir(_) => write!(f, "Stage::Iir(..)"),
+            Stage::StateSpace(_) => write!(f, "Stage::StateSpace(..)"),
+            Stage::BlackFeedback(_) => write!(f, "Stage::BlackFeedback(..)"),
+        }
+    }
+}
+
+impl Stage {
+    /// Get a reference to the inner WdfStage, if this is a Wdf variant.
+    pub(super) fn as_wdf(&self) -> Option<&WdfStage> {
+        if let Stage::Wdf(w) = self { Some(w) } else { None }
+    }
+    /// Get a mutable reference to the inner WdfStage, if this is a Wdf variant.
+    pub(super) fn as_wdf_mut(&mut self) -> Option<&mut WdfStage> {
+        if let Stage::Wdf(w) = self { Some(w) } else { None }
+    }
+    /// Get a reference to the inner MultiNlStage, if this is a MultiNl variant.
+    pub(super) fn as_multi_nl(&self) -> Option<&MultiNlStage> {
+        if let Stage::MultiNl(m) = self { Some(m) } else { None }
+    }
+    /// Get a mutable reference to the inner MultiNlStage, if this is a MultiNl variant.
+    pub(super) fn as_multi_nl_mut(&mut self) -> Option<&mut MultiNlStage> {
+        if let Stage::MultiNl(m) = self { Some(m) } else { None }
+    }
+    /// Get a reference to the inner IirStage, if this is an Iir variant.
+    pub(super) fn as_iir(&self) -> Option<&IirStage> {
+        if let Stage::Iir(i) = self { Some(i) } else { None }
+    }
+    /// Get a mutable reference to the inner IirStage.
+    pub(super) fn as_iir_mut(&mut self) -> Option<&mut IirStage> {
+        if let Stage::Iir(i) = self { Some(i) } else { None }
+    }
+    /// Get a reference to the inner StateSpaceStage.
+    pub(super) fn as_state_space(&self) -> Option<&StateSpaceStage> {
+        if let Stage::StateSpace(s) = self { Some(s) } else { None }
+    }
+    /// Get a mutable reference to the inner StateSpaceStage.
+    pub(super) fn as_state_space_mut(&mut self) -> Option<&mut StateSpaceStage> {
+        if let Stage::StateSpace(s) = self { Some(s) } else { None }
+    }
+    /// Get a reference to the inner BlackFeedbackStage.
+    pub(super) fn as_black_feedback(&self) -> Option<&super::stage::BlackFeedbackStage> {
+        if let Stage::BlackFeedback(b) = self { Some(b) } else { None }
+    }
+    /// Get a mutable reference to the inner BlackFeedbackStage.
+    pub(super) fn as_black_feedback_mut(&mut self) -> Option<&mut super::stage::BlackFeedbackStage> {
+        if let Stage::BlackFeedback(b) = self { Some(b) } else { None }
+    }
+}
+
+/// Legacy alias — being migrated to `Stage`.
+pub(super) type StageRef = Stage;
 
 #[cfg(feature = "debug-trace")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -477,16 +538,11 @@ impl RailSaturation {
 /// Each `.pedal` file produces a unique processor with its own WDF tree topology,
 /// component values, and diode models — no hardcoded processor selection.
 pub struct CompiledPedal {
-    pub(super) stages: Vec<WdfStage>,
+    /// All processing stages in signal-flow order. One vec, no index indirection.
+    pub(super) stages: Vec<Stage>,
     /// Push-pull differential stages (e.g., Fairchild 670 gain cell).
-    /// These are processed after regular WDF stages.
+    /// These are processed after regular stages.
     pub(super) push_pull_stages: Vec<PushPullStage>,
-    /// Multi-NL stages using R-type adaptor + multi-port NR solver.
-    pub(super) multi_nl_stages: Vec<MultiNlStage>,
-    /// IIR biquad stages compiled from linear rigid MNA. O(1)/sample.
-    pub(super) iir_stages: Vec<IirStage>,
-    /// State-space stages for linear circuits with 3+ reactive elements. O(N²)/sample.
-    pub(super) state_space_stages: Vec<StateSpaceStage>,
     pub(super) pre_gain: f64,
     /// Auto-calibrated output gain scalar (1.0 = no calibration).
     pub(super) output_gain: f64,
@@ -577,10 +633,7 @@ pub struct CompiledPedal {
     /// When a pot inside a multi-NL R-type adaptor changes, the O(n³) matrix
     /// inversion is deferred and flushed every 32 samples (~0.7 ms at 48 kHz).
     pub(super) multi_nl_recompute_counter: u32,
-    /// Topological ordering of WDF, multi-NL, and coupled BJT stages.
-    /// Stages are sorted by signal_flow_distance so earlier stages in the
-    /// signal path process first, regardless of stage type.
-    pub(super) stage_order: Vec<StageRef>,
+    // (stage_order removed — `stages` vec IS the order)
     /// Node-based signal routing buffer for parallel-path topologies.
     /// Maps circuit graph node IDs to signal values. When non-empty, multi-NL
     /// stages read from their injection_node_id and write to their output_node_id,
@@ -699,48 +752,27 @@ impl CompiledPedal {
             stage.opamp.set_v_max(opamp_v_max);
         }
 
-        // Propagate v_max to all nonlinear roots in WDF stages
-        for stage in &mut self.stages {
-            match &mut stage.root {
-                RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
-                RootKind::Triode(t) => t.set_v_max(tube_v_max),
-                RootKind::VariMu(t) => t.set_v_max(tube_v_max),
-                RootKind::Pentode(p) => p.set_v_max(tube_v_max),
-                // Diodes, JFETs, MOSFETs, OTAs, Zeners don't need supply voltage
-                // (their behavior is determined by their intrinsic parameters)
-                _ => {}
-            }
-        }
-
         // Propagate v_max to push-pull stages
         for pp in &mut self.push_pull_stages {
             pp.push_root.set_v_max(tube_v_max);
             pp.pull_root.set_v_max(tube_v_max);
         }
 
-        // Propagate v_max to multi-NL stage NL devices
-        for stage in &mut self.multi_nl_stages {
-            for device in &mut stage.nl_devices {
-                match device {
-                    NlDeviceKind::Triode(t) => t.set_v_max(tube_v_max),
-                    NlDeviceKind::Pentode(p) => p.set_v_max(tube_v_max),
-                    NlDeviceKind::VariMu(t) => t.set_v_max(tube_v_max),
-                    NlDeviceKind::Diode(_)
-                    | NlDeviceKind::DiodePair(_)
-                    | NlDeviceKind::ExplicitDiode(_)
-                    | NlDeviceKind::ExplicitDiodePair(_) => {}
+        // Propagate v_max to all stages (WDF roots + multi-NL devices).
+        for stage in &mut self.stages {
+            match stage {
+                Stage::Wdf(wdf) => {
+                    match &mut wdf.root {
+                        RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
+                        RootKind::Triode(t) => t.set_v_max(tube_v_max),
+                        RootKind::VariMu(t) => t.set_v_max(tube_v_max),
+                        RootKind::Pentode(p) => p.set_v_max(tube_v_max),
+                        _ => {}
+                    }
                 }
-            }
-            // Propagate to grouped devices (TriodeThreePort, VariMuThreePort)
-            if let Some(ref mut dg) = stage.device_groups {
-                for group in &mut dg.groups {
-                    match group {
-                        NlDeviceGroupKind::VariMuThreePort(t) => t.set_v_max(tube_v_max),
-                        NlDeviceGroupKind::TriodeThreePort(t) => t.set_v_max(tube_v_max),
-                        NlDeviceGroupKind::PentodeThreePort(p) => p.set_v_max(tube_v_max),
-                        NlDeviceGroupKind::BjtTwoPort(b) => b.set_v_max(bjt_v_max),
-                        NlDeviceGroupKind::EbersMollTwoPort(e) => e.set_v_max(bjt_v_max),
-                        NlDeviceGroupKind::SinglePort(d) => match d {
+                Stage::MultiNl(mnl) => {
+                    for device in &mut mnl.nl_devices {
+                        match device {
                             NlDeviceKind::Triode(t) => t.set_v_max(tube_v_max),
                             NlDeviceKind::Pentode(p) => p.set_v_max(tube_v_max),
                             NlDeviceKind::VariMu(t) => t.set_v_max(tube_v_max),
@@ -748,23 +780,42 @@ impl CompiledPedal {
                             | NlDeviceKind::DiodePair(_)
                             | NlDeviceKind::ExplicitDiode(_)
                             | NlDeviceKind::ExplicitDiodePair(_) => {}
-                        },
+                        }
                     }
+                    if let Some(ref mut dg) = mnl.device_groups {
+                        for group in &mut dg.groups {
+                            match group {
+                                NlDeviceGroupKind::VariMuThreePort(t) => t.set_v_max(tube_v_max),
+                                NlDeviceGroupKind::TriodeThreePort(t) => t.set_v_max(tube_v_max),
+                                NlDeviceGroupKind::PentodeThreePort(p) => p.set_v_max(tube_v_max),
+                                NlDeviceGroupKind::BjtTwoPort(b) => b.set_v_max(bjt_v_max),
+                                NlDeviceGroupKind::EbersMollTwoPort(e) => e.set_v_max(bjt_v_max),
+                                NlDeviceGroupKind::SinglePort(d) => match d {
+                                    NlDeviceKind::Triode(t) => t.set_v_max(tube_v_max),
+                                    NlDeviceKind::Pentode(p) => p.set_v_max(tube_v_max),
+                                    NlDeviceKind::VariMu(t) => t.set_v_max(tube_v_max),
+                                    NlDeviceKind::Diode(_)
+                                    | NlDeviceKind::DiodePair(_)
+                                    | NlDeviceKind::ExplicitDiode(_)
+                                    | NlDeviceKind::ExplicitDiodePair(_) => {}
+                                },
+                            }
+                        }
+                    }
+                    mnl.update_supply_voltage(voltage);
                 }
+                _ => {}
             }
-        }
-
-        // Update multi-NL stage DC bias for new supply voltage.
-        for stage in &mut self.multi_nl_stages {
-            stage.update_supply_voltage(voltage);
         }
 
         // Update single-NL WDF stage VCC bias.
         if prev_voltage.abs() > 0.0 {
             let scale = self.supply_voltage / prev_voltage;
             for stage in &mut self.stages {
-                if stage.vcc_injection_coeff != 0.0 {
-                    stage.vcc_injection_coeff *= scale;
+                if let Stage::Wdf(wdf) = stage {
+                    if wdf.vcc_injection_coeff != 0.0 {
+                        wdf.vcc_injection_coeff *= scale;
+                    }
                 }
             }
         }
@@ -783,7 +834,8 @@ impl CompiledPedal {
     /// Get the number of WDF stages and op-amp stages.
     /// Returns (stage_count, opamp_count).
     pub fn wdf_element_counts(&self) -> (u32, u32) {
-        let stage_count = self.stages.len() as u32 + self.push_pull_stages.len() as u32;
+        let wdf_count = self.stages.iter().filter(|s| matches!(s, Stage::Wdf(_))).count() as u32;
+        let stage_count = wdf_count + self.push_pull_stages.len() as u32;
         (stage_count, self.opamp_stages.len() as u32)
     }
 
@@ -793,27 +845,35 @@ impl CompiledPedal {
             .iter()
             .enumerate()
             .filter_map(|(i, s)| {
-                s.opamp_gain().map(|g| {
-                    let pot_id = s.feedback_pot_id().map(|s| s.to_string());
-                    (i, g, pot_id)
-                })
+                if let Stage::Wdf(wdf) = s {
+                    wdf.opamp_gain().map(|g| {
+                        let pot_id = wdf.feedback_pot_id().map(|s| s.to_string());
+                        (i, g, pot_id)
+                    })
+                } else {
+                    None
+                }
             })
             .collect()
     }
 
     /// Debug: return multi-NL stage scattering info.
     pub fn multi_nl_debug_info(&self) -> Vec<(usize, usize, Vec<f64>, f64, Vec<f64>)> {
-        self.multi_nl_stages
+        self.stages
             .iter()
             .enumerate()
-            .map(|(i, s)| {
-                (
-                    i,
-                    s.n_nl,
-                    s.scattering.s_nl_adapted.clone(),
-                    s.compensation,
-                    s.nl_port_resistances.clone(),
-                )
+            .filter_map(|(i, s)| {
+                if let Stage::MultiNl(mnl) = s {
+                    Some((
+                        i,
+                        mnl.n_nl,
+                        mnl.scattering.s_nl_adapted.clone(),
+                        mnl.compensation,
+                        mnl.nl_port_resistances.clone(),
+                    ))
+                } else {
+                    None
+                }
             })
             .collect()
     }
@@ -830,8 +890,8 @@ impl CompiledPedal {
     /// If the pedal has no stages, returns high impedance (1MΩ).
     pub fn input_impedance(&self) -> f64 {
         self.stages
-            .first()
-            .map(|s| s.tree.port_resistance())
+            .iter()
+            .find_map(|s| if let Stage::Wdf(wdf) = s { Some(wdf.tree.port_resistance()) } else { None })
             .unwrap_or(1_000_000.0) // High-Z default (doesn't load source)
     }
 
@@ -842,8 +902,9 @@ impl CompiledPedal {
     /// If the pedal has no stages, returns low impedance (1kΩ).
     pub fn output_impedance(&self) -> f64 {
         self.stages
-            .last()
-            .map(|s| s.tree.port_resistance())
+            .iter()
+            .rev()
+            .find_map(|s| if let Stage::Wdf(wdf) = s { Some(wdf.tree.port_resistance()) } else { None })
             .unwrap_or(1_000.0) // Low-Z default (can drive loads)
     }
 
@@ -1018,16 +1079,21 @@ impl CompiledPedal {
     pub fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> {
         let mut result = Vec::new();
         for stage in &self.stages {
-            result.extend(stage.tree.list_editable_leaves());
+            match stage {
+                Stage::Wdf(wdf) => {
+                    result.extend(wdf.tree.list_editable_leaves());
+                }
+                Stage::MultiNl(mnl) => {
+                    for child in &mnl.passive_children {
+                        result.extend(child.list_editable_leaves());
+                    }
+                }
+                _ => {}
+            }
         }
         for stage in &self.push_pull_stages {
             result.extend(stage.push_tree.list_editable_leaves());
             result.extend(stage.pull_tree.list_editable_leaves());
-        }
-        for stage in &self.multi_nl_stages {
-            for child in &stage.passive_children {
-                result.extend(child.list_editable_leaves());
-            }
         }
         result
     }
@@ -1043,17 +1109,37 @@ impl CompiledPedal {
         let sample_rate = self.sample_rate;
         let mut found = false;
 
-        // Search WDF stages
+        // Search all stages
         for stage in &mut self.stages {
-            let hit = match kind {
-                "resistor" => stage.tree.set_resistor(comp_id, value),
-                "capacitor" => stage.tree.set_capacitor(comp_id, value, sample_rate),
-                "inductor" => stage.tree.set_inductor(comp_id, value, sample_rate),
-                _ => false,
-            };
-            if hit {
-                stage.tree.recompute();
-                found = true;
+            match stage {
+                Stage::Wdf(wdf) => {
+                    let hit = match kind {
+                        "resistor" => wdf.tree.set_resistor(comp_id, value),
+                        "capacitor" => wdf.tree.set_capacitor(comp_id, value, sample_rate),
+                        "inductor" => wdf.tree.set_inductor(comp_id, value, sample_rate),
+                        _ => false,
+                    };
+                    if hit {
+                        wdf.tree.recompute();
+                        found = true;
+                    }
+                }
+                Stage::MultiNl(mnl) => {
+                    for child in &mut mnl.passive_children {
+                        let hit = match kind {
+                            "resistor" => child.set_resistor(comp_id, value),
+                            "capacitor" => child.set_capacitor(comp_id, value, sample_rate),
+                            "inductor" => child.set_inductor(comp_id, value, sample_rate),
+                            _ => false,
+                        };
+                        if hit {
+                            child.recompute();
+                            mnl.recompute_pending = true;
+                            found = true;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -1078,23 +1164,6 @@ impl CompiledPedal {
             if hit_pull {
                 stage.pull_tree.recompute();
                 found = true;
-            }
-        }
-
-        // Search multi-NL stages (passive children)
-        for stage in &mut self.multi_nl_stages {
-            for child in &mut stage.passive_children {
-                let hit = match kind {
-                    "resistor" => child.set_resistor(comp_id, value),
-                    "capacitor" => child.set_capacitor(comp_id, value, sample_rate),
-                    "inductor" => child.set_inductor(comp_id, value, sample_rate),
-                    _ => false,
-                };
-                if hit {
-                    child.recompute();
-                    stage.recompute_pending = true;
-                    found = true;
-                }
             }
         }
 
@@ -1150,17 +1219,22 @@ impl CompiledPedal {
                         let comp_id_aw = self.controls[i].component_id_aw.clone();
                         let comp_id_wb = self.controls[i].component_id_wb.clone();
                         for stage in &mut self.stages {
-                            stage.set_pot(&comp_id, value);
-                            stage.set_pot(&comp_id_aw, value);
-                            stage.set_pot(&comp_id_wb, 1.0 - value);
-                            stage.flush_recompute();
-                        }
-                        for stage in &mut self.iir_stages {
-                            stage.set_pot(&comp_id, value);
-                        }
-                        for stage in &mut self.multi_nl_stages {
-                            stage.set_pot(&comp_id, value);
-                            stage.flush_recompute();
+                            match stage {
+                                Stage::Wdf(wdf) => {
+                                    wdf.set_pot(&comp_id, value);
+                                    wdf.set_pot(&comp_id_aw, value);
+                                    wdf.set_pot(&comp_id_wb, 1.0 - value);
+                                    wdf.flush_recompute();
+                                }
+                                Stage::Iir(iir) => {
+                                    iir.set_pot(&comp_id, value);
+                                }
+                                Stage::MultiNl(mnl) => {
+                                    mnl.set_pot(&comp_id, value);
+                                    mnl.flush_recompute();
+                                }
+                                _ => {}
+                            }
                         }
                         if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
                             self.bbd_wet_mix = value;
@@ -1234,8 +1308,10 @@ impl CompiledPedal {
                     };
                     // Update all stages' switched resistors
                     for stage in &mut self.stages {
-                        stage.tree.set_switch_position(switch_id, position);
-                        stage.tree.recompute();
+                        if let Stage::Wdf(wdf) = stage {
+                            wdf.tree.set_switch_position(switch_id, position);
+                            wdf.tree.recompute();
+                        }
                     }
                 }
                 ControlTarget::Trigger(idx) => {
@@ -1285,9 +1361,20 @@ impl CompiledPedal {
             let inv = 1.0 - value;
             for (id, id_aw, id_wb) in &mirrors {
                 for stage in &mut self.stages {
-                    stage.set_pot(id, inv);
-                    stage.set_pot(id_aw, inv);
-                    stage.set_pot(id_wb, 1.0 - inv);
+                    match stage {
+                        Stage::Wdf(wdf) => {
+                            wdf.set_pot(id, inv);
+                            wdf.set_pot(id_aw, inv);
+                            wdf.set_pot(id_wb, 1.0 - inv);
+                        }
+                        Stage::Iir(iir) => {
+                            iir.set_pot(id, inv);
+                        }
+                        Stage::MultiNl(mnl) => {
+                            mnl.set_pot(id, inv);
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -1319,19 +1406,22 @@ impl CompiledPedal {
                 // stores the target. The smoothed value is tapered+ranged, so
                 // aw/wb split uses it directly (aw + wb = max_R always).
 
-                // Update all WDF stages — each stage ignores pots it doesn't own.
+                // Update all stages — each stage ignores pots it doesn't own.
                 for stage in &mut self.stages {
-                    stage.set_pot(&comp_id, value);
-                    stage.set_pot(&comp_id_aw, value);
-                    stage.set_pot(&comp_id_wb, 1.0 - value);
-                }
-                // Update all IIR stages — recomputes dc_gain / biquad coefficients.
-                for stage in &mut self.iir_stages {
-                    stage.set_pot(&comp_id, value);
-                }
-                // Update all multi-NL stages (handles __aw/__wb internally).
-                for stage in &mut self.multi_nl_stages {
-                    stage.set_pot(&comp_id, value);
+                    match stage {
+                        Stage::Wdf(wdf) => {
+                            wdf.set_pot(&comp_id, value);
+                            wdf.set_pot(&comp_id_aw, value);
+                            wdf.set_pot(&comp_id_wb, 1.0 - value);
+                        }
+                        Stage::Iir(iir) => {
+                            iir.set_pot(&comp_id, value);
+                        }
+                        Stage::MultiNl(mnl) => {
+                            mnl.set_pot(&comp_id, value);
+                        }
+                        _ => {}
+                    }
                 }
 
                 if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
@@ -1341,10 +1431,12 @@ impl CompiledPedal {
             }
         }
 
-        // Per-sample flush for table-based stages (O(1) lookup).
+        // Per-sample flush for table-based WDF stages (O(1) lookup).
         for stage in &mut self.stages {
-            if stage.has_interp_table() {
-                stage.flush_recompute();
+            if let Stage::Wdf(wdf) = stage {
+                if wdf.has_interp_table() {
+                    wdf.flush_recompute();
+                }
             }
         }
 
@@ -1354,11 +1446,12 @@ impl CompiledPedal {
         self.multi_nl_recompute_counter += 1;
         if self.multi_nl_recompute_counter >= 32 {
             self.multi_nl_recompute_counter = 0;
-            for stage in &mut self.multi_nl_stages {
-                stage.flush_recompute();
-            }
             for stage in &mut self.stages {
-                stage.flush_recompute();
+                match stage {
+                    Stage::MultiNl(mnl) => mnl.flush_recompute(),
+                    Stage::Wdf(wdf) => wdf.flush_recompute(),
+                    _ => {}
+                }
             }
         }
     }
@@ -1375,7 +1468,7 @@ impl CompiledPedal {
     }
     /// Number of multi-NL stages (for debug reporting).
     pub fn debug_multi_nl_count(&self) -> usize {
-        self.multi_nl_stages.len()
+        self.stages.iter().filter(|s| matches!(s, Stage::MultiNl(_))).count()
     }
 
     /// Shows gain structure, all WDF stages with their trees, and control bindings.
@@ -1400,24 +1493,27 @@ impl CompiledPedal {
         ));
         s.push_str(&format!("Oversampling: {:?}\n\n", self.oversampling));
 
-        s.push_str(&format!("WDF Stages: {}\n", self.stages.len()));
+        s.push_str(&format!("Stages: {} total\n", self.stages.len()));
         s.push_str("───────────────────────────────────────────────────────────────────────────\n");
         for (i, stage) in self.stages.iter().enumerate() {
-            s.push_str(&format!("\n[Stage {}]\n", i));
-            s.push_str(&stage.debug_dump());
-            s.push('\n');
-        }
-
-        if !self.multi_nl_stages.is_empty() {
-            s.push_str(&format!(
-                "\nMulti-NL Stages: {}\n",
-                self.multi_nl_stages.len()
-            ));
-            s.push_str(
-                "───────────────────────────────────────────────────────────────────────────\n",
-            );
-            for (i, mnl) in self.multi_nl_stages.iter().enumerate() {
-                s.push_str(&format!("  [{}] {}\n", i, mnl.debug_dump()));
+            match stage {
+                Stage::Wdf(wdf) => {
+                    s.push_str(&format!("\n[Stage {} (WDF)]\n", i));
+                    s.push_str(&wdf.debug_dump());
+                    s.push('\n');
+                }
+                Stage::MultiNl(mnl) => {
+                    s.push_str(&format!("\n[Stage {} (MultiNL)] {}\n", i, mnl.debug_dump()));
+                }
+                Stage::Iir(_) => {
+                    s.push_str(&format!("\n[Stage {} (IIR)]\n", i));
+                }
+                Stage::StateSpace(_) => {
+                    s.push_str(&format!("\n[Stage {} (StateSpace)]\n", i));
+                }
+                Stage::BlackFeedback(_) => {
+                    s.push_str(&format!("\n[Stage {} (BlackFeedback)]\n", i));
+                }
             }
         }
 
@@ -1515,7 +1611,7 @@ impl CompiledPedal {
             }
         }
 
-        s.push_str(&format!("\nStage Order: {:?}\n", self.stage_order));
+        s.push_str(&format!("\nStages: {} total\n", self.stages.len()));
 
         s
     }
@@ -1619,7 +1715,9 @@ impl PedalProcessor for CompiledPedal {
         if let Some(ref mut thermal) = self.thermal {
             let state = *thermal.tick();
             for stage in &mut self.stages {
-                stage.apply_thermal(&state);
+                if let Stage::Wdf(wdf) = stage {
+                    wdf.apply_thermal(&state);
+                }
             }
         }
 
@@ -1630,58 +1728,57 @@ impl PedalProcessor for CompiledPedal {
 
             match &binding.target {
                 ModulationTarget::JfetVgs { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.set_jfet_vgs(modulation);
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_jfet_vgs(modulation);
                     }
                 }
                 ModulationTarget::AllJfetVgs => {
                     // Modulate ALL JFET stages with the same value (for phasers)
                     for stage in &mut self.stages {
-                        if matches!(&stage.root, RootKind::Jfet(_) | RootKind::JfetVr(_)) {
-                            stage.set_jfet_vgs(modulation);
+                        if let Stage::Wdf(wdf) = stage {
+                            if matches!(&wdf.root, RootKind::Jfet(_) | RootKind::JfetVr(_)) {
+                                wdf.set_jfet_vgs(modulation);
+                            }
                         }
                     }
                 }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
                         let led = modulation.clamp(0.0, 1.0);
-                        // Try WDF tree first (photocoupler in passive stage)
-                        if stage.tree.set_photocoupler_led(comp_id, led) {
-                            stage.tree.recompute();
+                        if wdf.tree.set_photocoupler_led(comp_id, led) {
+                            wdf.tree.recompute();
                         }
-                        // Also update input-path photocouplers (opamp integrator stages)
-                        stage.set_input_photocoupler_led(comp_id, led);
+                        wdf.set_input_photocoupler_led(comp_id, led);
                     }
                 }
                 ModulationTarget::TriodeVgk { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.set_triode_vgk(modulation);
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_triode_vgk(modulation);
                     }
                 }
                 ModulationTarget::PentodeVg1k { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.set_pentode_vg1k(modulation);
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_pentode_vg1k(modulation);
                     }
                 }
                 ModulationTarget::VariMuVgk { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.set_vari_mu_vgk(modulation);
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_vari_mu_vgk(modulation);
                     }
                 }
                 ModulationTarget::MosfetVgs { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.set_mosfet_vgs(modulation);
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_mosfet_vgs(modulation);
                     }
                 }
                 ModulationTarget::OtaIabc { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        // LFO modulation of OTA: modulation maps to gain (0-1)
-                        stage.set_ota_gain(modulation.clamp(0.0, 1.0));
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_ota_gain(modulation.clamp(0.0, 1.0));
                     }
                 }
                 ModulationTarget::OtaIabcLinear { multi_nl_idx } => {
-                    if let Some(stage) = self.multi_nl_stages.get_mut(*multi_nl_idx) {
-                        stage.set_ota_gain_linear(modulation.clamp(0.0, 1.0));
+                    if let Some(Stage::MultiNl(mnl)) = self.stages.get_mut(*multi_nl_idx) {
+                        mnl.set_ota_gain_linear(modulation.clamp(0.0, 1.0));
                     }
                 }
                 ModulationTarget::BbdClock { bbd_idx } => {
@@ -1720,62 +1817,58 @@ impl PedalProcessor for CompiledPedal {
 
             match &binding.target {
                 ModulationTarget::JfetVgs { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.set_jfet_vgs(modulation);
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_jfet_vgs(modulation);
                     }
                 }
                 ModulationTarget::AllJfetVgs => {
-                    // Modulate ALL JFET stages with the same value (for phasers)
                     for stage in &mut self.stages {
-                        if matches!(&stage.root, RootKind::Jfet(_) | RootKind::JfetVr(_)) {
-                            stage.set_jfet_vgs(modulation);
+                        if let Stage::Wdf(wdf) = stage {
+                            if matches!(&wdf.root, RootKind::Jfet(_) | RootKind::JfetVr(_)) {
+                                wdf.set_jfet_vgs(modulation);
+                            }
                         }
                     }
                 }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
                         let led = modulation.clamp(0.0, 1.0);
-                        // Try WDF tree first (photocoupler in passive stage)
-                        if stage.tree.set_photocoupler_led(comp_id, led) {
-                            stage.tree.recompute();
+                        if wdf.tree.set_photocoupler_led(comp_id, led) {
+                            wdf.tree.recompute();
                         }
-                        // Also update input-path photocouplers (opamp integrator stages)
-                        stage.set_input_photocoupler_led(comp_id, led);
+                        wdf.set_input_photocoupler_led(comp_id, led);
                     }
                 }
                 ModulationTarget::TriodeVgk { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.set_triode_vgk(modulation);
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_triode_vgk(modulation);
                     }
                 }
                 ModulationTarget::PentodeVg1k { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.set_pentode_vg1k(modulation);
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_pentode_vg1k(modulation);
                     }
                 }
                 ModulationTarget::VariMuVgk { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.set_vari_mu_vgk(modulation);
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_vari_mu_vgk(modulation);
                     }
                 }
                 ModulationTarget::MosfetVgs { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        stage.set_mosfet_vgs(modulation);
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_mosfet_vgs(modulation);
                     }
                 }
                 ModulationTarget::OtaIabc { stage_idx } => {
-                    if let Some(stage) = self.stages.get_mut(*stage_idx) {
-                        // Envelope controls OTA gain: louder input → lower gain
-                        // Invert: high envelope (loud) → low gain (compression)
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
                         let gain = (1.0 - modulation).clamp(0.0, 1.0);
-                        stage.set_ota_gain(gain);
+                        wdf.set_ota_gain(gain);
                     }
                 }
                 ModulationTarget::OtaIabcLinear { multi_nl_idx } => {
-                    if let Some(stage) = self.multi_nl_stages.get_mut(*multi_nl_idx) {
-                        // Envelope controls linearized OTA: louder → lower gm
+                    if let Some(Stage::MultiNl(mnl)) = self.stages.get_mut(*multi_nl_idx) {
                         let gain = (1.0 - modulation).clamp(0.0, 1.0);
-                        stage.set_ota_gain_linear(gain);
+                        mnl.set_ota_gain_linear(gain);
                     }
                 }
                 ModulationTarget::BbdClock { bbd_idx } => {
@@ -1845,10 +1938,18 @@ impl PedalProcessor for CompiledPedal {
                 stage.opamp.set_v_max(opamp_v_max);
             }
             for stage in &mut self.stages {
-                match &mut stage.root {
-                    RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
-                    RootKind::Triode(t) => t.set_v_max(tube_v_max),
-                    RootKind::Pentode(p) => p.set_v_max(tube_v_max),
+                match stage {
+                    Stage::Wdf(wdf) => {
+                        match &mut wdf.root {
+                            RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
+                            RootKind::Triode(t) => t.set_v_max(tube_v_max),
+                            RootKind::Pentode(p) => p.set_v_max(tube_v_max),
+                            _ => {}
+                        }
+                    }
+                    Stage::MultiNl(mnl) => {
+                        mnl.update_supply_voltage(sagged_voltage);
+                    }
                     _ => {}
                 }
             }
@@ -1856,17 +1957,14 @@ impl PedalProcessor for CompiledPedal {
                 pp.push_root.set_v_max(tube_v_max);
                 pp.pull_root.set_v_max(tube_v_max);
             }
-            // Update multi-NL stage DC bias for supply sag.
-            // dc_bias and vcc_bias_all scale linearly with supply voltage.
-            for stage in &mut self.multi_nl_stages {
-                stage.update_supply_voltage(sagged_voltage);
-            }
             // Update single-NL WDF stage VCC bias for supply sag.
             if prev_supply_voltage.abs() > 0.0 {
                 let scale = sagged_voltage / prev_supply_voltage;
                 for stage in &mut self.stages {
-                    if stage.vcc_injection_coeff != 0.0 {
-                        stage.vcc_injection_coeff *= scale;
+                    if let Stage::Wdf(wdf) = stage {
+                        if wdf.vcc_injection_coeff != 0.0 {
+                            wdf.vcc_injection_coeff *= scale;
+                        }
                     }
                 }
             }
@@ -1926,21 +2024,28 @@ impl PedalProcessor for CompiledPedal {
 
         // Node routing: trigger impulses were already pushed to node_signals above.
 
-        for sr in &self.stage_order {
-            match sr {
-                StageRef::Wdf(i) => {
-                    let stage = &mut self.stages[*i];
+        for stage_idx in 0..self.stages.len() {
+            // Determine variant type to dispatch correctly.
+            let is_wdf = matches!(&self.stages[stage_idx], Stage::Wdf(_));
+            let is_mnl = matches!(&self.stages[stage_idx], Stage::MultiNl(_));
+            let is_iir = matches!(&self.stages[stage_idx], Stage::Iir(_));
+            let is_ss = matches!(&self.stages[stage_idx], Stage::StateSpace(_));
+            let is_bf = matches!(&self.stages[stage_idx], Stage::BlackFeedback(_));
+
+            if is_wdf {
+                    let stage = if let Stage::Wdf(w) = &mut self.stages[stage_idx] { w } else { unreachable!() };
 
                     // Node-based routing for per-voice trigger stages:
                     // Only trigger voice stages read exclusively from node_signals.
                     // Regular stages (triodes, BJTs, etc.) use serial chain even
                     // if they have injection_node_id set for other purposes.
                     let stage_input = if stage.is_trigger_voice {
+                        let inj_node = stage.injection_node_id;
                         let impulse: f64 = self
                             .node_signals
                             .iter()
                             .rev()
-                            .filter(|(nid, _)| *nid == stage.injection_node_id)
+                            .filter(|(nid, _)| *nid == inj_node)
                             .map(|(_, v)| *v)
                             .sum();
                         // Activate voice on first trigger impulse.
@@ -1957,10 +2062,11 @@ impl PedalProcessor for CompiledPedal {
                         impulse
                     } else if stage.is_feedforward {
                         // Feedforward stages read from upstream node_signals
+                        let inj_node = stage.injection_node_id;
                         self.node_signals
                             .iter()
                             .rev()
-                            .find(|(nid, _)| *nid == stage.injection_node_id)
+                            .find(|(nid, _)| *nid == inj_node)
                             .map(|(_, v)| *v)
                             .unwrap_or(0.0)
                     } else {
@@ -2058,21 +2164,14 @@ impl PedalProcessor for CompiledPedal {
                         stats.record_stage_level(wdf_stage_counter, stage_output);
                     }
                     wdf_stage_counter += 1;
-                }
-                StageRef::MultiNl(i) => {
+            } else if is_mnl {
                     prev_was_clipping = false;
-
-                    // Main-path multi-NL stages use the serial chain signal.
-                    // Sidechain multi-NL stages live in self.sidechains (separate
-                    // SidechainProcessor structs) and are NOT in stage_order,
-                    // so all MultiNl refs here are main-path.
-                    let mnl = &mut self.multi_nl_stages[*i];
+                    let mnl = if let Stage::MultiNl(m) = &mut self.stages[stage_idx] { m } else { unreachable!() };
                     let mnl_input = signal;
 
                     #[cfg(feature = "debug-trace")]
                     let pre = mnl_input;
                     let mnl_output = mnl.process(mnl_input);
-                    // Guard against NaN from multi-NL NR solver divergence.
                     let mnl_output = if mnl_output.is_finite() {
                         mnl_output
                     } else {
@@ -2095,19 +2194,19 @@ impl PedalProcessor for CompiledPedal {
                             };
                             tracing::warn!(
                                 "NaN/Inf in MultiNL stage {} [{}]: input={:.6e} output={:.6e} v_prev={:.4?}",
-                                i, devices, mnl_input, mnl_output, &mnl.v_prev,
+                                stage_idx, devices, mnl_input, mnl_output, &mnl.v_prev,
                             );
                         }
                         0.0
                     };
 
-                    // Store output at the stage's output node for downstream routing.
-                    self.node_signals.push((mnl.output_node_id, mnl_output));
+                    let out_node = mnl.output_node_id;
+                    self.node_signals.push((out_node, mnl_output));
                     signal = mnl_output;
 
                     #[cfg(feature = "debug-trace")]
                     if trace_on {
-                        let mnl = &self.multi_nl_stages[*i];
+                        let mnl = if let Stage::MultiNl(m) = &self.stages[stage_idx] { m } else { unreachable!() };
                         let devices: String = if let Some(ref dg) = mnl.device_groups {
                             dg.groups
                                 .iter()
@@ -2122,7 +2221,7 @@ impl PedalProcessor for CompiledPedal {
                                 .join(",")
                         };
                         eprintln!(
-                            "  [MNL {i}] [{devices}] in={pre:.6e} out={signal:.6e} n_nl={} out_port={} xfmr={:.2} inj={} out={}",
+                            "  [MNL {stage_idx}] [{devices}] in={pre:.6e} out={signal:.6e} n_nl={} out_port={} xfmr={:.2} inj={} out={}",
                             mnl.n_nl, mnl.output_port, mnl.transformer_gain,
                             mnl.injection_node_id, mnl.output_node_id,
                         );
@@ -2131,38 +2230,41 @@ impl PedalProcessor for CompiledPedal {
                             &mnl.scattering.s_nl_adapted, &mnl.v_prev,
                         );
                     }
-                }
-                StageRef::Iir(i) => {
+            } else if is_iir {
                     prev_was_clipping = false;
                     let iir_in = signal;
-                    let iir_stage = &mut self.iir_stages[*i];
+                    let iir_stage = if let Stage::Iir(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
                     signal = iir_stage.process(signal);
                     #[cfg(test)]
                     if iir_in.abs() > 1e-10 || signal.abs() > 1e-10 {
                         static IIR_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                         let n = IIR_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if n < 3 {
-                            eprintln!("  [IIR {i}] in={iir_in:.6e} out={signal:.6e}");
+                            eprintln!("  [IIR {stage_idx}] in={iir_in:.6e} out={signal:.6e}");
                         }
                     }
-                }
-                StageRef::StateSpace(i) => {
+            } else if is_ss {
                     prev_was_clipping = false;
-                    let ss_stage = &mut self.state_space_stages[*i];
+                    let ss_stage = if let Stage::StateSpace(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
                     signal = ss_stage.process(signal);
-                }
+            } else if is_bf {
+                    prev_was_clipping = false;
+                    let bf_stage = if let Stage::BlackFeedback(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
+                    signal = bf_stage.process(signal);
             }
         }
 
         #[cfg(feature = "debug-trace")]
         if trace_on {
+            let wdf_count = self.stages.iter().filter(|s| matches!(s, Stage::Wdf(_))).count();
+            let mnl_count = self.stages.iter().filter(|s| matches!(s, Stage::MultiNl(_))).count();
             eprintln!(
-                "  [PRE-PP] signal={signal:.6e} n_pp={} n_sc={} stage_order={}(wdf={}, mnl={})",
+                "  [PRE-PP] signal={signal:.6e} n_pp={} n_sc={} stages={}(wdf={}, mnl={})",
                 self.push_pull_stages.len(),
                 self.sidechains.len(),
-                self.stage_order.len(),
                 self.stages.len(),
-                self.multi_nl_stages.len()
+                wdf_count,
+                mnl_count
             );
         }
 
@@ -2403,22 +2505,22 @@ impl PedalProcessor for CompiledPedal {
             // Record tube state from WDF stages (plate current for glow shaders)
             let mut tube_idx = 0;
             for stage in &self.stages {
-                match &stage.root {
-                    RootKind::Triode(t) => {
-                        // Get plate voltage from last WDF wave (approximate)
-                        // For more accurate values, we'd need to track v_pk from process()
-                        let vpk = (self.supply_voltage * 0.6) as f32; // Typical idle point
-                        let ip_ma = (t.plate_current(vpk as f64) * 1000.0) as f32;
-                        acc.record_tube(tube_idx, ip_ma, vpk);
-                        tube_idx += 1;
+                if let Stage::Wdf(wdf) = stage {
+                    match &wdf.root {
+                        RootKind::Triode(t) => {
+                            let vpk = (self.supply_voltage * 0.6) as f32;
+                            let ip_ma = (t.plate_current(vpk as f64) * 1000.0) as f32;
+                            acc.record_tube(tube_idx, ip_ma, vpk);
+                            tube_idx += 1;
+                        }
+                        RootKind::Pentode(p) => {
+                            let vpk = (self.supply_voltage * 0.6) as f32;
+                            let ip_ma = (p.plate_current(vpk as f64) * 1000.0) as f32;
+                            acc.record_tube(tube_idx, ip_ma, vpk);
+                            tube_idx += 1;
+                        }
+                        _ => {}
                     }
-                    RootKind::Pentode(p) => {
-                        let vpk = (self.supply_voltage * 0.6) as f32;
-                        let ip_ma = (p.plate_current(vpk as f64) * 1000.0) as f32;
-                        acc.record_tube(tube_idx, ip_ma, vpk);
-                        tube_idx += 1;
-                    }
-                    _ => {}
                 }
             }
             // Record push-pull triode tubes
@@ -2455,8 +2557,16 @@ impl PedalProcessor for CompiledPedal {
     fn set_sample_rate(&mut self, rate: f64) {
         self.sample_rate = rate;
         for stage in &mut self.stages {
-            stage.tree.update_sample_rate(rate);
-            stage.tree.recompute();
+            match stage {
+                Stage::Wdf(wdf) => {
+                    wdf.tree.update_sample_rate(rate);
+                    wdf.tree.recompute();
+                }
+                Stage::MultiNl(mnl) => {
+                    mnl.reset();
+                }
+                _ => {}
+            }
         }
         for binding in &mut self.lfos {
             binding.lfo.set_sample_rate(rate);
@@ -2489,10 +2599,12 @@ impl PedalProcessor for CompiledPedal {
 
     fn reset(&mut self) {
         for stage in &mut self.stages {
-            stage.reset();
-        }
-        for mnl in &mut self.multi_nl_stages {
-            mnl.reset();
+            match stage {
+                Stage::Wdf(wdf) => wdf.reset(),
+                Stage::MultiNl(mnl) => mnl.reset(),
+                // IIR, StateSpace, BlackFeedback don't have reset()
+                _ => {}
+            }
         }
         for binding in &mut self.lfos {
             binding.lfo.reset();
@@ -2568,47 +2680,52 @@ impl PedalProcessor for CompiledPedal {
             out.push((ctrl.label.clone(), target, smoothed));
         }
 
-        // All pot leaves from WDF stages (includes ganged halves like __aw/__wb)
+        // All pot leaves from stages (includes ganged halves like __aw/__wb)
         let mut seen = std::collections::HashSet::new();
         for (si, stage) in self.stages.iter().enumerate() {
-            stage.tree.for_each_leaf(&mut |leaf| {
-                if leaf.type_tag() == "pot" {
-                    if let Some(id) = leaf.comp_id() {
-                        if seen.insert(format!("s{}:{}", si, id)) {
-                            let pos = leaf.pot_position().unwrap_or(0.0);
-                            let r = leaf.port_resistance();
-                            out.push((format!("[{}] {}", si, id), pos, r));
+            match stage {
+                Stage::Wdf(wdf) => {
+                    wdf.tree.for_each_leaf(&mut |leaf| {
+                        if leaf.type_tag() == "pot" {
+                            if let Some(id) = leaf.comp_id() {
+                                if seen.insert(format!("s{}:{}", si, id)) {
+                                    let pos = leaf.pot_position().unwrap_or(0.0);
+                                    let r = leaf.port_resistance();
+                                    out.push((format!("[{}] {}", si, id), pos, r));
+                                }
+                            }
                         }
+                    });
+                }
+                Stage::MultiNl(mnl) => {
+                    for child in &mnl.passive_children {
+                        child.for_each_leaf(&mut |leaf| {
+                            if leaf.type_tag() == "pot" {
+                                if let Some(id) = leaf.comp_id() {
+                                    if seen.insert(format!("m{}:{}", si, id)) {
+                                        let pos = leaf.pot_position().unwrap_or(0.0);
+                                        let r = leaf.port_resistance();
+                                        out.push((format!("[m{}] {}", si, id), pos, r));
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    for child in &mnl.pot_children {
+                        child.for_each_leaf(&mut |leaf| {
+                            if leaf.type_tag() == "pot" {
+                                if let Some(id) = leaf.comp_id() {
+                                    if seen.insert(format!("m{}:{}", si, id)) {
+                                        let pos = leaf.pot_position().unwrap_or(0.0);
+                                        let r = leaf.port_resistance();
+                                        out.push((format!("[m{}] {}", si, id), pos, r));
+                                    }
+                                }
+                            }
+                        });
                     }
                 }
-            });
-        }
-        for (si, stage) in self.multi_nl_stages.iter().enumerate() {
-            for child in &stage.passive_children {
-                child.for_each_leaf(&mut |leaf| {
-                    if leaf.type_tag() == "pot" {
-                        if let Some(id) = leaf.comp_id() {
-                            if seen.insert(format!("m{}:{}", si, id)) {
-                                let pos = leaf.pot_position().unwrap_or(0.0);
-                                let r = leaf.port_resistance();
-                                out.push((format!("[m{}] {}", si, id), pos, r));
-                            }
-                        }
-                    }
-                });
-            }
-            for child in &stage.pot_children {
-                child.for_each_leaf(&mut |leaf| {
-                    if leaf.type_tag() == "pot" {
-                        if let Some(id) = leaf.comp_id() {
-                            if seen.insert(format!("m{}:{}", si, id)) {
-                                let pos = leaf.pot_position().unwrap_or(0.0);
-                                let r = leaf.port_resistance();
-                                out.push((format!("[m{}] {}", si, id), pos, r));
-                            }
-                        }
-                    }
-                });
+                _ => {}
             }
         }
 
@@ -2638,7 +2755,11 @@ pub(crate) fn extract_precomputed_from_compiled(
     let mut stages = Vec::new();
     let mut interp_tables = Vec::new();
 
-    for (stage_idx, mnl) in compiled.multi_nl_stages.iter().enumerate() {
+    for (stage_idx, stage) in compiled.stages.iter().enumerate() {
+        let mnl = match stage {
+            Stage::MultiNl(m) => m,
+            _ => continue,
+        };
         let adaptor = mnl.adaptor();
         let n = adaptor.num_ports();
         let scattering = adaptor.power_scattering().to_vec();

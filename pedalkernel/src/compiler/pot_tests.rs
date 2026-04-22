@@ -38,7 +38,7 @@ fn pot_halves_in_same_stage() {
     // Both pot edges should be in the same stage (same comp_idx).
     // With native ports, the pot is "Volume" (not __aw/__wb).
     let pot_stage = compiled.stages.iter().position(|s| {
-        s.tree.get_pot_position("Volume").is_some()
+        if let super::compiled::Stage::Wdf(w) = s { w.tree.get_pot_position("Volume").is_some() } else { false }
     });
     assert!(
         pot_stage.is_some(),
@@ -72,7 +72,9 @@ fn pot_creates_voltage_divider_stage() {
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
     eprintln!("Divider stages: {}", compiled.stages.len());
     for (i, s) in compiled.stages.iter().enumerate() {
-        eprintln!("  stage {i}: rp={:.1}", s.tree.port_resistance());
+        if let super::compiled::Stage::Wdf(w) = s {
+            eprintln!("  stage {i}: rp={:.1}", w.tree.port_resistance());
+        }
     }
 
     // At default (0.5): should pass signal with some attenuation

@@ -6,7 +6,7 @@
 //! Smoothing spreads parameter changes over ~32 samples to avoid zipper
 //! noise and CPU spikes from recomputation.
 
-use super::compiled::{CompiledPedal, ControlBinding, ControlTarget};
+use super::compiled::{CompiledPedal, ControlBinding, ControlTarget, Stage};
 use crate::dsl::{PedalDef, PotTaper};
 
 /// Bind control declarations to compiled stages.
@@ -53,84 +53,84 @@ fn find_pot_binding(
     let aw_id = format!("{comp_id}__aw");
     let wb_id = format!("{comp_id}__wb");
 
-    // Search WDF stages (pot leaves in tree, opamp_children, or feedback_pot_id)
+    // Search all stages in the unified vec
     for (idx, stage) in compiled.stages.iter().enumerate() {
-        let in_tree = stage.tree.get_pot_position(comp_id).is_some()
-            || stage.tree.get_pot_position(&aw_id).is_some()
-            || stage.tree.get_pot_position(&wb_id).is_some();
-        let in_children = stage.opamp_children.iter().any(|c| {
-            c.get_pot_position(comp_id).is_some()
-                || c.get_pot_position(&aw_id).is_some()
-                || c.get_pot_position(&wb_id).is_some()
-        });
-        let is_feedback_pot = stage.feedback_pot_id.as_deref() == Some(comp_id);
+        match stage {
+            Stage::Wdf(wdf) => {
+                let in_tree = wdf.tree.get_pot_position(comp_id).is_some()
+                    || wdf.tree.get_pot_position(&aw_id).is_some()
+                    || wdf.tree.get_pot_position(&wb_id).is_some();
+                let in_children = wdf.opamp_children.iter().any(|c| {
+                    c.get_pot_position(comp_id).is_some()
+                        || c.get_pot_position(&aw_id).is_some()
+                        || c.get_pot_position(&wb_id).is_some()
+                });
+                let is_feedback_pot = wdf.feedback_pot_id.as_deref() == Some(comp_id);
 
-        if in_tree || in_children || is_feedback_pot {
-            return Some(make_binding(
-                ctrl,
-                comp_id,
-                &aw_id,
-                &wb_id,
-                max_r,
-                taper,
-                ControlTarget::PotInStage(idx),
-            ));
-        }
-    }
-
-    // Search MultiNl stages (pot in MNA scattering)
-    for (idx, stage) in compiled.multi_nl_stages.iter().enumerate() {
-        for (pi, child) in stage.passive_children.iter().enumerate() {
-            if child.get_pot_position(comp_id).is_some()
-                || child.get_pot_position(&aw_id).is_some()
-                || child.get_pot_position(&wb_id).is_some()
-            {
-                return Some(make_binding(
-                    ctrl,
-                    comp_id,
-                    &aw_id,
-                    &wb_id,
-                    max_r,
-                    taper,
-                    ControlTarget::PotInMultiNlStage(idx, pi),
-                ));
+                if in_tree || in_children || is_feedback_pot {
+                    return Some(make_binding(
+                        ctrl,
+                        comp_id,
+                        &aw_id,
+                        &wb_id,
+                        max_r,
+                        taper,
+                        ControlTarget::PotInStage(idx),
+                    ));
+                }
+            }
+            Stage::MultiNl(mnl) => {
+                for (pi, child) in mnl.passive_children.iter().enumerate() {
+                    if child.get_pot_position(comp_id).is_some()
+                        || child.get_pot_position(&aw_id).is_some()
+                        || child.get_pot_position(&wb_id).is_some()
+                    {
+                        return Some(make_binding(
+                            ctrl,
+                            comp_id,
+                            &aw_id,
+                            &wb_id,
+                            max_r,
+                            taper,
+                            ControlTarget::PotInMultiNlStage(idx, pi),
+                        ));
+                    }
+                }
+                for child in &mnl.pot_children {
+                    if child.get_pot_position(comp_id).is_some()
+                        || child.get_pot_position(&aw_id).is_some()
+                        || child.get_pot_position(&wb_id).is_some()
+                    {
+                        return Some(make_binding(
+                            ctrl,
+                            comp_id,
+                            &aw_id,
+                            &wb_id,
+                            max_r,
+                            taper,
+                            ControlTarget::PotInMultiNlStage(idx, 0),
+                        ));
+                    }
+                }
+            }
+            Stage::Iir(iir) => {
+                if iir.has_pot(comp_id) {
+                    return Some(make_binding(
+                        ctrl,
+                        comp_id,
+                        &aw_id,
+                        &wb_id,
+                        max_r,
+                        taper,
+                        ControlTarget::PotInIirStage(idx),
+                    ));
+                }
+            }
+            Stage::BlackFeedback(_) | Stage::StateSpace(_) => {
+                // TODO: StateSpaceStage G-matrix delta
             }
         }
-        // Also check pot_children
-        for child in &stage.pot_children {
-            if child.get_pot_position(comp_id).is_some()
-                || child.get_pot_position(&aw_id).is_some()
-                || child.get_pot_position(&wb_id).is_some()
-            {
-                return Some(make_binding(
-                    ctrl,
-                    comp_id,
-                    &aw_id,
-                    &wb_id,
-                    max_r,
-                    taper,
-                    ControlTarget::PotInMultiNlStage(idx, 0),
-                ));
-            }
-        }
     }
-
-    // Search IIR stages (pot in feedback → changes dc_gain)
-    for (idx, stage) in compiled.iir_stages.iter().enumerate() {
-        if stage.has_pot(comp_id) {
-            return Some(make_binding(
-                ctrl,
-                comp_id,
-                &aw_id,
-                &wb_id,
-                max_r,
-                taper,
-                ControlTarget::PotInIirStage(idx),
-            ));
-        }
-    }
-
-    // TODO: StateSpaceStage G-matrix delta
 
     None
 }

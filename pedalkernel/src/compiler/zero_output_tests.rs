@@ -3,6 +3,7 @@
 // Traces exactly where signal dies in the compilation pipeline.
 // Each test isolates one layer: grouping → SPQR → stage type → audio.
 
+use super::compiled::Stage;
 use super::spqr_build::compile_via_spqr;
 use super::spqr::*;
 use super::graph::CircuitGraph;
@@ -31,7 +32,7 @@ fn screamer_no_iir_with_zero_b() {
     let pedal = load_legend("screamer");
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
-    for (i, stage) in compiled.iir_stages.iter().enumerate() {
+    for (i, stage) in compiled.stages.iter().filter_map(|s| s.as_iir()).enumerate() {
         let dc = stage.iir.dc_gain();
         let all_zero = stage.iir.b_coeffs.iter().all(|&b| b.abs() < 1e-30);
         eprintln!("  iir[{i}]: dc_gain={dc:.4}, b={:?}, a={:?}",
@@ -48,7 +49,7 @@ fn sd1_no_iir_with_zero_b() {
     let pedal = load_legend("sd1");
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
-    for (i, stage) in compiled.iir_stages.iter().enumerate() {
+    for (i, stage) in compiled.stages.iter().filter_map(|s| s.as_iir()).enumerate() {
         let all_zero = stage.iir.b_coeffs.iter().all(|&b| b.abs() < 1e-30);
         eprintln!("  iir[{i}]: b={:?}", stage.iir.b_coeffs);
         assert!(!all_zero, "SD1 IIR stage {i} has b=[0,0,0]");
@@ -156,11 +157,11 @@ fn minimal_bias_network_not_rigid() {
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
     eprintln!("Bias network: wdf={}, iir={}, ss={}, order={:?}",
-        compiled.stages.len(), compiled.iir_stages.len(),
-        compiled.state_space_stages.len(), compiled.stage_order);
+        compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(),
+        compiled.stages.iter().filter(|s| matches!(s, Stage::StateSpace(_))).count(), compiled.stages);
 
     // Check no IIR with zero b
-    for (i, stage) in compiled.iir_stages.iter().enumerate() {
+    for (i, stage) in compiled.stages.iter().filter_map(|s| s.as_iir()).enumerate() {
         let all_zero = stage.iir.b_coeffs.iter().all(|&b| b.abs() < 1e-30);
         eprintln!("  iir[{i}]: b={:?}", stage.iir.b_coeffs);
         assert!(!all_zero, "IIR stage {i} has b=[0,0,0]");
@@ -201,7 +202,7 @@ fn minimal_coupling_cap_passes_signal() {
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
     eprintln!("Coupling cap: wdf={}, iir={}, order={:?}",
-        compiled.stages.len(), compiled.iir_stages.len(), compiled.stage_order);
+        compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(), compiled.stages);
 
     for _ in 0..2000 { compiled.process(0.0); }
     let mut peak = 0.0f64;
@@ -242,8 +243,8 @@ fn minimal_opamp_with_input_network_produces_audio() {
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
     eprintln!("Cin+R+opamp: wdf={}, iir={}, ss={}, order={:?}",
-        compiled.stages.len(), compiled.iir_stages.len(),
-        compiled.state_space_stages.len(), compiled.stage_order);
+        compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(),
+        compiled.stages.iter().filter(|s| matches!(s, Stage::StateSpace(_))).count(), compiled.stages);
 
     for _ in 0..2000 { compiled.process(0.0); }
     let mut peak = 0.0f64;
@@ -495,11 +496,11 @@ fn pot_with_output_passives_produces_audio() {
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
     eprintln!("Pot+output: wdf={}, iir={}, ss={}, order={:?}",
-        compiled.stages.len(), compiled.iir_stages.len(),
-        compiled.state_space_stages.len(), compiled.stage_order);
+        compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(),
+        compiled.stages.iter().filter(|s| matches!(s, Stage::StateSpace(_))).count(), compiled.stages);
 
     // Check no IIR with zero b
-    for (i, stage) in compiled.iir_stages.iter().enumerate() {
+    for (i, stage) in compiled.stages.iter().filter_map(|s| s.as_iir()).enumerate() {
         let all_zero = stage.iir.b_coeffs.iter().all(|&b| b.abs() < 1e-30);
         eprintln!("  iir[{i}]: b={:?}", stage.iir.b_coeffs);
         assert!(!all_zero, "IIR stage {i} has b=[0,0,0]");
@@ -573,8 +574,8 @@ fn opamp_into_tone_stack_into_volume_produces_audio() {
 
     // Remove the detailed edge debug output for cleanliness
     eprintln!("Opamp+tone+vol: wdf={}, iir={}, ss={}, order={:?}",
-        compiled.stages.len(), compiled.iir_stages.len(),
-        compiled.state_space_stages.len(), compiled.stage_order);
+        compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(),
+        compiled.stages.iter().filter(|s| matches!(s, Stage::StateSpace(_))).count(), compiled.stages);
 
     for _ in 0..2000 { compiled.process(0.0); }
     let mut peak = 0.0f64;

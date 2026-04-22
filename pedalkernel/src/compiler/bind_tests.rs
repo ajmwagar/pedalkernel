@@ -2,6 +2,7 @@
 //
 // Verifies: parse .pedal with controls → compile → bind → set_control changes output.
 
+use super::compiled::Stage;
 use super::spqr_build::compile_via_spqr;
 use super::spqr_control::bind_controls;
 use crate::PedalProcessor;
@@ -128,8 +129,10 @@ fn debug_volume_stages() {
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
     eprintln!("WDF Stages: {}", compiled.stages.len());
     for (i, s) in compiled.stages.iter().enumerate() {
-        eprintln!("  wdf {i}: rp={:.1}", s.tree.port_resistance());
+        if let Stage::Wdf(w) = s {
+            eprintln!("  wdf {i}: rp={:.1}", w.tree.port_resistance());
+        }
     }
-    eprintln!("IIR Stages: {}", compiled.iir_stages.len());
-    eprintln!("Stage order: {:?}", compiled.stage_order);
+    eprintln!("IIR Stages: {}", compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count());
+    eprintln!("Stage order: {:?}", compiled.stages);
 }

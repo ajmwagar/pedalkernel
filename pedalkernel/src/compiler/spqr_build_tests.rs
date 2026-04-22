@@ -1,5 +1,6 @@
 // Tests extracted from spqr_build.rs — stage building + end-to-end pipeline.
 
+use super::compiled::Stage;
 use super::graph::CircuitGraph;
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::spqr_build::*;
@@ -418,9 +419,9 @@ fn assert_produces_audio(name: &str, pedal: &crate::dsl::PedalDef) {
         .unwrap_or_else(|e| panic!("{name}: compile error: {e}"));
 
     eprintln!("{name}: wdf={}, iir={}, ss={}, mnl={}, order={:?}",
-        compiled.stages.len(), compiled.iir_stages.len(),
-        compiled.state_space_stages.len(), compiled.multi_nl_stages.len(),
-        compiled.stage_order);
+        compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(),
+        compiled.stages.iter().filter(|s| matches!(s, Stage::StateSpace(_))).count(), compiled.stages.iter().filter(|s| matches!(s, Stage::MultiNl(_))).count(),
+        compiled.stages);
 
     // Settle DC
     for _ in 0..2000 {
@@ -522,10 +523,13 @@ fn diagnose_ratking_hpf() {
 
     let ratio = if peak_lo > 1e-10 { peak_hi / peak_lo } else { f64::INFINITY };
     eprintln!("  200Hz peak={peak_lo:.6}V, 5kHz peak={peak_hi:.6}V, ratio={ratio:.1}x");
-    eprintln!("  stage_order: {:?}", compiled_lo.stage_order);
+    eprintln!("  stages: {:?}", compiled_lo.stages);
     for (i, s) in compiled_lo.stages.iter().enumerate() {
-        eprintln!("  wdf[{i}]: rp={:.0} comp={} clip={}",
-            s.tree.port_resistance(), s.root_comp_id, s.root.is_clipping_stage());
+        if let Stage::Wdf(wdf) = s {
+            eprintln!("  [{i}] Wdf: rp={:.0} comp={}", wdf.tree.port_resistance(), wdf.root_comp_id);
+        } else {
+            eprintln!("  [{i}] {:?}", s);
+        }
     }
 
     // A distortion pedal should NOT have 10x more output at 5kHz vs 200Hz

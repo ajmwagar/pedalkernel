@@ -118,9 +118,6 @@ fn compile_subcircuit_equipment(
     Ok(CompiledPedal {
         stages: Vec::new(),
         push_pull_stages: Vec::new(),
-        multi_nl_stages: Vec::new(),
-        iir_stages: Vec::new(),
-        state_space_stages: Vec::new(),
         pre_gain: 1.0,
         output_gain: 1.0,
         rail_saturation: super::compiled::RailSaturation::None,
@@ -159,7 +156,6 @@ fn compile_subcircuit_equipment(
         pot_mirrors: std::collections::HashMap::new(),
         base_grid_bias: 0.0,
         multi_nl_recompute_counter: 0,
-        stage_order: Vec::new(),
         node_signals: Vec::new(),
         bbd_wet_mix: 0.5,
         bbd_mix_pot_id: None,

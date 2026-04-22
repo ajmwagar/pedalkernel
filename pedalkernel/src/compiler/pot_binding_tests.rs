@@ -160,11 +160,13 @@ fn tone_pot_in_blackfeedback_changes_spectrum() {
     if !bound {
         eprintln!("  Tone NOT bound — checking WDF stage trees:");
         for (i, s) in compiled.stages.iter().enumerate() {
-            let pos = s.tree.get_pot_position("Tone")
-                .or_else(|| s.tree.get_pot_position("Tone__aw"))
-                .or_else(|| s.tree.get_pot_position("Tone__wb"));
-            if pos.is_some() {
-                eprintln!("    wdf[{i}]: Tone found, pos={:?}", pos);
+            if let super::compiled::Stage::Wdf(w) = s {
+                let pos = w.tree.get_pot_position("Tone")
+                    .or_else(|| w.tree.get_pot_position("Tone__aw"))
+                    .or_else(|| w.tree.get_pot_position("Tone__wb"));
+                if pos.is_some() {
+                    eprintln!("    wdf[{i}]: Tone found, pos={:?}", pos);
+                }
             }
         }
     }
@@ -173,31 +175,37 @@ fn tone_pot_in_blackfeedback_changes_spectrum() {
     // Verify the pot position actually changes when set_control is called
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
-    // Get initial Tone pot position
-    let stage = &compiled.stages[1]; // PotInStage(1)
-    let initial_pos = stage.tree.get_pot_position("Tone")
-        .or_else(|| stage.tree.get_pot_position("Tone__aw"));
+    // Find a WDF stage with the Tone pot
+    let find_tone_pos = |stages: &[super::compiled::Stage]| -> Option<f64> {
+        for s in stages {
+            if let super::compiled::Stage::Wdf(wdf) = s {
+                if let Some(pos) = wdf.tree.get_pot_position("Tone")
+                    .or_else(|| wdf.tree.get_pot_position("Tone__aw"))
+                {
+                    return Some(pos);
+                }
+            }
+        }
+        None
+    };
+
+    let initial_pos = find_tone_pos(&compiled.stages);
     eprintln!("Initial Tone position: {:?}", initial_pos);
 
-    // Set to 0.0
     compiled.set_control("Tone", 0.0);
-    let pos_0 = compiled.stages[1].tree.get_pot_position("Tone")
-        .or_else(|| compiled.stages[1].tree.get_pot_position("Tone__aw"));
+    let pos_0 = find_tone_pos(&compiled.stages);
 
-    // Set to 1.0
     compiled.set_control("Tone", 1.0);
-    let pos_1 = compiled.stages[1].tree.get_pot_position("Tone")
-        .or_else(|| compiled.stages[1].tree.get_pot_position("Tone__aw"));
+    let pos_1 = find_tone_pos(&compiled.stages);
 
     eprintln!("Tone @0.0: {:?}, @1.0: {:?}", pos_0, pos_1);
 
-    // Position should change
     if let (Some(p0), Some(p1)) = (pos_0, pos_1) {
         assert!(
             (p0 - p1).abs() > 0.01,
             "Tone pot position should change: @0={p0:.3}, @1={p1:.3}"
         );
     } else {
-        panic!("Tone pot not found in stage tree after set_control");
+        panic!("Tone pot not found in any WDF stage after set_control");
     }
 }

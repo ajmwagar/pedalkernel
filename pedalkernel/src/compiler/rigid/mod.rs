@@ -368,44 +368,18 @@ pub(super) fn build_rigid_from_group(
     match optimization {
         RigidOptimization::BlackFeedback => {
             // Black's feedback formula: closed-form gain from Rf/Ri.
-            // Requires FlowGroup classification (feedback_edges → Rf, pendant_edges → Ri).
+            // Uses BlackFeedbackStage — clean gain + NonIdealFx, no OpAmpRoot.
             if let Some(g) = group {
                 let inverting = is_inverting_topology(&stats, graph);
                 let config = opamp_root::extract_opamp_config(g, inverting, graph)?;
-                let mut opamp = opamp_root::make_opamp_root(&config, sample_rate);
 
-                // Build WDF tree from pendant edges (input coupling)
-                let tree = general::build_pendant_tree(&g.pendant_edges, graph, sample_rate);
+                // Collect NonIdealFx from the op-amp component
+                let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
 
-                // Find feedback pot and configure runtime gain recomputation.
-                // The pot leaf needs to be in the WDF tree (or a child) so
-                // set_pot can find it and notify_pot_changed recomputes gain.
-                let feedback_pot = find_feedback_pot(g, graph);
-                if let Some((pot_id, pot_leaf, fixed_r, parallel_r)) = feedback_pot {
-                    opamp.set_feedback_config(crate::elements::FeedbackConfig {
-                        pot_comp_id: pot_id.clone(),
-                        other_leg_r: config.ri,
-                        fixed_series_r: fixed_r,
-                        parallel_r,
-                        pot_is_feedback: true,
-                        is_inverting: inverting,
-                    });
-                }
-
-                let oversampler = crate::oversampling::Oversampler::new(
-                    crate::oversampling::OversamplingFactor::X1,
+                let stage = super::stage::BlackFeedbackStage::new(
+                    config.rf, config.ri, inverting, &fx, sample_rate,
                 );
-                let root = super::stage::RootKind::OpAmp(opamp);
-                let mut stage = super::stage::WdfStage::new(tree, root, oversampler);
-
-                // Attach feedback pot to the stage for runtime binding
-                if let Some((pot_id, pot_leaf, _, _)) = find_feedback_pot(g, graph) {
-                    stage.feedback_pot_id = Some(pot_id);
-                    // Add pot leaf to opamp_children so set_pot can find it
-                    stage.opamp_children.push(pot_leaf);
-                }
-
-                Ok(BuiltStage::Wdf(stage))
+                Ok(BuiltStage::BlackFeedback(stage))
             } else {
                 // No FlowGroup → can't classify Rf/Ri. Fall back to IIR.
                 // This path is rare (only from build_spqr_stage without signal flow).

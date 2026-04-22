@@ -10,6 +10,7 @@
 // 3. Passive components between split points are grouped together
 // 4. The HPF regression is fixed (standalone caps no longer act as high-pass)
 
+use super::compiled::Stage;
 use super::component::{Component, OutputImpedance};
 use super::spqr_build::compile_via_spqr;
 use crate::PedalProcessor;
@@ -93,10 +94,10 @@ fn rat_has_few_stages_not_many() {
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
-    let total_stages = compiled.stage_order.len();
+    let total_stages = compiled.stages.len();
     eprintln!("RAT v1a: {} total stages (wdf={}, iir={}, ss={}, mnl={})",
-        total_stages, compiled.stages.len(), compiled.iir_stages.len(),
-        compiled.state_space_stages.len(), compiled.multi_nl_stages.len());
+        total_stages, compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(),
+        compiled.stages.iter().filter(|s| matches!(s, Stage::StateSpace(_))).count(), compiled.stages.iter().filter(|s| matches!(s, Stage::MultiNl(_))).count());
 
     // With proper splitting at op-amp outputs, should be ~3-5 stages:
     // 1. Input network (C1, R1, R2) as passive WDF or IIR
@@ -119,7 +120,7 @@ fn screamer_has_few_stages() {
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
-    let total_stages = compiled.stage_order.len();
+    let total_stages = compiled.stages.len();
     eprintln!("Screamer: {} total stages", total_stages);
 
     assert!(
@@ -233,9 +234,9 @@ fn simple_rc_opamp_groups_input_with_stage() {
     .expect("parse");
 
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    let total = compiled.stage_order.len();
+    let total = compiled.stages.len();
     eprintln!("Simple RC+opamp: {total} stages (wdf={}, iir={}, ss={})",
-        compiled.stages.len(), compiled.iir_stages.len(), compiled.state_space_stages.len());
+        compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(), compiled.stages.iter().filter(|s| matches!(s, Stage::StateSpace(_))).count());
 
     // Should be ≤3 stages: input network, opamp, output
     // NOT 5 stages (C1, R1, opamp, Rf, R_out each separate)
