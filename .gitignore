@@ -21,3 +21,6 @@ tools/.venv/
 # Beads task tracking (ephemeral)
 .beads/
 .mcp.json
+
+# Local git worktrees (created by beads workflow; never meant to be committed)
+.worktrees/
