@@ -367,6 +367,127 @@ fn noninverting_pos_to_signal_with_bias_on_neg() {
         }"#), "pos→signal (with Ri on neg) should be non-inverting");
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Unity follower node union: pos and out should be the same node
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn unity_follower_pos_equals_out() {
+    // A unity follower (U2.out -> U2.neg) is electrically a wire from
+    // pos to out. The graph should union pos and out into the same node.
+    let (graph, _) = make_graph_all_edges(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                U2: opamp(tl072)
+                C_out: cap(10u)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> U2.pos
+                U2.out -> U2.neg
+                U2.out -> C_out.a
+                C_out.b -> out
+            }
+            controls {}
+        }"#);
+
+    // Find U2's nullor pins
+    let u2_pins = graph.nullor_pins.iter()
+        .find(|p| graph.components[p.comp_idx].id == "U2")
+        .expect("Should find U2 nullor pins");
+
+    eprintln!("U2: pos={} neg={} out={}", u2_pins.pos_node, u2_pins.neg_node, u2_pins.out_node);
+
+    // For a unity follower, pos_node and out_node should be the same
+    // (unioned during graph construction)
+    assert_eq!(u2_pins.pos_node, u2_pins.out_node,
+        "Unity follower: pos and out should be the same node (pos={}, out={})",
+        u2_pins.pos_node, u2_pins.out_node);
+}
+
+#[test]
+fn unity_follower_does_not_union_inverting_opamp() {
+    // An inverting op-amp (NOT a follower) should keep pos and out separate.
+    let (graph, _) = make_graph_all_edges(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#);
+
+    let u1_pins = graph.nullor_pins.iter()
+        .find(|p| graph.components[p.comp_idx].id == "U1")
+        .expect("Should find U1 nullor pins");
+
+    // Inverting amp: pos (GND) and out should NOT be unioned
+    assert_ne!(u1_pins.pos_node, u1_pins.out_node,
+        "Inverting amp: pos and out should be different nodes");
+}
+
+#[test]
+fn unity_follower_signal_passes_through() {
+    // With node union, signal should flow through the follower naturally.
+    // U1 (gain=10) → U2 (follower) → out. Output should be ~10x input.
+    use super::spqr_build::compile_via_spqr;
+    use crate::PedalProcessor;
+
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                U2: opamp(tl072)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> U2.pos
+                U2.out -> U2.neg
+                U2.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+
+    // Warmup
+    for s in 0..500 {
+        let input = 0.01 * (std::f64::consts::TAU * 440.0 * s as f64 / 48000.0).sin();
+        compiled.process(input);
+    }
+    let mut peak = 0.0f64;
+    for s in 500..720 {
+        let input = 0.01 * (std::f64::consts::TAU * 440.0 * s as f64 / 48000.0).sin();
+        peak = peak.max(compiled.process(input).abs());
+    }
+
+    eprintln!("Unity follower passthrough: peak={peak:.6}");
+    assert!(peak > 0.01, "Signal should pass through unity follower: peak={peak:.6}");
+}
+
 #[test]
 fn inverting_second_stage_with_bias() {
     // Two-stage pedal: U1 (inverting, pos→GND) → U2 (inverting, pos→Vref).
