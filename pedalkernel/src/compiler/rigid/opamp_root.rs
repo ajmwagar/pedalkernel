@@ -34,9 +34,6 @@ pub(in crate::compiler) fn extract_opamp_config(
     inverting: bool,
     graph: &CircuitGraph,
 ) -> Result<OpAmpConfig, String> {
-    #[cfg(test)]
-    eprintln!("  [extract_opamp_config] inverting={inverting} active={} feedback={} pendant={}",
-        group.active_edges.len(), group.feedback_edges.len(), group.pendant_edges.len());
     // Find the VCVS edge → get OpAmpModel
     let vcvs_edge_idx = group
         .active_edges
