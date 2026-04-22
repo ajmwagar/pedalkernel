@@ -1323,6 +1323,7 @@ impl WdfStage {
             };
             // ── Down-sweep ────────────────────────────────────────────
             tree.set_incident(a_root);
+
             // If an output probe is set, extract voltage at that leaf
             // after the down-sweep instead of the root junction.
             if let Some(ref probe_id) = output_probe {
