@@ -1,0 +1,31 @@
+{{/*
+  Doc freshness badge — shown at the bottom of pages that declare
+  `source_commit` (and optionally `watches`) in their front matter.
+
+  Surfaces how old the source-code snapshot a doc was written against
+  actually is, so readers can spot pages that may have drifted from
+  current code. The source_commit points at a full git SHA; the badge
+  renders the short form plus a link to the commit on GitHub.
+*/}}
+{{- with .Params.source_commit -}}
+{{- $short := substr . 0 7 -}}
+{{- $repo := $.Site.Params.github -}}
+<div class="doc-freshness">
+  <p class="doc-freshness-line">
+    Reviewed against commit
+    <a href="{{ $repo }}/commit/{{ . }}">
+      <code>{{ $short }}</code>
+    </a>{{ with $.Lastmod }} · last edited {{ dateFormat "Jan 2, 2006" . }}{{ end }}.
+  </p>
+  {{- with $.Params.watches }}
+  <details class="doc-freshness-watches">
+    <summary>Watched files</summary>
+    <ul>
+      {{- range . }}
+      <li><code>{{ . }}</code></li>
+      {{- end }}
+    </ul>
+  </details>
+  {{- end }}
+</div>
+{{- end -}}
