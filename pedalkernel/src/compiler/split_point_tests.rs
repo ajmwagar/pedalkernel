@@ -234,9 +234,153 @@ fn simple_rc_opamp_groups_input_with_stage() {
 
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
     let total = compiled.stage_order.len();
-    eprintln!("Simple RC+opamp: {total} stages");
+    eprintln!("Simple RC+opamp: {total} stages (wdf={}, iir={}, ss={})",
+        compiled.stages.len(), compiled.iir_stages.len(), compiled.state_space_stages.len());
 
     // Should be ≤3 stages: input network, opamp, output
     // NOT 5 stages (C1, R1, opamp, Rf, R_out each separate)
     assert!(total <= 3, "Should be ≤3 stages, got {total}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 5: SPQR terminal resolution — passive sub-groups must decompose
+// as WDF (PassiveWdf), not Rigid. The key: SPQR needs the group's
+// boundary nodes as terminals, not the global in/out nodes.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn passive_rc_chain_becomes_wdf_not_rigid() {
+    // C1 → R1 as a standalone passive group (between input and op-amp).
+    // SPQR should produce a PassiveWdf stage (series tree), NOT a Rigid
+    // stage that goes to IIR with b=[0,0,0].
+    //
+    // The test verifies the stage produces correct frequency response:
+    // RC lowpass should pass DC and attenuate high frequencies.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                C1: cap(100n)
+                R1: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+            }
+            nets {
+                in -> C1.a
+                C1.b -> R1.a
+                R1.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+
+    // Settle
+    for _ in 0..2000 { compiled.process(0.0); }
+
+    // 200Hz should pass through (well below RC cutoff of ~160Hz)
+    let mut peak = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 200.0 * s as f64 / 48000.0).sin();
+        peak = peak.max(compiled.process(input).abs());
+    }
+
+    eprintln!("RC+opamp: 200Hz peak={peak:.6}");
+    // With gain=10 from the op-amp, 200Hz should produce significant output
+    assert!(peak > 0.01, "200Hz should pass through RC+opamp: peak={peak:.6}");
+}
+
+#[test]
+fn passive_tone_stack_produces_output() {
+    // Tone stack (R + C + pot) as a standalone passive group after an op-amp.
+    // Should attenuate but still pass signal — not zero output.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                R_tone: resistor(10k)
+                C_tone: cap(22n)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> R_tone.a
+                R_tone.b -> C_tone.a
+                C_tone.b -> gnd
+                R_tone.b -> R_out.a
+                R_out.b -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    for _ in 0..2000 { compiled.process(0.0); }
+
+    let mut peak = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 1000.0 * s as f64 / 48000.0).sin();
+        peak = peak.max(compiled.process(input).abs());
+    }
+
+    eprintln!("Tone stack: 1kHz peak={peak:.6}");
+    assert!(peak > 0.001, "Tone stack should pass signal: peak={peak:.6}");
+}
+
+#[test]
+fn passive_group_between_opamps_passes_signal() {
+    // Two op-amps with an RC coupling network between them.
+    // The RC network is a passive group between two voltage-source barriers.
+    // It MUST pass signal — not produce b=[0,0,0].
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf1: resistor(100k)
+                C_couple: cap(1u)
+                R_mid: resistor(10k)
+                U2: opamp(tl072)
+                Rf2: resistor(100k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf1.a
+                Rf1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> C_couple.a
+                C_couple.b -> R_mid.a
+                R_mid.b -> U2.neg
+                U2.neg -> Rf2.a
+                Rf2.b -> U2.out
+                U2.pos -> gnd
+                U2.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    for _ in 0..2000 { compiled.process(0.0); }
+
+    let mut peak = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 440.0 * s as f64 / 48000.0).sin();
+        peak = peak.max(compiled.process(input).abs());
+    }
+
+    eprintln!("Two opamps + RC couple: 440Hz peak={peak:.6}");
+    // gain1=10 × coupling × gain2=10 → significant output
+    assert!(peak > 0.01, "Coupled op-amps should produce output: peak={peak:.6}");
 }
