@@ -23,6 +23,134 @@ pub(super) fn flush_denormal(x: f64) -> f64 {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// NonIdealFxState: shared GBW + slew + rail post-processing
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Pre-computed runtime state for component-declared non-idealities.
+///
+/// Constructed from [`NonIdealFx`] values at compile time, applied per-sample
+/// at runtime. All stage types that contain an op-amp use this — one
+/// implementation, called at the physically correct point in each stage:
+///
+/// - [`BlackFeedbackStage`]: after gain multiplication
+/// - [`IirStage`]: after biquad filtering
+/// - `OpAmpRoot` (NL path): inside WDF scatter, before diode NR solver
+///
+/// No heap allocations. All fields are scalars.
+#[derive(Debug, Clone)]
+pub(super) struct NonIdealFxState {
+    /// GBW lowpass coefficient: α = 2π·fc / (2π·fc + fs).
+    pub gbw_coeff: f64,
+    /// Single-pole IIR state for GBW rolloff.
+    pub gbw_state: f64,
+    /// Maximum voltage change per sample (slew_rate_V_per_us * 1e6 / sample_rate).
+    pub max_dv: f64,
+    /// Previous output sample for slew rate limiting.
+    pub prev_out: f64,
+    /// Rail saturation voltage (tanh soft clip ceiling).
+    pub v_max: f64,
+}
+
+impl Default for NonIdealFxState {
+    /// Default: passthrough (no GBW limiting, no slew, no rails).
+    fn default() -> Self {
+        Self {
+            gbw_coeff: 1.0,
+            gbw_state: 0.0,
+            max_dv: f64::MAX,
+            prev_out: 0.0,
+            v_max: f64::MAX,
+        }
+    }
+}
+
+impl NonIdealFxState {
+    /// Construct from SPICE model parameters.
+    ///
+    /// - `gbw`: gain-bandwidth product in Hz
+    /// - `slew_rate`: maximum dV/dt in V/µs
+    /// - `v_max`: rail saturation voltage in V
+    /// - `gain`: closed-loop gain (for fc = GBW/gain)
+    /// - `sample_rate`: in Hz
+    pub fn from_params(gbw: f64, slew_rate: f64, v_max: f64, gain: f64, sample_rate: f64) -> Self {
+        let gain_abs = gain.abs().max(1.0);
+        let fc = gbw / gain_abs;
+        let w = 2.0 * std::f64::consts::PI * fc;
+        Self {
+            gbw_coeff: w / (w + sample_rate),
+            gbw_state: 0.0,
+            max_dv: slew_rate * 1e6 / sample_rate,
+            prev_out: 0.0,
+            v_max,
+        }
+    }
+
+    /// Construct from Component trait's NonIdealFx declarations.
+    pub fn from_nonideal_fx(fx: &[super::component::NonIdealFx], gain: f64, sample_rate: f64) -> Self {
+        let mut state = Self::default();
+        for effect in fx {
+            match effect {
+                super::component::NonIdealFx::OpAmpBandwidth { gbw, slew_rate } => {
+                    let gain_abs = gain.abs().max(1.0);
+                    let fc = gbw / gain_abs;
+                    let w = 2.0 * std::f64::consts::PI * fc;
+                    state.gbw_coeff = w / (w + sample_rate);
+                    state.max_dv = slew_rate * 1e6 / sample_rate;
+                }
+                super::component::NonIdealFx::RailSaturation { v_max } => {
+                    state.v_max = *v_max;
+                }
+            }
+        }
+        state
+    }
+
+    /// Reset runtime state (for recomputation after gain change).
+    pub fn reset(&mut self) {
+        self.gbw_state = 0.0;
+        self.prev_out = 0.0;
+    }
+
+    /// Update GBW coefficient for a new gain value (pot changed Rf).
+    pub fn update_gain(&mut self, gbw: f64, new_gain: f64, sample_rate: f64) {
+        let gain_abs = new_gain.abs().max(1.0);
+        let fc = gbw / gain_abs;
+        let w = 2.0 * std::f64::consts::PI * fc;
+        self.gbw_coeff = w / (w + sample_rate);
+    }
+}
+
+/// Apply NonIdealFx post-processing to a sample.
+///
+/// GBW rolloff → slew rate limiting → rail saturation (tanh soft clip).
+/// Called at the correct point by each stage type.
+/// No heap allocations, no branching on stage type.
+#[inline]
+pub(super) fn apply_nonideal_fx(sample: f64, state: &mut NonIdealFxState) -> f64 {
+    // GBW rolloff: single-pole lowpass
+    let mut out = state.gbw_coeff * sample + (1.0 - state.gbw_coeff) * state.gbw_state;
+    state.gbw_state = out;
+
+    // Slew rate limiting
+    let dv = out - state.prev_out;
+    if dv > state.max_dv {
+        out = state.prev_out + state.max_dv;
+    } else if dv < -state.max_dv {
+        out = state.prev_out - state.max_dv;
+    }
+    state.prev_out = out;
+
+    // Rail saturation: tanh soft clip
+    if state.v_max < f64::MAX {
+        out = state.v_max * crate::fast_math::fast_tanh(out / state.v_max);
+    }
+
+    flush_denormal(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+
 /// Compute adaptive NR tolerance based on input signal change rate.
 ///
 /// During transients (large delta), loosen tolerance to reduce iterations.
@@ -3095,6 +3223,97 @@ impl IirStage {
             let w = 2.0 * std::f64::consts::PI * fc;
             self.gbw_coeff = w / (w + self.sample_rate);
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BlackFeedbackStage: clean Rf/Ri gain + NonIdealFx
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Linear VCVS feedback stage using Harold Black's negative feedback formula.
+///
+/// Gain = Rf/Ri (inverting) or 1 + Rf/Ri (non-inverting). GBW rolloff,
+/// slew limiting, and rail saturation come from the shared [`NonIdealFxState`]
+/// post-processing — same code path as [`IirStage`].
+///
+/// No OpAmpRoot, no WDF scattering for the gain computation. The pendant
+/// tree (input coupling network) is processed as a passive WDF stage to
+/// get the input signal, then gain is applied as scalar multiplication.
+///
+/// Pot binding: when Rf is a pot, `set_rf()` recomputes gain and updates
+/// the GBW coefficient for the new closed-loop bandwidth.
+pub(super) struct BlackFeedbackStage {
+    /// Feedback resistance (Ohms). Changes at runtime when pot sweeps.
+    rf: f64,
+    /// Input resistance (Ohms). Fixed at compile time.
+    ri: f64,
+    /// True = inverting (gain = -Rf/Ri), false = non-inverting (1 + Rf/Ri).
+    inverting: bool,
+    /// NonIdealFx post-processing state (GBW/slew/rails).
+    fx_state: NonIdealFxState,
+    /// Stored GBW for recomputation when gain changes.
+    stored_gbw: f64,
+    /// Sample rate for GBW recomputation.
+    sample_rate: f64,
+    /// BFS distance from input (for topological ordering).
+    pub(super) signal_flow_distance: usize,
+}
+
+impl BlackFeedbackStage {
+    /// Construct from circuit parameters.
+    pub(super) fn new(
+        rf: f64,
+        ri: f64,
+        inverting: bool,
+        fx: &[super::component::NonIdealFx],
+        sample_rate: f64,
+    ) -> Self {
+        let gain = if inverting { rf / ri.max(1.0) } else { 1.0 + rf / ri.max(1.0) };
+        let fx_state = NonIdealFxState::from_nonideal_fx(fx, gain, sample_rate);
+        let stored_gbw = fx.iter().find_map(|f| match f {
+            super::component::NonIdealFx::OpAmpBandwidth { gbw, .. } => Some(*gbw),
+            _ => None,
+        }).unwrap_or(0.0);
+
+        Self {
+            rf,
+            ri,
+            inverting,
+            fx_state,
+            stored_gbw,
+            sample_rate,
+            signal_flow_distance: 0,
+        }
+    }
+
+    /// Test helper: construct with default NonIdealFx.
+    #[cfg(test)]
+    pub(super) fn new_test(rf: f64, ri: f64, inverting: bool, sample_rate: f64) -> Self {
+        Self::new(rf, ri, inverting, &[], sample_rate)
+    }
+
+    /// Current closed-loop gain.
+    pub(super) fn gain(&self) -> f64 {
+        if self.inverting {
+            -(self.rf / self.ri.max(1.0))
+        } else {
+            1.0 + self.rf / self.ri.max(1.0)
+        }
+    }
+
+    /// Update Rf (pot sweep). Recomputes gain and GBW coefficient.
+    pub(super) fn set_rf(&mut self, rf: f64) {
+        self.rf = rf;
+        if self.stored_gbw > 0.0 {
+            self.fx_state.update_gain(self.stored_gbw, self.gain(), self.sample_rate);
+        }
+    }
+
+    /// Process one sample: gain × input → NonIdealFx → output.
+    #[inline]
+    pub(super) fn process(&mut self, input: f64) -> f64 {
+        let gained = input * self.gain();
+        flush_denormal(apply_nonideal_fx(gained, &mut self.fx_state))
     }
 }
 
