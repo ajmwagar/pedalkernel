@@ -4,6 +4,7 @@ description: "How circuit elements plug into the compiler, and how to add a new 
 section: "Internals"
 weight: 86
 source_commit: "2cafa26fe49ea6ad3d1ccf9f52401060c4ae1ea2"
+preview: true
 watches:
   - pedalkernel/src/compiler/component.rs
   - pedalkernel/src/compiler/components/
