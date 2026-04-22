@@ -1,0 +1,28 @@
+{{ define "main" }}
+<section class="hero">
+  <h1>{{ .Title }}</h1>
+  <p class="tagline">{{ .Description }}</p>
+</section>
+
+<section class="cards" aria-label="Crates">
+  <a class="card" href="{{ "api/pedalkernel/" | relURL }}">
+    <p class="card-kicker">Crate</p>
+    <p class="card-name">pedalkernel</p>
+    <p class="card-desc">Wave digital filter kernel: DSL parser, compiler, and real-time audio runtime.</p>
+  </a>
+
+  <a class="card" href="{{ "api/pedalkernel_layout/" | relURL }}">
+    <p class="card-kicker">Crate</p>
+    <p class="card-name">pedalkernel-layout</p>
+    <p class="card-desc">Automatic schematic layout engine for <code>.pedal</code> circuits (KiCad export).</p>
+  </a>
+
+  <a class="card" href="{{ "api/pedalkernel_validate/" | relURL }}">
+    <p class="card-kicker">Crate</p>
+    <p class="card-name">pedalkernel-validate</p>
+    <p class="card-desc">SPICE validation harness &mdash; signal generation, analytical references, regression reports.</p>
+  </a>
+</section>
+
+<p class="note">Rebuilt from source on every push to <code>main</code>.</p>
+{{ end }}

@@ -1,22 +1,24 @@
 # Netlify configuration for docs.pedalkernel.com
 #
-# Publishes Rust API documentation (cargo doc output) on every push to main.
-# Netlify's build image ships rustup preinstalled but with no default
-# toolchain set, so the build unconditionally selects stable.
-# netlify-plugin-cache persists ~/.rustup and target/ across builds, so
-# only the first cold build is slow.
+# Two-stage build:
+#   1. cargo doc for each workspace crate   (target/doc/<crate>)
+#   2. hugo renders the site + The Book      (public/)
+#   3. rustdoc output is merged in at /api/  (public/api/<crate>)
 #
-# Scope: pedalkernel, pedalkernel-layout, pedalkernel-validate.
-# Each crate is built with features chosen to avoid system dependencies
-# (no libjack, no pkg-config): pedalkernel runs without jack-rt, and
-# pedalkernel-validate's Cargo.toml pins default-features = false on its
-# path dep for the same reason.
+# The build is zero-system-deps (no libjack / pkg-config) thanks to feature
+# flags chosen in the cargo-doc commands and in pedalkernel-validate's
+# Cargo.toml (default-features = false on its pedalkernel path dep).
+#
+# Caching: netlify-plugin-cache persists ~/.rustup, cargo registries, and
+# target/ across builds. Hugo is fast enough that it does not need caching.
 
 [build]
   base = "."
-  publish = "target/doc"
+  publish = "public"
   command = """
     set -euo pipefail
+
+    # --- Rust toolchain -----------------------------------------------------
     if ! command -v rustup >/dev/null 2>&1; then
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain none --profile minimal
@@ -25,16 +27,28 @@
     rustup toolchain install stable --profile minimal --no-self-update
     rustup default stable
     rustc --version
+
+    # --- rustdoc ------------------------------------------------------------
     cargo doc -p pedalkernel --no-deps --no-default-features --features tui,cli,gummel-poon
     cargo doc -p pedalkernel-layout --no-deps
     cargo doc -p pedalkernel-validate --no-deps
-    cp netlify/index.html target/doc/index.html
+    # cargo doc writes an index.html redirect at target/doc; Hugo owns /api/
+    rm -f target/doc/index.html
+
+    # --- Hugo site ----------------------------------------------------------
+    hugo version
+    hugo --minify --gc
+
+    # --- Merge rustdoc under /api/ ------------------------------------------
+    mkdir -p public/api
+    cp -r target/doc/. public/api/
   """
 
 [build.environment]
   RUST_BACKTRACE = "1"
   CARGO_TERM_COLOR = "always"
   CARGO_INCREMENTAL = "0"
+  HUGO_VERSION = "0.128.0"
 
 [[plugins]]
   package = "netlify-plugin-cache"
