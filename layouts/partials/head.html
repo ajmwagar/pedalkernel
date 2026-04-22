@@ -3,4 +3,5 @@
 <title>{{ if .IsHome }}{{ .Site.Title }} &mdash; API &amp; docs{{ else }}{{ .Title }} &mdash; {{ .Site.Title }}{{ end }}</title>
 <meta name="description" content="{{ with .Description }}{{ . }}{{ else }}{{ .Site.Params.description }}{{ end }}" />
 <link rel="stylesheet" href="{{ "css/main.css" | relURL }}" />
+<link rel="stylesheet" href="{{ "pagefind/pagefind-ui.css" | relURL }}" />
 <link rel="icon" type="image/png" href="{{ "favicon.png" | relURL }}" />

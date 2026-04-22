@@ -91,6 +91,29 @@ main { flex: 1; }
 }
 .site-header ul a:hover { color: var(--accent); }
 
+/* Pagefind search widget in the site header. Theme variables are set so
+   the bundled pagefind-ui.css adapts to our accent + card palette.
+   If pagefind has not been built (local dev without the index), the div
+   stays empty and takes no space. */
+.site-search {
+  --pagefind-ui-scale: 0.85;
+  --pagefind-ui-primary: var(--accent);
+  --pagefind-ui-text: var(--fg);
+  --pagefind-ui-background: var(--bg);
+  --pagefind-ui-border: var(--border);
+  --pagefind-ui-tag: var(--card);
+  --pagefind-ui-border-radius: 6px;
+  --pagefind-ui-border-width: 1px;
+  --pagefind-ui-font: var(--sans);
+  min-width: 0;
+  flex: 0 1 16rem;
+  margin-left: auto;
+}
+.site-search :where(input, .pagefind-ui__search-input) {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
 .site-footer {
   border-top: 1px solid var(--border);
   padding: 1.5rem;
