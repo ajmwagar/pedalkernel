@@ -334,6 +334,47 @@ body.page main {
   margin-left: 0.4rem;
 }
 
+/* ---------- doc freshness badge ---------- */
+
+.doc-freshness {
+  margin: 2.5rem 0 0;
+  padding: 0.9rem 1.1rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.doc-freshness-line {
+  margin: 0;
+}
+.doc-freshness code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  color: var(--accent);
+  background: transparent;
+  padding: 0;
+  border: 0;
+}
+.doc-freshness a { color: var(--accent); }
+.doc-freshness-watches {
+  margin-top: 0.6rem;
+}
+.doc-freshness-watches summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.doc-freshness-watches ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.82rem;
+}
+.doc-freshness-watches li {
+  margin: 0.1rem 0;
+  list-style: square;
+}
+
 /* ---------- chapter pager ---------- */
 
 .pager {

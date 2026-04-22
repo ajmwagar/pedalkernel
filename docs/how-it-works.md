@@ -3,6 +3,11 @@ title: "How it works"
 description: "The WDF compilation pipeline — from .pedal file to per-sample processing."
 section: "Guide"
 weight: 10
+source_commit: "97277d4988a7e0b16efe26dd98ba7a341f0b76b9"
+watches:
+  - pedalkernel/src/compiler/
+  - pedalkernel/src/tree.rs
+  - pedalkernel/src/dsl.rs
 ---
 
 # How PedalKernel Works
