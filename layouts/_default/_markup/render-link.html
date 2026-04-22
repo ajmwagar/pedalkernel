@@ -1,0 +1,12 @@
+{{/*
+  Rewrite relative .md links to their rendered URLs so book pages can
+  cross-link using normal markdown references like [other](./other.md).
+  External URLs and anchors pass through untouched.
+*/}}
+{{- $url := .Destination -}}
+{{- $title := .Title -}}
+{{- $text := .Text -}}
+{{- with .Page.GetPage $url -}}
+  {{- $url = .RelPermalink -}}
+{{- end -}}
+<a href="{{ $url | safeURL }}"{{ with $title }} title="{{ . }}"{{ end }}>{{ $text | safeHTML }}</a>
