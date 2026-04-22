@@ -1,3 +1,10 @@
+---
+title: "Physical realism"
+description: "Oversampling, interstage loading, component tolerance, and thermal drift."
+section: "Guide"
+weight: 20
+---
+
 # Physical Realism in PedalKernel
 
 PedalKernel uses Wave Digital Filters (WDFs) to simulate guitar pedal circuits at the component level. While WDF theory handles the physics within a single circuit accurately, a naive implementation misses several real-world phenomena that occur between circuits, across time, and at the boundaries of digital audio. This document describes the physical realism features PedalKernel provides beyond the core WDF engine.

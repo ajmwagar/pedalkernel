@@ -1,3 +1,10 @@
+---
+title: "Modeling limits"
+description: "Where PedalKernel is pure WDF, where it approximates, and why."
+section: "Internals"
+weight: 90
+---
+
 # Modeling Limits
 
 PedalKernel is circuit-exact where it can be and pragmatic where it has to be. This page documents where the current implementation falls short of pure component modeling, so expectations are calibrated and contributors know where to push.
@@ -55,4 +62,4 @@ Real-world phenomena we would like to model but have not.
 - Speaker / cabinet physics (Thiele-Small, voice-coil compression, cone breakup, cabinet resonance).
 - Oversampling latency reporting for DAW compensation.
 
-See the [roadmap](../ROADMAP.md) for the items we plan to tackle next.
+See the [roadmap](./roadmap.md) for the items we plan to tackle next.

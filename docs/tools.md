@@ -1,3 +1,10 @@
+---
+title: "CLI & tools"
+description: "Python scripts for schematics and BOMs, plus cargo bench."
+section: "Reference"
+weight: 80
+---
+
 # Python tools & benchmarks
 
 A handful of optional scripts live under `tools/` at the repo root. They are standalone Python — nothing in the Rust workspace depends on them.

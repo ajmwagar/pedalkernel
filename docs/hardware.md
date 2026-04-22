@@ -1,3 +1,10 @@
+---
+title: "Hardware export"
+description: "KiCad netlists, Mouser BOMs, and .pedalhw voltage-safety checks."
+section: "Guide"
+weight: 30
+---
+
 # Hardware Export
 
 A `.pedal` file is not just a simulation target. The same description drives KiCad netlists, bills of material, and voltage-safety checks, so you can go from compiled tone to a physical build without re-entering the circuit anywhere.

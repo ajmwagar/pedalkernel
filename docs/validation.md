@@ -1,3 +1,10 @@
+---
+title: "Validation"
+description: "How we verify WDF output against ngspice ground truth."
+section: "Internals"
+weight: 100
+---
+
 # PedalKernel SPICE Validation Harness
 
 Dockerized validation framework for the PedalKernel WDF compiler. Runs deterministic ngspice simulations as ground truth and compares against WDF compiler output across multiple test layers.

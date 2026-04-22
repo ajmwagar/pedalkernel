@@ -1,3 +1,10 @@
+---
+title: "How it works"
+description: "The WDF compilation pipeline — from .pedal file to per-sample processing."
+section: "Guide"
+weight: 10
+---
+
 # How PedalKernel Works
 
 PedalKernel compiles your circuit description into a real-time Wave Digital Filter (WDF) engine. This document explains the compilation pipeline and how circuits become audio.

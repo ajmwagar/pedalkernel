@@ -1,5 +1,0 @@
-{{- $path := .Get 0 -}}
-{{- $page := .Page -}}
-{{- with readFile $path -}}
-{{- $page.RenderString (dict "display" "block") . -}}
-{{- end -}}

@@ -1,6 +1,13 @@
+---
+title: "Roadmap"
+description: "Where the engine is going next."
+section: "Project"
+weight: 110
+---
+
 # Roadmap
 
-PedalKernel is under active development. This page tracks the significant work items we want to take on next. It is intentionally short — the [modeling limits](./docs/modeling-limits.md) page is a fuller accounting of known gaps.
+PedalKernel is under active development. This page tracks the significant work items we want to take on next. It is intentionally short — the [modeling limits](./modeling-limits.md) page is a fuller accounting of known gaps.
 
 ## Modeling frontier
 

@@ -1,3 +1,10 @@
+---
+title: "DSL Reference"
+description: "Syntax and semantics of .pedal and .board files."
+section: "Reference"
+weight: 40
+---
+
 # PedalKernel DSL Reference
 
 PedalKernel uses two file formats: `.pedal` files define individual guitar pedal circuits, and `.board` files chain multiple pedals into a pedalboard.

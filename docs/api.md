@@ -1,3 +1,10 @@
+---
+title: "Rust API"
+description: "A primer for the pedalkernel crate — parse, compile, process."
+section: "Reference"
+weight: 60
+---
+
 # Rust API
 
 The full API reference — every public type, function, and module — is generated from the source and lives at **[/api/pedalkernel/](/api/pedalkernel/)**. This page is a primer that points at the handful of entry points most consumers need.
