@@ -74,18 +74,14 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     let oversampler = Oversampler::new(OversamplingFactor::X2);
     let mut stage = WdfStage::new(tree, root, oversampler);
 
-    // Find feedback pot and configure runtime gain recomputation
+    // Find feedback pot for runtime gain recomputation.
+    // Instead of FeedbackConfig, compute gain from port resistances:
+    //   Rf = pot_r + series_r,  gain = Rf / Ri
     let feedback_pot = super::find_feedback_pot(group, graph);
-    if let Some((pot_id, pot_leaf, fixed_r, parallel_r)) = feedback_pot {
-        opamp.set_feedback_config(crate::elements::FeedbackConfig {
-            pot_comp_id: pot_id.clone(),
-            other_leg_r: config.ri,
-            fixed_series_r: fixed_r,
-            parallel_r,
-            pot_is_feedback: true,
-            is_inverting: inverting,
-        });
+    if let Some((pot_id, pot_leaf, fixed_r, _parallel_r)) = feedback_pot {
         stage.feedback_pot_id = Some(pot_id);
+        stage.feedback_series_r = fixed_r;
+        stage.feedback_ri = config.ri;
         stage.opamp_children.push(pot_leaf);
     }
 
