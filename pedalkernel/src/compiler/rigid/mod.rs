@@ -113,11 +113,14 @@ impl StageStats {
 /// Runtime strategy for a Rigid stage, selected at compile time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RigidOptimization {
-    /// All linear (with or without VCVS) → biquad from MNA. O(1)/sample.
-    /// Covers passive bridges AND active linear circuits (808 bridged-T).
-    /// When VCVS is present, NonIdealFx (GBW/slew/rails) are applied as
-    /// post-processing on the IirStage — no OpAmpRoot special case.
+    /// All linear, no VCVS → biquad from MNA. O(1)/sample.
+    /// Covers passive bridges, 808 bridged-T resonator, pot dividers.
     Iir,
+    /// Single VCVS, linear feedback → Black's formula (H = A/(1+Aβ)).
+    /// Closed-form gain from Rf/Ri, GBW/slew/rails from NonIdealFx.
+    /// Named after Harold Black's 1927 negative feedback amplifier theorem.
+    /// O(1)/sample with WDF two-port scattering (Zi input, Zf feedback).
+    BlackFeedback,
     /// Linear but IIR-incompatible (>2nd order) → state-space. O(N)/sample.
     StateSpace,
     /// Has NL elements → MNA scattering + Component::solver_hint(). O(N²)/sample.
@@ -128,10 +131,9 @@ pub(super) enum RigidOptimization {
 ///
 /// Decision rules (applied in cost order):
 /// 1. NL present → General (needs NR/WO solver, Component decides which)
-/// 2. All linear (no NL) → IIR from MNA (passive bridges, VCVS feedback, resonators)
-///    - VCVS is a linear constraint — MNA handles it natively
-///    - NonIdealFx (GBW/slew/rails) applied as IirStage post-processing
-/// 3. Fallback → General
+/// 2. Single VCVS, no NL → BlackFeedback (closed-form Rf/Ri + NonIdealFx)
+/// 3. No VCVS, linear → IIR from MNA (passive bridges, resonators)
+/// 4. Fallback → General
 pub(super) fn classify_rigid(
     stats: &StageStats,
     graph: &CircuitGraph,
@@ -142,16 +144,34 @@ pub(super) fn classify_rigid(
         return RigidOptimization::General;
     }
 
-    // Rule 2: all linear (with or without VCVS, with or without reactive) → IIR
-    // VCVS is a linear constraint that MNA handles natively.
+    // Rule 2: single VCVS, no NL → check feedback path topology.
+    // If reactive elements are in ground shunts with resistive feedback (808 bridged-T),
+    // IIR handles the resonance correctly via extract_feedback_r.
+    // Otherwise, Black's formula for closed-form Rf/Ri gain.
+    if stats.is_single_vcvs_linear() {
+        if let Some(g) = _group {
+            let is_reactive = |eidx: usize| -> bool {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                comp.kind.capacitance().is_some() || comp.kind.inductance().is_some()
+            };
+            let has_reactive_ground = g.ground_shunt_edges.iter().any(|&eidx| is_reactive(eidx));
+            let feedback_purely_resistive = g.feedback_edges.iter().all(|&eidx| !is_reactive(eidx));
+            if has_reactive_ground && feedback_purely_resistive {
+                // 808-style: caps to ground create resonance, feedback is resistive.
+                // IIR with extract_feedback_r handles this correctly.
+                return RigidOptimization::Iir;
+            }
+        }
+        return RigidOptimization::BlackFeedback;
+    }
+
+    // Rule 3: all linear, no VCVS → IIR biquad from MNA
     // Reactive elements give biquad dynamics; purely resistive gives DC gain.
-    // Op-amp non-idealities (GBW, slew, rails) come from Component::nonideal_fx()
-    // and are applied as post-processing on the IirStage.
     if stats.nl_count == 0 {
         return RigidOptimization::Iir;
     }
 
-    // Rule 3: fallback
+    // Rule 4: fallback
     RigidOptimization::General
 }
 
@@ -283,12 +303,37 @@ pub(super) fn build_rigid_from_group(
         optimization, stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count, edge_indices.len());
 
     match optimization {
+        RigidOptimization::BlackFeedback => {
+            // Black's feedback formula: closed-form gain from Rf/Ri.
+            // Requires FlowGroup classification (feedback_edges → Rf, pendant_edges → Ri).
+            if let Some(g) = group {
+                let inverting = is_inverting_topology(&stats, graph);
+                let config = opamp_root::extract_opamp_config(g, inverting, graph)?;
+                let opamp = opamp_root::make_opamp_root(&config, sample_rate);
+
+                // Build WDF tree from pendant edges (input coupling)
+                let tree = general::build_pendant_tree(&g.pendant_edges, graph, sample_rate);
+
+                let oversampler = crate::oversampling::Oversampler::new(
+                    crate::oversampling::OversamplingFactor::X1,
+                );
+                let root = super::stage::RootKind::OpAmp(opamp);
+                Ok(BuiltStage::Wdf(super::stage::WdfStage::new(tree, root, oversampler)))
+            } else {
+                // No FlowGroup → can't classify Rf/Ri. Fall back to IIR.
+                // This path is rare (only from build_spqr_stage without signal flow).
+                let pendant_trees = Vec::new();
+                match iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate) {
+                    Ok(iir_data) => Ok(BuiltStage::Iir(IirStage::new(iir_data))),
+                    Err(e) => Err(format!("BlackFeedback without FlowGroup: IIR fallback failed: {e}")),
+                }
+            }
+        }
         RigidOptimization::Iir => {
             let pendant_trees = Vec::new();
             // Try IIR (≤2 states). If too many states, use StateSpace.
             match iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate) {
-                Ok(iir_data) if iir_data.b_coeffs.iter().any(|&b| b.abs() > 1e-30) => {
-                    // Valid biquad — b coefficients are non-zero
+                Ok(iir_data) => {
                     let mut stage = IirStage::new(iir_data);
                     // Collect NonIdealFx from any op-amp components in this stage.
                     let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
@@ -300,18 +345,6 @@ pub(super) fn build_rigid_from_group(
                         stage.pot_bindings = extract_pot_bindings(g, &edge_indices, graph);
                     }
                     Ok(BuiltStage::Iir(stage))
-                }
-                Ok(_zero_b) => {
-                    // IIR produced zero numerator — MNA couldn't extract transfer function.
-                    // Common for VCVS + reactive feedback (e.g., RAT op-amp stage).
-                    // Fall back to StateSpace which handles arbitrary linear systems.
-                    #[cfg(test)]
-                    eprintln!("  IIR b=[0,0,0] → falling back to StateSpace");
-                    let supply_voltage = 9.0;
-                    state_space::build_state_space_stage(
-                        &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
-                    )
-                    .map(BuiltStage::StateSpace)
                 }
                 Err(_) => {
                     // IIR failed (>2 states or other issue) → StateSpace

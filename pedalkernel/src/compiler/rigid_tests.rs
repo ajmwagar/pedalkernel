@@ -50,7 +50,7 @@ fn stats_passive_bridge_is_iir() {
 }
 
 #[test]
-fn stats_inverting_opamp_is_iir() {
+fn stats_inverting_opamp_is_black_feedback() {
     let (graph, edges) = make_graph_all_edges(r#"
         pedal "test" { supply 9V
             components {
@@ -74,12 +74,12 @@ fn stats_inverting_opamp_is_iir() {
     assert_eq!(stats.linear_count, 2);
     assert_eq!(
         classify_rigid(&stats, &graph, None),
-        RigidOptimization::Iir
+        RigidOptimization::BlackFeedback
     );
 }
 
 #[test]
-fn stats_noninverting_opamp_is_iir() {
+fn stats_noninverting_opamp_is_black_feedback() {
     let (graph, edges) = make_graph_all_edges(r#"
         pedal "test" { supply 9V
             components {
@@ -100,12 +100,12 @@ fn stats_noninverting_opamp_is_iir() {
     let stats = StageStats::from_edges(&edges, &graph);
     assert_eq!(
         classify_rigid(&stats, &graph, None),
-        RigidOptimization::Iir
+        RigidOptimization::BlackFeedback
     );
 }
 
 #[test]
-fn stats_opamp_with_feedback_cap_is_iir() {
+fn stats_opamp_with_feedback_cap_is_black_feedback() {
     let (graph, edges) = make_graph_all_edges(r#"
         pedal "test" { supply 9V
             components {
@@ -129,8 +129,8 @@ fn stats_opamp_with_feedback_cap_is_iir() {
     let stats = StageStats::from_edges(&edges, &graph);
     assert_eq!(stats.vcvs_count, 1);
     assert_eq!(stats.reactive_count, 1);
-    // Single VCVS + reactive → IIR (GBW/slew/rails via NonIdealFx post-processing)
-    assert_eq!(classify_rigid(&stats, &graph, None), RigidOptimization::Iir);
+    // Single VCVS + reactive → BlackFeedback (closed-form Rf/Ri + NonIdealFx)
+    assert_eq!(classify_rigid(&stats, &graph, None), RigidOptimization::BlackFeedback);
 }
 
 #[test]

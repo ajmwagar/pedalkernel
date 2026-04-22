@@ -79,7 +79,7 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
 }
 
 /// Build a WDF tree from pendant edges, or a bare voltage source if none.
-fn build_pendant_tree(pendant_edges: &[usize], graph: &CircuitGraph, sample_rate: f64) -> DynNode {
+pub(super) fn build_pendant_tree(pendant_edges: &[usize], graph: &CircuitGraph, sample_rate: f64) -> DynNode {
     if !pendant_edges.is_empty() {
         if let Some(leaf) = pendant_edges.iter().find_map(|&eidx| {
             let comp = &graph.components[graph.edges[eidx].comp_idx];
