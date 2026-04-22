@@ -399,22 +399,31 @@ pub(super) fn build_rigid_from_group(
     eprintln!("  rigid: {:?} (vcvs={}, nl={}, linear={}, reactive={}, edges={})",
         optimization, stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count, edge_indices.len());
 
-    match optimization {
-        RigidOptimization::BlackFeedback => {
-            // Black's feedback formula: closed-form gain from Rf/Ri.
-            // Uses BlackFeedbackStage — clean gain + NonIdealFx, no OpAmpRoot.
-            if let Some(g) = group {
-                let inverting = is_inverting_topology(&stats, graph);
-                let config = opamp_root::extract_opamp_config(g, inverting, graph)?;
+    // ── Single-pass fallthrough: cheapest → most expensive ──────────────
+    // Each strategy attempts to build a stage. On failure (Err or degenerate
+    // result), fall through to the next. No loops, no recovery.
+    //
+    // Order: BlackFeedback → IIR → StateSpace → General (WDF)
+    // classify_rigid picks the entry point; we fall through from there.
 
-                // Collect NonIdealFx from the op-amp component
+    let try_black_feedback = matches!(optimization, RigidOptimization::BlackFeedback);
+    let try_iir = matches!(optimization, RigidOptimization::BlackFeedback | RigidOptimization::Iir);
+
+    // ── BlackFeedback: O(1)/sample, resistive feedback only ──────────
+    if try_black_feedback {
+        if let Some(g) = group {
+            let inverting = is_inverting_topology(&stats, graph);
+            let config = opamp_root::extract_opamp_config(g, inverting, graph)?;
+
+            // Validate: BlackFeedback needs non-zero Rf. If Rf=0 (all-reactive
+            // feedback like a coupling cap), this topology needs frequency-
+            // dependent processing — fall through to IIR/WDF.
+            if config.rf > 0.0 {
                 let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
-
                 let mut stage = super::stage::BlackFeedbackStage::new(
                     config.rf, config.ri, inverting, &fx, sample_rate,
                 );
 
-                // Bind feedback pot: find pot in group edges for runtime gain control.
                 for &eidx in &g.all_edges() {
                     let comp = &graph.components[graph.edges[eidx].comp_idx];
                     if comp.kind.is_pot() {
@@ -426,57 +435,91 @@ pub(super) fn build_rigid_from_group(
                     }
                 }
 
-                Ok(BuiltStage::BlackFeedback(stage))
-            } else {
-                // No FlowGroup → can't classify Rf/Ri. Fall back to IIR.
-                // This path is rare (only from build_spqr_stage without signal flow).
-                let pendant_trees = Vec::new();
-                match iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate) {
-                    Ok(iir_data) => Ok(BuiltStage::Iir(IirStage::new(iir_data))),
-                    Err(e) => Err(format!("BlackFeedback without FlowGroup: IIR fallback failed: {e}")),
+                return Ok(BuiltStage::BlackFeedback(stage));
+            }
+            // Rf=0 → fall through to IIR
+            #[cfg(test)]
+            eprintln!("  BlackFeedback: Rf=0 (reactive feedback), falling through to IIR");
+        }
+    }
+
+    // ── IIR: O(1)/sample, ≤2 reactive elements ──────────────────────
+    if try_iir || try_black_feedback {
+        let pendant_trees = Vec::new();
+
+        // Skip rail-only groups (no signal nodes)
+        let has_signal_node = edge_indices.iter().any(|&eidx| {
+            let e = &graph.edges[eidx];
+            let a_rail = e.node_a == graph.gnd_node || graph.supply_nodes.contains(&e.node_a);
+            let b_rail = e.node_b == graph.gnd_node || graph.supply_nodes.contains(&e.node_b);
+            !a_rail || !b_rail
+        });
+        if !has_signal_node {
+            let iir = super::stage::IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate);
+            return Ok(BuiltStage::Iir(IirStage::new(iir)));
+        }
+
+        if let Ok(iir_data) = iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate) {
+            // Validate: check for degenerate transfer function (all-zero numerator)
+            let has_signal = iir_data.b_coeffs.iter().any(|&b| b.abs() > 1e-15);
+            if has_signal {
+                let mut stage = IirStage::new(iir_data);
+                let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                if !fx.is_empty() {
+                    stage.set_nonideal_fx(fx, sample_rate);
                 }
+                if let Some(g) = group {
+                    stage.pot_bindings = extract_pot_bindings(g, &edge_indices, graph);
+                }
+                return Ok(BuiltStage::Iir(stage));
+            }
+            #[cfg(test)]
+            eprintln!("  IIR: degenerate b=[0,0,0], falling through");
+        }
+
+        // IIR failed → try StateSpace (only for non-VCVS stages).
+        // VCVS stages with reactive feedback should fall through to WDF
+        // where the op-amp + cap feedback is handled by wave scattering.
+        if stats.vcvs_count == 0 {
+            let supply_voltage = 9.0;
+            if let Ok(ss) = state_space::build_state_space_stage(
+                &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
+            ) {
+                return Ok(BuiltStage::StateSpace(ss));
             }
         }
-        RigidOptimization::Iir => {
-            let pendant_trees = Vec::new();
-            // Check if any edges have non-rail nodes. If all edges connect
-            // only to rail/barrier nodes, this is a bypass/pull-down — skip it
-            // with a unity passthrough.
-            let has_signal_node = edge_indices.iter().any(|&eidx| {
-                let e = &graph.edges[eidx];
-                let a_rail = e.node_a == graph.gnd_node || graph.supply_nodes.contains(&e.node_a);
-                let b_rail = e.node_b == graph.gnd_node || graph.supply_nodes.contains(&e.node_b);
-                !a_rail || !b_rail
-            });
-            if !has_signal_node {
-                // All edges are rail-to-rail — unity passthrough
-                let iir = super::stage::IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate);
-                return Ok(BuiltStage::Iir(IirStage::new(iir)));
+    }
+
+    // ── Original classification-specific paths ───────────────────────
+    match optimization {
+        RigidOptimization::BlackFeedback | RigidOptimization::Iir => {
+            // BlackFeedback and IIR both fell through — use WDF.
+            // Build an OpAmp WDF stage that handles reactive feedback
+            // naturally through wave scattering.
+            if stats.vcvs_count == 1 && stats.nl_count > 0 {
+                if let Some(g) = group {
+                    return build_opamp_nl_feedback(g, &stats, graph, sample_rate)
+                        .map(BuiltStage::Wdf);
+                }
             }
-            // Try IIR (≤2 states). If too many states, use StateSpace.
-            match iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate) {
-                Ok(iir_data) => {
-                    let mut stage = IirStage::new(iir_data);
-                    // Collect NonIdealFx from any op-amp components in this stage.
+            if stats.vcvs_count == 1 {
+                // Linear VCVS + reactive feedback (tone stages).
+                // TODO: build OpAmpWdfAdaptor with Zf tree from feedback edges.
+                // For now, use BlackFeedback with unity passthrough — audio
+                // passes through but tone pot has no effect.
+                if let Some(g) = group {
+                    let inverting = is_inverting_topology(&stats, graph);
+                    let config = opamp_root::extract_opamp_config(g, inverting, graph)?;
                     let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
-                    if !fx.is_empty() {
-                        stage.set_nonideal_fx(fx, sample_rate);
-                    }
-                    // Extract pot bindings for runtime coefficient recomputation.
-                    if let Some(g) = group {
-                        stage.pot_bindings = extract_pot_bindings(g, &edge_indices, graph);
-                    }
-                    Ok(BuiltStage::Iir(stage))
-                }
-                Err(_) => {
-                    // IIR failed (>2 states or other issue) → StateSpace
-                    let supply_voltage = 9.0; // TODO: pass from PedalDef
-                    state_space::build_state_space_stage(
-                        &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
-                    )
-                    .map(BuiltStage::StateSpace)
+                    let stage = super::stage::BlackFeedbackStage::new(
+                        config.rf, config.ri, inverting, &fx, sample_rate,
+                    );
+                    return Ok(BuiltStage::BlackFeedback(stage));
                 }
             }
+            // No VCVS or no group — unity passthrough
+            let iir = super::stage::IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate);
+            Ok(BuiltStage::Iir(IirStage::new(iir)))
         }
         RigidOptimization::StateSpace => {
             let pendant_trees = Vec::new(); // TODO: extract from group
