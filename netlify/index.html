@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pedalkernel &mdash; API docs</title>
+  <meta name="description" content="Rust API documentation for pedalkernel, the WDF kernel for guitar FX pedal simulation." />
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f1012;
+      --fg: #e8e6e3;
+      --muted: #9aa0a6;
+      --accent: #ffb000;
+      --card: #17181c;
+      --border: #2a2b30;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #fafafa;
+        --fg: #1a1a1a;
+        --muted: #5a5f66;
+        --accent: #b96800;
+        --card: #ffffff;
+        --border: #e4e4e7;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.55;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    main {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 4rem 1.5rem 2rem;
+      flex: 1;
+    }
+    header { margin-bottom: 2.5rem; }
+    h1 {
+      font-family: var(--mono);
+      font-size: 2rem;
+      margin: 0 0 0.4rem;
+      letter-spacing: -0.01em;
+    }
+    .tagline {
+      color: var(--muted);
+      margin: 0;
+      font-size: 1.05rem;
+    }
+    .tagline code {
+      font-family: var(--mono);
+      color: var(--accent);
+      font-size: 0.95em;
+    }
+    .crates {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: 1fr;
+      margin: 2rem 0;
+    }
+    .crate {
+      display: block;
+      padding: 1.25rem 1.4rem;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      text-decoration: none;
+      color: inherit;
+      transition: border-color 0.15s ease, transform 0.15s ease;
+    }
+    .crate:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+    .crate-name {
+      font-family: var(--mono);
+      font-size: 1.1rem;
+      color: var(--accent);
+      margin: 0 0 0.25rem;
+    }
+    .crate-desc {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin: 0;
+    }
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 1.5rem;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    footer a { color: var(--muted); }
+    footer a:hover { color: var(--accent); }
+    .note {
+      margin-top: 2rem;
+      padding: 1rem 1.2rem;
+      background: var(--card);
+      border-left: 3px solid var(--accent);
+      border-radius: 4px;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>pedalkernel</h1>
+      <p class="tagline">API reference for the <code>.pedal</code> &rarr; WDF &rarr; audio kernel.</p>
+    </header>
+
+    <section class="crates" aria-label="Crates">
+      <a class="crate" href="pedalkernel/index.html">
+        <p class="crate-name">pedalkernel</p>
+        <p class="crate-desc">Wave digital filter kernel: DSL parser, compiler, and real-time audio runtime.</p>
+      </a>
+      <a class="crate" href="pedalkernel_layout/index.html">
+        <p class="crate-name">pedalkernel-layout</p>
+        <p class="crate-desc">Automatic schematic layout engine for <code>.pedal</code> circuits (KiCad export).</p>
+      </a>
+    </section>
+
+    <p class="note">
+      Docs are rebuilt on every push to <code>main</code>. For released versions, refer to
+      <a href="https://docs.rs/pedalkernel" style="color: var(--accent);">docs.rs/pedalkernel</a>.
+    </p>
+  </main>
+  <footer>
+    <a href="https://github.com/ajmwagar/pedalkernel">github.com/ajmwagar/pedalkernel</a>
+    &middot;
+    <a href="https://pedalkernel.com">pedalkernel.com</a>
+  </footer>
+</body>
+</html>
