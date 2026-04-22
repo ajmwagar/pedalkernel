@@ -1,0 +1,34 @@
+{{ define "main" }}
+<section class="hero">
+  <h1>pedalkernel</h1>
+  <p class="tagline">Rust WDF kernel for guitar FX pedal simulation. <code>.pedal</code> &rarr; WDF &rarr; audio.</p>
+</section>
+
+<section class="cards" aria-label="Sections">
+  <a class="card card-book" href="{{ "book/" | relURL }}">
+    <p class="card-kicker">Written docs</p>
+    <p class="card-name">The Book</p>
+    <p class="card-desc">DSL reference, architecture notes, contributing guide &mdash; everything that is not API reference.</p>
+  </a>
+
+  <a class="card" href="{{ "api/pedalkernel/" | relURL }}">
+    <p class="card-kicker">Crate</p>
+    <p class="card-name">pedalkernel</p>
+    <p class="card-desc">Wave digital filter kernel: DSL parser, compiler, and real-time audio runtime.</p>
+  </a>
+
+  <a class="card" href="{{ "api/pedalkernel_layout/" | relURL }}">
+    <p class="card-kicker">Crate</p>
+    <p class="card-name">pedalkernel-layout</p>
+    <p class="card-desc">Automatic schematic layout engine for <code>.pedal</code> circuits (KiCad export).</p>
+  </a>
+
+  <a class="card" href="{{ "api/pedalkernel_validate/" | relURL }}">
+    <p class="card-kicker">Crate</p>
+    <p class="card-name">pedalkernel-validate</p>
+    <p class="card-desc">SPICE validation harness &mdash; signal generation, analytical references, regression reports.</p>
+  </a>
+</section>
+
+<p class="note">API docs rebuild on every push to <code>main</code>.</p>
+{{ end }}

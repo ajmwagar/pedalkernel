@@ -27,3 +27,8 @@ tools/.venv/
 
 # Netlify build plugin (only needed for docs.pedalkernel.com build)
 node_modules/
+
+# Hugo build output + lock (docs.pedalkernel.com)
+/public/
+.hugo_build.lock
+resources/_gen/

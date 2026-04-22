@@ -1,0 +1,9 @@
+{{ define "main" }}
+<article class="prose">
+  <header class="prose-header">
+    <h1>{{ .Title }}</h1>
+    {{ with .Description }}<p class="subtitle">{{ . }}</p>{{ end }}
+  </header>
+  {{ .Content }}
+</article>
+{{ end }}
