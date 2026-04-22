@@ -321,6 +321,152 @@ fn screamer_clipping_stage_has_gain() {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 4: Pendant classification — input coupling must be found
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn inverting_opamp_pendant_has_input_resistor() {
+    // Inverting: R_in → U1.neg [← Rf ← U1.out]. R_in touches U1.neg
+    // (the input terminal), so it should be classified as pendant.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    let opamp_group = groups.iter().find(|g| g.has_feedback()).expect("should have feedback group");
+
+    let pendant_names: Vec<String> = opamp_group.pendant_edges.iter().map(|&eidx| {
+        graph.components[graph.edges[eidx].comp_idx].id.clone()
+    }).collect();
+
+    eprintln!("Inverting pendant: {:?}", pendant_names);
+    assert!(
+        pendant_names.contains(&"R_in".to_string()),
+        "R_in should be pendant (touches neg input): got {:?}",
+        pendant_names
+    );
+}
+
+#[test]
+fn noninverting_opamp_pendant_has_input_coupling() {
+    // Non-inverting (screamer pattern): signal → C_c1 → U1.pos.
+    // C_c1 touches U1.pos (the signal input for non-inverting).
+    // Even though signal_terminals says input="neg", the pendant
+    // detection must also check the control pin (pos).
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                C_c1: cap(47n)
+                R_b1: resistor(510k)
+                U1: opamp(tl072)
+                R_hp: resistor(4.7k)
+                Rf: resistor(51k)
+                D1: diode(silicon)
+            }
+            nets {
+                in -> C_c1.a
+                C_c1.b -> U1.pos
+                C_c1.b -> R_b1.a
+                R_b1.b -> gnd
+                U1.neg -> R_hp.a
+                R_hp.b -> gnd
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    let opamp_group = groups.iter().find(|g| g.has_feedback()).expect("should have feedback group");
+
+    let pendant_names: Vec<String> = opamp_group.pendant_edges.iter().map(|&eidx| {
+        graph.components[graph.edges[eidx].comp_idx].id.clone()
+    }).collect();
+
+    eprintln!("Non-inverting pendant: {:?}", pendant_names);
+    // C_c1 and/or R_b1 should be pendant — they touch U1.pos
+    assert!(
+        !pendant_names.is_empty(),
+        "Non-inverting opamp should have pendant edges at pos input, got none"
+    );
+}
+
+#[test]
+fn noninverting_opamp_with_input_coupling_produces_audio() {
+    // The full non-inverting pattern must produce audio.
+    // Signal: in → C_c1 → U1.pos → [gain stage] → out
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                C_c1: cap(47n)
+                R_b1: resistor(510k)
+                U1: opamp(tl072)
+                R_hp: resistor(4.7k)
+                Rf: resistor(51k)
+            }
+            nets {
+                in -> C_c1.a
+                C_c1.b -> U1.pos
+                C_c1.b -> R_b1.a
+                R_b1.b -> gnd
+                U1.neg -> R_hp.a
+                R_hp.b -> gnd
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    for _ in 0..2000 { compiled.process(0.0); }
+
+    let mut peak = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 440.0 * s as f64 / 48000.0).sin();
+        peak = peak.max(compiled.process(input).abs());
+    }
+
+    eprintln!("Non-inverting opamp: peak={peak:.6}");
+    // gain = 1 + Rf/R_hp = 1 + 51k/4.7k ≈ 11.85
+    assert!(peak > 0.01, "Non-inverting opamp should amplify: peak={peak:.6}");
+}
+
 #[test]
 fn pot_with_output_passives_produces_audio() {
     // Volume pot + output coupling cap + load resistors.

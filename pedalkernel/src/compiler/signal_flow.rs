@@ -487,17 +487,25 @@ pub(in crate::compiler) fn find_flow_groups(
             }
         }
 
-        // Input terminal nodes for pendant detection
+        // Input terminal nodes for pendant detection.
+        // Includes BOTH the feedback input (neg for op-amps) AND the signal
+        // input (pos for non-inverting op-amps). The control pin carries signal
+        // in non-inverting topologies — edges touching it are input coupling.
         let input_terminals: HashSet<NodeId> = scc
             .iter()
-            .filter_map(|&i| {
-                let node = active_elements[i].input_node;
-                if rails.contains(&node) {
-                    None
-                } else {
-                    Some(node)
+            .flat_map(|&i| {
+                let elem = &active_elements[i];
+                let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
+                let mut nodes = vec![elem.input_node];
+                // Also include the control pin (pos for op-amps)
+                if let SignalTerminals::Amplifier { control: Some(ctrl), .. } = comp.kind.signal_terminals() {
+                    if let Some(node) = resolve_pin(&comp.id, ctrl, graph) {
+                        nodes.push(node);
+                    }
                 }
+                nodes
             })
+            .filter(|node| !rails.contains(node))
             .collect();
 
         // Classify remaining passive edges: pendant or ground shunt
