@@ -783,13 +783,15 @@ impl DynNode {
                 let right_is_vs = matches!(right.as_ref(), Self::Leaf(l) if l.type_tag() == "voltage_source" || l.type_tag() == "cathode_bias_source");
 
                 if left_is_vs {
+                    // VS emits b = 2*V (WDF convention). The junction voltage
+                    // needs to be halved to convert from wave to circuit voltage.
                     let sum = *b1 + *b2 + a_root;
                     let a_inner = *b2 - (1.0 - *gamma) * sum;
-                    right.extract_load_voltage(a_inner)
+                    right.extract_load_voltage(a_inner).map(|v| v / 2.0)
                 } else if right_is_vs {
                     let sum = *b1 + *b2 + a_root;
                     let a_left = *b1 - *gamma * sum;
-                    left.extract_load_voltage(a_left)
+                    left.extract_load_voltage(a_left).map(|v| v / 2.0)
                 } else {
                     // Not Series(VS, _), try direct load
                     if right.is_load_element() {

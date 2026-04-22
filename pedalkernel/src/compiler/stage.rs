@@ -1217,14 +1217,10 @@ impl WdfStage {
                             return v;
                         }
                     }
-                    // For passive filters with embedded voltage source, the output
-                    // voltage at the load is half the root wave (resistive extraction)
-                    if tree.resistive_termination_voltage(b_tree).is_some() {
-                        // V_out = b_tree / 2 (but keep open-circuit for state updates)
-                        return b_tree / 2.0;
-                    }
-                    // Fallback: standard open-circuit extraction
-                    b_tree
+                    // Convert WDF wave variable to circuit voltage.
+                    // VS emits b = 2*V (WDF convention), so b_tree / 2 gives
+                    // the actual circuit voltage at the output port.
+                    b_tree / 2.0
                 }
                 // ShortCircuit: ground termination (a = -b)
                 // Ground has zero impedance, so it reflects with inverted sign.
