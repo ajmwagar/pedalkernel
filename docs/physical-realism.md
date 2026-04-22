@@ -1,3 +1,10 @@
+---
+title: "Physical realism"
+description: "Oversampling, interstage loading, component tolerance, and thermal drift."
+section: "Guide"
+weight: 20
+---
+
 # Physical Realism in PedalKernel
 
 PedalKernel uses Wave Digital Filters (WDFs) to simulate guitar pedal circuits at the component level. While WDF theory handles the physics within a single circuit accurately, a naive implementation misses several real-world phenomena that occur between circuits, across time, and at the boundaries of digital audio. This document describes the physical realism features PedalKernel provides beyond the core WDF engine.
@@ -216,7 +223,7 @@ board.set_interstage_loading(
 
 These are real phenomena that could be added in the future:
 
-- **Power supply sag** -- A shared 9V supply sagging under current draw causes compression and harmonic softening. Would need a simple PSU model (ideal Vs + series R + filter C) shared across pedals drawing from the same supply rail. Also 60 Hz / 120 Hz hum injection from unregulated supplies.
+- **Shared-supply sag across a pedalboard** -- Single pedals can opt into a supply model (the `supplies` block in the DSL). A shared 9 V supply sagging across several pedals drawing current simultaneously is not yet modeled, nor is 60 Hz / 120 Hz hum injection from unregulated supplies.
 - **Ground loops and crosstalk** -- Multiple pedals sharing a ground path can create ground loop noise. In a digital model this manifests as inter-channel leakage if you're not careful about signal isolation between parallel processing paths.
 - **Speaker/cabinet physics** -- Thiele-Small parameters, voice coil compression, cone breakup resonances, cabinet resonance/port tuning. Important for full-chain-to-speaker modeling.
 - **Latency compensation** -- Oversampling introduces latency that needs to be reported to the DAW host for dry/wet alignment. The current oversampling implementation does not report latency.

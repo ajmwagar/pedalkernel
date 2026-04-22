@@ -1,3 +1,10 @@
+---
+title: "Components"
+description: "Every component type available in the DSL, with syntax and variants."
+section: "Reference"
+weight: 50
+---
+
 # PedalKernel Components Reference
 
 This is the complete reference for all component types available in PedalKernel DSL. Use these in your `.pedal` files to build circuits from real electronic components.

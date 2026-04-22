@@ -1,3 +1,10 @@
+---
+title: "Contributing"
+description: "How to contribute to PedalKernel."
+section: "Project"
+weight: 120
+---
+
 # Contributing
 
 Thank you for your interest in contributing! We welcome contributions from the community. Before you get started, please read this guide carefully.

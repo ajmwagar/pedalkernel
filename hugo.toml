@@ -33,3 +33,21 @@ enableRobotsTXT = true
   home = ["HTML"]
   section = ["HTML"]
   page = ["HTML"]
+
+# Mount docs/ as the book section, so any .md file dropped into docs/
+# becomes a page at /book/<slug>/ without needing a wrapper file.
+# Files that should NOT appear on the site (CLA.md, internal notes, etc.)
+# simply stay out of docs/.
+[module]
+  [[module.mounts]]
+    source = "content"
+    target = "content"
+  [[module.mounts]]
+    source = "docs"
+    target = "content/book"
+  [[module.mounts]]
+    source = "layouts"
+    target = "layouts"
+  [[module.mounts]]
+    source = "static"
+    target = "static"

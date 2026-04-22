@@ -54,7 +54,7 @@ Full documentation — DSL reference, API docs, roadmap, architecture notes — 
 
 ## Contributing
 
-Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [CLA](CLA.md).
+Contributions welcome. See [CONTRIBUTING](docs/contributing.md) and the [CLA](CLA.md).
 
 ## License
 
