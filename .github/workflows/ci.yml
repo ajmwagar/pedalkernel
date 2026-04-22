@@ -152,3 +152,41 @@ jobs:
           if grep -q "regressed" bench-output.txt; then
             echo "::warning::Benchmark regression detected — check bench-output.txt artifact"
           fi
+
+  # ----------------------------------------------------------------
+  # License + supply-chain policy (cargo-deny)
+  # ----------------------------------------------------------------
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          # Order matches deny.toml sections. Listing them explicitly makes
+          # it clear in the job log which gate failed.
+          arguments: --all-features advisories bans licenses sources
+
+  # ----------------------------------------------------------------
+  # Third-party attribution smoke test (cargo-about)
+  # Ensures the about.hbs template keeps rendering as the tree grows.
+  # The resulting HTML is not checked in — downstream binary builds
+  # generate it at release time.
+  # ----------------------------------------------------------------
+  attribution:
+    name: cargo-about (smoke test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-about
+        run: cargo install cargo-about --locked
+      - name: Render attribution HTML
+        run: cargo about generate about.hbs --output-file third_party_licenses.html
+      - name: Upload attribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: third-party-licenses
+          path: third_party_licenses.html
