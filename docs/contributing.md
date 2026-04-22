@@ -17,7 +17,7 @@ This project is licensed under the AGPL-3.0-or-later. To ensure we can enforce t
 
 ### How to Sign
 
-Before you open your first pull request you must sign the CLA. This only needs to be done once.
+When you open your first pull request, the [CLA Assistant](https://cla-assistant.io) bot posts a comment with a sign-in link. Click it, sign in with your GitHub account, and confirm — that's it. You only need to sign once; subsequent PRs are automatically accepted. The PR's CLA status check will go green as soon as you sign.
 
 If you are contributing on behalf of your employer or another entity, please ensure you have authorization to sign on their behalf.
 
