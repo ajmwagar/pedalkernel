@@ -492,3 +492,64 @@ fn r_in_is_pendant_with_diodes_in_feedback() {
         "R_in should be pendant even with diodes in feedback. Got pendant={pendant_names:?}, feedback={feedback_names:?}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 5: WdfStage gain from port resistances — the correct approach
+//
+// The stage should compute gain = Rf/Ri from actual port resistances,
+// not from pre-computed FeedbackConfig parameters. When a pot moves,
+// the stage reads the pot's current resistance, adds any fixed series R,
+// divides by Ri (from pendant tree), and calls opamp.set_gain().
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn wdf_stage_gain_updates_from_pot_resistance() {
+    // End-to-end: compile a circuit with Drive pot in feedback + diode,
+    // sweep the pot, verify the OpAmpRoot gain changes.
+    // This tests the STAGE's pot→gain pipeline, not just OpAmpRoot math.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(500k, a)
+                D1: diode(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let sr = 48000.0;
+    let freq = 440.0;
+
+    let mut measure = |pos: f64| -> f64 {
+        let mut c = compile_via_spqr(&pedal, sr).expect("compile");
+        c.set_control("Drive", pos);
+        for s in 0..500 {
+            let input = 0.01 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+            c.process(input);
+        }
+        let mut peak = 0.0f64;
+        for s in 500..720 {
+            let input = 0.01 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+            peak = peak.max(c.process(input).abs());
+        }
+        peak
+    };
+
+    let lo = measure(0.1);
+    let hi = measure(0.9);
+    eprintln!("WDF stage pot→gain: lo={lo:.6}, hi={hi:.6}");
+    assert!(hi > lo * 1.5,
+        "Drive pot should change WDF stage gain: lo={lo:.6}, hi={hi:.6}");
+}

@@ -882,4 +882,120 @@ mod tests {
         eprintln!("Inverting: out={out:.6}, gain={gain:.2}");
         assert!(gain < -5.0, "Should invert with gain ~10: got {gain:.2}");
     }
+
+    // ── Gain from port resistances (new approach) ────────────────────────
+    //
+    // Instead of FeedbackConfig with pre-computed Rf/Ri/series/parallel,
+    // gain should be computed from the actual WDF port resistances at
+    // runtime. These tests verify that set_gain() with Rf/Ri ratios
+    // produces correct compute_vs_voltage() output.
+
+    #[test]
+    fn opamp_vs_voltage_tracks_gain_change() {
+        // When gain changes via set_gain(), compute_vs_voltage() should
+        // produce proportionally different output.
+        let mut model = tl072();
+        model.slew_rate = 100.0; // fast slew
+        model.v_max = 100.0; // high rails
+        let mut root = OpAmpRoot::new_inverting(model, 10.0);
+        root.set_sample_rate(48000.0);
+
+        // Warmup at gain=10
+        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        let out_g10 = root.compute_vs_voltage(0.01).abs();
+
+        // Change gain to 2
+        root.set_gain(2.0);
+        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        let out_g2 = root.compute_vs_voltage(0.01).abs();
+
+        eprintln!("VS voltage: g10={out_g10:.6}, g2={out_g2:.6}");
+        assert!(out_g10 > out_g2 * 3.0,
+            "Higher gain should give more VS voltage: g10={out_g10:.6}, g2={out_g2:.6}");
+    }
+
+    #[test]
+    fn opamp_gain_from_rf_ri_inverting() {
+        // set_gain(Rf/Ri) should produce correct gain for inverting topology.
+        // Rf=100k, Ri=10k → gain=10.
+        let mut model = tl072();
+        model.slew_rate = 100.0;
+        model.v_max = 100.0;
+        let rf = 100_000.0;
+        let ri = 10_000.0;
+        let gain = rf / ri; // = 10.0
+
+        let mut root = OpAmpRoot::new_inverting(model, gain);
+        root.set_sample_rate(48000.0);
+        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+
+        let out = root.compute_vs_voltage(0.01).abs();
+        let measured_gain = out / 0.01;
+        eprintln!("Rf/Ri gain: expected=10, measured={measured_gain:.2}");
+        assert!(measured_gain > 7.0 && measured_gain < 13.0,
+            "Gain should be ~10: got {measured_gain:.2}");
+    }
+
+    #[test]
+    fn opamp_gain_updates_when_pot_changes() {
+        // Simulates what should happen when a pot moves:
+        // 1. Compute new Rf from pot resistance
+        // 2. Call set_gain(new_rf / ri)
+        // 3. Output should change
+        let mut model = tl072();
+        model.slew_rate = 100.0;
+        model.v_max = 100.0;
+
+        let ri = 10_000.0;
+        let rf_lo = 10_000.0; // pot at 10% of 100k
+        let rf_hi = 100_000.0; // pot at 100% of 100k
+
+        let mut root = OpAmpRoot::new_inverting(model, rf_lo / ri);
+        root.set_sample_rate(48000.0);
+
+        // Measure at low gain
+        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        let out_lo = root.compute_vs_voltage(0.01).abs();
+
+        // Update gain to high
+        root.set_gain(rf_hi / ri);
+        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        let out_hi = root.compute_vs_voltage(0.01).abs();
+
+        eprintln!("Pot change: lo={out_lo:.6} (g={:.1}), hi={out_hi:.6} (g={:.1})",
+            rf_lo/ri, rf_hi/ri);
+        assert!(out_hi > out_lo * 3.0,
+            "Higher Rf should give more output: lo={out_lo:.6}, hi={out_hi:.6}");
+    }
+
+    #[test]
+    fn opamp_gain_from_pot_plus_series_r() {
+        // Pot + series R_clip: effective Rf = pot_r + R_clip.
+        // This is what the stage should compute from port resistances.
+        let mut model = tl072();
+        model.slew_rate = 100.0;
+        model.v_max = 100.0;
+
+        let ri = 10_000.0;
+        let r_clip = 4_700.0;
+        let pot_lo = 10_000.0;
+        let pot_hi = 500_000.0;
+
+        let rf_lo = pot_lo + r_clip; // 14.7k
+        let rf_hi = pot_hi + r_clip; // 504.7k
+
+        let mut root = OpAmpRoot::new_inverting(model, rf_lo / ri);
+        root.set_sample_rate(48000.0);
+
+        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        let out_lo = root.compute_vs_voltage(0.01).abs();
+
+        root.set_gain(rf_hi / ri);
+        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        let out_hi = root.compute_vs_voltage(0.01).abs();
+
+        eprintln!("Pot+series: lo={out_lo:.6} (Rf={rf_lo:.0}), hi={out_hi:.6} (Rf={rf_hi:.0})");
+        assert!(out_hi > out_lo * 3.0,
+            "Higher pot should give more output: lo={out_lo:.6}, hi={out_hi:.6}");
+    }
 }
