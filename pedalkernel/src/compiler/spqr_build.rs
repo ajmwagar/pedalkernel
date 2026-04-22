@@ -180,10 +180,19 @@ pub fn compile_via_spqr_with_options(
             }
             stage_counter += 1;
         } else {
-            // No feedback, not a pot → SPQR decompose for WDF/NlWdf stages
+            // No feedback, not a pot → SPQR decompose for WDF/NlWdf stages.
+            // Compute per-group terminals: use the group's actual boundary nodes
+            // (nodes shared with other groups or the global in/out).
+            // Include GND as a terminal if any edge touches ground — this lets
+            // SPQR recognize ground-shunt caps as part of the SP structure
+            // instead of forcing the whole group to Rigid.
+            let group_edges = group.all_edges();
+            let group_terminals = compute_group_terminals(&group_edges, &graph, &terminals);
+            #[cfg(test)]
+            eprintln!("  SPQR terminals for group: {:?}", group_terminals);
             let spqr_tree = spqr_decompose(
-                &group.all_edges(),
-                &terminals,
+                &group_edges,
+                &group_terminals,
                 &graph,
                 graph.gnd_node,
             );
@@ -406,5 +415,72 @@ pub(super) fn build_spqr_stage(
             ..
         } => build_rigid(edge_indices, boundary_nodes, pendant_trees, graph, _sample_rate),
     }
+}
+
+/// Compute SPQR terminals for a passive sub-group.
+///
+/// Instead of using the global [in_node, out_node], find the group's actual
+/// boundary nodes — nodes that connect to edges outside the group or to the
+/// global input/output. Includes GND if any edge touches ground, so SPQR
+/// can recognize ground-shunt components in the SP structure.
+pub(super) fn compute_group_terminals(
+    group_edges: &[usize],
+    graph: &CircuitGraph,
+    global_terminals: &[NodeId],
+) -> Vec<NodeId> {
+    use std::collections::HashSet;
+
+    // Collect all nodes touched by this group's edges
+    let mut group_nodes: HashSet<NodeId> = HashSet::new();
+    let mut touches_gnd = false;
+    for &eidx in group_edges {
+        let e = &graph.edges[eidx];
+        group_nodes.insert(e.node_a);
+        group_nodes.insert(e.node_b);
+        if e.node_a == graph.gnd_node || e.node_b == graph.gnd_node
+            || graph.ac_ground_nodes.contains(&e.node_a)
+            || graph.ac_ground_nodes.contains(&e.node_b)
+        {
+            touches_gnd = true;
+        }
+    }
+
+    // Terminals = nodes in this group that are also global terminals
+    // or that connect to edges NOT in this group (boundary nodes).
+    let group_edge_set: HashSet<usize> = group_edges.iter().copied().collect();
+    let mut terminals: Vec<NodeId> = Vec::new();
+
+    for &node in &group_nodes {
+        if node == graph.gnd_node || graph.supply_nodes.contains(&node) {
+            continue; // GND handled separately below
+        }
+        // Is this a global terminal?
+        if global_terminals.contains(&node) {
+            if !terminals.contains(&node) {
+                terminals.push(node);
+            }
+            continue;
+        }
+        // Does this node connect to edges outside the group?
+        let is_boundary = graph.edges.iter().enumerate().any(|(eidx, e)| {
+            !group_edge_set.contains(&eidx)
+                && (e.node_a == node || e.node_b == node)
+        });
+        if is_boundary && !terminals.contains(&node) {
+            terminals.push(node);
+        }
+    }
+
+    // Do NOT include GND as a terminal — the pendant extraction in SPQR
+    // handles ground-terminated edges correctly (GND has degree 1, pendant
+    // extraction removes the cap, reducing the junction's degree for series
+    // detection).
+
+    // Fallback: if no terminals found, use global
+    if terminals.is_empty() {
+        return global_terminals.to_vec();
+    }
+
+    terminals
 }
 

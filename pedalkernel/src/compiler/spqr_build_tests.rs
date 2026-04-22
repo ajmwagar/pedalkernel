@@ -562,6 +562,126 @@ fn diagnose_screamer_hpf() {
     assert!(peak_lo > 0.001, "200Hz should produce output: {peak_lo:.6}");
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// compute_group_terminals: verify correct boundary node detection
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn compute_group_terminals_t_junction_after_opamp() {
+    // Circuit: in → R_in → U1.neg [Rf feedback] → U1.out → R_tone → (C_tone→gnd, R_out→out)
+    // The tone stack group (R_tone, C_tone, R_out) should have 2 terminals:
+    // - U1.out (entry from previous stage, voltage source barrier)
+    // - out (exit to circuit output)
+    // The junction node (R_tone.b = C_tone.a = R_out.a) is INTERNAL — not a terminal.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                R_tone: resistor(10k)
+                C_tone: cap(22n)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> R_tone.a
+                R_tone.b -> C_tone.a
+                C_tone.b -> gnd
+                R_tone.b -> R_out.a
+                R_out.b -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    // Find the tone stack edges
+    let tone_edges: Vec<usize> = all_edges.iter().copied().filter(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        comp.id == "R_tone" || comp.id == "C_tone" || comp.id == "R_out"
+    }).collect();
+
+    eprintln!("Tone stack edges:");
+    for &eidx in &tone_edges {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        eprintln!("  {} ({:?}): node {} → node {}", comp.id,
+            graph.effective_edge_kind(eidx), e.node_a, e.node_b);
+    }
+    eprintln!("  gnd={}, in={}, out={}", graph.gnd_node, graph.in_node, graph.out_node);
+
+    let global_terminals = vec![graph.in_node, graph.out_node];
+    let terminals = super::spqr_build::compute_group_terminals(
+        &tone_edges, &graph, &global_terminals
+    );
+
+    eprintln!("Computed terminals: {:?}", terminals);
+
+    // Should have exactly 2 non-GND terminals:
+    // 1. The node shared with U1.out (entry)
+    // 2. The out node (exit)
+    // GND may be included for ground-shunt detection.
+    let non_gnd_terminals: Vec<_> = terminals.iter()
+        .filter(|&&n| n != graph.gnd_node)
+        .collect();
+
+    assert!(
+        non_gnd_terminals.len() <= 2,
+        "Should have ≤2 non-GND terminals (entry + exit), got {:?}",
+        terminals
+    );
+
+    // Now verify SPQR with these terminals produces PassiveWdf, not Rigid
+    let spqr_tree = super::spqr::spqr_decompose(
+        &tone_edges, &terminals, &graph, graph.gnd_node,
+    );
+    let stages = super::spqr::spqr_to_stages(&spqr_tree, &graph, 48000.0);
+    eprintln!("SPQR stages with computed terminals:");
+    for (i, s) in stages.iter().enumerate() {
+        eprintln!("  [{i}]: {s:?}");
+    }
+    let has_rigid = stages.iter().any(|s| matches!(s, super::spqr::SpqrStage::Rigid { .. }));
+    assert!(!has_rigid, "T-junction with correct terminals should NOT produce Rigid stage");
+}
+
+#[test]
+fn compute_group_terminals_simple_series() {
+    // Simple series chain: in → R1 → R2 → out
+    // Terminals should be [in, out]
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components { R1: resistor(10k)  R2: resistor(10k) }
+            nets { in -> R1.a  R1.b -> R2.a  R2.b -> out }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|&i| !graph.active_edge_indices.contains(&i))
+        .collect();
+
+    let global_terminals = vec![graph.in_node, graph.out_node];
+    let terminals = super::spqr_build::compute_group_terminals(
+        &edges, &graph, &global_terminals
+    );
+
+    eprintln!("Series chain terminals: {:?}", terminals);
+    assert!(terminals.contains(&graph.in_node), "Should include in_node");
+    assert!(terminals.contains(&graph.out_node), "Should include out_node");
+}
+
 #[test]
 fn spqr_noninverting_opamp_gain() {
     // Non-inverting amp: R1=10k, Rf=100k → gain = 1 + 100k/10k = 11

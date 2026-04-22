@@ -152,6 +152,42 @@ pub(super) fn spqr_decompose(
     let terminal_set: std::collections::HashSet<NodeId> =
         terminals.iter().copied().collect();
 
+    // Extract pendant edges (dead-ends) before SP reduction.
+    // Pendants reduce junction degree, enabling series detection.
+    // E.g., T-junction: R1→junction→(C1→gnd, R2→out)
+    // → extract C1 pendant → junction becomes degree 2 → series(R1, R2).
+    let (remaining_edges, pendant_children) =
+        extract_pendants(edge_indices, &terminal_set, graph);
+
+    if remaining_edges.len() < edge_indices.len() {
+        // Pendants found — decompose the core and combine
+        if remaining_edges.is_empty() {
+            return if pendant_children.len() == 1 {
+                pendant_children.into_iter().next().unwrap()
+            } else {
+                SpqrNode::S {
+                    children: pendant_children,
+                    cut_vertices: (terminals.first().copied().unwrap_or(0),
+                                  terminals.last().copied().unwrap_or(0)),
+                }
+            };
+        }
+        let core = spqr_decompose(&remaining_edges, terminals, graph, gnd_node);
+        let mut children = vec![core];
+        children.extend(pendant_children);
+        return if children.len() == 1 {
+            children.into_iter().next().unwrap()
+        } else {
+            SpqrNode::S {
+                children,
+                cut_vertices: (terminals.first().copied().unwrap_or(0),
+                              terminals.last().copied().unwrap_or(0)),
+            }
+        };
+    }
+    // No pendants — continue with SP reduction below
+    // (adj was already built above for the full set, still valid if no pendants)
+
     // Check for parallel edges: multiple edges between the same pair
     let mut edge_pairs: std::collections::HashMap<(NodeId, NodeId), Vec<usize>> =
         std::collections::HashMap::new();
@@ -361,6 +397,69 @@ pub(super) fn spqr_decompose(
         boundary_nodes: junction_nodes.into_iter().collect(),
         children: pendant_children,
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Pendant extraction
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Extract pendant edges (dead-ends) from a subgraph.
+///
+/// A pendant is an edge where one endpoint has degree 1 in the subgraph
+/// (only connects to one junction node). Ground-terminated caps are
+/// pendants: GND has degree 1 within the signal subgraph.
+///
+/// Iteratively removes pendants until no more exist, reducing junction
+/// degrees so series detection can proceed.
+///
+/// Returns `(remaining_edges, pendant_q_nodes)`.
+fn extract_pendants(
+    edge_indices: &[usize],
+    terminal_set: &std::collections::HashSet<NodeId>,
+    graph: &CircuitGraph,
+) -> (Vec<usize>, Vec<SpqrNode>) {
+    let mut remaining: Vec<usize> = edge_indices.to_vec();
+    let mut pendants: Vec<SpqrNode> = Vec::new();
+
+    loop {
+        // Build degree map for current remaining edges
+        let mut degree: std::collections::HashMap<NodeId, usize> =
+            std::collections::HashMap::new();
+        for &eidx in &remaining {
+            let e = &graph.edges[eidx];
+            *degree.entry(e.node_a).or_default() += 1;
+            *degree.entry(e.node_b).or_default() += 1;
+        }
+
+        // Find edges with a degree-1 non-terminal endpoint
+        let mut found: Vec<usize> = Vec::new();
+        for &eidx in &remaining {
+            let e = &graph.edges[eidx];
+            let a_pendant = degree.get(&e.node_a).copied().unwrap_or(0) == 1
+                && !terminal_set.contains(&e.node_a);
+            let b_pendant = degree.get(&e.node_b).copied().unwrap_or(0) == 1
+                && !terminal_set.contains(&e.node_b);
+            if a_pendant || b_pendant {
+                found.push(eidx);
+            }
+        }
+
+        if found.is_empty() {
+            break;
+        }
+
+        let found_set: std::collections::HashSet<usize> = found.iter().copied().collect();
+        for &eidx in &found {
+            let e = &graph.edges[eidx];
+            pendants.push(SpqrNode::Q {
+                edge_idx: eidx,
+                endpoints: (e.node_a, e.node_b),
+            });
+        }
+        remaining.retain(|e| !found_set.contains(e));
+    }
+
+    (remaining, pendants)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

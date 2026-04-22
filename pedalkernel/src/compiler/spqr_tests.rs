@@ -703,3 +703,236 @@ fn spqr_t_junction_produces_audio_as_stage() {
     eprintln!("T-junction tone stack: 1kHz peak={peak:.6}");
     assert!(peak > 0.001, "Tone stack should pass signal: peak={peak:.6}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Pendant → stage pipeline: SPQR tree with pendants must produce
+// PassiveWdf stages (not Rigid → IIR with b=[0,0,0])
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn spqr_t_junction_becomes_passive_wdf_stage() {
+    // The T-junction SPQR tree (with pendant extraction) should convert
+    // to a PassiveWdf stage, NOT a Rigid stage.
+    let (graph, edges) = make_graph(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                C1: cap(22n)
+                R2: resistor(10k)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> C1.a
+                C1.b -> gnd
+                R1.b -> R2.a
+                R2.b -> out
+            }
+            controls {}
+        }"#);
+
+    let tree = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+    let stages = spqr_to_stages(&tree, &graph, 48000.0);
+
+    eprintln!("T-junction stages:");
+    for (i, s) in stages.iter().enumerate() {
+        eprintln!("  [{i}]: {s:?}");
+    }
+
+    // Should produce PassiveWdf stage(s), NOT Rigid
+    let has_passive_wdf = stages.iter().any(|s| matches!(s, SpqrStage::PassiveWdf { .. }));
+    let has_rigid = stages.iter().any(|s| matches!(s, SpqrStage::Rigid { .. }));
+
+    assert!(has_passive_wdf, "T-junction should produce PassiveWdf stage");
+    assert!(!has_rigid, "T-junction should NOT produce Rigid stage");
+}
+
+#[test]
+fn spqr_t_junction_dyn_node_has_all_components() {
+    // The DynNode tree from a T-junction should contain all 3 components:
+    // R1, C1, R2. None should be lost during pendant extraction.
+    let (graph, edges) = make_graph(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                C1: cap(22n)
+                R2: resistor(10k)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> C1.a
+                C1.b -> gnd
+                R1.b -> R2.a
+                R2.b -> out
+            }
+            controls {}
+        }"#);
+
+    let tree = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+
+    // Convert to DynNode
+    let dyn_node = spqr_to_dyn_node(&tree, &graph, 48000.0);
+    assert!(dyn_node.is_some(), "T-junction should produce a valid DynNode");
+
+    let node = dyn_node.unwrap();
+    // Count leaves
+    let mut leaf_count = 0;
+    node.for_each_leaf(&mut |_leaf| { leaf_count += 1; });
+    eprintln!("T-junction DynNode: {leaf_count} leaves, rp={:.0}", node.port_resistance());
+
+    assert_eq!(leaf_count, 3, "DynNode should have 3 leaves (R1, C1, R2)");
+}
+
+#[test]
+fn spqr_t_junction_stage_edges_include_all() {
+    // When spqr_to_stages converts a T-junction, the PassiveWdf stage's
+    // edge_indices must include ALL edges (R1, C1, R2) — not just the
+    // core series chain.
+    let (graph, edges) = make_graph(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                C1: cap(22n)
+                R2: resistor(10k)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> C1.a
+                C1.b -> gnd
+                R1.b -> R2.a
+                R2.b -> out
+            }
+            controls {}
+        }"#);
+
+    let tree = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+    let stages = spqr_to_stages(&tree, &graph, 48000.0);
+
+    let total_edges: usize = stages.iter().map(|s| match s {
+        SpqrStage::PassiveWdf { edge_indices, .. }
+        | SpqrStage::NlWdf { edge_indices, .. }
+        | SpqrStage::Rigid { edge_indices, .. } => edge_indices.len(),
+    }).sum();
+
+    assert_eq!(total_edges, 3, "All 3 edges should be accounted for in stages");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Ground-terminated caps in SP reduction
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn spqr_single_cap_to_ground_is_not_rigid() {
+    // A cap from signal node to GND is a valid WDF leaf.
+    // SPQR should treat it as a Q node (single edge), not Rigid.
+    let (graph, edges) = make_graph(r#"
+        pedal "test" { supply 9V
+            components { R1: resistor(10k)  C1: cap(100n) }
+            nets { in -> R1.a  R1.b -> C1.a  C1.b -> gnd  R1.b -> out }
+            controls {}
+        }"#);
+
+    let tree = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+    let is_rigid = matches!(tree, SpqrNode::R { .. });
+    eprintln!("R + C-to-gnd: rigid={is_rigid}, tree={tree:?}");
+    assert!(!is_rigid, "R + C-to-ground should be SP-reducible (parallel at junction)");
+}
+
+#[test]
+fn spqr_two_caps_to_ground_are_parallel() {
+    // Two caps from the same node to GND are parallel.
+    // Common pattern: bypass caps, decoupling.
+    let (graph, edges) = make_graph(r#"
+        pedal "test" { supply 9V
+            components { R1: resistor(10k)  C1: cap(100n)  C2: cap(10n) }
+            nets {
+                in -> R1.a
+                R1.b -> C1.a
+                C1.b -> gnd
+                R1.b -> C2.a
+                C2.b -> gnd
+                R1.b -> out
+            }
+            controls {}
+        }"#);
+
+    let tree = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+    let is_rigid = matches!(tree, SpqrNode::R { .. });
+    eprintln!("R + 2×C-to-gnd: rigid={is_rigid}");
+    assert!(!is_rigid, "R + two ground caps should be SP-reducible");
+}
+
+#[test]
+fn spqr_bridged_t_stays_rigid() {
+    // Bridged-T: R1-R2 series with C1, C2 ground shunts AND Rf bridging.
+    // The bridge resistor Rf makes it genuinely non-SP. Must stay Rigid.
+    // (This is the 808 kick drum pattern — IIR handles it correctly.)
+    let (graph, edges) = make_graph_all_edges(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                R2: resistor(10k)
+                C1: cap(68n)
+                C2: cap(68n)
+                Rf: resistor(47k)
+                U1: opamp(tl072)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> R2.a
+                R2.b -> U1.neg
+                R1.b -> C1.a
+                C1.b -> gnd
+                R2.b -> C2.a
+                C2.b -> gnd
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#);
+
+    let tree = spqr_decompose(
+        &edges,
+        &[graph.in_node, graph.out_node],
+        &graph,
+        graph.gnd_node,
+    );
+
+    // Should have at least one Rigid node (the bridged-T can't SP-reduce)
+    fn has_rigid(node: &SpqrNode) -> bool {
+        match node {
+            SpqrNode::R { children, .. } => true,
+            SpqrNode::S { children, .. } | SpqrNode::P { children, .. } => {
+                children.iter().any(has_rigid)
+            }
+            SpqrNode::Q { .. } => false,
+        }
+    }
+    assert!(has_rigid(&tree), "Bridged-T must contain a Rigid node (bridge prevents SP reduction)");
+}
