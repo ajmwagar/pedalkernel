@@ -376,9 +376,22 @@ pub(super) fn build_rigid_from_group(
                 // Collect NonIdealFx from the op-amp component
                 let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
 
-                let stage = super::stage::BlackFeedbackStage::new(
+                let mut stage = super::stage::BlackFeedbackStage::new(
                     config.rf, config.ri, inverting, &fx, sample_rate,
                 );
+
+                // Bind feedback pot: find pot in group edges for runtime gain control.
+                for &eidx in &g.all_edges() {
+                    let comp = &graph.components[graph.edges[eidx].comp_idx];
+                    if comp.kind.is_pot() {
+                        if let Some(max_r) = comp.kind.resistance() {
+                            stage.pot_comp_id = Some(comp.id.clone());
+                            stage.pot_max_r = max_r;
+                            break;
+                        }
+                    }
+                }
+
                 Ok(BuiltStage::BlackFeedback(stage))
             } else {
                 // No FlowGroup → can't classify Rf/Ri. Fall back to IIR.

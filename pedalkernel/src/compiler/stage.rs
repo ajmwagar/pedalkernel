@@ -3257,6 +3257,10 @@ pub(super) struct BlackFeedbackStage {
     sample_rate: f64,
     /// BFS distance from input (for topological ordering).
     pub(super) signal_flow_distance: usize,
+    /// Pot component ID bound to Rf (if any). Set at compile time.
+    pub(super) pot_comp_id: Option<String>,
+    /// Maximum pot resistance (Ohms). Position 1.0 = this value.
+    pub(super) pot_max_r: f64,
 }
 
 impl BlackFeedbackStage {
@@ -3283,6 +3287,8 @@ impl BlackFeedbackStage {
             stored_gbw,
             sample_rate,
             signal_flow_distance: 0,
+            pot_comp_id: None,
+            pot_max_r: 0.0,
         }
     }
 
@@ -3298,6 +3304,18 @@ impl BlackFeedbackStage {
             -(self.rf / self.ri.max(1.0))
         } else {
             1.0 + self.rf / self.ri.max(1.0)
+        }
+    }
+
+    /// Check if this stage owns a pot with the given component ID.
+    pub(super) fn has_pot(&self, comp_id: &str) -> bool {
+        self.pot_comp_id.as_deref() == Some(comp_id)
+    }
+
+    /// Set pot position (0.0–1.0). Converts to Rf = position * max_r.
+    pub(super) fn set_pot(&mut self, _comp_id: &str, position: f64) {
+        if self.pot_max_r > 0.0 {
+            self.set_rf(position * self.pot_max_r);
         }
     }
 

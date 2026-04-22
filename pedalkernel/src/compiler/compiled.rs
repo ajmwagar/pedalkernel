@@ -136,6 +136,8 @@ pub(super) enum ControlTarget {
     /// Modify a pot inside a multi-NL stage (R-type adaptor approach).
     /// (multi_nl_stage_idx, passive_child_idx)
     PotInMultiNlStage(usize, usize),
+    /// Modify the feedback pot in a BlackFeedback stage (recomputes Rf → gain).
+    PotInBlackFeedbackStage(usize),
     /// Forward a control change to a sidechain sub-circuit.
     /// The sidechain's own CompiledPedal handles the pot lookup and
     /// scattering matrix recomputation internally.
@@ -1207,7 +1209,7 @@ impl CompiledPedal {
             let tapered_pos = self.controls[i].taper.apply(value);
             let value = (r0 + tapered_pos * (r1 - r0)).clamp(0.0, 1.0);
             match &self.controls[i].target {
-                ControlTarget::PotInStage(_) | ControlTarget::PotInIirStage(_) | ControlTarget::PotInMultiNlStage(_, _) => {
+                ControlTarget::PotInStage(_) | ControlTarget::PotInIirStage(_) | ControlTarget::PotInMultiNlStage(_, _) | ControlTarget::PotInBlackFeedbackStage(_) => {
                     if let Some(smoother) =
                         self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
                     {
@@ -1232,6 +1234,9 @@ impl CompiledPedal {
                                 Stage::MultiNl(mnl) => {
                                     mnl.set_pot(&comp_id, value);
                                     mnl.flush_recompute();
+                                }
+                                Stage::BlackFeedback(bf) => {
+                                    bf.set_pot(&comp_id, value);
                                 }
                                 _ => {}
                             }
@@ -1419,6 +1424,9 @@ impl CompiledPedal {
                         }
                         Stage::MultiNl(mnl) => {
                             mnl.set_pot(&comp_id, value);
+                        }
+                        Stage::BlackFeedback(bf) => {
+                            bf.set_pot(&comp_id, value);
                         }
                         _ => {}
                     }
