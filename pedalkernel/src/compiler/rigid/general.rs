@@ -50,7 +50,7 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
 ) -> Result<WdfStage, String> {
     let inverting = is_inverting_topology(stats, graph);
     let config = extract_opamp_config(group, inverting, graph)?;
-    let opamp = make_opamp_root(&config, sample_rate);
+    let mut opamp = make_opamp_root(&config, sample_rate);
 
     // Find first NL active edge → build root
     let nl_edge_idx = group
@@ -73,6 +73,22 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
 
     let oversampler = Oversampler::new(OversamplingFactor::X2);
     let mut stage = WdfStage::new(tree, root, oversampler);
+
+    // Find feedback pot and configure runtime gain recomputation
+    let feedback_pot = super::find_feedback_pot(group, graph);
+    if let Some((pot_id, pot_leaf, fixed_r, parallel_r)) = feedback_pot {
+        opamp.set_feedback_config(crate::elements::FeedbackConfig {
+            pot_comp_id: pot_id.clone(),
+            other_leg_r: config.ri,
+            fixed_series_r: fixed_r,
+            parallel_r,
+            pot_is_feedback: true,
+            is_inverting: inverting,
+        });
+        stage.feedback_pot_id = Some(pot_id);
+        stage.opamp_children.push(pot_leaf);
+    }
+
     stage.feedback_opamp = Some(opamp);
     stage.base_diode_model = base_diode_model;
     Ok(stage)

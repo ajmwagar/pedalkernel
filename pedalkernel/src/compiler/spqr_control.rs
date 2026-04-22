@@ -53,12 +53,19 @@ fn find_pot_binding(
     let aw_id = format!("{comp_id}__aw");
     let wb_id = format!("{comp_id}__wb");
 
-    // Search WDF stages (pot leaves in DynNode trees)
+    // Search WDF stages (pot leaves in tree, opamp_children, or feedback_pot_id)
     for (idx, stage) in compiled.stages.iter().enumerate() {
-        if stage.tree.get_pot_position(comp_id).is_some()
+        let in_tree = stage.tree.get_pot_position(comp_id).is_some()
             || stage.tree.get_pot_position(&aw_id).is_some()
-            || stage.tree.get_pot_position(&wb_id).is_some()
-        {
+            || stage.tree.get_pot_position(&wb_id).is_some();
+        let in_children = stage.opamp_children.iter().any(|c| {
+            c.get_pot_position(comp_id).is_some()
+                || c.get_pot_position(&aw_id).is_some()
+                || c.get_pot_position(&wb_id).is_some()
+        });
+        let is_feedback_pot = stage.feedback_pot_id.as_deref() == Some(comp_id);
+
+        if in_tree || in_children || is_feedback_pot {
             return Some(make_binding(
                 ctrl,
                 comp_id,

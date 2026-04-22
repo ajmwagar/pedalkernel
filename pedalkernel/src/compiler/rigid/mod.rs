@@ -266,6 +266,69 @@ fn extract_pot_bindings(
     bindings
 }
 
+/// Find a pot in the feedback edges and create a WDF leaf for it.
+///
+/// Returns `(pot_comp_id, pot_dyn_node, fixed_series_r, parallel_r)` if found.
+/// The pot leaf is needed in the WDF tree so `set_pot` can find it and
+/// `notify_pot_changed` can read its resistance to recompute OpAmpRoot gain.
+fn find_feedback_pot(
+    group: &FlowGroup,
+    graph: &CircuitGraph,
+) -> Option<(String, DynNode, f64, Option<f64>)> {
+    let mut pot_id = None;
+    let mut pot_leaf = None;
+    let mut fixed_r = 0.0f64;
+    let mut parallel_r_candidates: Vec<f64> = Vec::new();
+
+    for &eidx in &group.feedback_edges {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if comp.kind.as_any().downcast_ref::<crate::compiler::components::Potentiometer>().is_some() {
+            if pot_id.is_none() {
+                pot_id = Some(comp.id.clone());
+                // Create a WDF leaf for the pot (using the base comp_id, not __aw/__wb)
+                pot_leaf = comp.kind.make_leaf(&comp.id, 48000.0);
+            }
+        } else if let Some(r) = comp.kind.resistance() {
+            // Could be series or parallel with the pot — heuristic:
+            // if it's on the same edge pair as the pot, it's in parallel
+            // otherwise it's in series. For now, assume series.
+            fixed_r += r;
+        }
+    }
+
+    // Check for parallel resistors (Rf in parallel with the pot+series chain)
+    // This is common in TS-style circuits where Rf parallels Drive+R_clip.
+    // For now, if there are multiple resistors in feedback, the largest is parallel.
+    if fixed_r > 0.0 && group.feedback_edges.len() > 3 {
+        let mut resistances: Vec<f64> = group.feedback_edges.iter()
+            .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
+            .collect();
+        resistances.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        // Heuristic: if there are 2+ resistors and one is much larger, it's parallel
+        if resistances.len() >= 2 && resistances[0] > resistances[1] * 5.0 {
+            let pr = resistances[0];
+            fixed_r -= pr; // Remove it from series sum
+            parallel_r_candidates.push(pr);
+        }
+    }
+
+    let parallel_r = parallel_r_candidates.first().copied();
+
+    pot_id.map(|id| {
+        let leaf = pot_leaf.unwrap_or_else(|| {
+            DynNode::Leaf(Box::new(crate::compiler::wdf_leaf::WdfPot {
+                comp_id: id.clone(),
+                max_resistance: 100_000.0,
+                position: 0.5,
+                taper: crate::dsl::PotTaper::B,
+                rp: 50_000.0,
+                last_a: 0.0,
+            }))
+        });
+        (id, leaf, fixed_r, parallel_r)
+    })
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Rigid stage dispatcher
 // ═══════════════════════════════════════════════════════════════════════════
@@ -309,16 +372,40 @@ pub(super) fn build_rigid_from_group(
             if let Some(g) = group {
                 let inverting = is_inverting_topology(&stats, graph);
                 let config = opamp_root::extract_opamp_config(g, inverting, graph)?;
-                let opamp = opamp_root::make_opamp_root(&config, sample_rate);
+                let mut opamp = opamp_root::make_opamp_root(&config, sample_rate);
 
                 // Build WDF tree from pendant edges (input coupling)
                 let tree = general::build_pendant_tree(&g.pendant_edges, graph, sample_rate);
+
+                // Find feedback pot and configure runtime gain recomputation.
+                // The pot leaf needs to be in the WDF tree (or a child) so
+                // set_pot can find it and notify_pot_changed recomputes gain.
+                let feedback_pot = find_feedback_pot(g, graph);
+                if let Some((pot_id, pot_leaf, fixed_r, parallel_r)) = feedback_pot {
+                    opamp.set_feedback_config(crate::elements::FeedbackConfig {
+                        pot_comp_id: pot_id.clone(),
+                        other_leg_r: config.ri,
+                        fixed_series_r: fixed_r,
+                        parallel_r,
+                        pot_is_feedback: true,
+                        is_inverting: inverting,
+                    });
+                }
 
                 let oversampler = crate::oversampling::Oversampler::new(
                     crate::oversampling::OversamplingFactor::X1,
                 );
                 let root = super::stage::RootKind::OpAmp(opamp);
-                Ok(BuiltStage::Wdf(super::stage::WdfStage::new(tree, root, oversampler)))
+                let mut stage = super::stage::WdfStage::new(tree, root, oversampler);
+
+                // Attach feedback pot to the stage for runtime binding
+                if let Some((pot_id, pot_leaf, _, _)) = find_feedback_pot(g, graph) {
+                    stage.feedback_pot_id = Some(pot_id);
+                    // Add pot leaf to opamp_children so set_pot can find it
+                    stage.opamp_children.push(pot_leaf);
+                }
+
+                Ok(BuiltStage::Wdf(stage))
             } else {
                 // No FlowGroup → can't classify Rf/Ri. Fall back to IIR.
                 // This path is rare (only from build_spqr_stage without signal flow).
