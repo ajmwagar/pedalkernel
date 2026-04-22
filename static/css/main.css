@@ -94,24 +94,62 @@ main { flex: 1; }
 /* Pagefind search widget in the site header. Theme variables are set so
    the bundled pagefind-ui.css adapts to our accent + card palette.
    If pagefind has not been built (local dev without the index), the div
-   stays empty and takes no space. */
-.site-search {
+   stays empty and takes no space.
+
+   Scoped both on `.site-search` and on `.site-search .pagefind-ui` so the
+   cascade beats Pagefind's own `:root` defaults regardless of how Pagefind
+   mounts its shadow DOM or scope classes. */
+.site-search,
+.site-search .pagefind-ui {
   --pagefind-ui-scale: 0.85;
   --pagefind-ui-primary: var(--accent);
   --pagefind-ui-text: var(--fg);
-  --pagefind-ui-background: var(--bg);
+  /* Widget background uses --card (subtle elevation above the page bg in
+     dark mode, pure white in light mode). Using --bg instead made the
+     widget invisible in dark mode because the page was the same color. */
+  --pagefind-ui-background: var(--card);
   --pagefind-ui-border: var(--border);
-  --pagefind-ui-tag: var(--card);
+  /* Tag pills: accent-tinted so they're visible on the card bg in both
+     themes. Was --card, which vanished into the widget background. */
+  --pagefind-ui-tag: var(--accent-weak);
   --pagefind-ui-border-radius: 6px;
   --pagefind-ui-border-width: 1px;
   --pagefind-ui-font: var(--sans);
+}
+.site-search {
   min-width: 0;
   flex: 0 1 16rem;
   margin-left: auto;
 }
+/* Result links take the accent color so they stand out against the
+   card background — Pagefind's default uses --pagefind-ui-text which
+   makes titles and body text indistinguishable. */
+.site-search .pagefind-ui__result-link {
+  color: var(--accent);
+}
+.site-search .pagefind-ui__result-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+/* Highlighted terms inside excerpts: use the accent-weak background so
+   matches are obvious without being garish. */
+.site-search .pagefind-ui__result-excerpt mark {
+  background: var(--accent-weak);
+  color: var(--accent);
+  padding: 0 0.15em;
+  border-radius: 2px;
+}
 .site-search :where(input, .pagefind-ui__search-input) {
   font-family: var(--mono);
   font-size: 0.85rem;
+  /* Input text was inheriting --pagefind-ui-text but font-weight:700 in
+     Pagefind's CSS was dominating; keep it readable. */
+  font-weight: 500;
+  color: var(--fg);
+}
+.site-search .pagefind-ui__search-input::placeholder {
+  color: var(--muted);
+  opacity: 0.7;
 }
 
 .site-footer {
