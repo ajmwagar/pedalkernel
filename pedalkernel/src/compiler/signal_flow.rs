@@ -546,30 +546,72 @@ pub(in crate::compiler) fn find_flow_groups(
         });
     }
 
-    // Unclaimed edges -> standalone groups.
-    // Pot halves (__aw/__wb) sharing the same base component ID are merged
-    // into one group so they form a working voltage divider.
-    let mut pot_groups: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut other_unclaimed: Vec<usize> = Vec::new();
+    // ── Unclaimed passive edges: group by connectivity ──────────────────
+    //
+    // Barrier nodes prevent merging across stage boundaries:
+    // - Rails (GND, VCC, supply, AC ground) — always barriers
+    // - Voltage-source outputs (op-amp out pins) — safe split points
+    //   per Harold Black's theorem: zero output impedance means
+    //   downstream load doesn't affect upstream behavior.
+    //
+    // Edges sharing a non-barrier node are grouped → one WDF stage.
+    // This prevents standalone caps from acting as high-pass filters.
+    use super::component::OutputImpedance;
 
+    let mut barrier_nodes = rails.clone();
+
+    // Add active element output nodes as barriers.
+    // Voltage-source outputs (op-amps): zero impedance, always safe to split.
+    // Finite-impedance outputs (BJTs, diodes): splitting changes impedance,
+    // but the active element's feedback group already owns these nodes.
+    // Treating them as barriers prevents unclaimed passives from merging
+    // across active element boundaries.
+    for &eidx in edge_indices {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        match comp.kind.signal_terminals() {
+            SignalTerminals::Amplifier { output, input, .. } => {
+                if let Some(node) = resolve_pin(&comp.id, output, graph) {
+                    barrier_nodes.insert(node);
+                }
+                if let Some(node) = resolve_pin(&comp.id, input, graph) {
+                    barrier_nodes.insert(node);
+                }
+            }
+            SignalTerminals::TwoPort { input, output } => {
+                if let Some(node) = resolve_pin(&comp.id, output, graph) {
+                    barrier_nodes.insert(node);
+                }
+                if let Some(node) = resolve_pin(&comp.id, input, graph) {
+                    barrier_nodes.insert(node);
+                }
+            }
+            SignalTerminals::Passive => {}
+        }
+    }
+
+    // Separate unclaimed edges into:
+    // - signal_edges: at least one non-barrier endpoint (carry signal, groupable)
+    // - isolated_edges: both endpoints are barriers (bypass caps, pull-downs)
+    let mut signal_edges: Vec<usize> = Vec::new();
+    let mut isolated_edges: Vec<usize> = Vec::new();
     for &eidx in edge_indices {
         if claimed.contains(&eidx) {
             continue;
         }
-        let comp_id = &graph.components[graph.edges[eidx].comp_idx].id;
-        if comp_id.contains("__aw") || comp_id.contains("__wb") {
-            let base_id = comp_id
-                .trim_end_matches("__aw")
-                .trim_end_matches("__wb")
-                .to_string();
-            pot_groups.entry(base_id).or_default().push(eidx);
+        let e = &graph.edges[eidx];
+        let a_barrier = barrier_nodes.contains(&e.node_a);
+        let b_barrier = barrier_nodes.contains(&e.node_b);
+        if a_barrier && b_barrier {
+            // Both ends are barriers — this edge is isolated (bypass cap, etc.)
+            isolated_edges.push(eidx);
         } else {
-            other_unclaimed.push(eidx);
+            signal_edges.push(eidx);
         }
     }
 
-    // Merged pot halves → one group per pot
-    for (_base_id, edges) in pot_groups {
+    // Group signal-carrying edges by connectivity (split at barriers)
+    let passive_groups = group_by_connectivity(&signal_edges, graph, &barrier_nodes);
+    for edges in passive_groups {
         groups.push(FlowGroup {
             active_edges: Vec::new(),
             feedback_edges: Vec::new(),
@@ -578,12 +620,8 @@ pub(in crate::compiler) fn find_flow_groups(
         });
     }
 
-    // Other unclaimed → individual standalone groups.
-    // TODO: merge connected passives into WDF trees (currently each component
-    // is its own stage, causing standalone caps to act as high-pass filters).
-    // The fix requires careful handling of rail-connected edges and overlap
-    // with feedback group nodes.
-    for eidx in other_unclaimed {
+    // Isolated edges → individual standalone stages
+    for eidx in isolated_edges {
         groups.push(FlowGroup {
             active_edges: Vec::new(),
             feedback_edges: Vec::new(),
@@ -596,26 +634,33 @@ pub(in crate::compiler) fn find_flow_groups(
 }
 
 /// Group edges by node connectivity using union-find.
-/// Edges sharing a node (excluding GND, VCC, supply, AC ground) are merged.
-fn group_by_connectivity(edges: &[usize], graph: &CircuitGraph) -> Vec<Vec<usize>> {
+///
+/// Edges sharing a non-barrier node are merged into one group.
+/// Barrier nodes (rails + voltage-source outputs) act as boundaries —
+/// edges on opposite sides of a barrier stay in separate groups.
+/// This preserves impedance relationships within each group.
+fn group_by_connectivity(
+    edges: &[usize],
+    graph: &CircuitGraph,
+    barrier_nodes: &HashSet<NodeId>,
+) -> Vec<Vec<usize>> {
     if edges.is_empty() {
         return Vec::new();
     }
 
-    // Build node → edge index mapping
-    let rails = rail_nodes(graph);
+    // Build node → edge index mapping (skip barrier nodes)
     let mut node_to_edges: HashMap<NodeId, Vec<usize>> = HashMap::new();
     for &eidx in edges {
         let e = &graph.edges[eidx];
-        if !rails.contains(&e.node_a) {
+        if !barrier_nodes.contains(&e.node_a) {
             node_to_edges.entry(e.node_a).or_default().push(eidx);
         }
-        if !rails.contains(&e.node_b) {
+        if !barrier_nodes.contains(&e.node_b) {
             node_to_edges.entry(e.node_b).or_default().push(eidx);
         }
     }
 
-    // Union-find: edges sharing a non-rail node are in the same group
+    // Union-find: edges sharing a non-barrier node are in the same group
     let edge_pos: HashMap<usize, usize> = edges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
     let mut parent: Vec<usize> = (0..edges.len()).collect();
 

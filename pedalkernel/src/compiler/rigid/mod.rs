@@ -331,6 +331,20 @@ pub(super) fn build_rigid_from_group(
         }
         RigidOptimization::Iir => {
             let pendant_trees = Vec::new();
+            // Check if any edges have non-rail nodes. If all edges connect
+            // only to rail/barrier nodes, this is a bypass/pull-down — skip it
+            // with a unity passthrough.
+            let has_signal_node = edge_indices.iter().any(|&eidx| {
+                let e = &graph.edges[eidx];
+                let a_rail = e.node_a == graph.gnd_node || graph.supply_nodes.contains(&e.node_a);
+                let b_rail = e.node_b == graph.gnd_node || graph.supply_nodes.contains(&e.node_b);
+                !a_rail || !b_rail
+            });
+            if !has_signal_node {
+                // All edges are rail-to-rail — unity passthrough
+                let iir = super::stage::IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate);
+                return Ok(BuiltStage::Iir(IirStage::new(iir)));
+            }
             // Try IIR (≤2 states). If too many states, use StateSpace.
             match iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate) {
                 Ok(iir_data) => {
