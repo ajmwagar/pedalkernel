@@ -7,6 +7,8 @@ weight: 110
 
 # Roadmap
 
+> **Preview.** This page reflects the state once the `feature/spqr-tree` branch lands. Items that have already been closed on that branch (op-amp feedback topology extraction, BJT WDF roots, and others) have been removed from this list. On `main` today, some of those items are still in progress.
+
 PedalKernel is under active development. This page tracks the significant work items we want to take on next. It is intentionally short — the [modeling limits](./modeling-limits.md) page is a fuller accounting of known gaps.
 
 ## Modeling frontier

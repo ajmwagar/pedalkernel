@@ -7,6 +7,8 @@ weight: 90
 
 # Modeling Limits
 
+> **Preview.** The op-amp section reflects the `BlackFeedbackStage` + `NonIdealFxState` split being developed on the `feature/spqr-tree` branch. On `main` today, op-amps use the older single-path `OpAmpRoot`-in-WDF-tree approach. See [compiler internals](./compiler-internals.md) for the in-progress architecture.
+
 PedalKernel is circuit-exact where it can be and pragmatic where it has to be. This page documents where the current implementation falls short of pure component modeling, so expectations are calibrated and contributors know where to push.
 
 We keep the list honest rather than aspirational. Fixed items graduate off the list silently; they don't live here as a changelog.

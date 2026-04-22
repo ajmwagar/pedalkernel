@@ -7,6 +7,8 @@ weight: 85
 
 # Compiler Internals
 
+> **Preview.** This page describes the SPQR compiler architecture being developed on the `feature/spqr-tree` branch. Some of what is covered here — signal-flow grouping, `BlackFeedbackStage`, the unified `Vec<Stage>` — is not yet on `main`. The overall shape is stable; specific type names and file paths may move before the branch merges. Published here ahead of the merge so contributors can read along with the implementation.
+
 This page is for contributors. It documents the architecture of the compiler that lives under `pedalkernel/src/compiler/` — the data structures, the decomposition algorithm, and the routing decisions that send each part of a circuit to the right solver.
 
 If you only want the user-level story, the [how it works](./how-it-works.md) page covers it.

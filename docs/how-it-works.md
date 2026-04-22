@@ -7,6 +7,8 @@ weight: 10
 
 # How PedalKernel Works
 
+> **Preview.** The compilation pipeline described below is being developed on the `feature/spqr-tree` branch. The user-visible behaviour (parse → compile → process a sample) is unchanged on `main`; this page reflects how the engine will get there once SPQR lands. See [compiler internals](./compiler-internals.md) for full details.
+
 PedalKernel compiles your circuit description into a real-time Wave Digital Filter (WDF) engine. This page is the guide-level story. The [compiler internals](./compiler-internals.md) page goes deeper on data structures, algorithms, and routing decisions.
 
 ## The compilation pipeline
