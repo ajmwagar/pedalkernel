@@ -163,10 +163,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
+          # The action splices inputs as:
+          #   cargo-deny <arguments> <command> <command-arguments>
+          # so global flags must live in `arguments` (before the subcommand),
+          # and gate names (advisories/bans/licenses/sources) must live in
+          # `command-arguments` (after the subcommand). `check` with no
+          # positional args runs all four gates by default, so listing them
+          # is optional — kept explicit so the job log shows which gate
+          # failed without cross-referencing cargo-deny defaults.
           command: check
-          # Order matches deny.toml sections. Listing them explicitly makes
-          # it clear in the job log which gate failed.
-          arguments: --all-features advisories bans licenses sources
+          arguments: --all-features
+          command-arguments: advisories bans licenses sources
 
   # ----------------------------------------------------------------
   # Third-party attribution smoke test (cargo-about)
