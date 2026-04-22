@@ -1,0 +1,33 @@
+{{/*
+  Chapter pager — shown at the bottom of every book page.
+  Finds the current page's position in the weight-sorted list of all
+  pages under the current section and emits prev/next links.
+*/}}
+{{ $pages := sort .CurrentSection.Pages "Params.weight" "asc" }}
+{{ $cur := .RelPermalink }}
+{{ $idx := -1 }}
+{{ range $i, $p := $pages }}
+  {{ if eq $p.RelPermalink $cur }}{{ $idx = $i }}{{ end }}
+{{ end }}
+{{ if ge $idx 0 }}
+<nav class="pager" aria-label="Chapter navigation">
+  <div class="pager-cell pager-prev">
+    {{ if gt $idx 0 }}
+      {{ $prev := index $pages (sub $idx 1) }}
+      <a href="{{ $prev.RelPermalink }}">
+        <span class="pager-label">&larr; Previous</span>
+        <span class="pager-title">{{ $prev.Title }}</span>
+      </a>
+    {{ end }}
+  </div>
+  <div class="pager-cell pager-next">
+    {{ if lt $idx (sub (len $pages) 1) }}
+      {{ $next := index $pages (add $idx 1) }}
+      <a href="{{ $next.RelPermalink }}">
+        <span class="pager-label">Next &rarr;</span>
+        <span class="pager-title">{{ $next.Title }}</span>
+      </a>
+    {{ end }}
+  </div>
+</nav>
+{{ end }}
