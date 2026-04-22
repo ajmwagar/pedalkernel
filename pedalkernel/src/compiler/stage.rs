@@ -1331,6 +1331,37 @@ impl WdfStage {
                     return v;
                 }
             }
+
+            // For feedback_opamp stages (op-amp + diode clipping), extract
+            // output at the voltage source leaf. The VS represents the op-amp
+            // output — its voltage after the down-sweep is the clipped output.
+            // The root junction (a_root + b_tree) / 2 gives the virtual ground
+            // voltage which is ≈0 for inverting amps.
+            if feedback_opamp.is_some() {
+                let mut vs_out = None;
+                tree.for_each_leaf(&mut |leaf| {
+                    if leaf.type_tag() == "voltage_source" && vs_out.is_none() {
+                        // VS voltage = (a_vs + b_vs) / 2
+                        // b_vs = 2*V (set before reflected()), a_vs from down-sweep
+                        vs_out = Some(leaf.leaf_voltage());
+                    }
+                });
+                if let Some(v) = vs_out {
+                    // leaf_voltage for VS returns 0 by default — need to compute
+                    // from the incident wave. Use the series junction approach:
+                    // the VS is the first child of the Series adaptor, so its
+                    // voltage is the tree's input port voltage.
+                    if v.abs() > 1e-15 {
+                        return v;
+                    }
+                }
+                // VS leaf_voltage returned 0 — compute from wave variables.
+                // For Series(VS, pendant), the VS port voltage after scattering
+                // is vs_voltage (the value we set). The output IS vs_voltage
+                // because the op-amp enforces Vout = gain * Vin.
+                return vs_voltage;
+            }
+
             (a_root + b_tree) / 2.0
         });
 
