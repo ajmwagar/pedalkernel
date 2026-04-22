@@ -1,7 +1,8 @@
 ---
 title: "Roadmap"
-description: "Planned component types, modeling work, and pedal coverage."
-weight: 20
+description: "Where the engine is going next."
+section: "Project"
+weight: 110
 ---
 
 {{< include "ROADMAP.md" >}}

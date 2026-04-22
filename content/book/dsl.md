@@ -1,7 +1,8 @@
 ---
 title: "DSL Reference"
 description: "Syntax and semantics of .pedal and .board files."
-weight: 10
+section: "Reference"
+weight: 40
 ---
 
 {{< include "DSL.md" >}}

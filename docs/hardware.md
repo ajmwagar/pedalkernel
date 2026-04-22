@@ -1,59 +1,58 @@
-# Hardware Export & PCB Design
+# Hardware Export
 
-PedalKernel can export your circuit for physical PCB layout and generate a bill of materials. This document explains the hardware pipeline.
+A `.pedal` file is not just a simulation target. The same description drives KiCad netlists, bills of material, and voltage-safety checks, so you can go from compiled tone to a physical build without re-entering the circuit anywhere.
 
-## From tone to PCB
-
-The same `.pedal` file drives three outputs:
+## The pipeline
 
 ```
-                          +---> WDF audio engine ---> WAV / JACK real-time
-                          |
-  .pedal file ---> parse -+---> KiCad netlist ---> PCB layout
-                          |
-                          +---> Bill of Materials ---> Mouser order
+                      +---> WDF audio engine   (WAV / JACK real-time)
+                      |
+  .pedal file  ------>+---> KiCad netlist       (PCB layout)
+                      |
+                      +---> Bill of Materials   (Mouser-ready)
 ```
+
+All three outputs are generated from the same parsed `PedalDef`. Components, values, and nets are preserved exactly — there is no translation layer.
 
 ## KiCad export
 
-Every component maps to a real KiCad symbol:
+Every component in the DSL maps to a real KiCad symbol. Triodes route to the correct `Valve:ECC8x` variants, power pentodes to `Valve:6L6GC` / `Valve:EL34` / `Valve:6550`, JFETs to `Device:Q_NJFET_DGS`, and transformers to the matching `Transformer:*` symbol based on winding type. Nets are preserved by name.
 
-- **Triodes**: `Valve:ECC83` / `ECC81` / `ECC82` (maps by model)
-- **Power pentodes**: `Valve:6L6GC` / `Valve:EL34` / `Valve:6550` (by model)
-- **JFETs**: `Device:Q_NJFET_DGS`
-- **Transformers**: `Transformer:Transformer_1P_CT_1S_CT`
+```rust
+use pedalkernel::kicad;
 
-Nets are preserved exactly. Open the `.net` file in KiCad and start laying out copper.
-
-### Example: Export Klon Centaur
-
-```bash
-cargo run --example parse_pedal -- examples/pedals/overdrive/klon_centaur.pedal
+let netlist = kicad::export_kicad_netlist(&def);
+std::fs::write("circuit.net", netlist)?;
 ```
 
-This generates a `.net` file with all symbols and connections ready for PCB layout.
+Open the `.net` file in KiCad and start laying out copper.
+
+Schematic-level export (positioned symbols rather than just connectivity) lives in a sibling crate, `pedalkernel-layout`, which handles automatic placement, layering, and routing.
 
 ## Bill of materials
 
-The BOM engine maps your circuit to real parts from a curated database:
+The BOM engine maps each component to a real Mouser part number from a curated database:
 
-- Yageo metal film resistors
-- WIMA film caps
-- Nichicon electrolytics
-- Alpha pots
-- JJ Electronic tubes
-
-Generate a BOM as a Rust program:
+- **Resistors** — Yageo metal film (RC series) and carbon composition for vintage circuits
+- **Capacitors** — WIMA film, Nichicon electrolytic, ceramic disc where appropriate
+- **Potentiometers** — Alpha linear and audio taper
+- **Transistors / op-amps / ICs** — current-production replacements for vintage parts where the originals are unavailable
+- **Tubes** — JJ Electronic for common preamp and power types
 
 ```rust
-let bom = pedalkernel::hw::build_bom(&pedal, None);
-print!("{}", pedalkernel::hw::format_bom_table(&pedal.name, &bom, 1));
-// -> Mouser P/Ns, quantities, descriptions, ready to order
+use pedalkernel::hw;
+
+let bom = hw::build_bom(&def, None);
+print!("{}", hw::format_bom_table(&def.name, &bom, 1));
 ```
 
-## Hardware specs (`.pedalhw` files)
+The `hardware` feature must be enabled in `Cargo.toml` to use `pedalkernel::hw`.
 
-For builders who need to know if a part will survive the voltage. Declare real specs alongside your circuit:
+There is also a Python tool under [`tools/mouser_bom.py`](./tools.md) that reads a `.pedal` file directly and emits a CSV ready to upload to Mouser.
+
+## Voltage safety (`.pedalhw` files)
+
+Running a circuit in a simulator tolerates voltages that a real build cannot. A `.pedalhw` file sits next to a `.pedal` file and declares the part numbers and voltage ratings that constrain the physical implementation:
 
 ```
 # fuzz_face.pedalhw
@@ -62,27 +61,15 @@ Q2: vce_max(32) part("AC128")
 C2: voltage_rating(16)
 ```
 
-Run voltage compatibility checks before you power anything up:
+The voltage checker reads this against a planned supply rail and returns warnings:
 
 ```rust
-let warnings = pedalkernel::hw::check_voltage_with_specs(&pedal, 18.0, &limits);
+use pedalkernel::hw;
+
+let warnings = hw::check_voltage_with_specs(&def, 18.0, &limits);
 // [Danger] Q1: Germanium transistor exceeds Vce(max) 32V at 18V
 // [Info]   V1: Tube needs 150-400V plate supply; at 18V the WDF model
 //              runs fine but a physical build needs a B+ supply
 ```
 
-Without a `.pedalhw` file, heuristic checks still catch obvious problems:
-
-- Germanium transistors in fuzz circuits above 12V
-- Undersized electrolytic caps
-- Tubes at pedal voltages
-
-## Context: `.pedalhw` vs UI manifests
-
-Note on file types:
-
-- **`.pedal`** is **circuit-only** (signal path + parameter mapping to pots/switches).
-- **`.pedalhw`** is **hardware/skin metadata** (e.g., parts specs, faceplate/finish in the pro toolchain).
-- **UI manifests** (JSON) are in `pedalkernel-vst/ui/` for non-secret control-surface metadata (labels, knob/switch list, enclosure preset).
-
-The pro pipeline may merge `.pedalhw` + UI manifest + internal assets when generating final branded skins.
+Without a `.pedalhw` file, heuristic checks still catch common mistakes: germanium transistors in fuzz circuits above 12 V, undersized electrolytic caps, tubes running at pedal voltages.

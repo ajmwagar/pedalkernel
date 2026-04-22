@@ -1,23 +1,27 @@
 # Performance & benchmarks
 
-PedalKernel circuits are designed for real-time performance. This page shows actual CPU usage and scaling behavior.
+PedalKernel circuits are designed for real-time performance. This page shows indicative CPU usage and scaling behavior.
+
+Numbers should be read as order-of-magnitude, not promises. They depend on the host CPU, compile flags, sample rate, and how the circuit is cascaded. Run `cargo bench --bench wdf_bench` on your machine for the authoritative measurement.
 
 ## Pedal benchmarks
 
-All pedals run comfortably in real-time. Measurements on an Apple M-series chip at 48 kHz:
+Measurements on an Apple M-series chip at 48 kHz, with default compile options (no oversampling, ideal tolerance):
 
 | Pedal | CPU Budget | Samples/sec | Realtime × |
 |-------|------------|-------------|------------|
-| Tube Screamer | 1.2% | 3.8M | 80× |
-| Big Muff | 1.7% | 2.8M | 59× |
 | Fuzz Face | 0.04% | 122M | 2500× |
-| Blues Driver | 5.9% | 818K | 17× |
-| Dyna Comp | 0.4% | 12M | 252× |
-| Klon Centaur | 1.4% | 3.5M | 72× |
 | ProCo RAT | 0.3% | 16M | 330× |
+| Dyna Comp | 0.4% | 12M | 252× |
 | Boss CE-2 (BBD) | 0.5% | 9.9M | 207× |
+| Tube Screamer | 1.2% | 3.8M | 80× |
+| Klon Centaur | 1.4% | 3.5M | 72× |
+| Big Muff | 1.7% | 2.8M | 59× |
+| Blues Driver | 5.9% | 818K | 17× |
 
-**CPU Budget** = fraction of real-time budget consumed. Under 100% means glitch-free audio.
+**CPU Budget** = fraction of the real-time budget consumed. Under 100% means glitch-free audio.
+
+Pedals not shown in the table (SD1, Fulltone OCD, Boss DM-2, Memory Man, Phase 90, and the tube amps and synth modules) have not been benchmarked in this pass but fall within the same envelope.
 
 ## FLOPS breakdown
 

@@ -1,110 +1,85 @@
-# Rust API Reference
+# Rust API
 
-PedalKernel exposes a clean Rust API for parsing, compiling, and running circuits.
+The full API reference — every public type, function, and module — is generated from the source and lives at **[/api/pedalkernel/](/api/pedalkernel/)**. This page is a primer that points at the handful of entry points most consumers need.
 
-## Basic usage
+## Getting a pedal from a `.pedal` file
 
 ```rust
-use pedalkernel::{dsl, compiler, kicad};
+use pedalkernel::{dsl, compiler, PedalProcessor};
 
-// Parse a .pedal file
 let src = std::fs::read_to_string("tube_screamer.pedal")?;
-let pedal = dsl::parse_pedal_file(&src)?;
-
-// Compile to WDF
-let mut proc = compiler::compile_pedal(&pedal, 48000.0)?;
-
-// Process audio samples
-proc.set_control("Drive", 0.7);
-let output = proc.process(input_sample);
-
-// Export for PCB
-let netlist = kicad::export_kicad_netlist(&pedal);
+let def = dsl::parse_pedal_file(&src)?;
+let mut pedal = compiler::compile_pedal(&def, 48_000.0)?;
 ```
 
-## DSL parsing
+`dsl::parse_pedal_file` returns a `PedalDef` — the parsed AST of a `.pedal` or `.board` file. `compiler::compile_pedal` turns that AST into a runnable `CompiledPedal`. Compilation does all the graph reduction, WDF tree construction, and solver warm-up; after it returns, every `process` call runs with zero allocation.
+
+## Processing audio
 
 ```rust
-use pedalkernel::dsl;
-
-let src = r#"
-  pedal "Tube Screamer" {
-    components { ... }
-    nets { ... }
-    controls { ... }
-  }
-"#;
-
-let pedal = dsl::parse_pedal_file(src)?;
+pedal.set_control("Drive", 0.7);
+let y = pedal.process(x);
 ```
 
-The parser returns a `Pedal` struct with components, nets, and control mappings. All component values are validated during parsing.
+`set_control` accepts the names declared in the `controls { ... }` block of the `.pedal` file. Values are in the range each control declares. `process` consumes one input sample and returns one output sample.
 
-## Compilation
+## Physical realism
+
+The default `compile_pedal` function uses sensible defaults (no oversampling, ideal component tolerances, no thermal drift). To enable any of these, compile with `compile_pedal_with_options`:
 
 ```rust
-use pedalkernel::compiler;
+use pedalkernel::compiler::{compile_pedal_with_options, CompileOptions};
+use pedalkernel::oversampling::OversamplingFactor;
+use pedalkernel::tolerance::{ToleranceEngine, ToleranceGrade};
 
-let mut proc = compiler::compile_pedal(&pedal, 48000.0)?;
-
-// Run at a different sample rate
-let mut proc_96k = compiler::compile_pedal(&pedal, 96000.0)?;
+let options = CompileOptions {
+    oversampling: OversamplingFactor::X4,
+    tolerance: ToleranceEngine::with_grades(
+        42,
+        ToleranceGrade::Standard,
+        ToleranceGrade::Loose,
+    ),
+    thermal: true,
+};
+let mut pedal = compile_pedal_with_options(&def, 48_000.0, options)?;
 ```
 
-The compiler generates a `Processor` that can run in real-time. Each call to `.process()` does exactly one WDF solve cycle.
+See the [physical realism guide](./physical-realism.md) for what each option does.
 
-## Control and processing
+## Pedalboards
+
+`pedalkernel::pedalboard` lets you chain multiple pedals and configure the impedance interaction between them. Interstage loading is configured on the board, not on any individual pedal:
 
 ```rust
-// Set a named control
-proc.set_control("Drive", 0.7);   // Range: [0.0, 1.0]
+use pedalkernel::loading::ImpedanceModel;
 
-// Process one sample
-let y = proc.process(x);
-
-// Batch process
-let output: Vec<f32> = input
-    .iter()
-    .map(|&sample| proc.process(sample))
-    .collect();
+board.set_interstage_loading(
+    0, // junction between pedal 0 and pedal 1
+    ImpedanceModel::guitar_pickup(),
+    ImpedanceModel::low_z_input(),
+    48_000.0,
+);
 ```
 
-## Hardware export (requires `hardware` feature)
+## Hardware export
+
+With the `hardware` feature enabled:
 
 ```rust
-use pedalkernel::hw;
+use pedalkernel::{hw, kicad};
 
-// Build BOM
-let bom = hw::build_bom(&pedal, None);
-println!("{}", hw::format_bom_table(&pedal.name, &bom, 1));
+let bom = hw::build_bom(&def, None);
+println!("{}", hw::format_bom_table(&def.name, &bom, 1));
 
-// Check voltage safety
-let warnings = hw::check_voltage_with_specs(&pedal, 18.0, &limits);
-for w in warnings {
-    println!("{:?}", w);
-}
-```
-
-## KiCad export
-
-```rust
-use pedalkernel::kicad;
-
-let netlist = kicad::export_kicad_netlist(&pedal);
+let warnings = hw::check_voltage_with_specs(&def, 18.0, &limits);
+let netlist = kicad::export_kicad_netlist(&def);
 std::fs::write("circuit.net", netlist)?;
 ```
 
-The netlist is compatible with KiCad's native format. Open it in the layout tool to start designing PCBs.
+See [Hardware export](./hardware.md) for the larger story.
 
-## Built-in pedals (no DSL required)
+## Where to go next
 
-For quick testing, PedalKernel includes precompiled pedal models:
-
-```rust
-// Instantiate a built-in Overdrive
-let mut od = pedalkernel::pedals::Overdrive::new(48000.0);
-od.set_gain(0.7);
-let output = od.process(input_sample);
-```
-
-This skips parsing and compilation entirely -- useful for benchmarking or when you don't need customization.
+- **[/api/pedalkernel/](/api/pedalkernel/)** — the full type-level reference.
+- **[/api/pedalkernel_layout/](/api/pedalkernel_layout/)** — schematic layout engine.
+- **[/api/pedalkernel_validate/](/api/pedalkernel_validate/)** — SPICE validation harness.

@@ -1,7 +1,8 @@
 ---
 title: "Contributing"
-description: "How to contribute to pedalkernel."
-weight: 30
+description: "How to contribute to PedalKernel."
+section: "Project"
+weight: 120
 ---
 
 {{< include "CONTRIBUTING.md" >}}
