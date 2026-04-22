@@ -48,24 +48,62 @@ pub(in crate::compiler) fn extract_opamp_config(
         .ok_or("VCVS component has no op_amp_type")?;
     let model = OpAmpModel::from_opamp_type(&op_type);
 
-    // Rf: sum resistance of feedback_edges (already classified by feedback.rs)
-    let rf: f64 = group
-        .feedback_edges
-        .iter()
-        .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
-        .sum();
-
-    // Ri: sum resistance of pendant_edges (input coupling)
-    let ri: f64 = if !group.pendant_edges.is_empty() {
-        group
-            .pendant_edges
+    // For non-inverting topology, both Rf and Ri are in the feedback group
+    // (Rf: neg→out, Ri: neg→GND). We must distinguish them by checking
+    // which node is GND. For inverting, Ri comes from pendant_edges.
+    let (rf, ri) = if inverting {
+        // Inverting: Rf = feedback_edges, Ri = pendant_edges
+        let rf: f64 = group
+            .feedback_edges
             .iter()
             .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
-            .sum::<f64>()
+            .sum();
+        let ri: f64 = if !group.pendant_edges.is_empty() {
+            group
+                .pendant_edges
+                .iter()
+                .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
+                .sum::<f64>()
+        } else {
+            f64::INFINITY
+        };
+        (rf, ri)
     } else {
-        f64::INFINITY
+        // Non-inverting: split feedback_edges into Rf (neg→out) and Ri (neg→GND).
+        // An edge touches GND if either of its nodes is the ground node or an AC ground.
+        // Non-inverting: Rf is between neg and out (feedback_edges).
+        // Ri is between neg and GND — may be in feedback_edges, pendant_edges,
+        // or unclassified (just in the group's all_edges).
+        // Strategy: Rf = feedback edges NOT touching GND.
+        //           Ri = any group edge touching GND with resistance.
+        let rf_sum: f64 = group
+            .feedback_edges
+            .iter()
+            .filter_map(|&eidx| {
+                let e = &graph.edges[eidx];
+                let touches_gnd = e.node_a == graph.gnd_node
+                    || e.node_b == graph.gnd_node
+                    || graph.ac_ground_nodes.contains(&e.node_a)
+                    || graph.ac_ground_nodes.contains(&e.node_b);
+                if touches_gnd { None } else { graph.components[e.comp_idx].kind.resistance() }
+            })
+            .sum();
+
+        let ri_sum: f64 = group
+            .all_edges()
+            .iter()
+            .filter_map(|&eidx| {
+                let e = &graph.edges[eidx];
+                let touches_gnd = e.node_a == graph.gnd_node
+                    || e.node_b == graph.gnd_node
+                    || graph.ac_ground_nodes.contains(&e.node_a)
+                    || graph.ac_ground_nodes.contains(&e.node_b);
+                if touches_gnd { graph.components[e.comp_idx].kind.resistance() } else { None }
+            })
+            .sum();
+        (rf_sum, ri_sum)
     };
-    // If pendant edges have no resistance (all caps?), fall back to infinity
+    // If no Ri found, gain = 1 (voltage follower)
     let ri = if ri <= 0.0 { f64::INFINITY } else { ri };
 
     let gain = if ri.is_infinite() {
