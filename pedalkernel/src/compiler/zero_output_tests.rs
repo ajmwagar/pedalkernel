@@ -256,6 +256,72 @@ fn minimal_opamp_with_input_network_produces_audio() {
 }
 
 #[test]
+fn screamer_clipping_stage_has_gain() {
+    // The screamer's clipping stage (General: vcvs=1, nl=1) should AMPLIFY,
+    // not attenuate by 5000x. The build_opamp_nl_feedback function creates
+    // an OpAmpRoot from Rf/Ri — if Ri is wrong, gain is wrong.
+    let pedal = load_legend("screamer");
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+
+    // Find the clipping group (has VCVS + NL)
+    let clip_group = groups.iter().find(|g| {
+        g.active_edges.iter().any(|&eidx| {
+            graph.effective_edge_kind(eidx) == super::component::EdgeKind::Nonlinear
+        }) && g.active_edges.iter().any(|&eidx| {
+            graph.effective_edge_kind(eidx) == super::component::EdgeKind::Vcvs
+        })
+    });
+
+    if let Some(group) = clip_group {
+        let active_names: Vec<String> = group.active_edges.iter().map(|&eidx| {
+            format!("{}({:?})", graph.components[graph.edges[eidx].comp_idx].id,
+                graph.effective_edge_kind(eidx))
+        }).collect();
+        let feedback_names: Vec<String> = group.feedback_edges.iter().map(|&eidx| {
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            format!("{}(R={:?})", comp.id, comp.kind.resistance())
+        }).collect();
+        let pendant_names: Vec<String> = group.pendant_edges.iter().map(|&eidx| {
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            format!("{}(R={:?})", comp.id, comp.kind.resistance())
+        }).collect();
+        let ground_names: Vec<String> = group.ground_shunt_edges.iter().map(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id.clone()
+        }).collect();
+
+        eprintln!("Screamer clipping group:");
+        eprintln!("  active: {:?}", active_names);
+        eprintln!("  feedback: {:?}", feedback_names);
+        eprintln!("  pendant: {:?}", pendant_names);
+        eprintln!("  ground_shunt: {:?}", ground_names);
+
+        // Pendant edges are Ri (input coupling). Should have resistance.
+        let ri: f64 = group.pendant_edges.iter()
+            .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
+            .sum();
+        let rf: f64 = group.feedback_edges.iter()
+            .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
+            .sum();
+
+        eprintln!("  Ri={ri:.0}, Rf={rf:.0}, gain={:.1}", rf / ri.max(1.0));
+
+        assert!(ri > 0.0, "Screamer clipping stage needs Ri > 0 for gain calculation");
+        assert!(rf > 0.0, "Screamer clipping stage needs Rf > 0 for gain calculation");
+        let gain = rf / ri;
+        assert!(gain > 1.0, "Screamer clipping stage should have gain > 1, got {gain:.2}");
+    } else {
+        panic!("No clipping group found in screamer");
+    }
+}
+
+#[test]
 fn pot_with_output_passives_produces_audio() {
     // Volume pot + output coupling cap + load resistors.
     // This is the screamer's Level group pattern.
@@ -359,6 +425,7 @@ fn opamp_into_tone_stack_into_volume_produces_audio() {
         }
     }
 
+    // Remove the detailed edge debug output for cleanliness
     eprintln!("Opamp+tone+vol: wdf={}, iir={}, ss={}, order={:?}",
         compiled.stages.len(), compiled.iir_stages.len(),
         compiled.state_space_stages.len(), compiled.stage_order);

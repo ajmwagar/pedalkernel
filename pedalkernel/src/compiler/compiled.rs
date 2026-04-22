@@ -2030,6 +2030,18 @@ impl PedalProcessor for CompiledPedal {
                         }
                     }
 
+                    #[cfg(test)]
+                    {
+                        static WDF_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                        if stage_input.abs() > 1e-10 {
+                            let n = WDF_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if n < 10 {
+                                eprintln!("  [WDF {}] in={:.6e} out={:.6e} comp={}",
+                                    wdf_stage_counter, stage_input, stage_output, stage.root_comp_id);
+                            }
+                        }
+                    }
+
                     #[cfg(feature = "debug-trace")]
                     if trace_on {
                         eprintln!(
