@@ -61,3 +61,5 @@ mod graph_role_tests;
 mod nonideal_tests;
 #[cfg(test)]
 mod split_point_tests;
+#[cfg(test)]
+mod pot_sweep_tests;
