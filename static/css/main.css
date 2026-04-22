@@ -491,23 +491,152 @@ body.page main {
   line-height: 1.5;
 }
 
-@media (max-width: 560px) {
+@media (max-width: 640px) {
+  /* ---------- header: compact, no more three-row column stack ---------- */
+  .site-header {
+    padding: 0.6rem 0.9rem;
+    /* Drop sticky on mobile — a tall sticky header ate too much viewport.
+       A flick to the top is cheap; stealing 20-30% of the screen isn't. */
+    position: static;
+    backdrop-filter: none;
+  }
+  .site-header nav {
+    flex-wrap: wrap;
+    gap: 0.55rem 1rem;
+    align-items: center;
+  }
+  .site-header .brand {
+    font-size: 0.92rem;
+    flex: 0 0 auto;
+  }
+  .site-header ul {
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    font-size: 0.85rem;
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+  /* Search wraps to its own row, full width. The widget shrinks with
+     --pagefind-ui-scale so its input is finger-sized without dominating
+     the viewport. */
+  .site-search {
+    flex: 1 0 100%;
+    min-width: 0;
+    max-width: none;
+    margin: 0;
+    --pagefind-ui-scale: 0.82;
+  }
+
+  /* ---------- main content: reclaim horizontal space ---------- */
+  body.home main {
+    padding: 2rem 1rem 1.5rem;
+  }
+  body.page main {
+    padding: 1.5rem 1rem 2.5rem;
+  }
+
+  /* ---------- landing ---------- */
+  .hero { margin-bottom: 1.5rem; }
+  .hero h1 { font-size: 1.55rem; }
+  .hero .tagline { font-size: 0.95rem; }
+  .card {
+    padding: 1rem 1.1rem;
+  }
+  .card-name { font-size: 1rem; }
+  .card-desc { font-size: 0.9rem; }
+  .cards { gap: 0.7rem; }
+
+  /* ---------- book TOC ---------- */
+  .page-list h2 {
+    font-size: 0.76rem;
+    margin: 1.4rem 0 0.5rem;
+  }
+  .page-list li {
+    padding: 0.55rem 0;
+    font-size: 0.95rem;
+  }
+  .page-list a { font-size: 0.95rem; }
+  .page-list-desc {
+    display: block;
+    margin: 0.15rem 0 0;
+    font-size: 0.85rem;
+  }
+  .preview-badge {
+    font-size: 0.58rem;
+    letter-spacing: 0.1em;
+    padding: 0.08rem 0.4rem;
+  }
+
+  /* ---------- prose pages ---------- */
+  .prose h1, .prose > h1 { font-size: 1.45rem; }
+  .prose h2 {
+    font-size: 1.15rem;
+    margin: 1.8rem 0 0.6rem;
+  }
+  .prose h3 {
+    font-size: 1.02rem;
+    margin: 1.4rem 0 0.4rem;
+  }
+  .prose p { margin: 0.7rem 0; }
+  .prose ul, .prose ol { padding-left: 1.2rem; }
+  .prose pre {
+    padding: 0.8rem 0.9rem;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    /* Keep code on its own scroll rail so long lines don't break layout. */
+    margin-left: -0.3rem;
+    margin-right: -0.3rem;
+    border-radius: 4px;
+  }
+  .prose code {
+    font-size: 0.88em;
+    word-break: break-word;
+  }
+  /* Tables: turn into horizontally-scrollable blocks so multi-column
+     content stays readable instead of squishing into 4-char cells. */
+  .prose table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    font-size: 0.85rem;
+  }
+  .prose th, .prose td {
+    padding: 0.4rem 0.6rem;
+    white-space: nowrap;
+  }
+  .prose blockquote {
+    margin: 0.8rem -0.3rem;
+    padding: 0.5rem 0.9rem;
+    font-size: 0.92rem;
+  }
+
+  /* ---------- freshness badge ---------- */
+  .doc-freshness {
+    padding: 0.7rem 0.9rem;
+    font-size: 0.82rem;
+  }
+
+  /* ---------- pager: stack both cells vertically ---------- */
   .pager {
     grid-template-columns: 1fr;
+    margin-top: 2rem;
+    padding-top: 1.2rem;
   }
   .pager-cell-next { justify-content: flex-start; }
   .pager-card-next { text-align: left; }
-}
 
-/* ---------- responsive ---------- */
-
-@media (max-width: 560px) {
-  .site-header nav {
-    flex-direction: column;
-    gap: 0.6rem;
-    align-items: flex-start;
+  /* ---------- preview callout on the book index ---------- */
+  .preview-callout {
+    font-size: 0.85rem;
+    padding: 0.6rem 0.9rem;
   }
-  .hero h1 { font-size: 1.6rem; }
-  body.home main,
-  body.page main { padding-top: 2rem; }
+
+  /* ---------- footer ---------- */
+  .site-footer {
+    padding: 1.2rem 0.9rem;
+    font-size: 0.8rem;
+  }
 }
+
