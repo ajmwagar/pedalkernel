@@ -82,6 +82,23 @@ pub enum PinDirection {
 
 /// Component-declared non-ideal behavior applied as post-processing.
 ///
+/// Output impedance classification for stage-splitting decisions.
+///
+/// Determines where the compiler can safely split the circuit into
+/// independent stages. Based on Harold Black's observation: a negative
+/// feedback amplifier's output is a voltage source (zero impedance),
+/// so downstream loads don't affect upstream behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputImpedance {
+    /// Zero output impedance — this node is a voltage source.
+    /// Safe to split the circuit after this component's output pin.
+    /// Op-amp outputs, unity-gain buffers, ideal voltage sources.
+    VoltageSource,
+    /// Finite or high output impedance — splitting here changes the circuit.
+    /// Resistors, caps, inductors, BJT collectors, JFET drains, diodes.
+    Finite,
+}
+
 /// Non-ideal behavior declared by a component (from its datasheet/SPICE model).
 ///
 /// Each variant is a distinct physical effect. A component returns a `Vec` of
@@ -390,6 +407,18 @@ pub trait Component: std::fmt::Debug {
     }
 
     // ── Signal Flow ──────────────────────────────────────────────────────
+
+    /// Output impedance at this component's output pin.
+    ///
+    /// `VoltageSource` means the output node voltage is determined entirely
+    /// by the component (via feedback), independent of downstream load.
+    /// The compiler can safely split the circuit at these nodes.
+    ///
+    /// `Finite` (default) means splitting here would change impedances
+    /// and break the transfer function.
+    fn output_impedance(&self) -> OutputImpedance {
+        OutputImpedance::Finite
+    }
 
     /// Signal flow classification for this component's pins.
     ///

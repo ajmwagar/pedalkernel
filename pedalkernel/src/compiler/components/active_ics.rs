@@ -45,6 +45,16 @@ impl Component for OpAmp {
         }
     }
 
+    fn output_impedance(&self) -> crate::compiler::component::OutputImpedance {
+        if self.op_type.is_ota() {
+            // OTA output is a current source (high impedance)
+            crate::compiler::component::OutputImpedance::Finite
+        } else {
+            // Op-amp output is a voltage source (zero impedance via feedback)
+            crate::compiler::component::OutputImpedance::VoltageSource
+        }
+    }
+
     fn nonideal_fx(&self, _sample_rate: f64) -> Vec<NonIdealFx> {
         if self.op_type.is_ota() {
             return Vec::new(); // OTA non-idealities handled differently
