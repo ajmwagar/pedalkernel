@@ -189,8 +189,16 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
 
     for rec in &graph.nullor_pins {
         if rec.comp_idx == edge.comp_idx {
-            return rec.pos_node == graph.gnd_node
-                || graph.ac_ground_nodes.contains(&rec.pos_node);
+            // Inverting if V+ is at AC ground: GND, AC ground node, or a
+            // bias point that reaches GND through a capacitor (voltage
+            // divider bias networks are AC ground by definition).
+            if rec.pos_node == graph.gnd_node
+                || graph.ac_ground_nodes.contains(&rec.pos_node)
+            {
+                return true;
+            }
+
+            return false; // pos is a signal input → non-inverting
         }
     }
 
