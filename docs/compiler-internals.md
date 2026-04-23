@@ -3,7 +3,7 @@ title: "Compiler internals"
 description: "SPQR decomposition, stage routing, and the compiler passes that turn a .pedal file into a runnable processor."
 section: "Internals"
 weight: 85
-source_commit: "2cafa26fe49ea6ad3d1ccf9f52401060c4ae1ea2"
+source_commit: "95744ce1cdd9c2cdec3550bfdce9879b1737312c"
 preview: true
 watches:
   - pedalkernel/src/compiler/mod.rs
@@ -27,7 +27,7 @@ If you only want the user-level story, the [how it works](./how-it-works.md) pag
 Every guitar circuit is a graph of components. Solving audio through it in real time means turning that graph into something a computer can evaluate per sample. There are two classic approaches:
 
 - **Matrix solvers** (MNA, state-space) treat the whole circuit as one system of equations. General but slow — each sample is an `O(n³)` factorization or an `O(n²)` multiply.
-- **Wave digital filters** trade generality for speed. A series/parallel tree of 2-port adaptors evaluates in `O(n)` per sample, and nonlinearities live at the tree's root where a cheap Newton-Raphson solves a scalar equation.
+- **Wave digital filters** trade generality for speed. A series/parallel tree of 2-port adaptors evaluates in `O(n)` per sample, and nonlinearities live at the tree's root where a scalar equation solves (Wright Omega for diodes and zeners — explicit, no iteration — Newton-Raphson for tubes and BJTs).
 
 Real pedal circuits are *mostly* series-parallel but not entirely. An op-amp with feedback, a differential pair, a bridged-T filter — these are irreducible by pure series/parallel reduction. The compiler's job is to find the biggest series-parallel subtrees it can, peel them off, and hand the remaining rigid pieces to a matrix solver.
 
@@ -154,7 +154,7 @@ pub(super) enum Stage {
 
 When each fires:
 
-- **`Wdf`** — an SPQR tree that terminates in at least one nonlinear root (diode, JFET, MOSFET, tube, BJT, zener, OTA). Per-sample solver: scatter up → Newton-Raphson root solve → scatter down → state update.
+- **`Wdf`** — an SPQR tree that terminates in at least one nonlinear root (diode, JFET, MOSFET, tube, BJT, zener, OTA). Per-sample solver: scatter up → root solve (Wright Omega for diodes and zeners, Newton-Raphson for everything else) → scatter down → state update. Clipping stages specifically use an `OpAmpWdfAdaptor` that feeds input coupling (`zi`) and feedback impedance (`zf`) into an `OpAmpRoot` so gain emerges from the `Zf / Zi` ratio instead of a precomputed scalar.
 - **`Iir`** — a purely linear series-parallel network. The compiler converts passive tone stacks, filters, and coupling networks into biquad or higher-order cascades when no nonlinearity is present. Much faster than running them as WDF trees.
 - **`StateSpace`** — a linear rigid subgraph. `y = Cx + Du; x' = Ax + Bu`. Good for small matrix subcircuits like some high-order filters and multi-feedback networks.
 - **`MultiNl`** — a rigid nonlinear subgraph where multiple nonlinear devices interact and cannot be factored into independent roots (e.g. a differential pair of BJTs with shared tail current). One Newton-Raphson over a small state vector.

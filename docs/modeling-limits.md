@@ -3,7 +3,7 @@ title: "Modeling limits"
 description: "Where PedalKernel is pure WDF, where it approximates, and why."
 section: "Internals"
 weight: 90
-source_commit: "2cafa26fe49ea6ad3d1ccf9f52401060c4ae1ea2"
+source_commit: "95744ce1cdd9c2cdec3550bfdce9879b1737312c"
 preview: true
 watches:
   - pedalkernel/src/compiler/stage.rs
@@ -27,7 +27,7 @@ These are compiled through the Wave Digital Filter tree and solved per-sample.
 | Element | Model |
 |---|---|
 | Resistor, capacitor, inductor, potentiometer | Textbook one-port adaptors |
-| Diode, diode pair, zener | WDF root, Newton-Raphson Shockley (per-device Is/n) |
+| Diode, diode pair, zener | WDF root, Wright Omega explicit solver (per-device Is/n, no iteration) |
 | NPN / PNP BJT | WDF root, Newton-Raphson Ebers-Moll or Gummel-Poon (feature-gated) |
 | N- / P- JFET | WDF root, square-law |
 | N- / P- MOSFET | WDF root, square-law |
