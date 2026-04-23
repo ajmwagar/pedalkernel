@@ -268,7 +268,11 @@ fn hard_clip_diodes_to_ground_both_directions() {
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
-    let (pos_peak, neg_peak) = measure_peaks(&mut compiled, 0.05, 2000, 500);
+    // Dump per-stage metering to see what each stage does
+    dump_stage_metering(&mut compiled, 0.05, 2000, 2000);
+
+    let mut compiled2 = compile_via_spqr(&pedal, SR).expect("compile");
+    let (pos_peak, neg_peak) = measure_peaks(&mut compiled2, 0.05, 2000, 500);
 
     eprintln!("Hard clip to GND: pos_peak={pos_peak:.4}V, neg_peak={neg_peak:.4}V");
 

@@ -55,6 +55,16 @@ pub(super) fn classify_group_bias(
     group: &FlowGroup,
     graph: &CircuitGraph,
 ) -> GroupBiasKind {
+    // A group with any nonlinear edge is NEVER static bias.
+    // Diodes/transistors to ground are signal clippers, not DC references.
+    let has_nonlinear = group.all_edges().iter().any(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        comp.kind.is_nonlinear()
+    });
+    if has_nonlinear {
+        return GroupBiasKind::SignalPath;
+    }
+
     let rail_set = build_rail_set(graph);
 
     // Collect all nodes this group touches.
