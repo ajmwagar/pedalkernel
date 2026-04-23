@@ -681,6 +681,10 @@ pub(super) struct WdfStage {
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
     #[cfg(debug_assertions)]
     pub(super) debug_label: String,
+    /// When true, this stage is not on the audio signal path (e.g. bias
+    /// network). It still processes and meters, but its output does NOT
+    /// overwrite the serial audio chain signal.
+    pub(super) bypass_serial: bool,
     /// Inter-stage voltage gain from a transformer boundary.
     /// When the stage's injection node is on a transformer secondary,
     /// this is 1/turns_ratio (e.g., 17.0 for a 1:17 step-up).
@@ -821,6 +825,7 @@ impl WdfStage {
             signal_flow_distance: 0,
             #[cfg(debug_assertions)]
             debug_label: String::new(),
+            bypass_serial: false,
             transformer_gain: 1.0,
             injection_node_id: usize::MAX,
             output_node_id: usize::MAX,
@@ -2870,6 +2875,10 @@ pub(super) struct MultiNlStage {
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
     #[cfg(debug_assertions)]
     pub(super) debug_label: String,
+    /// When true, this stage is not on the audio signal path (e.g. bias
+    /// network). It still processes and meters, but its output does NOT
+    /// overwrite the serial audio chain signal.
+    pub(super) bypass_serial: bool,
     /// Inter-stage voltage gain from a transformer boundary.
     pub(super) transformer_gain: f64,
     /// Circuit graph node ID (for debug routing).
@@ -3133,6 +3142,10 @@ pub(super) struct IirStage {
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
     #[cfg(debug_assertions)]
     pub(super) debug_label: String,
+    /// When true, this stage is not on the audio signal path (e.g. bias
+    /// network). It still processes and meters, but its output does NOT
+    /// overwrite the serial audio chain signal.
+    pub(super) bypass_serial: bool,
     /// Component-declared non-idealities applied after IIR computation.
     pub(super) nonideal_fx: Vec<super::component::NonIdealFx>,
     /// Pot bindings for runtime coefficient recomputation.
@@ -3163,6 +3176,7 @@ impl IirStage {
             signal_flow_distance: 0,
             #[cfg(debug_assertions)]
             debug_label: String::new(),
+            bypass_serial: false,
             nonideal_fx: Vec::new(),
             pot_bindings: Vec::new(),
             sample_rate,
@@ -3295,6 +3309,10 @@ pub(super) struct BlackFeedbackStage {
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
     #[cfg(debug_assertions)]
     pub(super) debug_label: String,
+    /// When true, this stage is not on the audio signal path (e.g. bias
+    /// network). It still processes and meters, but its output does NOT
+    /// overwrite the serial audio chain signal.
+    pub(super) bypass_serial: bool,
     /// Pot component ID bound to Rf (if any). Set at compile time.
     pub(super) pot_comp_id: Option<String>,
     /// Maximum pot resistance (Ohms). Position 1.0 = this value.
@@ -3327,6 +3345,7 @@ impl BlackFeedbackStage {
             signal_flow_distance: 0,
             #[cfg(debug_assertions)]
             debug_label: String::new(),
+            bypass_serial: false,
             pot_comp_id: None,
             pot_max_r: 0.0,
         }
@@ -3407,6 +3426,10 @@ pub(super) struct StateSpaceStage {
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
     #[cfg(debug_assertions)]
     pub(super) debug_label: String,
+    /// When true, this stage is not on the audio signal path (e.g. bias
+    /// network). It still processes and meters, but its output does NOT
+    /// overwrite the serial audio chain signal.
+    pub(super) bypass_serial: bool,
     /// Supply voltage for rail saturation.
     pub(super) supply_voltage: f64,
 }
@@ -3421,6 +3444,7 @@ impl StateSpaceStage {
             signal_flow_distance: 0,
             #[cfg(debug_assertions)]
             debug_label: String::new(),
+            bypass_serial: false,
             supply_voltage,
         }
     }

@@ -775,6 +775,7 @@ fn assemble_multi_nl_stage(
         signal_flow_distance: 0,
         #[cfg(debug_assertions)]
         debug_label: String::new(),
+        bypass_serial: false,
         transformer_gain: 1.0,
         injection_node_id: graph.in_node,
         output_node_id: graph.out_node,

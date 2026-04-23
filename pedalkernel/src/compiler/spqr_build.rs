@@ -113,6 +113,13 @@ pub fn compile_via_spqr_with_options(
     // tone third, etc.) regardless of the order find_flow_groups returned them.
     let group_flow_distances = compute_group_flow_distances(&feedback_groups, &graph);
 
+    // Step 1c: Classify each group as signal path or static bias.
+    // Static bias groups (VCC dividers) are bypassed in the serial audio
+    // chain — they still process and meter, but don't overwrite the signal.
+    let group_bias: Vec<_> = feedback_groups.iter()
+        .map(|g| super::bias_analysis::classify_group_bias(g, &graph))
+        .collect();
+
     // Step 2: SPQR decompose each group independently.
     let terminals = vec![graph.in_node, graph.out_node];
     let mut stages: Vec<Stage> = Vec::new();
@@ -120,35 +127,41 @@ pub fn compile_via_spqr_with_options(
     // Helper: push a BuiltStage into the unified stages vec.
     // `flow_distance` comes from BFS-computed signal flow distance.
     // `label` is the debug component names (zero cost in release).
+    // `bypass` is true for static bias groups (not on audio path).
     macro_rules! push_stage {
-        ($built:expr, $flow_distance:expr, $label:expr) => {
+        ($built:expr, $flow_distance:expr, $label:expr, $bypass:expr) => {
             match $built {
                 BuiltStage::Wdf(mut wdf) => {
                     wdf.signal_flow_distance = $flow_distance;
+                    wdf.bypass_serial = $bypass;
                     #[cfg(debug_assertions)]
                     { wdf.debug_label = $label; }
                     stages.push(Stage::Wdf(wdf));
                 }
                 BuiltStage::Iir(mut iir) => {
                     iir.signal_flow_distance = $flow_distance;
+                    iir.bypass_serial = $bypass;
                     #[cfg(debug_assertions)]
                     { iir.debug_label = $label; }
                     stages.push(Stage::Iir(iir));
                 }
                 BuiltStage::StateSpace(mut ss) => {
                     ss.signal_flow_distance = $flow_distance;
+                    ss.bypass_serial = $bypass;
                     #[cfg(debug_assertions)]
                     { ss.debug_label = $label; }
                     stages.push(Stage::StateSpace(ss));
                 }
                 BuiltStage::MultiNl(mut mnl) => {
                     mnl.signal_flow_distance = $flow_distance;
+                    mnl.bypass_serial = $bypass;
                     #[cfg(debug_assertions)]
                     { mnl.debug_label = $label; }
                     stages.push(Stage::MultiNl(mnl));
                 }
                 BuiltStage::BlackFeedback(mut bf) => {
                     bf.signal_flow_distance = $flow_distance;
+                    bf.bypass_serial = $bypass;
                     #[cfg(debug_assertions)]
                     { bf.debug_label = $label; }
                     stages.push(Stage::BlackFeedback(bf));
@@ -181,6 +194,12 @@ pub fn compile_via_spqr_with_options(
         };
         #[cfg(not(debug_assertions))]
         let group_label = String::new();
+
+        // Static bias groups bypass the serial audio chain
+        let is_bypass = matches!(
+            group_bias[gi],
+            super::bias_analysis::GroupBiasKind::StaticBias { .. }
+        );
 
         #[cfg(test)]
         {
@@ -273,7 +292,7 @@ pub fn compile_via_spqr_with_options(
                 }
             }
 
-            push_stage!(built, group_flow_distances[gi], group_label.clone());
+            push_stage!(built, group_flow_distances[gi], group_label.clone(), is_bypass);
         } else if is_pot_divider_group(group, &graph) {
             #[cfg(test)]
             eprintln!("  → POT DIVIDER group: {:?}", group.all_edges());
@@ -282,7 +301,7 @@ pub fn compile_via_spqr_with_options(
             let built = build_pot_divider(group, &graph, sample_rate);
             match built {
                 Ok(built_stage) => {
-                    push_stage!(built_stage, group_flow_distances[gi], group_label.clone());
+                    push_stage!(built_stage, group_flow_distances[gi], group_label.clone(), is_bypass);
                 }
                 Err(e) => return Err(format!("Group {gi} (pot): {e}")),
             }
@@ -308,7 +327,7 @@ pub fn compile_via_spqr_with_options(
             for stage in spqr_stages {
                 let built = build_spqr_stage(stage, &graph, sample_rate)
                     .map_err(|e| format!("Group {gi}: {e}"))?;
-                push_stage!(built, group_flow_distances[gi], group_label.clone());
+                push_stage!(built, group_flow_distances[gi], group_label.clone(), is_bypass);
             }
         }
     }
@@ -526,6 +545,78 @@ pub(super) fn build_spqr_stage(
             ..
         } => build_rigid(edge_indices, boundary_nodes, pendant_trees, graph, _sample_rate),
     }
+}
+
+/// Determine which groups are on the audio signal path (in_node → ... → out_node).
+///
+/// A group is on the signal path if it contains at least one node reachable
+/// from `in_node` AND one node that can reach `out_node`, both through
+/// non-supply edges. Groups that only connect to VCC/supply rails (bias
+/// networks, bypass caps) are NOT on the signal path and should be skipped
+/// in the serial processing chain.
+fn compute_signal_path_flags(
+    groups: &[super::signal_flow::FlowGroup],
+    graph: &super::graph::CircuitGraph,
+) -> Vec<bool> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use super::graph::NodeId;
+
+    // Build adjacency excluding supply rails as intermediaries.
+    // Edges TO supply/GND are kept (a resistor to ground is valid), but
+    // supply nodes themselves don't propagate further.
+    let supply_set: HashSet<NodeId> = {
+        let mut s = HashSet::new();
+        s.insert(graph.gnd_node);
+        s.insert(graph.vcc_node);
+        for &n in &graph.supply_nodes {
+            s.insert(n);
+        }
+        for &n in &graph.ac_ground_nodes {
+            s.insert(n);
+        }
+        s
+    };
+
+    let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for e in &graph.edges {
+        adj.entry(e.node_a).or_default().push(e.node_b);
+        adj.entry(e.node_b).or_default().push(e.node_a);
+    }
+
+    // BFS from a start node, not expanding through supply nodes.
+    let bfs = |start: NodeId| -> HashSet<NodeId> {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        visited.insert(start);
+        queue.push_back(start);
+        while let Some(node) = queue.pop_front() {
+            if let Some(neighbors) = adj.get(&node) {
+                for &next in neighbors {
+                    if !visited.contains(&next) {
+                        visited.insert(next);
+                        // Don't expand FROM supply nodes (they're sinks, not bridges)
+                        if !supply_set.contains(&next) {
+                            queue.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+        visited
+    };
+
+    let from_in = bfs(graph.in_node);
+    let from_out = bfs(graph.out_node);
+
+    // A group is on the signal path if any of its edges touch a node
+    // reachable from BOTH in_node and out_node.
+    groups.iter().map(|group| {
+        group.all_edges().iter().any(|&eidx| {
+            let e = &graph.edges[eidx];
+            (from_in.contains(&e.node_a) && from_out.contains(&e.node_a))
+                || (from_in.contains(&e.node_b) && from_out.contains(&e.node_b))
+        })
+    }).collect()
 }
 
 /// Compute SPQR terminals for a passive sub-group.

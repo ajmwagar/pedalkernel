@@ -2026,6 +2026,28 @@ impl PedalProcessor for CompiledPedal {
             let is_ss = matches!(&self.stages[stage_idx], Stage::StateSpace(_));
             let is_bf = matches!(&self.stages[stage_idx], Stage::BlackFeedback(_));
 
+            // Check bypass_serial: static bias networks process for metering
+            // but don't overwrite the serial audio signal.
+            let bypass_serial = match &self.stages[stage_idx] {
+                Stage::Wdf(w) => w.bypass_serial,
+                Stage::MultiNl(m) => m.bypass_serial,
+                Stage::Iir(i) => i.bypass_serial,
+                Stage::StateSpace(s) => s.bypass_serial,
+                Stage::BlackFeedback(b) => b.bypass_serial,
+            };
+
+            if bypass_serial {
+                // Process for metering but don't touch `signal`
+                match &mut self.stages[stage_idx] {
+                    Stage::Wdf(w) => { let _ = w.process(0.0); }
+                    Stage::MultiNl(m) => { let _ = m.process(0.0); }
+                    Stage::Iir(i) => { let _ = i.process(0.0); }
+                    Stage::StateSpace(s) => { let _ = s.process(0.0); }
+                    Stage::BlackFeedback(b) => { let _ = b.process(0.0); }
+                }
+                continue;
+            }
+
             if is_wdf {
                     let stage = if let Stage::Wdf(w) = &mut self.stages[stage_idx] { w } else { unreachable!() };
 

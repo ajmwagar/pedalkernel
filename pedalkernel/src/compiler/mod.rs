@@ -7,6 +7,7 @@
 //! 4. Modeling active elements (transistors, opamps) as gain stages
 //! 5. Chaining everything into a cascaded `PedalProcessor`
 
+mod bias_analysis;
 mod bind;
 mod bjt_bias_analysis;
 mod build;
@@ -79,3 +80,5 @@ mod pot_binding_tests;
 mod black_feedback_tests;
 #[cfg(test)]
 mod diode_polarity_tests;
+#[cfg(test)]
+mod bias_analysis_tests;

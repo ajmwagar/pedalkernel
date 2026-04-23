@@ -421,3 +421,108 @@ fn single_diode_clips_one_direction_only() {
     assert!((asymmetry - 1.0).abs() > 0.2,
         "Single diode should be asymmetric: ratio={asymmetry:.3}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. Bias network does NOT kill audio signal
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn bias_network_does_not_kill_signal() {
+    // A circuit with a VCC bias network (voltage divider for op-amp DC reference)
+    // should pass audio through the clipping stage without the bias network
+    // stomping the signal to zero. The bias network creates a DC reference;
+    // it is NOT in the audio signal path.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                # Bias network — 4.5V virtual ground
+                R_v1: resistor(10k)
+                R_v2: resistor(10k)
+                C_v: cap(47u, electrolytic)
+
+                # Input coupling
+                Cin: cap(22n)
+                R_in: resistor(510k)
+
+                # Clipping stage
+                C_c1: cap(1u, electrolytic)
+                R_b1: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                D_clip: diode_pair(silicon)
+
+                # Output
+                R_out: resistor(10k)
+            }
+            nets {
+                # Bias
+                vcc -> R_v1.a
+                R_v1.b -> R_v2.a, C_v.a
+                R_v2.b -> gnd
+                C_v.b -> gnd
+                R_v1.b -> vb
+
+                # Input
+                in -> Cin.a
+                Cin.b -> R_in.a, C_c1.a
+                R_in.b -> gnd
+
+                # Clipping (non-inverting)
+                C_c1.b -> U1.pos, R_b1.a
+                R_b1.b -> vb
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.out -> D_clip.a
+                D_clip.b -> U1.neg
+                U1.pos -> gnd
+
+                # Output
+                U1.out -> R_out.a
+                R_out.b -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    // Dump per-stage metering to diagnose
+    dump_stage_metering(&mut compiled, 0.1, 2000, 2000);
+
+    // Re-compile for measurement
+    let mut compiled2 = compile_via_spqr(&pedal, SR).expect("compile");
+    let (pos_peak, neg_peak) = measure_peaks(&mut compiled2, 0.1, 2000, 500);
+
+    eprintln!("Bias network test: pos_peak={pos_peak:.4}V, neg_peak={neg_peak:.4}V");
+
+    // The bias network should NOT kill the signal.
+    // The clipping stage output should reach the circuit output.
+    assert!(pos_peak > 0.01, "Signal should survive bias network: {pos_peak:.4}V");
+    assert!(neg_peak < -0.01, "Signal should survive bias network: {neg_peak:.4}V");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 9. Screamer legend with bias network produces audio
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn screamer_legend_with_bias_produces_audio() {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read screamer.pedal");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    // Dump per-stage metering
+    dump_stage_metering(&mut compiled, 0.1, 2000, 2000);
+
+    let mut compiled2 = compile_via_spqr(&pedal, SR).expect("compile");
+    let (pos_peak, neg_peak) = measure_peaks(&mut compiled2, 0.1, 4000, 500);
+
+    eprintln!("Screamer: pos_peak={pos_peak:.4}V, neg_peak={neg_peak:.4}V");
+
+    assert!(pos_peak > 0.001, "Screamer should produce output: {pos_peak:.4}V");
+    assert!(neg_peak < -0.001, "Screamer should produce output: {neg_peak:.4}V");
+}
