@@ -61,14 +61,15 @@ fn dump_stage_metering(compiled: &mut CompiledPedal, amp: f64, warmup: usize, me
     for i in 0..n {
         let lvl = metrics.stage_levels[i];
         let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
-        let (stage_type, dist, label) = match &compiled.stages[i] {
-            super::compiled::Stage::Wdf(w) => ("Wdf", w.signal_flow_distance, &w.debug_label),
-            super::compiled::Stage::MultiNl(m) => ("MultiNl", m.signal_flow_distance, &m.debug_label),
-            super::compiled::Stage::Iir(s) => ("Iir", s.signal_flow_distance, &s.debug_label),
-            super::compiled::Stage::StateSpace(s) => ("SS", s.signal_flow_distance, &s.debug_label),
-            super::compiled::Stage::BlackFeedback(b) => ("BF", b.signal_flow_distance, &b.debug_label),
+        let (stage_type, dist, label, bypass) = match &compiled.stages[i] {
+            super::compiled::Stage::Wdf(w) => ("Wdf", w.signal_flow_distance, &w.debug_label, w.bypass_serial),
+            super::compiled::Stage::MultiNl(m) => ("MultiNl", m.signal_flow_distance, &m.debug_label, m.bypass_serial),
+            super::compiled::Stage::Iir(s) => ("Iir", s.signal_flow_distance, &s.debug_label, s.bypass_serial),
+            super::compiled::Stage::StateSpace(s) => ("SS", s.signal_flow_distance, &s.debug_label, s.bypass_serial),
+            super::compiled::Stage::BlackFeedback(b) => ("BF", b.signal_flow_distance, &b.debug_label, b.bypass_serial),
         };
-        eprintln!("    stage {i}: [{stage_type}] dist={dist} [{label}] → {lvl:.4} ({db:.1} dB)");
+        let bypass_tag = if bypass { " BYPASS" } else { "" };
+        eprintln!("    stage {i}: [{stage_type}] dist={dist} [{label}]{bypass_tag} → {lvl:.4} ({db:.1} dB)");
     }
     if n == 0 {
         eprintln!("    (no stages)");
