@@ -212,6 +212,7 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
             queue.push_back(rec.pos_node);
 
             let mut reaches_rail = false;
+            let mut reaches_signal = false;
             while let Some(node) = queue.pop_front() {
                 for e in &graph.edges {
                     let comp = &graph.components[e.comp_idx];
@@ -225,21 +226,27 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
                     };
                     if let Some(n) = next {
                         if blocked.contains(&n) { continue; }
+                        if n == graph.in_node {
+                            reaches_signal = true;
+                        }
                         if n == graph.gnd_node || n == graph.vcc_node
                             || graph.supply_nodes.contains(&n)
                         {
                             reaches_rail = true;
-                            break;
+                            // Don't break — keep searching for in_node
+                            continue;
                         }
                         visited.insert(n);
                         queue.push_back(n);
                     }
                 }
-                if reaches_rail { break; }
             }
 
-            // If pos reaches a rail (through bias network) → inverting.
-            // If pos doesn't reach any rail → it's a floating signal input → non-inverting.
+            // If pos reaches circuit input → non-inverting (signal at pos).
+            // If pos reaches only rails → inverting (pos is biased).
+            if reaches_signal {
+                return false;
+            }
             return reaches_rail;
         }
     }
