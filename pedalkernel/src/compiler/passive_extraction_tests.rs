@@ -331,7 +331,210 @@ fn cascade_gain_then_passive_preserves_level() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 6. RAT-style diode-to-ground after gain stage
+// 6. Level/Volume pot — 3-terminal pot in passive group
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn level_pot_standalone_changes_output() {
+    // Simple: signal → Level pot → out, Level.b → gnd.
+    // Sweeping should change output level.
+    let src = r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(1k)
+                Level: pot(100k, a)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> Level.a
+                Level.w -> out
+                Level.b -> gnd
+            }
+            controls { Level.position -> "Level" [0.0, 1.0] = 0.5 }
+        }"#;
+
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+
+    let measure = |pos: f64| -> f64 {
+        let mut c = compile_via_spqr(&pedal, SR).expect("compile");
+        c.set_control("Level", pos);
+        let amp = 0.01;
+        for s in 0..500 {
+            c.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+        }
+        let mut peak = 0.0f64;
+        for s in 500..720 {
+            peak = peak.max(c.process(
+                amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin()
+            ).abs());
+        }
+        peak
+    };
+
+    let lo = measure(0.1);
+    let hi = measure(0.9);
+    eprintln!("Level pot: @0.1={lo:.4}, @0.9={hi:.4}");
+    assert!(hi > lo * 1.5, "Level pot should change output: lo={lo:.4}, hi={hi:.4}");
+}
+
+#[test]
+fn level_pot_after_gain_stage_changes_output() {
+    // Gain(10x) → Level pot → out. The screamer/SD-1 pattern.
+    let src = r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                Level: pot(100k, a)
+                C_out: cap(10u)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Level.a
+                Level.w -> C_out.a
+                C_out.b -> out
+                Level.b -> gnd
+            }
+            controls { Level.position -> "Level" [0.0, 1.0] = 0.5 }
+        }"#;
+
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+
+    let measure = |pos: f64| -> f64 {
+        let mut c = compile_via_spqr(&pedal, SR).expect("compile");
+        c.set_control("Level", pos);
+        let amp = 0.01;
+        for s in 0..500 {
+            c.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+        }
+        let mut peak = 0.0f64;
+        for s in 500..720 {
+            peak = peak.max(c.process(
+                amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin()
+            ).abs());
+        }
+        peak
+    };
+
+    let lo = measure(0.1);
+    let hi = measure(0.9);
+    eprintln!("Level after gain: @0.1={lo:.4}, @0.9={hi:.4}");
+    assert!(hi > lo * 1.5, "Level pot should change output: lo={lo:.4}, hi={hi:.4}");
+}
+
+#[test]
+fn level_pot_complement_correct_polarity() {
+    // At position=1.0, Level should give maximum output (near unity).
+    // At position=0.0, Level should give minimum output (near zero).
+    let src = r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(1k)
+                Level: pot(100k, b)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> Level.a
+                Level.w -> out
+                Level.b -> gnd
+            }
+            controls { Level.position -> "Level" [0.0, 1.0] = 0.5 }
+        }"#;
+
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+
+    let measure = |pos: f64| -> f64 {
+        let mut c = compile_via_spqr(&pedal, SR).expect("compile");
+        c.set_control("Level", pos);
+        let amp = 0.01;
+        for s in 0..500 {
+            c.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+        }
+        let mut peak = 0.0f64;
+        for s in 500..720 {
+            peak = peak.max(c.process(
+                amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin()
+            ).abs());
+        }
+        peak
+    };
+
+    let at_zero = measure(0.0);
+    let at_full = measure(1.0);
+    eprintln!("Level polarity: @0.0={at_zero:.4}, @1.0={at_full:.4}");
+    assert!(at_full > at_zero * 3.0,
+        "Full level should be much louder than zero: full={at_full:.4}, zero={at_zero:.4}");
+}
+
+#[test]
+fn level_pot_in_tone_network_changes_output() {
+    // Screamer pattern: Tone pot + Level pot + coupling caps in one group.
+    let src = r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                R_tone: resistor(1k)
+                C_tone: cap(220n)
+                Tone: pot(20k, b)
+                Level: pot(100k, a)
+                C_out: cap(10u)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> R_tone.a
+                R_tone.b -> C_tone.a
+                C_tone.b -> Tone.a
+                R_tone.b -> Tone.b
+                Tone.w -> Level.a
+                Level.w -> C_out.a
+                Level.b -> gnd
+                C_out.b -> R_out.a
+                R_out.b -> out
+            }
+            controls {
+                Tone.position -> "Tone" [0.0, 1.0] = 0.5
+                Level.position -> "Level" [0.0, 1.0] = 0.5
+            }
+        }"#;
+
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+
+    let measure = |pos: f64| -> f64 {
+        let mut c = compile_via_spqr(&pedal, SR).expect("compile");
+        c.set_control("Level", pos);
+        let amp = 0.01;
+        for s in 0..500 {
+            c.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+        }
+        let mut peak = 0.0f64;
+        for s in 500..720 {
+            peak = peak.max(c.process(
+                amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin()
+            ).abs());
+        }
+        peak
+    };
+
+    let lo = measure(0.1);
+    let hi = measure(0.9);
+    eprintln!("Level in tone network: @0.1={lo:.4}, @0.9={hi:.4}");
+    assert!(hi > lo * 1.5, "Level pot should change output in tone network: lo={lo:.4}, hi={hi:.4}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. RAT-style diode-to-ground after gain stage
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
