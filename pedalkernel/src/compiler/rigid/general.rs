@@ -89,9 +89,9 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     let zi = if !group.pendant_edges.is_empty() {
         build_pendant_tree(&group.pendant_edges, graph, sample_rate)
     } else {
-        // No pendant edges — create zi with Ri from the graph.
-        // Find non-feedback passive edges touching the active element's
-        // input pin. Their resistance = Ri.
+        // No pendant edges — build zi from input coupling edges in the graph.
+        // Find non-feedback passive edges touching the active element's input pin
+        // and build a WDF tree from them.
         let input_pin_node = group.active_edges.iter().find_map(|&eidx| {
             let comp = &graph.components[graph.edges[eidx].comp_idx];
             if let super::super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
@@ -101,23 +101,30 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
                 None
             }
         });
-        let ri = if let Some(neg) = input_pin_node {
+        if let Some(neg) = input_pin_node {
             let feedback_set: std::collections::HashSet<usize> = group.feedback_edges.iter().copied().collect();
-            graph.edges.iter().enumerate()
+            let active_set: std::collections::HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
+            // Collect input coupling edges touching neg
+            let input_edges: Vec<usize> = graph.edges.iter().enumerate()
                 .filter_map(|(eidx, e)| {
-                    if feedback_set.contains(&eidx) { return None; }
+                    if feedback_set.contains(&eidx) || active_set.contains(&eidx) { return None; }
                     let touches = e.node_a == neg || e.node_b == neg;
                     if !touches { return None; }
                     let comp = &graph.components[e.comp_idx];
                     if !comp.kind.is_passive() { return None; }
-                    comp.kind.resistance()
+                    Some(eidx)
                 })
-                .sum::<f64>()
+                .collect();
+            if !input_edges.is_empty() {
+                // Build tree from these edges
+                build_pendant_tree(&input_edges, graph, sample_rate)
+            } else {
+                // Truly no input coupling — bare VS
+                with_voltage_source(DynNode::Resistor(None, config.ri.min(100_000.0).max(1000.0)))
+            }
         } else {
-            0.0
-        };
-        let ri = if ri > 0.0 { ri } else { config.ri.min(100_000.0).max(1000.0) };
-        with_voltage_source(DynNode::Resistor(None, ri))
+            with_voltage_source(DynNode::Resistor(None, config.ri.min(100_000.0).max(1000.0)))
+        }
     };
 
     // Build zf (feedback network) from feedback edges (passives only, no NL).
