@@ -62,11 +62,13 @@ pub(super) fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind,
     match kind {
         NonlinearKind::DiodePair(dt) => {
             let model = diode_model(*dt);
-            (RootKind::DiodePair(DiodePairRoot::new(model)), Some(model))
+            // Use Wright Omega explicit solver (O(1), no iteration)
+            (RootKind::ExplicitDiodePair(ExplicitDiodePairRoot::new(model)), Some(model))
         }
         NonlinearKind::SingleDiode(dt) => {
             let model = diode_model(*dt);
-            (RootKind::SingleDiode(DiodeRoot::new(model)), Some(model))
+            // Use Wright Omega explicit solver (O(1), no iteration)
+            (RootKind::ExplicitSingleDiode(ExplicitDiodeRoot::new(model)), Some(model))
         }
         NonlinearKind::Jfet {
             model_name,

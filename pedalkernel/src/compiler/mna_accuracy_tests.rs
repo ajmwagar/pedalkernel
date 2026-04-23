@@ -69,8 +69,11 @@ fn explicit_diode_pair_clips_at_correct_voltage() {
     let rp: f64 = 10000.0;
 
     // Drive with 2.0V incident wave (would give 1.0V without clipping)
-    let v = explicit_diode_pair(2.0, rp, is, n_vt);
-    eprintln!("Explicit diode pair: a=2.0, v={v:.4}");
+    let a: f64 = 2.0;
+    let b = explicit_diode_pair(a, rp, is, n_vt);
+    let v = (a + b) / 2.0; // WDF port voltage
+
+    eprintln!("Explicit diode pair: a={a}, b={b:.4}, v={v:.4}");
     assert!(v.abs() < 0.8, "Should clip below 0.8V: {v:.4}");
     assert!(v.abs() > 0.3, "Should produce some output: {v:.4}");
 }
@@ -83,10 +86,14 @@ fn explicit_single_diode_clips_asymmetrically() {
     let n_vt: f64 = 1.752 * 25.85e-3;
     let rp: f64 = 10000.0;
 
-    let v_fwd = explicit_single_diode(2.0, rp, is, n_vt);
-    let v_rev = explicit_single_diode(-2.0, rp, is, n_vt);
+    let b_fwd = explicit_single_diode(2.0, rp, is, n_vt);
+    let v_fwd = (2.0 + b_fwd) / 2.0;
+    let b_rev = explicit_single_diode(-2.0, rp, is, n_vt);
+    let v_rev = (-2.0 + b_rev) / 2.0;
 
-    eprintln!("Single diode: fwd={v_fwd:.4}, rev={v_rev:.4}");
+    eprintln!("Single diode: fwd_v={v_fwd:.4}, rev_v={v_rev:.4}");
+    // Forward bias: diode conducts, clips voltage → |v_fwd| small
+    // Reverse bias: diode blocks, voltage passes → |v_rev| ≈ 1.0
     assert!(v_fwd.abs() < v_rev.abs(),
         "Forward should clip more than reverse: fwd={v_fwd:.4}, rev={v_rev:.4}");
 }
@@ -100,12 +107,15 @@ fn explicit_germanium_clips_lower_than_silicon() {
     let ge_is: f64 = 2.0e-6;
     let ge_nvt: f64 = 1.25 * 25.85e-3;
     let rp: f64 = 10000.0;
+    let a: f64 = 2.0;
 
-    let si_clip = explicit_diode_pair(2.0, rp, si_is, si_nvt).abs();
-    let ge_clip = explicit_diode_pair(2.0, rp, ge_is, ge_nvt).abs();
+    let si_b = explicit_diode_pair(a, rp, si_is, si_nvt);
+    let si_v = ((a + si_b) / 2.0).abs();
+    let ge_b = explicit_diode_pair(a, rp, ge_is, ge_nvt);
+    let ge_v = ((a + ge_b) / 2.0).abs();
 
-    eprintln!("Clip levels: Si={si_clip:.4}V, Ge={ge_clip:.4}V");
-    assert!(ge_clip < si_clip, "Ge should clip lower than Si: Ge={ge_clip:.4} < Si={si_clip:.4}");
+    eprintln!("Clip voltages: Si={si_v:.4}V, Ge={ge_v:.4}V");
+    assert!(ge_v < si_v, "Ge should clip lower than Si: Ge={ge_v:.4} < Si={si_v:.4}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
