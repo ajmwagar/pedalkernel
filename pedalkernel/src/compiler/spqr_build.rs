@@ -188,6 +188,8 @@ pub fn compile_via_spqr_with_options(
     // find_flow_groups), which becomes signal_flow_distance on each stage.
     let mut build_order: Vec<(usize, &super::signal_flow::FlowGroup)> =
         feedback_groups.iter().enumerate().collect();
+    // Track which ground-clip groups were merged into another group's stage
+    let mut ground_clip_built: std::collections::HashSet<usize> = std::collections::HashSet::new();
     build_order.sort_by_key(|(_, g)| if g.has_feedback() { 1 } else { 0 });
 
     for &(gi, group) in &build_order {
@@ -324,13 +326,32 @@ pub fn compile_via_spqr_with_options(
                 }
                 Err(e) => return Err(format!("Group {gi} (pot): {e}")),
             }
+        } else if is_ground_clip_group(group, &graph) {
+            // Standalone NL element to ground (RAT/Klon hard-clip diodes).
+            // Collect ALL ground-clip groups at the same signal node and merge
+            // them into a single DiodePair stage. Skip individual groups that
+            // were already merged into a preceding group.
+            if !ground_clip_built.contains(&gi) {
+                // Find all other ground-clip groups sharing the same signal node
+                let signal_node = get_ground_clip_signal_node(group, &graph);
+                let mut merged_edges: Vec<usize> = group.all_edges();
+                for &(gj, other_group) in &build_order {
+                    if gj != gi && !ground_clip_built.contains(&gj)
+                        && is_ground_clip_group(other_group, &graph)
+                        && get_ground_clip_signal_node(other_group, &graph) == signal_node
+                    {
+                        merged_edges.extend(other_group.all_edges());
+                        ground_clip_built.insert(gj);
+                    }
+                }
+                ground_clip_built.insert(gi);
+                if let Some(built) = build_ground_clip_stage(&merged_edges, &graph, sample_rate) {
+                    push_stage!(built, group_flow_distances[gi], group_label.clone(), is_bypass);
+                }
+            }
         } else {
-            // No feedback, not a pot → SPQR decompose for WDF/NlWdf stages.
-            // Compute per-group terminals: use the group's actual boundary nodes
-            // (nodes shared with other groups or the global in/out).
-            // Include GND as a terminal if any edge touches ground — this lets
-            // SPQR recognize ground-shunt caps as part of the SP structure
-            // instead of forcing the whole group to Rigid.
+            // No feedback, not a pot, not a ground clip →
+            // SPQR decompose for WDF/NlWdf stages.
             let group_edges = group.all_edges();
             let group_terminals = compute_group_terminals(&group_edges, &graph, &terminals);
             #[cfg(test)]
@@ -566,6 +587,119 @@ pub(super) fn build_spqr_stage(
 
 /// Determine which groups are on the audio signal path (in_node → ... → out_node).
 ///
+/// Check if a group is a ground-clip pattern: diode edges connecting signal to GND.
+/// Only matches diode-family components (diode, diode_pair, zener), not BJTs/JFETs
+/// which also have NL edges to ground but serve a different purpose.
+fn is_ground_clip_group(
+    group: &super::signal_flow::FlowGroup,
+    graph: &super::graph::CircuitGraph,
+) -> bool {
+    use super::component::EdgeKind;
+    let nl_edges: Vec<usize> = group.all_edges().iter()
+        .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
+        .copied()
+        .collect();
+    if nl_edges.is_empty() { return false; }
+    nl_edges.iter().all(|&eidx| {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        let is_diode = comp.kind.is_diode_family();
+        let to_gnd = e.node_a == graph.gnd_node || e.node_b == graph.gnd_node
+            || graph.ac_ground_nodes.contains(&e.node_a)
+            || graph.ac_ground_nodes.contains(&e.node_b);
+        is_diode && to_gnd
+    })
+}
+
+/// Get the non-GND signal node from a ground-clip group.
+fn get_ground_clip_signal_node(
+    group: &super::signal_flow::FlowGroup,
+    graph: &super::graph::CircuitGraph,
+) -> super::graph::NodeId {
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        if e.node_a != graph.gnd_node && !graph.ac_ground_nodes.contains(&e.node_a) {
+            return e.node_a;
+        }
+        if e.node_b != graph.gnd_node && !graph.ac_ground_nodes.contains(&e.node_b) {
+            return e.node_b;
+        }
+    }
+    graph.gnd_node // fallback
+}
+
+/// Build a ground-clip WdfStage from merged NL edges (all to GND).
+///
+/// If two SingleDiode edges exist, synthesizes a DiodePair for antiparallel
+/// clipping. Otherwise uses a single diode root.
+fn build_ground_clip_stage(
+    nl_edge_indices: &[usize],
+    graph: &super::graph::CircuitGraph,
+    _sample_rate: f64,
+) -> Option<BuiltStage> {
+    // Classify all NL edges
+    let mut nl_kinds = Vec::new();
+    for &eidx in nl_edge_indices {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if let Some((kind, _)) = comp.kind.classify_nonlinear(
+            &comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names,
+        ) {
+            nl_kinds.push(kind);
+        }
+    }
+    if nl_kinds.is_empty() { return None; }
+
+    // Synthesize DiodePair from two SingleDiode edges (antiparallel to ground)
+    let (root, base_diode_model) = if nl_kinds.len() >= 2 {
+        let mut pair_dt = None;
+        for i in 0..nl_kinds.len() {
+            for j in (i+1)..nl_kinds.len() {
+                if let (
+                    super::classify::NonlinearKind::SingleDiode(dt_a),
+                    super::classify::NonlinearKind::SingleDiode(_),
+                ) = (&nl_kinds[i], &nl_kinds[j]) {
+                    pair_dt = Some(*dt_a);
+                    break;
+                }
+            }
+            if pair_dt.is_some() { break; }
+        }
+        if let Some(dt) = pair_dt {
+            let model = super::helpers::diode_model(dt);
+            (
+                super::stage::RootKind::ExplicitDiodePair(
+                    crate::elements::ExplicitDiodePairRoot::new(model),
+                ),
+                Some(model),
+            )
+        } else {
+            super::build::create_root(&nl_kinds[0], false)
+        }
+    } else {
+        super::build::create_root(&nl_kinds[0], false)
+    };
+
+    // VS with op-amp output impedance as source resistance.
+    // In the real circuit, the diode sees the driving stage's output Z.
+    // Typical op-amp output impedance: 50-200Ω. Using 100Ω as default.
+    // This gives the WDF diode root the correct source impedance for
+    // computing junction voltage and clipping behavior.
+    let tree = DynNode::Leaf(Box::new(super::wdf_leaf::WdfVoltageSource {
+        voltage: 0.0,
+        rp: 100.0,
+        is_cathode_bias: false,
+    }));
+
+    let oversampler = crate::oversampling::Oversampler::new(
+        crate::oversampling::OversamplingFactor::X2,
+    );
+    let mut stage = super::stage::WdfStage::new(tree, root, oversampler);
+    stage.base_diode_model = base_diode_model;
+
+    Some(BuiltStage::Wdf(stage))
+}
+
 /// A group is on the signal path if it contains at least one node reachable
 /// from `in_node` AND one node that can reach `out_node`, both through
 /// non-supply edges. Groups that only connect to VCC/supply rails (bias

@@ -84,3 +84,5 @@ mod diode_polarity_tests;
 mod bias_analysis_tests;
 #[cfg(test)]
 mod bias_application_tests;
+#[cfg(test)]
+mod ground_clip_tests;
