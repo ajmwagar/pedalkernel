@@ -41,6 +41,26 @@ fn measure_gain(src: &str) -> f64 {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
+fn passive_wire_dc_step() {
+    // Simplest possible test: one DC sample through a wire.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components { R1: resistor(1k) }
+            nets { in -> R1.a  R1.b -> out }
+            controls {}
+        }"#).expect("parse");
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    // Process DC=1.0 for 100 samples to let filters settle
+    let mut out = 0.0;
+    for _ in 0..100 {
+        out = compiled.process(1.0);
+    }
+    eprintln!("DC steady-state: in=1.0, out={out:.6}");
+    assert!((out.abs() - 1.0).abs() < 0.6, "DC steady-state should be ~1.0: {out:.6}");
+}
+
+#[test]
 fn passive_wire_is_unity() {
     let gain = measure_gain(r#"
         pedal "test" { supply 9V
