@@ -889,9 +889,12 @@ impl DynNode {
         }
     }
 
-    /// Check if this node is a load element (resistor or pot).
+    /// Check if this node is a passive element that can be an output point.
     fn is_load_element(&self) -> bool {
-        matches!(self, Self::Leaf(l) if l.type_tag() == "resistor" || l.type_tag() == "pot")
+        matches!(self, Self::Leaf(l) if {
+            let t = l.type_tag();
+            t == "resistor" || t == "pot" || t == "capacitor" || t == "leaky_capacitor" || t == "inductor"
+        })
     }
 
     /// Check if this tree contains any reactive elements.
