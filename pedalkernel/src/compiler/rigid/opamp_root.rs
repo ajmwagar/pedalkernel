@@ -48,17 +48,27 @@ pub(in crate::compiler) fn extract_opamp_config(
         .ok_or("VCVS component has no op_amp_type")?;
     let model = OpAmpModel::from_opamp_type(&op_type);
 
-    // Compute Rf: sum resistance of ALL feedback edges (resistors + pots).
-    // Pots contribute their current position's resistance. At compile time
-    // this is the initial position (typically 50% of max_r).
-    let rf: f64 = group
-        .feedback_edges
-        .iter()
-        .filter_map(|&eidx| {
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            comp.kind.resistance()
-        })
-        .sum();
+    // Compute Rf and Ri from feedback edges.
+    // For non-inverting: edges touching GND are Ri (ground leg).
+    // All other resistive feedback edges are Rf (neg→out).
+    // For inverting: all feedback edges are Rf; Ri comes from pendant/graph.
+    let mut rf = 0.0f64;
+    let mut ri_from_feedback = 0.0f64;
+    for &eidx in &group.feedback_edges {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if let Some(r) = comp.kind.resistance() {
+            let touches_gnd = e.node_a == graph.gnd_node
+                || e.node_b == graph.gnd_node
+                || graph.ac_ground_nodes.contains(&e.node_a)
+                || graph.ac_ground_nodes.contains(&e.node_b);
+            if !inverting && touches_gnd {
+                ri_from_feedback += r;
+            } else {
+                rf += r;
+            }
+        }
+    }
 
     // Compute Ri: the input coupling resistance at the op-amp's neg node.
     // Strategy: find resistors touching the neg node that are NOT in the
@@ -69,7 +79,10 @@ pub(in crate::compiler) fn extract_opamp_config(
         .find(|p| p.comp_idx == vcvs_comp_idx)
         .map(|p| p.neg_node);
 
-    let ri = if let Some(neg) = neg_node {
+    // For non-inverting, prefer Ri from feedback edges touching GND
+    let ri = if !inverting && ri_from_feedback > 0.0 {
+        ri_from_feedback
+    } else if let Some(neg) = neg_node {
         let feedback_set: std::collections::HashSet<usize> =
             group.feedback_edges.iter().copied().collect();
         let active_set: std::collections::HashSet<usize> =
