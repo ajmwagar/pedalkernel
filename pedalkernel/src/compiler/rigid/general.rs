@@ -110,6 +110,29 @@ pub(super) fn build_pendant_tree(pendant_edges: &[usize], graph: &CircuitGraph, 
     }))
 }
 
+/// Build a proper WDF tree from a set of passive edges using SPQR decomposition.
+///
+/// Unlike `build_pendant_tree` (which grabs one leaf), this builds the full
+/// Series/Parallel topology from the graph structure. Use for zi (input coupling)
+/// and zf (feedback network) in the OpAmpWdfAdaptor.
+///
+/// Returns None if SPQR decomposition fails or produces no passive tree.
+pub(super) fn build_spqr_tree(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    terminals: &[NodeId],
+    sample_rate: f64,
+) -> Option<DynNode> {
+    if edge_indices.is_empty() {
+        return None;
+    }
+    let tree_terminals = super::super::spqr_build::compute_group_terminals(edge_indices, graph, terminals);
+    let spqr = super::super::spqr::spqr_decompose(
+        edge_indices, &tree_terminals, graph, graph.gnd_node,
+    );
+    super::super::spqr::spqr_to_dyn_node(&spqr, graph, sample_rate)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // General MNA + NR solver
 // ═══════════════════════════════════════════════════════════════════════════
