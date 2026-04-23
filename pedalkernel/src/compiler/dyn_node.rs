@@ -814,12 +814,17 @@ impl DynNode {
         }
     }
 
-    /// Extract voltage at the load element in a filter subtree.
+    /// Extract voltage at the output element in a filter subtree.
+    /// For short-circuit terminated filters, the output is at the element
+    /// nearest to ground — the right child of the innermost series adaptor.
     fn extract_load_voltage(&self, a_parent: f64) -> Option<f64> {
         match self {
             Self::Leaf(leaf) => {
                 let tag = leaf.type_tag();
-                if tag == "resistor" || tag == "pot" {
+                // Any passive leaf can be the output: resistor, pot, cap, inductor
+                if tag == "resistor" || tag == "pot" || tag == "capacitor"
+                    || tag == "leaky_capacitor" || tag == "inductor"
+                {
                     Some(a_parent / 2.0)
                 } else {
                     None
