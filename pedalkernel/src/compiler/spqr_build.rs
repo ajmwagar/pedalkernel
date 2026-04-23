@@ -140,7 +140,16 @@ pub fn compile_via_spqr_with_options(
         };
     }
 
-    for (gi, group) in feedback_groups.iter().enumerate() {
+    // Process groups in signal flow order: non-feedback groups first
+    // (input coupling, passive filters, pot dividers), then feedback groups
+    // (op-amp + NL stages). This ensures the input coupling stage is built
+    // BEFORE the clipping stage, so the clipping stage can read the input
+    // coupling impedance (Ri) from the already-built preceding stage.
+    let mut sorted_groups: Vec<(usize, &super::signal_flow::FlowGroup)> =
+        feedback_groups.iter().enumerate().collect();
+    sorted_groups.sort_by_key(|(_, g)| if g.has_feedback() { 1 } else { 0 });
+
+    for &(gi, group) in &sorted_groups {
         if group.all_edges().is_empty() {
             continue;
         }
@@ -156,15 +165,86 @@ pub fn compile_via_spqr_with_options(
         }
 
         if group.has_feedback() {
-            // Feedback group → build directly as Rigid.
-            // Classification flows from FeedbackGroup to builder.
-            let built = build_rigid_from_group(
+            let mut built = build_rigid_from_group(
                 group.all_edges(),
                 &graph,
                 sample_rate,
                 Some(group),
             )
             .map_err(|e| format!("Stage {stage_counter}: {e}"))?;
+
+            // Fix gain for feedback_opamp stages where Ri is in a preceding
+            // stage. Find the input coupling group's edges touching the active
+            // element's input pin, sum their resistance as Ri, compute gain.
+            if let BuiltStage::Wdf(ref mut wdf) = built {
+                if let Some(ref mut opamp) = wdf.feedback_opamp {
+                    if opamp.gain().abs() <= 1.01 {
+                        let input_node = group.active_edges.iter().find_map(|&eidx| {
+                            let comp = &graph.components[graph.edges[eidx].comp_idx];
+                            if let super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
+                                let key = format!("{}.{input}", comp.id);
+                                graph.node_names.get(&key).copied()
+                            } else {
+                                None
+                            }
+                        });
+
+                        if let Some(neg) = input_node {
+                            // Find the non-feedback group whose edges touch neg
+                            // and sum their resistance as Ri.
+                            let ri: f64 = sorted_groups.iter()
+                                .filter(|(_, g)| !g.has_feedback())
+                                .flat_map(|(_, g)| g.all_edges())
+                                .filter_map(|eidx| {
+                                    let e = &graph.edges[eidx];
+                                    if e.node_a != neg && e.node_b != neg { return None; }
+                                    graph.components[e.comp_idx].kind.resistance()
+                                })
+                                .sum();
+
+                            if ri > 0.0 {
+                                let rf: f64 = group.feedback_edges.iter()
+                                    .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
+                                    .sum();
+                                if rf > 0.0 {
+                                    opamp.set_gain(rf / ri);
+                                    wdf.feedback_ri = ri;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Same Ri fix for BlackFeedback stages
+            if let BuiltStage::BlackFeedback(ref mut bf) = built {
+                if bf.gain().abs() <= 1.01 {
+                    let input_node = group.active_edges.iter().find_map(|&eidx| {
+                        let comp = &graph.components[graph.edges[eidx].comp_idx];
+                        if let super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
+                            let key = format!("{}.{input}", comp.id);
+                            graph.node_names.get(&key).copied()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(neg) = input_node {
+                        let ri: f64 = sorted_groups.iter()
+                            .filter(|(_, g)| !g.has_feedback())
+                            .flat_map(|(_, g)| g.all_edges())
+                            .filter_map(|eidx| {
+                                let e = &graph.edges[eidx];
+                                if e.node_a != neg && e.node_b != neg { return None; }
+                                graph.components[e.comp_idx].kind.resistance()
+                            })
+                            .sum();
+                        if ri > 0.0 {
+                            bf.set_ri(ri);
+                        }
+                    }
+                }
+            }
+
             push_stage!(built, stage_counter);
             stage_counter += 1;
         } else if is_pot_divider_group(group, &graph) {
@@ -279,11 +359,18 @@ fn is_pot_divider_group(
     if edges.len() != 2 {
         return false;
     }
-    let id0 = &graph.components[graph.edges[edges[0]].comp_idx].id;
-    let id1 = &graph.components[graph.edges[edges[1]].comp_idx].id;
-    // Both are pot halves of the same base component
-    (id0.ends_with("__aw") && id1.ends_with("__wb"))
-        || (id0.ends_with("__wb") && id1.ends_with("__aw"))
+    let comp0 = &graph.components[graph.edges[edges[0]].comp_idx];
+    let comp1 = &graph.components[graph.edges[edges[1]].comp_idx];
+
+    // Check for synthetic __aw/__wb split (legacy 3-terminal pot encoding)
+    let is_aw_wb = (comp0.id.ends_with("__aw") && comp1.id.ends_with("__wb"))
+        || (comp0.id.ends_with("__wb") && comp1.id.ends_with("__aw"));
+
+    // Check for 2-edge pot (same component, both edges are the same pot)
+    let is_same_pot = graph.edges[edges[0]].comp_idx == graph.edges[edges[1]].comp_idx
+        && comp0.kind.is_pot();
+
+    is_aw_wb || is_same_pot
 }
 
 /// Build a pot voltage divider stage: Parallel(R_aw, R_wb) with ShortCircuit root.
@@ -297,11 +384,23 @@ fn build_pot_divider(
 ) -> Result<BuiltStage, String> {
     let edges = group.all_edges();
 
-    // Build both pot leaf nodes
+    // Build both pot leaf nodes. Use the component's actual name (no __aw/__wb).
+    // The signal-side half (NOT touching ground) gets marked as complement
+    // so set_control applies 1-value: R_aw = (1-pos)*max_R.
     let mut leaves: Vec<DynNode> = Vec::new();
     for &eidx in &edges {
-        let comp = &graph.components[graph.edges[eidx].comp_idx];
-        if let Some(leaf) = comp.kind.make_leaf(&comp.id, sample_rate) {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if let Some(mut leaf) = comp.kind.make_leaf(&comp.id, sample_rate) {
+            let touches_gnd = e.node_a == graph.gnd_node
+                || e.node_b == graph.gnd_node
+                || graph.ac_ground_nodes.contains(&e.node_a)
+                || graph.ac_ground_nodes.contains(&e.node_b);
+            if !touches_gnd {
+                if let DynNode::Leaf(ref mut l) = leaf {
+                    l.set_complement();
+                }
+            }
             leaves.push(leaf);
         }
     }

@@ -42,6 +42,16 @@ pub use validate::{validate_pedal, validate_pedal_files, PedalWarning, Severity}
 pub use warnings::{check_voltage_compatibility, VoltageWarning, WarningSeverity};
 
 #[cfg(test)]
+mod opamp_drive_tests;
+#[cfg(test)]
+mod passive_extraction_tests;
+#[cfg(test)]
+mod tree_build_tests;
+#[cfg(test)]
+mod voltage_extraction_tests;
+#[cfg(test)]
+mod mna_accuracy_tests;
+#[cfg(test)]
 mod spqr_tests;
 #[cfg(test)]
 mod spqr_build_tests;

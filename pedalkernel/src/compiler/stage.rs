@@ -1217,14 +1217,10 @@ impl WdfStage {
                             return v;
                         }
                     }
-                    // For passive filters with embedded voltage source, the output
-                    // voltage at the load is half the root wave (resistive extraction)
-                    if tree.resistive_termination_voltage(b_tree).is_some() {
-                        // V_out = b_tree / 2 (but keep open-circuit for state updates)
-                        return b_tree / 2.0;
-                    }
-                    // Fallback: standard open-circuit extraction
-                    b_tree
+                    // Convert WDF wave variable to circuit voltage.
+                    // VS emits b = 2*V (WDF convention), so b_tree / 2 gives
+                    // the actual circuit voltage at the output port.
+                    b_tree / 2.0
                 }
                 // ShortCircuit: ground termination (a = -b)
                 // Ground has zero impedance, so it reflects with inverted sign.
@@ -1327,6 +1323,7 @@ impl WdfStage {
             };
             // ── Down-sweep ────────────────────────────────────────────
             tree.set_incident(a_root);
+
             // If an output probe is set, extract voltage at that leaf
             // after the down-sweep instead of the root junction.
             if let Some(ref probe_id) = output_probe {
@@ -1334,6 +1331,35 @@ impl WdfStage {
                     return v;
                 }
             }
+
+            // For feedback_opamp stages (op-amp + diode clipping):
+            // The VS drives gain × input into the tree. The diode root
+            // clips the wave nonlinearly (Wright Omega). The clipped output
+            // voltage is vs_voltage shaped by the diode's I-V curve.
+            //
+            // We use vs_voltage as the base (correct gain) and apply the
+            // diode's clipping from the WDF wave variables. The diode
+            // voltage v_d = (a_root + b_tree) / 2 tells us how much
+            // the diode conducted. The output is vs_voltage minus the
+            // voltage absorbed by the diode current through Rf.
+            if feedback_opamp.is_some() {
+                // The diode clips vs_voltage. The WDF root already computed
+                // the clipped wave. Extract the clipped voltage from the
+                // diode's perspective: the diode port voltage is v_d = (a_root + b_tree) / 2.
+                // For small signals (below clip), v_d ≈ 0 → output ≈ vs_voltage.
+                // For large signals (clipping), v_d absorbs energy → output limited.
+                //
+                // The actual output voltage at U1.out in the circuit:
+                // V_out = V_neg + I_diode × R_f  (neg ≈ virtual ground ≈ 0)
+                // But I_diode is encoded in the wave: I = (a - b) / (2·Rp)
+                // V_out = Rp_tree × I = (b_tree - a_root) / 2
+                // The WDF current at the root port encodes the clipped signal.
+                // V_out ∝ current × Rp. Try both wave-variable combinations
+                // to find which contains the clipped signal with harmonics.
+                let v_current = (b_tree - a_root) / 2.0;
+                return v_current;
+            }
+
             (a_root + b_tree) / 2.0
         });
 
@@ -3177,15 +3203,6 @@ impl IirStage {
     pub(super) fn process(&mut self, input: f64) -> f64 {
         let mut out = self.iir.process(input * self.compensation);
 
-        #[cfg(test)]
-        {
-            static IIR_COEFF_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            if input.abs() > 1e-10 && IIR_COEFF_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1 {
-                eprintln!("  IIR coeffs: b={:?} a={:?} comp={} gbw_coeff={} v_max={}",
-                    self.iir.b_coeffs, self.iir.a_coeffs, self.compensation, self.gbw_coeff, self.v_max);
-            }
-        }
-
         // GBW rolloff: single-pole lowpass
         out = self.gbw_coeff * out + (1.0 - self.gbw_coeff) * self.gbw_state;
         self.gbw_state = out;
@@ -3316,8 +3333,16 @@ impl BlackFeedbackStage {
 
     /// Current closed-loop gain.
     pub(super) fn gain(&self) -> f64 {
+        // When Rf is 0 (all-reactive feedback, e.g., coupling cap only),
+        // the DC gain is undefined. Use unity passthrough — the reactive
+        // elements handle frequency shaping in the WDF tree, not here.
+        if self.rf <= 0.0 && self.ri <= 0.0 {
+            return 1.0;
+        }
         if self.inverting {
-            -(self.rf / self.ri.max(1.0))
+            let g = self.rf / self.ri.max(1.0);
+            if g < 1e-6 { return -1.0; } // Cap-only feedback → unity
+            -g
         } else {
             1.0 + self.rf / self.ri.max(1.0)
         }
@@ -3333,6 +3358,11 @@ impl BlackFeedbackStage {
         if self.pot_max_r > 0.0 {
             self.set_rf(position * self.pot_max_r);
         }
+    }
+
+    /// Set input resistance (for pipeline Ri fix).
+    pub(super) fn set_ri(&mut self, ri: f64) {
+        self.ri = ri;
     }
 
     /// Update Rf (pot sweep). Recomputes gain and GBW coefficient.

@@ -187,6 +187,7 @@ impl DynNode {
             taper,
             rp,
             last_a: 0.0,
+            complement: false,
         }))
     }
 
@@ -576,6 +577,7 @@ impl DynNode {
                         taper: PotTaper::B,
                         rp,
                         last_a: 0.0,
+                        complement: false,
                     }));
                     true
                 } else {
@@ -781,13 +783,15 @@ impl DynNode {
                 let right_is_vs = matches!(right.as_ref(), Self::Leaf(l) if l.type_tag() == "voltage_source" || l.type_tag() == "cathode_bias_source");
 
                 if left_is_vs {
+                    // VS emits b = 2*V (WDF convention). The junction voltage
+                    // needs to be halved to convert from wave to circuit voltage.
                     let sum = *b1 + *b2 + a_root;
                     let a_inner = *b2 - (1.0 - *gamma) * sum;
-                    right.extract_load_voltage(a_inner)
+                    right.extract_load_voltage(a_inner).map(|v| v / 2.0)
                 } else if right_is_vs {
                     let sum = *b1 + *b2 + a_root;
                     let a_left = *b1 - *gamma * sum;
-                    left.extract_load_voltage(a_left)
+                    left.extract_load_voltage(a_left).map(|v| v / 2.0)
                 } else {
                     // Not Series(VS, _), try direct load
                     if right.is_load_element() {
@@ -810,12 +814,17 @@ impl DynNode {
         }
     }
 
-    /// Extract voltage at the load element in a filter subtree.
+    /// Extract voltage at the output element in a filter subtree.
+    /// For short-circuit terminated filters, the output is at the element
+    /// nearest to ground — the right child of the innermost series adaptor.
     fn extract_load_voltage(&self, a_parent: f64) -> Option<f64> {
         match self {
             Self::Leaf(leaf) => {
                 let tag = leaf.type_tag();
-                if tag == "resistor" || tag == "pot" {
+                // Any passive leaf can be the output: resistor, pot, cap, inductor
+                if tag == "resistor" || tag == "pot" || tag == "capacitor"
+                    || tag == "leaky_capacitor" || tag == "inductor"
+                {
                     Some(a_parent / 2.0)
                 } else {
                     None
@@ -880,9 +889,12 @@ impl DynNode {
         }
     }
 
-    /// Check if this node is a load element (resistor or pot).
+    /// Check if this node is a passive element that can be an output point.
     fn is_load_element(&self) -> bool {
-        matches!(self, Self::Leaf(l) if l.type_tag() == "resistor" || l.type_tag() == "pot")
+        matches!(self, Self::Leaf(l) if {
+            let t = l.type_tag();
+            t == "resistor" || t == "pot" || t == "capacitor" || t == "leaky_capacitor" || t == "inductor"
+        })
     }
 
     /// Check if this tree contains any reactive elements.

@@ -161,8 +161,6 @@ fn make_binding(
         label: ctrl.label.clone(),
         target,
         component_id: comp_id.to_string(),
-        component_id_aw: aw_id.to_string(),
-        component_id_wb: wb_id.to_string(),
         max_resistance: max_r,
         taper,
         range: ctrl.range,

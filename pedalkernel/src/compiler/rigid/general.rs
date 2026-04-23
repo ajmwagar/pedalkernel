@@ -52,7 +52,7 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     let config = extract_opamp_config(group, inverting, graph)?;
     let mut opamp = make_opamp_root(&config, sample_rate);
 
-    // Find first NL active edge → build root
+    // Find NL active edge → build diode root for proper harmonic clipping
     let nl_edge_idx = group
         .active_edges
         .iter()
@@ -74,17 +74,17 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     let oversampler = Oversampler::new(OversamplingFactor::X2);
     let mut stage = WdfStage::new(tree, root, oversampler);
 
-    // Find feedback pot for runtime gain recomputation.
-    // Instead of FeedbackConfig, compute gain from port resistances:
-    //   Rf = pot_r + series_r,  gain = Rf / Ri
+    // Find feedback pot
     let feedback_pot = super::find_feedback_pot(group, graph);
     if let Some((pot_id, pot_leaf, fixed_r, _parallel_r)) = feedback_pot {
-        #[cfg(test)]
-        eprintln!("  [POT BIND] pot={pot_id} series_r={fixed_r:.0} ri={:.0} gain={:.2}",
-            config.ri, config.gain);
+        let ri = if config.ri.is_finite() && config.ri > 0.0 {
+            config.ri
+        } else {
+            stage.tree.port_resistance()
+        };
         stage.feedback_pot_id = Some(pot_id);
         stage.feedback_series_r = fixed_r;
-        stage.feedback_ri = config.ri;
+        stage.feedback_ri = ri;
         stage.opamp_children.push(pot_leaf);
     }
 
@@ -108,6 +108,29 @@ pub(super) fn build_pendant_tree(pendant_edges: &[usize], graph: &CircuitGraph, 
         rp: 1.0,
         is_cathode_bias: false,
     }))
+}
+
+/// Build a proper WDF tree from a set of passive edges using SPQR decomposition.
+///
+/// Unlike `build_pendant_tree` (which grabs one leaf), this builds the full
+/// Series/Parallel topology from the graph structure. Use for zi (input coupling)
+/// and zf (feedback network) in the OpAmpWdfAdaptor.
+///
+/// Returns None if SPQR decomposition fails or produces no passive tree.
+pub(super) fn build_spqr_tree(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    terminals: &[NodeId],
+    sample_rate: f64,
+) -> Option<DynNode> {
+    if edge_indices.is_empty() {
+        return None;
+    }
+    let tree_terminals = super::super::spqr_build::compute_group_terminals(edge_indices, graph, terminals);
+    let spqr = super::super::spqr::spqr_decompose(
+        edge_indices, &tree_terminals, graph, graph.gnd_node,
+    );
+    super::super::spqr::spqr_to_dyn_node(&spqr, graph, sample_rate)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -185,7 +208,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
 
     // Step 4: Build WDF ports
     let (mut ports, port_node_pairs, passive_children, mut nl_port_resistances) =
-        build_wdf_ports(&nl_terminals, &reactive_edges, graph, &node_to_mna, n_nl);
+        build_wdf_ports(&nl_terminals, &reactive_edges, graph, &node_to_mna, n_nl, all_edges);
     let n_passive = passive_children.len();
 
     // Step 5: Derive scattering matrix + Thevenin adaptation
@@ -391,6 +414,7 @@ fn build_wdf_ports(
     graph: &CircuitGraph,
     node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
     n_nl: usize,
+    edge_indices: &[usize],
 ) -> (Vec<WdfPort>, Vec<(Option<usize>, Option<usize>)>, Vec<DynNode>, Vec<f64>) {
     let r_nl_default = 1000.0;
     let r_adapted = 1000.0;
@@ -418,8 +442,21 @@ fn build_wdf_ports(
         passive_children.push(dyn_node.clone());
     }
 
-    // Adapted (input voltage source) port
-    let injection_mna = node_to_mna(graph.in_node);
+    // Adapted (input voltage source) port.
+    // Use graph.in_node if it's in this MNA. Otherwise, find the active
+    // element's signal input pin from Component::signal_terminals().
+    let injection_mna = node_to_mna(graph.in_node).or_else(|| {
+        edge_indices.iter().find_map(|&eidx| {
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            match comp.kind.signal_terminals() {
+                super::super::component::SignalTerminals::Amplifier { input, .. } => {
+                    let key = format!("{}.{}", comp.id, input);
+                    graph.node_names.get(&key).and_then(|&n| node_to_mna(n))
+                }
+                _ => None,
+            }
+        })
+    });
     ports.push(WdfPort { node_pos: injection_mna, node_neg: None, resistance: r_adapted });
     port_node_pairs.push((injection_mna, None));
 

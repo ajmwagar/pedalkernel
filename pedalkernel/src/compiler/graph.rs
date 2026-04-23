@@ -636,15 +636,32 @@ impl CircuitGraph {
                     let id_neg = get_id(&key_neg, &mut uf);
                     let id_out = get_id(&key_out, &mut uf);
 
-                    // Create a proper graph edge (neg→out) for SPQR decomposition.
-                    // The Component's stamp_mna_multi() resolves all 3 pins.
+                    // Unity follower detection: if neg == out (direct wire
+                    // feedback, e.g., U2.out → U2.neg), the op-amp is a
+                    // voltage buffer. Union pos and out — they're electrically
+                    // the same node. This makes the buffer transparent to
+                    // the SPQR decomposition.
                     let node_neg = uf.find(id_neg);
                     let node_out = uf.find(id_out);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a: node_neg,
-                        node_b: node_out,
-                    });
+                    if node_neg == node_out {
+                        // Unity follower: pos = out (buffer is a wire)
+                        uf.union(id_pos, id_out);
+                    }
+
+                    // Re-resolve after potential union
+                    let node_neg = uf.find(id_neg);
+                    let node_out = uf.find(id_out);
+
+                    // Create a proper graph edge (neg→out) for SPQR decomposition.
+                    // For unity followers, neg==out==pos, so this edge is a self-loop
+                    // (node_a == node_b) and gets filtered later.
+                    if node_neg != node_out {
+                        edges.push(GraphEdge {
+                            comp_idx: idx,
+                            node_a: node_neg,
+                            node_b: node_out,
+                        });
+                    }
 
                     // Record nullor pins for backward compat with existing pipeline.
                     nullor_pin_records.push(NullorPinRecord {
@@ -895,7 +912,7 @@ impl CircuitGraph {
             rec.out_node = uf.find(rec.out_node);
         }
 
-        CircuitGraph {
+        let mut graph = CircuitGraph {
             edges,
             components,
             in_node,
@@ -916,7 +933,9 @@ impl CircuitGraph {
             trigger_nodes,
             ac_ground_nodes: HashSet::new(),
             nullor_pins: nullor_pin_records,
-        }
+        };
+        graph.compute_ac_ground_nodes(pedal);
+        graph
     }
 
     /// Compute AC ground nodes: supply rails and nodes bypassed to ground
@@ -945,7 +964,12 @@ impl CircuitGraph {
             }
         }
 
-        // Nodes bypassed to ground through large caps (≥10µF)
+        // Nodes bypassed to ground through large caps (≥10µF) that also
+        // have multiple signal connections. A lone bias node (VCC→R→node→C→GND)
+        // shouldn't be AC ground — it needs its DC path intact for biasing.
+        // Only mark as AC ground if 3+ non-rail edges touch the node (the cap,
+        // the bias resistor, AND at least one signal component like an op-amp
+        // or pot that references this voltage).
         for edge in &self.edges {
             let comp = &self.components[edge.comp_idx];
             if let Some(cap) = comp
@@ -954,10 +978,29 @@ impl CircuitGraph {
                 .downcast_ref::<super::components::Capacitor>()
             {
                 if cap.config.value >= 10e-6 {
-                    if edge.node_a == self.gnd_node {
-                        ac_ground.insert(edge.node_b);
+                    let candidate = if edge.node_a == self.gnd_node {
+                        Some(edge.node_b)
                     } else if edge.node_b == self.gnd_node {
-                        ac_ground.insert(edge.node_a);
+                        Some(edge.node_a)
+                    } else {
+                        None
+                    };
+                    if let Some(node) = candidate {
+                        // Count how many edges touch this node (excluding
+                        // edges to GND/VCC/supply rails)
+                        let signal_edges = self.edges.iter().filter(|e| {
+                            let touches = e.node_a == node || e.node_b == node;
+                            if !touches { return false; }
+                            let other = if e.node_a == node { e.node_b } else { e.node_a };
+                            other != self.gnd_node
+                                && other != self.vcc_node
+                                && !self.supply_nodes.contains(&other)
+                        }).count();
+                        // ≥3 signal edges: cap + bias R + at least one signal
+                        // component (op-amp pos, pot, etc.)
+                        if signal_edges >= 3 {
+                            ac_ground.insert(node);
+                        }
                     }
                 }
             }

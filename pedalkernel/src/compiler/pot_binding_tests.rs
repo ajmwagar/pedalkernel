@@ -377,6 +377,304 @@ fn feedback_pot_screamer_topology_drive_changes_gain() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Layer 3b: Orphaned pots — pots in non-feedback passive groups
+//
+// Some pots (volume dividers, fuzz emitter coupling) aren't in any
+// feedback stage. They're standalone passive groups. The binding
+// system needs to find and bind them anyway.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn orphan_volume_pot_is_bound() {
+    // Volume pot as a simple voltage divider (not in any feedback loop).
+    // Should still be bound as a control.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                Volume: pot(100k, a)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Volume.a
+                Volume.w -> out
+                Volume.b -> gnd
+            }
+            controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    let bound = compiled.controls.iter().any(|c| c.label == "Volume");
+    eprintln!("Orphan volume: bound={bound}");
+    for c in &compiled.controls {
+        eprintln!("  {:?} -> {:?}", c.label, c.target);
+    }
+    assert!(bound, "Volume pot (voltage divider) should be bound even when not in feedback");
+}
+
+#[test]
+fn orphan_volume_pot_changes_output() {
+    // Volume pot as divider should actually change output level.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                Volume: pot(100k, a)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Volume.a
+                Volume.w -> out
+                Volume.b -> gnd
+            }
+            controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Volume");
+    eprintln!("Orphan volume: lo={lo:.6}, hi={hi:.6}");
+    // Volume pot is a divider — output should change significantly between positions.
+    // Direction depends on taper/wiring: either hi>lo or lo>hi is valid.
+    let ratio = lo.max(hi) / lo.min(hi).max(1e-10);
+    assert!(ratio > 1.5,
+        "Volume pot should change output: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+}
+
+/// Helper for parsed pedals (avoids re-parsing)
+fn measure_pot_sweep_parsed(pedal: &crate::dsl::PedalDef, control: &str) -> (f64, f64) {
+    let sr = 48000.0;
+    let freq = 440.0;
+    let mut measure = |pos: f64| -> f64 {
+        let mut c = compile_via_spqr(pedal, sr).expect("compile");
+        c.set_control(control, pos);
+        for s in 0..500 {
+            let input = 0.01 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+            c.process(input);
+        }
+        let mut peak = 0.0f64;
+        for s in 500..720 {
+            let input = 0.01 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+            peak = peak.max(c.process(input).abs());
+        }
+        peak
+    };
+    (measure(0.1), measure(0.9))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 3c: Inter-stage voltage divider — pot wiper splits across stages
+//
+// When a pot's wiper sits between two stages (output of one, input of next),
+// the pot acts as a voltage divider in the routing layer. No WDF tree needed.
+// signal *= R_wb / (R_aw + R_wb) applied between stages.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn interstage_volume_pot_changes_output() {
+    // Simple case: gain stage → Volume pot → output.
+    // Volume wiper goes to out. Volume.a connects to stage output.
+    // Volume.b goes to GND. Sweeping should attenuate.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                Volume: pot(100k, a)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Volume.a
+                Volume.w -> out
+                Volume.b -> gnd
+            }
+            controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Volume");
+    let ratio = lo.max(hi) / lo.min(hi).max(1e-10);
+    eprintln!("Interstage volume: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+    assert!(ratio > 2.0,
+        "Volume pot should attenuate: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+}
+
+#[test]
+fn interstage_volume_pot_between_two_stages() {
+    // Two gain stages with Volume pot between them.
+    // U1.out → Volume.a, Volume.w → R_mid → U2.neg, Volume.b → gnd.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf1: resistor(100k)
+                Volume: pot(100k, a)
+                R_mid: resistor(10k)
+                U2: opamp(tl072)
+                Rf2: resistor(100k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf1.a
+                Rf1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Volume.a
+                Volume.w -> R_mid.a
+                R_mid.b -> U2.neg
+                U2.neg -> Rf2.a
+                Rf2.b -> U2.out
+                U2.pos -> gnd
+                Volume.b -> gnd
+                U2.out -> out
+            }
+            controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Volume");
+    let ratio = lo.max(hi) / lo.min(hi).max(1e-10);
+    eprintln!("Interstage 2-stage volume: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+    assert!(ratio > 2.0,
+        "Volume between stages should attenuate: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+}
+
+#[test]
+fn interstage_tone_pot_with_buffer_changes_spectrum() {
+    // Screamer pattern: tone RC network → Tone pot → U2 (unity follower) → out.
+    // The Tone pot blends between bass (direct) and treble (through cap).
+    // Sweeping Tone should change the spectral balance.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                R_tone: resistor(1k)
+                C_tone: cap(220n)
+                Tone: pot(20k, b)
+                U2: opamp(tl072)
+                C_out: cap(10u)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> R_tone.a
+                R_tone.b -> C_tone.a
+                C_tone.b -> Tone.a
+                R_tone.b -> Tone.b
+                Tone.w -> U2.pos
+                U2.out -> U2.neg
+                U2.out -> C_out.a
+                C_out.b -> out
+            }
+            controls { Tone.position -> "Tone" [0.0, 1.0] = 0.5 }
+        }"#)
+    .expect("parse");
+
+    let sr = 48000.0;
+    let measure_spectrum = |pos: f64| -> (f64, f64) {
+        // 200Hz
+        let mut lo = compile_via_spqr(&pedal, sr).expect("compile");
+        lo.set_control("Tone", pos);
+        for _ in 0..500 { lo.process(0.0); }
+        let mut peak_lo = 0.0f64;
+        for s in 0..480 {
+            let input = 0.05 * (std::f64::consts::TAU * 200.0 * s as f64 / sr).sin();
+            peak_lo = peak_lo.max(lo.process(input).abs());
+        }
+        // 5kHz
+        let mut hi = compile_via_spqr(&pedal, sr).expect("compile");
+        hi.set_control("Tone", pos);
+        for _ in 0..500 { hi.process(0.0); }
+        let mut peak_hi = 0.0f64;
+        for s in 0..480 {
+            let input = 0.05 * (std::f64::consts::TAU * 5000.0 * s as f64 / sr).sin();
+            peak_hi = peak_hi.max(hi.process(input).abs());
+        }
+        (peak_lo, peak_hi)
+    };
+
+    let (lo_0, hi_0) = measure_spectrum(0.0);
+    let (lo_1, hi_1) = measure_spectrum(1.0);
+    let ratio_0 = if lo_0 > 1e-10 { hi_0 / lo_0 } else { 0.0 };
+    let ratio_1 = if lo_1 > 1e-10 { hi_1 / lo_1 } else { 0.0 };
+
+    eprintln!("Tone+buffer: @0: lo={lo_0:.4} hi={hi_0:.4} ratio={ratio_0:.2}");
+    eprintln!("             @1: lo={lo_1:.4} hi={hi_1:.4} ratio={ratio_1:.2}");
+
+    // At least one setting should produce output
+    assert!(lo_0 > 0.001 || hi_0 > 0.001 || lo_1 > 0.001 || hi_1 > 0.001,
+        "Should produce output at some setting");
+
+    // Spectral balance should change between positions
+    let ratio_diff = (ratio_0 - ratio_1).abs();
+    assert!(ratio_diff > 0.3,
+        "Tone pot should change spectral balance: ratio_diff={ratio_diff:.2}");
+}
+
+#[test]
+fn interstage_level_pot_after_clipping_changes_gain() {
+    // Level/Volume pot after a clipping stage (common pedal pattern).
+    // The pot is in a separate non-feedback group but may share nodes
+    // with the clipping stage's output.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Drive: pot(500k, a)
+                D1: diode(silicon)
+                Level: pot(100k, a)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Drive.a
+                Drive.b -> U1.out
+                U1.neg -> D1.a
+                D1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Level.a
+                Level.w -> out
+                Level.b -> gnd
+            }
+            controls {
+                Drive.position -> "Drive" [0.0, 1.0] = 0.5
+                Level.position -> "Level" [0.0, 1.0] = 0.5
+            }
+        }"#)
+    .expect("parse");
+
+    let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Level");
+    let ratio = lo.max(hi) / lo.min(hi).max(1e-10);
+    eprintln!("Level after clipping: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+    assert!(ratio > 2.0,
+        "Level pot should change output: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Layer 4: FlowGroup edge classification — R_in should be pendant, not feedback
 // ═══════════════════════════════════════════════════════════════════════════
 

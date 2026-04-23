@@ -636,19 +636,6 @@ impl WdfRoot for OpAmpRoot {
     fn process(&mut self, a: f64, _rp: f64) -> f64 {
         let v_max = self.model.v_max;
 
-        #[cfg(test)]
-        {
-            static OPAMP_PROC_TRACE: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(0);
-            let n = OPAMP_PROC_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // X4 oversampling: 4800 warmup × 4 = 19200 sub-samples before signal
-            if n >= 19200 && n < 19220 {
-                eprintln!("[OPAMP_PROC] n={n} a={a:.6e} vp={:.6e} gain={:.4} gbw_coeff={:.6} gbw_state={:.6e} v_max={v_max:.2} mode={:?}",
-                    self.vp, self.gain(), self.gbw_coeff, self.gbw_state,
-                    match self.mode { OpAmpMode::Inverting{..} => "inv", OpAmpMode::NonInverting{..} => "ni" });
-            }
-        }
-
         // Compute output voltage based on topology
         let mut v_out = match self.mode {
             OpAmpMode::Inverting { gain } => {

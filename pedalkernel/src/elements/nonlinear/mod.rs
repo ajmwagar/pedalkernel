@@ -12,7 +12,7 @@ pub(crate) mod solver;
 mod bbd;
 mod bjt;
 mod delay;
-mod diode;
+pub(crate) mod diode;
 mod jfet;
 mod mosfet;
 mod opamp;

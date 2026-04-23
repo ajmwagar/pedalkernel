@@ -34,6 +34,9 @@ pub trait WdfLeaf: Send {
     /// Type tag string for introspection/matching.
     fn type_tag(&self) -> &'static str;
 
+    /// Mark this pot half as the complement: uses 1-value on set_control.
+    fn set_complement(&mut self) {}
+
     // ── Voltage extraction (after down-sweep) ────────────────────────────
     /// Voltage at this leaf after the WDF cycle.
     fn leaf_voltage(&self) -> f64 {
@@ -421,6 +424,11 @@ pub struct WdfPot {
     pub taper: PotTaper,
     pub rp: f64,
     pub last_a: f64,
+    /// When true, this half uses the complement of the control position
+    /// (1 - value). For a 3-terminal pot split into two halves, one half
+    /// tracks position and the other tracks 1-position so their
+    /// resistances always sum to max_R.
+    pub complement: bool,
 }
 
 impl WdfLeaf for WdfPot {
@@ -439,6 +447,12 @@ impl WdfLeaf for WdfPot {
     fn type_tag(&self) -> &'static str {
         "pot"
     }
+    fn set_complement(&mut self) {
+        self.complement = true;
+        self.position = 1.0 - self.position;
+        let tapered = self.taper.apply(self.position);
+        self.rp = (tapered * self.max_resistance).max(1.0);
+    }
     fn leaf_voltage(&self) -> f64 {
         self.last_a / 2.0
     }
@@ -448,8 +462,9 @@ impl WdfLeaf for WdfPot {
         if self.comp_id == id
             || (self.comp_id.starts_with(id) && self.comp_id[id.len()..].starts_with("__"))
         {
-            self.position = value;
-            let tapered_pos = self.taper.apply(value);
+            let effective = if self.complement { 1.0 - value } else { value };
+            self.position = effective;
+            let tapered_pos = self.taper.apply(effective);
             self.rp = (tapered_pos * self.max_resistance).max(1.0);
             true
         } else {
