@@ -2130,17 +2130,6 @@ impl PedalProcessor for CompiledPedal {
                         }
                     }
 
-                    #[cfg(test)]
-                    {
-                        static WDF_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                        if stage_input.abs() > 1e-10 {
-                            let n = WDF_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if n < 10 {
-                                eprintln!("  [WDF {}] in={:.6e} out={:.6e} comp={}",
-                                    wdf_stage_counter, stage_input, stage_output, stage.root_comp_id);
-                            }
-                        }
-                    }
 
                     #[cfg(feature = "debug-trace")]
                     if trace_on {
@@ -2229,14 +2218,6 @@ impl PedalProcessor for CompiledPedal {
                     let iir_in = signal;
                     let iir_stage = if let Stage::Iir(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
                     signal = iir_stage.process(signal);
-                    #[cfg(test)]
-                    if iir_in.abs() > 1e-10 || signal.abs() > 1e-10 {
-                        static IIR_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                        let n = IIR_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if n < 3 {
-                            eprintln!("  [IIR {stage_idx}] in={iir_in:.6e} out={signal:.6e}");
-                        }
-                    }
             } else if is_ss {
                     prev_was_clipping = false;
                     let ss_stage = if let Stage::StateSpace(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
