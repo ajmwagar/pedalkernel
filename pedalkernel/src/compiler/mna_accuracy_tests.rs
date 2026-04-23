@@ -21,7 +21,95 @@ use crate::PedalProcessor;
 const SR: f64 = 48000.0;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 1. Diode I-V curve correctness (pure math, no module access needed)
+// 1. Wright Omega accuracy
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn wright_omega_satisfies_defining_equation() {
+    use crate::elements::nonlinear::diode::wright_omega;
+
+    let test_points = [-30.0, -10.0, -5.0, -1.0, 0.0, 1.0, 5.0, 10.0, 50.0, 100.0];
+    for x in test_points {
+        let w = wright_omega(x);
+        if w > 1e-15 {
+            let residual = (w + w.ln() - x).abs();
+            assert!(residual < 1e-8,
+                "Wright Omega residual at x={x}: w={w:.10e}, residual={residual:.2e}");
+        }
+    }
+}
+
+#[test]
+fn wright_omega_known_values() {
+    use crate::elements::nonlinear::diode::wright_omega;
+
+    // ω(0) ≈ 0.5671 (the Omega constant)
+    let w0 = wright_omega(0.0);
+    assert!((w0 - 0.5671).abs() < 0.001, "ω(0) ≈ 0.5671: got {w0:.6}");
+
+    // ω(1) = 1.0 (1 + ln(1) = 1)
+    let w1 = wright_omega(1.0);
+    assert!((w1 - 1.0).abs() < 1e-8, "ω(1) = 1.0: got {w1:.10}");
+
+    // ω(e+1) = e (e + ln(e) = e + 1)
+    let we1 = wright_omega(std::f64::consts::E + 1.0);
+    assert!((we1 - std::f64::consts::E).abs() < 1e-6, "ω(e+1) = e: got {we1:.6}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2. Explicit diode solver accuracy (Wright Omega path)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn explicit_diode_pair_clips_at_correct_voltage() {
+    use crate::elements::nonlinear::diode::explicit_diode_pair;
+
+    let is: f64 = 2.52e-9; // Silicon
+    let n_vt: f64 = 1.752 * 25.85e-3;
+    let rp: f64 = 10000.0;
+
+    // Drive with 2.0V incident wave (would give 1.0V without clipping)
+    let v = explicit_diode_pair(2.0, rp, is, n_vt);
+    eprintln!("Explicit diode pair: a=2.0, v={v:.4}");
+    assert!(v.abs() < 0.8, "Should clip below 0.8V: {v:.4}");
+    assert!(v.abs() > 0.3, "Should produce some output: {v:.4}");
+}
+
+#[test]
+fn explicit_single_diode_clips_asymmetrically() {
+    use crate::elements::nonlinear::diode::explicit_single_diode;
+
+    let is: f64 = 2.52e-9;
+    let n_vt: f64 = 1.752 * 25.85e-3;
+    let rp: f64 = 10000.0;
+
+    let v_fwd = explicit_single_diode(2.0, rp, is, n_vt);
+    let v_rev = explicit_single_diode(-2.0, rp, is, n_vt);
+
+    eprintln!("Single diode: fwd={v_fwd:.4}, rev={v_rev:.4}");
+    assert!(v_fwd.abs() < v_rev.abs(),
+        "Forward should clip more than reverse: fwd={v_fwd:.4}, rev={v_rev:.4}");
+}
+
+#[test]
+fn explicit_germanium_clips_lower_than_silicon() {
+    use crate::elements::nonlinear::diode::explicit_diode_pair;
+
+    let si_is: f64 = 2.52e-9;
+    let si_nvt: f64 = 1.752 * 25.85e-3;
+    let ge_is: f64 = 2.0e-6;
+    let ge_nvt: f64 = 1.25 * 25.85e-3;
+    let rp: f64 = 10000.0;
+
+    let si_clip = explicit_diode_pair(2.0, rp, si_is, si_nvt).abs();
+    let ge_clip = explicit_diode_pair(2.0, rp, ge_is, ge_nvt).abs();
+
+    eprintln!("Clip levels: Si={si_clip:.4}V, Ge={ge_clip:.4}V");
+    assert!(ge_clip < si_clip, "Ge should clip lower than Si: Ge={ge_clip:.4} < Si={si_clip:.4}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. Diode I-V curve correctness (pure math)
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
