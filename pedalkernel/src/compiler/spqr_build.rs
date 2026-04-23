@@ -140,7 +140,16 @@ pub fn compile_via_spqr_with_options(
         };
     }
 
-    for (gi, group) in feedback_groups.iter().enumerate() {
+    // Process groups in signal flow order: non-feedback groups first
+    // (input coupling, passive filters, pot dividers), then feedback groups
+    // (op-amp + NL stages). This ensures the input coupling stage is built
+    // BEFORE the clipping stage, so the clipping stage can read the input
+    // coupling impedance (Ri) from the already-built preceding stage.
+    let mut sorted_groups: Vec<(usize, &super::signal_flow::FlowGroup)> =
+        feedback_groups.iter().enumerate().collect();
+    sorted_groups.sort_by_key(|(_, g)| if g.has_feedback() { 1 } else { 0 });
+
+    for &(gi, group) in &sorted_groups {
         if group.all_edges().is_empty() {
             continue;
         }
@@ -156,15 +165,62 @@ pub fn compile_via_spqr_with_options(
         }
 
         if group.has_feedback() {
-            // Feedback group → build directly as Rigid.
-            // Classification flows from FeedbackGroup to builder.
-            let built = build_rigid_from_group(
+            let mut built = build_rigid_from_group(
                 group.all_edges(),
                 &graph,
                 sample_rate,
                 Some(group),
             )
             .map_err(|e| format!("Stage {stage_counter}: {e}"))?;
+
+            // Fix gain for clipping stages where Ri is in a preceding stage.
+            // Find the active element's input pin node, then find a preceding
+            // WDF stage whose tree touches that node — its port resistance = Ri.
+            if let BuiltStage::Wdf(ref mut wdf) = built {
+                if let Some(ref mut opamp) = wdf.feedback_opamp {
+                    if opamp.gain().abs() <= 1.01 {
+                        // Find the active element's input pin node
+                        let input_node = group.active_edges.iter().find_map(|&eidx| {
+                            let comp = &graph.components[graph.edges[eidx].comp_idx];
+                            if let super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
+                                let key = format!("{}.{input}", comp.id);
+                                graph.node_names.get(&key).copied()
+                            } else {
+                                None
+                            }
+                        });
+
+                        if let Some(neg) = input_node {
+                            // Find the non-feedback group whose edges touch the
+                            // neg node — that's the input coupling group. Sum
+                            // the resistance of edges between that group and neg.
+                            let ri: f64 = sorted_groups.iter()
+                                .filter(|(_, g)| !g.has_feedback())
+                                .flat_map(|(_, g)| g.all_edges())
+                                .filter_map(|eidx| {
+                                    let e = &graph.edges[eidx];
+                                    let touches_neg = e.node_a == neg || e.node_b == neg;
+                                    if !touches_neg { return None; }
+                                    let comp = &graph.components[e.comp_idx];
+                                    comp.kind.resistance()
+                                })
+                                .sum();
+                            let ri = if ri > 0.0 { Some(ri) } else { None };
+
+                            if let Some(ri) = ri {
+                                let rf: f64 = group.feedback_edges.iter()
+                                    .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
+                                    .sum();
+                                if rf > 0.0 {
+                                    opamp.set_gain(rf / ri);
+                                    wdf.feedback_ri = ri;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             push_stage!(built, stage_counter);
             stage_counter += 1;
         } else if is_pot_divider_group(group, &graph) {
