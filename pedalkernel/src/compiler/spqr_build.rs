@@ -551,7 +551,25 @@ pub(super) fn build_spqr_stage(
                     || graph.ac_ground_nodes.contains(&e.node_b)
             });
             let root = if touches_gnd { RootKind::ShortCircuit } else { RootKind::Passthrough };
-            Ok(BuiltStage::Wdf(WdfStage::new(tree, root, oversampler)))
+            let mut wdf = WdfStage::new(tree, root, oversampler);
+
+            // Set output_probe when a pot wiper connects to the circuit's
+            // out_node in a ground-terminated stage. Pot wipers sit at interior
+            // tree junctions that ShortCircuit extraction can't reach.
+            if touches_gnd {
+                let out_node = graph.out_node;
+                for &eidx in &edge_indices {
+                    let e = &graph.edges[eidx];
+                    if e.node_a != out_node && e.node_b != out_node { continue; }
+                    let comp = &graph.components[e.comp_idx];
+                    if comp.kind.is_pot() {
+                        wdf.output_probe = Some(comp.id.clone());
+                        break;
+                    }
+                }
+            }
+
+            Ok(BuiltStage::Wdf(wdf))
         }
         SpqrStage::NlWdf { tree, nl_edge_idx, .. } => {
             let e = &graph.edges[nl_edge_idx];

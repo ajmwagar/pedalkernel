@@ -106,6 +106,93 @@ fn coupling_cap_passes_440hz() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Layer 1b: single cap — deeper investigation
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cap_10u_passes_440hz() {
+    // 10µF at 440Hz: Xc = 1/(2π·440·10e-6) ≈ 36Ω. Near unity.
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components { C1: cap(10u) }
+            nets { in -> C1.a  C1.b -> out }
+            controls {}
+        }"#);
+    eprintln!("Cap 10µF: gain={gain:.3}");
+    assert!(gain > 0.5, "10µF cap should pass 440Hz: gain={gain:.3}");
+}
+
+#[test]
+fn cap_100u_passes_440hz() {
+    // 100µF at 440Hz: Xc ≈ 3.6Ω. Essentially a wire.
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components { C1: cap(100u) }
+            nets { in -> C1.a  C1.b -> out }
+            controls {}
+        }"#);
+    eprintln!("Cap 100µF: gain={gain:.3}");
+    assert!(gain > 0.8, "100µF cap should be near unity at 440Hz: gain={gain:.3}");
+}
+
+#[test]
+fn cap_1n_with_load_blocks_440hz() {
+    // 1nF at 440Hz: Xc ≈ 362kΩ. With 10k load to GND:
+    // gain = R_load / (R_load + Xc) ≈ 10k/372k ≈ 0.027. Should block.
+    // (A floating cap with open-circuit output doesn't filter — no current path.)
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                C1: cap(1n)
+                R_load: resistor(10k)
+            }
+            nets {
+                in -> C1.a
+                C1.b -> R_load.a, out
+                R_load.b -> gnd
+            }
+            controls {}
+        }"#);
+    eprintln!("Cap 1nF + load: gain={gain:.3}");
+    assert!(gain < 0.1, "1nF cap + load should block 440Hz: gain={gain:.3}");
+}
+
+#[test]
+fn cap_with_load_resistor_passes() {
+    // Cap + load R to ground. This gives the WDF tree a proper load.
+    // C=1µF, R_load=10k. At 440Hz: Xc=362Ω.
+    // Voltage divider: R_load/(R_load + Xc) ≈ 10000/10362 ≈ 0.97
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                C1: cap(1u)
+                R_load: resistor(10k)
+            }
+            nets {
+                in -> C1.a
+                C1.b -> R_load.a, out
+                R_load.b -> gnd
+            }
+            controls {}
+        }"#);
+    eprintln!("Cap + load R: gain={gain:.3}");
+    assert!(gain > 0.5, "Cap + load should pass 440Hz: gain={gain:.3}");
+}
+
+#[test]
+fn inductor_passes_440hz() {
+    // 100mH at 440Hz: XL = 2π·440·0.1 ≈ 276Ω. Should pass some signal.
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components { L1: inductor(100m) }
+            nets { in -> L1.a  L1.b -> out }
+            controls {}
+        }"#);
+    eprintln!("Inductor 100mH: gain={gain:.3}");
+    assert!(gain > 0.3, "100mH inductor should pass 440Hz: gain={gain:.3}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Layer 2: two-component networks
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -212,7 +299,7 @@ fn coupling_cap_then_pot_passes_signal() {
 #[test]
 fn tone_control_passes_signal() {
     // Screamer tone: R_t1 → Tone pot blends bass (C_t1) and treble (R_t2+C_t2)
-    let gain = measure_gain(r#"
+    let gain = measure_gain_metered(r#"
         pedal "test" { supply 9V
             components {
                 R_t1: resistor(1k)
@@ -233,7 +320,7 @@ fn tone_control_passes_signal() {
             controls {
                 Tone.position -> "Tone" [0.0, 1.0] = 0.5
             }
-        }"#);
+        }"#, "Tone control");
     eprintln!("Tone control: gain={gain:.3}");
     assert!(gain > 0.05, "Tone control should pass signal: gain={gain:.3}");
 }

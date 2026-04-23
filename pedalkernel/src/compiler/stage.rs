@@ -1226,18 +1226,18 @@ impl WdfStage {
                 // For passive filters with voltage source, the output voltage
                 // should be extracted at the load resistor, not the root port.
                 RootKind::Passthrough => {
-                    // Standard open-circuit behavior for state updates
+                    // Open-circuit termination: a_root = b_tree (total reflection).
+                    // Port voltage V = (a + b) / 2 = (b_tree + b_tree) / 2 = b_tree.
                     tree.set_incident(b_tree);
-                    // Check output_probe BEFORE resistive_termination fallback
+                    // Check output_probe BEFORE fallback
                     if let Some(ref probe_id) = output_probe {
                         if let Some(v) = tree.leaf_voltage(probe_id) {
                             return v;
                         }
                     }
-                    // Convert WDF wave variable to circuit voltage.
-                    // VS emits b = 2*V (WDF convention), so b_tree / 2 gives
-                    // the actual circuit voltage at the output port.
-                    b_tree / 2.0
+                    // Open circuit: full voltage appears at the port.
+                    // V_port = (a_root + b_tree) / 2 = b_tree (since a_root = b_tree).
+                    (b_tree + b_tree) / 2.0
                 }
                 // ShortCircuit: ground termination (a = -b)
                 // Ground has zero impedance, so it reflects with inverted sign.
