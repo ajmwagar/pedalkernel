@@ -44,6 +44,8 @@ pub use warnings::{check_voltage_compatibility, VoltageWarning, WarningSeverity}
 #[cfg(test)]
 mod voltage_extraction_tests;
 #[cfg(test)]
+mod mna_accuracy_tests;
+#[cfg(test)]
 mod spqr_tests;
 #[cfg(test)]
 mod spqr_build_tests;
