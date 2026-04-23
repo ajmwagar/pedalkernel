@@ -3362,6 +3362,11 @@ impl BlackFeedbackStage {
         }
     }
 
+    /// Set input resistance (for pipeline Ri fix).
+    pub(super) fn set_ri(&mut self, ri: f64) {
+        self.ri = ri;
+    }
+
     /// Update Rf (pot sweep). Recomputes gain and GBW coefficient.
     pub(super) fn set_rf(&mut self, rf: f64) {
         self.rf = rf;

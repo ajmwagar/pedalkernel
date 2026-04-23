@@ -216,6 +216,35 @@ pub fn compile_via_spqr_with_options(
                 }
             }
 
+            // Same Ri fix for BlackFeedback stages
+            if let BuiltStage::BlackFeedback(ref mut bf) = built {
+                if bf.gain().abs() <= 1.01 {
+                    let input_node = group.active_edges.iter().find_map(|&eidx| {
+                        let comp = &graph.components[graph.edges[eidx].comp_idx];
+                        if let super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
+                            let key = format!("{}.{input}", comp.id);
+                            graph.node_names.get(&key).copied()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(neg) = input_node {
+                        let ri: f64 = sorted_groups.iter()
+                            .filter(|(_, g)| !g.has_feedback())
+                            .flat_map(|(_, g)| g.all_edges())
+                            .filter_map(|eidx| {
+                                let e = &graph.edges[eidx];
+                                if e.node_a != neg && e.node_b != neg { return None; }
+                                graph.components[e.comp_idx].kind.resistance()
+                            })
+                            .sum();
+                        if ri > 0.0 {
+                            bf.set_ri(ri);
+                        }
+                    }
+                }
+            }
+
             push_stage!(built, stage_counter);
             stage_counter += 1;
         } else if is_pot_divider_group(group, &graph) {
