@@ -36,9 +36,11 @@ pub struct OpAmpModel {
     pub gbw: f64,
     /// Slew rate (V/µs). TL072 ≈ 13, LM308 ≈ 0.3.
     pub slew_rate: f64,
-    /// Maximum output voltage swing (V, single-sided from Vcc/2).
-    /// Typically Vcc/2 - 1.5V for rail-to-rail, less for others.
-    pub v_max: f64,
+    /// Maximum positive output swing (V above bias point).
+    /// For symmetric bias: same as v_rail_neg. For asymmetric: differs.
+    pub v_rail_pos: f64,
+    /// Maximum negative output swing (V below bias point).
+    pub v_rail_neg: f64,
     /// Output impedance (Ω). Typically 50-200Ω for voltage-feedback op-amps.
     /// Used by the VCVS stamp in the MNA nullor path.
     pub output_impedance: f64,
@@ -59,7 +61,8 @@ impl OpAmpModel {
             open_loop_gain: 200_000.0, // 106 dB
             gbw: 3e6,                  // 3 MHz
             slew_rate: 13.0,           // 13 V/µs
-            v_max: 12.0,               // ±12V swing at ±15V supply
+            v_rail_pos: 12.0,
+            v_rail_neg: 12.0,               // ±12V swing at ±15V supply
             output_impedance: 75.0,  // Ω
             output_capacitance: 20e-12, // 20pF
         }
@@ -74,7 +77,8 @@ impl OpAmpModel {
             open_loop_gain: 200_000.0,
             gbw: 4e6,
             slew_rate: 13.0,
-            v_max: 12.0,
+            v_rail_pos: 12.0,
+            v_rail_neg: 12.0,
             output_impedance: 75.0,
             output_capacitance: 20e-12,
         }
@@ -85,7 +89,8 @@ impl OpAmpModel {
             open_loop_gain: 300_000.0,
             gbw: 1e6,
             slew_rate: 0.3,
-            v_max: 12.0,
+            v_rail_pos: 12.0,
+            v_rail_neg: 12.0,
             output_impedance: 200.0, // Higher Ro than JFET types
             output_capacitance: 30e-12, // 30pF — slower output stage
         }
@@ -96,7 +101,8 @@ impl OpAmpModel {
             open_loop_gain: 200_000.0,
             gbw: 1e6,
             slew_rate: 0.5,
-            v_max: 12.0,
+            v_rail_pos: 12.0,
+            v_rail_neg: 12.0,
             output_impedance: 75.0,
             output_capacitance: 20e-12,
         }
@@ -107,7 +113,8 @@ impl OpAmpModel {
             open_loop_gain: 100_000.0,
             gbw: 3e6,
             slew_rate: 1.7,
-            v_max: 12.0,
+            v_rail_pos: 12.0,
+            v_rail_neg: 12.0,
             output_impedance: 75.0,
             output_capacitance: 20e-12,
         }
@@ -118,7 +125,8 @@ impl OpAmpModel {
             open_loop_gain: 100_000.0,
             gbw: 3e6,
             slew_rate: 1.5,
-            v_max: 12.0,
+            v_rail_pos: 12.0,
+            v_rail_neg: 12.0,
             output_impedance: 75.0,
             output_capacitance: 20e-12,
         }
@@ -129,7 +137,8 @@ impl OpAmpModel {
             open_loop_gain: 100_000.0,
             gbw: 10e6,
             slew_rate: 9.0,
-            v_max: 12.0,
+            v_rail_pos: 12.0,
+            v_rail_neg: 12.0,
             output_impedance: 50.0, // Lower Ro — studio grade
             output_capacitance: 15e-12, // 15pF — fast output
         }
@@ -140,7 +149,8 @@ impl OpAmpModel {
             open_loop_gain: 400_000.0,
             gbw: 0.6e6,
             slew_rate: 0.3,
-            v_max: 12.0,
+            v_rail_pos: 12.0,
+            v_rail_neg: 12.0,
             output_impedance: 60.0,
             output_capacitance: 25e-12,
         }
@@ -151,7 +161,8 @@ impl OpAmpModel {
             open_loop_gain: 100_000.0,
             gbw: 1e6,
             slew_rate: 1.0,
-            v_max: 12.0,
+            v_rail_pos: 12.0,
+            v_rail_neg: 12.0,
             output_impedance: 75.0,
             output_capacitance: 20e-12,
         }
@@ -273,8 +284,7 @@ impl OpAmpPostFx {
     /// target. This matches SPICE behaviour where the op-amp can't exceed
     /// the supply rails regardless of input rate of change.
     pub fn process(&mut self, v_raw: f64) -> f64 {
-        let v_max = self.model.v_max;
-        let v_clip = v_raw.clamp(-v_max, v_max);
+        let v_clip = v_raw.clamp(-self.model.v_rail_neg, self.model.v_rail_pos);
         // slew_rate is V/µs in the datasheet. Convert to V/sample.
         let slew_max = self.model.slew_rate * 1e6 / self.sample_rate;
         let delta = (v_clip - self.prev_out).clamp(-slew_max, slew_max);
@@ -502,14 +512,23 @@ impl OpAmpRoot {
 
     /// Set the maximum output voltage (supply rails).
     #[inline]
+    /// Set symmetric rail limits (both positive and negative).
     pub fn set_v_max(&mut self, v_max: f64) {
-        self.model.v_max = v_max.max(0.5);
+        let v = v_max.max(0.5);
+        self.model.v_rail_pos = v;
+        self.model.v_rail_neg = v;
     }
 
-    /// Get the current v_max setting.
+    /// Set asymmetric rail limits (from bias analysis).
+    pub fn set_v_rails(&mut self, v_rail_pos: f64, v_rail_neg: f64) {
+        self.model.v_rail_pos = v_rail_pos.max(0.5);
+        self.model.v_rail_neg = v_rail_neg.max(0.5);
+    }
+
+    /// Get the symmetric v_max (minimum of both rails).
     #[inline]
     pub fn v_max(&self) -> f64 {
-        self.model.v_max
+        self.model.v_rail_pos.min(self.model.v_rail_neg)
     }
 
     /// Set feedback configuration for pot-driven gain control.
@@ -604,7 +623,6 @@ impl OpAmpRoot {
     #[inline]
     pub fn compute_vs_voltage(&mut self, input: f64) -> f64 {
         let gain = self.gain();
-        let v_max = self.model.v_max;
 
         // Apply gain (magnitude only — WDF handles sign convention)
         let mut v_out = gain * input;
@@ -613,8 +631,8 @@ impl OpAmpRoot {
         v_out = self.gbw_coeff * v_out + (1.0 - self.gbw_coeff) * self.gbw_state;
         self.gbw_state = v_out;
 
-        // Hard clip at supply rails
-        v_out = v_out.clamp(-v_max, v_max);
+        // Hard clip at supply rails (asymmetric)
+        v_out = v_out.clamp(-self.model.v_rail_neg, self.model.v_rail_pos);
 
         // Slew rate limiting
         v_out = self.apply_slew_limit(v_out);
@@ -634,8 +652,6 @@ impl WdfRoot for OpAmpRoot {
     /// Op-amp processing based on mode.
     #[inline]
     fn process(&mut self, a: f64, _rp: f64) -> f64 {
-        let v_max = self.model.v_max;
-
         // Compute output voltage based on topology
         let mut v_out = match self.mode {
             OpAmpMode::Inverting { gain } => {
@@ -661,8 +677,8 @@ impl WdfRoot for OpAmpRoot {
             v_out = vd * (v_out / vd).tanh();
         }
 
-        // Hard clip at supply rails
-        v_out = v_out.clamp(-v_max, v_max);
+        // Hard clip at supply rails (asymmetric)
+        v_out = v_out.clamp(-self.model.v_rail_neg, self.model.v_rail_pos);
 
         // Apply slew rate limiting
         v_out = self.apply_slew_limit(v_out);
@@ -711,10 +727,10 @@ mod tests {
 
         let mut lm_model = lm308();
         lm_model.slew_rate = 100.0; // fast slew so it doesn't interfere
-        lm_model.v_max = 1000.0;
+        lm_model.v_rail_pos = 1000.0; lm_model.v_rail_neg = 1000.0;
         let mut tl_model = tl072();
         tl_model.slew_rate = 100.0;
-        tl_model.v_max = 1000.0;
+        tl_model.v_rail_pos = 1000.0; tl_model.v_rail_neg = 1000.0;
 
         let mut lm = OpAmpRoot::new_inverting(lm_model, gain);
         lm.set_sample_rate(sr);
@@ -797,7 +813,7 @@ mod tests {
     fn opamp_rails_clamp_output() {
         // v_max = 3.0V (9V supply). Output should hard clip at ±3V.
         let mut model = tl072();
-        model.v_max = 3.0;
+        model.v_rail_pos =3.0; model.v_rail_neg =3.0;
         // High slew rate so it doesn't interfere
         model.slew_rate = 100.0;
         let mut root = OpAmpRoot::new_non_inverting(model, 1.0);
@@ -829,7 +845,7 @@ mod tests {
         let mut model = lm308();
         model.gbw = 100_000.0; // Very low GBW
         model.slew_rate = 0.1; // Very slow slew
-        model.v_max = 20.0; // High rails so they don't interfere
+        model.v_rail_pos =20.0; model.v_rail_neg =20.0; // High rails so they don't interfere
         let mut root = OpAmpRoot::new_non_inverting(model, 10.0);
         root.set_sample_rate(48000.0);
 
@@ -854,7 +870,7 @@ mod tests {
         // In WDF: v_in = a/2, so a=0.02 → v_in=0.01 → v_out=-0.1.
         let mut model = tl072();
         model.slew_rate = 100.0; // Fast slew
-        model.v_max = 10.0;
+        model.v_rail_pos =10.0; model.v_rail_neg =10.0;
         let mut root = OpAmpRoot::new_inverting(model, 10.0);
         root.set_sample_rate(48000.0);
 
@@ -883,7 +899,7 @@ mod tests {
         // produce proportionally different output.
         let mut model = tl072();
         model.slew_rate = 100.0; // fast slew
-        model.v_max = 100.0; // high rails
+        model.v_rail_pos =100.0; model.v_rail_neg =100.0; // high rails
         let mut root = OpAmpRoot::new_inverting(model, 10.0);
         root.set_sample_rate(48000.0);
 
@@ -907,7 +923,7 @@ mod tests {
         // Rf=100k, Ri=10k → gain=10.
         let mut model = tl072();
         model.slew_rate = 100.0;
-        model.v_max = 100.0;
+        model.v_rail_pos =100.0; model.v_rail_neg =100.0;
         let rf = 100_000.0;
         let ri = 10_000.0;
         let gain = rf / ri; // = 10.0
@@ -931,7 +947,7 @@ mod tests {
         // 3. Output should change
         let mut model = tl072();
         model.slew_rate = 100.0;
-        model.v_max = 100.0;
+        model.v_rail_pos =100.0; model.v_rail_neg =100.0;
 
         let ri = 10_000.0;
         let rf_lo = 10_000.0; // pot at 10% of 100k
@@ -961,7 +977,7 @@ mod tests {
         // This is what the stage should compute from port resistances.
         let mut model = tl072();
         model.slew_rate = 100.0;
-        model.v_max = 100.0;
+        model.v_rail_pos =100.0; model.v_rail_neg =100.0;
 
         let ri = 10_000.0;
         let r_clip = 4_700.0;

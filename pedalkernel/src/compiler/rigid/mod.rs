@@ -400,7 +400,7 @@ pub(super) fn build_rigid_from_group(
     sample_rate: f64,
     group: Option<&FlowGroup>,
     supply_voltage: f64,
-    bias_v_max: Option<f64>,
+    bias_v_max: Option<(f64, f64)>,
 ) -> Result<BuiltStage, String> {
     let stats = StageStats::from_edges(&edge_indices, graph);
     let optimization = classify_rigid(&stats, graph, group);
@@ -429,18 +429,17 @@ pub(super) fn build_rigid_from_group(
             // feedback like a coupling cap), this topology needs frequency-
             // dependent processing — fall through to IIR/WDF.
             if config.rf > 0.0 {
-                let mut fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
-                // Patch RailSaturation with bias-derived v_max or supply voltage
-                let actual_v_max = bias_v_max
-                    .unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
-                for f in &mut fx {
-                    if let super::component::NonIdealFx::RailSaturation { v_max } = f {
-                        *v_max = actual_v_max;
-                    }
-                }
+                let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
                 let mut stage = super::stage::BlackFeedbackStage::new(
                     config.rf, config.ri, inverting, &fx, sample_rate,
                 );
+                // Apply bias-derived asymmetric rail limits directly
+                if let Some((pos, neg)) = bias_v_max {
+                    stage.set_v_rails(pos, neg);
+                } else {
+                    let v = (supply_voltage / 2.0 - 1.5).max(0.5);
+                    stage.set_v_rails(v, v);
+                }
 
                 for &eidx in &g.all_edges() {
                     let comp = &graph.components[graph.edges[eidx].comp_idx];
@@ -483,8 +482,10 @@ pub(super) fn build_rigid_from_group(
             if has_signal {
                 let mut stage = IirStage::new(iir_data);
                 let mut fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
-                // Patch RailSaturation with bias-derived v_max or supply voltage
+                // Patch RailSaturation with bias-derived v_max or supply voltage.
+                // NonIdealFx uses symmetric v_max; OpAmpRoot gets asymmetric rails.
                 let actual_v_max = bias_v_max
+                    .map(|(pos, neg)| pos.min(neg))
                     .unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
                 for f in &mut fx {
                     if let super::component::NonIdealFx::RailSaturation { v_max } = f {
@@ -537,8 +538,10 @@ pub(super) fn build_rigid_from_group(
                     let inverting = is_inverting_topology(&stats, graph);
                     let config = opamp_root::extract_opamp_config(g, inverting, graph)?;
                     let mut fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
-                    // Patch RailSaturation with bias-derived v_max or supply voltage
+                    // Patch RailSaturation with bias-derived v_max or supply voltage.
+                    // NonIdealFx uses symmetric v_max; OpAmpRoot gets asymmetric rails.
                     let actual_v_max = bias_v_max
+                        .map(|(pos, neg)| pos.min(neg))
                         .unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
                     for f in &mut fx {
                         if let super::component::NonIdealFx::RailSaturation { v_max } = f {

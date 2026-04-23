@@ -1613,10 +1613,11 @@ mod tests {
         let b = root.process(0.0, 10_000.0);
         let v = b / 2.0;
 
+        let v_max = model.v_rail_pos.min(model.v_rail_neg);
         assert!(
-            v.abs() <= model.v_max * 1.1,
+            v.abs() <= v_max * 1.1,
             "Output should saturate at Vmax={}: got v={v}",
-            model.v_max
+            v_max
         );
     }
 

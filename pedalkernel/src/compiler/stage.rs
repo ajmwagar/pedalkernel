@@ -48,8 +48,10 @@ pub(super) struct NonIdealFxState {
     pub max_dv: f64,
     /// Previous output sample for slew rate limiting.
     pub prev_out: f64,
-    /// Rail saturation voltage (tanh soft clip ceiling).
-    pub v_max: f64,
+    /// Positive rail saturation voltage (tanh soft clip ceiling).
+    pub v_rail_pos: f64,
+    /// Negative rail saturation voltage.
+    pub v_rail_neg: f64,
 }
 
 impl Default for NonIdealFxState {
@@ -60,7 +62,8 @@ impl Default for NonIdealFxState {
             gbw_state: 0.0,
             max_dv: f64::MAX,
             prev_out: 0.0,
-            v_max: f64::MAX,
+            v_rail_pos: f64::MAX,
+            v_rail_neg: f64::MAX,
         }
     }
 }
@@ -70,7 +73,7 @@ impl NonIdealFxState {
     ///
     /// - `gbw`: gain-bandwidth product in Hz
     /// - `slew_rate`: maximum dV/dt in V/µs
-    /// - `v_max`: rail saturation voltage in V
+    /// - `v_max`: symmetric rail saturation voltage in V
     /// - `gain`: closed-loop gain (for fc = GBW/gain)
     /// - `sample_rate`: in Hz
     pub fn from_params(gbw: f64, slew_rate: f64, v_max: f64, gain: f64, sample_rate: f64) -> Self {
@@ -82,7 +85,8 @@ impl NonIdealFxState {
             gbw_state: 0.0,
             max_dv: slew_rate * 1e6 / sample_rate,
             prev_out: 0.0,
-            v_max,
+            v_rail_pos: v_max,
+            v_rail_neg: v_max,
         }
     }
 
@@ -99,7 +103,8 @@ impl NonIdealFxState {
                     state.max_dv = slew_rate * 1e6 / sample_rate;
                 }
                 super::component::NonIdealFx::RailSaturation { v_max } => {
-                    state.v_max = *v_max;
+                    state.v_rail_pos = *v_max;
+                    state.v_rail_neg = *v_max;
                 }
             }
         }
@@ -141,9 +146,11 @@ pub(super) fn apply_nonideal_fx(sample: f64, state: &mut NonIdealFxState) -> f64
     }
     state.prev_out = out;
 
-    // Rail saturation: tanh soft clip
-    if state.v_max < f64::MAX {
-        out = state.v_max * crate::fast_math::fast_tanh(out / state.v_max);
+    // Rail saturation: asymmetric tanh soft clip
+    if out > 0.0 && state.v_rail_pos < f64::MAX {
+        out = state.v_rail_pos * crate::fast_math::fast_tanh(out / state.v_rail_pos);
+    } else if out < 0.0 && state.v_rail_neg < f64::MAX {
+        out = -state.v_rail_neg * crate::fast_math::fast_tanh(-out / state.v_rail_neg);
     }
 
     flush_denormal(out)
@@ -3389,6 +3396,12 @@ impl BlackFeedbackStage {
     /// Set input resistance (for pipeline Ri fix).
     pub(super) fn set_ri(&mut self, ri: f64) {
         self.ri = ri;
+    }
+
+    /// Set asymmetric rail limits from bias analysis.
+    pub(super) fn set_v_rails(&mut self, v_rail_pos: f64, v_rail_neg: f64) {
+        self.fx_state.v_rail_pos = v_rail_pos;
+        self.fx_state.v_rail_neg = v_rail_neg;
     }
 
     /// Update Rf (pot sweep). Recomputes gain and GBW coefficient.

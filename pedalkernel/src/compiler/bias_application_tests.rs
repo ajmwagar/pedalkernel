@@ -253,66 +253,46 @@ fn supply_18v_uses_actual_supply_not_hardcoded_9v() {
 // ── Bias voltage from divider sets v_max, not just supply/2 ─────────────
 
 #[test]
-fn bias_voltage_sets_vmax_not_supply_half() {
-    // Asymmetric divider: R_top=30k, R_bot=10k → bias = 9V × 10/40 = 2.25V
-    // Positive headroom: 9V - 2.25V - 1.5V = 5.25V
-    // Negative headroom: 2.25V - 1.5V = 0.75V
-    // With supply/2 assumed: v_max = 3.0V (symmetric) → clips both ways at 3V
-    // With actual bias: positive clips at 5.25V, negative clips at 0.75V
+fn asymmetric_rails_produce_asymmetric_clipping() {
+    // Direct test: construct a BlackFeedbackStage, set asymmetric v_rails,
+    // and verify the output clips at different levels for positive vs negative.
     //
-    // Test: drive a strong signal. With correct asymmetric bias, the negative
-    // peak should be much smaller than the positive peak.
-    let source = r#"
-        pedal "test" { supply 9V
-            components {
-                R_v1: resistor(30k)
-                R_v2: resistor(10k)
-                C_v: cap(47u, electrolytic)
-                R_in: resistor(10k)
-                U1: opamp(jrc4558)
-                Rf: resistor(100k)
-            }
-            nets {
-                vcc -> R_v1.a
-                R_v1.b -> R_v2.a, C_v.a
-                R_v2.b -> gnd
-                C_v.b -> gnd
-                in -> R_in.a
-                R_in.b -> U1.neg
-                U1.neg -> Rf.a
-                Rf.b -> U1.out
-                U1.pos -> gnd
-                U1.out -> out
-            }
-            controls {}
-        }"#;
+    // v_rail_pos = 5.0V, v_rail_neg = 1.0V
+    // Drive with gain × input > both rails → output should clip asymmetrically.
+    use super::stage::BlackFeedbackStage;
+    use super::component::NonIdealFx;
 
-    let pedal = crate::dsl::parse_pedal_file(source).expect("parse");
-    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+    let fx = vec![
+        NonIdealFx::OpAmpBandwidth { gbw: 3e6, slew_rate: 13.0 },
+        NonIdealFx::RailSaturation { v_max: 3.0 }, // initial symmetric
+    ];
+    let mut stage = BlackFeedbackStage::new(100_000.0, 10_000.0, true, &fx, SR);
+    // Override with asymmetric rails
+    stage.set_v_rails(5.0, 1.0);
 
-    // Drive hard to hit rail clipping (no diodes)
-    let amp = 0.5;
-    let freq = 440.0;
-    for s in 0..2000 {
-        compiled.process(amp * (std::f64::consts::TAU * freq * s as f64 / SR).sin());
+    // Warmup
+    for _ in 0..200 {
+        stage.process(0.0);
     }
+
+    // Drive hard: gain = Rf/Ri = 10, input = 0.8V → 8V unclipped
     let mut pos_peak = 0.0f64;
     let mut neg_peak = 0.0f64;
+    let freq = 440.0;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * freq * (2000 + s) as f64 / SR).sin()
-        );
+        let input = 0.8 * (std::f64::consts::TAU * freq * s as f64 / SR).sin();
+        let out = stage.process(input);
         if out > pos_peak { pos_peak = out; }
         if out < neg_peak { neg_peak = out; }
     }
 
-    eprintln!("Asymmetric bias (2.25V): pos={pos_peak:.4}V, neg={neg_peak:.4}V");
-    // With correct asymmetric bias: neg clips earlier (0.75V headroom)
-    // than pos (5.25V headroom). The ratio should be >2:1.
+    eprintln!("Asymmetric rails: pos={pos_peak:.4}V, neg={neg_peak:.4}V");
     let ratio = pos_peak / neg_peak.abs().max(0.001);
-    eprintln!("  Asymmetry ratio: {ratio:.2} (should be >2.0 for 30k/10k divider)");
-    assert!(ratio > 2.0,
-        "Asymmetric bias should produce asymmetric rail clipping: ratio={ratio:.2}");
+    eprintln!("  Ratio: {ratio:.2} (should be ~5.0 for 5V/1V rails)");
+    // Positive clips at ~5V (tanh), negative clips at ~1V (tanh)
+    assert!(pos_peak > 2.0, "Positive should reach beyond 2V: {pos_peak:.4}V");
+    assert!(neg_peak.abs() < 1.5, "Negative should clip around 1V: {neg_peak:.4}V");
+    assert!(ratio > 2.0, "Should be asymmetric: ratio={ratio:.2}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

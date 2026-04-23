@@ -647,12 +647,13 @@ fn compute_signal_path_flags(
 /// Looks up the VCVS component's pos/neg pin nodes in the bias voltage
 /// map, then calls `Component::apply_bias()` to get rail limits.
 /// Returns the symmetric v_max (min of positive and negative rail).
+/// Returns (v_rail_pos, v_rail_neg) for asymmetric rail clipping.
 fn compute_bias_v_max_for_group(
     group: &super::signal_flow::FlowGroup,
     graph: &super::graph::CircuitGraph,
     bias_node_voltages: &std::collections::HashMap<super::graph::NodeId, f64>,
     supply_voltage: f64,
-) -> Option<f64> {
+) -> Option<(f64, f64)> {
     use super::component::BiasResult;
 
     // Find the VCVS component in this group
@@ -664,10 +665,8 @@ fn compute_bias_v_max_for_group(
         }
 
         // Build bias_voltages map from pin names to DC voltages.
-        // Look up this component's pin nodes in the bias voltage map.
         let mut pin_voltages: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
 
-        // Check nullor_pins for this component's pos/neg/out nodes
         if let Some(pins) = graph.nullor_pins.iter().find(|p| p.comp_idx == e.comp_idx) {
             if let Some(&v) = bias_node_voltages.get(&pins.pos_node) {
                 pin_voltages.insert("pos".to_string(), v);
@@ -677,18 +676,9 @@ fn compute_bias_v_max_for_group(
             }
         }
 
-        if pin_voltages.is_empty() {
-            // No bias voltage found for this op-amp's pins — use supply default
-            let result = comp.kind.apply_bias(&pin_voltages, supply_voltage);
-            if let BiasResult::Applied { v_rail_pos, v_rail_neg } = result {
-                return Some(v_rail_pos.min(v_rail_neg));
-            }
-            continue;
-        }
-
         let result = comp.kind.apply_bias(&pin_voltages, supply_voltage);
         if let BiasResult::Applied { v_rail_pos, v_rail_neg } = result {
-            return Some(v_rail_pos.min(v_rail_neg));
+            return Some((v_rail_pos, v_rail_neg));
         }
     }
 

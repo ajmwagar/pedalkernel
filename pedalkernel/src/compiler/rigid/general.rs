@@ -48,7 +48,7 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     graph: &CircuitGraph,
     sample_rate: f64,
     supply_voltage: f64,
-    bias_v_max: Option<f64>,
+    bias_v_max: Option<(f64, f64)>,
 ) -> Result<WdfStage, String> {
     let inverting = is_inverting_topology(stats, graph);
     let config = extract_opamp_config(group, inverting, graph)?;
