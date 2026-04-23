@@ -4,7 +4,6 @@ description: "Real-time-safe signal and state metrics — what's recorded, how t
 section: "Internals"
 weight: 88
 source_commit: "95744ce1cdd9c2cdec3550bfdce9879b1737312c"
-preview: true
 watches:
   - pedalkernel/src/metering.rs
   - pedalkernel/src/compiler/compiled.rs
