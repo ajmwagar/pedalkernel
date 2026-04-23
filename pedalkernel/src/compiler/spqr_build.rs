@@ -120,6 +120,18 @@ pub fn compile_via_spqr_with_options(
         .map(|g| super::bias_analysis::classify_group_bias(g, &graph))
         .collect();
 
+    // Build a map from node → DC bias voltage across all StaticBias groups.
+    // Used to set op-amp v_max from the circuit's actual bias network.
+    let mut bias_node_voltages: std::collections::HashMap<super::graph::NodeId, f64> =
+        std::collections::HashMap::new();
+    for kind in &group_bias {
+        if let super::bias_analysis::GroupBiasKind::StaticBias { dc_voltages } = kind {
+            bias_node_voltages.extend(dc_voltages);
+        }
+    }
+
+    let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
+
     // Step 2: SPQR decompose each group independently.
     let terminals = vec![graph.in_node, graph.out_node];
     let mut stages: Vec<Stage> = Vec::new();
@@ -212,11 +224,18 @@ pub fn compile_via_spqr_with_options(
         }
 
         if group.has_feedback() {
+            // Compute bias-derived v_max for op-amps in this group.
+            // Find the VCVS component, look up its pos/neg pin nodes in the
+            // bias voltage map, and call apply_bias to get rail limits.
+            let bias_v_max = compute_bias_v_max_for_group(group, &graph, &bias_node_voltages, supply_voltage);
+
             let mut built = build_rigid_from_group(
                 group.all_edges(),
                 &graph,
                 sample_rate,
                 Some(group),
+                supply_voltage,
+                bias_v_max,
             )
             .map_err(|e| format!("Group {gi}: {e}"))?;
 
@@ -342,8 +361,6 @@ pub fn compile_via_spqr_with_options(
         Stage::MultiNl(m) => m.signal_flow_distance,
         Stage::BlackFeedback(b) => b.signal_flow_distance,
     });
-
-    let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
 
     let mut compiled = CompiledPedal {
         stages,
@@ -625,6 +642,59 @@ fn compute_signal_path_flags(
 ///
 /// Each group's distance = minimum BFS hop count from `graph.in_node` to any
 /// node touched by the group's edges. Groups closer to the circuit input get
+/// Compute bias-derived v_max for an op-amp in a flow group.
+///
+/// Looks up the VCVS component's pos/neg pin nodes in the bias voltage
+/// map, then calls `Component::apply_bias()` to get rail limits.
+/// Returns the symmetric v_max (min of positive and negative rail).
+fn compute_bias_v_max_for_group(
+    group: &super::signal_flow::FlowGroup,
+    graph: &super::graph::CircuitGraph,
+    bias_node_voltages: &std::collections::HashMap<super::graph::NodeId, f64>,
+    supply_voltage: f64,
+) -> Option<f64> {
+    use super::component::BiasResult;
+
+    // Find the VCVS component in this group
+    for &eidx in group.active_edges.iter() {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if comp.kind.op_amp_type().is_none() {
+            continue;
+        }
+
+        // Build bias_voltages map from pin names to DC voltages.
+        // Look up this component's pin nodes in the bias voltage map.
+        let mut pin_voltages: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+
+        // Check nullor_pins for this component's pos/neg/out nodes
+        if let Some(pins) = graph.nullor_pins.iter().find(|p| p.comp_idx == e.comp_idx) {
+            if let Some(&v) = bias_node_voltages.get(&pins.pos_node) {
+                pin_voltages.insert("pos".to_string(), v);
+            }
+            if let Some(&v) = bias_node_voltages.get(&pins.neg_node) {
+                pin_voltages.insert("neg".to_string(), v);
+            }
+        }
+
+        if pin_voltages.is_empty() {
+            // No bias voltage found for this op-amp's pins — use supply default
+            let result = comp.kind.apply_bias(&pin_voltages, supply_voltage);
+            if let BiasResult::Applied { v_rail_pos, v_rail_neg } = result {
+                return Some(v_rail_pos.min(v_rail_neg));
+            }
+            continue;
+        }
+
+        let result = comp.kind.apply_bias(&pin_voltages, supply_voltage);
+        if let BiasResult::Applied { v_rail_pos, v_rail_neg } = result {
+            return Some(v_rail_pos.min(v_rail_neg));
+        }
+    }
+
+    None
+}
+
 /// lower distance values, giving the correct processing order regardless of
 /// the order `find_flow_groups` returned them.
 fn compute_group_flow_distances(

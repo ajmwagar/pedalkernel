@@ -65,8 +65,12 @@ impl Component for OpAmp {
                 gbw: model.gbw,
                 slew_rate: model.slew_rate,
             },
+            // Default rail saturation — overridden by apply_bias() when a
+            // bias network is detected. The v_max here assumes the minimum
+            // common pedal supply (9V). Pipeline patches this after bias
+            // analysis with the actual supply voltage and bias point.
             NonIdealFx::RailSaturation {
-                v_max: 3.0, // default: 9V/2 - 1.5V saturation. Updated by set_supply_voltage.
+                v_max: 3.0,
             },
         ]
     }
@@ -296,6 +300,39 @@ impl Component for OpAmp {
 
     fn op_amp_type(&self) -> Option<OpAmpType> {
         Some(self.op_type)
+    }
+
+    fn apply_bias(
+        &self,
+        bias_voltages: &std::collections::HashMap<String, f64>,
+        supply_voltage: f64,
+    ) -> crate::compiler::component::BiasResult {
+        // Op-amp bias sets the DC operating point (output swing center).
+        // The bias voltage at the pos/neg input determines the output's
+        // midpoint. Rail limits are supply_voltage minus headroom on each side.
+        //
+        // For a symmetric divider (bias = supply/2 = 4.5V at 9V):
+        //   v_rail_pos = supply - bias - headroom = 9 - 4.5 - 1.5 = 3.0V
+        //   v_rail_neg = bias - headroom = 4.5 - 1.5 = 3.0V
+        //
+        // For asymmetric (bias = 2.25V at 9V):
+        //   v_rail_pos = 9 - 2.25 - 1.5 = 5.25V
+        //   v_rail_neg = 2.25 - 1.5 = 0.75V
+        const HEADROOM: f64 = 1.5; // Typical output stage headroom
+
+        // Use bias voltage if provided; default to supply/2 (symmetric)
+        let bias_v = bias_voltages.get("pos")
+            .or_else(|| bias_voltages.get("neg"))
+            .copied()
+            .unwrap_or(supply_voltage / 2.0);
+
+        let v_rail_pos = (supply_voltage - bias_v - HEADROOM).max(0.5);
+        let v_rail_neg = (bias_v - HEADROOM).max(0.5);
+
+        crate::compiler::component::BiasResult::Applied {
+            v_rail_pos,
+            v_rail_neg,
+        }
     }
 }
 

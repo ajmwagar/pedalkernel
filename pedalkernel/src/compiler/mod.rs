@@ -82,3 +82,5 @@ mod black_feedback_tests;
 mod diode_polarity_tests;
 #[cfg(test)]
 mod bias_analysis_tests;
+#[cfg(test)]
+mod bias_application_tests;

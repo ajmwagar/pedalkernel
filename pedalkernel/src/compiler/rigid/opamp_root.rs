@@ -133,15 +133,25 @@ pub(in crate::compiler) fn extract_opamp_config(
 }
 
 /// Create an OpAmpRoot from config, with sample rate and supply voltage set.
-pub(in crate::compiler) fn make_opamp_root(config: &OpAmpConfig, sample_rate: f64) -> OpAmpRoot {
-    let supply_voltage: f64 = 9.0; // TODO: propagate from PedalDef
+///
+/// `supply_voltage` comes from the PedalDef's supply declaration.
+/// `bias_v_max` is the v_max derived from the circuit's bias network
+/// via `Component::apply_bias()`. If None, falls back to symmetric
+/// supply/2 - headroom.
+pub(in crate::compiler) fn make_opamp_root(
+    config: &OpAmpConfig,
+    sample_rate: f64,
+    supply_voltage: f64,
+    bias_v_max: Option<f64>,
+) -> OpAmpRoot {
     let mut root = if config.inverting {
         OpAmpRoot::new_inverting(config.model, config.gain)
     } else {
         OpAmpRoot::new_non_inverting(config.model, config.gain)
     };
     root.set_sample_rate(sample_rate);
-    root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5));
+    let v_max = bias_v_max.unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
+    root.set_v_max(v_max);
     root
 }
 
@@ -151,10 +161,12 @@ pub(in crate::compiler) fn build_opamp_root(
     inverting: bool,
     graph: &CircuitGraph,
     sample_rate: f64,
+    supply_voltage: f64,
+    bias_v_max: Option<f64>,
 ) -> Result<WdfStage, String> {
     let config = extract_opamp_config(group, inverting, graph)?;
     // Rf=0 is valid: unity-gain buffer (direct neg→out connection)
-    let root = make_opamp_root(&config, sample_rate);
+    let root = make_opamp_root(&config, sample_rate, supply_voltage, bias_v_max);
 
     // Build WDF tree from pendant edges (input coupling)
     let tree = if !group.pendant_edges.is_empty() {

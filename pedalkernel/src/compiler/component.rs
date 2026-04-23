@@ -397,6 +397,20 @@ pub enum SolverMethod {
     GummelPoon,
 }
 
+/// Result of applying DC bias to an active component.
+#[derive(Debug, Clone)]
+pub enum BiasResult {
+    /// Component doesn't use bias (passive elements, diodes).
+    NotApplicable,
+    /// Bias applied successfully. Contains the computed model parameters.
+    Applied {
+        /// Positive rail voltage (V above bias point before clipping).
+        v_rail_pos: f64,
+        /// Negative rail voltage (V below bias point before clipping).
+        v_rail_neg: f64,
+    },
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Component trait
 // ═══════════════════════════════════════════════════════════════════════════
@@ -869,6 +883,30 @@ pub trait Component: std::fmt::Debug {
     }
     fn transformer_config(&self) -> Option<&crate::dsl::TransformerConfig> {
         None
+    }
+
+    // ── Bias application ────────────────────────────────────────────────
+
+    /// Apply DC bias from a static bias network detected at compile time.
+    ///
+    /// `bias_voltages` maps pin names (e.g. "pos", "neg", "base", "gate")
+    /// to their DC voltage computed from the circuit's resistor divider.
+    /// `supply_voltage` is the pedal's supply rail voltage (e.g. 9.0V).
+    ///
+    /// Each component type interprets bias differently:
+    /// - **Op-amp**: sets positive/negative rail limits from bias point
+    /// - **BJT**: sets quiescent Ic, Vce from collector/emitter voltages
+    /// - **Triode/Pentode**: sets grid bias (Vgk) from grid DC voltage
+    /// - **JFET**: sets Vgs from gate bias voltage
+    ///
+    /// Returns `BiasResult` describing what was applied.
+    /// Default: no-op (passive components don't need bias).
+    fn apply_bias(
+        &self,
+        _bias_voltages: &std::collections::HashMap<String, f64>,
+        _supply_voltage: f64,
+    ) -> BiasResult {
+        BiasResult::NotApplicable
     }
 
     // ── Layout methods (defaults use type_tag) ──────────────────────────

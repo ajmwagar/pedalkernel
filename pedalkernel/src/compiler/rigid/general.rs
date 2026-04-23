@@ -47,10 +47,12 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     stats: &StageStats,
     graph: &CircuitGraph,
     sample_rate: f64,
+    supply_voltage: f64,
+    bias_v_max: Option<f64>,
 ) -> Result<WdfStage, String> {
     let inverting = is_inverting_topology(stats, graph);
     let config = extract_opamp_config(group, inverting, graph)?;
-    let mut opamp = make_opamp_root(&config, sample_rate);
+    let mut opamp = make_opamp_root(&config, sample_rate, supply_voltage, bias_v_max);
 
     // Collect ALL NL active edges
     let nl_edge_indices: Vec<usize> = group

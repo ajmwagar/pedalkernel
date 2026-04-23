@@ -390,7 +390,7 @@ pub(super) fn build_rigid(
     graph: &CircuitGraph,
     sample_rate: f64,
 ) -> Result<BuiltStage, String> {
-    build_rigid_from_group(edge_indices, graph, sample_rate, None)
+    build_rigid_from_group(edge_indices, graph, sample_rate, None, 9.0, None)
 }
 
 /// Build from a FlowGroup with full classification.
@@ -399,6 +399,8 @@ pub(super) fn build_rigid_from_group(
     graph: &CircuitGraph,
     sample_rate: f64,
     group: Option<&FlowGroup>,
+    supply_voltage: f64,
+    bias_v_max: Option<f64>,
 ) -> Result<BuiltStage, String> {
     let stats = StageStats::from_edges(&edge_indices, graph);
     let optimization = classify_rigid(&stats, graph, group);
@@ -427,7 +429,15 @@ pub(super) fn build_rigid_from_group(
             // feedback like a coupling cap), this topology needs frequency-
             // dependent processing — fall through to IIR/WDF.
             if config.rf > 0.0 {
-                let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                let mut fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                // Patch RailSaturation with bias-derived v_max or supply voltage
+                let actual_v_max = bias_v_max
+                    .unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
+                for f in &mut fx {
+                    if let super::component::NonIdealFx::RailSaturation { v_max } = f {
+                        *v_max = actual_v_max;
+                    }
+                }
                 let mut stage = super::stage::BlackFeedbackStage::new(
                     config.rf, config.ri, inverting, &fx, sample_rate,
                 );
@@ -472,7 +482,15 @@ pub(super) fn build_rigid_from_group(
             let has_signal = iir_data.b_coeffs.iter().any(|&b| b.abs() > 1e-15);
             if has_signal {
                 let mut stage = IirStage::new(iir_data);
-                let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                let mut fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                // Patch RailSaturation with bias-derived v_max or supply voltage
+                let actual_v_max = bias_v_max
+                    .unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
+                for f in &mut fx {
+                    if let super::component::NonIdealFx::RailSaturation { v_max } = f {
+                        *v_max = actual_v_max;
+                    }
+                }
                 if !fx.is_empty() {
                     stage.set_nonideal_fx(fx, sample_rate);
                 }
@@ -506,7 +524,7 @@ pub(super) fn build_rigid_from_group(
             // naturally through wave scattering.
             if stats.vcvs_count == 1 && stats.nl_count == 1 {
                 if let Some(g) = group {
-                    return build_opamp_nl_feedback(g, &stats, graph, sample_rate)
+                    return build_opamp_nl_feedback(g, &stats, graph, sample_rate, supply_voltage, bias_v_max)
                         .map(BuiltStage::Wdf);
                 }
             }
@@ -518,7 +536,15 @@ pub(super) fn build_rigid_from_group(
                 if let Some(g) = group {
                     let inverting = is_inverting_topology(&stats, graph);
                     let config = opamp_root::extract_opamp_config(g, inverting, graph)?;
-                    let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                    let mut fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                    // Patch RailSaturation with bias-derived v_max or supply voltage
+                    let actual_v_max = bias_v_max
+                        .unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
+                    for f in &mut fx {
+                        if let super::component::NonIdealFx::RailSaturation { v_max } = f {
+                            *v_max = actual_v_max;
+                        }
+                    }
                     let stage = super::stage::BlackFeedbackStage::new(
                         config.rf, config.ri, inverting, &fx, sample_rate,
                     );
@@ -531,7 +557,6 @@ pub(super) fn build_rigid_from_group(
         }
         RigidOptimization::StateSpace => {
             let pendant_trees = Vec::new(); // TODO: extract from group
-            let supply_voltage = 9.0; // TODO: pass from PedalDef
             state_space::build_state_space_stage(
                 &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
             )
@@ -544,7 +569,7 @@ pub(super) fn build_rigid_from_group(
             // a DiodePair root from individual diode components.
             if let Some(g) = group {
                 if stats.vcvs_count == 1 && stats.nl_count > 0 {
-                    return build_opamp_nl_feedback(g, &stats, graph, sample_rate)
+                    return build_opamp_nl_feedback(g, &stats, graph, sample_rate, supply_voltage, bias_v_max)
                         .map(BuiltStage::Wdf);
                 }
             }
