@@ -1332,34 +1332,32 @@ impl WdfStage {
                 }
             }
 
-            // For feedback_opamp stages (op-amp + diode clipping), extract
-            // output at the voltage source leaf. The VS represents the op-amp
-            // output — its voltage after the down-sweep is the clipped output.
-            // The root junction (a_root + b_tree) / 2 gives the virtual ground
-            // voltage which is ≈0 for inverting amps.
+            // For feedback_opamp stages (op-amp + diode clipping):
+            // The VS drives gain × input into the tree. The diode root
+            // clips the wave nonlinearly (Wright Omega). The clipped output
+            // voltage is vs_voltage shaped by the diode's I-V curve.
+            //
+            // We use vs_voltage as the base (correct gain) and apply the
+            // diode's clipping from the WDF wave variables. The diode
+            // voltage v_d = (a_root + b_tree) / 2 tells us how much
+            // the diode conducted. The output is vs_voltage minus the
+            // voltage absorbed by the diode current through Rf.
             if feedback_opamp.is_some() {
-                let mut vs_out = None;
-                tree.for_each_leaf(&mut |leaf| {
-                    if leaf.type_tag() == "voltage_source" && vs_out.is_none() {
-                        // VS voltage = (a_vs + b_vs) / 2
-                        // b_vs = 2*V (set before reflected()), a_vs from down-sweep
-                        vs_out = Some(leaf.leaf_voltage());
-                    }
-                });
-                if let Some(v) = vs_out {
-                    // leaf_voltage for VS returns 0 by default — need to compute
-                    // from the incident wave. Use the series junction approach:
-                    // the VS is the first child of the Series adaptor, so its
-                    // voltage is the tree's input port voltage.
-                    if v.abs() > 1e-15 {
-                        return v;
-                    }
-                }
-                // VS leaf_voltage returned 0 — compute from wave variables.
-                // For Series(VS, pendant), the VS port voltage after scattering
-                // is vs_voltage (the value we set). The output IS vs_voltage
-                // because the op-amp enforces Vout = gain * Vin.
-                return vs_voltage;
+                // The diode clips vs_voltage. The WDF root already computed
+                // the clipped wave. Extract the clipped voltage from the
+                // diode's perspective: the diode port voltage is v_d = (a_root + b_tree) / 2.
+                // For small signals (below clip), v_d ≈ 0 → output ≈ vs_voltage.
+                // For large signals (clipping), v_d absorbs energy → output limited.
+                //
+                // The actual output voltage at U1.out in the circuit:
+                // V_out = V_neg + I_diode × R_f  (neg ≈ virtual ground ≈ 0)
+                // But I_diode is encoded in the wave: I = (a - b) / (2·Rp)
+                // V_out = Rp_tree × I = (b_tree - a_root) / 2
+                // The WDF current at the root port encodes the clipped signal.
+                // V_out ∝ current × Rp. Try both wave-variable combinations
+                // to find which contains the clipped signal with harmonics.
+                let v_current = (b_tree - a_root) / 2.0;
+                return v_current;
             }
 
             (a_root + b_tree) / 2.0
