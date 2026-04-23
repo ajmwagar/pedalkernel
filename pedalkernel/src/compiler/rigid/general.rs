@@ -52,125 +52,44 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     let config = extract_opamp_config(group, inverting, graph)?;
     let mut opamp = make_opamp_root(&config, sample_rate);
 
-    // Find diode model for soft-clip voltage
+    // Find NL active edge → build diode root for proper harmonic clipping
     let nl_edge_idx = group
         .active_edges
         .iter()
-        .find(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear);
+        .find(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
+        .ok_or("General stage has no NL edge")?;
 
-    if let Some(&nl_eidx) = nl_edge_idx {
-        let comp = &graph.components[graph.edges[nl_eidx].comp_idx];
-        if let Some((nl_kind, _)) = comp.kind.classify_nonlinear(
-            &comp.id,
-            graph.edges[nl_eidx].node_a,
-            graph.edges[nl_eidx].node_b,
-            graph.gnd_node,
-            &graph.node_names,
-        ) {
-            // Extract diode Vf for soft-clipping
-            let diode_model = match &nl_kind {
-                super::super::classify::NonlinearKind::DiodePair(dt)
-                | super::super::classify::NonlinearKind::SingleDiode(dt) => {
-                    Some(super::super::helpers::diode_model(*dt))
-                }
-                _ => None,
-            };
-            if let Some(dm) = diode_model {
-                // Vf ≈ nVt * ln(1mA / Is) — forward voltage at 1mA reference
-                let vf = dm.n_vt * (1e-3 / dm.is).ln();
-                opamp.set_soft_clip(vf);
-            }
-        }
+    let e = &graph.edges[*nl_edge_idx];
+    let comp = &graph.components[e.comp_idx];
+    let (nl_kind, _) = comp
+        .kind
+        .classify_nonlinear(&comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names)
+        .ok_or_else(|| format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id))?;
+
+    let (root, base_diode_model) = create_root(&nl_kind, false);
+
+    // Tree from pendant edges (input coupling)
+    let tree = build_pendant_tree(&group.pendant_edges, graph, sample_rate);
+
+    let oversampler = Oversampler::new(OversamplingFactor::X2);
+    let mut stage = WdfStage::new(tree, root, oversampler);
+
+    // Find feedback pot
+    let feedback_pot = super::find_feedback_pot(group, graph);
+    if let Some((pot_id, pot_leaf, fixed_r, _parallel_r)) = feedback_pot {
+        let ri = if config.ri.is_finite() && config.ri > 0.0 {
+            config.ri
+        } else {
+            stage.tree.port_resistance()
+        };
+        stage.feedback_pot_id = Some(pot_id);
+        stage.feedback_series_r = fixed_r;
+        stage.feedback_ri = ri;
+        stage.opamp_children.push(pot_leaf);
     }
 
-    // Build zi (input coupling) from pendant edges — includes VS for signal injection.
-    // When pendant_edges is empty (input coupling in separate group), use config.ri
-    // or the Ri from the graph to create a proper impedance.
-    let zi = if !group.pendant_edges.is_empty() {
-        build_pendant_tree(&group.pendant_edges, graph, sample_rate)
-    } else {
-        // No pendant edges — build zi from input coupling edges in the graph.
-        // Find non-feedback passive edges touching the active element's input pin
-        // and build a WDF tree from them.
-        let input_pin_node = group.active_edges.iter().find_map(|&eidx| {
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            if let super::super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
-                let key = format!("{}.{input}", comp.id);
-                graph.node_names.get(&key).copied()
-            } else {
-                None
-            }
-        });
-        if let Some(neg) = input_pin_node {
-            let feedback_set: std::collections::HashSet<usize> = group.feedback_edges.iter().copied().collect();
-            let active_set: std::collections::HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
-            // Collect input coupling edges touching neg
-            let input_edges: Vec<usize> = graph.edges.iter().enumerate()
-                .filter_map(|(eidx, e)| {
-                    if feedback_set.contains(&eidx) || active_set.contains(&eidx) { return None; }
-                    let touches = e.node_a == neg || e.node_b == neg;
-                    if !touches { return None; }
-                    let comp = &graph.components[e.comp_idx];
-                    if !comp.kind.is_passive() { return None; }
-                    Some(eidx)
-                })
-                .collect();
-            if !input_edges.is_empty() {
-                // Build tree from these edges
-                build_pendant_tree(&input_edges, graph, sample_rate)
-            } else {
-                // Truly no input coupling — bare VS
-                with_voltage_source(DynNode::Resistor(None, config.ri.min(100_000.0).max(1000.0)))
-            }
-        } else {
-            with_voltage_source(DynNode::Resistor(None, config.ri.min(100_000.0).max(1000.0)))
-        }
-    };
-
-    // Build zf (feedback network) from feedback edges (passives only, no NL).
-    // NO voltage source — zf is a passive impedance, not a signal source.
-    let zf = {
-        let passive_feedback: Vec<usize> = group.feedback_edges.iter().copied()
-            .filter(|&eidx| {
-                let comp = &graph.components[graph.edges[eidx].comp_idx];
-                comp.kind.is_passive()
-            })
-            .collect();
-        if let Some(&first_eidx) = passive_feedback.first() {
-            let comp = &graph.components[graph.edges[first_eidx].comp_idx];
-            comp.kind.make_leaf(&comp.id, sample_rate)
-                .unwrap_or_else(|| DynNode::Resistor(None, comp.kind.resistance().unwrap_or(100_000.0)))
-        } else {
-            // No passive feedback — use a high-impedance resistor (open circuit)
-            DynNode::Resistor(None, 1e6)
-        }
-    };
-
-    let adaptor = super::super::stage::OpAmpWdfAdaptor {
-        zi,
-        zf,
-        is_inverting: inverting,
-        opamp,
-        gbw_state: 0.0,
-        prev_out: 0.0,
-        feedback_pot_id: None,
-    };
-
-    // Build stage with bare tree (signal enters through the adaptor)
-    let tree = DynNode::Leaf(Box::new(
-        crate::compiler::wdf_leaf::WdfVoltageSource {
-            voltage: 0.0,
-            rp: 1.0,
-            is_cathode_bias: false,
-        },
-    ));
-    let oversampler = Oversampler::new(OversamplingFactor::X1);
-    let mut stage = WdfStage::new(
-        tree,
-        super::super::stage::RootKind::ShortCircuit,
-        oversampler,
-    );
-    stage.opamp_wdf_adaptor = Some(adaptor);
+    stage.feedback_opamp = Some(opamp);
+    stage.base_diode_model = base_diode_model;
     Ok(stage)
 }
 

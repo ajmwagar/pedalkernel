@@ -173,77 +173,44 @@ pub fn compile_via_spqr_with_options(
             )
             .map_err(|e| format!("Stage {stage_counter}: {e}"))?;
 
-            // For OpAmpWdfAdaptor stages: wire zi and zf from context.
-            //
-            // zi (input coupling): find the preceding WDF stage whose tree
-            // connects to this stage's input pin. That stage was already built
-            // (non-feedback groups processed first). Clone its tree as zi.
-            //
-            // zf (feedback network): build a proper WDF tree from the feedback
-            // edges using SPQR decomposition.
+            // Fix gain for feedback_opamp stages where Ri is in a preceding
+            // stage. Find the input coupling group's edges touching the active
+            // element's input pin, sum their resistance as Ri, compute gain.
             if let BuiltStage::Wdf(ref mut wdf) = built {
-                if let Some(ref mut adaptor) = wdf.opamp_wdf_adaptor {
-                    // Find the active element's input pin node
-                    let input_node = group.active_edges.iter().find_map(|&eidx| {
-                        let comp = &graph.components[graph.edges[eidx].comp_idx];
-                        if let super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
-                            let key = format!("{}.{input}", comp.id);
-                            graph.node_names.get(&key).copied()
-                        } else {
-                            None
-                        }
-                    });
+                if let Some(ref mut opamp) = wdf.feedback_opamp {
+                    if opamp.gain().abs() <= 1.01 {
+                        let input_node = group.active_edges.iter().find_map(|&eidx| {
+                            let comp = &graph.components[graph.edges[eidx].comp_idx];
+                            if let super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
+                                let key = format!("{}.{input}", comp.id);
+                                graph.node_names.get(&key).copied()
+                            } else {
+                                None
+                            }
+                        });
 
-                    // zi: find the non-feedback group that touches the input pin,
-                    // then find the WDF stage built from that group's edges.
-                    if let Some(neg) = input_node {
-                        // Find which non-feedback group has edges touching neg
-                        let input_group_edges: Vec<usize> = sorted_groups.iter()
-                            .filter(|(_, g)| !g.has_feedback())
-                            .flat_map(|(_, g)| g.all_edges())
-                            .filter(|&eidx| {
-                                let e = &graph.edges[eidx];
-                                e.node_a == neg || e.node_b == neg
-                            })
-                            .collect();
+                        if let Some(neg) = input_node {
+                            // Find the non-feedback group whose edges touch neg
+                            // and sum their resistance as Ri.
+                            let ri: f64 = sorted_groups.iter()
+                                .filter(|(_, g)| !g.has_feedback())
+                                .flat_map(|(_, g)| g.all_edges())
+                                .filter_map(|eidx| {
+                                    let e = &graph.edges[eidx];
+                                    if e.node_a != neg && e.node_b != neg { return None; }
+                                    graph.components[e.comp_idx].kind.resistance()
+                                })
+                                .sum();
 
-                        // Find the stage whose tree contains these edges
-                        // (match by port resistance — the stage built from
-                        // the input coupling group has the right impedance)
-                        if !input_group_edges.is_empty() {
-                            // Build the input coupling tree from those edges
-                            // using the group that contains them
-                            for &(_, g) in &sorted_groups {
-                                if g.has_feedback() { continue; }
-                                let g_edges = g.all_edges();
-                                let has_input_edge = input_group_edges.iter()
-                                    .any(|&ie| g_edges.contains(&ie));
-                                if has_input_edge {
-                                    // Build zi tree from this group's edges
-                                    let zi_terminals = compute_group_terminals(&g_edges, &graph, &terminals);
-                                    let zi_spqr = super::spqr::spqr_decompose(
-                                        &g_edges, &zi_terminals, &graph, graph.gnd_node,
-                                    );
-                                    if let Some(zi_tree) = super::spqr::spqr_to_dyn_node(&zi_spqr, &graph, sample_rate) {
-                                        adaptor.zi = with_voltage_source(zi_tree);
-                                    }
-                                    break;
+                            if ri > 0.0 {
+                                let rf: f64 = group.feedback_edges.iter()
+                                    .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
+                                    .sum();
+                                if rf > 0.0 {
+                                    opamp.set_gain(rf / ri);
+                                    wdf.feedback_ri = ri;
                                 }
                             }
-                        }
-                    }
-
-                    // zf: build from feedback edges using SPQR
-                    let passive_fb: Vec<usize> = group.feedback_edges.iter().copied()
-                        .filter(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.is_passive())
-                        .collect();
-                    if !passive_fb.is_empty() {
-                        let zf_terminals = compute_group_terminals(&passive_fb, &graph, &terminals);
-                        let zf_spqr = super::spqr::spqr_decompose(
-                            &passive_fb, &zf_terminals, &graph, graph.gnd_node,
-                        );
-                        if let Some(zf_tree) = super::spqr::spqr_to_dyn_node(&zf_spqr, &graph, sample_rate) {
-                            adaptor.zf = zf_tree;
                         }
                     }
                 }
