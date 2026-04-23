@@ -2138,8 +2138,8 @@ impl PedalProcessor for CompiledPedal {
                             stage.tree.port_resistance()
                         );
                     }
-                    if wdf_stage_counter < crate::metering::MAX_STAGES {
-                        stage_levels[wdf_stage_counter] = stage_output;
+                    if stage_idx < crate::metering::MAX_STAGES {
+                        stage_levels[stage_idx] = stage_output;
                     }
 
                     #[cfg(debug_assertions)]
@@ -2186,6 +2186,9 @@ impl PedalProcessor for CompiledPedal {
                     let out_node = mnl.output_node_id;
                     self.node_signals.push((out_node, mnl_output));
                     signal = mnl_output;
+                    if stage_idx < crate::metering::MAX_STAGES {
+                        stage_levels[stage_idx] = mnl_output;
+                    }
 
                     #[cfg(feature = "debug-trace")]
                     if trace_on {
@@ -2215,17 +2218,25 @@ impl PedalProcessor for CompiledPedal {
                     }
             } else if is_iir {
                     prev_was_clipping = false;
-                    let iir_in = signal;
                     let iir_stage = if let Stage::Iir(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
                     signal = iir_stage.process(signal);
+                    if stage_idx < crate::metering::MAX_STAGES {
+                        stage_levels[stage_idx] = signal;
+                    }
             } else if is_ss {
                     prev_was_clipping = false;
                     let ss_stage = if let Stage::StateSpace(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
                     signal = ss_stage.process(signal);
+                    if stage_idx < crate::metering::MAX_STAGES {
+                        stage_levels[stage_idx] = signal;
+                    }
             } else if is_bf {
                     prev_was_clipping = false;
                     let bf_stage = if let Stage::BlackFeedback(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
                     signal = bf_stage.process(signal);
+                    if stage_idx < crate::metering::MAX_STAGES {
+                        stage_levels[stage_idx] = signal;
+                    }
             }
 
         }

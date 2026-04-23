@@ -538,7 +538,10 @@ pub(super) fn build_rigid_from_group(
             .map(BuiltStage::StateSpace)
         }
         RigidOptimization::General => {
-            // VCVS + NL with FlowGroup → op-amp drives NL root
+            // VCVS + NL with FlowGroup → op-amp drives NL root.
+            // For multiple NL edges (e.g. SD-1's two separate antiparallel diodes),
+            // build_opamp_nl_feedback detects antiparallel pairs and synthesizes
+            // a DiodePair root from individual diode components.
             if let Some(g) = group {
                 if stats.vcvs_count == 1 && stats.nl_count > 0 {
                     return build_opamp_nl_feedback(g, &stats, graph, sample_rate)

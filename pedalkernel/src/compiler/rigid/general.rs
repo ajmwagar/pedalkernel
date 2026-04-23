@@ -52,24 +52,114 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     let config = extract_opamp_config(group, inverting, graph)?;
     let mut opamp = make_opamp_root(&config, sample_rate);
 
-    // Find NL active edge → build diode root for proper harmonic clipping
-    let nl_edge_idx = group
+    // Collect ALL NL active edges
+    let nl_edge_indices: Vec<usize> = group
         .active_edges
         .iter()
-        .find(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
-        .ok_or("General stage has no NL edge")?;
+        .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
+        .copied()
+        .collect();
 
-    let e = &graph.edges[*nl_edge_idx];
-    let comp = &graph.components[e.comp_idx];
-    let (nl_kind, _) = comp
-        .kind
-        .classify_nonlinear(&comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names)
-        .ok_or_else(|| format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id))?;
+    if nl_edge_indices.is_empty() {
+        return Err("General stage has no NL edge".to_string());
+    }
 
-    let (root, base_diode_model) = create_root(&nl_kind, false);
+    // Classify all NL edges
+    let mut nl_kinds: Vec<(NonlinearKind, usize)> = Vec::new(); // (kind, edge_idx)
+    for &eidx in &nl_edge_indices {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if let Some((kind, _)) = comp.kind.classify_nonlinear(
+            &comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names,
+        ) {
+            nl_kinds.push((kind, eidx));
+        }
+    }
 
-    // Tree from pendant edges (input coupling)
-    let tree = build_pendant_tree(&group.pendant_edges, graph, sample_rate);
+    // Detect antiparallel diode pairs from separate diode components.
+    // Two SingleDiode edges between the same pair of nodes (with swapped polarity)
+    // form an antiparallel pair → synthesize a DiodePair root using the first diode's model.
+    let (root, base_diode_model) = if nl_kinds.len() >= 2 {
+        let mut synthesized = false;
+        let mut result_root = None;
+        let mut result_model = None;
+
+        // Check each pair of diode edges for antiparallel topology
+        for i in 0..nl_kinds.len() {
+            for j in (i + 1)..nl_kinds.len() {
+                if let (
+                    (NonlinearKind::SingleDiode(dt_a), eidx_a),
+                    (NonlinearKind::SingleDiode(dt_b), eidx_b),
+                ) = (&nl_kinds[i], &nl_kinds[j])
+                {
+                    let ea = &graph.edges[*eidx_a];
+                    let eb = &graph.edges[*eidx_b];
+                    // Antiparallel: node_a↔node_b swapped (same two nodes, opposite polarity)
+                    let antiparallel = (ea.node_a == eb.node_b && ea.node_b == eb.node_a)
+                        || (ea.node_a == eb.node_a && ea.node_b == eb.node_b);
+                    if antiparallel {
+                        // Use the higher-Vf diode's model for the pair.
+                        // For asymmetric pairs (SD-1: silicon + germanium), this gives
+                        // approximately correct symmetric clipping at the silicon threshold.
+                        // TODO: implement AsymmetricDiodePairRoot for exact behavior.
+                        use crate::dsl::DiodeType;
+                        let dt = if dt_a == dt_b {
+                            *dt_a
+                        } else {
+                            // Pick silicon (higher Vf) for now
+                            match (dt_a, dt_b) {
+                                (DiodeType::Silicon, _) | (_, DiodeType::Silicon) => {
+                                    DiodeType::Silicon
+                                }
+                                _ => *dt_a,
+                            }
+                        };
+                        let model = super::super::helpers::diode_model(dt);
+                        result_root =
+                            Some(super::super::stage::RootKind::ExplicitDiodePair(
+                                ExplicitDiodePairRoot::new(model),
+                            ));
+                        result_model = Some(model);
+                        synthesized = true;
+                        break;
+                    }
+                }
+            }
+            if synthesized {
+                break;
+            }
+        }
+
+        if synthesized {
+            (result_root.unwrap(), result_model)
+        } else {
+            // Multiple NL edges but not antiparallel — use the first one
+            create_root(&nl_kinds[0].0, false)
+        }
+    } else {
+        create_root(&nl_kinds[0].0, false)
+    };
+
+    // Tree from pendant edges (input coupling) — use full SPQR tree if available,
+    // falling back to single-leaf if SPQR decomposition fails.
+    let tree = if group.pendant_edges.len() > 1 {
+        // Multiple pendant edges → build full Series/Parallel tree via SPQR.
+        // Terminals: use the nodes where pendant edges connect to the opamp input.
+        let terminals: Vec<NodeId> = group.pendant_edges.iter()
+            .flat_map(|&eidx| {
+                let e = &graph.edges[eidx];
+                [e.node_a, e.node_b]
+            })
+            .filter(|&n| n != graph.gnd_node && !graph.supply_nodes.contains(&n))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        build_spqr_tree(&group.pendant_edges, graph, &terminals, sample_rate)
+            .map(|tree| with_voltage_source(tree))
+            .unwrap_or_else(|| build_pendant_tree(&group.pendant_edges, graph, sample_rate))
+    } else {
+        build_pendant_tree(&group.pendant_edges, graph, sample_rate)
+    };
 
     let oversampler = Oversampler::new(OversamplingFactor::X2);
     let mut stage = WdfStage::new(tree, root, oversampler);
@@ -683,6 +773,8 @@ fn assemble_multi_nl_stage(
             extract_output_nodes: None,
         }),
         signal_flow_distance: 0,
+        #[cfg(debug_assertions)]
+        debug_label: String::new(),
         transformer_gain: 1.0,
         injection_node_id: graph.in_node,
         output_node_id: graph.out_node,

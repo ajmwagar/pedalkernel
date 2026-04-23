@@ -678,6 +678,9 @@ pub(super) struct WdfStage {
     pub(super) prev_source_voltage: f64,
     /// BFS distance from input of the injection node (for topological ordering).
     pub(super) signal_flow_distance: usize,
+    /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
+    #[cfg(debug_assertions)]
+    pub(super) debug_label: String,
     /// Inter-stage voltage gain from a transformer boundary.
     /// When the stage's injection node is on a transformer secondary,
     /// this is 1/turns_ratio (e.g., 17.0 for a 1:17 step-up).
@@ -816,6 +819,8 @@ impl WdfStage {
             is_source_follower: false,
             prev_source_voltage: 0.0,
             signal_flow_distance: 0,
+            #[cfg(debug_assertions)]
+            debug_label: String::new(),
             transformer_gain: 1.0,
             injection_node_id: usize::MAX,
             output_node_id: usize::MAX,
@@ -1342,25 +1347,14 @@ impl WdfStage {
             // voltage v_d = (a_root + b_tree) / 2 tells us how much
             // the diode conducted. The output is vs_voltage minus the
             // voltage absorbed by the diode current through Rf.
-            if feedback_opamp.is_some() {
-                // The diode clips vs_voltage. The WDF root already computed
-                // the clipped wave. Extract the clipped voltage from the
-                // diode's perspective: the diode port voltage is v_d = (a_root + b_tree) / 2.
-                // For small signals (below clip), v_d ≈ 0 → output ≈ vs_voltage.
-                // For large signals (clipping), v_d absorbs energy → output limited.
-                //
-                // The actual output voltage at U1.out in the circuit:
-                // V_out = V_neg + I_diode × R_f  (neg ≈ virtual ground ≈ 0)
-                // But I_diode is encoded in the wave: I = (a - b) / (2·Rp)
-                // V_out = Rp_tree × I = (b_tree - a_root) / 2
-                // The WDF current at the root port encodes the clipped signal.
-                // V_out ∝ current × Rp. Try both wave-variable combinations
-                // to find which contains the clipped signal with harmonics.
-                let v_current = (b_tree - a_root) / 2.0;
-                return v_current;
-            }
-
-            (a_root + b_tree) / 2.0
+            // The junction voltage v_d = (a_root + b_tree) / 2 is the voltage
+            // at the root port (= diode junction voltage in WDF theory).
+            //
+            // For feedback_opamp stages: V_out = V_diode because the diode
+            // is across the feedback path (V_out - V_neg) and V_neg ≈ 0
+            // (virtual ground). The diode clamps V_out to ±Vf.
+            let out = (a_root + b_tree) / 2.0;
+            out
         });
 
         // Inverting all-pass feedback (Phase 90 topology).
@@ -2873,6 +2867,9 @@ pub(super) struct MultiNlStage {
     pub(super) recompute_data: Option<ScatteringRecomputeData>,
     /// BFS distance from input of the injection node (for topological ordering).
     pub(super) signal_flow_distance: usize,
+    /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
+    #[cfg(debug_assertions)]
+    pub(super) debug_label: String,
     /// Inter-stage voltage gain from a transformer boundary.
     pub(super) transformer_gain: f64,
     /// Circuit graph node ID (for debug routing).
@@ -3133,6 +3130,9 @@ pub(super) struct IirStage {
     pub(super) compensation: f64,
     /// BFS distance from input (for topological ordering).
     pub(super) signal_flow_distance: usize,
+    /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
+    #[cfg(debug_assertions)]
+    pub(super) debug_label: String,
     /// Component-declared non-idealities applied after IIR computation.
     pub(super) nonideal_fx: Vec<super::component::NonIdealFx>,
     /// Pot bindings for runtime coefficient recomputation.
@@ -3161,6 +3161,8 @@ impl IirStage {
             iir,
             compensation: 1.0,
             signal_flow_distance: 0,
+            #[cfg(debug_assertions)]
+            debug_label: String::new(),
             nonideal_fx: Vec::new(),
             pot_bindings: Vec::new(),
             sample_rate,
@@ -3290,6 +3292,9 @@ pub(super) struct BlackFeedbackStage {
     sample_rate: f64,
     /// BFS distance from input (for topological ordering).
     pub(super) signal_flow_distance: usize,
+    /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
+    #[cfg(debug_assertions)]
+    pub(super) debug_label: String,
     /// Pot component ID bound to Rf (if any). Set at compile time.
     pub(super) pot_comp_id: Option<String>,
     /// Maximum pot resistance (Ohms). Position 1.0 = this value.
@@ -3320,6 +3325,8 @@ impl BlackFeedbackStage {
             stored_gbw,
             sample_rate,
             signal_flow_distance: 0,
+            #[cfg(debug_assertions)]
+            debug_label: String::new(),
             pot_comp_id: None,
             pot_max_r: 0.0,
         }
@@ -3397,6 +3404,9 @@ pub(super) struct StateSpaceStage {
     pub(super) compensation: f64,
     /// BFS distance from input (for topological ordering).
     pub(super) signal_flow_distance: usize,
+    /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
+    #[cfg(debug_assertions)]
+    pub(super) debug_label: String,
     /// Supply voltage for rail saturation.
     pub(super) supply_voltage: f64,
 }
@@ -3409,6 +3419,8 @@ impl StateSpaceStage {
             work: vec![0.0; n],
             compensation: 1.0,
             signal_flow_distance: 0,
+            #[cfg(debug_assertions)]
+            debug_label: String::new(),
             supply_voltage,
         }
     }

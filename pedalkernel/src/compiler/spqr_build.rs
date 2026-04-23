@@ -107,52 +107,80 @@ pub fn compile_via_spqr_with_options(
     // Uses directed dependency graph: cycles = co-solved, acyclic = sequential.
     let feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
 
+    // Step 1b: Compute signal flow distance for each group via BFS from in_node.
+    // Each group's distance = min BFS hop count from in_node to any node in the group.
+    // This gives the correct processing order (input coupling first, clipping second,
+    // tone third, etc.) regardless of the order find_flow_groups returned them.
+    let group_flow_distances = compute_group_flow_distances(&feedback_groups, &graph);
+
     // Step 2: SPQR decompose each group independently.
     let terminals = vec![graph.in_node, graph.out_node];
     let mut stages: Vec<Stage> = Vec::new();
-    let mut stage_counter = 0usize;
 
     // Helper: push a BuiltStage into the unified stages vec.
+    // `flow_distance` comes from BFS-computed signal flow distance.
+    // `label` is the debug component names (zero cost in release).
     macro_rules! push_stage {
-        ($built:expr, $counter:expr) => {
+        ($built:expr, $flow_distance:expr, $label:expr) => {
             match $built {
                 BuiltStage::Wdf(mut wdf) => {
-                    wdf.signal_flow_distance = $counter;
+                    wdf.signal_flow_distance = $flow_distance;
+                    #[cfg(debug_assertions)]
+                    { wdf.debug_label = $label; }
                     stages.push(Stage::Wdf(wdf));
                 }
                 BuiltStage::Iir(mut iir) => {
-                    iir.signal_flow_distance = $counter;
+                    iir.signal_flow_distance = $flow_distance;
+                    #[cfg(debug_assertions)]
+                    { iir.debug_label = $label; }
                     stages.push(Stage::Iir(iir));
                 }
                 BuiltStage::StateSpace(mut ss) => {
-                    ss.signal_flow_distance = $counter;
+                    ss.signal_flow_distance = $flow_distance;
+                    #[cfg(debug_assertions)]
+                    { ss.debug_label = $label; }
                     stages.push(Stage::StateSpace(ss));
                 }
                 BuiltStage::MultiNl(mut mnl) => {
-                    mnl.signal_flow_distance = $counter;
+                    mnl.signal_flow_distance = $flow_distance;
+                    #[cfg(debug_assertions)]
+                    { mnl.debug_label = $label; }
                     stages.push(Stage::MultiNl(mnl));
                 }
                 BuiltStage::BlackFeedback(mut bf) => {
-                    bf.signal_flow_distance = $counter;
+                    bf.signal_flow_distance = $flow_distance;
+                    #[cfg(debug_assertions)]
+                    { bf.debug_label = $label; }
                     stages.push(Stage::BlackFeedback(bf));
                 }
             }
         };
     }
 
-    // Process groups in signal flow order: non-feedback groups first
-    // (input coupling, passive filters, pot dividers), then feedback groups
-    // (op-amp + NL stages). This ensures the input coupling stage is built
-    // BEFORE the clipping stage, so the clipping stage can read the input
-    // coupling impedance (Ri) from the already-built preceding stage.
-    let mut sorted_groups: Vec<(usize, &super::signal_flow::FlowGroup)> =
+    // Build order: non-feedback groups first so the clipping stage can read
+    // input coupling impedance (Ri) from already-built preceding stages.
+    // Signal flow order is preserved via `gi` (original group index from
+    // find_flow_groups), which becomes signal_flow_distance on each stage.
+    let mut build_order: Vec<(usize, &super::signal_flow::FlowGroup)> =
         feedback_groups.iter().enumerate().collect();
-    sorted_groups.sort_by_key(|(_, g)| if g.has_feedback() { 1 } else { 0 });
+    build_order.sort_by_key(|(_, g)| if g.has_feedback() { 1 } else { 0 });
 
-    for &(gi, group) in &sorted_groups {
+    for &(gi, group) in &build_order {
         if group.all_edges().is_empty() {
             continue;
         }
+
+        // Build debug label from component names (zero cost in release)
+        #[cfg(debug_assertions)]
+        let group_label = {
+            let mut names: Vec<&str> = group.all_edges().iter()
+                .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+                .collect();
+            names.dedup();
+            names.join(",")
+        };
+        #[cfg(not(debug_assertions))]
+        let group_label = String::new();
 
         #[cfg(test)]
         {
@@ -171,7 +199,7 @@ pub fn compile_via_spqr_with_options(
                 sample_rate,
                 Some(group),
             )
-            .map_err(|e| format!("Stage {stage_counter}: {e}"))?;
+            .map_err(|e| format!("Group {gi}: {e}"))?;
 
             // Fix gain for feedback_opamp stages where Ri is in a preceding
             // stage. Find the input coupling group's edges touching the active
@@ -192,7 +220,7 @@ pub fn compile_via_spqr_with_options(
                         if let Some(neg) = input_node {
                             // Find the non-feedback group whose edges touch neg
                             // and sum their resistance as Ri.
-                            let ri: f64 = sorted_groups.iter()
+                            let ri: f64 = build_order.iter()
                                 .filter(|(_, g)| !g.has_feedback())
                                 .flat_map(|(_, g)| g.all_edges())
                                 .filter_map(|eidx| {
@@ -229,7 +257,7 @@ pub fn compile_via_spqr_with_options(
                         }
                     });
                     if let Some(neg) = input_node {
-                        let ri: f64 = sorted_groups.iter()
+                        let ri: f64 = build_order.iter()
                             .filter(|(_, g)| !g.has_feedback())
                             .flat_map(|(_, g)| g.all_edges())
                             .filter_map(|eidx| {
@@ -245,8 +273,7 @@ pub fn compile_via_spqr_with_options(
                 }
             }
 
-            push_stage!(built, stage_counter);
-            stage_counter += 1;
+            push_stage!(built, group_flow_distances[gi], group_label.clone());
         } else if is_pot_divider_group(group, &graph) {
             #[cfg(test)]
             eprintln!("  → POT DIVIDER group: {:?}", group.all_edges());
@@ -255,11 +282,10 @@ pub fn compile_via_spqr_with_options(
             let built = build_pot_divider(group, &graph, sample_rate);
             match built {
                 Ok(built_stage) => {
-                    push_stage!(built_stage, stage_counter);
+                    push_stage!(built_stage, group_flow_distances[gi], group_label.clone());
                 }
-                Err(e) => return Err(format!("Stage {stage_counter} (pot): {e}")),
+                Err(e) => return Err(format!("Group {gi} (pot): {e}")),
             }
-            stage_counter += 1;
         } else {
             // No feedback, not a pot → SPQR decompose for WDF/NlWdf stages.
             // Compute per-group terminals: use the group's actual boundary nodes
@@ -281,12 +307,22 @@ pub fn compile_via_spqr_with_options(
 
             for stage in spqr_stages {
                 let built = build_spqr_stage(stage, &graph, sample_rate)
-                    .map_err(|e| format!("Stage {stage_counter}: {e}"))?;
-                push_stage!(built, stage_counter);
-                stage_counter += 1;
+                    .map_err(|e| format!("Group {gi}: {e}"))?;
+                push_stage!(built, group_flow_distances[gi], group_label.clone());
             }
         }
     }
+
+    // Sort stages by signal_flow_distance (original group index from
+    // find_flow_groups) so processing order matches the circuit's signal chain.
+    // Build order was different (non-feedback first for Ri extraction).
+    stages.sort_by_key(|s| match s {
+        Stage::Wdf(w) => w.signal_flow_distance,
+        Stage::Iir(i) => i.signal_flow_distance,
+        Stage::StateSpace(ss) => ss.signal_flow_distance,
+        Stage::MultiNl(m) => m.signal_flow_distance,
+        Stage::BlackFeedback(b) => b.signal_flow_distance,
+    });
 
     let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
 
@@ -494,6 +530,63 @@ pub(super) fn build_spqr_stage(
 
 /// Compute SPQR terminals for a passive sub-group.
 ///
+/// Compute signal flow distance for each group via BFS from in_node.
+///
+/// Each group's distance = minimum BFS hop count from `graph.in_node` to any
+/// node touched by the group's edges. Groups closer to the circuit input get
+/// lower distance values, giving the correct processing order regardless of
+/// the order `find_flow_groups` returned them.
+fn compute_group_flow_distances(
+    groups: &[super::signal_flow::FlowGroup],
+    graph: &super::graph::CircuitGraph,
+) -> Vec<usize> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use super::graph::NodeId;
+
+    // BFS from in_node through all circuit edges to compute node distances.
+    let mut node_dist: HashMap<NodeId, usize> = HashMap::new();
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    node_dist.insert(graph.in_node, 0);
+    queue.push_back(graph.in_node);
+
+    // Build adjacency from ALL edges (not just group edges)
+    let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for e in &graph.edges {
+        adj.entry(e.node_a).or_default().push(e.node_b);
+        adj.entry(e.node_b).or_default().push(e.node_a);
+    }
+
+    while let Some(node) = queue.pop_front() {
+        let dist = node_dist[&node];
+        if let Some(neighbors) = adj.get(&node) {
+            for &next in neighbors {
+                if !node_dist.contains_key(&next) {
+                    node_dist.insert(next, dist + 1);
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+
+    // For each group, find the minimum distance of any node it touches.
+    groups
+        .iter()
+        .map(|group| {
+            let mut min_dist = usize::MAX;
+            for &eidx in group.all_edges().iter() {
+                let e = &graph.edges[eidx];
+                if let Some(&d) = node_dist.get(&e.node_a) {
+                    min_dist = min_dist.min(d);
+                }
+                if let Some(&d) = node_dist.get(&e.node_b) {
+                    min_dist = min_dist.min(d);
+                }
+            }
+            if min_dist == usize::MAX { groups.len() } else { min_dist }
+        })
+        .collect()
+}
+
 /// Instead of using the global [in_node, out_node], find the group's actual
 /// boundary nodes — nodes that connect to edges outside the group or to the
 /// global input/output. Includes GND if any edge touches ground, so SPQR

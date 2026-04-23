@@ -49,19 +49,36 @@ pub(in crate::compiler) fn extract_opamp_config(
     let model = OpAmpModel::from_opamp_type(&op_type);
 
     // Compute Rf and Ri from feedback edges.
-    // For non-inverting: edges touching GND are Ri (ground leg).
+    // For non-inverting: edges in the ground-return path are Ri (ground leg).
     // All other resistive feedback edges are Rf (neg→out).
     // For inverting: all feedback edges are Rf; Ri comes from pendant/graph.
+    //
+    // Ground-return detection: a resistor "touches ground" if either of its
+    // nodes is GND, an AC ground, or connects to GND through a reactive
+    // element (cap/inductor). Example: R_hp → C_hp → GND means R_hp is
+    // in the ground-return path (Ri at mid frequencies).
+    let reaches_gnd = |node: NodeId| -> bool {
+        if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
+            return true;
+        }
+        // Check if any reactive neighbor of this node connects to GND
+        graph.edges.iter().any(|e2| {
+            let other = if e2.node_a == node { e2.node_b }
+                else if e2.node_b == node { e2.node_a }
+                else { return false };
+            let c2 = &graph.components[e2.comp_idx];
+            (c2.kind.capacitance().is_some() || c2.kind.inductance().is_some())
+                && (other == graph.gnd_node || graph.ac_ground_nodes.contains(&other))
+        })
+    };
+
     let mut rf = 0.0f64;
     let mut ri_from_feedback = 0.0f64;
     for &eidx in &group.feedback_edges {
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
         if let Some(r) = comp.kind.resistance() {
-            let touches_gnd = e.node_a == graph.gnd_node
-                || e.node_b == graph.gnd_node
-                || graph.ac_ground_nodes.contains(&e.node_a)
-                || graph.ac_ground_nodes.contains(&e.node_b);
+            let touches_gnd = reaches_gnd(e.node_a) || reaches_gnd(e.node_b);
             if !inverting && touches_gnd {
                 ri_from_feedback += r;
             } else {

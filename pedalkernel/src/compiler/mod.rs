@@ -77,3 +77,5 @@ mod zero_output_tests;
 mod pot_binding_tests;
 #[cfg(test)]
 mod black_feedback_tests;
+#[cfg(test)]
+mod diode_polarity_tests;
