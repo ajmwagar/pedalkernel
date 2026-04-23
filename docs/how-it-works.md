@@ -3,7 +3,7 @@ title: "How it works"
 description: "The WDF compilation pipeline — from .pedal file to per-sample processing."
 section: "Guide"
 weight: 10
-source_commit: "2cafa26fe49ea6ad3d1ccf9f52401060c4ae1ea2"
+source_commit: "95744ce1cdd9c2cdec3550bfdce9879b1737312c"
 preview: true
 watches:
   - pedalkernel/src/compiler/
@@ -44,7 +44,7 @@ Roughly:
 
 A compiled pedal processes one sample at a time by walking the stage list in order. Each stage kind runs its own code path:
 
-- **WDF stages** run the classic four phases: scatter up from leaves to root, Newton-Raphson solve on the nonlinear root (Shockley for diodes, Koren for tubes, square-law for FETs), scatter down, then state update on capacitors and inductors.
+- **WDF stages** run the classic four phases: scatter up from leaves to root, root solve on the nonlinear element (Wright Omega explicit solver for diodes and zeners, Newton-Raphson for tubes and BJTs with the Koren and Ebers-Moll / Gummel-Poon equations, square-law for FETs), scatter down, then state update on capacitors and inductors.
 - **BlackFeedback stages** apply a linear gain to their input — no iterative solver. If a pendant tree (input coupling network) is attached, that part is run as passive WDF first.
 - **IIR stages** run biquad or higher-order filter cascades; the compiler converts series-parallel passive networks into biquads when no nonlinearity is present.
 - **State-space stages** run a small `y = Cx + Du; x = Ax + Bu` update for rigid linear subcircuits.

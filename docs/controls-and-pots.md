@@ -3,7 +3,7 @@ title: "Controls and pots"
 description: "How runtime control updates flow through the engine — binding, dispatch, and what each pot movement actually costs."
 section: "Internals"
 weight: 87
-source_commit: "2cafa26fe49ea6ad3d1ccf9f52401060c4ae1ea2"
+source_commit: "95744ce1cdd9c2cdec3550bfdce9879b1737312c"
 preview: true
 watches:
   - pedalkernel/src/compiler/spqr_control.rs
@@ -33,8 +33,6 @@ pub(super) struct ControlBinding {
     pub label: String,               // user-visible name: "Drive", "Tone"
     pub target: ControlTarget,       // which stage, and how to reach the pot
     pub component_id: String,        // pot component ID in the circuit
-    pub component_id_aw: String,     // precomputed "{id}__aw"  (Baxandall split)
-    pub component_id_wb: String,     // precomputed "{id}__wb"
     pub max_resistance: f64,
     pub taper: PotTaper,
     pub range: (f64, f64),
@@ -55,7 +53,7 @@ pub(super) enum ControlTarget {
 
 The search is exhaustive at compile time: for WDF stages the code checks the main tree, the impedance-dividing `zf_child`, the `zg_child`, and every opamp child. For multi-NL stages it scans `passive_children`. The resulting `Vec<ControlBinding>` is stored on `CompiledPedal` and never touched again at runtime.
 
-Two key compile-time optimisations worth knowing about. First, the `__aw` / `__wb` component-id strings used for Baxandall-split pots are computed once during binding — the runtime path never formats strings. Second, the binding records include the taper (`PotTaper::BTaper` for audio potentiometers, for example), so taper mapping is applied on the RT thread without a lookup.
+Two key compile-time optimisations worth knowing about. First, three-terminal pots use a **complement mechanism** rather than separate component IDs: the WDF `Pot` leaf carries a `complement: bool` flag set by the SPQR builder for the ground-touching half, and at runtime a single `set_pot(name, value)` call applies `value` or `1 - value` depending on the flag so the two halves always sum to `max_R`. Second, the binding records include the taper (`PotTaper::BTaper` for audio potentiometers, for example), so taper mapping is applied on the RT thread without a lookup.
 
 ## Runtime dispatch
 
