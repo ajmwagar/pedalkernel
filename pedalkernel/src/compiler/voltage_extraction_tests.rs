@@ -378,6 +378,72 @@ fn wdf_opamp_diode_gain_increases_with_drive() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 3a. Asymmetric diode clipping — both diodes must be modeled
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn wdf_asymmetric_diodes_both_modeled() {
+    // Two separate diodes (D_ge: germanium, D_si: silicon) in feedback.
+    // Asymmetric clipping: positive clips at ~0.3V (Ge), negative at ~0.6V (Si).
+    // The output waveform should be asymmetric.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                D_ge: diode(germanium)
+                D_si: diode(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.neg -> D_ge.a
+                D_ge.b -> U1.out
+                U1.neg -> D_si.b
+                D_si.a -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    // Drive hard to ensure clipping
+    for s in 0..2000 {
+        let input = 0.05 * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin();
+        compiled.process(input);
+    }
+
+    // Measure positive and negative peaks separately
+    let mut pos_peak = 0.0f64;
+    let mut neg_peak = 0.0f64;
+    for s in 0..220 {
+        let input = 0.05 * (std::f64::consts::TAU * FREQ * (2000 + s) as f64 / SR).sin();
+        let out = compiled.process(input);
+        pos_peak = pos_peak.max(out);
+        neg_peak = neg_peak.min(out);
+    }
+
+    eprintln!("Asymmetric diodes: pos={pos_peak:.4}, neg={neg_peak:.4}");
+
+    // Both polarities should produce output
+    assert!(pos_peak > 0.05, "Positive peak should be significant: {pos_peak:.4}");
+    assert!(neg_peak < -0.05, "Negative peak should be significant: {neg_peak:.4}");
+
+    // Asymmetry: germanium clips lower than silicon
+    // So positive and negative peaks should differ
+    let asymmetry = (pos_peak.abs() - neg_peak.abs()).abs();
+    eprintln!("Asymmetry: {asymmetry:.4}");
+    assert!(asymmetry > 0.01,
+        "Ge vs Si should create asymmetric clipping: pos={pos_peak:.4}, neg={neg_peak:.4}, diff={asymmetry:.4}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 3b. WDF clipping with input coupling — the screamer pattern
 //
 // When the input coupling (R_in + Cin) is in a separate group from the

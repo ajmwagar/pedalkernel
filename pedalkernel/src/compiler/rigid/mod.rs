@@ -497,13 +497,13 @@ pub(super) fn build_rigid_from_group(
             // BlackFeedback and IIR both fell through — use WDF.
             // Build an OpAmp WDF stage that handles reactive feedback
             // naturally through wave scattering.
-            if stats.vcvs_count == 1 && stats.nl_count > 0 {
+            if stats.vcvs_count == 1 && stats.nl_count == 1 {
                 if let Some(g) = group {
                     return build_opamp_nl_feedback(g, &stats, graph, sample_rate)
                         .map(BuiltStage::Wdf);
                 }
             }
-            if stats.vcvs_count == 1 {
+            if stats.vcvs_count == 1 && stats.nl_count == 0 {
                 // Linear VCVS + reactive feedback (tone stages).
                 // TODO: build OpAmpWdfAdaptor with Zf tree from feedback edges.
                 // For now, use BlackFeedback with unity passthrough — audio
@@ -531,7 +531,7 @@ pub(super) fn build_rigid_from_group(
             .map(BuiltStage::StateSpace)
         }
         RigidOptimization::General => {
-            // VCVS + NL with FlowGroup → op-amp drives NL root (TS/RAT/Klon)
+            // VCVS + NL with FlowGroup → op-amp drives NL root
             if let Some(g) = group {
                 if stats.vcvs_count == 1 && stats.nl_count > 0 {
                     return build_opamp_nl_feedback(g, &stats, graph, sample_rate)

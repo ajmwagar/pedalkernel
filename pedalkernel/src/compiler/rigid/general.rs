@@ -190,7 +190,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
 
     // Step 4: Build WDF ports
     let (mut ports, port_node_pairs, passive_children, mut nl_port_resistances) =
-        build_wdf_ports(&nl_terminals, &reactive_edges, graph, &node_to_mna, n_nl);
+        build_wdf_ports(&nl_terminals, &reactive_edges, graph, &node_to_mna, n_nl, all_edges);
     let n_passive = passive_children.len();
 
     // Step 5: Derive scattering matrix + Thevenin adaptation
@@ -396,6 +396,7 @@ fn build_wdf_ports(
     graph: &CircuitGraph,
     node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
     n_nl: usize,
+    edge_indices: &[usize],
 ) -> (Vec<WdfPort>, Vec<(Option<usize>, Option<usize>)>, Vec<DynNode>, Vec<f64>) {
     let r_nl_default = 1000.0;
     let r_adapted = 1000.0;
@@ -423,8 +424,21 @@ fn build_wdf_ports(
         passive_children.push(dyn_node.clone());
     }
 
-    // Adapted (input voltage source) port
-    let injection_mna = node_to_mna(graph.in_node);
+    // Adapted (input voltage source) port.
+    // Use graph.in_node if it's in this MNA. Otherwise, find the active
+    // element's signal input pin from Component::signal_terminals().
+    let injection_mna = node_to_mna(graph.in_node).or_else(|| {
+        edge_indices.iter().find_map(|&eidx| {
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            match comp.kind.signal_terminals() {
+                super::super::component::SignalTerminals::Amplifier { input, .. } => {
+                    let key = format!("{}.{}", comp.id, input);
+                    graph.node_names.get(&key).and_then(|&n| node_to_mna(n))
+                }
+                _ => None,
+            }
+        })
+    });
     ports.push(WdfPort { node_pos: injection_mna, node_neg: None, resistance: r_adapted });
     port_node_pairs.push((injection_mna, None));
 
