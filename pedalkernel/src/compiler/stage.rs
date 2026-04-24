@@ -1236,7 +1236,6 @@ impl WdfStage {
                         }
                     }
                     // Open circuit: full voltage appears at the port.
-                    // V_port = (a_root + b_tree) / 2 = b_tree (since a_root = b_tree).
                     (b_tree + b_tree) / 2.0
                 }
                 // ShortCircuit: ground termination (a = -b)

@@ -873,16 +873,19 @@ impl DynNode {
                 right,
                 ..
             } => {
+                let sum = *b1 + *b2 + a_parent;
                 if right.is_load_element() {
-                    let sum = *b1 + *b2 + a_parent;
                     let a2 = *b2 - (1.0 - *gamma) * sum;
                     Some((a2 + *b2) / 2.0)
                 } else if left.is_load_element() {
-                    let sum = *b1 + *b2 + a_parent;
                     let a1 = *b1 - *gamma * sum;
                     Some((a1 + *b1) / 2.0)
                 } else {
-                    None
+                    // Recurse into children for complex parallel trees
+                    let a2 = *b2 - (1.0 - *gamma) * sum;
+                    let a1 = *b1 - *gamma * sum;
+                    right.extract_load_voltage(a2)
+                        .or_else(|| left.extract_load_voltage(a1))
                 }
             }
             _ => None,
