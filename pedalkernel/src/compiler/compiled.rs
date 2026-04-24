@@ -2077,14 +2077,16 @@ impl PedalProcessor for CompiledPedal {
                         }
                         impulse
                     } else if stage.is_feedforward {
-                        // Feedforward stages read from upstream node_signals
+                        // Feedforward stages read from upstream node_signals.
+                        // Fall back to serial `signal` if no upstream stage
+                        // wrote to this node (e.g. unity follower buffers).
                         let inj_node = stage.injection_node_id;
                         self.node_signals
                             .iter()
                             .rev()
                             .find(|(nid, _)| *nid == inj_node)
                             .map(|(_, v)| *v)
-                            .unwrap_or(0.0)
+                            .unwrap_or(signal)
                     } else {
                         // Re-amplify only after the *previous* stage clipped.
                         if prev_was_clipping {

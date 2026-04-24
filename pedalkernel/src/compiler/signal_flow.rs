@@ -78,7 +78,7 @@ fn rail_nodes(graph: &CircuitGraph) -> HashSet<NodeId> {
 }
 
 /// Resolve a component's pin name to a graph node ID.
-fn resolve_pin(comp_id: &str, pin: &str, graph: &CircuitGraph) -> Option<NodeId> {
+pub(super) fn resolve_pin(comp_id: &str, pin: &str, graph: &CircuitGraph) -> Option<NodeId> {
     let key = format!("{comp_id}.{pin}");
     graph.node_names.get(&key).copied()
 }

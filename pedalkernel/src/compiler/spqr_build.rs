@@ -423,18 +423,14 @@ pub fn compile_via_spqr_with_options(
     // Phase 1: collect (stage_index, injection_node) pairs.
     // Phase 2: apply flags to stages.
     {
-        // Main path output nodes: active element outputs + in_node
+        // Main path output nodes: ALL active element outputs + in_node.
+        // This includes both feedback group op-amps AND unity followers
+        // (which have nullor_pins but no feedback group).
         let mut main_path_output_nodes: std::collections::HashSet<super::graph::NodeId> =
             std::collections::HashSet::new();
         main_path_output_nodes.insert(graph.in_node);
-        for group in feedback_groups.iter() {
-            if !group.has_feedback() { continue; }
-            for &eidx in group.active_edges.iter() {
-                let e = &graph.edges[eidx];
-                if let Some(pins) = graph.nullor_pins.iter().find(|p| p.comp_idx == e.comp_idx) {
-                    main_path_output_nodes.insert(pins.out_node);
-                }
-            }
+        for pins in &graph.nullor_pins {
+            main_path_output_nodes.insert(pins.out_node);
         }
 
         // Collect feedback group input nodes (where feedforward paths converge).
@@ -468,8 +464,11 @@ pub fn compile_via_spqr_with_options(
                 .collect();
 
             // Does this group tap from a main-path output?
+            // Prefer op-amp output nodes over in_node — in_node is only
+            // the source for the very first stage, not mid-chain feedforward.
             let source_node = group_nodes.iter()
-                .find(|&&n| main_path_output_nodes.contains(&n))
+                .find(|&&n| main_path_output_nodes.contains(&n) && n != graph.in_node)
+                .or_else(|| group_nodes.iter().find(|&&n| n == graph.in_node))
                 .copied();
 
             // Does this group converge at a feedback group's input?
