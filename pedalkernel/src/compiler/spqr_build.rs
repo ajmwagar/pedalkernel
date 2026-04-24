@@ -553,16 +553,37 @@ pub(super) fn build_spqr_stage(
             let root = if touches_gnd { RootKind::ShortCircuit } else { RootKind::Passthrough };
             let mut wdf = WdfStage::new(tree, root, oversampler);
 
-            // Set output_probe when a pot wiper connects to the circuit's
-            // out_node in a ground-terminated stage. Pot wipers sit at interior
-            // tree junctions that ShortCircuit extraction can't reach.
-            if touches_gnd {
+            // Set output_probe for complex ground-terminated trees where
+            // short_circuit_junction_voltage can't find the output node.
+            // Simple trees (≤4 edges) work with junction extraction.
+            // Complex trees (5+ edges, e.g. Screamer tone+output) need
+            // explicit probing at the leaf connecting out_node toward GND.
+            if touches_gnd && edge_indices.len() > 4 {
                 let out_node = graph.out_node;
+                let is_gnd = |n: super::graph::NodeId| -> bool {
+                    n == graph.gnd_node || graph.ac_ground_nodes.contains(&n)
+                };
+                // Find edge at out_node whose other terminal goes toward GND
+                // (is GND itself, or connects to GND through other edges).
                 for &eidx in &edge_indices {
                     let e = &graph.edges[eidx];
-                    if e.node_a != out_node && e.node_b != out_node { continue; }
-                    let comp = &graph.components[e.comp_idx];
-                    if comp.kind.is_pot() {
+                    let (touches_out, other) = if e.node_a == out_node {
+                        (true, e.node_b)
+                    } else if e.node_b == out_node {
+                        (true, e.node_a)
+                    } else {
+                        (false, out_node) // dummy
+                    };
+                    if !touches_out { continue; }
+                    // The GND-side edge: other terminal is GND or connects
+                    // to GND through other group edges
+                    let other_reaches_gnd = is_gnd(other) || edge_indices.iter().any(|&eidx2| {
+                        let e2 = &graph.edges[eidx2];
+                        (e2.node_a == other || e2.node_b == other)
+                            && (is_gnd(e2.node_a) || is_gnd(e2.node_b))
+                    });
+                    if other_reaches_gnd {
+                        let comp = &graph.components[e.comp_idx];
                         wdf.output_probe = Some(comp.id.clone());
                         break;
                     }
