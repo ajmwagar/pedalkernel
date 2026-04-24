@@ -894,12 +894,28 @@ pub(super) fn compute_group_terminals(
     let mut terminals: Vec<NodeId> = Vec::new();
 
     for &node in &group_nodes {
-        if node == graph.gnd_node || graph.supply_nodes.contains(&node) {
-            continue; // GND handled separately below
+        // Skip rail and AC ground nodes — they're DC references, not
+        // signal boundaries. AC ground nodes (VB+ bias junctions) are
+        // detected by the graph builder from capacitor-bypassed dividers.
+        if node == graph.gnd_node
+            || graph.supply_nodes.contains(&node)
+            || graph.ac_ground_nodes.contains(&node)
+        {
+            continue;
         }
-        // Is this a global terminal?
+        // Global terminals (in_node, out_node) are only terminals for
+        // THIS group if the group actually uses them as signal entry/exit.
+        // A mid-chain group that happens to touch in_node via one edge
+        // (e.g. R1 connecting to the global input) shouldn't get in_node
+        // as a terminal — that edge is a pendant, not a signal boundary.
+        // Check: is this global terminal also a boundary node (connects
+        // to edges outside the group)? If not, it's pendant — skip it.
         if global_terminals.contains(&node) {
-            if !terminals.contains(&node) {
+            let is_also_boundary = graph.edges.iter().enumerate().any(|(eidx, e)| {
+                !group_edge_set.contains(&eidx)
+                    && (e.node_a == node || e.node_b == node)
+            });
+            if is_also_boundary && !terminals.contains(&node) {
                 terminals.push(node);
             }
             continue;
