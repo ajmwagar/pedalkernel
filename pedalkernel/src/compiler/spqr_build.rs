@@ -364,6 +364,12 @@ pub fn compile_via_spqr_with_options(
             );
             let spqr_stages = spqr_to_stages(&spqr_tree, &graph, sample_rate);
 
+            #[cfg(test)]
+            if spqr_stages.is_empty() {
+                eprintln!("  WARNING: SPQR produced 0 stages for group {gi} ({} edges, {} terminals)",
+                    group_edges.len(), group_terminals.len());
+            }
+
             for stage in spqr_stages {
                 let built = build_spqr_stage(stage, &graph, sample_rate)
                     .map_err(|e| format!("Group {gi}: {e}"))?;

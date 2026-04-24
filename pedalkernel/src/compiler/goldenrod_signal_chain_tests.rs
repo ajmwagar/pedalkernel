@@ -216,6 +216,154 @@ fn both_gain_pots_are_bound() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 5b. Minimal feedforward pot group — does SPQR handle it?
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn minimal_feedforward_pot_produces_stage() {
+    // Simplest possible feedforward: pot from signal to output.
+    // One pot (2 edges) + one resistor. Should produce a stage.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                Vol: pot(100k, b)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> Vol.a
+                Vol.b -> gnd
+                Vol.w -> R_out.a
+                R_out.b -> out
+            }
+            controls {
+                Vol.position -> "Volume" [0.0, 1.0] = 0.5
+            }
+        }"#).expect("parse");
+    let compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    #[cfg(debug_assertions)]
+    {
+        let labels: Vec<&str> = compiled.stages.iter().map(|s| match s {
+            super::compiled::Stage::Wdf(w) => w.debug_label.as_str(),
+            super::compiled::Stage::MultiNl(m) => m.debug_label.as_str(),
+            super::compiled::Stage::Iir(i) => i.debug_label.as_str(),
+            super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
+            super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
+        }).collect();
+        eprintln!("Stages: {labels:?}");
+        let has_vol = labels.iter().any(|l| l.contains("Vol"));
+        assert!(has_vol, "Volume pot must appear in a stage: {labels:?}");
+    }
+}
+
+#[test]
+fn feedforward_with_multiple_paths_produces_stages() {
+    // Two feedforward paths from buffer output — mimics Goldenrod topology.
+    // Path 1: R_ff → C_ff → out_node (passive LPF)
+    // Path 2: Pot.w → R_ff2 → out_node (pot blend)
+    // Both should produce stages.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                R_ff1: resistor(15k)
+                C_ff1: cap(100n)
+                Blend: pot(100k, b)
+                R_ff2: resistor(392k)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> R_ff1.a, Blend.a
+                R_ff1.b -> C_ff1.a
+                C_ff1.b -> R_out.a
+                Blend.w -> R_ff2.a
+                R_ff2.b -> R_out.a
+                Blend.b -> gnd
+                R_out.b -> out
+            }
+            controls {
+                Blend.position -> "Blend" [0.0, 1.0] = 0.5
+            }
+        }"#).expect("parse");
+    let compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    #[cfg(debug_assertions)]
+    {
+        let labels: Vec<&str> = compiled.stages.iter().map(|s| match s {
+            super::compiled::Stage::Wdf(w) => w.debug_label.as_str(),
+            super::compiled::Stage::MultiNl(m) => m.debug_label.as_str(),
+            super::compiled::Stage::Iir(i) => i.debug_label.as_str(),
+            super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
+            super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
+        }).collect();
+        eprintln!("Feedforward stages: {labels:?}");
+        let has_blend = labels.iter().any(|l| l.contains("Blend"));
+        let has_ff1 = labels.iter().any(|l| l.contains("R_ff1") || l.contains("C_ff1"));
+        assert!(has_blend, "Blend pot must appear in a stage: {labels:?}");
+        assert!(has_ff1, "Feedforward 1 path must appear in a stage: {labels:?}");
+    }
+}
+
+#[test]
+fn spqr_with_many_terminals_produces_stages() {
+    // The Goldenrod's Gain_B group has 5 SPQR terminals because many nodes
+    // connect to other groups. This tests whether SPQR can handle that.
+    // Reduced version: 4 edges, 3 terminals.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                R2: resistor(1M)
+                C1: cap(100n)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> C1.a, R2.a, U1.neg
+                C1.b -> out
+                R2.b -> gnd
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+            }
+            controls {}
+        }"#).expect("parse");
+    let compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    #[cfg(debug_assertions)]
+    {
+        let labels: Vec<&str> = compiled.stages.iter().map(|s| match s {
+            super::compiled::Stage::Wdf(w) => w.debug_label.as_str(),
+            super::compiled::Stage::MultiNl(m) => m.debug_label.as_str(),
+            super::compiled::Stage::Iir(i) => i.debug_label.as_str(),
+            super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
+            super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
+        }).collect();
+        eprintln!("Multi-terminal stages: {labels:?}");
+        // Every passive component should be in some stage
+        let has_r1 = labels.iter().any(|l| l.contains("R1"));
+        let has_c1 = labels.iter().any(|l| l.contains("C1"));
+        assert!(has_r1 || has_c1, "Passive components must produce stages: {labels:?}");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 6. Output should be reasonable level (not near-zero)
 // ═══════════════════════════════════════════════════════════════════════════
 
