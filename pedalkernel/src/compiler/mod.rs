@@ -91,3 +91,5 @@ mod passive_wdf_tests;
 mod goldenrod_pot_tests;
 #[cfg(test)]
 mod goldenrod_signal_chain_tests;
+#[cfg(test)]
+mod group_terminal_tests;
