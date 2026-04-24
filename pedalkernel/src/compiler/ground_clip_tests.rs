@@ -307,3 +307,59 @@ fn germanium_clips_lower_than_silicon() {
     // Germanium should clip at lower voltage
     assert!(ge_pos < si_pos, "Germanium ({ge_pos:.4}V) should clip lower than silicon ({si_pos:.4}V)");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. Ratking stage diagnostic — what does the pipeline actually build?
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn ratking_stage_diagnostic() {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/ratking.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read ratking.pedal");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+    compiled.enable_metering(128);
+
+    let amp = 0.1;
+    for s in 0..8000 {
+        compiled.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+    }
+
+    let metrics = compiled.read_metrics();
+    let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
+    eprintln!("\nRATKING DIAGNOSTIC: {} stages", n);
+    eprintln!("  input:  RMS={:.1} dB, peak={:.1} dB", metrics.input_rms_db, metrics.input_peak_db);
+    eprintln!("  output: RMS={:.1} dB, peak={:.1} dB", metrics.output_rms_db, metrics.output_peak_db);
+    for i in 0..n {
+        let lvl = metrics.stage_levels[i];
+        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        #[cfg(debug_assertions)]
+        {
+            let (stype, lbl, bypass, dist) = match &compiled.stages[i] {
+                super::compiled::Stage::Wdf(w) => ("Wdf", &w.debug_label, w.bypass_serial, w.signal_flow_distance),
+                super::compiled::Stage::MultiNl(m) => ("MNL", &m.debug_label, m.bypass_serial, m.signal_flow_distance),
+                super::compiled::Stage::Iir(s) => ("Iir", &s.debug_label, s.bypass_serial, s.signal_flow_distance),
+                super::compiled::Stage::StateSpace(s) => ("SS", &s.debug_label, s.bypass_serial, s.signal_flow_distance),
+                super::compiled::Stage::BlackFeedback(b) => ("BF", &b.debug_label, b.bypass_serial, b.signal_flow_distance),
+            };
+            let bp = if bypass { " BYPASS" } else { "" };
+            eprintln!("  stage {i}: [{stype}] dist={dist} [{lbl}]{bp} → {lvl:.4} ({db:.1} dB)");
+        }
+    }
+
+    // The RAT should have:
+    // 1. Input coupling (C1, R1)
+    // 2. Op-amp gain stage (U1 + feedback)
+    // 3. Diode clipper (D1, D2 merged)
+    // 4. Tone filter (C_tone, Filter pot, R_tone)
+    // 5. Output volume (C_out, Volume pot)
+    //
+    // Key: the tone filter (passive LPF) should be AFTER the diode clipper.
+    // If it's missing or in the wrong order, the RAT will sound too bright.
+    eprintln!("\n  Expected signal chain:");
+    eprintln!("    in → C1+R1 → U1(gain) → D1+D2(clip) → Filter+C_tone(LPF) → Volume → out");
+
+}
