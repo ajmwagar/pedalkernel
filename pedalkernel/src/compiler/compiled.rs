@@ -2256,6 +2256,10 @@ impl PedalProcessor for CompiledPedal {
                     prev_was_clipping = false;
                     let bf_stage = if let Stage::BlackFeedback(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
                     signal = bf_stage.process(signal);
+                    // Write to node_signals for downstream feedforward stages
+                    if bf_stage.output_node_id != usize::MAX {
+                        self.node_signals.push((bf_stage.output_node_id, signal));
+                    }
                     if stage_idx < crate::metering::MAX_STAGES {
                         stage_levels[stage_idx] = signal;
                     }

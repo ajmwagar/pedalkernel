@@ -505,6 +505,63 @@ pub fn compile_via_spqr_with_options(
                 }
             }
         }
+
+        // Set output_node_id on upstream stages that feed feedforward stages.
+        // The upstream stage is the one whose output node matches the feedforward's
+        // injection_node_id. It must write to node_signals so feedforward stages
+        // can read from it.
+        let ff_inj_nodes: std::collections::HashSet<usize> = stages.iter()
+            .filter_map(|s| {
+                if let Stage::Wdf(w) = s {
+                    if w.is_feedforward { Some(w.injection_node_id) } else { None }
+                } else { None }
+            })
+            .collect();
+
+        if !ff_inj_nodes.is_empty() {
+            for stage in &mut stages {
+                match stage {
+                    Stage::Wdf(w) if !w.is_feedforward && !w.bypass_serial => {
+                        // Check if this stage's group outputs to a feedforward injection node.
+                        // The output node is the last node in the stage's signal path.
+                        if w.output_node_id == usize::MAX {
+                            // Find the group's output node from its debug label (match nullor_pins)
+                            for pins in &graph.nullor_pins {
+                                if ff_inj_nodes.contains(&pins.out_node) {
+                                    // Check if this stage contains the active element
+                                    #[cfg(debug_assertions)]
+                                    {
+                                        let comp_id = &graph.components[pins.comp_idx].id;
+                                        if w.debug_label.contains(comp_id.as_str()) {
+                                            w.output_node_id = pins.out_node;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Stage::BlackFeedback(b) if !b.bypass_serial => {
+                        // BlackFeedback stages also need output_node_id for feedforward
+                        if b.output_node_id == usize::MAX {
+                            for pins in &graph.nullor_pins {
+                                if ff_inj_nodes.contains(&pins.out_node) {
+                                    #[cfg(debug_assertions)]
+                                    {
+                                        let comp_id = &graph.components[pins.comp_idx].id;
+                                        if b.debug_label.contains(comp_id.as_str()) {
+                                            b.output_node_id = pins.out_node;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     let mut compiled = CompiledPedal {

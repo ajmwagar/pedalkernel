@@ -3320,6 +3320,8 @@ pub(super) struct BlackFeedbackStage {
     /// network). It still processes and meters, but its output does NOT
     /// overwrite the serial audio chain signal.
     pub(super) bypass_serial: bool,
+    /// Circuit graph node ID for writing to node_signals (feedforward routing).
+    pub(super) output_node_id: usize,
     /// Pot component ID bound to Rf (if any). Set at compile time.
     pub(super) pot_comp_id: Option<String>,
     /// Maximum pot resistance (Ohms). Position 1.0 = this value.
@@ -3353,6 +3355,7 @@ impl BlackFeedbackStage {
             #[cfg(debug_assertions)]
             debug_label: String::new(),
             bypass_serial: false,
+            output_node_id: usize::MAX,
             pot_comp_id: None,
             pot_max_r: 0.0,
         }
