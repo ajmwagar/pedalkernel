@@ -259,3 +259,115 @@ fn goldenrod_gain_crossfade_with_feedforward() {
     assert!((ratio - 1.0).abs() > 0.2,
         "Gain crossfade should change character: ratio={ratio:.2}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. Feedforward stage receives non-zero input
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn feedforward_stage_receives_signal() {
+    // The Gain_B feedforward stage should receive the serial chain signal
+    // (via node_signals fallback). Verify it processes non-zero input.
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+    compiled.enable_metering(128);
+
+    let amp = 0.1;
+    for s in 0..8000 {
+        compiled.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+    }
+
+    let metrics = compiled.read_metrics();
+    let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
+
+    // Find the feedforward stage and check its level
+    for i in 0..n {
+        let lvl = metrics.stage_levels[i];
+        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        #[cfg(debug_assertions)]
+        {
+            let (lbl, is_ff) = match &compiled.stages[i] {
+                super::compiled::Stage::Wdf(w) => (&w.debug_label, w.is_feedforward),
+                _ => continue,
+            };
+            if is_ff {
+                eprintln!("Feedforward stage [{lbl}]: {db:.1} dB");
+                assert!(db > -60.0,
+                    "Feedforward stage [{lbl}] receives near-zero input ({db:.1} dB). \
+                     Should receive serial signal via node_signals fallback.");
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. Feedforward stage processes BEFORE stages that overwrite signal
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn feedforward_stage_ordering() {
+    // The feedforward stage should be processed at a point where `signal`
+    // still contains the input from the upstream buffer. If a later stage
+    // processes first and overwrites `signal`, the feedforward reads stale data.
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    // Find feedforward stage index and flow distance
+    let mut ff_idx = None;
+    let mut ff_dist = 0;
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        if let super::compiled::Stage::Wdf(w) = stage {
+            if w.is_feedforward {
+                ff_idx = Some(i);
+                ff_dist = w.signal_flow_distance;
+                #[cfg(debug_assertions)]
+                eprintln!("Feedforward at index {i}, dist={ff_dist}, label={}", w.debug_label);
+            }
+        }
+    }
+
+    // Dump all stage ordering
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        let (d, lbl, bp, ff) = match stage {
+            super::compiled::Stage::Wdf(w) => (w.signal_flow_distance, &w.debug_label, w.bypass_serial, w.is_feedforward),
+            super::compiled::Stage::BlackFeedback(b) => (b.signal_flow_distance, &b.debug_label, b.bypass_serial, false),
+            super::compiled::Stage::Iir(s) => (s.signal_flow_distance, &s.debug_label, s.bypass_serial, false),
+            super::compiled::Stage::StateSpace(s) => (s.signal_flow_distance, &s.debug_label, s.bypass_serial, false),
+            super::compiled::Stage::MultiNl(m) => (m.signal_flow_distance, &m.debug_label, m.bypass_serial, false),
+        };
+        let flags = if bp { " BYPASS" } else if ff { " FF" } else { "" };
+        eprintln!("  [{i}] dist={d} [{lbl}]{flags}");
+    }
+
+    if let Some(idx) = ff_idx {
+        // The feedforward stage should NOT be at index 0 if there are
+        // stages that should process before it (input coupling, buffer).
+        // It needs signal from the upstream buffer to be in `signal` first.
+        let stages_before = compiled.stages[..idx].iter().filter(|s| {
+            let bp = match s {
+                super::compiled::Stage::Wdf(w) => w.bypass_serial,
+                super::compiled::Stage::BlackFeedback(b) => b.bypass_serial,
+                super::compiled::Stage::Iir(i) => i.bypass_serial,
+                super::compiled::Stage::StateSpace(s) => s.bypass_serial,
+                super::compiled::Stage::MultiNl(m) => m.bypass_serial,
+            };
+            !bp
+        }).count();
+        eprintln!("Non-bypass stages before feedforward: {stages_before}");
+
+        // There should be at least one non-bypass stage before feedforward
+        // (the input coupling or buffer that produces the signal to tap from)
+        assert!(stages_before >= 1,
+            "Feedforward at index {idx} has no upstream stages — it reads unprocessed input");
+    }
+}
