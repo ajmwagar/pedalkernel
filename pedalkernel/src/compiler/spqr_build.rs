@@ -704,7 +704,17 @@ pub(super) fn build_spqr_stage(
                     });
                     if other_reaches_gnd {
                         let comp = &graph.components[e.comp_idx];
-                        wdf.output_probe = Some(comp.id.clone());
+                        // For pots: probe the wb half (wiper→GND) specifically.
+                        // leaf_voltage finds the first match, and aw would give
+                        // V_in - V_wiper (wrong). wb gives V_wiper (correct).
+                        let probe_id = if comp.kind.is_pot() {
+                            format!("{}__wb", comp.id)
+                        } else {
+                            comp.id.clone()
+                        };
+                        #[cfg(test)]
+                        eprintln!("    output_probe set to '{probe_id}' (out_node={out_node:?})");
+                        wdf.output_probe = Some(probe_id);
                         break;
                     }
                 }
