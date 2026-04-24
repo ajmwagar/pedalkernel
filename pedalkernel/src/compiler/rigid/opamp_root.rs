@@ -12,7 +12,6 @@ use super::super::wdf_leaf::WdfVoltageSource;
 use crate::elements::{OpAmpModel, OpAmpRoot};
 use crate::oversampling::{Oversampler, OversamplingFactor};
 
-use super::super::spqr_build::with_voltage_source;
 use super::super::graph::NodeId;
 
 /// Shared op-amp extraction from classified FlowGroup.
@@ -170,29 +169,13 @@ pub(in crate::compiler) fn build_opamp_root(
     // Rf=0 is valid: unity-gain buffer (direct neg→out connection)
     let root = make_opamp_root(&config, sample_rate, supply_voltage, bias_v_max);
 
-    // Build WDF tree from pendant edges (input coupling)
-    let tree = if !group.pendant_edges.is_empty() {
-        // Create DynNode from pendant passive components
-        let pendant_leaf = group.pendant_edges.iter().find_map(|&eidx| {
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            comp.kind.make_leaf(&comp.id, sample_rate)
-        });
-        if let Some(leaf) = pendant_leaf {
-            with_voltage_source(leaf)
-        } else {
-            DynNode::Leaf(Box::new(WdfVoltageSource {
-                voltage: 0.0,
-                rp: 1.0,
-                is_cathode_bias: false,
-            }))
-        }
-    } else {
-        DynNode::Leaf(Box::new(WdfVoltageSource {
-            voltage: 0.0,
-            rp: 1.0,
-            is_cathode_bias: false,
-        }))
-    };
+    // VS with op-amp output impedance. No pendant tree — input coupling
+    // is handled by separate SPQR passive stages.
+    let tree = DynNode::Leaf(Box::new(WdfVoltageSource {
+        voltage: 0.0,
+        rp: config.model.output_impedance,
+        is_cathode_bias: false,
+    }));
 
     let oversampler = Oversampler::new(OversamplingFactor::X1);
     Ok(WdfStage::new(tree, RootKind::OpAmp(root), oversampler))

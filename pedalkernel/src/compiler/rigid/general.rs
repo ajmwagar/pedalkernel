@@ -22,7 +22,6 @@ use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use super::super::helpers::gummel_poon_model;
 use super::super::signal_flow::FlowGroup;
-use super::super::spqr_build::with_voltage_source;
 use super::super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
     ScatteringRecomputeData, WdfStage, NR_ITERATION_BUDGET,
@@ -180,45 +179,15 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     Ok(stage)
 }
 
-/// Build a WDF tree from pendant edges, or a bare voltage source if none.
-pub(super) fn build_pendant_tree(pendant_edges: &[usize], graph: &CircuitGraph, sample_rate: f64) -> DynNode {
-    if !pendant_edges.is_empty() {
-        if let Some(leaf) = pendant_edges.iter().find_map(|&eidx| {
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            comp.kind.make_leaf(&comp.id, sample_rate)
-        }) {
-            return with_voltage_source(leaf);
-        }
-    }
-    DynNode::Leaf(Box::new(WdfVoltageSource {
-        voltage: 0.0,
-        rp: 1.0,
-        is_cathode_bias: false,
-    }))
-}
-
-/// Build a proper WDF tree from a set of passive edges using SPQR decomposition.
-///
-/// Unlike `build_pendant_tree` (which grabs one leaf), this builds the full
-/// Series/Parallel topology from the graph structure. Use for zi (input coupling)
-/// and zf (feedback network) in the OpAmpWdfAdaptor.
-///
-/// Returns None if SPQR decomposition fails or produces no passive tree.
-pub(super) fn build_spqr_tree(
-    edge_indices: &[usize],
-    graph: &CircuitGraph,
-    terminals: &[NodeId],
-    sample_rate: f64,
-) -> Option<DynNode> {
-    if edge_indices.is_empty() {
-        return None;
-    }
-    let tree_terminals = super::super::spqr_build::compute_group_terminals(edge_indices, graph, terminals);
-    let spqr = super::super::spqr::spqr_decompose(
-        edge_indices, &tree_terminals, graph, graph.gnd_node,
-    );
-    super::super::spqr::spqr_to_dyn_node(&spqr, graph, sample_rate)
-}
+// build_pendant_tree and build_spqr_tree removed.
+//
+// The pendant tree concept was fundamentally wrong for feedback_opamp stages:
+// it modeled input coupling impedance (at the pos/neg input) in the WDF tree,
+// but the diode root sees the op-amp's OUTPUT impedance, not the input coupling.
+//
+// Input coupling is now handled by separate SPQR passive stages.
+// DC bias is handled by bias_analysis.
+// The feedback_opamp WDF tree is just VS(output_impedance) → diode root.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // General MNA + NR solver

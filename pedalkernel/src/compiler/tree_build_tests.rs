@@ -1,11 +1,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // WDF Tree Construction Tests
 //
-// build_pendant_tree currently grabs ONE leaf from the edge list.
-// It should build a proper WDF tree from ALL edges — Series chains,
-// Parallel branches, mixed R/C/L networks.
-//
-// These tests define the correct behavior for multi-edge tree building.
+// Tests for SPQR-based WDF tree construction from circuit edges.
+// Pendant trees were removed — input coupling is now handled by separate
+// SPQR passive stages. These tests verify the remaining tree builders.
 // ═══════════════════════════════════════════════════════════════════════════
 
 use super::spqr_build::compile_via_spqr;
