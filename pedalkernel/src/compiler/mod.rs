@@ -93,3 +93,5 @@ mod goldenrod_pot_tests;
 mod goldenrod_signal_chain_tests;
 #[cfg(test)]
 mod group_terminal_tests;
+#[cfg(test)]
+mod feedforward_tests;
