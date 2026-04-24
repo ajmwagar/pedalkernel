@@ -432,6 +432,226 @@ fn pot_wiper_output_with_ground_shunt_caps() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Layer 5c: Screamer input coupling in isolation
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn screamer_input_coupling_alone() {
+    // Screamer input: Cin(22nF) → R_in(510k) to GND, output at junction.
+    // At 440Hz: Xc = 16.4kΩ. R_in = 510kΩ.
+    // Gain = R_in/(R_in+Xc) = 510k/526k ≈ 0.97. Near unity.
+    let gain = measure_gain_metered(r#"
+        pedal "test" { supply 9V
+            components {
+                Cin: cap(22n)
+                R_in: resistor(510k)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> R_in.a, out
+                R_in.b -> gnd
+            }
+            controls {}
+        }"#, "Screamer input coupling");
+    eprintln!("Screamer input coupling: gain={gain:.3}");
+    assert!(gain > 0.5, "22nF + 510k should be near unity at 440Hz: gain={gain:.3}");
+}
+
+#[test]
+fn two_passive_stages_chain() {
+    // Two passive stages in series: input coupling → output coupling.
+    // Each is near-unity. Combined should be near-unity.
+    // This tests whether the serial chain preserves signal between stages.
+    let gain = measure_gain_metered(r#"
+        pedal "test" { supply 9V
+            components {
+                Cin: cap(22n)
+                R_in: resistor(510k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> R_in.a, U1.neg
+                R_in.b -> gnd
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> R_out.a
+                R_out.b -> out
+            }
+            controls {}
+        }"#, "Two stages chained");
+    eprintln!("Two stages chained: gain={gain:.3}");
+    // Input coupling ≈ 0.97, opamp gain = 10, R_out ≈ 1.0
+    // Combined ≈ 9.7
+    assert!(gain > 1.0, "Chained stages should amplify: gain={gain:.3}");
+}
+
+#[test]
+fn sd1_input_coupling_alone() {
+    // SD-1 input: Cin(47nF) → R_in(470k) to GND.
+    // At 440Hz: Xc = 7.7kΩ. R_in = 470kΩ.
+    // Gain ≈ 0.98.
+    let gain = measure_gain_metered(r#"
+        pedal "test" { supply 9V
+            components {
+                Cin: cap(47n)
+                R_in: resistor(470k)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> R_in.a, out
+                R_in.b -> gnd
+            }
+            controls {}
+        }"#, "SD-1 input coupling");
+    eprintln!("SD-1 input coupling: gain={gain:.3}");
+    assert!(gain > 0.5, "47nF + 470k should be near unity at 440Hz: gain={gain:.3}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 5d: opamp + diode clipping without pendant tree
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn inverting_opamp_diode_gain_correct() {
+    // Inverting: R_in=10k, Rf=100k → gain=10. Input=0.1V → 1.0V → diode clips at ~0.5V.
+    // This is the simple 4-edge test that already works.
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                D_clip: diode_pair(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.out -> D_clip.a
+                D_clip.b -> U1.neg
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#);
+    eprintln!("Inverting opamp+diode: gain={gain:.3}");
+    // Gain=10, clipped at ~0.5V → output ~0.5V from 0.1V input → gain ~5
+    assert!(gain > 2.0, "Should amplify + clip: gain={gain:.3}");
+}
+
+#[test]
+fn inverting_opamp_diode_with_cap_input() {
+    // Same but with coupling cap input (the bug case).
+    // Cin(1µF) → R_in(10k) → neg → Rf(100k) → out → D_clip → neg
+    // Gain should still be ~10 (Ri=R_in=10k, not Cin's impedance).
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                Cin: cap(1u)
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                D_clip: diode_pair(silicon)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.out -> D_clip.a
+                D_clip.b -> U1.neg
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#);
+    eprintln!("Inverting opamp+diode+cap: gain={gain:.3}");
+    assert!(gain > 1.5, "Cap input shouldn't kill gain: gain={gain:.3}");
+}
+
+#[test]
+fn inverting_opamp_with_ground_termination() {
+    // R_in to ground + cap input — the Screamer-like inverting topology.
+    // Cin → R_in_gnd(510k, to GND) → junction → Rf → out
+    // Ri should be the impedance from input to neg.
+    // With cap coupling: Ri = R_series if present, or just Xc(Cin).
+    let gain = measure_gain_metered(r#"
+        pedal "test" { supply 9V
+            components {
+                Cin: cap(1u)
+                R_in_gnd: resistor(510k)
+                R_series: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                D_clip: diode_pair(silicon)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> R_in_gnd.a, R_series.a
+                R_in_gnd.b -> gnd
+                R_series.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.out -> D_clip.a
+                D_clip.b -> U1.neg
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#, "Inverting with ground termination");
+    eprintln!("Inverting + ground term: gain={gain:.3}");
+    // Ri = R_series = 10k (not R_in_gnd=510k!)
+    // Gain = Rf/Ri = 100k/10k = 10, clipped at ~0.5V → gain ~5
+    assert!(gain > 1.5, "R_series should be Ri, not R_in_gnd: gain={gain:.3}");
+}
+
+#[test]
+fn noninverting_screamer_clipping_gain() {
+    // Non-inverting: Screamer-like topology.
+    // Input → C_c1 → pos, R_b1 → vbias
+    // neg → R_hp → C_hp → gnd (Ri = R_hp = 4.7k)
+    // Feedback: Drive + R_clip ≈ 255k
+    // Gain = 1 + 255k/4.7k ≈ 55
+    // With diode: clips at ~0.5V → output 0.5V from 0.1V input → gain ~5
+    let gain = measure_gain_metered(r#"
+        pedal "test" { supply 9V
+            components {
+                C_c1: cap(1u, electrolytic)
+                U1: opamp(jrc4558)
+                R_hp: resistor(4.7k)
+                C_hp: cap(47n)
+                Drive: pot(500k, a)
+                R_clip: resistor(4.7k)
+                D_clip: diode_pair(silicon)
+            }
+            nets {
+                in -> C_c1.a
+                C_c1.b -> U1.pos
+                U1.pos -> gnd
+                U1.neg -> R_hp.a
+                R_hp.b -> C_hp.a
+                C_hp.b -> gnd
+                U1.out -> Drive.a, D_clip.a
+                Drive.b -> R_clip.a
+                R_clip.b -> U1.neg
+                D_clip.b -> U1.neg
+                U1.out -> out
+            }
+            controls {
+                Drive.position -> "Drive" [0.0, 1.0] = 0.5
+            }
+        }"#, "Screamer clipping stage");
+    eprintln!("Screamer clipping: gain={gain:.3}");
+    assert!(gain > 1.5, "Screamer should amplify + clip: gain={gain:.3}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Layer 6: full Screamer output chain (tone + level + output coupling)
 // ═══════════════════════════════════════════════════════════════════════════
 

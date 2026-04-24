@@ -142,26 +142,21 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
         create_root(&nl_kinds[0].0, false)
     };
 
-    // Tree from pendant edges (input coupling) — use full SPQR tree if available,
-    // falling back to single-leaf if SPQR decomposition fails.
-    let tree = if group.pendant_edges.len() > 1 {
-        // Multiple pendant edges → build full Series/Parallel tree via SPQR.
-        // Terminals: use the nodes where pendant edges connect to the opamp input.
-        let terminals: Vec<NodeId> = group.pendant_edges.iter()
-            .flat_map(|&eidx| {
-                let e = &graph.edges[eidx];
-                [e.node_a, e.node_b]
-            })
-            .filter(|&n| n != graph.gnd_node && !graph.supply_nodes.contains(&n))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        build_spqr_tree(&group.pendant_edges, graph, &terminals, sample_rate)
-            .map(|tree| with_voltage_source(tree))
-            .unwrap_or_else(|| build_pendant_tree(&group.pendant_edges, graph, sample_rate))
-    } else {
-        build_pendant_tree(&group.pendant_edges, graph, sample_rate)
-    };
+    // VS with op-amp output impedance as source resistance.
+    //
+    // No pendant tree. The pendant edges (input coupling: Cin, R_b1, etc.)
+    // are either in their own SPQR passive stage or provide DC bias handled
+    // by bias_analysis. They don't affect the diode clipping — the diode
+    // sees the op-amp's output impedance, not the input coupling impedance.
+    //
+    // The gain is already computed from Rf/Ri by extract_opamp_config and
+    // applied by OpAmpRoot.compute_vs_voltage(). The VS output IS the
+    // op-amp output voltage. The diode clips it.
+    let tree = DynNode::Leaf(Box::new(WdfVoltageSource {
+        voltage: 0.0,
+        rp: config.model.output_impedance,
+        is_cathode_bias: false,
+    }));
 
     let oversampler = Oversampler::new(OversamplingFactor::X2);
     let mut stage = WdfStage::new(tree, root, oversampler);
