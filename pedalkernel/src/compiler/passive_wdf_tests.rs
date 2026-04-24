@@ -695,3 +695,82 @@ fn screamer_output_chain_passes_signal() {
         }"#, "Screamer output chain");
     assert!(gain > 0.01, "Screamer output chain should pass signal: gain={gain:.3}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 7: mid-chain passive stages (not at global out_node)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn mid_chain_passive_stage_passes_signal() {
+    // Three groups: input → opamp → passive_filter → output_resistor.
+    // The passive_filter is mid-chain: it doesn't touch graph.out_node.
+    // Its output boundary is the node shared with the next group.
+    let gain = measure_gain_metered(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                C_tone: cap(3.3n)
+                R_filter: resistor(10k)
+                C_out: cap(1u)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> C_tone.a, R_filter.a
+                C_tone.b -> gnd
+                R_filter.b -> C_out.a
+                C_out.b -> R_out.a
+                R_out.b -> out
+            }
+            controls {}
+        }"#, "Mid-chain passive");
+    eprintln!("Mid-chain passive: gain={gain:.3}");
+    assert!(gain > 0.1, "Mid-chain passive should pass signal: gain={gain:.3}");
+}
+
+#[test]
+fn ratking_tone_volume_stage_not_dead() {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/ratking.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let mut compiled = super::spqr_build::compile_via_spqr(&pedal, SR).expect("compile");
+    compiled.enable_metering(128);
+
+    let amp = 0.1;
+    for s in 0..8000 {
+        compiled.process(amp * (std::f64::consts::TAU * 440.0 * s as f64 / SR).sin());
+    }
+
+    let metrics = compiled.read_metrics();
+    let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
+    for i in 0..n {
+        let lvl = metrics.stage_levels[i];
+        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        #[cfg(debug_assertions)]
+        {
+            let (lbl, bypass) = match &compiled.stages[i] {
+                super::compiled::Stage::Wdf(w) => (&w.debug_label, w.bypass_serial),
+                super::compiled::Stage::MultiNl(m) => (&m.debug_label, m.bypass_serial),
+                super::compiled::Stage::Iir(s) => (&s.debug_label, s.bypass_serial),
+                super::compiled::Stage::StateSpace(s) => (&s.debug_label, s.bypass_serial),
+                super::compiled::Stage::BlackFeedback(b) => (&b.debug_label, b.bypass_serial),
+            };
+            if bypass { continue; }
+            // The tone+volume stage should not be dead
+            if lbl.contains("C_tone") || lbl.contains("Filter") || lbl.contains("Volume") {
+                eprintln!("Ratking tone stage [{lbl}]: {db:.1} dB");
+                assert!(db > -60.0,
+                    "Ratking tone+volume stage [{lbl}] is dead at {db:.1} dB");
+            }
+        }
+    }
+}
