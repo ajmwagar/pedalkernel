@@ -77,7 +77,7 @@ fn c_tone_in_passive_tone_group() {
 
     eprintln!("Tone group components: {tone_comps:?}");
 
-    // Also dump ALL groups to find where C_tone ended up
+    // Find where C_tone ended up
     for (gi, g) in groups.iter().enumerate() {
         let comps: Vec<&str> = g.all_edges().iter()
             .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())

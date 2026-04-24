@@ -664,15 +664,17 @@ pub(in crate::compiler) fn find_flow_groups(
 
     let mut barrier_nodes = rails.clone();
 
-    // Add active element INPUT nodes as barriers.
+    // Add active AMPLIFIER input nodes as barriers.
     // Input nodes (neg, base, gate) separate upstream from downstream passive
     // groups — e.g., input coupling should not merge with feedback passives.
     //
-    // Output nodes are NOT barriers. While op-amp outputs are zero-impedance
-    // (theoretically independent), the serial processing chain needs post-amp
-    // passive components (tone caps, coupling caps) to group together for
-    // correct WDF filtering. The feedback group already claims its edges via
-    // `claimed`, so output-side passives won't contaminate feedback groups.
+    // Only Amplifier types (op-amps, BJTs, tubes) create barriers. TwoPort
+    // elements (diodes, zeners) are nonlinear but don't create impedance
+    // boundaries — their input nodes should NOT be barriers, or else
+    // post-amp passive networks (tone caps, filter pots) can't merge.
+    //
+    // Output nodes are NOT barriers. The serial processing chain needs
+    // post-amp passive components to group together for correct WDF filtering.
     for &eidx in edge_indices {
         let comp = &graph.components[graph.edges[eidx].comp_idx];
         match comp.kind.signal_terminals() {
@@ -681,12 +683,7 @@ pub(in crate::compiler) fn find_flow_groups(
                     barrier_nodes.insert(node);
                 }
             }
-            SignalTerminals::TwoPort { input, .. } => {
-                if let Some(node) = resolve_pin(&comp.id, input, graph) {
-                    barrier_nodes.insert(node);
-                }
-            }
-            SignalTerminals::Passive => {}
+            SignalTerminals::TwoPort { .. } | SignalTerminals::Passive => {}
         }
     }
 
