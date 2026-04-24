@@ -221,7 +221,105 @@ fn static_bias_junction_not_terminal() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 5. Full Goldenrod Gain_B group should produce stages
+// 5. ac_ground_nodes must be excluded from terminals
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn ac_ground_node_excluded_from_terminals() {
+    // VB+ (virtual ground from bias divider) is in ac_ground_nodes.
+    // A group edge connecting to VB+ should NOT make VB+ a terminal.
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let groups = find_flow_groups(&all_edges, &graph);
+    let global_terminals = vec![graph.in_node, graph.out_node];
+
+    let gain_b_group = groups.iter().find(|g| {
+        g.all_edges().iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "Gain_B"
+        })
+    }).expect("Gain_B group");
+
+    let terminals = compute_group_terminals(&gain_b_group.all_edges(), &graph, &global_terminals);
+
+    // Node 76 is in ac_ground_nodes — it must NOT be a terminal
+    for &t in &terminals {
+        assert!(!graph.ac_ground_nodes.contains(&t),
+            "ac_ground node {t:?} should not be a terminal. Terminals: {terminals:?}");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. Global terminals only when they're this group's signal boundary
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn global_in_node_not_terminal_for_mid_chain_group() {
+    // A group that touches in_node via one edge (R1) shouldn't get in_node
+    // as a terminal if in_node is just a shared node, not this group's
+    // signal entry point.
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let groups = find_flow_groups(&all_edges, &graph);
+    let global_terminals = vec![graph.in_node, graph.out_node];
+
+    let gain_b_group = groups.iter().find(|g| {
+        g.all_edges().iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "Gain_B"
+        })
+    }).expect("Gain_B group");
+
+    let terminals = compute_group_terminals(&gain_b_group.all_edges(), &graph, &global_terminals);
+
+    // in_node should NOT be a terminal for the Gain_B feedforward group.
+    // R1 connects in_node to an internal junction — in_node is the global
+    // input, not this group's signal boundary.
+    assert!(!terminals.contains(&graph.in_node),
+        "in_node should not be terminal for mid-chain group. Terminals: {terminals:?}");
+}
+
+#[test]
+fn goldenrod_gain_b_has_three_terminals() {
+    // After fixing ac_ground and global terminal issues, Gain_B should
+    // have exactly 3 terminals: nodes 13 (U1.out), 49 (C_ff1.b→U3),
+    // and 51 (Gain_B.w→R_ff2).
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let groups = find_flow_groups(&all_edges, &graph);
+    let global_terminals = vec![graph.in_node, graph.out_node];
+
+    let gain_b_group = groups.iter().find(|g| {
+        g.all_edges().iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "Gain_B"
+        })
+    }).expect("Gain_B group");
+
+    let terminals = compute_group_terminals(&gain_b_group.all_edges(), &graph, &global_terminals);
+
+    eprintln!("Gain_B terminals: {terminals:?} (expected 3)");
+    assert!(terminals.len() <= 3,
+        "Gain_B should have ≤3 terminals, got {}: {terminals:?}", terminals.len());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. Full Goldenrod Gain_B group should produce stages
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
