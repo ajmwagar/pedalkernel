@@ -87,3 +87,5 @@ mod bias_application_tests;
 mod ground_clip_tests;
 #[cfg(test)]
 mod passive_wdf_tests;
+#[cfg(test)]
+mod goldenrod_pot_tests;
