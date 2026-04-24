@@ -404,6 +404,94 @@ pub fn compile_via_spqr_with_options(
         Stage::BlackFeedback(b) => b.signal_flow_distance,
     });
 
+    // ── Feedforward detection ─────────────────────────────────────────────
+    // Detect non-feedback stages that fan out from a shared source node
+    // and converge at a summing point. These stages read from node_signals
+    // instead of the serial chain, and add their output to the signal.
+    //
+    // Phase 1: collect (stage_index, injection_node) pairs.
+    // Phase 2: apply flags to stages.
+    {
+        // Main path output nodes: active element outputs + in_node
+        let mut main_path_output_nodes: std::collections::HashSet<super::graph::NodeId> =
+            std::collections::HashSet::new();
+        main_path_output_nodes.insert(graph.in_node);
+        for group in feedback_groups.iter() {
+            if !group.has_feedback() { continue; }
+            for &eidx in group.active_edges.iter() {
+                let e = &graph.edges[eidx];
+                if let Some(pins) = graph.nullor_pins.iter().find(|p| p.comp_idx == e.comp_idx) {
+                    main_path_output_nodes.insert(pins.out_node);
+                }
+            }
+        }
+
+        // Phase 1: collect feedforward candidates as (flow_distance, injection_node, first_comp_name)
+        let mut ff_candidates: Vec<(usize, usize, String)> = Vec::new();
+        for (gi, group) in feedback_groups.iter().enumerate() {
+            if group.has_feedback() { continue; }
+
+            let group_nodes: std::collections::HashSet<super::graph::NodeId> = group.all_edges().iter()
+                .flat_map(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    vec![e.node_a, e.node_b]
+                })
+                .collect();
+
+            let source_node = group_nodes.iter()
+                .find(|&&n| main_path_output_nodes.contains(&n))
+                .copied();
+
+            if let Some(src) = source_node {
+                let dist = group_flow_distances[gi];
+                let first_comp = group.all_edges().first()
+                    .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+                    .unwrap_or_default();
+                ff_candidates.push((dist, src, first_comp));
+            }
+        }
+
+        // Check which distances have multiple non-bypass stages (parallel paths)
+        let mut dist_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        for stage in &stages {
+            let (d, bp) = match stage {
+                Stage::Wdf(w) => (w.signal_flow_distance, w.bypass_serial),
+                Stage::BlackFeedback(b) => (b.signal_flow_distance, b.bypass_serial),
+                Stage::Iir(i) => (i.signal_flow_distance, i.bypass_serial),
+                Stage::StateSpace(ss) => (ss.signal_flow_distance, ss.bypass_serial),
+                Stage::MultiNl(m) => (m.signal_flow_distance, m.bypass_serial),
+            };
+            if !bp {
+                *dist_counts.entry(d).or_insert(0) += 1;
+            }
+        }
+
+        // Phase 2: apply feedforward flags
+        for (dist, inj_node, comp_name) in &ff_candidates {
+            // Only mark as feedforward if there are multiple stages at this distance
+            if dist_counts.get(dist).copied().unwrap_or(0) <= 1 {
+                continue;
+            }
+            for stage in &mut stages {
+                if let Stage::Wdf(w) = stage {
+                    if w.signal_flow_distance == *dist && !w.bypass_serial && !w.is_feedforward {
+                        #[cfg(debug_assertions)]
+                        let matches = w.debug_label.contains(comp_name.as_str());
+                        #[cfg(not(debug_assertions))]
+                        let matches = true;
+                        if matches {
+                            w.is_feedforward = true;
+                            w.injection_node_id = *inj_node;
+                            #[cfg(test)]
+                            eprintln!("  → feedforward: [{}] inj_node={}", w.debug_label, inj_node);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut compiled = CompiledPedal {
         stages,
         push_pull_stages: Vec::new(),
