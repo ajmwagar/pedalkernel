@@ -1088,10 +1088,44 @@ pub(super) fn compute_group_terminals(
         }
     }
 
-    // Do NOT include GND as a terminal — the pendant extraction in SPQR
-    // handles ground-terminated edges correctly (GND has degree 1, pendant
-    // extraction removes the cap, reducing the junction's degree for series
-    // detection).
+    // Merge terminals that converge at the same downstream node.
+    // If two boundary nodes both connect (via external edges) to the same
+    // destination node, they're effectively one output port — keep only one.
+    // Example: nodes 49 and 51 both connect to U3.neg → merge to one terminal.
+    if terminals.len() > 2 {
+        // For each terminal, find the set of downstream nodes it connects to
+        let downstream: Vec<(NodeId, std::collections::HashSet<NodeId>)> = terminals.iter()
+            .map(|&t| {
+                let dests: std::collections::HashSet<NodeId> = graph.edges.iter().enumerate()
+                    .filter(|(eidx, e)| {
+                        !group_edge_set.contains(eidx)
+                            && (e.node_a == t || e.node_b == t)
+                    })
+                    .map(|(_, e)| if e.node_a == t { e.node_b } else { e.node_a })
+                    .collect();
+                (t, dests)
+            })
+            .collect();
+
+        // Find terminals that share downstream destinations and merge them
+        let mut merged = vec![false; terminals.len()];
+        for i in 0..downstream.len() {
+            if merged[i] { continue; }
+            for j in (i + 1)..downstream.len() {
+                if merged[j] { continue; }
+                // If they share ANY downstream node, merge (keep i, drop j)
+                if !downstream[i].1.is_disjoint(&downstream[j].1) {
+                    merged[j] = true;
+                }
+            }
+        }
+
+        terminals = terminals.into_iter()
+            .enumerate()
+            .filter(|(i, _)| !merged[*i])
+            .map(|(_, t)| t)
+            .collect();
+    }
 
     // Fallback: if no terminals found, use global
     if terminals.is_empty() {

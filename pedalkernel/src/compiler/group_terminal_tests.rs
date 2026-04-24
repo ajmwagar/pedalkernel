@@ -290,10 +290,10 @@ fn global_in_node_not_terminal_for_mid_chain_group() {
 }
 
 #[test]
-fn goldenrod_gain_b_has_three_terminals() {
-    // After fixing ac_ground and global terminal issues, Gain_B should
-    // have exactly 3 terminals: nodes 13 (U1.out), 49 (C_ff1.b→U3),
-    // and 51 (Gain_B.w→R_ff2).
+fn goldenrod_gain_b_has_two_terminals() {
+    // After fixing ac_ground, global terminal, and convergence issues,
+    // Gain_B should have 2 terminals: node 13 (U1.out, input) and one
+    // merged output (nodes 49+51 converge at U3.neg).
     let path = format!(
         "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
         env!("CARGO_MANIFEST_DIR"),
@@ -313,9 +313,9 @@ fn goldenrod_gain_b_has_three_terminals() {
 
     let terminals = compute_group_terminals(&gain_b_group.all_edges(), &graph, &global_terminals);
 
-    eprintln!("Gain_B terminals: {terminals:?} (expected 3)");
-    assert!(terminals.len() <= 3,
-        "Gain_B should have ≤3 terminals, got {}: {terminals:?}", terminals.len());
+    eprintln!("Gain_B terminals: {terminals:?} (expected 2)");
+    assert!(terminals.len() <= 2,
+        "Gain_B should have ≤2 terminals, got {}: {terminals:?}", terminals.len());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
