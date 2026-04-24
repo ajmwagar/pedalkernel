@@ -89,3 +89,5 @@ mod ground_clip_tests;
 mod passive_wdf_tests;
 #[cfg(test)]
 mod goldenrod_pot_tests;
+#[cfg(test)]
+mod goldenrod_signal_chain_tests;
