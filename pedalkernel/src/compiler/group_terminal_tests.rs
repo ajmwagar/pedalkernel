@@ -408,3 +408,96 @@ fn goldenrod_gain_b_produces_stages() {
         assert!(has_gain_b, "Goldenrod Gain_B must produce a stage after terminal fix");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. Terminals that converge at the same downstream node should merge
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn converging_outputs_count_as_one_terminal() {
+    // Gain_B group has nodes 49 and 51 as separate terminals.
+    // Both connect to U3.neg (node 56) via external edges (R_ff1b and R_ff2).
+    // Since they converge at the same destination, they should count as
+    // ONE output terminal, giving the group 2 terminals total (in + out).
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let groups = find_flow_groups(&all_edges, &graph);
+    let global_terminals = vec![graph.in_node, graph.out_node];
+
+    let gain_b_group = groups.iter().find(|g| {
+        g.all_edges().iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "Gain_B"
+        })
+    }).expect("Gain_B group");
+
+    let terminals = compute_group_terminals(&gain_b_group.all_edges(), &graph, &global_terminals);
+
+    eprintln!("Gain_B terminals after merge: {terminals:?}");
+    assert!(terminals.len() <= 2,
+        "Converging outputs should merge: got {} terminals {:?}, expected ≤2",
+        terminals.len(), terminals);
+}
+
+#[test]
+fn two_outputs_to_same_destination_merge() {
+    // Simplified: two paths from junction to the same downstream node.
+    // R_a → junction_a and R_b → junction_b, both connect to U2.neg.
+    // junction_a and junction_b should merge into one terminal.
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                R_a: resistor(15k)
+                C_a: cap(100n)
+                R_b: resistor(100k)
+                U1: opamp(tl072)
+                Rf1: resistor(100k)
+                U2: opamp(tl072)
+                Rf2: resistor(100k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf1.a
+                Rf1.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> R_a.a, R_b.a
+                R_a.b -> C_a.a
+                C_a.b -> U2.neg
+                R_b.b -> U2.neg
+                U2.neg -> Rf2.a
+                Rf2.b -> U2.out
+                U2.pos -> gnd
+                U2.out -> out
+            }
+            controls {}
+        }"#).expect("parse");
+
+    let graph = CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let groups = find_flow_groups(&all_edges, &graph);
+    let global_terminals = vec![graph.in_node, graph.out_node];
+
+    // Find the group containing R_a (the feedforward passive group)
+    let ff_group = groups.iter().find(|g| {
+        g.all_edges().iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "R_a"
+        })
+    }).expect("feedforward group");
+
+    let terminals = compute_group_terminals(&ff_group.all_edges(), &graph, &global_terminals);
+
+    eprintln!("Two-output terminals: {terminals:?}");
+    // R_a path output (C_a.b) and R_b path output (R_b.b) both go to U2.neg.
+    // They should merge → 2 terminals total (U1.out input + merged output).
+    assert!(terminals.len() <= 2,
+        "Two outputs to same destination should merge: got {} terminals {:?}",
+        terminals.len(), terminals);
+}
+
