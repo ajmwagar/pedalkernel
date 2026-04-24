@@ -774,3 +774,142 @@ fn ratking_tone_volume_stage_not_dead() {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Layer 8: WDF output extraction for complex multi-edge passive groups
+//
+// Bug 3: short_circuit_junction_voltage returns None for trees with 5+
+// edges and multiple SPQR terminals. The signal enters the tree via VS
+// but the output extraction can't find the correct junction voltage.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn five_edge_passive_group_passes_signal() {
+    // Simplified Goldenrod Gain_B topology: 5 passive edges, ground shunt.
+    // R1 → C1 → junction → R2 → out, with C_shunt → gnd at junction.
+    // This is the simplest multi-edge group that should work but might not.
+    let gain = measure_gain_metered(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                C1: cap(100n)
+                C_shunt: cap(10n)
+                R2: resistor(10k)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> C1.a
+                C1.b -> C_shunt.a, R2.a
+                C_shunt.b -> gnd
+                R2.b -> R_out.a
+                R_out.b -> out
+            }
+            controls {}
+        }"#, "5-edge passive");
+    eprintln!("5-edge passive: gain={gain:.3}");
+    assert!(gain > 0.1, "5-edge passive group should pass signal: gain={gain:.3}");
+}
+
+#[test]
+fn six_edge_with_pot_passes_signal() {
+    // Closer to Goldenrod: R + C + pot(2 edges) + R + ground shunt.
+    let gain = measure_gain_metered(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                C1: cap(100n)
+                Vol: pot(100k, b)
+                C_shunt: cap(10n)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> C1.a
+                C1.b -> Vol.a, C_shunt.a
+                Vol.b -> gnd
+                Vol.w -> R_out.a
+                C_shunt.b -> gnd
+                R_out.b -> out
+            }
+            controls {
+                Vol.position -> "Volume" [0.0, 1.0] = 0.5
+            }
+        }"#, "6-edge with pot");
+    eprintln!("6-edge with pot: gain={gain:.3}");
+    assert!(gain > 0.05, "6-edge passive with pot should pass signal: gain={gain:.3}");
+}
+
+#[test]
+fn seven_edge_feedforward_group_passes_signal() {
+    // Exact Goldenrod Gain_B topology: R1, C1, R_bias, R_ff, C_ff, Pot(2).
+    // All passive, connected between two active stages.
+    let gain = measure_gain_metered(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                C1: cap(100n)
+                R_bias: resistor(1M)
+                R_ff: resistor(15k)
+                C_ff: cap(100n)
+                Blend: pot(100k, b)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> C1.a
+                C1.b -> R_bias.a, R_ff.a, Blend.a
+                R_bias.b -> gnd
+                R_ff.b -> C_ff.a
+                C_ff.b -> R_out.a
+                Blend.b -> gnd
+                Blend.w -> R_out.a
+                R_out.b -> out
+            }
+            controls {
+                Blend.position -> "Blend" [0.0, 1.0] = 0.5
+            }
+        }"#, "7-edge feedforward");
+    eprintln!("7-edge feedforward: gain={gain:.3}");
+    assert!(gain > 0.01, "7-edge feedforward group should pass signal: gain={gain:.3}");
+}
+
+#[test]
+fn goldenrod_gain_b_stage_not_dead() {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let mut compiled = super::spqr_build::compile_via_spqr(&pedal, SR).expect("compile");
+    compiled.enable_metering(128);
+
+    let amp = 0.1;
+    for s in 0..8000 {
+        compiled.process(amp * (std::f64::consts::TAU * 440.0 * s as f64 / SR).sin());
+    }
+
+    let metrics = compiled.read_metrics();
+    let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
+    for i in 0..n {
+        let lvl = metrics.stage_levels[i];
+        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        #[cfg(debug_assertions)]
+        {
+            let (lbl, bypass) = match &compiled.stages[i] {
+                super::compiled::Stage::Wdf(w) => (&w.debug_label, w.bypass_serial),
+                super::compiled::Stage::MultiNl(m) => (&m.debug_label, m.bypass_serial),
+                super::compiled::Stage::Iir(s) => (&s.debug_label, s.bypass_serial),
+                super::compiled::Stage::StateSpace(s) => (&s.debug_label, s.bypass_serial),
+                super::compiled::Stage::BlackFeedback(b) => (&b.debug_label, b.bypass_serial),
+            };
+            if bypass { continue; }
+            if lbl.contains("Gain_B") {
+                eprintln!("Goldenrod Gain_B stage [{lbl}]: {db:.1} dB");
+                assert!(db > -60.0,
+                    "Goldenrod Gain_B stage [{lbl}] is dead at {db:.1} dB");
+            }
+        }
+    }
+}

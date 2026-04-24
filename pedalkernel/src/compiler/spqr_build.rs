@@ -367,39 +367,30 @@ pub fn compile_via_spqr_with_options(
             let group_terminals = compute_group_terminals(&group_edges, &graph, &terminals);
             #[cfg(test)]
             eprintln!("  SPQR terminals for group: {:?}", group_terminals);
-            let spqr_tree = spqr_decompose(
-                &group_edges,
-                &group_terminals,
-                &graph,
-                graph.gnd_node,
-            );
-            let spqr_stages = spqr_to_stages(&spqr_tree, &graph, sample_rate);
 
-            #[cfg(test)]
             {
-                let node_type = if spqr_tree.is_rigid() { "R" }
-                    else if matches!(&spqr_tree, super::spqr::SpqrNode::S { .. }) { "S" }
-                    else if matches!(&spqr_tree, super::spqr::SpqrNode::P { .. }) { "P" }
-                    else { "Q" };
-                eprintln!("  SPQR result: {node_type}-node → {} stages", spqr_stages.len());
-                if spqr_stages.is_empty() {
-                    eprintln!("    WARNING: 0 stages from {node_type}-node ({} edges, {} terminals)",
-                        group_edges.len(), group_terminals.len());
-                    // Show what stage types were produced
-                    for stage in &spqr_stages {
-                        match stage {
-                            super::spqr::SpqrStage::PassiveWdf { .. } => eprintln!("      → PassiveWdf"),
-                            super::spqr::SpqrStage::NlWdf { .. } => eprintln!("      → NlWdf"),
-                            super::spqr::SpqrStage::Rigid { .. } => eprintln!("      → Rigid"),
-                        }
-                    }
-                }
-            }
+                let spqr_tree = spqr_decompose(
+                    &group_edges,
+                    &group_terminals,
+                    &graph,
+                    graph.gnd_node,
+                );
+                let spqr_stages = spqr_to_stages(&spqr_tree, &graph, sample_rate);
 
-            for stage in spqr_stages {
-                let built = build_spqr_stage(stage, &graph, sample_rate)
-                    .map_err(|e| format!("Group {gi}: {e}"))?;
-                push_stage!(built, group_flow_distances[gi], group_label.clone(), is_bypass);
+                #[cfg(test)]
+                {
+                    let node_type = if spqr_tree.is_rigid() { "R" }
+                        else if matches!(&spqr_tree, super::spqr::SpqrNode::S { .. }) { "S" }
+                        else if matches!(&spqr_tree, super::spqr::SpqrNode::P { .. }) { "P" }
+                        else { "Q" };
+                    eprintln!("  SPQR result: {node_type}-node → {} stages", spqr_stages.len());
+                }
+
+                for stage in spqr_stages {
+                    let built = build_spqr_stage(stage, &graph, sample_rate)
+                        .map_err(|e| format!("Group {gi}: {e}"))?;
+                    push_stage!(built, group_flow_distances[gi], group_label.clone(), is_bypass);
+                }
             }
         }
     }
