@@ -2672,6 +2672,21 @@ impl PedalProcessor for CompiledPedal {
     fn control_debug_info(&self) -> Vec<(String, f64, f64)> {
         let mut out = Vec::new();
 
+        // Stage type map: {S0} WDF, {S1} IIR, etc.
+        for (si, stage) in self.stages.iter().enumerate() {
+            let type_name = match stage {
+                Stage::Wdf(w) => {
+                    if w.feedback_opamp.is_some() { "WDF+OpAmp" }
+                    else { "WDF" }
+                }
+                Stage::MultiNl(_) => "MultiNL",
+                Stage::Iir(_) => "IIR",
+                Stage::StateSpace(_) => "StateSpace",
+                Stage::BlackFeedback(_) => "BlackFB",
+            };
+            out.push((format!("{{S{si}}} {type_name}"), 0.0, 0.0));
+        }
+
         // Named controls with smoother state
         for (i, ctrl) in self.controls.iter().enumerate() {
             let smoothed = self

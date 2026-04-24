@@ -179,28 +179,9 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     Ok(stage)
 }
 
-// build_pendant_tree and build_spqr_tree removed.
-//
-// The pendant tree concept was fundamentally wrong for feedback_opamp stages:
-// it modeled input coupling impedance (at the pos/neg input) in the WDF tree,
-// but the diode root sees the op-amp's OUTPUT impedance, not the input coupling.
-//
-// Input coupling is now handled by separate SPQR passive stages.
-// DC bias is handled by bias_analysis.
-// The feedback_opamp WDF tree is just VS(output_impedance) → diode root.
-
 // ═══════════════════════════════════════════════════════════════════════════
 // General MNA + NR solver
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Build from a classified FlowGroup.
-pub(in crate::compiler) fn build_general_mna(
-    group: &FlowGroup,
-    graph: &CircuitGraph,
-    sample_rate: f64,
-) -> Result<MultiNlStage, String> {
-    build_general_mna_from_edges(&group.all_edges(), graph, sample_rate)
-}
 
 /// Build from raw edge indices (no FlowGroup required).
 pub(in crate::compiler) fn build_general_mna_from_edges(
@@ -210,7 +191,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
 ) -> Result<MultiNlStage, String> {
     let oversampling = OversamplingFactor::X2;
     let effective_rate = sample_rate * oversampling.ratio() as f64;
-    let supply_voltage = 9.0; // TODO: pass from PedalDef
+    let supply_voltage = 9.0; // TODO(#bias): pass from PedalDef via build_rigid_from_group
 
     // Step 1: Collect unique MNA nodes
     let mut node_set = collect_mna_nodes(all_edges, graph);

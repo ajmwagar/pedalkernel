@@ -20,11 +20,8 @@ mod state_space;
 // Re-exports
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(super) use self::general::{build_general_mna, build_general_mna_from_edges, build_opamp_nl_feedback};
-// Legacy re-exports for old pipeline — will be removed with opamp_analysis.rs
-pub(super) use self::opamp_root::{
-    extract_opamp_config, make_opamp_root, build_opamp_root, OpAmpConfig,
-};
+pub(super) use self::general::{build_general_mna_from_edges, build_opamp_nl_feedback};
+pub(super) use self::opamp_root::{extract_opamp_config, make_opamp_root, OpAmpConfig};
 
 use super::component::EdgeKind;
 use super::dyn_node::DynNode;
@@ -508,7 +505,6 @@ pub(super) fn build_rigid_from_group(
         // VCVS stages with reactive feedback should fall through to WDF
         // where the op-amp + cap feedback is handled by wave scattering.
         if stats.vcvs_count == 0 {
-            let supply_voltage = 9.0;
             if let Ok(ss) = state_space::build_state_space_stage(
                 &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
             ) {
@@ -559,7 +555,7 @@ pub(super) fn build_rigid_from_group(
             Ok(BuiltStage::Iir(IirStage::new(iir)))
         }
         RigidOptimization::StateSpace => {
-            let pendant_trees = Vec::new(); // TODO: extract from group
+            let pendant_trees = Vec::new(); // Empty — input coupling handled by SPQR passive stages
             state_space::build_state_space_stage(
                 &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
             )

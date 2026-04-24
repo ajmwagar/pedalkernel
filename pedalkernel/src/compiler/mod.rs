@@ -9,7 +9,6 @@
 
 mod bias_analysis;
 mod bind;
-mod bjt_bias_analysis;
 mod build;
 mod calibrate;
 mod classify;

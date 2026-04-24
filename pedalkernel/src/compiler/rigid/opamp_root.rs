@@ -1,18 +1,12 @@
-//! Op-amp root stage building for Rigid stages.
+//! Op-amp configuration extraction and root construction for Rigid stages.
 //!
-//! Uses the classified FlowGroup directly — no second DFS.
-//! Rf comes from feedback_edges, Ri from pendant_edges.
+//! Extracts Rf/Ri from FlowGroup feedback/pendant edges, computes gain,
+//! and creates OpAmpRoot with bias-derived rail limits.
 
 use super::super::component::EdgeKind;
-use super::super::dyn_node::DynNode;
 use super::super::signal_flow::FlowGroup;
-use super::super::graph::CircuitGraph;
-use super::super::stage::{RootKind, WdfStage};
-use super::super::wdf_leaf::WdfVoltageSource;
+use super::super::graph::{CircuitGraph, NodeId};
 use crate::elements::{OpAmpModel, OpAmpRoot};
-use crate::oversampling::{Oversampler, OversamplingFactor};
-
-use super::super::graph::NodeId;
 
 /// Shared op-amp extraction from classified FlowGroup.
 pub(in crate::compiler) struct OpAmpConfig {
@@ -156,27 +150,4 @@ pub(in crate::compiler) fn make_opamp_root(
     root
 }
 
-/// Build an OpAmpRoot stage from a classified FlowGroup.
-pub(in crate::compiler) fn build_opamp_root(
-    group: &FlowGroup,
-    inverting: bool,
-    graph: &CircuitGraph,
-    sample_rate: f64,
-    supply_voltage: f64,
-    bias_v_max: Option<(f64, f64)>,
-) -> Result<WdfStage, String> {
-    let config = extract_opamp_config(group, inverting, graph)?;
-    // Rf=0 is valid: unity-gain buffer (direct neg→out connection)
-    let root = make_opamp_root(&config, sample_rate, supply_voltage, bias_v_max);
-
-    // VS with op-amp output impedance. No pendant tree — input coupling
-    // is handled by separate SPQR passive stages.
-    let tree = DynNode::Leaf(Box::new(WdfVoltageSource {
-        voltage: 0.0,
-        rp: config.model.output_impedance,
-        is_cathode_bias: false,
-    }));
-
-    let oversampler = Oversampler::new(OversamplingFactor::X1);
-    Ok(WdfStage::new(tree, RootKind::OpAmp(root), oversampler))
-}
+// build_opamp_root() removed — zero callers. Use make_opamp_root() directly.
