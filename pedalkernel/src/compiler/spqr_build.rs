@@ -462,25 +462,29 @@ pub fn compile_via_spqr_with_options(
             }
         }
 
-        // Check which distances have multiple non-bypass stages (parallel paths)
-        let mut dist_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        // Check which distances have a feedback (main-path) stage.
+        // A non-feedback stage is only feedforward if there's a feedback
+        // stage at the same distance carrying the serial signal. If ALL
+        // stages at a distance are non-feedback, they're serial, not
+        // feedforward — marking them all would leave nobody on the chain.
+        let mut dist_has_feedback: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
         for stage in &stages {
-            let (d, bp) = match stage {
-                Stage::Wdf(w) => (w.signal_flow_distance, w.bypass_serial),
-                Stage::BlackFeedback(b) => (b.signal_flow_distance, b.bypass_serial),
-                Stage::Iir(i) => (i.signal_flow_distance, i.bypass_serial),
-                Stage::StateSpace(ss) => (ss.signal_flow_distance, ss.bypass_serial),
-                Stage::MultiNl(m) => (m.signal_flow_distance, m.bypass_serial),
+            let (d, bp, is_fb) = match stage {
+                Stage::BlackFeedback(b) => (b.signal_flow_distance, b.bypass_serial, true),
+                Stage::Wdf(w) => (w.signal_flow_distance, w.bypass_serial, false),
+                Stage::Iir(i) => (i.signal_flow_distance, i.bypass_serial, false),
+                Stage::StateSpace(ss) => (ss.signal_flow_distance, ss.bypass_serial, false),
+                Stage::MultiNl(m) => (m.signal_flow_distance, m.bypass_serial, false),
             };
-            if !bp {
-                *dist_counts.entry(d).or_insert(0) += 1;
+            if !bp && is_fb {
+                dist_has_feedback.insert(d);
             }
         }
 
-        // Phase 2: apply feedforward flags
+        // Phase 2: apply feedforward flags — only at distances with a feedback stage
         for (dist, inj_node, comp_name) in &ff_candidates {
-            // Only mark as feedforward if there are multiple stages at this distance
-            if dist_counts.get(dist).copied().unwrap_or(0) <= 1 {
+            if !dist_has_feedback.contains(dist) {
                 continue;
             }
             for stage in &mut stages {
@@ -704,17 +708,10 @@ pub(super) fn build_spqr_stage(
                     });
                     if other_reaches_gnd {
                         let comp = &graph.components[e.comp_idx];
-                        // For pots: probe the wb half (wiper→GND) specifically.
-                        // leaf_voltage finds the first match, and aw would give
-                        // V_in - V_wiper (wrong). wb gives V_wiper (correct).
-                        let probe_id = if comp.kind.is_pot() {
-                            format!("{}__wb", comp.id)
-                        } else {
-                            comp.id.clone()
-                        };
-                        #[cfg(test)]
-                        eprintln!("    output_probe set to '{probe_id}' (out_node={out_node:?})");
-                        wdf.output_probe = Some(probe_id);
+                        // Use the component ID as probe. For pots, make_leaf
+                        // creates leaves with the base comp_id — leaf_matches_id
+                        // will match "Volume" against "Volume" or "Volume__*".
+                        wdf.output_probe = Some(comp.id.clone());
                         break;
                     }
                 }
