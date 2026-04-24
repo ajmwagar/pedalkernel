@@ -437,7 +437,25 @@ pub fn compile_via_spqr_with_options(
             }
         }
 
-        // Phase 1: collect feedforward candidates as (flow_distance, injection_node, first_comp_name)
+        // Collect feedback group input nodes (where feedforward paths converge).
+        // A feedback group's input node is where non-feedback groups can feed into.
+        let mut feedback_input_nodes: std::collections::HashSet<super::graph::NodeId> =
+            std::collections::HashSet::new();
+        for group in feedback_groups.iter() {
+            if !group.has_feedback() { continue; }
+            for &eidx in group.active_edges.iter() {
+                let e = &graph.edges[eidx];
+                if let Some(pins) = graph.nullor_pins.iter().find(|p| p.comp_idx == e.comp_idx) {
+                    feedback_input_nodes.insert(pins.neg_node);
+                    feedback_input_nodes.insert(pins.pos_node);
+                }
+            }
+        }
+
+        // Phase 1: A non-feedback group is feedforward if:
+        //   - It shares an input node with a main-path output (taps from main path)
+        //   - It shares an output node with a feedback group's input (converges)
+        // This uses actual node connectivity, not distance heuristics.
         let mut ff_candidates: Vec<(usize, usize, String)> = Vec::new();
         for (gi, group) in feedback_groups.iter().enumerate() {
             if group.has_feedback() { continue; }
@@ -449,44 +467,31 @@ pub fn compile_via_spqr_with_options(
                 })
                 .collect();
 
+            // Does this group tap from a main-path output?
             let source_node = group_nodes.iter()
                 .find(|&&n| main_path_output_nodes.contains(&n))
                 .copied();
 
+            // Does this group converge at a feedback group's input?
+            let converges = group_nodes.iter()
+                .any(|n| feedback_input_nodes.contains(n));
+
             if let Some(src) = source_node {
-                let dist = group_flow_distances[gi];
-                let first_comp = group.all_edges().first()
-                    .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
-                    .unwrap_or_default();
-                ff_candidates.push((dist, src, first_comp));
+                if converges {
+                    // This is a feedforward path: taps from main path AND
+                    // converges at a feedback input. It's parallel to the
+                    // main serial chain.
+                    let dist = group_flow_distances[gi];
+                    let first_comp = group.all_edges().first()
+                        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+                        .unwrap_or_default();
+                    ff_candidates.push((dist, src, first_comp));
+                }
             }
         }
 
-        // Check which distances have a feedback (main-path) stage.
-        // A non-feedback stage is only feedforward if there's a feedback
-        // stage at the same distance carrying the serial signal. If ALL
-        // stages at a distance are non-feedback, they're serial, not
-        // feedforward — marking them all would leave nobody on the chain.
-        let mut dist_has_feedback: std::collections::HashSet<usize> =
-            std::collections::HashSet::new();
-        for stage in &stages {
-            let (d, bp, is_fb) = match stage {
-                Stage::BlackFeedback(b) => (b.signal_flow_distance, b.bypass_serial, true),
-                Stage::Wdf(w) => (w.signal_flow_distance, w.bypass_serial, false),
-                Stage::Iir(i) => (i.signal_flow_distance, i.bypass_serial, false),
-                Stage::StateSpace(ss) => (ss.signal_flow_distance, ss.bypass_serial, false),
-                Stage::MultiNl(m) => (m.signal_flow_distance, m.bypass_serial, false),
-            };
-            if !bp && is_fb {
-                dist_has_feedback.insert(d);
-            }
-        }
-
-        // Phase 2: apply feedforward flags — only at distances with a feedback stage
+        // Phase 2: apply feedforward flags
         for (dist, inj_node, comp_name) in &ff_candidates {
-            if !dist_has_feedback.contains(dist) {
-                continue;
-            }
             for stage in &mut stages {
                 if let Stage::Wdf(w) = stage {
                     if w.signal_flow_distance == *dist && !w.bypass_serial && !w.is_feedforward {
