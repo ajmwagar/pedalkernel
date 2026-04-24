@@ -365,9 +365,24 @@ pub fn compile_via_spqr_with_options(
             let spqr_stages = spqr_to_stages(&spqr_tree, &graph, sample_rate);
 
             #[cfg(test)]
-            if spqr_stages.is_empty() {
-                eprintln!("  WARNING: SPQR produced 0 stages for group {gi} ({} edges, {} terminals)",
-                    group_edges.len(), group_terminals.len());
+            {
+                let node_type = if spqr_tree.is_rigid() { "R" }
+                    else if matches!(&spqr_tree, super::spqr::SpqrNode::S { .. }) { "S" }
+                    else if matches!(&spqr_tree, super::spqr::SpqrNode::P { .. }) { "P" }
+                    else { "Q" };
+                eprintln!("  SPQR result: {node_type}-node → {} stages", spqr_stages.len());
+                if spqr_stages.is_empty() {
+                    eprintln!("    WARNING: 0 stages from {node_type}-node ({} edges, {} terminals)",
+                        group_edges.len(), group_terminals.len());
+                    // Show what stage types were produced
+                    for stage in &spqr_stages {
+                        match stage {
+                            super::spqr::SpqrStage::PassiveWdf { .. } => eprintln!("      → PassiveWdf"),
+                            super::spqr::SpqrStage::NlWdf { .. } => eprintln!("      → NlWdf"),
+                            super::spqr::SpqrStage::Rigid { .. } => eprintln!("      → Rigid"),
+                        }
+                    }
+                }
             }
 
             for stage in spqr_stages {
