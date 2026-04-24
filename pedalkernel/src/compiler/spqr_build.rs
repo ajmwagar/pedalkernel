@@ -345,8 +345,19 @@ pub fn compile_via_spqr_with_options(
                     }
                 }
                 ground_clip_built.insert(gi);
+                // Rebuild label from all merged edges (not just first group)
+                #[cfg(debug_assertions)]
+                let merged_label = {
+                    let mut names: Vec<&str> = merged_edges.iter()
+                        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+                        .collect();
+                    names.dedup();
+                    names.join(",")
+                };
+                #[cfg(not(debug_assertions))]
+                let merged_label = String::new();
                 if let Some(built) = build_ground_clip_stage(&merged_edges, &graph, sample_rate) {
-                    push_stage!(built, group_flow_distances[gi], group_label.clone(), is_bypass);
+                    push_stage!(built, group_flow_distances[gi], merged_label, is_bypass);
                 }
             }
         } else {

@@ -361,5 +361,101 @@ fn ratking_stage_diagnostic() {
     // If it's missing or in the wrong order, the RAT will sound too bright.
     eprintln!("\n  Expected signal chain:");
     eprintln!("    in → C1+R1 → U1(gain) → D1+D2(clip) → Filter+C_tone(LPF) → Volume → out");
+}
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. Merged diode label contains both D1 and D2
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn merged_diodes_label_contains_both() {
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                D1: diode(silicon)
+                D2: diode(silicon)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> D1.a, D2.b
+                D1.b -> gnd
+                D2.a -> gnd
+                U1.out -> R_out.a
+                R_out.b -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    #[cfg(debug_assertions)]
+    {
+        let labels: Vec<&str> = compiled.stages.iter().map(|s| match s {
+            super::compiled::Stage::Wdf(w) => w.debug_label.as_str(),
+            super::compiled::Stage::MultiNl(m) => m.debug_label.as_str(),
+            super::compiled::Stage::Iir(i) => i.debug_label.as_str(),
+            super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
+            super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
+        }).collect();
+        eprintln!("Stages: {labels:?}");
+
+        let diode_label = labels.iter().find(|l| l.contains("D1")).expect("D1 stage");
+        assert!(diode_label.contains("D2"),
+            "Merged diode stage should contain both D1 AND D2: got '{diode_label}'");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 9. Merged diodes clip both directions symmetrically
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn merged_diodes_clip_both_directions() {
+    let pedal = crate::dsl::parse_pedal_file(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                D1: diode(silicon)
+                D2: diode(silicon)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> D1.a, D2.b
+                D1.b -> gnd
+                D2.a -> gnd
+                U1.out -> R_out.a
+                R_out.b -> out
+            }
+            controls {}
+        }"#)
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+    let (pos_peak, neg_peak) = measure_peaks(&mut compiled, 0.05, 2000, 500);
+
+    eprintln!("Merged diodes: pos={pos_peak:.4}V, neg={neg_peak:.4}V");
+
+    assert!(pos_peak > 0.01, "Positive should have output: {pos_peak:.4}V");
+    assert!(neg_peak < -0.01, "Negative should have output: {neg_peak:.4}V");
+
+    let ratio = pos_peak / neg_peak.abs().max(0.001);
+    eprintln!("  Symmetry ratio: {ratio:.2} (should be ~1.0)");
+    assert!(ratio > 0.3 && ratio < 3.0,
+        "DiodePair should clip symmetrically: ratio={ratio:.2}");
 }
