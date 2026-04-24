@@ -593,6 +593,14 @@ pub(in crate::compiler) fn find_flow_groups(
         let mut pendant_edges = Vec::new();
         let mut ground_shunt_edges = Vec::new();
 
+        // Collect active element output nodes. Edges at these nodes that
+        // shunt to ground are post-amplification components (tone caps,
+        // coupling caps), NOT feedback network shunts. They should fall
+        // through to passive grouping, not be claimed by the feedback group.
+        let active_output_nodes: HashSet<NodeId> = scc.iter()
+            .map(|&ei| active_elements[ei].output_node)
+            .collect();
+
         for &eidx in edge_indices {
             if claimed.contains(&eidx)
                 || active_edges.contains(&eidx)
@@ -608,8 +616,15 @@ pub(in crate::compiler) fn find_flow_groups(
             let a_rail = rails.contains(&e.node_a);
             let b_rail = rails.contains(&e.node_b);
 
-            if (a_rail && group_nodes.contains(&e.node_b))
-                || (b_rail && group_nodes.contains(&e.node_a))
+            // Ground shunt: one terminal on rail, other in group_nodes.
+            // But NOT if the non-rail terminal is an active output node —
+            // those are post-amp shunts (e.g. C_tone in RAT), not feedback.
+            let non_rail_node = if a_rail { e.node_b } else if b_rail { e.node_a } else { e.node_a };
+            let at_output = active_output_nodes.contains(&non_rail_node);
+
+            if !at_output
+                && ((a_rail && group_nodes.contains(&e.node_b))
+                    || (b_rail && group_nodes.contains(&e.node_a)))
             {
                 ground_shunt_edges.push(eidx);
             } else if input_terminals.contains(&e.node_a) || input_terminals.contains(&e.node_b) {
@@ -649,27 +664,24 @@ pub(in crate::compiler) fn find_flow_groups(
 
     let mut barrier_nodes = rails.clone();
 
-    // Add active element output nodes as barriers.
-    // Voltage-source outputs (op-amps): zero impedance, always safe to split.
-    // Finite-impedance outputs (BJTs, diodes): splitting changes impedance,
-    // but the active element's feedback group already owns these nodes.
-    // Treating them as barriers prevents unclaimed passives from merging
-    // across active element boundaries.
+    // Add active element INPUT nodes as barriers.
+    // Input nodes (neg, base, gate) separate upstream from downstream passive
+    // groups — e.g., input coupling should not merge with feedback passives.
+    //
+    // Output nodes are NOT barriers. While op-amp outputs are zero-impedance
+    // (theoretically independent), the serial processing chain needs post-amp
+    // passive components (tone caps, coupling caps) to group together for
+    // correct WDF filtering. The feedback group already claims its edges via
+    // `claimed`, so output-side passives won't contaminate feedback groups.
     for &eidx in edge_indices {
         let comp = &graph.components[graph.edges[eidx].comp_idx];
         match comp.kind.signal_terminals() {
-            SignalTerminals::Amplifier { output, input, .. } => {
-                if let Some(node) = resolve_pin(&comp.id, output, graph) {
-                    barrier_nodes.insert(node);
-                }
+            SignalTerminals::Amplifier { input, .. } => {
                 if let Some(node) = resolve_pin(&comp.id, input, graph) {
                     barrier_nodes.insert(node);
                 }
             }
-            SignalTerminals::TwoPort { input, output } => {
-                if let Some(node) = resolve_pin(&comp.id, output, graph) {
-                    barrier_nodes.insert(node);
-                }
+            SignalTerminals::TwoPort { input, .. } => {
                 if let Some(node) = resolve_pin(&comp.id, input, graph) {
                     barrier_nodes.insert(node);
                 }

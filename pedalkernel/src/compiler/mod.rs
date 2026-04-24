@@ -95,3 +95,5 @@ mod goldenrod_signal_chain_tests;
 mod group_terminal_tests;
 #[cfg(test)]
 mod feedforward_tests;
+#[cfg(test)]
+mod ratking_signal_chain_tests;
