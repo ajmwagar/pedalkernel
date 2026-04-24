@@ -234,6 +234,67 @@ fn goldenrod_gain_b_produces_stages() {
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = super::spqr_build::compile_via_spqr(&pedal, SR).expect("compile");
 
+    // First: dump the terminal analysis for the Gain_B group
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    let global_terminals = vec![graph.in_node, graph.out_node];
+
+    let gain_b_group = groups.iter().find(|g| {
+        g.all_edges().iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "Gain_B"
+        })
+    }).expect("Gain_B group");
+
+    let group_edges = gain_b_group.all_edges();
+    let terminals = compute_group_terminals(&group_edges, &graph, &global_terminals);
+
+    eprintln!("\nGain_B group terminal analysis:");
+    eprintln!("  edges ({}):", group_edges.len());
+    for &eidx in &group_edges {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        eprintln!("    {}({:?}→{:?})", comp.id, e.node_a, e.node_b);
+    }
+
+    eprintln!("  nodes in group: {:?}", {
+        let mut nodes: Vec<_> = group_edges.iter().flat_map(|&eidx| {
+            let e = &graph.edges[eidx];
+            vec![e.node_a, e.node_b]
+        }).collect::<std::collections::HashSet<_>>().into_iter().collect();
+        nodes.sort();
+        nodes
+    });
+
+    eprintln!("  terminals ({}):", terminals.len());
+    for &t in &terminals {
+        // Why is this a terminal? Check what external edges connect here.
+        let external_edges: Vec<String> = graph.edges.iter().enumerate()
+            .filter(|(eidx, e)| {
+                !group_edges.contains(eidx)
+                    && (e.node_a == t || e.node_b == t)
+            })
+            .map(|(_, e)| {
+                let comp = &graph.components[e.comp_idx];
+                let other = if e.node_a == t { e.node_b } else { e.node_a };
+                let other_name = if other == graph.gnd_node { "GND".to_string() }
+                    else if other == graph.vcc_node { "VCC".to_string() }
+                    else if graph.supply_nodes.contains(&other) { format!("SUPPLY({:?})", other) }
+                    else if graph.ac_ground_nodes.contains(&other) { format!("AC_GND({:?})", other) }
+                    else { format!("{:?}", other) };
+                format!("{}→{}", comp.id, other_name)
+            })
+            .collect();
+        let is_global = global_terminals.contains(&t);
+        let tag = if is_global { " [GLOBAL]" } else { "" };
+        eprintln!("    node {:?}{tag}: external edges: {:?}", t, external_edges);
+    }
+
+    eprintln!("  special nodes: in={:?} out={:?} gnd={:?} vcc={:?}",
+        graph.in_node, graph.out_node, graph.gnd_node, graph.vcc_node);
+    eprintln!("  supply_nodes: {:?}", graph.supply_nodes);
+    eprintln!("  ac_ground_nodes: {:?}", graph.ac_ground_nodes);
+
     #[cfg(debug_assertions)]
     {
         let has_gain_b = compiled.stages.iter().any(|s| {
