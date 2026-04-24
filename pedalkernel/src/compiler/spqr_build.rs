@@ -414,6 +414,32 @@ pub fn compile_via_spqr_with_options(
     // Phase 1: collect (stage_index, injection_node) pairs.
     // Phase 2: apply flags to stages.
     {
+        // BFS node distances for feedforward stage ordering
+        let node_dist = {
+            use std::collections::{HashMap, VecDeque};
+            let mut dist: HashMap<usize, usize> = HashMap::new();
+            let mut queue: VecDeque<usize> = VecDeque::new();
+            dist.insert(graph.in_node, 0);
+            queue.push_back(graph.in_node);
+            let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
+            for e in &graph.edges {
+                adj.entry(e.node_a).or_default().push(e.node_b);
+                adj.entry(e.node_b).or_default().push(e.node_a);
+            }
+            while let Some(node) = queue.pop_front() {
+                let d = dist[&node];
+                if let Some(neighbors) = adj.get(&node) {
+                    for &next in neighbors {
+                        if !dist.contains_key(&next) {
+                            dist.insert(next, d + 1);
+                            queue.push_back(next);
+                        }
+                    }
+                }
+            }
+            dist
+        };
+
         // Main path output nodes: ALL active element outputs + in_node.
         // This includes both feedback group op-amps AND unity followers
         // (which have nullor_pins but no feedback group).
@@ -492,8 +518,14 @@ pub fn compile_via_spqr_with_options(
                         if matches {
                             w.is_feedforward = true;
                             w.injection_node_id = *inj_node;
+                            // Set flow distance based on the injection node's
+                            // BFS distance from in_node. The feedforward stage
+                            // must process AFTER signal arrives at the tap point.
+                            if let Some(&node_d) = node_dist.get(inj_node) {
+                                w.signal_flow_distance = node_d;
+                            }
                             #[cfg(test)]
-                            eprintln!("  → feedforward: [{}] inj_node={}", w.debug_label, inj_node);
+                            eprintln!("  → feedforward: [{}] inj_node={} dist→{}", w.debug_label, inj_node, w.signal_flow_distance);
                             break;
                         }
                     }
@@ -558,6 +590,19 @@ pub fn compile_via_spqr_with_options(
             }
         }
     }
+
+    // Re-sort: feedforward stages may have changed distance.
+    // Secondary key: feedforward stages sort AFTER non-feedforward at same distance.
+    stages.sort_by_key(|s| {
+        let (d, ff) = match s {
+            Stage::Wdf(w) => (w.signal_flow_distance, w.is_feedforward),
+            Stage::Iir(i) => (i.signal_flow_distance, false),
+            Stage::StateSpace(ss) => (ss.signal_flow_distance, false),
+            Stage::MultiNl(m) => (m.signal_flow_distance, false),
+            Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
+        };
+        (d, ff as u8) // false=0 sorts before true=1
+    });
 
     let mut compiled = CompiledPedal {
         stages,
