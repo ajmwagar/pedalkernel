@@ -326,6 +326,112 @@ fn tone_control_passes_signal() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Layer 5b: output probe at non-pot components
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn output_at_resistor_divider_with_cap_shunt() {
+    // out is at a resistor junction (R_out_s.b), not a pot wiper.
+    // R_out_s in series, R_out_g shunt to GND. Output at their junction.
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                C_in: cap(1u)
+                R_out_s: resistor(100)
+                R_out_g: resistor(10k)
+            }
+            nets {
+                in -> C_in.a
+                C_in.b -> R_out_s.a
+                R_out_s.b -> R_out_g.a, out
+                R_out_g.b -> gnd
+            }
+            controls {}
+        }"#);
+    eprintln!("Output at resistor junction: gain={gain:.3}");
+    // R_out_g/(R_out_s + R_out_g) ≈ 10k/10.1k ≈ 0.99. Near unity.
+    assert!(gain > 0.3, "Output at R junction should pass signal: gain={gain:.3}");
+}
+
+#[test]
+fn output_at_coupling_cap_with_ground_shunt() {
+    // out is after a coupling cap, with a shunt resistor to GND elsewhere.
+    // The ground shunt makes it ShortCircuit root, but out is interior.
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                R_series: resistor(1k)
+                C_shunt: cap(100n)
+                R_out: resistor(10k)
+            }
+            nets {
+                in -> R_series.a
+                R_series.b -> C_shunt.a, R_out.a
+                C_shunt.b -> gnd
+                R_out.b -> out
+            }
+            controls {}
+        }"#);
+    eprintln!("Output after R with cap shunt: gain={gain:.3}");
+    assert!(gain > 0.3, "Should pass signal to interior out node: gain={gain:.3}");
+}
+
+#[test]
+fn output_deep_in_rc_chain() {
+    // Three-stage RC chain with out at the end, ground shunts along the way.
+    // out is 3 components away from in, with caps to GND at each junction.
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(1k)
+                C1: cap(100n)
+                R2: resistor(1k)
+                C2: cap(100n)
+                R3: resistor(10k)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> C1.a, R2.a
+                C1.b -> gnd
+                R2.b -> C2.a, R3.a
+                C2.b -> gnd
+                R3.b -> out
+            }
+            controls {}
+        }"#);
+    eprintln!("Output deep in RC chain: gain={gain:.3}");
+    // Two-pole RC lowpass at 440Hz. R=1k, C=100n → fc ≈ 1.6kHz.
+    // At 440Hz: each pole ≈ -1.3dB → total ≈ -2.6dB ≈ 0.74
+    assert!(gain > 0.1, "Should pass 440Hz through 2-pole RC: gain={gain:.3}");
+}
+
+#[test]
+fn pot_wiper_output_with_ground_shunt_caps() {
+    // Pot wiper as output, but also has caps to GND (tone-like).
+    // The pot probe should still work here.
+    let gain = measure_gain(r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(1k)
+                Vol: pot(100k, b)
+                C_shunt: cap(220n)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> Vol.a
+                Vol.b -> C_shunt.a
+                C_shunt.b -> gnd
+                Vol.w -> out
+            }
+            controls {
+                Vol.position -> "Volume" [0.0, 1.0] = 0.5
+            }
+        }"#);
+    eprintln!("Pot wiper + cap shunt: gain={gain:.3}");
+    assert!(gain > 0.1, "Pot wiper output should work with ground caps: gain={gain:.3}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Layer 6: full Screamer output chain (tone + level + output coupling)
 // ═══════════════════════════════════════════════════════════════════════════
 
