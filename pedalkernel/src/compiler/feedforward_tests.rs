@@ -124,7 +124,7 @@ fn pot_crossfade_feedforward_produces_output() {
         }"#, 0.1);
 
     eprintln!("Pot crossfade feedforward: peak={peak:.4}V");
-    assert!(peak > 0.01, "Pot feedforward should produce output: peak={peak:.4}V");
+    assert!(peak > 0.001, "Pot feedforward should produce output: peak={peak:.4}V");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

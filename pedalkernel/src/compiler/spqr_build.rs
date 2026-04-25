@@ -506,8 +506,27 @@ pub fn compile_via_spqr_with_options(
             }
         }
 
-        // Phase 2: apply feedforward flags
+        // Phase 2: apply feedforward flags.
+        // A candidate is feedforward if a feedback stage ALSO taps from the same
+        // source. This means there's a main path (through the feedback stage) and
+        // a parallel path (through this non-feedback group). Without a feedback
+        // stage at the same source, the non-feedback group IS the serial chain.
+        let sources_with_feedback: std::collections::HashSet<usize> = ff_candidates.iter()
+            .filter_map(|(_, inj, _)| {
+                // Check if any feedback group also taps from this source node
+                let has_fb = feedback_groups.iter().any(|g| {
+                    g.has_feedback() && g.all_edges().iter().any(|&eidx| {
+                        let e = &graph.edges[eidx];
+                        e.node_a == *inj || e.node_b == *inj
+                    })
+                });
+                if has_fb { Some(*inj) } else { None }
+            })
+            .collect();
         for (dist, inj_node, comp_name) in &ff_candidates {
+            if !sources_with_feedback.contains(inj_node) {
+                continue; // No feedback stage at this source — this is serial, not feedforward
+            }
             for stage in &mut stages {
                 if let Stage::Wdf(w) = stage {
                     if w.signal_flow_distance == *dist && !w.bypass_serial && !w.is_feedforward {
