@@ -97,3 +97,5 @@ mod group_terminal_tests;
 mod feedforward_tests;
 #[cfg(test)]
 mod ratking_signal_chain_tests;
+#[cfg(test)]
+mod harmonic_tests;
