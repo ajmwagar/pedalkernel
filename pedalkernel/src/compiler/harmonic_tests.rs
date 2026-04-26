@@ -393,6 +393,195 @@ fn input_coupling_isolation_vs_full_pedal() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 7. Direct signal trace — process one sample and check intermediate values
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn screamer_single_sample_trace() {
+    // Process the Screamer for warmup, then trace one sample through.
+    // This uses the actual process() path, not metering.
+    let mut compiled = load_legend("screamer");
+
+    let amp = 0.1;
+    let freq = 440.0;
+    // Warmup
+    for s in 0..4000 {
+        compiled.process(amp * (std::f64::consts::TAU * freq * s as f64 / SR).sin());
+    }
+
+    // Process several samples and track peak output
+    let mut peak = 0.0f64;
+    for s in 0..500 {
+        let input = amp * (std::f64::consts::TAU * freq * (4000 + s) as f64 / SR).sin();
+        let output = compiled.process(input);
+        peak = peak.max(output.abs());
+    }
+
+    eprintln!("Screamer: input amp={amp}V, output peak={peak:.4}V, gain={:.2}", peak / amp);
+
+    // With Screamer gain ≈ 50 and diode clip at 0.5V:
+    // Expected output ≈ 0.5V (clipped)
+    // Currently getting ≈ 0.02V
+    assert!(peak > 0.1,
+        "Screamer should clip at ~0.5V, got peak={peak:.4}V — gain stage or diode not working");
+}
+
+#[test]
+fn simple_inverting_gain_traces_correctly() {
+    // Minimal test: just an inverting op-amp with gain=10, no diodes.
+    // This isolates whether the gain stage itself works.
+    let source = r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#;
+    let pedal = crate::dsl::parse_pedal_file(source).expect("parse");
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    let amp = 0.1;
+    let freq = 440.0;
+    for s in 0..4000 {
+        compiled.process(amp * (std::f64::consts::TAU * freq * s as f64 / SR).sin());
+    }
+    let mut peak = 0.0f64;
+    for s in 0..500 {
+        let out = compiled.process(
+            amp * (std::f64::consts::TAU * freq * (4000 + s) as f64 / SR).sin()
+        );
+        peak = peak.max(out.abs());
+    }
+
+    let gain = peak / amp;
+    eprintln!("Simple inverting gain=10: peak={peak:.4}V, measured gain={gain:.2}");
+    // Gain = Rf/Ri = 100k/10k = 10. After tanh(1.0/3.0)*3 ≈ 0.96V.
+    // Peak should be ~0.96V.
+    assert!(gain > 3.0, "Gain stage should amplify ≈10x: got {gain:.2}x");
+}
+
+#[test]
+fn simple_inverting_with_diode_clips() {
+    // Inverting + feedback diode pair. Should clip at ~0.5V.
+    let source = r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                D: diode_pair(silicon)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.out -> D.a
+                D.b -> U1.neg
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#;
+    let pedal = crate::dsl::parse_pedal_file(source).expect("parse");
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+    compiled.enable_metering(128);
+
+    let amp = 0.1;
+    let freq = 440.0;
+    for s in 0..4000 {
+        compiled.process(amp * (std::f64::consts::TAU * freq * s as f64 / SR).sin());
+    }
+    let mut peak = 0.0f64;
+    for s in 0..500 {
+        let out = compiled.process(
+            amp * (std::f64::consts::TAU * freq * (4000 + s) as f64 / SR).sin()
+        );
+        peak = peak.max(out.abs());
+    }
+
+    let metrics = compiled.read_metrics();
+    let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
+    for i in 0..n {
+        let lvl = metrics.stage_levels[i];
+        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        #[cfg(debug_assertions)]
+        {
+            let (stype, lbl) = match &compiled.stages[i] {
+                super::compiled::Stage::Wdf(w) => ("Wdf", &w.debug_label),
+                super::compiled::Stage::BlackFeedback(b) => ("BF", &b.debug_label),
+                _ => continue,
+            };
+            eprintln!("  [{i}] [{stype}] {lbl}: {db:.1} dB (level={lvl:.4})");
+        }
+    }
+
+    let gain = peak / amp;
+    eprintln!("Inverting + diode: peak={peak:.4}V, gain={gain:.2}");
+    // Should clip at diode Vf ≈ 0.5V
+    assert!(peak > 0.2, "Should clip at ~0.5V: peak={peak:.4}V");
+    assert!(peak < 1.5, "Should be below rail: peak={peak:.4}V");
+}
+
+#[test]
+fn input_coupling_then_gain_preserves_level() {
+    // Cin + R_in → gain stage. Does adding input coupling kill the signal?
+    let source = r#"
+        pedal "test" { supply 9V
+            components {
+                Cin: cap(22n)
+                R_in: resistor(510k)
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                R_series: resistor(10k)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> R_in.a, R_series.a
+                R_in.b -> gnd
+                R_series.b -> U1.neg
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls {}
+        }"#;
+    let pedal = crate::dsl::parse_pedal_file(source).expect("parse");
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    let amp = 0.1;
+    let freq = 440.0;
+    for s in 0..4000 {
+        compiled.process(amp * (std::f64::consts::TAU * freq * s as f64 / SR).sin());
+    }
+    let mut peak = 0.0f64;
+    for s in 0..500 {
+        let out = compiled.process(
+            amp * (std::f64::consts::TAU * freq * (4000 + s) as f64 / SR).sin()
+        );
+        peak = peak.max(out.abs());
+    }
+
+    let gain = peak / amp;
+    eprintln!("Cin + R_in + gain: peak={peak:.4}V, gain={gain:.2}");
+    // Cin barely attenuates at 440Hz. Gain = Rf/R_series = 100k/10k = 10.
+    // Expected: ~1V (10x gain, tanh-clipped)
+    assert!(gain > 3.0,
+        "Input coupling + gain should amplify: got {gain:.2}x — coupling killing signal?");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 2. RAT (LM308) should have more slew-rate distortion than SD-1 (TL072)
 // ═══════════════════════════════════════════════════════════════════════════
 
