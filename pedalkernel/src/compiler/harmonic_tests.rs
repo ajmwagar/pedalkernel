@@ -113,6 +113,186 @@ fn pedals_have_different_harmonic_profiles() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 5. Per-stage signal trace — find where attenuation happens
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn screamer_per_stage_signal_levels() {
+    // Trace signal level at each stage to find where the 50× drop occurs.
+    // Expected: gain stage outputs ~1V, diode clips to ~0.5V.
+    // Actual: gain stage outputs ~1V but diode stage receives ~0.02V.
+    let mut compiled = load_legend("screamer");
+    compiled.enable_metering(128);
+
+    let amp = 0.1;
+    for s in 0..8000 {
+        compiled.process(amp * (std::f64::consts::TAU * 440.0 * s as f64 / SR).sin());
+    }
+
+    let metrics = compiled.read_metrics();
+    let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
+
+    eprintln!("\nSCREAMER per-stage signal trace:");
+    let mut prev_db = -20.0f64; // input is 0.1V ≈ -20 dB
+    for i in 0..n {
+        let lvl = metrics.stage_levels[i];
+        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        let delta = db - prev_db;
+        #[cfg(debug_assertions)]
+        {
+            let (stype, lbl, bypass) = match &compiled.stages[i] {
+                super::compiled::Stage::Wdf(w) => ("Wdf", &w.debug_label, w.bypass_serial),
+                super::compiled::Stage::MultiNl(m) => ("MNL", &m.debug_label, m.bypass_serial),
+                super::compiled::Stage::Iir(s) => ("Iir", &s.debug_label, s.bypass_serial),
+                super::compiled::Stage::StateSpace(s) => ("SS", &s.debug_label, s.bypass_serial),
+                super::compiled::Stage::BlackFeedback(b) => ("BF", &b.debug_label, b.bypass_serial),
+            };
+            if !bypass {
+                let arrow = if delta > 3.0 { "↑↑" } else if delta > 0.5 { "↑" }
+                    else if delta < -20.0 { "↓↓↓" } else if delta < -3.0 { "↓↓" }
+                    else if delta < -0.5 { "↓" } else { "→" };
+                eprintln!("  [{i}] [{stype}] {lbl}: {db:.1} dB ({delta:+.1} dB) {arrow}");
+                prev_db = db;
+            } else {
+                eprintln!("  [{i}] [{stype}] {lbl}: BYPASS");
+            }
+        }
+    }
+
+    // The gain stage should amplify significantly
+    // The diode stage should clip (reduce peak but add harmonics)
+    // No stage should drop more than 20 dB unexpectedly
+    for i in 0..n {
+        let lvl = metrics.stage_levels[i];
+        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        let bypass = match &compiled.stages[i] {
+            super::compiled::Stage::Wdf(w) => w.bypass_serial,
+            super::compiled::Stage::MultiNl(m) => m.bypass_serial,
+            super::compiled::Stage::Iir(s) => s.bypass_serial,
+            super::compiled::Stage::StateSpace(s) => s.bypass_serial,
+            super::compiled::Stage::BlackFeedback(b) => b.bypass_serial,
+        };
+        if bypass { continue; }
+        #[cfg(debug_assertions)]
+        {
+            let lbl = match &compiled.stages[i] {
+                super::compiled::Stage::Wdf(w) => &w.debug_label,
+                super::compiled::Stage::MultiNl(m) => &m.debug_label,
+                super::compiled::Stage::Iir(s) => &s.debug_label,
+                super::compiled::Stage::StateSpace(s) => &s.debug_label,
+                super::compiled::Stage::BlackFeedback(b) => &b.debug_label,
+            };
+            assert!(db > -60.0,
+                "Stage {i} [{lbl}] has dead signal at {db:.1} dB — signal lost in chain");
+        }
+    }
+}
+
+#[test]
+fn ratking_per_stage_signal_levels() {
+    let mut compiled = load_legend("ratking");
+    compiled.enable_metering(128);
+
+    let amp = 0.1;
+    for s in 0..8000 {
+        compiled.process(amp * (std::f64::consts::TAU * 440.0 * s as f64 / SR).sin());
+    }
+
+    let metrics = compiled.read_metrics();
+    let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
+
+    eprintln!("\nRATKING per-stage signal trace:");
+    let mut prev_db = -20.0f64;
+    for i in 0..n {
+        let lvl = metrics.stage_levels[i];
+        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        let delta = db - prev_db;
+        #[cfg(debug_assertions)]
+        {
+            let (stype, lbl, bypass) = match &compiled.stages[i] {
+                super::compiled::Stage::Wdf(w) => ("Wdf", &w.debug_label, w.bypass_serial),
+                super::compiled::Stage::MultiNl(m) => ("MNL", &m.debug_label, m.bypass_serial),
+                super::compiled::Stage::Iir(s) => ("Iir", &s.debug_label, s.bypass_serial),
+                super::compiled::Stage::StateSpace(s) => ("SS", &s.debug_label, s.bypass_serial),
+                super::compiled::Stage::BlackFeedback(b) => ("BF", &b.debug_label, b.bypass_serial),
+            };
+            if !bypass {
+                let arrow = if delta > 3.0 { "↑↑" } else if delta > 0.5 { "↑" }
+                    else if delta < -20.0 { "↓↓↓" } else if delta < -3.0 { "↓↓" }
+                    else if delta < -0.5 { "↓" } else { "→" };
+                eprintln!("  [{i}] [{stype}] {lbl}: {db:.1} dB ({delta:+.1} dB) {arrow}");
+                prev_db = db;
+            } else {
+                eprintln!("  [{i}] [{stype}] {lbl}: BYPASS");
+            }
+        }
+    }
+
+    // The gain stage (BF with LM308) should amplify
+    // The diode stage (D1,D2) should clip hard
+    // The tone stage should pass signal
+    for i in 0..n {
+        let lvl = metrics.stage_levels[i];
+        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        let bypass = match &compiled.stages[i] {
+            super::compiled::Stage::Wdf(w) => w.bypass_serial,
+            super::compiled::Stage::MultiNl(m) => m.bypass_serial,
+            super::compiled::Stage::Iir(s) => s.bypass_serial,
+            super::compiled::Stage::StateSpace(s) => s.bypass_serial,
+            super::compiled::Stage::BlackFeedback(b) => b.bypass_serial,
+        };
+        if bypass { continue; }
+        #[cfg(debug_assertions)]
+        {
+            let lbl = match &compiled.stages[i] {
+                super::compiled::Stage::Wdf(w) => &w.debug_label,
+                super::compiled::Stage::MultiNl(m) => &m.debug_label,
+                super::compiled::Stage::Iir(s) => &s.debug_label,
+                super::compiled::Stage::StateSpace(s) => &s.debug_label,
+                super::compiled::Stage::BlackFeedback(b) => &b.debug_label,
+            };
+            assert!(db > -60.0,
+                "Stage {i} [{lbl}] has dead signal at {db:.1} dB — signal lost in chain");
+        }
+    }
+}
+
+#[test]
+fn gain_stage_output_reaches_diode_threshold() {
+    // The gain stage should output enough voltage to reach diode Vf.
+    // Silicon Vf ≈ 0.6V, Germanium ≈ 0.25V.
+    // With gain=10 and input=0.1V, the gain stage should output ~1V peak
+    // (or ~0.96V after tanh at v_max=3V). That's well above Vf.
+    let mut compiled = load_legend("screamer");
+    compiled.enable_metering(128);
+
+    let amp = 0.1;
+    for s in 0..8000 {
+        compiled.process(amp * (std::f64::consts::TAU * 440.0 * s as f64 / SR).sin());
+    }
+
+    let metrics = compiled.read_metrics();
+    let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
+
+    // Find the gain stage (BlackFeedback) output level
+    let mut gain_stage_peak = 0.0f64;
+    for i in 0..n {
+        if let super::compiled::Stage::BlackFeedback(b) = &compiled.stages[i] {
+            if !b.bypass_serial {
+                gain_stage_peak = metrics.stage_levels[i] as f64;
+                #[cfg(debug_assertions)]
+                eprintln!("Gain stage [{}]: peak={gain_stage_peak:.4}V", b.debug_label);
+            }
+        }
+    }
+
+    // The gain stage output should be above diode Vf
+    assert!(gain_stage_peak > 0.5,
+        "Gain stage should output >{:.1}V (above diode Vf), got {gain_stage_peak:.4}V. \
+         The signal is too low for diodes to clip.", 0.5);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 2. RAT (LM308) should have more slew-rate distortion than SD-1 (TL072)
 // ═══════════════════════════════════════════════════════════════════════════
 
