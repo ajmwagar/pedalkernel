@@ -293,6 +293,106 @@ fn gain_stage_output_reaches_diode_threshold() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 6. Input coupling: isolation vs full pedal
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn input_coupling_isolation_vs_full_pedal() {
+    // The input coupling (Cin + R_in) works in isolation (gain ≈ 0.97)
+    // but drops 30 dB in the full Screamer. Find the difference.
+
+    // Isolation test: standalone Cin + R_in
+    let iso_source = r#"
+        pedal "test" { supply 9V
+            components {
+                Cin: cap(22n)
+                R_in: resistor(510k)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> R_in.a, out
+                R_in.b -> gnd
+            }
+            controls {}
+        }"#;
+    let iso_pedal = crate::dsl::parse_pedal_file(iso_source).expect("parse");
+    let mut iso = compile_via_spqr(&iso_pedal, SR).expect("compile");
+
+    let amp = 0.1;
+    for s in 0..4000 {
+        iso.process(amp * (std::f64::consts::TAU * 440.0 * s as f64 / SR).sin());
+    }
+    let mut iso_peak = 0.0f64;
+    for s in 0..500 {
+        let out = iso.process(
+            amp * (std::f64::consts::TAU * 440.0 * (4000 + s) as f64 / SR).sin()
+        );
+        iso_peak = iso_peak.max(out.abs());
+    }
+    let iso_db = 20.0 * iso_peak.log10();
+
+    // Full Screamer: same Cin + R_in but with other stages after
+    let mut full = load_legend("screamer");
+    full.enable_metering(128);
+    for s in 0..4000 {
+        full.process(amp * (std::f64::consts::TAU * 440.0 * s as f64 / SR).sin());
+    }
+    let metrics = full.read_metrics();
+    let full_level = metrics.stage_levels[0] as f64;
+    let full_db = if full_level > 1e-10 { 20.0 * full_level.log10() } else { -120.0 };
+
+    eprintln!("Input coupling:");
+    eprintln!("  Isolation: peak={iso_peak:.4}V ({iso_db:.1} dB)");
+    eprintln!("  Full pedal stage 0: level={full_level:.4} ({full_db:.1} dB)");
+    eprintln!("  Difference: {:.1} dB", full_db - iso_db);
+
+    // Check the SPQR terminals and tree structure for both
+    let iso_graph = super::graph::CircuitGraph::from_pedal(&iso_pedal);
+    let iso_edges: Vec<usize> = (0..iso_graph.edges.len()).collect();
+    let iso_groups = super::signal_flow::find_flow_groups(&iso_edges, &iso_graph);
+
+    let full_source = std::fs::read_to_string(format!(
+        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    )).expect("read");
+    let full_pedal = crate::dsl::parse_pedal_file(&full_source).expect("parse");
+    let full_graph = super::graph::CircuitGraph::from_pedal(&full_pedal);
+    let full_edges: Vec<usize> = (0..full_graph.edges.len()).collect();
+    let full_groups = super::signal_flow::find_flow_groups(&full_edges, &full_graph);
+
+    // Find the input coupling group in both
+    let iso_ic = iso_groups.iter().find(|g| {
+        g.all_edges().iter().any(|&eidx| iso_graph.components[iso_graph.edges[eidx].comp_idx].id == "Cin")
+    });
+    let full_ic = full_groups.iter().find(|g| {
+        g.all_edges().iter().any(|&eidx| full_graph.components[full_graph.edges[eidx].comp_idx].id == "Cin")
+    });
+
+    if let Some(g) = iso_ic {
+        let comps: Vec<&str> = g.all_edges().iter()
+            .map(|&eidx| iso_graph.components[iso_graph.edges[eidx].comp_idx].id.as_str())
+            .collect();
+        let terms = super::spqr_build::compute_group_terminals(
+            &g.all_edges(), &iso_graph, &vec![iso_graph.in_node, iso_graph.out_node]);
+        eprintln!("  Isolation group: {comps:?} terminals={terms:?}");
+    }
+
+    if let Some(g) = full_ic {
+        let comps: Vec<&str> = g.all_edges().iter()
+            .map(|&eidx| full_graph.components[full_graph.edges[eidx].comp_idx].id.as_str())
+            .collect();
+        let terms = super::spqr_build::compute_group_terminals(
+            &g.all_edges(), &full_graph, &vec![full_graph.in_node, full_graph.out_node]);
+        eprintln!("  Full pedal group: {comps:?} terminals={terms:?}");
+    }
+
+    // The input coupling should NOT lose more than 10 dB between isolation and full
+    let diff = (full_db - iso_db).abs();
+    assert!(diff < 10.0,
+        "Input coupling loses {diff:.1} dB in full pedal vs isolation — something is wrong");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 2. RAT (LM308) should have more slew-rate distortion than SD-1 (TL072)
 // ═══════════════════════════════════════════════════════════════════════════
 
