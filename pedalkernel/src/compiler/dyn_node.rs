@@ -840,22 +840,7 @@ impl DynNode {
                 ..
             } => {
                 let sum = *b1 + *b2 + a_parent;
-                // For pot dividers: extract at the non-complement half
-                // (the GND-side half whose voltage = wiper voltage).
-                // Check which child is non-complement (direct position).
-                let right_is_complement = matches!(right.as_ref(),
-                    Self::Leaf(l) if l.type_tag() == "pot" && l.is_complement());
-                let left_is_complement = matches!(left.as_ref(),
-                    Self::Leaf(l) if l.type_tag() == "pot" && l.is_complement());
-
-                // Prefer the non-complement load element
-                if right.is_load_element() && !right_is_complement {
-                    let a2 = *b2 - (1.0 - *gamma) * sum;
-                    Some((a2 + *b2) / 2.0)
-                } else if left.is_load_element() && !left_is_complement {
-                    let a1 = *b1 - *gamma * sum;
-                    Some((a1 + *b1) / 2.0)
-                } else if right.is_load_element() {
+                if right.is_load_element() {
                     let a2 = *b2 - (1.0 - *gamma) * sum;
                     Some((a2 + *b2) / 2.0)
                 } else if left.is_load_element() && matches!(right.as_ref(), Self::Binary { .. }) {

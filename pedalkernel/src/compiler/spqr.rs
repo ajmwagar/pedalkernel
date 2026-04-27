@@ -723,7 +723,7 @@ pub(super) fn spqr_to_dyn_node(
                         || e.node_b == graph.gnd_node
                         || graph.ac_ground_nodes.contains(&e.node_a)
                         || graph.ac_ground_nodes.contains(&e.node_b);
-                    if !touches_gnd {
+                    if touches_gnd {
                         if let DynNode::Leaf(ref mut l) = leaf {
                             l.set_complement();
                         }
