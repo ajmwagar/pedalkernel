@@ -361,9 +361,58 @@ pub fn compile_via_spqr_with_options(
                 }
             }
         } else {
-            // No feedback, not a pot, not a ground clip →
-            // SPQR decompose for WDF/NlWdf stages.
+            // Extract pot dividers from the group BEFORE SPQR processing.
+            // Pots need dedicated pot-divider stages with correct complement
+            // handling. If left inside a larger SPQR tree, the WDF wave
+            // propagation produces V-shaped output at extreme positions.
             let group_edges = group.all_edges();
+            let mut remaining_edges = group_edges.clone();
+
+            // Find pot component indices with 2 edges in this group
+            let mut pot_edge_pairs: Vec<(usize, Vec<usize>)> = Vec::new(); // (comp_idx, [eidx1, eidx2])
+            {
+                let mut pot_edges: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+                for &eidx in &group_edges {
+                    let comp = &graph.components[graph.edges[eidx].comp_idx];
+                    if comp.kind.is_pot() {
+                        pot_edges.entry(graph.edges[eidx].comp_idx).or_default().push(eidx);
+                    }
+                }
+                for (comp_idx, edges) in pot_edges {
+                    if edges.len() == 2 {
+                        pot_edge_pairs.push((comp_idx, edges));
+                    }
+                }
+            }
+
+            // Build each pot as a standalone pot-divider stage
+            for (_, pot_edges) in &pot_edge_pairs {
+                // Create a temporary FlowGroup with just the pot edges
+                let pot_group = super::signal_flow::FlowGroup {
+                    active_edges: Vec::new(),
+                    feedback_edges: Vec::new(),
+                    pendant_edges: pot_edges.clone(),
+                    ground_shunt_edges: Vec::new(),
+                };
+                if let Ok(built) = build_pot_divider(&pot_group, &graph, sample_rate) {
+                    #[cfg(debug_assertions)]
+                    let pot_label = {
+                        let comp = &graph.components[graph.edges[pot_edges[0]].comp_idx];
+                        comp.id.clone()
+                    };
+                    #[cfg(not(debug_assertions))]
+                    let pot_label = String::new();
+                    push_stage!(built, group_flow_distances[gi], pot_label, is_bypass);
+                    // Remove pot edges from remaining
+                    for &eidx in pot_edges {
+                        remaining_edges.retain(|&e| e != eidx);
+                    }
+                }
+            }
+
+            // Process remaining non-pot edges through SPQR
+            let group_edges = remaining_edges;
+            if group_edges.is_empty() { continue; } // All edges were pots
             let group_terminals = compute_group_terminals(&group_edges, &graph, &terminals);
             #[cfg(test)]
             eprintln!("  SPQR terminals for group: {:?}", group_terminals);
