@@ -5,7 +5,7 @@
 //! classify.rs, compile.rs, build.rs, and kicad.rs can delegate to
 //! trait methods on concrete component structs.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::tree::MnaSystem;
 

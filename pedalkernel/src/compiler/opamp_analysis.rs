@@ -9,7 +9,8 @@
 //! into the unified pipeline. The detection logic lives in `graph.rs` as
 //! `find_opamp_feedback_loops()`.
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::HashSet;
 
 use crate::dsl::*;
 use crate::elements::FeedbackConfig;
@@ -855,7 +856,7 @@ fn build_feedback_tree(
         &terminals,
         graph,
         sample_rate,
-        &std::collections::HashMap::new(),
+        &hashbrown::HashMap::new(),
         |n| n,
         None,
     )
@@ -960,7 +961,7 @@ fn build_3port_opamp(
         &fb_border,
         graph,
         sample_rate,
-        &std::collections::HashMap::new(),
+        &hashbrown::HashMap::new(),
         |n| n,
         None,
     )
@@ -1018,7 +1019,7 @@ fn build_3port_opamp(
         &gl_border,
         graph,
         sample_rate,
-        &std::collections::HashMap::new(),
+        &hashbrown::HashMap::new(),
         |n| n,
         None,
     )
@@ -1176,7 +1177,7 @@ fn build_opamp_adaptor(
     Option<usize>,
 )> {
     use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
 
     // Collect ALL feedback + ground-leg + input component IDs
     let all_ids: HashSet<&str> = info
@@ -1480,7 +1481,7 @@ fn build_opamp_wdf_adaptor(
         &fb_border,
         graph,
         sample_rate,
-        &std::collections::HashMap::new(),
+        &hashbrown::HashMap::new(),
         |n| n,
         None,
     )
@@ -1548,7 +1549,7 @@ fn build_opamp_wdf_adaptor(
             &input_border,
             graph,
             sample_rate,
-            &std::collections::HashMap::new(),
+            &hashbrown::HashMap::new(),
             |n| n,
             None,
         )
@@ -1670,7 +1671,7 @@ fn build_opamp_wdf_adaptor_ni(
         &fb_border,
         graph,
         sample_rate,
-        &std::collections::HashMap::new(),
+        &hashbrown::HashMap::new(),
         |n| n,
         None,
     )
@@ -1734,7 +1735,7 @@ fn build_opamp_wdf_adaptor_ni(
             &gl_border,
             graph,
             sample_rate,
-            &std::collections::HashMap::new(),
+            &hashbrown::HashMap::new(),
             |n| n,
             None,
         )

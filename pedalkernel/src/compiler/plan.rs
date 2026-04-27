@@ -13,7 +13,8 @@
 //!    recompute state.
 //! 7. **No orphans**: Every edge belongs to exactly one stage.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use hashbrown::HashMap;
+use std::collections::{HashSet, VecDeque};
 
 use crate::dsl::*;
 

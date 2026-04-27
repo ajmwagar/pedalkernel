@@ -1,6 +1,6 @@
 //! FX loop split: partition a PedalDef at fx_send/fx_return boundaries.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::dsl::*;
 use crate::PedalProcessor;

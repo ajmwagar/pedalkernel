@@ -1,6 +1,6 @@
 //! Transistor component structs: Npn, Pnp, NJfet, PJfet, Nmos, Pmos.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{

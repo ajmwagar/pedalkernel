@@ -158,7 +158,7 @@ pub struct PedalDef {
     /// Mirrored pot mappings: mirrored_pot_id → source_pot_id.
     /// A mirrored pot's position is always `1.0 - source.position`.
     /// Used for dual-gang pots where one gang tracks inversely.
-    pub mirrors: std::collections::HashMap<String, String>,
+    pub mirrors: hashbrown::HashMap<String, String>,
     /// MIDI note bindings for trigger components.
     /// Maps trigger inputs to specific MIDI note numbers.
     pub midi_bindings: Vec<MidiBinding>,
@@ -190,7 +190,7 @@ pub struct SubcircuitDef {
     /// Monitor definitions scoped to this subcircuit.
     pub monitors: Vec<MonitorDef>,
     /// Mirrored pot mappings within this subcircuit.
-    pub mirrors: std::collections::HashMap<String, String>,
+    pub mirrors: hashbrown::HashMap<String, String>,
     /// MIDI bindings within this subcircuit.
     pub midi_bindings: Vec<MidiBinding>,
 }
@@ -2180,7 +2180,7 @@ fn parse_lfo(input: &str) -> IResult<&str, BoxComp> {
 
 fn components_section(
     input: &str,
-) -> IResult<&str, (Vec<ComponentDef>, std::collections::HashMap<String, String>)> {
+) -> IResult<&str, (Vec<ComponentDef>, hashbrown::HashMap<String, String>)> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("components")(input)?;
     let (input, _) = ws_comments(input)?;
@@ -2188,7 +2188,7 @@ fn components_section(
     let (input, pairs) = many0(component_def)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
-    let mut mirrors = std::collections::HashMap::new();
+    let mut mirrors = hashbrown::HashMap::new();
     let mut comps = Vec::with_capacity(pairs.len());
     for (comp, mirror_target) in pairs {
         if let Some(target) = mirror_target {
@@ -2850,7 +2850,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     } else if let Ok((rest, result)) = components_section(input) {
         (rest, result)
     } else {
-        (input, (Vec::new(), std::collections::HashMap::new()))
+        (input, (Vec::new(), hashbrown::HashMap::new()))
     };
     let (input, nets) = if subcircuits.is_empty() {
         nets_section(input)?

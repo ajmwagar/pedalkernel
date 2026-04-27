@@ -8,7 +8,8 @@
 //! Over time, each topology migrates into its component's `classify_topology()`
 //! implementation, shrinking the monolith.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use hashbrown::HashMap;
+use std::collections::{HashSet, VecDeque};
 
 use crate::dsl::*;
 

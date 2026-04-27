@@ -11,7 +11,8 @@
 //!
 //! This mirrors the `opamp_analysis.rs` pattern for op-amp feedback pots.
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::HashSet;
 
 use crate::dsl::*;
 

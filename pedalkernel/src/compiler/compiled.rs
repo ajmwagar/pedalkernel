@@ -6,7 +6,7 @@ use crate::metering::{MetricsAccumulator, MetricsRingBuffer, UiMetrics};
 use crate::oversampling::OversamplingFactor;
 use crate::thermal::ThermalModel;
 use crate::PedalProcessor;
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::sync::Arc;
 
 use super::stage::{

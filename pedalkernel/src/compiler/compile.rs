@@ -8,7 +8,8 @@
 //! - Pass 4: Tree building (build.rs)
 //! - Pass 5: Binding & assembly (bind.rs)
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::HashSet;
 
 use crate::dsl::*;
 use crate::elements::{BbdDelayLine, BbdModel, SlewRateLimiter, TriodeModel};
@@ -915,7 +916,7 @@ fn build_feedforward_stages(
                     .min_by_key(|n| {
                         classified
                             .dist_from_in
-                            .get(n)
+                            .get(*n)
                             .copied()
                             .unwrap_or(usize::MAX)
                     })
@@ -1512,7 +1513,7 @@ fn compile_subcircuit_equipment(
         subcircuit_output_idx: Some(output_idx),
         subcircuit_outputs: vec![0.0; n],
         pot_smoothers: Vec::new(),
-        pot_mirrors: std::collections::HashMap::new(),
+        pot_mirrors: hashbrown::HashMap::new(),
         base_grid_bias: 0.0,
         multi_nl_recompute_counter: 0,
         stage_order: Vec::new(),
@@ -1520,8 +1521,8 @@ fn compile_subcircuit_equipment(
         bbd_wet_mix: 0.5,
         bbd_mix_pot_id: None,
         triggers: Vec::new(),
-        midi_trigger_map: std::collections::HashMap::new(),
-        original_passive_values: std::collections::HashMap::new(),
+        midi_trigger_map: hashbrown::HashMap::new(),
+        original_passive_values: hashbrown::HashMap::new(),
     })
 }
 
@@ -2220,7 +2221,7 @@ pub fn compile_pedal_with_options(
                     let d = dist[&node];
                     if let Some(neighbors) = adj_no_gnd.get(&node) {
                         for &(neighbor, _) in neighbors {
-                            if let std::collections::hash_map::Entry::Vacant(e) =
+                            if let hashbrown::hash_map::Entry::Vacant(e) =
                                 dist.entry(neighbor)
                             {
                                 e.insert(d + 1);
@@ -2881,8 +2882,8 @@ pub fn compile_pedal_with_options(
         pot_smoothers,
         pot_mirrors: {
             // Build reverse mapping: source_id → [mirrored_ids]
-            let mut m: std::collections::HashMap<String, Vec<super::compiled::MirrorPot>> =
-                std::collections::HashMap::new();
+            let mut m: hashbrown::HashMap<String, Vec<super::compiled::MirrorPot>> =
+                hashbrown::HashMap::new();
             for (mirrored, source) in &pedal.mirrors {
                 m.entry(source.clone())
                     .or_default()

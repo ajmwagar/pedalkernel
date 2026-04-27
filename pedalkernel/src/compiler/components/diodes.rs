@@ -1,6 +1,6 @@
 //! Diode component structs: Diode, DiodePair, Zener, Neon.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{

@@ -1,6 +1,7 @@
 //! Circuit graph construction, series-parallel decomposition, and WDF tree building.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::{BTreeMap, HashSet};
 
 use super::component::{GraphRole, ResolveContext};
 use super::components::*;
@@ -1205,7 +1206,7 @@ impl CircuitGraph {
             let d = dist[&n];
             if let Some(neighbors) = adj.get(&n) {
                 for &nb in neighbors {
-                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                    if let hashbrown::hash_map::Entry::Vacant(e) = dist.entry(nb) {
                         e.insert(d + 1);
                         queue.push_back(nb);
                     }
@@ -2084,7 +2085,7 @@ impl CircuitGraph {
             let d = dist[&n];
             if let Some(neighbors) = adj.get(&n) {
                 for &nb in neighbors {
-                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                    if let hashbrown::hash_map::Entry::Vacant(e) = dist.entry(nb) {
                         e.insert(d + 1);
                         queue.push_back(nb);
                     }

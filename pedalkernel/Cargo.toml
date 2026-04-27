@@ -38,6 +38,9 @@ runtime-warnings = []
 pro-pedals = []
 
 [dependencies]
+# no_std-compatible HashMap
+hashbrown = "0.15"
+
 # DSL parser
 nom = "7"
 

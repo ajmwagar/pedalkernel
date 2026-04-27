@@ -16,7 +16,8 @@
 //! - **Missing signal path**: no route from `in` to `out`
 //! - **Control binding issues**: controls targeting nonexistent components
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::HashSet;
 
 use crate::dsl::*;
 use crate::models;
@@ -1159,7 +1160,7 @@ mod tests {
             trims: vec![],
             monitors: vec![],
             sidechains: vec![],
-            mirrors: std::collections::HashMap::new(),
+            mirrors: hashbrown::HashMap::new(),
             midi_bindings: vec![],
             calibrate: false,
             subcircuits: vec![],
@@ -1302,7 +1303,7 @@ mod tests {
             trims: vec![],
             monitors: vec![],
             sidechains: vec![],
-            mirrors: std::collections::HashMap::new(),
+            mirrors: hashbrown::HashMap::new(),
             midi_bindings: vec![],
             calibrate: false,
             subcircuits: vec![],
@@ -2084,7 +2085,7 @@ mod tests {
             trims: vec![],
             monitors: vec![],
             sidechains: vec![],
-            mirrors: std::collections::HashMap::new(),
+            mirrors: hashbrown::HashMap::new(),
             midi_bindings: vec![],
             calibrate: false,
             subcircuits: vec![],

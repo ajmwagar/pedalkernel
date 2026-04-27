@@ -7,7 +7,8 @@
 //! 4. Balance VS impedance
 //! 5. Package into WdfStage
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::HashSet;
 
 use crate::dsl::*;
 use crate::elements::nonlinear::solver::{

@@ -1,7 +1,7 @@
 //! Active IC component structs: OpAmp, Vco, Vcf, Vca, Comparator, AnalogSwitch,
 //! MatchedNpn, MatchedPnp.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
