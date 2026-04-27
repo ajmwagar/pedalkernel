@@ -107,9 +107,15 @@ fn pedals_have_different_harmonic_profiles() {
     // THD should be significantly different between hard-clip and feedback-clip topologies.
     // Real pedals: RAT ~40-60% THD, Screamer ~20-40% THD.
     // Currently all are <2% — the diode stages aren't actually clipping.
-    assert!(spread > 3.0,
-        "Pedals should have very different THD: spread={spread:.2}x. \
-         All at {:.1}%-{:.1}% — diodes aren't clipping!", min_thd * 100.0, max_thd * 100.0);
+    // Force print even on pass
+    if spread <= 3.0 {
+        panic!("Pedals should have very different THD: spread={spread:.2}x. \
+             All at {:.1}%-{:.1}% — diodes aren't clipping!", min_thd * 100.0, max_thd * 100.0);
+    }
+    // Also verify minimum THD for distortion pedals
+    let max_thd_pct = max_thd * 100.0;
+    assert!(max_thd_pct > 5.0,
+        "Max THD is {max_thd_pct:.1}% — distortion pedals should have >5% THD. Diodes barely clipping.");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

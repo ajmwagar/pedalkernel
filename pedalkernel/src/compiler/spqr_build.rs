@@ -763,7 +763,7 @@ fn build_pot_divider(
 pub(super) fn with_voltage_source(passive_tree: DynNode) -> DynNode {
     let vs = DynNode::Leaf(Box::new(WdfVoltageSource {
         voltage: 0.0,
-        rp: 1.0, // Small source impedance
+        rp: 1.0,
         is_cathode_bias: false,
     }));
     DynNode::Series(Box::new(vs), Box::new(passive_tree))
@@ -793,30 +793,39 @@ pub(super) fn build_spqr_stage(
             let root = if touches_gnd { RootKind::ShortCircuit } else { RootKind::Passthrough };
             let mut wdf = WdfStage::new(tree, root, oversampler);
 
-            // Set output_probe for complex ground-terminated trees where
-            // short_circuit_junction_voltage can't find the output node.
-            // Simple trees (≤4 edges) work with junction extraction.
-            // Complex trees (5+ edges, e.g. Screamer tone+output) need
-            // explicit probing at the leaf connecting out_node toward GND.
-            if touches_gnd && edge_indices.len() > 4 {
-                let out_node = graph.out_node;
+            // Set output_probe: find the GND-side leaf at the output boundary.
+            // For ShortCircuit stages, short_circuit_junction_voltage fails when
+            // VS rp << passive rp (gamma ≈ 0 → near-zero junction voltage).
+            // Instead, probe the leaf directly — leaf_voltage returns (a+b)/2
+            // which is correct regardless of gamma.
+            //
+            // The output boundary is the group's non-input terminal. Find the
+            // edge at that node whose other end reaches GND.
+            if touches_gnd {
+                // Find the group's output boundary node: any terminal that isn't
+                // in_node and isn't GND.
+                let group_terminals = compute_group_terminals(&edge_indices, graph,
+                    &vec![graph.in_node, graph.out_node]);
+                let output_boundary = group_terminals.iter()
+                    .find(|&&t| t != graph.in_node)
+                    .or_else(|| group_terminals.first())
+                    .copied()
+                    .unwrap_or(graph.out_node);
+
                 let is_gnd = |n: super::graph::NodeId| -> bool {
                     n == graph.gnd_node || graph.ac_ground_nodes.contains(&n)
                 };
-                // Find edge at out_node whose other terminal goes toward GND
-                // (is GND itself, or connects to GND through other edges).
+                // Find the edge at the output boundary that goes toward GND
                 for &eidx in &edge_indices {
                     let e = &graph.edges[eidx];
-                    let (touches_out, other) = if e.node_a == out_node {
+                    let (touches_out, other) = if e.node_a == output_boundary {
                         (true, e.node_b)
-                    } else if e.node_b == out_node {
+                    } else if e.node_b == output_boundary {
                         (true, e.node_a)
                     } else {
-                        (false, out_node) // dummy
+                        (false, output_boundary)
                     };
                     if !touches_out { continue; }
-                    // The GND-side edge: other terminal is GND or connects
-                    // to GND through other group edges
                     let other_reaches_gnd = is_gnd(other) || edge_indices.iter().any(|&eidx2| {
                         let e2 = &graph.edges[eidx2];
                         (e2.node_a == other || e2.node_b == other)
@@ -824,9 +833,6 @@ pub(super) fn build_spqr_stage(
                     });
                     if other_reaches_gnd {
                         let comp = &graph.components[e.comp_idx];
-                        // Use the component ID as probe. For pots, make_leaf
-                        // creates leaves with the base comp_id — leaf_matches_id
-                        // will match "Volume" against "Volume" or "Volume__*".
                         wdf.output_probe = Some(comp.id.clone());
                         break;
                     }

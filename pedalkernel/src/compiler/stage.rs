@@ -1245,6 +1245,8 @@ impl WdfStage {
                     // Short-circuit reflection: a = -b
                     let a_root = -b_tree;
                     tree.set_incident(a_root);
+
+
                     // Check output_probe first (for SP-reduced orphan stages)
                     if let Some(ref probe_id) = output_probe {
                         if let Some(v) = tree.leaf_voltage(probe_id) {
