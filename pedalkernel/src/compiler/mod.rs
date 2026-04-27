@@ -103,3 +103,5 @@ mod harmonic_tests;
 mod tone_stage_tests;
 #[cfg(test)]
 mod pot_binding_investigation_tests;
+#[cfg(test)]
+mod pot_wiper_tests;

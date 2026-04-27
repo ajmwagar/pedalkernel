@@ -470,7 +470,10 @@ impl WdfLeaf for WdfPot {
             let effective = if self.complement { 1.0 - value } else { value };
             self.position = effective;
             let tapered_pos = self.taper.apply(effective);
-            self.rp = (tapered_pos * self.max_resistance).max(1.0);
+            // Minimum resistance prevents gamma≈0 in series adaptors,
+            // which causes numerically degenerate wave propagation.
+            // Real pots have 10-100Ω contact resistance.
+            self.rp = (tapered_pos * self.max_resistance).max(self.max_resistance * 0.001);
             true
         } else {
             false

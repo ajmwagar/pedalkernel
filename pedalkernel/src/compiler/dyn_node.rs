@@ -179,7 +179,7 @@ impl DynNode {
 
     pub fn Pot(comp_id: String, max_resistance: f64, position: f64, taper: PotTaper) -> Self {
         let tapered_pos = taper.apply(position);
-        let rp = tapered_pos * max_resistance;
+        let rp = (tapered_pos * max_resistance).max(max_resistance * 0.001);
         Self::Leaf(Box::new(WdfPot {
             comp_id,
             max_resistance,
@@ -546,14 +546,39 @@ impl DynNode {
     }
 
     /// Extract voltage at a named leaf after the down-sweep.
-    pub fn leaf_voltage(&self, target_id: &str) -> Option<f64> {
-        self.find_leaf(&|leaf| {
-            if leaf_matches_id(leaf, target_id) {
-                Some(leaf.leaf_voltage())
-            } else {
-                None
+    /// Visit all leaves (non-short-circuiting).
+    fn visit_leaves(&self, f: &impl Fn(&dyn WdfLeaf)) {
+        match self {
+            Self::Leaf(leaf) => f(leaf.as_ref()),
+            Self::Binary { left, right, .. } => {
+                left.visit_leaves(f);
+                right.visit_leaves(f);
             }
-        })
+            Self::Transformer { secondary, .. } => secondary.visit_leaves(f),
+            Self::RType { children, .. } => {
+                for c in children { c.visit_leaves(f); }
+            }
+        }
+    }
+
+    pub fn leaf_voltage(&self, target_id: &str) -> Option<f64> {
+        // For pots: prefer the non-complement (GND-side) half.
+        // Its voltage = V_wiper (voltage from wiper to GND).
+        // The complement half gives V_in - V_wiper (wrong for output).
+        use std::cell::Cell;
+        let best: Cell<Option<(f64, bool)>> = Cell::new(None);
+        self.visit_leaves(&|leaf| {
+            if leaf_matches_id(leaf, target_id) {
+                let v = leaf.leaf_voltage();
+                let is_preferred = leaf.type_tag() == "pot" && !leaf.is_complement();
+                match best.get() {
+                    None => best.set(Some((v, is_preferred))),
+                    Some((_, false)) if is_preferred => best.set(Some((v, true))),
+                    _ => {}
+                }
+            }
+        });
+        best.get().map(|(v, _)| v)
     }
 
     /// Return this leaf's component ID (only if this node is a leaf).
