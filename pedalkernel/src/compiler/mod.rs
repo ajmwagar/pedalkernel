@@ -101,3 +101,5 @@ mod ratking_signal_chain_tests;
 mod harmonic_tests;
 #[cfg(test)]
 mod tone_stage_tests;
+#[cfg(test)]
+mod pot_binding_investigation_tests;
