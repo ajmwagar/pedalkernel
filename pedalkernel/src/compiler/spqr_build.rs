@@ -368,8 +368,12 @@ pub fn compile_via_spqr_with_options(
             let group_edges = group.all_edges();
             let mut remaining_edges = group_edges.clone();
 
-            // Find pot component indices with 2 edges in this group
-            let mut pot_edge_pairs: Vec<(usize, Vec<usize>)> = Vec::new(); // (comp_idx, [eidx1, eidx2])
+            // Find pot component indices with 2 edges in this group.
+            // Only extract pots that are OUTPUT dividers (wiper → out or
+            // downstream group). Pots whose wiper stays internal (gain
+            // controls, impedance elements) must NOT be extracted.
+            let group_edge_set: std::collections::HashSet<usize> = group_edges.iter().copied().collect();
+            let mut pot_edge_pairs: Vec<(usize, Vec<usize>)> = Vec::new();
             {
                 let mut pot_edges: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
                 for &eidx in &group_edges {
@@ -379,7 +383,30 @@ pub fn compile_via_spqr_with_options(
                     }
                 }
                 for (comp_idx, edges) in pot_edges {
-                    if edges.len() == 2 {
+                    if edges.len() != 2 { continue; }
+                    // Check if the pot's wiper node connects to edges OUTSIDE
+                    // this group (it's an output divider) or only to edges
+                    // INSIDE this group (it's an internal impedance element).
+                    // Find the wiper node: the node shared by both pot edges.
+                    let e0 = &graph.edges[edges[0]];
+                    let e1 = &graph.edges[edges[1]];
+                    let wiper_node = if e0.node_a == e1.node_a || e0.node_a == e1.node_b {
+                        Some(e0.node_a)
+                    } else if e0.node_b == e1.node_a || e0.node_b == e1.node_b {
+                        Some(e0.node_b)
+                    } else {
+                        None
+                    };
+                    let is_output_divider = if let Some(wiper) = wiper_node {
+                        // Wiper connects to edges outside this group?
+                        graph.edges.iter().enumerate().any(|(eidx, e)| {
+                            !group_edge_set.contains(&eidx)
+                                && (e.node_a == wiper || e.node_b == wiper)
+                        })
+                    } else {
+                        false
+                    };
+                    if is_output_divider {
                         pot_edge_pairs.push((comp_idx, edges));
                     }
                 }

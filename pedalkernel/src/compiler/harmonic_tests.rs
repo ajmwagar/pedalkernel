@@ -590,6 +590,39 @@ fn input_coupling_then_gain_preserves_level() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 8. Goldenrod crossfade: Gain should change harmonic content
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn goldenrod_gain_changes_thd() {
+    // At low Gain: clean path dominates → low THD
+    // At high Gain: dirty path dominates → high THD
+    let mut low = load_legend("goldenrod");
+    low.set_control("Gain", 0.1);
+    let (fund_low, harm_low, peak_low) = measure_harmonics(&mut low, 0.1, 440.0);
+    let thd_low = if fund_low > 1e-20 { (harm_low / fund_low).sqrt() } else { 0.0 };
+
+    let mut high = load_legend("goldenrod");
+    high.set_control("Gain", 0.9);
+    let (fund_high, harm_high, peak_high) = measure_harmonics(&mut high, 0.1, 440.0);
+    let thd_high = if fund_high > 1e-20 { (harm_high / fund_high).sqrt() } else { 0.0 };
+
+    eprintln!("Goldenrod crossfade:");
+    eprintln!("  Gain=0.1: peak={peak_low:.4}V THD={:.1}%", thd_low * 100.0);
+    eprintln!("  Gain=0.9: peak={peak_high:.4}V THD={:.1}%", thd_high * 100.0);
+    eprintln!("  THD ratio: {:.2}x", thd_high / thd_low.max(0.001));
+
+    // Both should produce output
+    assert!(peak_low > 0.001, "Low gain should produce output: {peak_low:.4}V");
+    assert!(peak_high > 0.001, "High gain should produce output: {peak_high:.4}V");
+
+    // High gain should have MORE harmonics than low gain
+    assert!(thd_high > thd_low * 1.5,
+        "High gain should have more THD: low={:.1}% high={:.1}%",
+        thd_low * 100.0, thd_high * 100.0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 2. RAT (LM308) should have more slew-rate distortion than SD-1 (TL072)
 // ═══════════════════════════════════════════════════════════════════════════
 
