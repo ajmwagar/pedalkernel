@@ -88,6 +88,10 @@ pub trait WdfLeaf: Send {
     fn pot_max_resistance(&self) -> Option<f64> {
         None
     }
+    /// For Pot: return whether this half uses complement (1-position).
+    fn is_complement(&self) -> bool {
+        false
+    }
 
     // ── Clone support ────────────────────────────────────────────────────
     fn clone_box(&self) -> Box<dyn WdfLeaf>;
@@ -487,6 +491,9 @@ impl WdfLeaf for WdfPot {
     }
     fn pot_max_resistance(&self) -> Option<f64> {
         Some(self.max_resistance)
+    }
+    fn is_complement(&self) -> bool {
+        self.complement
     }
 
     fn debug_info(&self) -> String {
