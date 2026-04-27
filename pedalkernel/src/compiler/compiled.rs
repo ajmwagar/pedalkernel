@@ -1412,6 +1412,7 @@ impl CompiledPedal {
                         }
                         Stage::BlackFeedback(bf) => {
                             bf.set_pot(&comp_id, value);
+                            bf.update_ri_from_pot(&comp_id, value);
                         }
                         _ => {}
                     }

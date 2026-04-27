@@ -258,18 +258,66 @@ pub fn compile_via_spqr_with_options(
                         });
 
                         if let Some(neg) = input_node {
-                            // Find the non-feedback group whose edges touch neg
-                            // and sum their resistance as Ri.
-                            let ri: f64 = build_order.iter()
+                            // Follow the ground-leg chain from neg through resistors
+                            // to GND across ALL non-feedback groups. This captures
+                            // multi-hop impedance like R5→R6→Gain_A→GND.
+                            let non_fb_edges: Vec<usize> = build_order.iter()
                                 .filter(|(_, g)| !g.has_feedback())
                                 .flat_map(|(_, g)| g.all_edges())
-                                .filter_map(|eidx| {
-                                    let e = &graph.edges[eidx];
-                                    if e.node_a != neg && e.node_b != neg { return None; }
-                                    graph.components[e.comp_idx].kind.resistance()
-                                })
-                                .sum();
+                                .collect();
 
+                            // BFS from neg through resistive edges to GND.
+                            // Track fixed resistors and pot components separately.
+                            let is_gnd = |n: super::graph::NodeId| -> bool {
+                                n == graph.gnd_node || graph.ac_ground_nodes.contains(&n)
+                            };
+                            let mut ri_fixed = 0.0f64;
+                            let mut ri_pot_id: Option<String> = None;
+                            let mut ri_pot_max_r = 0.0f64;
+                            let mut ri_pot_initial_r = 0.0f64;
+                            let mut visited = std::collections::HashSet::new();
+                            let mut frontier = vec![neg];
+                            visited.insert(neg);
+
+                            while let Some(node) = frontier.pop() {
+                                for &eidx in &non_fb_edges {
+                                    let e = &graph.edges[eidx];
+                                    let (touches, other) = if e.node_a == node {
+                                        (true, e.node_b)
+                                    } else if e.node_b == node {
+                                        (true, e.node_a)
+                                    } else {
+                                        (false, node)
+                                    };
+                                    if !touches || visited.contains(&other) { continue; }
+                                    let comp = &graph.components[e.comp_idx];
+                                    if comp.kind.is_pot() {
+                                        if let Some(max_r) = comp.kind.resistance() {
+                                            ri_pot_id = Some(comp.id.clone());
+                                            ri_pot_max_r = max_r;
+                                            ri_pot_initial_r = max_r * 0.5; // default position
+                                            ri_fixed += ri_pot_initial_r; // add initial pot R to total
+                                            visited.insert(other);
+                                            if !is_gnd(other) { frontier.push(other); }
+                                        }
+                                    } else if let Some(r) = comp.kind.resistance() {
+                                        ri_fixed += r;
+                                        visited.insert(other);
+                                        if !is_gnd(other) { frontier.push(other); }
+                                    }
+                                }
+                            }
+
+                            // Also include pendant resistors from the feedback group
+                            for &eidx in group.pendant_edges.iter() {
+                                let e = &graph.edges[eidx];
+                                if e.node_a != neg && e.node_b != neg { continue; }
+                                if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
+                                    ri_fixed += r;
+                                }
+                            }
+
+                            let ri = ri_fixed;
                             if ri > 0.0 {
                                 let rf: f64 = group.feedback_edges.iter()
                                     .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
@@ -284,9 +332,10 @@ pub fn compile_via_spqr_with_options(
                 }
             }
 
-            // Same Ri fix for BlackFeedback stages
+            // Ground-leg Ri fix for BlackFeedback stages — BFS chain from neg to GND.
+            // Always run (not just for gain≈1) to find pot-controlled Ri.
             if let BuiltStage::BlackFeedback(ref mut bf) = built {
-                if bf.gain().abs() <= 1.01 {
+                {
                     let input_node = group.active_edges.iter().find_map(|&eidx| {
                         let comp = &graph.components[graph.edges[eidx].comp_idx];
                         if let super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
@@ -297,17 +346,67 @@ pub fn compile_via_spqr_with_options(
                         }
                     });
                     if let Some(neg) = input_node {
-                        let ri: f64 = build_order.iter()
+                        let non_fb_edges: Vec<usize> = build_order.iter()
                             .filter(|(_, g)| !g.has_feedback())
                             .flat_map(|(_, g)| g.all_edges())
-                            .filter_map(|eidx| {
+                            .collect();
+                        let is_gnd = |n: super::graph::NodeId| -> bool {
+                            n == graph.gnd_node || graph.ac_ground_nodes.contains(&n)
+                        };
+
+                        let mut ri_fixed = 0.0f64;
+                        let mut ri_pot_id: Option<String> = None;
+                        let mut ri_pot_max_r = 0.0f64;
+                        let mut visited = std::collections::HashSet::new();
+                        let mut frontier = vec![neg];
+                        visited.insert(neg);
+
+                        while let Some(node) = frontier.pop() {
+                            for &eidx in &non_fb_edges {
                                 let e = &graph.edges[eidx];
-                                if e.node_a != neg && e.node_b != neg { return None; }
-                                graph.components[e.comp_idx].kind.resistance()
-                            })
-                            .sum();
-                        if ri > 0.0 {
-                            bf.set_ri(ri);
+                                let (touches, other) = if e.node_a == node {
+                                    (true, e.node_b)
+                                } else if e.node_b == node {
+                                    (true, e.node_a)
+                                } else {
+                                    (false, node)
+                                };
+                                if !touches || visited.contains(&other) { continue; }
+                                let comp = &graph.components[e.comp_idx];
+                                if comp.kind.is_pot() {
+                                    if let Some(max_r) = comp.kind.resistance() {
+                                        ri_pot_id = Some(comp.id.clone());
+                                        ri_pot_max_r = max_r;
+                                        ri_fixed += max_r * 0.5; // default
+                                        visited.insert(other);
+                                        if !is_gnd(other) { frontier.push(other); }
+                                    }
+                                } else if let Some(r) = comp.kind.resistance() {
+                                    ri_fixed += r;
+                                    visited.insert(other);
+                                    if !is_gnd(other) { frontier.push(other); }
+                                }
+                            }
+                        }
+
+                        // Pendant resistors touching neg (R5)
+                        for &eidx in group.pendant_edges.iter() {
+                            let e = &graph.edges[eidx];
+                            if e.node_a != neg && e.node_b != neg { continue; }
+                            if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
+                                ri_fixed += r;
+                            }
+                        }
+
+                        if ri_fixed > 0.0 {
+                            bf.set_ri(ri_fixed);
+                        }
+                        // Store ground-leg pot mapping for runtime Ri updates
+                        if let Some(pot_id) = ri_pot_id {
+                            let fixed_without_pot = ri_fixed - ri_pot_max_r * 0.5;
+                            bf.ri_pot_comp_id = Some(pot_id);
+                            bf.ri_fixed_r = fixed_without_pot;
+                            bf.ri_pot_max_r = ri_pot_max_r;
                         }
                     }
                 }

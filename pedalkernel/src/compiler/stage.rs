@@ -3331,6 +3331,13 @@ pub(super) struct BlackFeedbackStage {
     pub(super) pot_comp_id: Option<String>,
     /// Maximum pot resistance (Ohms). Position 1.0 = this value.
     pub(super) pot_max_r: f64,
+    /// Pot component ID in the ground leg (Ri). When this pot changes,
+    /// Ri = ri_fixed_r + pot_position × ri_pot_max_r.
+    pub(super) ri_pot_comp_id: Option<String>,
+    /// Fixed resistance in the ground leg (sum of non-pot resistors: R5 + R6).
+    pub(super) ri_fixed_r: f64,
+    /// Max resistance of the Ri pot (e.g. Gain_A max_r = 100k).
+    pub(super) ri_pot_max_r: f64,
 }
 
 impl BlackFeedbackStage {
@@ -3363,6 +3370,9 @@ impl BlackFeedbackStage {
             output_node_id: usize::MAX,
             pot_comp_id: None,
             pot_max_r: 0.0,
+            ri_pot_comp_id: None,
+            ri_fixed_r: 0.0,
+            ri_pot_max_r: 0.0,
         }
     }
 
@@ -3398,6 +3408,21 @@ impl BlackFeedbackStage {
     pub(super) fn set_pot(&mut self, _comp_id: &str, position: f64) {
         if self.pot_max_r > 0.0 {
             self.set_rf(position * self.pot_max_r);
+        }
+    }
+
+    /// Update Ri from ground-leg pot position. Called when a pot in the
+    /// ground leg (e.g. Gain_A in Goldenrod) changes position.
+    /// The position is range-mapped but NOT tapered — apply taper here.
+    pub(super) fn update_ri_from_pot(&mut self, comp_id: &str, position: f64) {
+        if self.ri_pot_comp_id.as_deref() == Some(comp_id) {
+            // Apply taper to get actual resistance fraction.
+            // Gain_A is linear (b) taper, so taper(pos) ≈ pos.
+            // For audio (a) taper, taper(pos) gives the log curve.
+            let tapered = crate::dsl::PotTaper::B.apply(position); // TODO: store actual taper
+            let pot_r = tapered * self.ri_pot_max_r;
+            let new_ri = (self.ri_fixed_r + pot_r).max(1.0);
+            self.set_ri(new_ri);
         }
     }
 

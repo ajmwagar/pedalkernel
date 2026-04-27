@@ -623,6 +623,50 @@ fn goldenrod_gain_changes_thd() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 9. Goldenrod: Gain_A ground-leg resistance affects U2 gain
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn goldenrod_gain_a_in_ground_leg() {
+    // U2's gain = 1 + Rf/Rg where Rg = R5 + R6 + Gain_A.
+    // At Gain_A=0 (max position): Rg = 15k + 2k + 0 = 17k → gain ≈ 26
+    // At Gain_A=100k (min position): Rg = 15k + 2k + 100k = 117k → gain ≈ 4.6
+    // The THD should change dramatically between these settings.
+    let mut low_gain = load_legend("goldenrod");
+    low_gain.set_control("Gain", 0.0); // Gain_A range [1.0, 0.0] → pos=1.0 → R=100k → low gain
+    let (_, harm_low, peak_low) = measure_harmonics(&mut low_gain, 0.1, 440.0);
+
+    let mut high_gain = load_legend("goldenrod");
+    high_gain.set_control("Gain", 1.0); // Gain_A range [1.0, 0.0] → pos=0.0 → R≈0 → high gain
+    let (_, harm_high, peak_high) = measure_harmonics(&mut high_gain, 0.1, 440.0);
+
+    eprintln!("Goldenrod Gain_A ground-leg:");
+    eprintln!("  Gain=0.0 (low):  peak={peak_low:.4}V harm={harm_low:.2e}");
+    eprintln!("  Gain=1.0 (high): peak={peak_high:.4}V harm={harm_high:.2e}");
+
+    // High gain should produce more harmonics (harder clipping)
+    // Also check 0.1 vs 0.9 (the range the user actually uses)
+    let mut mid_low = load_legend("goldenrod");
+    mid_low.set_control("Gain", 0.1);
+    let (fund_ml, harm_ml, peak_ml) = measure_harmonics(&mut mid_low, 0.1, 440.0);
+    let thd_ml = if fund_ml > 1e-20 { (harm_ml / fund_ml).sqrt() } else { 0.0 };
+
+    let mut mid_high = load_legend("goldenrod");
+    mid_high.set_control("Gain", 0.9);
+    let (fund_mh, harm_mh, peak_mh) = measure_harmonics(&mut mid_high, 0.1, 440.0);
+    let thd_mh = if fund_mh > 1e-20 { (harm_mh / fund_mh).sqrt() } else { 0.0 };
+
+    eprintln!("  Gain=0.1: peak={peak_ml:.4}V THD={:.1}%", thd_ml * 100.0);
+    eprintln!("  Gain=0.9: peak={peak_mh:.4}V THD={:.1}%", thd_mh * 100.0);
+    eprintln!("  THD ratio (0.9/0.1): {:.2}x", thd_mh / thd_ml.max(0.001));
+
+    assert!(harm_high > harm_low * 2.0,
+        "High gain should produce >2× harmonics: low={harm_low:.2e} high={harm_high:.2e}");
+    assert!(thd_mh > thd_ml * 1.3,
+        "Gain=0.9 should have more THD than 0.1: {:.1}% vs {:.1}%", thd_mh * 100.0, thd_ml * 100.0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 2. RAT (LM308) should have more slew-rate distortion than SD-1 (TL072)
 // ═══════════════════════════════════════════════════════════════════════════
 
