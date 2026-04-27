@@ -5,7 +5,8 @@
 //! produce a topologically-sorted signal graph connecting them.
 
 use crate::dsl::{PedalDef, Pin, SubcircuitDef};
-use std::collections::{HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::HashSet;
 
 /// A resolved subcircuit ready for separate compilation.
 pub struct ResolvedSubcircuit {

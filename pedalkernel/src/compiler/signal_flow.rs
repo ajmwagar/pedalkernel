@@ -13,7 +13,8 @@
 //! 3. Strongly connected components (SCCs) define co-solved groups.
 //! 4. Elements without mutual dependency are separate stages.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use hashbrown::HashMap;
+use std::collections::{HashSet, VecDeque};
 
 use super::component::{EdgeKind, SignalTerminals};
 use super::graph::{CircuitGraph, NodeId};

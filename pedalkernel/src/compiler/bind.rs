@@ -3,7 +3,8 @@
 //! Moves LFO binding, envelope follower binding, control target resolution,
 //! sidechain construction, and peripheral construction from compile.rs.
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::HashSet;
 
 use crate::dsl::*;
 use crate::elements::*;
@@ -1036,7 +1037,7 @@ fn extract_sidechain_def(
         trims,
         monitors: vec![],
         sidechains: vec![],
-        mirrors: std::collections::HashMap::new(),
+        mirrors: hashbrown::HashMap::new(),
         calibrate: false,
         subcircuits: vec![],
     }

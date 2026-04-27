@@ -1,7 +1,7 @@
 //! Active IC component structs: OpAmp, Vco, Vcf, Vca, Comparator, AnalogSwitch,
 //! MatchedNpn, MatchedPnp.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
@@ -304,7 +304,7 @@ impl Component for OpAmp {
 
     fn apply_bias(
         &self,
-        bias_voltages: &std::collections::HashMap<String, f64>,
+        bias_voltages: &hashbrown::HashMap<String, f64>,
         supply_voltage: f64,
     ) -> crate::compiler::component::BiasResult {
         // Op-amp bias sets the DC operating point (output swing center).

@@ -65,7 +65,7 @@
 //! - [`ModulationSink`] — how a component receives LFO/envelope modulation
 //! - [`SolverMethod`] — preferred nonlinear solver (Newton-Raphson, Wright Omega, Ebers-Moll, Gummel-Poon)
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::tree::MnaSystem;
 
@@ -903,7 +903,7 @@ pub trait Component: std::fmt::Debug {
     /// Default: no-op (passive components don't need bias).
     fn apply_bias(
         &self,
-        _bias_voltages: &std::collections::HashMap<String, f64>,
+        _bias_voltages: &hashbrown::HashMap<String, f64>,
         _supply_voltage: f64,
     ) -> BiasResult {
         BiasResult::NotApplicable

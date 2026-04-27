@@ -205,6 +205,7 @@ pub mod models;
 pub mod oversampling;
 pub mod pedalboard;
 pub mod pedals;
+pub mod pot_taper;
 pub mod precompute;
 #[cfg(feature = "runtime-warnings")]
 pub mod runtime_warnings;

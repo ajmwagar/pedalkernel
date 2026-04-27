@@ -122,8 +122,8 @@ pub fn compile_via_spqr_with_options(
 
     // Build a map from node → DC bias voltage across all StaticBias groups.
     // Used to set op-amp v_max from the circuit's actual bias network.
-    let mut bias_node_voltages: std::collections::HashMap<super::graph::NodeId, f64> =
-        std::collections::HashMap::new();
+    let mut bias_node_voltages: hashbrown::HashMap<super::graph::NodeId, f64> =
+        hashbrown::HashMap::new();
     for kind in &group_bias {
         if let super::bias_analysis::GroupBiasKind::StaticBias { dc_voltages } = kind {
             bias_node_voltages.extend(dc_voltages);
@@ -474,7 +474,7 @@ pub fn compile_via_spqr_with_options(
             let group_edge_set: std::collections::HashSet<usize> = group_edges.iter().copied().collect();
             let mut pot_edge_pairs: Vec<(usize, Vec<usize>)> = Vec::new();
             {
-                let mut pot_edges: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+                let mut pot_edges: hashbrown::HashMap<usize, Vec<usize>> = hashbrown::HashMap::new();
                 for &eidx in &group_edges {
                     let comp = &graph.components[graph.edges[eidx].comp_idx];
                     if comp.kind.is_pot() {
@@ -591,7 +591,8 @@ pub fn compile_via_spqr_with_options(
     {
         // BFS node distances for feedforward stage ordering
         let node_dist = {
-            use std::collections::{HashMap, VecDeque};
+            use hashbrown::HashMap;
+            use std::collections::VecDeque;
             let mut dist: HashMap<usize, usize> = HashMap::new();
             let mut queue: VecDeque<usize> = VecDeque::new();
             dist.insert(graph.in_node, 0);
@@ -834,14 +835,14 @@ pub fn compile_via_spqr_with_options(
         subcircuit_output_idx: None,
         subcircuit_outputs: Vec::new(),
         pot_smoothers: Vec::new(),
-        pot_mirrors: std::collections::HashMap::new(),
+        pot_mirrors: hashbrown::HashMap::new(),
         base_grid_bias: 0.0,
         multi_nl_recompute_counter: 0,
         node_signals: Vec::new(),
         triggers: Vec::new(),
         bbd_wet_mix: 0.5,
         bbd_mix_pot_id: None,
-        original_passive_values: std::collections::HashMap::new(),
+        original_passive_values: hashbrown::HashMap::new(),
     };
 
     if pedal.calibrate {
@@ -1181,7 +1182,7 @@ fn build_ground_clip_stage(
 fn compute_bias_v_max_for_group(
     group: &super::signal_flow::FlowGroup,
     graph: &super::graph::CircuitGraph,
-    bias_node_voltages: &std::collections::HashMap<super::graph::NodeId, f64>,
+    bias_node_voltages: &hashbrown::HashMap<super::graph::NodeId, f64>,
     supply_voltage: f64,
 ) -> Option<(f64, f64)> {
     use super::component::BiasResult;
@@ -1195,7 +1196,7 @@ fn compute_bias_v_max_for_group(
         }
 
         // Build bias_voltages map from pin names to DC voltages.
-        let mut pin_voltages: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let mut pin_voltages: hashbrown::HashMap<String, f64> = hashbrown::HashMap::new();
 
         if let Some(pins) = graph.nullor_pins.iter().find(|p| p.comp_idx == e.comp_idx) {
             if let Some(&v) = bias_node_voltages.get(&pins.pos_node) {
@@ -1221,7 +1222,8 @@ fn compute_group_flow_distances(
     groups: &[super::signal_flow::FlowGroup],
     graph: &super::graph::CircuitGraph,
 ) -> Vec<usize> {
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use hashbrown::HashMap;
+    use std::collections::{HashSet, VecDeque};
     use super::graph::NodeId;
 
     // BFS from in_node through all circuit edges to compute node distances.

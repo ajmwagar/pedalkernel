@@ -5,7 +5,8 @@
 //! trait method. Cross-component concerns (parallel triode merging, anti-parallel
 //! diode synthesis) are handled as post-passes here.
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::HashSet;
 
 use crate::dsl::*;
 

@@ -7,7 +7,7 @@
 //! Model files are included at compile time via `include_str!` and parsed
 //! into a lazy-initialized registry on first access.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::sync::LazyLock;
 
 // ---------------------------------------------------------------------------

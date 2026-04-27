@@ -53,6 +53,9 @@ clap = { version = "4", features = ["derive"], optional = true }
 # Math
 num-complex = "0.4"
 
+# Collections
+hashbrown = "0.15"
+
 # Logging
 tracing = "0.1"
 

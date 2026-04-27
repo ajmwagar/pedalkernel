@@ -15,7 +15,8 @@
 //! The detection is graph-level: "does this branch have an audio-rate input
 //! or only DC supply?" No component-type special-casing.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use hashbrown::HashMap;
+use std::collections::{HashSet, VecDeque};
 
 use super::graph::{CircuitGraph, NodeId};
 use super::signal_flow::FlowGroup;
