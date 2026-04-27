@@ -1404,12 +1404,14 @@ impl CompiledPedal {
                     match stage {
                         Stage::Wdf(wdf) => {
                             wdf.set_pot(&comp_id, value);
+                            wdf.flush_recompute();
                         }
                         Stage::Iir(iir) => {
                             iir.set_pot(&comp_id, value);
                         }
                         Stage::MultiNl(mnl) => {
                             mnl.set_pot(&comp_id, value);
+                            mnl.flush_recompute();
                         }
                         Stage::BlackFeedback(bf) => {
                             bf.set_pot(&comp_id, value);

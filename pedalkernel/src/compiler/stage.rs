@@ -1990,6 +1990,10 @@ impl WdfStage {
     /// Rebuild scattering/state matrices after pot changes.
     /// Flushes both passive RType and opamp adaptor recomputes.
     pub(super) fn flush_recompute(&mut self) {
+        // Recompute binary adaptor gamma from updated children port resistances.
+        // This is needed after set_pot changes a leaf's rp — the parent
+        // adaptor's gamma depends on the children's impedance ratio.
+        self.tree.recompute();
         self.flush_passive_rtype_recompute();
         self.flush_opamp_adaptor_recompute();
     }
