@@ -99,3 +99,5 @@ mod feedforward_tests;
 mod ratking_signal_chain_tests;
 #[cfg(test)]
 mod harmonic_tests;
+#[cfg(test)]
+mod tone_stage_tests;

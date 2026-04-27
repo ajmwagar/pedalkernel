@@ -806,8 +806,11 @@ pub(super) fn build_spqr_stage(
                 // in_node and isn't GND.
                 let group_terminals = compute_group_terminals(&edge_indices, graph,
                     &vec![graph.in_node, graph.out_node]);
+                // Prefer out_node as the output boundary (it's the circuit output).
+                // Fall back to any terminal that isn't in_node.
                 let output_boundary = group_terminals.iter()
-                    .find(|&&t| t != graph.in_node)
+                    .find(|&&t| t == graph.out_node)
+                    .or_else(|| group_terminals.iter().find(|&&t| t != graph.in_node))
                     .or_else(|| group_terminals.first())
                     .copied()
                     .unwrap_or(graph.out_node);
