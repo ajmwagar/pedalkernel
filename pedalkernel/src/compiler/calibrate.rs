@@ -11,9 +11,9 @@ use crate::PedalProcessor;
 /// Measures the actual output RMS over 500ms and sets `compiled.output_gain`
 /// so the pedal produces levels proportional to the input. Resets state afterward.
 pub(super) fn calibrate_output(compiled: &mut CompiledPedal) {
-    let input_atten = calibrate_input_level();
-    compiled.pre_gain *= input_atten;
-    compiled.reset();
+    // Input level matching removed — should be a UI slider, not hardcoded.
+    // The circuit receives the raw input signal at instrument level.
+    // pre_gain stays at 1.0.
 
     let output_gain = measure_output_gain(compiled);
     compiled.output_gain = output_gain;

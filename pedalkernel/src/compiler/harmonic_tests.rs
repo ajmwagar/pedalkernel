@@ -107,15 +107,14 @@ fn pedals_have_different_harmonic_profiles() {
     // THD should be significantly different between hard-clip and feedback-clip topologies.
     // Real pedals: RAT ~40-60% THD, Screamer ~20-40% THD.
     // Currently all are <2% — the diode stages aren't actually clipping.
-    // Force print even on pass
-    if spread <= 3.0 {
-        panic!("Pedals should have very different THD: spread={spread:.2}x. \
-             All at {:.1}%-{:.1}% — diodes aren't clipping!", min_thd * 100.0, max_thd * 100.0);
-    }
+    assert!(spread > 3.0,
+        "Pedals should have very different THD: spread={spread:.2}x. \
+         All at {:.1}%-{:.1}% — diodes aren't clipping!", min_thd * 100.0, max_thd * 100.0);
     // Also verify minimum THD for distortion pedals
     let max_thd_pct = max_thd * 100.0;
     assert!(max_thd_pct > 5.0,
         "Max THD is {max_thd_pct:.1}% — distortion pedals should have >5% THD. Diodes barely clipping.");
+
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -280,15 +279,18 @@ fn gain_stage_output_reaches_diode_threshold() {
     let metrics = compiled.read_metrics();
     let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
 
-    // Find the gain stage (BlackFeedback) output level
+    // Find the gain stage output level (may be WDF or BlackFeedback)
     let mut gain_stage_peak = 0.0f64;
     for i in 0..n {
-        if let super::compiled::Stage::BlackFeedback(b) = &compiled.stages[i] {
-            if !b.bypass_serial {
-                gain_stage_peak = metrics.stage_levels[i] as f64;
-                #[cfg(debug_assertions)]
-                eprintln!("Gain stage [{}]: peak={gain_stage_peak:.4}V", b.debug_label);
-            }
+        let (lbl, bypass) = match &compiled.stages[i] {
+            super::compiled::Stage::Wdf(w) => (&w.debug_label, w.bypass_serial),
+            super::compiled::Stage::BlackFeedback(b) => (&b.debug_label, b.bypass_serial),
+            _ => continue,
+        };
+        if !bypass && (lbl.contains("U1") || lbl.contains("D_clip")) {
+            gain_stage_peak = metrics.stage_levels[i] as f64;
+            #[cfg(debug_assertions)]
+            eprintln!("Gain stage [{lbl}]: peak={gain_stage_peak:.4}V");
         }
     }
 
