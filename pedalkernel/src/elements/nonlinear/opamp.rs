@@ -195,6 +195,10 @@ impl OpAmpModel {
 ///
 /// Stores topology info so the op-amp can recompute its gain from the
 /// pot's current resistance, without relying on external side-effect systems.
+///
+/// DEPRECATED: Only used in test code. The compiler pipeline uses
+/// `WdfStage::notify_pot_changed()` + incremental recompute instead.
+/// Will be removed once test helpers are updated.
 #[derive(Debug, Clone)]
 pub struct FeedbackConfig {
     /// Component ID of the pot controlling gain.
@@ -535,6 +539,9 @@ impl OpAmpRoot {
     ///
     /// After this is set, `set_feedback_pot_r()` can be called to recompute
     /// the gain from the pot's current resistance.
+    ///
+    /// DEPRECATED: Only used in test code. The compiler pipeline uses
+    /// `WdfStage::notify_pot_changed()` + incremental recompute instead.
     pub fn set_feedback_config(&mut self, cfg: FeedbackConfig) {
         self.feedback_config = Some(cfg);
     }

@@ -1882,28 +1882,28 @@ impl WdfStage {
             found = true;
         }
         if let Some(ref mut zf) = self.zf_child {
-            if zf.set_pot(comp_id, value) {
+            if zf.set_pot_dirty(comp_id, value) {
                 found = true;
             }
         }
         if let Some(ref mut zg) = self.zg_child {
-            if zg.set_pot(comp_id, value) {
+            if zg.set_pot_dirty(comp_id, value) {
                 found = true;
             }
         }
         for child in self.opamp_children.iter_mut() {
-            if child.set_pot(comp_id, value) {
+            if child.set_pot_dirty(comp_id, value) {
                 found = true;
             }
         }
         // WDF constraint adaptor subtrees
         if let Some(ref mut adaptor) = self.opamp_wdf_adaptor {
-            if adaptor.zi.set_pot(comp_id, value) {
-                adaptor.zi.recompute();
+            if adaptor.zi.set_pot_dirty(comp_id, value) {
+                adaptor.zi.recompute_incremental();
                 found = true;
             }
-            if adaptor.zf.set_pot(comp_id, value) {
-                adaptor.zf.recompute();
+            if adaptor.zf.set_pot_dirty(comp_id, value) {
+                adaptor.zf.recompute_incremental();
                 found = true;
             }
         }
@@ -1919,19 +1919,18 @@ impl WdfStage {
     }
 
     /// Recompute all trees including opamp children.
-    /// Recompute all trees including opamp children.
-    /// Uses incremental recompute for the main tree (only dirty subtrees),
-    /// and full recompute for the smaller opamp sub-trees.
+    /// Uses incremental recompute for all sub-trees (only dirty subtrees
+    /// are recomputed, static branches are skipped).
     pub(super) fn recompute_all(&mut self) {
         self.tree.recompute_incremental();
         if let Some(ref mut zf) = self.zf_child {
-            zf.recompute();
+            zf.recompute_incremental();
         }
         if let Some(ref mut zg) = self.zg_child {
-            zg.recompute();
+            zg.recompute_incremental();
         }
         for child in &mut self.opamp_children {
-            child.recompute();
+            child.recompute_incremental();
         }
     }
 
@@ -1998,7 +1997,7 @@ impl WdfStage {
         // Recompute binary adaptor gamma from updated children port resistances.
         // This is needed after set_pot changes a leaf's rp — the parent
         // adaptor's gamma depends on the children's impedance ratio.
-        self.tree.recompute();
+        self.tree.recompute_incremental();
         self.flush_passive_rtype_recompute();
         self.flush_opamp_adaptor_recompute();
     }
