@@ -1196,14 +1196,11 @@ impl CompiledPedal {
                 continue;
             }
             found = true;
-            // Apply taper FIRST (on raw knob position), then map through range.
-            // Range inversion after taper preserves the taper curve shape.
-            // Previous order (range then taper) caused audio-taper pots with
-            // inverted range [1.0, 0.0] to compress the usable range into the
-            // first ~8% of knob travel.
+            // Apply range mapping only. Taper is applied by each leaf/stage
+            // internally — WdfPot applies taper in set_control, IIR/BF
+            // apply it when computing gain/coefficients.
             let (r0, r1) = self.controls[i].range;
-            let tapered_pos = self.controls[i].taper.apply(value);
-            let value = (r0 + tapered_pos * (r1 - r0)).clamp(0.0, 1.0);
+            let value = (r0 + value * (r1 - r0)).clamp(0.0, 1.0);
             match &self.controls[i].target {
                 ControlTarget::PotInStage(_) | ControlTarget::PotInIirStage(_) | ControlTarget::PotInMultiNlStage(_, _) | ControlTarget::PotInBlackFeedbackStage(_) => {
                     if let Some(smoother) =

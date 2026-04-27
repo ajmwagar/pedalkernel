@@ -462,6 +462,7 @@ impl WdfLeaf for WdfPot {
         if self.comp_id == id
             || (self.comp_id.starts_with(id) && self.comp_id[id.len()..].starts_with("__"))
         {
+            // Apply complement (for split pots: one half tracks 1-position).
             let effective = if self.complement { 1.0 - value } else { value };
             self.position = effective;
             let tapered_pos = self.taper.apply(effective);

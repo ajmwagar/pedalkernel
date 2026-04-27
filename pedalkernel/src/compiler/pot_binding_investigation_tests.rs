@@ -187,6 +187,121 @@ fn screamer_level_pot_is_bound() {
 }
 
 #[test]
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. Pot sweep monotonicity — output should increase with position
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn pot_sweep_monotonic() {
+    // Sweep a pot from 0.1 to 0.9 in steps. Output should increase monotonically.
+    // With double taper, the response is compressed and may not be monotonic.
+    let source = r#"
+        pedal "test" { supply 9V
+            components {
+                R_in: resistor(10k)
+                Vol: pot(100k, b)
+            }
+            nets {
+                in -> R_in.a
+                R_in.b -> Vol.a
+                Vol.b -> gnd
+                Vol.w -> out
+            }
+            controls {
+                Vol.position -> "Volume" [0.0, 1.0] = 0.5
+            }
+        }"#;
+
+    let positions = [0.1, 0.3, 0.5, 0.7, 0.9];
+    let mut peaks: Vec<(f64, f64)> = Vec::new();
+
+    for &pos in &positions {
+        let pedal = crate::dsl::parse_pedal_file(source).expect("parse");
+        let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+        compiled.set_control("Volume", pos);
+        let peak = measure_peak(&mut compiled, 0.1);
+        peaks.push((pos, peak));
+    }
+
+    eprintln!("Pot sweep:");
+    for (pos, peak) in &peaks {
+        eprintln!("  pos={pos:.1}: peak={peak:.4}V");
+    }
+
+    // Check monotonicity: each step should increase
+    for i in 1..peaks.len() {
+        assert!(peaks[i].1 > peaks[i-1].1 * 0.9,
+            "Pot sweep should be monotonic: pos={:.1}→{:.4}V < pos={:.1}→{:.4}V",
+            peaks[i].0, peaks[i].1, peaks[i-1].0, peaks[i-1].1);
+    }
+
+    // Check range: high position should be > 3x low position
+    let ratio = peaks.last().unwrap().1 / peaks.first().unwrap().1.max(0.0001);
+    eprintln!("  Range ratio: {ratio:.2}x");
+    assert!(ratio > 3.0, "Pot should have >3x range from 0.1 to 0.9: ratio={ratio:.2}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. Screamer Level: 0 quiet, 1 loud
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn screamer_level_0_quiet_1_loud() {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+
+    let pedal_quiet = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let mut quiet = compile_via_spqr(&pedal_quiet, SR).expect("compile");
+    quiet.set_control("Level", 0.1);
+    let peak_quiet = measure_peak(&mut quiet, 0.1);
+
+    let pedal_loud = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let mut loud = compile_via_spqr(&pedal_loud, SR).expect("compile");
+    loud.set_control("Level", 0.9);
+    let peak_loud = measure_peak(&mut loud, 0.1);
+
+    eprintln!("Screamer Level: quiet(0.1)={peak_quiet:.4}V loud(0.9)={peak_loud:.4}V");
+    let ratio = peak_loud / peak_quiet.max(0.0001);
+    eprintln!("  Ratio: {ratio:.2}x");
+
+    assert!(peak_loud > peak_quiet * 2.0,
+        "Level 0.9 should be louder than 0.1: ratio={ratio:.2}x");
+}
+
+#[test]
+fn sd1_level_0_quiet_1_loud() {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/sd1.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+
+    let pedal_quiet = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let mut quiet = compile_via_spqr(&pedal_quiet, SR).expect("compile");
+    quiet.set_control("Level", 0.1);
+    let peak_quiet = measure_peak(&mut quiet, 0.1);
+
+    let pedal_loud = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let mut loud = compile_via_spqr(&pedal_loud, SR).expect("compile");
+    loud.set_control("Level", 0.9);
+    let peak_loud = measure_peak(&mut loud, 0.1);
+
+    eprintln!("SD-1 Level: quiet(0.1)={peak_quiet:.4}V loud(0.9)={peak_loud:.4}V");
+    let ratio = peak_loud / peak_quiet.max(0.0001);
+    eprintln!("  Ratio: {ratio:.2}x");
+
+    assert!(peak_loud > peak_quiet * 2.0,
+        "Level 0.9 should be louder than 0.1: ratio={ratio:.2}x");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (trace helper — kept for debugging)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
 fn screamer_level_pot_changes_output_trace() {
     // Trace: check pot rp before and after set_control
     let path = format!(
