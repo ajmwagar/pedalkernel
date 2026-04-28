@@ -32,3 +32,15 @@ pub mod fast_math;
 // ── Shared types (no dependencies) ───────────────────────────────────────
 pub mod pot_taper;
 pub mod nonideal_fx;
+
+// ── Oversampling (antialiasing for nonlinear stages) ────────────────────
+pub mod oversampling;
+
+// ── Impedance loading (interstage, cable models) ──��─────────────────────
+pub mod loading;
+
+// ── Metering (lock-free audio->UI metrics) ──────────────────────────────
+pub mod metering;
+
+// ── Thermal drift (temperature-dependent component behavior) ────────────
+pub mod thermal;

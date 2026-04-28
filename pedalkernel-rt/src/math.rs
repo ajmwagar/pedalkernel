@@ -20,6 +20,8 @@ mod inner {
     #[inline(always)]
     pub fn powf(x: f64, y: f64) -> f64 { x.powf(y) }
     #[inline(always)]
+    pub fn tan(x: f64) -> f64 { x.tan() }
+    #[inline(always)]
     pub fn tanh(x: f64) -> f64 { x.tanh() }
     #[inline(always)]
     pub fn abs(x: f64) -> f64 { x.abs() }
@@ -65,6 +67,8 @@ mod inner {
     pub fn sqrt(x: f64) -> f64 { libm::sqrt(x) }
     #[inline(always)]
     pub fn powf(x: f64, y: f64) -> f64 { libm::pow(x, y) }
+    #[inline(always)]
+    pub fn tan(x: f64) -> f64 { libm::tan(x) }
     #[inline(always)]
     pub fn tanh(x: f64) -> f64 { libm::tanh(x) }
     #[inline(always)]
