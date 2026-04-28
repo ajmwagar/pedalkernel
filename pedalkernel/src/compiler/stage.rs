@@ -91,18 +91,18 @@ impl NonIdealFxState {
     }
 
     /// Construct from Component trait's NonIdealFx declarations.
-    pub fn from_nonideal_fx(fx: &[super::component::NonIdealFx], gain: f64, sample_rate: f64) -> Self {
+    pub fn from_nonideal_fx(fx: &[crate::nonideal_fx::NonIdealFx], gain: f64, sample_rate: f64) -> Self {
         let mut state = Self::default();
         for effect in fx {
             match effect {
-                super::component::NonIdealFx::OpAmpBandwidth { gbw, slew_rate } => {
+                crate::nonideal_fx::NonIdealFx::OpAmpBandwidth { gbw, slew_rate } => {
                     let gain_abs = gain.abs().max(1.0);
                     let fc = gbw / gain_abs;
                     let w = 2.0 * std::f64::consts::PI * fc;
                     state.gbw_coeff = w / (w + sample_rate);
                     state.max_dv = slew_rate * 1e6 / sample_rate;
                 }
-                super::component::NonIdealFx::RailSaturation { v_max } => {
+                crate::nonideal_fx::NonIdealFx::RailSaturation { v_max } => {
                     state.v_rail_pos = *v_max;
                     state.v_rail_neg = *v_max;
                 }
@@ -3163,7 +3163,7 @@ pub(super) struct IirStage {
     /// overwrite the serial audio chain signal.
     pub(super) bypass_serial: bool,
     /// Component-declared non-idealities applied after IIR computation.
-    pub(super) nonideal_fx: Vec<super::component::NonIdealFx>,
+    pub(super) nonideal_fx: Vec<crate::nonideal_fx::NonIdealFx>,
     /// Pot bindings for runtime coefficient recomputation.
     pub(super) pot_bindings: Vec<IirPotBinding>,
     /// Sample rate (needed for GBW recomputation on gain change).
@@ -3209,8 +3209,8 @@ impl IirStage {
     ///
     /// Pre-computes runtime constants (gbw_coeff, max_dv_per_sample, v_max)
     /// so process() stays O(1) with no branching on enum variants.
-    pub(super) fn set_nonideal_fx(&mut self, fx: Vec<super::component::NonIdealFx>, sample_rate: f64) {
-        use super::component::NonIdealFx;
+    pub(super) fn set_nonideal_fx(&mut self, fx: Vec<crate::nonideal_fx::NonIdealFx>, sample_rate: f64) {
+        use crate::nonideal_fx::NonIdealFx;
         for effect in &fx {
             match effect {
                 NonIdealFx::OpAmpBandwidth { gbw, slew_rate } => {
@@ -3350,13 +3350,13 @@ impl BlackFeedbackStage {
         rf: f64,
         ri: f64,
         inverting: bool,
-        fx: &[super::component::NonIdealFx],
+        fx: &[crate::nonideal_fx::NonIdealFx],
         sample_rate: f64,
     ) -> Self {
         let gain = if inverting { rf / ri.max(1.0) } else { 1.0 + rf / ri.max(1.0) };
         let fx_state = NonIdealFxState::from_nonideal_fx(fx, gain, sample_rate);
         let stored_gbw = fx.iter().find_map(|f| match f {
-            super::component::NonIdealFx::OpAmpBandwidth { gbw, .. } => Some(*gbw),
+            crate::nonideal_fx::NonIdealFx::OpAmpBandwidth { gbw, .. } => Some(*gbw),
             _ => None,
         }).unwrap_or(0.0);
 
