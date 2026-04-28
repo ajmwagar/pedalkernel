@@ -1330,7 +1330,7 @@ impl CompiledPedal {
 
     /// Handle MIDI note-on by firing all trigger inputs.
     pub fn note_on(&mut self, note: u8, _velocity: u8) {
-        #[cfg(debug_assertions)]
+        #[cfg(all(debug_assertions, feature = "std"))]
         eprintln!(
             "[CompiledPedal] note_on({}) → firing ALL {} triggers",
             note,

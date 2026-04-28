@@ -1,53 +1,27 @@
 //! Shared Newton-Raphson solver and numerical utilities for nonlinear WDF roots.
 
+#[cfg(feature = "std")]
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU8, Ordering};
 
 // ---------------------------------------------------------------------------
-// Global diode solver override
+// Diode solver method (per-instance configuration)
 // ---------------------------------------------------------------------------
 
-/// Diode solver method selector, mirroring `compiler::component::SolverMethod`.
+/// Per-instance diode solver method selector.
 ///
-/// Re-declared here to avoid a circular dependency between the `elements` and
-/// `compiler` crates.  Values must match the encoding used by
-/// `DIODE_SOLVER_OVERRIDE`.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Stored on each nonlinear root struct so that solver selection is local
+/// to the instance rather than process-wide.  This eliminates global mutable
+/// state and the parallel-test interference that came with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SolverMethod {
-    /// Newton-Raphson iterative solver (default).
-    NewtonRaphson = 1,
-    /// Wright Omega explicit closed-form solver.
-    WrightOmega = 2,
-}
-
-/// Process-wide override for the diode solver method.
-///
-/// `0` = no override (use per-component hint).
-/// `1` = force Newton-Raphson.
-/// `2` = force Wright Omega.
-static DIODE_SOLVER_OVERRIDE: AtomicU8 = AtomicU8::new(0);
-
-/// Override the diode solver method process-wide.
-///
-/// Useful for A/B testing and benchmarking.
-/// Call with the desired [`SolverMethod`].
-pub fn set_diode_solver(method: SolverMethod) {
-    DIODE_SOLVER_OVERRIDE.store(method as u8, Ordering::Relaxed);
-}
-
-/// Clear the process-wide diode solver override (revert to per-component hint).
-pub fn clear_diode_solver_override() {
-    DIODE_SOLVER_OVERRIDE.store(0, Ordering::Relaxed);
-}
-
-/// Return the current process-wide diode solver override, or `None` if unset.
-pub fn get_diode_solver_override() -> Option<SolverMethod> {
-    match DIODE_SOLVER_OVERRIDE.load(Ordering::Relaxed) {
-        1 => Some(SolverMethod::NewtonRaphson),
-        2 => Some(SolverMethod::WrightOmega),
-        _ => None,
-    }
+    /// Pick the best solver automatically based on the circuit topology
+    /// (mirrors `compiler::component::SolverMethod` hints).
+    #[default]
+    Auto,
+    /// Force the explicit Wright Omega closed-form solver (no outer NR loop).
+    ExplicitWrightOmega,
+    /// Force the Newton-Raphson iterative solver.
+    NewtonRaphson,
 }
 
 /// Default maximum Newton-Raphson iterations for nonlinear device solvers.
@@ -143,13 +117,16 @@ impl NrWorkspace {
     }
 }
 
+#[cfg(feature = "std")]
 const SOLVER_STATS_ENABLED: bool = true;
 
+#[cfg(feature = "std")]
 thread_local! {
     static SOLVER_STATS: RefCell<SolverStatsAggregate> = RefCell::new(SolverStatsAggregate::default());
     static SOLVER_TRACE: RefCell<Option<Vec<SolverTraceEntry>>> = const { RefCell::new(None) };
 }
 
+#[cfg(feature = "std")]
 #[derive(Default, Clone, Debug)]
 struct SolverStatsAggregate {
     solves: u64,
@@ -161,6 +138,7 @@ struct SolverStatsAggregate {
     iter_cap_hits: u64,
 }
 
+#[cfg(feature = "std")]
 impl SolverStatsAggregate {
     fn record(&mut self, entry: SolverStatsEntry) {
         self.solves += 1;
@@ -199,18 +177,27 @@ struct SolverStatsEntry {
     iter_cap_hit: bool,
 }
 
+#[cfg(feature = "std")]
 fn record_solver_stats(entry: SolverStatsEntry) {
     if SOLVER_STATS_ENABLED {
         SOLVER_STATS.with(|stats| stats.borrow_mut().record(entry));
     }
 }
 
+#[cfg(not(feature = "std"))]
+fn record_solver_stats(_entry: SolverStatsEntry) {}
+
+#[cfg(feature = "std")]
 pub fn reset_solver_stats() {
     if SOLVER_STATS_ENABLED {
         SOLVER_STATS.with(|stats| *stats.borrow_mut() = SolverStatsAggregate::default());
     }
 }
 
+#[cfg(not(feature = "std"))]
+pub fn reset_solver_stats() {}
+
+#[cfg(feature = "std")]
 pub fn solver_stats_snapshot() -> SolverStatsSnapshot {
     if SOLVER_STATS_ENABLED {
         SOLVER_STATS.with(|stats| {
@@ -228,6 +215,11 @@ pub fn solver_stats_snapshot() -> SolverStatsSnapshot {
     } else {
         SolverStatsSnapshot::default()
     }
+}
+
+#[cfg(not(feature = "std"))]
+pub fn solver_stats_snapshot() -> SolverStatsSnapshot {
+    SolverStatsSnapshot::default()
 }
 
 // ---------------------------------------------------------------------------
@@ -252,18 +244,29 @@ pub struct SolverTraceEntry {
 /// Enable per-solve tracing. Each NR solve will append a `SolverTraceEntry`
 /// to an internal buffer pre-allocated with `capacity` entries.
 /// Call `disable_solver_trace()` to retrieve and consume the buffer.
+#[cfg(feature = "std")]
 pub fn enable_solver_trace(capacity: usize) {
     SOLVER_TRACE.with(|t| {
         *t.borrow_mut() = Some(Vec::with_capacity(capacity));
     });
 }
 
+#[cfg(not(feature = "std"))]
+pub fn enable_solver_trace(_capacity: usize) {}
+
 /// Disable per-solve tracing and return the accumulated trace entries.
 /// Returns an empty vec if tracing was not enabled.
+#[cfg(feature = "std")]
 pub fn disable_solver_trace() -> Vec<SolverTraceEntry> {
     SOLVER_TRACE.with(|t| t.borrow_mut().take().unwrap_or_default())
 }
 
+#[cfg(not(feature = "std"))]
+pub fn disable_solver_trace() -> Vec<SolverTraceEntry> {
+    Vec::new()
+}
+
+#[cfg(feature = "std")]
 fn record_solver_trace(entry: SolverTraceEntry) {
     SOLVER_TRACE.with(|t| {
         if let Some(ref mut buf) = *t.borrow_mut() {
@@ -272,9 +275,18 @@ fn record_solver_trace(entry: SolverTraceEntry) {
     });
 }
 
+#[cfg(not(feature = "std"))]
+fn record_solver_trace(_entry: SolverTraceEntry) {}
+
 /// Returns true if solver tracing is currently enabled (buffer is Some).
+#[cfg(feature = "std")]
 fn is_solver_trace_enabled() -> bool {
     SOLVER_TRACE.with(|t| t.borrow().is_some())
+}
+
+#[cfg(not(feature = "std"))]
+fn is_solver_trace_enabled() -> bool {
+    false
 }
 
 /// Numerically stable softplus: `ln(1 + exp(x))`.
@@ -706,6 +718,7 @@ pub(crate) fn multi_port_nr_solve_into(
                     .sum::<f64>();
             let embed_err = (a_i - a_scatter).abs();
             if embed_err > 1e-4 || cond > 1e6 {
+                #[cfg(feature = "std")]
                 eprintln!(
                     "[NR] port R cond={cond:.1e} embed_err[{i}]={embed_err:.2e} residual={last_residual:.2e}"
                 );
@@ -1081,6 +1094,7 @@ pub(crate) fn multi_port_nr_solve_grouped_into(
                     .sum::<f64>();
             let embed_err = (a_i - a_scatter).abs();
             if embed_err > 1e-4 || cond > 1e6 {
+                #[cfg(feature = "std")]
                 eprintln!(
                     "[NR-grouped] port R cond={cond:.1e} embed_err[{i}]={embed_err:.2e} residual={last_residual:.2e}"
                 );

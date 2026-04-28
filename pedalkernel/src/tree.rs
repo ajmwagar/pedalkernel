@@ -1921,8 +1921,11 @@ impl MnaSystem {
                 }
             }
 
-            eprintln!("[ss-reduce] G_cc = {g_cc:?}");
-            eprintln!("[ss-reduce] G_red = {g_red:?}");
+            #[cfg(feature = "std")]
+            {
+                eprintln!("[ss-reduce] G_cc = {g_cc:?}");
+                eprintln!("[ss-reduce] G_red = {g_red:?}");
+            }
 
             // Reduced C matrix (cap diagonal only, in reduced space)
             let mut c_red = vec![0.0; n_c * n_c];
