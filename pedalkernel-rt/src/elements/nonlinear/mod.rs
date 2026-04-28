@@ -7,12 +7,12 @@
 //! OTA (operational transconductance amplifier) for CA3080-based circuits,
 //! and delay line implementations (BBD and generic).
 
-pub(crate) mod solver;
+pub mod solver;
 
 mod bbd;
 mod bjt;
 mod delay;
-pub(crate) mod diode;
+pub mod diode;
 mod jfet;
 mod mosfet;
 mod opamp;

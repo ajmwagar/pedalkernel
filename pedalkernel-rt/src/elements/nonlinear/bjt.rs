@@ -733,7 +733,7 @@ impl BjtGummelPoonRoot {
 #[derive(Debug, Clone)]
 pub struct BjtTwoPort {
     pub model: GummelPoonModel,
-    pub(crate) is_pnp: bool,
+    pub is_pnp: bool,
     v_max: f64,
     /// IS-dependent Vbe clamp: NF * VT * ln(I_max / IS).
     /// Prevents exponential blow-up at forward bias for high-IS devices (Ge).

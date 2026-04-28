@@ -26,7 +26,7 @@ use crate::elements::WdfRoot;
 /// assert!((wright_omega(0.0) - 0.5671).abs() < 1e-4);
 /// ```
 #[inline]
-pub(crate) fn wright_omega(x: f64) -> f64 {
+pub fn wright_omega(x: f64) -> f64 {
     // Guard against extreme underflow
     if x <= -33.0 {
         return 0.0;
@@ -133,7 +133,7 @@ pub(crate) fn wright_omega(x: f64) -> f64 {
 /// * `is`   - Saturation current (A)
 /// * `n_vt` - Thermal voltage × ideality factor (V)
 #[inline]
-pub(crate) fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
+pub fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
     // α = Rp·Is / nVt
     let alpha = rp * is / n_vt;
     let ln_alpha = alpha.ln();
@@ -204,7 +204,7 @@ pub(crate) fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
 /// * `is`   - Saturation current (A)
 /// * `n_vt` - Thermal voltage × ideality factor (V)
 #[inline]
-pub(crate) fn explicit_single_diode(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
+pub fn explicit_single_diode(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
     // α = Rp·Is / nVt
     let alpha = rp * is / n_vt;
     let ln_alpha = alpha.ln();

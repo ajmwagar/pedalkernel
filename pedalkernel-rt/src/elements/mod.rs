@@ -12,7 +12,7 @@ mod allpass;
 mod controlled;
 mod linear;
 mod modulation;
-pub(crate) mod nonlinear;
+pub mod nonlinear;
 mod synth;
 
 pub use allpass::*;

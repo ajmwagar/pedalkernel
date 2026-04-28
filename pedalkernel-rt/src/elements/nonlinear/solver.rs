@@ -37,35 +37,35 @@ pub const NR_MAX_ITER: usize = 24;
 #[derive(Debug, Clone)]
 pub struct NrWorkspace {
     // Independent solver buffers
-    pub(crate) f_vec: Vec<f64>,
-    pub(crate) jacobian: Vec<f64>, // n_nl * n_nl
-    pub(crate) currents: Vec<f64>,
-    pub(crate) derivatives: Vec<f64>, // independent solver only
-    pub(crate) rhs: Vec<f64>,
-    pub(crate) jac_copy: Vec<f64>, // n_nl * n_nl
-    pub(crate) b_nl: Vec<f64>,
+    pub f_vec: Vec<f64>,
+    pub jacobian: Vec<f64>, // n_nl * n_nl
+    pub currents: Vec<f64>,
+    pub derivatives: Vec<f64>, // independent solver only
+    pub rhs: Vec<f64>,
+    pub jac_copy: Vec<f64>, // n_nl * n_nl
+    pub b_nl: Vec<f64>,
 
     // Grouped solver additional buffers
-    pub(crate) port_group: Vec<(usize, usize)>,
-    pub(crate) dev_currents: Vec<f64>,
-    pub(crate) dev_jacobian: Vec<f64>,
-    pub(crate) full_dev_jac: Vec<f64>, // n_nl * n_nl
+    pub port_group: Vec<(usize, usize)>,
+    pub dev_currents: Vec<f64>,
+    pub dev_jacobian: Vec<f64>,
+    pub full_dev_jac: Vec<f64>, // n_nl * n_nl
 
     // Frozen Newton cache: reuse previous sample's system Jacobian and currents
     // for a first "frozen" step that skips device eval entirely.
     // If that step converges, we save all device evals for this sample.
-    pub(crate) cached_sys_jac: Vec<f64>,  // n_nl * n_nl
-    pub(crate) cached_currents: Vec<f64>, // n_nl
-    pub(crate) has_cached_jac: bool,
+    pub cached_sys_jac: Vec<f64>,  // n_nl * n_nl
+    pub cached_currents: Vec<f64>, // n_nl
+    pub has_cached_jac: bool,
 
     // Adaptive oversampling: track frozen Newton failures within a base sample.
     // When zero, the signal is slowly varying and X2 NR rate suffices.
-    pub(crate) frozen_failures: u8,
+    pub frozen_failures: u8,
 
     /// Actual NR iterations consumed by the most recent solve call.
     /// Written by both `multi_port_nr_solve_into` and `multi_port_nr_solve_grouped_into`
     /// so that `MultiNlStage::process` can deduct from the per-base-sample budget.
-    pub(crate) iters_used: usize,
+    pub iters_used: usize,
 }
 
 impl NrWorkspace {
@@ -305,7 +305,7 @@ fn is_solver_trace_enabled() -> bool {
 /// This is the standard numerically-stable implementation used throughout
 /// the Koren triode/pentode equations.
 #[inline]
-pub(crate) fn softplus(x: f64) -> f64 {
+pub fn softplus(x: f64) -> f64 {
     if x > 50.0 {
         x
     } else if x < -50.0 {
@@ -323,7 +323,7 @@ pub(crate) fn softplus(x: f64) -> f64 {
 /// For silicon: Icbo ≈ 1–100 nA → Gleakage ≈ 1e-12 to 1e-9 S.
 /// Using 1e-12 S (1 TΩ) is conservative and prevents Newton-Raphson
 /// from dividing by zero without adding measurable phantom current.
-pub(crate) const LEAKAGE_CONDUCTANCE: f64 = 1e-12;
+pub const LEAKAGE_CONDUCTANCE: f64 = 1e-12;
 
 // ---------------------------------------------------------------------------
 // NlDeviceIv trait for multi-port NR solver
@@ -333,7 +333,7 @@ pub(crate) const LEAKAGE_CONDUCTANCE: f64 = 1e-12;
 ///
 /// Used by the multi-port Newton-Raphson solver to evaluate the device
 /// current and its derivative at a given port voltage.
-pub(crate) trait NlDeviceIv {
+pub trait NlDeviceIv {
     /// Return `(current, d_current/d_voltage)` at the given port voltage.
     fn iv(&self, v: f64) -> (f64, f64);
 
@@ -355,7 +355,7 @@ pub(crate) trait NlDeviceIv {
 /// Each device group owns N ports. The grouped NR solver uses the full
 /// N×N device Jacobian (including cross-derivatives) when building the
 /// system Jacobian.
-pub(crate) trait NlDeviceGroupIv {
+pub trait NlDeviceGroupIv {
     /// Number of ports in this device group.
     fn n_ports(&self) -> usize;
 
@@ -383,7 +383,7 @@ pub(crate) trait NlDeviceGroupIv {
 /// cross-coupled device groups (triodes) in the same grouped NR solver.
 /// The adapter wraps the single-port I-V into the grouped interface with
 /// a trivial 1×1 Jacobian.
-pub(crate) struct SinglePortGroupAdapter<'a>(pub &'a dyn NlDeviceIv);
+pub struct SinglePortGroupAdapter<'a>(pub &'a dyn NlDeviceIv);
 
 impl NlDeviceGroupIv for SinglePortGroupAdapter<'_> {
     fn n_ports(&self) -> usize {
@@ -412,7 +412,7 @@ impl NlDeviceGroupIv for SinglePortGroupAdapter<'_> {
 /// For N≥3: Gaussian elimination with partial pivoting.
 ///
 /// Returns `false` if the system is singular (near-zero determinant/pivot).
-pub(crate) fn solve_small_linear(n: usize, a: &mut [f64], b: &mut [f64]) -> bool {
+pub fn solve_small_linear(n: usize, a: &mut [f64], b: &mut [f64]) -> bool {
     debug_assert_eq!(a.len(), n * n);
     debug_assert_eq!(b.len(), n);
 
@@ -523,7 +523,7 @@ pub(crate) fn solve_small_linear(n: usize, a: &mut [f64], b: &mut [f64]) -> bool
 ///
 /// # Returns
 /// Reflected wave `b[i]` for each NL port.
-pub(crate) fn multi_port_nr_solve(
+pub fn multi_port_nr_solve(
     n_nl: usize,
     s_nl: &[f64],
     known_a: &[f64],
@@ -549,7 +549,7 @@ pub(crate) fn multi_port_nr_solve(
 }
 
 /// Like `multi_port_nr_solve`, but writes results into `ws.b_nl` to avoid allocation.
-pub(crate) fn multi_port_nr_solve_into(
+pub fn multi_port_nr_solve_into(
     n_nl: usize,
     s_nl: &[f64],
     known_a: &[f64],
@@ -784,7 +784,7 @@ pub(crate) fn multi_port_nr_solve_into(
 ///           - R_i · ∂i_i/∂v_k                              (if k ∈ device(i))
 ///           - Σ_j S[i][j] · R_j · ∂i_j/∂v_k               (j ∈ device(k))
 /// ```
-pub(crate) fn multi_port_nr_solve_grouped(
+pub fn multi_port_nr_solve_grouped(
     n_nl: usize,
     s_nl: &[f64],             // n_nl × n_nl scattering sub-block
     known_a: &[f64],          // n_nl
@@ -813,7 +813,7 @@ pub(crate) fn multi_port_nr_solve_grouped(
 }
 
 /// Like `multi_port_nr_solve_grouped`, but writes results into `ws.b_nl` to avoid allocation.
-pub(crate) fn multi_port_nr_solve_grouped_into(
+pub fn multi_port_nr_solve_grouped_into(
     n_nl: usize,
     s_nl: &[f64],
     known_a: &[f64],
@@ -1155,7 +1155,7 @@ pub(crate) fn multi_port_nr_solve_grouped_into(
 ///   to prevent overshoot. Pass `None` for standard (undamped) Newton.
 /// - `device_iv`: Closure returning `(i, di_dv)` for a given voltage
 #[inline]
-pub(crate) fn newton_raphson_solve<F>(
+pub fn newton_raphson_solve<F>(
     a: f64,
     rp: f64,
     mut v: f64,

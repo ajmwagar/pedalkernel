@@ -50,3 +50,7 @@ pub mod elements;
 
 // ── WDF tree adaptors and MNA system ────────────────────────────────────
 pub mod tree;
+
+// ── Dynamic WDF leaf nodes and tree ────────────────────────────────────
+pub mod wdf_leaf;
+pub mod dyn_node;

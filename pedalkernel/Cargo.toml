@@ -39,6 +39,10 @@ runtime-warnings = []
 pro-pedals = []
 
 [dependencies]
+# Runtime crate (WDF engine, elements, tree)
+# TODO: wire pedalkernel → pedalkernel-rt dependency when rt types replace local types
+# pedalkernel-rt = { path = "../pedalkernel-rt" }
+
 # DSL parser
 nom = "7"
 
