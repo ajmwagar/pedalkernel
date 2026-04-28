@@ -14,6 +14,15 @@ rust-version = "1.80"
 default = ["std"]
 std = []
 debug-trace = []
+runtime-warnings = ["std"]
+fault-injection = ["std"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(DISABLED_needs_model_db)',
+    'cfg(DISABLED_tests_in_pedalkernel)',
+    'cfg(DISABLED_needs_pedalkernel)',
+] }
 
 [dependencies]
 libm = "0.2"

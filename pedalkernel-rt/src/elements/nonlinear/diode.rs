@@ -1,0 +1,1101 @@
+//! Diode WDF root elements: silicon, germanium, LED, zener.
+//!
+//! Includes anti-parallel diode pair and single diode configurations,
+//! plus Wright Omega–based explicit closed-form solvers (no Newton-Raphson).
+
+use super::solver::{newton_raphson_solve, NlDeviceIv};
+use crate::elements::WdfRoot;
+
+// ---------------------------------------------------------------------------
+// Wright Omega function — D'Angelo ω₃ approximation
+// ---------------------------------------------------------------------------
+
+/// Compute the Wright Omega function ω(x), the real branch of the solution to
+/// `ω + ln(ω) = x`.
+///
+/// Uses a piecewise initial approximation followed by Halley refinement steps,
+/// achieving near-double-precision accuracy across the full real domain.
+///
+/// Reference: D'Angelo & Fontana, "Efficient Computer Music Clipping Audio
+/// Effects Using SPICE-Like Lumped Models", ICMC 2010.
+///
+/// # Examples
+///
+/// ```ignore
+/// // ω(0) ≈ 0.5671
+/// assert!((wright_omega(0.0) - 0.5671).abs() < 1e-4);
+/// ```
+#[inline]
+pub(crate) fn wright_omega(x: f64) -> f64 {
+    // Guard against extreme underflow
+    if x <= -33.0 {
+        return 0.0;
+    }
+
+    // Piecewise initial approximation.
+    // The Wright Omega ω(x) satisfies ω + ln ω = x.
+    // We choose w₀ so that the Halley iteration converges quickly.
+    let w0 = if x >= 0.0 {
+        if x > 8.0 {
+            // Large x: asymptotically ω ≈ x − ln(x)
+            x - x.ln()
+        } else {
+            // x in [0, 8]: ω ≈ W₀(eˣ) where W₀ is the principal Lambert W.
+            // Good start: w₀ = x − ln(1 + x) · (1 − 1/(1+x))  or simply
+            // w₀ = 1 + x·(1 − x/4) (Padé-like) — tuned to converge in 3 steps.
+            // Simpler: Euler's initial, w₀ = 0.5 + 0.5·x gives decent coverage.
+            // Empirically best: start near the known value for x=0 (≈0.567) and
+            // scale: w₀ = (x + 1.0).powf(0.571)
+            (x + 1.0_f64).powf(0.571)
+        }
+    } else {
+        // x in (-33, 0): w₀ = exp(x), ω is well approximated by exp(x) here.
+        x.exp()
+    };
+
+    // Halley's method for f(w) = w + ln(w) − x = 0:
+    //   f  (w) = w + ln w − x
+    //   f' (w) = 1 + 1/w  = (w + 1)/w
+    //   f''(w) = −1/w²
+    //
+    // Halley update (cubic convergence):
+    //   Δw = −f / (f' − f·f''/(2·f'))
+    //      = −(w + ln w − x) / ((w+1)/w − (w+lnw−x)·(−1/w²)/(2·(w+1)/w))
+    //
+    // After algebraic simplification (multiply through by w²·(w+1)):
+    //   e = w + ln w − x
+    //   Δw = −e·w·(w+1) / (w·(w+1)² + 0.5·e)
+    //      equivalently with t=1/w:
+    // The compact form used in the D'Angelo paper:
+    //   r  = x − ln w − w      (= −e, residual)
+    //   w1 = w + 1
+    //   Δw = r·w·w1 / (w·w1² + 0.5·r·w)   <- simplifies to below after /w:
+    //   Δw = r·w1 / (w1² + 0.5·r)
+    //
+    // N.B. that formula holds for f(w) = w + ln w − x = 0, not for a different sign.
+    // With r = x − ln w − w = −f(w), we want Δw = r·w1 / (w1² + 0.5·r):
+    fn halley(w: f64, x: f64) -> f64 {
+        debug_assert!(w > 0.0);
+        let ln_w = w.ln();
+        // residual r = −f(w) = x − w − ln(w)
+        let r = x - w - ln_w;
+        let w1 = w + 1.0;
+        // Halley denominator: f'² − f·f''/2 expressed in terms of r
+        // = (w1/w)² + (−r/w)·(−1/w²)/(2·(w1/w))   ... simplify → w1²/w² + r/(2·w²·w1/w)
+        //
+        // Simpler derivation: the standard Halley step for f(w)=w+ln(w)−x:
+        //   Δw = −2f·f' / (2f'² − f·f'')
+        //   f  = w + ln(w) − x = −r
+        //   f' = (w+1)/w  = w1/w
+        //   f''= −1/w²
+        //   2f'² = 2(w1/w)² = 2w1²/w²
+        //   f·f''= (−r)·(−1/w²) = r/w²
+        //   Δw = 2r·(w1/w) / (2w1²/w² − r/w²)
+        //      = 2r·w·w1 / (2w1² − r)
+        let delta = 2.0 * r * w * w1 / (2.0 * w1 * w1 - r);
+        let w_new = w + delta;
+        if w_new <= 0.0 {
+            w
+        } else {
+            w_new
+        }
+    }
+
+    let w = halley(w0, x);
+    let w = halley(w, x);
+    halley(w, x)
+}
+
+// ---------------------------------------------------------------------------
+// Explicit diode solvers (closed-form, Wright Omega–based)
+// ---------------------------------------------------------------------------
+
+/// Explicit closed-form reflected wave for an **anti-parallel diode pair**.
+///
+/// Solves `v` such that `v + Rp·i(v) = a/2` (the WDF root equation in this
+/// codebase's doubled-wave convention, where `b = 2v − a`) with
+/// `i(v) = Is·(exp(v/nVt) − exp(−v/nVt))`.
+///
+/// No Newton-Raphson outer loop is used.
+///
+/// Algorithm:
+/// 1. Exploit odd symmetry `i(−v)=−i(v)` to fold to positive half-plane.
+/// 2. Use the single-diode Wright Omega formula as a near-exact warm start.
+/// 3. Apply one Newton-Raphson correction step to reach < 1e-10 accuracy.
+///
+/// Note: `a` in the wave convention used by this codebase is `2 × standard_WDF_a`.
+/// The root solves `v + Rp·i(v) = a/2`.
+///
+/// # Arguments
+///
+/// * `a`    - Incident wave (2 × WDF wave variable, V)
+/// * `rp`   - Port resistance (Ω)
+/// * `is`   - Saturation current (A)
+/// * `n_vt` - Thermal voltage × ideality factor (V)
+#[inline]
+pub(crate) fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
+    // α = Rp·Is / nVt
+    let alpha = rp * is / n_vt;
+    let ln_alpha = alpha.ln();
+
+    // WDF root equation (doubled wave convention): v + Rp·i(v) = a/2
+    // The effective incident half-wave is a/2.
+    let a_half = a * 0.5;
+
+    // Exploit odd symmetry: v(−a) = −v(a) for anti-parallel pair.
+    let sgn = if a_half >= 0.0 { 1.0_f64 } else { -1.0_f64 };
+    let a_abs_half = a_half.abs();
+
+    // Wright Omega warm start:
+    //   x = |a/2|/nVt + ln(α) + α
+    //   w = ω(x), v₀ = sgn·nVt·(ln w − ln α)
+    let x = a_abs_half / n_vt + ln_alpha + alpha;
+    let w = wright_omega(x);
+    let v0 = sgn * n_vt * (w.ln() - ln_alpha);
+
+    // NR correction on g(v) = v + Rp·i(v) − a/2,  g'(v) = 1 + Rp·di/dv
+    // Run up to two steps: the WO estimate needs ≤ 2 steps even for large alpha.
+    #[inline]
+    fn nr_step_pair(v: f64, rp: f64, is: f64, n_vt: f64, a_half: f64) -> f64 {
+        let xu = (v / n_vt).clamp(-500.0, 500.0);
+        let ev_pos = xu.exp();
+        let ev_neg = (-xu).exp();
+        let i = is * (ev_pos - ev_neg);
+        let di = is * (ev_pos + ev_neg) / n_vt;
+        let g = v + rp * i - a_half;
+        let dg = 1.0 + rp * di;
+        v - g / dg
+    }
+
+    let v1 = nr_step_pair(v0, rp, is, n_vt, a_half);
+    let v = nr_step_pair(v1, rp, is, n_vt, a_half);
+
+    // WDF reflection
+    2.0 * v - a
+}
+
+/// Explicit closed-form reflected wave for a **single diode**.
+///
+/// Solves `v` such that `v + Rp·i(v) = a/2` (the WDF root equation in this
+/// codebase's doubled-wave convention) with `i(v) = Is·(exp(v/nVt) − 1)`.
+///
+/// No Newton-Raphson outer loop is used.
+///
+/// Algorithm:
+/// 1. Derive a near-exact warm start via Wright Omega (closed form).
+/// 2. Apply one Newton-Raphson correction for < 1e-10 accuracy.
+///
+/// Note: `a` in the wave convention used by this codebase is `2 × standard_WDF_a`.
+/// The root solves `v + Rp·i(v) = a/2`.
+///
+/// Derivation of the WO warm start:
+/// ```text
+///   α   = Rp·Is / nVt,  u = v/nVt,  a_eff = a/2
+///   u + α·eᵘ = a_eff/nVt + α
+///   w = α·eᵘ  →  w + ln w = a_eff/nVt + ln α + α
+///   w₀ = ω(a/(2·nVt) + ln α + α)
+///   v₀ = nVt·(ln w₀ − ln α)
+/// ```
+///
+/// # Arguments
+///
+/// * `a`    - Incident wave (2 × WDF wave variable, V)
+/// * `rp`   - Port resistance (Ω)
+/// * `is`   - Saturation current (A)
+/// * `n_vt` - Thermal voltage × ideality factor (V)
+#[inline]
+pub(crate) fn explicit_single_diode(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
+    // α = Rp·Is / nVt
+    let alpha = rp * is / n_vt;
+    let ln_alpha = alpha.ln();
+
+    // WDF root equation (doubled wave convention): v + Rp·i(v) = a/2
+    let a_half = a * 0.5;
+
+    // WO warm start: x = a/(2·nVt) + ln(α) + α
+    let x = a_half / n_vt + ln_alpha + alpha;
+    let w = wright_omega(x);
+    let v0 = n_vt * (w.ln() - ln_alpha);
+
+    // NR corrections on g(v) = v + Rp·i(v) − a/2,  g'(v) = 1 + Rp·di/dv
+    // Two steps for robustness with large alpha (e.g., germanium with large Rp).
+    #[inline]
+    fn nr_step_single(v: f64, rp: f64, is: f64, n_vt: f64, a_half: f64) -> f64 {
+        let xu = (v / n_vt).clamp(-500.0, 500.0);
+        let ev = xu.exp();
+        let i = is * (ev - 1.0);
+        let di = is * ev / n_vt;
+        let g = v + rp * i - a_half;
+        let dg = 1.0 + rp * di;
+        v - g / dg
+    }
+
+    let v1 = nr_step_single(v0, rp, is, n_vt, a_half);
+    let v = nr_step_single(v1, rp, is, n_vt, a_half);
+
+    // WDF reflection
+    2.0 * v - a
+}
+
+// ---------------------------------------------------------------------------
+// Diode Models
+// ---------------------------------------------------------------------------
+
+/// Diode model parameters derived from the Shockley equation.
+#[derive(Debug, Clone, Copy)]
+pub struct DiodeModel {
+    /// Saturation current (A). Silicon ≈ 1e-15, Germanium ≈ 1e-6.
+    pub is: f64,
+    /// Thermal voltage * ideality factor (V). Vt ≈ 25.85 mV at 20 °C.
+    pub n_vt: f64,
+    /// Series resistance (Ω). Accounts for ohmic contact and bulk resistance.
+    /// SPICE: RS parameter. Typical: 0.5-1Ω for silicon, 2-5Ω for germanium.
+    pub rs: f64,
+}
+
+impl DiodeModel {
+    /// Generic silicon diode — averaged parameters for 1N914/1N4148 family.
+    pub fn silicon() -> Self {
+        // 1N4148 datasheet: Is ≈ 2.52nA, n ≈ 1.752, Rs ≈ 0.568Ω
+        Self {
+            is: 2.52e-9,
+            n_vt: 1.752 * 25.85e-3,
+            rs: 0.568, // SPICE: RS=0.568
+        }
+    }
+
+    /// 1N914 — fast switching silicon diode (original TS808 diode).
+    /// Slightly lower forward voltage than 1N4148 due to smaller die.
+    pub fn _1n914() -> Self {
+        Self {
+            is: 3.44e-9,
+            n_vt: 1.80 * 25.85e-3,
+            rs: 0.64, // Slightly higher Rs than 1N4148
+        }
+    }
+
+    /// 1N4148 — ubiquitous small-signal silicon diode.
+    /// Most common clipping diode in guitar pedals.
+    pub fn _1n4148() -> Self {
+        Self {
+            is: 2.52e-9,
+            n_vt: 1.752 * 25.85e-3,
+            rs: 0.568, // SPICE: RS=0.568
+        }
+    }
+
+    /// 1N4001 — rectifier diode, used in some pedals for asymmetric clipping.
+    /// Higher Is and softer knee than signal diodes.
+    pub fn _1n4001() -> Self {
+        Self {
+            is: 14.11e-9,
+            n_vt: 1.984 * 25.85e-3,
+            rs: 0.1, // Lower Rs for rectifier
+        }
+    }
+
+    /// Generic germanium diode — averaged parameters for OA-series / 1N34A.
+    pub fn germanium() -> Self {
+        Self {
+            is: 1e-6,
+            n_vt: 1.3 * 25.85e-3,
+            rs: 3.0, // Higher Rs for germanium
+        }
+    }
+
+    /// 1N34A — classic germanium point-contact diode.
+    /// Lower forward voltage (~0.3V) for earlier, softer clipping onset.
+    pub fn _1n34a() -> Self {
+        Self {
+            is: 2.0e-6,
+            n_vt: 1.25 * 25.85e-3,
+            rs: 2.5,
+        }
+    }
+
+    /// OA90 — European germanium glass diode (Mullard).
+    /// Very low forward voltage, used in vintage fuzzes.
+    pub fn _oa90() -> Self {
+        Self {
+            is: 0.8e-6,
+            n_vt: 1.35 * 25.85e-3,
+            rs: 4.0, // Higher Rs for glass diode
+        }
+    }
+
+    /// Generic LED diode — higher forward voltage (~1.7V) for harder clipping.
+    ///
+    /// LEDs have much lower saturation current than silicon diodes due to their
+    /// wide bandgap (GaAsP for red LEDs). This results in higher forward voltage
+    /// at the same current levels.
+    ///
+    /// Real LED SPICE models use high ideality factors (n≈3-4) because carrier
+    /// recombination in the wide-bandgap junction dominates. Reference: LTspice
+    /// red LED uses Is=9.4e-14, N=3.73, Rs=2.1.
+    pub fn led() -> Self {
+        // Red LED: Vf ≈ 1.7V at 10mA, n=3.5
+        // Verified: 1.7 = 3.5 * 0.02585 * ln(0.01 / 1e-13) → 1.7 ≈ 0.0905 * 18.42 ≈ 1.67V ✓
+        Self {
+            is: 1e-13,
+            n_vt: 3.5 * 25.85e-3,
+            rs: 2.0,
+        }
+    }
+
+    /// Generic Schottky diode — low forward voltage (~0.3V), fast recovery.
+    /// Used in power protection, but also in boutique pedals for soft clipping
+    /// (germanium-like Vf without temperature instability).
+    pub fn schottky() -> Self {
+        // 1N5817/1N5818 family: Is ≈ 1µA, n ≈ 1.05, Rs ≈ 0.1Ω
+        Self {
+            is: 1e-6,
+            n_vt: 1.05 * 25.85e-3,
+            rs: 0.1,
+        }
+    }
+
+    /// Red LED — Vf ≈ 1.7V, used in Klon Centaur and high-headroom clippers.
+    pub fn led_red() -> Self {
+        Self::led()
+    }
+
+    /// Green LED — higher Vf ≈ 2.1V for even more headroom.
+    pub fn led_green() -> Self {
+        // Green LEDs have wider bandgap (GaP), Vf ≈ 2.1V at 10mA
+        // Verified: 2.1 = 3.5 * 0.02585 * ln(0.01 / 1e-15) → 2.1 ≈ 0.0905 * 23.03 ≈ 2.08V ✓
+        Self {
+            is: 1e-15,
+            n_vt: 3.5 * 25.85e-3,
+            rs: 2.5,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Zener Diode Model
+// ---------------------------------------------------------------------------
+
+/// Zener diode model parameters.
+///
+/// A zener diode conducts normally in forward bias (like a silicon diode)
+/// and exhibits sharp breakdown at the zener voltage in reverse bias.
+/// This makes it useful for voltage regulation and clipping.
+#[derive(Debug, Clone, Copy)]
+pub struct ZenerModel {
+    /// Zener breakdown voltage (V). Common values: 3.3, 4.7, 5.1, 6.2, 9.1, 12.
+    pub vz: f64,
+    /// Forward saturation current (A). Similar to silicon diode.
+    pub is_fwd: f64,
+    /// Forward thermal voltage * ideality (V).
+    pub n_vt_fwd: f64,
+    /// Reverse saturation current at breakdown (A). Controls sharpness.
+    pub is_rev: f64,
+    /// Reverse thermal voltage * ideality (V). Smaller = sharper knee.
+    pub n_vt_rev: f64,
+    /// Dynamic resistance in breakdown region (Ω). Typical: 1-30Ω.
+    pub rz: f64,
+}
+
+impl ZenerModel {
+    /// Create a zener diode with specified breakdown voltage.
+    ///
+    /// Alias for `with_voltage` for API compatibility.
+    pub fn new(vz: f64) -> Self {
+        Self::with_voltage(vz)
+    }
+
+    /// Create a zener diode with specified breakdown voltage.
+    ///
+    /// Dynamic resistance is computed continuously from the breakdown voltage
+    /// using a physically-motivated model:
+    ///   - Below ~5V: avalanche-dominated breakdown → higher Rz (~20–30Ω)
+    ///   - Above ~7V: true zener (tunneling) mechanism → lower Rz (~2–5Ω)
+    ///   - Transition region: smooth interpolation
+    ///
+    /// Empirical fit: Rz ≈ 2 + 28 / (1 + (Vz/5.5)^3)
+    /// Matches datasheet Rz values for common zeners (1N47xx series) within ±20%.
+    pub fn with_voltage(vz: f64) -> Self {
+        // Continuous Rz model: high at low Vz (avalanche), low at high Vz (zener)
+        let vz_norm = vz / 5.5; // Crossover point at ~5.5V
+        let rz = 2.0 + 28.0 / (1.0 + vz_norm * vz_norm * vz_norm);
+
+        Self {
+            vz,
+            is_fwd: 2.52e-9,
+            n_vt_fwd: 1.752 * 25.85e-3,
+            is_rev: 1e-12,
+            n_vt_rev: 0.5 * 25.85e-3, // Sharp knee
+            rz,
+        }
+    }
+
+    /// 1N4728A - 3.3V Zener (500mW)
+    pub fn z3v3() -> Self {
+        Self::with_voltage(3.3)
+    }
+
+    /// 1N4732A - 4.7V Zener (500mW)
+    pub fn z4v7() -> Self {
+        Self::with_voltage(4.7)
+    }
+
+    /// 1N4733A - 5.1V Zener (500mW) - Common in pedal circuits
+    pub fn z5v1() -> Self {
+        Self::with_voltage(5.1)
+    }
+
+    /// 1N4734A - 5.6V Zener (500mW)
+    pub fn z5v6() -> Self {
+        Self::with_voltage(5.6)
+    }
+
+    /// 1N4735A - 6.2V Zener (500mW)
+    pub fn z6v2() -> Self {
+        Self::with_voltage(6.2)
+    }
+
+    /// 1N4739A - 9.1V Zener (500mW)
+    pub fn z9v1() -> Self {
+        Self::with_voltage(9.1)
+    }
+
+    /// 1N4742A - 12V Zener (500mW)
+    pub fn z12v() -> Self {
+        Self::with_voltage(12.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Zener Diode Root
+// ---------------------------------------------------------------------------
+
+/// Zener diode at the tree root.
+///
+/// Models both forward conduction (like silicon diode) and reverse
+/// breakdown (zener/avalanche). Uses Newton-Raphson iteration.
+///
+/// Current equation:
+/// - Forward (v > 0): `i = Is_fwd * (exp(v/nVt_fwd) - 1)`
+/// - Reverse (v < -Vz): `i = -Is_rev * (exp(-(v+Vz)/nVt_rev) - 1) - (v+Vz)/Rz`
+#[derive(Debug, Clone, Copy)]
+pub struct ZenerRoot {
+    pub model: ZenerModel,
+    max_iter: usize,
+    prev_v: f64,
+}
+
+impl ZenerRoot {
+    pub fn new(model: ZenerModel) -> Self {
+        Self {
+            model,
+            max_iter: super::solver::NR_MAX_ITER,
+            prev_v: 0.0,
+        }
+    }
+
+    /// Compute zener current for given voltage.
+    #[inline]
+    pub fn current(&self, v: f64) -> f64 {
+        if v >= 0.0 {
+            // Forward bias: standard Shockley diode
+            let x = (v / self.model.n_vt_fwd).clamp(-500.0, 500.0);
+            self.model.is_fwd * (x.exp() - 1.0)
+        } else if v > -self.model.vz {
+            // Reverse bias below breakdown: small leakage
+            -self.model.is_rev
+        } else {
+            // Reverse breakdown: exponential + resistive
+            let v_excess = -v - self.model.vz; // How far past Vz
+            let x = (v_excess / self.model.n_vt_rev).clamp(-500.0, 500.0);
+            let i_breakdown = self.model.is_rev * (x.exp() - 1.0);
+            let i_resistive = v_excess / self.model.rz;
+            -(i_breakdown + i_resistive + self.model.is_rev)
+        }
+    }
+
+    /// Compute derivative of current w.r.t. voltage.
+    #[inline]
+    fn current_derivative(&self, v: f64) -> f64 {
+        if v >= 0.0 {
+            // Forward bias
+            let x = (v / self.model.n_vt_fwd).clamp(-500.0, 500.0);
+            self.model.is_fwd * x.exp() / self.model.n_vt_fwd
+        } else if v > -self.model.vz {
+            // Reverse bias below breakdown: very small conductance
+            1e-12
+        } else {
+            // Reverse breakdown
+            let v_excess = -v - self.model.vz;
+            let x = (v_excess / self.model.n_vt_rev).clamp(-500.0, 500.0);
+            let di_exp = self.model.is_rev * x.exp() / self.model.n_vt_rev;
+            let di_res = 1.0 / self.model.rz;
+            di_exp + di_res // Note: chain rule gives positive derivative
+        }
+    }
+}
+
+impl WdfRoot for ZenerRoot {
+    /// Solve for reflected wave using Newton-Raphson with warm-starting.
+    #[inline]
+    fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let root = *self;
+        let cold = if a > 0.0 {
+            (a * 0.5).min(0.7)
+        } else if a < -2.0 * self.model.vz {
+            -self.model.vz - 0.1
+        } else {
+            a * 0.5
+        };
+        // Warm-start only if prev_v is on the same side and bounded
+        let v0 = if self.prev_v != 0.0 && self.prev_v * a > 0.0 && self.prev_v.abs() < 10.0 {
+            self.prev_v
+        } else {
+            cold
+        };
+        let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+            (root.current(v), root.current_derivative(v))
+        });
+        self.prev_v = (a + b) * 0.5;
+        b
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diode Pair Root
+// ---------------------------------------------------------------------------
+
+/// Anti-parallel diode pair at the tree root.
+///
+/// Solves for the reflected wave `b` given the incident wave `a` and
+/// port resistance `Rp` using Newton-Raphson on the implicit equation
+/// derived from the Shockley model of two anti-parallel diodes.
+///
+/// Max iterations capped for real-time safety.
+#[derive(Debug, Clone, Copy)]
+pub struct DiodePairRoot {
+    pub model: DiodeModel,
+    max_iter: usize,
+    /// Previous sample's junction voltage for warm-starting Newton-Raphson.
+    /// Consecutive samples have very similar solutions, so reusing the
+    /// previous voltage as initial guess typically converges in 2-3 iterations
+    /// instead of 10-15.
+    prev_v: f64,
+}
+
+impl DiodePairRoot {
+    pub fn new(model: DiodeModel) -> Self {
+        Self {
+            model,
+            max_iter: super::solver::NR_MAX_ITER,
+            prev_v: 0.0,
+        }
+    }
+}
+
+impl WdfRoot for DiodePairRoot {
+    /// Compute reflected wave from incident wave `a` and port resistance `rp`.
+    ///
+    /// Anti-parallel diode pair with series resistance:
+    /// - Junction current: `i(v_j) = Is*(exp(v_j/nVt) - exp(-v_j/nVt))`
+    /// - Total voltage: `v = v_j + i*Rs` (each diode has Rs)
+    ///
+    /// We solve for junction voltage v_j using effective port resistance (Rp + Rs).
+    /// The solver returns b_eff = 2*v_j - a, then we correct for Rs:
+    /// b = b_eff + 2*i*Rs
+    #[inline]
+    fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let is = self.model.is;
+        let nvt = self.model.n_vt;
+        let rs = self.model.rs;
+
+        // Analytic initial guess based on incident wave.
+        let cold_guess = |a: f64, rp: f64| -> f64 {
+            if a.abs() > 10.0 * nvt {
+                let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
+                nvt * log_arg.ln() * a.signum()
+            } else {
+                a * 0.5
+            }
+        };
+
+        // Warm-start helper: use prev_v only when it's on the same side as
+        // the incident wave AND within a reasonable voltage range. This avoids
+        // solver divergence at zero-crossings and operating-point jumps while
+        // still giving fast convergence for audio-rate signals.
+        let warm_guess = |prev_v: f64, a: f64, rp: f64| -> f64 {
+            let cg = cold_guess(a, rp);
+            if prev_v != 0.0 && prev_v * a > 0.0 && prev_v.abs() < 10.0 {
+                prev_v
+            } else {
+                cg
+            }
+        };
+
+        // If no series resistance, use original fast path
+        if rs < 1e-9 {
+            let v0 = warm_guess(self.prev_v, a, rp);
+            let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+                let x = (v / nvt).clamp(-500.0, 500.0);
+                let ev_pos = x.exp();
+                let ev_neg = (-x).exp();
+                let i = is * (ev_pos - ev_neg);
+                let di = is * (ev_pos + ev_neg) / nvt;
+                (i, di)
+            });
+            self.prev_v = (a + b) * 0.5;
+            #[cfg(feature = "fault-injection")]
+            if crate::fault_injection::is_active(crate::fault_injection::Fault::WrongDiodePolarity)
+            {
+                return b + 0.01;
+            }
+            return b;
+        }
+
+        // Effective port resistance including series resistance
+        let rp_eff = rp + rs;
+
+        let v0 = warm_guess(self.prev_v, a, rp_eff);
+
+        // Solve for junction voltage with effective port resistance
+        // Solver returns b_eff = 2*v_junction - a
+        let b_eff = newton_raphson_solve(a, rp_eff, v0, self.max_iter, 1e-6, None, None, |v_j| {
+            let x = (v_j / nvt).clamp(-500.0, 500.0);
+            let ev_pos = x.exp();
+            let ev_neg = (-x).exp();
+            let i = is * (ev_pos - ev_neg);
+            let di = is * (ev_pos + ev_neg) / nvt;
+            (i, di)
+        });
+
+        // Recover junction voltage from b_eff: v_junction = (a + b_eff) / 2
+        let v_junction = (a + b_eff) * 0.5;
+        self.prev_v = v_junction;
+
+        // Compute current at junction voltage
+        let x = (v_junction / nvt).clamp(-500.0, 500.0);
+        let i = is * (x.exp() - (-x).exp());
+
+        // Correct reflected wave for series resistance
+        // b = 2*v_total - a = 2*(v_junction + i*Rs) - a = b_eff + 2*i*Rs
+        let b = b_eff + 2.0 * i * rs;
+        #[cfg(feature = "fault-injection")]
+        let b =
+            if crate::fault_injection::is_active(crate::fault_injection::Fault::WrongDiodePolarity)
+            {
+                b + 0.01
+            } else {
+                b
+            };
+        b
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single Diode Root
+// ---------------------------------------------------------------------------
+
+/// Single diode at the tree root (asymmetric clipping).
+///
+/// Solves `i_d(v) = Is*(exp(v/nVt) - 1)` via Newton-Raphson.
+#[derive(Debug, Clone, Copy)]
+pub struct DiodeRoot {
+    pub model: DiodeModel,
+    max_iter: usize,
+    prev_v: f64,
+}
+
+impl DiodeRoot {
+    pub fn new(model: DiodeModel) -> Self {
+        Self {
+            model,
+            max_iter: super::solver::NR_MAX_ITER,
+            prev_v: 0.0,
+        }
+    }
+}
+
+impl WdfRoot for DiodeRoot {
+    /// Single diode with series resistance and warm-starting.
+    #[inline]
+    fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let is = self.model.is;
+        let nvt = self.model.n_vt;
+        let rs = self.model.rs;
+
+        let cold_guess = |a: f64, rp: f64| -> f64 {
+            if a > 10.0 * nvt {
+                let log_arg = (a / (2.0 * rp * is)).max(1.0);
+                nvt * log_arg.ln()
+            } else {
+                a * 0.5
+            }
+        };
+
+        // Warm-start: use prev_v only when reasonable (same sign, bounded magnitude).
+        let warm_guess = |prev_v: f64, a: f64, rp: f64| -> f64 {
+            let cg = cold_guess(a, rp);
+            if prev_v != 0.0 && prev_v * a > 0.0 && prev_v.abs() < 10.0 {
+                prev_v
+            } else {
+                cg
+            }
+        };
+
+        // If no series resistance, use original fast path
+        if rs < 1e-9 {
+            let v0 = warm_guess(self.prev_v, a, rp);
+            let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+                let x = (v / nvt).clamp(-500.0, 500.0);
+                let ev = x.exp();
+                let i = is * (ev - 1.0);
+                let di = is * ev / nvt;
+                (i, di)
+            });
+            self.prev_v = (a + b) * 0.5;
+            return b;
+        }
+
+        // Effective port resistance including series resistance
+        let rp_eff = rp + rs;
+
+        let v0 = warm_guess(self.prev_v, a, rp_eff);
+
+        // Solve for junction voltage with effective port resistance
+        let b_eff = newton_raphson_solve(a, rp_eff, v0, self.max_iter, 1e-6, None, None, |v_j| {
+            let x = (v_j / nvt).clamp(-500.0, 500.0);
+            let ev = x.exp();
+            let i = is * (ev - 1.0);
+            let di = is * ev / nvt;
+            (i, di)
+        });
+
+        let v_junction = (a + b_eff) * 0.5;
+        self.prev_v = v_junction;
+
+        let x = (v_junction / nvt).clamp(-500.0, 500.0);
+        let i = is * (x.exp() - 1.0);
+
+        b_eff + 2.0 * i * rs
+    }
+}
+
+impl NlDeviceIv for DiodeRoot {
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        let is = self.model.is;
+        let nvt = self.model.n_vt;
+        let x = (v / nvt).clamp(-500.0, 500.0);
+        let ev = x.exp();
+        let i = is * (ev - 1.0);
+        let di = is * ev / nvt;
+        (i, di)
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-5.0, 5.0)
+    }
+}
+
+impl NlDeviceIv for DiodePairRoot {
+    /// Anti-parallel diode pair I-V: I = Is*(e^(V/nVt) - e^(-V/nVt)) = 2*Is*sinh(V/nVt)
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        let is = self.model.is;
+        let nvt = self.model.n_vt;
+        let x = (v / nvt).clamp(-500.0, 500.0);
+        let ev_pos = x.exp();
+        let ev_neg = (-x).exp();
+        let i = is * (ev_pos - ev_neg);
+        #[cfg(feature = "fault-injection")]
+        let i =
+            if crate::fault_injection::is_active(crate::fault_injection::Fault::WrongDiodePolarity)
+            {
+                i + 1e-3
+            } else {
+                i
+            };
+        let di = is * (ev_pos + ev_neg) / nvt;
+        (i, di)
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-5.0, 5.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Explicit (Wright Omega) Diode Pair Root
+// ---------------------------------------------------------------------------
+
+/// Anti-parallel diode pair WDF root using the explicit Wright Omega solver.
+///
+/// Produces the same I-V characteristic as [`DiodePairRoot`] but computes
+/// the reflected wave in closed form — no Newton-Raphson iteration.
+///
+/// The explicit solver is `O(1)` and branch-free (two Wright Omega evaluations
+/// plus one Halley step each), making it ~4–6× faster than the NR solver for
+/// typical audio signals.
+#[derive(Debug, Clone, Copy)]
+pub struct ExplicitDiodePairRoot {
+    /// Diode model parameters (Is, nVt, Rs).
+    pub model: DiodeModel,
+}
+
+impl ExplicitDiodePairRoot {
+    /// Create a new explicit diode pair root from a `DiodeModel`.
+    pub fn new(model: DiodeModel) -> Self {
+        Self { model }
+    }
+}
+
+impl WdfRoot for ExplicitDiodePairRoot {
+    #[inline]
+    fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let is = self.model.is;
+        let nvt = self.model.n_vt;
+        let rs = self.model.rs;
+
+        if rs < 1e-9 {
+            return explicit_diode_pair(a, rp, is, nvt);
+        }
+
+        // Series resistance: solve at effective port resistance,
+        // then correct reflected wave by 2·i·Rs (same as NR path).
+        let rp_eff = rp + rs;
+        let b_eff = explicit_diode_pair(a, rp_eff, is, nvt);
+        let v_junction = (a + b_eff) * 0.5;
+        let x = (v_junction / nvt).clamp(-500.0, 500.0);
+        let i = is * (x.exp() - (-x).exp());
+        b_eff + 2.0 * i * rs
+    }
+}
+
+impl NlDeviceIv for ExplicitDiodePairRoot {
+    /// Anti-parallel diode pair I-V: I = Is·(e^(V/nVt) - e^(-V/nVt))
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        let is = self.model.is;
+        let nvt = self.model.n_vt;
+        let x = (v / nvt).clamp(-500.0, 500.0);
+        let ev_pos = x.exp();
+        let ev_neg = (-x).exp();
+        let i = is * (ev_pos - ev_neg);
+        let di = is * (ev_pos + ev_neg) / nvt;
+        (i, di)
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-5.0, 5.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Explicit (Wright Omega) Single Diode Root
+// ---------------------------------------------------------------------------
+
+/// Single diode WDF root using the explicit Wright Omega solver.
+///
+/// Produces the same I-V characteristic as [`DiodeRoot`] but computes
+/// the reflected wave in closed form — no Newton-Raphson iteration.
+#[derive(Debug, Clone, Copy)]
+pub struct ExplicitDiodeRoot {
+    /// Diode model parameters (Is, nVt, Rs).
+    pub model: DiodeModel,
+}
+
+impl ExplicitDiodeRoot {
+    /// Create a new explicit single diode root from a `DiodeModel`.
+    pub fn new(model: DiodeModel) -> Self {
+        Self { model }
+    }
+}
+
+impl WdfRoot for ExplicitDiodeRoot {
+    #[inline]
+    fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let is = self.model.is;
+        let nvt = self.model.n_vt;
+        let rs = self.model.rs;
+
+        if rs < 1e-9 {
+            return explicit_single_diode(a, rp, is, nvt);
+        }
+
+        let rp_eff = rp + rs;
+        let b_eff = explicit_single_diode(a, rp_eff, is, nvt);
+        let v_junction = (a + b_eff) * 0.5;
+        let x = (v_junction / nvt).clamp(-500.0, 500.0);
+        let i = is * (x.exp() - 1.0);
+        b_eff + 2.0 * i * rs
+    }
+}
+
+impl NlDeviceIv for ExplicitDiodeRoot {
+    /// Single diode I-V: I = Is·(e^(V/nVt) - 1)
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        let is = self.model.is;
+        let nvt = self.model.n_vt;
+        let x = (v / nvt).clamp(-500.0, 500.0);
+        let ev = x.exp();
+        let i = is * (ev - 1.0);
+        let di = is * ev / nvt;
+        (i, di)
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-5.0, 5.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, DISABLED_tests_in_pedalkernel))]
+mod tests {
+    use super::*;
+    use crate::elements::WdfRoot;
+
+    // ── Wright Omega known-value tests ──────────────────────────────────────
+
+    #[test]
+    fn wright_omega_zero() {
+        // ω(0) is the omega constant ≈ 0.56714329
+        let w = wright_omega(0.0);
+        assert!(
+            (w - 0.5671_4329).abs() < 1e-6,
+            "wright_omega(0) = {w}, expected ≈ 0.56714329"
+        );
+    }
+
+    #[test]
+    fn wright_omega_one() {
+        // ω(1): satisfies ω + ln(ω) = 1, numerically ≈ 1.0 (close but not exactly 1)
+        let w = wright_omega(1.0);
+        // Verify the defining equation: ω + ln(ω) ≈ 1
+        let residual = w + w.ln() - 1.0;
+        assert!(
+            residual.abs() < 1e-10,
+            "wright_omega(1): ω + ln(ω) residual = {residual}"
+        );
+    }
+
+    #[test]
+    fn wright_omega_minus_one() {
+        // ω(-1) ≈ 0.27846
+        let w = wright_omega(-1.0);
+        let residual = w + w.ln() - (-1.0);
+        assert!(
+            residual.abs() < 1e-10,
+            "wright_omega(-1): ω + ln(ω) residual = {residual}"
+        );
+        // Rough range check
+        assert!(
+            (w - 0.2785).abs() < 1e-3,
+            "wright_omega(-1) = {w}, expected ≈ 0.2785"
+        );
+    }
+
+    #[test]
+    fn wright_omega_large_positive() {
+        // For large x, ω ≈ x - ln(x). Verify defining equation still holds.
+        for x in [10.0_f64, 20.0, 50.0, 100.0] {
+            let w = wright_omega(x);
+            let residual = w + w.ln() - x;
+            assert!(
+                residual.abs() < 1e-8,
+                "wright_omega({x}): residual = {residual}"
+            );
+        }
+    }
+
+    #[test]
+    fn wright_omega_very_negative() {
+        // x << -33: ω → 0
+        let w = wright_omega(-100.0);
+        assert!(w < 1e-10, "wright_omega(-100) should be near 0, got {w}");
+    }
+
+    // ── Explicit diode pair vs NR ───────────────────────────────────────────
+
+    fn nr_diode_pair_b(a: f64, rp: f64, model: DiodeModel) -> f64 {
+        let mut root = DiodePairRoot::new(model);
+        root.process(a, rp)
+    }
+
+    fn explicit_diode_pair_b(a: f64, rp: f64, model: DiodeModel) -> f64 {
+        let mut root = ExplicitDiodePairRoot::new(model);
+        root.process(a, rp)
+    }
+
+    #[test]
+    fn explicit_diode_pair_matches_nr() {
+        let model = DiodeModel::silicon();
+        let rp_values = [100.0, 1000.0, 10_000.0, 47_000.0];
+        let a_values = [-1.0, -0.5, -0.1, 0.0, 0.1, 0.5, 1.0];
+
+        for rp in rp_values {
+            for a in a_values {
+                let b_nr = nr_diode_pair_b(a, rp, model);
+                let b_ex = explicit_diode_pair_b(a, rp, model);
+                let err = (b_nr - b_ex).abs();
+                assert!(
+                    err < 1e-6,
+                    "DiodePair a={a} rp={rp}: NR={b_nr:.9}, explicit={b_ex:.9}, diff={err:.2e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_diode_pair_matches_nr_germanium() {
+        let model = DiodeModel::germanium();
+        let rp = 4700.0;
+        for a in [-0.5_f64, -0.2, 0.0, 0.2, 0.5] {
+            let b_nr = nr_diode_pair_b(a, rp, model);
+            let b_ex = explicit_diode_pair_b(a, rp, model);
+            let err = (b_nr - b_ex).abs();
+            assert!(
+                err < 1e-5,
+                "Germanium a={a}: NR={b_nr:.9}, explicit={b_ex:.9}, diff={err:.2e}"
+            );
+        }
+    }
+
+    // ── Explicit single diode vs NR ─────────────────────────────────────────
+
+    fn nr_single_diode_b(a: f64, rp: f64, model: DiodeModel) -> f64 {
+        let mut root = DiodeRoot::new(model);
+        root.process(a, rp)
+    }
+
+    fn explicit_single_diode_b(a: f64, rp: f64, model: DiodeModel) -> f64 {
+        let mut root = ExplicitDiodeRoot::new(model);
+        root.process(a, rp)
+    }
+
+    #[test]
+    fn explicit_single_diode_matches_nr() {
+        let model = DiodeModel::silicon();
+        let rp_values = [100.0, 1000.0, 10_000.0, 47_000.0];
+        // Single diode only conducts in forward direction; use positive a
+        let a_values = [0.0_f64, 0.05, 0.1, 0.3, 0.5, 0.8, 1.0];
+
+        for rp in rp_values {
+            for a in a_values {
+                let b_nr = nr_single_diode_b(a, rp, model);
+                let b_ex = explicit_single_diode_b(a, rp, model);
+                let err = (b_nr - b_ex).abs();
+                assert!(
+                    err < 1e-5,
+                    "SingleDiode a={a} rp={rp}: NR={b_nr:.9}, explicit={b_ex:.9}, diff={err:.2e}"
+                );
+            }
+        }
+    }
+}

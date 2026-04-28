@@ -44,3 +44,9 @@ pub mod metering;
 
 // ── Thermal drift (temperature-dependent component behavior) ────────────
 pub mod thermal;
+
+// ── WDF circuit elements (leaf, root, modulator, controlled) ────────────
+pub mod elements;
+
+// ── WDF tree adaptors and MNA system ────────────────────────────────────
+pub mod tree;
