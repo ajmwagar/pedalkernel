@@ -59,7 +59,7 @@ impl Component for OpAmp {
         if self.op_type.is_ota() {
             return Vec::new(); // OTA non-idealities handled differently
         }
-        let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
+        let model = crate::model_lookup::opamp_model_from_type(&self.op_type);
         vec![
             NonIdealFx::OpAmpBandwidth {
                 gbw: model.gbw,
@@ -170,7 +170,7 @@ impl Component for OpAmp {
         if self.op_type.is_ota() {
             return StampResult::Skip;
         }
-        let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
+        let model = crate::model_lookup::opamp_model_from_type(&self.op_type);
         let ro = model.output_impedance;
 
         let aol = model.open_loop_gain;

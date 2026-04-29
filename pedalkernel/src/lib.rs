@@ -201,6 +201,7 @@ pub mod hw;
 pub mod kicad;
 pub mod loading;
 pub mod metering;
+pub mod model_lookup;
 pub mod models;
 pub mod nonideal_fx;
 pub mod oversampling;

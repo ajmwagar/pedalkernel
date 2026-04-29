@@ -361,7 +361,7 @@ impl Component for NJfet {
     }
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
-        let model = JfetModel::by_name(&self.model);
+        let model = crate::model_lookup::jfet_model_by_name(&self.model);
         Some(DynNode::JfetVrNode(
             comp_id.to_string(),
             JfetVariableResistor::new(model),
@@ -520,7 +520,7 @@ impl Component for PJfet {
     }
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
-        let model = JfetModel::by_name(&self.model);
+        let model = crate::model_lookup::jfet_model_by_name(&self.model);
         Some(DynNode::JfetVrNode(
             comp_id.to_string(),
             JfetVariableResistor::new(model),

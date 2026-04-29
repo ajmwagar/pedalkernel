@@ -2,6 +2,7 @@
 
 use crate::dsl::*;
 use crate::elements::*;
+use crate::model_lookup;
 
 use super::dyn_node::{BinaryKind, DynNode};
 
@@ -15,21 +16,21 @@ pub(super) fn diode_model(dt: DiodeType) -> DiodeModel {
 }
 
 pub(super) fn jfet_model(name: &str, is_n_channel: bool) -> JfetModel {
-    let model = JfetModel::by_name(name);
+    let model = model_lookup::jfet_model_by_name(name);
     // Handle polarity mismatch: if DSL says N-channel but model is P-channel
     if is_n_channel != model.is_n_channel {
-        JfetModel::by_name("2N5457")
+        model_lookup::jfet_model_by_name("2N5457")
     } else {
         model
     }
 }
 
 pub(super) fn triode_model(name: &str) -> TriodeModel {
-    TriodeModel::by_name(name)
+    model_lookup::triode_model_by_name(name)
 }
 
 pub(super) fn pentode_model(name: &str) -> PentodeModel {
-    PentodeModel::by_name(name)
+    model_lookup::pentode_model_by_name(name)
 }
 
 pub(super) fn vari_mu_model(name: &str) -> VariMuModel {
@@ -38,7 +39,7 @@ pub(super) fn vari_mu_model(name: &str) -> VariMuModel {
 
 /// Look up a Gummel-Poon BJT model by name from the embedded SPICE model library.
 pub(super) fn gummel_poon_model(name: &str) -> GummelPoonModel {
-    GummelPoonModel::by_name(name)
+    model_lookup::bjt_model_by_name(name)
 }
 
 pub(super) fn mosfet_model(mt: MosfetType, is_n_channel: bool) -> MosfetModel {

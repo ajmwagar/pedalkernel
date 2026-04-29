@@ -39,7 +39,7 @@ pub(in crate::compiler) fn extract_opamp_config(
         .kind
         .op_amp_type()
         .ok_or("VCVS component has no op_amp_type")?;
-    let model = OpAmpModel::from_opamp_type(&op_type);
+    let model = crate::model_lookup::opamp_model_from_type(&op_type);
 
     // Compute Rf and Ri from feedback edges.
     // For non-inverting: edges in the ground-return path are Ri (ground leg).
