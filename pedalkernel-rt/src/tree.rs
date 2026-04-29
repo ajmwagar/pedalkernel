@@ -224,7 +224,7 @@ impl RTypeAdaptor {
             "Scattering matrix must be {n}×{n}"
         );
 
-        let sqrt_r: Vec<f64> = port_resistances.iter().map(|r| r.sqrt()).collect();
+        let sqrt_r: Vec<f64> = port_resistances.iter().map(|r| crate::math::sqrt(*r)).collect();
         let inv_sqrt_r: Vec<f64> = sqrt_r.iter().map(|sr| 1.0 / sr).collect();
 
         // Compute power-normalized scattering: S̅[i][j] = S[i][j] * √(R_j / R_i)
@@ -320,11 +320,11 @@ impl RTypeAdaptor {
         // Approximate scattering for 3-winding (assuming loose coupling model)
         // These coefficients route waves through the transformer correctly
         let s11 = 2.0 * alpha - 1.0;
-        let s12 = 2.0 * (alpha * beta).sqrt();
-        let s13 = n12 * 2.0 * alpha.sqrt() * (1.0 - alpha).max(0.0).sqrt();
+        let s12 = 2.0 * crate::math::sqrt(alpha * beta);
+        let s13 = n12 * 2.0 * crate::math::sqrt(alpha) * crate::math::sqrt((1.0 - alpha).max(0.0));
         let s21 = s12;
         let s22 = 2.0 * beta - 1.0;
-        let s23 = n13 * 2.0 * beta.sqrt() * (1.0 - beta).max(0.0).sqrt();
+        let s23 = n13 * 2.0 * crate::math::sqrt(beta) * crate::math::sqrt((1.0 - beta).max(0.0));
         let s31 = n12;
         let s32 = n13;
         let s33 = 0.0; // Adapted
@@ -1387,7 +1387,7 @@ impl MnaSystem {
             for i in 0..n_aug {
                 for j in 0..n_aug { w[i] += a_d[i * n_aug + j] * v[j]; }
             }
-            let norm: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+            let norm: f64 = crate::math::sqrt(w.iter().map(|x| x * x).sum::<f64>());
             if norm > 1e-15 {
                 for x in &mut w { *x /= norm; }
             }
@@ -1427,9 +1427,9 @@ impl MnaSystem {
             let gain = if r_in < f64::MAX { rf / r_in } else { 1.0 };
 
             // Audio EQ Cookbook BPF (constant 0dB peak)
-            let w0 = 2.0 * std::f64::consts::PI * f0 / sample_rate;
-            let sin_w0 = w0.sin();
-            let cos_w0 = w0.cos();
+            let w0 = 2.0 * crate::math::PI * f0 / sample_rate;
+            let sin_w0 = crate::math::sin(w0);
+            let cos_w0 = crate::math::cos(w0);
             let alpha = sin_w0 / (2.0 * q);
 
             let b0 = alpha * gain;
@@ -2095,7 +2095,7 @@ fn invert_matrix_equilibrated(matrix: &[f64], n: usize) -> Vec<f64> {
             row_max = row_max.max(matrix[i * n + j].abs());
         }
         if row_max > 1e-30 {
-            d[i] = 1.0 / row_max.sqrt();
+            d[i] = 1.0 / crate::math::sqrt(row_max);
         }
     }
 
@@ -2164,8 +2164,8 @@ impl ScatteringInterpolationTable {
     ) -> Self {
         let n_ports = ports.len();
         let n_mna = mna.num_nodes;
-        let log_min = r_min.ln();
-        let log_max = r_max.ln();
+        let log_min = crate::math::ln(r_min);
+        let log_max = crate::math::ln(r_max);
 
         let mut resistances = Vec::with_capacity(k);
         let mut scattering_matrices = Vec::with_capacity(k);
@@ -2183,7 +2183,7 @@ impl ScatteringInterpolationTable {
             } else {
                 0.5
             };
-            let r = (log_min + t * (log_max - log_min)).exp();
+            let r = crate::math::exp(log_min + t * (log_max - log_min));
             let g = 1.0 / r;
 
             // Delta-update: remove previous conductance, add new
@@ -2228,9 +2228,9 @@ impl ScatteringInterpolationTable {
     /// in log-resistance space. Returns (scattering, vs_injection).
     pub fn lookup(&self, pot_resistance: f64) -> (Vec<f64>, Vec<f64>) {
         let k = self.resistances.len();
-        let log_r = pot_resistance.ln();
-        let log_min = self.resistances[0].ln();
-        let log_max = self.resistances[k - 1].ln();
+        let log_r = crate::math::ln(pot_resistance);
+        let log_min = crate::math::ln(self.resistances[0]);
+        let log_max = crate::math::ln(self.resistances[k - 1]);
 
         // Normalized position in [0, 1]
         let t = if log_max > log_min {
@@ -2241,7 +2241,7 @@ impl ScatteringInterpolationTable {
 
         // Map to table index
         let idx_f = t * (k - 1) as f64;
-        let lo = (idx_f.floor() as usize).min(k - 2);
+        let lo = (crate::math::floor(idx_f) as usize).min(k - 2);
         let hi = lo + 1;
         let frac = idx_f - lo as f64;
 
@@ -2988,7 +2988,7 @@ mod tests {
         let n_samples = (fs * 0.5) as usize;
         let mut input = vec![0.0; n_samples];
         for i in 0..n_samples {
-            input[i] = (2.0 * std::f64::consts::PI * 100.0 * i as f64 / fs).sin();
+            input[i] = crate::math::sin(2.0 * crate::math::PI * 100.0 * i as f64 / fs);
         }
 
         let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
@@ -3030,7 +3030,7 @@ mod tests {
         let n_samples = (fs * 0.25) as usize;
         let mut input = vec![0.0; n_samples];
         for i in 0..n_samples {
-            input[i] = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / fs).sin();
+            input[i] = crate::math::sin(2.0 * crate::math::PI * 440.0 * i as f64 / fs);
         }
         let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
 
@@ -3066,7 +3066,7 @@ mod tests {
         let n_samples = (fs * 0.5) as usize;
         let mut input = vec![0.0; n_samples];
         for i in 0..n_samples {
-            input[i] = 0.1 * (2.0 * std::f64::consts::PI * 200.0 * i as f64 / fs).sin();
+            input[i] = 0.1 * crate::math::sin(2.0 * crate::math::PI * 200.0 * i as f64 / fs);
         }
         let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
 
@@ -3108,7 +3108,7 @@ mod tests {
             let n_samples = (fs * 0.25) as usize;
             let mut input = vec![0.0; n_samples];
             for i in 0..n_samples {
-                input[i] = 0.01 * (2.0 * std::f64::consts::PI * freq * i as f64 / fs).sin();
+                input[i] = 0.01 * crate::math::sin(2.0 * crate::math::PI * freq * i as f64 / fs);
             }
             let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
             let start = n_samples * 3 / 4;
@@ -3207,7 +3207,7 @@ mod tests {
         let mut max_out = 0.0_f64;
         for i in 0..48000 {
             let t = i as f64 / 48000.0;
-            let input = 5.0 * (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            let input = 5.0 * crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             let out = c.process(input);
             max_out = max_out.max(out.abs());
         }
@@ -3226,7 +3226,7 @@ mod tests {
         let mut max_out = 0.0_f64;
         for i in 0..4800 {
             let t = i as f64 / 48000.0;
-            let input = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            let input = 0.5 * crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             let out = c.process(input);
             max_out = max_out.max(out.abs());
         }
@@ -3714,13 +3714,13 @@ mod tests {
         let det = a[0] * a[3] - a[1] * a[2]; // determinant
         let disc = tr * tr - 4.0 * det;
         if disc >= 0.0 {
-            let sq = disc.sqrt();
+            let sq = crate::math::sqrt(disc);
             (
                 Complex64::new((tr + sq) / 2.0, 0.0),
                 Complex64::new((tr - sq) / 2.0, 0.0),
             )
         } else {
-            let sq = (-disc).sqrt();
+            let sq = crate::math::sqrt(-disc);
             (
                 Complex64::new(tr / 2.0, sq / 2.0),
                 Complex64::new(tr / 2.0, -sq / 2.0),
@@ -3805,7 +3805,7 @@ mod tests {
     /// Must produce complex eigenvalues near 130 Hz.
     #[test]
     fn state_space_bridged_t_has_complex_poles_at_130hz() {
-        use std::f64::consts::PI;
+        use crate::math::PI;
 
         let r1 = 150_000.0;
         let r2 = 150_000.0;
@@ -3819,7 +3819,7 @@ mod tests {
         let fs = 48000.0;
 
         let rc_product: f64 = r1 * r2 * c1 * c2;
-        let f0_target = 1.0 / (2.0 * PI * rc_product.sqrt());
+        let f0_target = 1.0 / (2.0 * PI * crate::math::sqrt(rc_product));
         eprintln!("Target f0 = {f0_target:.1} Hz");
 
         // MNA: 5 nodes + 2 VS (VCVS + input)

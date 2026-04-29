@@ -3,7 +3,7 @@
 //! These are audio-rate synthesis building blocks modeled after classic
 //! synth ICs (CEM3340, CEM3320, SSM2164).
 
-use std::f64::consts::PI;
+use crate::math::PI;
 
 // ---------------------------------------------------------------------------
 // VCO (Voltage-Controlled Oscillator)
@@ -69,7 +69,7 @@ impl Vco {
     #[inline]
     pub fn set_cv_pitch(&mut self, cv: f64) {
         // 1V/octave: frequency = base_freq * 2^cv
-        self.frequency = self.base_freq * (2.0_f64).powf(cv);
+        self.frequency = self.base_freq * crate::math::powf(2.0_f64, cv);
         self.phase_inc = self.frequency / self.sample_rate;
     }
 
@@ -135,7 +135,7 @@ impl Vco {
         // PolyBLEP at rising edge (phase = 0)
         pulse += self.poly_blep(self.phase);
         // PolyBLEP at falling edge (phase = pulse_width)
-        let pw_phase = (self.phase - self.pulse_width).rem_euclid(1.0);
+        let pw_phase = crate::math::rem_euclid(self.phase - self.pulse_width, 1.0);
         pulse -= self.poly_blep(pw_phase);
 
         // Store outputs
@@ -223,14 +223,14 @@ impl Vcf {
         // Simplified coefficient calculation
         // g = tan(pi * fc / fs) for proper frequency warping
         let fc = self.cutoff.clamp(20.0, self.sample_rate * 0.45);
-        self.g = (PI * fc / self.sample_rate).tan();
+        self.g = crate::math::tan(PI * fc / self.sample_rate);
     }
 
     /// Set cutoff frequency via CV (1V/octave from 1kHz base).
     #[inline]
     pub fn set_cv_cutoff(&mut self, cv: f64) {
         // 1V/octave: cutoff = 1000 * 2^cv
-        self.cutoff = 1000.0 * (2.0_f64).powf(cv);
+        self.cutoff = 1000.0 * crate::math::powf(2.0_f64, cv);
         self.cutoff = self.cutoff.clamp(20.0, 20000.0);
         self.update_coefficients();
     }
@@ -258,7 +258,7 @@ impl Vcf {
         let feedback = self.resonance * 4.0 * self.stage[3];
 
         // Input with resonance feedback, saturated
-        let x = (input - feedback).tanh();
+        let x = crate::math::tanh(input - feedback);
 
         // 4-pole ladder: each stage is a one-pole lowpass
         // y[n] = g * (x[n] - y[n-1]) + y[n-1]
@@ -323,7 +323,7 @@ impl Vca {
         // Exponential: gain = 10^(cv * dB_per_volt / 20)
         // For SSM2164: -5V = -100dB (effectively off)
         let db = cv * self.db_per_volt;
-        self.gain = (10.0_f64).powf(db / 20.0).clamp(0.0, 10.0);
+        self.gain = crate::math::powf(10.0_f64, db / 20.0).clamp(0.0, 10.0);
     }
 
     /// Set gain directly (0.0 - 1.0+).
@@ -342,7 +342,7 @@ impl Vca {
         // Apply gain with soft saturation
         let output = input * self.gain;
         // Soft clip at high levels
-        output.tanh()
+        crate::math::tanh(output)
     }
 
     /// Reset VCA state.
@@ -421,9 +421,9 @@ impl AdsrEnvelope {
     /// Update coefficients from time values.
     fn update_coefficients(&mut self) {
         // Time constant: coef = exp(-1 / (time * sample_rate))
-        self.attack_coef = (-1.0 / (self.attack.max(0.001) * self.sample_rate)).exp();
-        self.decay_coef = (-1.0 / (self.decay.max(0.001) * self.sample_rate)).exp();
-        self.release_coef = (-1.0 / (self.release.max(0.001) * self.sample_rate)).exp();
+        self.attack_coef = crate::math::exp(-1.0 / (self.attack.max(0.001) * self.sample_rate));
+        self.decay_coef = crate::math::exp(-1.0 / (self.decay.max(0.001) * self.sample_rate));
+        self.release_coef = crate::math::exp(-1.0 / (self.release.max(0.001) * self.sample_rate));
     }
 
     /// Set attack time in seconds.
@@ -611,7 +611,7 @@ impl SynthProcessor {
     /// Set note on with MIDI note number.
     pub fn note_on(&mut self, midi_note: u8, _velocity: u8) {
         // Convert MIDI note to frequency: f = 440 * 2^((n-69)/12)
-        self.note_freq = 440.0 * (2.0_f64).powf((midi_note as f64 - 69.0) / 12.0);
+        self.note_freq = 440.0 * crate::math::powf(2.0_f64, (midi_note as f64 - 69.0) / 12.0);
         self.vco.set_base_freq(self.note_freq);
         self.vco.set_cv_pitch(0.0); // Reset CV offset
         self.gate = true;
@@ -714,7 +714,7 @@ impl SynthProcessor {
         let filter_env_val = self.filter_env.tick();
         // Modulate filter cutoff: base_cutoff * 2^(env * amount)
         let cutoff =
-            self.filter_base_cutoff * (2.0_f64).powf(filter_env_val * self.filter_env_amount);
+            self.filter_base_cutoff * crate::math::powf(2.0_f64, filter_env_val * self.filter_env_amount);
         self.vcf.set_cutoff(cutoff);
 
         // Filter the oscillator
@@ -737,7 +737,7 @@ impl SynthProcessor {
         // For audio input mode, just apply filter and envelope
         let filter_env_val = self.filter_env.tick();
         let cutoff =
-            self.filter_base_cutoff * (2.0_f64).powf(filter_env_val * self.filter_env_amount);
+            self.filter_base_cutoff * crate::math::powf(2.0_f64, filter_env_val * self.filter_env_amount);
         self.vcf.set_cutoff(cutoff);
 
         let filtered = self.vcf.process(input);
@@ -772,7 +772,7 @@ impl SynthProcessor {
         match label.to_ascii_lowercase().as_str() {
             "cutoff" | "filter" => {
                 // Map 0-1 to 20Hz - 20kHz (exponential)
-                let freq = 20.0 * (1000.0_f64).powf(value);
+                let freq = 20.0 * crate::math::powf(1000.0_f64, value);
                 self.set_filter_cutoff(freq);
             }
             "resonance" | "res" | "q" => {
@@ -780,18 +780,18 @@ impl SynthProcessor {
             }
             "attack" => {
                 // Map 0-1 to 1ms - 2s (exponential)
-                let time = 0.001 * (2000.0_f64).powf(value);
+                let time = 0.001 * crate::math::powf(2000.0_f64, value);
                 self.set_attack(time);
             }
             "decay" => {
-                let time = 0.001 * (2000.0_f64).powf(value);
+                let time = 0.001 * crate::math::powf(2000.0_f64, value);
                 self.set_decay(time);
             }
             "sustain" => {
                 self.set_sustain(value);
             }
             "release" => {
-                let time = 0.001 * (5000.0_f64).powf(value);
+                let time = 0.001 * crate::math::powf(5000.0_f64, value);
                 self.set_release(time);
             }
             "level" | "volume" | "output" => {
@@ -875,7 +875,7 @@ mod tests {
         // High frequency input should be attenuated
         let mut output_sum = 0.0;
         for i in 0..1000 {
-            let input = (i as f64 * 0.5).sin(); // ~3.8kHz at 48kHz
+            let input = crate::math::sin(i as f64 * 0.5); // ~3.8kHz at 48kHz
             output_sum += vcf.process(input).abs();
         }
 
@@ -892,11 +892,11 @@ mod tests {
 
         // Unity gain
         vca.set_gain(1.0);
-        assert!((vca.process(0.5) - 0.5_f64.tanh()).abs() < 0.01);
+        assert!((vca.process(0.5) - crate::math::tanh(0.5_f64)).abs() < 0.01);
 
         // Half gain
         vca.set_gain(0.5);
-        assert!((vca.process(1.0) - 0.5_f64.tanh()).abs() < 0.01);
+        assert!((vca.process(1.0) - crate::math::tanh(0.5_f64)).abs() < 0.01);
     }
 
     #[test]

@@ -348,7 +348,7 @@ impl OpAmpRoot {
         if f_cl >= sample_rate * 0.5 {
             1.0 // Bandwidth exceeds Nyquist — no filtering needed
         } else {
-            1.0 - (-std::f64::consts::TAU * f_cl / sample_rate).exp()
+            1.0 - crate::math::exp(-crate::math::TAU * f_cl / sample_rate)
         }
     }
 
@@ -667,7 +667,7 @@ impl WdfRoot for OpAmpRoot {
 
         // Apply soft clipping if feedback diodes present
         if let Some(vd) = self.soft_clip_v {
-            v_out = vd * (v_out / vd).tanh();
+            v_out = vd * crate::math::tanh(v_out / vd);
         }
 
         // Hard clip at supply rails (asymmetric)
@@ -732,12 +732,12 @@ mod tests {
 
         let measure = |root: &mut OpAmpRoot| {
             for s in 0..500 {
-                let v = 0.001 * (std::f64::consts::TAU * freq * s as f64 / sr).sin();
+                let v = 0.001 * crate::math::sin(crate::math::TAU * freq * s as f64 / sr);
                 drive(root, 2.0 * v);
             }
             let mut peak = 0.0f64;
             for s in 500..600 {
-                let v = 0.001 * (std::f64::consts::TAU * freq * (500 + s) as f64 / sr).sin();
+                let v = 0.001 * crate::math::sin(crate::math::TAU * freq * (500 + s) as f64 / sr);
                 peak = peak.max(drive(root, 2.0 * v).abs());
             }
             peak

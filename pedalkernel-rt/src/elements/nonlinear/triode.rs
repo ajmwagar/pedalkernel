@@ -158,7 +158,7 @@ impl TriodeRoot {
         }
 
         // Koren model: E1 = Kp * (1/mu + Vgk / sqrt(Kvb + Vpk^2))
-        let e1 = kp * (1.0 / mu + vgk / (kvb + vpk * vpk).sqrt());
+        let e1 = kp * (1.0 / mu + vgk / crate::math::sqrt(kvb + vpk * vpk));
 
         // Softplus: ln(1 + exp(E1)) — handles cutoff (E1 << 0) and
         // saturation (E1 >> 0) numerically stably.
@@ -174,7 +174,7 @@ impl TriodeRoot {
         }
 
         // Ip = base^Ex / KG1, scaled by parallel_count for N tubes in parallel.
-        (base.powf(ex) / self.model.kg1) * self.parallel_count as f64
+        (crate::math::powf(base, ex) / self.model.kg1) * self.parallel_count as f64
     }
 
     /// Compute derivative of plate current w.r.t. Vpk for Newton-Raphson.
@@ -191,7 +191,7 @@ impl TriodeRoot {
         }
 
         let vpk_sq = vpk * vpk;
-        let sqrt_term = (kvb + vpk_sq).sqrt();
+        let sqrt_term = crate::math::sqrt(kvb + vpk_sq);
         let e1 = kp * (1.0 / mu + vgk / sqrt_term);
 
         let ln_term = softplus(e1);
@@ -206,7 +206,7 @@ impl TriodeRoot {
         } else if e1 < -50.0 {
             0.0
         } else {
-            let exp_e1 = e1.exp();
+            let exp_e1 = crate::math::exp(e1);
             exp_e1 / (1.0 + exp_e1)
         };
 
@@ -226,7 +226,7 @@ impl TriodeRoot {
 
         // d(base^Ex / KG1)/dVpk = Ex * base^(Ex-1) * dbase_dvpk / KG1
         // Scale by parallel_count to match plate_current() scaling.
-        (ex * base.powf(ex - 1.0) * dbase_dvpk / self.model.kg1) * self.parallel_count as f64
+        (ex * crate::math::powf(base, ex - 1.0) * dbase_dvpk / self.model.kg1) * self.parallel_count as f64
     }
 }
 
@@ -350,7 +350,7 @@ impl TriodeThreePort {
     #[inline]
     fn grid_iv(&self, vgk: f64) -> (f64, f64) {
         let x = (vgk / self.grid_vt).clamp(-500.0, 500.0);
-        let ev = x.exp();
+        let ev = crate::math::exp(x);
         let ig = self.grid_is * (ev - 1.0) * self.parallel_count as f64;
         let dig = self.grid_is * ev / self.grid_vt * self.parallel_count as f64;
         (ig, dig)
@@ -368,7 +368,7 @@ impl TriodeThreePort {
         }
 
         let vpk_sq = vpk * vpk;
-        let sqrt_term = (m.kvb + vpk_sq).sqrt();
+        let sqrt_term = crate::math::sqrt(m.kvb + vpk_sq);
 
         // E1 = Kp * (1/mu + Vgk / sqrt(Kvb + Vpk^2))
         let e1 = m.kp * (1.0 / m.mu + vgk / sqrt_term);
@@ -384,7 +384,7 @@ impl TriodeThreePort {
         }
 
         // Ip = base^Ex / KG1
-        let ia = (base.powf(m.ex) / m.kg1) * pc;
+        let ia = (crate::math::powf(base, m.ex) / m.kg1) * pc;
         if ia <= 0.0 {
             return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
         }
@@ -395,12 +395,12 @@ impl TriodeThreePort {
         } else if e1 < -50.0 {
             0.0
         } else {
-            let exp_e1 = e1.exp();
+            let exp_e1 = crate::math::exp(e1);
             exp_e1 / (1.0 + exp_e1)
         };
 
         // Common factor: Ex * base^(Ex-1) / KG1
-        let ex_base_factor = m.ex * base.powf(m.ex - 1.0) / m.kg1 * pc;
+        let ex_base_factor = m.ex * crate::math::powf(base, m.ex - 1.0) / m.kg1 * pc;
 
         // ∂Ia/∂Vpk:
         // dE1/dVpk = -Kp * Vgk * Vpk / (Kvb + Vpk^2)^(3/2)

@@ -332,9 +332,9 @@ impl DelayLine {
     /// at short delays, larger changes at long delays.
     pub fn set_delay_normalized(&mut self, norm: f64) {
         let norm = norm.clamp(0.0, 1.0);
-        let log_min = self.min_delay_sec.ln();
-        let log_max = self.max_delay_sec.ln();
-        let delay_sec = (log_min + norm * (log_max - log_min)).exp();
+        let log_min = crate::math::ln(self.min_delay_sec);
+        let log_max = crate::math::ln(self.max_delay_sec);
+        let delay_sec = crate::math::exp(log_min + norm * (log_max - log_min));
         self.current_delay_samples = delay_sec * self.sample_rate;
     }
 
@@ -494,7 +494,7 @@ impl DelayLine {
 
         // Sort tap ratios to determine zone boundaries
         let mut sorted_ratios: Vec<f64> = tap_ratios.to_vec();
-        sorted_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
         sorted_ratios.dedup();
 
         // Default coefficients: progressively stronger
@@ -683,7 +683,7 @@ mod delay_tests {
 
         for i in 0..2400 {
             let t = i as f64 / SR;
-            let input = (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            let input = crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             dl.write(input);
             let out = dl.read();
             assert!(out.is_finite(), "Output should be finite at sample {i}");
@@ -741,7 +741,7 @@ mod delay_tests {
         // Normal speed: write a tone and measure delay
         for i in 0..960 {
             let t = i as f64 / SR;
-            dl.write((2.0 * std::f64::consts::PI * 440.0 * t).sin());
+            dl.write(crate::math::sin(2.0 * crate::math::PI * 440.0 * t));
         }
         let normal_out = dl.read();
 
@@ -799,7 +799,7 @@ mod delay_tests {
 
         for i in 0..4800 {
             let t = i as f64 / SR;
-            let input = (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            let input = crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             dl.write(input);
             let out = dl.read();
             assert!(
@@ -816,7 +816,7 @@ mod delay_tests {
 
         for i in 0..4800 {
             let t = i as f64 / SR;
-            let input = (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            let input = crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             dl.write(input);
             let out = dl.read();
             assert!(
@@ -861,7 +861,7 @@ mod delay_tests {
         // Process a high-frequency tone through both
         for i in 0..4800 {
             let t = i as f64 / SR;
-            let input = (2.0 * std::f64::consts::PI * 8000.0 * t).sin();
+            let input = crate::math::sin(2.0 * crate::math::PI * 8000.0 * t);
             dl_clean.write(input);
             dl_tape.write(input);
 
@@ -893,7 +893,7 @@ mod delay_tests {
 
         for i in 0..4800 {
             let t = i as f64 / SR;
-            let input = (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            let input = crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             dl_clean.write(input);
             dl_bbd.write(input);
 
@@ -965,7 +965,7 @@ mod delay_tests {
 
         for i in 0..4800 {
             let t = i as f64 / SR;
-            let input = (2.0 * std::f64::consts::PI * 440.0 * t).sin() * 0.5;
+            let input = crate::math::sin(2.0 * crate::math::PI * 440.0 * t) * 0.5;
             let out = bbd.process(input);
             assert!(
                 out.is_finite(),
@@ -1010,7 +1010,7 @@ mod delay_tests {
         for i in 0..480 {
             let t = i as f64 / SR;
             let input = if i < 48 {
-                (2.0 * std::f64::consts::PI * 440.0 * t).sin()
+                crate::math::sin(2.0 * crate::math::PI * 440.0 * t)
             } else {
                 0.0
             };
@@ -1038,7 +1038,7 @@ mod delay_tests {
         // Process some signal
         for i in 0..4800 {
             let t = i as f64 / SR;
-            bbd.process((2.0 * std::f64::consts::PI * 440.0 * t).sin());
+            bbd.process(crate::math::sin(2.0 * crate::math::PI * 440.0 * t));
         }
 
         bbd.reset();
@@ -1077,7 +1077,7 @@ mod delay_tests {
         // Fill with signal
         for i in 0..4800 {
             let t = i as f64 / SR;
-            dl.write((2.0 * std::f64::consts::PI * 440.0 * t).sin());
+            dl.write(crate::math::sin(2.0 * crate::math::PI * 440.0 * t));
         }
 
         dl.reset();

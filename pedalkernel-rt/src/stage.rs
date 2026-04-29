@@ -464,10 +464,8 @@ impl ResonatorFeedback {
     ///
     /// Uses the Audio EQ Cookbook bandpass formula with bilinear pre-warping.
     pub(crate) fn new(r1: f64, r2: f64, c1: f64, c2: f64, rf: f64, sample_rate: f64) -> Self {
-        use core::f64::consts::PI;
-
         // Resonant angular frequency
-        let omega_0 = 1.0 / (r1 * r2 * c1 * c2).sqrt();
+        let omega_0 = 1.0 / crate::math::sqrt(r1 * r2 * c1 * c2);
 
         // Q factor for a bridged-T oscillator.
         // The T-network has a notch attenuation of ~1/3 for equal R,C.
@@ -484,11 +482,11 @@ impl ResonatorFeedback {
         };
 
         // Bilinear pre-warping: map analog frequency to digital
-        let w0 = 2.0 * (omega_0 / (2.0 * sample_rate)).atan();
+        let w0 = 2.0 * crate::math::atan(omega_0 / (2.0 * sample_rate));
 
         // Audio EQ Cookbook: BPF (constant 0 dB peak gain)
-        let sin_w0 = w0.sin();
-        let cos_w0 = w0.cos();
+        let sin_w0 = crate::math::sin(w0);
+        let cos_w0 = crate::math::cos(w0);
         let alpha = sin_w0 / (2.0 * q);
 
         let b0 = alpha;
@@ -2818,7 +2816,7 @@ impl MultiNlScattering {
             n_nl + n_passive + 1
         } else {
             let len = scattering.len();
-            let nt = (len as f64).sqrt() as usize;
+            let nt = crate::math::sqrt(len as f64) as usize;
             debug_assert_eq!(nt * nt, len, "scattering matrix must be square");
             nt
         };
@@ -3080,17 +3078,17 @@ impl IirData {
             return;
         }
 
-        let f0 = 1.0 / (2.0 * PI * (self.r_series_product * self.c_shunt_product).sqrt());
+        let f0 = 1.0 / (2.0 * PI * crate::math::sqrt(self.r_series_product * self.c_shunt_product));
         let q = if self.r_fb > self.r_crit * 1.01 {
             self.r_fb / (self.r_fb - self.r_crit)
         } else {
             100.0
         };
-        let gain = self.r_fb / (self.r_series_product.sqrt()); // Rf / sqrt(R1*R2)
+        let gain = self.r_fb / (crate::math::sqrt(self.r_series_product)); // Rf / sqrt(R1*R2)
 
         let w0 = 2.0 * PI * f0 / self.sample_rate;
-        let sin_w0 = w0.sin();
-        let cos_w0 = w0.cos();
+        let sin_w0 = crate::math::sin(w0);
+        let cos_w0 = crate::math::cos(w0);
         let alpha = sin_w0 / (2.0 * q);
 
         let a0 = 1.0 + alpha;

@@ -311,7 +311,7 @@ pub fn softplus(x: f64) -> f64 {
     } else if x < -50.0 {
         0.0
     } else {
-        (1.0 + x.exp()).ln()
+        crate::math::ln(1.0 + crate::math::exp(x))
     }
 }
 
@@ -1278,7 +1278,7 @@ mod tests {
     impl NlDeviceIv for SimpleExponentialDiode {
         fn iv(&self, v: f64) -> (f64, f64) {
             let x = (v / self.vt).clamp(-500.0, 500.0);
-            let ev = x.exp();
+            let ev = crate::math::exp(x);
             let i = self.is * (ev - 1.0);
             let di = self.is * ev / self.vt;
             (i, di)
@@ -1654,7 +1654,7 @@ mod tests {
 
             // Grid current (diode)
             let x = (vg / self.grid_vt).clamp(-500.0, 500.0);
-            let ev = x.exp();
+            let ev = crate::math::exp(x);
             let ig = self.grid_is * (ev - 1.0);
             let dig_dvg = self.grid_is * ev / self.grid_vt;
             let dig_dvp = 0.0;

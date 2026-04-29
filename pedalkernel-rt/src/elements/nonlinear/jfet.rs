@@ -64,7 +64,7 @@ impl JfetModel {
         let vgs_int = sign * vgs;
         // Limit exponent to avoid overflow
         let arg = (vgs_int / (self.n * VT)).min(40.0);
-        sign * self.gate_is * (arg.exp() - 1.0)
+        sign * self.gate_is * (crate::math::exp(arg) - 1.0)
     }
 
     /// Compute gate-drain junction diode current.
@@ -75,7 +75,7 @@ impl JfetModel {
         let sign = if self.is_n_channel { 1.0 } else { -1.0 };
         let vgd_int = sign * vgd;
         let arg = (vgd_int / (self.n * VT)).min(40.0);
-        sign * self.gate_is * (arg.exp() - 1.0)
+        sign * self.gate_is * (crate::math::exp(arg) - 1.0)
     }
 }
 

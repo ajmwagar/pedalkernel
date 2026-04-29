@@ -49,6 +49,8 @@ mod inner {
     pub fn copysign(x: f64, y: f64) -> f64 { x.copysign(y) }
     #[inline(always)]
     pub fn fma(x: f64, y: f64, z: f64) -> f64 { x.mul_add(y, z) }
+    #[inline(always)]
+    pub fn rem_euclid(x: f64, y: f64) -> f64 { x.rem_euclid(y) }
 }
 
 #[cfg(not(feature = "std"))]
@@ -97,6 +99,11 @@ mod inner {
     pub fn copysign(x: f64, y: f64) -> f64 { libm::copysign(x, y) }
     #[inline(always)]
     pub fn fma(x: f64, y: f64, z: f64) -> f64 { libm::fma(x, y, z) }
+    #[inline(always)]
+    pub fn rem_euclid(x: f64, y: f64) -> f64 {
+        let r = libm::fmod(x, y);
+        if r < 0.0 { r + libm::fabs(y) } else { r }
+    }
 }
 
 pub use inner::*;

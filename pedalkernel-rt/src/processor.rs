@@ -29,7 +29,7 @@ pub(crate) enum Stage {
 }
 
 impl core::fmt::Debug for Stage {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Stage::Wdf(_) => write!(f, "Stage::Wdf(..)"),
             Stage::MultiNl(_) => write!(f, "Stage::MultiNl(..)"),
@@ -354,7 +354,7 @@ impl SmoothedParam {
         // Smoothing time constant ~10ms = 0.010 seconds
         // coef = exp(-1 / (tau * fs)) ≈ exp(-1 / (0.010 * 48000)) ≈ 0.9979
         let tau = 0.010; // 10ms smoothing
-        let coef = (-1.0 / (tau * sample_rate)).exp();
+        let coef = crate::math::exp(-1.0 / (tau * sample_rate));
         Self {
             target: initial,
             current: initial,
@@ -389,7 +389,7 @@ impl SmoothedParam {
     /// Update smoothing coefficient for new sample rate.
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         let tau = 0.010;
-        self.coef = (-1.0 / (tau * sample_rate)).exp();
+        self.coef = crate::math::exp(-1.0 / (tau * sample_rate));
     }
 }
 
@@ -479,7 +479,7 @@ impl RailSaturation {
                     } else {
                         let over = x - 0.8;
                         // Exponential compression: gradual cutoff
-                        -(neg_ceiling * (0.8 + 0.2 * (1.0 - (-over * 5.0).exp())))
+                        -(neg_ceiling * (0.8 + 0.2 * (1.0 - crate::math::exp(-over * 5.0))))
                     }
                 }
             }
@@ -514,7 +514,7 @@ impl RailSaturation {
                         ceiling
                     } else {
                         let t = (x - 0.6) / 1.4;
-                        let curve = 1.0 - (-t * 2.5 * sharpness).exp();
+                        let curve = 1.0 - crate::math::exp(-t * 2.5 * sharpness);
                         ceiling * (0.6 + 0.4 * curve)
                     }
                 } else {
@@ -1235,7 +1235,7 @@ impl CompiledPedal {
                     if let Some(binding) = self.lfos.get_mut(lfo_idx) {
                         // Scale rate around base_freq: 0.1x to 10x (100x range)
                         // pot=0 -> 0.1x, pot=0.5 -> 1x, pot=1 -> 10x
-                        let scale = 0.1_f64 * 100.0_f64.powf(value);
+                        let scale = 0.1_f64 * crate::math::powf(100.0_f64, value);
                         let rate = binding.base_freq * scale;
                         binding.lfo.set_rate(rate);
                     }
@@ -1461,7 +1461,7 @@ impl CompiledPedal {
         s.push_str(&format!(
             "Pre-Gain: {:.6} ({:.2} dB)\n",
             self.pre_gain,
-            20.0 * self.pre_gain.log10()
+            20.0 * crate::math::log10(self.pre_gain)
         ));
         s.push_str(&format!(
             "Gain Range: ({:.6}, {:.6})\n",

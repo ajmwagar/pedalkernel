@@ -221,7 +221,7 @@ impl BbdDelayLine {
 
         // Anti-alias LPF cutoff: bandwidth_ratio * clock_freq
         let lpf_cutoff = model.bandwidth_ratio * clock_freq;
-        let lpf_coef = (-2.0 * std::f64::consts::PI * lpf_cutoff / sample_rate).exp();
+        let lpf_coef = crate::math::exp(-2.0 * crate::math::PI * lpf_cutoff / sample_rate);
 
         // Leakage LPF: models accumulated charge loss across all BBD stages.
         // Each stage loses `leakage_per_stage` of its charge per clock period.
@@ -230,13 +230,13 @@ impl BbdDelayLine {
         let leakage_lpf_coef = Self::compute_leakage_coef(&model, clock_freq, sample_rate);
 
         // Clock feedthrough: the BBD switching clock couples into the signal path.
-        let clock_phase_inc = 2.0 * std::f64::consts::PI * clock_freq / sample_rate;
+        let clock_phase_inc = 2.0 * crate::math::PI * clock_freq / sample_rate;
 
         // Compander: NE571-style attack/release time constants.
         // Attack ~5ms, release ~50ms (NE571 syllabic time constants).
         // The mismatch causes "breathing" artifacts.
-        let compander_attack = (-1.0 / (0.005 * sample_rate)).exp();
-        let compander_release = (-1.0 / (0.050 * sample_rate)).exp();
+        let compander_attack = crate::math::exp(-1.0 / (0.005 * sample_rate));
+        let compander_release = crate::math::exp(-1.0 / (0.050 * sample_rate));
 
         // Envelope delay buffer: sized for maximum BBD delay time.
         // This delays the compression envelope to match the audio delay.
@@ -282,9 +282,9 @@ impl BbdDelayLine {
         // Higher loss → lower cutoff → darker sound.
         let retention = 1.0 - total_loss;
         // Cutoff in Hz: scale with clock frequency (higher clock = shorter hold time = less leakage)
-        let fc_leakage = -(retention.ln()) * clock_freq / (2.0 * std::f64::consts::PI);
+        let fc_leakage = -(crate::math::ln(retention)) * clock_freq / (2.0 * crate::math::PI);
         let fc_clamped = fc_leakage.min(sample_rate * 0.45); // Never exceed Nyquist
-        (-2.0 * std::f64::consts::PI * fc_clamped / sample_rate).exp()
+        crate::math::exp(-2.0 * crate::math::PI * fc_clamped / sample_rate)
     }
 
     /// Set the clock frequency directly (Hz).
@@ -300,19 +300,19 @@ impl BbdDelayLine {
 
         // Update anti-alias filter
         let lpf_cutoff = self.model.bandwidth_ratio * self.clock_freq;
-        self.lpf_coef = (-2.0 * std::f64::consts::PI * lpf_cutoff / sample_rate).exp();
+        self.lpf_coef = crate::math::exp(-2.0 * crate::math::PI * lpf_cutoff / sample_rate);
 
         // Update leakage LPF (more leakage at lower clock = longer delays)
         self.leakage_lpf_coef =
             Self::compute_leakage_coef(&self.model, self.clock_freq, sample_rate);
 
         // Update clock feedthrough frequency
-        self.clock_phase_inc = 2.0 * std::f64::consts::PI * self.clock_freq / sample_rate;
+        self.clock_phase_inc = 2.0 * crate::math::PI * self.clock_freq / sample_rate;
 
         // Update envelope delay to match audio delay
         let delay_secs = self.model.delay_at_clock(self.clock_freq);
         self.env_delay_samples =
-            (delay_secs * sample_rate).round() as usize % self.env_delay_buffer.len();
+            crate::math::round(delay_secs * sample_rate) as usize % self.env_delay_buffer.len();
     }
 
     /// Set delay time as a normalized value (0.0 = min delay, 1.0 = max delay).
@@ -322,9 +322,9 @@ impl BbdDelayLine {
         let norm = norm.clamp(0.0, 1.0);
         // Logarithmic interpolation between min and max clock
         // norm=0 -> max clock (min delay), norm=1 -> min clock (max delay)
-        let log_min = self.model.clock_min.ln();
-        let log_max = self.model.clock_max.ln();
-        let clock = (log_max - norm * (log_max - log_min)).exp();
+        let log_min = crate::math::ln(self.model.clock_min);
+        let log_max = crate::math::ln(self.model.clock_max);
+        let clock = crate::math::exp(log_max - norm * (log_max - log_min));
         self.set_clock(clock);
     }
 
@@ -378,7 +378,7 @@ impl BbdDelayLine {
         // Compress: reduce dynamic range by 2:1 (typical NE571 ratio).
         // gain = 1/sqrt(envelope) — louder signals get compressed more.
         let comp_gain = if self.compander_env_in > 0.001 {
-            1.0 / self.compander_env_in.sqrt()
+            1.0 / crate::math::sqrt(self.compander_env_in)
         } else {
             1.0
         };
@@ -414,10 +414,10 @@ impl BbdDelayLine {
 
         // Clock feedthrough
         self.clock_phase += self.clock_phase_inc;
-        if self.clock_phase > 2.0 * std::f64::consts::PI {
-            self.clock_phase -= 2.0 * std::f64::consts::PI;
+        if self.clock_phase > 2.0 * crate::math::PI {
+            self.clock_phase -= 2.0 * crate::math::PI;
         }
-        let clock_bleed = self.model.clock_feedthrough * self.clock_phase.sin();
+        let clock_bleed = self.model.clock_feedthrough * crate::math::sin(self.clock_phase);
 
         // Noise injection
         let noise = self.next_noise() * self.model.noise_floor;
@@ -436,7 +436,7 @@ impl BbdDelayLine {
         // Base expansion gain from delayed compression envelope.
         // This restores the original dynamic range (ideally cancels compression).
         let base_exp_gain = if delayed_env > 0.001 {
-            delayed_env.sqrt()
+            crate::math::sqrt(delayed_env)
         } else {
             1.0
         };
@@ -490,12 +490,12 @@ impl BbdDelayLine {
             .set_delay_seconds(self.model.delay_at_clock(self.clock_freq));
 
         let lpf_cutoff = self.model.bandwidth_ratio * self.clock_freq;
-        self.lpf_coef = (-2.0 * std::f64::consts::PI * lpf_cutoff / sample_rate).exp();
+        self.lpf_coef = crate::math::exp(-2.0 * crate::math::PI * lpf_cutoff / sample_rate);
         self.leakage_lpf_coef =
             Self::compute_leakage_coef(&self.model, self.clock_freq, sample_rate);
-        self.clock_phase_inc = 2.0 * std::f64::consts::PI * self.clock_freq / sample_rate;
-        self.compander_attack = (-1.0 / (0.005 * sample_rate)).exp();
-        self.compander_release = (-1.0 / (0.050 * sample_rate)).exp();
+        self.clock_phase_inc = 2.0 * crate::math::PI * self.clock_freq / sample_rate;
+        self.compander_attack = crate::math::exp(-1.0 / (0.005 * sample_rate));
+        self.compander_release = crate::math::exp(-1.0 / (0.050 * sample_rate));
 
         // Resize envelope delay buffer for new sample rate
         let max_delay = self.model.delay_at_clock(self.model.clock_min);
@@ -572,7 +572,7 @@ pub fn tape_saturation(x: f64, level: f64) -> f64 {
     // Scale input so that level corresponds to ~90% saturation
     // tanh(1.47) ≈ 0.9, so we scale accordingly
     let scaled = x * 1.47 / level;
-    level * scaled.tanh() / 1.47
+    level * crate::math::tanh(scaled) / 1.47
 }
 
 // ===========================================================================
@@ -592,7 +592,7 @@ mod tests {
         if buf.is_empty() {
             return 0.0;
         }
-        (buf.iter().map(|x| x * x).sum::<f64>() / buf.len() as f64).sqrt()
+        crate::math::sqrt(buf.iter().map(|x| x * x).sum::<f64>() / buf.len() as f64)
     }
 
     // -----------------------------------------------------------------------
@@ -603,7 +603,7 @@ mod tests {
         (0..n)
             .map(|i| {
                 let t = i as f64 / sample_rate;
-                amplitude * (2.0 * std::f64::consts::PI * freq_hz * t).sin()
+                amplitude * crate::math::sin(2.0 * crate::math::PI * freq_hz * t)
             })
             .collect()
     }
@@ -613,9 +613,9 @@ mod tests {
     // -----------------------------------------------------------------------
     fn goertzel_power(buf: &[f64], sample_rate: f64, target_hz: f64) -> f64 {
         let n = buf.len() as f64;
-        let k = (target_hz * n / sample_rate).round();
-        let w = 2.0 * std::f64::consts::PI * k / n;
-        let coeff = 2.0 * w.cos();
+        let k = crate::math::round(target_hz * n / sample_rate);
+        let w = 2.0 * crate::math::PI * k / n;
+        let coeff = 2.0 * crate::math::cos(w);
 
         let mut s1 = 0.0;
         let mut s2 = 0.0;
@@ -645,7 +645,7 @@ mod tests {
             harmonic_power += goertzel_power(buf, sample_rate, freq);
         }
 
-        (harmonic_power / fund_power).sqrt()
+        crate::math::sqrt(harmonic_power / fund_power)
     }
 
     // =======================================================================
@@ -716,7 +716,7 @@ mod tests {
 
         let input_rms = rms(&input);
         let output_rms = rms(&output);
-        let gain_db = 20.0 * (output_rms / input_rms).log10();
+        let gain_db = 20.0 * crate::math::log10(output_rms / input_rms);
 
         println!(
             "Compander steady-state gain: {:.2} dB (input RMS={:.4}, output RMS={:.4})",
@@ -760,14 +760,14 @@ mod tests {
         for i in 0..24000 {
             // 500ms of signal
             let t = i as f64 / SAMPLE_RATE;
-            let env = (1.0 - (-t * 20.0).exp()); // 50ms attack
-            input.push(env * 0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin());
+            let env = (1.0 - crate::math::exp(-t * 20.0)); // 50ms attack
+            input.push(env * 0.5 * crate::math::sin(2.0 * crate::math::PI * 440.0 * t));
         }
         // Decay
         for i in 0..24000 {
             let t = i as f64 / SAMPLE_RATE;
-            let env = (-t * 3.0).exp(); // ~300ms decay
-            input.push(env * 0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin());
+            let env = crate::math::exp(-t * 3.0); // ~300ms decay
+            input.push(env * 0.5 * crate::math::sin(2.0 * crate::math::PI * 440.0 * t));
         }
 
         let output: Vec<f64> = input.iter().map(|&s| bbd.process(s)).collect();
@@ -1031,7 +1031,7 @@ mod tests {
                 // Estimate effective cutoff from coefficient
                 // coef = exp(-2π × fc / sr), so fc = -ln(coef) × sr / (2π)
                 let fc_estimate = if coef > 0.0 && coef < 1.0 {
-                    -coef.ln() * SAMPLE_RATE / (2.0 * std::f64::consts::PI)
+                    -crate::math::ln(coef) * SAMPLE_RATE / (2.0 * crate::math::PI)
                 } else {
                     0.0
                 };
@@ -1072,10 +1072,10 @@ mod tests {
             .map(|i| {
                 let t = i as f64 / SAMPLE_RATE;
                 let f = 220.0;
-                0.3 * ((2.0 * std::f64::consts::PI * f * t).sin()
-                    + 0.5 * (2.0 * std::f64::consts::PI * 2.0 * f * t).sin()
-                    + 0.25 * (2.0 * std::f64::consts::PI * 3.0 * f * t).sin()
-                    + 0.125 * (2.0 * std::f64::consts::PI * 4.0 * f * t).sin())
+                0.3 * (crate::math::sin(2.0 * crate::math::PI * f * t)
+                    + 0.5 * crate::math::sin(2.0 * crate::math::PI * 2.0 * f * t)
+                    + 0.25 * crate::math::sin(2.0 * crate::math::PI * 3.0 * f * t)
+                    + 0.125 * crate::math::sin(2.0 * crate::math::PI * 4.0 * f * t))
             })
             .collect();
 

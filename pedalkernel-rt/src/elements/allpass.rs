@@ -43,8 +43,8 @@ impl AllPassFilter {
     fn update_coefficient(&mut self) {
         // Bilinear transform coefficient
         // a = (1 - tan(πf₀/fs)) / (1 + tan(πf₀/fs))
-        let w = std::f64::consts::PI * self.cutoff / self.sample_rate;
-        let tan_w = w.tan();
+        let w = crate::math::PI * self.cutoff / self.sample_rate;
+        let tan_w = crate::math::tan(w);
         self.coef = (1.0 - tan_w) / (1.0 + tan_w);
     }
 
@@ -139,7 +139,7 @@ impl Phaser {
         // mod_value -1 -> base_freq / mod_depth
         // mod_value  0 -> base_freq
         // mod_value +1 -> base_freq * mod_depth
-        let freq = self.base_freq * self.mod_depth.powf(mod_value);
+        let freq = self.base_freq * crate::math::powf(self.mod_depth, mod_value);
         for stage in &mut self.stages {
             stage.set_cutoff(freq);
         }
@@ -218,7 +218,7 @@ mod tests {
 
         for i in 0..4800 {
             let t = i as f64 / 48000.0;
-            let input = (2.0 * std::f64::consts::PI * freq * t).sin();
+            let input = crate::math::sin((2.0 * crate::math::PI * freq * t));
             let output = filter.process(input);
 
             // Skip first 100 samples for transient
@@ -228,8 +228,8 @@ mod tests {
             }
         }
 
-        let rms_in = (sum_sq_in / 4700.0).sqrt();
-        let rms_out = (sum_sq_out / 4700.0).sqrt();
+        let rms_in = crate::math::sqrt((sum_sq_in / 4700.0));
+        let rms_out = crate::math::sqrt((sum_sq_out / 4700.0));
 
         // Should be very close to unity gain
         assert!((rms_out / rms_in - 1.0).abs() < 0.01);
@@ -245,7 +245,7 @@ mod tests {
         let mut output_sum = 0.0;
         for i in 0..4800 {
             let t = i as f64 / 48000.0;
-            let input = (2.0 * std::f64::consts::PI * 440.0 * t).sin();
+            let input = crate::math::sin((2.0 * crate::math::PI * 440.0 * t));
             output_sum += phaser.process(input).abs();
         }
 

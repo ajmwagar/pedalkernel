@@ -38,19 +38,19 @@ pub fn wright_omega(x: f64) -> f64 {
     let w0 = if x >= 0.0 {
         if x > 8.0 {
             // Large x: asymptotically ω ≈ x − ln(x)
-            x - x.ln()
+            x - crate::math::ln(x)
         } else {
             // x in [0, 8]: ω ≈ W₀(eˣ) where W₀ is the principal Lambert W.
             // Good start: w₀ = x − ln(1 + x) · (1 − 1/(1+x))  or simply
             // w₀ = 1 + x·(1 − x/4) (Padé-like) — tuned to converge in 3 steps.
             // Simpler: Euler's initial, w₀ = 0.5 + 0.5·x gives decent coverage.
             // Empirically best: start near the known value for x=0 (≈0.567) and
-            // scale: w₀ = (x + 1.0).powf(0.571)
-            (x + 1.0_f64).powf(0.571)
+            // scale: w₀ = crate::math::powf(x + 1.0, 0.571)
+            crate::math::powf(x + 1.0_f64, 0.571)
         }
     } else {
         // x in (-33, 0): w₀ = exp(x), ω is well approximated by exp(x) here.
-        x.exp()
+        crate::math::exp(x)
     };
 
     // Halley's method for f(w) = w + ln(w) − x = 0:
@@ -76,7 +76,7 @@ pub fn wright_omega(x: f64) -> f64 {
     // With r = x − ln w − w = −f(w), we want Δw = r·w1 / (w1² + 0.5·r):
     fn halley(w: f64, x: f64) -> f64 {
         debug_assert!(w > 0.0);
-        let ln_w = w.ln();
+        let ln_w = crate::math::ln(w);
         // residual r = −f(w) = x − w − ln(w)
         let r = x - w - ln_w;
         let w1 = w + 1.0;
@@ -136,7 +136,7 @@ pub fn wright_omega(x: f64) -> f64 {
 pub fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
     // α = Rp·Is / nVt
     let alpha = rp * is / n_vt;
-    let ln_alpha = alpha.ln();
+    let ln_alpha = crate::math::ln(alpha);
 
     // WDF root equation (doubled wave convention): v + Rp·i(v) = a/2
     // The effective incident half-wave is a/2.
@@ -151,15 +151,15 @@ pub fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
     //   w = ω(x), v₀ = sgn·nVt·(ln w − ln α)
     let x = a_abs_half / n_vt + ln_alpha + alpha;
     let w = wright_omega(x);
-    let v0 = sgn * n_vt * (w.ln() - ln_alpha);
+    let v0 = sgn * n_vt * (crate::math::ln(w) - ln_alpha);
 
     // NR correction on g(v) = v + Rp·i(v) − a/2,  g'(v) = 1 + Rp·di/dv
     // Run up to two steps: the WO estimate needs ≤ 2 steps even for large alpha.
     #[inline]
     fn nr_step_pair(v: f64, rp: f64, is: f64, n_vt: f64, a_half: f64) -> f64 {
         let xu = (v / n_vt).clamp(-500.0, 500.0);
-        let ev_pos = xu.exp();
-        let ev_neg = (-xu).exp();
+        let ev_pos = crate::math::exp(xu);
+        let ev_neg = crate::math::exp(-xu);
         let i = is * (ev_pos - ev_neg);
         let di = is * (ev_pos + ev_neg) / n_vt;
         let g = v + rp * i - a_half;
@@ -207,7 +207,7 @@ pub fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
 pub fn explicit_single_diode(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
     // α = Rp·Is / nVt
     let alpha = rp * is / n_vt;
-    let ln_alpha = alpha.ln();
+    let ln_alpha = crate::math::ln(alpha);
 
     // WDF root equation (doubled wave convention): v + Rp·i(v) = a/2
     let a_half = a * 0.5;
@@ -215,14 +215,14 @@ pub fn explicit_single_diode(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
     // WO warm start: x = a/(2·nVt) + ln(α) + α
     let x = a_half / n_vt + ln_alpha + alpha;
     let w = wright_omega(x);
-    let v0 = n_vt * (w.ln() - ln_alpha);
+    let v0 = n_vt * (crate::math::ln(w) - ln_alpha);
 
     // NR corrections on g(v) = v + Rp·i(v) − a/2,  g'(v) = 1 + Rp·di/dv
     // Two steps for robustness with large alpha (e.g., germanium with large Rp).
     #[inline]
     fn nr_step_single(v: f64, rp: f64, is: f64, n_vt: f64, a_half: f64) -> f64 {
         let xu = (v / n_vt).clamp(-500.0, 500.0);
-        let ev = xu.exp();
+        let ev = crate::math::exp(xu);
         let i = is * (ev - 1.0);
         let di = is * ev / n_vt;
         let g = v + rp * i - a_half;
@@ -499,7 +499,7 @@ impl ZenerRoot {
         if v >= 0.0 {
             // Forward bias: standard Shockley diode
             let x = (v / self.model.n_vt_fwd).clamp(-500.0, 500.0);
-            self.model.is_fwd * (x.exp() - 1.0)
+            self.model.is_fwd * (crate::math::exp(x) - 1.0)
         } else if v > -self.model.vz {
             // Reverse bias below breakdown: small leakage
             -self.model.is_rev
@@ -507,7 +507,7 @@ impl ZenerRoot {
             // Reverse breakdown: exponential + resistive
             let v_excess = -v - self.model.vz; // How far past Vz
             let x = (v_excess / self.model.n_vt_rev).clamp(-500.0, 500.0);
-            let i_breakdown = self.model.is_rev * (x.exp() - 1.0);
+            let i_breakdown = self.model.is_rev * (crate::math::exp(x) - 1.0);
             let i_resistive = v_excess / self.model.rz;
             -(i_breakdown + i_resistive + self.model.is_rev)
         }
@@ -519,7 +519,7 @@ impl ZenerRoot {
         if v >= 0.0 {
             // Forward bias
             let x = (v / self.model.n_vt_fwd).clamp(-500.0, 500.0);
-            self.model.is_fwd * x.exp() / self.model.n_vt_fwd
+            self.model.is_fwd * crate::math::exp(x) / self.model.n_vt_fwd
         } else if v > -self.model.vz {
             // Reverse bias below breakdown: very small conductance
             1e-12
@@ -527,7 +527,7 @@ impl ZenerRoot {
             // Reverse breakdown
             let v_excess = -v - self.model.vz;
             let x = (v_excess / self.model.n_vt_rev).clamp(-500.0, 500.0);
-            let di_exp = self.model.is_rev * x.exp() / self.model.n_vt_rev;
+            let di_exp = self.model.is_rev * crate::math::exp(x) / self.model.n_vt_rev;
             let di_res = 1.0 / self.model.rz;
             di_exp + di_res // Note: chain rule gives positive derivative
         }
@@ -612,7 +612,7 @@ impl WdfRoot for DiodePairRoot {
         let cold_guess = |a: f64, rp: f64| -> f64 {
             if a.abs() > 10.0 * nvt {
                 let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
-                nvt * log_arg.ln() * a.signum()
+                nvt * crate::math::ln(log_arg) * a.signum()
             } else {
                 a * 0.5
             }
@@ -636,8 +636,8 @@ impl WdfRoot for DiodePairRoot {
             let v0 = warm_guess(self.prev_v, a, rp);
             let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
                 let x = (v / nvt).clamp(-500.0, 500.0);
-                let ev_pos = x.exp();
-                let ev_neg = (-x).exp();
+                let ev_pos = crate::math::exp(x);
+                let ev_neg = crate::math::exp(-x);
                 let i = is * (ev_pos - ev_neg);
                 let di = is * (ev_pos + ev_neg) / nvt;
                 (i, di)
@@ -660,8 +660,8 @@ impl WdfRoot for DiodePairRoot {
         // Solver returns b_eff = 2*v_junction - a
         let b_eff = newton_raphson_solve(a, rp_eff, v0, self.max_iter, 1e-6, None, None, |v_j| {
             let x = (v_j / nvt).clamp(-500.0, 500.0);
-            let ev_pos = x.exp();
-            let ev_neg = (-x).exp();
+            let ev_pos = crate::math::exp(x);
+            let ev_neg = crate::math::exp(-x);
             let i = is * (ev_pos - ev_neg);
             let di = is * (ev_pos + ev_neg) / nvt;
             (i, di)
@@ -673,7 +673,7 @@ impl WdfRoot for DiodePairRoot {
 
         // Compute current at junction voltage
         let x = (v_junction / nvt).clamp(-500.0, 500.0);
-        let i = is * (x.exp() - (-x).exp());
+        let i = is * (crate::math::exp(x) - crate::math::exp(-x));
 
         // Correct reflected wave for series resistance
         // b = 2*v_total - a = 2*(v_junction + i*Rs) - a = b_eff + 2*i*Rs
@@ -725,7 +725,7 @@ impl WdfRoot for DiodeRoot {
         let cold_guess = |a: f64, rp: f64| -> f64 {
             if a > 10.0 * nvt {
                 let log_arg = (a / (2.0 * rp * is)).max(1.0);
-                nvt * log_arg.ln()
+                nvt * crate::math::ln(log_arg)
             } else {
                 a * 0.5
             }
@@ -746,7 +746,7 @@ impl WdfRoot for DiodeRoot {
             let v0 = warm_guess(self.prev_v, a, rp);
             let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
                 let x = (v / nvt).clamp(-500.0, 500.0);
-                let ev = x.exp();
+                let ev = crate::math::exp(x);
                 let i = is * (ev - 1.0);
                 let di = is * ev / nvt;
                 (i, di)
@@ -763,7 +763,7 @@ impl WdfRoot for DiodeRoot {
         // Solve for junction voltage with effective port resistance
         let b_eff = newton_raphson_solve(a, rp_eff, v0, self.max_iter, 1e-6, None, None, |v_j| {
             let x = (v_j / nvt).clamp(-500.0, 500.0);
-            let ev = x.exp();
+            let ev = crate::math::exp(x);
             let i = is * (ev - 1.0);
             let di = is * ev / nvt;
             (i, di)
@@ -773,7 +773,7 @@ impl WdfRoot for DiodeRoot {
         self.prev_v = v_junction;
 
         let x = (v_junction / nvt).clamp(-500.0, 500.0);
-        let i = is * (x.exp() - 1.0);
+        let i = is * (crate::math::exp(x) - 1.0);
 
         b_eff + 2.0 * i * rs
     }
@@ -785,7 +785,7 @@ impl NlDeviceIv for DiodeRoot {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let x = (v / nvt).clamp(-500.0, 500.0);
-        let ev = x.exp();
+        let ev = crate::math::exp(x);
         let i = is * (ev - 1.0);
         let di = is * ev / nvt;
         (i, di)
@@ -804,8 +804,8 @@ impl NlDeviceIv for DiodePairRoot {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let x = (v / nvt).clamp(-500.0, 500.0);
-        let ev_pos = x.exp();
-        let ev_neg = (-x).exp();
+        let ev_pos = crate::math::exp(x);
+        let ev_neg = crate::math::exp(-x);
         let i = is * (ev_pos - ev_neg);
         #[cfg(feature = "fault-injection")]
         let i =
@@ -867,7 +867,7 @@ impl WdfRoot for ExplicitDiodePairRoot {
         let b_eff = explicit_diode_pair(a, rp_eff, is, nvt);
         let v_junction = (a + b_eff) * 0.5;
         let x = (v_junction / nvt).clamp(-500.0, 500.0);
-        let i = is * (x.exp() - (-x).exp());
+        let i = is * (crate::math::exp(x) - crate::math::exp(-x));
         b_eff + 2.0 * i * rs
     }
 }
@@ -879,8 +879,8 @@ impl NlDeviceIv for ExplicitDiodePairRoot {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let x = (v / nvt).clamp(-500.0, 500.0);
-        let ev_pos = x.exp();
-        let ev_neg = (-x).exp();
+        let ev_pos = crate::math::exp(x);
+        let ev_neg = crate::math::exp(-x);
         let i = is * (ev_pos - ev_neg);
         let di = is * (ev_pos + ev_neg) / nvt;
         (i, di)
@@ -928,7 +928,7 @@ impl WdfRoot for ExplicitDiodeRoot {
         let b_eff = explicit_single_diode(a, rp_eff, is, nvt);
         let v_junction = (a + b_eff) * 0.5;
         let x = (v_junction / nvt).clamp(-500.0, 500.0);
-        let i = is * (x.exp() - 1.0);
+        let i = is * (crate::math::exp(x) - 1.0);
         b_eff + 2.0 * i * rs
     }
 }
@@ -940,7 +940,7 @@ impl NlDeviceIv for ExplicitDiodeRoot {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let x = (v / nvt).clamp(-500.0, 500.0);
-        let ev = x.exp();
+        let ev = crate::math::exp(x);
         let i = is * (ev - 1.0);
         let di = is * ev / nvt;
         (i, di)
@@ -978,7 +978,7 @@ mod tests {
         // ω(1): satisfies ω + ln(ω) = 1, numerically ≈ 1.0 (close but not exactly 1)
         let w = wright_omega(1.0);
         // Verify the defining equation: ω + ln(ω) ≈ 1
-        let residual = w + w.ln() - 1.0;
+        let residual = w + crate::math::ln(w) - 1.0;
         assert!(
             residual.abs() < 1e-10,
             "wright_omega(1): ω + ln(ω) residual = {residual}"
@@ -989,7 +989,7 @@ mod tests {
     fn wright_omega_minus_one() {
         // ω(-1) ≈ 0.27846
         let w = wright_omega(-1.0);
-        let residual = w + w.ln() - (-1.0);
+        let residual = w + crate::math::ln(w) - (-1.0);
         assert!(
             residual.abs() < 1e-10,
             "wright_omega(-1): ω + ln(ω) residual = {residual}"
@@ -1006,7 +1006,7 @@ mod tests {
         // For large x, ω ≈ x - ln(x). Verify defining equation still holds.
         for x in [10.0_f64, 20.0, 50.0, 100.0] {
             let w = wright_omega(x);
-            let residual = w + w.ln() - x;
+            let residual = w + crate::math::ln(w) - x;
             assert!(
                 residual.abs() < 1e-8,
                 "wright_omega({x}): residual = {residual}"

@@ -132,8 +132,8 @@ impl GummelPoonModel {
     /// ```
     #[inline]
     pub fn base_charge(&self, vbe: f64, vbc: f64) -> f64 {
-        let exp_vbe = ((vbe / (self.nf * self.vt)).min(40.0)).exp();
-        let exp_vbc = ((vbc / (self.nr * self.vt)).min(40.0)).exp();
+        let exp_vbe = crate::math::exp((vbe / (self.nf * self.vt)).min(40.0));
+        let exp_vbc = crate::math::exp((vbc / (self.nr * self.vt)).min(40.0));
         self.base_charge_from_exp(vbe, vbc, exp_vbe, exp_vbc)
     }
 
@@ -166,7 +166,7 @@ impl GummelPoonModel {
         let q2 = q2_f + q2_r;
 
         // Qb from quadratic formula (always >= 1)
-        (q1 / 2.0) * (1.0 + (1.0 + 4.0 * q2).max(0.0).sqrt())
+        (q1 / 2.0) * (1.0 + crate::math::sqrt((1.0 + 4.0 * q2).max(0.0)))
     }
 
     /// Compute collector current using Gummel-Poon transport equations.
@@ -175,8 +175,8 @@ impl GummelPoonModel {
     #[inline]
     pub fn currents(&self, vbe: f64, vbc: f64) -> (f64, f64) {
         // Compute all exponentials once — shared between base_charge and transport
-        let exp_vbe = ((vbe / (self.nf * self.vt)).min(40.0)).exp();
-        let exp_vbc = ((vbc / (self.nr * self.vt)).min(40.0)).exp();
+        let exp_vbe = crate::math::exp((vbe / (self.nf * self.vt)).min(40.0));
+        let exp_vbc = crate::math::exp((vbc / (self.nr * self.vt)).min(40.0));
 
         let qb = self.base_charge_from_exp(vbe, vbc, exp_vbe, exp_vbc);
 
@@ -191,12 +191,12 @@ impl GummelPoonModel {
         let ib_f = icc / self.bf; // Forward base current
         let ib_r = iec / self.br; // Reverse base current
         let ib_leak_e = if self.ise > 0.0 {
-            self.ise * (((vbe / (self.ne * self.vt)).min(40.0)).exp() - 1.0)
+            self.ise * (crate::math::exp((vbe / (self.ne * self.vt)).min(40.0)) - 1.0)
         } else {
             0.0
         };
         let ib_leak_c = if self.isc > 0.0 {
-            self.isc * (((vbc / (self.nc * self.vt)).min(40.0)).exp() - 1.0)
+            self.isc * (crate::math::exp((vbc / (self.nc * self.vt)).min(40.0)) - 1.0)
         } else {
             0.0
         };
@@ -217,8 +217,8 @@ impl GummelPoonModel {
         // Exponentials (shared with currents computation)
         let arg_vbe = (vbe / (self.nf * self.vt)).min(40.0);
         let arg_vbc = (vbc / (self.nr * self.vt)).min(40.0);
-        let exp_vbe = arg_vbe.exp();
-        let exp_vbc = arg_vbc.exp();
+        let exp_vbe = crate::math::exp(arg_vbe);
+        let exp_vbc = crate::math::exp(arg_vbc);
         let vbe_clamped = arg_vbe >= 40.0;
         let vbc_clamped = arg_vbc >= 40.0;
 
@@ -283,7 +283,7 @@ impl GummelPoonModel {
 
         // qb = (q1/2) * (1 + sqrt(1 + 4*q2))
         let inner = (1.0 + 4.0 * q2).max(0.0);
-        let sqrt_inner = inner.sqrt();
+        let sqrt_inner = crate::math::sqrt(inner);
         let qb = (q1 / 2.0) * (1.0 + sqrt_inner);
 
         // d(qb)/d(vbe) = (dq1/dvbe / 2) * (1 + sqrt_inner) + (q1/2) * (4 * dq2/dvbe) / (2 * sqrt_inner)
@@ -344,7 +344,7 @@ impl GummelPoonModel {
         // Leakage: ise * (exp(vbe/(ne*vt)) - 1)
         let (ib_leak_e, dleak_e_dvbe) = if self.ise > 0.0 {
             let arg = (vbe / (self.ne * self.vt)).min(40.0);
-            let e = arg.exp();
+            let e = crate::math::exp(arg);
             let clamped = arg >= 40.0;
             (
                 self.ise * (e - 1.0),
@@ -360,7 +360,7 @@ impl GummelPoonModel {
 
         let (ib_leak_c, dleak_c_dvbc) = if self.isc > 0.0 {
             let arg = (vbc / (self.nc * self.vt)).min(40.0);
-            let e = arg.exp();
+            let e = crate::math::exp(arg);
             let clamped = arg >= 40.0;
             (
                 self.isc * (e - 1.0),
@@ -409,11 +409,11 @@ impl GummelPoonModel {
             // Avoid singularity: linearize for Vbe > 0.8*Vje
             let fc = 0.8;
             if vbe < fc * self.vje {
-                self.cje / (1.0 - vbe / self.vje).powf(self.mje)
+                self.cje / crate::math::powf(1.0 - vbe / self.vje, self.mje)
             } else {
                 // Linear extrapolation for forward bias
-                let cje_fc = self.cje / (1.0 - fc).powf(self.mje);
-                let dcje = self.cje * self.mje / (self.vje * (1.0 - fc).powf(self.mje + 1.0));
+                let cje_fc = self.cje / crate::math::powf(1.0 - fc, self.mje);
+                let dcje = self.cje * self.mje / (self.vje * crate::math::powf(1.0 - fc, self.mje + 1.0));
                 cje_fc + dcje * (vbe - fc * self.vje)
             }
         } else {
@@ -443,10 +443,10 @@ impl GummelPoonModel {
         let c_depletion = if self.cjc > 0.0 {
             let fc = 0.8;
             if vbc < fc * self.vjc {
-                self.cjc / (1.0 - vbc / self.vjc).powf(self.mjc)
+                self.cjc / crate::math::powf(1.0 - vbc / self.vjc, self.mjc)
             } else {
-                let cjc_fc = self.cjc / (1.0 - fc).powf(self.mjc);
-                let dcjc = self.cjc * self.mjc / (self.vjc * (1.0 - fc).powf(self.mjc + 1.0));
+                let cjc_fc = self.cjc / crate::math::powf(1.0 - fc, self.mjc);
+                let dcjc = self.cjc * self.mjc / (self.vjc * crate::math::powf(1.0 - fc, self.mjc + 1.0));
                 cjc_fc + dcjc * (vbc - fc * self.vjc)
             }
         } else {
@@ -747,7 +747,7 @@ impl BjtTwoPort {
     /// Compute IS-dependent Vbe clamp for max 100mA collector current.
     fn compute_vbe_max(model: &GummelPoonModel) -> f64 {
         let i_max = 0.1; // 100mA — generous bound for small-signal BJTs
-        let vbe_max = model.nf * model.vt * (i_max / model.is).ln();
+        let vbe_max = model.nf * model.vt * crate::math::ln(i_max / model.is);
         vbe_max.clamp(0.3, 1.0) // At least 0.3V, at most 1.0V
     }
 
@@ -1055,7 +1055,7 @@ impl EbersMollTwoPort {
     /// Compute the IS-dependent Vbe clamp (same logic as `BjtTwoPort`).
     fn compute_vbe_max(is: f64, nf: f64, vt: f64) -> f64 {
         let i_max = 0.1; // 100 mA generous bound
-        let vbe_max = nf * vt * (i_max / is).ln();
+        let vbe_max = nf * vt * crate::math::ln(i_max / is);
         vbe_max.clamp(0.3, 1.0)
     }
 
@@ -1124,8 +1124,8 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
         // Clamp exponential arguments to prevent overflow (same limit as GP).
         let arg_be = (vbe / self.nf_vt).min(40.0);
         let arg_bc = (vbc / self.nr_vt).min(40.0);
-        let exp_be = arg_be.exp();
-        let exp_bc = arg_bc.exp();
+        let exp_be = crate::math::exp(arg_be);
+        let exp_bc = crate::math::exp(arg_bc);
         let be_clamped = arg_be >= 40.0;
         let bc_clamped = arg_bc >= 40.0;
 

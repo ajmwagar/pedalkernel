@@ -104,7 +104,7 @@ impl Lfo {
     #[inline]
     fn raw_waveform(&mut self, phase: f64) -> f64 {
         match self.waveform {
-            LfoWaveform::Sine => (phase * std::f64::consts::TAU).sin(),
+            LfoWaveform::Sine => crate::math::sin(phase * crate::math::TAU),
             LfoWaveform::Triangle => {
                 // Triangle: rises from -1 to 1 in first half, falls in second
                 if phase < 0.5 {
@@ -150,7 +150,7 @@ impl Lfo {
 
     /// Set phase directly (0.0 - 1.0), useful for sync.
     pub fn set_phase(&mut self, phase: f64) {
-        self.phase = phase.rem_euclid(1.0);
+        self.phase = crate::math::rem_euclid(phase, 1.0);
     }
 }
 
@@ -294,8 +294,8 @@ impl EnvelopeFollower {
         let attack_samples = (self.attack_ms * self.sample_rate / 1000.0).max(1.0);
         let release_samples = (self.release_ms * self.sample_rate / 1000.0).max(1.0);
 
-        self.attack_coef = (-1.0 / attack_samples).exp();
-        self.release_coef = (-1.0 / release_samples).exp();
+        self.attack_coef = crate::math::exp(-1.0 / attack_samples);
+        self.release_coef = crate::math::exp(-1.0 / release_samples);
     }
 
     /// Set attack time in milliseconds.

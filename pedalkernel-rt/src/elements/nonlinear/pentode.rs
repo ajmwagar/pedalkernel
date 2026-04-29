@@ -192,12 +192,12 @@ impl PentodeRoot {
             return 0.0;
         }
 
-        let ip_base = base.powf(ex);
+        let ip_base = crate::math::powf(base, ex);
 
         // Pentode plate saturation: atan(Vpk/KVB)
         // For typical operating Vpk/KVB ratios this is ~1.5 (close to π/2).
         // KG1 absorbs the overall current scale.
-        let plate_factor = (vpk / kvb).atan();
+        let plate_factor = crate::math::atan(vpk / kvb);
 
         (ip_base / self.model.kg1) * plate_factor.max(0.0)
     }
@@ -228,7 +228,7 @@ impl PentodeRoot {
             return LEAKAGE_CONDUCTANCE;
         }
 
-        let ip_base = base.powf(ex);
+        let ip_base = crate::math::powf(base, ex);
 
         // d/dVpk of atan(Vpk/KVB) = 1/(1 + (Vpk/KVB)^2) * 1/KVB
         let vpk_ratio = vpk / kvb;
@@ -346,7 +346,7 @@ impl PentodeThreePort {
     #[inline]
     fn grid_iv(&self, vgk: f64) -> (f64, f64) {
         let x = (vgk / self.grid_vt).clamp(-500.0, 500.0);
-        let ev = x.exp();
+        let ev = crate::math::exp(x);
         let ig = self.grid_is * (ev - 1.0);
         let dig = self.grid_is * ev / self.grid_vt;
         (ig, dig)
@@ -373,11 +373,11 @@ impl PentodeThreePort {
             return (0.0, LEAKAGE_CONDUCTANCE, 0.0);
         }
 
-        let ip_base = base.powf(m.ex);
+        let ip_base = crate::math::powf(base, m.ex);
 
         // Pentode plate saturation: atan(Vpk/KVB)
         let vpk_ratio = vpk / m.kvb;
-        let plate_factor = vpk_ratio.atan();
+        let plate_factor = crate::math::atan(vpk_ratio);
 
         let ip = (ip_base / m.kg1) * plate_factor.max(0.0);
         if ip <= 0.0 {
@@ -408,11 +408,11 @@ impl PentodeThreePort {
         } else if e1 < -50.0 {
             0.0
         } else {
-            let exp_e1 = e1.exp();
+            let exp_e1 = crate::math::exp(e1);
             exp_e1 / (1.0 + exp_e1)
         };
 
-        let dip_dvg1k = (m.ex * base.powf(m.ex - 1.0) * sigmoid_e1 / m.kg1) * plate_factor.max(0.0);
+        let dip_dvg1k = (m.ex * crate::math::powf(base, m.ex - 1.0) * sigmoid_e1 / m.kg1) * plate_factor.max(0.0);
 
         (ip, dip_dvpk, dip_dvg1k)
     }

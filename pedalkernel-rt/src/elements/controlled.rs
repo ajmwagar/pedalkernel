@@ -146,10 +146,10 @@ impl Photocoupler {
     fn update_coefficients(&mut self) {
         let dt = 1.0 / self.sample_rate;
         // alpha = exp(-dt/tau), so (1 - alpha) is the step response per sample
-        self.alpha_fast_rise = (-dt / self.model.tau_fast_rise).exp();
-        self.alpha_fast_fall = (-dt / self.model.tau_fast_fall).exp();
-        self.alpha_slow_rise = (-dt / self.model.tau_slow_rise).exp();
-        self.alpha_slow_fall = (-dt / self.model.tau_slow_fall).exp();
+        self.alpha_fast_rise = crate::math::exp(-dt / self.model.tau_fast_rise);
+        self.alpha_fast_fall = crate::math::exp(-dt / self.model.tau_fast_fall);
+        self.alpha_slow_rise = crate::math::exp(-dt / self.model.tau_slow_rise);
+        self.alpha_slow_fall = crate::math::exp(-dt / self.model.tau_slow_fall);
     }
 
     /// Set LED drive level and update LDR resistance.
@@ -184,11 +184,11 @@ impl Photocoupler {
         // x = effective_light^gamma, then R = R_dark^(1-x) * R_light^x
         // This gives R_dark when light=0 and approaches R_light as light→1
         if effective_light > 1e-9 {
-            let x = effective_light.powf(self.model.gamma);
-            let log_r_dark = self.model.r_dark.ln();
-            let log_r_light = self.model.r_light.ln();
+            let x = crate::math::powf(effective_light, self.model.gamma);
+            let log_r_dark = crate::math::ln(self.model.r_dark);
+            let log_r_light = crate::math::ln(self.model.r_light);
             let log_r = log_r_dark + x * (log_r_light - log_r_dark);
-            self.resistance = log_r.exp().clamp(self.model.r_light, self.model.r_dark);
+            self.resistance = crate::math::exp(log_r).clamp(self.model.r_light, self.model.r_dark);
         } else {
             self.resistance = self.model.r_dark;
         }

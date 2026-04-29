@@ -114,7 +114,7 @@ impl OtaRoot {
     #[inline]
     pub fn output_current(&self, v_in: f64) -> f64 {
         let x = v_in / (2.0 * self.model.vt);
-        self.iabc * x.tanh()
+        self.iabc * crate::math::tanh(x)
     }
 
     /// Derivative of output current w.r.t. input voltage.
@@ -124,7 +124,7 @@ impl OtaRoot {
     #[inline]
     fn output_current_derivative(&self, v_in: f64) -> f64 {
         let x = v_in / (2.0 * self.model.vt);
-        let sech = 1.0 / x.cosh();
+        let sech = 1.0 / crate::math::cosh(x);
         self.iabc / (2.0 * self.model.vt) * sech * sech
     }
 

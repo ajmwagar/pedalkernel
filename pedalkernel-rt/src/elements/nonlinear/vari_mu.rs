@@ -200,10 +200,10 @@ impl VariMuTriodeRoot {
 
         // Exponential term with overflow protection
         let exp_arg = (m.p7 * vak - m.p8 * vgk).clamp(-500.0, 500.0);
-        let exp_term = exp_arg.exp();
+        let exp_term = crate::math::exp(exp_arg);
 
-        let numerator = m.p1 * vak.powf(m.p2);
-        let denominator = denom_base.powf(m.p5) * (m.p6 + exp_term);
+        let numerator = m.p1 * crate::math::powf(vak, m.p2);
+        let denominator = crate::math::powf(denom_base, m.p5) * (m.p6 + exp_term);
 
         if denominator <= 0.0 {
             return 0.0;
@@ -237,7 +237,7 @@ impl VariMuTriodeRoot {
         }
 
         let exp_arg = (m.p7 * vak - m.p8 * vgk).clamp(-500.0, 500.0);
-        let exp_term = exp_arg.exp();
+        let exp_term = crate::math::exp(exp_arg);
         let exp_sum = m.p6 + exp_term;
 
         if exp_sum <= 0.0 {
@@ -368,7 +368,7 @@ impl VariMuThreePort {
     #[inline]
     fn grid_iv(&self, vgk: f64) -> (f64, f64) {
         let x = (vgk / self.grid_vt).clamp(-500.0, 500.0);
-        let ev = x.exp();
+        let ev = crate::math::exp(x);
         let ig = self.grid_is * (ev - 1.0) * self.parallel_count as f64;
         let dig = self.grid_is * ev / self.grid_vt * self.parallel_count as f64;
         (ig, dig)
@@ -395,15 +395,15 @@ impl VariMuThreePort {
 
         // Exponential term
         let exp_arg = (m.p7 * vak - m.p8 * vgk).clamp(-500.0, 500.0);
-        let exp_term = exp_arg.exp();
+        let exp_term = crate::math::exp(exp_arg);
         let exp_sum = m.p6 + exp_term;
 
         if exp_sum <= 0.0 {
             return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
         }
 
-        let numerator = m.p1 * vak.powf(m.p2);
-        let denom_pow = denom_base.powf(m.p5);
+        let numerator = m.p1 * crate::math::powf(vak, m.p2);
+        let denom_pow = crate::math::powf(denom_base, m.p5);
         let denominator = denom_pow * exp_sum;
 
         if denominator <= 0.0 {
