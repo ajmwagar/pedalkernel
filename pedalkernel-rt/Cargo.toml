@@ -13,7 +13,7 @@ rust-version = "1.80"
 [features]
 default = ["std"]
 std = []
-debug-trace = []
+debug-trace = ["std"]
 runtime-warnings = ["std"]
 fault-injection = ["std"]
 
