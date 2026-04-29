@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use crate::wdf_leaf::{
-    leaf_matches_id, WdfCapacitor, WdfInductor, WdfJfetVr, WdfLeaf, WdfLeakyCapacitor,
+    leaf_matches_id, LeafKind, WdfCapacitor, WdfInductor, WdfJfetVr, WdfLeaf, WdfLeakyCapacitor,
     WdfPhotocoupler, WdfPot, WdfResistor, WdfSwitchedResistor, WdfUnitDelay, WdfVoltageSource,
 };
 use crate::pot_taper::PotTaper;
@@ -36,8 +36,8 @@ pub enum BinaryKind {
 /// Leaves are one-port elements (trait objects); internal nodes are
 /// series/parallel/transformer/R-type adaptors.
 pub enum DynNode {
-    /// Terminal one-port element. Component-defined behavior.
-    Leaf(Box<dyn WdfLeaf>),
+    /// Terminal one-port element. Concrete enum for serialization support.
+    Leaf(LeafKind),
 
     /// Binary adaptor (Series or Parallel).
     Binary {
@@ -76,7 +76,7 @@ pub enum DynNode {
 impl Clone for DynNode {
     fn clone(&self) -> Self {
         match self {
-            Self::Leaf(leaf) => Self::Leaf(leaf.clone()),
+            Self::Leaf(leaf) => Self::Leaf(leaf.clone()), // LeafKind derives Clone
             Self::Binary {
                 kind,
                 left,
@@ -128,7 +128,7 @@ impl Clone for DynNode {
 #[allow(non_snake_case)]
 impl DynNode {
     pub fn Resistor(comp_id: Option<String>, rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfResistor {
+        Self::Leaf(LeafKind::Resistor(WdfResistor {
             comp_id,
             rp,
             last_a: 0.0,
@@ -136,7 +136,7 @@ impl DynNode {
     }
 
     pub fn Capacitor(comp_id: Option<String>, capacitance: f64, rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfCapacitor {
+        Self::Leaf(LeafKind::Capacitor(WdfCapacitor {
             comp_id,
             capacitance,
             rp,
@@ -154,7 +154,7 @@ impl DynNode {
         da_state: f64,
         da_rate: f64,
     ) -> Self {
-        Self::Leaf(Box::new(WdfLeakyCapacitor {
+        Self::Leaf(LeafKind::LeakyCapacitor(WdfLeakyCapacitor {
             comp_id,
             capacitance,
             rp,
@@ -167,7 +167,7 @@ impl DynNode {
     }
 
     pub fn Inductor(comp_id: Option<String>, inductance: f64, rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfInductor {
+        Self::Leaf(LeafKind::Inductor(WdfInductor {
             comp_id,
             inductance,
             rp,
@@ -176,7 +176,7 @@ impl DynNode {
     }
 
     pub fn VoltageSource(voltage: f64, rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfVoltageSource {
+        Self::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
             voltage,
             rp,
             is_cathode_bias: false,
@@ -184,7 +184,7 @@ impl DynNode {
     }
 
     pub fn CathodeBiasSource(voltage: f64, rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfVoltageSource {
+        Self::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
             voltage,
             rp,
             is_cathode_bias: true,
@@ -192,7 +192,7 @@ impl DynNode {
     }
 
     pub fn UnitDelay(rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfUnitDelay {
+        Self::Leaf(LeafKind::UnitDelay(WdfUnitDelay {
             rp,
             state: 0.0,
             partner_state: 0.0,
@@ -202,7 +202,7 @@ impl DynNode {
     pub fn Pot(comp_id: String, max_resistance: f64, position: f64, taper: PotTaper) -> Self {
         let tapered_pos = taper.apply(position);
         let rp = (tapered_pos * max_resistance).max(max_resistance * 0.001);
-        Self::Leaf(Box::new(WdfPot {
+        Self::Leaf(LeafKind::Pot(WdfPot {
             comp_id,
             max_resistance,
             position,
@@ -214,7 +214,7 @@ impl DynNode {
     }
 
     pub fn PhotocouplerNode(comp_id: String, inner: Photocoupler) -> Self {
-        Self::Leaf(Box::new(WdfPhotocoupler {
+        Self::Leaf(LeafKind::Photocoupler(WdfPhotocoupler {
             comp_id,
             inner,
             prev_resistance: 0.0,
@@ -222,7 +222,7 @@ impl DynNode {
     }
 
     pub fn JfetVrNode(comp_id: String, inner: JfetVariableResistor) -> Self {
-        Self::Leaf(Box::new(WdfJfetVr {
+        Self::Leaf(LeafKind::JfetVr(WdfJfetVr {
             comp_id,
             inner,
             prev_rds: 0.0,
@@ -242,7 +242,7 @@ impl DynNode {
         } else {
             r_inactive
         };
-        Self::Leaf(Box::new(WdfSwitchedResistor {
+        Self::Leaf(LeafKind::SwitchedResistor(WdfSwitchedResistor {
             switch_id,
             path_index,
             num_paths,
@@ -313,7 +313,7 @@ impl DynNode {
     /// Find a leaf by predicate (first match, depth-first). Returns None if not found.
     pub fn find_leaf<T>(&self, f: &impl Fn(&dyn WdfLeaf) -> Option<T>) -> Option<T> {
         match self {
-            Self::Leaf(leaf) => f(leaf.as_ref()),
+            Self::Leaf(leaf) => f(leaf),
             Self::Binary { left, right, .. } => left.find_leaf(f).or_else(|| right.find_leaf(f)),
             Self::Transformer { secondary, .. } => secondary.find_leaf(f),
             Self::RType { children, .. } => children.iter().find_map(|c| c.find_leaf(f)),
@@ -324,7 +324,7 @@ impl DynNode {
     /// to handle split pots where both halves must update.
     pub fn for_each_leaf_mut(&mut self, f: &mut impl FnMut(&mut dyn WdfLeaf) -> bool) -> bool {
         match self {
-            Self::Leaf(leaf) => f(leaf.as_mut()),
+            Self::Leaf(leaf) => f(leaf),
             Self::Binary { left, right, .. } => {
                 let a = left.for_each_leaf_mut(f);
                 let b = right.for_each_leaf_mut(f);
@@ -344,7 +344,7 @@ impl DynNode {
     /// Iterate all leaves immutably.
     pub fn for_each_leaf(&self, f: &mut impl FnMut(&dyn WdfLeaf)) {
         match self {
-            Self::Leaf(leaf) => f(leaf.as_ref()),
+            Self::Leaf(leaf) => f(leaf),
             Self::Binary { left, right, .. } => {
                 left.for_each_leaf(f);
                 right.for_each_leaf(f);
@@ -577,7 +577,7 @@ impl DynNode {
     /// Visit all leaves (non-short-circuiting).
     fn visit_leaves(&self, f: &impl Fn(&dyn WdfLeaf)) {
         match self {
-            Self::Leaf(leaf) => f(leaf.as_ref()),
+            Self::Leaf(leaf) => f(leaf),
             Self::Binary { left, right, .. } => {
                 left.visit_leaves(f);
                 right.visit_leaves(f);
@@ -622,7 +622,7 @@ impl DynNode {
             Self::Leaf(leaf) => {
                 if leaf.type_tag() == "resistor" {
                     let rp = leaf.port_resistance();
-                    *self = DynNode::Leaf(Box::new(WdfPot {
+                    *self = DynNode::Leaf(LeafKind::Pot(WdfPot {
                         comp_id: tag.to_string(),
                         max_resistance: rp,
                         position: 1.0,

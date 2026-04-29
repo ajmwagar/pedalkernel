@@ -5,6 +5,7 @@ use crate::elements::*;
 use crate::model_lookup;
 
 use super::dyn_node::{BinaryKind, DynNode};
+use super::wdf_leaf::WdfLeaf;
 
 pub(super) fn diode_model(dt: DiodeType) -> DiodeModel {
     match dt {

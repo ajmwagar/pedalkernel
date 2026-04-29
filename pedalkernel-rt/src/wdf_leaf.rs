@@ -790,6 +790,115 @@ impl WdfUnitDelay {
 // Downcast helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LeafKind — concrete enum replacing Box<dyn WdfLeaf>
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Concrete leaf type — replaces Box<dyn WdfLeaf> for serialization support.
+#[derive(Clone)]
+pub enum LeafKind {
+    Resistor(WdfResistor),
+    Capacitor(WdfCapacitor),
+    LeakyCapacitor(WdfLeakyCapacitor),
+    Inductor(WdfInductor),
+    VoltageSource(WdfVoltageSource),
+    Pot(WdfPot),
+    Photocoupler(WdfPhotocoupler),
+    JfetVr(WdfJfetVr),
+    SwitchedResistor(WdfSwitchedResistor),
+    UnitDelay(WdfUnitDelay),
+}
+
+macro_rules! delegate_leaf {
+    ($self:ident, $method:ident $(, $arg:expr)*) => {
+        match $self {
+            LeafKind::Resistor(x) => x.$method($($arg),*),
+            LeafKind::Capacitor(x) => x.$method($($arg),*),
+            LeafKind::LeakyCapacitor(x) => x.$method($($arg),*),
+            LeafKind::Inductor(x) => x.$method($($arg),*),
+            LeafKind::VoltageSource(x) => x.$method($($arg),*),
+            LeafKind::Pot(x) => x.$method($($arg),*),
+            LeafKind::Photocoupler(x) => x.$method($($arg),*),
+            LeafKind::JfetVr(x) => x.$method($($arg),*),
+            LeafKind::SwitchedResistor(x) => x.$method($($arg),*),
+            LeafKind::UnitDelay(x) => x.$method($($arg),*),
+        }
+    };
+}
+
+impl WdfLeaf for LeafKind {
+    fn reflected(&mut self) -> f64 {
+        delegate_leaf!(self, reflected)
+    }
+    fn set_incident(&mut self, a: f64) {
+        delegate_leaf!(self, set_incident, a)
+    }
+    fn port_resistance(&self) -> f64 {
+        delegate_leaf!(self, port_resistance)
+    }
+    fn comp_id(&self) -> Option<&str> {
+        delegate_leaf!(self, comp_id)
+    }
+    fn type_tag(&self) -> &'static str {
+        delegate_leaf!(self, type_tag)
+    }
+    fn set_complement(&mut self) {
+        delegate_leaf!(self, set_complement)
+    }
+    fn leaf_voltage(&self) -> f64 {
+        delegate_leaf!(self, leaf_voltage)
+    }
+    fn set_control(&mut self, id: &str, value: f64) -> bool {
+        delegate_leaf!(self, set_control, id, value)
+    }
+    fn set_resistance(&mut self, ohms: f64) -> bool {
+        delegate_leaf!(self, set_resistance, ohms)
+    }
+    fn set_voltage(&mut self, v: f64) -> bool {
+        delegate_leaf!(self, set_voltage, v)
+    }
+    fn update_sample_rate(&mut self, fs: f64) {
+        delegate_leaf!(self, update_sample_rate, fs)
+    }
+    fn reset(&mut self) {
+        delegate_leaf!(self, reset)
+    }
+    fn is_dynamic(&self) -> bool {
+        delegate_leaf!(self, is_dynamic)
+    }
+    fn is_reactive(&self) -> bool {
+        delegate_leaf!(self, is_reactive)
+    }
+    fn editable_info(&self) -> Option<(&'static str, f64)> {
+        delegate_leaf!(self, editable_info)
+    }
+    fn debug_info(&self) -> String {
+        delegate_leaf!(self, debug_info)
+    }
+    fn unit_delay_state(&self) -> Option<f64> {
+        delegate_leaf!(self, unit_delay_state)
+    }
+    fn set_unit_delay_partner(&mut self, val: f64) -> bool {
+        delegate_leaf!(self, set_unit_delay_partner, val)
+    }
+    fn pot_position(&self) -> Option<f64> {
+        delegate_leaf!(self, pot_position)
+    }
+    fn pot_max_resistance(&self) -> Option<f64> {
+        delegate_leaf!(self, pot_max_resistance)
+    }
+    fn is_complement(&self) -> bool {
+        delegate_leaf!(self, is_complement)
+    }
+    fn clone_box(&self) -> Box<dyn WdfLeaf> {
+        Box::new(self.clone())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Downcast helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
 /// Helper to check if a leaf matches a comp_id with split-pot prefix matching.
 pub fn leaf_matches_id(leaf: &dyn WdfLeaf, target_id: &str) -> bool {
     match leaf.comp_id() {

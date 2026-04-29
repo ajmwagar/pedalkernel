@@ -13,7 +13,7 @@ use super::graph::{CircuitGraph, NodeId};
 use super::rigid::{build_rigid, build_rigid_from_group};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
-use super::wdf_leaf::WdfVoltageSource;
+use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
 use crate::dsl::PedalDef;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 
@@ -937,7 +937,7 @@ fn build_pot_divider(
 /// Creates `Series(VoltageSource, passive_tree)` — the standard WDF
 /// topology where VS drives the tree and the root terminates it.
 pub(super) fn with_voltage_source(passive_tree: DynNode) -> DynNode {
-    let vs = DynNode::Leaf(Box::new(WdfVoltageSource {
+    let vs = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
         voltage: 0.0,
         rp: 1.0,
         is_cathode_bias: false,
@@ -1152,7 +1152,7 @@ fn build_ground_clip_stage(
     // Typical op-amp output impedance: 50-200Ω. Using 100Ω as default.
     // This gives the WDF diode root the correct source impedance for
     // computing junction voltage and clipping behavior.
-    let tree = DynNode::Leaf(Box::new(super::wdf_leaf::WdfVoltageSource {
+    let tree = DynNode::Leaf(super::wdf_leaf::LeafKind::VoltageSource(super::wdf_leaf::WdfVoltageSource {
         voltage: 0.0,
         rp: 100.0,
         is_cathode_bias: false,

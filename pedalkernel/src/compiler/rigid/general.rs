@@ -26,7 +26,7 @@ use super::super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
     ScatteringRecomputeData, WdfStage, NR_ITERATION_BUDGET,
 };
-use super::super::wdf_leaf::WdfVoltageSource;
+use super::super::wdf_leaf::{LeafKind, WdfVoltageSource};
 use super::opamp_root::{extract_opamp_config, make_opamp_root};
 use super::{is_inverting_topology, StageStats};
 use crate::elements::*;
@@ -151,7 +151,7 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     // The gain is already computed from Rf/Ri by extract_opamp_config and
     // applied by OpAmpRoot.compute_vs_voltage(). The VS output IS the
     // op-amp output voltage. The diode clips it.
-    let tree = DynNode::Leaf(Box::new(WdfVoltageSource {
+    let tree = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
         voltage: 0.0,
         rp: config.model.output_impedance,
         is_cathode_bias: false,

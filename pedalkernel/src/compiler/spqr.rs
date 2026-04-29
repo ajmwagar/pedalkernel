@@ -678,6 +678,7 @@ fn collect_non_passive_edges(
 // ═══════════════════════════════════════════════════════════════════════════
 
 use super::dyn_node::DynNode;
+use super::wdf_leaf::WdfLeaf;
 
 /// Fold a list of DynNodes into a binary tree using the given constructor.
 ///

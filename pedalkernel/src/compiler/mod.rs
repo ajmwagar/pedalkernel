@@ -105,7 +105,6 @@ mod tone_stage_tests;
 mod pot_binding_investigation_tests;
 #[cfg(test)]
 mod pot_wiper_tests;
-#[cfg(test)]
-mod incremental_recompute_tests;
+// incremental_recompute_tests moved to pedalkernel-rt/tests/incremental_recompute.rs
 #[cfg(test)]
 mod opamp_gain_tests;

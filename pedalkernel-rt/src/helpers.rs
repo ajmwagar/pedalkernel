@@ -7,6 +7,7 @@ extern crate alloc;
 use alloc::{format, string::{String, ToString}, vec::Vec};
 
 use crate::dyn_node::{BinaryKind, DynNode};
+use crate::wdf_leaf::WdfLeaf;
 
 pub(crate) fn has_vs(node: &DynNode) -> bool {
     match node {

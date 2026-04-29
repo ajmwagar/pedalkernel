@@ -354,7 +354,7 @@ fn find_feedback_pot(
 
     pot_id.map(|id| {
         let leaf = pot_leaf.unwrap_or_else(|| {
-            DynNode::Leaf(Box::new(crate::compiler::wdf_leaf::WdfPot {
+            DynNode::Leaf(crate::compiler::wdf_leaf::LeafKind::Pot(crate::compiler::wdf_leaf::WdfPot {
                 comp_id: id.clone(),
                 max_resistance: 100_000.0,
                 position: 0.5,
