@@ -29,6 +29,7 @@ use crate::elements::WdfRoot;
 /// - Slew rate limiting (optional, applied post-convergence)
 /// - Gain-bandwidth product (closed-loop bandwidth rolloff)
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpAmpModel {
     /// Open-loop DC gain. TL072 ≈ 200k (106dB), LM308 ≈ 300k.
     pub open_loop_gain: f64,
@@ -186,6 +187,7 @@ impl OpAmpModel {
 /// `WdfStage::notify_pot_changed()` + incremental recompute instead.
 /// Will be removed once test helpers are updated.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FeedbackConfig {
     /// Component ID of the pot controlling gain.
     pub pot_comp_id: String,
@@ -224,6 +226,7 @@ pub struct FeedbackConfig {
 /// - **NonInverting**: Input to V+, feedback to V-. Gain = 1 + Rf/Ri.
 ///   Input set via `set_vp()`. Unity-gain buffer is NonInverting with gain=1.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OpAmpMode {
     /// Inverting amplifier: Vout = -gain * Vin
     /// Input comes from WDF wave variable (virtual ground at V-).
@@ -249,6 +252,7 @@ pub enum OpAmpMode {
 /// unified nullor pipeline, any op-amp whose output is the stage's
 /// audio output gets an `OpAmpPostFx` attached.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpAmpPostFx {
     /// Datasheet parameters (slew_rate, v_max).
     pub model: OpAmpModel,
@@ -302,6 +306,7 @@ impl OpAmpPostFx {
 /// - Output saturation at supply rails
 /// - Soft clipping via feedback diodes (optional)
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpAmpRoot {
     pub model: OpAmpModel,
     /// Operating mode (inverting/non-inverting).

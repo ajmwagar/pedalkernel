@@ -16,6 +16,7 @@ use super::{ControlledResistance, WdfLeaf};
 /// tremolos and Uni-Vibe circuits. Uses a Persyn-style two-rate model
 /// for accurate CdS carrier dynamics.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PhotocouplerModel {
     /// Resistance when fully dark (Ω). Typical: 500kΩ - 5MΩ.
     pub r_dark: f64,
@@ -108,6 +109,7 @@ impl PhotocouplerModel {
 /// In WDF terms, this is a one-port resistor with time-varying resistance.
 /// The LED current is an external control parameter (0.0 = off, 1.0 = full).
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Photocoupler {
     pub model: PhotocouplerModel,
     /// Fast carrier state (normalized 0-1).
@@ -329,6 +331,7 @@ impl ControlledResistance for Photocoupler {
 /// This replaces the full Newton-Raphson JFET solver for LFO-modulated
 /// JFETs that serve as variable resistors (e.g., Phase 90 all-pass stages).
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JfetVariableResistor {
     pub model: JfetModel,
     /// Current gate-source voltage (V).

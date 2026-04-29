@@ -26,6 +26,7 @@ use crate::tree::RTypeAdaptor;
 
 /// Binary adaptor kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BinaryKind {
     Series,
     Parallel,
@@ -35,6 +36,7 @@ pub enum BinaryKind {
 ///
 /// Leaves are one-port elements (trait objects); internal nodes are
 /// series/parallel/transformer/R-type adaptors.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DynNode {
     /// Terminal one-port element. Concrete enum for serialization support.
     Leaf(LeafKind),

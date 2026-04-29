@@ -13,6 +13,7 @@ rust-version = "1.80"
 [features]
 default = ["std"]
 std = []
+serde = ["dep:serde"]
 debug-trace = ["std"]
 runtime-warnings = ["std"]
 fault-injection = ["std"]
@@ -26,10 +27,12 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 
 [dependencies]
 libm = "0.2"
-hashbrown = "0.15"
+hashbrown = { version = "0.15", features = ["serde"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
+postcard = { version = "1", features = ["alloc"] }
 
 [[bench]]
 name = "rt_bench"

@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 /// Routing step in the inter-subcircuit signal graph.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RoutingStep {
     /// Process subcircuit at index, feeding it signal from source.
     ProcessSubcircuit {
@@ -18,6 +19,7 @@ pub enum RoutingStep {
 
 /// Where a subcircuit gets its input signal.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SignalSource {
     /// The equipment-level input.
     EquipmentInput,

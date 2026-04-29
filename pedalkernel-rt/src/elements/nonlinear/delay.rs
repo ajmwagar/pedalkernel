@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 /// - Allpass: sub-sample accuracy without HF loss — best for tape/analog feel
 /// - Cubic: smooth with low aliasing — good general purpose
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Interpolation {
     /// Linear interpolation: `y = y0*(1-f) + y1*f`
     /// Simple and cheap. Causes slight HF roll-off at short delays.
@@ -42,6 +43,7 @@ pub enum Interpolation {
 /// it crosses a zone boundary. This is O(zones) per tick, not
 /// O(buffer_length), keeping CPU cost negligible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Medium {
     /// Clean digital delay — no buffer processing.
     None,
@@ -68,6 +70,7 @@ pub enum Medium {
 /// At normal playback speed, exactly one sample crosses each zone
 /// boundary per tick, so the total cost is O(zones) per sample.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ZoneBoundary {
     /// Distance from write head in samples.
     pub distance_samples: f64,
@@ -85,6 +88,7 @@ pub struct ZoneBoundary {
 
 /// Pre-configured medium settings for common tape echo models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MediumPreset {
     /// RE-201: gentle, well-maintained tape.
     Re201,
@@ -131,6 +135,7 @@ impl MediumPreset {
 /// different positions (ratios of the base delay time). This models
 /// multi-head tape machines (RE-201) and multi-tap digital delays.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DelayLine {
     /// Ring buffer holding delayed samples.
     buffer: Vec<f64>,
@@ -619,6 +624,7 @@ impl DelayLine {
 /// Taps are separate WDF output ports that can feed into their own
 /// subtrees (e.g., per-head HF filtering, individual level controls).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Tap {
     /// Ratio of base delay time (e.g., 1.0, 2.0, 4.0).
     pub ratio: f64,

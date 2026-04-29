@@ -117,6 +117,7 @@ impl Clone for Box<dyn WdfLeaf> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfResistor {
     pub comp_id: Option<String>,
     pub rp: f64,
@@ -167,6 +168,7 @@ impl WdfLeaf for WdfResistor {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfCapacitor {
     pub comp_id: Option<String>,
     pub capacitance: f64,
@@ -241,6 +243,7 @@ impl WdfLeaf for WdfCapacitor {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfLeakyCapacitor {
     pub comp_id: Option<String>,
     pub capacitance: f64,
@@ -317,6 +320,7 @@ impl WdfLeaf for WdfLeakyCapacitor {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfInductor {
     pub comp_id: Option<String>,
     pub inductance: f64,
@@ -376,6 +380,7 @@ impl WdfLeaf for WdfInductor {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfVoltageSource {
     pub voltage: f64,
     pub rp: f64,
@@ -430,6 +435,7 @@ impl WdfLeaf for WdfVoltageSource {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfPot {
     pub comp_id: String,
     pub max_resistance: f64,
@@ -542,6 +548,7 @@ impl WdfPot {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfPhotocoupler {
     pub comp_id: String,
     pub inner: PhotocouplerInner,
@@ -601,6 +608,7 @@ impl WdfLeaf for WdfPhotocoupler {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfJfetVr {
     pub comp_id: String,
     pub inner: JfetVariableResistor,
@@ -670,6 +678,7 @@ impl WdfJfetVr {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfSwitchedResistor {
     pub switch_id: String,
     pub path_index: usize,
@@ -736,6 +745,7 @@ impl WdfLeaf for WdfSwitchedResistor {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfUnitDelay {
     pub rp: f64,
     pub state: f64,
@@ -796,6 +806,7 @@ impl WdfUnitDelay {
 
 /// Concrete leaf type — replaces Box<dyn WdfLeaf> for serialization support.
 #[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LeafKind {
     Resistor(WdfResistor),
     Capacitor(WdfCapacitor),

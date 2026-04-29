@@ -29,6 +29,7 @@ use crate::elements::WdfRoot;
 /// plate current is nearly independent of Vpk in the normal operating region.
 /// KG1 scales the absolute plate current magnitude.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PentodeModel {
     /// Amplification factor (mu), screen-referenced. EF86 ≈ 38, EL84 ≈ 19.
     pub mu: f64,
@@ -82,6 +83,7 @@ impl PentodeModel {
 /// Pins: `.grid` (control grid g1), `.screen` (screen grid g2),
 ///       `.plate`, `.cathode`
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PentodeRoot {
     pub model: PentodeModel,
     /// Current control grid voltage (g1-cathode). Set externally.
@@ -294,6 +296,7 @@ impl WdfRoot for PentodeRoot {
 /// Plate current: screen-referenced Koren pentode equation
 /// Transconductance: `∂Ip/∂Vgk` derived from the pentode Koren model
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PentodeThreePort {
     pub model: PentodeModel,
     /// Maximum plate voltage (B+ supply rail).

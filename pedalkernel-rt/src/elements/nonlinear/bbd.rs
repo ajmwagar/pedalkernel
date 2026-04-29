@@ -26,6 +26,7 @@ use super::delay::{DelayLine, Interpolation};
 /// We model these as a delay buffer with a variable-rate reader,
 /// anti-aliasing LPF, and subtle noise/distortion.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BbdModel {
     /// Number of BBD stages. MN3207=1024, MN3007=1024, MN3005=4096.
     pub num_stages: usize,
@@ -155,6 +156,7 @@ impl BbdModel {
 /// independent envelope of the output signal, to achieve unity gain
 /// in steady state while preserving the analog artifacts.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BbdDelayLine {
     pub model: BbdModel,
     /// Inner delay line handling ring buffer, write position, and interpolation.

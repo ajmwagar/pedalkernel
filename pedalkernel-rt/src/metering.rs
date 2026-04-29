@@ -24,6 +24,7 @@ pub const MAX_STAGES: usize = 16;
 /// (typically 128 or 256) and read by the UI thread at ~60fps.
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct UiMetrics {
     // ═══════════════════════════════════════════════════════════════════════════
     // Level meters — for VU meters, LED bars, clip indicators
@@ -118,6 +119,7 @@ impl UiMetrics {
 ///
 /// Used by the audio thread to compute RMS, peak, and tap tube/transformer state.
 /// Call `accumulate()` every sample, then `reduce()` every `block_size` samples.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MetricsAccumulator {
     /// Block size for metric reduction (typically 128 or 256).
     block_size: usize,

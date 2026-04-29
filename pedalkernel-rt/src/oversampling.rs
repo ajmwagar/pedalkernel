@@ -18,6 +18,7 @@ use crate::math;
 
 /// Oversampling factor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OversamplingFactor {
     /// No oversampling (1x). Cheapest, most aliasing.
     X1 = 1,
@@ -42,6 +43,7 @@ impl OversamplingFactor {
 /// Coefficients are for a 3rd-order Butterworth at 0.5 * fs_base,
 /// evaluated at the oversampled rate.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct HalfBandFilter {
     /// Biquad coefficients [b0, b1, b2, a1, a2] for each section.
     sections: Vec<[f64; 5]>,
@@ -136,6 +138,7 @@ impl HalfBandFilter {
 /// let output = os.process(input, |x| my_nonlinear_fn(x));
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Oversampler {
     factor: OversamplingFactor,
     /// Anti-imaging filter (applied after zero-stuffing on upsample).

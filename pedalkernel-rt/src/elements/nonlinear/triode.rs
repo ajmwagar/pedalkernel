@@ -19,6 +19,7 @@ use crate::elements::WdfRoot;
 /// The Koren equation:
 /// `Ip = (Vpk/Kp * ln(1 + exp(Kp * (1/mu + Vgk/sqrt(Kvb + Vpk^2)))))^Ex / KG1`
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TriodeModel {
     /// Amplification factor (mu). Higher = more gain. 12AX7 ≈ 100, 12AU7 ≈ 20.
     pub mu: f64,
@@ -59,6 +60,7 @@ impl TriodeModel {
 /// The plate current follows the Koren model, which accurately captures
 /// the tube's behavior in cutoff, active, and saturation regions.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TriodeRoot {
     pub model: TriodeModel,
     /// Current grid-cathode voltage (external control parameter).
@@ -298,6 +300,7 @@ impl NlDeviceIv for TriodeRoot {
 /// Plate current: Koren equation `Ip = (Vpk/Kp × ln(1 + exp(E1)))^Ex / KG1`
 /// Transconductance: `∂Ia/∂Vgk = Ex × base^(Ex-1) / KG1 × Vpk × σ(E1) / √(Kvb + Vpk²)`
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TriodeThreePort {
     pub model: TriodeModel,
     /// Maximum plate voltage (B+ supply rail).

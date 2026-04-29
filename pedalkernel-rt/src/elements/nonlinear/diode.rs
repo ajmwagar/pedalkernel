@@ -243,6 +243,7 @@ pub fn explicit_single_diode(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
 
 /// Diode model parameters derived from the Shockley equation.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiodeModel {
     /// Saturation current (A). Silicon ≈ 1e-15, Germanium ≈ 1e-6.
     pub is: f64,
@@ -381,6 +382,7 @@ impl DiodeModel {
 /// and exhibits sharp breakdown at the zener voltage in reverse bias.
 /// This makes it useful for voltage regulation and clipping.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ZenerModel {
     /// Zener breakdown voltage (V). Common values: 3.3, 4.7, 5.1, 6.2, 9.1, 12.
     pub vz: f64,
@@ -478,6 +480,7 @@ impl ZenerModel {
 /// - Forward (v > 0): `i = Is_fwd * (exp(v/nVt_fwd) - 1)`
 /// - Reverse (v < -Vz): `i = -Is_rev * (exp(-(v+Vz)/nVt_rev) - 1) - (v+Vz)/Rz`
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ZenerRoot {
     pub model: ZenerModel,
     max_iter: usize,
@@ -572,6 +575,7 @@ impl WdfRoot for ZenerRoot {
 ///
 /// Max iterations capped for real-time safety.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiodePairRoot {
     pub model: DiodeModel,
     max_iter: usize,
@@ -698,6 +702,7 @@ impl WdfRoot for DiodePairRoot {
 ///
 /// Solves `i_d(v) = Is*(exp(v/nVt) - 1)` via Newton-Raphson.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiodeRoot {
     pub model: DiodeModel,
     max_iter: usize,
@@ -838,6 +843,7 @@ impl NlDeviceIv for DiodePairRoot {
 /// plus one Halley step each), making it ~4–6× faster than the NR solver for
 /// typical audio signals.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExplicitDiodePairRoot {
     /// Diode model parameters (Is, nVt, Rs).
     pub model: DiodeModel,
@@ -901,6 +907,7 @@ impl NlDeviceIv for ExplicitDiodePairRoot {
 /// Produces the same I-V characteristic as [`DiodeRoot`] but computes
 /// the reflected wave in closed form — no Newton-Raphson iteration.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExplicitDiodeRoot {
     /// Diode model parameters (Is, nVt, Rs).
     pub model: DiodeModel,

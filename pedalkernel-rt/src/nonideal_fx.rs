@@ -4,6 +4,7 @@
 /// these — the stage builder applies them as post-processing. No pattern
 /// matching on component type anywhere in the pipeline.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NonIdealFx {
     /// Gain-bandwidth product limiting + slew rate.
     /// Applied as a first-order IIR lowpass (fc = GBW/gain) followed by

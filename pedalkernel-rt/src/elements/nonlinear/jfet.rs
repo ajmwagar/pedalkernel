@@ -21,6 +21,7 @@ const VT: f64 = 0.02585;
 /// Uses VTO (threshold voltage) and BETA (transconductance coefficient)
 /// directly from SPICE `.MODEL` statements rather than the derived Idss.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JfetModel {
     /// Threshold (pinch-off) voltage (V). Negative for N-channel depletion mode.
     pub vto: f64,
@@ -106,6 +107,7 @@ impl JfetModel {
 /// Uses SPICE sign convention: internal voltages are `sign × external`,
 /// where `sign = +1` for N-channel and `-1` for P-channel.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JfetRoot {
     pub model: JfetModel,
     /// Current gate-source voltage (external control parameter).

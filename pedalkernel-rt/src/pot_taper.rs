@@ -7,6 +7,7 @@
 ///
 /// Note: Some American manufacturers flip A and B. Always check datasheets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PotTaper {
     /// Audio/Logarithmic taper - slow at start, fast at end (volume controls)
     A,

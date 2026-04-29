@@ -22,6 +22,7 @@ use crate::math;
 /// Different semiconductor technologies have different temperature sensitivities.
 /// These coefficients parameterize the thermal model for the dominant device type.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThermalCoefficients {
     /// Beta (hFE) temperature coefficient (%/deg C from 25 deg C reference).
     pub beta_tempco: f64,
@@ -72,6 +73,7 @@ impl Default for ThermalCoefficients {
 
 /// Temperature-dependent parameters that change as the circuit warms up.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThermalState {
     /// Current junction temperature in deg C.
     pub temperature: f64,
@@ -119,6 +121,7 @@ impl ThermalState {
 ///
 /// The temperature follows: `T(t) = T_ambient + (T_steady - T_ambient) * (1 - exp(-t/tau))`
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThermalModel {
     /// Ambient (starting) temperature in deg C.
     ambient_temp: f64,

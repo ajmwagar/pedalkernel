@@ -7,6 +7,7 @@ use super::WdfLeaf;
 ///
 /// Copied from pedalkernel DSL to avoid circular dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RectifierType {
     /// Tube rectifier (GZ34, 5U4, 5Y3) — high impedance, significant sag.
     Tube,
@@ -23,6 +24,7 @@ pub enum RectifierType {
 ///
 /// `b = 0` (matched termination when Rp == R)
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Resistor {
     resistance: f64,
 }
@@ -64,6 +66,7 @@ impl WdfLeaf for Resistor {
 /// `b[n] = z^{-1} a[n]` (previous incident becomes current reflected)
 /// `Rp = 1 / (2 * fs * C)`
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Capacitor {
     capacitance: f64,
     resistance: f64,
@@ -114,6 +117,7 @@ impl WdfLeaf for Capacitor {
 /// `b[n] = -z^{-1} a[n]`
 /// `Rp = 2 * fs * L`
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Inductor {
     inductance: f64,
     resistance: f64,
@@ -164,6 +168,7 @@ impl WdfLeaf for Inductor {
 /// `b = 2 * Vs - a` where Vs is the source voltage.
 /// Port resistance set to a small value (near-ideal source).
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VoltageSource {
     voltage: f64,
     resistance: f64,
@@ -227,6 +232,7 @@ impl WdfLeaf for VoltageSource {
 /// This is what distinguishes a Marshall Plexi (tube rectifier, high sag,
 /// spongy feel) from a Mesa Boogie (solid-state rectifier, stiff response).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PowerSupply {
     /// Nominal (no-load) supply voltage (V).
     nominal_voltage: f64,

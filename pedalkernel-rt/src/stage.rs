@@ -42,6 +42,7 @@ pub(crate) fn flush_denormal(x: f64) -> f64 {
 ///
 /// No heap allocations. All fields are scalars.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct NonIdealFxState {
     /// GBW lowpass coefficient: α = 2π·fc / (2π·fc + fs).
     pub gbw_coeff: f64,
@@ -225,6 +226,7 @@ const MAX_TRACE_MNL: u64 = 20;
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[allow(dead_code)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum RootKind {
     DiodePair(DiodePairRoot),
     SingleDiode(DiodeRoot),
@@ -404,6 +406,7 @@ impl RootKind {
 /// Models the inverting all-pass where JFET drain connects to opamp neg
 /// with Rf||Cf feedback to output. Transfer function: V_out = -(Z_fb/Z_in) * V_in
 /// where Z_fb(s) = Rf/(1 + s·Rf·Cf) via bilinear transform.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct AllpassFeedback {
     /// Input resistance (R_ap) in the signal path before the JFET.
     pub(crate) r_ap: f64,
@@ -425,6 +428,7 @@ pub(crate) struct AllpassFeedback {
 ///
 /// The WDF tree still processes each sample to maintain the JFET's NR state,
 /// but the output comes from this IIR rather than the tree's root port voltage.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct AllpassDirect {
     /// Phase-shifting capacitor value (e.g., C_ap = 47nF).
     pub(crate) cap: f64,
@@ -444,6 +448,7 @@ pub(crate) struct AllpassDirect {
 ///
 /// Bilinear-transformed to a 2nd-order IIR:
 ///   y[n] = b0·x[n] + b1·x[n-1] + b2·x[n-2] - a1·y[n-1] - a2·y[n-2]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct ResonatorFeedback {
     /// IIR coefficients (normalized by a0).
     pub(crate) b0: f64,
@@ -549,6 +554,7 @@ impl ResonatorFeedback {
 /// a₂ = b₂ − 2·R₂·(V+ − b₁) / R₁
 /// V_out = V+ + R₂·(V+ − b₁) / R₁ − b₂
 /// ```
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct OpAmpWdfAdaptor {
     /// Zi subtree (input network for inverting, ground-leg for non-inverting).
     pub(crate) zi: DynNode,
@@ -638,6 +644,7 @@ impl OpAmpWdfAdaptor {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct WdfStage {
     pub(crate) tree: DynNode,
     pub(crate) root: RootKind,
@@ -866,6 +873,7 @@ impl WdfStage {
 }
 
 /// Stored data for recomputing opamp adaptor scattering when pots change.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct OpAmpRecomputeData {
     pub(crate) mna: crate::tree::MnaSystem,
     pub(crate) port_pairs: Vec<(Option<usize>, Option<usize>)>,
@@ -875,6 +883,7 @@ pub(crate) struct OpAmpRecomputeData {
 /// A photocoupler in the input path of an inverting opamp stage.
 /// Stores the element itself (for asymmetric time constant modeling)
 /// plus the fixed series resistance and DC feedback resistance for gain updates.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct InputPhotocoupler {
     pub(crate) comp_id: String,
     pub(crate) element: Photocoupler,
@@ -2184,6 +2193,7 @@ impl WdfStage {
 /// Tube root that dispatches to either a standard Koren triode or a
 /// Raffensperger variable-mu triode. Used in PushPullStage where
 /// both types may appear.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum TubeRoot {
     Koren(TriodeRoot),
     VariMu(VariMuTriodeRoot),
@@ -2249,6 +2259,7 @@ impl TubeRoot {
 /// Push gets +Vin, pull gets -Vin. Output = push_v - pull_v.
 /// Used for circuits like the Fairchild 670 where push and pull triodes
 /// connect to opposite ends of a center-tapped output transformer.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct PushPullStage {
     /// WDF tree for push half (plate load + cathode passives).
     pub(crate) push_tree: DynNode,
@@ -2284,6 +2295,7 @@ pub(crate) struct PushPullStage {
 /// When grid passives are present, the push-pull half uses an R-type adaptor
 /// with the grid as a WDF port instead of a simple WDF tree. This allows
 /// coupling caps and grid stoppers to naturally AC-couple the signal.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct PushPullHalfAdaptor {
     pub(crate) adaptor: RTypeAdaptor,
     pub(crate) device: NlDeviceGroupKind,
@@ -2600,6 +2612,7 @@ use crate::elements::nonlinear::{PentodeThreePort, VariMuThreePort};
 /// Each variant wraps a concrete nonlinear root type that implements
 /// `NlDeviceIv`, providing the I-V characteristic and its derivative.
 #[allow(dead_code)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum NlDeviceKind {
     Triode(TriodeRoot),
     VariMu(VariMuTriodeRoot),
@@ -2685,6 +2698,7 @@ impl NlDeviceGroupIv for NlDeviceKind {
 /// Each variant wraps a concrete device with multiple coupled ports
 /// (e.g., a 3-port triode with grid and plate ports), or a single-port
 /// device adapted to the grouped interface for mixed-device solves.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum NlDeviceGroupKind {
     /// 3-port variable-mu triode (grid-cathode + plate-cathode).
     VariMuThreePort(VariMuThreePort),
@@ -2757,6 +2771,7 @@ impl NlDeviceGroupKind {
 ///
 /// When present, the multi-port NR solver uses cross-coupled device Jacobians
 /// instead of treating each port independently.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct MultiNlDeviceGroups {
     pub(crate) groups: Vec<NlDeviceGroupKind>,
     pub(crate) offsets: Vec<usize>,
@@ -2768,6 +2783,7 @@ pub(crate) struct MultiNlDeviceGroups {
 /// Port node pairs are fixed; only port resistances change (from pots).
 /// On pot change, we rebuild `WdfPort`s with current resistances, re-derive
 /// the scattering matrix, and update all sub-blocks.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct ScatteringRecomputeData {
     /// MNA system with fixed resistors stamped (no pots).
     pub(crate) mna: MnaSystem,
@@ -2794,6 +2810,7 @@ pub(crate) struct ScatteringRecomputeData {
 /// These sub-blocks are extracted from the full R-type adaptor scattering
 /// matrix and are the only parts needed during per-sample NR solving.
 /// They are recomputed together when pot values change.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct MultiNlScattering {
     /// NL-to-NL sub-block (n_nl × n_nl, row-major).
     pub(crate) s_nl: Vec<f64>,
@@ -2855,6 +2872,7 @@ impl MultiNlScattering {
 /// - Fuzz Face (2 PNP BJTs with collector-base feedback)
 /// - Darlington pairs
 /// - Long-tailed pairs
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct MultiNlStage {
     /// R-type adaptor containing the full scattering matrix.
     pub(crate) adaptor: RTypeAdaptor,
@@ -3021,6 +3039,7 @@ pub(crate) struct MultiNlStage {
 /// from stored component values and update the 5 biquad coefficients.
 /// No matrix inversion needed. Cortex-M7 safe.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct IirData {
     /// Numerator coefficients [b0, b1, b2].
     pub b_coeffs: Vec<f64>,
@@ -3136,6 +3155,7 @@ impl IirData {
 /// are applied as post-processing: GBW rolloff → slew limiting → rail clamp.
 /// Pot binding info stored in IirStage for runtime coefficient recomputation.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct IirPotBinding {
     /// Component ID of the pot (matches ControlBinding::component_id).
     pub comp_id: String,
@@ -3149,6 +3169,7 @@ pub(crate) struct IirPotBinding {
     pub position: f64,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct IirStage {
     /// The biquad filter data (coefficients + history).
     pub(crate) iir: IirData,
@@ -3308,6 +3329,7 @@ impl IirStage {
 ///
 /// Pot binding: when Rf is a pot, `set_rf()` recomputes gain and updates
 /// the GBW coefficient for the new closed-loop bandwidth.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct BlackFeedbackStage {
     /// Feedback resistance (Ohms). Changes at runtime when pot sweeps.
     rf: f64,
@@ -3466,6 +3488,7 @@ impl BlackFeedbackStage {
 ///
 /// O(N²)/sample where N = number of states. Covers complex active filters
 /// (Klon stages, BB Preamp) that can't reduce to a biquad.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct StateSpaceStage {
     pub(crate) ss: StateSpaceData,
     /// Pre-allocated work buffer for state update (avoids per-sample allocation).
@@ -3535,6 +3558,7 @@ impl StateSpaceStage {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct StateSpaceData {
     /// State vector [V_nodes..., I_vs...] (n_states elements).
     pub x: Vec<f64>,
@@ -3572,6 +3596,7 @@ pub(crate) struct StateSpaceData {
 /// is an off-diagonal conductance in the MNA matrix. When the envelope
 /// follower changes the OTA's bias current (Iabc), we recompute gm,
 /// delta-update the stored MNA, and re-derive the scattering matrix.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct LinearizedOtaData {
     /// OTA model parameters (iabc_max, vt, r_load).
     pub model: crate::elements::OtaModel,
@@ -4562,6 +4587,7 @@ impl MultiNlStage {
 /// At runtime, the sidechain processes the tapped audio and produces an
 /// output (CV) that modulates the main circuit's push-pull grid bias
 /// with a 1-sample feedback delay.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct SidechainProcessor {
     /// The compiled sidechain sub-circuit.
     pub(crate) circuit: crate::processor::CompiledPedal,
@@ -4598,6 +4624,7 @@ impl SidechainProcessor {
 /// are each compiled via the full WDF pipeline.  Rate-reduced subcircuits
 /// (e.g. `rate: 1/64` sidechain detectors) process one sample every
 /// `rate_divisor` input samples and use linear interpolation to fill gaps.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct SubcircuitProcessor {
     /// The compiled sub-circuit.
     pub(crate) circuit: crate::processor::CompiledPedal,

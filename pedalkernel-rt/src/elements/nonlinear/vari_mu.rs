@@ -30,6 +30,7 @@ use crate::elements::WdfRoot;
 /// Parameters are fitted to measured tube data. The GE 6386 parameters were
 /// derived from published plate characteristic curves.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VariMuModel {
     /// Overall current scaling factor.
     pub p1: f64,
@@ -103,6 +104,7 @@ impl VariMuModel {
 /// decreases smoothly as Vgk becomes more negative, providing the gradual
 /// gain reduction that defines variable-mu compressor behavior.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VariMuTriodeRoot {
     pub model: VariMuModel,
     /// Current grid-cathode voltage (external control parameter).
@@ -315,6 +317,7 @@ impl NlDeviceIv for VariMuTriodeRoot {
 ///   ∂Ia/∂Vgk = Ia × (p4×p5/D_base + p8×exp_term/(p6 + exp_term))
 /// where D_base = p3 - p4×Vgk.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VariMuThreePort {
     pub model: VariMuModel,
     /// Maximum plate voltage (B+ supply rail).

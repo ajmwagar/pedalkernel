@@ -16,6 +16,7 @@ use crate::elements::WdfRoot;
 /// - Triode: `Ids = Kp * [2*(Vgs-Vth)*Vds - Vds^2]`
 /// - Saturation: `Ids = Kp * (Vgs-Vth)^2 * (1 + lambda*|Vds|)`
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MosfetModel {
     /// Threshold voltage (V). N-channel: positive, P-channel: negative.
     pub vth: f64,
@@ -89,6 +90,7 @@ impl MosfetModel {
 /// Unlike JFETs (depletion-mode, normally on), enhancement MOSFETs are
 /// normally off and require Vgs > Vth to conduct.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MosfetRoot {
     pub model: MosfetModel,
     /// Current gate-source voltage (external control parameter).

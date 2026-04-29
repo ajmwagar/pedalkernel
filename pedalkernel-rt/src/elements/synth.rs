@@ -11,6 +11,7 @@ use crate::math::PI;
 
 /// VCO waveform outputs available from CEM3340-style oscillators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum VcoWaveform {
     Saw,
     Triangle,
@@ -25,6 +26,7 @@ pub enum VcoWaveform {
 /// - Pulse width modulation
 /// - Anti-aliased using PolyBLEP for saw/pulse
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vco {
     /// Current phase (0.0 - 1.0)
     phase: f64,
@@ -191,6 +193,7 @@ impl Vco {
 /// Uses a simplified Moog ladder topology with tanh saturation for
 /// analog-like resonance and self-oscillation behavior.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vcf {
     /// Filter stages (4-pole = 4 one-pole sections)
     stage: [f64; 4],
@@ -298,6 +301,7 @@ impl Vcf {
 /// Features exponential CV response (dB/V) with soft saturation
 /// at high levels.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vca {
     /// Current gain (0.0 - 1.0+)
     gain: f64,
@@ -363,6 +367,7 @@ impl Default for Vca {
 
 /// ADSR envelope stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EnvelopeStage {
     Idle,
     Attack,
@@ -373,6 +378,7 @@ pub enum EnvelopeStage {
 
 /// ADSR envelope generator for controlling VCA/VCF.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AdsrEnvelope {
     /// Current stage
     stage: EnvelopeStage,
@@ -543,6 +549,7 @@ impl AdsrEnvelope {
 /// This provides a ready-to-use synth processor that can be controlled via
 /// CV/gate signals (from MIDI or other sources).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SynthProcessor {
     /// Oscillator
     vco: Vco,

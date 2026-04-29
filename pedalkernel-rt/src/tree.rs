@@ -30,6 +30,7 @@ use crate::elements::*;
 ///   scatter_down: `a1 = b1 - gamma * (b1 + b2 + a3)`
 ///                 `a2 = b2 - (1 - gamma) * (b1 + b2 + a3)`
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SeriesAdaptor {
     pub port_resistance: f64,
     gamma: f64,
@@ -106,6 +107,7 @@ impl SeriesAdaptor {
 /// For a step-down transformer (n > 1): voltage decreases, current increases.
 /// For a step-up transformer (n < 1): voltage increases, current decreases.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TransformerAdaptor {
     /// Port resistance seen from primary (root direction) = n² × R_secondary
     pub port_resistance: f64,
@@ -191,6 +193,7 @@ impl TransformerAdaptor {
 ///
 /// One port (typically the last) is adapted to be reflection-free (S_nn = 0).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RTypeAdaptor {
     /// Number of ports (children + 1 for parent)
     pub num_ports: usize,
@@ -493,6 +496,7 @@ impl RTypeAdaptor {
 /// ```
 /// where `ai`, `bi` are the positive and negative nodes of port `i`.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfPort {
     /// Positive node index (None = ground).
     pub node_pos: Option<usize>,
@@ -534,6 +538,7 @@ fn x_inv_port_entry(
 /// Element stamps define the internal circuit topology. The system is solved
 /// at compile time to produce the scattering matrix.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MnaSystem {
     /// Number of nodes (excluding ground)
     pub num_nodes: usize,
@@ -2130,6 +2135,7 @@ fn invert_matrix_equilibrated(matrix: &[f64], n: usize) -> Vec<f64> {
 /// At compile time, sweeps the pot through K positions and computes full-precision
 /// scattering matrices. At runtime, binary search + linear interpolation replaces
 /// O(n³) matrix inversion with O(n²) lerp.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScatteringInterpolationTable {
     /// K log-spaced resistance values (ascending).
     resistances: Vec<f64>,
@@ -2307,6 +2313,7 @@ impl ScatteringInterpolationTable {
 ///     a1 = a3 + γ·(b2 - b1)
 ///     a2 = a3 - (1-γ)·(b2 - b1)
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ParallelAdaptor {
     pub port_resistance: f64,
     gamma: f64,
@@ -2372,6 +2379,7 @@ impl ParallelAdaptor {
 /// The voltage source injects the input signal.  The series adaptor
 /// connects it with the parallel RC + diode clipping network.
 /// The diode pair at the root provides the nonlinearity.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfClipper {
     // Leaves
     vs: VoltageSource,
@@ -2488,6 +2496,7 @@ impl WdfClipper {
 /// WDF single-diode clipper (asymmetric clipping).
 ///
 /// Same topology as `WdfClipper` but with a single diode root.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfSingleDiodeClipper {
     vs: VoltageSource,
     resistor: Resistor,

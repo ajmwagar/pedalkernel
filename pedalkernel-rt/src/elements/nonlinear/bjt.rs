@@ -30,6 +30,7 @@ use super::solver::NlDeviceGroupIv;
 /// **Reference:** H.K. Gummel and H.C. Poon, "An Integral Charge Control Model
 /// of Bipolar Transistors", Bell Syst. Tech. J., 1970.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GummelPoonModel {
     // --- DC parameters ---
     /// Saturation current (A). Typically 1e-15 to 1e-12.
@@ -482,6 +483,7 @@ impl GummelPoonModel {
 /// constrain the terminal voltages and currents. We solve for the
 /// reflected waves b that satisfy both WDF port equations and BJT physics.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BjtGummelPoonRoot {
     pub model: GummelPoonModel,
     /// Port resistances [Rb, Rc, Re]
@@ -731,6 +733,7 @@ impl BjtGummelPoonRoot {
 /// (transconductance gm ≈ Ic/Vt), enabling proper coupled BJT solving
 /// (e.g., Fuzz Face where Q1 and Q2 interact through shared bias networks).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BjtTwoPort {
     pub model: GummelPoonModel,
     pub is_pnp: bool,
@@ -1031,6 +1034,7 @@ impl NlDeviceGroupIv for BjtTwoPort {
 /// negligible at the operating point (Vbe near turn-on, Vce >> Vce_sat,
 /// small-signal regime). Enable via `--features ebers-moll`.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EbersMollTwoPort {
     /// Saturation current (A). Typically 1e-15 to 1e-12.
     pub is: f64,

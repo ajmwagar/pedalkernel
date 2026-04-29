@@ -11,6 +11,7 @@ use super::Modulator;
 
 /// LFO waveform shapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LfoWaveform {
     /// Smooth sine wave - classic tremolo sound.
     Sine,
@@ -31,6 +32,7 @@ pub enum LfoWaveform {
 /// Generates periodic control signals for tremolo, vibrato, phaser, etc.
 /// Uses a phase accumulator for efficient, RT-safe operation.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Lfo {
     /// Current phase (0.0 - 1.0).
     phase: f64,
@@ -210,6 +212,7 @@ impl Modulator for Lfo {
 /// signal for auto-wah, compressor side-chains, or dynamic modulation.
 /// Uses asymmetric attack/release smoothing for natural response.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EnvelopeFollower {
     /// Current envelope value (0.0 - 1.0+).
     envelope: f64,

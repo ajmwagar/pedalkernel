@@ -16,6 +16,7 @@ use std::cell::RefCell;
 /// to the instance rather than process-wide.  This eliminates global mutable
 /// state and the parallel-test interference that came with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SolverMethod {
     /// Pick the best solver automatically based on the circuit topology
     /// (mirrors `compiler::component::SolverMethod` hints).
@@ -35,6 +36,7 @@ pub const NR_MAX_ITER: usize = 24;
 /// Pre-allocated workspace for the multi-port NR solver.
 /// Eliminates per-sample heap allocations by reusing buffers across calls.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NrWorkspace {
     // Independent solver buffers
     pub f_vec: Vec<f64>,
@@ -164,6 +166,7 @@ impl SolverStatsAggregate {
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SolverStatsSnapshot {
     pub solves: u64,
     pub total_iterations: u64,
@@ -234,6 +237,7 @@ pub fn solver_stats_snapshot() -> SolverStatsSnapshot {
 
 /// A single entry in the solver trace buffer, recorded per NR solve call.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SolverTraceEntry {
     /// Number of NR iterations for this solve.
     pub iterations: u32,

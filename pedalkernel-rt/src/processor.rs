@@ -20,6 +20,7 @@ use crate::stage::{
 ///
 /// Owns its data directly — no index indirection. The `stages` vec
 /// on [`CompiledPedal`] holds these in processing order.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum Stage {
     Wdf(WdfStage),
     MultiNl(MultiNlStage),
@@ -104,6 +105,7 @@ static LATE_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Pre-computed mirror pot IDs (avoids format!() allocation on RT thread).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct MirrorPot {
     pub(crate) id: String,
     pub(crate) id_aw: String,
@@ -111,6 +113,7 @@ pub(crate) struct MirrorPot {
 }
 
 /// Control binding: maps a knob label to a parameter in the processing chain.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct ControlBinding {
     pub(crate) label: String,
     pub(crate) target: ControlTarget,
@@ -126,6 +129,7 @@ pub(crate) struct ControlBinding {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum ControlTarget {
     /// Modify a pot in a specific WDF stage.
     PotInStage(usize),
@@ -166,6 +170,7 @@ pub(crate) enum ControlTarget {
 
 /// Runtime state for a single-sample impulse source (drum trigger).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct TriggerState {
     pub(crate) amplitude: f64,
     pub(crate) countdown: u32,
@@ -213,6 +218,7 @@ impl TriggerState {
 
 /// Modulation target for LFOs and envelope followers.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum ModulationTarget {
     /// Modulate a JFET's Vgs.
     JfetVgs { stage_idx: usize },
@@ -250,6 +256,7 @@ pub(crate) enum ModulationTarget {
 /// Holds the generic delay line and metadata about its taps.
 /// The delay line is processed separately from the WDF tree:
 /// write once per sample, then read from each tap.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct DelayLineBinding {
     /// The ring-buffer delay line.
     pub(crate) delay_line: crate::elements::DelayLine,
@@ -262,6 +269,7 @@ pub(crate) struct DelayLineBinding {
 }
 
 /// VCO runtime binding — generates audio-rate waveforms at a circuit node.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct VcoBinding {
     pub(crate) vco: crate::elements::Vco,
     /// Which waveform output to use (saw/tri/pulse).
@@ -274,6 +282,7 @@ pub(crate) struct VcoBinding {
 }
 
 /// VCA runtime binding — amplitude modulation controlled by trigger envelope.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct VcaBinding {
     pub(crate) vca: crate::elements::Vca,
     /// ADSR envelope that gates the VCA.
@@ -294,6 +303,7 @@ pub(crate) struct VcaBinding {
 /// Models the op-amp as a voltage-controlled voltage source (VCVS).
 /// The output voltage follows: Vout = Aol * (Vp - Vm)
 /// For unity-gain buffers (neg tied to out), Vout ≈ Vp.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct OpAmpStage {
     /// The op-amp root element with Newton-Raphson solver.
     pub(crate) opamp: OpAmpRoot,
@@ -303,6 +313,7 @@ pub(crate) struct OpAmpStage {
 }
 
 /// LFO binding in a compiled pedal.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct LfoBinding {
     pub(crate) lfo: crate::elements::Lfo,
     pub(crate) target: ModulationTarget,
@@ -318,6 +329,7 @@ pub(crate) struct LfoBinding {
 }
 
 /// Envelope follower binding in a compiled pedal.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct EnvelopeBinding {
     pub(crate) envelope: crate::elements::EnvelopeFollower,
     pub(crate) target: ModulationTarget,
@@ -337,6 +349,7 @@ pub(crate) struct EnvelopeBinding {
 ///
 /// Smoothing time is ~10ms (coefficient ~0.9995 at 48kHz).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct SmoothedParam {
     /// Target value (set immediately by user input)
     pub target: f64,
@@ -399,6 +412,7 @@ impl SmoothedParam {
 /// Instead of a generic `tanh` waveshaper, this models the saturation shape
 /// based on the dominant active device type in the circuit.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) enum RailSaturation {
     /// No active devices — passive clipping only (no rail saturation).
     None,
@@ -537,6 +551,7 @@ impl RailSaturation {
 ///
 /// Each `.pedal` file produces a unique processor with its own WDF tree topology,
 /// component values, and diode models — no hardcoded processor selection.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CompiledPedal {
     /// All processing stages in signal-flow order. One vec, no index indirection.
     pub(crate) stages: Vec<Stage>,
@@ -591,6 +606,9 @@ pub struct CompiledPedal {
     /// Accumulates per-sample data and reduces to `UiMetrics` every block.
     pub(crate) metrics_accumulator: Option<MetricsAccumulator>,
     /// Ring buffer for sending metrics to the UI thread (shared via Arc).
+    /// Skipped for serde: AtomicUsize inside MetricsRingBuffer is not serializable,
+    /// and the ring buffer is a runtime-only construct (not needed on M7 firmware).
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) metrics_buffer: Option<Arc<MetricsRingBuffer>>,
     /// Input loading model — models source impedance interaction at circuit input.
     /// Applies DC attenuation and frequency-dependent rolloff based on the
@@ -648,6 +666,9 @@ pub struct CompiledPedal {
     pub(crate) triggers: Vec<TriggerState>,
     /// Original passive component values for reset support.
     /// Maps comp_id -> (kind_str, original_value).
+    /// Skipped for serde: `&'static str` cannot be deserialized from owned data.
+    /// Reconstructed on the M7 target if needed.
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) original_passive_values: HashMap<String, (&'static str, f64)>,
 }
 

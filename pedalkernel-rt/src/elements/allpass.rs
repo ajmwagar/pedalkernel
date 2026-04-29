@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 ///
 /// Phase shift varies from 0° at DC to -180° at Nyquist, with -90° at f₀.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AllPassFilter {
     /// Filter coefficient (computed from cutoff frequency)
     coef: f64,
@@ -92,6 +93,7 @@ impl AllPassFilter {
 /// Cascades multiple all-pass filters and mixes with dry signal to create
 /// the classic phaser comb-filter effect.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Phaser {
     /// All-pass filter stages
     stages: Vec<AllPassFilter>,

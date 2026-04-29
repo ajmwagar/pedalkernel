@@ -18,6 +18,7 @@
 /// This is NOT a WDF root — it sits in the signal path between stages,
 /// modeling the op-amp's output stage limitation.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SlewRateLimiter {
     /// Maximum voltage change per sample (V/sample).
     max_dv: f64,

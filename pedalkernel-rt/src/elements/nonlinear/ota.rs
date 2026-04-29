@@ -25,6 +25,7 @@ use crate::elements::WdfRoot;
 /// - For large signals: soft clipping at ±Iabc
 /// - The gain is controlled by current, not voltage — perfect for VCA/compressor
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OtaModel {
     /// Maximum bias current (A). CA3080 typical: 0.5mA.
     pub iabc_max: f64,
@@ -65,6 +66,7 @@ impl OtaModel {
 /// For the WDF constraint, the OTA output current flows through the
 /// load resistor, creating the voltage that the rest of the tree sees.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OtaRoot {
     pub model: OtaModel,
     /// Current amplifier bias current (A). Controls gain.

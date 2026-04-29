@@ -21,6 +21,7 @@ use crate::math;
 /// capacitance. This captures both the DC impedance and the HF rolloff
 /// that loading causes.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ImpedanceModel {
     /// DC resistance (Ohm). Typical input: 500kOhm-1MOhm. Output: 1kOhm-10kOhm.
     pub resistance: f64,
@@ -95,6 +96,7 @@ impl ImpedanceModel {
 /// is negligible. But for impedance-sensitive circuits (guitar -> Fuzz Face,
 /// wah -> fuzz), this interaction is crucial to the sound.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InterstageLoading {
     /// Source (output) impedance model.
     source: ImpedanceModel,
@@ -201,6 +203,7 @@ impl InterstageLoading {
 /// - R = source impedance (pickup or buffer output)
 /// - C = cable capacitance (length * pF/ft)
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CableModel {
     /// Cable capacitance in Farads.
     capacitance: f64,
