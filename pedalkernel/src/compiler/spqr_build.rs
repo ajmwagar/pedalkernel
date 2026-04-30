@@ -822,8 +822,6 @@ pub fn compile_via_spqr_with_options(
         tolerance_seed: 0,
         opamp_stages: Vec::new(),
         power_supply: None,
-        #[cfg(debug_assertions)]
-        debug_stats: None,
         metrics_accumulator: None,
         metrics_buffer: None,
         input_loading: None,

@@ -9,7 +9,7 @@ use alloc::{format, string::{String, ToString}, vec::Vec};
 use crate::dyn_node::{BinaryKind, DynNode};
 use crate::wdf_leaf::WdfLeaf;
 
-pub(crate) fn has_vs(node: &DynNode) -> bool {
+pub fn has_vs(node: &DynNode) -> bool {
     match node {
         DynNode::Leaf(leaf) if leaf.type_tag() == "voltage_source" => true,
         DynNode::Binary { left, right, .. } => has_vs(left) || has_vs(right),
@@ -19,7 +19,7 @@ pub(crate) fn has_vs(node: &DynNode) -> bool {
 
 /// Walk the tree and balance any adaptor where one branch contains the
 /// VoltageSource and the other has much higher impedance.
-pub(crate) fn balance_parallel_vs(node: &mut DynNode) {
+pub fn balance_parallel_vs(node: &mut DynNode) {
     match node {
         DynNode::Binary { left, right, .. } => {
             let left_has_vs = has_vs(left);
@@ -44,7 +44,7 @@ pub(crate) fn balance_parallel_vs(node: &mut DynNode) {
 }
 
 /// Adjust the Vs port resistance inside `branch` so that `branch.port_resistance() ~ target_rp`.
-pub(crate) fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
+pub fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
     let current_rp = branch.port_resistance();
     if current_rp >= target_rp * 0.5 {
         return;
@@ -85,7 +85,7 @@ pub(crate) fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
     }
 }
 
-pub(crate) fn set_vs_rp(node: &mut DynNode, rp_val: f64) {
+pub fn set_vs_rp(node: &mut DynNode, rp_val: f64) {
     match node {
         DynNode::Leaf(leaf) if leaf.type_tag() == "voltage_source" => {
             leaf.set_resistance(rp_val);
@@ -102,7 +102,7 @@ pub(crate) fn set_vs_rp(node: &mut DynNode, rp_val: f64) {
 }
 
 /// Collect all pot component IDs from a DynNode tree.
-pub(crate) fn collect_pot_ids(node: &DynNode, out: &mut Vec<String>) {
+pub fn collect_pot_ids(node: &DynNode, out: &mut Vec<String>) {
     match node {
         DynNode::Leaf(leaf) if leaf.type_tag() == "pot" => {
             if let Some(id) = leaf.comp_id() {
@@ -123,7 +123,7 @@ pub(crate) fn collect_pot_ids(node: &DynNode, out: &mut Vec<String>) {
     }
 }
 
-pub(crate) fn has_pot(node: &DynNode, comp_id: &str) -> bool {
+pub fn has_pot(node: &DynNode, comp_id: &str) -> bool {
     match node {
         DynNode::Leaf(leaf) if leaf.type_tag() == "pot" => {
             match leaf.comp_id() {

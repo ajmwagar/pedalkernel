@@ -21,7 +21,7 @@ use crate::stage::{
 /// Owns its data directly — no index indirection. The `stages` vec
 /// on [`CompiledPedal`] holds these in processing order.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) enum Stage {
+pub enum Stage {
     Wdf(WdfStage),
     MultiNl(MultiNlStage),
     Iir(IirStage),
@@ -43,49 +43,49 @@ impl core::fmt::Debug for Stage {
 
 impl Stage {
     /// Get a reference to the inner WdfStage, if this is a Wdf variant.
-    pub(crate) fn as_wdf(&self) -> Option<&WdfStage> {
+    pub fn as_wdf(&self) -> Option<&WdfStage> {
         if let Stage::Wdf(w) = self { Some(w) } else { None }
     }
     /// Get a mutable reference to the inner WdfStage, if this is a Wdf variant.
-    pub(crate) fn as_wdf_mut(&mut self) -> Option<&mut WdfStage> {
+    pub fn as_wdf_mut(&mut self) -> Option<&mut WdfStage> {
         if let Stage::Wdf(w) = self { Some(w) } else { None }
     }
     /// Get a reference to the inner MultiNlStage, if this is a MultiNl variant.
-    pub(crate) fn as_multi_nl(&self) -> Option<&MultiNlStage> {
+    pub fn as_multi_nl(&self) -> Option<&MultiNlStage> {
         if let Stage::MultiNl(m) = self { Some(m) } else { None }
     }
     /// Get a mutable reference to the inner MultiNlStage, if this is a MultiNl variant.
-    pub(crate) fn as_multi_nl_mut(&mut self) -> Option<&mut MultiNlStage> {
+    pub fn as_multi_nl_mut(&mut self) -> Option<&mut MultiNlStage> {
         if let Stage::MultiNl(m) = self { Some(m) } else { None }
     }
     /// Get a reference to the inner IirStage, if this is an Iir variant.
-    pub(crate) fn as_iir(&self) -> Option<&IirStage> {
+    pub fn as_iir(&self) -> Option<&IirStage> {
         if let Stage::Iir(i) = self { Some(i) } else { None }
     }
     /// Get a mutable reference to the inner IirStage.
-    pub(crate) fn as_iir_mut(&mut self) -> Option<&mut IirStage> {
+    pub fn as_iir_mut(&mut self) -> Option<&mut IirStage> {
         if let Stage::Iir(i) = self { Some(i) } else { None }
     }
     /// Get a reference to the inner StateSpaceStage.
-    pub(crate) fn as_state_space(&self) -> Option<&StateSpaceStage> {
+    pub fn as_state_space(&self) -> Option<&StateSpaceStage> {
         if let Stage::StateSpace(s) = self { Some(s) } else { None }
     }
     /// Get a mutable reference to the inner StateSpaceStage.
-    pub(crate) fn as_state_space_mut(&mut self) -> Option<&mut StateSpaceStage> {
+    pub fn as_state_space_mut(&mut self) -> Option<&mut StateSpaceStage> {
         if let Stage::StateSpace(s) = self { Some(s) } else { None }
     }
     /// Get a reference to the inner BlackFeedbackStage.
-    pub(crate) fn as_black_feedback(&self) -> Option<&crate::stage::BlackFeedbackStage> {
+    pub fn as_black_feedback(&self) -> Option<&crate::stage::BlackFeedbackStage> {
         if let Stage::BlackFeedback(b) = self { Some(b) } else { None }
     }
     /// Get a mutable reference to the inner BlackFeedbackStage.
-    pub(crate) fn as_black_feedback_mut(&mut self) -> Option<&mut crate::stage::BlackFeedbackStage> {
+    pub fn as_black_feedback_mut(&mut self) -> Option<&mut crate::stage::BlackFeedbackStage> {
         if let Stage::BlackFeedback(b) = self { Some(b) } else { None }
     }
 }
 
 /// Legacy alias — being migrated to `Stage`.
-pub(crate) type StageRef = Stage;
+pub type StageRef = Stage;
 
 #[cfg(feature = "debug-trace")]
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -106,31 +106,31 @@ static LATE_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Pre-computed mirror pot IDs (avoids format!() allocation on RT thread).
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct MirrorPot {
-    pub(crate) id: String,
-    pub(crate) id_aw: String,
-    pub(crate) id_wb: String,
+pub struct MirrorPot {
+    pub id: String,
+    pub id_aw: String,
+    pub id_wb: String,
 }
 
 /// Control binding: maps a knob label to a parameter in the processing chain.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct ControlBinding {
-    pub(crate) label: String,
-    pub(crate) target: ControlTarget,
-    pub(crate) component_id: String,
+pub struct ControlBinding {
+    pub label: String,
+    pub target: ControlTarget,
+    pub component_id: String,
     #[allow(dead_code)]
-    pub(crate) max_resistance: f64,
+    pub max_resistance: f64,
     /// Pot taper curve — applied once before splitting into aw/wb halves
     /// so that aw + wb = max_R always (split halves use Linear taper internally).
-    pub(crate) taper: crate::pot_taper::PotTaper,
+    pub taper: crate::pot_taper::PotTaper,
     /// Range mapping: (min, max).  Input 0→min, 1→max.
     /// Default (0.0, 1.0) is identity; (1.0, 0.0) inverts.
-    pub(crate) range: (f64, f64),
+    pub range: (f64, f64),
 }
 
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) enum ControlTarget {
+pub enum ControlTarget {
     /// Modify a pot in a specific WDF stage.
     PotInStage(usize),
     /// Modify a pot in an IIR stage (recomputes dc_gain / biquad coefficients).
@@ -171,21 +171,21 @@ pub(crate) enum ControlTarget {
 /// Runtime state for a single-sample impulse source (drum trigger).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct TriggerState {
-    pub(crate) amplitude: f64,
-    pub(crate) countdown: u32,
+pub struct TriggerState {
+    pub amplitude: f64,
+    pub countdown: u32,
     /// True on the sample when this trigger fired (before tick() clears countdown).
     /// Used by VCA envelope gating which runs after tick().
-    pub(crate) active_this_sample: bool,
+    pub active_this_sample: bool,
     /// Index of the WDF stage this trigger injects into (None = global input).
-    pub(crate) target_stage: Option<usize>,
+    pub target_stage: Option<usize>,
     /// Circuit graph node ID where this trigger injects its impulse.
     /// `usize::MAX` means use global input (backward compat for single-trigger circuits).
-    pub(crate) injection_node: usize,
+    pub injection_node: usize,
 }
 
 impl TriggerState {
-    pub(crate) fn new(amplitude: f64) -> Self {
+    pub fn new(amplitude: f64) -> Self {
         Self {
             amplitude,
             countdown: 0,
@@ -194,13 +194,13 @@ impl TriggerState {
             injection_node: usize::MAX,
         }
     }
-    pub(crate) fn fire(&mut self) {
+    pub fn fire(&mut self) {
         self.countdown = 1;
     }
     /// Returns the impulse value for this sample (amplitude or 0.0).
     /// Also sets `active_this_sample` so downstream consumers (VCA envelopes)
     /// can detect the trigger even after countdown is decremented.
-    pub(crate) fn tick(&mut self) -> f64 {
+    pub fn tick(&mut self) -> f64 {
         if self.countdown > 0 {
             self.countdown -= 1;
             self.active_this_sample = true;
@@ -219,7 +219,7 @@ impl TriggerState {
 /// Modulation target for LFOs and envelope followers.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) enum ModulationTarget {
+pub enum ModulationTarget {
     /// Modulate a JFET's Vgs.
     JfetVgs { stage_idx: usize },
     /// Modulate ALL JFET stages' Vgs together (for phasers).
@@ -257,45 +257,45 @@ pub(crate) enum ModulationTarget {
 /// The delay line is processed separately from the WDF tree:
 /// write once per sample, then read from each tap.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct DelayLineBinding {
+pub struct DelayLineBinding {
     /// The ring-buffer delay line.
-    pub(crate) delay_line: crate::elements::DelayLine,
+    pub delay_line: crate::elements::DelayLine,
     /// Tap ratios for multi-tap reading (e.g., [1.0, 2.0, 4.0] for RE-201).
     /// Each tap reads from the buffer at `base_delay * ratio`.
-    pub(crate) taps: Vec<f64>,
+    pub taps: Vec<f64>,
     /// Component ID for debugging and control binding.
     #[allow(dead_code)]
-    pub(crate) comp_id: String,
+    pub comp_id: String,
 }
 
 /// VCO runtime binding — generates audio-rate waveforms at a circuit node.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct VcoBinding {
-    pub(crate) vco: crate::elements::Vco,
+pub struct VcoBinding {
+    pub vco: crate::elements::Vco,
     /// Which waveform output to use (saw/tri/pulse).
-    pub(crate) waveform: crate::elements::VcoWaveform,
+    pub waveform: crate::elements::VcoWaveform,
     /// Circuit node where VCO output is injected.
-    pub(crate) output_node_id: usize,
+    pub output_node_id: usize,
     /// Component ID for debugging.
     #[allow(dead_code)]
-    pub(crate) comp_id: String,
+    pub comp_id: String,
 }
 
 /// VCA runtime binding — amplitude modulation controlled by trigger envelope.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct VcaBinding {
-    pub(crate) vca: crate::elements::Vca,
+pub struct VcaBinding {
+    pub vca: crate::elements::Vca,
     /// ADSR envelope that gates the VCA.
-    pub(crate) envelope: crate::elements::AdsrEnvelope,
+    pub envelope: crate::elements::AdsrEnvelope,
     /// Index into triggers vec (which trigger gates this VCA).
-    pub(crate) trigger_idx: Option<usize>,
+    pub trigger_idx: Option<usize>,
     /// Circuit node to read audio input from.
-    pub(crate) input_node_id: usize,
+    pub input_node_id: usize,
     /// Circuit node to write amplitude-modulated output to.
-    pub(crate) output_node_id: usize,
+    pub output_node_id: usize,
     /// Component ID for debugging.
     #[allow(dead_code)]
-    pub(crate) comp_id: String,
+    pub comp_id: String,
 }
 
 /// Op-amp stage for unity-gain buffers and gain stages.
@@ -304,42 +304,42 @@ pub(crate) struct VcaBinding {
 /// The output voltage follows: Vout = Aol * (Vp - Vm)
 /// For unity-gain buffers (neg tied to out), Vout ≈ Vp.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct OpAmpStage {
+pub struct OpAmpStage {
     /// The op-amp root element with Newton-Raphson solver.
-    pub(crate) opamp: OpAmpRoot,
+    pub opamp: OpAmpRoot,
     /// Component ID for debugging.
     #[allow(dead_code)]
-    pub(crate) comp_id: String,
+    pub comp_id: String,
 }
 
 /// LFO binding in a compiled pedal.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct LfoBinding {
-    pub(crate) lfo: crate::elements::Lfo,
-    pub(crate) target: ModulationTarget,
+pub struct LfoBinding {
+    pub lfo: crate::elements::Lfo,
+    pub target: ModulationTarget,
     /// Bias offset for the modulation (e.g., Vgs center point).
-    pub(crate) bias: f64,
+    pub bias: f64,
     /// Modulation range (amplitude).
-    pub(crate) range: f64,
+    pub range: f64,
     /// Base frequency from RC timing: f = 1/(2πRC).
-    pub(crate) base_freq: f64,
+    pub base_freq: f64,
     /// LFO component ID (for debugging and future control binding).
     #[allow(dead_code)]
-    pub(crate) lfo_id: String,
+    pub lfo_id: String,
 }
 
 /// Envelope follower binding in a compiled pedal.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct EnvelopeBinding {
-    pub(crate) envelope: crate::elements::EnvelopeFollower,
-    pub(crate) target: ModulationTarget,
+pub struct EnvelopeBinding {
+    pub envelope: crate::elements::EnvelopeFollower,
+    pub target: ModulationTarget,
     /// Bias offset for the modulation.
-    pub(crate) bias: f64,
+    pub bias: f64,
     /// Modulation range (amplitude).
-    pub(crate) range: f64,
+    pub range: f64,
     /// Envelope follower component ID.
     #[allow(dead_code)]
-    pub(crate) env_id: String,
+    pub env_id: String,
 }
 
 /// Smoothed parameter for zipper-free pot control.
@@ -350,7 +350,7 @@ pub(crate) struct EnvelopeBinding {
 /// Smoothing time is ~10ms (coefficient ~0.9995 at 48kHz).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct SmoothedParam {
+pub struct SmoothedParam {
     /// Target value (set immediately by user input)
     pub target: f64,
     /// Current smoothed value (approaches target over time)
@@ -413,7 +413,7 @@ impl SmoothedParam {
 /// based on the dominant active device type in the circuit.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) enum RailSaturation {
+pub enum RailSaturation {
     /// No active devices — passive clipping only (no rail saturation).
     None,
     /// Op-amp output stage: symmetric saturation with slight crossover
@@ -554,127 +554,127 @@ impl RailSaturation {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CompiledPedal {
     /// All processing stages in signal-flow order. One vec, no index indirection.
-    pub(crate) stages: Vec<Stage>,
+    pub stages: Vec<Stage>,
     /// Push-pull differential stages (e.g., Fairchild 670 gain cell).
     /// These are processed after regular stages.
-    pub(crate) push_pull_stages: Vec<PushPullStage>,
-    pub(crate) pre_gain: f64,
+    pub push_pull_stages: Vec<PushPullStage>,
+    pub pre_gain: f64,
     /// Auto-calibrated output gain scalar (1.0 = no calibration).
-    pub(crate) output_gain: f64,
-    pub(crate) rail_saturation: RailSaturation,
+    pub output_gain: f64,
+    pub rail_saturation: RailSaturation,
     /// Oversampler for rail saturation to anti-alias harmonics generated
     /// by the nonlinear clipping at supply rails.
-    pub(crate) rail_sat_oversampler: crate::oversampling::Oversampler,
-    pub(crate) sample_rate: f64,
-    pub(crate) controls: Vec<ControlBinding>,
-    pub(crate) gain_range: (f64, f64),
+    pub rail_sat_oversampler: crate::oversampling::Oversampler,
+    pub sample_rate: f64,
+    pub controls: Vec<ControlBinding>,
+    pub gain_range: (f64, f64),
     /// Supply voltage in volts (default 9.0).
-    pub(crate) supply_voltage: f64,
+    pub supply_voltage: f64,
     /// LFO modulators.
-    pub(crate) lfos: Vec<LfoBinding>,
+    pub lfos: Vec<LfoBinding>,
     /// Envelope follower modulators.
-    pub(crate) envelopes: Vec<EnvelopeBinding>,
+    pub envelopes: Vec<EnvelopeBinding>,
     /// Slew rate limiters for op-amp stages (one per op-amp in the circuit).
     /// Applied to the signal path to model HF compression from slow op-amps.
-    pub(crate) slew_limiters: Vec<SlewRateLimiter>,
+    pub slew_limiters: Vec<SlewRateLimiter>,
     /// BBD delay lines for delay/chorus/flanger effects.
-    pub(crate) bbds: Vec<BbdDelayLine>,
+    pub bbds: Vec<BbdDelayLine>,
     /// Generic delay lines (tape echo, digital delay, Karplus-Strong, etc.).
-    pub(crate) delay_lines: Vec<DelayLineBinding>,
+    pub delay_lines: Vec<DelayLineBinding>,
     /// VCO audio-rate oscillator bindings (inject audio at circuit nodes).
-    pub(crate) vcos: Vec<VcoBinding>,
+    pub vcos: Vec<VcoBinding>,
     /// VCA amplitude modulation bindings (scale audio by envelope).
-    pub(crate) vcas: Vec<VcaBinding>,
+    pub vcas: Vec<VcaBinding>,
     /// Thermal model for temperature-dependent behavior.
     /// When present, modulates diode Is and BJT gain over time.
-    pub(crate) thermal: Option<ThermalModel>,
+    pub thermal: Option<ThermalModel>,
     /// Tolerance engine seed (stored for diagnostics).
-    pub(crate) tolerance_seed: u64,
+    pub tolerance_seed: u64,
     /// Oversampling factor used for this pedal's nonlinear stages.
-    pub(crate) oversampling: OversamplingFactor,
+    pub oversampling: OversamplingFactor,
     /// Op-amp stages for unity-gain buffers and gain stages.
     /// Each op-amp is modeled as a VCVS with the OpAmpRoot element.
-    pub(crate) opamp_stages: Vec<OpAmpStage>,
+    pub opamp_stages: Vec<OpAmpStage>,
     /// Power supply sag model.
     /// When present, computes instantaneous B+ droop based on signal current draw
     /// and feeds the sagged voltage into `set_supply_voltage()` each sample.
-    pub(crate) power_supply: Option<PowerSupply>,
+    pub power_supply: Option<PowerSupply>,
     // TODO: DebugStats lives in pedalkernel crate, not rt. Re-enable when DebugStats is ported.
     // #[cfg(debug_assertions)]
-    // pub(crate) debug_stats: Option<alloc::sync::Arc<crate::debug::DebugStats>>,
+    // pub debug_stats: Option<alloc::sync::Arc<crate::debug::DebugStats>>,
     /// Metrics accumulator for real-time UI visualization.
     /// Accumulates per-sample data and reduces to `UiMetrics` every block.
-    pub(crate) metrics_accumulator: Option<MetricsAccumulator>,
+    pub metrics_accumulator: Option<MetricsAccumulator>,
     /// Ring buffer for sending metrics to the UI thread (shared via Arc).
     /// Skipped for serde: AtomicUsize inside MetricsRingBuffer is not serializable,
     /// and the ring buffer is a runtime-only construct (not needed on M7 firmware).
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub(crate) metrics_buffer: Option<Arc<MetricsRingBuffer>>,
+    pub metrics_buffer: Option<Arc<MetricsRingBuffer>>,
     /// Input loading model — models source impedance interaction at circuit input.
     /// Applies DC attenuation and frequency-dependent rolloff based on the
     /// source (e.g., guitar pickup, upstream pedal) driving this circuit.
-    pub(crate) input_loading: Option<InterstageLoading>,
+    pub input_loading: Option<InterstageLoading>,
     /// Output loading model — models load impedance interaction at circuit output.
     /// Applies DC attenuation and frequency-dependent rolloff based on what
     /// this circuit is driving (e.g., downstream pedal, amp input).
-    pub(crate) output_loading: Option<InterstageLoading>,
+    pub output_loading: Option<InterstageLoading>,
     /// Output DC blocker — first-order HPF at ~5 Hz to remove subsonic drift
     /// from integrator DC tails and opamp offset accumulation.
     /// Format: (a1, b0, y_prev, x_prev) for IIR highpass.
-    pub(crate) output_dc_block: Option<(f64, f64, f64, f64)>,
+    pub output_dc_block: Option<(f64, f64, f64, f64)>,
     /// Sidechain processors for feedback compression loops.
     /// Each sidechain taps audio, extracts an envelope, and modulates
     /// the push-pull grid bias. Multiple sidechains are supported
     /// (e.g., one per channel in a stereo compressor like the 670).
-    pub(crate) sidechains: Vec<SidechainProcessor>,
+    pub sidechains: Vec<SidechainProcessor>,
     /// Subcircuit processors (for equipment with subcircuit blocks).
     /// When non-empty, `process()` delegates to `process_subcircuits()` and
     /// the normal WDF stage pipeline is bypassed.
-    pub(crate) subcircuit_processors: Vec<SubcircuitProcessor>,
+    pub subcircuit_processors: Vec<SubcircuitProcessor>,
     /// Routing steps defining signal flow between subcircuits (topological order).
-    pub(crate) subcircuit_routing: Vec<crate::subcircuit::RoutingStep>,
+    pub subcircuit_routing: Vec<crate::subcircuit::RoutingStep>,
     /// Index of the subcircuit whose output is the equipment output.
-    pub(crate) subcircuit_output_idx: Option<usize>,
+    pub subcircuit_output_idx: Option<usize>,
     /// Per-subcircuit output buffer (indexed by subcircuit_idx).
-    pub(crate) subcircuit_outputs: Vec<f64>,
+    pub subcircuit_outputs: Vec<f64>,
     /// Smoothed parameters for zipper-free pot control.
     /// One per pot in the circuit that needs smoothing.
-    pub(crate) pot_smoothers: Vec<SmoothedParam>,
+    pub pot_smoothers: Vec<SmoothedParam>,
     /// Mirrored pot mappings: source_comp_id → list of mirrored pots.
     /// When a source pot is updated, each mirror gets position = 1.0 - source.
-    pub(crate) pot_mirrors: HashMap<String, Vec<MirrorPot>>,
+    pub pot_mirrors: HashMap<String, Vec<MirrorPot>>,
     /// Base (unmodulated) grid bias for push-pull stages.
     /// Stored so sidechain CV can be subtracted without accumulation.
-    pub(crate) base_grid_bias: f64,
+    pub base_grid_bias: f64,
     /// Sample counter for throttling multi-NL scattering recomputes.
     /// When a pot inside a multi-NL R-type adaptor changes, the O(n³) matrix
     /// inversion is deferred and flushed every 32 samples (~0.7 ms at 48 kHz).
-    pub(crate) multi_nl_recompute_counter: u32,
+    pub multi_nl_recompute_counter: u32,
     // (stage_order removed — `stages` vec IS the order)
     /// Node-based signal routing buffer for parallel-path topologies.
     /// Maps circuit graph node IDs to signal values. When non-empty, multi-NL
     /// stages read from their injection_node_id and write to their output_node_id,
     /// enabling correct parallel channel processing (e.g., 670 sidechain).
-    pub(crate) node_signals: Vec<(usize, f64)>,
+    pub node_signals: Vec<(usize, f64)>,
     /// BBD wet/dry mix (0.0 = fully dry, 1.0 = fully wet).
     /// Controlled by "Blend"/"Mix" knobs on BBD delay pedals.
-    pub(crate) bbd_wet_mix: f64,
+    pub bbd_wet_mix: f64,
     /// Component ID of the pot controlling BBD wet/dry mix.
     /// When set, the pot position is read directly after pot updates.
-    pub(crate) bbd_mix_pot_id: Option<String>,
+    pub bbd_mix_pot_id: Option<String>,
     /// Trigger impulse sources for drum/percussion circuits.
-    pub(crate) triggers: Vec<TriggerState>,
+    pub triggers: Vec<TriggerState>,
     /// Original passive component values for reset support.
     /// Maps comp_id -> (kind_str, original_value).
     /// Skipped for serde: `&'static str` cannot be deserialized from owned data.
     /// Reconstructed on the M7 target if needed.
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub(crate) original_passive_values: HashMap<String, (&'static str, f64)>,
+    pub original_passive_values: HashMap<String, (&'static str, f64)>,
 }
 
 /// Gain-like control labels.
 #[allow(dead_code)]
-pub(crate) fn is_gain_label(label: &str) -> bool {
+pub fn is_gain_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
         "drive" | "gain" | "fuzz" | "sustain" | "distortion" | "sensitivity"
@@ -683,7 +683,7 @@ pub(crate) fn is_gain_label(label: &str) -> bool {
 
 /// Level-like control labels.
 #[allow(dead_code)]
-pub(crate) fn is_level_label(label: &str) -> bool {
+pub fn is_level_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
         "level" | "volume" | "output"
@@ -692,7 +692,7 @@ pub(crate) fn is_level_label(label: &str) -> bool {
 
 /// Rate-like control labels (for LFO).
 #[allow(dead_code)]
-pub(crate) fn is_rate_label(label: &str) -> bool {
+pub fn is_rate_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
         "rate" | "speed" | "tempo"
@@ -701,13 +701,13 @@ pub(crate) fn is_rate_label(label: &str) -> bool {
 
 /// Depth-like control labels (for LFO modulation amount).
 #[allow(dead_code)]
-pub(crate) fn is_depth_label(label: &str) -> bool {
+pub fn is_depth_label(label: &str) -> bool {
     matches!(label.to_ascii_lowercase().as_str(), "depth" | "width")
 }
 
 /// Delay time control labels.
 #[allow(dead_code)]
-pub(crate) fn is_delay_time_label(label: &str) -> bool {
+pub fn is_delay_time_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
         "time" | "delay" | "repeat_rate" | "echo"
@@ -716,7 +716,7 @@ pub(crate) fn is_delay_time_label(label: &str) -> bool {
 
 /// Delay feedback/intensity control labels.
 #[allow(dead_code)]
-pub(crate) fn is_delay_feedback_label(label: &str) -> bool {
+pub fn is_delay_feedback_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
         "feedback" | "repeats" | "intensity" | "regeneration"
@@ -724,7 +724,7 @@ pub(crate) fn is_delay_feedback_label(label: &str) -> bool {
 }
 
 /// Wet/dry mix control labels.
-pub(crate) fn is_mix_label(label: &str) -> bool {
+pub fn is_mix_label(label: &str) -> bool {
     matches!(
         label.to_ascii_lowercase().as_str(),
         "mix" | "blend" | "wet" | "dry/wet" | "wet/dry"
@@ -2772,4 +2772,4 @@ impl PedalProcessor for CompiledPedal {
 // ═══════════════════════════════════════════════════════════════════════════
 // Precompute extraction — lives in pedalkernel crate (compiler-only).
 // TODO: Re-enable when precompute module is ported to rt.
-// pub(crate) fn extract_precomputed_from_compiled(...) { ... }
+// pub fn extract_precomputed_from_compiled(...) { ... }

@@ -14,7 +14,7 @@ use crate::helpers::{balance_parallel_vs, has_pot};
 /// Flush denormals to zero. Subnormal floats are 100x slower to process
 /// on x86 and serve no useful purpose in audio signals.
 #[inline(always)]
-pub(crate) fn flush_denormal(x: f64) -> f64 {
+pub fn flush_denormal(x: f64) -> f64 {
     #[cfg(feature = "fault-injection")]
     if crate::fault_injection::is_active(crate::fault_injection::Fault::SkipDenormalFlush) {
         return x;
@@ -43,7 +43,7 @@ pub(crate) fn flush_denormal(x: f64) -> f64 {
 /// No heap allocations. All fields are scalars.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct NonIdealFxState {
+pub struct NonIdealFxState {
     /// GBW lowpass coefficient: α = 2π·fc / (2π·fc + fs).
     pub gbw_coeff: f64,
     /// Single-pole IIR state for GBW rolloff.
@@ -136,7 +136,7 @@ impl NonIdealFxState {
 /// Called at the correct point by each stage type.
 /// No heap allocations, no branching on stage type.
 #[inline]
-pub(crate) fn apply_nonideal_fx(sample: f64, state: &mut NonIdealFxState) -> f64 {
+pub fn apply_nonideal_fx(sample: f64, state: &mut NonIdealFxState) -> f64 {
     // GBW rolloff: single-pole lowpass
     let mut out = state.gbw_coeff * sample + (1.0 - state.gbw_coeff) * state.gbw_state;
     state.gbw_state = out;
@@ -227,7 +227,7 @@ const MAX_TRACE_MNL: u64 = 20;
 
 #[allow(dead_code)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) enum RootKind {
+pub enum RootKind {
     DiodePair(DiodePairRoot),
     SingleDiode(DiodeRoot),
     /// Wright Omega–based explicit anti-parallel diode pair root.
@@ -363,11 +363,11 @@ const PENTODE_GRID_BIAS: f64 = -8.0;
 /// later sub-samples reuse the previous b_nl when the budget is exhausted.
 /// 48 is generous enough for normal signals (most sub-samples converge in 2–5 iters)
 /// while protecting against extreme transient spikes.
-pub(crate) const NR_ITERATION_BUDGET: usize = 48;
+pub const NR_ITERATION_BUDGET: usize = 48;
 
 impl RootKind {
     /// Returns `true` for roots that clip the signal (diodes, zeners).
-    pub(crate) fn is_clipping_stage(&self) -> bool {
+    pub fn is_clipping_stage(&self) -> bool {
         matches!(
             self,
             RootKind::DiodePair(_)
@@ -385,7 +385,7 @@ impl RootKind {
     /// - Triodes/VariMu: Vgk from input
     /// - Pentodes: Vg1k from input
     /// - Diodes/JFETs/other: no control voltage
-    pub(crate) fn set_control_voltage(&mut self, input: f64, compensation: f64, _bias_offset: f64) {
+    pub fn set_control_voltage(&mut self, input: f64, compensation: f64, _bias_offset: f64) {
         match self {
             RootKind::Triode(t) => {
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
@@ -407,17 +407,17 @@ impl RootKind {
 /// with Rf||Cf feedback to output. Transfer function: V_out = -(Z_fb/Z_in) * V_in
 /// where Z_fb(s) = Rf/(1 + s·Rf·Cf) via bilinear transform.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct AllpassFeedback {
+pub struct AllpassFeedback {
     /// Input resistance (R_ap) in the signal path before the JFET.
-    pub(crate) r_ap: f64,
+    pub r_ap: f64,
     /// IIR numerator coefficient: Rf / (1 + K) where K = 2·fs·Rf·Cf.
-    pub(crate) b0: f64,
+    pub b0: f64,
     /// IIR denominator coefficient: (K - 1) / (K + 1).
-    pub(crate) a1: f64,
+    pub a1: f64,
     /// Previous input current sample for IIR.
-    pub(crate) x_prev: f64,
+    pub x_prev: f64,
     /// Previous output voltage for IIR.
-    pub(crate) y_prev: f64,
+    pub y_prev: f64,
 }
 
 /// Non-inverting all-pass IIR for Phase 90-style JFET + opamp topology.
@@ -429,15 +429,15 @@ pub(crate) struct AllpassFeedback {
 /// The WDF tree still processes each sample to maintain the JFET's NR state,
 /// but the output comes from this IIR rather than the tree's root port voltage.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct AllpassDirect {
+pub struct AllpassDirect {
     /// Phase-shifting capacitor value (e.g., C_ap = 47nF).
-    pub(crate) cap: f64,
+    pub cap: f64,
     /// Sample rate for coefficient computation.
-    pub(crate) sample_rate: f64,
+    pub sample_rate: f64,
     /// Previous input sample.
-    pub(crate) x_prev: f64,
+    pub x_prev: f64,
     /// Previous output sample.
-    pub(crate) y_prev: f64,
+    pub y_prev: f64,
 }
 
 /// Models a bridged-T opamp resonator as a 2nd-order IIR bandpass.
@@ -449,26 +449,26 @@ pub(crate) struct AllpassDirect {
 /// Bilinear-transformed to a 2nd-order IIR:
 ///   y[n] = b0·x[n] + b1·x[n-1] + b2·x[n-2] - a1·y[n-1] - a2·y[n-2]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct ResonatorFeedback {
+pub struct ResonatorFeedback {
     /// IIR coefficients (normalized by a0).
-    pub(crate) b0: f64,
-    pub(crate) b1: f64,
-    pub(crate) b2: f64,
-    pub(crate) a1: f64,
-    pub(crate) a2: f64,
+    pub b0: f64,
+    pub b1: f64,
+    pub b2: f64,
+    pub a1: f64,
+    pub a2: f64,
     /// State: previous input samples.
-    pub(crate) x1: f64,
-    pub(crate) x2: f64,
+    pub x1: f64,
+    pub x2: f64,
     /// State: previous output samples.
-    pub(crate) y1: f64,
-    pub(crate) y2: f64,
+    pub y1: f64,
+    pub y2: f64,
 }
 
 impl ResonatorFeedback {
     /// Create a new bridged-T resonator IIR from circuit parameters.
     ///
     /// Uses the Audio EQ Cookbook bandpass formula with bilinear pre-warping.
-    pub(crate) fn new(r1: f64, r2: f64, c1: f64, c2: f64, rf: f64, sample_rate: f64) -> Self {
+    pub fn new(r1: f64, r2: f64, c1: f64, c2: f64, rf: f64, sample_rate: f64) -> Self {
         // Resonant angular frequency
         let omega_0 = 1.0 / crate::math::sqrt(r1 * r2 * c1 * c2);
 
@@ -519,7 +519,7 @@ impl ResonatorFeedback {
 
     /// Process one sample through the 2nd-order bandpass.
     #[inline]
-    pub(crate) fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: f64) -> f64 {
         let y = self.b0 * input + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1
             - self.a2 * self.y2;
@@ -555,21 +555,21 @@ impl ResonatorFeedback {
 /// V_out = V+ + R₂·(V+ − b₁) / R₁ − b₂
 /// ```
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct OpAmpWdfAdaptor {
+pub struct OpAmpWdfAdaptor {
     /// Zi subtree (input network for inverting, ground-leg for non-inverting).
-    pub(crate) zi: DynNode,
+    pub zi: DynNode,
     /// Zf subtree (feedback network: caps, pots, resistors between neg and output).
-    pub(crate) zf: DynNode,
+    pub zf: DynNode,
     /// True for inverting topology, false for non-inverting.
-    pub(crate) is_inverting: bool,
+    pub is_inverting: bool,
     /// Op-amp model for GBW rolloff and slew rate limiting.
-    pub(crate) opamp: OpAmpRoot,
+    pub opamp: OpAmpRoot,
     /// GBW rolloff filter state (single-pole LPF on output).
-    pub(crate) gbw_state: f64,
+    pub gbw_state: f64,
     /// Previous output for slew rate limiting.
-    pub(crate) prev_out: f64,
+    pub prev_out: f64,
     /// Feedback pot ID (if any pot in Zf subtree responds to control changes).
-    pub(crate) feedback_pot_id: Option<String>,
+    pub feedback_pot_id: Option<String>,
 }
 
 impl OpAmpWdfAdaptor {
@@ -578,7 +578,7 @@ impl OpAmpWdfAdaptor {
     /// `v_plus`: non-inverting input voltage (bias for inverting, signal for non-inv).
     /// `v_in`: far-end voltage of Zi (signal for inverting, 0 for non-inverting).
     #[inline]
-    pub(crate) fn process(&mut self, v_plus: f64, v_in: f64) -> f64 {
+    pub fn process(&mut self, v_plus: f64, v_in: f64) -> f64 {
         // Up-sweep: get reflected waves from both subtrees
         let b1 = self.zi.reflected();
         let b2 = self.zf.reflected();
@@ -635,7 +635,7 @@ impl OpAmpWdfAdaptor {
     }
 
     /// Reset internal state.
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.gbw_state = 0.0;
         self.prev_out = 0.0;
         self.zi.reset();
@@ -645,17 +645,17 @@ impl OpAmpWdfAdaptor {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct WdfStage {
-    pub(crate) tree: DynNode,
-    pub(crate) root: RootKind,
+pub struct WdfStage {
+    pub tree: DynNode,
+    pub root: RootKind,
     /// Compensates for passive attenuation in the tree topology.
     /// Computed automatically from the tree's impedance structure.
-    pub(crate) compensation: f64,
+    pub compensation: f64,
     /// Oversampler for antialiasing at nonlinear stages.
-    pub(crate) oversampler: Oversampler,
+    pub oversampler: Oversampler,
     /// Base diode model (before thermal modulation). Stored so thermal
     /// drift can be applied as a multiplier without accumulation.
-    pub(crate) base_diode_model: Option<DiodeModel>,
+    pub base_diode_model: Option<DiodeModel>,
     /// Op-amp buffer paired with this WDF stage (for all-pass circuits).
     ///
     /// When a unity-gain op-amp feedback loop (neg=out) is detected at this
@@ -663,19 +663,19 @@ pub(crate) struct WdfStage {
     /// The op-amp receives the stage INPUT as its Vp (non-inverting input),
     /// modeling the all-pass behavior where the op-amp buffers the signal
     /// at unity gain while the R/C/JFET network shifts phase.
-    pub(crate) paired_opamp: Option<OpAmpRoot>,
+    pub paired_opamp: Option<OpAmpRoot>,
     /// Inverting all-pass feedback (Phase 90 topology).
     /// When present, bypasses the WDF output and computes V_out = -(Z_fb/Z_in) * V_in
     /// where Z_in includes the JFET variable resistance.
-    pub(crate) allpass_feedback: Option<AllpassFeedback>,
+    pub allpass_feedback: Option<AllpassFeedback>,
     /// Non-inverting all-pass IIR (Phase 90 gain-of-2 style).
     /// Computes H(s) = (1 - s·Rds·C) / (1 + s·Rds·C) directly,
     /// using the JFET's approximate Rds from its operating point.
-    pub(crate) allpass_direct: Option<AllpassDirect>,
+    pub allpass_direct: Option<AllpassDirect>,
     /// DC-blocking highpass filter for triode stages.
     /// Models the output coupling capacitor's DC blocking behavior.
     /// Format: (a1, b0, y_prev, x_prev) for IIR highpass.
-    pub(crate) dc_block: Option<(f64, f64, f64, f64)>,
+    pub dc_block: Option<(f64, f64, f64, f64)>,
     /// Inter-stage grid DC blocker: removes plate DC from the previous stage
     /// before setting the tube's grid voltage. Without this, multi-stage chains
     /// feed plate voltage (~80-200V) directly into Vgk, saturating the tube.
@@ -683,71 +683,71 @@ pub(crate) struct WdfStage {
     /// voltage is set externally via set_control_voltage(). This HPF mimics
     /// the coupling cap's DC-blocking effect on the grid bias.
     /// Format: (x_prev, y_prev). α = 0.9995, fc ≈ 3.5 Hz at 48 kHz.
-    pub(crate) grid_dc_blocker: Option<(f64, f64)>,
+    pub grid_dc_blocker: Option<(f64, f64)>,
     /// Source follower mode for JFETs.
     /// When true, Vgs is computed as Vgate (input) - Vsource (output).
     /// This enables proper source follower behavior where the source follows the gate.
-    pub(crate) is_source_follower: bool,
+    pub is_source_follower: bool,
     /// Previous source voltage for source follower Vgs calculation.
     /// Vgs[n] = input[n] - Vsource[n-1]
-    pub(crate) prev_source_voltage: f64,
+    pub prev_source_voltage: f64,
     /// BFS distance from input of the injection node (for topological ordering).
-    pub(crate) signal_flow_distance: usize,
+    pub signal_flow_distance: usize,
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
     #[cfg(debug_assertions)]
-    pub(crate) debug_label: String,
+    pub debug_label: String,
     /// When true, this stage is not on the audio signal path (e.g. bias
     /// network). It still processes and meters, but its output does NOT
     /// overwrite the serial audio chain signal.
-    pub(crate) bypass_serial: bool,
+    pub bypass_serial: bool,
     /// Inter-stage voltage gain from a transformer boundary.
     /// When the stage's injection node is on a transformer secondary,
     /// this is 1/turns_ratio (e.g., 17.0 for a 1:17 step-up).
-    pub(crate) transformer_gain: f64,
+    pub transformer_gain: f64,
     /// Circuit graph node ID where this stage's voltage source injects signal.
     /// Used for node-based routing in parallel-path topologies.
-    pub(crate) injection_node_id: usize,
+    pub injection_node_id: usize,
     /// Circuit graph node ID where this stage's output is extracted.
     /// Typically the plate (triode), collector (BJT), or drain (JFET) node.
     /// Used for node-based routing in parallel-path topologies.
-    pub(crate) output_node_id: usize,
+    pub output_node_id: usize,
     /// When true, this stage is a per-trigger voice stage that reads
     /// exclusively from `node_signals` (trigger impulses) rather than
     /// the serial chain signal. Unfired voices receive 0.0 input.
-    pub(crate) is_trigger_voice: bool,
+    pub is_trigger_voice: bool,
     /// Activation gate for trigger voice stages. When false, the stage
     /// skips processing entirely (outputs 0.0). Set to true on the first
     /// trigger impulse. Prevents unfired voices from contributing VCC
     /// bias to the output sum.
-    pub(crate) voice_active: bool,
+    pub voice_active: bool,
     /// When true, this stage is a feedforward (parallel) path that reads
     /// from `node_signals` at `injection_node_id` and additively blends
     /// its output into the serial chain signal.
-    pub(crate) is_feedforward: bool,
+    pub is_feedforward: bool,
     /// Sample counter for runtime warnings rate limiting.
     /// Only meaningful when `runtime-warnings` feature is enabled.
     #[allow(dead_code)]
-    pub(crate) sample_counter: u64,
+    pub sample_counter: u64,
     /// Component ID for the root device (for runtime warning attribution).
     /// Only meaningful when `runtime-warnings` feature is enabled.
     #[allow(dead_code)]
-    pub(crate) root_comp_id: String,
+    pub root_comp_id: String,
     /// When set, identifies a pot in the WDF tree whose resistance drives
     /// OpAmpRoot gain recalculation. After pot update + recompute, the stage
     /// reads the pot's resistance and calls `OpAmpRoot::set_feedback_pot_r()`.
-    pub(crate) feedback_pot_id: Option<String>,
+    pub feedback_pot_id: Option<String>,
     /// Fixed resistance in series with the feedback pot (e.g., R_clip).
     /// Used to compute effective Rf = pot_r + series_r when pot changes.
-    pub(crate) feedback_series_r: f64,
+    pub feedback_series_r: f64,
     /// Input resistance (Ri) for gain computation. Read from pendant tree
     /// port resistance or input-touching resistor at compile time.
-    pub(crate) feedback_ri: f64,
+    pub feedback_ri: f64,
     /// When set, extract output voltage at this component (pot leaf) in the
     /// WDF tree instead of at the root junction. After the down-sweep,
     /// V_out = a_leaf / 2 (for a resistive leaf where b=0).
     /// This models voltage extraction at the circuit's output node when
     /// a pot sits between the NL junction and the output.
-    pub(crate) output_probe: Option<String>,
+    pub output_probe: Option<String>,
     /// Op-amp gain stage paired with a DiodePair/SingleDiode root.
     ///
     /// When an inverting op-amp has diodes in its feedback path (e.g., Tube Screamer,
@@ -756,59 +756,59 @@ pub(crate) struct WdfStage {
     /// stage + soft-clip tanh approximation with proper gain-into-diode-clipping.
     ///
     /// NOT the same as `paired_opamp` (which is for Bridged-T all-pass circuits).
-    pub(crate) feedback_opamp: Option<OpAmpRoot>,
+    pub feedback_opamp: Option<OpAmpRoot>,
     /// VCC injection coefficient (per-unit, wave domain).
     /// Multiply by supply voltage to get the DC bias added to the reflected wave.
     /// Computed from a small resistive MNA at build time. Zero when no VCC edge.
-    pub(crate) vcc_injection_coeff: f64,
+    pub vcc_injection_coeff: f64,
     /// Gradual DC ramp counter (0..256) to prevent NR solver divergence on startup.
-    pub(crate) vcc_dc_ramp: u32,
+    pub vcc_dc_ramp: u32,
     /// Component ID of the coupling capacitor connected to the injection node.
     /// When set for triode/pentode stages, the input signal flows through the WDF
     /// tree (through the coupling cap) so DC is naturally blocked. The cap's WDF
     /// state is used to extract Vgk instead of a software HPF.
-    pub(crate) coupling_cap_id: Option<String>,
+    pub coupling_cap_id: Option<String>,
     /// Bridged-T resonator IIR for opamps with series R1→R2 path and
     /// C1/C2 shunt caps to ground. When present, the stage output is
     /// computed from this 2nd-order bandpass IIR instead of the WDF tree.
-    pub(crate) resonator_feedback: Option<ResonatorFeedback>,
+    pub resonator_feedback: Option<ResonatorFeedback>,
     /// Negate the voltage source value for tree topologies where the Series
     /// adaptor sign convention produces a negative reflected wave. Detected
     /// during construction: if `tree.reflected()` with positive VS gives a
     /// negative b_tree, the VS must be negated so the NR solver can find
     /// a valid operating point (plate/collector voltage must be positive).
-    pub(crate) negate_vs: bool,
+    pub negate_vs: bool,
     /// Input-path photocouplers that modulate the input impedance (Ri) of
     /// an inverting opamp. When the envelope follower drives these, the
     /// opamp gain is updated: gain = Rf / (fixed_r + photocoupler_r).
     /// Used by Mu-Tron style envelope-controlled integrators.
-    pub(crate) input_photocouplers: Vec<InputPhotocoupler>,
+    pub input_photocouplers: Vec<InputPhotocoupler>,
     /// Feedback (Zf) subtree for the 3-port linear opamp adaptor (NonInverting).
     /// Used with `zg_child` + `opamp_adaptor` when Zf/Zg split cleanly (e.g. RAT).
-    pub(crate) zf_child: Option<DynNode>,
+    pub zf_child: Option<DynNode>,
     /// Ground-leg (Zg) subtree for the 3-port linear opamp adaptor (NonInverting).
-    pub(crate) zg_child: Option<DynNode>,
+    pub zg_child: Option<DynNode>,
     /// R-type adaptor scattering matrix. Used by BOTH the 3-port path (zf/zg)
     /// and the MNA path (opamp_children). When Some, process() uses the adaptor.
-    pub(crate) opamp_adaptor: Option<crate::tree::RTypeAdaptor>,
+    pub opamp_adaptor: Option<crate::tree::RTypeAdaptor>,
     /// MNA-based child ports for opamps with reactive feedback (Inverting).
     /// Each child is a DynNode leaf (cap, inductor, or pot). Fixed resistors
     /// are stamped into the MNA. Used when build_feedback_tree + scalar gain
     /// can't model frequency-dependent feedback (e.g. Goldenrod Treble).
-    pub(crate) opamp_children: Vec<DynNode>,
+    pub opamp_children: Vec<DynNode>,
     /// Stored MNA + port pairs for scattering recompute on pot change.
-    pub(crate) opamp_recompute: Option<OpAmpRecomputeData>,
+    pub opamp_recompute: Option<OpAmpRecomputeData>,
     /// Index of the VoltageSource child in `opamp_children` that models R_in.
     /// When `Some(i)`, the stage drives `opamp_children[i]` with the input signal
     /// each sample before scatter_up. This is the R_in port of the MNA adaptor
     /// for Inverting opamps — the scattering matrix encodes the full Rf/Ri gain
     /// so the OpAmpRoot gain is set to 1.0 and gain comes from impedance ratios.
-    pub(crate) opamp_input_child_idx: Option<usize>,
+    pub opamp_input_child_idx: Option<usize>,
     /// Custom WDF adaptor for op-amp circuits with reactive feedback.
     /// When `Some`, the stage uses the V_neg = V+ constraint-based scattering
     /// instead of the MNA/RType adaptor or precomputed scalar gain.
     /// The gain emerges from Zf/Zi impedance ratios in the wave propagation.
-    pub(crate) opamp_wdf_adaptor: Option<OpAmpWdfAdaptor>,
+    pub opamp_wdf_adaptor: Option<OpAmpWdfAdaptor>,
 }
 
 impl WdfStage {
@@ -819,7 +819,7 @@ impl WdfStage {
     /// ```ignore
     /// WdfStage { feedback_pot_id: Some("Gain".into()), ..WdfStage::new(tree, root, os) }
     /// ```
-    pub(crate) fn new(
+    pub fn new(
         mut tree: DynNode,
         root: RootKind,
         oversampler: crate::oversampling::Oversampler,
@@ -874,28 +874,28 @@ impl WdfStage {
 
 /// Stored data for recomputing opamp adaptor scattering when pots change.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct OpAmpRecomputeData {
-    pub(crate) mna: crate::tree::MnaSystem,
-    pub(crate) port_pairs: Vec<(Option<usize>, Option<usize>)>,
-    pub(crate) port_resistances: Vec<f64>,
+pub struct OpAmpRecomputeData {
+    pub mna: crate::tree::MnaSystem,
+    pub port_pairs: Vec<(Option<usize>, Option<usize>)>,
+    pub port_resistances: Vec<f64>,
 }
 
 /// A photocoupler in the input path of an inverting opamp stage.
 /// Stores the element itself (for asymmetric time constant modeling)
 /// plus the fixed series resistance and DC feedback resistance for gain updates.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct InputPhotocoupler {
-    pub(crate) comp_id: String,
-    pub(crate) element: Photocoupler,
+pub struct InputPhotocoupler {
+    pub comp_id: String,
+    pub element: Photocoupler,
     /// Fixed resistance in series with this photocoupler (e.g., R_min).
-    pub(crate) fixed_series_r: f64,
+    pub fixed_series_r: f64,
     /// DC feedback resistance (Rf) for gain recalculation.
-    pub(crate) dc_rf: f64,
+    pub dc_rf: f64,
 }
 
 impl WdfStage {
     /// Check if any DynNode tree in this stage contains a pot with the given ID.
-    pub(crate) fn has_pot(&self, pot_id: &str) -> bool {
+    pub fn has_pot(&self, pot_id: &str) -> bool {
         use crate::helpers::has_pot;
         if has_pot(&self.tree, pot_id) {
             return true;
@@ -1548,7 +1548,7 @@ impl WdfStage {
     /// Set a pot value in the PassiveRType children and mark for recompute.
     ///
     /// Returns `true` if the pot was found and updated.
-    pub(crate) fn set_passive_rtype_pot(&mut self, comp_id: &str, value: f64) -> bool {
+    pub fn set_passive_rtype_pot(&mut self, comp_id: &str, value: f64) -> bool {
         if let RootKind::PassiveRType {
             children,
             needs_recompute,
@@ -1569,7 +1569,7 @@ impl WdfStage {
     ///
     /// Unstamps old pot conductances from the G matrix, stamps new ones based
     /// on current DynNode::Pot resistance, then re-derives S and k vectors.
-    pub(crate) fn flush_passive_rtype_recompute(&mut self) {
+    pub fn flush_passive_rtype_recompute(&mut self) {
         if let RootKind::PassiveRType {
             scattering,
             vs_injection,
@@ -1621,7 +1621,7 @@ impl WdfStage {
     }
 
     /// Returns true if this stage has an interpolation table for fast pot recompute.
-    pub(crate) fn has_interp_table(&self) -> bool {
+    pub fn has_interp_table(&self) -> bool {
         if let RootKind::PassiveRType { interp_table, .. } = &self.root {
             interp_table.is_some()
         } else {
@@ -1633,7 +1633,7 @@ impl WdfStage {
     ///
     /// Modulates diode Is and n_vt based on the current thermal state.
     /// Uses stored base model to prevent multiplier accumulation.
-    pub(crate) fn apply_thermal(&mut self, state: &crate::thermal::ThermalState) {
+    pub fn apply_thermal(&mut self, state: &crate::thermal::ThermalState) {
         if let Some(base) = &self.base_diode_model {
             let ideality_ratio = base.n_vt / 0.02585; // n factor (ideality * Vt_ref)
             match &mut self.root {
@@ -1663,7 +1663,7 @@ impl WdfStage {
     /// When the Vs branch is inside a Parallel adaptor whose sibling has much
     /// higher impedance, the signal is heavily attenuated.  This adjusts the
     /// Vs port resistance so the branches are balanced (gamma ≈ 0.5).
-    pub(crate) fn balance_vs_impedance(&mut self) {
+    pub fn balance_vs_impedance(&mut self) {
         balance_parallel_vs(&mut self.tree);
         self.tree.recompute();
         self.tree.compute_dynamic_flags();
@@ -1839,7 +1839,7 @@ impl WdfStage {
     /// If this stage has a `feedback_pot_id`, reads the pot's current resistance
     /// and calls `OpAmpRoot::set_feedback_pot_r()` to recompute gain.
     /// Checks both the OpAmp root (standalone) and feedback_opamp (DiodePair paired).
-    pub(crate) fn notify_pot_changed(&mut self) {
+    pub fn notify_pot_changed(&mut self) {
         if let Some(ref pot_id) = self.feedback_pot_id {
             // Check main tree, then 3-port children, then MNA children
             let pot_r = self
@@ -1884,7 +1884,7 @@ impl WdfStage {
     /// Uses accumulator pattern (not early return) so split pots (__aw/__wb)
     /// that appear in multiple locations all get updated. Triggers
     /// recompute_all + notify_pot_changed when any pot is found.
-    pub(crate) fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
+    pub fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
         let mut found = false;
         // Main tree: use set_pot_dirty for incremental recompute.
         // Marks only the leaf-to-root path dirty instead of full recompute.
@@ -1931,7 +1931,7 @@ impl WdfStage {
     /// Recompute all trees including opamp children.
     /// Uses incremental recompute for all sub-trees (only dirty subtrees
     /// are recomputed, static branches are skipped).
-    pub(crate) fn recompute_all(&mut self) {
+    pub fn recompute_all(&mut self) {
         self.tree.recompute_incremental();
         if let Some(ref mut zf) = self.zf_child {
             zf.recompute_incremental();
@@ -1947,7 +1947,7 @@ impl WdfStage {
     /// Recompute the MNA opamp adaptor scattering matrix after pot changes.
     /// Pots are NOT in the MNA G matrix — they're WDF ports only.
     /// Re-derives scattering with current port resistances.
-    pub(crate) fn flush_opamp_adaptor_recompute(&mut self) {
+    pub fn flush_opamp_adaptor_recompute(&mut self) {
         let recompute = match &self.opamp_recompute {
             Some(r) => r,
             None => return,
@@ -2003,7 +2003,7 @@ impl WdfStage {
 
     /// Rebuild scattering/state matrices after pot changes.
     /// Flushes both passive RType and opamp adaptor recomputes.
-    pub(crate) fn flush_recompute(&mut self) {
+    pub fn flush_recompute(&mut self) {
         // Recompute binary adaptor gamma from updated children port resistances.
         // This is needed after set_pot changes a leaf's rp — the parent
         // adaptor's gamma depends on the children's impedance ratio.
@@ -2019,7 +2019,7 @@ impl WdfStage {
     /// Mu-Tron integrator). The photocoupler's asymmetric time constants
     /// are modeled internally, and the resulting resistance modulates the
     /// opamp's gain: gain = dc_rf / (fixed_r + photocoupler_r).
-    pub(crate) fn set_input_photocoupler_led(&mut self, comp_id: &str, led_drive: f64) -> bool {
+    pub fn set_input_photocoupler_led(&mut self, comp_id: &str, led_drive: f64) -> bool {
         let mut found = false;
         for pc in &mut self.input_photocouplers {
             if pc.comp_id == comp_id {
@@ -2194,7 +2194,7 @@ impl WdfStage {
 /// Raffensperger variable-mu triode. Used in PushPullStage where
 /// both types may appear.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) enum TubeRoot {
+pub enum TubeRoot {
     Koren(TriodeRoot),
     VariMu(VariMuTriodeRoot),
     Pentode(PentodeRoot),
@@ -2260,34 +2260,34 @@ impl TubeRoot {
 /// Used for circuits like the Fairchild 670 where push and pull triodes
 /// connect to opposite ends of a center-tapped output transformer.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct PushPullStage {
+pub struct PushPullStage {
     /// WDF tree for push half (plate load + cathode passives).
-    pub(crate) push_tree: DynNode,
+    pub push_tree: DynNode,
     /// WDF tree for pull half (plate load + cathode passives).
-    pub(crate) pull_tree: DynNode,
+    pub pull_tree: DynNode,
     /// Push tube model (Koren triode or Raffensperger variable-mu).
-    pub(crate) push_root: TubeRoot,
+    pub push_root: TubeRoot,
     /// Pull tube model (Koren triode or Raffensperger variable-mu).
-    pub(crate) pull_root: TubeRoot,
+    pub pull_root: TubeRoot,
     /// Oversampler for push half.
-    pub(crate) push_oversampler: Oversampler,
+    pub push_oversampler: Oversampler,
     /// Oversampler for pull half.
-    pub(crate) pull_oversampler: Oversampler,
+    pub pull_oversampler: Oversampler,
     /// Compensation factor (mu/ref_mu).
-    pub(crate) compensation: f64,
+    pub compensation: f64,
     /// Output transformer turns ratio (primary:secondary).
     /// Output is scaled by 1/ratio (step-down).
-    pub(crate) turns_ratio: f64,
+    pub turns_ratio: f64,
     /// Grid bias voltage (class AB operating point).
-    pub(crate) grid_bias: f64,
+    pub grid_bias: f64,
     /// DC blocker state: previous input sample (1-pole HPF, ~3.5Hz).
-    pub(crate) dc_blocker_x1: f64,
+    pub dc_blocker_x1: f64,
     /// DC blocker state: previous output sample.
-    pub(crate) dc_blocker_y1: f64,
+    pub dc_blocker_y1: f64,
     /// R-type adaptor for push half (3-port mode, when grid passives present).
-    pub(crate) push_adaptor: Option<PushPullHalfAdaptor>,
+    pub push_adaptor: Option<PushPullHalfAdaptor>,
     /// R-type adaptor for pull half (3-port mode).
-    pub(crate) pull_adaptor: Option<PushPullHalfAdaptor>,
+    pub pull_adaptor: Option<PushPullHalfAdaptor>,
 }
 
 /// R-type adaptor data for one push-pull half (3-port mode).
@@ -2296,19 +2296,19 @@ pub(crate) struct PushPullStage {
 /// with the grid as a WDF port instead of a simple WDF tree. This allows
 /// coupling caps and grid stoppers to naturally AC-couple the signal.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct PushPullHalfAdaptor {
-    pub(crate) adaptor: RTypeAdaptor,
-    pub(crate) device: NlDeviceGroupKind,
-    pub(crate) scattering: MultiNlScattering,
-    pub(crate) passive_children: Vec<DynNode>,
-    pub(crate) nl_port_resistances: Vec<f64>,
-    pub(crate) v_prev: Vec<f64>,
-    pub(crate) dc_bias: Vec<f64>,
-    pub(crate) output_port: usize,
-    pub(crate) n_nl: usize,
-    pub(crate) vs_injection: Option<Vec<f64>>,
-    pub(crate) vcc_bias_all: Vec<f64>,
-    pub(crate) dc_ramp: u32,
+pub struct PushPullHalfAdaptor {
+    pub adaptor: RTypeAdaptor,
+    pub device: NlDeviceGroupKind,
+    pub scattering: MultiNlScattering,
+    pub passive_children: Vec<DynNode>,
+    pub nl_port_resistances: Vec<f64>,
+    pub v_prev: Vec<f64>,
+    pub dc_bias: Vec<f64>,
+    pub output_port: usize,
+    pub n_nl: usize,
+    pub vs_injection: Option<Vec<f64>>,
+    pub vcc_bias_all: Vec<f64>,
+    pub dc_ramp: u32,
 }
 
 impl PushPullStage {
@@ -2613,7 +2613,7 @@ use crate::elements::nonlinear::{PentodeThreePort, VariMuThreePort};
 /// `NlDeviceIv`, providing the I-V characteristic and its derivative.
 #[allow(dead_code)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) enum NlDeviceKind {
+pub enum NlDeviceKind {
     Triode(TriodeRoot),
     VariMu(VariMuTriodeRoot),
     Pentode(PentodeRoot),
@@ -2630,7 +2630,7 @@ impl NlDeviceKind {
     ///
     /// `bias_offset` is an additional bias voltage from external controls
     /// (e.g., BJT bias pots). Zero for non-BJT devices.
-    pub(crate) fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
+    pub fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
         match self {
             NlDeviceKind::Triode(t) => {
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
@@ -2649,7 +2649,7 @@ impl NlDeviceKind {
     }
 
     /// Get a reference to this device as an `NlDeviceIv` trait object.
-    pub(crate) fn as_nl_device_iv(&self) -> &dyn NlDeviceIv {
+    pub fn as_nl_device_iv(&self) -> &dyn NlDeviceIv {
         match self {
             NlDeviceKind::Triode(t) => t,
             NlDeviceKind::VariMu(t) => t,
@@ -2661,7 +2661,7 @@ impl NlDeviceKind {
         }
     }
 
-    pub(crate) fn debug_name(&self) -> &'static str {
+    pub fn debug_name(&self) -> &'static str {
         match self {
             NlDeviceKind::Triode(_) => "Triode",
             NlDeviceKind::VariMu(_) => "VariMu",
@@ -2699,7 +2699,7 @@ impl NlDeviceGroupIv for NlDeviceKind {
 /// (e.g., a 3-port triode with grid and plate ports), or a single-port
 /// device adapted to the grouped interface for mixed-device solves.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) enum NlDeviceGroupKind {
+pub enum NlDeviceGroupKind {
     /// 3-port variable-mu triode (grid-cathode + plate-cathode).
     VariMuThreePort(VariMuThreePort),
     /// 3-port Koren triode (grid-cathode + plate-cathode) for MNA fallback.
@@ -2721,7 +2721,7 @@ pub(crate) enum NlDeviceGroupKind {
 }
 
 impl NlDeviceGroupKind {
-    pub(crate) fn as_group_iv(&self) -> &dyn NlDeviceGroupIv {
+    pub fn as_group_iv(&self) -> &dyn NlDeviceGroupIv {
         match self {
             NlDeviceGroupKind::VariMuThreePort(t) => t,
             NlDeviceGroupKind::TriodeThreePort(t) => t,
@@ -2732,7 +2732,7 @@ impl NlDeviceGroupKind {
         }
     }
 
-    pub(crate) fn debug_name(&self) -> &'static str {
+    pub fn debug_name(&self) -> &'static str {
         match self {
             NlDeviceGroupKind::VariMuThreePort(_) => "VariMuThreePort",
             NlDeviceGroupKind::TriodeThreePort(_) => "TriodeThreePort",
@@ -2755,7 +2755,7 @@ impl NlDeviceGroupKind {
         }
     }
 
-    pub(crate) fn n_ports(&self) -> usize {
+    pub fn n_ports(&self) -> usize {
         match self {
             NlDeviceGroupKind::VariMuThreePort(_) => 2,
             NlDeviceGroupKind::TriodeThreePort(_) => 2,
@@ -2772,9 +2772,9 @@ impl NlDeviceGroupKind {
 /// When present, the multi-port NR solver uses cross-coupled device Jacobians
 /// instead of treating each port independently.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct MultiNlDeviceGroups {
-    pub(crate) groups: Vec<NlDeviceGroupKind>,
-    pub(crate) offsets: Vec<usize>,
+pub struct MultiNlDeviceGroups {
+    pub groups: Vec<NlDeviceGroupKind>,
+    pub offsets: Vec<usize>,
 }
 
 /// Data needed to recompute the scattering matrix when pot values change.
@@ -2784,25 +2784,25 @@ pub(crate) struct MultiNlDeviceGroups {
 /// On pot change, we rebuild `WdfPort`s with current resistances, re-derive
 /// the scattering matrix, and update all sub-blocks.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct ScatteringRecomputeData {
+pub struct ScatteringRecomputeData {
     /// MNA system with fixed resistors stamped (no pots).
-    pub(crate) mna: MnaSystem,
+    pub mna: MnaSystem,
     /// Port node pairs: (pos_mna_idx, neg_mna_idx) for each port.
     /// Ordering: [NL_0..NL_{n-1}, passive_0..passive_{m-1}] (VS injection mode)
     /// Or: [NL_0..NL_{n-1}, passive_0..passive_{m-1}, adapted] (standard mode).
-    pub(crate) port_node_pairs: Vec<(Option<usize>, Option<usize>)>,
+    pub port_node_pairs: Vec<(Option<usize>, Option<usize>)>,
     /// Resistance of the adapted (voltage source) port.
-    pub(crate) adapted_resistance: f64,
+    pub adapted_resistance: f64,
     /// When Some, the input VS is stamped as an ideal voltage source in MNA B/C
     /// matrices. The value is the MNA VS branch index. Recompute uses
     /// `derive_scattering_and_vs_injection()` instead of `derive_scattering_matrix_general()`.
-    pub(crate) vs_source_index: Option<usize>,
+    pub vs_source_index: Option<usize>,
     /// VCC voltage source index in MNA. When Some, VCC is an ideal VS and
     /// recompute re-extracts dc_bias from the VCC injection vector.
-    pub(crate) vcc_vs_index: Option<usize>,
+    pub vcc_vs_index: Option<usize>,
     /// Output MNA node pair for direct node-voltage extraction.
     /// When Some, recompute also updates the extraction coefficients.
-    pub(crate) extract_output_nodes: Option<(Option<usize>, Option<usize>)>,
+    pub extract_output_nodes: Option<(Option<usize>, Option<usize>)>,
 }
 
 /// Scattering matrix sub-blocks for multi-NL solving.
@@ -2811,13 +2811,13 @@ pub(crate) struct ScatteringRecomputeData {
 /// matrix and are the only parts needed during per-sample NR solving.
 /// They are recomputed together when pot values change.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct MultiNlScattering {
+pub struct MultiNlScattering {
     /// NL-to-NL sub-block (n_nl × n_nl, row-major).
-    pub(crate) s_nl: Vec<f64>,
+    pub s_nl: Vec<f64>,
     /// NL-to-passive sub-block (n_nl × n_passive, row-major).
-    pub(crate) s_nl_passive: Vec<f64>,
+    pub s_nl_passive: Vec<f64>,
     /// NL-to-adapted column (n_nl).
-    pub(crate) s_nl_adapted: Vec<f64>,
+    pub s_nl_adapted: Vec<f64>,
 }
 
 impl MultiNlScattering {
@@ -2828,7 +2828,7 @@ impl MultiNlScattering {
     /// `n_total` is inferred from the scattering matrix size, so extra ports
     /// (like VCC) are handled automatically — only the first `n_nl` rows and
     /// the NL, passive, and last (adapted) columns are extracted.
-    pub(crate) fn from_full_matrix(scattering: &[f64], n_nl: usize, n_passive: usize) -> Self {
+    pub fn from_full_matrix(scattering: &[f64], n_nl: usize, n_passive: usize) -> Self {
         let n_total = if scattering.is_empty() {
             n_nl + n_passive + 1
         } else {
@@ -2873,144 +2873,144 @@ impl MultiNlScattering {
 /// - Darlington pairs
 /// - Long-tailed pairs
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct MultiNlStage {
+pub struct MultiNlStage {
     /// R-type adaptor containing the full scattering matrix.
-    pub(crate) adaptor: RTypeAdaptor,
+    pub adaptor: RTypeAdaptor,
     /// Nonlinear devices at the NL ports.
-    pub(crate) nl_devices: Vec<NlDeviceKind>,
+    pub nl_devices: Vec<NlDeviceKind>,
     /// Port resistances for the NL ports.
-    pub(crate) nl_port_resistances: Vec<f64>,
+    pub nl_port_resistances: Vec<f64>,
     /// Passive child nodes (capacitors, inductors) needing WDF state updates.
-    pub(crate) passive_children: Vec<DynNode>,
+    pub passive_children: Vec<DynNode>,
     /// Pot DynNodes stored separately — pots are G-matrix conductances, not WDF ports.
-    pub(crate) pot_children: Vec<DynNode>,
+    pub pot_children: Vec<DynNode>,
     /// MNA stamp tracking for pots: (pot_child_idx, node_pos, node_neg, last_conductance).
     /// Used for delta-updating the G matrix when pot values change.
-    pub(crate) pot_mna_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
+    pub pot_mna_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
     /// Number of nonlinear ports.
-    pub(crate) n_nl: usize,
+    pub n_nl: usize,
     /// Warm-start voltages for NR solver.
-    pub(crate) v_prev: Vec<f64>,
+    pub v_prev: Vec<f64>,
     /// Scattering matrix sub-blocks for NR solving.
-    pub(crate) scattering: MultiNlScattering,
+    pub scattering: MultiNlScattering,
     /// Oversampler for antialiasing.
-    pub(crate) oversampler: Oversampler,
+    pub oversampler: Oversampler,
     /// Passive attenuation compensation factor.
-    pub(crate) compensation: f64,
+    pub compensation: f64,
     /// Which NL port to tap for output.
-    pub(crate) output_port: usize,
+    pub output_port: usize,
     /// Optional device groups for cross-coupled NR solve (3-port triodes).
     /// When Some, uses `multi_port_nr_solve_grouped()` instead of `multi_port_nr_solve()`.
-    pub(crate) device_groups: Option<MultiNlDeviceGroups>,
+    pub device_groups: Option<MultiNlDeviceGroups>,
     /// Data for recomputing scattering matrix when pots change.
     /// None if the stage has no pots (no recomputation needed).
-    pub(crate) recompute_data: Option<ScatteringRecomputeData>,
+    pub recompute_data: Option<ScatteringRecomputeData>,
     /// BFS distance from input of the injection node (for topological ordering).
-    pub(crate) signal_flow_distance: usize,
+    pub signal_flow_distance: usize,
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
     #[cfg(debug_assertions)]
-    pub(crate) debug_label: String,
+    pub debug_label: String,
     /// When true, this stage is not on the audio signal path (e.g. bias
     /// network). It still processes and meters, but its output does NOT
     /// overwrite the serial audio chain signal.
-    pub(crate) bypass_serial: bool,
+    pub bypass_serial: bool,
     /// Inter-stage voltage gain from a transformer boundary.
-    pub(crate) transformer_gain: f64,
+    pub transformer_gain: f64,
     /// Circuit graph node ID (for debug routing).
-    pub(crate) injection_node_id: usize,
+    pub injection_node_id: usize,
     /// Circuit graph node ID (for debug routing).
-    pub(crate) output_node_id: usize,
+    pub output_node_id: usize,
     /// Flag: pot changed since last scattering recompute.
-    pub(crate) recompute_pending: bool,
+    pub recompute_pending: bool,
     /// VEB bias offset from a feedback pot.
-    pub(crate) veb_bias_offset: f64,
+    pub veb_bias_offset: f64,
     /// Feedback scale for coupled BJT stages.
-    pub(crate) feedback_scale: f64,
+    pub feedback_scale: f64,
     /// Feedback opamp root for diode-paired stages (Bluesbreaker, Tube Screamer).
     /// Applies opamp gain + GBW + slew to the input before MNA/NR solve.
-    pub(crate) feedback_opamp: Option<OpAmpRoot>,
+    pub feedback_opamp: Option<OpAmpRoot>,
     /// Pot ID that controls feedback opamp gain (if any).
-    pub(crate) feedback_pot_id: Option<String>,
+    pub feedback_pot_id: Option<String>,
     /// Post-scattering non-ideality filter for op-amps absorbed via nullor
     /// stamps. Applies supply rail clamping and slew rate limiting to the
     /// extracted output node voltage. `None` for stages whose output is
     /// not dominated by an op-amp, or stages where we cannot identify a
     /// specific op-amp as the audio output source.
-    pub(crate) opamp_post_fx: Option<crate::elements::OpAmpPostFx>,
+    pub opamp_post_fx: Option<crate::elements::OpAmpPostFx>,
     /// Linearized OTA data for gm-based scattering recompute.
     /// When Some, the OTA's transconductance is stamped into the MNA as a linear
     /// conductance. When the envelope changes gain, we delta-update the MNA and
     /// recompute the scattering matrix. No NR iteration needed.
-    pub(crate) linearized_ota: Option<LinearizedOtaData>,
+    pub linearized_ota: Option<LinearizedOtaData>,
     /// VS injection vector for ideal voltage source input.
     /// When Some, signal is injected via `a[i] += k[i] * V_in` instead of
     /// an adapted WDF port. Used for linearized OTA stages where the adapted
     /// port would share an MNA node with a reactive port.
-    pub(crate) vs_injection: Option<Vec<f64>>,
+    pub vs_injection: Option<Vec<f64>>,
     /// Node-voltage extraction coefficients for direct output reading.
     /// When Some, the output is computed as:
     ///   V_out = Σ_k extract_coeffs[k] * b[k] + extract_vs * V_in
     /// This bypasses WDF port impedance mismatch by reading the MNA node
     /// voltage directly from X⁻¹ coefficients.
-    pub(crate) extract_coeffs: Option<Vec<f64>>,
-    pub(crate) extract_vs: f64,
+    pub extract_coeffs: Option<Vec<f64>>,
+    pub extract_vs: f64,
     /// When set, identifies a pot in pot_children whose resistance drives
     /// BJT bias recalculation (feedback_scale + veb_bias_offset).
-    pub(crate) bias_pot_id: Option<String>,
+    pub bias_pot_id: Option<String>,
     /// Emitter resistance for bias pot computation (default 470Ω).
-    pub(crate) bias_emitter_r: f64,
+    pub bias_emitter_r: f64,
     /// State-space model for direct discrete-time simulation.
     /// When Some, process() uses state-space update (A·x + b·u) instead of
     /// WDF scattering. Used for linearized OTA stages where cap port
     /// conductances overwhelm circuit conductances.
-    pub(crate) state_space: Option<StateSpaceData>,
+    pub state_space: Option<StateSpaceData>,
     /// IIR filter compiled from linear R-node MNA. Takes priority over
     /// state_space when present — simpler, faster, correct Q for oscillators.
-    pub(crate) iir: Option<IirData>,
+    pub iir: Option<IirData>,
     /// Precomputed interpolation table for single-pot stages.
     /// When Some, pot changes use table lookup instead of MNA re-inversion.
-    pub(crate) interp_table: Option<ScatteringInterpolationTable>,
+    pub interp_table: Option<ScatteringInterpolationTable>,
     /// Precomputed DC bias from VCC supply injection vector (NL ports only).
     /// dc_bias[i] = vcc_injection[i] * supply_voltage, for i in 0..n_nl.
     /// Added to known_a[i] in the NR solver to establish transistor operating points.
-    pub(crate) dc_bias: Vec<f64>,
+    pub dc_bias: Vec<f64>,
     /// Full VCC injection vector × supply_voltage for ALL ports.
     /// Added to a_all after scatter_all to provide DC bias to passive children
     /// and correct output extraction. Length = n_nl + n_passive + adapted(0 or 1).
-    pub(crate) vcc_bias_all: Vec<f64>,
+    pub vcc_bias_all: Vec<f64>,
     /// VCC voltage source index in the MNA (for recomputing dc_bias on pot changes).
     /// When Some, VCC is stamped as an ideal VS in the MNA with zero impedance.
-    pub(crate) vcc_vs_index: Option<usize>,
+    pub vcc_vs_index: Option<usize>,
     /// Nominal supply voltage (volts). Used for dc_bias computation.
-    pub(crate) supply_voltage: f64,
+    pub supply_voltage: f64,
     /// DC ramp counter for gradual bias injection.
     /// Counts from 0 to DC_RAMP_SAMPLES, scaling dc_bias by ramp/N to let the
     /// NR solver track the operating point as supply voltage gradually increases.
-    pub(crate) dc_ramp: u32,
+    pub dc_ramp: u32,
     /// Physics-based initial v_prev values. Restored on reset() instead of zeroing,
     /// so the NR solver starts near the correct operating point after a DAW reset.
-    pub(crate) initial_v_prev: Vec<f64>,
+    pub initial_v_prev: Vec<f64>,
     /// Previous-previous sample's NR solution (v[n-2]).
     /// Used with v_prev (v[n-1]) to extrapolate a warm-start guess for v[n]:
     ///   v_guess = 2·v[n-1] − v[n-2]
     /// Reduces NR iterations on transients compared to a plain v_prev warm-start.
-    pub(crate) v_prev_2: Vec<f64>,
+    pub v_prev_2: Vec<f64>,
     /// DC blocker state: previous input sample (x[n-1]).
-    pub(crate) dc_blocker_x1: f64,
+    pub dc_blocker_x1: f64,
     /// DC blocker state: previous output sample (y[n-1]).
-    pub(crate) dc_blocker_y1: f64,
+    pub dc_blocker_y1: f64,
     /// Pre-allocated workspace for NR solver (eliminates per-sample heap allocations).
-    pub(crate) nr_workspace: crate::elements::nonlinear::solver::NrWorkspace,
+    pub nr_workspace: crate::elements::nonlinear::solver::NrWorkspace,
     /// Pre-allocated process buffers.
-    pub(crate) work_b_passive: Vec<f64>,
-    pub(crate) work_known_a: Vec<f64>,
-    pub(crate) work_b_all: Vec<f64>,
-    pub(crate) work_a_all: Vec<f64>,
+    pub work_b_passive: Vec<f64>,
+    pub work_known_a: Vec<f64>,
+    pub work_b_all: Vec<f64>,
+    pub work_a_all: Vec<f64>,
     /// Adaptive oversampling: when true, skip NR on odd sub-samples (X2 NR rate).
     /// Set based on previous base sample's frozen Newton success rate.
-    pub(crate) adaptive_x2: bool,
+    pub adaptive_x2: bool,
     /// Sub-sample counter within oversampler loop.
-    pub(crate) subsample_counter: u8,
+    pub subsample_counter: u8,
     /// Remaining NR iteration budget for the current base sample.
     ///
     /// Reset to `NR_ITERATION_BUDGET` at the start of each base sample's
@@ -3018,13 +3018,13 @@ pub(crate) struct MultiNlStage {
     /// When it reaches zero, subsequent sub-samples skip the NR solve and reuse
     /// the most recent `b_nl` values from the workspace — still doing scattering
     /// and WDF port updates correctly.
-    pub(crate) iteration_budget_remaining: usize,
+    pub iteration_budget_remaining: usize,
     /// Previous base-sample input value for transient detection.
     ///
     /// Used to compute `input_delta = input - prev_input` each sample.
     /// A large delta indicates a transient, allowing the NR tolerance to be
     /// loosened via `adaptive_nr_tolerance()` to reduce iteration count.
-    pub(crate) prev_input: f64,
+    pub prev_input: f64,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -3040,7 +3040,7 @@ pub(crate) struct MultiNlStage {
 /// No matrix inversion needed. Cortex-M7 safe.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct IirData {
+pub struct IirData {
     /// Numerator coefficients [b0, b1, b2].
     pub b_coeffs: Vec<f64>,
     /// Denominator coefficients [1.0, a1, a2].
@@ -3156,7 +3156,7 @@ impl IirData {
 /// Pot binding info stored in IirStage for runtime coefficient recomputation.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct IirPotBinding {
+pub struct IirPotBinding {
     /// Component ID of the pot (matches ControlBinding::component_id).
     pub comp_id: String,
     /// Maximum resistance of the pot.
@@ -3170,26 +3170,26 @@ pub(crate) struct IirPotBinding {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct IirStage {
+pub struct IirStage {
     /// The biquad filter data (coefficients + history).
-    pub(crate) iir: IirData,
+    pub iir: IirData,
     /// Passive attenuation compensation factor.
-    pub(crate) compensation: f64,
+    pub compensation: f64,
     /// BFS distance from input (for topological ordering).
-    pub(crate) signal_flow_distance: usize,
+    pub signal_flow_distance: usize,
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
     #[cfg(debug_assertions)]
-    pub(crate) debug_label: String,
+    pub debug_label: String,
     /// When true, this stage is not on the audio signal path (e.g. bias
     /// network). It still processes and meters, but its output does NOT
     /// overwrite the serial audio chain signal.
-    pub(crate) bypass_serial: bool,
+    pub bypass_serial: bool,
     /// Component-declared non-idealities applied after IIR computation.
-    pub(crate) nonideal_fx: Vec<crate::nonideal_fx::NonIdealFx>,
+    pub nonideal_fx: Vec<crate::nonideal_fx::NonIdealFx>,
     /// Pot bindings for runtime coefficient recomputation.
-    pub(crate) pot_bindings: Vec<IirPotBinding>,
+    pub pot_bindings: Vec<IirPotBinding>,
     /// Sample rate (needed for GBW recomputation on gain change).
-    pub(crate) sample_rate: f64,
+    pub sample_rate: f64,
     // ── NonIdealFx runtime state ──
     /// GBW single-pole IIR state (for OpAmpBandwidth).
     gbw_state: f64,
@@ -3206,7 +3206,7 @@ pub(crate) struct IirStage {
 }
 
 impl IirStage {
-    pub(crate) fn new(iir: IirData) -> Self {
+    pub fn new(iir: IirData) -> Self {
         let sample_rate = iir.sample_rate;
         Self {
             iir,
@@ -3231,7 +3231,7 @@ impl IirStage {
     ///
     /// Pre-computes runtime constants (gbw_coeff, max_dv_per_sample, v_max)
     /// so process() stays O(1) with no branching on enum variants.
-    pub(crate) fn set_nonideal_fx(&mut self, fx: Vec<crate::nonideal_fx::NonIdealFx>, sample_rate: f64) {
+    pub fn set_nonideal_fx(&mut self, fx: Vec<crate::nonideal_fx::NonIdealFx>, sample_rate: f64) {
         use crate::nonideal_fx::NonIdealFx;
         for effect in &fx {
             match effect {
@@ -3254,7 +3254,7 @@ impl IirStage {
     }
 
     #[inline]
-    pub(crate) fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: f64) -> f64 {
         let mut out = self.iir.process(input * self.compensation);
 
         // GBW rolloff: single-pole lowpass
@@ -3279,7 +3279,7 @@ impl IirStage {
     }
 
     /// Check if this stage contains a pot with the given component ID.
-    pub(crate) fn has_pot(&self, comp_id: &str) -> bool {
+    pub fn has_pot(&self, comp_id: &str) -> bool {
         self.pot_bindings.iter().any(|b| b.comp_id == comp_id)
     }
 
@@ -3288,7 +3288,7 @@ impl IirStage {
     /// For resistive feedback (no caps): recomputes dc_gain from Rf/Ri.
     /// For resonators (caps): delegates to IirData::recompute().
     /// No heap allocations — all state is pre-allocated.
-    pub(crate) fn set_pot(&mut self, comp_id: &str, position: f64) {
+    pub fn set_pot(&mut self, comp_id: &str, position: f64) {
         let binding = match self.pot_bindings.iter_mut().find(|b| b.comp_id == comp_id) {
             Some(b) => b,
             None => return,
@@ -3330,7 +3330,7 @@ impl IirStage {
 /// Pot binding: when Rf is a pot, `set_rf()` recomputes gain and updates
 /// the GBW coefficient for the new closed-loop bandwidth.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct BlackFeedbackStage {
+pub struct BlackFeedbackStage {
     /// Feedback resistance (Ohms). Changes at runtime when pot sweeps.
     rf: f64,
     /// Input resistance (Ohms). Fixed at compile time.
@@ -3344,32 +3344,32 @@ pub(crate) struct BlackFeedbackStage {
     /// Sample rate for GBW recomputation.
     sample_rate: f64,
     /// BFS distance from input (for topological ordering).
-    pub(crate) signal_flow_distance: usize,
+    pub signal_flow_distance: usize,
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
     #[cfg(debug_assertions)]
-    pub(crate) debug_label: String,
+    pub debug_label: String,
     /// When true, this stage is not on the audio signal path (e.g. bias
     /// network). It still processes and meters, but its output does NOT
     /// overwrite the serial audio chain signal.
-    pub(crate) bypass_serial: bool,
+    pub bypass_serial: bool,
     /// Circuit graph node ID for writing to node_signals (feedforward routing).
-    pub(crate) output_node_id: usize,
+    pub output_node_id: usize,
     /// Pot component ID bound to Rf (if any). Set at compile time.
-    pub(crate) pot_comp_id: Option<String>,
+    pub pot_comp_id: Option<String>,
     /// Maximum pot resistance (Ohms). Position 1.0 = this value.
-    pub(crate) pot_max_r: f64,
+    pub pot_max_r: f64,
     /// Pot component ID in the ground leg (Ri). When this pot changes,
     /// Ri = ri_fixed_r + pot_position × ri_pot_max_r.
-    pub(crate) ri_pot_comp_id: Option<String>,
+    pub ri_pot_comp_id: Option<String>,
     /// Fixed resistance in the ground leg (sum of non-pot resistors: R5 + R6).
-    pub(crate) ri_fixed_r: f64,
+    pub ri_fixed_r: f64,
     /// Max resistance of the Ri pot (e.g. Gain_A max_r = 100k).
-    pub(crate) ri_pot_max_r: f64,
+    pub ri_pot_max_r: f64,
 }
 
 impl BlackFeedbackStage {
     /// Construct from circuit parameters.
-    pub(crate) fn new(
+    pub fn new(
         rf: f64,
         ri: f64,
         inverting: bool,
@@ -3404,13 +3404,12 @@ impl BlackFeedbackStage {
     }
 
     /// Test helper: construct with default NonIdealFx.
-    #[cfg(test)]
-    pub(crate) fn new_test(rf: f64, ri: f64, inverting: bool, sample_rate: f64) -> Self {
+    pub fn new_test(rf: f64, ri: f64, inverting: bool, sample_rate: f64) -> Self {
         Self::new(rf, ri, inverting, &[], sample_rate)
     }
 
     /// Current closed-loop gain.
-    pub(crate) fn gain(&self) -> f64 {
+    pub fn gain(&self) -> f64 {
         // When Rf is 0 (all-reactive feedback, e.g., coupling cap only),
         // the DC gain is undefined. Use unity passthrough — the reactive
         // elements handle frequency shaping in the WDF tree, not here.
@@ -3427,12 +3426,12 @@ impl BlackFeedbackStage {
     }
 
     /// Check if this stage owns a pot with the given component ID.
-    pub(crate) fn has_pot(&self, comp_id: &str) -> bool {
+    pub fn has_pot(&self, comp_id: &str) -> bool {
         self.pot_comp_id.as_deref() == Some(comp_id)
     }
 
     /// Set pot position (0.0–1.0). Converts to Rf = position * max_r.
-    pub(crate) fn set_pot(&mut self, _comp_id: &str, position: f64) {
+    pub fn set_pot(&mut self, _comp_id: &str, position: f64) {
         if self.pot_max_r > 0.0 {
             self.set_rf(position * self.pot_max_r);
         }
@@ -3441,7 +3440,7 @@ impl BlackFeedbackStage {
     /// Update Ri from ground-leg pot position. Called when a pot in the
     /// ground leg (e.g. Gain_A in Goldenrod) changes position.
     /// The position is range-mapped but NOT tapered — apply taper here.
-    pub(crate) fn update_ri_from_pot(&mut self, comp_id: &str, position: f64) {
+    pub fn update_ri_from_pot(&mut self, comp_id: &str, position: f64) {
         if self.ri_pot_comp_id.as_deref() == Some(comp_id) {
             // Apply taper to get actual resistance fraction.
             // Gain_A is linear (b) taper, so taper(pos) ≈ pos.
@@ -3454,18 +3453,18 @@ impl BlackFeedbackStage {
     }
 
     /// Set input resistance (for pipeline Ri fix).
-    pub(crate) fn set_ri(&mut self, ri: f64) {
+    pub fn set_ri(&mut self, ri: f64) {
         self.ri = ri;
     }
 
     /// Set asymmetric rail limits from bias analysis.
-    pub(crate) fn set_v_rails(&mut self, v_rail_pos: f64, v_rail_neg: f64) {
+    pub fn set_v_rails(&mut self, v_rail_pos: f64, v_rail_neg: f64) {
         self.fx_state.v_rail_pos = v_rail_pos;
         self.fx_state.v_rail_neg = v_rail_neg;
     }
 
     /// Update Rf (pot sweep). Recomputes gain and GBW coefficient.
-    pub(crate) fn set_rf(&mut self, rf: f64) {
+    pub fn set_rf(&mut self, rf: f64) {
         self.rf = rf;
         if self.stored_gbw > 0.0 {
             self.fx_state.update_gain(self.stored_gbw, self.gain(), self.sample_rate);
@@ -3474,7 +3473,7 @@ impl BlackFeedbackStage {
 
     /// Process one sample: gain × input → NonIdealFx → output.
     #[inline]
-    pub(crate) fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: f64) -> f64 {
         let gained = input * self.gain();
         flush_denormal(apply_nonideal_fx(gained, &mut self.fx_state))
     }
@@ -3489,27 +3488,27 @@ impl BlackFeedbackStage {
 /// O(N²)/sample where N = number of states. Covers complex active filters
 /// (Klon stages, BB Preamp) that can't reduce to a biquad.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct StateSpaceStage {
-    pub(crate) ss: StateSpaceData,
+pub struct StateSpaceStage {
+    pub ss: StateSpaceData,
     /// Pre-allocated work buffer for state update (avoids per-sample allocation).
     work: Vec<f64>,
     /// Passive attenuation compensation factor.
-    pub(crate) compensation: f64,
+    pub compensation: f64,
     /// BFS distance from input (for topological ordering).
-    pub(crate) signal_flow_distance: usize,
+    pub signal_flow_distance: usize,
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
     #[cfg(debug_assertions)]
-    pub(crate) debug_label: String,
+    pub debug_label: String,
     /// When true, this stage is not on the audio signal path (e.g. bias
     /// network). It still processes and meters, but its output does NOT
     /// overwrite the serial audio chain signal.
-    pub(crate) bypass_serial: bool,
+    pub bypass_serial: bool,
     /// Supply voltage for rail saturation.
-    pub(crate) supply_voltage: f64,
+    pub supply_voltage: f64,
 }
 
 impl StateSpaceStage {
-    pub(crate) fn new(ss: StateSpaceData, supply_voltage: f64) -> Self {
+    pub fn new(ss: StateSpaceData, supply_voltage: f64) -> Self {
         let n = ss.n_states;
         Self {
             ss,
@@ -3524,7 +3523,7 @@ impl StateSpaceStage {
     }
 
     #[inline]
-    pub(crate) fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: f64) -> f64 {
         let n = self.ss.n_states;
         let sample = input * self.compensation;
 
@@ -3559,7 +3558,7 @@ impl StateSpaceStage {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct StateSpaceData {
+pub struct StateSpaceData {
     /// State vector [V_nodes..., I_vs...] (n_states elements).
     pub x: Vec<f64>,
     /// State transition matrix A_d = M⁻¹·N (n_states × n_states, row-major).
@@ -3597,7 +3596,7 @@ pub(crate) struct StateSpaceData {
 /// follower changes the OTA's bias current (Iabc), we recompute gm,
 /// delta-update the stored MNA, and re-derive the scattering matrix.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct LinearizedOtaData {
+pub struct LinearizedOtaData {
     /// OTA model parameters (iabc_max, vt, r_load).
     pub model: crate::elements::OtaModel,
     /// Current normalized gain (0.0 = off, 1.0 = max). Set by envelope.
@@ -4545,28 +4544,28 @@ impl MultiNlStage {
     // Minimal read-only accessors for `precompute::extract_precomputed`.
 
     /// The R-type adaptor containing the scattering matrix and port data.
-    pub(crate) fn adaptor(&self) -> &RTypeAdaptor {
+    pub fn adaptor(&self) -> &RTypeAdaptor {
         &self.adaptor
     }
 
     /// VS injection vector (present when driven by an ideal voltage source).
-    pub(crate) fn vs_injection(&self) -> Option<&Vec<f64>> {
+    pub fn vs_injection(&self) -> Option<&Vec<f64>> {
         self.vs_injection.as_ref()
     }
 
     /// Node-voltage extraction coefficients (present when output is read from
     /// MNA node voltages directly rather than WDF port waves).
-    pub(crate) fn extract_coeffs(&self) -> Option<&Vec<f64>> {
+    pub fn extract_coeffs(&self) -> Option<&Vec<f64>> {
         self.extract_coeffs.as_ref()
     }
 
     /// VS component of the extraction formula.
-    pub(crate) fn extract_vs(&self) -> f64 {
+    pub fn extract_vs(&self) -> f64 {
         self.extract_vs
     }
 
     /// Pot interpolation table (present for single-pot stages).
-    pub(crate) fn interp_table(&self) -> Option<&crate::tree::ScatteringInterpolationTable> {
+    pub fn interp_table(&self) -> Option<&crate::tree::ScatteringInterpolationTable> {
         self.interp_table.as_ref()
     }
 }
@@ -4588,11 +4587,11 @@ impl MultiNlStage {
 /// output (CV) that modulates the main circuit's push-pull grid bias
 /// with a 1-sample feedback delay.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct SidechainProcessor {
+pub struct SidechainProcessor {
     /// The compiled sidechain sub-circuit.
-    pub(crate) circuit: crate::processor::CompiledPedal,
+    pub circuit: crate::processor::CompiledPedal,
     /// 1-sample delay state for the feedback loop CV.
-    pub(crate) cv_delayed: f64,
+    pub cv_delayed: f64,
 }
 
 impl SidechainProcessor {
@@ -4625,20 +4624,20 @@ impl SidechainProcessor {
 /// (e.g. `rate: 1/64` sidechain detectors) process one sample every
 /// `rate_divisor` input samples and use linear interpolation to fill gaps.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(crate) struct SubcircuitProcessor {
+pub struct SubcircuitProcessor {
     /// The compiled sub-circuit.
-    pub(crate) circuit: crate::processor::CompiledPedal,
+    pub circuit: crate::processor::CompiledPedal,
     /// Subcircuit name (for debug and control routing).
     #[allow(dead_code)]
-    pub(crate) name: String,
+    pub name: String,
     /// Decimation factor (1 = full rate, 64 = process every 64th sample).
-    pub(crate) rate_divisor: u32,
+    pub rate_divisor: u32,
     /// Countdown to next processing tick (decrements each sample, resets to `rate_divisor`).
-    pub(crate) rate_counter: u32,
+    pub rate_counter: u32,
     /// Last computed output value (held between decimated samples).
-    pub(crate) held_output: f64,
+    pub held_output: f64,
     /// Output from one `rate_divisor` period ago (for linear interpolation).
-    pub(crate) prev_output: f64,
+    pub prev_output: f64,
 }
 
 impl SubcircuitProcessor {

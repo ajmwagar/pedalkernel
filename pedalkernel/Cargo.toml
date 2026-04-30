@@ -13,6 +13,7 @@ rust-version = "1.80"
 [features]
 default = ["std", "jack-rt", "tui", "cli", "gummel-poon"]
 std = []
+serde = ["pedalkernel-rt/serde"]
 jack-rt = ["jack"]
 tui = ["dep:ratatui", "dep:crossterm"]
 cli = ["dep:clap"]

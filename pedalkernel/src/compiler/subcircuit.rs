@@ -1,8 +1,12 @@
 //! Subcircuit resolution and routing for equipment-level circuit partitioning.
 //!
-//! Provides `resolve_subcircuits()` to convert `SubcircuitDef` blocks into
-//! compilable `ResolvedSubcircuit` sub-`PedalDef`s, and `build_routing()` to
-//! produce a topologically-sorted signal graph connecting them.
+//! Runtime routing types (`RoutingStep`, `SignalSource`) are re-exported from
+//! pedalkernel-rt. Compiler-only resolution and routing logic stays here.
+
+// Re-export runtime routing types
+pub use pedalkernel_rt::subcircuit::*;
+
+// ── Compiler-only resolution & routing ──────────────────────────────────
 
 use crate::dsl::{PedalDef, Pin, SubcircuitDef};
 use hashbrown::HashMap;
@@ -18,29 +22,6 @@ pub struct ResolvedSubcircuit {
     pub pedal_def: PedalDef,
     /// Decimation factor (1 = full rate).
     pub rate_divisor: u32,
-}
-
-/// Routing step in the inter-subcircuit signal graph.
-#[derive(Debug, Clone)]
-pub enum RoutingStep {
-    /// Process subcircuit at index, feeding it signal from source.
-    ProcessSubcircuit {
-        subcircuit_idx: usize,
-        input_source: SignalSource,
-    },
-}
-
-/// Where a subcircuit gets its input signal.
-#[derive(Debug, Clone)]
-pub enum SignalSource {
-    /// The equipment-level input.
-    EquipmentInput,
-    /// Output of subcircuit at given index.
-    SubcircuitOutput(usize),
-    /// Sum of multiple sources (fan-in).
-    /// Currently unused but reserved for multi-input routing in a future pass.
-    #[allow(dead_code)]
-    Sum(Vec<SignalSource>),
 }
 
 /// Resolve subcircuit definitions into compilable sub-`PedalDef`s.
@@ -317,9 +298,9 @@ fn validate_routing(pedal: &PedalDef, resolved: &[ResolvedSubcircuit]) -> Result
     Ok(())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════��══════════════════════════════════��════════════════════════════════
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════��══════════════════
 
 #[cfg(test)]
 mod tests {
