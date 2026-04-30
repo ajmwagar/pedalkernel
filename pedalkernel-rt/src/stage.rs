@@ -2623,6 +2623,8 @@ pub enum NlDeviceKind {
     ExplicitDiode(ExplicitDiodeRoot),
     /// Wright Omega explicit anti-parallel diode pair (multi-NL context).
     ExplicitDiodePair(ExplicitDiodePairRoot),
+    /// JFET drain-source as a 1-port NL device (Vgs set externally).
+    Jfet(JfetRoot),
 }
 
 impl NlDeviceKind {
@@ -2645,6 +2647,10 @@ impl NlDeviceKind {
             | NlDeviceKind::DiodePair(_)
             | NlDeviceKind::ExplicitDiode(_)
             | NlDeviceKind::ExplicitDiodePair(_) => {}
+            NlDeviceKind::Jfet(j) => {
+                // Vgs driven by input signal (for pitch sweep etc.)
+                j.set_vgs(input * compensation);
+            }
         }
     }
 
@@ -2658,6 +2664,7 @@ impl NlDeviceKind {
             NlDeviceKind::DiodePair(d) => d,
             NlDeviceKind::ExplicitDiode(d) => d,
             NlDeviceKind::ExplicitDiodePair(d) => d,
+            NlDeviceKind::Jfet(j) => j,
         }
     }
 
@@ -2670,6 +2677,7 @@ impl NlDeviceKind {
             NlDeviceKind::DiodePair(_) => "DiodePair",
             NlDeviceKind::ExplicitDiode(_) => "ExplicitDiode",
             NlDeviceKind::ExplicitDiodePair(_) => "ExplicitDiodePair",
+            NlDeviceKind::Jfet(_) => "Jfet",
         }
     }
 }

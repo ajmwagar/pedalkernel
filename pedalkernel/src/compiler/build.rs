@@ -45,7 +45,11 @@ pub(super) fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
             let model = pentode_model(model_name);
             Some(NlDeviceKind::Pentode(PentodeRoot::new(model)))
         }
-        _ => None, // Jfet, Mosfet, Zener, Ota not yet supported in multi-NL
+        NonlinearKind::Jfet { model_name, is_n_channel, .. } => {
+            let model = crate::model_lookup::jfet_model_by_name(model_name);
+            Some(NlDeviceKind::Jfet(JfetRoot::new(model)))
+        }
+        _ => None, // Mosfet, Zener, Ota not yet supported in multi-NL
     }
 }
 

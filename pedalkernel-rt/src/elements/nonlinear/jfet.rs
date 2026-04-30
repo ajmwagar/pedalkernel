@@ -221,6 +221,17 @@ impl JfetRoot {
     }
 }
 
+impl super::solver::NlDeviceIv for JfetRoot {
+    /// I(Vds) at current Vgs — drain-source as a 1-port nonlinear element.
+    fn iv(&self, v: f64) -> (f64, f64) {
+        (self.drain_current(v), self.drain_current_derivative(v))
+    }
+
+    fn v_clamp(&self) -> (f64, f64) {
+        (-20.0, 20.0)
+    }
+}
+
 impl JfetRoot {
     /// Source follower processing: solve for Vs where Ids(Vgate - Vs) = Vs / Rs.
     ///
