@@ -7,10 +7,11 @@
 //! - `spqr_build.rs`: stage construction + full pipeline entry point
 
 use super::build::create_root;
+use super::classify::NonlinearKind;
 use super::compiled::{CompiledPedal, RailSaturation, Stage, StageRef};
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
-use super::rigid::{build_rigid, build_rigid_from_group};
+use super::rigid::{build_general_mna_from_edges, build_rigid, build_rigid_from_group};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
@@ -69,11 +70,12 @@ impl BuiltStage {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Compile a `.pedal` circuit via the SPQR pipeline with default options.
-pub fn compile_via_spqr(
-    pedal: &PedalDef,
-    sample_rate: f64,
-) -> Result<CompiledPedal, String> {
-    compile_via_spqr_with_options(pedal, sample_rate, super::compile::CompileOptions::default())
+pub fn compile_via_spqr(pedal: &PedalDef, sample_rate: f64) -> Result<CompiledPedal, String> {
+    compile_via_spqr_with_options(
+        pedal,
+        sample_rate,
+        super::compile::CompileOptions::default(),
+    )
 }
 
 /// Compile a `.pedal` circuit via the SPQR pipeline.
@@ -90,6 +92,7 @@ pub fn compile_via_spqr_with_options(
     use super::signal_flow::find_flow_groups;
 
     let graph = CircuitGraph::from_pedal(pedal);
+    let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
 
     // Collect all non-bridge edges (passive + NL + VCVS)
     let active_set: std::collections::HashSet<usize> =
@@ -100,6 +103,55 @@ pub fn compile_via_spqr_with_options(
 
     if all_edges.is_empty() {
         return Err("No circuit edges found".to_string());
+    }
+
+    if options.collapse_nl {
+        let stage = super::rigid::build_general_mna_from_edges(&all_edges, &graph, sample_rate)?;
+        let mut compiled = CompiledPedal {
+            stages: vec![Stage::MultiNl(stage)],
+            push_pull_stages: Vec::new(),
+            pre_gain: 1.0,
+            output_gain: 1.0,
+            rail_saturation: RailSaturation::None,
+            rail_sat_oversampler: Oversampler::new(options.oversampling),
+            sample_rate,
+            controls: Vec::new(),
+            gain_range: (0.0, 1.0),
+            supply_voltage,
+            oversampling: options.oversampling,
+            lfos: Vec::new(),
+            envelopes: Vec::new(),
+            slew_limiters: Vec::new(),
+            bbds: Vec::new(),
+            delay_lines: Vec::new(),
+            vcos: Vec::new(),
+            vcas: Vec::new(),
+            thermal: None,
+            tolerance_seed: 0,
+            opamp_stages: Vec::new(),
+            power_supply: None,
+            metrics_accumulator: None,
+            metrics_buffer: None,
+            input_loading: None,
+            output_loading: None,
+            output_dc_block: None,
+            sidechains: Vec::new(),
+            subcircuit_processors: Vec::new(),
+            subcircuit_routing: Vec::new(),
+            subcircuit_output_idx: None,
+            subcircuit_outputs: Vec::new(),
+            pot_smoothers: Vec::new(),
+            pot_mirrors: hashbrown::HashMap::new(),
+            base_grid_bias: 0.0,
+            multi_nl_recompute_counter: 0,
+            node_signals: Vec::new(),
+            triggers: Vec::new(),
+            bbd_wet_mix: 0.5,
+            bbd_mix_pot_id: None,
+            original_passive_values: hashbrown::HashMap::new(),
+        };
+        super::spqr_control::bind_controls(pedal, &mut compiled);
+        return Ok(compiled);
     }
 
     // Step 1: Partition edges into signal flow groups.
@@ -116,7 +168,8 @@ pub fn compile_via_spqr_with_options(
     // Step 1c: Classify each group as signal path or static bias.
     // Static bias groups (VCC dividers) are bypassed in the serial audio
     // chain — they still process and meter, but don't overwrite the signal.
-    let group_bias: Vec<_> = feedback_groups.iter()
+    let group_bias: Vec<_> = feedback_groups
+        .iter()
         .map(|g| super::bias_analysis::classify_group_bias(g, &graph))
         .collect();
 
@@ -129,8 +182,6 @@ pub fn compile_via_spqr_with_options(
             bias_node_voltages.extend(dc_voltages);
         }
     }
-
-    let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
 
     // Step 2: SPQR decompose each group independently.
     let terminals = vec![graph.in_node, graph.out_node];
@@ -147,35 +198,45 @@ pub fn compile_via_spqr_with_options(
                     wdf.signal_flow_distance = $flow_distance;
                     wdf.bypass_serial = $bypass;
                     #[cfg(debug_assertions)]
-                    { wdf.debug_label = $label; }
+                    {
+                        wdf.debug_label = $label;
+                    }
                     stages.push(Stage::Wdf(wdf));
                 }
                 BuiltStage::Iir(mut iir) => {
                     iir.signal_flow_distance = $flow_distance;
                     iir.bypass_serial = $bypass;
                     #[cfg(debug_assertions)]
-                    { iir.debug_label = $label; }
+                    {
+                        iir.debug_label = $label;
+                    }
                     stages.push(Stage::Iir(iir));
                 }
                 BuiltStage::StateSpace(mut ss) => {
                     ss.signal_flow_distance = $flow_distance;
                     ss.bypass_serial = $bypass;
                     #[cfg(debug_assertions)]
-                    { ss.debug_label = $label; }
+                    {
+                        ss.debug_label = $label;
+                    }
                     stages.push(Stage::StateSpace(ss));
                 }
                 BuiltStage::MultiNl(mut mnl) => {
                     mnl.signal_flow_distance = $flow_distance;
                     mnl.bypass_serial = $bypass;
                     #[cfg(debug_assertions)]
-                    { mnl.debug_label = $label; }
+                    {
+                        mnl.debug_label = $label;
+                    }
                     stages.push(Stage::MultiNl(mnl));
                 }
                 BuiltStage::BlackFeedback(mut bf) => {
                     bf.signal_flow_distance = $flow_distance;
                     bf.bypass_serial = $bypass;
                     #[cfg(debug_assertions)]
-                    { bf.debug_label = $label; }
+                    {
+                        bf.debug_label = $label;
+                    }
                     stages.push(Stage::BlackFeedback(bf));
                 }
             }
@@ -200,7 +261,9 @@ pub fn compile_via_spqr_with_options(
         // Build debug label from component names (zero cost in release)
         #[cfg(debug_assertions)]
         let group_label = {
-            let mut names: Vec<&str> = group.all_edges().iter()
+            let mut names: Vec<&str> = group
+                .all_edges()
+                .iter()
                 .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
                 .collect();
             names.dedup();
@@ -209,27 +272,38 @@ pub fn compile_via_spqr_with_options(
         #[cfg(not(debug_assertions))]
         let group_label = String::new();
 
-        // Static bias groups bypass the serial audio chain
+        // Static bias groups bypass the serial audio chain. Transistor-only
+        // nonlinear modulator groups that do not reach the output also bypass:
+        // they are solved for their local operating point but must not become
+        // an independent serial audio stage.
         let is_bypass = matches!(
             group_bias[gi],
             super::bias_analysis::GroupBiasKind::StaticBias { .. }
-        );
+        ) || is_nonlinear_modulator_group(group, &graph);
 
         #[cfg(test)]
         {
             let edges = group.all_edges();
-            let edge_names: Vec<String> = edges.iter().map(|&eidx| {
-                let comp = &graph.components[graph.edges[eidx].comp_idx];
-                format!("{}({:?})", comp.id, graph.effective_edge_kind(eidx))
-            }).collect();
-            eprintln!("group {gi}: feedback={} edges={:?}", group.has_feedback(), edge_names);
+            let edge_names: Vec<String> = edges
+                .iter()
+                .map(|&eidx| {
+                    let comp = &graph.components[graph.edges[eidx].comp_idx];
+                    format!("{}({:?})", comp.id, graph.effective_edge_kind(eidx))
+                })
+                .collect();
+            eprintln!(
+                "group {gi}: feedback={} edges={:?}",
+                group.has_feedback(),
+                edge_names
+            );
         }
 
         if group.has_feedback() {
             // Compute bias-derived v_max for op-amps in this group.
             // Find the VCVS component, look up its pos/neg pin nodes in the
             // bias voltage map, and call apply_bias to get rail limits.
-            let bias_v_max = compute_bias_v_max_for_group(group, &graph, &bias_node_voltages, supply_voltage);
+            let bias_v_max =
+                compute_bias_v_max_for_group(group, &graph, &bias_node_voltages, supply_voltage);
 
             let mut built = build_rigid_from_group(
                 group.all_edges(),
@@ -249,7 +323,9 @@ pub fn compile_via_spqr_with_options(
                     if opamp.gain().abs() <= 1.01 {
                         let input_node = group.active_edges.iter().find_map(|&eidx| {
                             let comp = &graph.components[graph.edges[eidx].comp_idx];
-                            if let super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
+                            if let super::component::SignalTerminals::Amplifier { input, .. } =
+                                comp.kind.signal_terminals()
+                            {
                                 let key = format!("{}.{input}", comp.id);
                                 graph.node_names.get(&key).copied()
                             } else {
@@ -261,7 +337,8 @@ pub fn compile_via_spqr_with_options(
                             // Follow the ground-leg chain from neg through resistors
                             // to GND across ALL non-feedback groups. This captures
                             // multi-hop impedance like R5→R6→Gain_A→GND.
-                            let non_fb_edges: Vec<usize> = build_order.iter()
+                            let non_fb_edges: Vec<usize> = build_order
+                                .iter()
                                 .filter(|(_, g)| !g.has_feedback())
                                 .flat_map(|(_, g)| g.all_edges())
                                 .collect();
@@ -289,7 +366,9 @@ pub fn compile_via_spqr_with_options(
                                     } else {
                                         (false, node)
                                     };
-                                    if !touches || visited.contains(&other) { continue; }
+                                    if !touches || visited.contains(&other) {
+                                        continue;
+                                    }
                                     let comp = &graph.components[e.comp_idx];
                                     if comp.kind.is_pot() {
                                         if let Some(max_r) = comp.kind.resistance() {
@@ -298,12 +377,16 @@ pub fn compile_via_spqr_with_options(
                                             ri_pot_initial_r = max_r * 0.5; // default position
                                             ri_fixed += ri_pot_initial_r; // add initial pot R to total
                                             visited.insert(other);
-                                            if !is_gnd(other) { frontier.push(other); }
+                                            if !is_gnd(other) {
+                                                frontier.push(other);
+                                            }
                                         }
                                     } else if let Some(r) = comp.kind.resistance() {
                                         ri_fixed += r;
                                         visited.insert(other);
-                                        if !is_gnd(other) { frontier.push(other); }
+                                        if !is_gnd(other) {
+                                            frontier.push(other);
+                                        }
                                     }
                                 }
                             }
@@ -311,7 +394,9 @@ pub fn compile_via_spqr_with_options(
                             // Also include pendant resistors from the feedback group
                             for &eidx in group.pendant_edges.iter() {
                                 let e = &graph.edges[eidx];
-                                if e.node_a != neg && e.node_b != neg { continue; }
+                                if e.node_a != neg && e.node_b != neg {
+                                    continue;
+                                }
                                 if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
                                     ri_fixed += r;
                                 }
@@ -319,8 +404,14 @@ pub fn compile_via_spqr_with_options(
 
                             let ri = ri_fixed;
                             if ri > 0.0 {
-                                let rf: f64 = group.feedback_edges.iter()
-                                    .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
+                                let rf: f64 = group
+                                    .feedback_edges
+                                    .iter()
+                                    .filter_map(|&eidx| {
+                                        graph.components[graph.edges[eidx].comp_idx]
+                                            .kind
+                                            .resistance()
+                                    })
                                     .sum();
                                 if rf > 0.0 {
                                     opamp.set_gain(rf / ri);
@@ -338,7 +429,9 @@ pub fn compile_via_spqr_with_options(
                 {
                     let input_node = group.active_edges.iter().find_map(|&eidx| {
                         let comp = &graph.components[graph.edges[eidx].comp_idx];
-                        if let super::component::SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
+                        if let super::component::SignalTerminals::Amplifier { input, .. } =
+                            comp.kind.signal_terminals()
+                        {
                             let key = format!("{}.{input}", comp.id);
                             graph.node_names.get(&key).copied()
                         } else {
@@ -346,7 +439,8 @@ pub fn compile_via_spqr_with_options(
                         }
                     });
                     if let Some(neg) = input_node {
-                        let non_fb_edges: Vec<usize> = build_order.iter()
+                        let non_fb_edges: Vec<usize> = build_order
+                            .iter()
                             .filter(|(_, g)| !g.has_feedback())
                             .flat_map(|(_, g)| g.all_edges())
                             .collect();
@@ -371,7 +465,9 @@ pub fn compile_via_spqr_with_options(
                                 } else {
                                     (false, node)
                                 };
-                                if !touches || visited.contains(&other) { continue; }
+                                if !touches || visited.contains(&other) {
+                                    continue;
+                                }
                                 let comp = &graph.components[e.comp_idx];
                                 if comp.kind.is_pot() {
                                     if let Some(max_r) = comp.kind.resistance() {
@@ -379,12 +475,16 @@ pub fn compile_via_spqr_with_options(
                                         ri_pot_max_r = max_r;
                                         ri_fixed += max_r * 0.5; // default
                                         visited.insert(other);
-                                        if !is_gnd(other) { frontier.push(other); }
+                                        if !is_gnd(other) {
+                                            frontier.push(other);
+                                        }
                                     }
                                 } else if let Some(r) = comp.kind.resistance() {
                                     ri_fixed += r;
                                     visited.insert(other);
-                                    if !is_gnd(other) { frontier.push(other); }
+                                    if !is_gnd(other) {
+                                        frontier.push(other);
+                                    }
                                 }
                             }
                         }
@@ -392,7 +492,9 @@ pub fn compile_via_spqr_with_options(
                         // Pendant resistors touching neg (R5)
                         for &eidx in group.pendant_edges.iter() {
                             let e = &graph.edges[eidx];
-                            if e.node_a != neg && e.node_b != neg { continue; }
+                            if e.node_a != neg && e.node_b != neg {
+                                continue;
+                            }
                             if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
                                 ri_fixed += r;
                             }
@@ -412,7 +514,12 @@ pub fn compile_via_spqr_with_options(
                 }
             }
 
-            push_stage!(built, group_flow_distances[gi], group_label.clone(), is_bypass);
+            push_stage!(
+                built,
+                group_flow_distances[gi],
+                group_label.clone(),
+                is_bypass
+            );
         } else if is_pot_divider_group(group, &graph) {
             #[cfg(test)]
             eprintln!("  → POT DIVIDER group: {:?}", group.all_edges());
@@ -421,7 +528,12 @@ pub fn compile_via_spqr_with_options(
             let built = build_pot_divider(group, &graph, sample_rate);
             match built {
                 Ok(built_stage) => {
-                    push_stage!(built_stage, group_flow_distances[gi], group_label.clone(), is_bypass);
+                    push_stage!(
+                        built_stage,
+                        group_flow_distances[gi],
+                        group_label.clone(),
+                        is_bypass
+                    );
                 }
                 Err(e) => return Err(format!("Group {gi} (pot): {e}")),
             }
@@ -435,7 +547,8 @@ pub fn compile_via_spqr_with_options(
                 let signal_node = get_ground_clip_signal_node(group, &graph);
                 let mut merged_edges: Vec<usize> = group.all_edges();
                 for &(gj, other_group) in &build_order {
-                    if gj != gi && !ground_clip_built.contains(&gj)
+                    if gj != gi
+                        && !ground_clip_built.contains(&gj)
                         && is_ground_clip_group(other_group, &graph)
                         && get_ground_clip_signal_node(other_group, &graph) == signal_node
                     {
@@ -447,7 +560,8 @@ pub fn compile_via_spqr_with_options(
                 // Rebuild label from all merged edges (not just first group)
                 #[cfg(debug_assertions)]
                 let merged_label = {
-                    let mut names: Vec<&str> = merged_edges.iter()
+                    let mut names: Vec<&str> = merged_edges
+                        .iter()
                         .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
                         .collect();
                     names.dedup();
@@ -471,18 +585,25 @@ pub fn compile_via_spqr_with_options(
             // Only extract pots that are OUTPUT dividers (wiper → out or
             // downstream group). Pots whose wiper stays internal (gain
             // controls, impedance elements) must NOT be extracted.
-            let group_edge_set: std::collections::HashSet<usize> = group_edges.iter().copied().collect();
+            let group_edge_set: std::collections::HashSet<usize> =
+                group_edges.iter().copied().collect();
             let mut pot_edge_pairs: Vec<(usize, Vec<usize>)> = Vec::new();
             {
-                let mut pot_edges: hashbrown::HashMap<usize, Vec<usize>> = hashbrown::HashMap::new();
+                let mut pot_edges: hashbrown::HashMap<usize, Vec<usize>> =
+                    hashbrown::HashMap::new();
                 for &eidx in &group_edges {
                     let comp = &graph.components[graph.edges[eidx].comp_idx];
                     if comp.kind.is_pot() {
-                        pot_edges.entry(graph.edges[eidx].comp_idx).or_default().push(eidx);
+                        pot_edges
+                            .entry(graph.edges[eidx].comp_idx)
+                            .or_default()
+                            .push(eidx);
                     }
                 }
                 for (comp_idx, edges) in pot_edges {
-                    if edges.len() != 2 { continue; }
+                    if edges.len() != 2 {
+                        continue;
+                    }
                     // Check if the pot's wiper node connects to edges OUTSIDE
                     // this group (it's an output divider) or only to edges
                     // INSIDE this group (it's an internal impedance element).
@@ -538,33 +659,44 @@ pub fn compile_via_spqr_with_options(
 
             // Process remaining non-pot edges through SPQR
             let group_edges = remaining_edges;
-            if group_edges.is_empty() { continue; } // All edges were pots
+            if group_edges.is_empty() {
+                continue;
+            } // All edges were pots
             let group_terminals = compute_group_terminals(&group_edges, &graph, &terminals);
             #[cfg(test)]
             eprintln!("  SPQR terminals for group: {:?}", group_terminals);
 
             {
-                let spqr_tree = spqr_decompose(
-                    &group_edges,
-                    &group_terminals,
-                    &graph,
-                    graph.gnd_node,
-                );
+                let spqr_tree =
+                    spqr_decompose(&group_edges, &group_terminals, &graph, graph.gnd_node);
                 let spqr_stages = spqr_to_stages(&spqr_tree, &graph, sample_rate);
 
                 #[cfg(test)]
                 {
-                    let node_type = if spqr_tree.is_rigid() { "R" }
-                        else if matches!(&spqr_tree, super::spqr::SpqrNode::S { .. }) { "S" }
-                        else if matches!(&spqr_tree, super::spqr::SpqrNode::P { .. }) { "P" }
-                        else { "Q" };
-                    eprintln!("  SPQR result: {node_type}-node → {} stages", spqr_stages.len());
+                    let node_type = if spqr_tree.is_rigid() {
+                        "R"
+                    } else if matches!(&spqr_tree, super::spqr::SpqrNode::S { .. }) {
+                        "S"
+                    } else if matches!(&spqr_tree, super::spqr::SpqrNode::P { .. }) {
+                        "P"
+                    } else {
+                        "Q"
+                    };
+                    eprintln!(
+                        "  SPQR result: {node_type}-node → {} stages",
+                        spqr_stages.len()
+                    );
                 }
 
                 for stage in spqr_stages {
                     let built = build_spqr_stage(stage, &graph, sample_rate)
                         .map_err(|e| format!("Group {gi}: {e}"))?;
-                    push_stage!(built, group_flow_distances[gi], group_label.clone(), is_bypass);
+                    push_stage!(
+                        built,
+                        group_flow_distances[gi],
+                        group_label.clone(),
+                        is_bypass
+                    );
                 }
             }
         }
@@ -630,13 +762,25 @@ pub fn compile_via_spqr_with_options(
         // A feedback group's input node is where non-feedback groups can feed into.
         let mut feedback_input_nodes: std::collections::HashSet<super::graph::NodeId> =
             std::collections::HashSet::new();
+        let is_audio_convergence_node = |node: super::graph::NodeId| -> bool {
+            node != graph.gnd_node
+                && node != graph.vcc_node
+                && !graph.supply_nodes.contains(&node)
+                && !graph.ac_ground_nodes.contains(&node)
+        };
         for group in feedback_groups.iter() {
-            if !group.has_feedback() { continue; }
+            if !group.has_feedback() {
+                continue;
+            }
             for &eidx in group.active_edges.iter() {
                 let e = &graph.edges[eidx];
                 if let Some(pins) = graph.nullor_pins.iter().find(|p| p.comp_idx == e.comp_idx) {
-                    feedback_input_nodes.insert(pins.neg_node);
-                    feedback_input_nodes.insert(pins.pos_node);
+                    if is_audio_convergence_node(pins.neg_node) {
+                        feedback_input_nodes.insert(pins.neg_node);
+                    }
+                    if is_audio_convergence_node(pins.pos_node) {
+                        feedback_input_nodes.insert(pins.pos_node);
+                    }
                 }
             }
         }
@@ -647,9 +791,13 @@ pub fn compile_via_spqr_with_options(
         // This uses actual node connectivity, not distance heuristics.
         let mut ff_candidates: Vec<(usize, usize, String)> = Vec::new();
         for (gi, group) in feedback_groups.iter().enumerate() {
-            if group.has_feedback() { continue; }
+            if group.has_feedback() {
+                continue;
+            }
 
-            let group_nodes: std::collections::HashSet<super::graph::NodeId> = group.all_edges().iter()
+            let group_nodes: std::collections::HashSet<super::graph::NodeId> = group
+                .all_edges()
+                .iter()
                 .flat_map(|&eidx| {
                     let e = &graph.edges[eidx];
                     vec![e.node_a, e.node_b]
@@ -659,14 +807,14 @@ pub fn compile_via_spqr_with_options(
             // Does this group tap from a main-path output?
             // Prefer op-amp output nodes over in_node — in_node is only
             // the source for the very first stage, not mid-chain feedforward.
-            let source_node = group_nodes.iter()
+            let source_node = group_nodes
+                .iter()
                 .find(|&&n| main_path_output_nodes.contains(&n) && n != graph.in_node)
                 .or_else(|| group_nodes.iter().find(|&&n| n == graph.in_node))
                 .copied();
 
             // Does this group converge at a feedback group's input?
-            let converges = group_nodes.iter()
-                .any(|n| feedback_input_nodes.contains(n));
+            let converges = group_nodes.iter().any(|n| feedback_input_nodes.contains(n));
 
             if let Some(src) = source_node {
                 if converges {
@@ -674,7 +822,9 @@ pub fn compile_via_spqr_with_options(
                     // converges at a feedback input. It's parallel to the
                     // main serial chain.
                     let dist = group_flow_distances[gi];
-                    let first_comp = group.all_edges().first()
+                    let first_comp = group
+                        .all_edges()
+                        .first()
                         .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
                         .unwrap_or_default();
                     ff_candidates.push((dist, src, first_comp));
@@ -687,16 +837,22 @@ pub fn compile_via_spqr_with_options(
         // source. This means there's a main path (through the feedback stage) and
         // a parallel path (through this non-feedback group). Without a feedback
         // stage at the same source, the non-feedback group IS the serial chain.
-        let sources_with_feedback: std::collections::HashSet<usize> = ff_candidates.iter()
+        let sources_with_feedback: std::collections::HashSet<usize> = ff_candidates
+            .iter()
             .filter_map(|(_, inj, _)| {
                 // Check if any feedback group also taps from this source node
                 let has_fb = feedback_groups.iter().any(|g| {
-                    g.has_feedback() && g.all_edges().iter().any(|&eidx| {
-                        let e = &graph.edges[eidx];
-                        e.node_a == *inj || e.node_b == *inj
-                    })
+                    g.has_feedback()
+                        && g.all_edges().iter().any(|&eidx| {
+                            let e = &graph.edges[eidx];
+                            e.node_a == *inj || e.node_b == *inj
+                        })
                 });
-                if has_fb { Some(*inj) } else { None }
+                if has_fb {
+                    Some(*inj)
+                } else {
+                    None
+                }
             })
             .collect();
         for (dist, inj_node, comp_name) in &ff_candidates {
@@ -720,7 +876,10 @@ pub fn compile_via_spqr_with_options(
                                 w.signal_flow_distance = node_d;
                             }
                             #[cfg(test)]
-                            eprintln!("  → feedforward: [{}] inj_node={} dist→{}", w.debug_label, inj_node, w.signal_flow_distance);
+                            eprintln!(
+                                "  → feedforward: [{}] inj_node={} dist→{}",
+                                w.debug_label, inj_node, w.signal_flow_distance
+                            );
                             break;
                         }
                     }
@@ -732,11 +891,18 @@ pub fn compile_via_spqr_with_options(
         // The upstream stage is the one whose output node matches the feedforward's
         // injection_node_id. It must write to node_signals so feedforward stages
         // can read from it.
-        let ff_inj_nodes: std::collections::HashSet<usize> = stages.iter()
+        let ff_inj_nodes: std::collections::HashSet<usize> = stages
+            .iter()
             .filter_map(|s| {
                 if let Stage::Wdf(w) = s {
-                    if w.is_feedforward { Some(w.injection_node_id) } else { None }
-                } else { None }
+                    if w.is_feedforward {
+                        Some(w.injection_node_id)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -858,10 +1024,7 @@ pub fn compile_via_spqr_with_options(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Check if a group is a merged pot pair (aw + wb of same component).
-fn is_pot_divider_group(
-    group: &super::signal_flow::FlowGroup,
-    graph: &CircuitGraph,
-) -> bool {
+fn is_pot_divider_group(group: &super::signal_flow::FlowGroup, graph: &CircuitGraph) -> bool {
     let edges = group.all_edges();
     if edges.len() != 2 {
         return false;
@@ -874,8 +1037,8 @@ fn is_pot_divider_group(
         || (comp0.id.ends_with("__wb") && comp1.id.ends_with("__aw"));
 
     // Check for 2-edge pot (same component, both edges are the same pot)
-    let is_same_pot = graph.edges[edges[0]].comp_idx == graph.edges[edges[1]].comp_idx
-        && comp0.kind.is_pot();
+    let is_same_pot =
+        graph.edges[edges[0]].comp_idx == graph.edges[edges[1]].comp_idx && comp0.kind.is_pot();
 
     is_aw_wb || is_same_pot
 }
@@ -926,7 +1089,11 @@ fn build_pot_divider(
     let tree = with_voltage_source(divider);
 
     let oversampler = Oversampler::new(OversamplingFactor::X1);
-    Ok(BuiltStage::Wdf(WdfStage::new(tree, RootKind::ShortCircuit, oversampler)))
+    Ok(BuiltStage::Wdf(WdfStage::new(
+        tree,
+        RootKind::ShortCircuit,
+        oversampler,
+    )))
 }
 
 /// Wrap a passive DynNode tree with a voltage source input port.
@@ -954,17 +1121,24 @@ pub(super) fn build_spqr_stage(
     _sample_rate: f64,
 ) -> Result<BuiltStage, String> {
     match stage {
-        SpqrStage::PassiveWdf { tree, edge_indices, .. } => {
+        SpqrStage::PassiveWdf {
+            tree, edge_indices, ..
+        } => {
             let tree = with_voltage_source(tree);
             let oversampler = Oversampler::new(OversamplingFactor::X1);
             // Ground-terminated → ShortCircuit root. Floating → Passthrough.
             let touches_gnd = edge_indices.iter().any(|&eidx| {
                 let e = &graph.edges[eidx];
-                e.node_a == graph.gnd_node || e.node_b == graph.gnd_node
+                e.node_a == graph.gnd_node
+                    || e.node_b == graph.gnd_node
                     || graph.ac_ground_nodes.contains(&e.node_a)
                     || graph.ac_ground_nodes.contains(&e.node_b)
             });
-            let root = if touches_gnd { RootKind::ShortCircuit } else { RootKind::Passthrough };
+            let root = if touches_gnd {
+                RootKind::ShortCircuit
+            } else {
+                RootKind::Passthrough
+            };
             let mut wdf = WdfStage::new(tree, root, oversampler);
 
             // Set output_probe: find the GND-side leaf at the output boundary.
@@ -978,11 +1152,15 @@ pub(super) fn build_spqr_stage(
             if touches_gnd {
                 // Find the group's output boundary node: any terminal that isn't
                 // in_node and isn't GND.
-                let group_terminals = compute_group_terminals(&edge_indices, graph,
-                    &vec![graph.in_node, graph.out_node]);
+                let group_terminals = compute_group_terminals(
+                    &edge_indices,
+                    graph,
+                    &vec![graph.in_node, graph.out_node],
+                );
                 // Prefer out_node as the output boundary (it's the circuit output).
                 // Fall back to any terminal that isn't in_node.
-                let output_boundary = group_terminals.iter()
+                let output_boundary = group_terminals
+                    .iter()
                     .find(|&&t| t == graph.out_node)
                     .or_else(|| group_terminals.iter().find(|&&t| t != graph.in_node))
                     .or_else(|| group_terminals.first())
@@ -1002,12 +1180,15 @@ pub(super) fn build_spqr_stage(
                     } else {
                         (false, output_boundary)
                     };
-                    if !touches_out { continue; }
-                    let other_reaches_gnd = is_gnd(other) || edge_indices.iter().any(|&eidx2| {
-                        let e2 = &graph.edges[eidx2];
-                        (e2.node_a == other || e2.node_b == other)
-                            && (is_gnd(e2.node_a) || is_gnd(e2.node_b))
-                    });
+                    if !touches_out {
+                        continue;
+                    }
+                    let other_reaches_gnd = is_gnd(other)
+                        || edge_indices.iter().any(|&eidx2| {
+                            let e2 = &graph.edges[eidx2];
+                            (e2.node_a == other || e2.node_b == other)
+                                && (is_gnd(e2.node_a) || is_gnd(e2.node_b))
+                        });
                     if other_reaches_gnd {
                         let comp = &graph.components[e.comp_idx];
                         wdf.output_probe = Some(comp.id.clone());
@@ -1018,7 +1199,12 @@ pub(super) fn build_spqr_stage(
 
             Ok(BuiltStage::Wdf(wdf))
         }
-        SpqrStage::NlWdf { tree, nl_edge_idx, .. } => {
+        SpqrStage::NlWdf {
+            tree,
+            nl_edge_idx,
+            edge_indices,
+            ..
+        } => {
             let e = &graph.edges[nl_edge_idx];
             let comp = &graph.components[e.comp_idx];
             let (nl_kind, _junction_nodes) = comp
@@ -1030,9 +1216,15 @@ pub(super) fn build_spqr_stage(
                     graph.gnd_node,
                     &graph.node_names,
                 )
-                .ok_or_else(|| {
-                    format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id)
-                })?;
+                .ok_or_else(|| format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id))?;
+
+            if matches!(
+                nl_kind,
+                NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
+            ) {
+                return build_general_mna_from_edges(&edge_indices, graph, _sample_rate)
+                    .map(BuiltStage::MultiNl);
+            }
 
             let (root, base_diode_model) = create_root(&nl_kind, false);
             let tree = with_voltage_source(tree);
@@ -1046,7 +1238,13 @@ pub(super) fn build_spqr_stage(
             boundary_nodes,
             pendant_trees,
             ..
-        } => build_rigid(edge_indices, boundary_nodes, pendant_trees, graph, _sample_rate),
+        } => build_rigid(
+            edge_indices,
+            boundary_nodes,
+            pendant_trees,
+            graph,
+            _sample_rate,
+        ),
     }
 }
 
@@ -1060,20 +1258,52 @@ fn is_ground_clip_group(
     graph: &super::graph::CircuitGraph,
 ) -> bool {
     use super::component::EdgeKind;
-    let nl_edges: Vec<usize> = group.all_edges().iter()
+    let nl_edges: Vec<usize> = group
+        .all_edges()
+        .iter()
         .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
         .copied()
         .collect();
-    if nl_edges.is_empty() { return false; }
+    if nl_edges.is_empty() {
+        return false;
+    }
     nl_edges.iter().all(|&eidx| {
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
         let is_diode = comp.kind.is_diode_family();
-        let to_gnd = e.node_a == graph.gnd_node || e.node_b == graph.gnd_node
+        let to_gnd = e.node_a == graph.gnd_node
+            || e.node_b == graph.gnd_node
             || graph.ac_ground_nodes.contains(&e.node_a)
             || graph.ac_ground_nodes.contains(&e.node_b);
         is_diode && to_gnd
     })
+}
+
+fn is_nonlinear_modulator_group(
+    group: &super::signal_flow::FlowGroup,
+    graph: &super::graph::CircuitGraph,
+) -> bool {
+    if group.has_feedback() {
+        return false;
+    }
+
+    let mut has_transistor_nl = false;
+    let mut touches_output = false;
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        touches_output |= e.node_a == graph.out_node || e.node_b == graph.out_node;
+        if graph.effective_edge_kind(eidx) != super::component::EdgeKind::Nonlinear {
+            continue;
+        }
+        let comp = &graph.components[e.comp_idx];
+        if comp.kind.is_bjt() || comp.kind.is_jfet() || comp.kind.is_mosfet() {
+            has_transistor_nl = true;
+        } else {
+            return false;
+        }
+    }
+
+    has_transistor_nl && !touches_output
 }
 
 /// Get the non-GND signal node from a ground-clip group.
@@ -1108,27 +1338,36 @@ fn build_ground_clip_stage(
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
         if let Some((kind, _)) = comp.kind.classify_nonlinear(
-            &comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names,
+            &comp.id,
+            e.node_a,
+            e.node_b,
+            graph.gnd_node,
+            &graph.node_names,
         ) {
             nl_kinds.push(kind);
         }
     }
-    if nl_kinds.is_empty() { return None; }
+    if nl_kinds.is_empty() {
+        return None;
+    }
 
     // Synthesize DiodePair from two SingleDiode edges (antiparallel to ground)
     let (root, base_diode_model) = if nl_kinds.len() >= 2 {
         let mut pair_dt = None;
         for i in 0..nl_kinds.len() {
-            for j in (i+1)..nl_kinds.len() {
+            for j in (i + 1)..nl_kinds.len() {
                 if let (
                     super::classify::NonlinearKind::SingleDiode(dt_a),
                     super::classify::NonlinearKind::SingleDiode(_),
-                ) = (&nl_kinds[i], &nl_kinds[j]) {
+                ) = (&nl_kinds[i], &nl_kinds[j])
+                {
                     pair_dt = Some(*dt_a);
                     break;
                 }
             }
-            if pair_dt.is_some() { break; }
+            if pair_dt.is_some() {
+                break;
+            }
         }
         if let Some(dt) = pair_dt {
             let model = super::helpers::diode_model(dt);
@@ -1150,15 +1389,16 @@ fn build_ground_clip_stage(
     // Typical op-amp output impedance: 50-200Ω. Using 100Ω as default.
     // This gives the WDF diode root the correct source impedance for
     // computing junction voltage and clipping behavior.
-    let tree = DynNode::Leaf(super::wdf_leaf::LeafKind::VoltageSource(super::wdf_leaf::WdfVoltageSource {
-        voltage: 0.0,
-        rp: 100.0,
-        is_cathode_bias: false,
-    }));
+    let tree = DynNode::Leaf(super::wdf_leaf::LeafKind::VoltageSource(
+        super::wdf_leaf::WdfVoltageSource {
+            voltage: 0.0,
+            rp: 100.0,
+            is_cathode_bias: false,
+        },
+    ));
 
-    let oversampler = crate::oversampling::Oversampler::new(
-        crate::oversampling::OversamplingFactor::X2,
-    );
+    let oversampler =
+        crate::oversampling::Oversampler::new(crate::oversampling::OversamplingFactor::X2);
     let mut stage = super::stage::WdfStage::new(tree, root, oversampler);
     stage.base_diode_model = base_diode_model;
 
@@ -1206,7 +1446,11 @@ fn compute_bias_v_max_for_group(
         }
 
         let result = comp.kind.apply_bias(&pin_voltages, supply_voltage);
-        if let BiasResult::Applied { v_rail_pos, v_rail_neg } = result {
+        if let BiasResult::Applied {
+            v_rail_pos,
+            v_rail_neg,
+        } = result
+        {
             return Some((v_rail_pos, v_rail_neg));
         }
     }
@@ -1220,34 +1464,41 @@ fn compute_group_flow_distances(
     groups: &[super::signal_flow::FlowGroup],
     graph: &super::graph::CircuitGraph,
 ) -> Vec<usize> {
+    use super::graph::NodeId;
     use hashbrown::HashMap;
     use std::collections::{HashSet, VecDeque};
-    use super::graph::NodeId;
 
-    // BFS from in_node through all circuit edges to compute node distances.
-    let mut node_dist: HashMap<NodeId, usize> = HashMap::new();
-    let mut queue: VecDeque<NodeId> = VecDeque::new();
-    node_dist.insert(graph.in_node, 0);
-    queue.push_back(graph.in_node);
+    fn bfs_distances(start: NodeId, graph: &super::graph::CircuitGraph) -> HashMap<NodeId, usize> {
+        let mut node_dist: HashMap<NodeId, usize> = HashMap::new();
+        let mut queue: VecDeque<NodeId> = VecDeque::new();
+        node_dist.insert(start, 0);
+        queue.push_back(start);
 
-    // Build adjacency from ALL edges (not just group edges)
-    let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    for e in &graph.edges {
-        adj.entry(e.node_a).or_default().push(e.node_b);
-        adj.entry(e.node_b).or_default().push(e.node_a);
-    }
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in &graph.edges {
+            adj.entry(e.node_a).or_default().push(e.node_b);
+            adj.entry(e.node_b).or_default().push(e.node_a);
+        }
 
-    while let Some(node) = queue.pop_front() {
-        let dist = node_dist[&node];
-        if let Some(neighbors) = adj.get(&node) {
-            for &next in neighbors {
-                if !node_dist.contains_key(&next) {
-                    node_dist.insert(next, dist + 1);
-                    queue.push_back(next);
+        while let Some(node) = queue.pop_front() {
+            let dist = node_dist[&node];
+            if let Some(neighbors) = adj.get(&node) {
+                for &next in neighbors {
+                    if !node_dist.contains_key(&next) {
+                        node_dist.insert(next, dist + 1);
+                        queue.push_back(next);
+                    }
                 }
             }
         }
+
+        node_dist
     }
+
+    let mut node_dist: HashMap<NodeId, usize> = HashMap::new();
+    node_dist.extend(bfs_distances(graph.in_node, graph));
+    let out_dist = bfs_distances(graph.out_node, graph);
+    let span = graph.edges.len() + graph.components.len() + groups.len() + 1;
 
     // For each group, find the minimum distance of any node it touches.
     groups
@@ -1263,7 +1514,24 @@ fn compute_group_flow_distances(
                     min_dist = min_dist.min(d);
                 }
             }
-            if min_dist == usize::MAX { groups.len() } else { min_dist }
+            if min_dist == usize::MAX {
+                return groups.len() * span;
+            }
+
+            if group.has_feedback() {
+                let mut max_active_out_to_output = 0usize;
+                for &eidx in group.active_edges.iter() {
+                    let comp_idx = graph.edges[eidx].comp_idx;
+                    if let Some(pins) = graph.nullor_pins.iter().find(|p| p.comp_idx == comp_idx) {
+                        if let Some(&d) = out_dist.get(&pins.out_node) {
+                            max_active_out_to_output = max_active_out_to_output.max(d);
+                        }
+                    }
+                }
+                min_dist * span + (span - max_active_out_to_output.min(span))
+            } else {
+                min_dist
+            }
         })
         .collect()
 }
@@ -1286,7 +1554,8 @@ pub(super) fn compute_group_terminals(
         let e = &graph.edges[eidx];
         group_nodes.insert(e.node_a);
         group_nodes.insert(e.node_b);
-        if e.node_a == graph.gnd_node || e.node_b == graph.gnd_node
+        if e.node_a == graph.gnd_node
+            || e.node_b == graph.gnd_node
             || graph.ac_ground_nodes.contains(&e.node_a)
             || graph.ac_ground_nodes.contains(&e.node_b)
         {
@@ -1320,8 +1589,7 @@ pub(super) fn compute_group_terminals(
         }
         // Does this node connect to edges outside the group?
         let is_boundary = graph.edges.iter().enumerate().any(|(eidx, e)| {
-            !group_edge_set.contains(&eidx)
-                && (e.node_a == node || e.node_b == node)
+            !group_edge_set.contains(&eidx) && (e.node_a == node || e.node_b == node)
         });
         if is_boundary && !terminals.contains(&node) {
             terminals.push(node);
@@ -1334,12 +1602,15 @@ pub(super) fn compute_group_terminals(
     // Example: nodes 49 and 51 both connect to U3.neg → merge to one terminal.
     if terminals.len() > 2 {
         // For each terminal, find the set of downstream nodes it connects to
-        let downstream: Vec<(NodeId, std::collections::HashSet<NodeId>)> = terminals.iter()
+        let downstream: Vec<(NodeId, std::collections::HashSet<NodeId>)> = terminals
+            .iter()
             .map(|&t| {
-                let dests: std::collections::HashSet<NodeId> = graph.edges.iter().enumerate()
+                let dests: std::collections::HashSet<NodeId> = graph
+                    .edges
+                    .iter()
+                    .enumerate()
                     .filter(|(eidx, e)| {
-                        !group_edge_set.contains(eidx)
-                            && (e.node_a == t || e.node_b == t)
+                        !group_edge_set.contains(eidx) && (e.node_a == t || e.node_b == t)
                     })
                     .map(|(_, e)| if e.node_a == t { e.node_b } else { e.node_a })
                     .collect();
@@ -1350,9 +1621,13 @@ pub(super) fn compute_group_terminals(
         // Find terminals that share downstream destinations and merge them
         let mut merged = vec![false; terminals.len()];
         for i in 0..downstream.len() {
-            if merged[i] { continue; }
+            if merged[i] {
+                continue;
+            }
             for j in (i + 1)..downstream.len() {
-                if merged[j] { continue; }
+                if merged[j] {
+                    continue;
+                }
                 // If they share ANY downstream node, merge (keep i, drop j)
                 if !downstream[i].1.is_disjoint(&downstream[j].1) {
                     merged[j] = true;
@@ -1360,7 +1635,8 @@ pub(super) fn compute_group_terminals(
             }
         }
 
-        terminals = terminals.into_iter()
+        terminals = terminals
+            .into_iter()
             .enumerate()
             .filter(|(i, _)| !merged[*i])
             .map(|(_, t)| t)
@@ -1374,4 +1650,3 @@ pub(super) fn compute_group_terminals(
 
     terminals
 }
-
