@@ -161,6 +161,28 @@ pub enum OutputImpedance {
 
 pub use crate::nonideal_fx::NonIdealFx;
 
+/// Electrical behavior classification for a component port (pin pair).
+///
+/// Used by the compiler's optimization legality checks to determine whether
+/// a subgraph can be safely lowered to IIR/BlackFeedback, or must remain
+/// as full MNA/WDF. Nonlinear and ControlledConductance ports create
+/// coupling barriers that prevent unsafe optimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortSemantic {
+    /// Fixed impedance — R, voltage source. Safe to lower/optimize.
+    LinearPassive,
+    /// Stores energy between samples — C, L. Creates time-domain coupling.
+    Reactive,
+    /// I(V) is nonlinear — diode junction, BJT Vbe/Vce, tube plate.
+    /// Must be solved by NR or explicit solver. Optimization barrier.
+    Nonlinear,
+    /// Impedance varies with external control — JFET Rds, photocoupler LDR, pot.
+    /// Optimization barrier when coupled to reactive/feedback nodes.
+    ControlledConductance,
+    /// Voltage constraint (virtual ground, VCVS output). Defines topology.
+    VoltageConstraint,
+}
+
 /// Signal flow classification for a component's pins.
 ///
 /// Used by feedback analysis to determine which components are coupled
@@ -576,6 +598,28 @@ pub trait Component: std::fmt::Debug {
     /// feedback cycle direction. Passive components have no directionality.
     fn signal_terminals(&self) -> SignalTerminals {
         SignalTerminals::Passive
+    }
+
+    // ── Port Semantics ────────────────────────────────────────────────────
+
+    /// Classify the electrical behavior of a port (pin pair) for optimization
+    /// legality checks. The compiler uses this to determine which subgraphs
+    /// can be safely lowered to IIR/BlackFeedback vs requiring full MNA/WDF.
+    ///
+    /// Default derives from existing classification methods. Override for
+    /// multi-port devices where different pin pairs have different semantics
+    /// (e.g., BJT: B-E is Nonlinear, C-E is Nonlinear).
+    fn port_semantic(&self, _pin_a: &str, _pin_b: &str) -> PortSemantic {
+        if self.is_nonlinear() {
+            return PortSemantic::Nonlinear;
+        }
+        if self.is_variable() {
+            return PortSemantic::ControlledConductance;
+        }
+        if self.capacitance().is_some() || self.inductance().is_some() {
+            return PortSemantic::Reactive;
+        }
+        PortSemantic::LinearPassive
     }
 
     // ── Classification ────────────────────────────────────────────────────

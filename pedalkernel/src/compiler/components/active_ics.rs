@@ -109,6 +109,19 @@ impl Component for OpAmp {
         !self.op_type.is_ota()
     }
 
+    fn port_semantic(&self, pin_a: &str, pin_b: &str) -> crate::compiler::component::PortSemantic {
+        if self.op_type.is_ota() {
+            return crate::compiler::component::PortSemantic::Nonlinear;
+        }
+        // VCVS output is a voltage constraint
+        let pins = [pin_a, pin_b];
+        if pins.contains(&"out") || pins.contains(&"output") {
+            crate::compiler::component::PortSemantic::VoltageConstraint
+        } else {
+            crate::compiler::component::PortSemantic::LinearPassive
+        }
+    }
+
     fn pin_config(&self) -> PinConfig {
         PinConfig {
             valid_pins: &["pos", "neg", "out", "output", "vp", "in", "input"],
