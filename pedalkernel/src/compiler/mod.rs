@@ -16,6 +16,7 @@ mod compile;
 mod compiled;
 pub mod component;
 pub mod components;
+mod coupling;
 mod dyn_node;
 mod graph;
 mod signal_flow;
