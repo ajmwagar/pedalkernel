@@ -49,12 +49,17 @@ pub(super) fn has_reactive_state(edge_indices: &[usize], graph: &CircuitGraph) -
     })
 }
 
-/// Returns true if a nonlinear/controlled edge shares a circuit node with
-/// a reactive edge in the same subgraph.
+/// Returns true if a **Nonlinear** edge shares a circuit node with a
+/// reactive edge in the same subgraph.
 ///
 /// This is the key coupling test: if a BJT's collector shares a node with
 /// a capacitor in a bridged-T, the subgraph has NL-reactive coupling and
 /// MUST NOT be lowered to IIR (which would lose the nonlinear interaction).
+///
+/// ControlledConductance (pots, photocouplers) is NOT a barrier here because
+/// IIR stages handle pot-driven recomputation via biquad coefficient updates.
+/// Only truly nonlinear I(V) curves (BJT junctions, diodes, tubes) create
+/// coupling that IIR cannot model.
 pub(super) fn has_nl_reactive_coupling(edge_indices: &[usize], graph: &CircuitGraph) -> bool {
     let mut reactive_nodes: HashSet<NodeId> = HashSet::new();
     let mut nl_nodes: HashSet<NodeId> = HashSet::new();
@@ -67,7 +72,7 @@ pub(super) fn has_nl_reactive_coupling(edge_indices: &[usize], graph: &CircuitGr
                 reactive_nodes.insert(edge.node_a);
                 reactive_nodes.insert(edge.node_b);
             }
-            PortSemantic::Nonlinear | PortSemantic::ControlledConductance => {
+            PortSemantic::Nonlinear => {
                 nl_nodes.insert(edge.node_a);
                 nl_nodes.insert(edge.node_b);
             }
