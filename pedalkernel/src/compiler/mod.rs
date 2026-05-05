@@ -111,3 +111,5 @@ mod pot_wiper_tests;
 mod opamp_gain_tests;
 #[cfg(test)]
 mod coupling_tests;
+#[cfg(test)]
+mod level_pot_tests;
