@@ -95,7 +95,11 @@ impl NonIdealFxState {
     }
 
     /// Construct from Component trait's NonIdealFx declarations.
-    pub fn from_nonideal_fx(fx: &[crate::nonideal_fx::NonIdealFx], gain: f64, sample_rate: f64) -> Self {
+    pub fn from_nonideal_fx(
+        fx: &[crate::nonideal_fx::NonIdealFx],
+        gain: f64,
+        sample_rate: f64,
+    ) -> Self {
         let mut state = Self::default();
         for effect in fx {
             match effect {
@@ -1256,7 +1260,6 @@ impl WdfStage {
                     // Short-circuit reflection: a = -b
                     let a_root = -b_tree;
                     tree.set_incident(a_root);
-
 
                     // Check output_probe first (for SP-reduced orphan stages)
                     if let Some(ref probe_id) = output_probe {
@@ -3130,7 +3133,11 @@ impl IirData {
     pub fn dc_gain(&self) -> f64 {
         let num: f64 = self.b_coeffs.iter().sum();
         let den: f64 = self.a_coeffs.iter().sum();
-        if den.abs() < 1e-30 { 1.0 } else { num / den }
+        if den.abs() < 1e-30 {
+            1.0
+        } else {
+            num / den
+        }
     }
 
     /// Process one sample through the IIR (Direct Form I).
@@ -3384,12 +3391,19 @@ impl BlackFeedbackStage {
         fx: &[crate::nonideal_fx::NonIdealFx],
         sample_rate: f64,
     ) -> Self {
-        let gain = if inverting { rf / ri.max(1.0) } else { 1.0 + rf / ri.max(1.0) };
+        let gain = if inverting {
+            rf / ri.max(1.0)
+        } else {
+            1.0 + rf / ri.max(1.0)
+        };
         let fx_state = NonIdealFxState::from_nonideal_fx(fx, gain, sample_rate);
-        let stored_gbw = fx.iter().find_map(|f| match f {
-            crate::nonideal_fx::NonIdealFx::OpAmpBandwidth { gbw, .. } => Some(*gbw),
-            _ => None,
-        }).unwrap_or(0.0);
+        let stored_gbw = fx
+            .iter()
+            .find_map(|f| match f {
+                crate::nonideal_fx::NonIdealFx::OpAmpBandwidth { gbw, .. } => Some(*gbw),
+                _ => None,
+            })
+            .unwrap_or(0.0);
 
         Self {
             rf,
@@ -3426,7 +3440,9 @@ impl BlackFeedbackStage {
         }
         if self.inverting {
             let g = self.rf / self.ri.max(1.0);
-            if g < 1e-6 { return -1.0; } // Cap-only feedback → unity
+            if g < 1e-6 {
+                return -1.0;
+            } // Cap-only feedback → unity
             -g
         } else {
             1.0 + self.rf / self.ri.max(1.0)
@@ -3475,7 +3491,8 @@ impl BlackFeedbackStage {
     pub fn set_rf(&mut self, rf: f64) {
         self.rf = rf;
         if self.stored_gbw > 0.0 {
-            self.fx_state.update_gain(self.stored_gbw, self.gain(), self.sample_rate);
+            self.fx_state
+                .update_gain(self.stored_gbw, self.gain(), self.sample_rate);
         }
     }
 
@@ -3902,13 +3919,11 @@ impl MultiNlStage {
 
             // 6. Output extraction
             let raw_out = if let Some(ref coeffs) = self.extract_coeffs {
-                // Direct node-voltage extraction: V = Σ coeffs[k]*b[k] + vs*V_in
+                // Direct node-voltage extraction in the same port order used
+                // to derive the coefficients: [NL..., passive..., adapted?].
                 let mut v_out = self.extract_vs * b_adapted;
-                for k in 0..n_passive {
-                    v_out += coeffs[k] * b_passive[k];
-                }
-                for k in 0..n_nl {
-                    v_out += coeffs[n_passive + k] * b_nl[k];
+                for k in 0..n_total.min(coeffs.len()) {
+                    v_out += coeffs[k] * b_all[k];
                 }
                 v_out
             } else {
@@ -3988,7 +4003,10 @@ impl MultiNlStage {
                 };
                 std::eprintln!(
                     "[MNL n={n}] [{stage_id}] n_nl={} out_port={} comp={:.4} xfmr={:.2}",
-                    self.n_nl, self.output_port, self.compensation, self.transformer_gain
+                    self.n_nl,
+                    self.output_port,
+                    self.compensation,
+                    self.transformer_gain
                 );
                 std::eprintln!("  in={input:.6e} out={output:.6e} gain={gain_db:.1}dB");
                 std::eprintln!("  s_nl_adapted={:.6?}", &self.scattering.s_nl_adapted);
@@ -4000,7 +4018,8 @@ impl MultiNlStage {
                 std::eprintln!("  s_nl_diag={:.6?}", s_diag);
                 std::eprintln!(
                     "  v_prev={:.4?} Rp={:.1?}",
-                    &self.v_prev, &self.nl_port_resistances
+                    &self.v_prev,
+                    &self.nl_port_resistances
                 );
             }
         }
@@ -4533,6 +4552,15 @@ impl MultiNlStage {
                 self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
                 let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
                 self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
+
+                if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
+                    self.extract_coeffs = Some(
+                        recompute
+                            .mna
+                            .derive_node_extraction_coeffs(&ports, out_pos, out_neg),
+                    );
+                    self.extract_vs = 0.0;
+                }
             } else {
                 // No VS at all: standard scattering derivation
                 let scattering = recompute.mna.derive_scattering_matrix_general(&ports);
@@ -4544,6 +4572,15 @@ impl MultiNlStage {
                 self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
                 let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
                 self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
+
+                if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
+                    self.extract_coeffs = Some(
+                        recompute
+                            .mna
+                            .derive_node_extraction_coeffs(&ports, out_pos, out_neg),
+                    );
+                    self.extract_vs = 0.0;
+                }
             }
         }
     }

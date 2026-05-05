@@ -6,9 +6,7 @@ use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::spqr_build::*;
 use crate::PedalProcessor;
 
-fn make_graph_all_edges(
-    pedal_src: &str,
-) -> (CircuitGraph, Vec<usize>) {
+fn make_graph_all_edges(pedal_src: &str) -> (CircuitGraph, Vec<usize>) {
     let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse failed");
     let graph = CircuitGraph::from_pedal(&pedal);
     let active_set: std::collections::HashSet<usize> =
@@ -19,9 +17,7 @@ fn make_graph_all_edges(
     (graph, all_edges)
 }
 
-fn make_graph_passive(
-    pedal_src: &str,
-) -> (CircuitGraph, Vec<usize>) {
+fn make_graph_passive(pedal_src: &str) -> (CircuitGraph, Vec<usize>) {
     let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse failed");
     let graph = CircuitGraph::from_pedal(&pedal);
     let active_set: std::collections::HashSet<usize> =
@@ -35,12 +31,14 @@ fn make_graph_passive(
 
 #[test]
 fn spqr_diode_clipper_produces_audio() {
-    let (graph, edges) = make_graph_all_edges(r#"
+    let (graph, edges) = make_graph_all_edges(
+        r#"
         pedal "test" { supply 9V
             components { R1: resistor(4.7k)  D1: diode(silicon) }
             nets { in -> R1.a  R1.b -> D1.a  D1.b -> gnd }
             controls {}
-        }"#);
+        }"#,
+    );
     let spqr = spqr_decompose(
         &edges,
         &[graph.in_node, graph.out_node],
@@ -50,21 +48,17 @@ fn spqr_diode_clipper_produces_audio() {
     let spqr_stages = spqr_to_stages(&spqr, &graph, 48000.0);
 
     assert_eq!(spqr_stages.len(), 1);
-    let mut stage = build_spqr_stage(
-        spqr_stages.into_iter().next().unwrap(),
-        &graph,
-        48000.0,
-    )
-    .expect("Should build NlWdf stage")
-    .into_wdf();
+    let mut stage = build_spqr_stage(spqr_stages.into_iter().next().unwrap(), &graph, 48000.0)
+        .expect("Should build NlWdf stage")
+        .into_wdf();
 
     // DC test: 5V input should clip to ~0.6V (silicon diode forward voltage)
     let dc_out = stage.process(5.0);
+    assert!(dc_out < 1.5, "5V DC should clip to <1.5V, got {dc_out:.4}V");
     assert!(
-        dc_out < 1.5,
-        "5V DC should clip to <1.5V, got {dc_out:.4}V"
+        dc_out > 0.1,
+        "5V DC should produce output, got {dc_out:.4}V"
     );
-    assert!(dc_out > 0.1, "5V DC should produce output, got {dc_out:.4}V");
 
     // Negative DC: single diode doesn't clip reverse bias → passes through
     let neg_out = stage.process(-5.0);
@@ -77,8 +71,7 @@ fn spqr_diode_clipper_produces_audio() {
     let mut pos_peak = 0.0f64;
     let mut neg_peak = 0.0f64;
     for i in 0..960 {
-        let input =
-            5.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+        let input = 5.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
         let output = stage.process(input);
         pos_peak = pos_peak.max(output);
         neg_peak = neg_peak.min(output);
@@ -98,12 +91,14 @@ fn spqr_diode_clipper_produces_audio() {
 #[test]
 fn spqr_passive_rc_produces_audio() {
     // End-to-end: RC lowpass should pass DC through.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components { R1: resistor(10k)  C1: cap(100n) }
             nets { in -> R1.a  R1.b -> C1.a, out  C1.b -> gnd }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -115,14 +110,18 @@ fn spqr_passive_rc_produces_audio() {
     }
 
     // After 10ms with RC = 1ms, cap should be mostly charged
-    assert!(output.abs() > 0.001, "RC lowpass should pass DC, got {output:.6}");
+    assert!(
+        output.abs() > 0.001,
+        "RC lowpass should pass DC, got {output:.6}"
+    );
 }
 
 #[test]
 fn spqr_inverting_opamp_gain() {
     // Inverting amp: R1=10k, Rf=100k → gain = -10
     // Goes through full compile_via_spqr pipeline (signal flow groups include VCVS).
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -138,13 +137,16 @@ fn spqr_inverting_opamp_gain() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
     // Small signal: 0.01V input → should get ~0.1V output (gain=10, inverted)
-    for _ in 0..20 { compiled.process(0.01); }
+    for _ in 0..20 {
+        compiled.process(0.01);
+    }
     let output = compiled.process(0.01);
     let gain_measured = output.abs() / 0.01;
 
@@ -162,16 +164,17 @@ fn spqr_inverting_opamp_gain() {
 fn compile_via_spqr_diode_clipper_end_to_end() {
     use crate::PedalProcessor;
 
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test_clipper" { supply 9V
             components { R1: resistor(4.7k)  D1: diode(silicon) }
             nets { in -> R1.a  R1.b -> D1.a  D1.b -> gnd }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
-    let mut compiled = compile_via_spqr(&pedal, 48000.0)
-        .expect("Should compile via SPQR");
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("Should compile via SPQR");
 
     // Process through PedalProcessor trait
     let dc_out = compiled.process(5.0);
@@ -183,8 +186,7 @@ fn compile_via_spqr_diode_clipper_end_to_end() {
     // Process sine
     let mut peak = 0.0f64;
     for i in 0..480 {
-        let input =
-            1.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+        let input = 1.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
         let output = compiled.process(input);
         peak = peak.max(output.abs());
     }
@@ -195,7 +197,8 @@ fn compile_via_spqr_diode_clipper_end_to_end() {
 fn compile_via_spqr_inverting_opamp_end_to_end() {
     use crate::PedalProcessor;
 
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test_inv" { supply 9V
             components {
                 R1: resistor(10k)
@@ -211,11 +214,12 @@ fn compile_via_spqr_inverting_opamp_end_to_end() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
-    let mut compiled = compile_via_spqr(&pedal, 48000.0)
-        .expect("Should compile inverting amp via SPQR");
+    let mut compiled =
+        compile_via_spqr(&pedal, 48000.0).expect("Should compile inverting amp via SPQR");
 
     // Settle
     for _ in 0..10 {
@@ -235,7 +239,8 @@ fn compile_via_spqr_opamp_diode_feedback() {
     // OpAmpRoot pre-amplifies, diode clips
     use crate::PedalProcessor;
 
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test_ts" { supply 9V
             components {
                 R1: resistor(4.7k)
@@ -254,11 +259,12 @@ fn compile_via_spqr_opamp_diode_feedback() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
-    let mut compiled = compile_via_spqr(&pedal, 48000.0)
-        .expect("Should compile TS-style circuit via SPQR");
+    let mut compiled =
+        compile_via_spqr(&pedal, 48000.0).expect("Should compile TS-style circuit via SPQR");
 
     // Small signal should be amplified (gain ≈ Rf/Ri ≈ 51k/4.7k ≈ 10.8)
     for _ in 0..20 {
@@ -288,7 +294,8 @@ fn compile_via_spqr_808_kick() {
     // Should classify as Iir (VCVS + reactive, all linear)
     use crate::PedalProcessor;
 
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "808 BD" { supply 9V
             components {
                 U1: opamp(tl072)
@@ -319,12 +326,11 @@ fn compile_via_spqr_808_kick() {
                 R_out.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
-
-    let mut compiled = compile_via_spqr(&pedal, 48000.0)
-        .expect("Should compile 808 kick via SPQR");
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("Should compile 808 kick via SPQR");
 
     // Warmup
     for _ in 0..480 {
@@ -340,7 +346,10 @@ fn compile_via_spqr_808_kick() {
     }
 
     let peak = output.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
-    assert!(peak > 0.001, "808 kick should produce output, peak={peak:.6}");
+    assert!(
+        peak > 0.001,
+        "808 kick should produce output, peak={peak:.6}"
+    );
 
     // Count zero crossings in first 500ms to estimate frequency
     let analysis = 24000; // 500ms
@@ -358,10 +367,115 @@ fn compile_via_spqr_808_kick() {
 }
 
 #[test]
-fn try_all_legends_pedals() {
-    let pedal_dir = std::path::Path::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../pedalkernel-pro/pedals/legends")
+fn compile_via_spqr_808_kick_v2_bjt_sweep_compiles() {
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "808 Kick v2" {
+            supply 9V
+            components {
+                U1: opamp(tl072)
+                Rb1: resistor(100k)
+                Rb2: resistor(100k)
+                R1: resistor(150k)
+                R2: resistor(150k)
+                C1: cap(8.2n)
+                C2: cap(8.2n)
+                R_fb: resistor(470k)
+                R_trig: resistor(1k)
+                Q_sweep: npn(2n3904)
+                R_base: resistor(47k)
+                C_env: cap(100n)
+                R_env: resistor(100k)
+                Decay: pot(500k, b)
+                U2: opamp(tl072)
+                Ri_out: resistor(10k)
+                Rf_out: resistor(470k)
+                R_click: resistor(470k)
+                C_click: cap(100p)
+            }
+            nets {
+                vcc -> Rb1.a
+                Rb1.b -> Rb2.a, U1.pos
+                Rb2.b -> gnd
+                U1.neg -> R1.a, C1.a
+                R1.b -> R2.a, C2.a
+                R2.b -> U1.out
+                C1.b -> gnd
+                C2.b -> gnd
+                U1.neg -> R_fb.a
+                R_fb.b -> U1.out
+                U1.neg -> Q_sweep.collector
+                Q_sweep.emitter -> R1.b
+                in -> C_env.a
+                C_env.b -> R_base.a
+                R_base.b -> Q_sweep.base
+                Q_sweep.base -> R_env.a
+                R_env.b -> gnd
+                in -> R_trig.a
+                R_trig.b -> R1.b
+                R1.b -> Decay.a
+                Decay.b -> gnd
+                in -> R_click.a
+                R_click.b -> C_click.a
+                C_click.b -> Ri_out.b
+                U1.out -> Ri_out.a
+                Ri_out.b -> U2.neg
+                U2.neg -> Rf_out.a
+                Rf_out.b -> U2.out
+                U2.pos -> gnd
+                U2.out -> out
+            }
+            controls {
+                Decay.position -> "Decay" [0.0, 1.0] = 1.0
+            }
+        }"#,
+    )
+    .expect("parse");
+
+    let compiled =
+        compile_via_spqr(&pedal, 48000.0).expect("808 Kick v2 with BJT sweep should compile");
+
+    assert!(
+        compiled
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, Stage::MultiNl(_))),
+        "Q_sweep BJT should route through MultiNlStage, not a WDF nonlinear root"
     );
+    assert!(
+        compiled.stages.len() > 1,
+        "BJT sweep must not collapse the full 808 kick into a single generic stage"
+    );
+
+    let serial_stages: Vec<&Stage> = compiled
+        .stages
+        .iter()
+        .filter(|stage| match stage {
+            Stage::Wdf(stage) => !stage.bypass_serial,
+            Stage::MultiNl(stage) => !stage.bypass_serial,
+            Stage::Iir(stage) => !stage.bypass_serial,
+            Stage::StateSpace(stage) => !stage.bypass_serial,
+            Stage::BlackFeedback(stage) => !stage.bypass_serial,
+        })
+        .collect();
+    assert!(
+        matches!(serial_stages.first(), Some(Stage::Iir(_))),
+        "U1 bridged-T resonator should be first serial stage; got {:?}",
+        compiled.stages
+    );
+    assert!(
+        matches!(serial_stages.last(), Some(Stage::BlackFeedback(_))),
+        "U2 output amplifier should be last serial stage; got {:?}",
+        compiled.stages
+    );
+}
+
+#[test]
+fn try_all_legends_pedals() {
+    let pedal_dir = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../pedalkernel-pro/pedals/legends"
+    ));
     if !pedal_dir.exists() {
         eprintln!("Skipping: legends directory not found");
         return;
@@ -408,20 +522,34 @@ fn load_legend(name: &str) -> crate::dsl::PedalDef {
         env!("CARGO_MANIFEST_DIR"),
         name
     );
-    let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Can't read {path}"));
-    crate::dsl::parse_pedal_file(&source)
-        .unwrap_or_else(|e| panic!("{name}: parse error: {e}"))
+    let source = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Can't read {path}"));
+    crate::dsl::parse_pedal_file(&source).unwrap_or_else(|e| panic!("{name}: parse error: {e}"))
 }
 
 fn assert_produces_audio(name: &str, pedal: &crate::dsl::PedalDef) {
-    let mut compiled = compile_via_spqr(pedal, 48000.0)
-        .unwrap_or_else(|e| panic!("{name}: compile error: {e}"));
+    let mut compiled =
+        compile_via_spqr(pedal, 48000.0).unwrap_or_else(|e| panic!("{name}: compile error: {e}"));
 
-    eprintln!("{name}: wdf={}, iir={}, ss={}, mnl={}, order={:?}",
-        compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(),
-        compiled.stages.iter().filter(|s| matches!(s, Stage::StateSpace(_))).count(), compiled.stages.iter().filter(|s| matches!(s, Stage::MultiNl(_))).count(),
-        compiled.stages);
+    eprintln!(
+        "{name}: wdf={}, iir={}, ss={}, mnl={}, order={:?}",
+        compiled.stages.len(),
+        compiled
+            .stages
+            .iter()
+            .filter(|s| matches!(s, Stage::Iir(_)))
+            .count(),
+        compiled
+            .stages
+            .iter()
+            .filter(|s| matches!(s, Stage::StateSpace(_)))
+            .count(),
+        compiled
+            .stages
+            .iter()
+            .filter(|s| matches!(s, Stage::MultiNl(_)))
+            .count(),
+        compiled.stages
+    );
 
     // Settle DC
     for _ in 0..2000 {
@@ -438,7 +566,10 @@ fn assert_produces_audio(name: &str, pedal: &crate::dsl::PedalDef) {
 
     eprintln!("{name}: peak={peak:.6}V");
     assert!(peak.is_finite(), "{name}: output is NaN/Inf");
-    assert!(peak > 0.001, "{name}: ZERO OUTPUT regression — peak={peak:.6}V");
+    assert!(
+        peak > 0.001,
+        "{name}: ZERO OUTPUT regression — peak={peak:.6}V"
+    );
 }
 
 #[test]
@@ -505,7 +636,9 @@ fn diagnose_ratking_hpf() {
 
     // Measure at 200Hz (should be loud for a distortion pedal)
     let mut compiled_lo = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..2000 { compiled_lo.process(0.0); }
+    for _ in 0..2000 {
+        compiled_lo.process(0.0);
+    }
     let mut peak_lo = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 200.0 * s as f64 / 48000.0).sin();
@@ -514,19 +647,29 @@ fn diagnose_ratking_hpf() {
 
     // Measure at 5kHz
     let mut compiled_hi = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..2000 { compiled_hi.process(0.0); }
+    for _ in 0..2000 {
+        compiled_hi.process(0.0);
+    }
     let mut peak_hi = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 5000.0 * s as f64 / 48000.0).sin();
         peak_hi = peak_hi.max(compiled_hi.process(input).abs());
     }
 
-    let ratio = if peak_lo > 1e-10 { peak_hi / peak_lo } else { f64::INFINITY };
+    let ratio = if peak_lo > 1e-10 {
+        peak_hi / peak_lo
+    } else {
+        f64::INFINITY
+    };
     eprintln!("  200Hz peak={peak_lo:.6}V, 5kHz peak={peak_hi:.6}V, ratio={ratio:.1}x");
     eprintln!("  stages: {:?}", compiled_lo.stages);
     for (i, s) in compiled_lo.stages.iter().enumerate() {
         if let Stage::Wdf(wdf) = s {
-            eprintln!("  [{i}] Wdf: rp={:.0} comp={}", wdf.tree.port_resistance(), wdf.root_comp_id);
+            eprintln!(
+                "  [{i}] Wdf: rp={:.0} comp={}",
+                wdf.tree.port_resistance(),
+                wdf.root_comp_id
+            );
         } else {
             eprintln!("  [{i}] {:?}", s);
         }
@@ -547,20 +690,28 @@ fn diagnose_ratking_hpf() {
 fn diagnose_screamer_hpf() {
     let pedal = load_legend("screamer");
     let mut compiled_lo = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..2000 { compiled_lo.process(0.0); }
+    for _ in 0..2000 {
+        compiled_lo.process(0.0);
+    }
     let mut peak_lo = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 200.0 * s as f64 / 48000.0).sin();
         peak_lo = peak_lo.max(compiled_lo.process(input).abs());
     }
     let mut compiled_hi = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..2000 { compiled_hi.process(0.0); }
+    for _ in 0..2000 {
+        compiled_hi.process(0.0);
+    }
     let mut peak_hi = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 5000.0 * s as f64 / 48000.0).sin();
         peak_hi = peak_hi.max(compiled_hi.process(input).abs());
     }
-    let ratio = if peak_lo > 1e-10 { peak_hi / peak_lo } else { f64::INFINITY };
+    let ratio = if peak_lo > 1e-10 {
+        peak_hi / peak_lo
+    } else {
+        f64::INFINITY
+    };
     eprintln!("SCREAMER: 200Hz={peak_lo:.6}, 5kHz={peak_hi:.6}, ratio={ratio:.1}x");
     assert!(ratio < 10.0, "HPF detected: ratio={ratio:.1}x");
     assert!(peak_lo > 0.001, "200Hz should produce output: {peak_lo:.6}");
@@ -577,7 +728,8 @@ fn compute_group_terminals_t_junction_after_opamp() {
     // - U1.out (entry from previous stage, voltage source barrier)
     // - out (exit to circuit output)
     // The junction node (R_tone.b = C_tone.a = R_out.a) is INTERNAL — not a terminal.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -600,7 +752,8 @@ fn compute_group_terminals_t_junction_after_opamp() {
                 R_out.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let graph = super::graph::CircuitGraph::from_pedal(&pedal);
@@ -611,24 +764,35 @@ fn compute_group_terminals_t_junction_after_opamp() {
         .collect();
 
     // Find the tone stack edges
-    let tone_edges: Vec<usize> = all_edges.iter().copied().filter(|&eidx| {
-        let comp = &graph.components[graph.edges[eidx].comp_idx];
-        comp.id == "R_tone" || comp.id == "C_tone" || comp.id == "R_out"
-    }).collect();
+    let tone_edges: Vec<usize> = all_edges
+        .iter()
+        .copied()
+        .filter(|&eidx| {
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            comp.id == "R_tone" || comp.id == "C_tone" || comp.id == "R_out"
+        })
+        .collect();
 
     eprintln!("Tone stack edges:");
     for &eidx in &tone_edges {
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
-        eprintln!("  {} ({:?}): node {} → node {}", comp.id,
-            graph.effective_edge_kind(eidx), e.node_a, e.node_b);
+        eprintln!(
+            "  {} ({:?}): node {} → node {}",
+            comp.id,
+            graph.effective_edge_kind(eidx),
+            e.node_a,
+            e.node_b
+        );
     }
-    eprintln!("  gnd={}, in={}, out={}", graph.gnd_node, graph.in_node, graph.out_node);
+    eprintln!(
+        "  gnd={}, in={}, out={}",
+        graph.gnd_node, graph.in_node, graph.out_node
+    );
 
     let global_terminals = vec![graph.in_node, graph.out_node];
-    let terminals = super::spqr_build::compute_group_terminals(
-        &tone_edges, &graph, &global_terminals
-    );
+    let terminals =
+        super::spqr_build::compute_group_terminals(&tone_edges, &graph, &global_terminals);
 
     eprintln!("Computed terminals: {:?}", terminals);
 
@@ -636,9 +800,7 @@ fn compute_group_terminals_t_junction_after_opamp() {
     // 1. The node shared with U1.out (entry)
     // 2. The out node (exit)
     // GND may be included for ground-shunt detection.
-    let non_gnd_terminals: Vec<_> = terminals.iter()
-        .filter(|&&n| n != graph.gnd_node)
-        .collect();
+    let non_gnd_terminals: Vec<_> = terminals.iter().filter(|&&n| n != graph.gnd_node).collect();
 
     assert!(
         non_gnd_terminals.len() <= 2,
@@ -647,28 +809,33 @@ fn compute_group_terminals_t_junction_after_opamp() {
     );
 
     // Now verify SPQR with these terminals produces PassiveWdf, not Rigid
-    let spqr_tree = super::spqr::spqr_decompose(
-        &tone_edges, &terminals, &graph, graph.gnd_node,
-    );
+    let spqr_tree = super::spqr::spqr_decompose(&tone_edges, &terminals, &graph, graph.gnd_node);
     let stages = super::spqr::spqr_to_stages(&spqr_tree, &graph, 48000.0);
     eprintln!("SPQR stages with computed terminals:");
     for (i, s) in stages.iter().enumerate() {
         eprintln!("  [{i}]: {s:?}");
     }
-    let has_rigid = stages.iter().any(|s| matches!(s, super::spqr::SpqrStage::Rigid { .. }));
-    assert!(!has_rigid, "T-junction with correct terminals should NOT produce Rigid stage");
+    let has_rigid = stages
+        .iter()
+        .any(|s| matches!(s, super::spqr::SpqrStage::Rigid { .. }));
+    assert!(
+        !has_rigid,
+        "T-junction with correct terminals should NOT produce Rigid stage"
+    );
 }
 
 #[test]
 fn compute_group_terminals_simple_series() {
     // Simple series chain: in → R1 → R2 → out
     // Terminals should be [in, out]
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components { R1: resistor(10k)  R2: resistor(10k) }
             nets { in -> R1.a  R1.b -> R2.a  R2.b -> out }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let graph = super::graph::CircuitGraph::from_pedal(&pedal);
@@ -677,20 +844,22 @@ fn compute_group_terminals_simple_series() {
         .collect();
 
     let global_terminals = vec![graph.in_node, graph.out_node];
-    let terminals = super::spqr_build::compute_group_terminals(
-        &edges, &graph, &global_terminals
-    );
+    let terminals = super::spqr_build::compute_group_terminals(&edges, &graph, &global_terminals);
 
     eprintln!("Series chain terminals: {:?}", terminals);
     assert!(terminals.contains(&graph.in_node), "Should include in_node");
-    assert!(terminals.contains(&graph.out_node), "Should include out_node");
+    assert!(
+        terminals.contains(&graph.out_node),
+        "Should include out_node"
+    );
 }
 
 #[test]
 fn spqr_noninverting_opamp_gain() {
     // Non-inverting amp: R1=10k, Rf=100k → gain = 1 + 100k/10k = 11
     // Goes through full compile_via_spqr pipeline (signal flow groups include VCVS).
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -706,12 +875,15 @@ fn spqr_noninverting_opamp_gain() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
-    for _ in 0..20 { compiled.process(0.01); }
+    for _ in 0..20 {
+        compiled.process(0.01);
+    }
     let output = compiled.process(0.01);
     let gain_measured = output.abs() / 0.01;
 
@@ -727,27 +899,32 @@ fn spqr_noninverting_opamp_gain() {
 
 #[test]
 fn diagnose_ratking() {
-    let source = std::fs::read_to_string(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../pedalkernel-pro/pedals/legends/ratking.pedal")
-    ).expect("read ratking.pedal");
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../pedalkernel-pro/pedals/legends/ratking.pedal"
+    ))
+    .expect("read ratking.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
-    
+
     let graph = super::graph::CircuitGraph::from_pedal(&pedal);
     let active_set: std::collections::HashSet<usize> =
         graph.active_edge_indices.iter().copied().collect();
     let all_edges: Vec<usize> = (0..graph.edges.len())
         .filter(|i| !active_set.contains(i))
         .collect();
-    
+
     eprintln!("\nRATKING diagnosis:");
     eprintln!("  Total edges: {}", all_edges.len());
     for &eidx in &all_edges {
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
         let ek = graph.effective_edge_kind(eidx);
-        eprintln!("    edge {eidx}: {} ({:?}) nodes {}→{}", comp.id, ek, e.node_a, e.node_b);
+        eprintln!(
+            "    edge {eidx}: {} ({:?}) nodes {}→{}",
+            comp.id, ek, e.node_a, e.node_b
+        );
     }
-    
+
     let terminals = vec![graph.in_node, graph.out_node];
     let spqr_tree = spqr_decompose(&all_edges, &terminals, &graph, graph.gnd_node);
     eprintln!("\n  SPQR tree: {spqr_tree:?}");
@@ -757,14 +934,16 @@ fn diagnose_ratking() {
     for (i, s) in spqr_stages.iter().enumerate() {
         eprintln!("    stage {i}: {s:?}");
     }
-    
+
     // Also check what classify_rigid says
     for (i, s) in spqr_stages.iter().enumerate() {
         if let SpqrStage::Rigid { edge_indices, .. } = s {
             let stats = super::rigid::StageStats::from_edges(edge_indices, &graph);
             let opt = super::rigid::classify_rigid(&stats, &graph, None);
-            eprintln!("    stage {i} rigid: {:?} (stats: vcvs={}, nl={}, linear={}, reactive={})",
-                opt, stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count);
+            eprintln!(
+                "    stage {i} rigid: {:?} (stats: vcvs={}, nl={}, linear={}, reactive={})",
+                opt, stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count
+            );
         }
     }
 }
@@ -775,7 +954,8 @@ fn compile_via_spqr_state_space_active_filter() {
     // Should compile via StateSpace and produce filtered output.
     use crate::PedalProcessor;
 
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -800,24 +980,29 @@ fn compile_via_spqr_state_space_active_filter() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
-    let mut compiled = compile_via_spqr(&pedal, 48000.0)
-        .expect("Should compile active filter via StateSpace");
+    let mut compiled =
+        compile_via_spqr(&pedal, 48000.0).expect("Should compile active filter via StateSpace");
 
     // Should produce filtered output (not silence)
     for _ in 0..100 {
         compiled.process(0.1);
     }
     let output = compiled.process(0.1);
-    assert!(output.abs() > 0.001, "StateSpace should produce output, got {output:.6}");
+    assert!(
+        output.abs() > 0.001,
+        "StateSpace should produce output, got {output:.6}"
+    );
 }
 
 #[test]
 fn compile_via_spqr_single_bjt_stage() {
     // Simple common-emitter BJT amp: should compile via General MNA
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 C_in: cap(1u)
@@ -839,13 +1024,19 @@ fn compile_via_spqr_single_bjt_stage() {
                 C_out.b -> out
             }
             controls {}
-        }"#).expect("parse");
+        }"#,
+    )
+    .expect("parse");
 
-    let mut compiled = compile_via_spqr(&pedal, 48000.0)
-        .expect("Should compile BJT stage");
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("Should compile BJT stage");
 
     // Should produce amplified output
-    for _ in 0..100 { compiled.process(0.01); }
+    for _ in 0..100 {
+        compiled.process(0.01);
+    }
     let output = compiled.process(0.01);
-    assert!(output.abs() > 0.0001, "BJT should produce output: {output:.6}");
+    assert!(
+        output.abs() > 0.0001,
+        "BJT should produce output: {output:.6}"
+    );
 }
