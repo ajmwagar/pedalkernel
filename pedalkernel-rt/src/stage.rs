@@ -3218,6 +3218,11 @@ pub struct IirStage {
     v_max: f64,
     /// Stored GBW from OpAmpBandwidth (for recomputation when gain changes).
     stored_gbw: f64,
+    /// Output level pot position (1.0 = unity). For output divider pots that
+    /// don't control gain/feedback — just scale the output amplitude.
+    pub output_level: f64,
+    /// Component ID of the output level pot (if any).
+    pub output_level_pot_id: Option<String>,
 }
 
 impl IirStage {
@@ -3239,6 +3244,8 @@ impl IirStage {
             max_dv_per_sample: f64::MAX,
             v_max: f64::MAX,
             stored_gbw: 0.0,
+            output_level: 1.0,
+            output_level_pot_id: None,
         }
     }
 
@@ -3290,12 +3297,16 @@ impl IirStage {
             out = self.v_max * crate::fast_math::fast_tanh(out / self.v_max);
         }
 
+        // Output level pot (simple divider — doesn't affect filter coefficients)
+        out *= self.output_level;
+
         flush_denormal(out)
     }
 
     /// Check if this stage contains a pot with the given component ID.
     pub fn has_pot(&self, comp_id: &str) -> bool {
         self.pot_bindings.iter().any(|b| b.comp_id == comp_id)
+            || self.output_level_pot_id.as_deref() == Some(comp_id)
     }
 
     /// Update pot position and recompute IIR coefficients.
@@ -3304,6 +3315,12 @@ impl IirStage {
     /// For resonators (caps): delegates to IirData::recompute().
     /// No heap allocations — all state is pre-allocated.
     pub fn set_pot(&mut self, comp_id: &str, position: f64) {
+        // Check output level pot first
+        if self.output_level_pot_id.as_deref() == Some(comp_id) {
+            self.output_level = position;
+            return;
+        }
+
         let binding = match self.pot_bindings.iter_mut().find(|b| b.comp_id == comp_id) {
             Some(b) => b,
             None => return,

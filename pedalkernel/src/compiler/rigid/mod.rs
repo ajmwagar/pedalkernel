@@ -577,6 +577,25 @@ pub(super) fn build_rigid_from_group(
                 }
                 if let Some(g) = group {
                     stage.pot_bindings = extract_pot_bindings(g, &edge_indices, graph);
+
+                    // Detect output divider pots: pots in the group that are NOT
+                    // in feedback (not gain-controlling). These are simple output
+                    // level dividers — position directly scales output amplitude.
+                    let feedback_pot_ids: hashbrown::HashSet<&str> = stage
+                        .pot_bindings
+                        .iter()
+                        .map(|b| b.comp_id.as_str())
+                        .collect();
+                    for &eidx in g.all_edges().iter() {
+                        let comp = &graph.components[graph.edges[eidx].comp_idx];
+                        if comp.kind.is_variable()
+                            && comp.kind.resistance().is_some()
+                            && !feedback_pot_ids.contains(comp.id.as_str())
+                            && stage.output_level_pot_id.is_none()
+                        {
+                            stage.output_level_pot_id = Some(comp.id.clone());
+                        }
+                    }
                 }
                 return Ok(BuiltStage::Iir(stage));
             }
