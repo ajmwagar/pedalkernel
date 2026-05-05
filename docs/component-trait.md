@@ -3,7 +3,7 @@ title: "The Component trait"
 description: "How circuit elements plug into the compiler, and how to add a new one."
 section: "Internals"
 weight: 86
-source_commit: "95744ce1cdd9c2cdec3550bfdce9879b1737312c"
+source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
 preview: true
 watches:
   - pedalkernel/src/compiler/component.rs
@@ -28,6 +28,8 @@ The methods group into these buckets:
 **Classification.** `is_passive`, `is_nonlinear`, `is_variable`, `is_gain_device`, `is_pot`, `is_bjt`, and so on. These drive routing decisions at every compiler stage. Most are defaulted to `false`; concrete types override the handful that apply.
 
 **Signal flow.** `signal_terminals()` returns `Passive` / `TwoPort { input, output }` / `Amplifier { input, output, control }`. `output_impedance()` returns `VoltageSource` (op-amp outputs, buffers) or `Finite` (everything else). These drive the signal-flow grouping pass — `VoltageSource` outputs act as barriers that end a passive group.
+
+**Port semantics.** `port_semantic(pin_a, pin_b)` returns one of `LinearPassive`, `Reactive`, `Nonlinear`, `ControlledConductance`, `VoltageConstraint`. This is the modern hook the compiler uses to decide what optimisations are legal on a subgraph — see [Coupling-aware optimisation in compiler internals](./compiler-internals.md). The default implementation derives from the existing classifier methods; per-component overrides give per-pin precision.
 
 **Graph construction.** `graph_role()` returns `Edge` for ordinary two-terminal parts, `Pot` for three-terminal pots, `ActiveEdge` for devices with control pins, `Virtual` for metadata-only pins. `edges()` declares `EdgeKind::{Linear, Reactive, Nonlinear, Vcvs, Behavioral}` for each port. `resolve_edges()` lets a component change its mind based on neighbours (a JFET used as a modulated variable resistor reports `Linear` instead of `Nonlinear`).
 
@@ -192,11 +194,36 @@ Four passes, in order:
 
 None of these passes names a concrete component type. Everything flows through the trait.
 
+## Port semantics and coupling-aware optimisation
+
+`port_semantic(pin_a, pin_b) -> PortSemantic` is the trait method the compiler now uses to decide whether subgraph optimisations are *legal*. The enum has five variants:
+
+```rust
+pub enum PortSemantic {
+    LinearPassive,        // R, V — fixed impedance, optimisable
+    Reactive,             // C, L — energy-storing, creates time-domain coupling
+    Nonlinear,            // diode junction, BJT, tube — must use the NL solver
+    ControlledConductance,// JFET Rds, photocoupler LDR, pot — variable impedance
+    VoltageConstraint,    // op-amp output, VCVS — defines topology
+}
+```
+
+The default implementation derives port semantics from existing classifier methods (`is_nonlinear()`, `is_variable()`, `capacitance()`, `inductance()`). Concrete components override it for **per-pin** precision — the BJT base-emitter pair behaves differently from the JFET drain-source pair, even though both transistors are "nonlinear" overall:
+
+- **BJT** (`Npn`, `Pnp`) — every port returns `Nonlinear`. The B-E, C-E, and B-C junctions are all junction nonlinearities.
+- **JFET / MOSFET** — the gate port returns `Nonlinear` (gate junction is a diode), the drain-source port returns `ControlledConductance` (Vgs-modulated `Rds`).
+- **Op-amp / OTA** — the VCVS output (pos/neg → out) returns `VoltageConstraint`, ordinary input pins return `LinearPassive`. OTAs additionally return `Nonlinear` on their gm cells.
+
+The compiler consumes these annotations through a small set of predicates in `compiler/coupling.rs` — `has_coupling_barrier`, `has_reactive_state`, `has_nl_reactive_coupling`, `device_parallels_passive`. Those drive the lowering legality checks in `classify_rigid()` (see [compiler internals](./compiler-internals.md#coupling-aware-optimisation)).
+
+This replaced a set of topology-specific hacks. The most visible one was a special-case check called `bjt_collector_emitter_parallels_resistor()` that hard-coded BJT-shunt detection for one particular passive-extraction edge case. Its generic replacement, `device_parallels_passive()`, uses `port_semantic()` to identify any nonlinear or controlled-conductance device in parallel with a passive element — works for BJTs today, JFETs and MOSFETs tomorrow, and any future shunt-style device added under the trait. Adding a new component type means writing one or two `port_semantic()` overrides; you don't have to teach the optimiser about your specific topology.
+
 ## Auxiliary types
 
 A handful of enums do most of the classifying:
 
-- **`EdgeKind`** — `Linear`, `Reactive`, `Nonlinear`, `Vcvs`, `Vccs`, `Behavioral`. Tagged on each port.
+- **`EdgeKind`** — `Linear`, `Reactive`, `Nonlinear`, `Vcvs`, `Vccs`, `Behavioral`. Tagged on each port for SPQR-level graph reduction.
+- **`PortSemantic`** — `LinearPassive`, `Reactive`, `Nonlinear`, `ControlledConductance`, `VoltageConstraint`. Tagged per-pin for coupling-aware optimisation legality.
 - **`OutputImpedance`** — `VoltageSource` or `Finite`. Drives signal-flow barriers.
 - **`SignalTerminals`** — `Passive` / `TwoPort` / `Amplifier`. Tells the compiler which pin is input and which is output.
 - **`PinDirection`** — `Input`, `Output`, `Up` (toward VCC / B+), `Down` (toward GND), `Bidirectional`. Used by the layout engine.
