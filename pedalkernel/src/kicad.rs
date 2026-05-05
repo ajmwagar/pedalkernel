@@ -545,7 +545,7 @@ mod tests {
             trims: vec![],
             monitors: vec![],
             sidechains: vec![],
-            mirrors: std::collections::HashMap::new(),
+            mirrors: hashbrown::HashMap::new(),
             calibrate: false,
             subcircuits: vec![],
         };

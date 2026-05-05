@@ -32,7 +32,7 @@
 //! pedalkernel = { version = "0.1", features = ["hardware"] }
 //! ```
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use nom::{
     branch::alt,

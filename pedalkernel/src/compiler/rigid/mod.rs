@@ -20,16 +20,13 @@ mod state_space;
 // Re-exports
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(super) use self::general::{build_general_mna, build_general_mna_from_edges, build_opamp_nl_feedback};
-// Legacy re-exports for old pipeline — will be removed with opamp_analysis.rs
-pub(super) use self::opamp_root::{
-    extract_opamp_config, make_opamp_root, build_opamp_root, OpAmpConfig,
-};
+pub(super) use self::general::{build_general_mna_from_edges, build_opamp_nl_feedback};
+pub(super) use self::opamp_root::{extract_opamp_config, make_opamp_root, OpAmpConfig};
 
 use super::component::EdgeKind;
 use super::dyn_node::DynNode;
-use super::signal_flow::FlowGroup;
 use super::graph::{CircuitGraph, NodeId};
+use super::signal_flow::FlowGroup;
 use super::spqr_build::BuiltStage;
 use super::stage::{IirPotBinding, IirStage};
 
@@ -106,6 +103,24 @@ impl StageStats {
     }
 }
 
+fn group_nonlinear_edges_are_diode_family(edge_indices: &[usize], graph: &CircuitGraph) -> bool {
+    let mut found_nonlinear = false;
+
+    for &edge_idx in edge_indices {
+        if graph.effective_edge_kind(edge_idx) != EdgeKind::Nonlinear {
+            continue;
+        }
+
+        found_nonlinear = true;
+        let comp = &graph.components[graph.edges[edge_idx].comp_idx];
+        if !comp.kind.is_diode_family() {
+            return false;
+        }
+    }
+
+    found_nonlinear
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // RigidOptimization — strategy selection
 // ═══════════════════════════════════════════════════════════════════════════
@@ -148,8 +163,21 @@ pub(super) fn classify_rigid(
     // If reactive elements are in ground shunts with resistive feedback (808 bridged-T),
     // IIR handles the resonance correctly via extract_feedback_r.
     // Otherwise, Black's formula for closed-form Rf/Ri gain.
+    //
+    // SAFETY: Even though nl_count == 0, check for ControlledConductance ports
+    // (pots, photocouplers) that couple to reactive nodes. If found, IIR lowering
+    // is unsafe because the controlled element's time-varying impedance interacts
+    // with the reactive state in ways that a static biquad can't capture.
     if stats.is_single_vcvs_linear() {
         if let Some(g) = _group {
+            let all_edges = g.all_edges();
+
+            // Coupling safety check: if a ControlledConductance port shares a
+            // node with a reactive element, we must NOT lower to static IIR.
+            if super::coupling::has_nl_reactive_coupling(&all_edges, graph) {
+                return RigidOptimization::General;
+            }
+
             let is_reactive = |eidx: usize| -> bool {
                 let comp = &graph.components[graph.edges[eidx].comp_idx];
                 comp.kind.capacitance().is_some() || comp.kind.inductance().is_some()
@@ -167,7 +195,14 @@ pub(super) fn classify_rigid(
 
     // Rule 3: all linear, no VCVS → IIR biquad from MNA
     // Reactive elements give biquad dynamics; purely resistive gives DC gain.
+    // Same coupling safety check applies.
     if stats.nl_count == 0 {
+        if let Some(g) = _group {
+            let all_edges = g.all_edges();
+            if super::coupling::has_nl_reactive_coupling(&all_edges, graph) {
+                return RigidOptimization::General;
+            }
+        }
         return RigidOptimization::Iir;
     }
 
@@ -192,9 +227,7 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
             // Inverting if V+ is at AC ground: GND, AC ground node, or a
             // bias point that reaches GND through a capacitor (voltage
             // divider bias networks are AC ground by definition).
-            if rec.pos_node == graph.gnd_node
-                || graph.ac_ground_nodes.contains(&rec.pos_node)
-            {
+            if rec.pos_node == graph.gnd_node || graph.ac_ground_nodes.contains(&rec.pos_node) {
                 return true;
             }
 
@@ -216,7 +249,9 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
             while let Some(node) = queue.pop_front() {
                 for e in &graph.edges {
                     let comp = &graph.components[e.comp_idx];
-                    if !comp.kind.is_passive() { continue; }
+                    if !comp.kind.is_passive() {
+                        continue;
+                    }
                     let next = if e.node_a == node && !visited.contains(&e.node_b) {
                         Some(e.node_b)
                     } else if e.node_b == node && !visited.contains(&e.node_a) {
@@ -225,11 +260,14 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
                         None
                     };
                     if let Some(n) = next {
-                        if blocked.contains(&n) { continue; }
+                        if blocked.contains(&n) {
+                            continue;
+                        }
                         if n == graph.in_node {
                             reaches_signal = true;
                         }
-                        if n == graph.gnd_node || n == graph.vcc_node
+                        if n == graph.gnd_node
+                            || n == graph.vcc_node
                             || graph.supply_nodes.contains(&n)
                         {
                             reaches_rail = true;
@@ -294,7 +332,11 @@ fn extract_pot_bindings(
     let ri: f64 = group
         .pendant_edges
         .iter()
-        .filter_map(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.resistance())
+        .filter_map(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx]
+                .kind
+                .resistance()
+        })
         .sum();
     let ri = if ri <= 0.0 { 1.0 } else { ri }; // Safety: avoid div-by-zero
 
@@ -302,7 +344,11 @@ fn extract_pot_bindings(
     let mut fixed_r: f64 = 0.0;
     for &eidx in &group.feedback_edges {
         let comp = &graph.components[graph.edges[eidx].comp_idx];
-        if let Some(pot) = comp.kind.as_any().downcast_ref::<crate::compiler::components::Potentiometer>() {
+        if let Some(pot) = comp
+            .kind
+            .as_any()
+            .downcast_ref::<crate::compiler::components::Potentiometer>()
+        {
             bindings.push(IirPotBinding {
                 comp_id: comp.id.clone(),
                 max_r: pot.max_r,
@@ -357,15 +403,17 @@ fn find_feedback_pot(
 
     pot_id.map(|id| {
         let leaf = pot_leaf.unwrap_or_else(|| {
-            DynNode::Leaf(Box::new(crate::compiler::wdf_leaf::WdfPot {
-                comp_id: id.clone(),
-                max_resistance: 100_000.0,
-                position: 0.5,
-                taper: crate::dsl::PotTaper::B,
-                rp: 50_000.0,
-                last_a: 0.0,
-                complement: false,
-            }))
+            DynNode::Leaf(crate::compiler::wdf_leaf::LeafKind::Pot(
+                crate::compiler::wdf_leaf::WdfPot {
+                    comp_id: id.clone(),
+                    max_resistance: 100_000.0,
+                    position: 0.5,
+                    taper: crate::dsl::PotTaper::B,
+                    rp: 50_000.0,
+                    last_a: 0.0,
+                    complement: false,
+                },
+            ))
         });
         (id, leaf, fixed_r, parallel_r)
     })
@@ -390,7 +438,7 @@ pub(super) fn build_rigid(
     graph: &CircuitGraph,
     sample_rate: f64,
 ) -> Result<BuiltStage, String> {
-    build_rigid_from_group(edge_indices, graph, sample_rate, None)
+    build_rigid_from_group(edge_indices, graph, sample_rate, None, 9.0, None)
 }
 
 /// Build from a FlowGroup with full classification.
@@ -399,13 +447,22 @@ pub(super) fn build_rigid_from_group(
     graph: &CircuitGraph,
     sample_rate: f64,
     group: Option<&FlowGroup>,
+    supply_voltage: f64,
+    bias_v_max: Option<(f64, f64)>,
 ) -> Result<BuiltStage, String> {
     let stats = StageStats::from_edges(&edge_indices, graph);
     let optimization = classify_rigid(&stats, graph, group);
 
     #[cfg(test)]
-    eprintln!("  rigid: {:?} (vcvs={}, nl={}, linear={}, reactive={}, edges={})",
-        optimization, stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count, edge_indices.len());
+    eprintln!(
+        "  rigid: {:?} (vcvs={}, nl={}, linear={}, reactive={}, edges={})",
+        optimization,
+        stats.vcvs_count,
+        stats.nl_count,
+        stats.linear_count,
+        stats.reactive_count,
+        edge_indices.len()
+    );
 
     // ── Single-pass fallthrough: cheapest → most expensive ──────────────
     // Each strategy attempts to build a stage. On failure (Err or degenerate
@@ -415,7 +472,10 @@ pub(super) fn build_rigid_from_group(
     // classify_rigid picks the entry point; we fall through from there.
 
     let try_black_feedback = matches!(optimization, RigidOptimization::BlackFeedback);
-    let try_iir = matches!(optimization, RigidOptimization::BlackFeedback | RigidOptimization::Iir);
+    let try_iir = matches!(
+        optimization,
+        RigidOptimization::BlackFeedback | RigidOptimization::Iir
+    );
 
     // ── BlackFeedback: O(1)/sample, resistive feedback only ──────────
     if try_black_feedback {
@@ -429,8 +489,19 @@ pub(super) fn build_rigid_from_group(
             if config.rf > 0.0 {
                 let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
                 let mut stage = super::stage::BlackFeedbackStage::new(
-                    config.rf, config.ri, inverting, &fx, sample_rate,
+                    config.rf,
+                    config.ri,
+                    inverting,
+                    &fx,
+                    sample_rate,
                 );
+                // Apply bias-derived asymmetric rail limits directly
+                if let Some((pos, neg)) = bias_v_max {
+                    stage.set_v_rails(pos, neg);
+                } else {
+                    let v = (supply_voltage / 2.0 - 1.5).max(0.5);
+                    stage.set_v_rails(v, v);
+                }
 
                 for &eidx in &g.all_edges() {
                     let comp = &graph.components[graph.edges[eidx].comp_idx];
@@ -463,16 +534,29 @@ pub(super) fn build_rigid_from_group(
             !a_rail || !b_rail
         });
         if !has_signal_node {
-            let iir = super::stage::IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate);
+            let iir =
+                super::stage::IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate);
             return Ok(BuiltStage::Iir(IirStage::new(iir)));
         }
 
-        if let Ok(iir_data) = iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate) {
+        if let Ok(iir_data) =
+            iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate)
+        {
             // Validate: check for degenerate transfer function (all-zero numerator)
             let has_signal = iir_data.b_coeffs.iter().any(|&b| b.abs() > 1e-15);
             if has_signal {
                 let mut stage = IirStage::new(iir_data);
-                let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                let mut fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                // Patch RailSaturation with bias-derived v_max or supply voltage.
+                // NonIdealFx uses symmetric v_max; OpAmpRoot gets asymmetric rails.
+                let actual_v_max = bias_v_max
+                    .map(|(pos, neg)| pos.min(neg))
+                    .unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
+                for f in &mut fx {
+                    if let super::component::NonIdealFx::RailSaturation { v_max } = f {
+                        *v_max = actual_v_max;
+                    }
+                }
                 if !fx.is_empty() {
                     stage.set_nonideal_fx(fx, sample_rate);
                 }
@@ -489,9 +573,12 @@ pub(super) fn build_rigid_from_group(
         // VCVS stages with reactive feedback should fall through to WDF
         // where the op-amp + cap feedback is handled by wave scattering.
         if stats.vcvs_count == 0 {
-            let supply_voltage = 9.0;
             if let Ok(ss) = state_space::build_state_space_stage(
-                &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
+                &edge_indices,
+                &pendant_trees,
+                graph,
+                sample_rate,
+                supply_voltage,
             ) {
                 return Ok(BuiltStage::StateSpace(ss));
             }
@@ -506,8 +593,15 @@ pub(super) fn build_rigid_from_group(
             // naturally through wave scattering.
             if stats.vcvs_count == 1 && stats.nl_count == 1 {
                 if let Some(g) = group {
-                    return build_opamp_nl_feedback(g, &stats, graph, sample_rate)
-                        .map(BuiltStage::Wdf);
+                    return build_opamp_nl_feedback(
+                        g,
+                        &stats,
+                        graph,
+                        sample_rate,
+                        supply_voltage,
+                        bias_v_max,
+                    )
+                    .map(BuiltStage::Wdf);
                 }
             }
             if stats.vcvs_count == 1 && stats.nl_count == 0 {
@@ -518,31 +612,62 @@ pub(super) fn build_rigid_from_group(
                 if let Some(g) = group {
                     let inverting = is_inverting_topology(&stats, graph);
                     let config = opamp_root::extract_opamp_config(g, inverting, graph)?;
-                    let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                    let mut fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
+                    // Patch RailSaturation with bias-derived v_max or supply voltage.
+                    // NonIdealFx uses symmetric v_max; OpAmpRoot gets asymmetric rails.
+                    let actual_v_max = bias_v_max
+                        .map(|(pos, neg)| pos.min(neg))
+                        .unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
+                    for f in &mut fx {
+                        if let super::component::NonIdealFx::RailSaturation { v_max } = f {
+                            *v_max = actual_v_max;
+                        }
+                    }
                     let stage = super::stage::BlackFeedbackStage::new(
-                        config.rf, config.ri, inverting, &fx, sample_rate,
+                        config.rf,
+                        config.ri,
+                        inverting,
+                        &fx,
+                        sample_rate,
                     );
                     return Ok(BuiltStage::BlackFeedback(stage));
                 }
             }
             // No VCVS or no group — unity passthrough
-            let iir = super::stage::IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate);
+            let iir =
+                super::stage::IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate);
             Ok(BuiltStage::Iir(IirStage::new(iir)))
         }
         RigidOptimization::StateSpace => {
-            let pendant_trees = Vec::new(); // TODO: extract from group
-            let supply_voltage = 9.0; // TODO: pass from PedalDef
+            let pendant_trees = Vec::new(); // Empty — input coupling handled by SPQR passive stages
             state_space::build_state_space_stage(
-                &edge_indices, &pendant_trees, graph, sample_rate, supply_voltage,
+                &edge_indices,
+                &pendant_trees,
+                graph,
+                sample_rate,
+                supply_voltage,
             )
             .map(BuiltStage::StateSpace)
         }
         RigidOptimization::General => {
-            // VCVS + NL with FlowGroup → op-amp drives NL root
+            // VCVS + NL with FlowGroup → op-amp drives NL root.
+            // For multiple NL edges (e.g. SD-1's two separate antiparallel diodes),
+            // build_opamp_nl_feedback detects antiparallel pairs and synthesizes
+            // a DiodePair root from individual diode components.
             if let Some(g) = group {
-                if stats.vcvs_count == 1 && stats.nl_count > 0 {
-                    return build_opamp_nl_feedback(g, &stats, graph, sample_rate)
-                        .map(BuiltStage::Wdf);
+                if stats.vcvs_count == 1
+                    && stats.nl_count > 0
+                    && group_nonlinear_edges_are_diode_family(&edge_indices, graph)
+                {
+                    return build_opamp_nl_feedback(
+                        g,
+                        &stats,
+                        graph,
+                        sample_rate,
+                        supply_voltage,
+                        bias_v_max,
+                    )
+                    .map(BuiltStage::Wdf);
                 }
             }
 
@@ -564,4 +689,3 @@ pub(super) fn build_rigid_from_group(
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
-

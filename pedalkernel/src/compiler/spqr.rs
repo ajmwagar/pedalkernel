@@ -251,8 +251,8 @@ pub(super) fn spqr_decompose(
     }
 
     // Build adjacency: node → [(edge_idx, other_node)]
-    let mut adj: std::collections::HashMap<NodeId, Vec<(usize, NodeId)>> =
-        std::collections::HashMap::new();
+    let mut adj: hashbrown::HashMap<NodeId, Vec<(usize, NodeId)>> =
+        hashbrown::HashMap::new();
     for &eidx in edge_indices {
         let e = &graph.edges[eidx];
         adj.entry(e.node_a).or_default().push((eidx, e.node_b));
@@ -299,8 +299,8 @@ pub(super) fn spqr_decompose(
     // (adj was already built above for the full set, still valid if no pendants)
 
     // Check for parallel edges: multiple edges between the same pair
-    let mut edge_pairs: std::collections::HashMap<(NodeId, NodeId), Vec<usize>> =
-        std::collections::HashMap::new();
+    let mut edge_pairs: hashbrown::HashMap<(NodeId, NodeId), Vec<usize>> =
+        hashbrown::HashMap::new();
     for &eidx in edge_indices {
         let e = &graph.edges[eidx];
         let key = if e.node_a <= e.node_b {
@@ -546,8 +546,8 @@ fn extract_pendants(
 
     loop {
         // Build degree map — exclude rail nodes (they're always "dead ends")
-        let mut degree: std::collections::HashMap<NodeId, usize> =
-            std::collections::HashMap::new();
+        let mut degree: hashbrown::HashMap<NodeId, usize> =
+            hashbrown::HashMap::new();
         for &eidx in &remaining {
             let e = &graph.edges[eidx];
             if !rail_nodes.contains(&e.node_a) {
@@ -678,6 +678,7 @@ fn collect_non_passive_edges(
 // ═══════════════════════════════════════════════════════════════════════════
 
 use super::dyn_node::DynNode;
+use super::wdf_leaf::WdfLeaf;
 
 /// Fold a list of DynNodes into a binary tree using the given constructor.
 ///
@@ -723,7 +724,7 @@ pub(super) fn spqr_to_dyn_node(
                         || e.node_b == graph.gnd_node
                         || graph.ac_ground_nodes.contains(&e.node_a)
                         || graph.ac_ground_nodes.contains(&e.node_b);
-                    if !touches_gnd {
+                    if touches_gnd {
                         if let DynNode::Leaf(ref mut l) = leaf {
                             l.set_complement();
                         }

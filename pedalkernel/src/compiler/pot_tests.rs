@@ -414,18 +414,18 @@ fn wdf_voltage_divider_scatter_math() {
     // Direct WDF test: Series(VS, Series(R_aw, R_wb)) + ShortCircuit
     // Expected: wiper voltage = Vin * R_wb / (R_aw + R_wb)
     use super::dyn_node::DynNode;
-    use super::wdf_leaf::{WdfResistor, WdfVoltageSource};
+    use super::wdf_leaf::{LeafKind, WdfResistor, WdfVoltageSource};
 
     let r_aw = 50_000.0;
     let r_wb = 50_000.0;
 
-    let vs = DynNode::Leaf(Box::new(WdfVoltageSource {
+    let vs = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
         voltage: 0.0,
         rp: 1.0,
         is_cathode_bias: false,
     }));
-    let leaf_aw = DynNode::Leaf(Box::new(WdfResistor { rp: r_aw, comp_id: Some("aw".to_string()), last_a: 0.0 }));
-    let leaf_wb = DynNode::Leaf(Box::new(WdfResistor { rp: r_wb, comp_id: Some("wb".to_string()), last_a: 0.0 }));
+    let leaf_aw = DynNode::Leaf(LeafKind::Resistor(WdfResistor { rp: r_aw, comp_id: Some("aw".to_string()), last_a: 0.0 }));
+    let leaf_wb = DynNode::Leaf(LeafKind::Resistor(WdfResistor { rp: r_wb, comp_id: Some("wb".to_string()), last_a: 0.0 }));
 
     // Series(R_aw, R_wb) — the divider chain
     let divider = DynNode::Series(Box::new(leaf_aw), Box::new(leaf_wb));
@@ -478,14 +478,14 @@ fn wdf_simple_resistor_divider() {
     // Simplest possible test: Series(VS, R) with ShortCircuit.
     // Output should be 0 at root (short circuit) but VS drives current through R.
     use super::dyn_node::DynNode;
-    use super::wdf_leaf::{WdfResistor, WdfVoltageSource};
+    use super::wdf_leaf::{LeafKind, WdfResistor, WdfVoltageSource};
 
-    let vs = DynNode::Leaf(Box::new(WdfVoltageSource {
+    let vs = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
         voltage: 0.0,
         rp: 1.0,
         is_cathode_bias: false,
     }));
-    let r = DynNode::Leaf(Box::new(WdfResistor { rp: 10_000.0, comp_id: Some("R".to_string()), last_a: 0.0 }));
+    let r = DynNode::Leaf(LeafKind::Resistor(WdfResistor { rp: 10_000.0, comp_id: Some("R".to_string()), last_a: 0.0 }));
     let mut tree = DynNode::Series(Box::new(vs), Box::new(r));
 
     tree.set_voltage(1.0);

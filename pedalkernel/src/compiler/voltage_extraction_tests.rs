@@ -90,7 +90,11 @@ fn measure_spectral_ratio(pedal_src: &str) -> f64 {
 
     let lo = measure_freq(200.0);
     let hi = measure_freq(5000.0);
-    if lo > 1e-10 { hi / lo } else { 0.0 }
+    if lo > 1e-10 {
+        hi / lo
+    } else {
+        0.0
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -100,20 +104,26 @@ fn measure_spectral_ratio(pedal_src: &str) -> f64 {
 #[test]
 fn passive_wire_unity_gain() {
     // Direct wire: in → out. Gain should be exactly 1.0.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components { R1: resistor(1k) }
             nets { in -> R1.a  R1.b -> out }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Wire: gain={gain:.4}");
-    assert!(gain > 0.8 && gain < 1.2, "Wire should be unity gain: {gain:.4}");
+    assert!(
+        gain > 0.8 && gain < 1.2,
+        "Wire should be unity gain: {gain:.4}"
+    );
 }
 
 #[test]
 fn passive_resistive_divider_half() {
     // Voltage divider: R1=10k, R2=10k. Gain = R2/(R1+R2) = 0.5.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -126,15 +136,20 @@ fn passive_resistive_divider_half() {
                 R1.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Divider 50%: gain={gain:.4}");
-    assert!(gain > 0.35 && gain < 0.65, "50% divider should give ~0.5: {gain:.4}");
+    assert!(
+        gain > 0.35 && gain < 0.65,
+        "50% divider should give ~0.5: {gain:.4}"
+    );
 }
 
 #[test]
 fn passive_resistive_divider_tenth() {
     // Voltage divider: R1=9k, R2=1k. Gain = 1k/(9k+1k) = 0.1.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(9k)
@@ -147,16 +162,21 @@ fn passive_resistive_divider_tenth() {
                 R1.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Divider 10%: gain={gain:.4}");
-    assert!(gain > 0.05 && gain < 0.2, "10% divider should give ~0.1: {gain:.4}");
+    assert!(
+        gain > 0.05 && gain < 0.2,
+        "10% divider should give ~0.1: {gain:.4}"
+    );
 }
 
 #[test]
 fn passive_rc_lowpass_attenuates_high_freq() {
     // RC lowpass: R=10k, C=10nF. fc = 1/(2π·R·C) ≈ 1592Hz.
     // 200Hz should pass (~unity). 5kHz should be attenuated (~0.3).
-    let ratio = measure_spectral_ratio(r#"
+    let ratio = measure_spectral_ratio(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -169,9 +189,13 @@ fn passive_rc_lowpass_attenuates_high_freq() {
                 R1.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("RC LPF: 5kHz/200Hz ratio={ratio:.4}");
-    assert!(ratio < 0.7, "RC LPF should attenuate 5kHz relative to 200Hz: ratio={ratio:.4}");
+    assert!(
+        ratio < 0.7,
+        "RC LPF should attenuate 5kHz relative to 200Hz: ratio={ratio:.4}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -181,7 +205,8 @@ fn passive_rc_lowpass_attenuates_high_freq() {
 #[test]
 fn bf_inverting_gain_10() {
     // Inverting amp: Rf=100k, Ri=10k. Gain = Rf/Ri = 10.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -197,15 +222,20 @@ fn bf_inverting_gain_10() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("BF inverting gain=10: measured={gain:.2}");
-    assert!(gain > 7.0 && gain < 13.0, "Inverting gain should be ~10: {gain:.2}");
+    assert!(
+        gain > 7.0 && gain < 13.0,
+        "Inverting gain should be ~10: {gain:.2}"
+    );
 }
 
 #[test]
 fn bf_inverting_gain_2() {
     // Gain = 20k/10k = 2.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -221,15 +251,20 @@ fn bf_inverting_gain_2() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("BF inverting gain=2: measured={gain:.2}");
-    assert!(gain > 1.5 && gain < 3.0, "Inverting gain should be ~2: {gain:.2}");
+    assert!(
+        gain > 1.5 && gain < 3.0,
+        "Inverting gain should be ~2: {gain:.2}"
+    );
 }
 
 #[test]
 fn bf_noninverting_gain_11() {
     // Non-inverting: gain = 1 + Rf/Ri = 1 + 100k/10k = 11.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 U1: opamp(tl072)
@@ -245,15 +280,20 @@ fn bf_noninverting_gain_11() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("BF non-inverting gain=11: measured={gain:.2}");
-    assert!(gain > 8.0 && gain < 14.0, "Non-inverting gain should be ~11: {gain:.2}");
+    assert!(
+        gain > 8.0 && gain < 14.0,
+        "Non-inverting gain should be ~11: {gain:.2}"
+    );
 }
 
 #[test]
 fn bf_unity_follower() {
     // Unity follower: out→neg, gain = 1.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 U1: opamp(tl072)
@@ -264,9 +304,13 @@ fn bf_unity_follower() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("BF unity follower: gain={gain:.4}");
-    assert!(gain > 0.8 && gain < 1.2, "Unity follower should be ~1.0: {gain:.4}");
+    assert!(
+        gain > 0.8 && gain < 1.2,
+        "Unity follower should be ~1.0: {gain:.4}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -277,7 +321,8 @@ fn bf_unity_follower() {
 fn wdf_opamp_diode_clips_at_diode_voltage() {
     // Op-amp with diode pair in feedback. At high gain, output should
     // clip at ~0.6V (silicon diode forward voltage).
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -299,7 +344,8 @@ fn wdf_opamp_diode_clips_at_diode_voltage() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -328,7 +374,8 @@ fn wdf_opamp_diode_gain_increases_with_drive() {
     // At low drive, diodes don't clip — gain ≈ Rf/Ri.
     // At high drive, diodes clip — output limited.
     // Low drive output should be proportionally larger.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -347,7 +394,8 @@ fn wdf_opamp_diode_gain_increases_with_drive() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let measure = |amplitude: f64| -> f64 {
@@ -365,16 +413,22 @@ fn wdf_opamp_diode_gain_increases_with_drive() {
     };
 
     let out_lo = measure(0.001); // Well below clipping
-    let out_hi = measure(0.1);   // Should clip
+    let out_hi = measure(0.1); // Should clip
 
     let gain_lo = out_lo / 0.001;
     let gain_hi = out_hi / 0.1;
 
     eprintln!("Diode gain: lo_gain={gain_lo:.2} (amp=0.001), hi_gain={gain_hi:.2} (amp=0.1)");
     // At low amplitude, gain should be close to Rf/Ri = 10
-    assert!(gain_lo > 3.0, "Low-amplitude gain should be significant: {gain_lo:.2}");
+    assert!(
+        gain_lo > 3.0,
+        "Low-amplitude gain should be significant: {gain_lo:.2}"
+    );
     // At high amplitude, gain should be compressed (diode clips)
-    assert!(gain_hi < gain_lo, "High-amplitude gain should be compressed: hi={gain_hi:.2} < lo={gain_lo:.2}");
+    assert!(
+        gain_hi < gain_lo,
+        "High-amplitude gain should be compressed: hi={gain_hi:.2} < lo={gain_lo:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -386,7 +440,8 @@ fn wdf_asymmetric_diodes_both_modeled() {
     // Two separate diodes (D_ge: germanium, D_si: silicon) in feedback.
     // Asymmetric clipping: positive clips at ~0.3V (Ge), negative at ~0.6V (Si).
     // The output waveform should be asymmetric.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -408,7 +463,8 @@ fn wdf_asymmetric_diodes_both_modeled() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -432,8 +488,14 @@ fn wdf_asymmetric_diodes_both_modeled() {
     eprintln!("Asymmetric diodes: pos={pos_peak:.4}, neg={neg_peak:.4}");
 
     // Both polarities should produce output
-    assert!(pos_peak > 0.05, "Positive peak should be significant: {pos_peak:.4}");
-    assert!(neg_peak < -0.05, "Negative peak should be significant: {neg_peak:.4}");
+    assert!(
+        pos_peak > 0.05,
+        "Positive peak should be significant: {pos_peak:.4}"
+    );
+    assert!(
+        neg_peak < -0.05,
+        "Negative peak should be significant: {neg_peak:.4}"
+    );
 
     // Asymmetry: germanium clips lower than silicon
     // So positive and negative peaks should differ
@@ -456,7 +518,8 @@ fn wdf_clipping_with_separate_input_coupling_amplifies() {
     // Screamer-like: Cin + R_in → U1.neg → Drive(feedback) + D1(clipping).
     // The input coupling (Cin + R_in) ends up in a separate FlowGroup.
     // The clipping stage should still amplify with gain ≈ Drive/R_in.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 Cin: cap(47n)
@@ -477,7 +540,8 @@ fn wdf_clipping_with_separate_input_coupling_amplifies() {
                 U1.out -> out
             }
             controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
-        }"#);
+        }"#,
+    );
     eprintln!("Clipping+coupling: gain={gain:.2}");
     // At default Drive=50% → Rf≈250k, Ri=10k → gain≈25.
     // Diode clips, so actual gain depends on signal level.
@@ -489,7 +553,8 @@ fn wdf_clipping_with_separate_input_coupling_amplifies() {
 fn wdf_clipping_gain_matches_single_stage() {
     // Compare: same Rf/Ri ratio, one with coupling cap (multi-group)
     // and one without (single group). Gains should be similar.
-    let gain_single = measure_gain(r#"
+    let gain_single = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -508,9 +573,11 @@ fn wdf_clipping_gain_matches_single_stage() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
-    let gain_coupled = measure_gain(r#"
+    let gain_coupled = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 Cin: cap(47n)
@@ -531,14 +598,24 @@ fn wdf_clipping_gain_matches_single_stage() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
     eprintln!("Single={gain_single:.2}, Coupled={gain_coupled:.2}");
     // Both have Rf/Ri=10. Gains should be in the same ballpark.
-    assert!(gain_single > 3.0, "Single stage should amplify: {gain_single:.2}");
-    assert!(gain_coupled > 3.0, "Coupled stage should amplify: {gain_coupled:.2}");
+    assert!(
+        gain_single > 3.0,
+        "Single stage should amplify: {gain_single:.2}"
+    );
+    assert!(
+        gain_coupled > 3.0,
+        "Coupled stage should amplify: {gain_coupled:.2}"
+    );
     let ratio = gain_single.max(gain_coupled) / gain_single.min(gain_coupled).max(0.01);
-    assert!(ratio < 5.0, "Gains should be within 5x: single={gain_single:.2}, coupled={gain_coupled:.2}");
+    assert!(
+        ratio < 5.0,
+        "Gains should be within 5x: single={gain_single:.2}, coupled={gain_coupled:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -548,7 +625,8 @@ fn wdf_clipping_gain_matches_single_stage() {
 #[test]
 fn pot_divider_at_50_percent() {
     // Pot at 50%: gain ≈ 0.5. Not exact due to taper and loading.
-    let gain = measure_gain_with_control(r#"
+    let gain = measure_gain_with_control(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(1k)
@@ -561,15 +639,22 @@ fn pot_divider_at_50_percent() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#, "Volume", 0.5);
+        }"#,
+        "Volume",
+        0.5,
+    );
     eprintln!("Pot @50%: gain={gain:.4}");
-    assert!(gain > 0.2 && gain < 0.8, "Pot at 50% should give ~0.5: {gain:.4}");
+    assert!(
+        gain > 0.2 && gain < 0.8,
+        "Pot at 50% should give ~0.5: {gain:.4}"
+    );
 }
 
 #[test]
 fn pot_divider_at_100_percent() {
     // Pot at 100%: wiper at top → nearly unity gain.
-    let gain = measure_gain_with_control(r#"
+    let gain = measure_gain_with_control(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(1k)
@@ -582,7 +667,10 @@ fn pot_divider_at_100_percent() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#, "Volume", 1.0);
+        }"#,
+        "Volume",
+        1.0,
+    );
     eprintln!("Pot @100%: gain={gain:.4}");
     assert!(gain > 0.7, "Pot at 100% should be near unity: {gain:.4}");
 }
@@ -590,7 +678,8 @@ fn pot_divider_at_100_percent() {
 #[test]
 fn pot_divider_at_10_percent() {
     // Pot at 10%: heavy attenuation.
-    let gain = measure_gain_with_control(r#"
+    let gain = measure_gain_with_control(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(1k)
@@ -603,9 +692,15 @@ fn pot_divider_at_10_percent() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#, "Volume", 0.1);
+        }"#,
+        "Volume",
+        0.1,
+    );
     eprintln!("Pot @10%: gain={gain:.4}");
-    assert!(gain < 0.3, "Pot at 10% should be heavily attenuated: {gain:.4}");
+    assert!(
+        gain < 0.3,
+        "Pot at 10% should be heavily attenuated: {gain:.4}"
+    );
 }
 
 #[test]
@@ -647,7 +742,8 @@ fn pot_divider_monotonic() {
 fn cascade_two_inverting_amps() {
     // Two inverting amps in series: gain1=10, gain2=5 → total=50.
     // Phase inverts twice → net positive.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -671,7 +767,8 @@ fn cascade_two_inverting_amps() {
                 U2.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Cascade 10×5=50: gain={gain:.1}");
     // Allow wide tolerance for GBW rolloff and oversampler effects
     assert!(gain > 20.0, "Cascade gain should be > 20: {gain:.1}");
@@ -681,7 +778,8 @@ fn cascade_two_inverting_amps() {
 #[test]
 fn cascade_gain_then_volume_divider() {
     // Gain=10 → Volume pot at 50% → expected ~5.
-    let gain = measure_gain_with_control(r#"
+    let gain = measure_gain_with_control(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -700,15 +798,22 @@ fn cascade_gain_then_volume_divider() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#, "Volume", 0.5);
+        }"#,
+        "Volume",
+        0.5,
+    );
     eprintln!("Gain×Divider: 10 × 0.5 = {gain:.2}");
-    assert!(gain > 2.0 && gain < 8.0, "Gain 10 × 0.5 divider should be ~5: {gain:.2}");
+    assert!(
+        gain > 2.0 && gain < 8.0,
+        "Gain 10 × 0.5 divider should be ~5: {gain:.2}"
+    );
 }
 
 #[test]
 fn cascade_gain_then_unity_follower() {
     // Gain=10 → U2 unity follower → expected ~10 (follower is transparent).
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -727,9 +832,13 @@ fn cascade_gain_then_unity_follower() {
                 U2.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Gain + follower: gain={gain:.2}");
-    assert!(gain > 7.0 && gain < 13.0, "Gain 10 + follower should be ~10: {gain:.2}");
+    assert!(
+        gain > 7.0 && gain < 13.0,
+        "Gain 10 + follower should be ~10: {gain:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -739,7 +848,8 @@ fn cascade_gain_then_unity_follower() {
 #[test]
 fn output_at_opamp_out_pin() {
     // Output directly from U1.out. Should match the op-amp's computed output.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -755,16 +865,21 @@ fn output_at_opamp_out_pin() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Output @U1.out: gain={gain:.2}");
-    assert!(gain > 3.0 && gain < 7.0, "Gain 50k/10k should be ~5: {gain:.2}");
+    assert!(
+        gain > 3.0 && gain < 7.0,
+        "Gain 50k/10k should be ~5: {gain:.2}"
+    );
 }
 
 #[test]
 fn output_through_coupling_cap() {
     // Output through a coupling cap (blocks DC, passes AC).
     // At 440Hz with C=10µF, impedance ≈ 36Ω — should pass most signal.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -782,7 +897,8 @@ fn output_through_coupling_cap() {
                 C_out.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Output through 10µF cap: gain={gain:.2}");
     // Should be close to the op-amp gain of 5, slight attenuation from cap
     assert!(gain > 2.0, "Signal should pass through 10µF cap: {gain:.2}");
@@ -791,7 +907,8 @@ fn output_through_coupling_cap() {
 #[test]
 fn output_after_pot_wiper() {
     // Pot wiper connected to out. The extraction should read voltage at the wiper.
-    let gain = measure_gain_with_control(r#"
+    let gain = measure_gain_with_control(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(1k)
@@ -804,9 +921,73 @@ fn output_after_pot_wiper() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#, "Volume", 0.75);
+        }"#,
+        "Volume",
+        0.75,
+    );
     eprintln!("Output @wiper 75%: gain={gain:.4}");
-    assert!(gain > 0.5, "Wiper at 75% should give >50% signal: {gain:.4}");
+    assert!(
+        gain > 0.5,
+        "Wiper at 75% should give >50% signal: {gain:.4}"
+    );
+}
+
+#[test]
+fn output_after_multinl_named_pad() {
+    // Regression: a general MultiNL stage must read the named `out` node,
+    // not the first nonlinear port. At small signal the antiparallel diodes
+    // are effectively off, so this is just a resistive pad:
+    //   1k source + 9k top + 1k bottom => gain ≈ 1/11 = 0.091.
+    // If the stage falls back to the diode node, gain is roughly 10x higher.
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "test" { supply 9V
+            components {
+                R_src: resistor(1k)
+                D_pos: diode(silicon)
+                D_neg: diode(silicon)
+                R_pad_top: resistor(9k)
+                R_pad_bottom: resistor(1k)
+            }
+            nets {
+                in -> R_src.a
+                R_src.b -> clip
+                clip -> D_pos.a
+                D_pos.k -> gnd
+                gnd -> D_neg.a
+                D_neg.k -> clip
+                clip -> R_pad_top.a
+                R_pad_top.b -> out
+                out -> R_pad_bottom.a
+                R_pad_bottom.b -> gnd
+            }
+            controls {}
+        }"#,
+    )
+    .expect("parse");
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let mut stage = super::rigid::build_general_mna_from_edges(&all_edges, &graph, SR)
+        .expect("general MultiNL compile");
+
+    for s in 0..1000 {
+        let input = AMPLITUDE * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin();
+        stage.process(input);
+    }
+
+    let n_samples = (2.0 * SR / FREQ).ceil() as usize;
+    let mut peak = 0.0f64;
+    for s in 0..n_samples {
+        let input = AMPLITUDE * (std::f64::consts::TAU * FREQ * (1000 + s) as f64 / SR).sin();
+        peak = peak.max(stage.process(input).abs());
+    }
+
+    let gain = peak / AMPLITUDE;
+    eprintln!("MultiNL named output pad: gain={gain:.4}");
+    assert!(
+        gain > 0.04 && gain < 0.20,
+        "MultiNL should extract named out after pad, expected ~0.09, got {gain:.4}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -819,10 +1000,8 @@ fn load_legend(name: &str) -> crate::dsl::PedalDef {
         env!("CARGO_MANIFEST_DIR"),
         name
     );
-    let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Can't read {path}"));
-    crate::dsl::parse_pedal_file(&source)
-        .unwrap_or_else(|e| panic!("{name}: parse error: {e}"))
+    let source = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Can't read {path}"));
+    crate::dsl::parse_pedal_file(&source).unwrap_or_else(|e| panic!("{name}: parse error: {e}"))
 }
 
 fn legend_gain(name: &str) -> f64 {
@@ -849,7 +1028,10 @@ fn legend_screamer_gain_reasonable() {
     eprintln!("Screamer gain: {gain:.2}");
     // Screamer at default Drive (50%) should have moderate gain
     assert!(gain > 1.0, "Screamer should amplify: {gain:.2}");
-    assert!(gain < 100.0, "Screamer shouldn't be insanely loud: {gain:.2}");
+    assert!(
+        gain < 100.0,
+        "Screamer shouldn't be insanely loud: {gain:.2}"
+    );
 }
 
 #[test]
@@ -865,7 +1047,10 @@ fn legend_ratking_gain_reasonable() {
     let gain = legend_gain("ratking_non_invert_v1a");
     eprintln!("Ratking gain: {gain:.2}");
     assert!(gain > 1.0, "Ratking should amplify: {gain:.2}");
-    assert!(gain < 200.0, "Ratking shouldn't be insanely loud: {gain:.2}");
+    assert!(
+        gain < 200.0,
+        "Ratking shouldn't be insanely loud: {gain:.2}"
+    );
 }
 
 #[test]
@@ -873,7 +1058,10 @@ fn legend_goldenrod_gain_reasonable() {
     let gain = legend_gain("goldenrod");
     eprintln!("Goldenrod gain: {gain:.2}");
     assert!(gain > 0.5, "Goldenrod should produce output: {gain:.2}");
-    assert!(gain < 100.0, "Goldenrod shouldn't be insanely loud: {gain:.2}");
+    assert!(
+        gain < 100.0,
+        "Goldenrod shouldn't be insanely loud: {gain:.2}"
+    );
 }
 
 #[test]
@@ -889,7 +1077,10 @@ fn legend_rangemaster_gain_reasonable() {
     let gain = legend_gain("rangemaster");
     eprintln!("Rangemaster gain: {gain:.2}");
     assert!(gain > 1.0, "Rangemaster should boost: {gain:.2}");
-    assert!(gain < 100.0, "Rangemaster shouldn't be insanely loud: {gain:.2}");
+    assert!(
+        gain < 100.0,
+        "Rangemaster shouldn't be insanely loud: {gain:.2}"
+    );
 }
 
 #[test]

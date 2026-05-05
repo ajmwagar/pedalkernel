@@ -158,7 +158,7 @@ pub struct PedalDef {
     /// Mirrored pot mappings: mirrored_pot_id → source_pot_id.
     /// A mirrored pot's position is always `1.0 - source.position`.
     /// Used for dual-gang pots where one gang tracks inversely.
-    pub mirrors: std::collections::HashMap<String, String>,
+    pub mirrors: hashbrown::HashMap<String, String>,
     /// When true, auto-calibrate output level at compile time.
     pub calibrate: bool,
     /// Subcircuit definitions. When non-empty, the top-level `components` and
@@ -187,7 +187,7 @@ pub struct SubcircuitDef {
     /// Monitor definitions scoped to this subcircuit.
     pub monitors: Vec<MonitorDef>,
     /// Mirrored pot mappings within this subcircuit.
-    pub mirrors: std::collections::HashMap<String, String>,
+    pub mirrors: hashbrown::HashMap<String, String>,
 }
 
 impl PedalDef {
@@ -242,42 +242,7 @@ impl PartialEq for ComponentDef {
     }
 }
 
-/// Potentiometer taper type.
-///
-/// Following the Asian/European convention:
-/// - A (Audio/Logarithmic): Slow start, fast finish. Used for volume controls.
-/// - B (Linear): Proportional change. Used for tone/blend controls.
-/// - C (Reverse Log): Fast start, slow finish. Rare, for specific compensation.
-///
-/// Note: Some American manufacturers flip A and B. Always check datasheets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PotTaper {
-    /// Audio/Logarithmic taper - slow at start, fast at end (volume controls)
-    A,
-    /// Linear taper - proportional change (default for most controls)
-    #[default]
-    B,
-    /// Reverse logarithmic - fast at start, slow at end (rare)
-    C,
-}
-
-impl PotTaper {
-    /// Apply the taper curve to a linear position (0.0 to 1.0).
-    /// Returns the effective resistance ratio (0.0 to 1.0).
-    #[inline]
-    pub fn apply(self, pos: f64) -> f64 {
-        let pos = pos.clamp(0.0, 1.0);
-        match self {
-            // Linear: direct mapping
-            PotTaper::B => pos,
-            // Audio/Log: slow start, fast end
-            // Using (10^pos - 1) / 9 which gives ~10% at 50% rotation
-            PotTaper::A => (10.0_f64.powf(pos) - 1.0) / 9.0,
-            // Reverse log: fast start, slow end (inverse of A)
-            PotTaper::C => 1.0 - (10.0_f64.powf(1.0 - pos) - 1.0) / 9.0,
-        }
-    }
-}
+pub use crate::pot_taper::PotTaper;
 
 /// Op-amp types with different characteristics.
 /// Each type has distinct slew rate, gain-bandwidth product, and input impedance
@@ -2165,7 +2130,7 @@ fn parse_lfo(input: &str) -> IResult<&str, BoxComp> {
 
 fn components_section(
     input: &str,
-) -> IResult<&str, (Vec<ComponentDef>, std::collections::HashMap<String, String>)> {
+) -> IResult<&str, (Vec<ComponentDef>, hashbrown::HashMap<String, String>)> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("components")(input)?;
     let (input, _) = ws_comments(input)?;
@@ -2173,7 +2138,7 @@ fn components_section(
     let (input, pairs) = many0(component_def)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
-    let mut mirrors = std::collections::HashMap::new();
+    let mut mirrors = hashbrown::HashMap::new();
     let mut comps = Vec::with_capacity(pairs.len());
     for (comp, mirror_target) in pairs {
         if let Some(target) = mirror_target {
@@ -2783,7 +2748,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     } else if let Ok((rest, result)) = components_section(input) {
         (rest, result)
     } else {
-        (input, (Vec::new(), std::collections::HashMap::new()))
+        (input, (Vec::new(), hashbrown::HashMap::new()))
     };
     let (input, nets) = if subcircuits.is_empty() {
         nets_section(input)?

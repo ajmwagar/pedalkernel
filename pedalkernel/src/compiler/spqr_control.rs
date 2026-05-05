@@ -22,6 +22,17 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
         }
     }
 
+    // Create pot smoothers (one per control) for zipper-free updates.
+    // Without smoothers, set_control hits the fallback path which updates
+    // immediately (no interpolation between old and new position).
+    for (i, ctrl) in pedal.controls.iter().enumerate() {
+        if i < compiled.controls.len() {
+            compiled.pot_smoothers.push(
+                super::compiled::SmoothedParam::new(ctrl.default, i, compiled.sample_rate)
+            );
+        }
+    }
+
     // Apply defaults
     for ctrl in &pedal.controls {
         compiled.set_control(&ctrl.label, ctrl.default);

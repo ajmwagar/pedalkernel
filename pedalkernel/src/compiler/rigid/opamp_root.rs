@@ -1,19 +1,12 @@
-//! Op-amp root stage building for Rigid stages.
+//! Op-amp configuration extraction and root construction for Rigid stages.
 //!
-//! Uses the classified FlowGroup directly — no second DFS.
-//! Rf comes from feedback_edges, Ri from pendant_edges.
+//! Extracts Rf/Ri from FlowGroup feedback/pendant edges, computes gain,
+//! and creates OpAmpRoot with bias-derived rail limits.
 
 use super::super::component::EdgeKind;
-use super::super::dyn_node::DynNode;
 use super::super::signal_flow::FlowGroup;
-use super::super::graph::CircuitGraph;
-use super::super::stage::{RootKind, WdfStage};
-use super::super::wdf_leaf::WdfVoltageSource;
+use super::super::graph::{CircuitGraph, NodeId};
 use crate::elements::{OpAmpModel, OpAmpRoot};
-use crate::oversampling::{Oversampler, OversamplingFactor};
-
-use super::super::spqr_build::with_voltage_source;
-use super::super::graph::NodeId;
 
 /// Shared op-amp extraction from classified FlowGroup.
 pub(in crate::compiler) struct OpAmpConfig {
@@ -46,22 +39,39 @@ pub(in crate::compiler) fn extract_opamp_config(
         .kind
         .op_amp_type()
         .ok_or("VCVS component has no op_amp_type")?;
-    let model = OpAmpModel::from_opamp_type(&op_type);
+    let model = crate::model_lookup::opamp_model_from_type(&op_type);
 
     // Compute Rf and Ri from feedback edges.
-    // For non-inverting: edges touching GND are Ri (ground leg).
+    // For non-inverting: edges in the ground-return path are Ri (ground leg).
     // All other resistive feedback edges are Rf (neg→out).
     // For inverting: all feedback edges are Rf; Ri comes from pendant/graph.
+    //
+    // Ground-return detection: a resistor "touches ground" if either of its
+    // nodes is GND, an AC ground, or connects to GND through a reactive
+    // element (cap/inductor). Example: R_hp → C_hp → GND means R_hp is
+    // in the ground-return path (Ri at mid frequencies).
+    let reaches_gnd = |node: NodeId| -> bool {
+        if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
+            return true;
+        }
+        // Check if any reactive neighbor of this node connects to GND
+        graph.edges.iter().any(|e2| {
+            let other = if e2.node_a == node { e2.node_b }
+                else if e2.node_b == node { e2.node_a }
+                else { return false };
+            let c2 = &graph.components[e2.comp_idx];
+            (c2.kind.capacitance().is_some() || c2.kind.inductance().is_some())
+                && (other == graph.gnd_node || graph.ac_ground_nodes.contains(&other))
+        })
+    };
+
     let mut rf = 0.0f64;
     let mut ri_from_feedback = 0.0f64;
     for &eidx in &group.feedback_edges {
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
         if let Some(r) = comp.kind.resistance() {
-            let touches_gnd = e.node_a == graph.gnd_node
-                || e.node_b == graph.gnd_node
-                || graph.ac_ground_nodes.contains(&e.node_a)
-                || graph.ac_ground_nodes.contains(&e.node_b);
+            let touches_gnd = reaches_gnd(e.node_a) || reaches_gnd(e.node_b);
             if !inverting && touches_gnd {
                 ri_from_feedback += r;
             } else {
@@ -116,53 +126,28 @@ pub(in crate::compiler) fn extract_opamp_config(
 }
 
 /// Create an OpAmpRoot from config, with sample rate and supply voltage set.
-pub(in crate::compiler) fn make_opamp_root(config: &OpAmpConfig, sample_rate: f64) -> OpAmpRoot {
-    let supply_voltage: f64 = 9.0; // TODO: propagate from PedalDef
+///
+/// `supply_voltage` comes from the PedalDef's supply declaration.
+/// `bias_v_max` is (v_rail_pos, v_rail_neg) from `Component::apply_bias()`.
+/// If None, falls back to symmetric supply/2 - headroom.
+pub(in crate::compiler) fn make_opamp_root(
+    config: &OpAmpConfig,
+    sample_rate: f64,
+    supply_voltage: f64,
+    bias_v_max: Option<(f64, f64)>,
+) -> OpAmpRoot {
     let mut root = if config.inverting {
         OpAmpRoot::new_inverting(config.model, config.gain)
     } else {
         OpAmpRoot::new_non_inverting(config.model, config.gain)
     };
     root.set_sample_rate(sample_rate);
-    root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5));
+    if let Some((pos, neg)) = bias_v_max {
+        root.set_v_rails(pos, neg);
+    } else {
+        root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5));
+    }
     root
 }
 
-/// Build an OpAmpRoot stage from a classified FlowGroup.
-pub(in crate::compiler) fn build_opamp_root(
-    group: &FlowGroup,
-    inverting: bool,
-    graph: &CircuitGraph,
-    sample_rate: f64,
-) -> Result<WdfStage, String> {
-    let config = extract_opamp_config(group, inverting, graph)?;
-    // Rf=0 is valid: unity-gain buffer (direct neg→out connection)
-    let root = make_opamp_root(&config, sample_rate);
-
-    // Build WDF tree from pendant edges (input coupling)
-    let tree = if !group.pendant_edges.is_empty() {
-        // Create DynNode from pendant passive components
-        let pendant_leaf = group.pendant_edges.iter().find_map(|&eidx| {
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            comp.kind.make_leaf(&comp.id, sample_rate)
-        });
-        if let Some(leaf) = pendant_leaf {
-            with_voltage_source(leaf)
-        } else {
-            DynNode::Leaf(Box::new(WdfVoltageSource {
-                voltage: 0.0,
-                rp: 1.0,
-                is_cathode_bias: false,
-            }))
-        }
-    } else {
-        DynNode::Leaf(Box::new(WdfVoltageSource {
-            voltage: 0.0,
-            rp: 1.0,
-            is_cathode_bias: false,
-        }))
-    };
-
-    let oversampler = Oversampler::new(OversamplingFactor::X1);
-    Ok(WdfStage::new(tree, RootKind::OpAmp(root), oversampler))
-}
+// build_opamp_root() removed — zero callers. Use make_opamp_root() directly.

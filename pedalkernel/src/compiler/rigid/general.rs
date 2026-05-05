@@ -22,12 +22,11 @@ use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use super::super::helpers::gummel_poon_model;
 use super::super::signal_flow::FlowGroup;
-use super::super::spqr_build::with_voltage_source;
 use super::super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
     ScatteringRecomputeData, WdfStage, NR_ITERATION_BUDGET,
 };
-use super::super::wdf_leaf::WdfVoltageSource;
+use super::super::wdf_leaf::{LeafKind, WdfVoltageSource};
 use super::opamp_root::{extract_opamp_config, make_opamp_root};
 use super::{is_inverting_topology, StageStats};
 use crate::elements::*;
@@ -47,29 +46,119 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     stats: &StageStats,
     graph: &CircuitGraph,
     sample_rate: f64,
+    supply_voltage: f64,
+    bias_v_max: Option<(f64, f64)>,
 ) -> Result<WdfStage, String> {
     let inverting = is_inverting_topology(stats, graph);
     let config = extract_opamp_config(group, inverting, graph)?;
-    let mut opamp = make_opamp_root(&config, sample_rate);
+    let mut opamp = make_opamp_root(&config, sample_rate, supply_voltage, bias_v_max);
 
-    // Find NL active edge → build diode root for proper harmonic clipping
-    let nl_edge_idx = group
+    // Collect ALL NL active edges
+    let nl_edge_indices: Vec<usize> = group
         .active_edges
         .iter()
-        .find(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
-        .ok_or("General stage has no NL edge")?;
+        .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
+        .copied()
+        .collect();
 
-    let e = &graph.edges[*nl_edge_idx];
-    let comp = &graph.components[e.comp_idx];
-    let (nl_kind, _) = comp
-        .kind
-        .classify_nonlinear(&comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names)
-        .ok_or_else(|| format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id))?;
+    if nl_edge_indices.is_empty() {
+        return Err("General stage has no NL edge".to_string());
+    }
 
-    let (root, base_diode_model) = create_root(&nl_kind, false);
+    // Classify all NL edges
+    let mut nl_kinds: Vec<(NonlinearKind, usize)> = Vec::new(); // (kind, edge_idx)
+    for &eidx in &nl_edge_indices {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if let Some((kind, _)) = comp.kind.classify_nonlinear(
+            &comp.id,
+            e.node_a,
+            e.node_b,
+            graph.gnd_node,
+            &graph.node_names,
+        ) {
+            nl_kinds.push((kind, eidx));
+        }
+    }
 
-    // Tree from pendant edges (input coupling)
-    let tree = build_pendant_tree(&group.pendant_edges, graph, sample_rate);
+    // Detect antiparallel diode pairs from separate diode components.
+    // Two SingleDiode edges between the same pair of nodes (with swapped polarity)
+    // form an antiparallel pair → synthesize a DiodePair root using the first diode's model.
+    let (root, base_diode_model) = if nl_kinds.len() >= 2 {
+        let mut synthesized = false;
+        let mut result_root = None;
+        let mut result_model = None;
+
+        // Check each pair of diode edges for antiparallel topology
+        for i in 0..nl_kinds.len() {
+            for j in (i + 1)..nl_kinds.len() {
+                if let (
+                    (NonlinearKind::SingleDiode(dt_a), eidx_a),
+                    (NonlinearKind::SingleDiode(dt_b), eidx_b),
+                ) = (&nl_kinds[i], &nl_kinds[j])
+                {
+                    let ea = &graph.edges[*eidx_a];
+                    let eb = &graph.edges[*eidx_b];
+                    // Antiparallel: node_a↔node_b swapped (same two nodes, opposite polarity)
+                    let antiparallel = (ea.node_a == eb.node_b && ea.node_b == eb.node_a)
+                        || (ea.node_a == eb.node_a && ea.node_b == eb.node_b);
+                    if antiparallel {
+                        // Use the higher-Vf diode's model for the pair.
+                        // For asymmetric pairs (SD-1: silicon + germanium), this gives
+                        // approximately correct symmetric clipping at the silicon threshold.
+                        // TODO: implement AsymmetricDiodePairRoot for exact behavior.
+                        use crate::dsl::DiodeType;
+                        let dt = if dt_a == dt_b {
+                            *dt_a
+                        } else {
+                            // Pick silicon (higher Vf) for now
+                            match (dt_a, dt_b) {
+                                (DiodeType::Silicon, _) | (_, DiodeType::Silicon) => {
+                                    DiodeType::Silicon
+                                }
+                                _ => *dt_a,
+                            }
+                        };
+                        let model = super::super::helpers::diode_model(dt);
+                        result_root = Some(super::super::stage::RootKind::ExplicitDiodePair(
+                            ExplicitDiodePairRoot::new(model),
+                        ));
+                        result_model = Some(model);
+                        synthesized = true;
+                        break;
+                    }
+                }
+            }
+            if synthesized {
+                break;
+            }
+        }
+
+        if synthesized {
+            (result_root.unwrap(), result_model)
+        } else {
+            // Multiple NL edges but not antiparallel — use the first one
+            create_root(&nl_kinds[0].0, false)
+        }
+    } else {
+        create_root(&nl_kinds[0].0, false)
+    };
+
+    // VS with op-amp output impedance as source resistance.
+    //
+    // No pendant tree. The pendant edges (input coupling: Cin, R_b1, etc.)
+    // are either in their own SPQR passive stage or provide DC bias handled
+    // by bias_analysis. They don't affect the diode clipping — the diode
+    // sees the op-amp's output impedance, not the input coupling impedance.
+    //
+    // The gain is already computed from Rf/Ri by extract_opamp_config and
+    // applied by OpAmpRoot.compute_vs_voltage(). The VS output IS the
+    // op-amp output voltage. The diode clips it.
+    let tree = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
+        voltage: 0.0,
+        rp: config.model.output_impedance,
+        is_cathode_bias: false,
+    }));
 
     let oversampler = Oversampler::new(OversamplingFactor::X2);
     let mut stage = WdfStage::new(tree, root, oversampler);
@@ -93,58 +182,9 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
     Ok(stage)
 }
 
-/// Build a WDF tree from pendant edges, or a bare voltage source if none.
-pub(super) fn build_pendant_tree(pendant_edges: &[usize], graph: &CircuitGraph, sample_rate: f64) -> DynNode {
-    if !pendant_edges.is_empty() {
-        if let Some(leaf) = pendant_edges.iter().find_map(|&eidx| {
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            comp.kind.make_leaf(&comp.id, sample_rate)
-        }) {
-            return with_voltage_source(leaf);
-        }
-    }
-    DynNode::Leaf(Box::new(WdfVoltageSource {
-        voltage: 0.0,
-        rp: 1.0,
-        is_cathode_bias: false,
-    }))
-}
-
-/// Build a proper WDF tree from a set of passive edges using SPQR decomposition.
-///
-/// Unlike `build_pendant_tree` (which grabs one leaf), this builds the full
-/// Series/Parallel topology from the graph structure. Use for zi (input coupling)
-/// and zf (feedback network) in the OpAmpWdfAdaptor.
-///
-/// Returns None if SPQR decomposition fails or produces no passive tree.
-pub(super) fn build_spqr_tree(
-    edge_indices: &[usize],
-    graph: &CircuitGraph,
-    terminals: &[NodeId],
-    sample_rate: f64,
-) -> Option<DynNode> {
-    if edge_indices.is_empty() {
-        return None;
-    }
-    let tree_terminals = super::super::spqr_build::compute_group_terminals(edge_indices, graph, terminals);
-    let spqr = super::super::spqr::spqr_decompose(
-        edge_indices, &tree_terminals, graph, graph.gnd_node,
-    );
-    super::super::spqr::spqr_to_dyn_node(&spqr, graph, sample_rate)
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // General MNA + NR solver
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Build from a classified FlowGroup.
-pub(in crate::compiler) fn build_general_mna(
-    group: &FlowGroup,
-    graph: &CircuitGraph,
-    sample_rate: f64,
-) -> Result<MultiNlStage, String> {
-    build_general_mna_from_edges(&group.all_edges(), graph, sample_rate)
-}
 
 /// Build from raw edge indices (no FlowGroup required).
 pub(in crate::compiler) fn build_general_mna_from_edges(
@@ -154,7 +194,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
 ) -> Result<MultiNlStage, String> {
     let oversampling = OversamplingFactor::X2;
     let effective_rate = sample_rate * oversampling.ratio() as f64;
-    let supply_voltage = 9.0; // TODO: pass from PedalDef
+    let supply_voltage = 9.0; // TODO(#bias): pass from PedalDef via build_rigid_from_group
 
     // Step 1: Collect unique MNA nodes
     let mut node_set = collect_mna_nodes(all_edges, graph);
@@ -207,9 +247,16 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
     );
 
     // Step 4: Build WDF ports
-    let (mut ports, port_node_pairs, passive_children, mut nl_port_resistances) =
-        build_wdf_ports(&nl_terminals, &reactive_edges, graph, &node_to_mna, n_nl, all_edges);
+    let (mut ports, port_node_pairs, passive_children, mut nl_port_resistances) = build_wdf_ports(
+        &nl_terminals,
+        &reactive_edges,
+        graph,
+        &node_to_mna,
+        n_nl,
+        all_edges,
+    );
     let n_passive = passive_children.len();
+    let extract_output_nodes = node_to_mna(graph.out_node).map(|out| (Some(out), None));
 
     // Step 5: Derive scattering matrix + Thevenin adaptation
     let (scattering, vcc_injection_vec) =
@@ -218,8 +265,12 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
     let n_total = ports.len();
 
     // Step 6: DC bias from VCC injection
-    let (dc_bias, vcc_bias_all) =
-        compute_dc_bias(vcc_injection_vec.as_deref(), &nl_kinds, n_nl, supply_voltage);
+    let (dc_bias, vcc_bias_all) = compute_dc_bias(
+        vcc_injection_vec.as_deref(),
+        &nl_kinds,
+        n_nl,
+        supply_voltage,
+    );
 
     // Step 7: Create NL device groups
     let (nl_devices, device_groups) = create_nl_devices(&nl_kinds)?;
@@ -243,6 +294,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
         oversampling,
         graph,
         pot_stamps,
+        extract_output_nodes,
     )
 }
 
@@ -290,16 +342,35 @@ fn classify_nl_devices(
         let comp = &graph.components[e.comp_idx];
         let (kind, _) = comp
             .kind
-            .classify_nonlinear(&comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names)
+            .classify_nonlinear(
+                &comp.id,
+                e.node_a,
+                e.node_b,
+                graph.gnd_node,
+                &graph.node_names,
+            )
             .ok_or_else(|| format!("NL edge {} ({}) didn't classify", eidx, comp.id))?;
 
         match &kind {
-            NonlinearKind::BjtNpn { base_node, collector_node, emitter_node, .. }
-            | NonlinearKind::BjtPnp { base_node, collector_node, emitter_node, .. } => {
+            NonlinearKind::BjtNpn {
+                base_node,
+                collector_node,
+                emitter_node,
+                ..
+            }
+            | NonlinearKind::BjtPnp {
+                base_node,
+                collector_node,
+                emitter_node,
+                ..
+            } => {
                 nl_terminals.push((*base_node, *emitter_node));
                 nl_terminals.push((*collector_node, *emitter_node));
                 for &n in &[*base_node, *collector_node, *emitter_node] {
-                    if !node_set.contains(&n) && n != graph.gnd_node && !graph.supply_nodes.contains(&n) {
+                    if !node_set.contains(&n)
+                        && n != graph.gnd_node
+                        && !graph.supply_nodes.contains(&n)
+                    {
                         node_set.push(n);
                     }
                 }
@@ -326,7 +397,9 @@ fn check_vcc_needed(
     all_edges.iter().any(|&eidx| {
         let e = &graph.edges[eidx];
         e.node_a == graph.vcc_node || e.node_b == graph.vcc_node
-    }) || nl_terminals.iter().any(|&(p, n)| p == graph.vcc_node || n == graph.vcc_node)
+    }) || nl_terminals
+        .iter()
+        .any(|&(p, n)| p == graph.vcc_node || n == graph.vcc_node)
 }
 
 /// Step 3: Build MNA system and stamp passive edges (skip NL).
@@ -415,7 +488,12 @@ fn build_wdf_ports(
     node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
     n_nl: usize,
     edge_indices: &[usize],
-) -> (Vec<WdfPort>, Vec<(Option<usize>, Option<usize>)>, Vec<DynNode>, Vec<f64>) {
+) -> (
+    Vec<WdfPort>,
+    Vec<(Option<usize>, Option<usize>)>,
+    Vec<DynNode>,
+    Vec<f64>,
+) {
     let r_nl_default = 1000.0;
     let r_adapted = 1000.0;
     let mut ports = Vec::with_capacity(n_nl + reactive_edges.len() + 1);
@@ -426,7 +504,11 @@ fn build_wdf_ports(
     for (i, &(pos_node, neg_node)) in nl_terminals.iter().enumerate() {
         let pos = node_to_mna(pos_node);
         let neg = node_to_mna(neg_node);
-        ports.push(WdfPort { node_pos: pos, node_neg: neg, resistance: nl_port_resistances[i] });
+        ports.push(WdfPort {
+            node_pos: pos,
+            node_neg: neg,
+            resistance: nl_port_resistances[i],
+        });
         port_node_pairs.push((pos, neg));
     }
 
@@ -437,7 +519,11 @@ fn build_wdf_ports(
         let pos = node_to_mna(e.node_a);
         let neg = node_to_mna(e.node_b);
         let rp = dyn_node.port_resistance();
-        ports.push(WdfPort { node_pos: pos, node_neg: neg, resistance: rp });
+        ports.push(WdfPort {
+            node_pos: pos,
+            node_neg: neg,
+            resistance: rp,
+        });
         port_node_pairs.push((pos, neg));
         passive_children.push(dyn_node.clone());
     }
@@ -457,10 +543,19 @@ fn build_wdf_ports(
             }
         })
     });
-    ports.push(WdfPort { node_pos: injection_mna, node_neg: None, resistance: r_adapted });
+    ports.push(WdfPort {
+        node_pos: injection_mna,
+        node_neg: None,
+        resistance: r_adapted,
+    });
     port_node_pairs.push((injection_mna, None));
 
-    (ports, port_node_pairs, passive_children, nl_port_resistances)
+    (
+        ports,
+        port_node_pairs,
+        passive_children,
+        nl_port_resistances,
+    )
 }
 
 /// Step 5: Derive scattering matrix + iterative Thevenin adaptation.
@@ -508,12 +603,16 @@ fn derive_scattering(
         }
         if let Some(vcc_idx) = vcc_vs_idx {
             let (s, inj) = mna.derive_scattering_and_vs_injection(ports, vcc_idx);
-            if s.iter().any(|v| !v.is_finite()) { break; }
+            if s.iter().any(|v| !v.is_finite()) {
+                break;
+            }
             scattering = s;
             vcc_injection = Some(inj);
         } else {
             let s = mna.derive_scattering_matrix_general(ports);
-            if s.iter().any(|v| !v.is_finite()) { break; }
+            if s.iter().any(|v| !v.is_finite()) {
+                break;
+            }
             scattering = s;
         }
     }
@@ -553,7 +652,9 @@ fn compute_dc_bias(
                 }
                 port_idx += 2;
             }
-            _ => { port_idx += 1; }
+            _ => {
+                port_idx += 1;
+            }
         }
     }
 
@@ -565,7 +666,10 @@ fn create_nl_devices(
     nl_kinds: &[NonlinearKind],
 ) -> Result<(Vec<NlDeviceKind>, Option<MultiNlDeviceGroups>), String> {
     let all_bjt = nl_kinds.iter().all(|k| {
-        matches!(k, NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. })
+        matches!(
+            k,
+            NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
+        )
     });
 
     if all_bjt && !nl_kinds.is_empty() {
@@ -576,11 +680,15 @@ fn create_nl_devices(
             offsets.push(offset);
             match kind {
                 NonlinearKind::BjtNpn { model_name, .. } => {
-                    groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(gummel_poon_model(model_name))));
+                    groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(
+                        gummel_poon_model(model_name),
+                    )));
                     offset += 2;
                 }
                 NonlinearKind::BjtPnp { model_name, .. } => {
-                    groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new_pnp(gummel_poon_model(model_name))));
+                    groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new_pnp(
+                        gummel_poon_model(model_name),
+                    )));
                     offset += 2;
                 }
                 _ => unreachable!(),
@@ -618,11 +726,14 @@ fn assemble_multi_nl_stage(
     oversampling: OversamplingFactor,
     graph: &CircuitGraph,
     pot_stamps: Vec<PotStamp>,
+    extract_output_nodes: Option<(Option<usize>, Option<usize>)>,
 ) -> Result<MultiNlStage, String> {
     let scattering_blocks = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
     let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
     let r_adapted = 1000.0;
+    let extract_coeffs = extract_output_nodes
+        .map(|(out_pos, out_neg)| mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg));
 
     // Output port: last CE port for BJTs, first NL port otherwise
     let output_port = if let Some(ref dg) = device_groups {
@@ -664,9 +775,11 @@ fn assemble_multi_nl_stage(
         nl_port_resistances,
         passive_children,
         pot_children: pot_stamps.iter().map(|ps| ps.leaf.clone()).collect(),
-        pot_mna_stamps: pot_stamps.iter().enumerate().map(|(i, ps)| {
-            (i, ps.mna_pos, ps.mna_neg, ps.initial_conductance)
-        }).collect(),
+        pot_mna_stamps: pot_stamps
+            .iter()
+            .enumerate()
+            .map(|(i, ps)| (i, ps.mna_pos, ps.mna_neg, ps.initial_conductance))
+            .collect(),
         n_nl,
         v_prev: initial_v.clone(),
         scattering: scattering_blocks,
@@ -680,9 +793,12 @@ fn assemble_multi_nl_stage(
             adapted_resistance: r_adapted,
             vs_source_index: None,
             vcc_vs_index: vcc_vs_idx,
-            extract_output_nodes: None,
+            extract_output_nodes,
         }),
         signal_flow_distance: 0,
+        #[cfg(debug_assertions)]
+        debug_label: String::new(),
+        bypass_serial: false,
         transformer_gain: 1.0,
         injection_node_id: graph.in_node,
         output_node_id: graph.out_node,
@@ -693,7 +809,7 @@ fn assemble_multi_nl_stage(
         feedback_pot_id: None,
         linearized_ota: None,
         vs_injection: None,
-        extract_coeffs: None,
+        extract_coeffs,
         extract_vs: 0.0,
         state_space: None,
         iir: None,

@@ -25,7 +25,7 @@ pub(super) struct BuiltMna {
 /// 3. Component stamping (resistors, caps/inductors, VCVS)
 /// 4. Pendant tree port resistance stamping
 /// 5. Input voltage source injection at `graph.in_node`
-/// 6. Output node resolution (VCVS out or `graph.out_node`)
+/// 6. Output node resolution (`graph.out_node` when present, otherwise VCVS out)
 pub(super) fn build_mna(
     edge_indices: &[usize],
     pendant_trees: &[(DynNode, NodeId)],
@@ -180,24 +180,36 @@ pub(super) fn build_mna(
     // back to the VCVS neg node (for multi-stage pedals where the global
     // input is in a different stage).
     let injection_mna = node_to_mna(graph.in_node).or_else(|| {
-        graph.nullor_pins.iter()
-            .find(|rec| edge_indices.iter().any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx))
+        graph
+            .nullor_pins
+            .iter()
+            .find(|rec| {
+                edge_indices
+                    .iter()
+                    .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+            })
             .and_then(|rec| node_to_mna(rec.neg_node))
     });
     mna.stamp_voltage_source(injection_mna, None, vs_idx);
 
-    // Output node: VCVS out node (if present) or graph.out_node
-    let output_node = graph
-        .nullor_pins
-        .iter()
-        .find(|rec| {
-            edge_indices
-                .iter()
-                .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
-        })
-        .map(|rec| rec.out_node)
-        .unwrap_or(graph.out_node);
-    let output_mna = node_to_mna(output_node);
+    // Output node: if this rigid group contains the circuit's named `out`
+    // terminal, sample that node. Otherwise fall back to the active device's
+    // output node for mid-chain stages.
+    //
+    // This matters for module/pedal output pads: `U1.out -> R -> out -> R -> gnd`
+    // must extract at `out`, not at `U1.out`, or the pad only loads the circuit
+    // and never attenuates the returned signal.
+    let output_mna = node_to_mna(graph.out_node).or_else(|| {
+        graph
+            .nullor_pins
+            .iter()
+            .find(|rec| {
+                edge_indices
+                    .iter()
+                    .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+            })
+            .and_then(|rec| node_to_mna(rec.out_node))
+    });
 
     Ok(BuiltMna {
         mna,

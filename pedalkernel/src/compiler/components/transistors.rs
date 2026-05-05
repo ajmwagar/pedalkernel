@@ -1,6 +1,6 @@
 //! Transistor component structs: Npn, Pnp, NJfet, PJfet, Nmos, Pmos.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
@@ -153,6 +153,10 @@ impl Component for Npn {
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
     }
+    fn port_semantic(&self, _pin_a: &str, _pin_b: &str) -> crate::compiler::component::PortSemantic {
+        // All BJT ports (B-E, C-E, B-C) are nonlinear junctions.
+        crate::compiler::component::PortSemantic::Nonlinear
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -293,6 +297,9 @@ impl Component for Pnp {
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
     }
+    fn port_semantic(&self, _pin_a: &str, _pin_b: &str) -> crate::compiler::component::PortSemantic {
+        crate::compiler::component::PortSemantic::Nonlinear
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -361,7 +368,7 @@ impl Component for NJfet {
     }
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
-        let model = JfetModel::by_name(&self.model);
+        let model = crate::model_lookup::jfet_model_by_name(&self.model);
         Some(DynNode::JfetVrNode(
             comp_id.to_string(),
             JfetVariableResistor::new(model),
@@ -452,6 +459,16 @@ impl Component for NJfet {
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
     }
+    fn port_semantic(&self, pin_a: &str, pin_b: &str) -> crate::compiler::component::PortSemantic {
+        let pins = [pin_a, pin_b];
+        if pins.contains(&"gate") {
+            // Gate junction is nonlinear (diode)
+            crate::compiler::component::PortSemantic::Nonlinear
+        } else {
+            // Drain-source: controlled conductance (Vgs modulates Rds)
+            crate::compiler::component::PortSemantic::ControlledConductance
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -520,7 +537,7 @@ impl Component for PJfet {
     }
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
-        let model = JfetModel::by_name(&self.model);
+        let model = crate::model_lookup::jfet_model_by_name(&self.model);
         Some(DynNode::JfetVrNode(
             comp_id.to_string(),
             JfetVariableResistor::new(model),
@@ -610,6 +627,14 @@ impl Component for PJfet {
     }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
+    }
+    fn port_semantic(&self, pin_a: &str, pin_b: &str) -> crate::compiler::component::PortSemantic {
+        let pins = [pin_a, pin_b];
+        if pins.contains(&"gate") {
+            crate::compiler::component::PortSemantic::Nonlinear
+        } else {
+            crate::compiler::component::PortSemantic::ControlledConductance
+        }
     }
 }
 
@@ -742,6 +767,14 @@ impl Component for Nmos {
     fn is_gain_device(&self) -> bool {
         true
     }
+    fn port_semantic(&self, pin_a: &str, pin_b: &str) -> crate::compiler::component::PortSemantic {
+        let pins = [pin_a, pin_b];
+        if pins.contains(&"gate") {
+            crate::compiler::component::PortSemantic::Nonlinear
+        } else {
+            crate::compiler::component::PortSemantic::ControlledConductance
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -872,5 +905,13 @@ impl Component for Pmos {
     }
     fn is_gain_device(&self) -> bool {
         true
+    }
+    fn port_semantic(&self, pin_a: &str, pin_b: &str) -> crate::compiler::component::PortSemantic {
+        let pins = [pin_a, pin_b];
+        if pins.contains(&"gate") {
+            crate::compiler::component::PortSemantic::Nonlinear
+        } else {
+            crate::compiler::component::PortSemantic::ControlledConductance
+        }
     }
 }

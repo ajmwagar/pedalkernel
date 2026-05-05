@@ -7,8 +7,8 @@
 //! 4. Modeling active elements (transistors, opamps) as gain stages
 //! 5. Chaining everything into a cascaded `PedalProcessor`
 
+mod bias_analysis;
 mod bind;
-mod bjt_bias_analysis;
 mod build;
 mod calibrate;
 mod classify;
@@ -16,6 +16,7 @@ mod compile;
 mod compiled;
 pub mod component;
 pub mod components;
+mod coupling;
 mod dyn_node;
 mod graph;
 mod signal_flow;
@@ -77,3 +78,34 @@ mod zero_output_tests;
 mod pot_binding_tests;
 #[cfg(test)]
 mod black_feedback_tests;
+#[cfg(test)]
+mod diode_polarity_tests;
+#[cfg(test)]
+mod bias_analysis_tests;
+#[cfg(test)]
+mod bias_application_tests;
+#[cfg(test)]
+mod ground_clip_tests;
+#[cfg(test)]
+mod passive_wdf_tests;
+#[cfg(test)]
+mod goldenrod_pot_tests;
+#[cfg(test)]
+mod goldenrod_signal_chain_tests;
+#[cfg(test)]
+mod group_terminal_tests;
+#[cfg(test)]
+mod feedforward_tests;
+#[cfg(test)]
+mod ratking_signal_chain_tests;
+#[cfg(test)]
+mod harmonic_tests;
+#[cfg(test)]
+mod tone_stage_tests;
+#[cfg(test)]
+mod pot_binding_investigation_tests;
+#[cfg(test)]
+mod pot_wiper_tests;
+// incremental_recompute_tests moved to pedalkernel-rt/tests/incremental_recompute.rs
+#[cfg(test)]
+mod opamp_gain_tests;

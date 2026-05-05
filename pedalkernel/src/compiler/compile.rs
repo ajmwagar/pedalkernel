@@ -140,8 +140,6 @@ fn compile_subcircuit_equipment(
         oversampling: crate::oversampling::OversamplingFactor::X1,
         opamp_stages: Vec::new(),
         power_supply: None,
-        #[cfg(debug_assertions)]
-        debug_stats: None,
         metrics_accumulator: None,
         metrics_buffer: None,
         input_loading: None,
@@ -153,14 +151,14 @@ fn compile_subcircuit_equipment(
         subcircuit_output_idx: Some(output_idx),
         subcircuit_outputs: vec![0.0; n],
         pot_smoothers: Vec::new(),
-        pot_mirrors: std::collections::HashMap::new(),
+        pot_mirrors: hashbrown::HashMap::new(),
         base_grid_bias: 0.0,
         multi_nl_recompute_counter: 0,
         node_signals: Vec::new(),
         bbd_wet_mix: 0.5,
         bbd_mix_pot_id: None,
         triggers: Vec::new(),
-        original_passive_values: std::collections::HashMap::new(),
+        original_passive_values: hashbrown::HashMap::new(),
     })
 }
 
