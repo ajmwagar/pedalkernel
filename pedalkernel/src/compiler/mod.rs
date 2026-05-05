@@ -109,3 +109,5 @@ mod pot_wiper_tests;
 // incremental_recompute_tests moved to pedalkernel-rt/tests/incremental_recompute.rs
 #[cfg(test)]
 mod opamp_gain_tests;
+#[cfg(test)]
+mod coupling_tests;
