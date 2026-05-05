@@ -103,7 +103,20 @@ impl StageStats {
     }
 }
 
-fn group_nonlinear_edges_are_diode_family(edge_indices: &[usize], graph: &CircuitGraph) -> bool {
+/// Check if all nonlinear edges in a group are 1-port NL devices suitable
+/// for the WDF explicit diode solver (Wright Omega or NR single-port).
+///
+/// Returns true if: at least one NL edge exists, AND all NL edges are
+/// single-port nonlinear (diode family). Multi-port NL devices (BJT, JFET,
+/// tube) require general MNA and return false.
+///
+/// Uses port_semantic() to identify NL edges, then checks is_diode_family()
+/// for solver compatibility. This is the correct check because the WDF
+/// opamp+diode feedback path specifically creates DiodePair/SingleDiode roots.
+fn group_nl_edges_are_single_port_solvable(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+) -> bool {
     let mut found_nonlinear = false;
 
     for &edge_idx in edge_indices {
@@ -113,6 +126,8 @@ fn group_nonlinear_edges_are_diode_family(edge_indices: &[usize], graph: &Circui
 
         found_nonlinear = true;
         let comp = &graph.components[graph.edges[edge_idx].comp_idx];
+        // Must be a 1-port NL device (diode family) for the WDF solver.
+        // Multi-port NL (BJT, JFET, tube) can't use this path.
         if !comp.kind.is_diode_family() {
             return false;
         }
@@ -657,7 +672,7 @@ pub(super) fn build_rigid_from_group(
             if let Some(g) = group {
                 if stats.vcvs_count == 1
                     && stats.nl_count > 0
-                    && group_nonlinear_edges_are_diode_family(&edge_indices, graph)
+                    && group_nl_edges_are_single_port_solvable(&edge_indices, graph)
                 {
                     return build_opamp_nl_feedback(
                         g,
