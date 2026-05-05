@@ -3,7 +3,7 @@ title: "Controls and pots"
 description: "How runtime control updates flow through the engine — binding, dispatch, and what each pot movement actually costs."
 section: "Internals"
 weight: 87
-source_commit: "95744ce1cdd9c2cdec3550bfdce9879b1737312c"
+source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
 preview: true
 watches:
   - pedalkernel/src/compiler/spqr_control.rs
@@ -122,7 +122,11 @@ let sum = r1 + r2;
 *gamma = r2 / sum;
 ```
 
-So: one or two adds, a multiply, one or two divisions per node. A typical WDF tree has 5–20 nodes. Total cost per pot change is on the order of 20–60 floating-point operations. **Zero allocation.** The full scattering-matrix recompute is more expensive (it's linear in the tree size but involves more per-node math) and is throttled — batched every 32 samples by `flush_recompute()` rather than run per sample.
+So: one or two adds, a multiply, one or two divisions per node. **Zero allocation.**
+
+The cost story improved recently. `DynNode::Binary` now carries two new fields — `dirty: bool` and `has_dynamic: bool` — and pot updates only touch the path from the changed leaf up to its root, skipping any subtree that has no variable leaves at all. For a typical tone stack with one tone pot, that's `O(log n)` work per pot change instead of walking all 5–20 nodes. The full-walk path is still available as a fallback (compile-time setup, stages that haven't migrated). The full scattering-matrix recompute remains throttled — batched every 32 samples by `flush_recompute()` rather than run per sample.
+
+`FeedbackConfig`, the older type that held precomputed op-amp gain coefficients centrally, is deprecated. The op-amp's dynamic feedback divider is now read off the live WDF tree via `notify_pot_changed()` + `recompute_incremental()`, so a feedback-path pot change goes straight from `set_pot_dirty()` on the leaf to gain re-derivation without crossing a stale cache.
 
 ### IIR stages
 

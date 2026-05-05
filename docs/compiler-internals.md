@@ -3,7 +3,7 @@ title: "Compiler internals"
 description: "SPQR decomposition, stage routing, and the compiler passes that turn a .pedal file into a runnable processor."
 section: "Internals"
 weight: 85
-source_commit: "95744ce1cdd9c2cdec3550bfdce9879b1737312c"
+source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
 preview: true
 watches:
   - pedalkernel/src/compiler/mod.rs
@@ -227,6 +227,59 @@ Pots are graph edges whose resistance the user modulates at runtime. The compile
 
 The goal is zero allocation per control change. Pots can be swept at audio rate without glitching.
 
+## Coupling-aware optimisation
+
+The compiler doesn't just decide *which* stage variant a subgraph becomes — it also decides whether a particular optimisation is *legal*. The classic foot-gun: lowering a subgraph to a linear IIR biquad is great for performance, but if a nonlinear element shares a node with a capacitor in that same subgraph, the biquad model can't represent the time-domain coupling between them. You'd get a working pedal that sounded subtly wrong.
+
+The legality check is driven by `port_semantic()` on each component (see [the Component trait](./component-trait.md#port-semantics-and-coupling-aware-optimisation)) and a small set of predicates in `compiler/coupling.rs`:
+
+- `has_coupling_barrier(graph, edges)` — any edge in the subgraph is `Nonlinear` or `ControlledConductance`. Generic optimisation barrier.
+- `has_reactive_state(graph, edges)` — any edge is `Reactive` (capacitor, inductor).
+- `has_nl_reactive_coupling(graph, edges)` — a `Nonlinear` edge shares a circuit node with a `Reactive` edge. **The decisive test for IIR legality.**
+- `device_parallels_passive(comp_id, edge, edges, graph)` — a nonlinear or controlled-conductance device sits in parallel with a passive element. Used by passive-extraction edge cases.
+
+`has_nl_reactive_coupling` deliberately excludes `ControlledConductance` from the barrier set: pots can be lowered to IIR because pot recompute updates biquad coefficients on demand. Only nonlinear I(V) curves create coupling that IIR fundamentally cannot model.
+
+Two lowering paths in `classify_rigid()` consult this predicate before committing:
+
+1. The single-VCVS linear path (reactive feedback to ground with resistive divider) — IIR is the cheap home, but only if no nonlinearity touches the reactive node.
+2. The all-linear-passive path that goes straight to a biquad — same gate.
+
+If either fires, the subgraph falls back to `General` (rigid linear or multi-NL solver) and stays heavier but correct.
+
+This generalised system replaced a set of topology-specific exceptions. The clearest example: the old `bjt_collector_emitter_parallels_resistor()` check was a hard-coded BJT-shunt detector wired into one passive-extraction edge case. Its replacement, `device_parallels_passive()`, doesn't know what a BJT is — it asks `port_semantic()` whether the device is `Nonlinear` or `ControlledConductance`, then checks the graph topology. Adding a new device family doesn't require touching the optimiser; the trait override carries the information through.
+
+## The pedalkernel-rt crate
+
+The runtime — everything you need to *evaluate* a compiled pedal at audio rate — lives in a sibling crate, `pedalkernel-rt`, that compiles `no_std + alloc`. The split is:
+
+- **`pedalkernel`** keeps the DSL parser, the SPQR/coupling pipeline, the graph analysis, layout/KiCad/BOM exporters — anything that runs once at compile time.
+- **`pedalkernel-rt`** keeps `WdfStage`, `IirStage`, the `Stage` enum, `DynNode`, `WdfLeaf` and the `LeafKind` enum, MNA, oversampling, loading, metering, thermal, the nonlinear roots, and `crate::math` wrappers.
+- The main crate re-exports the runtime types it cares about (`pub use pedalkernel_rt::PedalProcessor;`) so consumers don't have to know about the split.
+
+Two pieces are worth flagging because they look unfamiliar in code:
+
+**`LeafKind` enum.** WDF leaves used to be `Box<dyn WdfLeaf>` — a heap-allocated trait object. `no_std` builds without an allocator can't ergonomically use trait objects (Box requires `alloc`; trait-object dispatch wants vtables that play badly with serde). The enum replacement names every concrete leaf type as a variant — `Resistor`, `Capacitor`, `Inductor`, `VoltageSource`, `Pot`, `Photocoupler`, `JfetVr`, `SwitchedResistor`, `LeakyCapacitor`, `UnitDelay` — and dispatches by `match`. Adding a new leaf type means adding an enum variant and arms in three or four match statements.
+
+**`crate::math` wrappers.** `f64::sin`, `f64::exp`, etc. are inherent methods that only exist with `std`. The math module wraps each of them: on `std` it's `#[inline(always)] x.sin()`, on `no_std` it's `libm::sin(x)`. Code in `pedalkernel-rt` calls `crate::math::sin(x)` rather than `x.sin()`. There's also a `fast_math` module with LUT-based `exp` and `tanh` for the hot paths inside the nonlinear root solvers.
+
+`HashMap` similarly migrated from `std::collections` to `hashbrown` so it works in both worlds.
+
+## Incremental WDF recompute
+
+Pot updates used to walk the entire WDF tree to recompute every adaptor coefficient. With dirty-flag tracking, recomputation only touches the path from a changed leaf up to its root, and skips entire subtrees that have no dynamic leaves at all.
+
+Two new fields on `DynNode::Binary`:
+
+- `dirty: bool` — does this node need its `gamma` / `b1` / `b2` re-derived?
+- `has_dynamic: bool` — does any leaf below this node have variable impedance?
+
+`compute_dynamic_flags()` walks the tree once at compile time, marking `has_dynamic` on every ancestor of every dynamic leaf (pot, photocoupler, JFET-VR, switched resistor). At runtime, `set_pot_dirty()` walks from the changed leaf upward and flips `dirty` on each ancestor. `recompute_incremental()` then skips any node whose `has_dynamic` is false (purely static subtree) or whose `dirty` is false (already up-to-date).
+
+For a typical tone stack with a single tone pot, this means roughly `O(log n)` work per pot change instead of `O(n)`. The full recompute path is preserved as a fallback for compile-time setup and for stages that haven't migrated yet.
+
+`FeedbackConfig`, the older central type that held precomputed op-amp gain coefficients, is on its way out. The dynamic feedback divider is now read off the live tree via `notify_pot_changed()` + `recompute_incremental()`, and the type is deprecated rather than load-bearing.
+
 ## Current status
 
 This branch is active development. The SPQR path is the only path — the old six-pass pipeline was deleted wholesale (6700 lines of tests with it).
@@ -242,9 +295,10 @@ If you want to follow the code:
 - **`compiler::spqr_build`** — top-level compiler entry point. `compile_via_spqr_with_options` is the function the rest of this page describes.
 - **`compiler::spqr`** — SPQR tree construction and pendant extraction.
 - **`compiler::signal_flow`** — directed BFS, OutputImpedance barriers, group assembly.
-- **`compiler::stage`** — stage variants including `BlackFeedbackStage` and `NonIdealFxState`.
-- **`compiler::compiled`** — the `Stage` enum and helper accessors.
+- **`compiler::coupling`** — `port_semantic()`-driven legality predicates (`has_coupling_barrier`, `has_nl_reactive_coupling`, `device_parallels_passive`).
+- **`compiler::rigid::mod`** — `classify_rigid()` and the lowering legality gates.
 - **`compiler::rigid::opamp_root`** — OpAmpRoot WDF element for multi-VCVS feedback.
 - **`compiler::spqr_control`** — control binding and pot update propagation.
+- **`pedalkernel-rt`** — runtime types: stages, `Stage` enum, `DynNode`, `LeafKind`, `WdfLeaf`, MNA, oversampling, loading, metering, thermal, nonlinear roots, and `crate::math` wrappers.
 
 For the external API that wraps all of this, see the [Rust API](./api.md) page.
