@@ -3,7 +3,7 @@ title: "How it works"
 description: "The WDF compilation pipeline — from .pedal file to per-sample processing."
 section: "Guide"
 weight: 10
-source_commit: "95744ce1cdd9c2cdec3550bfdce9879b1737312c"
+source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
 preview: true
 watches:
   - pedalkernel/src/compiler/
