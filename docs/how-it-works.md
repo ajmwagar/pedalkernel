@@ -27,28 +27,26 @@ Roughly:
 
 3. **Signal-flow grouping** — Active elements whose outputs behave as voltage sources (op-amps, unity-gain buffers) act as *barriers* in the signal flow. Passives between barriers form one group; each group will become one or more stages. The barriers matter because on the output side of an op-amp, the upstream circuit can't load it — impedance is effectively zero — so there's no WDF benefit to treating the full passive network as one tree.
 
-4. **Per-group SPQR decomposition** — Each signal-flow group is decomposed:
-   - An **acyclic passive group** becomes a WDF tree via series/parallel reduction.
-   - A **single-VCVS feedback group** (one op-amp with passive feedback) becomes a `BlackFeedbackStage` — gain computed from Harold Black's formula, `Rf / Ri`, extracted from the graph.
-   - A **multi-VCVS or complex feedback group** becomes an `OpAmpRoot` embedded in a WDF tree, with an MNA adaptor handling the irreducible rigid part.
-   - A **pot-divider group** is special-cased as `Parallel(R_aw, R_wb)` so pot positions map to resistances directly.
-   - An **irreducible rigid subgraph** falls back to one of the matrix-based solvers: MNA, IIR (when linear), state-space, or multi-NL.
+4. **Per-group decomposition** — Each signal-flow group is routed by `compiler::plan::plan_stages`:
+   - **Multiple nonlinear elements** in one rigid group become a single multi-NL stage that solves them all together via Newton-Raphson on an R-type adaptor.
+   - **One nonlinear element** triggers three upgrade checks first (vari-mu 3-port, BJT 2-port, envelope-controlled OTA) — any of which promote it into a coupled multi-NL stage. Otherwise it lands in a plain WDF tree built by series/parallel reduction.
+   - **All-passive** groups become WDF trees too; if the rigid residual is linear, it can carry a precomputed biquad cascade (IIR fast path) or state-space matrix as an internal optimisation.
+   - **Unclaimed op-amps** (bridged-T, multi-path) fall through to a nullor pass that absorbs them into a multi-NL R-type stage with VCVS stamping.
 
-5. **Stage-list consolidation** — Every stage is pushed into a single `Vec<Stage>` in processing order. Five stage kinds live in that enum: `Wdf`, `MultiNl`, `Iir`, `StateSpace`, and `BlackFeedback`. The order is topological — downstream stages read the upstream ones.
+5. **Stage assembly** — stages land in a few separate vectors: ordinary WDF stages, multi-NL stages, push-pull pairs (Fairchild-style differential triodes), and bare op-amp stages. A `stage_order` index threads the WDF and multi-NL stages into topological order; push-pull and op-amp stages process on their own schedule.
 
 6. **Control binding** — Pot controls declared in the `.pedal` file are bound to the stages that contain them. When the user moves a pot at runtime, only the affected stages recompute.
 
 ## Per-sample processing
 
-A compiled pedal processes one sample at a time by walking the stage list in order. Each stage kind runs its own code path:
+A compiled pedal processes one sample at a time by walking the stage order and dispatching to the right vector. Each stage kind runs its own code path:
 
-- **WDF stages** run the classic four phases: scatter up from leaves to root, root solve on the nonlinear element (Wright Omega explicit solver for diodes and zeners, Newton-Raphson for tubes and BJTs with the Koren and Ebers-Moll / Gummel-Poon equations, square-law for FETs), scatter down, then state update on capacitors and inductors.
-- **BlackFeedback stages** apply a linear gain to their input — no iterative solver. If a pendant tree (input coupling network) is attached, that part is run as passive WDF first.
-- **IIR stages** run biquad or higher-order filter cascades; the compiler converts series-parallel passive networks into biquads when no nonlinearity is present.
-- **State-space stages** run a small `y = Cx + Du; x = Ax + Bu` update for rigid linear subcircuits.
-- **MultiNL stages** run a Newton-Raphson iteration over a bundle of nonlinear devices whose interactions cannot be factored into separate roots.
+- **WDF stages** run the classic four phases: scatter up from leaves to root, root solve on the nonlinear element (Wright Omega explicit solver for diodes and zeners, Newton-Raphson for tubes and BJTs with the Koren and Ebers-Moll / Gummel-Poon equations, square-law for FETs), scatter down, then state update on capacitors and inductors. Some WDF stages have purely-passive roots (`Passthrough`, `CapacitorRoot`, `PassiveRType`) and skip the root solve.
+- **Multi-NL stages** run a multi-port Newton-Raphson over the coupled nonlinear devices on the R-type adaptor. If their `iir` or `state_space` field is set (linear-only passive children), the runtime takes that fast path instead.
+- **Push-pull stages** evaluate two coupled triode halves as one block.
+- **Op-amp stages** run an `OpAmpRoot` solve directly without a surrounding WDF tree.
 
-Finally, every stage output passes through a shared **non-ideality post-processor** — a gain-bandwidth low-pass, a slew-rate limiter, and device-aware rail saturation. This is where op-amp character (TL072 vs. LM308 vs. JRC4558) mostly lives, once the feedback topology has already set the gain.
+Finally, every op-amp output passes through a shared **non-ideality post-processor** — a gain-bandwidth low-pass, a slew-rate limiter, and device-aware rail saturation. This is where op-amp character (TL072 vs. LM308 vs. JRC4558) mostly lives.
 
 ## Example: Big Muff topology
 
