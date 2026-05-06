@@ -16,7 +16,7 @@ watches:
 
 # Modeling Limits
 
-> **Preview.** The op-amp section reflects the `BlackFeedbackStage` + `NonIdealFxState` split being developed on the `feature/spqr-tree` branch. On `main` today, op-amps use the older single-path `OpAmpRoot`-in-WDF-tree approach. See [compiler internals](./compiler-internals.md) for the in-progress architecture.
+> **Preview.** The op-amp section reflects the SPQR-era op-amp routing developed on the `feature/spqr-tree` branch — `OpAmpRoot`-in-WDF-tree with the `NonIdealFxState` post-processor, plus the multi-NL nullor fallback for bridged-T and multi-path topologies. See [compiler internals](./compiler-internals.md) for the in-progress architecture.
 
 PedalKernel is circuit-exact where it can be and pragmatic where it has to be. This page documents where the current implementation falls short of pure component modeling, so expectations are calibrated and contributors know where to push.
 
@@ -43,7 +43,7 @@ Per-device parameters — Shockley Is/n for diodes, Koren parameters for tubes, 
 
 These are modeled with a physical story but simplified for real-time cost or for modeling uncertainty.
 
-**Op-amp feedback topology** is now extracted from the circuit graph. Single-VCVS acyclic feedback groups (one op-amp with passive feedback) compile to a `BlackFeedbackStage` whose gain is computed via Harold Black's formula — `Rf / Ri` for inverting, `1 + Rf / Ri` for non-inverting — with `Rf` and `Ri` read off the graph. Multi-VCVS or irreducible-rigid feedback compiles to an `OpAmpRoot` embedded in a WDF tree with an MNA adaptor. Gain recomputes when a feedback-path pot changes. What is still approximate: closed-loop dynamics are handled by a post-processing layer rather than as part of the scattering matrix — see the next note.
+**Op-amp feedback topology** is now extracted from the circuit graph. The compiler builds an `OpAmpRoot` inside a WDF tree, reading the feedback resistor `Rf` and the input resistor `Ri` off the graph; gain emerges from `Rf / Ri` for inverting topologies and `1 + Rf / Ri` for non-inverting, recomputed on each pot change. For circuits where the op-amp doesn't fit a clean WDF root — bridged-T filters, multi-VCVS feedback, ring loops — a nullor pass absorbs the op-amp into a multi-NL R-type stage, stamping the VCVS into the MNA. What is still approximate: closed-loop dynamics are handled by a post-processing layer rather than as part of the scattering matrix — see the next note.
 
 **Op-amp non-idealities** (gain-bandwidth product, slew rate, rail saturation) are applied as a shared post-processor on top of every stage type, not as WDF elements. This means GBW-induced phase shift, slew-induced HF compression, and rail clipping all sit downstream of the scattering matrix. For most pedal circuits this is inaudible, but for precision topologies (servo loops, active filters where GBW is a design variable) it is a simplification worth knowing about.
 

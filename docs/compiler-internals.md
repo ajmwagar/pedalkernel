@@ -18,7 +18,7 @@ watches:
 
 # Compiler Internals
 
-> **Preview.** This page describes the SPQR compiler architecture being developed on the `feature/spqr-tree` branch. Some of what is covered here — signal-flow grouping, `BlackFeedbackStage`, the unified `Vec<Stage>` — is not yet on `main`. The overall shape is stable; specific type names and file paths may move before the branch merges. Published here ahead of the merge so contributors can read along with the implementation.
+> **Preview.** This page describes the SPQR compiler architecture being developed on the `feature/spqr-tree` branch. Most of what is covered here — signal-flow grouping, the `port_semantic`-driven coupling barriers, the `pedalkernel-rt` extraction, the multi-NL `iir` / `state_space` fast-path fields — is not yet on `main`. The overall shape is stable; specific type names and file paths may still move before the branch merges. Published here ahead of the merge so contributors can read along with the implementation.
 
 This page is for contributors. It documents the architecture of the compiler that lives under `pedalkernel/src/compiler/` — the data structures, the decomposition algorithm, and the routing decisions that send each part of a circuit to the right solver.
 
@@ -48,21 +48,21 @@ This is exactly what an **SPQR decomposition** does in graph theory: it breaks a
                                   (active barriers)
                                            │
                                            ▼
-                        ┌──── Per-group decomposition ────┐
+                        ┌──── plan_stages routing ────────┐
                         │                                  │
-                Feedback group               Acyclic passive group
-                        │                                  │
-                        ▼                                  ▼
-                  Rigid stage                     SPQR tree
-                 (OpAmpRoot or                  (S / P / Q / R)
-                  BlackFeedback)                       │
+                Single-NL upgrade                 All-passive
+                or multi-NL group                       │
                         │                              ▼
-                        │                        WDF / IIR / state-space
-                        │                                 │
-                        └─────────────┬───────────────────┘
+                        ▼                        SPQR tree
+                  MultiNlStage                  (S / P / Q / R)
+                  (R-type adaptor,                    │
+                   optional iir /                     ▼
+                   state_space fields)            WdfStage
+                        │                              │
+                        └─────────────┬────────────────┘
                                       ▼
-                                Vec<Stage>
-                                (topological order)
+                          Stage vectors + StageRef
+                          topological order
                                       │
                                       ▼
                                 CompiledPedal
@@ -142,57 +142,49 @@ After pendant extraction, `C1 → gnd` is peeled off as a Q-leaf (gnd is a rail 
 
 ## Stage variants
 
-Every stage the compiler emits is one of five kinds, stored in a single `Vec<Stage>`:
+Stages live in four parallel vectors on `CompiledPedal`, not a single tagged enum:
 
 ```rust
-pub(super) enum Stage {
-    Wdf(WdfStage),
-    MultiNl(MultiNlStage),
-    Iir(IirStage),
-    StateSpace(StateSpaceStage),
-    BlackFeedback(BlackFeedbackStage),
-}
+stages: Vec<WdfStage>,             // wave-domain stages, the workhorse
+multi_nl_stages: Vec<MultiNlStage>,// rigid linear or coupled-nonlinear blocks
+opamp_stages: Vec<OpAmpStage>,     // bare OpAmpRoot stages (rare)
+push_pull_stages: Vec<PushPullStage>, // differential triode pairs
+stage_order: Vec<StageRef>,        // topological traversal of WDF + MultiNL
 ```
 
-When each fires:
+`StageRef` itself is a slim two-variant enum (`Wdf(usize)` / `MultiNl(usize)`) that indexes into the first two vecs. Push-pull and bare op-amp stages are processed outside that ordering — push-pull tubes after the WDF passes, op-amp stages on a different schedule. There is **no** top-level `Stage` enum and no single `Vec<Stage>`.
 
-- **`Wdf`** — an SPQR tree that terminates in at least one nonlinear root (diode, JFET, MOSFET, tube, BJT, zener, OTA). Per-sample solver: scatter up → root solve (Wright Omega for diodes and zeners, Newton-Raphson for everything else) → scatter down → state update. Clipping stages specifically use an `OpAmpWdfAdaptor` that feeds input coupling (`zi`) and feedback impedance (`zf`) into an `OpAmpRoot` so gain emerges from the `Zf / Zi` ratio instead of a precomputed scalar.
-- **`Iir`** — a purely linear series-parallel network. The compiler converts passive tone stacks, filters, and coupling networks into biquad or higher-order cascades when no nonlinearity is present. Much faster than running them as WDF trees.
-- **`StateSpace`** — a linear rigid subgraph. `y = Cx + Du; x' = Ax + Bu`. Good for small matrix subcircuits like some high-order filters and multi-feedback networks.
-- **`MultiNl`** — a rigid nonlinear subgraph where multiple nonlinear devices interact and cannot be factored into independent roots (e.g. a differential pair of BJTs with shared tail current). One Newton-Raphson over a small state vector.
-- **`BlackFeedback`** — a single-VCVS acyclic feedback group (op-amp with passive feedback). Gain from Harold Black's formula, no iterative solve. Covered in detail below.
+What each kind covers:
 
-Stages are stored in topological order so processing just walks the vec. Helper accessors (`as_wdf`, `as_iir`, etc.) return `Option<&T>` for safe downcasting.
+- **`WdfStage`** is the workhorse. Carries an SPQR tree, a `RootKind` at the root, and the output extraction. The `RootKind` enum has roughly twenty variants, grouped into:
+  - **Diode family** — `DiodePair`, `SingleDiode`, plus their explicit (Wright Omega) twins `ExplicitDiodePair` and `ExplicitSingleDiode`. New diode stages compile to the explicit form by default.
+  - **Tubes** — `Triode`, `Pentode`, `VariMu`. Newton-Raphson on the Koren equation.
+  - **Semiconductors** — `Jfet`, `JfetVr` (LFO-modulated source-follower for variable-resistor mode), `Mosfet`, `Ota`, `OpAmp`.
+  - **Zener** — `Zener` for breakdown clamping.
+  - **Passive-only roots** — `Passthrough` (`b = a`), `ShortCircuit` (`a = -b`), `VoltageSourceDriver`, `CapacitorRoot`, `InductorRoot`, `ResistiveTermination`. Used when an SPQR tree has no nonlinearity but the compiler wants the wave-domain semantics anyway (proper port termination, correct VS injection).
+  - **`PassiveRType`** — an MNA-derived R-type adaptor for passive networks that aren't series-parallel reducible.
+- **`MultiNlStage`** is a rigid block: an R-type adaptor with a multi-port Newton-Raphson solver wrapped around it. Holds a vector of single-port nonlinear devices (`NlDeviceKind`) and optionally a coupled `NlDeviceGroupKind` (3-port triode/pentode, 2-port BJT, Ebers-Moll BJT). Two important escape hatches live as fields on the same struct: `iir: Option<IirData>` and `state_space: Option<StateSpaceData>`. When the passive children of the R-type are linear-only, the compiler precomputes a biquad cascade (`iir`) for series-parallel-reducible passives, or a state-space matrix (`state_space`) for rigid passives. The runtime picks the cheapest available path; IIR wins over state-space when both are populated.
+- **`OpAmpStage`** wraps a single `OpAmpRoot` for the rare case where an op-amp doesn't fit any of the other paths.
+- **`PushPullStage`** processes Fairchild-style differential triode pairs as one unit so the two halves stay phase-coherent.
 
-## BlackFeedbackStage
+A previous `BlackFeedbackStage` for single-VCVS feedback groups was prototyped and removed. The op-amp feedback path is now uniformly an `OpAmpRoot` inside a `WdfStage`.
 
-Most op-amp circuits in guitar pedals are single-amp with passive feedback. Solving them as full WDF trees is overkill — a closed-loop gain of `Rf / Ri` from Harold Black's feedback equation gives the right answer at a fraction of the cost.
+## Stage selection
 
-`BlackFeedbackStage` compiles such groups directly:
+Stage routing happens in `compiler::plan::plan_stages` (not in a `classify_rigid()` function — that name is gone). The decision tree, in order, for each signal-flow group:
 
-```rust
-pub(super) struct BlackFeedbackStage {
-    rf: f64,                    // feedback resistance (can follow a pot)
-    ri: f64,                    // input resistance (fixed)
-    inverting: bool,
-    fx_state: NonIdealFxState,  // GBW / slew / rails post-processor
-    stored_gbw: f64,
-    sample_rate: f64,
-    signal_flow_distance: usize,
-}
-```
+1. **Multiple nonlinear elements** in one rigid group → `MultiNlPlan`. The R-type adaptor stamps every nonlinearity as an exposed port, and the runtime solves them all together.
+2. **Single nonlinear element**, coupled to passives. Before defaulting to a plain WDF tree, three upgrade checks run in order:
+   - `try_varimu_3port` — promotes a vari-mu triode to a 3-port group with grid + plate exposed.
+   - `try_bjt_two_port` — promotes a BJT to a 2-port group with base + collector exposed.
+   - `try_linearized_ota` — promotes an envelope-controlled OTA into a coupled multi-NL solve.
+   If any of those fire, the group becomes a `MultiNlStage` with a coupled device group instead of a `WdfStage`. Otherwise it falls through to `plan_single_nl` and the single-NL WDF path.
+3. **All-passive** — falls to a feedforward `WdfStage` build, then either keeps wave-domain semantics (passive RootKind) or, for a linear rigid block, ends up wrapped inside a `MultiNlStage` with the `iir` or `state_space` field populated for fast evaluation.
+4. **Unclaimed op-amps** (bridged-T, multi-path) trigger a nullor fallback that absorbs the op-amp into a synthetic `MultiNlPlan` with VCVS stamping into the MNA.
 
-Runtime per sample:
+The coupling-aware legality checks from the previous section gate paths 3 and 4: if a subgraph would otherwise lower to a linear IIR/state-space form but `has_nl_reactive_coupling()` is true, it falls back to a heavier solver.
 
-1. If a pendant tree (input coupling network) hangs off the inverting input, run it as passive WDF to get the pre-gain voltage.
-2. Multiply by the Black gain: `Rf / Ri` (inverting) or `1 + Rf / Ri` (non-inverting).
-3. Pass the result through the non-ideality post-processor (next section).
-
-The compiler extracts `Rf` and `Ri` by walking the feedback path in the circuit graph. For a non-inverting topology, `Rf` is any feedback edge not touching GND; `Ri` is any group edge touching GND with resistance. For inverting, the roles flip around the summing junction.
-
-When the feedback path contains a pot (drive, distortion, sustain controls), moving the pot calls `set_feedback_pot_r()` which recomputes the gain and updates the GBW coefficient. See the "Pot binding" section below.
-
-The fallback for circuits this stage can't handle — multi-VCVS, nested feedback, rigid irreducible subgraphs — is still `OpAmpRoot` embedded in a full WDF tree with an MNA adaptor at the rigid part.
+There used to be a "pot divider special case" path. It is gone. Pots are passive edges that participate in the normal SPQR reduction; the three-terminal split (`__aw` / `__wb`) is a control-binding concern, documented in the [controls and pots](./controls-and-pots.md) page.
 
 ## NonIdealFxState
 
@@ -214,7 +206,7 @@ Three operations in series, applied to every stage output:
 2. **Slew rate limit** — clamps `|Δv|` per sample to the device's rated slew. LM308 is 0.4 V/µs; TL072 is 13 V/µs. Slew limiting at high drive levels is audible HF compression.
 3. **Rail saturation** — a soft clipper at `v_max ≈ supply / 2 − 1.5 V`, shaped per device family. Op-amps use a symmetric quintic knee; BJT output stages use asymmetric saturation; etc.
 
-Because this is stage-type-independent, it attaches to `BlackFeedbackStage`, `OpAmpRoot`-using `WdfStage`s, and anywhere else an op-amp output is the final value.
+Because this is stage-type-independent, it attaches to any stage whose final value is an op-amp output — `OpAmpRoot`-using `WdfStage`s, multi-NL stages with op-amp ports, dedicated `OpAmpStage`s.
 
 ## Pot binding
 
@@ -223,7 +215,7 @@ Pots are graph edges whose resistance the user modulates at runtime. The compile
 1. `set_control("Drive", 0.7)` dispatches to every bound pot.
 2. Each pot's `set_pot(name, position)` updates the component resistance.
 3. Stages containing that pot get `notify_pot_changed()`.
-4. For a feedback-path pot, `notify_pot_changed()` reads the new resistance and calls `OpAmpRoot::set_feedback_pot_r()` (or the equivalent on `BlackFeedbackStage`).
+4. For a feedback-path pot, `notify_pot_changed()` reads the new resistance and calls `OpAmpRoot::set_feedback_pot_r()`.
 5. The gain is recomputed. `NonIdealFxState::update_gain()` recalculates the GBW coefficient so the bandwidth tracks the new closed-loop gain.
 6. `recompute_all()` propagates the update through WDF port resistances if the pot lives inside a WDF tree.
 
@@ -286,7 +278,7 @@ For a typical tone stack with a single tone pot, this means roughly `O(log n)` w
 
 This branch is active development. The SPQR path is the only path — the old six-pass pipeline was deleted wholesale (6700 lines of tests with it).
 
-What works: all 13 legend pedals compile successfully; 7 of 9 produce correct audio; stage counts match expected values after signal-flow grouping. What is still red: some pot-sweep end-to-end tests, a handful of BlackFeedbackStage unit tests around multi-stage coupling, and OpAmpRoot gain recomputation for certain non-inverting topologies.
+What works: all 13 legend pedals compile successfully; the bulk produce correct audio; stage counts match expected values after signal-flow grouping; coupling-aware lowering gates correctly route bridged-T and similar topologies into multi-NL solvers. What is still red varies week to week — pot-sweep end-to-end tests, OpAmpRoot gain recomputation in particular non-inverting topologies, edge cases in the `iir` fast path inside multi-NL.
 
 Numbers are moving week to week. The test suite and the commit log are the source of truth.
 

@@ -25,7 +25,7 @@ One snapshot — a `UiMetrics` struct — is published every block (every ~128 s
 
 **Compression.** `gain_reduction_db` — sampled from the active compressor control voltage or, for tube-based compressors, the bias-shift deflection.
 
-**Per-stage levels.** `stage_levels[16]` — normalized RMS at the output of each stage in the pipeline. Every `Stage` variant participates (`Wdf`, `MultiNl`, `Iir`, `StateSpace`, `BlackFeedback`). `stage_count` reports how many are active.
+**Per-stage levels.** `stage_levels[16]` — normalized RMS at the output of each stage in the pipeline. Every stage kind participates (`WdfStage`, `MultiNlStage`, `OpAmpStage`, `PushPullStage`). `stage_count` reports how many are active.
 
 **Device state.** `tube_plate_current[12]` (mA) and `tube_dissipation[12]` (W) for up to 12 tubes, ready to drive a glow shader. `supply_voltage` and `supply_sag` for a "B+ droops under load" meter. `transformer_flux[4]` — currently a stub (zeroed; transformer saturation isn't computed yet).
 
@@ -98,7 +98,7 @@ There is no blocking-wait or callback API today. Polling at display rate is the 
 
 ## Stage integration
 
-All five `Stage` variants feed `stage_levels[]`. The process loop samples the post-stage output into the accumulator regardless of stage kind, so the array covers WDF trees, IIR biquads, state-space blocks, multi-NL solves, and BlackFeedback stages uniformly. For a wah-and-delay pedal you'd see one level per stage in the order the compiler placed them.
+All four stage kinds feed `stage_levels[]`. The process loop samples the post-stage output into the accumulator regardless of stage kind, so the array covers WDF trees (with all `RootKind` variants — passive or nonlinear), multi-NL R-type stages (whether they take the IIR or state-space fast path or solve the full coupled NR), op-amp stages, and push-pull triode pairs uniformly. For a wah-and-delay pedal you'd see one level per stage in the order the compiler placed them.
 
 Tube-specific fields are tapped from `RootKind::Triode` and `RootKind::Pentode` variants inside `Stage::Wdf`. For push-pull topologies both tubes are sampled independently so a glow shader can show them breathing out of phase.
 
