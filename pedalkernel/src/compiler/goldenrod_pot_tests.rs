@@ -168,6 +168,137 @@ fn goldenrod_treble_pot_changes_spectrum() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 4b. Gain sweep — signal at EVERY position including 100%
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn goldenrod_gain_100_not_dead() {
+    let positions = [0.0, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0];
+    let mut results = Vec::new();
+    for &pos in &positions {
+        let mut compiled = load_goldenrod();
+        compiled.set_control("Gain", pos);
+        let peak = measure_peak(&mut compiled, 0.1);
+        eprintln!("Gain={pos:.2}: peak={peak:.6}V");
+        results.push((pos, peak));
+    }
+    // All positions (except maybe 0 where it's intentional no-gain) should produce output
+    for &(pos, peak) in &results {
+        if pos > 0.1 {
+            assert!(peak > 0.001, "Signal dies at Gain={pos}: peak={peak:.6}V");
+        }
+    }
+    // 100% should not die
+    let full_peak = results.last().map(|(_, pk)| *pk).unwrap_or(0.0);
+    assert!(full_peak > 0.001, "Gain=1.0 should produce output: {full_peak:.6}V");
+
+    // Also check Output at 100%
+    let mut out100 = load_goldenrod();
+    out100.set_control("Output", 1.0);
+    let peak_out100 = measure_peak(&mut out100, 0.1);
+    eprintln!("Output=1.0: peak={peak_out100:.6}V");
+    assert!(peak_out100 > 0.001, "Output=1.0 should produce output: {peak_out100:.6}V");
+
+    // Per-stage levels at Gain=0 (where signal dies)
+    eprintln!("\nPer-stage at Gain=0.0:");
+    let mut g0 = load_goldenrod();
+    g0.set_control("Gain", 0.0);
+    // Print BF stage gains before processing
+    for (i, stage) in g0.stages.iter().enumerate() {
+        if let super::compiled::Stage::BlackFeedback(bf) = stage {
+            #[cfg(debug_assertions)]
+            eprintln!("  BF stage {i} [{}]: gain={:.2} bypass={}", bf.debug_label, bf.gain(), bf.bypass_serial);
+        }
+    }
+    // Also check WDF stages
+    for (i, stage) in g0.stages.iter().enumerate() {
+        if let super::compiled::Stage::Wdf(w) = stage {
+            #[cfg(debug_assertions)]
+            eprintln!("  WDF stage {i} [{}]: bypass={} feedforward={}", w.debug_label, w.bypass_serial, w.is_feedforward);
+        }
+    }
+    g0.enable_metering(128);
+    // Process with trace on a few samples
+    for s in 0..7990 {
+        g0.process(0.1 * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+    }
+    // Manual trace of last 10 samples through stages
+    eprintln!("\n  Signal trace (sample 7990):");
+    let input = 0.1 * (std::f64::consts::TAU * FREQ * 7990.0 / SR).sin();
+    let mut signal = input;
+    eprintln!("    input: {signal:.6}");
+    for (i, stage) in g0.stages.iter_mut().enumerate() {
+        let prev = signal;
+        match stage {
+            super::compiled::Stage::Wdf(w) => {
+                if !w.bypass_serial {
+                    signal = w.process(signal);
+                }
+            }
+            super::compiled::Stage::BlackFeedback(bf) => {
+                if !bf.bypass_serial {
+                    signal = bf.process(signal);
+                }
+            }
+            _ => {}
+        }
+        if (signal - prev).abs() > 0.0001 || i == 8 || i == 9 || i == 10 {
+            eprintln!("    stage {i}: {prev:.6} → {signal:.6} (×{:.2})", signal / prev.max(1e-10));
+        }
+    }
+    // Apply wiper dividers
+    for wd in &g0.wiper_dividers {
+        let prev = signal;
+        signal *= wd.position;
+        eprintln!("    wiper[{}] after_stage={}: {prev:.6} → {signal:.6} (×{:.4})", wd.pot_comp_id, wd.after_stage_idx, wd.position);
+    }
+    eprintln!("    final: {signal:.6}");
+
+    for s in 7990..8000 {
+        g0.process(0.1 * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+    }
+    let m0 = g0.read_metrics();
+    let n = g0.stages.len().min(crate::metering::MAX_STAGES);
+    for i in 0..n {
+        let lvl = m0.stage_levels[i];
+        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        #[cfg(debug_assertions)]
+        {
+            let lbl = match &g0.stages[i] {
+                super::compiled::Stage::Wdf(w) => &w.debug_label,
+                super::compiled::Stage::BlackFeedback(b) => &b.debug_label,
+                super::compiled::Stage::Iir(s) => &s.debug_label,
+                _ => &String::new(),
+            };
+            eprintln!("  stage {i}: [{lbl}] level={lvl:.6} ({db:.1} dB)");
+        }
+    }
+    eprintln!("  output: peak={:.1} dB", m0.output_peak_db);
+
+    // Wiper dividers + control targets
+    let diag = load_goldenrod();
+    eprintln!("\nControl targets:");
+    for ctrl in &diag.controls {
+        eprintln!("  '{}' comp={} target={:?}", ctrl.label, ctrl.component_id, ctrl.target);
+    }
+    eprintln!("\nWiper dividers ({}):", diag.wiper_dividers.len());
+    for wd in &diag.wiper_dividers {
+        eprintln!("  {} after_stage={} position={:.4} taper={:?}",
+            wd.pot_comp_id, wd.after_stage_idx, wd.position, wd.taper);
+    }
+
+    // Check Gain at 100% with Output at various levels
+    eprintln!("\nGain=1.0 with Output sweep:");
+    for out_pos in [0.3, 0.5, 0.7, 1.0] {
+        let mut c = load_goldenrod();
+        c.set_control("Gain", 1.0);
+        c.set_control("Output", out_pos);
+        let p = measure_peak(&mut c, 0.1);
+        eprintln!("  Gain=1.0, Output={out_pos:.1}: peak={p:.6}V");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 5. Gain pot increases harmonics (THD) — THE KEY BUG TEST
 //
 // Root cause: Gain_A (ground-leg pot in U2 non-inverting gain stage) is in

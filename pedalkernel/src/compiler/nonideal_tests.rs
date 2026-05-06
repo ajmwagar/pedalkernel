@@ -229,3 +229,181 @@ fn opamp_rails_clamp_output() {
         "Output should be rail-limited below 6V, got {output:.4}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Unit tests for NonIdealFxState directly (no compiler pipeline)
+// ═══════════════════════════════════════════════════════════════════════════
+
+use pedalkernel_rt::stage::{NonIdealFxState, apply_nonideal_fx};
+
+#[test]
+fn nonideal_fx_default_is_passthrough() {
+    let mut state = NonIdealFxState::default();
+    // gbw_coeff=1 means output tracks input exactly
+    assert_eq!(apply_nonideal_fx(1.0, &mut state), 1.0);
+    assert_eq!(apply_nonideal_fx(-0.5, &mut state), -0.5);
+    assert_eq!(apply_nonideal_fx(0.0, &mut state), 0.0);
+}
+
+#[test]
+fn nonideal_fx_gbw_filter_converges_at_dc() {
+    // GBW filter with any coeff should converge to the DC input after enough samples
+    let mut state = NonIdealFxState::from_params(
+        3e6,    // GBW = 3MHz (TL072)
+        13.0,   // slew = 13 V/µs
+        12.0,   // v_max = 12V
+        29.0,   // gain = 29 (fc = 103kHz)
+        48000.0,
+    );
+    // Feed DC=5.0 for 1000 samples → should converge
+    for _ in 0..1000 {
+        apply_nonideal_fx(5.0, &mut state);
+    }
+    let out = apply_nonideal_fx(5.0, &mut state);
+    eprintln!("GBW DC convergence: expected=5.0, got={out:.4}");
+    // With v_max=12V, 5V input is within rails so should converge close to 5.0
+    // Allow small tolerance for filter lag
+    assert!((out - 5.0).abs() < 0.5, "Should converge near DC: got {out:.4}");
+}
+
+#[test]
+fn nonideal_fx_gbw_passes_440hz_at_gain_29() {
+    // TL072 at gain=29: fc = 3MHz/29 = 103kHz
+    // 440Hz should pass with minimal attenuation
+    let mut state = NonIdealFxState::from_params(3e6, 13.0, 12.0, 29.0, 48000.0);
+    let sr = 48000.0;
+    // Warmup
+    for s in 0..4000 {
+        let signal = 3.0 * (std::f64::consts::TAU * 440.0 * s as f64 / sr).sin();
+        apply_nonideal_fx(signal, &mut state);
+    }
+    // Measure peak
+    let mut peak = 0.0f64;
+    for s in 4000..4500 {
+        let signal = 3.0 * (std::f64::consts::TAU * 440.0 * s as f64 / sr).sin();
+        peak = peak.max(apply_nonideal_fx(signal, &mut state).abs());
+    }
+    eprintln!("GBW 440Hz pass: input_peak=3.0, output_peak={peak:.4}");
+    // Should be very close to input (< 1dB attenuation at 440Hz with fc=103kHz)
+    assert!(peak > 2.5, "440Hz should pass at gain=29: peak={peak:.4}");
+}
+
+#[test]
+fn nonideal_fx_rails_clip_symmetrically() {
+    let mut state = NonIdealFxState::from_params(3e6, 13.0, 3.0, 1.0, 48000.0);
+    // Input of 10V should clip at 3V rail
+    for _ in 0..100 { apply_nonideal_fx(10.0, &mut state); }
+    let pos = apply_nonideal_fx(10.0, &mut state);
+    for _ in 0..100 { apply_nonideal_fx(-10.0, &mut state); }
+    let neg = apply_nonideal_fx(-10.0, &mut state);
+    eprintln!("Rail clip: +10→{pos:.2}, -10→{neg:.2} (rails=±3V)");
+    assert!(pos < 3.5 && pos > 2.0, "Positive rail: {pos:.2}");
+    assert!(neg > -3.5 && neg < -2.0, "Negative rail: {neg:.2}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BlackFeedback stage: NonIdealFx applied POST-GAIN
+//
+// The issue: BF process() = input * gain() then apply_nonideal_fx().
+// This means the GBW filter operates on the AMPLIFIED signal.
+// At 440Hz with gain=29 and fc=103kHz, the filter should barely attenuate.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn bf_stage_amplifies_then_nonidealfx() {
+    use pedalkernel_rt::stage::BlackFeedbackStage;
+    use pedalkernel_rt::nonideal_fx::NonIdealFx;
+
+    let fx = vec![
+        NonIdealFx::OpAmpBandwidth { gbw: 3e6, slew_rate: 13.0 },
+        NonIdealFx::RailSaturation { v_max: 7.0 },
+    ];
+    let mut bf = BlackFeedbackStage::new(422_000.0, 15_000.0, false, &fx, 48000.0);
+    // gain = 1 + 422k/15k = 29.13
+    eprintln!("BF gain: {:.2}", bf.gain());
+    assert!((bf.gain() - 29.13).abs() < 0.1);
+
+    // Process 440Hz tone at 0.05V amplitude (gained = 1.46V, within 7V rails)
+    let sr = 48000.0;
+    for s in 0..4000 {
+        let input = 0.05 * (std::f64::consts::TAU * 440.0 * s as f64 / sr).sin();
+        bf.process(input);
+    }
+    let mut peak = 0.0f64;
+    for s in 4000..4500 {
+        let input = 0.05 * (std::f64::consts::TAU * 440.0 * s as f64 / sr).sin();
+        peak = peak.max(bf.process(input).abs());
+    }
+    let effective_gain = peak / 0.05;
+    eprintln!("BF effective gain at 440Hz: {effective_gain:.2}x (expected ~29)");
+    assert!(effective_gain > 20.0, "Should amplify: gain={effective_gain:.2}");
+}
+
+#[test]
+fn bf_stage_with_low_rails_clips_not_zeros() {
+    use pedalkernel_rt::stage::BlackFeedbackStage;
+    use pedalkernel_rt::nonideal_fx::NonIdealFx;
+
+    // Simulate Goldenrod scenario: gain=29, rails=±3V (9V supply, 4.5V bias)
+    let fx = vec![
+        NonIdealFx::OpAmpBandwidth { gbw: 3e6, slew_rate: 13.0 },
+        NonIdealFx::RailSaturation { v_max: 3.0 },
+    ];
+    let mut bf = BlackFeedbackStage::new(422_000.0, 15_000.0, false, &fx, 48000.0);
+
+    // 0.1V input × 29 gain = 2.9V → just at rail threshold
+    // 0.2V input × 29 gain = 5.8V → clipped at 3V
+    let sr = 48000.0;
+    for s in 0..4000 {
+        let input = 0.2 * (std::f64::consts::TAU * 440.0 * s as f64 / sr).sin();
+        bf.process(input);
+    }
+    let mut peak = 0.0f64;
+    for s in 4000..4500 {
+        let input = 0.2 * (std::f64::consts::TAU * 440.0 * s as f64 / sr).sin();
+        peak = peak.max(bf.process(input).abs());
+    }
+    eprintln!("BF clipping: input=0.2V, gained=5.8V, rail=3V, output_peak={peak:.4}");
+    // Should be clipped around 2.8-3.0V (tanh softclip), NOT zero or input level
+    assert!(peak > 2.0, "Output should be near rail voltage: peak={peak:.4}");
+    assert!(peak < 4.0, "Output should not exceed rail: peak={peak:.4}");
+}
+
+#[test]
+fn bf_stage_set_ri_updates_gbw() {
+    use pedalkernel_rt::stage::BlackFeedbackStage;
+    use pedalkernel_rt::nonideal_fx::NonIdealFx;
+
+    // Create with high Ri (low gain), then set_ri to low Ri (high gain).
+    // The GBW filter must track the new gain.
+    let fx = vec![
+        NonIdealFx::OpAmpBandwidth { gbw: 3e6, slew_rate: 13.0 },
+        NonIdealFx::RailSaturation { v_max: 12.0 },
+    ];
+    // Initial: gain = 1 + 422k/100k = 5.22
+    let mut bf = BlackFeedbackStage::new(422_000.0, 100_000.0, false, &fx, 48000.0);
+    assert!((bf.gain() - 5.22).abs() < 0.1);
+
+    // Override Ri → gain = 1 + 422k/15k = 29.13
+    bf.set_ri(15_000.0);
+    assert!((bf.gain() - 29.13).abs() < 0.1);
+
+    // Process: should amplify by ~29x (not 5x or 1x)
+    let sr = 48000.0;
+    for s in 0..4000 {
+        let input = 0.01 * (std::f64::consts::TAU * 440.0 * s as f64 / sr).sin();
+        bf.process(input);
+    }
+    let mut peak = 0.0f64;
+    for s in 4000..4500 {
+        let input = 0.01 * (std::f64::consts::TAU * 440.0 * s as f64 / sr).sin();
+        peak = peak.max(bf.process(input).abs());
+    }
+    let effective_gain = peak / 0.01;
+    eprintln!("BF after set_ri: effective_gain={effective_gain:.2} (expected ~29)");
+    // The GBW filter should have been recalculated for gain=29
+    assert!(
+        effective_gain > 20.0,
+        "set_ri should update GBW filter: effective_gain={effective_gain:.2}"
+    );
+}
