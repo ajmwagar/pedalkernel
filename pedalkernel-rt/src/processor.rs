@@ -168,6 +168,28 @@ pub enum ControlTarget {
     Trigger(usize),
 }
 
+/// Inter-stage wiper divider for output Level/Volume pots.
+///
+/// Applied between stages in the serial audio chain. The WDF tree handles
+/// the impedance of each pot half; this routing layer applies the voltage
+/// division: `signal *= position` (after taper).
+///
+/// This is the correct architecture for pot wipers that span stage boundaries:
+/// the pot halves may be in different WDF tree branches, but the wiper voltage
+/// is a simple ratio computed from the pot position.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct WiperDivider {
+    /// Apply the divider AFTER processing this stage index.
+    pub after_stage_idx: usize,
+    /// Component ID of the pot (for smoother matching).
+    pub pot_comp_id: String,
+    /// Current position (0.0–1.0, after taper). Updated by smoother.
+    pub position: f64,
+    /// Pot taper for mapping raw position to effective position.
+    pub taper: crate::pot_taper::PotTaper,
+}
+
 /// Runtime state for a single-sample impulse source (drum trigger).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -640,6 +662,9 @@ pub struct CompiledPedal {
     /// Smoothed parameters for zipper-free pot control.
     /// One per pot in the circuit that needs smoothing.
     pub pot_smoothers: Vec<SmoothedParam>,
+    /// Inter-stage wiper dividers for output Level/Volume pots.
+    /// Applied in the serial stage chain after the specified stage index.
+    pub wiper_dividers: Vec<WiperDivider>,
     /// Mirrored pot mappings: source_comp_id → list of mirrored pots.
     /// When a source pot is updated, each mirror gets position = 1.0 - source.
     pub pot_mirrors: HashMap<String, Vec<MirrorPot>>,
@@ -1420,6 +1445,13 @@ impl CompiledPedal {
                             bf.update_ri_from_pot(&comp_id, value);
                         }
                         _ => {}
+                    }
+                }
+
+                // Update wiper dividers
+                for wd in &mut self.wiper_dividers {
+                    if wd.pot_comp_id == comp_id {
+                        wd.position = wd.taper.apply(value);
                     }
                 }
 
@@ -2273,6 +2305,15 @@ impl PedalProcessor for CompiledPedal {
                     if stage_idx < crate::metering::MAX_STAGES {
                         stage_levels[stage_idx] = signal;
                     }
+            }
+
+            // Apply wiper dividers after the stage that contains them.
+            // signal *= pot_position (after taper) — voltage division at
+            // the wiper point between pot halves in different tree branches.
+            for wd in &self.wiper_dividers {
+                if wd.after_stage_idx == stage_idx {
+                    signal *= wd.position;
+                }
             }
 
         }

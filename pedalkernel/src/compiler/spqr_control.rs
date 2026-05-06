@@ -22,9 +22,33 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
         }
     }
 
+    // Detect output divider pots and create wiper dividers.
+    // A pot is an output divider if:
+    // - Its label is "Level", "Volume", "Output", or "Mix" (convention)
+    // - It's bound to a WDF stage (PotInStage)
+    // The wiper divider applies `signal *= position` between stages,
+    // bypassing the WDF tree output probe issue.
+    for (i, ctrl) in compiled.controls.iter().enumerate() {
+        let label_lower = ctrl.label.to_lowercase();
+        let is_output_divider = label_lower.contains("level")
+            || label_lower.contains("volume")
+            || label_lower.contains("output");
+        if is_output_divider {
+            if let super::compiled::ControlTarget::PotInStage(stage_idx) = &ctrl.target {
+                compiled.wiper_dividers.push(super::compiled::WiperDivider {
+                    after_stage_idx: *stage_idx,
+                    pot_comp_id: ctrl.component_id.clone(),
+                    position: ctrl.taper.apply(ctrl.range.0 + pedal.controls.iter()
+                        .find(|c| c.label == ctrl.label)
+                        .map(|c| c.default)
+                        .unwrap_or(0.5) * (ctrl.range.1 - ctrl.range.0)),
+                    taper: ctrl.taper,
+                });
+            }
+        }
+    }
+
     // Create pot smoothers (one per control) for zipper-free updates.
-    // Without smoothers, set_control hits the fallback path which updates
-    // immediately (no interpolation between old and new position).
     for (i, ctrl) in pedal.controls.iter().enumerate() {
         if i < compiled.controls.len() {
             compiled.pot_smoothers.push(

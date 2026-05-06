@@ -151,6 +151,7 @@ fn compile_subcircuit_equipment(
         subcircuit_output_idx: Some(output_idx),
         subcircuit_outputs: vec![0.0; n],
         pot_smoothers: Vec::new(),
+        wiper_dividers: Vec::new(),
         pot_mirrors: hashbrown::HashMap::new(),
         base_grid_bias: 0.0,
         multi_nl_recompute_counter: 0,
