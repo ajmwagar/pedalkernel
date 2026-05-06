@@ -705,6 +705,123 @@ pub(in crate::compiler) fn find_flow_groups(
             }
         }
 
+        // Multi-hop ground-leg chain: follow unambiguous serial paths from
+        // pendant edge endpoints to a rail (GND/VCC). This captures
+        // ground-leg impedance chains like R5 → R6 → Gain_A → GND in the
+        // Klon, where R5 touches U2.neg (pendant) but R6 and Gain_A are
+        // one/two hops away.
+        //
+        // Key constraint: at each node, there must be EXACTLY ONE unclaimed
+        // passive edge to follow (unambiguous serial path). If there's a
+        // branch (multiple choices), we stop — the path is no longer a
+        // simple ground leg.
+        {
+            let all_claimed: HashSet<usize> = claimed.iter().copied()
+                .chain(active_edges.iter().copied())
+                .chain(feedback_edges.iter().copied())
+                .chain(pendant_edges.iter().copied())
+                .chain(ground_shunt_edges.iter().copied())
+                .collect();
+
+            // Build adjacency for unclaimed passive edges only
+            let unclaimed_passive: Vec<usize> = edge_indices.iter()
+                .filter(|&&eidx| {
+                    !all_claimed.contains(&eidx)
+                        && matches!(graph.components[graph.edges[eidx].comp_idx].kind.signal_terminals(), SignalTerminals::Passive)
+                })
+                .copied()
+                .collect();
+
+            let mut chain_edges: Vec<usize> = Vec::new();
+
+            for &eidx in &pendant_edges {
+                let e = &graph.edges[eidx];
+                // The "far" node is the one NOT on an input terminal
+                let far_nodes: Vec<NodeId> = [e.node_a, e.node_b].iter()
+                    .filter(|&&n| !input_terminals.contains(&n) && !rails.contains(&n))
+                    .copied()
+                    .collect();
+
+                'outer: for start in far_nodes {
+                    // Walk the serial chain: at each node, find exactly one
+                    // unclaimed passive edge to follow. If 0 or 2+, stop.
+                    let mut path: Vec<usize> = Vec::new();
+                    let mut current = start;
+                    let mut visited: HashSet<NodeId> = HashSet::new();
+                    visited.insert(current);
+
+                    loop {
+                        // Find unclaimed passive edges at current node
+                        let candidates: Vec<usize> = unclaimed_passive.iter()
+                            .filter(|&&ueidx| {
+                                if chain_edges.contains(&ueidx) || path.contains(&ueidx) {
+                                    return false;
+                                }
+                                let ue = &graph.edges[ueidx];
+                                ue.node_a == current || ue.node_b == current
+                            })
+                            .copied()
+                            .collect();
+
+                        if candidates.is_empty() {
+                            // Dead end, no rail reached → discard
+                            continue 'outer;
+                        }
+
+                        // Partition: edges going directly to a rail vs continuing
+                        let mut rail_edges: Vec<usize> = Vec::new();
+                        let mut continue_edges: Vec<usize> = Vec::new();
+
+                        for &c in &candidates {
+                            let ue = &graph.edges[c];
+                            let other = if ue.node_a == current { ue.node_b } else { ue.node_a };
+                            if rails.contains(&other) {
+                                rail_edges.push(c);
+                            } else {
+                                continue_edges.push(c);
+                            }
+                        }
+
+                        if !rail_edges.is_empty() && continue_edges.is_empty() {
+                            if rail_edges.len() == 1 {
+                                // Single rail termination — claim the chain
+                                path.extend(&rail_edges);
+                                chain_edges.extend(&path);
+                            }
+                            // Multiple rail edges = junction (bias node) → stop
+                            break;
+                        }
+
+                        // Include shunt-to-rail edges (bypass caps)
+                        path.extend(&rail_edges);
+
+                        if continue_edges.len() != 1 {
+                            if !rail_edges.is_empty() {
+                                // We have rail shunts + multiple continuations.
+                                // Claim what we have (includes the shunts).
+                                chain_edges.extend(&path);
+                            }
+                            // Multiple non-rail continuations → stop
+                            break;
+                        }
+
+                        // Exactly one non-rail continuation → follow it
+                        let next_eidx = continue_edges[0];
+                        let ue = &graph.edges[next_eidx];
+                        let other = if ue.node_a == current { ue.node_b } else { ue.node_a };
+                        path.push(next_eidx);
+
+                        if !visited.insert(other) {
+                            continue 'outer; // Cycle
+                        }
+                        current = other;
+                    }
+                }
+            }
+
+            pendant_edges.extend(chain_edges);
+        }
+
         // Mark all claimed
         for &eidx in active_edges
             .iter()

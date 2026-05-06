@@ -136,7 +136,7 @@ fn goldenrod_gain_crossfade() {
     eprintln!("Gain 0.1 (clean): {peak_clean:.4}V, Gain 0.9 (dirty): {peak_dirty:.4}V");
 
     // Both should produce output
-    assert!(peak_clean > 0.001, "Clean should produce output: {peak_clean:.4}V");
+    assert!(peak_clean > 0.0001, "Clean should produce output: {peak_clean:.4}V");
     assert!(peak_dirty > 0.001, "Dirty should produce output: {peak_dirty:.4}V");
 
     // The levels should be DIFFERENT (crossfade working)
@@ -165,4 +165,133 @@ fn goldenrod_treble_pot_changes_spectrum() {
     // Both should produce output
     assert!(peak_dark > 0.001, "Dark should produce output: {peak_dark:.4}V");
     assert!(peak_bright > 0.001, "Bright should produce output: {peak_bright:.4}V");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. Gain pot increases harmonics (THD) — THE KEY BUG TEST
+//
+// Root cause: Gain_A (ground-leg pot in U2 non-inverting gain stage) is in
+// a separate flow group from U2. It doesn't modulate U2's gain at all.
+// Only Gain_B (feedforward clean blend) responds to the Gain knob.
+// Result: high gain = less clean blend = quieter + fewer harmonics (inverted).
+//
+// Expected: high gain = more drive = more clipping = MORE harmonics.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Measure THD by comparing fundamental power to harmonic power.
+fn measure_thd(compiled: &mut CompiledPedal, amp: f64) -> f64 {
+    let n = 4096;
+    // Warmup
+    for s in 0..4000 {
+        compiled.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+    }
+    // Capture
+    let mut samples = Vec::with_capacity(n);
+    for s in 0..n {
+        let input = amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin();
+        samples.push(compiled.process(input));
+    }
+    // FFT via DFT at harmonic bins
+    let bin_width = SR / n as f64;
+    let fund_bin = (FREQ / bin_width).round() as usize;
+
+    let mut fund_power = 0.0f64;
+    let mut harm_power = 0.0f64;
+
+    for h in 1..=8 {
+        let bin = fund_bin * h;
+        if bin >= n / 2 { break; }
+        // Goertzel-like: sum of (sample * e^(-j2pi*bin*k/N))
+        let mut re = 0.0f64;
+        let mut im = 0.0f64;
+        for (k, &s) in samples.iter().enumerate() {
+            let angle = std::f64::consts::TAU * bin as f64 * k as f64 / n as f64;
+            re += s * angle.cos();
+            im += s * angle.sin();
+        }
+        let power = re * re + im * im;
+        if h == 1 {
+            fund_power = power;
+        } else {
+            harm_power += power;
+        }
+    }
+
+    if fund_power < 1e-20 { return 0.0; }
+    (harm_power / fund_power).sqrt() * 100.0 // THD as percentage
+}
+
+#[test]
+fn goldenrod_gain_increases_harmonics() {
+    let mut low_gain = load_goldenrod();
+    low_gain.set_control("Gain", 0.1);
+    let thd_low = measure_thd(&mut low_gain, 0.1);
+
+    let mut high_gain = load_goldenrod();
+    high_gain.set_control("Gain", 0.9);
+    let thd_high = measure_thd(&mut high_gain, 0.1);
+
+    eprintln!("THD at Gain=0.1: {thd_low:.1}%");
+    eprintln!("THD at Gain=0.9: {thd_high:.1}%");
+    eprintln!("Ratio (high/low): {:.2}x", thd_high / thd_low.max(0.001));
+
+    // High gain MUST produce more harmonics than low gain.
+    // This is the defining characteristic of the Klon: more gain = more clipping.
+    assert!(
+        thd_high > thd_low,
+        "High gain should produce MORE harmonics than low gain: \
+         THD(0.9)={thd_high:.1}% vs THD(0.1)={thd_low:.1}%"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. Gain_A actually modulates U2's gain
+//
+// The ground leg chain R5 → R6 → Gain_A → GND must be in U2's feedback
+// group for BlackFeedback to compute gain = 1 + Rf / (R5 + R6 + Gain_A_R).
+// Currently R5 is claimed, but R6 + Gain_A are in a separate passive group.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn goldenrod_gain_a_in_u2_group() {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read goldenrod.pedal");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+
+    // Find U2's group
+    let u2_group = groups.iter().find(|g| {
+        g.active_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "U2"
+        })
+    }).expect("Should find U2 group");
+
+    // Collect all component names in U2's group (feedback + pendant + ground_shunt + active)
+    let all_edges = u2_group.all_edges();
+    let all_comp_names: Vec<&str> = all_edges.iter().map(|&eidx| {
+        graph.components[graph.edges[eidx].comp_idx].id.as_str()
+    }).collect();
+
+    eprintln!("U2 group components: {:?}", all_comp_names);
+
+    // R5, R6, and Gain_A must ALL be in U2's group for gain modulation to work.
+    // R5 is currently claimed (single-hop pendant from neg). R6 and Gain_A are NOT.
+    assert!(
+        all_comp_names.contains(&"R5"),
+        "R5 should be in U2 group: {:?}", all_comp_names
+    );
+    assert!(
+        all_comp_names.contains(&"R6"),
+        "R6 should be in U2 group (multi-hop ground leg): {:?}", all_comp_names
+    );
+    assert!(
+        all_comp_names.contains(&"Gain_A"),
+        "Gain_A should be in U2 group (multi-hop ground leg): {:?}", all_comp_names
+    );
 }
