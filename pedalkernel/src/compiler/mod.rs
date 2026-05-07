@@ -113,3 +113,5 @@ mod opamp_gain_tests;
 mod coupling_tests;
 #[cfg(test)]
 mod level_pot_tests;
+#[cfg(test)]
+mod ground_leg_tests;

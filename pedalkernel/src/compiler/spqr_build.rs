@@ -440,11 +440,29 @@ pub fn compile_via_spqr_with_options(
                         }
                     });
                     if let Some(neg) = input_node {
-                        let non_fb_edges: Vec<usize> = build_order
-                            .iter()
-                            .filter(|(_, g)| !g.has_feedback())
-                            .flat_map(|(_, g)| g.all_edges())
+                        // Compute Ri: BFS from neg through passive edges to
+                        // GND. Finds the full ground-leg impedance chain
+                        // (e.g. R5 → R6 → Gain_A → GND) regardless of which
+                        // FlowGroup the edges belong to.
+                        //
+                        // Exclude:
+                        // - Feedback edges (Rf path, neg→out)
+                        // - Active edges (opamp itself)
+                        // - Edges at opamp output nodes (summing inputs)
+                        // - Edges at opamp input nodes (don't cross to pos bias)
+                        // - Edges at the global in/out nodes
+                        let feedback_set: std::collections::HashSet<usize> =
+                            group.feedback_edges.iter().copied().collect();
+                        let active_set: std::collections::HashSet<usize> =
+                            group.active_edges.iter().copied().collect();
+                        let mut barrier_nodes: std::collections::HashSet<super::graph::NodeId> =
+                            graph.nullor_pins.iter().flat_map(|p| vec![p.out_node, p.pos_node, p.neg_node])
                             .collect();
+                        barrier_nodes.insert(graph.in_node);
+                        barrier_nodes.insert(graph.out_node);
+                        // Allow traversal FROM neg (the starting point)
+                        barrier_nodes.remove(&neg);
+
                         let is_gnd = |n: super::graph::NodeId| -> bool {
                             n == graph.gnd_node || graph.ac_ground_nodes.contains(&n)
                         };
@@ -457,8 +475,11 @@ pub fn compile_via_spqr_with_options(
                         visited.insert(neg);
 
                         while let Some(node) = frontier.pop() {
-                            for &eidx in &non_fb_edges {
-                                let e = &graph.edges[eidx];
+                            // Search ALL graph edges (not just non-feedback)
+                            for (eidx, e) in graph.edges.iter().enumerate() {
+                                if feedback_set.contains(&eidx) || active_set.contains(&eidx) {
+                                    continue;
+                                }
                                 let (touches, other) = if e.node_a == node {
                                     (true, e.node_b)
                                 } else if e.node_b == node {
@@ -466,15 +487,26 @@ pub fn compile_via_spqr_with_options(
                                 } else {
                                     (false, node)
                                 };
-                                if !touches || visited.contains(&other) {
+                                if !touches {
+                                    continue;
+                                }
+                                // Allow multiple edges to GND (it's a shared
+                                // rail), but skip already-visited non-rail nodes
+                                if visited.contains(&other) && !is_gnd(other) {
+                                    continue;
+                                }
+                                // Don't cross into barrier nodes (opamp pins,
+                                // global in/out — not ground-leg paths)
+                                if barrier_nodes.contains(&other) {
                                     continue;
                                 }
                                 let comp = &graph.components[e.comp_idx];
+                                // Only follow passive edges with resistance
                                 if comp.kind.is_pot() {
                                     if let Some(max_r) = comp.kind.resistance() {
                                         ri_pot_id = Some(comp.id.clone());
                                         ri_pot_max_r = max_r;
-                                        ri_fixed += max_r * 0.5; // default
+                                        ri_fixed += max_r * 0.5; // default position
                                         visited.insert(other);
                                         if !is_gnd(other) {
                                             frontier.push(other);
@@ -486,18 +518,14 @@ pub fn compile_via_spqr_with_options(
                                     if !is_gnd(other) {
                                         frontier.push(other);
                                     }
+                                } else if comp.kind.capacitance().is_some() {
+                                    // Reactive elements: traverse through
+                                    // (C_gnd bypass) but don't add resistance
+                                    visited.insert(other);
+                                    if !is_gnd(other) {
+                                        frontier.push(other);
+                                    }
                                 }
-                            }
-                        }
-
-                        // Pendant resistors touching neg (R5)
-                        for &eidx in group.pendant_edges.iter() {
-                            let e = &graph.edges[eidx];
-                            if e.node_a != neg && e.node_b != neg {
-                                continue;
-                            }
-                            if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
-                                ri_fixed += r;
                             }
                         }
 
