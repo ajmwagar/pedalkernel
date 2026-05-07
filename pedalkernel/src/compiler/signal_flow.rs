@@ -734,6 +734,14 @@ pub(in crate::compiler) fn find_flow_groups(
 
             let mut chain_edges: Vec<usize> = Vec::new();
 
+            // Collect opamp/active output nodes — pendant edges whose far end
+            // is an opamp output are SUMMING INPUTS (e.g. R_clip, R_ff2 at a
+            // summing amp's neg). These should NOT be followed as ground-leg
+            // chains — they connect to signal sources, not to ground.
+            let active_output_set: HashSet<NodeId> = graph.nullor_pins.iter()
+                .map(|p| p.out_node)
+                .collect();
+
             for &eidx in &pendant_edges {
                 let e = &graph.edges[eidx];
                 // The "far" node is the one NOT on an input terminal
@@ -743,6 +751,11 @@ pub(in crate::compiler) fn find_flow_groups(
                     .collect();
 
                 'outer: for start in far_nodes {
+                    // Don't follow chains from opamp output nodes — those are
+                    // summing inputs from other stages, not ground-leg chains.
+                    if active_output_set.contains(&start) {
+                        continue;
+                    }
                     // Walk the serial chain: at each node, find exactly one
                     // unclaimed passive edge to follow. If 0 or 2+, stop.
                     let mut path: Vec<usize> = Vec::new();
@@ -809,6 +822,13 @@ pub(in crate::compiler) fn find_flow_groups(
                         let next_eidx = continue_edges[0];
                         let ue = &graph.edges[next_eidx];
                         let other = if ue.node_a == current { ue.node_b } else { ue.node_a };
+
+                        // Don't traverse into active output nodes — those are
+                        // signal sources (opamp outputs), not ground-leg paths.
+                        if active_output_set.contains(&other) {
+                            continue 'outer;
+                        }
+
                         path.push(next_eidx);
 
                         if !visited.insert(other) {
