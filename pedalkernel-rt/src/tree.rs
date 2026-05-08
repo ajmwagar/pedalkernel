@@ -1588,6 +1588,14 @@ impl MnaSystem {
         // Find which node the input VS drives (the one with B[node, vs_idx] = 1).
         // Only eliminate VS node if it has NO capacitor (truly algebraic).
         // If the VS node has a cap, it's a dynamic state — keep it.
+        //
+        // NOTE: HPF circuits with cap-coupled inputs (C from input to
+        // summing junction) have a cap on the VS node. The current Schur
+        // reduction can't handle this — b_kept becomes zero and the IIR
+        // extraction produces degenerate coefficients. HPF circuits need
+        // a R_dc bias resistor in parallel with the input cap as a
+        // workaround, or the state-space extraction needs to be extended
+        // to handle dual input vectors (b_M, b_N) in the bilinear transform.
         let vs_node = (0..n_nodes).find(|&i| {
             self.b_matrix[i * n_vs + vs_idx].abs() > 0.5
                 && c_cap[i * n_nodes + i].abs() < 1e-30 // no cap on this node
