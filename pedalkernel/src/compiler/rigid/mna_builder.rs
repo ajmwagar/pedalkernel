@@ -107,8 +107,16 @@ pub(super) fn build_mna(
         let n2 = node_to_mna(e.node_b);
         let edge_kind = graph.effective_edge_kind(eidx);
 
-        // Multi-port components (pots with 2 edges): stamp once via stamp_mna_multi
-        if comp.kind.ports().len() > 1 && edge_kind == EdgeKind::Linear {
+        // Multi-port components (pots with 2 edges): stamp once via stamp_mna_multi.
+        // ONLY use multi-port path when the component actually has multiple edges
+        // in this stage. Pots used with just a/b terminals (no wiper) have 1 edge
+        // and should use the normal resistance() path — stamp_mna_multi would
+        // incorrectly stamp two resistors to ground via the missing wiper node.
+        let comp_edge_count = edge_indices
+            .iter()
+            .filter(|&&ei| graph.edges[ei].comp_idx == e.comp_idx)
+            .count();
+        if comp.kind.ports().len() > 1 && edge_kind == EdgeKind::Linear && comp_edge_count > 1 {
             if stamped_multi.insert(e.comp_idx) {
                 let pin_fn = |pin: &str| -> Option<usize> {
                     let key = format!("{}.{}", comp.id, pin);

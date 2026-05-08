@@ -197,11 +197,16 @@ pub(super) fn classify_rigid(
                 let comp = &graph.components[graph.edges[eidx].comp_idx];
                 comp.kind.capacitance().is_some() || comp.kind.inductance().is_some()
             };
-            let has_reactive_ground = g.ground_shunt_edges.iter().any(|&eidx| is_reactive(eidx));
-            let feedback_purely_resistive = g.feedback_edges.iter().all(|&eidx| !is_reactive(eidx));
-            if has_reactive_ground && feedback_purely_resistive {
-                // 808-style: caps to ground create resonance, feedback is resistive.
-                // IIR with extract_feedback_r handles this correctly.
+
+            // Any reactive element in the rigid group → IIR to capture
+            // frequency response. Covers:
+            //   - 808 bridged-T: caps to ground, resistive feedback
+            //   - MFB/Rauch: cap in feedback (C from neg to out)
+            //   - Sallen-Key (when opamp group includes filter caps)
+            // Without this, BlackFeedback computes only DC gain = Rf/Ri,
+            // losing the filter's poles and zeros.
+            let has_any_reactive = all_edges.iter().any(|&eidx| is_reactive(eidx));
+            if has_any_reactive {
                 return RigidOptimization::Iir;
             }
         }
