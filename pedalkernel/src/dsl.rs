@@ -158,10 +158,7 @@ pub struct PedalDef {
     /// Mirrored pot mappings: mirrored_pot_id → source_pot_id.
     /// A mirrored pot's position is always `1.0 - source.position`.
     /// Used for dual-gang pots where one gang tracks inversely.
-    pub mirrors: std::collections::HashMap<String, String>,
-    /// MIDI note bindings for trigger components.
-    /// Maps trigger inputs to specific MIDI note numbers.
-    pub midi_bindings: Vec<MidiBinding>,
+    pub mirrors: hashbrown::HashMap<String, String>,
     /// When true, auto-calibrate output level at compile time.
     pub calibrate: bool,
     /// Subcircuit definitions. When non-empty, the top-level `components` and
@@ -190,9 +187,7 @@ pub struct SubcircuitDef {
     /// Monitor definitions scoped to this subcircuit.
     pub monitors: Vec<MonitorDef>,
     /// Mirrored pot mappings within this subcircuit.
-    pub mirrors: std::collections::HashMap<String, String>,
-    /// MIDI bindings within this subcircuit.
-    pub midi_bindings: Vec<MidiBinding>,
+    pub mirrors: hashbrown::HashMap<String, String>,
 }
 
 impl PedalDef {
@@ -247,42 +242,7 @@ impl PartialEq for ComponentDef {
     }
 }
 
-/// Potentiometer taper type.
-///
-/// Following the Asian/European convention:
-/// - A (Audio/Logarithmic): Slow start, fast finish. Used for volume controls.
-/// - B (Linear): Proportional change. Used for tone/blend controls.
-/// - C (Reverse Log): Fast start, slow finish. Rare, for specific compensation.
-///
-/// Note: Some American manufacturers flip A and B. Always check datasheets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PotTaper {
-    /// Audio/Logarithmic taper - slow at start, fast at end (volume controls)
-    A,
-    /// Linear taper - proportional change (default for most controls)
-    #[default]
-    B,
-    /// Reverse logarithmic - fast at start, slow at end (rare)
-    C,
-}
-
-impl PotTaper {
-    /// Apply the taper curve to a linear position (0.0 to 1.0).
-    /// Returns the effective resistance ratio (0.0 to 1.0).
-    #[inline]
-    pub fn apply(self, pos: f64) -> f64 {
-        let pos = pos.clamp(0.0, 1.0);
-        match self {
-            // Linear: direct mapping
-            PotTaper::B => pos,
-            // Audio/Log: slow start, fast end
-            // Using (10^pos - 1) / 9 which gives ~10% at 50% rotation
-            PotTaper::A => (10.0_f64.powf(pos) - 1.0) / 9.0,
-            // Reverse log: fast start, slow end (inverse of A)
-            PotTaper::C => 1.0 - (10.0_f64.powf(1.0 - pos) - 1.0) / 9.0,
-        }
-    }
-}
+pub use crate::pot_taper::PotTaper;
 
 /// Op-amp types with different characteristics.
 /// Each type has distinct slew rate, gain-bandwidth product, and input impedance
@@ -777,16 +737,6 @@ pub struct ControlDef {
 
 /// MIDI binding: maps a component trigger to a specific MIDI note number.
 ///
-/// # Syntax
-/// ```text
-/// T_C.trigger -> midi(48)
-/// ```
-#[derive(Debug, Clone, PartialEq)]
-pub struct MidiBinding {
-    pub component: String,
-    pub property: String,
-    pub note: u8,
-}
 
 /// Monitor definition for real-time metering visualization.
 ///
@@ -2180,7 +2130,7 @@ fn parse_lfo(input: &str) -> IResult<&str, BoxComp> {
 
 fn components_section(
     input: &str,
-) -> IResult<&str, (Vec<ComponentDef>, std::collections::HashMap<String, String>)> {
+) -> IResult<&str, (Vec<ComponentDef>, hashbrown::HashMap<String, String>)> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("components")(input)?;
     let (input, _) = ws_comments(input)?;
@@ -2188,7 +2138,7 @@ fn components_section(
     let (input, pairs) = many0(component_def)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
-    let mut mirrors = std::collections::HashMap::new();
+    let mut mirrors = hashbrown::HashMap::new();
     let mut comps = Vec::with_capacity(pairs.len());
     for (comp, mirror_target) in pairs {
         if let Some(target) = mirror_target {
@@ -2210,31 +2160,6 @@ fn nets_section(input: &str) -> IResult<&str, Vec<NetDef>> {
     Ok((input, nets))
 }
 
-/// `T_C.trigger -> midi(48)` — MIDI note binding for a trigger input.
-fn midi_binding_def(input: &str) -> IResult<&str, MidiBinding> {
-    let (input, _) = ws_comments(input)?;
-    let (input, comp) = identifier(input)?;
-    let (input, _) = char('.')(input)?;
-    let (input, prop) = identifier(input)?;
-    let (input, _) = ws_comments(input)?;
-    let (input, _) = tag("->")(input)?;
-    let (input, _) = ws_comments(input)?;
-    let (input, _) = tag("midi")(input)?;
-    let (input, _) = char('(')(input)?;
-    let (input, _) = ws_comments(input)?;
-    let (input, note_num) = double(input)?;
-    let (input, _) = ws_comments(input)?;
-    let (input, _) = char(')')(input)?;
-    Ok((
-        input,
-        MidiBinding {
-            component: comp.to_string(),
-            property: prop.to_string(),
-            note: note_num as u8,
-        },
-    ))
-}
-
 /// Skip a line we can't parse (for forward compatibility)
 fn skip_line(input: &str) -> IResult<&str, ()> {
     let (input, _) = ws_comments(input)?;
@@ -2245,14 +2170,8 @@ fn skip_line(input: &str) -> IResult<&str, ()> {
     Ok((input, ()))
 }
 
-/// A parsed item from the controls section: either a control or a MIDI binding.
-enum ControlItem {
-    Control(ControlDef),
-    Midi(MidiBinding),
-}
-
-/// Try to parse a control_def, midi_binding_def, or skip the line if unparsable
-fn control_or_skip(input: &str) -> IResult<&str, Option<ControlItem>> {
+/// Try to parse a control_def or skip the line if unparsable
+fn control_or_skip(input: &str) -> IResult<&str, Option<ControlDef>> {
     let (input, _) = ws_comments(input)?;
 
     // Check if we're at closing brace
@@ -2265,12 +2184,7 @@ fn control_or_skip(input: &str) -> IResult<&str, Option<ControlItem>> {
 
     // Try to parse a control_def
     if let Ok((remaining, ctrl)) = control_def(input) {
-        return Ok((remaining, Some(ControlItem::Control(ctrl))));
-    }
-
-    // Try to parse a midi_binding_def
-    if let Ok((remaining, midi)) = midi_binding_def(input) {
-        return Ok((remaining, Some(ControlItem::Midi(midi))));
+        return Ok((remaining, Some(ctrl)));
     }
 
     // Couldn't parse, skip this line
@@ -2278,26 +2192,19 @@ fn control_or_skip(input: &str) -> IResult<&str, Option<ControlItem>> {
     Ok((remaining, None))
 }
 
-fn controls_section(input: &str) -> IResult<&str, (Vec<ControlDef>, Vec<MidiBinding>)> {
+fn controls_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("controls")(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('{')(input)?;
 
-    // Parse controls and midi bindings, skipping lines we can't understand
+    // Parse controls, skipping lines we can't understand
     let (input, items) = many0(control_or_skip)(input)?;
-    let mut ctrls = Vec::new();
-    let mut midi_bindings = Vec::new();
-    for item in items.into_iter().flatten() {
-        match item {
-            ControlItem::Control(c) => ctrls.push(c),
-            ControlItem::Midi(m) => midi_bindings.push(m),
-        }
-    }
+    let ctrls: Vec<ControlDef> = items.into_iter().flatten().collect();
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
-    Ok((input, (ctrls, midi_bindings)))
+    Ok((input, ctrls))
 }
 
 /// Internal trim pots (factory adjustments, not user-facing).
@@ -2308,16 +2215,9 @@ fn trims_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('{')(input)?;
 
-    // Parse trims, skipping lines we can't understand (ignore midi bindings)
+    // Parse trims, skipping lines we can't understand
     let (input, items) = many0(control_or_skip)(input)?;
-    let trims: Vec<ControlDef> = items
-        .into_iter()
-        .flatten()
-        .filter_map(|item| match item {
-            ControlItem::Control(c) => Some(c),
-            ControlItem::Midi(_) => None,
-        })
-        .collect();
+    let trims: Vec<ControlDef> = items.into_iter().flatten().collect();
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
@@ -2733,8 +2633,7 @@ fn subcircuit_block(input: &str) -> IResult<&str, SubcircuitDef> {
     // Parse inner sections (same as parse_pedal internals)
     let (input, (components, mirrors)) = components_section(input)?;
     let (input, nets) = nets_section(input)?;
-    let (input, controls_and_midi) = opt(controls_section)(input)?;
-    let (controls, midi_bindings) = controls_and_midi.unwrap_or_default();
+    let (input, controls) = opt(controls_section)(input)?;
     let (input, trims) = opt(trims_section)(input)?;
     let (input, monitors) = opt(monitors_section)(input)?;
 
@@ -2748,11 +2647,10 @@ fn subcircuit_block(input: &str) -> IResult<&str, SubcircuitDef> {
             rate,
             components,
             nets,
-            controls,
+            controls: controls.unwrap_or_default(),
             trims: trims.unwrap_or_default(),
             monitors: monitors.unwrap_or_default(),
             mirrors,
-            midi_bindings,
         },
     ))
 }
@@ -2850,7 +2748,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     } else if let Ok((rest, result)) = components_section(input) {
         (rest, result)
     } else {
-        (input, (Vec::new(), std::collections::HashMap::new()))
+        (input, (Vec::new(), hashbrown::HashMap::new()))
     };
     let (input, nets) = if subcircuits.is_empty() {
         nets_section(input)?
@@ -2859,8 +2757,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     } else {
         (input, Vec::new())
     };
-    let (input, controls_result) = opt(controls_section)(input)?;
-    let (controls, midi_bindings) = controls_result.unwrap_or_default();
+    let (input, controls) = opt(controls_section)(input)?;
     let (input, trims) = opt(trims_section)(input)?;
     let (input, monitors) = opt(monitors_section)(input)?;
     let (input, sidechains) = opt(sidechains_section)(input)?;
@@ -2876,12 +2773,11 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
         supplies,
         components,
         nets,
-        controls,
+        controls: controls.unwrap_or_default(),
         trims: trims.unwrap_or_default(),
         monitors: monitors.unwrap_or_default(),
         sidechains: sidechains.unwrap_or_default(),
         mirrors,
-        midi_bindings,
         calibrate: calibrate.is_some(),
         subcircuits,
     };
@@ -5111,69 +5007,6 @@ pedal "No Monitors" {
 "#;
         let def = parse_pedal_file(src).unwrap();
         assert!(def.monitors.is_empty());
-    }
-
-    #[test]
-    fn parse_midi_binding() {
-        let (rest, mb) = midi_binding_def("T_C.trigger -> midi(48)").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(mb.component, "T_C");
-        assert_eq!(mb.property, "trigger");
-        assert_eq!(mb.note, 48);
-    }
-
-    #[test]
-    fn parse_midi_bindings_in_controls() {
-        let src = r#"
-pedal "Drum" {
-    components {
-        T_C: trigger_input()
-        T_D: trigger_input()
-        R1: resistor(10k)
-    }
-    nets {
-        in -> R1.a
-        R1.b -> out
-    }
-    controls {
-        T_C.trigger -> midi(48)
-        T_D.trigger -> midi(50)
-    }
-}
-"#;
-        let def = parse_pedal_file(src).unwrap();
-        assert_eq!(def.midi_bindings.len(), 2);
-        assert_eq!(def.midi_bindings[0].component, "T_C");
-        assert_eq!(def.midi_bindings[0].note, 48);
-        assert_eq!(def.midi_bindings[1].component, "T_D");
-        assert_eq!(def.midi_bindings[1].note, 50);
-        assert!(def.controls.is_empty());
-    }
-
-    #[test]
-    fn parse_mixed_controls_and_midi_bindings() {
-        let src = r#"
-pedal "Mixed" {
-    components {
-        T_C: trigger_input()
-        Vol: pot(100k)
-        R1: resistor(10k)
-    }
-    nets {
-        in -> R1.a
-        R1.b -> out
-    }
-    controls {
-        T_C.trigger -> midi(48)
-        Vol.position -> "Volume" [0.0, 1.0] = 0.5
-    }
-}
-"#;
-        let def = parse_pedal_file(src).unwrap();
-        assert_eq!(def.midi_bindings.len(), 1);
-        assert_eq!(def.midi_bindings[0].note, 48);
-        assert_eq!(def.controls.len(), 1);
-        assert_eq!(def.controls[0].label, "Volume");
     }
 
     // -----------------------------------------------------------------------

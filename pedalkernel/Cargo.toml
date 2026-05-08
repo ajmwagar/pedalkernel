@@ -11,7 +11,9 @@ categories = ["multimedia::audio"]
 rust-version = "1.80"
 
 [features]
-default = ["jack-rt", "tui", "cli", "gummel-poon"]
+default = ["std", "jack-rt", "tui", "cli", "gummel-poon"]
+std = []
+serde = ["pedalkernel-rt/serde"]
 jack-rt = ["jack"]
 tui = ["dep:ratatui", "dep:crossterm"]
 cli = ["dep:clap"]
@@ -38,6 +40,9 @@ runtime-warnings = []
 pro-pedals = []
 
 [dependencies]
+# Runtime crate (WDF engine, elements, tree)
+pedalkernel-rt = { path = "../pedalkernel-rt" }
+
 # DSL parser
 nom = "7"
 
@@ -52,6 +57,9 @@ clap = { version = "4", features = ["derive"], optional = true }
 
 # Math
 num-complex = "0.4"
+
+# Collections
+hashbrown = "0.15"
 
 # Logging
 tracing = "0.1"

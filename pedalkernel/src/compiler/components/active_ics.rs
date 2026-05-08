@@ -1,12 +1,12 @@
 //! Active IC component structs: OpAmp, Vco, Vcf, Vca, Comparator, AnalogSwitch,
 //! MatchedNpn, MatchedPnp.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
-    Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    PinDirection, ResolveContext, StampContext, StampResult,
+    Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, NonIdealFx,
+    PinConfig, PinDirection, ResolveContext, SignalTerminals, StampContext, StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::dsl::{
@@ -37,8 +37,68 @@ impl Component for OpAmp {
         }
     }
 
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        if self.op_type.is_ota() {
+            vec![("pos", "neg")]
+        } else {
+            vec![("neg", "out")]
+        }
+    }
+
+    fn output_impedance(&self) -> crate::compiler::component::OutputImpedance {
+        if self.op_type.is_ota() {
+            // OTA output is a current source (high impedance)
+            crate::compiler::component::OutputImpedance::Finite
+        } else {
+            // Op-amp output is a voltage source (zero impedance via feedback)
+            crate::compiler::component::OutputImpedance::VoltageSource
+        }
+    }
+
+    fn nonideal_fx(&self, _sample_rate: f64) -> Vec<NonIdealFx> {
+        if self.op_type.is_ota() {
+            return Vec::new(); // OTA non-idealities handled differently
+        }
+        let model = crate::model_lookup::opamp_model_from_type(&self.op_type);
+        vec![
+            NonIdealFx::OpAmpBandwidth {
+                gbw: model.gbw,
+                slew_rate: model.slew_rate,
+            },
+            // Default rail saturation — overridden by apply_bias() when a
+            // bias network is detected. The v_max here assumes the minimum
+            // common pedal supply (9V). Pipeline patches this after bias
+            // analysis with the actual supply voltage and bias point.
+            NonIdealFx::RailSaturation {
+                v_max: 3.0,
+            },
+        ]
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        if self.op_type.is_ota() {
+            SignalTerminals::Amplifier {
+                input: "pos",
+                output: "neg",
+                control: None,
+            }
+        } else {
+            SignalTerminals::Amplifier {
+                input: "neg",
+                output: "out",
+                control: Some("pos"),
+            }
+        }
+    }
+
     fn is_passive(&self) -> bool {
         false
+    }
+
+    fn feedback_input_is_barrier(&self) -> bool {
+        // Op-amp neg node is a summing junction shared with interstage
+        // coupling. OTAs don't have this property.
+        !self.op_type.is_ota()
     }
 
     fn is_nonlinear(&self) -> bool {
@@ -47,6 +107,19 @@ impl Component for OpAmp {
 
     fn is_active_ic(&self) -> bool {
         !self.op_type.is_ota()
+    }
+
+    fn port_semantic(&self, pin_a: &str, pin_b: &str) -> crate::compiler::component::PortSemantic {
+        if self.op_type.is_ota() {
+            return crate::compiler::component::PortSemantic::Nonlinear;
+        }
+        // VCVS output is a voltage constraint
+        let pins = [pin_a, pin_b];
+        if pins.contains(&"out") || pins.contains(&"output") {
+            crate::compiler::component::PortSemantic::VoltageConstraint
+        } else {
+            crate::compiler::component::PortSemantic::LinearPassive
+        }
     }
 
     fn pin_config(&self) -> PinConfig {
@@ -110,7 +183,7 @@ impl Component for OpAmp {
         if self.op_type.is_ota() {
             return StampResult::Skip;
         }
-        let model = crate::elements::OpAmpModel::from_opamp_type(&self.op_type);
+        let model = crate::model_lookup::opamp_model_from_type(&self.op_type);
         let ro = model.output_impedance;
 
         let aol = model.open_loop_gain;
@@ -148,7 +221,14 @@ impl Component for OpAmp {
                 port_group: None,
             }]
         } else {
-            vec![]
+            // VCVS edge: neg→out carries the nullor constraint.
+            // pos is resolved via stamp_mna_multi's pin_to_mna("pos").
+            vec![ComponentEdge {
+                pin_a: "neg",
+                pin_b: "out",
+                kind: EdgeKind::Vcvs,
+                port_group: None,
+            }]
         }
     }
 
@@ -233,6 +313,39 @@ impl Component for OpAmp {
 
     fn op_amp_type(&self) -> Option<OpAmpType> {
         Some(self.op_type)
+    }
+
+    fn apply_bias(
+        &self,
+        bias_voltages: &hashbrown::HashMap<String, f64>,
+        supply_voltage: f64,
+    ) -> crate::compiler::component::BiasResult {
+        // Op-amp bias sets the DC operating point (output swing center).
+        // The bias voltage at the pos/neg input determines the output's
+        // midpoint. Rail limits are supply_voltage minus headroom on each side.
+        //
+        // For a symmetric divider (bias = supply/2 = 4.5V at 9V):
+        //   v_rail_pos = supply - bias - headroom = 9 - 4.5 - 1.5 = 3.0V
+        //   v_rail_neg = bias - headroom = 4.5 - 1.5 = 3.0V
+        //
+        // For asymmetric (bias = 2.25V at 9V):
+        //   v_rail_pos = 9 - 2.25 - 1.5 = 5.25V
+        //   v_rail_neg = 2.25 - 1.5 = 0.75V
+        const HEADROOM: f64 = 1.5; // Typical output stage headroom
+
+        // Use bias voltage if provided; default to supply/2 (symmetric)
+        let bias_v = bias_voltages.get("pos")
+            .or_else(|| bias_voltages.get("neg"))
+            .copied()
+            .unwrap_or(supply_voltage / 2.0);
+
+        let v_rail_pos = (supply_voltage - bias_v - HEADROOM).max(0.5);
+        let v_rail_neg = (bias_v - HEADROOM).max(0.5);
+
+        crate::compiler::component::BiasResult::Applied {
+            v_rail_pos,
+            v_rail_neg,
+        }
     }
 }
 

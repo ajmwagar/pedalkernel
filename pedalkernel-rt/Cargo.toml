@@ -1,0 +1,39 @@
+[package]
+name = "pedalkernel-rt"
+version = "0.1.0"
+edition = "2021"
+authors = ["Avery Wagar <ajmwagar@gmail.com>"]
+description = "PedalKernel audio runtime — no_std WDF engine for real-time audio processing"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/ajmwagar/pedalkernel"
+keywords = ["audio", "dsp", "wdf", "no_std", "embedded"]
+categories = ["multimedia::audio", "no-std", "embedded"]
+rust-version = "1.80"
+
+[features]
+default = ["std"]
+std = []
+serde = ["dep:serde"]
+debug-trace = ["std"]
+runtime-warnings = ["std"]
+fault-injection = ["std"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(DISABLED_needs_model_db)',
+    'cfg(DISABLED_tests_in_pedalkernel)',
+    'cfg(DISABLED_needs_pedalkernel)',
+] }
+
+[dependencies]
+libm = "0.2"
+hashbrown = { version = "0.15", features = ["serde"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+postcard = { version = "1", features = ["alloc"] }
+
+[[bench]]
+name = "rt_bench"
+harness = false

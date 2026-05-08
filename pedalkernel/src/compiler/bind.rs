@@ -3,7 +3,8 @@
 //! Moves LFO binding, envelope follower binding, control target resolution,
 //! sidechain construction, and peripheral construction from compile.rs.
 
-use std::collections::{HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::HashSet;
 
 use crate::dsl::*;
 use crate::elements::*;
@@ -122,8 +123,6 @@ pub(super) fn build_controls(
             label: ctrl.label.clone(),
             target,
             component_id: ctrl.component.clone(),
-            component_id_aw: format!("{}__aw", ctrl.component),
-            component_id_wb: format!("{}__wb", ctrl.component),
             max_resistance: max_r,
             taper,
             range: ctrl.range,
@@ -1038,8 +1037,7 @@ fn extract_sidechain_def(
         trims,
         monitors: vec![],
         sidechains: vec![],
-        mirrors: std::collections::HashMap::new(),
-        midi_bindings: vec![],
+        mirrors: hashbrown::HashMap::new(),
         calibrate: false,
         subcircuits: vec![],
     }

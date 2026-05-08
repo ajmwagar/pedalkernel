@@ -7,29 +7,34 @@
 //! 4. Modeling active elements (transistors, opamps) as gain stages
 //! 5. Chaining everything into a cascaded `PedalProcessor`
 
+mod bias_analysis;
 mod bind;
-mod bjt_bias_analysis;
 mod build;
+mod calibrate;
 mod classify;
 mod compile;
 mod compiled;
 pub mod component;
 pub mod components;
+mod coupling;
 mod dyn_node;
 mod graph;
+mod signal_flow;
+mod spqr_control;
 mod helpers;
-mod opamp_analysis;
-mod plan;
+mod rigid;
+mod spqr;
+mod spqr_build;
 mod split;
 mod stage;
 pub mod stage_test_helpers;
 pub(crate) mod subcircuit;
-mod topology;
 pub mod validate;
 mod warnings;
 pub(crate) mod wdf_leaf;
 
 pub use compile::{compile_pedal, compile_pedal_with_options, CompileOptions};
+pub use spqr_build::{compile_via_spqr, compile_via_spqr_with_options};
 pub(crate) use compiled::extract_precomputed_from_compiled;
 pub use compiled::CompiledPedal;
 pub use component::{Component, PinDirection};
@@ -38,4 +43,75 @@ pub use validate::{validate_pedal, validate_pedal_files, PedalWarning, Severity}
 pub use warnings::{check_voltage_compatibility, VoltageWarning, WarningSeverity};
 
 #[cfg(test)]
-mod tests;
+mod opamp_drive_tests;
+#[cfg(test)]
+mod passive_extraction_tests;
+#[cfg(test)]
+mod tree_build_tests;
+#[cfg(test)]
+mod voltage_extraction_tests;
+#[cfg(test)]
+mod mna_accuracy_tests;
+#[cfg(test)]
+mod spqr_tests;
+#[cfg(test)]
+mod spqr_build_tests;
+#[cfg(test)]
+mod rigid_tests;
+#[cfg(test)]
+mod bind_tests;
+#[cfg(test)]
+mod general_mna_tests;
+#[cfg(test)]
+mod pot_tests;
+#[cfg(test)]
+mod graph_role_tests;
+#[cfg(test)]
+mod nonideal_tests;
+#[cfg(test)]
+mod split_point_tests;
+#[cfg(test)]
+mod pot_sweep_tests;
+#[cfg(test)]
+mod zero_output_tests;
+#[cfg(test)]
+mod pot_binding_tests;
+#[cfg(test)]
+mod black_feedback_tests;
+#[cfg(test)]
+mod diode_polarity_tests;
+#[cfg(test)]
+mod bias_analysis_tests;
+#[cfg(test)]
+mod bias_application_tests;
+#[cfg(test)]
+mod ground_clip_tests;
+#[cfg(test)]
+mod passive_wdf_tests;
+#[cfg(test)]
+mod goldenrod_pot_tests;
+#[cfg(test)]
+mod goldenrod_signal_chain_tests;
+#[cfg(test)]
+mod group_terminal_tests;
+#[cfg(test)]
+mod feedforward_tests;
+#[cfg(test)]
+mod ratking_signal_chain_tests;
+#[cfg(test)]
+mod harmonic_tests;
+#[cfg(test)]
+mod tone_stage_tests;
+#[cfg(test)]
+mod pot_binding_investigation_tests;
+#[cfg(test)]
+mod pot_wiper_tests;
+// incremental_recompute_tests moved to pedalkernel-rt/tests/incremental_recompute.rs
+#[cfg(test)]
+mod opamp_gain_tests;
+#[cfg(test)]
+mod coupling_tests;
+#[cfg(test)]
+mod level_pot_tests;
+#[cfg(test)]
+mod ground_leg_tests;

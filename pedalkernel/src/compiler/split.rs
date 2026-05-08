@@ -1,6 +1,6 @@
 //! FX loop split: partition a PedalDef at fx_send/fx_return boundaries.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::dsl::*;
 use crate::PedalProcessor;
@@ -226,7 +226,6 @@ fn build_half(
         monitors,
         sidechains: vec![],
         mirrors,
-        midi_bindings: vec![],
         calibrate: false,
         subcircuits: vec![],
     }

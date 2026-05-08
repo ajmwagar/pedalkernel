@@ -12,7 +12,7 @@
 //! warning per device per 1024 samples (~21ms at 48kHz).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::fmt;
 
 /// Rate limit: at most one warning per device per this many samples.

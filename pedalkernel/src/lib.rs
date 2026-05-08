@@ -39,14 +39,146 @@
 #![allow(clippy::unnecessary_map_or)]
 #![allow(clippy::write_literal)]
 #![allow(private_interfaces)]
-//! PedalKernel — compile guitar pedal circuit definitions into real-time
-//! audio DSP kernels using Wave Digital Filters (WDFs).
+//! # PedalKernel
+//!
+//! A DSL compiler that transforms `.pedal` circuit netlists into real-time audio
+//! processors using Wave Digital Filter (WDF) theory. PedalKernel models the
+//! complete analog signal path of guitar effect pedals — resistors, capacitors,
+//! op-amps, transistors, vacuum tubes, diodes — and synthesizes a per-sample
+//! processing kernel that runs at audio rate with deterministic, bounded latency.
+//!
+//! # Compilation Pipeline
+//!
+//! The compiler transforms a human-readable circuit description into an optimized
+//! real-time audio processor through five stages:
+//!
+//! ```text
+//!   .pedal DSL         nom parser           Circuit graph
+//!  ┌──────────┐      ┌──────────┐         ┌──────────────┐
+//!  │ pedal    │      │ PedalDef │         │ CircuitGraph │
+//!  │ "RAT" { │─────>│ (AST)    │────────>│ (nodes+edges)│
+//!  │  R1: ... │ parse│          │ graph   │              │
+//!  └──────────┘      └──────────┘ build   └──────┬───────┘
+//!                                                │
+//!                         SPQR decomposition     │
+//!                        ┌───────────────────────┘
+//!                        │
+//!                        v
+//!            ┌───────────────────────┐
+//!            │  S / P / Q / R nodes  │
+//!            │  (unique tree decomp) │
+//!            └───────────┬───────────┘
+//!                        │
+//!                        v
+//!              ┌──────────────────┐       ┌─────────────────┐
+//!              │  SpqrStage list  │──────>│  CompiledPedal  │
+//!              │  (WDF, IIR, MNA) │ build │  (PedalProcessor│
+//!              └──────────────────┘       │   impl)         │
+//!                                         └─────────────────┘
+//! ```
+//!
+//! 1. **Parse**: The [`dsl`] module uses nom to parse `.pedal` files into a
+//!    [`dsl::PedalDef`] AST containing components, nets, and controls.
+//!
+//! 2. **Graph build**: The [`compiler`] constructs a [`CircuitGraph`](compiler::component::Component)
+//!    from the AST. Each component declares its own topology via the
+//!    [`Component`](compiler::Component) trait — the compiler never pattern-matches
+//!    on component type.
+//!
+//! 3. **SPQR decomposition**: The circuit graph is decomposed into a unique
+//!    SPQR tree (Series / Parallel / Q-leaf / Rigid). S and P nodes map
+//!    directly to WDF adaptors. R nodes require matrix-based solvers.
+//!
+//! 4. **Stage assignment**: Each SPQR subtree becomes a processing stage with
+//!    complexity determined by its topology and component classification.
+//!
+//! 5. **Build**: Stages are compiled into concrete runtime processors and
+//!    chained into a [`CompiledPedal`](compiler::CompiledPedal) that implements
+//!    [`PedalProcessor`].
+//!
+//! # Key Concepts
+//!
+//! ## Wave Digital Filters (WDF)
+//!
+//! WDFs model analog circuits by propagating *wave variables* (incident and
+//! reflected voltage waves) through a binary tree of adaptors. Each passive
+//! component (R, C, L) becomes a leaf node; series and parallel connections
+//! become adaptor nodes. The tree is traversed once per sample — O(1) per
+//! component — making WDFs ideal for real-time audio.
+//!
+//! ## SPQR Decomposition
+//!
+//! Every 2-connected graph has a unique decomposition into Series, Parallel,
+//! and Rigid (triconnected) components. PedalKernel exploits this to
+//! automatically identify which parts of a circuit can be solved with cheap
+//! WDF tree traversal (S/P) and which require heavier matrix solvers (R).
+//!
+//! ## The Component Trait
+//!
+//! [`Component`](compiler::Component) is the single source of truth for all
+//! component behavior. Each concrete component (resistor, op-amp, triode, etc.)
+//! declares its own ports, edge kinds, signal flow, non-idealities, and MNA
+//! stamps. The compiler reacts to these declarations — it never hard-codes
+//! knowledge about specific component types. This makes adding new components
+//! a matter of implementing one trait, with no changes to the compilation
+//! pipeline.
+//!
+//! ## Stage Types and Complexity
+//!
+//! | Stage | Solver | Complexity | When Used |
+//! |-------|--------|------------|-----------|
+//! | **PassiveWdf** | WDF tree traversal | O(1) | All-passive S/P subtree |
+//! | **NlWdf** | WDF + scalar Newton-Raphson | O(1) | S/P subtree with one nonlinear element |
+//! | **IIR** | Biquad from MNA poles/zeros | O(1) | All-passive R-node (e.g., tone stack) |
+//! | **BlackFeedback** | Harold Black's formula | O(1) | Op-amp + passive feedback network |
+//! | **StateSpace** | State-space MNA integration | O(N) | Reactive R-node with active elements |
+//! | **MultiNl** | Multi-dimensional NR | O(N^2) | R-node with multiple nonlinear elements |
+//!
+//! ## Non-Ideal Effects
+//!
+//! Components declare their non-ideal behaviors via
+//! [`NonIdealFx`](compiler::component::NonIdealFx) — gain-bandwidth product
+//! limiting, slew rate, rail saturation — using values from SPICE models and
+//! datasheets. The stage builder applies these as post-processing filters,
+//! keeping the core WDF/MNA solver ideal and the non-ideal modeling composable.
+//!
+//! # Quick Start
+//!
+//! ```rust
+//! use pedalkernel::{dsl, compiler, PedalProcessor};
+//!
+//! // Parse a .pedal circuit definition
+//! let src = r#"
+//! pedal "Example" {
+//!   components {
+//!     R1: resistor(10k)
+//!     C1: cap(100n)
+//!   }
+//!   nets {
+//!     in -> C1.a
+//!     C1.b -> R1.a
+//!     R1.b -> gnd
+//!   }
+//! }
+//! "#;
+//! let pedal = dsl::parse_pedal_file(src).unwrap();
+//!
+//! // Compile to a real-time processor
+//! let mut processor = compiler::compile_pedal(&pedal, 48000.0).unwrap();
+//!
+//! // Process audio sample-by-sample
+//! let output = processor.process(0.5);
+//! ```
+//!
+//! See the [`compiler`] module for implementation details, and the
+//! [`compiler::component`] module for the trait that drives the entire pipeline.
 //!
 //! # Modules
 //!
 //! - [`dsl`] — nom-based parser for `.pedal` circuit definition files
+//! - [`compiler`] — netlist-to-WDF compiler: graph building, SPQR decomposition, stage synthesis
 //! - [`elements`] — WDF one-port elements (R, C, L) and nonlinear roots (diodes)
-//! - [`tree`] — WDF adaptors (series, parallel) and processing engine
+//! - [`tree`] — WDF adaptors (series, parallel) and the processing engine
 //! - [`pedals`] — legacy pedal module (all pedals now use `.pedal` DSL files)
 //! - [`kicad`] — KiCad netlist export from the parsed AST
 //! - [`wav`] — WAV file I/O for offline rendering and testing
@@ -69,10 +201,13 @@ pub mod hw;
 pub mod kicad;
 pub mod loading;
 pub mod metering;
+pub mod model_lookup;
 pub mod models;
+pub mod nonideal_fx;
 pub mod oversampling;
 pub mod pedalboard;
 pub mod pedals;
+pub mod pot_taper;
 pub mod precompute;
 #[cfg(feature = "runtime-warnings")]
 pub mod runtime_warnings;
@@ -83,52 +218,8 @@ pub mod wav;
 
 pub use debug::DebugStats;
 
-/// Audio processor trait for pedals.
-pub trait PedalProcessor {
-    /// Process a single sample.
-    fn process(&mut self, input: f64) -> f64;
-
-    /// Set sample rate (call before processing).
-    fn set_sample_rate(&mut self, rate: f64);
-
-    /// Reset all internal state.
-    fn reset(&mut self);
-
-    /// Set a named control parameter (0.0–1.0). Default: no-op.
-    fn set_control(&mut self, _label: &str, _value: f64) {}
-
-    /// Set supply voltage in volts (default 9.0).
-    ///
-    /// Real pedals run at 9V (standard battery), but many players and boutique
-    /// builders run them at 12V or 18V for more headroom.  Higher voltage means
-    /// the active gain stages (opamps / transistors) can swing further before
-    /// hitting their supply rails, preserving more dynamics before the diode
-    /// clipping stage.  The diode clipping threshold itself is unchanged.
-    fn set_supply_voltage(&mut self, _voltage: f64) {}
-
-    /// List all editable passive components (R, C, L with comp_ids).
-    /// Returns (comp_id, kind_str, current_value) for each editable leaf.
-    fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> {
-        Vec::new()
-    }
-
-    /// Set a passive component's value by comp_id. Returns true if found.
-    /// For resistors: value is in ohms. For capacitors: farads. For inductors: henries.
-    fn set_passive(&mut self, _comp_id: &str, _value: f64) -> bool {
-        false
-    }
-
-    /// Reset a passive component to its original value. Returns true if found.
-    fn reset_passive(&mut self, _comp_id: &str) -> bool {
-        false
-    }
-
-    /// Debug: return current control state as (label, target_value, smoothed_value).
-    /// target_value is what the UI set; smoothed_value is what the engine is using.
-    fn control_debug_info(&self) -> Vec<(String, f64, f64)> {
-        Vec::new()
-    }
-}
+/// Audio processor trait for pedals — re-exported from pedalkernel-rt.
+pub use pedalkernel_rt::PedalProcessor;
 
 // ---------------------------------------------------------------------------
 // JACK real-time audio engine (requires `jack-rt` feature)

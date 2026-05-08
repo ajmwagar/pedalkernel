@@ -1,6 +1,7 @@
 //! Circuit graph construction, series-parallel decomposition, and WDF tree building.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use hashbrown::HashMap;
+use std::collections::{BTreeMap, HashSet};
 
 use super::component::{GraphRole, ResolveContext};
 use super::components::*;
@@ -395,17 +396,38 @@ impl CircuitGraph {
                     });
                 }
                 GraphRole::ActiveEdge { pin_a, pin_b } => {
-                    let key_a = format!("{}.{}", comp.id, pin_a);
-                    let key_b = format!("{}.{}", comp.id, pin_b);
-                    let id_a = get_id(&key_a, &mut uf);
-                    let id_b = get_id(&key_b, &mut uf);
-                    let node_a = uf.find(id_a);
-                    let node_b = uf.find(id_b);
-                    edges.push(GraphEdge {
-                        comp_idx: idx,
-                        node_a,
-                        node_b,
-                    });
+                    // Use ports() for multi-port active components (BJTs: 2 ports).
+                    // All edges share the same comp_idx.
+                    let ports = comp.kind.ports();
+                    if ports.len() > 1 {
+                        for (pa, pb) in &ports {
+                            let key_a = format!("{}.{}", comp.id, pa);
+                            let key_b = format!("{}.{}", comp.id, pb);
+                            let id_a = get_id(&key_a, &mut uf);
+                            let id_b = get_id(&key_b, &mut uf);
+                            let node_a = uf.find(id_a);
+                            let node_b = uf.find(id_b);
+                            if node_a != node_b {
+                                edges.push(GraphEdge {
+                                    comp_idx: idx,
+                                    node_a,
+                                    node_b,
+                                });
+                            }
+                        }
+                    } else {
+                        let key_a = format!("{}.{}", comp.id, pin_a);
+                        let key_b = format!("{}.{}", comp.id, pin_b);
+                        let id_a = get_id(&key_a, &mut uf);
+                        let id_b = get_id(&key_b, &mut uf);
+                        let node_a = uf.find(id_a);
+                        let node_b = uf.find(id_b);
+                        edges.push(GraphEdge {
+                            comp_idx: idx,
+                            node_a,
+                            node_b,
+                        });
+                    }
                     num_active += 1;
                 }
                 GraphRole::CoupledEdge {
@@ -446,8 +468,26 @@ impl CircuitGraph {
                     }
                 }
                 GraphRole::Pot => {
-                    if pots_with_wiper.contains(&comp.id) {
-                        deferred_3term.push((idx, comp.id.clone()));
+                    // Use ports() for edge creation — handles both 2-term and 3-term pots.
+                    // 3-term pots create 2 edges (a→w, w→b) with the same comp_idx.
+                    // No synthetic __aw/__wb split.
+                    let ports = comp.kind.ports();
+                    if pots_with_wiper.contains(&comp.id) && ports.len() > 1 {
+                        for (pin_a, pin_b) in &ports {
+                            let key_a = format!("{}.{}", comp.id, pin_a);
+                            let key_b = format!("{}.{}", comp.id, pin_b);
+                            let id_a = get_id(&key_a, &mut uf);
+                            let id_b = get_id(&key_b, &mut uf);
+                            let node_a = uf.find(id_a);
+                            let node_b = uf.find(id_b);
+                            if node_a != node_b {
+                                edges.push(GraphEdge {
+                                    comp_idx: idx,
+                                    node_a,
+                                    node_b,
+                                });
+                            }
+                        }
                     } else {
                         let key_a = format!("{}.a", comp.id);
                         let key_b = format!("{}.b", comp.id);
@@ -590,18 +630,46 @@ impl CircuitGraph {
                     pin_neg,
                     pin_out,
                 } => {
-                    // Record nullor pins for MNA fallback path.
                     let key_pos = format!("{}.{}", comp.id, pin_pos);
                     let key_neg = format!("{}.{}", comp.id, pin_neg);
                     let key_out = format!("{}.{}", comp.id, pin_out);
                     let id_pos = get_id(&key_pos, &mut uf);
                     let id_neg = get_id(&key_neg, &mut uf);
                     let id_out = get_id(&key_out, &mut uf);
+
+                    // Unity follower detection: if neg == out (direct wire
+                    // feedback, e.g., U2.out → U2.neg), the op-amp is a
+                    // voltage buffer. Union pos and out — they're electrically
+                    // the same node. This makes the buffer transparent to
+                    // the SPQR decomposition.
+                    let node_neg = uf.find(id_neg);
+                    let node_out = uf.find(id_out);
+                    if node_neg == node_out {
+                        // Unity follower: pos = out (buffer is a wire)
+                        uf.union(id_pos, id_out);
+                    }
+
+                    // Re-resolve after potential union
+                    let node_neg = uf.find(id_neg);
+                    let node_out = uf.find(id_out);
+
+                    // Create a proper graph edge (neg→out) for SPQR decomposition.
+                    // For unity followers, neg==out==pos, so this edge is a self-loop
+                    // (node_a == node_b) and gets filtered later.
+                    if node_neg != node_out {
+                        edges.push(GraphEdge {
+                            comp_idx: idx,
+                            node_a: node_neg,
+                            node_b: node_out,
+                        });
+                    }
+
+                    // Record nullor pins for backward compat with existing pipeline.
                     nullor_pin_records.push(NullorPinRecord {
                         comp_idx: idx,
                         pos_node: uf.find(id_pos),
-                        neg_node: uf.find(id_neg),
-                        out_node: uf.find(id_out),
+                        neg_node: node_neg,
+                        out_node: node_out,
                     });
                     num_active += 1;
                 }
@@ -684,25 +752,31 @@ impl CircuitGraph {
             }
         }
 
-        // Create virtual bridge edges for active elements (OpAmp, Npn, Pnp).
-        // This ensures BFS can traverse through them for distance computation
-        // and voltage source injection picks a proper connected node.
+        // Create virtual bridge edges for active elements that have only 1 port.
+        // Components with 2+ ports (BJTs) already have all terminals connected
+        // via real edges — no bridge needed.
+        // Op-amps with 1 port (neg→out) still need a bridge for pos connectivity.
         let mut active_edge_indices = Vec::new();
-        for comp in &pedal.components {
+        for (pedal_comp_idx, comp) in pedal.components.iter().enumerate() {
+            // Skip components with multi-port edges (BJTs) — already connected
+            if comp.kind.ports().len() > 1 {
+                continue;
+            }
+
             let pin_order: &[&str] = if comp.kind.op_amp_type().is_some() {
-                // OpAmps use either 3-pin (pos/neg/out) or 2-pin (in/out) form.
                 if pin_ids.contains_key(&format!("{}.pos", comp.id)) {
                     &["pos", "neg", "out"]
                 } else {
                     &["in", "out"]
                 }
-            } else if comp.kind.is_bjt() {
-                &["base", "collector", "emitter"]
             } else {
                 continue;
             };
 
-            // Collect resolved node IDs for each pin that exists in the netlist.
+            // Find this component's index in all_components
+            let comp_idx = all_components.iter().position(|c| c.id == comp.id)
+                .unwrap_or(pedal_comp_idx);
+
             let mut pin_nodes: Vec<NodeId> = Vec::new();
             for pin_name in pin_order {
                 let key = format!("{}.{}", comp.id, pin_name);
@@ -711,12 +785,11 @@ impl CircuitGraph {
                 }
             }
 
-            // Chain consecutive pin pairs as virtual bridge edges.
             for pair in pin_nodes.windows(2) {
                 if pair[0] != pair[1] {
                     active_edge_indices.push(edges.len());
                     edges.push(GraphEdge {
-                        comp_idx: 0, // placeholder — active edges are excluded from WDF
+                        comp_idx,
                         node_a: pair[0],
                         node_b: pair[1],
                     });
@@ -840,7 +913,7 @@ impl CircuitGraph {
             rec.out_node = uf.find(rec.out_node);
         }
 
-        CircuitGraph {
+        let mut graph = CircuitGraph {
             edges,
             components,
             in_node,
@@ -861,7 +934,9 @@ impl CircuitGraph {
             trigger_nodes,
             ac_ground_nodes: HashSet::new(),
             nullor_pins: nullor_pin_records,
-        }
+        };
+        graph.compute_ac_ground_nodes(pedal);
+        graph
     }
 
     /// Compute AC ground nodes: supply rails and nodes bypassed to ground
@@ -890,7 +965,12 @@ impl CircuitGraph {
             }
         }
 
-        // Nodes bypassed to ground through large caps (≥10µF)
+        // Nodes bypassed to ground through large caps (≥10µF) that also
+        // have multiple signal connections. A lone bias node (VCC→R→node→C→GND)
+        // shouldn't be AC ground — it needs its DC path intact for biasing.
+        // Only mark as AC ground if 3+ non-rail edges touch the node (the cap,
+        // the bias resistor, AND at least one signal component like an op-amp
+        // or pot that references this voltage).
         for edge in &self.edges {
             let comp = &self.components[edge.comp_idx];
             if let Some(cap) = comp
@@ -899,10 +979,29 @@ impl CircuitGraph {
                 .downcast_ref::<super::components::Capacitor>()
             {
                 if cap.config.value >= 10e-6 {
-                    if edge.node_a == self.gnd_node {
-                        ac_ground.insert(edge.node_b);
+                    let candidate = if edge.node_a == self.gnd_node {
+                        Some(edge.node_b)
                     } else if edge.node_b == self.gnd_node {
-                        ac_ground.insert(edge.node_a);
+                        Some(edge.node_a)
+                    } else {
+                        None
+                    };
+                    if let Some(node) = candidate {
+                        // Count how many edges touch this node (excluding
+                        // edges to GND/VCC/supply rails)
+                        let signal_edges = self.edges.iter().filter(|e| {
+                            let touches = e.node_a == node || e.node_b == node;
+                            if !touches { return false; }
+                            let other = if e.node_a == node { e.node_b } else { e.node_a };
+                            other != self.gnd_node
+                                && other != self.vcc_node
+                                && !self.supply_nodes.contains(&other)
+                        }).count();
+                        // ≥3 signal edges: cap + bias R + at least one signal
+                        // component (op-amp pos, pot, etc.)
+                        if signal_edges >= 3 {
+                            ac_ground.insert(node);
+                        }
                     }
                 }
             }
@@ -1205,7 +1304,7 @@ impl CircuitGraph {
             let d = dist[&n];
             if let Some(neighbors) = adj.get(&n) {
                 for &nb in neighbors {
-                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                    if let hashbrown::hash_map::Entry::Vacant(e) = dist.entry(nb) {
                         e.insert(d + 1);
                         queue.push_back(nb);
                     }
@@ -2084,7 +2183,7 @@ impl CircuitGraph {
             let d = dist[&n];
             if let Some(neighbors) = adj.get(&n) {
                 for &nb in neighbors {
-                    if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                    if let hashbrown::hash_map::Entry::Vacant(e) = dist.entry(nb) {
                         e.insert(d + 1);
                         queue.push_back(nb);
                     }

@@ -1,11 +1,71 @@
-//! Component trait: compile-time behavior for circuit components.
+//! # Component Trait and Supporting Types
 //!
-//! Centralizes passivity, MNA stamping, pin configs, WDF leaf creation,
-//! validation, and KiCad export so that callers in graph.rs, validate.rs,
-//! classify.rs, compile.rs, build.rs, and kicad.rs can delegate to
-//! trait methods on concrete component structs.
+//! This module defines [`Component`], the central trait that drives the entire
+//! PedalKernel compilation pipeline. Every circuit element — from a simple
+//! resistor to a 12AX7 vacuum tube — implements `Component` to declare its
+//! electrical behavior, topology, and runtime characteristics.
+//!
+//! # Design Philosophy
+//!
+//! **Components declare; the compiler reacts.** The pipeline never pattern-matches
+//! on component types. Instead, it queries trait methods to determine how each
+//! component participates in the circuit:
+//!
+//! - **What edges does it create?** ([`Component::edges`]) — determines graph topology
+//! - **Is it passive or nonlinear?** ([`Component::is_passive`], [`Component::is_nonlinear`]) — determines stage solver
+//! - **What is its output impedance?** ([`Component::output_impedance`]) — determines stage boundaries
+//! - **What non-ideal effects does it have?** ([`Component::nonideal_fx`]) — determines post-processing
+//! - **How does signal flow through it?** ([`Component::signal_terminals`]) — determines feedback loops
+//!
+//! This inversion of control means adding a new component type requires implementing
+//! one trait — no changes to the graph builder, SPQR decomposer, stage builder,
+//! or any other pipeline stage.
+//!
+//! # How Components Drive the Pipeline
+//!
+//! ## Stage Splitting via Output Impedance
+//!
+//! [`OutputImpedance`] controls where the compiler can safely split a circuit into
+//! independent processing stages. This is based on Harold Black's theorem:
+//! a negative-feedback amplifier's output behaves as a voltage source (zero
+//! output impedance), meaning downstream loads cannot affect upstream behavior.
+//!
+//! When a component returns [`OutputImpedance::VoltageSource`], the compiler knows
+//! it can insert a stage boundary after that component's output. Op-amps in
+//! negative feedback return `VoltageSource`; passive components return
+//! [`OutputImpedance::Finite`].
+//!
+//! ## Feedback Detection via Signal Terminals
+//!
+//! [`SignalTerminals`] drives the feedback analysis pass. The compiler uses Tarjan's
+//! strongly-connected-component algorithm to find feedback loops. Components with
+//! [`SignalTerminals::Amplifier`] define the forward path direction; passive
+//! components with [`SignalTerminals::Passive`] can carry signal in either direction
+//! and may form the feedback path.
+//!
+//! ## Post-Processing via Non-Ideal Effects
+//!
+//! [`NonIdealFx`] allows components to declare physical imperfections from their
+//! SPICE models and datasheets. An LM308 op-amp declares its 1 MHz GBW product
+//! and 0.3 V/us slew rate; the stage builder translates these into a first-order
+//! IIR lowpass and a slew-rate limiter applied after the ideal WDF/MNA solver.
+//!
+//! # Key Types
+//!
+//! - [`Component`] — the trait itself (see its documentation for method groups)
+//! - [`EdgeKind`] — electrical classification of a circuit edge (Linear, Reactive, Nonlinear, Vcvs, etc.)
+//! - [`ComponentEdge`] — a single edge declared by a component
+//! - [`GraphRole`] — how a component participates in circuit graph construction
+//! - [`OutputImpedance`] — voltage-source vs. finite impedance classification
+//! - [`SignalTerminals`] — signal flow directionality for feedback analysis
+//! - [`NonIdealFx`] — non-ideal behaviors (GBW, slew rate, rail saturation)
+//! - [`StampResult`] — result of stamping a component into an MNA matrix
+//! - [`StampContext`] — pin-to-MNA-index resolution for multi-terminal stamping
+//! - [`ControlParam`] — controllable parameter declaration (pots, LFO rate, etc.)
+//! - [`ModulationSink`] — how a component receives LFO/envelope modulation
+//! - [`SolverMethod`] — preferred nonlinear solver (Newton-Raphson, Wright Omega, Ebers-Moll, Gummel-Poon)
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::tree::MnaSystem;
 
@@ -80,6 +140,74 @@ pub enum PinDirection {
     Bidirectional,
 }
 
+/// Component-declared non-ideal behavior applied as post-processing.
+///
+/// Output impedance classification for stage-splitting decisions.
+///
+/// Determines where the compiler can safely split the circuit into
+/// independent stages. Based on Harold Black's observation: a negative
+/// feedback amplifier's output is a voltage source (zero impedance),
+/// so downstream loads don't affect upstream behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputImpedance {
+    /// Zero output impedance — this node is a voltage source.
+    /// Safe to split the circuit after this component's output pin.
+    /// Op-amp outputs, unity-gain buffers, ideal voltage sources.
+    VoltageSource,
+    /// Finite or high output impedance — splitting here changes the circuit.
+    /// Resistors, caps, inductors, BJT collectors, JFET drains, diodes.
+    Finite,
+}
+
+pub use crate::nonideal_fx::NonIdealFx;
+
+/// Electrical behavior classification for a component port (pin pair).
+///
+/// Used by the compiler's optimization legality checks to determine whether
+/// a subgraph can be safely lowered to IIR/BlackFeedback, or must remain
+/// as full MNA/WDF. Nonlinear and ControlledConductance ports create
+/// coupling barriers that prevent unsafe optimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortSemantic {
+    /// Fixed impedance — R, voltage source. Safe to lower/optimize.
+    LinearPassive,
+    /// Stores energy between samples — C, L. Creates time-domain coupling.
+    Reactive,
+    /// I(V) is nonlinear — diode junction, BJT Vbe/Vce, tube plate.
+    /// Must be solved by NR or explicit solver. Optimization barrier.
+    Nonlinear,
+    /// Impedance varies with external control — JFET Rds, photocoupler LDR, pot.
+    /// Optimization barrier when coupled to reactive/feedback nodes.
+    ControlledConductance,
+    /// Voltage constraint (virtual ground, VCVS output). Defines topology.
+    VoltageConstraint,
+}
+
+/// Signal flow classification for a component's pins.
+///
+/// Used by feedback analysis to determine which components are coupled
+/// through feedback loops. The Component trait drives all decisions —
+/// no hardcoded component-type matching in the pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignalTerminals {
+    /// No directionality — R, C, L, pot. Signal flows either way.
+    Passive,
+    /// Unidirectional two-port — diode (a→b). Signal has a preferred direction.
+    TwoPort {
+        input: &'static str,
+        output: &'static str,
+    },
+    /// Amplifier with input, output, and optional control pin.
+    /// Op-amp: input=neg, output=out, control=Some(pos).
+    /// BJT: input=base, output=collector, control=None.
+    /// Tube: input=grid, output=plate, control=None.
+    Amplifier {
+        input: &'static str,
+        output: &'static str,
+        control: Option<&'static str>,
+    },
+}
+
 /// Classification of a circuit edge by electrical behavior.
 ///
 /// The planner uses edge kinds to group components into stages:
@@ -97,6 +225,9 @@ pub enum EdgeKind {
     Nonlinear,
     /// Voltage-controlled current source: OTA in linear mode (future).
     Vccs,
+    /// Voltage-controlled voltage source: op-amp nullor (neg→out edge,
+    /// pos resolved via stamp_mna_multi). Forces R-node in SPQR.
+    Vcvs,
     /// Handled outside WDF/MNA: BBD, delay line.
     Behavioral,
 }
@@ -261,15 +392,132 @@ pub enum SolverMethod {
     GummelPoon,
 }
 
+/// Result of applying DC bias to an active component.
+#[derive(Debug, Clone)]
+pub enum BiasResult {
+    /// Component doesn't use bias (passive elements, diodes).
+    NotApplicable,
+    /// Bias applied successfully. Contains the computed model parameters.
+    Applied {
+        /// Positive rail voltage (V above bias point before clipping).
+        v_rail_pos: f64,
+        /// Negative rail voltage (V below bias point before clipping).
+        v_rail_neg: f64,
+    },
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Component trait
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Compile-time component behavior.
+/// The single source of truth for circuit component behavior.
 ///
-/// Requires `Debug` for trait-object `Debug` forwarding.
-/// Provides `clone_box`, `as_any`, and `dyn_eq` for trait-object
-/// `Clone`, `PartialEq`, and downcasting support.
+/// Every circuit element in PedalKernel — resistors, capacitors, op-amps,
+/// BJTs, vacuum tubes, diodes, potentiometers, transformers, BBD delay lines —
+/// implements this trait. The compilation pipeline queries these methods to
+/// determine topology, solver strategy, stage boundaries, and runtime behavior
+/// without ever pattern-matching on concrete component types.
+///
+/// # Trait Object Support
+///
+/// `Component` is used as `Box<dyn Component>` throughout the pipeline. It
+/// requires [`Debug`] for trait-object formatting and provides `clone_box`,
+/// `as_any`, and `dyn_eq` for trait-object [`Clone`], downcasting, and
+/// [`PartialEq`] support.
+///
+/// # Method Groups
+///
+/// The trait methods are organized into functional groups:
+///
+/// ## Identity
+/// - [`type_tag`](Component::type_tag) — human-readable name (e.g., `"resistor"`, `"NPN transistor"`)
+///
+/// ## Ports
+/// - [`ports`](Component::ports) — terminal pairs carrying current. A resistor has 1 port `(a, b)`;
+///   a BJT has 2 ports `(base-emitter, collector-emitter)`.
+///
+/// ## Signal Flow
+/// - [`signal_terminals`](Component::signal_terminals) — directionality for feedback analysis.
+///   Amplifiers declare input/output pins; passive components are bidirectional.
+///   The compiler uses Tarjan's SCC algorithm on the directed signal graph to
+///   detect feedback loops.
+/// - [`output_impedance`](Component::output_impedance) — determines stage split points.
+///   [`OutputImpedance::VoltageSource`] (op-amps in feedback) allows safe splitting;
+///   [`OutputImpedance::Finite`] (passives, BJT collectors) prevents it.
+///   Based on Harold Black's negative feedback theorem (1934).
+///
+/// ## Non-Idealities
+/// - [`nonideal_fx`](Component::nonideal_fx) — declares physical imperfections as
+///   [`NonIdealFx`] variants. Values come from SPICE models and datasheets. The
+///   stage builder applies these as composable post-processing filters after the
+///   ideal WDF/MNA solver.
+///
+/// ## Classification
+/// - [`is_passive`](Component::is_passive) — whether BFS can collect this component into a stage
+/// - [`is_nonlinear`](Component::is_nonlinear) — whether this needs a Newton-Raphson solver
+/// - [`is_active_ic`](Component::is_active_ic) — whether this counts toward `num_active`
+/// - [`is_variable`](Component::is_variable) — whether the edge impedance changes at runtime
+///   (triggers scattering matrix recomputation)
+/// - Family booleans: [`is_bjt`](Component::is_bjt), [`is_jfet`](Component::is_jfet),
+///   [`is_tube`](Component::is_tube), [`is_pot`](Component::is_pot), etc.
+///
+/// ## Graph Building
+/// - [`graph_role`](Component::graph_role) — how this component participates in the circuit graph.
+///   [`GraphRole::Edge`] for passives, [`GraphRole::VcvsEdge`] for op-amps,
+///   [`GraphRole::Virtual`] for LFOs, [`GraphRole::Pot`] for potentiometers.
+/// - [`edges`](Component::edges) — declares circuit edges with [`EdgeKind`] classification.
+///   [`EdgeKind::Linear`] and [`EdgeKind::Reactive`] form passive WDF trees;
+///   [`EdgeKind::Nonlinear`] seeds NR solver stages; [`EdgeKind::Vcvs`] forces R-node MNA.
+/// - [`resolve_edges`](Component::resolve_edges) — context-dependent edge resolution. A JFET
+///   with its gate driven by an LFO resolves from `Nonlinear` to `Linear` (variable resistor).
+///
+/// ## MNA Stamping
+/// - [`stamp_mna`](Component::stamp_mna) — stamp into a 2-terminal MNA system (resistors, caps)
+/// - [`stamp_mna_multi`](Component::stamp_mna_multi) — stamp with multi-terminal pin resolution
+///   (op-amps resolve pos/neg/out pins)
+/// - [`mna_vsource_count`](Component::mna_vsource_count) — voltage sources needed (op-amps: 1)
+/// - [`mna_internal_node_count`](Component::mna_internal_node_count) — internal MNA nodes (op-amps: 1 for GBW pole)
+///
+/// ## WDF Leaf Creation
+/// - [`make_leaf`](Component::make_leaf) — create a runtime WDF leaf node (`DynNode`).
+///   Resistors, capacitors, and inductors return leaf nodes; nonlinear and virtual
+///   components return `None`.
+///
+/// ## Pin Interface
+/// - [`pin_config`](Component::pin_config) — valid pin names and aliases
+/// - [`pin_direction`](Component::pin_direction) — inferred direction for layout (Input, Output, Up, Down)
+///
+/// ## Controls
+/// - [`controls`](Component::controls) — declares runtime-adjustable parameters ([`ControlParam`]).
+///   Pots declare `PotPosition`; LFOs declare `LfoRate` and `LfoDepth`.
+/// - [`modulation_sink`](Component::modulation_sink) — how this component receives LFO/envelope
+///   control signals, including bias voltage and modulation range.
+///
+/// ## Validation
+/// - [`validate_values`](Component::validate_values) — design rule checks for suspicious or
+///   invalid component values (e.g., a 1-ohm resistor, a 1-farad capacitor).
+///
+/// # Implementing a New Component
+///
+/// To add a new component type to PedalKernel:
+///
+/// 1. Create a struct in [`super::components`] (e.g., `MyDevice { model: String }`)
+/// 2. Implement `Component` with at minimum:
+///    - `type_tag()` — return a human-readable name
+///    - `is_passive()` — `true` for R/C/L, `false` for active devices
+///    - `pin_config()` — declare valid pin names
+///    - `graph_role()` — how it enters the circuit graph
+///    - `edges()` — declare edge kinds (Linear, Nonlinear, etc.)
+///    - `stamp_mna()` — stamp into MNA matrices (for R-node solving)
+///    - `footprint_ref()` — KiCad symbol reference
+/// 3. For nonlinear devices, also implement `classify_nonlinear()` and set
+///    `is_nonlinear() -> true`
+/// 4. For active devices with feedback, implement `output_impedance()` and
+///    `signal_terminals()`
+/// 5. Add the DSL parser variant in [`crate::dsl`]
+///
+/// No changes are needed in the graph builder, SPQR decomposer, stage builder,
+/// or any other pipeline module.
 pub trait Component: std::fmt::Debug {
     // ── Trait Object Support ──────────────────────────────────────────────
 
@@ -303,6 +551,75 @@ pub trait Component: std::fmt::Debug {
     /// (NR) and `ExplicitDiodePairRoot`/`ExplicitDiodeRoot` (WO).
     fn solver_hint(&self) -> Option<SolverMethod> {
         None
+    }
+
+    // ── Ports ─────────────────────────────────────────────────────────────
+
+    /// Terminal pairs carrying current through this component.
+    ///
+    /// Each port = one graph edge. A resistor has 1 port (a, b).
+    /// A BJT has 2 ports (base-emitter, collector-emitter).
+    /// A pot has 2 ports (a-wiper, wiper-b).
+    /// An op-amp has 1 port (neg-out, pos is voltage-sense).
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("a", "b")] // default: 1-port component
+    }
+
+    // ── Non-Idealities ────────────────────────────────────────────────────
+
+    /// Non-ideal behaviors for this component (GBW, slew, rails, thermal, etc.).
+    ///
+    /// Each component declares what non-idealities it has. Values come from
+    /// the SPICE model / datasheet lookup. The stage builder attaches them
+    /// as post-processing. No pattern matching on component type.
+    ///
+    /// Default: empty vec (ideal component).
+    fn nonideal_fx(&self, _sample_rate: f64) -> Vec<NonIdealFx> {
+        Vec::new()
+    }
+
+    // ── Signal Flow ──────────────────────────────────────────────────────
+
+    /// Output impedance at this component's output pin.
+    ///
+    /// `VoltageSource` means the output node voltage is determined entirely
+    /// by the component (via feedback), independent of downstream load.
+    /// The compiler can safely split the circuit at these nodes.
+    ///
+    /// `Finite` (default) means splitting here would change impedances
+    /// and break the transfer function.
+    fn output_impedance(&self) -> OutputImpedance {
+        OutputImpedance::Finite
+    }
+
+    /// Signal flow classification for this component's pins.
+    ///
+    /// Drives feedback analysis: amplifier input→output defines the
+    /// feedback cycle direction. Passive components have no directionality.
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Passive
+    }
+
+    // ── Port Semantics ────────────────────────────────────────────────────
+
+    /// Classify the electrical behavior of a port (pin pair) for optimization
+    /// legality checks. The compiler uses this to determine which subgraphs
+    /// can be safely lowered to IIR/BlackFeedback vs requiring full MNA/WDF.
+    ///
+    /// Default derives from existing classification methods. Override for
+    /// multi-port devices where different pin pairs have different semantics
+    /// (e.g., BJT: B-E is Nonlinear, C-E is Nonlinear).
+    fn port_semantic(&self, _pin_a: &str, _pin_b: &str) -> PortSemantic {
+        if self.is_nonlinear() {
+            return PortSemantic::Nonlinear;
+        }
+        if self.is_variable() {
+            return PortSemantic::ControlledConductance;
+        }
+        if self.capacitance().is_some() || self.inductance().is_some() {
+            return PortSemantic::Reactive;
+        }
+        PortSemantic::LinearPassive
     }
 
     // ── Classification ────────────────────────────────────────────────────
@@ -540,6 +857,21 @@ pub trait Component: std::fmt::Debug {
         false
     }
 
+    /// Whether this element's input node acts as a summing junction that
+    /// should block BFS traversal in the signal flow graph.
+    ///
+    /// Op-amp neg nodes are summing junctions: the input signal, feedback
+    /// network, and interstage coupling all connect to the same node.
+    /// Without blocking, BFS from a downstream element can traverse backward
+    /// through this element's feedback, across shared passives, and reach
+    /// upstream elements — creating false cycle edges.
+    ///
+    /// Returns true for op-amps (VCVS). Returns false for diodes, BJTs,
+    /// tubes, etc. — their input nodes don't create false coupling paths.
+    fn feedback_input_is_barrier(&self) -> bool {
+        false
+    }
+
     // ── Composite classification ─────────────────────────────────────────
 
     /// Passive two-terminal element (R, C, L, etc.) — excludes transformers and pots.
@@ -568,6 +900,30 @@ pub trait Component: std::fmt::Debug {
     }
     fn transformer_config(&self) -> Option<&crate::dsl::TransformerConfig> {
         None
+    }
+
+    // ── Bias application ────────────────────────────────────────────────
+
+    /// Apply DC bias from a static bias network detected at compile time.
+    ///
+    /// `bias_voltages` maps pin names (e.g. "pos", "neg", "base", "gate")
+    /// to their DC voltage computed from the circuit's resistor divider.
+    /// `supply_voltage` is the pedal's supply rail voltage (e.g. 9.0V).
+    ///
+    /// Each component type interprets bias differently:
+    /// - **Op-amp**: sets positive/negative rail limits from bias point
+    /// - **BJT**: sets quiescent Ic, Vce from collector/emitter voltages
+    /// - **Triode/Pentode**: sets grid bias (Vgk) from grid DC voltage
+    /// - **JFET**: sets Vgs from gate bias voltage
+    ///
+    /// Returns `BiasResult` describing what was applied.
+    /// Default: no-op (passive components don't need bias).
+    fn apply_bias(
+        &self,
+        _bias_voltages: &hashbrown::HashMap<String, f64>,
+        _supply_voltage: f64,
+    ) -> BiasResult {
+        BiasResult::NotApplicable
     }
 
     // ── Layout methods (defaults use type_tag) ──────────────────────────
@@ -721,11 +1077,15 @@ mod tests {
     }
 
     #[test]
-    fn edges_active_ic_opamp_empty() {
+    fn edges_active_ic_opamp_vcvs() {
         let o = OpAmp {
             op_type: crate::dsl::OpAmpType::Tl072,
         };
-        assert!(o.edges().is_empty());
+        let edges = o.edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, EdgeKind::Vcvs);
+        assert_eq!(edges[0].pin_a, "neg");
+        assert_eq!(edges[0].pin_b, "out");
     }
 
     #[test]

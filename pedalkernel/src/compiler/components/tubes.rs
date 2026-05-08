@@ -1,11 +1,11 @@
 //! Vacuum tube component structs: Triode, Pentode, VariMu.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    PinDirection, StampResult,
+    PinDirection, SignalTerminals, StampResult,
 };
 use crate::compiler::graph::NodeId;
 use crate::tree::MnaSystem;
@@ -26,6 +26,18 @@ impl Component for Triode {
 
     fn type_tag(&self) -> &'static str {
         "triode"
+    }
+
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("plate", "cathode")] // grid is voltage-sense
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "grid",
+            output: "plate",
+            control: None,
+        }
     }
 
     fn is_passive(&self) -> bool {
@@ -155,6 +167,18 @@ impl Component for Pentode {
         "pentode"
     }
 
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("plate", "cathode")]
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "grid",
+            output: "plate",
+            control: None,
+        }
+    }
+
     fn is_passive(&self) -> bool {
         false
     }
@@ -282,6 +306,18 @@ impl Component for VariMu {
 
     fn type_tag(&self) -> &'static str {
         "variable-mu triode"
+    }
+
+    fn ports(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("plate", "cathode")]
+    }
+
+    fn signal_terminals(&self) -> SignalTerminals {
+        SignalTerminals::Amplifier {
+            input: "grid",
+            output: "plate",
+            control: None,
+        }
     }
 
     fn is_passive(&self) -> bool {
