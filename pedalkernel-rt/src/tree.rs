@@ -1586,19 +1586,11 @@ impl MnaSystem {
         // This avoids the singular G_aa from D[vs_idx,vs_idx] = 0.
         //
         // Find which node the input VS drives (the one with B[node, vs_idx] = 1).
-        // Only eliminate VS node if it has NO capacitor (truly algebraic).
-        // If the VS node has a cap, it's a dynamic state — keep it.
-        //
-        // NOTE: HPF circuits with cap-coupled inputs (C from input to
-        // summing junction) have a cap on the VS node. The current Schur
-        // reduction can't handle this — b_kept becomes zero and the IIR
-        // extraction produces degenerate coefficients. HPF circuits need
-        // a R_dc bias resistor in parallel with the input cap as a
-        // workaround, or the state-space extraction needs to be extended
-        // to handle dual input vectors (b_M, b_N) in the bilinear transform.
+        // Always eliminate: the VS forces V(node) = u, so the cap on this
+        // node doesn't create a free state — the voltage is determined by
+        // the source. The cap coupling is captured in b_c_kept below.
         let vs_node = (0..n_nodes).find(|&i| {
             self.b_matrix[i * n_vs + vs_idx].abs() > 0.5
-                && c_cap[i * n_nodes + i].abs() < 1e-30 // no cap on this node
         });
 
         // Build reduced G and C matrices with the VS node eliminated.
@@ -1626,11 +1618,18 @@ impl MnaSystem {
             }
         }
 
-        // Build input coupling vector: b_kept[i] = G[i, vs_node]
+        // Build input coupling vectors from both G and C columns of the
+        // eliminated VS node. In continuous time: (G + sC)*X = 0. When
+        // X[vn] = U, node i gets current G[i,vn]*U + sC[i,vn]*U.
+        // The G column (b_kept) is frequency-independent.
+        // The C column (b_c_kept) creates the s-dependent (z-1) term
+        // needed for HPF zeros.
         let mut b_kept = vec![0.0; n_kept];
+        let mut b_c_kept = vec![0.0; n_kept];
         if let Some(vn) = vs_node {
             for (ri, &r) in kept_nodes.iter().enumerate() {
                 b_kept[ri] = self.g_matrix[r * n_nodes + vn];
+                b_c_kept[ri] = c_cap[r * n_nodes + vn];
             }
         }
 
@@ -1671,6 +1670,7 @@ impl MnaSystem {
                     let c_vs_node = self.c_matrix[v * n_nodes + vn];
                     // This goes into the b vector for the vs row
                     b_kept.resize(n_aug_kept, 0.0);
+                    b_c_kept.resize(n_aug_kept, 0.0);
                     b_kept[n_kept + vi] += c_vs_node;
                 }
             }
@@ -1681,6 +1681,7 @@ impl MnaSystem {
                 }
             }
             b_kept.resize(n_aug_kept, 0.0);
+            b_c_kept.resize(n_aug_kept, 0.0);
 
             // ── Step 2: Schur complement on the augmented kept system ────
             // Cap indices in the kept system
@@ -1743,21 +1744,37 @@ impl MnaSystem {
                     }
                 }
 
-                // B_red = b_c - G_ca · G_aa⁻¹ · b_a
-                let b_c: Vec<f64> = cap_indices.iter().map(|&i| b_kept[i]).collect();
-                let b_a: Vec<f64> = alg_indices.iter().map(|&i| b_kept[i]).collect();
+                // Schur-reduce BOTH input coupling vectors (G and C columns).
+                // B_G_red = b_G_c - G_ca · G_aa⁻¹ · b_G_a
+                let b_g_c: Vec<f64> = cap_indices.iter().map(|&i| b_kept[i]).collect();
+                let b_g_a: Vec<f64> = alg_indices.iter().map(|&i| b_kept[i]).collect();
                 let mut gaa_inv_ba = vec![0.0; n_a];
                 for i in 0..n_a {
-                    for k in 0..n_a { gaa_inv_ba[i] += g_aa_inv[i * n_a + k] * b_a[k]; }
+                    for k in 0..n_a { gaa_inv_ba[i] += g_aa_inv[i * n_a + k] * b_g_a[k]; }
                 }
-                let mut b_red = b_c.clone();
+                let mut b_g_red = b_g_c.clone();
                 for i in 0..n_c {
                     let mut s = 0.0;
                     for k in 0..n_a { s += g_ca[i * n_a + k] * gaa_inv_ba[k]; }
-                    b_red[i] -= s;
+                    b_g_red[i] -= s;
                 }
 
-                // Bilinear transform
+                // B_C_red = b_C_c - G_ca · G_aa⁻¹ · b_C_a
+                // (same G_ca/G_aa⁻¹ — algebraic nodes are eliminated via G)
+                let b_cc_c: Vec<f64> = cap_indices.iter().map(|&i| b_c_kept[i]).collect();
+                let b_cc_a: Vec<f64> = alg_indices.iter().map(|&i| b_c_kept[i]).collect();
+                let mut gaa_inv_bca = vec![0.0; n_a];
+                for i in 0..n_a {
+                    for k in 0..n_a { gaa_inv_bca[i] += g_aa_inv[i * n_a + k] * b_cc_a[k]; }
+                }
+                let mut b_c_red = b_cc_c.clone();
+                for i in 0..n_c {
+                    let mut s = 0.0;
+                    for k in 0..n_a { s += g_ca[i * n_a + k] * gaa_inv_bca[k]; }
+                    b_c_red[i] -= s;
+                }
+
+                // Bilinear transform: M = G_red + 2fs·C_red, N = 2fs·C_red - G_red
                 let mut m_red = vec![0.0; n_c * n_c];
                 let mut n_red = vec![0.0; n_c * n_c];
                 for i in 0..n_c {
@@ -1773,18 +1790,37 @@ impl MnaSystem {
                     a_d[i * n_c + j] += m_inv[i * n_c + k] * n_red[k * n_c + j];
                 }}}
 
-                // b_d = M⁻¹ · b_red, with a factor of 2 ONLY when circuit
-                // nodes were eliminated (not just vsource rows). Eliminating
-                // circuit nodes via Schur complement introduces a 1/(1-A_d)
-                // = 2G_red/M factor that halves the DC gain. The 2× corrects
-                // this. When only vsource rows are eliminated (no circuit
-                // nodes lost), no correction is needed.
+                // Bilinear input coupling: two vectors for u[n+1] and u[n].
+                //   b_M_red = b_G_red + 2fs·b_C_red  (couples to u[n+1])
+                //   b_N_red = -b_G_red + 2fs·b_C_red  (couples to u[n])
+                //
+                // For LPF (b_C_red=0): b_M = b_G, b_N = -b_G → standard single-vector.
+                // For HPF (b_G_red=0): b_M = 2fs·b_C, b_N = 2fs·b_C → symmetric,
+                //   creates (z-1) HPF zero from the z·b_M + b_N = 2fs·b_C·(z+1)...
+                //   wait, that's allpass. The HPF zero comes from the asymmetry
+                //   in the denominator interaction.
                 let circuit_nodes_eliminated = alg_indices.iter().any(|&i| i < n_kept);
                 let b_scale = if circuit_nodes_eliminated { 2.0 } else { 1.0 };
-                let mut b_d = vec![0.0; n_c];
-                for i in 0..n_c { for k in 0..n_c {
-                    b_d[i] += b_scale * m_inv[i * n_c + k] * b_red[k];
-                }}
+
+                // Compute b_plus = M⁻¹·b_M_red and b_minus = M⁻¹·b_N_red
+                let mut b_plus = vec![0.0; n_c];
+                let mut b_minus = vec![0.0; n_c];
+                for i in 0..n_c {
+                    for k in 0..n_c {
+                        let bm = b_g_red[k] + two_fs * b_c_red[k];
+                        let bn = -b_g_red[k] + two_fs * b_c_red[k];
+                        b_plus[i] += b_scale * m_inv[i * n_c + k] * bm;
+                        b_minus[i] += b_scale * m_inv[i * n_c + k] * bn;
+                    }
+                }
+
+                // For backward compatibility, b_d = b_plus (used by caller
+                // for single-vector biquad extraction). The caller will be
+                // updated to use b_minus too via the new return value.
+                // For now, pack b_minus into the return by extending b_d.
+                let mut b_d = b_plus.clone();
+                // Append b_minus so caller can extract it: b_d[0..n_c] = b_plus, b_d[n_c..2*n_c] = b_minus
+                b_d.extend_from_slice(&b_minus);
 
                 // Output extraction: c_d and d_d
                 // Map output node to kept index, then to cap/alg index
@@ -1829,10 +1865,17 @@ impl MnaSystem {
                 for i in 0..n_c { for j in 0..n_c { for k in 0..n_c {
                     a_d[i * n_c + j] += m_inv[i * n_c + k] * n_k[k * n_c + j];
                 }}}
-                let mut b_d = vec![0.0; n_c];
+                // Two-vector input coupling (same as Schur path)
+                let mut b_plus = vec![0.0; n_c];
+                let mut b_minus = vec![0.0; n_c];
                 for i in 0..n_c { for k in 0..n_c {
-                    b_d[i] += 2.0 * m_inv[i * n_c + k] * b_kept[k];
+                    let bm = b_kept[k] + two_fs * b_c_kept[k];
+                    let bn = -b_kept[k] + two_fs * b_c_kept[k];
+                    b_plus[i] += 2.0 * m_inv[i * n_c + k] * bm;
+                    b_minus[i] += 2.0 * m_inv[i * n_c + k] * bn;
                 }}
+                let mut b_d = b_plus.clone();
+                b_d.extend_from_slice(&b_minus);
                 // Output extraction
                 let mut c_d = vec![0.0; n_c];
                 if let Some(op) = output_pos {

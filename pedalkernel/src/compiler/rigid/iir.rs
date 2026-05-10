@@ -84,10 +84,21 @@ pub(in crate::compiler) fn build_iir_stage(
         mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, sample_rate);
 
     if n_states <= 2 && n_states > 0 {
+        // b_d contains two packed vectors: b_plus[0..n] and b_minus[n..2n]
+        // b_plus couples to u[n+1], b_minus couples to u[n].
+        // H(z) = c·(zI-A)⁻¹·(b_plus·z + b_minus) + d
+        let has_two_vectors = b_d.len() >= 2 * n_states;
+        let bp = &b_d[..n_states];
+        let bm = if has_two_vectors { &b_d[n_states..2 * n_states] } else { bp };
+
         if n_states == 1 {
             let a_val = a_d[0];
-            let b0 = d_feedthrough;
-            let b1 = c_out[0] * b_d[0] - d_feedthrough * a_val;
+            // H(z) = c0·(z - a)⁻¹·(bp0·z + bm0) + d
+            // = c0·(bp0·z + bm0)/(z - a) + d·(z - a)/(z - a)
+            // = [c0·bp0·z + c0·bm0 + d·z - d·a] / (z - a)
+            // = [(c0·bp0 + d)·z + (c0·bm0 - d·a)] / (z - a)
+            let b0 = c_out[0] * bp[0] + d_feedthrough;
+            let b1 = c_out[0] * bm[0] - d_feedthrough * a_val;
             return Ok(IirData::new(vec![b0, b1], vec![1.0, -a_val], sample_rate));
         } else {
             let a11 = a_d[0];
@@ -96,12 +107,27 @@ pub(in crate::compiler) fn build_iir_stage(
             let a22 = a_d[3];
             let da1 = -(a11 + a22);
             let da2 = a11 * a22 - a12 * a21;
-            let num_z1 = c_out[0] * b_d[0] + c_out[1] * b_d[1];
-            let num_z0 = c_out[0] * (-a22 * b_d[0] + a12 * b_d[1])
-                + c_out[1] * (a21 * b_d[0] - a11 * b_d[1]);
-            let b0 = d_feedthrough;
-            let b1 = d_feedthrough * da1 + num_z1;
-            let b2 = d_feedthrough * da2 + num_z0;
+
+            // H(z) = c·adj(zI-A)·(bp·z + bm)/det(zI-A) + d
+            // adj(zI-A) = [z-a22, a12; a21, z-a11]
+            //
+            // c·adj·bp = z·(c0·bp0+c1·bp1) + (-c0·a22·bp0+c0·a12·bp1+c1·a21·bp0-c1·a11·bp1)
+            //          = z·num_z1_p + num_z0_p
+            // c·adj·bm = z·(c0·bm0+c1·bm1) + (-c0·a22·bm0+c0·a12·bm1+c1·a21·bm0-c1·a11·bm1)
+            //          = z·num_z1_m + num_z0_m
+            //
+            // Numerator = z·(z·num_z1_p + num_z0_p) + (z·num_z1_m + num_z0_m) + d·det
+            //           = z²·num_z1_p + z·(num_z0_p + num_z1_m) + num_z0_m + d·(z²+da1·z+da2)
+            let num_z1_p = c_out[0] * bp[0] + c_out[1] * bp[1];
+            let num_z0_p = c_out[0] * (-a22 * bp[0] + a12 * bp[1])
+                + c_out[1] * (a21 * bp[0] - a11 * bp[1]);
+            let num_z1_m = c_out[0] * bm[0] + c_out[1] * bm[1];
+            let num_z0_m = c_out[0] * (-a22 * bm[0] + a12 * bm[1])
+                + c_out[1] * (a21 * bm[0] - a11 * bm[1]);
+
+            let b0 = num_z1_p + d_feedthrough;
+            let b1 = num_z0_p + num_z1_m + d_feedthrough * da1;
+            let b2 = num_z0_m + d_feedthrough * da2;
             return Ok(IirData::new(
                 vec![b0, b1, b2],
                 vec![1.0, da1, da2],

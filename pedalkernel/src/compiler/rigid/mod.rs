@@ -335,18 +335,19 @@ fn collect_nonideal_fx(
 
 /// Extract pot bindings from a classified FlowGroup for IIR runtime recomputation.
 ///
-/// For each pot in the feedback path, computes:
-/// - `ri`: sum of resistance on pendant_edges (input coupling)
-/// - `fixed_series_r`: sum of non-pot resistance on feedback_edges
-/// - `max_r`: pot's maximum resistance
+/// Scans ALL edges in the group (feedback, ground shunt, pendant, active) for
+/// pots. Each pot gets an IirPotBinding so the IIR stage can recompute biquad
+/// coefficients when any pot changes.
 ///
-/// No heap allocations at runtime — all values are scalars stored at compile time.
+/// Previously only scanned feedback_edges — missed Resonance pots (ground shunt)
+/// and Cutoff pots (input path / pendant).
 fn extract_pot_bindings(
     group: &FlowGroup,
     _edge_indices: &[usize],
     graph: &CircuitGraph,
 ) -> Vec<IirPotBinding> {
     let mut bindings = Vec::new();
+    let all_edges = group.all_edges();
 
     // Ri: sum of resistance on pendant_edges (input coupling path)
     let ri: f64 = group
@@ -360,10 +361,15 @@ fn extract_pot_bindings(
         .sum();
     let ri = if ri <= 0.0 { 1.0 } else { ri }; // Safety: avoid div-by-zero
 
-    // Scan feedback edges for pots
+    // Scan ALL edges for pots — any pot in the group affects the IIR
     let mut fixed_r: f64 = 0.0;
-    for &eidx in &group.feedback_edges {
-        let comp = &graph.components[graph.edges[eidx].comp_idx];
+    let mut seen_comp: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for &eidx in &all_edges {
+        let comp_idx = graph.edges[eidx].comp_idx;
+        if !seen_comp.insert(comp_idx) {
+            continue; // skip duplicate edges for same component
+        }
+        let comp = &graph.components[comp_idx];
         if let Some(pot) = comp
             .kind
             .as_any()
@@ -377,7 +383,10 @@ fn extract_pot_bindings(
                 position: 0.5, // default
             });
         } else if let Some(r) = comp.kind.resistance() {
-            fixed_r += r;
+            // Only count non-pot feedback resistors as fixed_r
+            if group.feedback_edges.contains(&eidx) {
+                fixed_r += r;
+            }
         }
     }
 
