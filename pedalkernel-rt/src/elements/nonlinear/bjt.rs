@@ -4,7 +4,7 @@
 //! the multi-port Newton-Raphson grouped solver. The legacy single-port
 //! Ebers-Moll roots (`BjtNpnRoot`, `BjtPnpRoot`, `BjtModel`) have been removed.
 
-use super::solver::NlDeviceGroupIv;
+use super::solver::{newton_raphson_solve, NlDeviceGroupIv, NlDeviceIv};
 
 // ---------------------------------------------------------------------------
 // Gummel-Poon BJT Model
@@ -1176,6 +1176,131 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
             0 => (-self.vbe_max, self.vbe_max), // Vbe: IS-dependent
             _ => (-self.v_max, self.v_max),     // Vce: full swing
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BjtRoot: single-port WDF root for common-emitter BJT stages
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// BJT as a single-port WDF root (like TriodeRoot for tubes).
+///
+/// Vbe is set externally as a control parameter (from the base signal).
+/// The collector-emitter path is the WDF port. This enables:
+/// - Standard WDF tree processing for BJT stages
+/// - K-method table generation (2D: b_tree × Vbe)
+/// - Blockwise decomposition of BJT cascades (303 ladder)
+///
+/// Uses the Gummel-Poon model for the I-V characteristic.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BjtRoot {
+    pub model: GummelPoonModel,
+    pub is_pnp: bool,
+    /// Current base-emitter voltage (external control parameter).
+    vbe: f64,
+    /// Maximum collector-emitter voltage (from supply rail).
+    v_max: f64,
+    /// Previous sample's Vce for NR warm-starting.
+    prev_v: f64,
+}
+
+impl BjtRoot {
+    pub fn new(model: GummelPoonModel, is_pnp: bool) -> Self {
+        Self {
+            model,
+            is_pnp,
+            vbe: 0.0,
+            v_max: 50.0,
+            prev_v: 0.0,
+        }
+    }
+
+    pub fn new_with_v_max(model: GummelPoonModel, is_pnp: bool, v_max: f64) -> Self {
+        Self {
+            model,
+            is_pnp,
+            vbe: 0.0,
+            v_max: v_max.max(1.0),
+            prev_v: 0.0,
+        }
+    }
+
+    /// Set the base-emitter voltage (external control from input signal).
+    #[inline]
+    pub fn set_vbe(&mut self, vbe: f64) {
+        self.vbe = vbe;
+    }
+
+    /// Get current Vbe.
+    #[inline]
+    pub fn vbe(&self) -> f64 {
+        self.vbe
+    }
+
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0);
+    }
+
+    /// Collector current Ic as a function of Vce, with Vbe held constant.
+    /// This is the I-V characteristic seen at the WDF port.
+    #[inline]
+    pub fn collector_current(&self, vce: f64) -> f64 {
+        let sign = if self.is_pnp { -1.0 } else { 1.0 };
+        let vbe = sign * self.vbe;
+        let vce = sign * vce;
+        let vbc = (vbe - vce).min(0.4); // Clamp Vbc
+        let (ic, _ib) = self.model.currents(vbe, vbc);
+        sign * ic
+    }
+
+    /// Derivative dIc/dVce for Newton-Raphson.
+    #[inline]
+    pub fn collector_current_derivative(&self, vce: f64) -> f64 {
+        // Numerical derivative (simple, robust)
+        let h = 1e-6;
+        let ic_plus = self.collector_current(vce + h);
+        let ic_minus = self.collector_current(vce - h);
+        (ic_plus - ic_minus) / (2.0 * h)
+    }
+
+    /// WDF NR solve: incident wave → reflected wave.
+    pub fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let v_max = self.v_max;
+        let cold = a * 0.5;
+        let v0 = if self.prev_v != 0.0
+            && (self.prev_v - cold).abs() < v_max
+            && self.prev_v.abs() < v_max
+        {
+            self.prev_v
+        } else {
+            cold
+        };
+        let root = self.clone();
+        let b = newton_raphson_solve(
+            a,
+            rp,
+            v0,
+            super::solver::NR_MAX_ITER,
+            1e-6,
+            Some((-1.0, v_max)),
+            None,
+            |v| (root.collector_current(v), root.collector_current_derivative(v)),
+        );
+        self.prev_v = (a + b) * 0.5;
+        b
+    }
+}
+
+impl NlDeviceIv for BjtRoot {
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        (self.collector_current(v), self.collector_current_derivative(v))
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-1.0, self.v_max)
     }
 }
 

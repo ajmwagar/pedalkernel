@@ -41,6 +41,7 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
             RootKind::Jfet(_) => "Jfet",
             RootKind::Triode(_) => "Triode",
             RootKind::Mosfet(_) => "Mosfet",
+            RootKind::Bjt(_) => "Bjt",
             RootKind::ShortCircuit => "ShortCircuit",
             RootKind::Passthrough => "Passthrough",
             RootKind::OpAmp(_) => "OpAmp",
@@ -63,6 +64,7 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
         | RootKind::Jfet(_)
         | RootKind::Triode(_)
         | RootKind::Mosfet(_)
+        | RootKind::Bjt(_)
     );
     if !is_nl {
         return None;
@@ -88,6 +90,7 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
             RootKind::Triode(_) => (-4.0, 1.0),
             RootKind::Jfet(_) => (-3.0, 0.5),
             RootKind::Mosfet(_) => (-1.0, 5.0),
+            RootKind::Bjt(_) => (-0.2, 0.8), // Vbe range: cutoff to saturation
             _ => return None,
         };
         let root = &mut stage.root;

@@ -326,6 +326,10 @@ pub enum RootKind {
     VariMu(VariMuTriodeRoot),
     Pentode(PentodeRoot),
     Mosfet(MosfetRoot),
+    /// BJT as single-port WDF root (common-emitter topology).
+    /// Vbe is set externally (like triode Vgk), C-E is the WDF port.
+    /// Enables K-method tabulation (2D: b_tree × Vbe).
+    Bjt(BjtRoot),
     Ota(OtaRoot),
     /// Op-amp gain stage (TL072, LM308, JRC4558, etc.).
     /// Topology (inverting vs non-inverting) is stored in the root itself.
@@ -475,6 +479,7 @@ impl RootKind {
             RootKind::VariMu(t) => t.process(b_tree, rp),
             RootKind::Pentode(p) => p.process(b_tree, rp),
             RootKind::Mosfet(m) => m.process(b_tree, rp),
+            RootKind::Bjt(b) => b.process(b_tree, rp),
             RootKind::Ota(o) => o.process(b_tree, rp),
             RootKind::OpAmp(op) => op.process(b_tree, rp),
             RootKind::Passthrough => b_tree,
@@ -498,6 +503,11 @@ impl RootKind {
             }
             RootKind::VariMu(t) => {
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+            }
+            RootKind::Bjt(b) => {
+                // BJT Vbe driven by input signal.
+                // For common-emitter: Vbe ≈ signal (small amplitude around bias).
+                b.set_vbe(input * compensation);
             }
             RootKind::Pentode(p) => {
                 p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
@@ -1335,6 +1345,7 @@ impl WdfStage {
                 RootKind::VariMu(t) => t.process(b_tree, rp),
                 RootKind::Pentode(p) => p.process(b_tree, rp),
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
+                RootKind::Bjt(b) => b.process(b_tree, rp),
                 RootKind::Ota(o) => o.process(b_tree, rp),
                 RootKind::OpAmp(op) => {
                     if op.is_non_inverting() {
@@ -2212,6 +2223,7 @@ impl WdfStage {
             RootKind::VariMu(_) => "VariMu",
             RootKind::Pentode(_) => "Pentode",
             RootKind::Mosfet(_) => "Mosfet",
+            RootKind::Bjt(_) => "Bjt",
             RootKind::Ota(_) => "Ota",
             RootKind::OpAmp(_) => "OpAmp",
             RootKind::Passthrough => "Passthrough",
