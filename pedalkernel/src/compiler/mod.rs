@@ -122,3 +122,5 @@ mod mfb_debug_test;
 mod biquad_table_tests;
 #[cfg(test)]
 mod blockwise_detection_tests;
+#[cfg(test)]
+mod k_method_tests;

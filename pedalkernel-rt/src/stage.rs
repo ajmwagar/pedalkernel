@@ -226,6 +226,84 @@ static TRACE_COUNT_MNL: AtomicU64 = AtomicU64::new(0);
 const MAX_TRACE_MNL: u64 = 20;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// K-method lookup table for NL roots
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Precomputed lookup table replacing Newton-Raphson for a WDF NL root.
+///
+/// Maps incident wave (b_tree) → reflected wave (a_root) for a fixed port
+/// resistance. Built at compile time by evaluating the NL device's I-V curve
+/// across the operating domain.
+///
+/// 1D: single junction (diode pair, single diode) — indexed by b_tree only.
+/// 2D: two-port device (BJT, triode) — indexed by (b_tree, control_voltage).
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct KTable {
+    /// Number of input dimensions (1 for diode, 2 for BJT/triode).
+    pub dims: usize,
+    /// Min/max of the b_tree input domain.
+    pub b_min: f64,
+    pub b_max: f64,
+    /// Min/max of the second dimension (control voltage). Unused for 1D.
+    pub ctrl_min: f64,
+    pub ctrl_max: f64,
+    /// Number of steps per dimension.
+    pub steps: usize,
+    /// Flat table entries: a_root values.
+    /// 1D: [steps] entries.
+    /// 2D: [steps × steps] entries, row-major (b varies fastest).
+    pub entries: alloc::vec::Vec<f64>,
+}
+
+impl KTable {
+    /// 1D lookup: interpolate a_root from b_tree.
+    pub fn lookup_1d(&self, b_tree: f64) -> f64 {
+        if self.steps < 2 || self.entries.is_empty() {
+            return 0.0;
+        }
+        let range = self.b_max - self.b_min;
+        if range.abs() < 1e-15 {
+            return self.entries[0];
+        }
+        let t = ((b_tree - self.b_min) / range).clamp(0.0, 1.0);
+        let p = t * (self.steps - 1) as f64;
+        let i = (p as usize).min(self.steps - 2);
+        let frac = p - i as f64;
+        self.entries[i] * (1.0 - frac) + self.entries[i + 1] * frac
+    }
+
+    /// 2D lookup: interpolate a_root from (b_tree, control_voltage).
+    pub fn lookup_2d(&self, b_tree: f64, ctrl: f64) -> f64 {
+        if self.steps < 2 || self.entries.is_empty() {
+            return 0.0;
+        }
+        let b_range = self.b_max - self.b_min;
+        let c_range = self.ctrl_max - self.ctrl_min;
+        if b_range.abs() < 1e-15 || c_range.abs() < 1e-15 {
+            return self.entries[0];
+        }
+        let tb = ((b_tree - self.b_min) / b_range).clamp(0.0, 1.0);
+        let tc = ((ctrl - self.ctrl_min) / c_range).clamp(0.0, 1.0);
+        let pb = tb * (self.steps - 1) as f64;
+        let pc = tc * (self.steps - 1) as f64;
+        let ib = (pb as usize).min(self.steps - 2);
+        let ic = (pc as usize).min(self.steps - 2);
+        let fb = pb - ib as f64;
+        let fc = pc - ic as f64;
+        let s = self.steps;
+        let v00 = self.entries[ib + ic * s];
+        let v10 = self.entries[ib + 1 + ic * s];
+        let v01 = self.entries[ib + (ic + 1) * s];
+        let v11 = self.entries[ib + 1 + (ic + 1) * s];
+        v00 * (1.0 - fb) * (1.0 - fc)
+            + v10 * fb * (1.0 - fc)
+            + v01 * (1.0 - fb) * fc
+            + v11 * fb * fc
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // WDF clipping stage
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -761,6 +839,9 @@ pub struct WdfStage {
     ///
     /// NOT the same as `paired_opamp` (which is for Bridged-T all-pass circuits).
     pub feedback_opamp: Option<OpAmpRoot>,
+    /// K-method lookup table: precomputed NL root response.
+    /// When present, process() uses table lookup instead of NR iteration.
+    pub k_table: Option<KTable>,
     /// VCC injection coefficient (per-unit, wave domain).
     /// Multiply by supply voltage to get the DC bias added to the reflected wave.
     /// Computed from a small resistive MNA at build time. Zero when no VCC edge.
@@ -859,6 +940,7 @@ impl WdfStage {
             feedback_ri: f64::INFINITY,
             output_probe: None,
             feedback_opamp: None,
+            k_table: None,
             vcc_injection_coeff: 0.0,
             vcc_dc_ramp: 0,
             coupling_cap_id: None,
