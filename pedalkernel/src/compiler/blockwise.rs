@@ -67,8 +67,8 @@ impl BlockwisePlan {
 struct NlBlock {
     /// The NL edge indices (from Q-leaf children of the P-node).
     nl_edges: Vec<usize>,
-    /// The P-node's endpoints — the block's port nodes.
-    endpoints: (NodeId, NodeId),
+    /// All nodes touched by this block's NL edges.
+    nodes: Vec<NodeId>,
     /// Component index of the NL device.
     comp_idx: usize,
 }
@@ -111,7 +111,7 @@ fn find_nl_blocks(node: &SpqrNode, graph: &CircuitGraph, blocks: &mut Vec<NlBloc
                 if let Some(ci) = comp_idx {
                     blocks.push(NlBlock {
                         nl_edges,
-                        endpoints: *endpoints,
+                        nodes: vec![endpoints.0, endpoints.1],
                         comp_idx: ci,
                     });
                     return;
@@ -135,50 +135,16 @@ fn find_nl_blocks(node: &SpqrNode, graph: &CircuitGraph, blocks: &mut Vec<NlBloc
 
             for (ci, nl_edges) in comp_groups {
                 if nl_edges.is_empty() { continue; }
-                // Compute endpoints: union of all nodes from this comp's NL edges
+                // Collect all nodes touched by this component's NL edges
                 let mut all_nodes: Vec<NodeId> = Vec::new();
                 for &eidx in &nl_edges {
                     let e = &graph.edges[eidx];
                     if !all_nodes.contains(&e.node_a) { all_nodes.push(e.node_a); }
                     if !all_nodes.contains(&e.node_b) { all_nodes.push(e.node_b); }
                 }
-                // Endpoints: the two outermost nodes (or first two if >2)
-                let ep = if all_nodes.len() >= 2 {
-                    (all_nodes[0], all_nodes[1])
-                } else if all_nodes.len() == 1 {
-                    (all_nodes[0], all_nodes[0])
-                } else {
-                    continue;
-                };
-                // For 3-node BJTs (base, collector, emitter), use base and collector
-                // as endpoints (emitter is the shared internal node)
-                let ep = if all_nodes.len() == 3 {
-                    // Find the node that appears in ALL NL edges (the shared one = emitter)
-                    // The other two are the endpoints
-                    let shared = all_nodes.iter().find(|&&n| {
-                        nl_edges.iter().all(|&eidx| {
-                            let e = &graph.edges[eidx];
-                            e.node_a == n || e.node_b == n
-                        })
-                    });
-                    if let Some(&emitter) = shared {
-                        let others: Vec<NodeId> = all_nodes.iter()
-                            .filter(|&&n| n != emitter)
-                            .copied()
-                            .collect();
-                        if others.len() == 2 {
-                            (others[0], others[1])
-                        } else {
-                            ep
-                        }
-                    } else {
-                        ep
-                    }
-                } else {
-                    ep
-                };
+                if all_nodes.is_empty() { continue; }
 
-                blocks.push(NlBlock { nl_edges, endpoints: ep, comp_idx: ci });
+                blocks.push(NlBlock { nl_edges, nodes: all_nodes, comp_idx: ci });
             }
 
             // Also recurse into non-Q children (P-nodes, nested S/R)
@@ -302,10 +268,10 @@ pub(super) fn analyze_blockwise(
         .flat_map(|b| b.nl_edges.iter().copied())
         .collect();
 
-    let block_port_nodes: Vec<(usize, (NodeId, NodeId))> = nl_blocks
+    let block_port_nodes: Vec<(usize, Vec<NodeId>)> = nl_blocks
         .iter()
         .enumerate()
-        .map(|(i, b)| (i, b.endpoints))
+        .map(|(i, b)| (i, b.nodes.clone()))
         .collect();
 
     let excluded: HashSet<NodeId> = {
@@ -328,21 +294,38 @@ pub(super) fn analyze_blockwise(
         sibling_edges.len(), edge_indices.len(), nl_edge_set.len());
 
     // Step 3: assign siblings to blocks.
-    // First pass: assign edges directly touching a block's port nodes.
-    // Then expand: edges touching nodes already claimed by a block get
-    // assigned to that block too (captures pot chains: R_e→Cutoff→gnd).
-    let mut node_to_block: HashMap<NodeId, usize> = HashMap::new();
-    for &(bi, (ep_a, ep_b)) in &block_port_nodes {
-        // Port nodes may be shared between blocks — assign to the block
-        // with the most NL edges at that node (same heuristic as before)
-        for &node in &[ep_a, ep_b] {
+    //
+    // Node classification:
+    // - A port node appearing in exactly 1 block → owned by that block
+    // - A port node appearing in 2+ blocks → boundary (coupling interface)
+    //   Neither block owns it. Edges here are assigned by their OTHER endpoint.
+    // - Ground/supply → excluded (not owned, not boundary)
+    //
+    // Then iteratively expand: edges where one endpoint is owned and the
+    // other is unclaimed → assign to the owning block, claim the other node.
+
+    // Find boundary nodes (shared between blocks)
+    let mut node_block_count: HashMap<NodeId, HashSet<usize>> = HashMap::new();
+    for (bi, nodes) in &block_port_nodes {
+        for &node in nodes {
             if excluded.contains(&node) { continue; }
-            let existing = node_to_block.get(&node).copied();
-            if existing.is_none() {
-                node_to_block.insert(node, bi);
+            node_block_count.entry(node).or_default().insert(*bi);
+        }
+    }
+    let boundary_nodes: HashSet<NodeId> = node_block_count
+        .iter()
+        .filter(|(_, blocks)| blocks.len() > 1)
+        .map(|(&node, _)| node)
+        .collect();
+
+    // Seed node_to_block with non-boundary port nodes
+    let mut node_to_block: HashMap<NodeId, usize> = HashMap::new();
+    for (bi, nodes) in &block_port_nodes {
+        for &node in nodes {
+            if excluded.contains(&node) || boundary_nodes.contains(&node) {
+                continue;
             }
-            // If contested, keep the one with more NL edges at this node
-            // (already handled by find_nl_blocks ordering — first writer wins)
+            node_to_block.entry(node).or_insert(*bi);
         }
     }
 
@@ -363,10 +346,45 @@ pub(super) fn analyze_blockwise(
 
         for &eidx in &unassigned {
             let e = &graph.edges[eidx];
-            let owner_a = if excluded.contains(&e.node_a) { None }
-                else { node_to_block.get(&e.node_a).copied() };
-            let owner_b = if excluded.contains(&e.node_b) { None }
-                else { node_to_block.get(&e.node_b).copied() };
+            // For ownership lookup:
+            // - Excluded nodes (ground/supply) → None
+            // - Boundary nodes → look up which block has this as a
+            //   NON-shared endpoint. If both blocks share it, pick the
+            //   one with the lower block index (upstream in cascade).
+            let resolve = |node: NodeId| -> Option<usize> {
+                if excluded.contains(&node) { return None; }
+                if let Some(&owner) = node_to_block.get(&node) { return Some(owner); }
+                if boundary_nodes.contains(&node) {
+                    // At a boundary node between blocks, assign to the block
+                    // where this node is the "output" (emitter) side.
+                    // Heuristic: the block with MORE NL edges touching this
+                    // node is the one where it's the emitter (both B-E and
+                    // C-E touch the emitter, but only one junction touches
+                    // the base in CE topology). For diode-connected (equal
+                    // count), pick the block where the OTHER endpoint is NOT
+                    // also a boundary (i.e., the block with a non-shared end).
+                    // At a boundary node between blocks, assign ground-connected
+                    // edges to the block whose EMITTER is at this node.
+                    // Use graph.node_names to find which component has this node
+                    // as its emitter pin.
+                    for (bi, _) in block_port_nodes.iter().filter(|(_, nodes)| nodes.contains(&node)) {
+                        let comp = &graph.components[nl_blocks[*bi].comp_idx];
+                        let emitter_key = format!("{}.emitter", comp.id);
+                        if let Some(&emitter_node) = graph.node_names.get(&emitter_key) {
+                            if emitter_node == node {
+                                return Some(*bi);
+                            }
+                        }
+                    }
+                    // Fallback: first block that touches this node
+                    return block_port_nodes.iter()
+                        .find(|(_, nodes)| nodes.contains(&node))
+                        .map(|(bi, _)| *bi);
+                }
+                None
+            };
+            let owner_a = resolve(e.node_a);
+            let owner_b = resolve(e.node_b);
 
             match (owner_a, owner_b) {
                 (Some(a), Some(b)) if a == b => {
@@ -427,7 +445,7 @@ pub(super) fn analyze_blockwise(
             nl_edges: nl_block.nl_edges,
             linear_edges: std::mem::take(&mut block_linear[i]),
             reactive_edges: std::mem::take(&mut block_reactive[i]),
-            port_nodes: vec![nl_block.endpoints.0, nl_block.endpoints.1],
+            port_nodes: nl_block.nodes.clone(),
         });
     }
 
