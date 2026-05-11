@@ -107,7 +107,9 @@ impl VariMuModel {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VariMuTriodeRoot {
     pub model: VariMuModel,
-    /// Current grid-cathode voltage (external control parameter).
+    /// DC grid-cathode bias voltage.
+    vgk_bias: f64,
+    /// Current grid-cathode voltage (bias + AC signal).
     vgk: f64,
     /// Maximum plate voltage (determined by supply rail B+).
     v_max: f64,
@@ -121,7 +123,8 @@ impl VariMuTriodeRoot {
     pub fn new(model: VariMuModel) -> Self {
         Self {
             model,
-            vgk: 0.0,
+            vgk_bias: -2.0,
+            vgk: -2.0,
             v_max: 500.0,
             max_iter: super::solver::NR_MAX_ITER,
             parallel_count: 1,
@@ -132,7 +135,8 @@ impl VariMuTriodeRoot {
     pub fn new_with_v_max(model: VariMuModel, v_max: f64) -> Self {
         Self {
             model,
-            vgk: 0.0,
+            vgk_bias: -2.0,
+            vgk: -2.0,
             v_max: v_max.max(1.0),
             max_iter: super::solver::NR_MAX_ITER,
             parallel_count: 1,
@@ -159,6 +163,17 @@ impl VariMuTriodeRoot {
 
     pub fn parallel_count(&self) -> usize {
         self.parallel_count
+    }
+
+    /// Set the DC bias operating point from circuit analysis.
+    pub fn set_bias(&mut self, vgk_bias: f64) {
+        self.vgk_bias = vgk_bias;
+        self.vgk = vgk_bias;
+    }
+
+    /// Get the DC bias operating point.
+    pub fn vgk_bias(&self) -> f64 {
+        self.vgk_bias
     }
 
     /// Set the grid-cathode voltage (external control from bias, signal, LFO).

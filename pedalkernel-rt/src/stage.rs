@@ -438,7 +438,8 @@ pub enum RootKind {
 
 // Shared bias constants for NL device control voltage setting.
 // Used by both RootKind (WdfStage) and NlDeviceKind (MultiNlStage).
-const TRIODE_GRID_BIAS: f64 = -2.0;
+// Triode grid bias is now per-instance (TriodeRoot::vgk_bias), set from
+// circuit analysis. Default -2.0V (typical 12AX7) is set in TriodeRoot::new().
 const PENTODE_GRID_BIAS: f64 = -8.0;
 // BJT base bias is set per-instance from circuit analysis (BjtRoot::set_bias).
 
@@ -526,10 +527,10 @@ impl RootKind {
     pub fn set_control_voltage(&mut self, input: f64, compensation: f64, _bias_offset: f64) {
         match self {
             RootKind::Triode(t) => {
-                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+                t.set_vgk(t.vgk_bias() + input * compensation);
             }
             RootKind::VariMu(t) => {
-                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+                t.set_vgk(t.vgk_bias() + input * compensation);
             }
             RootKind::Bjt(b) => {
                 // BJT Vbe = DC bias (from circuit analysis) + AC input signal.
@@ -1367,7 +1368,7 @@ impl WdfStage {
                     // We subtract the bias to get back to the signal domain.
                     let ctrl = match root {
                         RootKind::Bjt(b) => b.vbe() - b.vbe_bias(),
-                        RootKind::Triode(t) => t.vgk() - TRIODE_GRID_BIAS,
+                        RootKind::Triode(t) => t.vgk() - t.vgk_bias(),
                         RootKind::Jfet(j) => j.vgs(),  // no DC bias added
                         RootKind::Mosfet(m) => m.vgs(), // no DC bias added
                         _ => 0.0,
@@ -2806,10 +2807,10 @@ impl NlDeviceKind {
     pub fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
         match self {
             NlDeviceKind::Triode(t) => {
-                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+                t.set_vgk(t.vgk_bias() + input * compensation);
             }
             NlDeviceKind::VariMu(t) => {
-                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+                t.set_vgk(t.vgk_bias() + input * compensation);
             }
             NlDeviceKind::Pentode(p) => {
                 p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
