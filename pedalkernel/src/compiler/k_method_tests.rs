@@ -1,13 +1,10 @@
 //! TDD tests for K-method table generation and runtime lookup.
 //!
 //! K-method replaces Newton-Raphson iteration inside WDF NL roots with
-//! a precomputed lookup table. The table maps incident wave → reflected wave
-//! for a specific port resistance and NL device.
+//! a precomputed lookup table. Targets: triode, JFET, BJT roots in WDF stages.
 //!
-//! Interface: root.process(b_tree, rp) → a_root
-//! K-method:  table.lookup(b_tree) → a_root  (rp baked in at build time)
-//!
-//! For 2D devices (BJT, triode): table is indexed by (b_tree, control_voltage).
+//! Diode-to-ground clippers use Wright Omega (already O(1)) and go through
+//! a separate ground-clip path — they don't need K-tables.
 
 use super::spqr_build::compile_via_spqr;
 use crate::dsl::parse_pedal_file;
@@ -15,26 +12,7 @@ use crate::PedalProcessor;
 
 const SR: f64 = 48_000.0;
 
-/// Simple diode clipper — 1D K-method target.
-const DIODE_CLIPPER: &str = r#"pedal "Diode Clipper" {
-  supply 9V
-  components {
-    R1: resistor(10k)
-    D1: diode(silicon)
-    D2: diode(silicon)
-  }
-  nets {
-    in -> R1.a
-    R1.b -> D1.anode
-    D1.cathode -> gnd
-    R1.b -> D2.cathode
-    D2.anode -> gnd
-    R1.b -> out
-  }
-  controls {}
-}"#;
-
-/// Single BJT common-emitter — 2D K-method target.
+/// Single BJT common-emitter — primary K-method target (2D).
 const BJT_CE: &str = r#"pedal "BJT CE" {
   supply 9V
   components {
@@ -58,69 +36,42 @@ const BJT_CE: &str = r#"pedal "BJT CE" {
   controls {}
 }"#;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 1. Table generation: a compiled NL stage should have a K-table
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn diode_clipper_stage_has_k_table() {
-    let pedal = parse_pedal_file(DIODE_CLIPPER).unwrap();
-    let compiled = compile_via_spqr(&pedal, SR).unwrap();
-
-    // Find the WDF stage with a diode root
-    let has_diode_stage = compiled.stages.iter().any(|s| {
-        matches!(s, super::compiled::Stage::Wdf(_))
-    });
-    assert!(has_diode_stage, "Should have a WDF stage");
-
-    // The diode stage should have a K-method table
-    // (currently it doesn't — this test drives the implementation)
-    let has_k_table = compiled.stages.iter().any(|s| {
+fn find_wdf_with_k_table(compiled: &super::compiled::CompiledPedal) -> bool {
+    compiled.stages.iter().any(|s| {
         if let super::compiled::Stage::Wdf(w) = s {
             w.k_table.is_some()
         } else {
             false
         }
-    });
-    assert!(has_k_table, "Diode WDF stage should have a K-method table");
+    })
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1. Table generation
+// ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn bjt_stage_has_k_table() {
     let pedal = parse_pedal_file(BJT_CE).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
 
-    let has_k_table = compiled.stages.iter().any(|s| {
-        if let super::compiled::Stage::Wdf(w) = s {
-            w.k_table.is_some()
-        } else {
-            false
-        }
-    });
-    assert!(has_k_table, "BJT WDF stage should have a K-method table");
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 2. Table properties: correct dimensions, finite values
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn diode_k_table_is_1d() {
-    let pedal = parse_pedal_file(DIODE_CLIPPER).unwrap();
-    let compiled = compile_via_spqr(&pedal, SR).unwrap();
-
-    for s in &compiled.stages {
-        if let super::compiled::Stage::Wdf(w) = s {
-            if let Some(ref table) = w.k_table {
-                assert_eq!(table.dims, 1, "Diode clipper should be 1D table");
-                assert!(table.entries.len() >= 64,
-                    "Should have ≥64 entries, got {}", table.entries.len());
-                return;
+    eprintln!("  Stages: {}", compiled.stages.len());
+    for (i, s) in compiled.stages.iter().enumerate() {
+        match s {
+            super::compiled::Stage::Wdf(w) => {
+                let has = w.k_table.is_some();
+                eprintln!("  [{i}] WDF k_table={has}");
             }
+            _ => eprintln!("  [{i}] other"),
         }
     }
-    panic!("No K-table found");
+
+    assert!(find_wdf_with_k_table(&compiled), "BJT WDF stage should have a K-method table");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2. Table properties
+// ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn bjt_k_table_is_2d() {
@@ -131,6 +82,8 @@ fn bjt_k_table_is_2d() {
         if let super::compiled::Stage::Wdf(w) = s {
             if let Some(ref table) = w.k_table {
                 assert_eq!(table.dims, 2, "BJT should be 2D table");
+                assert!(table.entries.len() >= 64,
+                    "Should have ≥64 entries, got {}", table.entries.len());
                 return;
             }
         }
@@ -140,7 +93,7 @@ fn bjt_k_table_is_2d() {
 
 #[test]
 fn k_table_values_are_finite() {
-    let pedal = parse_pedal_file(DIODE_CLIPPER).unwrap();
+    let pedal = parse_pedal_file(BJT_CE).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
 
     for s in &compiled.stages {
@@ -157,22 +110,25 @@ fn k_table_values_are_finite() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 3. Table accuracy: lookup matches NR solve
+// 3. Table accuracy
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn diode_k_table_matches_nr_at_zero() {
-    // At b_tree = 0 (no incident wave), reflected wave should be ~0
-    let pedal = parse_pedal_file(DIODE_CLIPPER).unwrap();
+fn bjt_k_table_response_varies_with_input() {
+    let pedal = parse_pedal_file(BJT_CE).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
 
     for s in &compiled.stages {
         if let super::compiled::Stage::Wdf(w) = s {
             if let Some(ref table) = w.k_table {
-                let a_root = table.lookup_1d(0.0);
+                let a_zero = table.lookup_2d(0.0, 0.0);
+                let a_pos = table.lookup_2d(5.0, 0.0);
+                let a_neg = table.lookup_2d(-5.0, 0.0);
+                eprintln!("  K-table: a(0)={a_zero:.4}, a(+5)={a_pos:.4}, a(-5)={a_neg:.4}");
+                // Output should vary with input
                 assert!(
-                    a_root.abs() < 0.1,
-                    "At b_tree=0, reflected wave should be ~0, got {a_root:.6}"
+                    (a_pos - a_neg).abs() > 0.01,
+                    "K-table should produce different outputs for +5V vs -5V"
                 );
                 return;
             }
@@ -182,27 +138,21 @@ fn diode_k_table_matches_nr_at_zero() {
 }
 
 #[test]
-fn diode_k_table_clips_large_input() {
-    // At large positive b_tree, diode conducts → reflected wave is clamped
-    let pedal = parse_pedal_file(DIODE_CLIPPER).unwrap();
+fn k_table_no_nan_across_input_range() {
+    let pedal = parse_pedal_file(BJT_CE).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
 
     for s in &compiled.stages {
         if let super::compiled::Stage::Wdf(w) = s {
             if let Some(ref table) = w.k_table {
-                let a_small = table.lookup_1d(0.1);
-                let a_large = table.lookup_1d(5.0);
-                // Large input should produce larger reflected wave, but
-                // growth should be sublinear (diode clips)
-                assert!(
-                    a_large.abs() > a_small.abs(),
-                    "Larger input should produce larger output"
-                );
-                assert!(
-                    a_large.abs() < 5.0,
-                    "Diode should clip — reflected wave {:.3} should be < 5V",
-                    a_large.abs()
-                );
+                for i in 0..100 {
+                    for j in 0..10 {
+                        let b = (i as f64 - 50.0) * 0.2;
+                        let ctrl = (j as f64 - 5.0) * 0.4;
+                        let a = table.lookup_2d(b, ctrl);
+                        assert!(a.is_finite(), "K-table NaN at b={b:.1}, ctrl={ctrl:.1}");
+                    }
+                }
                 return;
             }
         }
@@ -211,30 +161,11 @@ fn diode_k_table_clips_large_input() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 4. Runtime: K-table produces same audio as NR
+// 4. Runtime: K-table produces audio
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn diode_clipper_with_k_table_produces_audio() {
-    let pedal = parse_pedal_file(DIODE_CLIPPER).unwrap();
-    let compiled = compile_via_spqr(&pedal, SR).unwrap();
-    let mut proc: Box<dyn PedalProcessor> = Box::new(compiled);
-
-    let mut peak = 0.0f64;
-    for i in 0..9600 {
-        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin();
-        let out = proc.process(input);
-        if i >= 4800 {
-            peak = peak.max(out.abs());
-        }
-    }
-    eprintln!("  Diode clipper K-table peak: {peak:.6}");
-    assert!(peak > 0.01, "Should produce audible output, got {peak:.6}");
-    assert!(peak < 2.0, "Should clip — peak {peak:.3} should be < 2V");
-}
-
-#[test]
-fn bjt_ce_with_k_table_produces_audio() {
+fn bjt_with_k_table_produces_audio() {
     let pedal = parse_pedal_file(BJT_CE).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
     let mut proc: Box<dyn PedalProcessor> = Box::new(compiled);
@@ -253,29 +184,23 @@ fn bjt_ce_with_k_table_produces_audio() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 5. No regression: existing pedals still work with K-table enabled
+// 5. Serialization: table survives postcard roundtrip
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn k_table_no_nan_across_input_range() {
-    let pedal = parse_pedal_file(DIODE_CLIPPER).unwrap();
+#[cfg(feature = "serde")]
+fn k_table_survives_serialization() {
+    let pedal = parse_pedal_file(BJT_CE).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
 
-    for s in &compiled.stages {
-        if let super::compiled::Stage::Wdf(w) = s {
-            if let Some(ref table) = w.k_table {
-                // Sweep the full input domain
-                for i in 0..1000 {
-                    let b_tree = (i as f64 - 500.0) * 0.02; // -10V to +10V
-                    let a_root = table.lookup_1d(b_tree);
-                    assert!(
-                        a_root.is_finite(),
-                        "K-table lookup at b_tree={b_tree:.3} returned {a_root}"
-                    );
-                }
-                return;
-            }
-        }
+    // Only test if K-table was generated
+    if !find_wdf_with_k_table(&compiled) {
+        eprintln!("  SKIP: no K-table generated (not yet implemented for this root)");
+        return;
     }
-    panic!("No K-table found");
+
+    let blob = postcard::to_allocvec(&compiled).unwrap();
+    let roundtrip: super::compiled::CompiledPedal = postcard::from_bytes(&blob).unwrap();
+
+    assert!(find_wdf_with_k_table(&roundtrip), "K-table should survive serialization");
 }

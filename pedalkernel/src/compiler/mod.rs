@@ -10,6 +10,7 @@
 mod bias_analysis;
 mod bind;
 mod blockwise;
+mod k_method;
 mod build;
 mod calibrate;
 mod classify;

@@ -202,6 +202,16 @@ pub fn compile_via_spqr_with_options(
                     {
                         wdf.debug_label = $label;
                     }
+                    // Generate K-method lookup table for NL roots
+                    if wdf.k_table.is_none() {
+                        wdf.k_table = super::k_method::generate_k_table(&mut wdf);
+                        #[cfg(test)]
+                        if wdf.k_table.is_some() {
+                            eprintln!("  K-table generated: {}D, {} entries",
+                                wdf.k_table.as_ref().unwrap().dims,
+                                wdf.k_table.as_ref().unwrap().entries.len());
+                        }
+                    }
                     stages.push(Stage::Wdf(wdf));
                 }
                 BuiltStage::Iir(mut iir) => {
@@ -615,6 +625,8 @@ pub fn compile_via_spqr_with_options(
                 #[cfg(not(debug_assertions))]
                 let merged_label = String::new();
                 if let Some(built) = build_ground_clip_stage(&merged_edges, &graph, sample_rate) {
+                    #[cfg(test)]
+                    eprintln!("  Ground-clip stage built: {:?}", std::mem::discriminant(&built));
                     push_stage!(built, group_flow_distances[gi], merged_label, is_bypass);
                 }
             }

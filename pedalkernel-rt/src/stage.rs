@@ -460,6 +460,30 @@ impl RootKind {
         )
     }
 
+    /// Process the NL root: incident wave → reflected wave.
+    /// Dispatches to the concrete root type's NR solver.
+    pub fn process(&mut self, b_tree: f64, rp: f64) -> f64 {
+        match self {
+            RootKind::DiodePair(dp) => dp.process(b_tree, rp),
+            RootKind::SingleDiode(d) => d.process(b_tree, rp),
+            RootKind::ExplicitDiodePair(dp) => dp.process(b_tree, rp),
+            RootKind::ExplicitSingleDiode(d) => d.process(b_tree, rp),
+            RootKind::Zener(z) => z.process(b_tree, rp),
+            RootKind::Jfet(j) => j.process(b_tree, rp),
+            RootKind::JfetVr(j) => j.process_root(b_tree, rp),
+            RootKind::Triode(t) => t.process(b_tree, rp),
+            RootKind::VariMu(t) => t.process(b_tree, rp),
+            RootKind::Pentode(p) => p.process(b_tree, rp),
+            RootKind::Mosfet(m) => m.process(b_tree, rp),
+            RootKind::Ota(o) => o.process(b_tree, rp),
+            RootKind::OpAmp(op) => op.process(b_tree, rp),
+            RootKind::Passthrough => b_tree,
+            RootKind::ShortCircuit => -b_tree,
+            // Passive/linear roots: reflect without NL processing
+            _ => -b_tree,
+        }
+    }
+
     /// Set the control voltage on the nonlinear root from the input signal.
     ///
     /// Maps the audio input to the device's control terminal:
