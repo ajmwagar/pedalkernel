@@ -192,6 +192,41 @@ const SINGLE_BJT: &str = r#"pedal "Single BJT" {
 }"#;
 
 /// Wheatstone bridge (NOT blockwise — single R-node, no repeating children).
+/// 2-stage diode-connected BJT cascade (303 topology).
+const DIODE_CASCADE_2: &str = r#"pedal "Diode Cascade 2" {
+  supply 9V
+  components {
+    Q1: npn(2n3904)
+    Q2: npn(2n3904)
+    R_bias1: resistor(100k)
+    R_bias2: resistor(100k)
+    C1: cap(33n)
+    C2: cap(33n)
+    R_e1: resistor(220)
+    R_e2: resistor(220)
+    R_in: resistor(10k)
+  }
+  nets {
+    vcc -> R_bias1.a
+    R_bias1.b -> Q1.base, Q1.collector
+    vcc -> R_bias2.a
+    R_bias2.b -> Q2.base, Q2.collector
+    in -> R_in.a
+    R_in.b -> Q1.base
+    Q1.emitter -> C1.a
+    C1.b -> gnd
+    Q1.emitter -> R_e1.a
+    R_e1.b -> gnd
+    Q1.emitter -> Q2.base
+    Q2.emitter -> C2.a
+    C2.b -> gnd
+    Q2.emitter -> R_e2.a
+    R_e2.b -> gnd
+    Q2.emitter -> out
+  }
+  controls {}
+}"#;
+
 const WHEATSTONE_BRIDGE: &str = r#"pedal "Wheatstone" {
   supply 9V
   components {
@@ -314,6 +349,34 @@ fn single_bjt_is_not_blockwise() {
         plan.is_none(),
         "Single BJT should NOT be blockwise (only 1 NL element, no cascade)"
     );
+}
+
+#[test]
+fn diode_cascade_2_is_blockwise_decomposable() {
+    let (graph, edges) = make_graph_all(DIODE_CASCADE_2);
+    let nl_count = count_nl(&edges, &graph);
+    eprintln!("  Diode cascade 2: {nl_count} NL edges, {} total", edges.len());
+
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
+    if let Some(ref p) = plan {
+        eprintln!("  Blockwise: {} blocks, {} coupling", p.num_blocks(), p.coupling_edges.len());
+        for (i, b) in p.blocks.iter().enumerate() {
+            eprintln!("    block {i}: {} NL, {} reactive, {} linear",
+                b.nl_edges.len(), b.reactive_edges.len(), b.linear_edges.len());
+        }
+    } else {
+        eprintln!("  Blockwise: None");
+    }
+
+    assert!(plan.is_some(), "Diode-connected 2-stage cascade should be blockwise-decomposable");
+    let plan = plan.unwrap();
+    assert_eq!(plan.num_blocks(), 2, "Should split into 2 blocks");
+
+    // Each block should have ≥1 reactive edge (a cap)
+    for (i, block) in plan.blocks.iter().enumerate() {
+        assert!(block.reactive_edges.len() >= 1,
+            "Block {i} should have ≥1 reactive edge, got {}", block.reactive_edges.len());
+    }
 }
 
 #[test]
