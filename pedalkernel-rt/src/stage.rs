@@ -482,6 +482,15 @@ impl RootKind {
         }
     }
 
+    /// Reset NR warm-start state for clean cold-start solve.
+    /// Used by K-table generation to ensure each entry is independent.
+    pub fn reset_nr_state(&mut self) {
+        // Process with b=0 to reset internal prev_v to a neutral state.
+        // This is a no-op functionally (zero input → near-zero output)
+        // but resets the warm-start cache.
+        let _ = self.process(0.0, 1000.0);
+    }
+
     /// Process the NL root: incident wave → reflected wave.
     /// Dispatches to the concrete root type's NR solver.
     pub fn process(&mut self, b_tree: f64, rp: f64) -> f64 {

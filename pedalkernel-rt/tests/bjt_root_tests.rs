@@ -257,6 +257,114 @@ fn bjt_root_diode_connected_monotonic() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
+fn bjt_root_k_table_matches_nr_pointwise() {
+    // Build a K-table for a BjtRoot, then verify lookup matches NR at each point
+    use pedalkernel_rt::stage::KTable;
+
+    let model = model_2n3904();
+    let mut root = BjtRoot::new(model, false);
+    root.set_bias(0.6);
+
+    let rp = 1000.0; // typical port resistance
+    let steps = 64;
+    let b_min = -10.0;
+    let b_max = 10.0;
+    let ctrl_min = -0.5;
+    let ctrl_max = 0.5;
+
+    // Build table: sweep (b_tree, ctrl) where ctrl is raw signal
+    // Cold-start each entry to eliminate warm-start dependency
+    let mut entries = Vec::new();
+    for ic in 0..steps {
+        let tc = ic as f64 / (steps - 1) as f64;
+        let ctrl = ctrl_min + tc * (ctrl_max - ctrl_min);
+        for ib in 0..steps {
+            let tb = ib as f64 / (steps - 1) as f64;
+            let b = b_min + tb * (b_max - b_min);
+            // Fresh root for each entry (no warm-start contamination)
+            let mut entry_root = BjtRoot::new(model, false);
+            entry_root.set_bias(0.6);
+            entry_root.set_vbe(entry_root.vbe_bias() + ctrl);
+            let a = entry_root.process(b, rp);
+            entries.push(a);
+            // Trace the problem cell
+            if ic == 12 && ib == 25 {
+                eprintln!("  BUILD entry[{ic},{ib}]: ctrl={ctrl:.3}, b={b:.3}, vbe={:.3}, a={a:.6}",
+                    entry_root.vbe());
+            }
+        }
+    }
+
+    let table = KTable {
+        dims: 2,
+        b_min,
+        b_max,
+        ctrl_min,
+        ctrl_max,
+        steps,
+        entries,
+    };
+
+    // Now compare: at each test point, table lookup should match NR
+    let mut max_rel_err = 0.0f64;
+    let test_ctrls = [-0.3, -0.1, 0.0, 0.1, 0.3];
+    let test_bs = [-5.0, -2.0, 0.0, 1.0, 3.0, 5.0];
+
+    for &ctrl in &test_ctrls {
+        for &b in &test_bs {
+            // NR solve (fresh root = cold start, matches table build)
+            let mut nr_root = BjtRoot::new(model, false);
+            nr_root.set_bias(0.6);
+            nr_root.set_vbe(nr_root.vbe_bias() + ctrl);
+            let a_nr = nr_root.process(b, rp);
+
+            // Table lookup (ctrl is raw signal, same as what we swept)
+            let a_table = table.lookup_2d(b, ctrl);
+
+            let diff = (a_nr - a_table).abs();
+            let denom = a_nr.abs().max(0.01);
+            let rel = diff / denom;
+            max_rel_err = max_rel_err.max(rel);
+
+            if rel > 0.05 {
+                // Also verify by calling process with the exact same state
+                let mut verify_root = BjtRoot::new(model, false);
+                verify_root.set_bias(0.6);
+                verify_root.set_vbe(verify_root.vbe_bias() + ctrl);
+                let a_verify = verify_root.process(b, rp);
+                eprintln!("  MISMATCH: b={b:.1}, ctrl={ctrl:.2}: NR={a_nr:.4}, table={a_table:.4}, verify={a_verify:.4}, rel={rel:.4}");
+            }
+        }
+    }
+
+    // Direct entry verification at the problem point
+    let mut direct = BjtRoot::new(model, false);
+    direct.set_bias(0.6);
+    direct.set_vbe(0.6 + (-0.3)); // ctrl = -0.3
+    let a_direct = direct.process(-2.0, rp);
+    eprintln!("  Direct process at b=-2, ctrl=-0.3, vbe={:.3}: {a_direct:.6}", direct.vbe());
+
+    // Try the EXACT build params
+    let mut exact = BjtRoot::new(model, false);
+    exact.set_bias(0.6);
+    exact.set_vbe(0.6 + (-0.310)); // exact ctrl from build
+    let a_exact = exact.process(-2.063, rp);
+    eprintln!("  Exact build params b=-2.063, ctrl=-0.310, vbe={:.3}: {a_exact:.6}", exact.vbe());
+
+    // What does the table have at the EXACT grid cell?
+    // ctrl=-0.3 maps to: t = (-0.3 - (-0.5)) / 1.0 = 0.2, step = 0.2 * 63 = 12.6
+    // b=-2 maps to: t = (-2 - (-10)) / 20 = 0.4, step = 0.4 * 63 = 25.2
+    let ic = 12; // ctrl step
+    let ib = 25; // b step
+    let idx = ic * steps + ib;
+    eprintln!("  Table entry at grid[{ic},{ib}] (idx={idx}): {:.6}", table.entries[idx]);
+
+    eprintln!("  Max relative error: {max_rel_err:.6}");
+    assert!(max_rel_err < 0.05,
+        "K-table should match NR within 5%: max_rel_err={max_rel_err:.4}");
+}
+
+#[test]
 fn bjt_root_iv_trait_matches_direct() {
     let model = model_2n3904();
     let mut root = BjtRoot::new(model, false);

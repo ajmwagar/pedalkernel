@@ -73,16 +73,39 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
             RootKind::Bjt(_) => (-0.2, 0.8), // Vbe range: cutoff to saturation
             _ => return None,
         };
+        // Build table inline (not via sweep_2d) so we can reset NR state
+        // between entries. This ensures each entry is a cold-start solve,
+        // making the table a pure function of (b, ctrl) — no dependence
+        // on sweep order or warm-starting.
+        let b_min = -B_RANGE;
+        let b_max = B_RANGE;
+        let steps = DEFAULT_STEPS_2D;
+        let mut entries = Vec::with_capacity(steps * steps);
         let root = &mut stage.root;
-        Some(sweep_2d(
-            |b, ctrl| {
+
+        for ic in 0..steps {
+            let tc = ic as f64 / (steps - 1) as f64;
+            let ctrl = ctrl_min + tc * (ctrl_max - ctrl_min);
+            for ib in 0..steps {
+                let tb = ib as f64 / (steps - 1) as f64;
+                let b = b_min + tb * (b_max - b_min);
+                // Reset NR warm-start state for clean cold-start solve
+                root.reset_nr_state();
                 root.set_control_voltage(ctrl, 1.0, 0.0);
-                root.process(b, rp)
-            },
-            DEFAULT_STEPS_2D,
+                let a = root.process(b, rp);
+                entries.push(if a.is_finite() { a } else { 0.0 });
+            }
+        }
+
+        Some(KTable {
+            dims: 2,
+            b_min,
+            b_max,
             ctrl_min,
             ctrl_max,
-        ))
+            steps,
+            entries,
+        })
     }
 }
 
