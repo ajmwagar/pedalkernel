@@ -364,15 +364,24 @@ pub(super) fn analyze_blockwise(
                     // count), pick the block where the OTHER endpoint is NOT
                     // also a boundary (i.e., the block with a non-shared end).
                     // At a boundary node between blocks, assign ground-connected
-                    // edges to the block whose EMITTER is at this node.
-                    // Use graph.node_names to find which component has this node
-                    // as its emitter pin.
+                    // edges to the block whose COMMON terminal is at this node.
+                    // The common terminal (emitter/source/cathode) is the pin
+                    // NOT declared as input or output in signal_terminals().
+                    // Derived from: valid_pins - {input, output}.
                     for (bi, _) in block_port_nodes.iter().filter(|(_, nodes)| nodes.contains(&node)) {
                         let comp = &graph.components[nl_blocks[*bi].comp_idx];
-                        let emitter_key = format!("{}.emitter", comp.id);
-                        if let Some(&emitter_node) = graph.node_names.get(&emitter_key) {
-                            if emitter_node == node {
-                                return Some(*bi);
+                        if let super::component::SignalTerminals::Amplifier { input, output, .. }
+                            = comp.kind.signal_terminals()
+                        {
+                            let common_pin = comp.kind.pin_config().valid_pins.iter()
+                                .find(|&&p| p != input && p != output);
+                            if let Some(&pin) = common_pin {
+                                let key = format!("{}.{}", comp.id, pin);
+                                if let Some(&pin_node) = graph.node_names.get(&key) {
+                                    if pin_node == node {
+                                        return Some(*bi);
+                                    }
+                                }
                             }
                         }
                     }
