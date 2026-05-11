@@ -626,10 +626,27 @@ pub(super) fn classify_sp_subtree(node: &SpqrNode, graph: &CircuitGraph) -> SpCl
     if has_vcvs {
         return SpClassification::Vcvs;
     }
-    match nl_edges.len() {
-        0 => SpClassification::AllPassive,
-        1 => SpClassification::SingleNl { nl_edge_idx: nl_edges[0] },
-        _ => SpClassification::Complex,
+    if nl_edges.is_empty() {
+        return SpClassification::AllPassive;
+    }
+
+    // Count NL *components*, not NL *edges*. A BJT has 2 NL edges
+    // (B-E and C-E) from the same comp_idx — that's one NL device,
+    // not two. Counting edges would classify it as Complex, preventing
+    // it from becoming a WDF root with BjtRoot.
+    let mut nl_comp_indices: Vec<usize> = nl_edges
+        .iter()
+        .map(|&eidx| graph.edges[eidx].comp_idx)
+        .collect();
+    nl_comp_indices.sort_unstable();
+    nl_comp_indices.dedup();
+
+    if nl_comp_indices.len() == 1 {
+        // Single NL component (possibly multi-edge like BJT).
+        // Use the first NL edge as the representative for create_root().
+        SpClassification::SingleNl { nl_edge_idx: nl_edges[0] }
+    } else {
+        SpClassification::Complex
     }
 }
 

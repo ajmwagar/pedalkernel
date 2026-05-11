@@ -422,11 +422,15 @@ pub(super) fn try_build_blockwise(
         let spqr_stages = spqr_to_stages(&spqr_tree, graph, sample_rate);
 
         #[cfg(test)]
-        eprintln!(
-            "  Block {bi}: {} edges → {} stages",
-            block_edges.len(),
-            spqr_stages.len()
-        );
+        {
+            let class = super::spqr::classify_sp_subtree(&spqr_tree, graph);
+            eprintln!(
+                "  Block {bi}: {} edges → {} stages, class={:?}",
+                block_edges.len(),
+                spqr_stages.len(),
+                class,
+            );
+        }
 
         for stage in spqr_stages {
             let built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate)

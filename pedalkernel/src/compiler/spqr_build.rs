@@ -1292,14 +1292,8 @@ pub(super) fn build_spqr_stage(
                 )
                 .ok_or_else(|| format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id))?;
 
-            if matches!(
-                nl_kind,
-                NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
-            ) {
-                return build_general_mna_from_edges(&edge_indices, graph, _sample_rate)
-                    .map(BuiltStage::MultiNl);
-            }
-
+            // BJTs now use BjtRoot (single-port WDF root with external Vbe),
+            // same as triodes use TriodeRoot. No MultiNL fallback needed.
             let (root, base_diode_model) = create_root(&nl_kind, false);
             let tree = with_voltage_source(tree);
             let oversampler = Oversampler::new(OversamplingFactor::X1);
