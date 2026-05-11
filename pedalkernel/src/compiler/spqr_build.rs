@@ -300,6 +300,22 @@ pub fn compile_via_spqr_with_options(
         }
 
         if group.has_feedback() {
+            // ── Blockwise check for feedback groups (e.g. ladder with resonance)
+            let group_edges = group.all_edges();
+            if let Some(built_stages) = super::blockwise::try_build_blockwise(
+                &group_edges, &graph, &terminals, sample_rate,
+            ) {
+                for built in built_stages {
+                    push_stage!(
+                        built,
+                        group_flow_distances[gi],
+                        group_label.clone(),
+                        is_bypass
+                    );
+                }
+                continue;
+            }
+
             // Compute bias-derived v_max for op-amps in this group.
             // Find the VCVS component, look up its pos/neg pin nodes in the
             // bias voltage map, and call apply_bias to get rail limits.
@@ -691,6 +707,22 @@ pub fn compile_via_spqr_with_options(
             if group_edges.is_empty() {
                 continue;
             } // All edges were pots
+
+            // ── Blockwise check: can this group be split into chained NL blocks?
+            if let Some(built_stages) = super::blockwise::try_build_blockwise(
+                &group_edges, &graph, &terminals, sample_rate,
+            ) {
+                for built in built_stages {
+                    push_stage!(
+                        built,
+                        group_flow_distances[gi],
+                        group_label.clone(),
+                        is_bypass
+                    );
+                }
+                continue; // Skip normal SPQR path
+            }
+
             let group_terminals = compute_group_terminals(&group_edges, &graph, &terminals);
             #[cfg(test)]
             eprintln!("  SPQR terminals for group: {:?}", group_terminals);

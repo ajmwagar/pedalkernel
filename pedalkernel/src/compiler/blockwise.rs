@@ -13,6 +13,8 @@
 
 use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
+use super::spqr::{spqr_decompose, spqr_to_stages};
+use super::spqr_build::BuiltStage;
 use std::collections::{HashMap, HashSet};
 
 /// A block in the blockwise decomposition — one NL group + its local state.
@@ -26,6 +28,19 @@ pub struct Block {
     pub reactive_edges: Vec<usize>,
     /// Port nodes — where this block connects to the coupling network.
     pub port_nodes: Vec<NodeId>,
+}
+
+impl Block {
+    /// All edge indices in this block (NL + linear + reactive).
+    pub fn all_edges(&self) -> Vec<usize> {
+        let mut edges = Vec::with_capacity(
+            self.nl_edges.len() + self.linear_edges.len() + self.reactive_edges.len(),
+        );
+        edges.extend(&self.nl_edges);
+        edges.extend(&self.linear_edges);
+        edges.extend(&self.reactive_edges);
+        edges
+    }
 }
 
 /// Result of blockwise decomposition analysis.
@@ -365,4 +380,86 @@ pub(super) fn analyze_blockwise(
     } else {
         None
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Build: convert a BlockwisePlan into BuiltStages
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Try blockwise decomposition and build. Returns `Some(stages)` if the
+/// circuit decomposes into chained blocks, `None` to fall through to
+/// the normal SPQR path.
+///
+/// Each block is SPQR-decomposed independently → small WDF trees.
+/// Coupling edges are also SPQR-decomposed → passive stages.
+pub(super) fn try_build_blockwise(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    terminals: &[NodeId],
+    sample_rate: f64,
+) -> Option<Vec<BuiltStage>> {
+    let plan = analyze_blockwise(edge_indices, graph)?;
+
+    #[cfg(test)]
+    eprintln!(
+        "  Blockwise: {} blocks, {} coupling edges",
+        plan.num_blocks(),
+        plan.coupling_edges.len()
+    );
+
+    let mut all_stages = Vec::new();
+
+    // Build each block via SPQR
+    for (bi, block) in plan.blocks.iter().enumerate() {
+        let block_edges = block.all_edges();
+        if block_edges.is_empty() {
+            continue;
+        }
+
+        let block_terminals =
+            super::spqr_build::compute_group_terminals(&block_edges, graph, terminals);
+        let spqr_tree = spqr_decompose(&block_edges, &block_terminals, graph, graph.gnd_node);
+        let spqr_stages = spqr_to_stages(&spqr_tree, graph, sample_rate);
+
+        #[cfg(test)]
+        eprintln!(
+            "  Block {bi}: {} edges → {} stages",
+            block_edges.len(),
+            spqr_stages.len()
+        );
+
+        for stage in spqr_stages {
+            let built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate)
+                .ok()?; // If any block fails, fall through to monolithic
+            all_stages.push(built);
+        }
+    }
+
+    // Coupling edges → passive stages
+    if !plan.coupling_edges.is_empty() {
+        let coupling_terminals =
+            super::spqr_build::compute_group_terminals(&plan.coupling_edges, graph, terminals);
+        let spqr_tree = spqr_decompose(
+            &plan.coupling_edges,
+            &coupling_terminals,
+            graph,
+            graph.gnd_node,
+        );
+        let spqr_stages = spqr_to_stages(&spqr_tree, graph, sample_rate);
+
+        #[cfg(test)]
+        eprintln!(
+            "  Coupling: {} edges → {} stages",
+            plan.coupling_edges.len(),
+            spqr_stages.len()
+        );
+
+        for stage in spqr_stages {
+            let built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate)
+                .ok()?;
+            all_stages.push(built);
+        }
+    }
+
+    Some(all_stages)
 }
