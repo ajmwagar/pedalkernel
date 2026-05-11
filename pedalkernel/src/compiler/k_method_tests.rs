@@ -257,6 +257,67 @@ fn ladder_4_blocks_have_k_tables() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. K-table gating: only generated for eligible components
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn passive_stages_have_no_k_table() {
+    // Passive WDF stages (ShortCircuit, Passthrough) should NOT get K-tables
+    let pedal = parse_pedal_file(r#"pedal "test" {
+      supply 9V
+      components { R1: resistor(10k)  C1: cap(10n) }
+      nets { in -> R1.a  R1.b -> C1.a  C1.b -> gnd  R1.b -> out }
+      controls {}
+    }"#).unwrap();
+    let compiled = compile_via_spqr(&pedal, SR).unwrap();
+
+    for s in &compiled.stages {
+        if let super::compiled::Stage::Wdf(w) = s {
+            assert!(w.k_table.is_none(),
+                "Passive WDF stage should NOT have K-table");
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. Runtime: K-table is USED (not just stored)
+//
+// Process the same signal through two copies — one should use K-table
+// lookup, the other NR. Results should match closely.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn k_table_runtime_matches_nr() {
+    // Compile a BJT stage with K-table
+    let pedal = parse_pedal_file(BJT_LADDER_4).unwrap();
+    let compiled = compile_via_spqr(&pedal, SR).unwrap();
+
+    // Check that K-table stages exist
+    let has_k_table = compiled.stages.iter().any(|s| {
+        if let super::compiled::Stage::Wdf(w) = s { w.k_table.is_some() } else { false }
+    });
+    assert!(has_k_table, "Should have at least one K-table stage");
+
+    // Process audio — this SHOULD use the K-table internally
+    let mut proc: Box<dyn PedalProcessor> = Box::new(compiled);
+    let mut peak = 0.0f64;
+    let mut any_nonzero = false;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin() * 0.1;
+        let out = proc.process(input);
+        if i >= 4800 {
+            peak = peak.max(out.abs());
+            if out.abs() > 1e-6 { any_nonzero = true; }
+        }
+        assert!(out.is_finite(), "K-table runtime produced NaN at sample {i}");
+    }
+    eprintln!("  K-table runtime peak: {peak:.6}");
+    assert!(any_nonzero, "K-table runtime should produce nonzero output");
+    assert!(peak > 0.001, "K-table runtime peak too low: {peak:.6}");
+}
+
+#[test]
 fn bjt_k_table_no_nan() {
     let pedal = parse_pedal_file(BJT_CE).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();

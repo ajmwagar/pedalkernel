@@ -465,6 +465,23 @@ impl RootKind {
         )
     }
 
+    /// K-method eligibility: (is_eligible, port_dimensions).
+    /// Mirrors Component::k_method_candidacy() for the runtime root type.
+    pub fn k_method_candidacy(&self) -> (bool, usize) {
+        match self {
+            RootKind::DiodePair(_)
+            | RootKind::SingleDiode(_)
+            | RootKind::ExplicitDiodePair(_)
+            | RootKind::ExplicitSingleDiode(_)
+            | RootKind::Zener(_) => (true, 1),
+            RootKind::Jfet(_) | RootKind::Triode(_)
+            | RootKind::Mosfet(_) | RootKind::Bjt(_) => (true, 2),
+            RootKind::Pentode(_) => (true, 3),
+            // Not eligible: linear, variable, or hysteretic roots
+            _ => (false, 0),
+        }
+    }
+
     /// Process the NL root: incident wave → reflected wave.
     /// Dispatches to the concrete root type's NR solver.
     pub fn process(&mut self, b_tree: f64, rp: f64) -> f64 {
@@ -1161,6 +1178,7 @@ impl WdfStage {
         // Borrow fields individually to satisfy the borrow checker
         let tree = &mut self.tree;
         let root = &mut self.root;
+        let k_table = &self.k_table;
         let compensation = self.compensation;
         let output_probe = &self.output_probe;
         let feedback_opamp = &mut self.feedback_opamp;
@@ -1328,7 +1346,24 @@ impl WdfStage {
             let rp = tree.port_resistance();
             let b_tree = b1;
 
-            let a_root = match root {
+            // K-method fast path: use precomputed table lookup instead of NR
+            let a_root = if let Some(ref table) = k_table {
+                if table.dims == 1 {
+                    table.lookup_1d(b_tree)
+                } else {
+                    // 2D: use current control voltage from root
+                    let ctrl = match root {
+                        RootKind::Bjt(b) => b.vbe(),
+                        RootKind::Triode(t) => t.vgk(),
+                        RootKind::Jfet(j) => j.vgs(),
+                        RootKind::Mosfet(m) => m.vgs(),
+                        _ => 0.0,
+                    };
+                    table.lookup_2d(b_tree, ctrl)
+                }
+            } else {
+                // NR fallback
+                match root {
                 RootKind::DiodePair(dp) => dp.process(b_tree, rp),
                 RootKind::SingleDiode(d) => d.process(b_tree, rp),
                 RootKind::ExplicitDiodePair(dp) => dp.process(b_tree, rp),
@@ -1470,7 +1505,8 @@ impl WdfStage {
                     let b_out = b_children[*output_port];
                     return (a_out + b_out) / 2.0;
                 }
-            };
+            } // end NR fallback else
+            }; // end K-table if/else
             // ── Down-sweep ────────────────────────────────────────────
             tree.set_incident(a_root);
 

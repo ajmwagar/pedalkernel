@@ -53,34 +53,14 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
         return None;
     }
 
-    // Check if root is NL (skip linear/passthrough/opamp roots)
-    let is_nl = matches!(
-        stage.root,
-        RootKind::DiodePair(_)
-        | RootKind::SingleDiode(_)
-        | RootKind::ExplicitDiodePair(_)
-        | RootKind::ExplicitSingleDiode(_)
-        | RootKind::Zener(_)
-        | RootKind::Jfet(_)
-        | RootKind::Triode(_)
-        | RootKind::Mosfet(_)
-        | RootKind::Bjt(_)
-    );
-    if !is_nl {
+    // Check K-method eligibility via RootKind::k_method_candidacy()
+    let (eligible, _dims) = stage.root.k_method_candidacy();
+    if !eligible {
         return None;
     }
 
-    // Determine dimensionality from root type
-    let is_1d = matches!(
-        stage.root,
-        RootKind::DiodePair(_)
-        | RootKind::SingleDiode(_)
-        | RootKind::ExplicitDiodePair(_)
-        | RootKind::ExplicitSingleDiode(_)
-        | RootKind::Zener(_)
-    );
-
-    if is_1d {
+    // Use dimensionality from candidacy check
+    if _dims == 1 {
         // 1D: sweep b_tree, use RootKind's process method directly
         let root = &mut stage.root;
         Some(sweep_1d(|b| root.process(b, rp), DEFAULT_STEPS_1D))
