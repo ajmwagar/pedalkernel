@@ -1,30 +1,28 @@
 //! Blockwise decomposition of large nonlinear circuits.
 //!
 //! Detects when a monolithic multi-NL system can be split into smaller
-//! chained blocks with sparse inter-block coupling. Each block becomes
-//! its own WDF subtree with a local NL solve, and the blocks are connected
-//! by a lightweight coupling network (K-method scattering or iteration).
+//! chained blocks with sparse inter-block coupling. Uses the SPQR tree
+//! structure directly:
 //!
-//! The algorithm:
-//! 1. Find all NL components → group by shared circuit nodes (union-find)
-//! 2. For each NL group → collect interior edges (linear + reactive)
-//! 3. Edges touching multiple groups → coupling network
-//! 4. Validate: ≥2 blocks, coupling is NL-free, each block has reactive state
+//! 1. Find P-nodes containing NL edges → those are the blocks
+//! 2. Note each P-node's endpoints → block port nodes
+//! 3. Assign sibling Q-leaves to blocks by which port nodes they touch
+//! 4. Validate: ≥2 blocks, each has reactive state, coupling is NL-free
 
 use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
-use super::spqr::{spqr_decompose, spqr_to_stages};
+use super::spqr::{spqr_decompose, spqr_to_stages, SpqrNode};
 use super::spqr_build::BuiltStage;
 use std::collections::{HashMap, HashSet};
 
-/// A block in the blockwise decomposition — one NL group + its local state.
+/// A block in the blockwise decomposition — one NL device + its local state.
 #[derive(Debug)]
 pub struct Block {
     /// NL edge indices (the nonlinear device junctions).
     pub nl_edges: Vec<usize>,
-    /// Linear edge indices interior to this block (bias resistors, etc.).
+    /// Linear edge indices interior to this block.
     pub linear_edges: Vec<usize>,
-    /// Reactive edge indices interior to this block (shunt caps, etc.).
+    /// Reactive edge indices interior to this block.
     pub reactive_edges: Vec<usize>,
     /// Port nodes — where this block connects to the coupling network.
     pub port_nodes: Vec<NodeId>,
@@ -48,7 +46,7 @@ impl Block {
 pub struct BlockwisePlan {
     /// The chained blocks, in signal-flow order.
     pub blocks: Vec<Block>,
-    /// Coupling edges — the residual graph connecting blocks.
+    /// Coupling edges — the residual connecting blocks.
     pub coupling_edges: Vec<usize>,
     /// Port nodes shared between blocks and coupling network.
     pub port_nodes: Vec<NodeId>,
@@ -61,292 +59,196 @@ impl BlockwisePlan {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Step 1: NL component grouping via union-find on shared nodes
+// Step 1: Find NL P-nodes in the SPQR tree
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Simple union-find for grouping NL components by shared nodes.
-struct UnionFind {
-    parent: Vec<usize>,
-    rank: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n).collect(),
-            rank: vec![0; n],
-        }
-    }
-
-    fn find(&mut self, mut x: usize) -> usize {
-        while self.parent[x] != x {
-            self.parent[x] = self.parent[self.parent[x]]; // path compression
-            x = self.parent[x];
-        }
-        x
-    }
-
-    fn union(&mut self, a: usize, b: usize) {
-        let ra = self.find(a);
-        let rb = self.find(b);
-        if ra == rb {
-            return;
-        }
-        if self.rank[ra] < self.rank[rb] {
-            self.parent[ra] = rb;
-        } else if self.rank[ra] > self.rank[rb] {
-            self.parent[rb] = ra;
-        } else {
-            self.parent[rb] = ra;
-            self.rank[ra] += 1;
-        }
-    }
-}
-
-/// Find NL edge groups: NL edges that share circuit nodes belong to the
-/// same group. Ground and supply nodes are excluded from adjacency
-/// (otherwise every NL component touching ground merges into one group).
-///
-/// Returns a map: group_id → Vec<nl_edge_index>.
-fn group_nl_edges(
-    edge_indices: &[usize],
-    graph: &CircuitGraph,
-) -> HashMap<usize, Vec<usize>> {
-    // Collect NL edges
-    let nl_edges: Vec<usize> = edge_indices
-        .iter()
-        .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
-        .copied()
-        .collect();
-
-    if nl_edges.is_empty() {
-        return HashMap::new();
-    }
-
-    // Nodes to exclude from adjacency: ground, supply, ac_ground
-    let excluded_nodes: HashSet<NodeId> = {
-        let mut s = HashSet::new();
-        s.insert(graph.gnd_node);
-        for &n in &graph.supply_nodes {
-            s.insert(n);
-        }
-        for &n in &graph.ac_ground_nodes {
-            s.insert(n);
-        }
-        s
-    };
-
-    // Union-find: merge NL edges that belong to the SAME component.
-    // Two NL edges from the same BJT (B-E and C-E) share a comp_idx
-    // and must be in the same block. But NL edges from different devices
-    // that happen to share a circuit node (Q1.collector = Q2.base) must
-    // NOT merge — that shared node is the inter-block coupling point.
-    let mut uf = UnionFind::new(nl_edges.len());
-    for i in 0..nl_edges.len() {
-        for j in (i + 1)..nl_edges.len() {
-            let ci = graph.edges[nl_edges[i]].comp_idx;
-            let cj = graph.edges[nl_edges[j]].comp_idx;
-            if ci == cj {
-                uf.union(i, j);
-            }
-        }
-    }
-
-    // Collect groups
-    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, &eidx) in nl_edges.iter().enumerate() {
-        let root = uf.find(i);
-        groups.entry(root).or_default().push(eidx);
-    }
-
-    groups
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Step 2: Collect nodes for each NL group
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Collect all circuit nodes touched by a group's NL edges.
-fn group_nodes(nl_edges: &[usize], graph: &CircuitGraph) -> HashSet<NodeId> {
-    let mut nodes = HashSet::new();
-    for &eidx in nl_edges {
-        let e = &graph.edges[eidx];
-        nodes.insert(e.node_a);
-        nodes.insert(e.node_b);
-    }
-    nodes
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Step 3: Assign non-NL edges to blocks or coupling
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Determine which NL group each non-NL edge belongs to.
-///
-/// When both endpoints touch exactly one group → interior to that block.
-/// When an endpoint is shared between multiple groups (e.g., Q1.emitter =
-/// Q2.base in a cascade), the edge is assigned to the group that "owns"
-/// the shared node as an internal node — identified by having the most
-/// NL edges touching that node. Ties go to the FIRST group (upstream).
-///
-/// An edge touching no groups → coupling.
-fn classify_edge(
-    eidx: usize,
-    graph: &CircuitGraph,
-    group_node_sets: &[(usize, HashSet<NodeId>)],
-    nl_edges_by_group: &HashMap<usize, Vec<usize>>,
-) -> HashSet<usize> {
-    let e = &graph.edges[eidx];
-
-    // For each endpoint, find which groups contain it
-    let groups_a: Vec<usize> = group_node_sets
-        .iter()
-        .filter(|(_, nodes)| nodes.contains(&e.node_a))
-        .map(|&(gid, _)| gid)
-        .collect();
-    let groups_b: Vec<usize> = group_node_sets
-        .iter()
-        .filter(|(_, nodes)| nodes.contains(&e.node_b))
-        .map(|&(gid, _)| gid)
-        .collect();
-
-    // If neither endpoint touches any group → coupling
-    if groups_a.is_empty() && groups_b.is_empty() {
-        return HashSet::new();
-    }
-
-    // If exactly one endpoint touches exactly one group → that group
-    if groups_a.len() == 1 && groups_b.is_empty() {
-        return groups_a.into_iter().collect();
-    }
-    if groups_b.len() == 1 && groups_a.is_empty() {
-        return groups_b.into_iter().collect();
-    }
-    if groups_a.len() == 1 && groups_b.len() == 1 && groups_a[0] == groups_b[0] {
-        return groups_a.into_iter().collect();
-    }
-
-    // Shared node: an endpoint touches multiple groups.
-    // Assign to the group with the most NL edges at the shared node.
-    // This heuristic gives the edge to the "emitter" side (which has
-    // 2 NL edges — B-E and C-E) rather than the "base" side (which
-    // is just a connection point for the next stage's NL edges).
-    let pick_best = |groups: &[usize], node: NodeId| -> Option<usize> {
-        groups.iter().copied().max_by_key(|&gid| {
-            nl_edges_by_group
-                .get(&gid)
-                .map(|edges| {
-                    edges
-                        .iter()
-                        .filter(|&&eidx| {
-                            let e = &graph.edges[eidx];
-                            e.node_a == node || e.node_b == node
-                        })
-                        .count()
-                })
-                .unwrap_or(0)
-        })
-    };
-
-    // Try to assign via endpoint A
-    if groups_a.len() > 1 {
-        if let Some(best) = pick_best(&groups_a, e.node_a) {
-            let mut result = HashSet::new();
-            result.insert(best);
-            return result;
-        }
-    }
-    // Try endpoint B
-    if groups_b.len() > 1 {
-        if let Some(best) = pick_best(&groups_b, e.node_b) {
-            let mut result = HashSet::new();
-            result.insert(best);
-            return result;
-        }
-    }
-
-    // Both endpoints touch different single groups → coupling
-    let mut all = HashSet::new();
-    all.extend(&groups_a);
-    all.extend(&groups_b);
-    all
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Step 4: Build blocks and identify port nodes
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Build a Block from an NL group and its assigned interior edges.
-fn build_block(
+/// An NL block found in the SPQR tree: a P-node whose children are
+/// NL Q-leaves from the same component.
+struct NlBlock {
+    /// The NL edge indices (from Q-leaf children of the P-node).
     nl_edges: Vec<usize>,
-    interior_edges: &[usize],
-    all_edges: &[usize],
-    graph: &CircuitGraph,
-) -> Block {
-    let mut linear = Vec::new();
-    let mut reactive = Vec::new();
-    for &eidx in interior_edges {
-        match graph.effective_edge_kind(eidx) {
-            EdgeKind::Linear => linear.push(eidx),
-            EdgeKind::Reactive => reactive.push(eidx),
-            _ => {} // NL edges are in nl_edges already
-        }
-    }
+    /// The P-node's endpoints — the block's port nodes.
+    endpoints: (NodeId, NodeId),
+    /// Component index of the NL device.
+    comp_idx: usize,
+}
 
-    // Port nodes: nodes in this block that also touch edges NOT in the block
-    let block_edge_set: HashSet<usize> = nl_edges
-        .iter()
-        .chain(linear.iter())
-        .chain(reactive.iter())
-        .copied()
-        .collect();
-    let block_nodes: HashSet<NodeId> = block_edge_set
-        .iter()
-        .flat_map(|&eidx| {
-            let e = &graph.edges[eidx];
-            vec![e.node_a, e.node_b]
-        })
-        .collect();
+/// Walk the SPQR tree and collect NL blocks.
+///
+/// Two patterns:
+/// 1. **P-node**: children are parallel NL edges from the same component
+///    (diode-connected BJT: base=collector → same endpoints)
+/// 2. **S-node siblings**: Q-leaf NL edges from the same component that
+///    are siblings in an S-node (CE BJT: B-E and C-E share emitter node
+///    but have different other endpoints)
+fn find_nl_blocks(node: &SpqrNode, graph: &CircuitGraph, blocks: &mut Vec<NlBlock>) {
+    match node {
+        SpqrNode::P { children, endpoints } => {
+            // Pattern 1: P-node with all-NL children from same component
+            let mut nl_edges = Vec::new();
+            let mut comp_idx = None;
+            let mut all_nl_same_comp = true;
 
-    let mut port_nodes = Vec::new();
-    for &node in &block_nodes {
-        // Skip ground/supply — they're implicit
-        if node == graph.gnd_node || graph.supply_nodes.contains(&node) {
-            continue;
-        }
-        let touches_outside = all_edges.iter().any(|&eidx| {
-            if block_edge_set.contains(&eidx) {
-                return false;
+            for child in children {
+                if let SpqrNode::Q { edge_idx, .. } = child {
+                    if graph.effective_edge_kind(*edge_idx) == EdgeKind::Nonlinear {
+                        let ci = graph.edges[*edge_idx].comp_idx;
+                        if let Some(existing) = comp_idx {
+                            if existing != ci { all_nl_same_comp = false; }
+                        } else {
+                            comp_idx = Some(ci);
+                        }
+                        nl_edges.push(*edge_idx);
+                    } else {
+                        all_nl_same_comp = false;
+                    }
+                } else {
+                    all_nl_same_comp = false;
+                }
             }
-            let e = &graph.edges[eidx];
-            e.node_a == node || e.node_b == node
-        });
-        if touches_outside {
-            port_nodes.push(node);
-        }
-    }
 
-    Block {
-        nl_edges,
-        linear_edges: linear,
-        reactive_edges: reactive,
-        port_nodes,
+            if all_nl_same_comp && !nl_edges.is_empty() {
+                if let Some(ci) = comp_idx {
+                    blocks.push(NlBlock {
+                        nl_edges,
+                        endpoints: *endpoints,
+                        comp_idx: ci,
+                    });
+                    return;
+                }
+            }
+
+            for child in children { find_nl_blocks(child, graph, blocks); }
+        }
+
+        SpqrNode::S { children, .. } | SpqrNode::R { children, .. } => {
+            // Pattern 2: group NL Q-leaf siblings by comp_idx
+            let mut comp_groups: HashMap<usize, Vec<usize>> = HashMap::new();
+            for child in children {
+                if let SpqrNode::Q { edge_idx, .. } = child {
+                    if graph.effective_edge_kind(*edge_idx) == EdgeKind::Nonlinear {
+                        let ci = graph.edges[*edge_idx].comp_idx;
+                        comp_groups.entry(ci).or_default().push(*edge_idx);
+                    }
+                }
+            }
+
+            for (ci, nl_edges) in comp_groups {
+                if nl_edges.is_empty() { continue; }
+                // Compute endpoints: union of all nodes from this comp's NL edges
+                let mut all_nodes: Vec<NodeId> = Vec::new();
+                for &eidx in &nl_edges {
+                    let e = &graph.edges[eidx];
+                    if !all_nodes.contains(&e.node_a) { all_nodes.push(e.node_a); }
+                    if !all_nodes.contains(&e.node_b) { all_nodes.push(e.node_b); }
+                }
+                // Endpoints: the two outermost nodes (or first two if >2)
+                let ep = if all_nodes.len() >= 2 {
+                    (all_nodes[0], all_nodes[1])
+                } else if all_nodes.len() == 1 {
+                    (all_nodes[0], all_nodes[0])
+                } else {
+                    continue;
+                };
+                // For 3-node BJTs (base, collector, emitter), use base and collector
+                // as endpoints (emitter is the shared internal node)
+                let ep = if all_nodes.len() == 3 {
+                    // Find the node that appears in ALL NL edges (the shared one = emitter)
+                    // The other two are the endpoints
+                    let shared = all_nodes.iter().find(|&&n| {
+                        nl_edges.iter().all(|&eidx| {
+                            let e = &graph.edges[eidx];
+                            e.node_a == n || e.node_b == n
+                        })
+                    });
+                    if let Some(&emitter) = shared {
+                        let others: Vec<NodeId> = all_nodes.iter()
+                            .filter(|&&n| n != emitter)
+                            .copied()
+                            .collect();
+                        if others.len() == 2 {
+                            (others[0], others[1])
+                        } else {
+                            ep
+                        }
+                    } else {
+                        ep
+                    }
+                } else {
+                    ep
+                };
+
+                blocks.push(NlBlock { nl_edges, endpoints: ep, comp_idx: ci });
+            }
+
+            // Also recurse into non-Q children (P-nodes, nested S/R)
+            for child in children {
+                match child {
+                    SpqrNode::Q { .. } => {} // already handled above
+                    _ => find_nl_blocks(child, graph, blocks),
+                }
+            }
+        }
+
+        SpqrNode::Q { .. } => {} // Single leaf — not a block
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Step 5: Validation
+// Step 2: Collect sibling Q-leaves (non-NL edges)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Check that a BlockwisePlan is well-formed:
-/// - ≥2 blocks
-/// - Each block has ≥1 NL edge
-/// - Each block has ≥1 reactive edge (otherwise it's just a leaf NL root)
-/// - Coupling network has no NL edges
-fn validate_plan(
-    plan: &BlockwisePlan,
-    graph: &CircuitGraph,
-) -> bool {
+/// Collect all Q-leaf edge indices that are NOT part of any NL block.
+fn collect_sibling_edges(
+    node: &SpqrNode,
+    nl_edge_set: &HashSet<usize>,
+    siblings: &mut Vec<usize>,
+) {
+    match node {
+        SpqrNode::Q { edge_idx, .. } => {
+            if !nl_edge_set.contains(edge_idx) {
+                siblings.push(*edge_idx);
+            }
+        }
+        SpqrNode::S { children, .. }
+        | SpqrNode::P { children, .. } => {
+            // Check if this P-node is an NL block (all children are NL from same comp)
+            // If so, skip — its edges are already in nl_edge_set
+            let is_nl_p = matches!(node, SpqrNode::P { .. })
+                && children.iter().all(|c| {
+                    matches!(c, SpqrNode::Q { edge_idx, .. } if nl_edge_set.contains(edge_idx))
+                });
+            if !is_nl_p {
+                for child in children {
+                    collect_sibling_edges(child, nl_edge_set, siblings);
+                }
+            }
+        }
+        SpqrNode::R { children, edge_indices, .. } => {
+            // R-node edges that aren't NL
+            for &eidx in edge_indices {
+                if !nl_edge_set.contains(&eidx) {
+                    siblings.push(eidx);
+                }
+            }
+            for child in children {
+                collect_sibling_edges(child, nl_edge_set, siblings);
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Step 3: Assign siblings to blocks by port node adjacency
+// ═══════════════════════════════════════════════════════════════════════════
+
+// (assign_sibling replaced by iterative node_to_block expansion in analyze_blockwise)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Step 4: Validation
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn validate_plan(plan: &BlockwisePlan, graph: &CircuitGraph) -> bool {
     if plan.blocks.len() < 2 {
         return false;
     }
@@ -355,12 +257,10 @@ fn validate_plan(
             return false;
         }
         if block.reactive_edges.is_empty() {
-            // A block without reactive state is just a memoryless NL root —
-            // doesn't benefit from blockwise treatment.
             return false;
         }
     }
-    // Coupling must not contain NL edges
+    // Coupling must not contain NL
     for &eidx in &plan.coupling_edges {
         if graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear {
             return false;
@@ -370,67 +270,167 @@ fn validate_plan(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Public entry point
+// Public entry point: analyze
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Analyze a set of edges for blockwise decomposition.
+/// Analyze a set of edges for blockwise decomposition using the SPQR tree.
 ///
-/// Returns `Some(BlockwisePlan)` if the circuit can be split into ≥2
-/// NL blocks with sparse coupling. Returns `None` if monolithic is
-/// the only option.
+/// Returns `Some(BlockwisePlan)` if the circuit splits into ≥2 NL blocks
+/// with sparse coupling. Returns `None` otherwise.
 pub(super) fn analyze_blockwise(
     edge_indices: &[usize],
     graph: &CircuitGraph,
 ) -> Option<BlockwisePlan> {
-    // Step 1: group NL edges by shared nodes
-    let nl_groups = group_nl_edges(edge_indices, graph);
-    if nl_groups.len() < 2 {
-        return None; // 0 or 1 NL groups → no decomposition
+    // Build SPQR tree for these edges
+    let terminals = vec![graph.in_node, graph.out_node];
+    let tree = spqr_decompose(edge_indices, &terminals, graph, graph.gnd_node);
+
+    // Step 1: find NL blocks (P-nodes or S-node siblings)
+    let mut nl_blocks = Vec::new();
+    find_nl_blocks(&tree, graph, &mut nl_blocks);
+
+    #[cfg(test)]
+    eprintln!("  analyze_blockwise: found {} NL blocks from SPQR tree", nl_blocks.len());
+
+    if nl_blocks.len() < 2 {
+        return None;
     }
 
-    // Step 2: compute node sets for each group
-    let group_node_sets: Vec<(usize, HashSet<NodeId>)> = nl_groups
+    // Build NL edge set and port node map
+    let nl_edge_set: HashSet<usize> = nl_blocks
         .iter()
-        .map(|(&gid, nl_edges)| (gid, group_nodes(nl_edges, graph)))
+        .flat_map(|b| b.nl_edges.iter().copied())
         .collect();
 
-    // Step 3: classify all non-NL edges
-    let nl_edge_set: HashSet<usize> = nl_groups
-        .values()
-        .flat_map(|v| v.iter().copied())
+    let block_port_nodes: Vec<(usize, (NodeId, NodeId))> = nl_blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (i, b.endpoints))
         .collect();
 
-    let mut group_interior_edges: HashMap<usize, Vec<usize>> = HashMap::new();
+    let excluded: HashSet<NodeId> = {
+        let mut s = HashSet::new();
+        s.insert(graph.gnd_node);
+        for &n in &graph.supply_nodes { s.insert(n); }
+        for &n in &graph.ac_ground_nodes { s.insert(n); }
+        s
+    };
+
+    // Step 2: collect non-NL edges — everything that isn't in an NL block
+    let sibling_edges: Vec<usize> = edge_indices
+        .iter()
+        .filter(|e| !nl_edge_set.contains(e))
+        .copied()
+        .collect();
+
+    #[cfg(test)]
+    eprintln!("  siblings: {} edges (of {} total, {} NL)",
+        sibling_edges.len(), edge_indices.len(), nl_edge_set.len());
+
+    // Step 3: assign siblings to blocks.
+    // First pass: assign edges directly touching a block's port nodes.
+    // Then expand: edges touching nodes already claimed by a block get
+    // assigned to that block too (captures pot chains: R_e→Cutoff→gnd).
+    let mut node_to_block: HashMap<NodeId, usize> = HashMap::new();
+    for &(bi, (ep_a, ep_b)) in &block_port_nodes {
+        // Port nodes may be shared between blocks — assign to the block
+        // with the most NL edges at that node (same heuristic as before)
+        for &node in &[ep_a, ep_b] {
+            if excluded.contains(&node) { continue; }
+            let existing = node_to_block.get(&node).copied();
+            if existing.is_none() {
+                node_to_block.insert(node, bi);
+            }
+            // If contested, keep the one with more NL edges at this node
+            // (already handled by find_nl_blocks ordering — first writer wins)
+        }
+    }
+
+    let mut block_linear: Vec<Vec<usize>> = vec![Vec::new(); nl_blocks.len()];
+    let mut block_reactive: Vec<Vec<usize>> = vec![Vec::new(); nl_blocks.len()];
+    #[cfg(test)]
+    eprintln!("  node_to_block seed: {:?}", node_to_block);
+
+    let mut unassigned: Vec<usize> = sibling_edges.clone();
     let mut coupling_edges = Vec::new();
 
-    for &eidx in edge_indices {
-        if nl_edge_set.contains(&eidx) {
-            continue; // NL edges are already assigned to groups
+    // Iterative assignment: keep passing over unassigned edges until
+    // no more can be claimed. Each assigned edge's "other" node becomes
+    // available for the next pass.
+    loop {
+        let mut newly_assigned = Vec::new();
+        let mut still_unassigned = Vec::new();
+
+        for &eidx in &unassigned {
+            let e = &graph.edges[eidx];
+            let owner_a = if excluded.contains(&e.node_a) { None }
+                else { node_to_block.get(&e.node_a).copied() };
+            let owner_b = if excluded.contains(&e.node_b) { None }
+                else { node_to_block.get(&e.node_b).copied() };
+
+            match (owner_a, owner_b) {
+                (Some(a), Some(b)) if a == b => {
+                    // Both nodes owned by same block → interior
+                    newly_assigned.push((eidx, a));
+                }
+                (Some(a), None) => {
+                    newly_assigned.push((eidx, a));
+                    if !excluded.contains(&e.node_b) {
+                        node_to_block.insert(e.node_b, a);
+                    }
+                    #[cfg(test)]
+                    eprintln!("    assign edge {eidx} {}({:?}) → block {a}",
+                        graph.components[e.comp_idx].id, graph.effective_edge_kind(eidx));
+                }
+                (None, Some(b)) => {
+                    newly_assigned.push((eidx, b));
+                    if !excluded.contains(&e.node_a) {
+                        node_to_block.insert(e.node_a, b);
+                    }
+                    #[cfg(test)]
+                    eprintln!("    assign edge {eidx} {}({:?}) → block {b}",
+                        graph.components[e.comp_idx].id, graph.effective_edge_kind(eidx));
+                }
+                (Some(a), Some(b)) if a != b => {
+                    // Spans two blocks → coupling
+                    coupling_edges.push(eidx);
+                }
+                _ => {
+                    // Neither node owned yet → try again next pass
+                    still_unassigned.push(eidx);
+                }
+            }
         }
-        let touching = classify_edge(eidx, graph, &group_node_sets, &nl_groups);
-        if touching.len() == 1 {
-            // Interior to exactly one group
-            let gid = *touching.iter().next().unwrap();
-            group_interior_edges.entry(gid).or_default().push(eidx);
-        } else {
-            // Touches 0 or 2+ groups → coupling
-            coupling_edges.push(eidx);
+
+        // Assign newly found edges
+        for (eidx, bi) in &newly_assigned {
+            match graph.effective_edge_kind(*eidx) {
+                EdgeKind::Linear => block_linear[*bi].push(*eidx),
+                EdgeKind::Reactive => block_reactive[*bi].push(*eidx),
+                _ => coupling_edges.push(*eidx),
+            }
         }
+
+        if newly_assigned.is_empty() {
+            // No progress — remaining are truly unconnected → coupling
+            coupling_edges.extend(still_unassigned);
+            break;
+        }
+
+        unassigned = still_unassigned;
     }
 
-    // Step 4: build blocks
-    let mut blocks: Vec<Block> = Vec::new();
-    for (&gid, nl_edges) in &nl_groups {
-        let interior = group_interior_edges.get(&gid).map(|v| v.as_slice()).unwrap_or(&[]);
-        blocks.push(build_block(
-            nl_edges.clone(),
-            interior,
-            edge_indices,
-            graph,
-        ));
+    // Build the plan
+    let mut blocks = Vec::new();
+    for (i, nl_block) in nl_blocks.into_iter().enumerate() {
+        blocks.push(Block {
+            nl_edges: nl_block.nl_edges,
+            linear_edges: std::mem::take(&mut block_linear[i]),
+            reactive_edges: std::mem::take(&mut block_reactive[i]),
+            port_nodes: vec![nl_block.endpoints.0, nl_block.endpoints.1],
+        });
     }
 
-    // Collect all port nodes
     let all_port_nodes: Vec<NodeId> = blocks
         .iter()
         .flat_map(|b| b.port_nodes.iter().copied())
@@ -444,24 +444,26 @@ pub(super) fn analyze_blockwise(
         port_nodes: all_port_nodes,
     };
 
-    // Step 5: validate
     if validate_plan(&plan, graph) {
         Some(plan)
     } else {
+        #[cfg(test)]
+        {
+            for (i, b) in plan.blocks.iter().enumerate() {
+                eprintln!("  validate fail: block {i}: {} NL, {} reactive, {} linear",
+                    b.nl_edges.len(), b.reactive_edges.len(), b.linear_edges.len());
+            }
+        }
         None
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Build: convert a BlockwisePlan into BuiltStages
+// Public entry point: build
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Try blockwise decomposition and build. Returns `Some(stages)` if the
-/// circuit decomposes into chained blocks, `None` to fall through to
-/// the normal SPQR path.
-///
-/// Each block is SPQR-decomposed independently → small WDF trees.
-/// Coupling edges are also SPQR-decomposed → passive stages.
+/// circuit decomposes, `None` to fall through to monolithic.
 pub(super) fn try_build_blockwise(
     edge_indices: &[usize],
     graph: &CircuitGraph,
@@ -481,7 +483,6 @@ pub(super) fn try_build_blockwise(
 
     let mut all_stages = Vec::new();
 
-    // Build each block via SPQR
     for (bi, block) in plan.blocks.iter().enumerate() {
         let block_edges = block.all_edges();
         if block_edges.is_empty() {
@@ -506,39 +507,30 @@ pub(super) fn try_build_blockwise(
 
         for stage in spqr_stages {
             let mut built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate)
-                .ok()?; // If any block fails, fall through to monolithic
+                .ok()?;
 
-            // Set BJT base bias from the circuit's DC bias network.
-            // Find the BJT component in this block, look up its base node
-            // voltage from bias analysis, and set it on the BjtRoot.
+            // Set BJT bias from circuit analysis
             if let BuiltStage::Wdf(ref mut wdf) = built {
                 if let pedalkernel_rt::stage::RootKind::Bjt(ref mut bjt) = wdf.root {
-                    // Find BJT base node from the NL edges in this block
                     let base_bias = block.nl_edges.iter().find_map(|&eidx| {
                         let e = &graph.edges[eidx];
                         let comp = &graph.components[e.comp_idx];
-                        // Look up base pin node
                         let base_key = format!("{}.base", comp.id);
                         let base_node = graph.node_names.get(&base_key)?;
-                        // Check bias voltage map
                         bias_node_voltages.get(base_node).copied()
                     });
 
                     if let Some(v_base) = base_bias {
-                        // Vbe ≈ V_base (emitter near ground for common-emitter).
                         bjt.set_bias(v_base.min(0.8));
                         #[cfg(test)]
-                        eprintln!("  Block {bi}: BJT base bias = {v_base:.3}V (from circuit)");
+                        eprintln!("  Block {bi}: BJT bias = {v_base:.3}V (from circuit)");
                     } else {
-                        // No bias from analysis — use silicon default.
-                        // For Ge transistors, this would be ~0.3V.
                         let default_vbe = if supply_voltage > 1.0 { 0.6 } else { 0.3 };
                         bjt.set_bias(default_vbe);
                         #[cfg(test)]
                         eprintln!("  Block {bi}: BJT bias = {default_vbe:.1}V (default)");
                     }
 
-                    // Set v_max from supply voltage
                     bjt.set_v_max(supply_voltage.abs().max(1.0));
                 }
             }
@@ -558,13 +550,6 @@ pub(super) fn try_build_blockwise(
             graph.gnd_node,
         );
         let spqr_stages = spqr_to_stages(&spqr_tree, graph, sample_rate);
-
-        #[cfg(test)]
-        eprintln!(
-            "  Coupling: {} edges → {} stages",
-            plan.coupling_edges.len(),
-            spqr_stages.len()
-        );
 
         for stage in spqr_stages {
             let built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate)

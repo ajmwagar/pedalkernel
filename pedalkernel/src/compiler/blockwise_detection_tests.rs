@@ -273,6 +273,96 @@ const DIODE_CASCADE_2_WITH_POTS: &str = r#"pedal "Diode Cascade Pots" {
 }"#;
 
 #[test]
+fn diagnostic_diode_cascade_pots_spqr_tree() {
+    let (graph, edges) = make_graph_all(DIODE_CASCADE_2_WITH_POTS);
+    let terminals = vec![graph.in_node, graph.out_node];
+    let tree = spqr_decompose(&edges, &terminals, &graph, graph.gnd_node);
+
+    fn print_spqr(node: &SpqrNode, graph: &super::graph::CircuitGraph, depth: usize) {
+        let indent = "  ".repeat(depth);
+        match node {
+            SpqrNode::S { children, cut_vertices } => {
+                eprintln!("{indent}S (cut={:?}, {} children)", cut_vertices, children.len());
+                for c in children { print_spqr(c, graph, depth + 1); }
+            }
+            SpqrNode::P { children, endpoints } => {
+                eprintln!("{indent}P (ep={:?}, {} children)", endpoints, children.len());
+                for c in children { print_spqr(c, graph, depth + 1); }
+            }
+            SpqrNode::Q { edge_idx, .. } => {
+                let comp = &graph.components[graph.edges[*edge_idx].comp_idx];
+                let kind = graph.effective_edge_kind(*edge_idx);
+                let e = &graph.edges[*edge_idx];
+                eprintln!("{indent}Q {}: {}({:?}) [{:?}→{:?}]",
+                    edge_idx, comp.id, kind, e.node_a, e.node_b);
+            }
+            SpqrNode::R { edge_indices, boundary_nodes, children } => {
+                let mut nl = 0; let mut reactive = 0; let mut linear = 0;
+                for &eidx in edge_indices {
+                    match graph.effective_edge_kind(eidx) {
+                        super::component::EdgeKind::Nonlinear => nl += 1,
+                        super::component::EdgeKind::Reactive => reactive += 1,
+                        super::component::EdgeKind::Linear => linear += 1,
+                        _ => {}
+                    }
+                }
+                eprintln!("{indent}R ({} edges: {nl}NL+{reactive}C+{linear}R, boundary={:?}, {} children)",
+                    edge_indices.len(), boundary_nodes, children.len());
+                for &eidx in edge_indices {
+                    let comp = &graph.components[graph.edges[eidx].comp_idx];
+                    let kind = graph.effective_edge_kind(eidx);
+                    let e = &graph.edges[eidx];
+                    eprintln!("{indent}  {}: {}({:?}) [{:?}→{:?}]",
+                        eidx, comp.id, kind, e.node_a, e.node_b);
+                }
+                for c in children { print_spqr(c, graph, depth + 1); }
+            }
+        }
+    }
+
+    eprintln!("\n=== Diode Cascade 2 + Pots: SPQR tree ===");
+    print_spqr(&tree, &graph, 0);
+    eprintln!("  Total edges: {}", tree.edge_count());
+    eprintln!("  GND={:?}, VCC={:?}, IN={:?}, OUT={:?}",
+        graph.gnd_node, graph.supply_nodes, graph.in_node, graph.out_node);
+}
+
+#[test]
+fn diagnostic_diode_cascade_no_pots_spqr_tree() {
+    let (graph, edges) = make_graph_all(DIODE_CASCADE_2);
+    let terminals = vec![graph.in_node, graph.out_node];
+    let tree = spqr_decompose(&edges, &terminals, &graph, graph.gnd_node);
+
+    fn print_spqr(node: &SpqrNode, graph: &super::graph::CircuitGraph, depth: usize) {
+        let indent = "  ".repeat(depth);
+        match node {
+            SpqrNode::S { children, cut_vertices } => {
+                eprintln!("{indent}S (cut={:?}, {} children)", cut_vertices, children.len());
+                for c in children { print_spqr(c, graph, depth + 1); }
+            }
+            SpqrNode::P { children, .. } => {
+                eprintln!("{indent}P ({} children)", children.len());
+                for c in children { print_spqr(c, graph, depth + 1); }
+            }
+            SpqrNode::Q { edge_idx, .. } => {
+                let comp = &graph.components[graph.edges[*edge_idx].comp_idx];
+                let kind = graph.effective_edge_kind(*edge_idx);
+                let e = &graph.edges[*edge_idx];
+                eprintln!("{indent}Q {}: {}({:?}) [{:?}→{:?}]",
+                    edge_idx, comp.id, kind, e.node_a, e.node_b);
+            }
+            SpqrNode::R { edge_indices, children, .. } => {
+                eprintln!("{indent}R ({} edges, {} children)", edge_indices.len(), children.len());
+                for c in children { print_spqr(c, graph, depth + 1); }
+            }
+        }
+    }
+
+    eprintln!("\n=== Diode Cascade 2 (no pots): SPQR tree ===");
+    print_spqr(&tree, &graph, 0);
+}
+
+#[test]
 fn diode_cascade_with_pots_is_blockwise() {
     let (graph, edges) = make_graph_all(DIODE_CASCADE_2_WITH_POTS);
     let nl_count = count_nl(&edges, &graph);
