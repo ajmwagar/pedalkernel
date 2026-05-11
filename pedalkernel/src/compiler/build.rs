@@ -126,10 +126,13 @@ pub(super) fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind,
             let model = OtaModel::ca3080();
             (RootKind::Ota(OtaRoot::new(model)), None)
         }
-        NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. } => {
-            // BJTs are routed through MultiNlStage (BjtTwoPort) via try_bjt_two_port.
-            // create_root() should never be called for BJTs in normal operation.
-            unreachable!("BJTs use MultiNlStage, not WdfStage root — create_root should not be called for BJTs");
+        NonlinearKind::BjtNpn { model_name, .. } => {
+            let model = gummel_poon_model(model_name);
+            (RootKind::Bjt(BjtRoot::new(model, false)), None)
+        }
+        NonlinearKind::BjtPnp { model_name, .. } => {
+            let model = gummel_poon_model(model_name);
+            (RootKind::Bjt(BjtRoot::new(model, true)), None)
         }
     }
 }
