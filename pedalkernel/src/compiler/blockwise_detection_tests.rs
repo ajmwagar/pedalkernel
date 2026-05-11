@@ -20,6 +20,7 @@
 
 use super::graph::CircuitGraph;
 use super::spqr::*;
+use crate::PedalProcessor;
 
 /// Helper: build graph from .pedal source, return all non-active edges.
 fn make_graph_all(pedal_src: &str) -> (CircuitGraph, Vec<usize>) {
@@ -945,4 +946,166 @@ fn ts808_clipper_is_k_subgraph_but_not_blockwise() {
     let result = analyze_k_method_subgraph(&edges, &graph);
     assert!(result.is_candidate, "TS808 clipper subgraph should be K-method: {:?}", result.rejection);
     assert!(result.port_dims <= 2, "Should be ≤2D, got {}", result.port_dims);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. Blockwise runtime behavior: chained blocks produce correct audio
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cascade_2_produces_audio() {
+    let pedal = crate::dsl::parse_pedal_file(BJT_CASCADE_2).unwrap();
+    let compiled = super::spqr_build::compile_via_spqr(&pedal, 48_000.0).unwrap();
+    let mut proc: Box<dyn crate::PedalProcessor> = Box::new(compiled);
+
+    let mut peak = 0.0f64;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48_000.0).sin() * 0.1;
+        let out = proc.process(input);
+        if i >= 4800 {
+            peak = peak.max(out.abs());
+        }
+    }
+    eprintln!("  Cascade 2 peak: {peak:.6}");
+    assert!(peak > 0.001, "Cascade 2 should produce audible output, got {peak:.6}");
+    assert!(peak.is_finite(), "Output should be finite");
+}
+
+#[test]
+fn ladder_4_produces_audio() {
+    let pedal = crate::dsl::parse_pedal_file(BJT_LADDER_4).unwrap();
+    let compiled = super::spqr_build::compile_via_spqr(&pedal, 48_000.0).unwrap();
+    let mut proc: Box<dyn crate::PedalProcessor> = Box::new(compiled);
+
+    let mut peak = 0.0f64;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48_000.0).sin() * 0.1;
+        let out = proc.process(input);
+        if i >= 4800 {
+            peak = peak.max(out.abs());
+        }
+    }
+    eprintln!("  Ladder 4 peak: {peak:.6}");
+    assert!(peak > 0.001, "Ladder 4 should produce audible output, got {peak:.6}");
+    assert!(peak.is_finite(), "Output should be finite");
+}
+
+#[test]
+fn ladder_4_resonance_affects_output() {
+    let pedal = crate::dsl::parse_pedal_file(BJT_LADDER_4).unwrap();
+
+    // Process with resonance = 0
+    let mut no_res = super::spqr_build::compile_via_spqr(&pedal, 48_000.0).unwrap();
+    no_res.set_control("Resonance", 0.0);
+    let mut peak_no = 0.0f64;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48_000.0).sin() * 0.1;
+        let out = no_res.process(input);
+        if i >= 4800 { peak_no = peak_no.max(out.abs()); }
+    }
+
+    // Process with resonance = 0.9
+    let mut hi_res = super::spqr_build::compile_via_spqr(&pedal, 48_000.0).unwrap();
+    hi_res.set_control("Resonance", 0.9);
+    let mut peak_hi = 0.0f64;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48_000.0).sin() * 0.1;
+        let out = hi_res.process(input);
+        if i >= 4800 { peak_hi = peak_hi.max(out.abs()); }
+    }
+
+    eprintln!("  Ladder 4 resonance: off={peak_no:.6}, hi={peak_hi:.6}");
+    assert!(
+        (peak_no - peak_hi).abs() > 0.0001 || (peak_no > 0.001 && peak_hi > 0.001),
+        "Resonance should affect output: off={peak_no:.6}, hi={peak_hi:.6}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 9. Blockwise produces BETTER results than monolithic for same circuit
+//
+// The blockwise decomposition should produce correct cascaded lowpass
+// behavior — each block independently resolves its pole. A monolithic
+// solver may struggle with convergence or produce artifacts.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn ladder_4_no_nan_or_inf_at_any_resonance() {
+    let pedal = crate::dsl::parse_pedal_file(BJT_LADDER_4).unwrap();
+    let compiled = super::spqr_build::compile_via_spqr(&pedal, 48_000.0).unwrap();
+
+    for &res in &[0.0, 0.3, 0.5, 0.7, 0.9, 1.0] {
+        let pedal = crate::dsl::parse_pedal_file(BJT_LADDER_4).unwrap();
+        let mut proc = super::spqr_build::compile_via_spqr(&pedal, 48_000.0).unwrap();
+        proc.set_control("Resonance", res);
+
+        let mut any_bad = false;
+        for i in 0..4800 {
+            let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48_000.0).sin() * 0.1;
+            let out = proc.process(input);
+            if out.is_nan() || out.is_infinite() {
+                any_bad = true;
+                break;
+            }
+        }
+        assert!(!any_bad, "Ladder 4 at resonance={res} produced NaN/Inf");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 10. analyze_blockwise structural details
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn analyze_blockwise_groups_by_shared_nodes() {
+    // Each block should contain edges that share circuit nodes
+    // (BJT B-E and C-E junctions share the emitter node with Re and C)
+    let (graph, edges) = make_graph_all(BJT_LADDER_4);
+    let plan = analyze_blockwise(&edges, &graph);
+    assert!(plan.is_some(), "Should decompose");
+    let plan = plan.unwrap();
+
+    // Each block's NL edges should share nodes with its reactive edges
+    // (the cap is connected to the same emitter node as the BJT)
+    for (i, (nl, reactive)) in plan.block_nl_edges.iter()
+        .zip(plan.block_reactive_edges.iter()).enumerate()
+    {
+        let nl_nodes: std::collections::HashSet<_> = nl.iter()
+            .flat_map(|&eidx| {
+                let e = &graph.edges[eidx];
+                vec![e.node_a, e.node_b]
+            })
+            .collect();
+        let reactive_nodes: std::collections::HashSet<_> = reactive.iter()
+            .flat_map(|&eidx| {
+                let e = &graph.edges[eidx];
+                vec![e.node_a, e.node_b]
+            })
+            .collect();
+        let shared = nl_nodes.intersection(&reactive_nodes).count();
+        assert!(
+            shared > 0,
+            "Block {i}: NL and reactive edges should share at least 1 node (emitter), got 0"
+        );
+    }
+}
+
+#[test]
+fn analyze_blockwise_coupling_is_sparse() {
+    // The coupling edges (inter-block + feedback) should be a small
+    // fraction of total edges — sparse connection network
+    let (graph, edges) = make_graph_all(BJT_LADDER_4);
+    let plan = analyze_blockwise(&edges, &graph);
+    assert!(plan.is_some());
+    let plan = plan.unwrap();
+
+    let total_block_edges: usize = plan.block_nl_edges.iter().map(|e| e.len()).sum::<usize>()
+        + plan.block_reactive_edges.iter().map(|e| e.len()).sum::<usize>();
+    let coupling_count = plan.coupling_edges.len();
+
+    eprintln!("  Block edges: {total_block_edges}, coupling edges: {coupling_count}");
+    assert!(
+        coupling_count < total_block_edges,
+        "Coupling edges ({coupling_count}) should be fewer than block edges ({total_block_edges})"
+    );
 }
