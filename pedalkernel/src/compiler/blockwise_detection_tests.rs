@@ -605,18 +605,14 @@ struct KMethodCandidacy {
     rejection: Option<&'static str>,
 }
 
-/// Placeholder: check if an NL component is a K-method candidate.
-/// Will be implemented as a Component trait method.
+/// Query K-method candidacy from the Component trait.
 fn k_method_candidacy(comp_idx: usize, graph: &CircuitGraph) -> KMethodCandidacy {
     let comp = &graph.components[comp_idx];
-    let _type_tag = comp.kind.type_tag();
-
-    // TODO: implement via Component trait method
-    // For now, stub that rejects everything
+    let (is_candidate, port_dims, reason) = comp.kind.k_method_candidacy();
     KMethodCandidacy {
-        is_candidate: false,
-        port_dims: 0,
-        rejection: Some("not yet implemented"),
+        is_candidate,
+        port_dims,
+        rejection: if is_candidate { None } else { Some(reason) },
     }
 }
 
@@ -642,7 +638,7 @@ fn diode_is_k_method_candidate() {
 fn bjt_is_k_method_candidate_2d() {
     let (graph, _edges) = make_graph_all(SINGLE_BJT);
 
-    let bjt_comp = graph.components.iter().position(|c| c.kind.type_tag() == "npn");
+    let bjt_comp = graph.components.iter().position(|c| c.kind.type_tag() == "NPN transistor");
     assert!(bjt_comp.is_some(), "Should have an NPN component");
     let result = k_method_candidacy(bjt_comp.unwrap(), &graph);
 

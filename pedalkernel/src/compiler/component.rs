@@ -872,6 +872,34 @@ pub trait Component: std::fmt::Debug {
         false
     }
 
+    // ── K-method candidacy ────────────────────────────────────────────────
+
+    /// Whether this nonlinear element can be replaced by a precomputed
+    /// lookup table (K-method / wave digital tabulation).
+    ///
+    /// Returns `(is_candidate, port_dimensions, rejection_reason)`.
+    ///
+    /// Requirements for candidacy:
+    /// 1. Memoryless: the NL is purely algebraic (no internal state/caps)
+    /// 2. Low port count: ≤3 dimensions for practical table sizes
+    /// 3. Monotonic: unique output for any input (no fold-back/hysteresis)
+    ///
+    /// Port dimensions:
+    /// - 1D: single junction (diode, zener, single-port JFET Rds)
+    /// - 2D: two coupled junctions (BJT Vbe+Vce, triode Vgk+Vpk)
+    /// - 3D: three-port (pentode Vg1k+Vg2k+Vpk) — borderline feasible
+    ///
+    /// Linear components return (false, 0, "linear") — they don't need
+    /// NL tabulation. Variable components (pots, photocouplers) return
+    /// false because their parameters change at runtime.
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        if !self.is_nonlinear() {
+            return (false, 0, "linear — not a nonlinear element");
+        }
+        // Default for unknown NL: reject conservatively
+        (false, 0, "unknown nonlinear type — override k_method_candidacy()")
+    }
+
     // ── Composite classification ─────────────────────────────────────────
 
     /// Passive two-terminal element (R, C, L, etc.) — excludes transformers and pots.

@@ -126,6 +126,9 @@ impl Component for Diode {
     fn diode_type(&self) -> Option<DiodeType> {
         Some(self.diode_type)
     }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 1, "diode: 1D memoryless monotonic I-V")
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -236,6 +239,9 @@ impl Component for DiodePair {
     }
     fn diode_type(&self) -> Option<DiodeType> {
         Some(self.diode_type)
+    }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 1, "diode pair: 1D memoryless symmetric I-V")
     }
 }
 
@@ -357,6 +363,9 @@ impl Component for Zener {
     fn is_diode_family(&self) -> bool {
         true
     }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 1, "zener: 1D memoryless I-V with reverse breakdown")
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -432,5 +441,10 @@ impl Component for Neon {
     }
     fn layout_class(&self) -> &'static str {
         "neon"
+    }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        // Neon bulbs have hysteresis (strike vs maintain voltage) —
+        // the I-V curve folds back, violating the monotonicity requirement.
+        (false, 1, "neon: hysteretic I-V (strike/maintain) — not monotonic")
     }
 }

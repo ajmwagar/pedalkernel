@@ -150,6 +150,10 @@ impl Component for Npn {
     fn is_gain_device(&self) -> bool {
         true
     }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        // BJT: 2D (Vbe, Vce). Memoryless static I-V, monotonic in normal operation.
+        (true, 2, "BJT: 2D memoryless I-V (Vbe, Vce)")
+    }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
     }
@@ -293,6 +297,9 @@ impl Component for Pnp {
     }
     fn is_gain_device(&self) -> bool {
         true
+    }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 2, "BJT: 2D memoryless I-V (Vbe, Vce)")
     }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
@@ -455,6 +462,9 @@ impl Component for NJfet {
     }
     fn is_gain_device(&self) -> bool {
         true
+    }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 2, "JFET: 2D memoryless I-V (Vgs, Vds)")
     }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
@@ -625,6 +635,9 @@ impl Component for PJfet {
     fn is_gain_device(&self) -> bool {
         true
     }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 2, "JFET: 2D memoryless I-V (Vgs, Vds)")
+    }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
     }
@@ -767,6 +780,9 @@ impl Component for Nmos {
     fn is_gain_device(&self) -> bool {
         true
     }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 2, "MOSFET: 2D memoryless I-V (Vgs, Vds)")
+    }
     fn port_semantic(&self, pin_a: &str, pin_b: &str) -> crate::compiler::component::PortSemantic {
         let pins = [pin_a, pin_b];
         if pins.contains(&"gate") {
@@ -905,6 +921,9 @@ impl Component for Pmos {
     }
     fn is_gain_device(&self) -> bool {
         true
+    }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 2, "MOSFET: 2D memoryless I-V (Vgs, Vds)")
     }
     fn port_semantic(&self, pin_a: &str, pin_b: &str) -> crate::compiler::component::PortSemantic {
         let pins = [pin_a, pin_b];

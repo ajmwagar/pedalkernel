@@ -146,6 +146,9 @@ impl Component for Triode {
     fn is_gain_device(&self) -> bool {
         true
     }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 2, "tube: 2D memoryless I-V")
+    }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
     }
@@ -287,6 +290,9 @@ impl Component for Pentode {
     fn is_gain_device(&self) -> bool {
         true
     }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 2, "tube: 2D memoryless I-V")
+    }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
     }
@@ -425,6 +431,9 @@ impl Component for VariMu {
     }
     fn is_gain_device(&self) -> bool {
         true
+    }
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        (true, 3, "pentode: 3D memoryless I-V (Vg1k, Vg2k, Vpk)")
     }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
