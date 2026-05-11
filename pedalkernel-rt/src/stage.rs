@@ -3184,6 +3184,100 @@ pub struct IirPotBinding {
     pub position: f64,
 }
 
+/// Precomputed biquad coefficient lookup table for pot-controlled IIR stages.
+///
+/// Built at compile time by sweeping pot positions over an N-dimensional grid.
+/// At runtime, `set_pot` quantizes the position and bilinearly interpolates
+/// the 5 biquad coefficients from the nearest grid neighbors. O(1) lookup,
+/// no matrix math, no alloc. Cortex-M7 safe.
+///
+/// Dimensions correspond to independent control labels (ganged pots = 1 dim).
+/// Table size: `steps^n_dims × 5` f64 entries.
+#[cfg(feature = "biquad-table")]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BiquadTable {
+    /// Number of uniformly-spaced steps per dimension (e.g. 64).
+    pub steps: usize,
+    /// Dimension labels — each is a control label (e.g. "Cutoff", "Resonance").
+    /// Order matches the index arithmetic: dim 0 is the innermost.
+    pub dim_labels: alloc::vec::Vec<alloc::string::String>,
+    /// Flattened [b0, b1, b2, a1, a2] × (steps^n_dims) entries.
+    /// Entry index for (d0, d1, ...): d0 + d1*steps + d2*steps² + ...
+    pub coeffs: alloc::vec::Vec<f64>,
+}
+
+#[cfg(feature = "biquad-table")]
+impl BiquadTable {
+    /// Number of coefficients per entry (b0, b1, b2, a1, a2).
+    const COEFF_COUNT: usize = 5;
+
+    /// Look up and interpolate biquad coefficients for given positions.
+    /// `positions` maps dim index → normalized position [0.0, 1.0].
+    /// Writes 5 values into `out`: [b0, b1, b2, a1, a2].
+    pub fn lookup(&self, positions: &[f64], out: &mut [f64; 5]) {
+        let n_dims = self.dim_labels.len();
+        if n_dims == 0 || self.steps < 2 {
+            return;
+        }
+        let max_idx = self.steps - 1;
+
+        match n_dims {
+            1 => {
+                // Linear interpolation
+                let p = positions[0].clamp(0.0, 1.0) * max_idx as f64;
+                let i0 = (p as usize).min(max_idx - 1);
+                let frac = p - i0 as f64;
+                let base0 = i0 * Self::COEFF_COUNT;
+                let base1 = (i0 + 1) * Self::COEFF_COUNT;
+                for c in 0..5 {
+                    out[c] = self.coeffs[base0 + c] * (1.0 - frac)
+                        + self.coeffs[base1 + c] * frac;
+                }
+            }
+            2 => {
+                // Bilinear interpolation
+                let p0 = positions[0].clamp(0.0, 1.0) * max_idx as f64;
+                let p1 = positions[1].clamp(0.0, 1.0) * max_idx as f64;
+                let i0 = (p0 as usize).min(max_idx - 1);
+                let i1 = (p1 as usize).min(max_idx - 1);
+                let f0 = p0 - i0 as f64;
+                let f1 = p1 - i1 as f64;
+                let s = self.steps;
+                let idx00 = (i0 + i1 * s) * Self::COEFF_COUNT;
+                let idx10 = (i0 + 1 + i1 * s) * Self::COEFF_COUNT;
+                let idx01 = (i0 + (i1 + 1) * s) * Self::COEFF_COUNT;
+                let idx11 = (i0 + 1 + (i1 + 1) * s) * Self::COEFF_COUNT;
+                let w00 = (1.0 - f0) * (1.0 - f1);
+                let w10 = f0 * (1.0 - f1);
+                let w01 = (1.0 - f0) * f1;
+                let w11 = f0 * f1;
+                for c in 0..5 {
+                    out[c] = self.coeffs[idx00 + c] * w00
+                        + self.coeffs[idx10 + c] * w10
+                        + self.coeffs[idx01 + c] * w01
+                        + self.coeffs[idx11 + c] * w11;
+                }
+            }
+            _ => {
+                // Fallback: nearest-neighbor for 3+ dims
+                let mut flat_idx = 0usize;
+                let mut stride = 1usize;
+                for d in 0..n_dims {
+                    let p = positions[d].clamp(0.0, 1.0) * max_idx as f64;
+                    let i = (p as usize).min(max_idx);
+                    flat_idx += i * stride;
+                    stride *= self.steps;
+                }
+                let base = flat_idx * Self::COEFF_COUNT;
+                for c in 0..5 {
+                    out[c] = self.coeffs[base + c];
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IirStage {
     /// The biquad filter data (coefficients + history).
@@ -3203,6 +3297,10 @@ pub struct IirStage {
     pub nonideal_fx: Vec<crate::nonideal_fx::NonIdealFx>,
     /// Pot bindings for runtime coefficient recomputation.
     pub pot_bindings: Vec<IirPotBinding>,
+    /// Precomputed biquad lookup table (compile-time sweeps over pot positions).
+    /// When present, `set_pot` interpolates from this instead of the DC gain formula.
+    #[cfg(feature = "biquad-table")]
+    pub biquad_table: Option<BiquadTable>,
     /// Sample rate (needed for GBW recomputation on gain change).
     pub sample_rate: f64,
     // ── NonIdealFx runtime state ──
@@ -3232,6 +3330,8 @@ impl IirStage {
             bypass_serial: false,
             nonideal_fx: Vec::new(),
             pot_bindings: Vec::new(),
+            #[cfg(feature = "biquad-table")]
+            biquad_table: None,
             sample_rate,
             gbw_state: 0.0,
             gbw_coeff: 1.0, // passthrough (no GBW limiting)
@@ -3300,8 +3400,11 @@ impl IirStage {
 
     /// Update pot position and recompute IIR coefficients.
     ///
-    /// For resistive feedback (no caps): recomputes dc_gain from Rf/Ri.
-    /// For resonators (caps): delegates to IirData::recompute().
+    /// With `biquad-table` feature: interpolates full biquad from precomputed
+    /// table. Handles cutoff, resonance, and any other pot — all coefficients
+    /// update correctly for frequency-dependent changes.
+    ///
+    /// Without table: falls back to DC gain recalculation (Rf/Ri).
     /// No heap allocations — all state is pre-allocated.
     pub fn set_pot(&mut self, comp_id: &str, position: f64) {
         let binding = match self.pot_bindings.iter_mut().find(|b| b.comp_id == comp_id) {
@@ -3310,15 +3413,45 @@ impl IirStage {
         };
         binding.position = position;
 
-        // Recompute dc_gain: gain = -(fixed_r + pos * max_r) / ri
+        // ── Table lookup path (full biquad interpolation) ──
+        #[cfg(feature = "biquad-table")]
+        if let Some(ref table) = self.biquad_table {
+            // Build position vector from all pot bindings, matched by comp_id
+            let mut positions = alloc::vec![0.0f64; table.dim_labels.len()];
+            for binding in &self.pot_bindings {
+                for (di, comp_id) in table.dim_labels.iter().enumerate() {
+                    if comp_id.as_str() == binding.comp_id.as_str() {
+                        positions[di] = binding.position;
+                    }
+                }
+            }
+            let mut coeffs = [0.0f64; 5];
+            table.lookup(&positions, &mut coeffs);
+            // Update biquad coefficients
+            if self.iir.b_coeffs.len() >= 3 && self.iir.a_coeffs.len() >= 3 {
+                self.iir.b_coeffs[0] = coeffs[0];
+                self.iir.b_coeffs[1] = coeffs[1];
+                self.iir.b_coeffs[2] = coeffs[2];
+                self.iir.a_coeffs[1] = coeffs[3];
+                self.iir.a_coeffs[2] = coeffs[4];
+            }
+            // Recompute GBW for new DC gain
+            if self.stored_gbw > 0.0 {
+                let dc_gain = self.iir.dc_gain().abs().max(1.0);
+                let fc = self.stored_gbw / dc_gain;
+                let w = 2.0 * core::f64::consts::PI * fc;
+                self.gbw_coeff = w / (w + self.sample_rate);
+            }
+            return;
+        }
+
+        // ── Fallback: DC gain recalculation ──
         let rf = binding.fixed_series_r + position * binding.max_r;
         let ri = binding.ri;
         let dc_gain = if ri > 0.0 { -(rf / ri) } else { -1.0 };
 
-        // Update biquad: for DC-only (no caps), b=[gain, 0, 0], a=[1, 0, 0]
         self.iir.b_coeffs[0] = dc_gain;
 
-        // Recompute GBW coefficient for new gain (fc = GBW / |gain|)
         if self.stored_gbw > 0.0 {
             let gain_abs = dc_gain.abs().max(1.0);
             let fc = self.stored_gbw / gain_abs;

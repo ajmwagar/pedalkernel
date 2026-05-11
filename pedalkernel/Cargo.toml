@@ -14,6 +14,7 @@ rust-version = "1.80"
 default = ["std", "jack-rt", "tui", "cli", "gummel-poon"]
 std = []
 serde = ["pedalkernel-rt/serde"]
+biquad-table = ["pedalkernel-rt/biquad-table"]
 jack-rt = ["jack"]
 tui = ["dep:ratatui", "dep:crossterm"]
 cli = ["dep:clap"]
@@ -68,6 +69,7 @@ tracing = "0.1"
 criterion = "0.5"
 tempfile = "3"
 rand = "0.8"
+postcard = { version = "1", features = ["alloc"] }
 
 [[bench]]
 name = "wdf_bench"

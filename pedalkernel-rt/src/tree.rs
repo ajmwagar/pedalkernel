@@ -1791,14 +1791,14 @@ impl MnaSystem {
                 }}}
 
                 // Bilinear input coupling: two vectors for u[n+1] and u[n].
-                //   b_M_red = b_G_red + 2fs·b_C_red  (couples to u[n+1])
-                //   b_N_red = -b_G_red + 2fs·b_C_red  (couples to u[n])
                 //
-                // For LPF (b_C_red=0): b_M = b_G, b_N = -b_G → standard single-vector.
-                // For HPF (b_G_red=0): b_M = 2fs·b_C, b_N = 2fs·b_C → symmetric,
-                //   creates (z-1) HPF zero from the z·b_M + b_N = 2fs·b_C·(z+1)...
-                //   wait, that's allpass. The HPF zero comes from the asymmetry
-                //   in the denominator interaction.
+                // From the continuous-time substitution X[vn] = U into the
+                // bilinear discretized system M·x[n+1] = N·x[n]:
+                //   b_M = G[i,vn] + 2fs·C[i,vn]  (couples to U[n+1])
+                //   b_N = G[i,vn] - 2fs·C[i,vn]  (couples to U[n])
+                //
+                // DC check: b_M + b_N = 2·G[i,vn] → correct (proportional to G only).
+                // HPF check: b_M - b_N = 4fs·C[i,vn] → creates (z-1) zero for cap inputs.
                 let circuit_nodes_eliminated = alg_indices.iter().any(|&i| i < n_kept);
                 let b_scale = if circuit_nodes_eliminated { 2.0 } else { 1.0 };
 
@@ -1808,7 +1808,7 @@ impl MnaSystem {
                 for i in 0..n_c {
                     for k in 0..n_c {
                         let bm = b_g_red[k] + two_fs * b_c_red[k];
-                        let bn = -b_g_red[k] + two_fs * b_c_red[k];
+                        let bn = b_g_red[k] - two_fs * b_c_red[k];
                         b_plus[i] += b_scale * m_inv[i * n_c + k] * bm;
                         b_minus[i] += b_scale * m_inv[i * n_c + k] * bn;
                     }
@@ -1870,7 +1870,7 @@ impl MnaSystem {
                 let mut b_minus = vec![0.0; n_c];
                 for i in 0..n_c { for k in 0..n_c {
                     let bm = b_kept[k] + two_fs * b_c_kept[k];
-                    let bn = -b_kept[k] + two_fs * b_c_kept[k];
+                    let bn = b_kept[k] - two_fs * b_c_kept[k];
                     b_plus[i] += 2.0 * m_inv[i * n_c + k] * bm;
                     b_minus[i] += 2.0 * m_inv[i * n_c + k] * bn;
                 }}

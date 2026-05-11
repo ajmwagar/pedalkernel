@@ -591,6 +591,36 @@ pub(super) fn build_rigid_from_group(
                 }
                 if let Some(g) = group {
                     stage.pot_bindings = extract_pot_bindings(g, &edge_indices, graph);
+
+                    // Build biquad lookup table for pot-controlled stages.
+                    // Each pot becomes its own dimension (ganged pots sharing a
+                    // control label are handled at the BiValve/set_pot level).
+                    #[cfg(feature = "biquad-table")]
+                    if !stage.pot_bindings.is_empty() {
+                        let labels: Vec<String> = stage.pot_bindings
+                            .iter()
+                            .map(|b| b.comp_id.clone())
+                            .collect();
+                        let table_steps = if labels.len() <= 2 { 32 } else { 16 };
+                        stage.biquad_table = iir::build_biquad_table(
+                            &edge_indices,
+                            &pendant_trees,
+                            graph,
+                            sample_rate,
+                            &labels,
+                            table_steps,
+                        );
+                        #[cfg(test)]
+                        if let Some(ref t) = stage.biquad_table {
+                            eprintln!(
+                                "  BiquadTable: {}D, {} steps, {} entries, {:.1}KB",
+                                t.dim_labels.len(),
+                                t.steps,
+                                t.coeffs.len() / 5,
+                                t.coeffs.len() as f64 * 8.0 / 1024.0,
+                            );
+                        }
+                    }
                 }
                 return Ok(BuiltStage::Iir(stage));
             }

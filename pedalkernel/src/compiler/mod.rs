@@ -117,3 +117,5 @@ mod level_pot_tests;
 mod ground_leg_tests;
 #[cfg(test)]
 mod mfb_debug_test;
+#[cfg(test)]
+mod biquad_table_tests;
