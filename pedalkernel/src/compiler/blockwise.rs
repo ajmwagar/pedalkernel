@@ -397,6 +397,8 @@ pub(super) fn try_build_blockwise(
     graph: &CircuitGraph,
     terminals: &[NodeId],
     sample_rate: f64,
+    bias_node_voltages: &hashbrown::HashMap<NodeId, f64>,
+    supply_voltage: f64,
 ) -> Option<Vec<BuiltStage>> {
     let plan = analyze_blockwise(edge_indices, graph)?;
 
@@ -433,8 +435,44 @@ pub(super) fn try_build_blockwise(
         }
 
         for stage in spqr_stages {
-            let built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate)
+            let mut built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate)
                 .ok()?; // If any block fails, fall through to monolithic
+
+            // Set BJT base bias from the circuit's DC bias network.
+            // Find the BJT component in this block, look up its base node
+            // voltage from bias analysis, and set it on the BjtRoot.
+            if let BuiltStage::Wdf(ref mut wdf) = built {
+                if let pedalkernel_rt::stage::RootKind::Bjt(ref mut bjt) = wdf.root {
+                    // Find BJT base node from the NL edges in this block
+                    let base_bias = block.nl_edges.iter().find_map(|&eidx| {
+                        let e = &graph.edges[eidx];
+                        let comp = &graph.components[e.comp_idx];
+                        // Look up base pin node
+                        let base_key = format!("{}.base", comp.id);
+                        let base_node = graph.node_names.get(&base_key)?;
+                        // Check bias voltage map
+                        bias_node_voltages.get(base_node).copied()
+                    });
+
+                    if let Some(v_base) = base_bias {
+                        // Vbe ≈ V_base (emitter near ground for common-emitter).
+                        bjt.set_bias(v_base.min(0.8));
+                        #[cfg(test)]
+                        eprintln!("  Block {bi}: BJT base bias = {v_base:.3}V (from circuit)");
+                    } else {
+                        // No bias from analysis — use silicon default.
+                        // For Ge transistors, this would be ~0.3V.
+                        let default_vbe = if supply_voltage > 1.0 { 0.6 } else { 0.3 };
+                        bjt.set_bias(default_vbe);
+                        #[cfg(test)]
+                        eprintln!("  Block {bi}: BJT bias = {default_vbe:.1}V (default)");
+                    }
+
+                    // Set v_max from supply voltage
+                    bjt.set_v_max(supply_voltage.abs().max(1.0));
+                }
+            }
+
             all_stages.push(built);
         }
     }

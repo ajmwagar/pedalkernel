@@ -1197,7 +1197,10 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
 pub struct BjtRoot {
     pub model: GummelPoonModel,
     pub is_pnp: bool,
-    /// Current base-emitter voltage (external control parameter).
+    /// DC base-emitter bias voltage, set at compile time from circuit analysis.
+    /// The runtime input signal modulates around this operating point.
+    vbe_bias: f64,
+    /// Current base-emitter voltage (bias + AC signal).
     vbe: f64,
     /// Maximum collector-emitter voltage (from supply rail).
     v_max: f64,
@@ -1210,6 +1213,7 @@ impl BjtRoot {
         Self {
             model,
             is_pnp,
+            vbe_bias: 0.0,
             vbe: 0.0,
             v_max: 50.0,
             prev_v: 0.0,
@@ -1220,10 +1224,23 @@ impl BjtRoot {
         Self {
             model,
             is_pnp,
+            vbe_bias: 0.0,
             vbe: 0.0,
             v_max: v_max.max(1.0),
             prev_v: 0.0,
         }
+    }
+
+    /// Set the DC bias operating point from circuit analysis.
+    /// Called at compile time, not per-sample.
+    pub fn set_bias(&mut self, vbe_bias: f64) {
+        self.vbe_bias = vbe_bias;
+        self.vbe = vbe_bias; // Initialize runtime Vbe to bias point
+    }
+
+    /// Get the DC bias operating point.
+    pub fn vbe_bias(&self) -> f64 {
+        self.vbe_bias
     }
 
     /// Set the base-emitter voltage (external control from input signal).

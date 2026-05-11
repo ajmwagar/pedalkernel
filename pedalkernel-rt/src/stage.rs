@@ -440,12 +440,7 @@ pub enum RootKind {
 // Used by both RootKind (WdfStage) and NlDeviceKind (MultiNlStage).
 const TRIODE_GRID_BIAS: f64 = -2.0;
 const PENTODE_GRID_BIAS: f64 = -8.0;
-/// BJT base-emitter forward bias voltage.
-/// In active operation, Vbe ≈ 0.6-0.7V. The input signal modulates
-/// around this point. For diode-connected BJTs (303 ladder), the
-/// bias resistor from VCC sets Vbe; this constant provides the DC
-/// operating point that the WDF tree's voltage source doesn't carry.
-const BJT_BASE_BIAS: f64 = 0.6;
+// BJT base bias is set per-instance from circuit analysis (BjtRoot::set_bias).
 
 /// Maximum total NR iterations per base sample across all sub-samples.
 ///
@@ -511,10 +506,9 @@ impl RootKind {
                 t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
             }
             RootKind::Bjt(b) => {
-                // BJT Vbe = DC bias + AC signal modulation.
-                // BJT_BASE_BIAS provides the forward-active operating point
-                // (~0.6V). The input signal modulates around this.
-                b.set_vbe(BJT_BASE_BIAS + input * compensation);
+                // BJT Vbe = DC bias (from circuit analysis) + AC input signal.
+                // The bias is set once at compile time via set_bias().
+                b.set_vbe(b.vbe_bias() + input * compensation);
             }
             RootKind::Pentode(p) => {
                 p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);

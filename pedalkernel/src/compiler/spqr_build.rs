@@ -314,6 +314,7 @@ pub fn compile_via_spqr_with_options(
             let group_edges = group.all_edges();
             if let Some(built_stages) = super::blockwise::try_build_blockwise(
                 &group_edges, &graph, &terminals, sample_rate,
+                &bias_node_voltages, supply_voltage,
             ) {
                 for built in built_stages {
                     push_stage!(
@@ -723,6 +724,7 @@ pub fn compile_via_spqr_with_options(
             // ── Blockwise check: can this group be split into chained NL blocks?
             if let Some(built_stages) = super::blockwise::try_build_blockwise(
                 &group_edges, &graph, &terminals, sample_rate,
+                &bias_node_voltages, supply_voltage,
             ) {
                 for built in built_stages {
                     push_stage!(
