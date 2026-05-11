@@ -594,106 +594,214 @@ fn ladder_4_blockwise_has_no_large_scattering_matrix() {
 // not the circuit topology.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// K-method candidacy result for a nonlinear component.
-#[derive(Debug, Clone, PartialEq)]
-struct KMethodCandidacy {
-    /// Can this NL be tabulated? (memoryless, monotonic, ≤3D)
+/// K-method analysis of a nonlinear subgraph.
+///
+/// This is the "box" you draw around the NL stuff. The analysis checks:
+/// 1. All NL elements inside are memoryless (component-level k_method_candidacy)
+/// 2. No reactive elements inside the box (caps/inductors must be outside)
+/// 3. Port wires crossing the boundary ≤ 3 (table dimensionality)
+/// 4. No variable components inside (pots, photocouplers)
+#[derive(Debug)]
+struct KMethodSubgraph {
+    /// Can this subgraph be tabulated?
     is_candidate: bool,
-    /// Number of port dimensions (1D for diode, 2D for BJT, etc.)
+    /// Edge indices inside the NL box.
+    nl_box_edges: Vec<usize>,
+    /// Number of port wires crossing the box boundary = table dimensions.
     port_dims: usize,
     /// Reason for rejection, if not a candidate.
-    rejection: Option<&'static str>,
+    rejection: Option<String>,
 }
 
-/// Query K-method candidacy from the Component trait.
-fn k_method_candidacy(comp_idx: usize, graph: &CircuitGraph) -> KMethodCandidacy {
-    let comp = &graph.components[comp_idx];
-    let (is_candidate, port_dims, reason) = comp.kind.k_method_candidacy();
-    KMethodCandidacy {
-        is_candidate,
-        port_dims,
-        rejection: if is_candidate { None } else { Some(reason) },
+/// Analyze a set of edges as a potential K-method subgraph.
+///
+/// Finds the NL "box": all NL edges + any linear edges connecting them
+/// internally. Checks the 4 constraints. Counts boundary wires.
+///
+/// This is a stub — returns a rejection until the subgraph analysis is
+/// implemented. The component-level `k_method_candidacy()` provides the
+/// building block (constraint 1), but the full check needs graph analysis
+/// for constraints 2-4.
+fn analyze_k_method_subgraph(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+) -> KMethodSubgraph {
+    // Step 1: find NL edges
+    let nl_edges: Vec<usize> = edge_indices
+        .iter()
+        .filter(|&&eidx| {
+            graph.effective_edge_kind(eidx) == super::component::EdgeKind::Nonlinear
+        })
+        .copied()
+        .collect();
+
+    if nl_edges.is_empty() {
+        return KMethodSubgraph {
+            is_candidate: false,
+            nl_box_edges: vec![],
+            port_dims: 0,
+            rejection: Some("no nonlinear elements".into()),
+        };
+    }
+
+    // Step 2: check all NL components are memoryless (component-level)
+    for &eidx in &nl_edges {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        let (is_ok, _dims, reason) = comp.kind.k_method_candidacy();
+        if !is_ok {
+            return KMethodSubgraph {
+                is_candidate: false,
+                nl_box_edges: nl_edges,
+                port_dims: 0,
+                rejection: Some(format!("{}: {reason}", comp.id)),
+            };
+        }
+    }
+
+    // Step 3: check no reactive elements inside the NL box.
+    // The "box" is the NL edges + any linear edges whose BOTH endpoints
+    // are internal to the NL subgraph (shared nodes between NL edges).
+    let mut nl_nodes: std::collections::HashSet<super::graph::NodeId> =
+        std::collections::HashSet::new();
+    for &eidx in &nl_edges {
+        let e = &graph.edges[eidx];
+        nl_nodes.insert(e.node_a);
+        nl_nodes.insert(e.node_b);
+    }
+    // Note: ground/supply are kept in nl_nodes — a cap from base to gnd
+    // IS inside the NL box if the base is an NL node.
+
+    let mut box_edges = nl_edges.clone();
+    for &eidx in edge_indices {
+        if box_edges.contains(&eidx) { continue; }
+        let e = &graph.edges[eidx];
+        // Edge is "inside the box" if at least one endpoint is an NL node
+        // and the other is either also NL or ground/supply (shared rail)
+        let a_is_nl = nl_nodes.contains(&e.node_a);
+        let b_is_nl = nl_nodes.contains(&e.node_b);
+        if a_is_nl && b_is_nl {
+            let kind = graph.effective_edge_kind(eidx);
+            if kind == super::component::EdgeKind::Reactive {
+                return KMethodSubgraph {
+                    is_candidate: false,
+                    nl_box_edges: nl_edges,
+                    port_dims: 0,
+                    rejection: Some(format!(
+                        "reactive element {} inside NL box",
+                        graph.components[graph.edges[eidx].comp_idx].id
+                    )),
+                };
+            }
+            // Check for variable components
+            if graph.components[graph.edges[eidx].comp_idx].kind.is_variable() {
+                return KMethodSubgraph {
+                    is_candidate: false,
+                    nl_box_edges: nl_edges,
+                    port_dims: 0,
+                    rejection: Some(format!(
+                        "variable component {} inside NL box",
+                        graph.components[graph.edges[eidx].comp_idx].id
+                    )),
+                };
+            }
+            box_edges.push(eidx);
+        }
+    }
+
+    // Step 4: count boundary ports — nodes where box edges connect to
+    // non-box edges. Each such node is one port wire.
+    let mut box_nodes: std::collections::HashSet<super::graph::NodeId> =
+        std::collections::HashSet::new();
+    for &eidx in &box_edges {
+        let e = &graph.edges[eidx];
+        box_nodes.insert(e.node_a);
+        box_nodes.insert(e.node_b);
+    }
+    // Remove ground/supply — they're implicit, not counted as ports
+    box_nodes.remove(&graph.gnd_node);
+    for &s in &graph.supply_nodes {
+        box_nodes.remove(&s);
+    }
+    // A boundary node has at least one edge OUTSIDE the box
+    let non_box_edges: Vec<usize> = edge_indices
+        .iter()
+        .filter(|e| !box_edges.contains(e))
+        .copied()
+        .collect();
+    let mut boundary_nodes = 0usize;
+    for &node in &box_nodes {
+        let touches_outside = non_box_edges.iter().any(|&eidx| {
+            let e = &graph.edges[eidx];
+            e.node_a == node || e.node_b == node
+        });
+        if touches_outside {
+            boundary_nodes += 1;
+        }
+    }
+
+    if boundary_nodes > 3 {
+        return KMethodSubgraph {
+            is_candidate: false,
+            nl_box_edges: box_edges,
+            port_dims: boundary_nodes,
+            rejection: Some(format!(
+                "{boundary_nodes} port wires — too many dimensions for K-method table"
+            )),
+        };
+    }
+
+    KMethodSubgraph {
+        is_candidate: true,
+        nl_box_edges: box_edges,
+        port_dims: boundary_nodes.max(1), // at least 1D
+        rejection: None,
     }
 }
 
+// ── Component-level building block tests ──
+
 #[test]
-fn diode_is_k_method_candidate() {
-    let (graph, edges) = make_graph_all(r#"pedal "test" {
+fn diode_component_is_memoryless() {
+    let (graph, _) = make_graph_all(r#"pedal "test" {
       supply 9V
       components { D1: diode(silicon)  R1: resistor(10k) }
       nets { in -> R1.a  R1.b -> D1.anode  D1.cathode -> gnd  R1.b -> out }
       controls {}
     }"#);
-
-    // Find the diode component
-    let diode_comp = graph.components.iter().position(|c| c.kind.type_tag() == "diode");
-    assert!(diode_comp.is_some(), "Should have a diode component");
-    let result = k_method_candidacy(diode_comp.unwrap(), &graph);
-
-    assert!(result.is_candidate, "Diode should be K-method candidate: {:?}", result.rejection);
-    assert_eq!(result.port_dims, 1, "Diode is 1D (single junction voltage)");
+    let diode = graph.components.iter().find(|c| c.kind.type_tag() == "diode").unwrap();
+    let (ok, dims, _) = diode.kind.k_method_candidacy();
+    assert!(ok, "Diode should be memoryless");
+    assert_eq!(dims, 1);
 }
 
 #[test]
-fn bjt_is_k_method_candidate_2d() {
-    let (graph, _edges) = make_graph_all(SINGLE_BJT);
-
-    let bjt_comp = graph.components.iter().position(|c| c.kind.type_tag() == "NPN transistor");
-    assert!(bjt_comp.is_some(), "Should have an NPN component");
-    let result = k_method_candidacy(bjt_comp.unwrap(), &graph);
-
-    assert!(result.is_candidate, "BJT should be K-method candidate: {:?}", result.rejection);
-    assert_eq!(result.port_dims, 2, "BJT is 2D (Vbe, Vce)");
+fn bjt_component_is_memoryless_2d() {
+    let (graph, _) = make_graph_all(SINGLE_BJT);
+    let bjt = graph.components.iter().find(|c| c.kind.type_tag() == "NPN transistor").unwrap();
+    let (ok, dims, _) = bjt.kind.k_method_candidacy();
+    assert!(ok, "BJT should be memoryless");
+    assert_eq!(dims, 2);
 }
 
 #[test]
-fn resistor_is_not_k_method_candidate() {
-    let (graph, _edges) = make_graph_all(r#"pedal "test" {
+fn resistor_component_is_not_nl() {
+    let (graph, _) = make_graph_all(r#"pedal "test" {
       supply 9V
       components { R1: resistor(10k) }
       nets { in -> R1.a  R1.b -> out }
       controls {}
     }"#);
-
-    let r_comp = graph.components.iter().position(|c| c.kind.type_tag() == "resistor");
-    assert!(r_comp.is_some());
-    let result = k_method_candidacy(r_comp.unwrap(), &graph);
-
-    assert!(!result.is_candidate, "Resistor is linear, not NL — not a K-method target");
+    let r = graph.components.iter().find(|c| c.kind.type_tag() == "resistor").unwrap();
+    let (ok, _, _) = r.kind.k_method_candidacy();
+    assert!(!ok, "Resistor is linear");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 7. Combined: blockwise + K-method gives the full optimization plan
-// ═══════════════════════════════════════════════════════════════════════════
+// ── Subgraph-level K-method tests ──
 
 #[test]
-fn ladder_4_each_block_is_k_method_eligible() {
-    let (graph, edges) = make_graph_all(BJT_LADDER_4);
-    let plan = analyze_blockwise(&edges, &graph);
-
-    // First, blockwise must succeed
-    assert!(plan.is_some(), "Ladder should be blockwise-decomposable");
-    let plan = plan.unwrap();
-
-    // Each block's NL edges should be K-method candidates
-    for (i, nl_edges) in plan.block_nl_edges.iter().enumerate() {
-        for &eidx in nl_edges {
-            let comp_idx = graph.edges[eidx].comp_idx;
-            let candidacy = k_method_candidacy(comp_idx, &graph);
-            assert!(
-                candidacy.is_candidate,
-                "Block {i} NL edge {eidx} ({}) should be K-method candidate: {:?}",
-                graph.components[comp_idx].id,
-                candidacy.rejection,
-            );
-        }
-    }
-}
-
-#[test]
-fn ts808_clipper_is_k_method_without_blockwise() {
-    // TS808 diode clipper: single NL element, no cascade.
-    // K-method candidate but NOT blockwise (only 1 block).
+fn diode_clipper_subgraph_is_k_candidate() {
+    // D1 + D2 anti-parallel with R1 — all NL is memoryless, no reactive
+    // inside the box, ≤2 boundary wires (signal in, ground)
     let (graph, edges) = make_graph_all(r#"pedal "test" {
       supply 9V
       components {
@@ -712,17 +820,129 @@ fn ts808_clipper_is_k_method_without_blockwise() {
       controls {}
     }"#);
 
-    // Not blockwise (no cascade)
+    let result = analyze_k_method_subgraph(&edges, &graph);
+    eprintln!("  Diode clipper: candidate={}, dims={}, rejection={:?}",
+        result.is_candidate, result.port_dims, result.rejection);
+    assert!(result.is_candidate, "Diode clipper subgraph should be K-method: {:?}", result.rejection);
+    assert!(result.port_dims <= 2, "Should be ≤2D, got {}", result.port_dims);
+}
+
+#[test]
+fn single_bjt_subgraph_is_k_candidate() {
+    // Single BJT stage: BJT is memoryless 2D, caps are OUTSIDE the box
+    // (C1 is a ground shunt separate from the BJT junctions)
+    let (graph, edges) = make_graph_all(SINGLE_BJT);
+    let result = analyze_k_method_subgraph(&edges, &graph);
+    eprintln!("  Single BJT: candidate={}, dims={}, rejection={:?}",
+        result.is_candidate, result.port_dims, result.rejection);
+    assert!(result.is_candidate, "Single BJT subgraph should be K-method: {:?}", result.rejection);
+    assert!(result.port_dims <= 3, "Should be ≤3D, got {}", result.port_dims);
+}
+
+#[test]
+fn bjt_with_cap_across_junction_is_not_k_candidate() {
+    // If a cap connects directly across the BJT's B-E junction,
+    // it's INSIDE the NL box → reactive inside → not K-method
+    let (graph, edges) = make_graph_all(r#"pedal "test" {
+      supply 9V
+      components {
+        Q1: npn(2n3904)
+        R_c: resistor(22k)
+        R_in: resistor(10k)
+        C_be: cap(100p)
+      }
+      nets {
+        in -> R_in.a
+        R_in.b -> Q1.base
+        vcc -> R_c.a
+        R_c.b -> Q1.collector
+        Q1.emitter -> gnd
+        Q1.base -> C_be.a
+        C_be.b -> Q1.emitter
+        Q1.collector -> out
+      }
+      controls {}
+    }"#);
+
+    let result = analyze_k_method_subgraph(&edges, &graph);
+    eprintln!("  BJT+C_be: candidate={}, dims={}, rejection={:?}",
+        result.is_candidate, result.port_dims, result.rejection);
+    assert!(!result.is_candidate,
+        "BJT with cap across B-E should NOT be K-method (reactive inside NL box)");
+}
+
+#[test]
+fn pure_linear_circuit_is_not_k_candidate() {
+    let (graph, edges) = make_graph_all(WHEATSTONE_BRIDGE);
+    let result = analyze_k_method_subgraph(&edges, &graph);
+    assert!(!result.is_candidate, "Pure linear circuit has no NL to tabulate");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. Combined: blockwise + K-method gives the full optimization plan
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn ladder_4_each_block_is_k_method_eligible() {
+    let (graph, edges) = make_graph_all(BJT_LADDER_4);
+    let plan = analyze_blockwise(&edges, &graph);
+
+    // First, blockwise must succeed
+    assert!(plan.is_some(), "Ladder should be blockwise-decomposable");
+    let plan = plan.unwrap();
+
+    // Each block's edges (NL + reactive + linear) should form a valid
+    // K-method subgraph: memoryless NL, no reactive INSIDE the NL box,
+    // ≤3 boundary wires.
+    for (i, nl_edges) in plan.block_nl_edges.iter().enumerate() {
+        // Build the full edge set for this block
+        let mut block_edges = nl_edges.clone();
+        block_edges.extend(&plan.block_reactive_edges[i]);
+        // The reactive edges are OUTSIDE the NL box (caps are state, not NL).
+        // The subgraph analysis should see NL edges only as the "box"
+        // and confirm no reactive edges share both endpoints with NL.
+        let result = analyze_k_method_subgraph(&block_edges, &graph);
+        assert!(
+            result.is_candidate,
+            "Block {i} should be K-method eligible: {:?}",
+            result.rejection,
+        );
+        assert!(
+            result.port_dims <= 3,
+            "Block {i} has {} port dims — too many for K-method",
+            result.port_dims,
+        );
+    }
+}
+
+#[test]
+fn ts808_clipper_is_k_subgraph_but_not_blockwise() {
+    // TS808 diode clipper: the whole subgraph is one K-method candidate
+    // (1D diode pair), but NOT blockwise (no cascade to split).
+    let (graph, edges) = make_graph_all(r#"pedal "test" {
+      supply 9V
+      components {
+        D1: diode(silicon)
+        D2: diode(silicon)
+        R1: resistor(10k)
+      }
+      nets {
+        in -> R1.a
+        R1.b -> D1.anode
+        D1.cathode -> gnd
+        R1.b -> D2.cathode
+        D2.anode -> gnd
+        R1.b -> out
+      }
+      controls {}
+    }"#);
+
+    // Not blockwise
     let plan = analyze_blockwise(&edges, &graph);
     assert!(plan.is_none(), "TS808 clipper is not blockwise (single NL group)");
 
-    // But diodes ARE K-method candidates
-    for comp_idx in 0..graph.components.len() {
-        if graph.components[comp_idx].kind.type_tag() == "diode" {
-            let candidacy = k_method_candidacy(comp_idx, &graph);
-            assert!(candidacy.is_candidate,
-                "Diode {} should be K-method candidate",
-                graph.components[comp_idx].id);
-        }
-    }
+    // But the full subgraph IS a K-method candidate
+    let result = analyze_k_method_subgraph(&edges, &graph);
+    assert!(result.is_candidate, "TS808 clipper subgraph should be K-method: {:?}", result.rejection);
+    assert!(result.port_dims <= 2, "Should be ≤2D, got {}", result.port_dims);
 }
