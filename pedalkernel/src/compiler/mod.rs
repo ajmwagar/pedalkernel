@@ -9,6 +9,7 @@
 
 mod bias_analysis;
 mod bind;
+mod blockwise;
 mod build;
 mod calibrate;
 mod classify;

@@ -18,6 +18,7 @@
 //! For the 303 ladder: blockwise gives 4 blocks, K-method tabulates each
 //! block's BJT. Both wins stack: O(8³) monolithic → O(4 × table_lookup).
 
+use super::blockwise;
 use super::graph::CircuitGraph;
 use super::spqr::*;
 use crate::PedalProcessor;
@@ -244,57 +245,47 @@ fn cascade_2_has_2_nl_elements() {
 // contain a small number of NL + reactive elements. The detection function
 // should identify these sub-blocks.
 //
-// Future API: `analyze_blockwise(r_node, graph) -> Option<BlockwisePlan>`
+// Future API: `blockwise::analyze_blockwise(r_node, graph) -> Option<BlockwisePlan>`
 // For now, we define the expected structure and test it.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A blockwise decomposition plan for an R-node.
-/// This is the target data structure — doesn't exist yet.
-#[derive(Debug)]
-struct BlockwisePlan {
-    /// Number of chained blocks.
-    num_blocks: usize,
-    /// NL edge indices per block (each block should have ≤ 2 NL ports).
-    block_nl_edges: Vec<Vec<usize>>,
-    /// Reactive edge indices per block.
-    block_reactive_edges: Vec<Vec<usize>>,
-    /// Coupling edges (feedback, resonance) — the residual graph.
-    coupling_edges: Vec<usize>,
-}
-
-/// Placeholder for the detection function that will be implemented.
-/// For now, returns None (no blockwise detected).
-fn analyze_blockwise(
-    _edge_indices: &[usize],
-    _graph: &CircuitGraph,
-) -> Option<BlockwisePlan> {
-    // TODO: implement blockwise detection from SPQR structure
-    None
-}
+// BlockwisePlan and analyze_blockwise are in super::blockwise
 
 #[test]
 fn ladder_4_is_blockwise_decomposable() {
     let (graph, edges) = make_graph_all(BJT_LADDER_4);
-    let plan = analyze_blockwise(&edges, &graph);
+
+    // Debug: check NL grouping directly
+    let nl_count = count_nl(&edges, &graph);
+    eprintln!("  Ladder 4: {nl_count} NL edges, {} total edges", edges.len());
+
+    // Check what groups we get
+    let nl_edges: Vec<usize> = edges.iter()
+        .filter(|&&eidx| graph.effective_edge_kind(eidx) == super::component::EdgeKind::Nonlinear)
+        .copied().collect();
+    eprintln!("  NL edges: {:?}", nl_edges.iter()
+        .map(|&eidx| format!("{}({:?}→{:?})", graph.components[graph.edges[eidx].comp_idx].id,
+            graph.edges[eidx].node_a, graph.edges[eidx].node_b))
+        .collect::<Vec<_>>());
+
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
 
     assert!(plan.is_some(), "4-stage BJT ladder should be blockwise-decomposable");
     let plan = plan.unwrap();
 
-    assert_eq!(plan.num_blocks, 4, "Should decompose into 4 blocks");
+    assert_eq!(plan.num_blocks(), 4, "Should decompose into 4 blocks");
 
     // Each block should have exactly 1 BJT (1-2 NL edges) and 1 cap
-    for (i, nl) in plan.block_nl_edges.iter().enumerate() {
+    for (i, block) in plan.blocks.iter().enumerate() {
         assert!(
-            nl.len() >= 1 && nl.len() <= 2,
+            block.nl_edges.len() >= 1 && block.nl_edges.len() <= 2,
             "Block {i} should have 1-2 NL edges, got {}",
-            nl.len()
+            block.nl_edges.len()
         );
-    }
-    for (i, reactive) in plan.block_reactive_edges.iter().enumerate() {
         assert!(
-            reactive.len() >= 1,
+            block.reactive_edges.len() >= 1,
             "Block {i} should have at least 1 reactive edge, got {}",
-            reactive.len()
+            block.reactive_edges.len()
         );
     }
 
@@ -308,18 +299,18 @@ fn ladder_4_is_blockwise_decomposable() {
 #[test]
 fn cascade_2_is_blockwise_decomposable() {
     let (graph, edges) = make_graph_all(BJT_CASCADE_2);
-    let plan = analyze_blockwise(&edges, &graph);
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
 
     assert!(plan.is_some(), "2-stage BJT cascade should be blockwise-decomposable");
     let plan = plan.unwrap();
 
-    assert_eq!(plan.num_blocks, 2, "Should decompose into 2 blocks");
+    assert_eq!(plan.num_blocks(), 2, "Should decompose into 2 blocks");
 }
 
 #[test]
 fn single_bjt_is_not_blockwise() {
     let (graph, edges) = make_graph_all(SINGLE_BJT);
-    let plan = analyze_blockwise(&edges, &graph);
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
 
     assert!(
         plan.is_none(),
@@ -330,7 +321,7 @@ fn single_bjt_is_not_blockwise() {
 #[test]
 fn wheatstone_bridge_is_not_blockwise() {
     let (graph, edges) = make_graph_all(WHEATSTONE_BRIDGE);
-    let plan = analyze_blockwise(&edges, &graph);
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
 
     assert!(
         plan.is_none(),
@@ -886,7 +877,7 @@ fn pure_linear_circuit_is_not_k_candidate() {
 #[test]
 fn ladder_4_each_block_is_k_method_eligible() {
     let (graph, edges) = make_graph_all(BJT_LADDER_4);
-    let plan = analyze_blockwise(&edges, &graph);
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
 
     // First, blockwise must succeed
     assert!(plan.is_some(), "Ladder should be blockwise-decomposable");
@@ -895,10 +886,10 @@ fn ladder_4_each_block_is_k_method_eligible() {
     // Each block's edges (NL + reactive + linear) should form a valid
     // K-method subgraph: memoryless NL, no reactive INSIDE the NL box,
     // ≤3 boundary wires.
-    for (i, nl_edges) in plan.block_nl_edges.iter().enumerate() {
+    for (i, block) in plan.blocks.iter().enumerate() {
         // Build the full edge set for this block
-        let mut block_edges = nl_edges.clone();
-        block_edges.extend(&plan.block_reactive_edges[i]);
+        let mut block_edges = block.nl_edges.clone();
+        block_edges.extend(&block.reactive_edges);
         // The reactive edges are OUTSIDE the NL box (caps are state, not NL).
         // The subgraph analysis should see NL edges only as the "box"
         // and confirm no reactive edges share both endpoints with NL.
@@ -939,7 +930,7 @@ fn ts808_clipper_is_k_subgraph_but_not_blockwise() {
     }"#);
 
     // Not blockwise
-    let plan = analyze_blockwise(&edges, &graph);
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
     assert!(plan.is_none(), "TS808 clipper is not blockwise (single NL group)");
 
     // But the full subgraph IS a K-method candidate
@@ -1061,22 +1052,21 @@ fn analyze_blockwise_groups_by_shared_nodes() {
     // Each block should contain edges that share circuit nodes
     // (BJT B-E and C-E junctions share the emitter node with Re and C)
     let (graph, edges) = make_graph_all(BJT_LADDER_4);
-    let plan = analyze_blockwise(&edges, &graph);
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
     assert!(plan.is_some(), "Should decompose");
     let plan = plan.unwrap();
 
     // Each block's NL edges should share nodes with its reactive edges
     // (the cap is connected to the same emitter node as the BJT)
-    for (i, (nl, reactive)) in plan.block_nl_edges.iter()
-        .zip(plan.block_reactive_edges.iter()).enumerate()
+    for (i, block) in plan.blocks.iter().enumerate()
     {
-        let nl_nodes: std::collections::HashSet<_> = nl.iter()
+        let nl_nodes: std::collections::HashSet<_> = block.nl_edges.iter()
             .flat_map(|&eidx| {
                 let e = &graph.edges[eidx];
                 vec![e.node_a, e.node_b]
             })
             .collect();
-        let reactive_nodes: std::collections::HashSet<_> = reactive.iter()
+        let reactive_nodes: std::collections::HashSet<_> = block.reactive_edges.iter()
             .flat_map(|&eidx| {
                 let e = &graph.edges[eidx];
                 vec![e.node_a, e.node_b]
@@ -1095,12 +1085,13 @@ fn analyze_blockwise_coupling_is_sparse() {
     // The coupling edges (inter-block + feedback) should be a small
     // fraction of total edges — sparse connection network
     let (graph, edges) = make_graph_all(BJT_LADDER_4);
-    let plan = analyze_blockwise(&edges, &graph);
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
     assert!(plan.is_some());
     let plan = plan.unwrap();
 
-    let total_block_edges: usize = plan.block_nl_edges.iter().map(|e| e.len()).sum::<usize>()
-        + plan.block_reactive_edges.iter().map(|e| e.len()).sum::<usize>();
+    let total_block_edges: usize = plan.blocks.iter()
+        .map(|b| b.nl_edges.len() + b.reactive_edges.len() + b.linear_edges.len())
+        .sum();
     let coupling_count = plan.coupling_edges.len();
 
     eprintln!("  Block edges: {total_block_edges}, coupling edges: {coupling_count}");
