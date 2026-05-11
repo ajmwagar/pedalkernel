@@ -181,25 +181,95 @@ fn group_nodes(nl_edges: &[usize], graph: &CircuitGraph) -> HashSet<NodeId> {
 // Step 3: Assign non-NL edges to blocks or coupling
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Determine which NL group(s) each non-NL edge's endpoints belong to.
-/// Returns: for each edge, the set of group IDs its endpoints touch.
+/// Determine which NL group each non-NL edge belongs to.
 ///
-/// An edge touching exactly one group → interior to that block.
-/// An edge touching multiple groups → coupling network.
-/// An edge touching no groups → coupling (linear glue between blocks).
+/// When both endpoints touch exactly one group → interior to that block.
+/// When an endpoint is shared between multiple groups (e.g., Q1.emitter =
+/// Q2.base in a cascade), the edge is assigned to the group that "owns"
+/// the shared node as an internal node — identified by having the most
+/// NL edges touching that node. Ties go to the FIRST group (upstream).
+///
+/// An edge touching no groups → coupling.
 fn classify_edge(
     eidx: usize,
     graph: &CircuitGraph,
     group_node_sets: &[(usize, HashSet<NodeId>)],
+    nl_edges_by_group: &HashMap<usize, Vec<usize>>,
 ) -> HashSet<usize> {
     let e = &graph.edges[eidx];
-    let mut touching_groups = HashSet::new();
-    for &(gid, ref nodes) in group_node_sets {
-        if nodes.contains(&e.node_a) || nodes.contains(&e.node_b) {
-            touching_groups.insert(gid);
+
+    // For each endpoint, find which groups contain it
+    let groups_a: Vec<usize> = group_node_sets
+        .iter()
+        .filter(|(_, nodes)| nodes.contains(&e.node_a))
+        .map(|&(gid, _)| gid)
+        .collect();
+    let groups_b: Vec<usize> = group_node_sets
+        .iter()
+        .filter(|(_, nodes)| nodes.contains(&e.node_b))
+        .map(|&(gid, _)| gid)
+        .collect();
+
+    // If neither endpoint touches any group → coupling
+    if groups_a.is_empty() && groups_b.is_empty() {
+        return HashSet::new();
+    }
+
+    // If exactly one endpoint touches exactly one group → that group
+    if groups_a.len() == 1 && groups_b.is_empty() {
+        return groups_a.into_iter().collect();
+    }
+    if groups_b.len() == 1 && groups_a.is_empty() {
+        return groups_b.into_iter().collect();
+    }
+    if groups_a.len() == 1 && groups_b.len() == 1 && groups_a[0] == groups_b[0] {
+        return groups_a.into_iter().collect();
+    }
+
+    // Shared node: an endpoint touches multiple groups.
+    // Assign to the group with the most NL edges at the shared node.
+    // This heuristic gives the edge to the "emitter" side (which has
+    // 2 NL edges — B-E and C-E) rather than the "base" side (which
+    // is just a connection point for the next stage's NL edges).
+    let pick_best = |groups: &[usize], node: NodeId| -> Option<usize> {
+        groups.iter().copied().max_by_key(|&gid| {
+            nl_edges_by_group
+                .get(&gid)
+                .map(|edges| {
+                    edges
+                        .iter()
+                        .filter(|&&eidx| {
+                            let e = &graph.edges[eidx];
+                            e.node_a == node || e.node_b == node
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+    };
+
+    // Try to assign via endpoint A
+    if groups_a.len() > 1 {
+        if let Some(best) = pick_best(&groups_a, e.node_a) {
+            let mut result = HashSet::new();
+            result.insert(best);
+            return result;
         }
     }
-    touching_groups
+    // Try endpoint B
+    if groups_b.len() > 1 {
+        if let Some(best) = pick_best(&groups_b, e.node_b) {
+            let mut result = HashSet::new();
+            result.insert(best);
+            return result;
+        }
+    }
+
+    // Both endpoints touch different single groups → coupling
+    let mut all = HashSet::new();
+    all.extend(&groups_a);
+    all.extend(&groups_b);
+    all
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -337,7 +407,7 @@ pub(super) fn analyze_blockwise(
         if nl_edge_set.contains(&eidx) {
             continue; // NL edges are already assigned to groups
         }
-        let touching = classify_edge(eidx, graph, &group_node_sets);
+        let touching = classify_edge(eidx, graph, &group_node_sets, &nl_groups);
         if touching.len() == 1 {
             // Interior to exactly one group
             let gid = *touching.iter().next().unwrap();
