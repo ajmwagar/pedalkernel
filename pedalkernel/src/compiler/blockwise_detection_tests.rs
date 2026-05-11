@@ -227,6 +227,112 @@ const DIODE_CASCADE_2: &str = r#"pedal "Diode Cascade 2" {
   controls {}
 }"#;
 
+/// 2-stage diode-connected cascade WITH cutoff pot chains.
+/// This is the 303 topology that currently fails blockwise.
+/// R_e_floor → Cutoff → gnd creates intermediate nodes that
+/// must be claimed by the block through chain-following.
+const DIODE_CASCADE_2_WITH_POTS: &str = r#"pedal "Diode Cascade Pots" {
+  supply 9V
+  components {
+    Q1: npn(2n3904)
+    Q2: npn(2n3904)
+    R_bias1: resistor(100k)
+    R_bias2: resistor(100k)
+    C1: cap(33n)
+    C2: cap(33n)
+    R_e_floor1: resistor(220)
+    Cutoff1: pot(10k, b)
+    R_e_floor2: resistor(220)
+    Cutoff2: pot(10k, b)
+    R_in: resistor(10k)
+  }
+  nets {
+    vcc -> R_bias1.a
+    R_bias1.b -> Q1.base, Q1.collector
+    vcc -> R_bias2.a
+    R_bias2.b -> Q2.base, Q2.collector
+    in -> R_in.a
+    R_in.b -> Q1.base
+    Q1.emitter -> C1.a
+    C1.b -> gnd
+    Q1.emitter -> R_e_floor1.a
+    R_e_floor1.b -> Cutoff1.a
+    Cutoff1.b -> gnd
+    Q1.emitter -> Q2.base
+    Q2.emitter -> C2.a
+    C2.b -> gnd
+    Q2.emitter -> R_e_floor2.a
+    R_e_floor2.b -> Cutoff2.a
+    Cutoff2.b -> gnd
+    Q2.emitter -> out
+  }
+  controls {
+    Cutoff1.position -> "Cutoff" [1.0, 0.02] = 0.5
+    Cutoff2.position -> "Cutoff" [1.0, 0.02] = 0.5
+  }
+}"#;
+
+#[test]
+fn diode_cascade_with_pots_is_blockwise() {
+    let (graph, edges) = make_graph_all(DIODE_CASCADE_2_WITH_POTS);
+    let nl_count = count_nl(&edges, &graph);
+    eprintln!("  Diode cascade+pots: {nl_count} NL edges, {} total", edges.len());
+
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
+    if let Some(ref p) = plan {
+        eprintln!("  Blockwise: {} blocks, {} coupling", p.num_blocks(), p.coupling_edges.len());
+        for (i, b) in p.blocks.iter().enumerate() {
+            eprintln!("    block {i}: {} NL, {} reactive, {} linear",
+                b.nl_edges.len(), b.reactive_edges.len(), b.linear_edges.len());
+        }
+    } else {
+        eprintln!("  Blockwise: None");
+    }
+
+    assert!(plan.is_some(),
+        "Diode cascade with cutoff pots should be blockwise-decomposable. \
+         The pot chains (R_e_floor → Cutoff → gnd) must be followed from \
+         the NL group's emitter node into the block.");
+    let plan = plan.unwrap();
+    assert_eq!(plan.num_blocks(), 2, "Should split into 2 blocks");
+
+    // Each block must have its cap (reactive) AND its pot chain (linear)
+    for (i, block) in plan.blocks.iter().enumerate() {
+        assert!(block.reactive_edges.len() >= 1,
+            "Block {i} must have ≥1 reactive edge (cap), got {}", block.reactive_edges.len());
+        // The pot chain (R_e_floor + Cutoff) should be in linear_edges
+        assert!(block.linear_edges.len() >= 2,
+            "Block {i} must have ≥2 linear edges (R_e_floor + Cutoff), got {}",
+            block.linear_edges.len());
+    }
+}
+
+#[test]
+fn diode_cascade_with_pots_each_block_has_correct_cap() {
+    // C1 must be in Q1's block, C2 must be in Q2's block.
+    // The pot chains must NOT pull caps into the wrong block.
+    let (graph, edges) = make_graph_all(DIODE_CASCADE_2_WITH_POTS);
+    let plan = blockwise::analyze_blockwise(&edges, &graph);
+    assert!(plan.is_some(), "Should decompose");
+    let plan = plan.unwrap();
+
+    // Find which block has C1 and which has C2
+    for (i, block) in plan.blocks.iter().enumerate() {
+        let cap_names: Vec<&str> = block.reactive_edges.iter()
+            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+            .collect();
+        let nl_names: Vec<&str> = block.nl_edges.iter()
+            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+            .collect();
+        eprintln!("  Block {i}: NL={nl_names:?}, caps={cap_names:?}");
+
+        // Q1's block should have C1, Q2's block should have C2
+        // (not both caps in one block)
+        assert!(cap_names.len() == 1,
+            "Block {i} should have exactly 1 cap, got {:?}", cap_names);
+    }
+}
+
 const WHEATSTONE_BRIDGE: &str = r#"pedal "Wheatstone" {
   supply 9V
   components {
