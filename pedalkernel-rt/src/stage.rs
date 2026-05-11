@@ -1351,12 +1351,16 @@ impl WdfStage {
                 if table.dims == 1 {
                     table.lookup_1d(b_tree)
                 } else {
-                    // 2D: use current control voltage from root
+                    // 2D: use the AC signal portion of the control voltage.
+                    // The table was swept with set_control_voltage(ctrl, 1.0, 0.0)
+                    // which adds the DC bias internally. So the table's ctrl axis
+                    // represents the raw signal input, not the absolute voltage.
+                    // We subtract the bias to get back to the signal domain.
                     let ctrl = match root {
-                        RootKind::Bjt(b) => b.vbe(),
-                        RootKind::Triode(t) => t.vgk(),
-                        RootKind::Jfet(j) => j.vgs(),
-                        RootKind::Mosfet(m) => m.vgs(),
+                        RootKind::Bjt(b) => b.vbe() - b.vbe_bias(),
+                        RootKind::Triode(t) => t.vgk() - TRIODE_GRID_BIAS,
+                        RootKind::Jfet(j) => j.vgs(),  // no DC bias added
+                        RootKind::Mosfet(m) => m.vgs(), // no DC bias added
                         _ => 0.0,
                     };
                     table.lookup_2d(b_tree, ctrl)

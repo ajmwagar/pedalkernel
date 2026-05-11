@@ -317,6 +317,61 @@ fn k_table_runtime_matches_nr() {
     assert!(peak > 0.001, "K-table runtime peak too low: {peak:.6}");
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 9. Diagnostic: compare K-table lookup vs NR at same operating point
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn k_table_vs_nr_pipeline_comparison() {
+    // Compare full pipeline output: K-table path vs NR-only path
+    let pedal = parse_pedal_file(BJT_LADDER_4).unwrap();
+
+    // NR path: compile then strip K-tables
+    let mut compiled_nr = compile_via_spqr(&pedal, SR).unwrap();
+    for s in &mut compiled_nr.stages {
+        if let super::compiled::Stage::Wdf(w) = s { w.k_table = None; }
+    }
+    let mut proc_nr: Box<dyn PedalProcessor> = Box::new(compiled_nr);
+    let mut nr_peak = 0.0f64;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin() * 0.1;
+        let out = proc_nr.process(input);
+        if i >= 4800 { nr_peak = nr_peak.max(out.abs()); }
+    }
+
+    // K-table path: compile normally
+    let compiled_kt = compile_via_spqr(&parse_pedal_file(BJT_LADDER_4).unwrap(), SR).unwrap();
+    // Diagnostic: check table entries
+    for (si, s) in compiled_kt.stages.iter().enumerate() {
+        if let super::compiled::Stage::Wdf(w) = s {
+            if let Some(ref table) = w.k_table {
+                let nonzero = table.entries.iter().filter(|&&v| v.abs() > 1e-12).count();
+                let max = table.entries.iter().cloned().fold(0.0f64, f64::max);
+                let min = table.entries.iter().cloned().fold(0.0f64, f64::min);
+                eprintln!("  Stage {si} table: {} entries, {} nonzero, range=[{min:.4}, {max:.4}]",
+                    table.entries.len(), nonzero);
+            }
+        }
+    }
+    let mut proc_kt: Box<dyn PedalProcessor> = Box::new(compiled_kt);
+    let mut kt_peak = 0.0f64;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin() * 0.1;
+        let out = proc_kt.process(input);
+        if i >= 4800 { kt_peak = kt_peak.max(out.abs()); }
+    }
+
+    eprintln!("  Pipeline: NR={nr_peak:.6}, K-table={kt_peak:.6}, ratio={:.3}",
+        kt_peak / nr_peak.max(1e-12));
+
+    assert!(nr_peak > 0.001, "NR should produce output: {nr_peak:.6}");
+    assert!(kt_peak > 0.001, "K-table should produce output: {kt_peak:.6}");
+    // K-table output should be within 10x of NR (generous for now)
+    let ratio = kt_peak / nr_peak.max(1e-12);
+    assert!(ratio > 0.1 && ratio < 10.0,
+        "K-table should be within 10x of NR: ratio={ratio:.3}");
+}
+
 #[test]
 fn bjt_k_table_no_nan() {
     let pedal = parse_pedal_file(BJT_CE).unwrap();
