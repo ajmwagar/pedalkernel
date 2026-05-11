@@ -119,3 +119,5 @@ mod ground_leg_tests;
 mod mfb_debug_test;
 #[cfg(test)]
 mod biquad_table_tests;
+#[cfg(test)]
+mod blockwise_detection_tests;
