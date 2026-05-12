@@ -601,8 +601,10 @@ fn claim_passive_edges(
         let b_rail = rails.contains(&e.node_b);
 
         // Ground shunt: one terminal on rail, other in group_nodes.
-        // But NOT if the non-rail terminal is an active output node —
-        // those are post-amp shunts (e.g. C_tone in RAT), not feedback.
+        // But NOT if the non-rail terminal is an active output node AND
+        // the rail is ground — those are post-amp shunts (e.g. C_tone in
+        // RAT), not part of the amplifier. Supply-side load resistors
+        // (VCC → plate/drain/collector) ARE essential and must be claimed.
         let non_rail_node = if a_rail {
             e.node_b
         } else if b_rail {
@@ -610,7 +612,10 @@ fn claim_passive_edges(
         } else {
             e.node_a
         };
-        let at_output = active_output_nodes.contains(&non_rail_node);
+        let rail_node = if a_rail { e.node_a } else { e.node_b };
+        let rail_is_ground = rail_node == graph.gnd_node
+            || graph.ac_ground_nodes.contains(&rail_node);
+        let at_output = active_output_nodes.contains(&non_rail_node) && rail_is_ground;
 
         if !at_output
             && ((a_rail && group_nodes.contains(&e.node_b))

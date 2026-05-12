@@ -497,4 +497,40 @@ fn single_triode_passives_in_same_flow_group() {
         "R_k should be in V1's group: {:?}", group_comp_names);
     assert!(group_comp_names.contains(&"C_k"),
         "C_k should be in V1's group: {:?}", group_comp_names);
+    // R_p is the plate load resistor (VCC → plate). It must also be claimed —
+    // without it, the WDF port resistance is wrong by orders of magnitude.
+    assert!(group_comp_names.contains(&"R_p"),
+        "R_p (plate load) should be in V1's group: {:?}", group_comp_names);
+}
+
+#[test]
+fn triode_cascade_load_resistors_in_feedback_group() {
+    // In a cascaded triode circuit with feedback, the plate load resistors
+    // (R_p1, R_p2) must be in the feedback group so blockwise can assign
+    // them to the correct NL blocks.
+    let pedal = parse_pedal_file(TRIODE_CASCADE_2).unwrap();
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+
+    // Find the feedback group (contains V1 and V2)
+    let fb_group = groups.iter().find(|g| {
+        g.active_edges.iter().any(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id == "V1"
+        }) && g.has_feedback()
+    });
+    assert!(fb_group.is_some(), "Should have a feedback group with V1");
+    let fb_group = fb_group.unwrap();
+
+    let all_group_edges = fb_group.all_edges();
+    let group_comp_names: Vec<&str> = all_group_edges.iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .collect();
+
+    eprintln!("  Feedback group edges: {:?}", group_comp_names);
+
+    assert!(group_comp_names.contains(&"R_p1"),
+        "R_p1 (plate load) should be in feedback group: {:?}", group_comp_names);
+    assert!(group_comp_names.contains(&"R_p2"),
+        "R_p2 (plate load) should be in feedback group: {:?}", group_comp_names);
 }
