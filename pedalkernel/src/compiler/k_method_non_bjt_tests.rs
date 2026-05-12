@@ -174,7 +174,239 @@ fn triode_k_table_no_nan_across_range() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 4. 1D diode test — TS808-style opamp+diode feedback
+// 4. Cascaded triode — goes through blockwise → gets K-tables
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Two cascaded triode preamp stages. Blockwise should split into 2 blocks,
+/// each getting a Triode WDF root + 2D K-table.
+const TRIODE_CASCADE_2: &str = r#"pedal "Triode Cascade" {
+  supply 9V
+  components {
+    V1: triode(12ax7)
+    V2: triode(12ax7)
+    R_g1: resistor(1M)
+    R_g2: resistor(1M)
+    R_k1: resistor(1.5k)
+    R_k2: resistor(1.5k)
+    C_k1: cap(25u)
+    C_k2: cap(25u)
+    R_p1: resistor(100k)
+    R_p2: resistor(100k)
+    C_coup: cap(22n)
+    R_in: resistor(10k)
+    R_fb: resistor(1M)
+  }
+  nets {
+    in -> R_in.a
+    R_in.b -> R_g1.a
+    R_g1.b -> gnd
+    R_in.b -> V1.grid
+    V1.cathode -> R_k1.a
+    R_k1.b -> gnd
+    V1.cathode -> C_k1.a
+    C_k1.b -> gnd
+    vcc -> R_p1.a
+    R_p1.b -> V1.plate
+
+    V1.plate -> C_coup.a
+    C_coup.b -> R_g2.a
+    R_g2.b -> gnd
+    C_coup.b -> V2.grid
+    V2.cathode -> R_k2.a
+    R_k2.b -> gnd
+    V2.cathode -> C_k2.a
+    C_k2.b -> gnd
+    vcc -> R_p2.a
+    R_p2.b -> V2.plate
+    V2.plate -> out
+
+    V2.plate -> R_fb.a
+    R_fb.b -> R_in.b
+  }
+  controls {}
+}"#;
+
+#[test]
+fn triode_cascade_blockwise_has_k_tables() {
+    let pedal = parse_pedal_file(TRIODE_CASCADE_2).unwrap();
+    let compiled = compile_via_spqr(&pedal, SR).unwrap();
+
+    let mut triode_k_count = 0;
+    for (i, s) in compiled.stages.iter().enumerate() {
+        if let super::compiled::Stage::Wdf(w) = s {
+            let root_name = match &w.root {
+                pedalkernel_rt::stage::RootKind::Triode(_) => "Triode",
+                pedalkernel_rt::stage::RootKind::ShortCircuit => "ShortCircuit",
+                pedalkernel_rt::stage::RootKind::Passthrough => "Passthrough",
+                _ => "other",
+            };
+            let has_table = w.k_table.is_some();
+            eprintln!("  [{i}] root={root_name} k_table={has_table}");
+            if has_table && root_name == "Triode" {
+                let t = w.k_table.as_ref().unwrap();
+                eprintln!("    dims={} steps={} entries={}", t.dims, t.steps, t.entries.len());
+                triode_k_count += 1;
+            }
+        }
+    }
+    assert!(triode_k_count >= 2,
+        "Cascaded triode should have ≥2 Triode stages with K-tables, got {triode_k_count}");
+}
+
+#[test]
+fn triode_cascade_k_table_vs_nr() {
+    let pedal = parse_pedal_file(TRIODE_CASCADE_2).unwrap();
+
+    // NR path
+    let mut compiled_nr = compile_via_spqr(&pedal, SR).unwrap();
+    for s in &mut compiled_nr.stages {
+        if let super::compiled::Stage::Wdf(w) = s { w.k_table = None; }
+    }
+    let mut proc_nr: Box<dyn PedalProcessor> = Box::new(compiled_nr);
+    let mut nr_peak = 0.0f64;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin() * 0.1;
+        let out = proc_nr.process(input);
+        if i >= 4800 { nr_peak = nr_peak.max(out.abs()); }
+    }
+
+    // K-table path
+    let compiled_kt = compile_via_spqr(&parse_pedal_file(TRIODE_CASCADE_2).unwrap(), SR).unwrap();
+    let mut proc_kt: Box<dyn PedalProcessor> = Box::new(compiled_kt);
+    let mut kt_peak = 0.0f64;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin() * 0.1;
+        let out = proc_kt.process(input);
+        if i >= 4800 { kt_peak = kt_peak.max(out.abs()); }
+    }
+
+    let ratio = kt_peak / nr_peak.max(1e-12);
+    eprintln!("  Triode cascade: NR={nr_peak:.6}, KT={kt_peak:.6}, ratio={ratio:.3}");
+
+    assert!(nr_peak > 0.001, "NR should produce output: {nr_peak:.6}");
+    assert!(kt_peak > 0.001, "KT should produce output: {kt_peak:.6}");
+    assert!(ratio > 0.3 && ratio < 3.0,
+        "Triode K-table should be within 3x of NR: ratio={ratio:.3}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. Cascaded JFET — blockwise → K-tables
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Two cascaded JFET common-source stages.
+const JFET_CASCADE_2: &str = r#"pedal "JFET Cascade" {
+  supply 9V
+  components {
+    J1: njfet(2n5457)
+    J2: njfet(2n5457)
+    R_d1: resistor(10k)
+    R_d2: resistor(10k)
+    R_s1: resistor(1k)
+    R_s2: resistor(1k)
+    C_s1: cap(10u)
+    C_s2: cap(10u)
+    R_g1: resistor(1M)
+    R_g2: resistor(1M)
+    C_coup: cap(100n)
+    R_in: resistor(10k)
+    R_fb: resistor(1M)
+  }
+  nets {
+    in -> R_in.a
+    R_in.b -> R_g1.a
+    R_g1.b -> gnd
+    R_in.b -> J1.gate
+    vcc -> R_d1.a
+    R_d1.b -> J1.drain
+    J1.source -> R_s1.a
+    R_s1.b -> gnd
+    J1.source -> C_s1.a
+    C_s1.b -> gnd
+
+    J1.drain -> C_coup.a
+    C_coup.b -> R_g2.a
+    R_g2.b -> gnd
+    C_coup.b -> J2.gate
+    vcc -> R_d2.a
+    R_d2.b -> J2.drain
+    J2.source -> R_s2.a
+    R_s2.b -> gnd
+    J2.source -> C_s2.a
+    C_s2.b -> gnd
+
+    J2.drain -> out
+
+    J2.drain -> R_fb.a
+    R_fb.b -> R_in.b
+  }
+  controls {}
+}"#;
+
+#[test]
+fn jfet_cascade_blockwise_has_k_tables() {
+    let pedal = parse_pedal_file(JFET_CASCADE_2).unwrap();
+    let compiled = compile_via_spqr(&pedal, SR).unwrap();
+
+    let mut jfet_k_count = 0;
+    for (i, s) in compiled.stages.iter().enumerate() {
+        if let super::compiled::Stage::Wdf(w) = s {
+            let root_name = match &w.root {
+                pedalkernel_rt::stage::RootKind::Jfet(_) => "Jfet",
+                pedalkernel_rt::stage::RootKind::ShortCircuit => "ShortCircuit",
+                pedalkernel_rt::stage::RootKind::Passthrough => "Passthrough",
+                _ => "other",
+            };
+            let has_table = w.k_table.is_some();
+            eprintln!("  [{i}] root={root_name} k_table={has_table}");
+            if has_table && root_name == "Jfet" {
+                let t = w.k_table.as_ref().unwrap();
+                eprintln!("    dims={} steps={} entries={}", t.dims, t.steps, t.entries.len());
+                jfet_k_count += 1;
+            }
+        }
+    }
+    assert!(jfet_k_count >= 2,
+        "Cascaded JFET should have ≥2 Jfet stages with K-tables, got {jfet_k_count}");
+}
+
+#[test]
+fn jfet_cascade_k_table_vs_nr() {
+    let pedal = parse_pedal_file(JFET_CASCADE_2).unwrap();
+
+    // NR path
+    let mut compiled_nr = compile_via_spqr(&pedal, SR).unwrap();
+    for s in &mut compiled_nr.stages {
+        if let super::compiled::Stage::Wdf(w) = s { w.k_table = None; }
+    }
+    let mut proc_nr: Box<dyn PedalProcessor> = Box::new(compiled_nr);
+    let mut nr_peak = 0.0f64;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin() * 0.1;
+        let out = proc_nr.process(input);
+        if i >= 4800 { nr_peak = nr_peak.max(out.abs()); }
+    }
+
+    // K-table path
+    let compiled_kt = compile_via_spqr(&parse_pedal_file(JFET_CASCADE_2).unwrap(), SR).unwrap();
+    let mut proc_kt: Box<dyn PedalProcessor> = Box::new(compiled_kt);
+    let mut kt_peak = 0.0f64;
+    for i in 0..9600 {
+        let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin() * 0.1;
+        let out = proc_kt.process(input);
+        if i >= 4800 { kt_peak = kt_peak.max(out.abs()); }
+    }
+
+    let ratio = kt_peak / nr_peak.max(1e-12);
+    eprintln!("  JFET cascade: NR={nr_peak:.6}, KT={kt_peak:.6}, ratio={ratio:.3}");
+
+    assert!(nr_peak > 0.001, "NR should produce output: {nr_peak:.6}");
+    assert!(kt_peak > 0.001, "KT should produce output: {kt_peak:.6}");
+    assert!(ratio > 0.3 && ratio < 3.0,
+        "JFET K-table should be within 3x of NR: ratio={ratio:.3}");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. 1D diode test — TS808-style opamp+diode feedback
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Note: diode-to-ground clippers use Wright Omega (already O(1)) and
