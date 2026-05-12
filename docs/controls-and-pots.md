@@ -3,8 +3,7 @@ title: "Controls and pots"
 description: "How runtime control updates flow through the engine — binding, dispatch, and what each pot movement actually costs."
 section: "Internals"
 weight: 87
-source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
-preview: true
+source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
 watches:
   - pedalkernel/src/compiler/spqr_control.rs
   - pedalkernel/src/compiler/compiled.rs
@@ -15,8 +14,6 @@ watches:
 ---
 
 # Controls and Pots
-
-> **Preview.** Several of the paths described here (`spqr_control::bind_controls`, the incremental WDF recompute, the OpAmpRoot feedback-pot pathway, the multi-NL `iir` fast-path field) are on `feature/spqr-tree` and not yet on `main`. The user-visible API (`pedal.set_control("Drive", 0.7)`) is stable on both branches.
 
 When a user moves a knob, a lot of math has to happen before the next sample comes out right. This page walks through exactly what — the compile-time binding, the runtime dispatch, the per-stage recompute paths, and the resulting heat map of "what is actually expensive."
 

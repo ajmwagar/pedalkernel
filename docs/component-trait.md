@@ -3,8 +3,7 @@ title: "The Component trait"
 description: "How circuit elements plug into the compiler, and how to add a new one."
 section: "Internals"
 weight: 86
-source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
-preview: true
+source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
 watches:
   - pedalkernel/src/compiler/component.rs
   - pedalkernel/src/compiler/components/
@@ -12,8 +11,6 @@ watches:
 ---
 
 # The Component Trait
-
-> **Preview.** This page describes the component system as it exists on the `feature/spqr-tree` branch. The underlying trait is older, but several of the dispatch points (signal-flow grouping via `output_impedance()`, edge classification via `edges()`) are specific to the SPQR compiler. See [compiler internals](./compiler-internals.md) for the pipeline context.
 
 This is the piece of the compiler that determines "what does a circuit element do, and how does it participate in compilation?" Every resistor, op-amp, tube, pot, transformer, and delay line implements the `Component` trait. The compiler queries trait methods; it never pattern-matches on concrete types. That's the whole design: adding a new component type doesn't require editing any compiler pass.
 
@@ -38,6 +35,8 @@ The methods group into these buckets:
 **WDF leaf creation.** `make_leaf()` returns `Some(DynNode)` for elements that become leaves in a WDF tree (resistor, capacitor, inductor, pot). Nonlinear and virtual components return `None` — they aren't leaves; they're tree roots or external.
 
 **Non-idealities.** `nonideal_fx()` returns a `Vec<NonIdealFx>` of post-processing effects — `OpAmpBandwidth` (GBW-derived lowpass), `RailSaturation` (per-device output swing). These are applied as a shared layer on stage outputs, not in the scattering matrix.
+
+**K-method candidacy.** `k_method_candidacy() -> (bool, usize, &'static str)` returns `(is_candidate, port_dims, rejection_reason)`. Memoryless monotonic nonlinearities are candidates: diodes / zeners report `(true, 1, ...)`, BJT / JFET / triode / MOSFET report `(true, 2, ...)`, pentodes report `(true, 3, ...)`. Linear or hysteretic devices return `(false, 0, ...)`. The compile-time generator in `compiler::k_method::generate_k_table` consults this method to decide whether to sample a stage's I-V curve into a `KTable`. A runtime mirror `RootKind::k_method_candidacy() -> (bool, usize)` covers the WDF root types in `pedalkernel-rt`. See [nonlinear elements](./nonlinear-elements.md) for the per-device classification.
 
 **Controls and modulation.** `controls()` declares what the user can turn at runtime — typically a `PotPosition` on a pot, or `Rate`/`Depth` on an LFO. `modulation_sink()` says where modulation signals enter a component (JFET gate, photocoupler cell).
 
