@@ -382,3 +382,56 @@ fn bjt_root_iv_trait_matches_direct() {
     assert!((i_trait - i_direct).abs() < 1e-15, "iv() current should match direct");
     assert!((di_trait - di_direct).abs() < 1e-15, "iv() derivative should match direct");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. NR convergence near cutoff
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn bjt_root_nr_converges_near_cutoff() {
+    // At cutoff (vbe≈0.29V), the BJT is nearly off. With a negative incident
+    // wave, cold-start v0 = a/2 is negative. The NR solver must converge to
+    // a near-zero reflected wave (open-circuit BJT ≈ no current).
+    let model = model_2n3904();
+
+    for &a in &[-2.0, -5.0, -10.0] {
+        let mut root = BjtRoot::new(model, false);
+        root.set_vbe(0.29); // near cutoff
+        let b = root.process(a, 1000.0);
+        assert!(
+            b.abs() < 0.1,
+            "Near cutoff with a={a}, reflected wave b={b:.6} should be near zero (open circuit)"
+        );
+    }
+}
+
+#[test]
+fn bjt_root_nr_deterministic_across_cold_starts() {
+    // Two fresh BjtRoot instances with the same parameters must produce
+    // identical results. The bug caused warm-start-dependent convergence.
+    let model = model_2n3904();
+    let rp = 1000.0;
+
+    let test_cases: &[(f64, f64)] = &[
+        (0.29, -2.0),
+        (0.29, -5.0),
+        (0.30, -2.0),
+        (0.25, -3.0),
+        (0.28, -10.0),
+    ];
+
+    for &(vbe, a) in test_cases {
+        let mut root1 = BjtRoot::new(model, false);
+        root1.set_vbe(vbe);
+        let b1 = root1.process(a, rp);
+
+        let mut root2 = BjtRoot::new(model, false);
+        root2.set_vbe(vbe);
+        let b2 = root2.process(a, rp);
+
+        assert!(
+            (b1 - b2).abs() < 1e-12,
+            "Determinism: vbe={vbe}, a={a}: b1={b1:.10}, b2={b2:.10} differ"
+        );
+    }
+}

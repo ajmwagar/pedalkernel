@@ -4,7 +4,7 @@
 //! the multi-port Newton-Raphson grouped solver. The legacy single-port
 //! Ebers-Moll roots (`BjtNpnRoot`, `BjtPnpRoot`, `BjtModel`) have been removed.
 
-use super::solver::{newton_raphson_solve, NlDeviceGroupIv, NlDeviceIv};
+use super::solver::{newton_raphson_solve, NlDeviceGroupIv, NlDeviceIv, LEAKAGE_CONDUCTANCE};
 
 // ---------------------------------------------------------------------------
 // Gummel-Poon BJT Model
@@ -1278,7 +1278,14 @@ impl BjtRoot {
         let h = 1e-6;
         let ic_plus = self.collector_current(vce + h);
         let ic_minus = self.collector_current(vce - h);
-        (ic_plus - ic_minus) / (2.0 * h)
+        let d = (ic_plus - ic_minus) / (2.0 * h);
+        // When Vbc is clamped, both samples may land in the flat region,
+        // giving d ≈ 0. Return a small conductance so NR has a valid gradient.
+        if d.abs() < 1e-12 {
+            LEAKAGE_CONDUCTANCE
+        } else {
+            d
+        }
     }
 
     /// WDF NR solve: incident wave → reflected wave.
@@ -1300,7 +1307,7 @@ impl BjtRoot {
             v0,
             super::solver::NR_MAX_ITER,
             1e-6,
-            Some((-1.0, v_max)),
+            Some((-v_max, v_max)),
             None,
             |v| (root.collector_current(v), root.collector_current_derivative(v)),
         );
@@ -1317,7 +1324,7 @@ impl NlDeviceIv for BjtRoot {
 
     #[inline]
     fn v_clamp(&self) -> (f64, f64) {
-        (-1.0, self.v_max)
+        (-self.v_max, self.v_max)
     }
 }
 
