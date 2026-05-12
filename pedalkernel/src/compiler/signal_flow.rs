@@ -521,6 +521,110 @@ fn merge_same_component_sccs(
     merged.into_values().collect()
 }
 
+/// Classify unclaimed passive edges as ground-shunts or pendants relative
+/// to a set of active elements and their signal nodes.
+///
+/// Shared by both standalone (non-feedback) and feedback NL paths so that
+/// passive claiming logic is not duplicated.
+fn claim_passive_edges(
+    scc: &[usize],
+    active_elements: &[ActiveElement],
+    active_edges: &[usize],
+    feedback_edges: &[usize],
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    rails: &HashSet<NodeId>,
+    claimed: &HashSet<usize>,
+) -> (Vec<usize>, Vec<usize>) {
+    // Collect group signal nodes from active + feedback edges
+    let mut group_nodes: HashSet<NodeId> = HashSet::new();
+    for &eidx in active_edges.iter().chain(feedback_edges.iter()) {
+        let e = &graph.edges[eidx];
+        if !rails.contains(&e.node_a) {
+            group_nodes.insert(e.node_a);
+        }
+        if !rails.contains(&e.node_b) {
+            group_nodes.insert(e.node_b);
+        }
+    }
+
+    // Input terminal nodes for pendant detection.
+    // Includes BOTH the feedback input (neg for op-amps) AND the signal
+    // input (pos for non-inverting op-amps). The control pin carries signal
+    // in non-inverting topologies — edges touching it are input coupling.
+    let input_terminals: HashSet<NodeId> = scc
+        .iter()
+        .flat_map(|&i| {
+            let elem = &active_elements[i];
+            let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
+            let mut nodes = vec![elem.input_node];
+            // Also include the control pin (pos for op-amps)
+            if let SignalTerminals::Amplifier {
+                control: Some(ctrl),
+                ..
+            } = comp.kind.signal_terminals()
+            {
+                if let Some(node) = resolve_pin(&comp.id, ctrl, graph) {
+                    nodes.push(node);
+                }
+            }
+            nodes
+        })
+        .filter(|node| !rails.contains(node))
+        .collect();
+
+    // Collect active element output nodes. Edges at these nodes that
+    // shunt to ground are post-amplification components (tone caps,
+    // coupling caps), NOT feedback network shunts. They should fall
+    // through to passive grouping, not be claimed by the active group.
+    let active_output_nodes: HashSet<NodeId> = scc
+        .iter()
+        .map(|&ei| active_elements[ei].output_node)
+        .collect();
+
+    let mut pendant_edges = Vec::new();
+    let mut ground_shunt_edges = Vec::new();
+
+    for &eidx in edge_indices {
+        if claimed.contains(&eidx)
+            || active_edges.contains(&eidx)
+            || feedback_edges.contains(&eidx)
+        {
+            continue;
+        }
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+            continue;
+        }
+        let e = &graph.edges[eidx];
+        let a_rail = rails.contains(&e.node_a);
+        let b_rail = rails.contains(&e.node_b);
+
+        // Ground shunt: one terminal on rail, other in group_nodes.
+        // But NOT if the non-rail terminal is an active output node —
+        // those are post-amp shunts (e.g. C_tone in RAT), not feedback.
+        let non_rail_node = if a_rail {
+            e.node_b
+        } else if b_rail {
+            e.node_a
+        } else {
+            e.node_a
+        };
+        let at_output = active_output_nodes.contains(&non_rail_node);
+
+        if !at_output
+            && ((a_rail && group_nodes.contains(&e.node_b))
+                || (b_rail && group_nodes.contains(&e.node_a)))
+        {
+            ground_shunt_edges.push(eidx);
+        } else if input_terminals.contains(&e.node_a) || input_terminals.contains(&e.node_b) {
+            pendant_edges.push(eidx);
+        }
+    }
+
+    (pendant_edges, ground_shunt_edges)
+}
+
 /// Partition circuit edges into signal flow groups.
 ///
 /// Uses directed signal flow analysis (SCC detection) to correctly
@@ -594,15 +698,31 @@ pub(in crate::compiler) fn find_flow_groups(
         let has_feedback = has_mutual || has_self_feedback;
 
         if !has_feedback {
-            // Standalone NL element — no passive claiming
-            for &eidx in &active_edges {
+            // Standalone NL element — claim adjacent passive edges
+            // (ground shunts and pendants) so SPQR can build a complete
+            // WDF tree with the NL element as root.
+            let (pendant_edges, ground_shunt_edges) = claim_passive_edges(
+                &scc,
+                &active_elements,
+                &active_edges,
+                &[],  // no feedback edges
+                edge_indices,
+                graph,
+                &rails,
+                &claimed,
+            );
+            for &eidx in active_edges
+                .iter()
+                .chain(&pendant_edges)
+                .chain(&ground_shunt_edges)
+            {
                 claimed.insert(eidx);
             }
             groups.push(FlowGroup {
                 active_edges,
                 feedback_edges: Vec::new(),
-                pendant_edges: Vec::new(),
-                ground_shunt_edges: Vec::new(),
+                pendant_edges,
+                ground_shunt_edges,
             });
             continue;
         }
@@ -679,97 +799,18 @@ pub(in crate::compiler) fn find_flow_groups(
         }
         let feedback_edges: Vec<usize> = feedback_set.into_iter().collect();
 
-        // Collect group signal nodes
-        let mut group_nodes: HashSet<NodeId> = HashSet::new();
-        for &eidx in active_edges.iter().chain(feedback_edges.iter()) {
-            let e = &graph.edges[eidx];
-            if !rails.contains(&e.node_a) {
-                group_nodes.insert(e.node_a);
-            }
-            if !rails.contains(&e.node_b) {
-                group_nodes.insert(e.node_b);
-            }
-        }
-
-        // Input terminal nodes for pendant detection.
-        // Includes BOTH the feedback input (neg for op-amps) AND the signal
-        // input (pos for non-inverting op-amps). The control pin carries signal
-        // in non-inverting topologies — edges touching it are input coupling.
-        let input_terminals: HashSet<NodeId> = scc
-            .iter()
-            .flat_map(|&i| {
-                let elem = &active_elements[i];
-                let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
-                let mut nodes = vec![elem.input_node];
-                // Also include the control pin (pos for op-amps)
-                if let SignalTerminals::Amplifier {
-                    control: Some(ctrl),
-                    ..
-                } = comp.kind.signal_terminals()
-                {
-                    if let Some(node) = resolve_pin(&comp.id, ctrl, graph) {
-                        nodes.push(node);
-                    }
-                }
-                nodes
-            })
-            .filter(|node| !rails.contains(node))
-            .collect();
-
-        // Classify remaining passive edges: pendant or ground shunt
-        let mut pendant_edges = Vec::new();
-        let mut ground_shunt_edges = Vec::new();
-
-        // Collect active element output nodes. Edges at these nodes that
-        // shunt to ground are post-amplification components (tone caps,
-        // coupling caps), NOT feedback network shunts. They should fall
-        // through to passive grouping, not be claimed by the feedback group.
-        let active_output_nodes: HashSet<NodeId> = scc
-            .iter()
-            .map(|&ei| active_elements[ei].output_node)
-            .collect();
-
-        for &eidx in edge_indices {
-            if claimed.contains(&eidx)
-                || active_edges.contains(&eidx)
-                || feedback_edges.contains(&eidx)
-            {
-                continue;
-            }
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
-                continue;
-            }
-            let e = &graph.edges[eidx];
-            let a_rail = rails.contains(&e.node_a);
-            let b_rail = rails.contains(&e.node_b);
-
-            // Ground shunt: one terminal on rail, other in group_nodes.
-            // But NOT if the non-rail terminal is an active output node —
-            // those are post-amp shunts (e.g. C_tone in RAT), not feedback.
-            let non_rail_node = if a_rail {
-                e.node_b
-            } else if b_rail {
-                e.node_a
-            } else {
-                e.node_a
-            };
-            let at_output = active_output_nodes.contains(&non_rail_node);
-
-            if !at_output
-                && ((a_rail && group_nodes.contains(&e.node_b))
-                    || (b_rail && group_nodes.contains(&e.node_a)))
-            {
-                ground_shunt_edges.push(eidx);
-            } else if input_terminals.contains(&e.node_a) || input_terminals.contains(&e.node_b) {
-                pendant_edges.push(eidx);
-            }
-        }
-
-        // NOTE: Ground-leg chain detection was removed. Multi-hop ground-leg
-        // impedance (neg → R5 → R6 → Gain_A → GND) is now handled by the
-        // Ri BFS in spqr_build.rs, which searches ALL passive edges reachable
-        // from neg (not just pendant or non-feedback edges).
+        // Claim passive edges (ground shunts and pendants) adjacent to
+        // the active + feedback edges.
+        let (pendant_edges, ground_shunt_edges) = claim_passive_edges(
+            &scc,
+            &active_elements,
+            &active_edges,
+            &feedback_edges,
+            edge_indices,
+            graph,
+            &rails,
+            &claimed,
+        );
 
         // Mark all claimed
         for &eidx in active_edges
