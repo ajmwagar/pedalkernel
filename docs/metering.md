@@ -3,7 +3,7 @@ title: "Metering and the metrics ring buffer"
 description: "Real-time-safe signal and state metrics — what's recorded, how the ring buffer works, and how a UI consumes it."
 section: "Internals"
 weight: 88
-source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
+source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
 watches:
   - pedalkernel/src/metering.rs
   - pedalkernel/src/compiler/compiled.rs

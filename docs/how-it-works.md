@@ -3,8 +3,7 @@ title: "How it works"
 description: "The WDF compilation pipeline — from .pedal file to per-sample processing."
 section: "Guide"
 weight: 10
-source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
-preview: true
+source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
 watches:
   - pedalkernel/src/compiler/
   - pedalkernel/src/tree.rs
@@ -12,8 +11,6 @@ watches:
 ---
 
 # How PedalKernel Works
-
-> **Preview.** The compilation pipeline described below is being developed on the `feature/spqr-tree` branch. The user-visible behaviour (parse → compile → process a sample) is unchanged on `main`; this page reflects how the engine will get there once SPQR lands. See [compiler internals](./compiler-internals.md) for full details.
 
 PedalKernel compiles your circuit description into a real-time Wave Digital Filter (WDF) engine. This page is the guide-level story. The [compiler internals](./compiler-internals.md) page goes deeper on data structures, algorithms, and routing decisions.
 
@@ -29,21 +26,27 @@ Roughly:
 
 3. **Signal-flow grouping** — Active elements whose outputs behave as voltage sources (op-amps, unity-gain buffers) act as *barriers* in the signal flow. Passives between barriers form one group; each group will become one or more stages. The barriers matter because on the output side of an op-amp, the upstream circuit can't load it — impedance is effectively zero — so there's no WDF benefit to treating the full passive network as one tree.
 
-4. **Per-group decomposition** — Each signal-flow group is routed by `compiler::plan::plan_stages`:
+4. **DC bias analysis** — Each group is classified as a `StaticBias` network (only resistor dividers between rails) or a `SignalPath` (carries audio). Static-bias groups are solved at compile time by nodal analysis and their results land in the triodes, pentodes, and BJTs as per-instance `vgk_bias` / `vg1k_bias` / `vbe_bias` fields. The audio signal modulates around that real operating point rather than around a hardcoded global constant.
+
+5. **Blockwise decomposition** — When several nonlinear devices are chained together through passive coupling (a TB-303 ladder, a cascaded triode stage), the compiler splits them into individual blocks. Each block becomes its own small WDF tree with one nonlinear root; the passives between them become coupling stages. This turns one large multi-port Newton-Raphson into several small single-port solves — each of which is then eligible for the K-method fast path described below.
+
+6. **Per-group decomposition** — Each signal-flow group (or each block, after blockwise splitting) is routed by `compiler::plan::plan_stages`:
    - **Multiple nonlinear elements** in one rigid group become a single multi-NL stage that solves them all together via Newton-Raphson on an R-type adaptor.
    - **One nonlinear element** triggers three upgrade checks first (vari-mu 3-port, BJT 2-port, envelope-controlled OTA) — any of which promote it into a coupled multi-NL stage. Otherwise it lands in a plain WDF tree built by series/parallel reduction.
    - **All-passive** groups become WDF trees too; if the rigid residual is linear, it can carry a precomputed biquad cascade (IIR fast path) or state-space matrix as an internal optimisation.
    - **Unclaimed op-amps** (bridged-T, multi-path) fall through to a nullor pass that absorbs them into a multi-NL R-type stage with VCVS stamping.
 
-5. **Stage assembly** — stages land in a few separate vectors: ordinary WDF stages, multi-NL stages, push-pull pairs (Fairchild-style differential triodes), and bare op-amp stages. A `stage_order` index threads the WDF and multi-NL stages into topological order; push-pull and op-amp stages process on their own schedule.
+7. **K-method tabulation** — For each WDF stage whose root is a memoryless nonlinearity (diode, zener, BJT, JFET, MOSFET, triode), the compiler samples the device's I-V curve across the operating domain into a `KTable` — 1024 entries for 1D devices, 256 × 256 for 2D. At runtime the stage interpolates from the table instead of running Newton-Raphson. The two paths are equivalent in the limit of infinite resolution; the table trades floating-point work for L1 bandwidth and removes per-sample iteration variance. Stateful devices (BBDs, photocouplers, envelope-modulated OTAs, vari-mu triodes) are not candidates — their I-V depends on history. See [nonlinear elements](./nonlinear-elements.md) for the per-device list.
 
-6. **Control binding** — Pot controls declared in the `.pedal` file are bound to the stages that contain them. When the user moves a pot at runtime, only the affected stages recompute.
+8. **Stage assembly** — stages land in a few separate vectors: ordinary WDF stages, multi-NL stages, push-pull pairs (Fairchild-style differential triodes), and bare op-amp stages. A `stage_order` index threads the WDF and multi-NL stages into topological order; push-pull and op-amp stages process on their own schedule.
+
+9. **Control binding** — Pot controls declared in the `.pedal` file are bound to the stages that contain them. When the user moves a pot at runtime, only the affected stages recompute.
 
 ## Per-sample processing
 
 A compiled pedal processes one sample at a time by walking the stage order and dispatching to the right vector. Each stage kind runs its own code path:
 
-- **WDF stages** run the classic four phases: scatter up from leaves to root, root solve on the nonlinear element (Wright Omega explicit solver for diodes and zeners, Newton-Raphson for tubes and BJTs with the Koren and Ebers-Moll / Gummel-Poon equations, square-law for FETs), scatter down, then state update on capacitors and inductors. Some WDF stages have purely-passive roots (`Passthrough`, `CapacitorRoot`, `PassiveRType`) and skip the root solve.
+- **WDF stages** run the classic four phases: scatter up from leaves to root, root solve on the nonlinear element (Wright Omega explicit solver for diodes and zeners, Newton-Raphson on the Koren equation for tubes, Newton-Raphson on the full Gummel-Poon model for BJTs, square-law for FETs), scatter down, then state update on capacitors and inductors. If the stage carries a K-method table, the root solve is replaced by a bilinear table lookup. Some WDF stages have purely-passive roots (`Passthrough`, `CapacitorRoot`, `PassiveRType`) and skip the root solve.
 - **Multi-NL stages** run a multi-port Newton-Raphson over the coupled nonlinear devices on the R-type adaptor. If their `iir` or `state_space` field is set (linear-only passive children), the runtime takes that fast path instead.
 - **Push-pull stages** evaluate two coupled triode halves as one block.
 - **Op-amp stages** run an `OpAmpRoot` solve directly without a surrounding WDF tree.

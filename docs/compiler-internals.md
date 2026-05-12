@@ -3,8 +3,7 @@ title: "Compiler internals"
 description: "SPQR decomposition, stage routing, and the compiler passes that turn a .pedal file into a runnable processor."
 section: "Internals"
 weight: 85
-source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
-preview: true
+source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
 watches:
   - pedalkernel/src/compiler/mod.rs
   - pedalkernel/src/compiler/compile.rs
@@ -14,11 +13,12 @@ watches:
   - pedalkernel/src/compiler/stage.rs
   - pedalkernel/src/compiler/compiled.rs
   - pedalkernel/src/compiler/rigid/
+  - pedalkernel/src/compiler/blockwise.rs
+  - pedalkernel/src/compiler/k_method.rs
+  - pedalkernel/src/compiler/bias_analysis.rs
 ---
 
 # Compiler Internals
-
-> **Preview.** This page describes the SPQR compiler architecture being developed on the `feature/spqr-tree` branch. Most of what is covered here — signal-flow grouping, the `port_semantic`-driven coupling barriers, the `pedalkernel-rt` extraction, the multi-NL `iir` / `state_space` fast-path fields — is not yet on `main`. The overall shape is stable; specific type names and file paths may still move before the branch merges. Published here ahead of the merge so contributors can read along with the implementation.
 
 This page is for contributors. It documents the architecture of the compiler that lives under `pedalkernel/src/compiler/` — the data structures, the decomposition algorithm, and the routing decisions that send each part of a circuit to the right solver.
 
@@ -48,6 +48,14 @@ This is exactly what an **SPQR decomposition** does in graph theory: it breaks a
                                   (active barriers)
                                            │
                                            ▼
+                          bias_analysis::classify_group_bias
+                          (StaticBias vs SignalPath)
+                                           │
+                                           ▼
+                         blockwise::try_build_blockwise
+                          (NL cascades → chained blocks)
+                                           │
+                                           ▼
                         ┌──── plan_stages routing ────────┐
                         │                                  │
                 Single-NL upgrade                 All-passive
@@ -58,8 +66,9 @@ This is exactly what an **SPQR decomposition** does in graph theory: it breaks a
                   (R-type adaptor,                    │
                    optional iir /                     ▼
                    state_space fields)            WdfStage
-                        │                              │
-                        └─────────────┬────────────────┘
+                        │                              │     ┌─ k_method::generate_k_table
+                        │                              ├─────┤   (optional KTable fast path)
+                        └─────────────┬────────────────┘     └─ (memoryless NL roots only)
                                       ▼
                           Stage vectors + StageRef
                           topological order
@@ -186,6 +195,131 @@ The coupling-aware legality checks from the previous section gate paths 3 and 4:
 
 There used to be a "pot divider special case" path. It is gone. Pots are passive edges that participate in the normal SPQR reduction; the three-terminal split (`__aw` / `__wb`) is a control-binding concern, documented in the [controls and pots](./controls-and-pots.md) page.
 
+## Blockwise decomposition
+
+Some circuits — the TB-303 diode-transistor ladder is the canonical example — chain several nonlinear devices together with passive coupling networks between them. Treating that as one monolithic R-type adaptor would put every junction into one Newton-Raphson solve; per-iteration cost grows cubically in the number of NL ports, and convergence degrades when far-apart junctions interact through stiff coupling.
+
+`compiler::blockwise` (introduced in commit `f732eaa`) sits between SPQR decomposition and stage building. It walks the SPQR tree, finds places where two or more NL components live in separate sub-trees connected only by linear/reactive passives, and emits a `BlockwisePlan`:
+
+```rust
+pub struct Block {
+    pub nl_edges: Vec<usize>,
+    pub linear_edges: Vec<usize>,
+    pub reactive_edges: Vec<usize>,
+    pub port_nodes: Vec<NodeId>,
+}
+pub struct BlockwisePlan {
+    pub blocks: Vec<Block>,
+    pub coupling_edges: Vec<usize>,
+    pub port_nodes: Vec<NodeId>,
+}
+```
+
+Each `Block` gets its own SPQR sub-decomposition, becomes one (or a few) WDF stages with a single nonlinear root, and connects to its neighbours through the passive `coupling_edges` (also lowered to WDF stages). The validation check requires at least two blocks, every block carries some reactive state of its own, and the coupling network contains no NL edges — otherwise the plan is rejected and `spqr_build` falls through to the monolithic R-type path.
+
+The walker recognises two structural patterns: P-nodes whose children are NL Q-leaves from the same component (diode-connected BJTs, where base and collector share a net), and NL Q-leaf siblings inside S/R nodes (common-emitter BJTs, where B-E and C-E share the emitter node but have distinct base/collector endpoints). Boundary nodes shared by multiple blocks are resolved by inspecting the device's signal terminals — the block whose "common pin" (emitter / source / cathode) sits at the shared node owns the ground-side edges hanging off it. The fallback is to pick the lower-indexed block (upstream in cascade).
+
+The payoff is that each individual block becomes a small single-NL WDF tree, eligible for [K-method tabulation](#k-method-tables) and for the per-stage NR warm-starting that single-root stages already do well. A 4-BJT ladder that the old pipeline ran as a 4×4 NR system is now four cascaded single-port solves with three coupling RC stages between them.
+
+## K-method tables
+
+For memoryless nonlinear roots — diodes, BJTs, JFETs, triodes — the per-sample Newton-Raphson solve can be replaced by a precomputed lookup table. The reflected wave `a_root` is sampled across the operating domain at compile time, and the runtime does a bilinear interpolation instead of iterating.
+
+The table lives on the `WdfStage` itself:
+
+```rust
+pub struct KTable {
+    pub dims: usize,              // 1 (1D) or 2 (2D)
+    pub b_min: f64, pub b_max: f64,
+    pub ctrl_min: f64, pub ctrl_max: f64,
+    pub steps: usize,             // 1024 for 1D, 256 for 2D
+    pub entries: Vec<f64>,
+}
+```
+
+1D tables (1024 entries) cover single-junction devices: diodes, diode pairs, zeners. The single axis is `b_tree`, the incident wave. 2D tables (256 × 256 = 65 536 entries) cover BJTs / JFETs / MOSFETs / triodes — `b_tree` on one axis, the device's control voltage (`Vbe`, `Vgs`, `Vgk`) on the other. Pentodes report themselves as 3D K-method candidates but 3D tables are not yet generated.
+
+Eligibility is gated by a `k_method_candidacy()` method on both the `Component` trait (`(bool, usize, &'static str)` — eligible, dims, rejection reason) and on `RootKind` itself (`(bool, usize)`). The two checks are mirrored — one is consulted at compile time when deciding whether to sample, the other at runtime when deciding whether to dispatch. Devices missing from either match arm fall through to NR.
+
+Generation runs once per stage at compile time:
+
+```rust
+for ic in 0..steps {
+    let ctrl = ctrl_min + tc * (ctrl_max - ctrl_min);
+    for ib in 0..steps {
+        let b = b_min + tb * (b_max - b_min);
+        root.reset_nr_state();                  // cold-start per entry
+        root.set_control_voltage(ctrl, 1.0, 0.0);
+        let a = root.process(b, rp);            // NR solve
+        entries.push(if a.is_finite() { a } else { 0.0 });
+    }
+}
+```
+
+Each grid point is a cold-start NR solve — `reset_nr_state()` zeroes the warm-start cache so the table value is a pure function of `(b_tree, ctrl)`, independent of sweep order. The control axis stores the AC signal portion, not the absolute voltage; the DC bias is subtracted at lookup so the same table works regardless of the stage's operating point.
+
+The runtime dispatch in `WdfStage::process` is a single branch:
+
+```rust
+let a_root = if let Some(ref table) = k_table {
+    if table.dims == 1 {
+        table.lookup_1d(b_tree)
+    } else {
+        let ctrl = match root {
+            RootKind::Bjt(b) => b.vbe() - b.vbe_bias(),
+            RootKind::Triode(t) => t.vgk() - t.vgk_bias(),
+            RootKind::Jfet(j) => j.vgs(),
+            RootKind::Mosfet(m) => m.vgs(),
+            _ => 0.0,
+        };
+        table.lookup_2d(b_tree, ctrl)
+    }
+} else {
+    root.process(b_tree, rp)                    // NR fallback
+};
+```
+
+A stage either has a `k_table: Option<KTable>` (lookup) or doesn't (NR). The two paths are mathematically equivalent in the limit of infinite table resolution; in practice the table trades floating-point work for L1 cache bandwidth and removes per-sample iteration variance — useful for tight CPU budgets and for circuits where NR convergence is borderline.
+
+Stateful devices — BBDs, photocouplers, envelope-modulated OTAs, vari-mu triodes — are explicitly **not** K-method candidates because their I-V curve depends on history (charge buffer, thermal lag, envelope-shifted bias). See [nonlinear elements](./nonlinear-elements.md) for the complete per-device classification.
+
+## Per-instance bias analysis
+
+Before commit `5f782e1`, every triode used the same hardcoded `TRIODE_GRID_BIAS = -2.0`, every pentode used `PENTODE_GRID_BIAS = -8.0`, and BJTs ran at a fixed `0.6 V` Vbe. That worked well enough for circuits whose operating point happened to land near those constants — and badly for everything else.
+
+`compiler::bias_analysis::classify_group_bias` extracts the real DC operating point from the circuit graph. It first classifies each signal-flow group:
+
+```rust
+pub(super) enum GroupBiasKind {
+    SignalPath,
+    StaticBias { dc_voltages: HashMap<NodeId, f64> },
+}
+```
+
+A group is `StaticBias` when every edge in it has at least one rail terminal — i.e. the whole subgraph is `rail ↔ interior ↔ rail` resistor dividers with no edges spanning two non-rail nodes and no nonlinear elements. That's the topological signature of a bias network. A group that fails either condition carries audio and is on the `SignalPath`.
+
+For bias groups, the DC voltage at each interior junction is computed by stamping the resistor conductances into a `G·V = I` system (caps are open-circuit at DC, so they're skipped) and solving via Gaussian elimination with partial pivoting. The systems are small (typically `n ≤ 5`).
+
+Those DC voltages then flow into the NL roots through per-instance bias fields:
+
+| Device | Field | Setter |
+|---|---|---|
+| `TriodeRoot` | `vgk_bias: f64` | `set_bias(vgk)` |
+| `PentodeRoot` | `vg1k_bias: f64` | `set_bias(vg1k)` |
+| `BjtRoot` | `vbe_bias: f64` | `set_bias(vbe)` |
+
+At runtime, `set_control_voltage` adds the bias to the AC signal:
+
+```rust
+RootKind::Triode(t)  => t.set_vgk(t.vgk_bias() + input * compensation),
+RootKind::Bjt(b)     => b.set_vbe(b.vbe_bias() + input * compensation),
+RootKind::Pentode(p) => p.set_vg1k(p.vg1k_bias() + input * compensation),
+```
+
+The same machinery feeds the K-method generator: when a 2D table is sampled, the control axis runs across `ctrl_signal = vbe - vbe_bias` rather than absolute `Vbe`, so the table is shared across stages that have different bias points. At lookup, the bias is subtracted back out (see the K-method dispatch snippet above).
+
+The old hardcoded constants are gone from the live source — they survive only as constructor-level fallbacks (`-2.0` for `TriodeRoot::new()`, `-8.0` for `PentodeRoot::new()`, `0.0` for `BjtRoot::new()`) used if `set_bias` is never called, which is rare in practice. Any tube or BJT stage built through the normal compile pipeline gets its operating point from the circuit graph.
+
 ## NonIdealFxState
 
 Op-amp character — the reason a TL072 sounds different from an LM308 — mostly lives in the stage-independent post-processor:
@@ -289,6 +423,9 @@ If you want to follow the code:
 - **`compiler::spqr_build`** — top-level compiler entry point. `compile_via_spqr_with_options` is the function the rest of this page describes.
 - **`compiler::spqr`** — SPQR tree construction and pendant extraction.
 - **`compiler::signal_flow`** — directed BFS, OutputImpedance barriers, group assembly.
+- **`compiler::bias_analysis`** — `classify_group_bias()` and per-instance DC operating point extraction.
+- **`compiler::blockwise`** — `analyze_blockwise()` / `try_build_blockwise()` for cascaded multi-NL circuits.
+- **`compiler::k_method`** — `generate_k_table()` for 1D / 2D NL root tabulation.
 - **`compiler::coupling`** — `port_semantic()`-driven legality predicates (`has_coupling_barrier`, `has_nl_reactive_coupling`, `device_parallels_passive`).
 - **`compiler::rigid::mod`** — `classify_rigid()` and the lowering legality gates.
 - **`compiler::rigid::opamp_root`** — OpAmpRoot WDF element for multi-VCVS feedback.
