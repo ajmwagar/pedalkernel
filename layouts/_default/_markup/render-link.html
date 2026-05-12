@@ -1,12 +1,34 @@
 {{/*
   Rewrite relative .md links to their rendered URLs so book pages can
-  cross-link using normal markdown references like [other](./other.md).
-  External URLs and anchors pass through untouched.
+  cross-link using normal markdown references like [other](./other.md)
+  or [section](./other.md#some-anchor). External URLs and pure anchors
+  pass through untouched.
 */}}
 {{- $url := .Destination -}}
 {{- $title := .Title -}}
 {{- $text := .Text -}}
-{{- with .Page.GetPage $url -}}
-  {{- $url = .RelPermalink -}}
+
+{{- /* Split off any #anchor so GetPage sees a clean path. */ -}}
+{{- $anchor := "" -}}
+{{- $path := $url -}}
+{{- if strings.Contains $url "#" -}}
+  {{- $parts := split $url "#" -}}
+  {{- $path = index $parts 0 -}}
+  {{- $anchor = printf "#%s" (index $parts 1) -}}
 {{- end -}}
+
+{{- /* External links, mailto, pure anchors, and absolute URLs pass through. */ -}}
+{{- $external := or (strings.HasPrefix $url "http") (strings.HasPrefix $url "mailto:") (strings.HasPrefix $url "#") -}}
+
+{{- if and (not $external) (ne $path "") -}}
+  {{- /* Strip leading ./ from the path before handing to GetPage. */ -}}
+  {{- $lookup := $path -}}
+  {{- if strings.HasPrefix $lookup "./" -}}
+    {{- $lookup = strings.TrimPrefix "./" $lookup -}}
+  {{- end -}}
+  {{- with .Page.GetPage $lookup -}}
+    {{- $url = printf "%s%s" .RelPermalink $anchor -}}
+  {{- end -}}
+{{- end -}}
+
 <a href="{{ $url | safeURL }}"{{ with $title }} title="{{ . }}"{{ end }}>{{ $text | safeHTML }}</a>
