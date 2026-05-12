@@ -465,6 +465,62 @@ fn dfs_find_paths(
     }
 }
 
+/// Merge SCCs whose active elements share a `comp_idx`.
+///
+/// Multi-terminal devices (BJTs, MOSFETs) have multiple edges in the flow graph.
+/// Without feedback, Tarjan places them in separate SCCs. This merges them so
+/// the device stays in one FlowGroup.
+fn merge_same_component_sccs(
+    sccs: Vec<Vec<usize>>,
+    active_elements: &[ActiveElement],
+    graph: &CircuitGraph,
+) -> Vec<Vec<usize>> {
+    if sccs.len() <= 1 {
+        return sccs;
+    }
+
+    // Map each SCC to a merge-group ID via union-find on comp_idx
+    let mut group_of: Vec<usize> = (0..sccs.len()).collect(); // identity
+
+    fn find(group_of: &mut [usize], mut i: usize) -> usize {
+        while group_of[i] != i {
+            group_of[i] = group_of[group_of[i]];
+            i = group_of[i];
+        }
+        i
+    }
+    fn union(group_of: &mut [usize], a: usize, b: usize) {
+        let ra = find(group_of, a);
+        let rb = find(group_of, b);
+        if ra != rb {
+            group_of[rb] = ra;
+        }
+    }
+
+    // Build comp_idx → first SCC index map
+    let mut comp_to_scc: HashMap<usize, usize> = HashMap::new();
+    for (si, scc) in sccs.iter().enumerate() {
+        for &elem_idx in scc {
+            let eidx = active_elements[elem_idx].edge_idx;
+            let comp_idx = graph.edges[eidx].comp_idx;
+            if let Some(&prev_si) = comp_to_scc.get(&comp_idx) {
+                union(&mut group_of, si, prev_si);
+            } else {
+                comp_to_scc.insert(comp_idx, si);
+            }
+        }
+    }
+
+    // Collect merged SCCs
+    let mut merged: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (si, scc) in sccs.into_iter().enumerate() {
+        let root = find(&mut group_of, si);
+        merged.entry(root).or_default().extend(scc);
+    }
+
+    merged.into_values().collect()
+}
+
 /// Partition circuit edges into signal flow groups.
 ///
 /// Uses directed signal flow analysis (SCC detection) to correctly
@@ -491,6 +547,11 @@ pub(in crate::compiler) fn find_flow_groups(
     // Build directed flow graph and find SCCs
     let flow_adj = build_flow_graph(&active_elements, &adj, &rails, graph);
     let sccs = tarjan_scc(&flow_adj);
+
+    // Merge SCCs that contain edges from the same multi-edge component (e.g. BJT).
+    // A BJT has 2 active elements (B-E, C-E) from the same comp_idx. Without
+    // feedback they land in separate SCCs, but must be co-solved as one device.
+    let sccs = merge_same_component_sccs(sccs, &active_elements, graph);
 
     // Build classified FlowGroup for each SCC
     let mut claimed: HashSet<usize> = HashSet::new();

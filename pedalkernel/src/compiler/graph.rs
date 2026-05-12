@@ -2982,6 +2982,12 @@ impl CircuitGraph {
 
         results
     }
+
+    /// Check whether two edge indices belong to the same component.
+    /// Multi-terminal devices (BJTs, MOSFETs) have multiple edges sharing one `comp_idx`.
+    pub(super) fn edges_share_component(&self, a: usize, b: usize) -> bool {
+        self.edges[a].comp_idx == self.edges[b].comp_idx
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

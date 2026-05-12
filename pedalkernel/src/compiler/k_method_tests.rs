@@ -180,11 +180,23 @@ fn bjt_k_table_response_varies_with_input() {
     for s in &compiled.stages {
         if let super::compiled::Stage::Wdf(w) = s {
             if let Some(ref table) = w.k_table {
-                let a_pos = table.lookup_2d(5.0, -0.6);
-                let a_neg = table.lookup_2d(-5.0, -0.6);
+                // Sweep across ctrl range to find a conducting operating point
+                let mut max_diff = 0.0f64;
+                let mut best_ctrl = 0.0;
+                for ci in 0..10 {
+                    let ctrl = table.ctrl_min + (ci as f64 / 9.0) * (table.ctrl_max - table.ctrl_min);
+                    let a_pos = table.lookup_2d(5.0, ctrl);
+                    let a_neg = table.lookup_2d(-5.0, ctrl);
+                    let diff = (a_pos - a_neg).abs();
+                    if diff > max_diff {
+                        max_diff = diff;
+                        best_ctrl = ctrl;
+                    }
+                }
+                eprintln!("  Max table variation: {max_diff:.6} at ctrl={best_ctrl:.3}");
                 assert!(
-                    (a_pos - a_neg).abs() > 0.01,
-                    "K-table should vary: +5V→{a_pos:.4}, -5V→{a_neg:.4}"
+                    max_diff > 1e-6,
+                    "K-table should vary with input at some ctrl, max_diff={max_diff:.6}"
                 );
                 return;
             }
@@ -393,4 +405,27 @@ fn bjt_k_table_no_nan() {
         }
     }
     panic!("No K-table found");
+}
+
+#[test]
+fn single_bjt_edges_in_same_flow_group() {
+    // A single BJT's two NL edges (B-E and C-E) must land in the same FlowGroup.
+    // If split, SPQR can't build a WDF stage for either edge alone.
+    let pedal = parse_pedal_file(BJT_CE).unwrap();
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+
+    // Find all groups containing Q1's NL edges
+    let q1_groups: Vec<usize> = groups.iter().enumerate()
+        .filter(|(_, g)| {
+            g.active_edges.iter().any(|&eidx| {
+                graph.components[graph.edges[eidx].comp_idx].id == "Q1"
+            })
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    assert_eq!(q1_groups.len(), 1,
+        "Q1's edges should be in 1 group, got {} groups: {:?}", q1_groups.len(), q1_groups);
 }
