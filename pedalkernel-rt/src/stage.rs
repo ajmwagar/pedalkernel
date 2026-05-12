@@ -440,7 +440,7 @@ pub enum RootKind {
 // Used by both RootKind (WdfStage) and NlDeviceKind (MultiNlStage).
 // Triode grid bias is now per-instance (TriodeRoot::vgk_bias), set from
 // circuit analysis. Default -2.0V (typical 12AX7) is set in TriodeRoot::new().
-const PENTODE_GRID_BIAS: f64 = -8.0;
+// Pentode grid bias is now per-instance (PentodeRoot::vg1k_bias).
 // BJT base bias is set per-instance from circuit analysis (BjtRoot::set_bias).
 
 /// Maximum total NR iterations per base sample across all sub-samples.
@@ -538,7 +538,7 @@ impl RootKind {
                 b.set_vbe(b.vbe_bias() + input * compensation);
             }
             RootKind::Pentode(p) => {
-                p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
+                p.set_vg1k(p.vg1k_bias() + input * compensation);
             }
             _ => {}
         }
@@ -2813,7 +2813,7 @@ impl NlDeviceKind {
                 t.set_vgk(t.vgk_bias() + input * compensation);
             }
             NlDeviceKind::Pentode(p) => {
-                p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
+                p.set_vg1k(p.vg1k_bias() + input * compensation);
             }
             NlDeviceKind::Diode(_)
             | NlDeviceKind::DiodePair(_)
