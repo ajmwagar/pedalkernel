@@ -544,3 +544,40 @@ fn triode_cascade_load_resistors_in_feedback_group() {
     assert!(group_comp_names.contains(&"R_p2"),
         "R_p2 (plate load) should be in feedback group: {:?}", group_comp_names);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 9. WDF port resistance: ground shunts must be parallel, not series
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+#[ignore] // Requires SPQR pendant-grouping fix (ground shunts as P-nodes, not S-nodes)
+fn triode_wdf_port_resistance_reflects_plate_load() {
+    // A triode preamp with R_p=100kΩ plate load should have rp dominated
+    // by R_p, not by R_g=1MΩ (grid bias). R_g is a parallel shunt to
+    // ground at the grid node — it should NOT be in series with R_p.
+    //
+    // Correct WDF tree (schematic):
+    //   Series(Parallel(C_in, R_g), V1_root, Parallel(R_k, C_k), R_p)
+    // rp ≈ R_p || (R_k + ...) ≈ 100kΩ range
+    //
+    // Bug: SPQR extract_pendants puts ground-connected edges in series:
+    //   Series(C_in, R_g, V1_root, R_k, C_k, R_p)
+    // rp ≈ R_g + R_k + R_p ≈ 1.1MΩ (wrong — R_g dominates)
+    let pedal = parse_pedal_file(TRIODE_PREAMP).unwrap();
+    let compiled = compile_via_spqr(&pedal, SR).unwrap();
+
+    for s in &compiled.stages {
+        if let super::compiled::Stage::Wdf(w) = s {
+            if matches!(w.root, pedalkernel_rt::stage::RootKind::Triode(_)) {
+                let rp = w.tree.port_resistance();
+                eprintln!("  Triode WDF rp = {rp:.1}");
+                // R_p = 100kΩ. With parallel shunts, rp should be < 200kΩ.
+                // The bug gives rp ≈ 1.1MΩ (everything in series).
+                assert!(rp < 200_000.0,
+                    "WDF rp={rp:.0} too high — ground shunts likely in series instead of parallel");
+                return;
+            }
+        }
+    }
+    panic!("No triode WDF stage found");
+}
