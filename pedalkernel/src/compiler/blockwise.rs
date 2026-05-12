@@ -13,7 +13,7 @@ use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrNode};
 use super::spqr_build::BuiltStage;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A block in the blockwise decomposition — one NL device + its local state.
 #[derive(Debug)]
@@ -123,7 +123,7 @@ fn find_nl_blocks(node: &SpqrNode, graph: &CircuitGraph, blocks: &mut Vec<NlBloc
 
         SpqrNode::S { children, .. } | SpqrNode::R { children, .. } => {
             // Pattern 2: group NL Q-leaf siblings by comp_idx
-            let mut comp_groups: HashMap<usize, Vec<usize>> = HashMap::new();
+            let mut comp_groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
             for child in children {
                 if let SpqrNode::Q { edge_idx, .. } = child {
                     if graph.effective_edge_kind(*edge_idx) == EdgeKind::Nonlinear {

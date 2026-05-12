@@ -14,7 +14,7 @@
 //! 4. Elements without mutual dependency are separate stages.
 
 use hashbrown::HashMap;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use super::component::{EdgeKind, SignalTerminals};
 use super::graph::{CircuitGraph, NodeId};
@@ -511,8 +511,8 @@ fn merge_same_component_sccs(
         }
     }
 
-    // Collect merged SCCs
-    let mut merged: HashMap<usize, Vec<usize>> = HashMap::new();
+    // Collect merged SCCs (BTreeMap for deterministic iteration order)
+    let mut merged: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (si, scc) in sccs.into_iter().enumerate() {
         let root = find(&mut group_of, si);
         merged.entry(root).or_default().extend(scc);
@@ -802,7 +802,8 @@ pub(in crate::compiler) fn find_flow_groups(
         for &ae in &active_edges {
             feedback_set.remove(&ae);
         }
-        let feedback_edges: Vec<usize> = feedback_set.into_iter().collect();
+        let mut feedback_edges: Vec<usize> = feedback_set.into_iter().collect();
+        feedback_edges.sort_unstable(); // deterministic ordering
 
         // Claim passive edges (ground shunts and pendants) adjacent to
         // the active + feedback edges.
@@ -969,8 +970,8 @@ fn group_by_connectivity(
         }
     }
 
-    // Collect groups
-    let mut groups_map: HashMap<usize, Vec<usize>> = HashMap::new();
+    // Collect groups (BTreeMap for deterministic iteration order)
+    let mut groups_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (i, &eidx) in edges.iter().enumerate() {
         let root = find(&mut parent, i);
         groups_map.entry(root).or_default().push(eidx);
