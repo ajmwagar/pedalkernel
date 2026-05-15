@@ -211,6 +211,64 @@ fn tone_pot_in_blackfeedback_changes_spectrum() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Layer 2b: Functional tone pot test — pot CHANGES the audio output.
+// The binding test (Layer 1) checks the pot is found. This test checks
+// that set_control("Tone", x) actually produces different output.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn screamer_legend_tone_pot_changes_output() {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => { eprintln!("SKIP: screamer.pedal not found"); return; }
+    };
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+
+    let measure = |tone: f64, freq: f64| -> f64 {
+        let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+        compiled.set_control("Tone", tone);
+        compiled.set_control("Drive", 0.5);
+        compiled.set_control("Level", 0.8);
+        for _ in 0..2400 { compiled.process(0.0); }
+        let mut peak = 0.0f64;
+        for i in 0..4800 {
+            let input = 0.3 * (2.0 * std::f64::consts::PI * freq * i as f64 / 48000.0).sin();
+            peak = peak.max(compiled.process(input).abs());
+        }
+        peak
+    };
+
+    // Measure at 1kHz with Tone at 0.0 vs 1.0
+    let t0_1k = measure(0.0, 1000.0);
+    let t1_1k = measure(1.0, 1000.0);
+    // Measure at 5kHz with Tone at 0.0 vs 1.0
+    let t0_5k = measure(0.0, 5000.0);
+    let t1_5k = measure(1.0, 5000.0);
+
+    eprintln!("  Tone=0: 1kHz={t0_1k:.4}, 5kHz={t0_5k:.4}");
+    eprintln!("  Tone=1: 1kHz={t1_1k:.4}, 5kHz={t1_5k:.4}");
+
+    // The tone pot should change the frequency balance.
+    // At least one frequency should differ by >10% between Tone=0 and Tone=1.
+    let diff_1k = (t0_1k - t1_1k).abs();
+    let diff_5k = (t0_5k - t1_5k).abs();
+    let max_diff = diff_1k.max(diff_5k);
+    let max_level = t0_1k.max(t1_1k).max(t0_5k).max(t1_5k);
+
+    eprintln!("  Diff: 1kHz={diff_1k:.4}, 5kHz={diff_5k:.4}, max_diff={max_diff:.4}");
+
+    assert!(
+        max_diff > max_level * 0.1,
+        "Tone pot should change output by >10%: max_diff={max_diff:.4}, max_level={max_level:.4}. \
+         If zero, the pot is bound but set_pot doesn't affect the stage's processing."
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Layer 3: Feedback pot parameter extraction — the root cause of broken
 // Drive/Distortion pots. The FeedbackConfig must have correct Rf/Ri/series
 // values for the gain recomputation to work.
