@@ -1944,4 +1944,92 @@ mod tests {
             "Global NFB (U2.out → R_nfb → U1.neg) is true feedback — must stay SAME group"
         );
     }
+
+    // ── Screamer topology: tone/level pots must NOT be in feedback group ─
+    //
+    // TS-808 topology: opamp + diode clipping in feedback, with a tone
+    // stack and level pot AFTER the opamp output. The tone/level pots
+    // connect to U1.out but are NOT part of the feedback loop — they're
+    // downstream passive components.
+    //
+    // At v0.5.4 these were correctly in their own passive group.
+    // A BFS expansion regression pulled them into the feedback group.
+
+    #[test]
+    fn flow_screamer_tone_pot_not_in_feedback_group() {
+        // Simplified Screamer: opamp + diode clipping feedback + tone pot + level pot
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf: resistor(100k)
+                    D1: diode(silicon)
+                    D2: diode(silicon)
+                    C_hp: cap(47n)
+                    Tone: pot(20k, a)
+                    R_t1: resistor(10k)
+                    C_t1: cap(220n)
+                    Level: pot(100k, a)
+                    C_out: cap(10u)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> Rf.a
+                    Rf.b -> U1.out
+                    U1.neg -> D1.a
+                    D1.b -> U1.out
+                    U1.neg -> D2.b
+                    D2.a -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> C_hp.a
+                    C_hp.b -> Tone.a
+                    Tone.w -> R_t1.a
+                    R_t1.b -> gnd
+                    Tone.b -> C_t1.a
+                    C_t1.b -> gnd
+                    Tone.w -> Level.a
+                    Level.w -> C_out.a
+                    Level.b -> gnd
+                    C_out.b -> out
+                }
+                controls {
+                    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+                    Level.position -> "Level" [0.0, 1.0] = 0.5
+                }
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group = find_group_containing(&groups, &graph, "U1");
+        let tone_group = find_group_containing(&groups, &graph, "Tone");
+        let level_group = find_group_containing(&groups, &graph, "Level");
+
+        assert!(u1_group.is_some(), "Should have U1 group");
+        assert!(tone_group.is_some(), "Should have Tone group");
+        assert!(level_group.is_some(), "Should have Level group");
+
+        // Tone and Level must NOT be in the same group as U1.
+        // They connect to U1.out but are downstream passive components,
+        // not part of the feedback loop.
+        assert_ne!(
+            u1_group, tone_group,
+            "Tone pot should be in a SEPARATE group from the opamp feedback. \
+             It connects to U1.out (a voltage source output) and is downstream, \
+             not part of the Rf/D1/D2 feedback loop."
+        );
+        assert_ne!(
+            u1_group, level_group,
+            "Level pot should be in a SEPARATE group from the opamp feedback."
+        );
+
+        // Tone and Level should be in the SAME passive group (they're connected)
+        assert_eq!(
+            tone_group, level_group,
+            "Tone and Level should be in the same passive group (connected network)"
+        );
+    }
 }
