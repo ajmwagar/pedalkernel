@@ -158,6 +158,15 @@ impl DecayEnvelope {
         self.value = 0.0;
     }
 
+    /// Set the envelope value directly (for attack ramp injection).
+    ///
+    /// Use to write a linearly-ramped value during an attack phase
+    /// before handing off to the normal exponential decay. Does not
+    /// affect the decay coefficient.
+    pub fn set_value(&mut self, v: f64) {
+        self.value = v;
+    }
+
     /// Check if the envelope has decayed below a threshold.
     #[inline]
     pub fn is_silent(&self, threshold: f64) -> bool {
